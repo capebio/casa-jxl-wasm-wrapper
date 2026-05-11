@@ -94,6 +94,8 @@ pub fn process_orf(
     tint: f32,
     wb_r_override: f32,
     wb_b_override: f32,
+    texture: f32,
+    clarity: f32,
 ) -> Result<ProcessResult, JsError> {
     let info = tiff::parse(data).map_err(|e| JsError::new(&e))?;
 
@@ -129,9 +131,10 @@ pub fn process_orf(
         if let Some(r) = info.wb_r { params.wb_r = r; }
         if let Some(b) = info.wb_b { params.wb_b = b; }
     }
+    if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
 
     let t = now_ms();
-    let rgb16 = demosaic::demosaic_rggb(&raw, w, h);
+    let mut rgb16 = demosaic::demosaic_rggb(&raw, w, h);
     let demosaic_ms = now_ms() - t;
     drop(raw);
 
@@ -152,6 +155,11 @@ pub fn process_orf(
     if vibrance.is_finite()     { params.vibrance    = vibrance; }
     if temp.is_finite()         { params.temp        = temp; }
     if tint.is_finite()         { params.tint        = tint; }
+    if texture.is_finite()      { params.texture     = texture; }
+    if clarity.is_finite()      { params.clarity     = clarity; }
+    if params.texture != 0.0 || params.clarity != 0.0 {
+        pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
+    }
     let rgb8 = pipeline::process(&rgb16, &params);
     let tonemap_ms = now_ms() - t;
     drop(rgb16);

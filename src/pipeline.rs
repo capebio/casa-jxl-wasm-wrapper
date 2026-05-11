@@ -43,6 +43,9 @@ pub struct PipelineParams {
     pub vibrance: f32,      // -1..+1
     pub temp: f32,          // -1..+1 (warm <-> cool)
     pub tint: f32,          // -1..+1 (magenta <-> green)
+    pub color_matrix: Option<[[f32; 3]; 3]>,
+    pub texture: f32,       // -1..+1, unsharp σ=1
+    pub clarity: f32,       // -1..+1, unsharp σ=3
 }
 
 impl PipelineParams {
@@ -63,6 +66,9 @@ impl PipelineParams {
             vibrance: 0.0,
             temp: 0.0,
             tint: 0.0,
+            color_matrix: None,
+            texture: 0.0,
+            clarity: 0.0,
         }
     }
 }
@@ -154,6 +160,73 @@ fn build_post_lut(t: &TonePost) -> Vec<u8> {
     lut
 }
 
+pub fn gaussian_kernel_5() -> [f32; 5] {
+    [0.0545, 0.2442, 0.4026, 0.2442, 0.0545]
+}
+
+pub fn gaussian_kernel_13() -> [f32; 13] {
+    [0.0185, 0.0342, 0.0563, 0.0831, 0.1097, 0.1296,
+     0.1370,
+     0.1296, 0.1097, 0.0831, 0.0563, 0.0342, 0.0185]
+}
+
+fn separable_blur(src: &[u16], width: usize, height: usize, kernel: &[f32]) -> Vec<u16> {
+    let half = kernel.len() / 2;
+    let n = width * height * 3;
+    let mut temp = vec![0u16; n];
+
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..3 {
+                let mut acc = 0f32;
+                for (ki, &kv) in kernel.iter().enumerate() {
+                    let xi = (x as isize + ki as isize - half as isize)
+                        .clamp(0, width as isize - 1) as usize;
+                    acc += src[(y * width + xi) * 3 + c] as f32 * kv;
+                }
+                temp[(y * width + x) * 3 + c] = acc.round() as u16;
+            }
+        }
+    }
+
+    let mut out = vec![0u16; n];
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..3 {
+                let mut acc = 0f32;
+                for (ki, &kv) in kernel.iter().enumerate() {
+                    let yi = (y as isize + ki as isize - half as isize)
+                        .clamp(0, height as isize - 1) as usize;
+                    acc += temp[(yi * width + x) * 3 + c] as f32 * kv;
+                }
+                out[(y * width + x) * 3 + c] = acc.round() as u16;
+            }
+        }
+    }
+    out
+}
+
+pub fn apply_unsharp_mask(rgb16: &mut [u16], width: usize, height: usize,
+                           amount: f32, kernel: &[f32]) {
+    let blurred = separable_blur(rgb16, width, height, kernel);
+    for i in 0..rgb16.len() {
+        let orig = rgb16[i] as i32;
+        let blur = blurred[i] as i32;
+        let result = orig + (amount * (orig - blur) as f32).round() as i32;
+        rgb16[i] = result.clamp(0, 4095) as u16;
+    }
+}
+
+pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
+                            params: &PipelineParams) {
+    if params.texture != 0.0 {
+        apply_unsharp_mask(rgb16, width, height, params.texture, &gaussian_kernel_5());
+    }
+    if params.clarity != 0.0 {
+        apply_unsharp_mask(rgb16, width, height, params.clarity, &gaussian_kernel_13());
+    }
+}
+
 pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
 
@@ -182,7 +255,8 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     let sat = (BASELINE_SAT + params.saturation.clamp(-1.0, 1.0) * 0.8).max(0.0);
     let vib = params.vibrance.clamp(-1.0, 1.0);
 
-    let m = &CAM_TO_SRGB;
+    let fallback = CAM_TO_SRGB;
+    let m = params.color_matrix.as_ref().unwrap_or(&fallback);
 
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 3];

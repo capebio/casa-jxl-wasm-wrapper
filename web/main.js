@@ -10,7 +10,7 @@ const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
-const BUILD_TAG = '2026-05-11f / auto-wb + baseline-lift';
+const BUILD_TAG = '2026-05-11g / wb-subifd + colormatrix + texture-clarity';
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -131,6 +131,8 @@ function currentOptions() {
             vibrance:   lookValueFor('vibrance'),
             temp:       lookValueFor('temp'),
             tint:       lookValueFor('tint'),
+            texture:    lookValueFor('texture'),
+            clarity:    lookValueFor('clarity'),
         },
         // WB R/B numeric override — no longer surfaced as sliders.  Temp /
         // tint sliders give relative shifts; auto WB used as base.
