@@ -23,6 +23,7 @@ pub struct OrfInfo {
     pub model: String,
     pub wb_r: Option<f32>,
     pub wb_b: Option<f32>,
+    pub color_matrix: Option<[[f32; 3]; 3]>,
     #[allow(dead_code)]
     pub black_level: u16,
     #[allow(dead_code)]
@@ -49,6 +50,7 @@ pub fn parse(data: &[u8]) -> Result<OrfInfo> {
         model: String::new(),
         wb_r: None,
         wb_b: None,
+        color_matrix: None,
         black_level: 0,
         little_endian,
     };
@@ -259,6 +261,24 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
             0x2040 => {
                 let _ = parse_image_processing_subifd(&sub, val, info);
             }
+            0x1011 => {
+                if cnt == 9 {
+                    let p = val as usize;
+                    let mut m = [[0f32; 3]; 3];
+                    let mut ok = true;
+                    'outer: for row in 0..3 {
+                        for col in 0..3 {
+                            match sub.u16(p + (row * 3 + col) * 2) {
+                                Ok(v) => m[row][col] = (v as i16) as f32 / 256.0,
+                                Err(_) => { ok = false; break 'outer; }
+                            }
+                        }
+                    }
+                    if ok {
+                        info.color_matrix = Some(m);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -297,8 +317,10 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, info: &mut OrfInfo) -> Re
             } else {
                 (r.u16(val as usize)?, r.u16(val as usize + 2)?)
             };
-            info.wb_r = Some(r_lvl as f32 / 256.0);
-            info.wb_b = Some(b_lvl as f32 / 256.0);
+            if r_lvl > 0 && b_lvl > 0 {
+                info.wb_r = Some(r_lvl as f32 / 256.0);
+                info.wb_b = Some(b_lvl as f32 / 256.0);
+            }
         }
     }
     Ok(())

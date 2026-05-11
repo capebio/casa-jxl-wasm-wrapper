@@ -66,6 +66,8 @@ self.addEventListener('message', async (ev) => {
             look.tint       ?? 0,
             Number.isFinite(options.wbR) ? options.wbR : NaN,
             Number.isFinite(options.wbB) ? options.wbB : NaN,
+            look.texture ?? 0,
+            look.clarity ?? 0,
         );
         const w = result.width;
         const h = result.height;
