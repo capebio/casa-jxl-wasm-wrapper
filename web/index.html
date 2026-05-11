@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ORF → JPEG XL (browser)</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <header>
+        <div class="title">
+            <h1>ORF → JPEG XL — fully in the browser</h1>
+            <p>Olympus 12-bit predictive ORF decode + bilinear demosaic +
+               sRGB pipeline (Rust → wasm) + JXL encode (libjxl via jSquash
+               wasm).  Per-file Web Worker pool saturates all cores.
+               Nothing leaves your machine.</p>
+        </div>
+        <div class="controls">
+            <fieldset>
+                <legend>JXL</legend>
+                <label>
+                    <span>quality <strong id="quality-label">90</strong></span>
+                    <input type="range" id="quality-range" min="50" max="100" step="1" value="90" />
+                </label>
+                <label>
+                    <span>effort</span>
+                    <select id="effort-select">
+                        <option value="1">1 — Lightning</option>
+                        <option value="3" selected>3 — Falcon</option>
+                        <option value="5">5 — Hare</option>
+                        <option value="7">7 — Squirrel</option>
+                    </select>
+                </label>
+                <label class="toggle">
+                    <input type="checkbox" id="lossless-toggle" />
+                    <span>lossless</span>
+                </label>
+            </fieldset>
+
+            <fieldset class="look-fieldset">
+                <legend>Tone <small>(centred at 0)</small></legend>
+                <label class="lr">
+                    <span>exposure <strong data-label="exposureEv">0.00</strong></span>
+                    <input type="range" data-look="exposureEv" min="-3" max="3" step="0.05" value="0" />
+                </label>
+                <label class="lr">
+                    <span>contrast <strong data-label="contrast">0</strong></span>
+                    <input type="range" data-look="contrast" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>highlights <strong data-label="highlights">0</strong></span>
+                    <input type="range" data-look="highlights" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>shadows <strong data-label="shadows">0</strong></span>
+                    <input type="range" data-look="shadows" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>whites <strong data-label="whites">0</strong></span>
+                    <input type="range" data-look="whites" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>blacks <strong data-label="blacks">0</strong></span>
+                    <input type="range" data-look="blacks" min="-100" max="100" step="1" value="0" />
+                </label>
+            </fieldset>
+
+            <fieldset class="look-fieldset">
+                <legend>Color <small>(centred at 0)</small></legend>
+                <label class="lr">
+                    <span>temp <strong data-label="temp">0</strong></span>
+                    <input type="range" data-look="temp" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>tint <strong data-label="tint">0</strong></span>
+                    <input type="range" data-look="tint" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>vibrance <strong data-label="vibrance">0</strong></span>
+                    <input type="range" data-look="vibrance" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>saturation <strong data-label="saturation">0</strong></span>
+                    <input type="range" data-look="saturation" min="-100" max="100" step="1" value="0" />
+                </label>
+                <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
+                <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
+            </fieldset>
+        </div>
+    </header>
+
+    <main>
+        <section id="drop" class="drop-target">
+            <input type="file" id="file-input" multiple accept=".orf,.ORF" class="visually-hidden" />
+            <button id="pick">Pick ORF files</button>
+            <p class="hint">or drop ORF files / folders here</p>
+        </section>
+
+        <section id="status" class="status" hidden>
+            <progress id="progress" max="100" value="0"></progress>
+            <span id="status-text"></span>
+        </section>
+
+        <section id="grid" class="grid"></section>
+
+        <section id="stats-panel" class="stats-panel">
+            <header class="stats-header">
+                <h2>Timings (copy-paste back to chat)</h2>
+                <div class="stats-actions">
+                    <button id="copy-stats" type="button">Copy</button>
+                    <button id="clear-stats" type="button">Clear</button>
+                </div>
+            </header>
+            <pre id="stats-log" aria-live="polite"></pre>
+        </section>
+    </main>
+
+    <div id="lightbox" class="lightbox" hidden>
+        <button class="lightbox-close" aria-label="Close">×</button>
+        <button class="lightbox-prev" aria-label="Previous">‹</button>
+        <button class="lightbox-next" aria-label="Next">›</button>
+        <canvas id="lightbox-canvas"></canvas>
+        <div class="lightbox-info"></div>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
