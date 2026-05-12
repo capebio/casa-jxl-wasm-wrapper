@@ -21,6 +21,13 @@ export class ProcessResult {
         wasm.__wbg_processresult_free(ptr, 0);
     }
     /**
+     * @returns {boolean}
+     */
+    get color_matrix_from_mn() {
+        const ret = wasm.__wbg_get_processresult_color_matrix_from_mn(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @returns {number}
      */
     get decompress_ms() {

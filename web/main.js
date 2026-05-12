@@ -10,7 +10,7 @@ const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
-const BUILD_TAG = '2026-05-12a / makernote-wb-base_off-fix';
+const BUILD_TAG = '2026-05-12b / sat-contrast-exp-tuned';
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -330,6 +330,7 @@ function startConvert(file, existingCard) {
                     card._pipelineMs = msg.pipelineMs;
                     card._phaseMs = msg.phaseMs;
                     card._wb = { r: msg.wbR, b: msg.wbB };
+                    card._colorMatrixFromMn = msg.colorMatrixFromMn;
                     card._camera = [msg.make, msg.model].filter(Boolean).join(' ') || '?';
                     card.querySelector('.thumb-dl-btn').hidden = false;
                     // Show thumb immediately — JXL still encoding in background.
@@ -366,9 +367,12 @@ function startConvert(file, existingCard) {
                     const wbStr = wb.r != null
                         ? `wb R${wb.r.toFixed(3)} B${wb.b.toFixed(3)}`
                         : 'wb ?';
+                    const matrixStr = card._colorMatrixFromMn === true ? 'mn-matrix'
+                                    : card._colorMatrixFromMn === false ? 'fallback-matrix'
+                                    : '';
                     pushStat(
                         `[${String(statSeq).padStart(3, ' ')}] ${name} ${msg.w}×${msg.h}  ` +
-                        `${wbStr}  ` +
+                        `${wbStr}  ${matrixStr}  ` +
                         `dec ${fmtMs(p.decompress)}  ` +
                         `dem ${fmtMs(p.demosaic)}  ` +
                         `tone ${fmtMs(p.tonemap)}  ` +

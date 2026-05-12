@@ -37,6 +37,8 @@ pub struct ProcessResult {
     pub wb_r_used: f32,
     #[wasm_bindgen(readonly)]
     pub wb_b_used: f32,
+    #[wasm_bindgen(readonly)]
+    pub color_matrix_from_mn: bool,
     make: String,
     model: String,
 }
@@ -131,6 +133,7 @@ pub fn process_orf(
         if let Some(r) = info.wb_r { params.wb_r = r; }
         if let Some(b) = info.wb_b { params.wb_b = b; }
     }
+    let color_matrix_from_mn = info.color_matrix.is_some();
     if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
 
     let t = now_ms();
@@ -181,6 +184,7 @@ pub fn process_orf(
         orient_ms,
         wb_r_used: params.wb_r,
         wb_b_used: params.wb_b,
+        color_matrix_from_mn,
         make: info.make.clone(),
         model: info.model.clone(),
     })

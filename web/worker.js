@@ -83,13 +83,14 @@ self.addEventListener('message', async (ev) => {
         const wbB = result.wb_b_used;
         const make  = result.make;
         const model = result.model;
+        const colorMatrixFromMn = result.color_matrix_from_mn;
 
         // ---- thumbnail (small) — send first so UI updates fast ------------
         const thumb = sized(w, h, THUMB_LONG_EDGE);
         const thumbRgb = downscale_rgb(fullRgb, w, h, thumb.w, thumb.h);
         self.postMessage(
             { id, type: 'thumb', rgb: thumbRgb, w: thumb.w, h: thumb.h, pipelineMs, phaseMs,
-              wbR, wbB, make, model },
+              wbR, wbB, make, model, colorMatrixFromMn },
             [thumbRgb.buffer],
         );
 

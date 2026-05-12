@@ -21,9 +21,9 @@ const CAM_TO_SRGB: [[f32; 3]; 3] = [
 /// Always-applied baselines that emulate Olympus Picture-Mode (Natural).
 /// Without these, raw matrix output looks "flat" relative to the embedded
 /// JPEG.  User look sliders adjust on top.
-const BASELINE_SAT: f32 = 1.70;        // chroma scale around luma
-const BASELINE_CONTRAST: f32 = 0.45;   // S-curve blend, [0,1]
-const BASELINE_EXP_EV: f32 = 1.00;     // +1 EV always-on lift
+const BASELINE_SAT: f32 = 1.20;        // chroma scale around luma
+const BASELINE_CONTRAST: f32 = 0.35;   // S-curve blend, [0,1]
+const BASELINE_EXP_EV: f32 = 0.70;     // +0.7 EV always-on lift
 
 pub struct PipelineParams {
     pub black: u16,
