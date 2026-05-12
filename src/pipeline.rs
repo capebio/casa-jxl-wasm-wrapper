@@ -12,7 +12,7 @@
 //! All slider params are LR-style: zero-centred (-1..+1 normalised),
 //! exposure in stops (-3..+3).
 
-const CAM_TO_SRGB: [[f32; 3]; 3] = [
+pub const CAM_TO_SRGB: [[f32; 3]; 3] = [
     [ 1.526, -0.450, -0.077],
     [-0.245,  1.336, -0.091],
     [ 0.018, -0.298,  1.281],

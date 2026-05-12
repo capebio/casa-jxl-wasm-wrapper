@@ -20,6 +20,7 @@ import init, {
     process_orf,
     downscale_rgb,
     rgb_to_rgba,
+    apply_look,
 } from '../pkg/raw_converter_wasm.js';
 
 import encode_jxl from './vendor/jsquash-jxl/encode.js';
@@ -28,6 +29,7 @@ const THUMB_LONG_EDGE = 360;
 const LIGHTBOX_LONG_EDGE = 1800;
 
 let wasmReady;
+let liveState = null;
 
 async function ensureWasm() {
     if (!wasmReady) wasmReady = init();
@@ -45,6 +47,37 @@ function sized(srcW, srcH, longEdge) {
 }
 
 self.addEventListener('message', async (ev) => {
+    if (ev.data.type === 'reprocess_live') {
+        const { id, look } = ev.data;
+        if (!liveState) {
+            self.postMessage({ id, type: 'error_live', error: 'no live state' });
+            return;
+        }
+        try {
+            const t0 = performance.now();
+            const rgb = apply_look(
+                liveState.rgb16,
+                liveState.w, liveState.h, liveState.orientation,
+                liveState.wbR, liveState.wbB,
+                liveState.colorMatrix,
+                look.exposureEv  ?? 0, look.contrast   ?? 0,
+                look.highlights  ?? 0, look.shadows    ?? 0,
+                look.whites      ?? 0, look.blacks      ?? 0,
+                look.saturation  ?? 0, look.vibrance    ?? 0,
+                look.temp        ?? 0, look.tint        ?? 0,
+                look.texture     ?? 0, look.clarity     ?? 0,
+            );
+            const liveMs = performance.now() - t0;
+            self.postMessage(
+                { id, type: 'lightbox_live', rgb, w: liveState.w, h: liveState.h, liveMs },
+                [rgb.buffer],
+            );
+        } catch (err) {
+            self.postMessage({ id, type: 'error_live', error: String(err?.message || err) });
+        }
+        return;
+    }
+
     const { id, bytes, options } = ev.data;
     try {
         await ensureWasm();
@@ -84,6 +117,20 @@ self.addEventListener('message', async (ev) => {
         const make  = result.make;
         const model = result.model;
         const colorMatrixFromMn = result.color_matrix_from_mn;
+
+        // ---- store live state for subsequent reprocess_live calls ----------
+        const lb16 = result.take_rgb16_lb();
+        const lbW = result.lb_w;
+        const lbH = result.lb_h;
+        liveState = {
+            rgb16: lb16,
+            w: lbW,
+            h: lbH,
+            orientation: result.orientation,
+            wbR,
+            wbB,
+            colorMatrix: new Float32Array(result.color_matrix_used()),
+        };
 
         // ---- thumbnail (small) — send first so UI updates fast ------------
         const thumb = sized(w, h, THUMB_LONG_EDGE);

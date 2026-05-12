@@ -51,6 +51,20 @@ export class ProcessResult {
     /**
      * @returns {number}
      */
+    get lb_h() {
+        const ret = wasm.__wbg_get_processresult_lb_h(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get lb_w() {
+        const ret = wasm.__wbg_get_processresult_lb_w(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     get orient_ms() {
         const ret = wasm.__wbg_get_processresult_orient_ms(this.__wbg_ptr);
         return ret;
@@ -89,6 +103,16 @@ export class ProcessResult {
     get width() {
         const ret = wasm.__wbg_get_processresult_width(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Return the color matrix used (9 floats, row-major).
+     * @returns {Float32Array}
+     */
+    color_matrix_used() {
+        const ret = wasm.processresult_color_matrix_used(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
     }
     /**
      * @returns {string}
@@ -140,8 +164,59 @@ export class ProcessResult {
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
     }
+    /**
+     * Move the lightbox-sized packed u16 LE buffer out.  Caller owns the bytes.
+     * @returns {Uint8Array}
+     */
+    take_rgb16_lb() {
+        const ret = wasm.processresult_take_rgb16_lb(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
 }
 if (Symbol.dispose) ProcessResult.prototype[Symbol.dispose] = ProcessResult.prototype.free;
+
+/**
+ * Re-apply tonemap + orientation to a cached lightbox-sized rgb16 buffer.
+ *
+ * `rgb16_bytes` is packed u16 LE (6 bytes per pixel).
+ * `color_matrix_flat` is 9 f32s row-major; pass a slice of len != 9 to use the
+ * built-in fallback.
+ * @param {Uint8Array} rgb16_bytes
+ * @param {number} width
+ * @param {number} height
+ * @param {number} orientation
+ * @param {number} wb_r
+ * @param {number} wb_b
+ * @param {Float32Array} color_matrix_flat
+ * @param {number} exposure_ev
+ * @param {number} contrast
+ * @param {number} highlights
+ * @param {number} shadows
+ * @param {number} whites
+ * @param {number} blacks
+ * @param {number} saturation
+ * @param {number} vibrance
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} texture
+ * @param {number} clarity
+ * @returns {Uint8Array}
+ */
+export function apply_look(rgb16_bytes, width, height, orientation, wb_r, wb_b, color_matrix_flat, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, texture, clarity) {
+    const ptr0 = passArray8ToWasm0(rgb16_bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArrayF32ToWasm0(color_matrix_flat, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.apply_look(ptr0, len0, width, height, orientation, wb_r, wb_b, ptr1, len1, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
 
 /**
  * Box-filter downscale an RGB8 buffer.  Useful for thumbnail generation.
@@ -298,9 +373,22 @@ function addToExternrefTable0(obj) {
     return idx;
 }
 
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -322,6 +410,13 @@ function isLikeNone(x) {
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -353,6 +448,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedFloat32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

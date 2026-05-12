@@ -10,7 +10,7 @@ const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
-const BUILD_TAG = '2026-05-12d / mn-colormatrix + ev1.25';
+const BUILD_TAG = '2026-05-12e / live-lightbox + contrast-toggle';
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -43,6 +43,7 @@ const losslessToggle = document.getElementById('lossless-toggle');
 
 const reprocessBtn = document.getElementById('reprocess-btn');
 const resetLookBtn = document.getElementById('reset-look');
+const contrastBoostEl = document.getElementById('contrast-boost');
 
 // LR-style controls are declared as <input data-look="<name>"> in the
 // markup; we discover them at runtime so the JS doesn't need to know every
@@ -121,25 +122,29 @@ let statSeq = 0;
 // ---------------------------------------------------------------------------
 // Encoder option state
 // ---------------------------------------------------------------------------
+function currentLook() {
+    return {
+        exposureEv: lookValueFor('exposureEv'),
+        contrast:   lookValueFor('contrast') + (contrastBoostEl.checked ? 0.15 : 0.0),
+        highlights: lookValueFor('highlights'),
+        shadows:    lookValueFor('shadows'),
+        whites:     lookValueFor('whites'),
+        blacks:     lookValueFor('blacks'),
+        saturation: lookValueFor('saturation'),
+        vibrance:   lookValueFor('vibrance'),
+        temp:       lookValueFor('temp'),
+        tint:       lookValueFor('tint'),
+        texture:    lookValueFor('texture'),
+        clarity:    lookValueFor('clarity'),
+    };
+}
+
 function currentOptions() {
     return {
         quality: Number(qualityRange.value),
         effort: Number(effortSelect.value),
         lossless: losslessToggle.checked,
-        look: {
-            exposureEv: lookValueFor('exposureEv'),
-            contrast:   lookValueFor('contrast'),
-            highlights: lookValueFor('highlights'),
-            shadows:    lookValueFor('shadows'),
-            whites:     lookValueFor('whites'),
-            blacks:     lookValueFor('blacks'),
-            saturation: lookValueFor('saturation'),
-            vibrance:   lookValueFor('vibrance'),
-            temp:       lookValueFor('temp'),
-            tint:       lookValueFor('tint'),
-            texture:    lookValueFor('texture'),
-            clarity:    lookValueFor('clarity'),
-        },
+        look: currentLook(),
         // WB R/B numeric override — no longer surfaced as sliders.  Temp /
         // tint sliders give relative shifts; auto WB used as base.
         wbR: NaN,
@@ -159,12 +164,14 @@ for (const el of lookInputs) {
         const name = el.dataset.look;
         const lbl = lookLabels.get(name);
         if (lbl) lbl.textContent = lookDisplay(name);
+        scheduleLiveUpdate();
     });
 }
 
 reprocessBtn.addEventListener('click', () => reprocessSelected());
 resetLookBtn.addEventListener('click', () => {
     for (const el of lookInputs) el.value = '0';
+    contrastBoostEl.checked = false;
     refreshLookLabels();
 });
 
@@ -213,6 +220,10 @@ class WorkerPool {
 
     _onMessage(worker, ev) {
         const { id, type } = ev.data;
+        if (type === 'lightbox_live' || type === 'error_live') {
+            if (this._liveHandler) this._liveHandler(ev.data);
+            return;
+        }
         const t = this.tasks.get(id);
         if (!t) return;
         const handlers = t.handlers;
@@ -228,15 +239,77 @@ class WorkerPool {
     }
 
     _release(worker, id) {
+        worker._lastTaskId = id;
         this.tasks.delete(id);
         this.free.push(worker);
         const next = this.queue.shift();
         if (next) this._dispatch(next);
     }
+
+    setLiveHandler(fn) {
+        this._liveHandler = fn;
+    }
+
+    reprocessLive(taskId, look) {
+        const worker = this.workers.find(w => w._lastTaskId === taskId);
+        if (!worker) return false;
+        worker.postMessage({ id: taskId, type: 'reprocess_live', look });
+        return true;
+    }
 }
 
 const pool = new WorkerPool(POOL_SIZE);
 pool.init();
+
+// ---------------------------------------------------------------------------
+// Live lightbox re-render (debounced, in-flight gating)
+// ---------------------------------------------------------------------------
+let liveDebounceTimer = null;
+let liveInFlight = false;
+let livePendingLook = null;
+
+function scheduleLiveUpdate() {
+    if (lightboxIndex < 0) return;
+    clearTimeout(liveDebounceTimer);
+    liveDebounceTimer = setTimeout(() => {
+        if (liveInFlight) {
+            livePendingLook = currentLook();
+            return;
+        }
+        triggerLiveUpdate(currentLook());
+    }, 80);
+}
+
+function triggerLiveUpdate(look) {
+    const card = cards[lightboxIndex];
+    if (!card || !card._taskId) return;
+    if (!pool.reprocessLive(card._taskId, look)) return;
+    liveInFlight = true;
+}
+
+pool.setLiveHandler((msg) => {
+    liveInFlight = false;
+    if (lightboxIndex >= 0) {
+        const card = cards[lightboxIndex];
+        if (msg.type === 'lightbox_live' && card && msg.id === card._taskId) {
+            // Update pixels without resetting zoom
+            const ctx = lightboxCanvas.getContext('2d');
+            const rgba = new Uint8ClampedArray(msg.w * msg.h * 4);
+            for (let i = 0, j = 0; i < msg.rgb.length; i += 3, j += 4) {
+                rgba[j] = msg.rgb[i]; rgba[j + 1] = msg.rgb[i + 1];
+                rgba[j + 2] = msg.rgb[i + 2]; rgba[j + 3] = 255;
+            }
+            ctx.putImageData(new ImageData(rgba, msg.w, msg.h), 0, 0);
+        }
+    }
+    if (livePendingLook) {
+        const pending = livePendingLook;
+        livePendingLook = null;
+        triggerLiveUpdate(pending);
+    }
+});
+
+contrastBoostEl.addEventListener('change', () => scheduleLiveUpdate());
 
 // ---------------------------------------------------------------------------
 // Card grid + per-file state
@@ -324,7 +397,7 @@ function startConvert(file, existingCard) {
 
     file.arrayBuffer()
         .then((buf) => {
-            pool.submit(new Uint8Array(buf), currentOptions(), {
+            const taskId = pool.submit(new Uint8Array(buf), currentOptions(), {
                 onThumb(msg) {
                     drawCanvas(card.querySelector('canvas'), msg.w, msg.h, msg.rgb);
                     card._pipelineMs = msg.pipelineMs;
@@ -395,6 +468,7 @@ function startConvert(file, existingCard) {
                     refreshStatus();
                 },
             });
+            card._taskId = taskId;
         })
         .catch((e) => {
             card.classList.add('error');
