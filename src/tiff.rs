@@ -74,12 +74,13 @@ pub fn parse(data: &[u8]) -> Result<OrfInfo> {
         }
     }
 
-    if info.width == 0 || info.height == 0 || info.strip_offset == 0 {
+    if info.width == 0 || info.height == 0 || info.strip_offset == 0 || info.strip_byte_count == 0 {
         bail!(
-            "missing required tags (w={}, h={}, strip={})",
+            "missing required tags (w={}, h={}, strip={}, byte_count={})",
             info.width,
             info.height,
-            info.strip_offset
+            info.strip_offset,
+            info.strip_byte_count,
         );
     }
 
@@ -155,8 +156,15 @@ impl IfdEntry {
         match self.dtype {
             3 => {
                 if self.count == 1 {
-                    let bytes = self.value_off.to_le_bytes();
-                    Ok(u16::from_le_bytes([bytes[0], bytes[1]]) as u32)
+                    // Inline SHORT: occupies the first 2 bytes of the 4-byte value
+                    // field.  For LE files the value lands in the low 16 bits of the
+                    // already-decoded u32; for BE files it lands in the high 16 bits.
+                    let v = if r.le {
+                        self.value_off & 0xFFFF
+                    } else {
+                        self.value_off >> 16
+                    };
+                    Ok(v)
                 } else {
                     Ok(r.u16(self.value_off as usize)? as u32)
                 }
@@ -217,12 +225,23 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
     } else {
         (off, 0)
     };
-    let _ = base_off;
 
     let sub = Reader { data, le: r.le };
     let Ok(count) = sub.u16(sub_off) else {
         return;
     };
+
+    // OLYMPUS\0 / OM SYSTEM\0: IFD value-offsets are relative to the MakerNote start
+    // (base_off). OLYMP\0 legacy uses absolute file offsets (base_off == 0).
+    let abs = |v: u32| base_off + v as usize;
+
+    // Extract the first inline SHORT from an IFD value field.
+    // TIFF stores SHORT[1] or SHORT[2] directly in the 4-byte value field when
+    // count*2 ≤ 4.  Must NOT treat it as a file pointer.
+    let inline_u16 = |v: u32| -> u16 {
+        if sub.le { (v & 0xFFFF) as u16 } else { (v >> 16) as u16 }
+    };
+
     for i in 0..count as usize {
         let e_off = sub_off + 2 + i * 12;
         let Ok(tag) = sub.u16(e_off) else { return };
@@ -230,40 +249,61 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
         let Ok(cnt) = sub.u32(e_off + 4) else { return };
         let Ok(val) = sub.u32(e_off + 8) else { return };
         match tag {
+            // RedBalance: SHORT×1, inline value, × 256
             0x1017 => {
-                // RedBalance: 2 SHORTs, value × 256
                 if dtype == 3 && cnt >= 1 {
-                    if let Ok(v) = sub.u16(val as usize) {
-                        info.wb_r = Some(v as f32 / 256.0);
-                    }
+                    let v = if cnt <= 2 {
+                        inline_u16(val)
+                    } else if let Ok(v) = sub.u16(abs(val)) {
+                        v
+                    } else {
+                        continue;
+                    };
+                    info.wb_r = Some(v as f32 / 256.0);
                 }
             }
+            // BlueBalance: SHORT×1, inline value, × 256
             0x1018 => {
                 if dtype == 3 && cnt >= 1 {
-                    if let Ok(v) = sub.u16(val as usize) {
-                        info.wb_b = Some(v as f32 / 256.0);
-                    }
+                    let v = if cnt <= 2 {
+                        inline_u16(val)
+                    } else if let Ok(v) = sub.u16(abs(val)) {
+                        v
+                    } else {
+                        continue;
+                    };
+                    info.wb_b = Some(v as f32 / 256.0);
                 }
             }
-            // 0x1029 (WB_RBLevels) - 2 SHORTs scaled by /256
+            // WB_RBLevels: SHORT×2 inline (4 bytes fits in value field), × 256
             0x1029 => {
                 if dtype == 3 && cnt >= 2 {
-                    let p = val as usize;
-                    if let (Ok(a), Ok(b)) = (sub.u16(p), sub.u16(p + 2)) {
-                        info.wb_r = Some(a as f32 / 256.0);
-                        info.wb_b = Some(b as f32 / 256.0);
-                    }
+                    let (a, b) = if cnt <= 2 {
+                        if sub.le {
+                            ((val & 0xFFFF) as u16, (val >> 16) as u16)
+                        } else {
+                            ((val >> 16) as u16, (val & 0xFFFF) as u16)
+                        }
+                    } else {
+                        let p = abs(val);
+                        match (sub.u16(p), sub.u16(p + 2)) {
+                            (Ok(a), Ok(b)) => (a, b),
+                            _ => continue,
+                        }
+                    };
+                    info.wb_r = Some(a as f32 / 256.0);
+                    info.wb_b = Some(b as f32 / 256.0);
                 }
             }
-            // 0x2040 ImageProcessing sub-IFD — descend and look for tag
-            // 0x0100 (WB_RBLevels: 2 SHORTs × 256) which is where modern
-            // Olympus bodies (E-M1 II/III, OM-1) actually store WB.
+            // ImageProcessing sub-IFD — contains WB_RBLevels (tag 0x0100) on
+            // modern E-M1 II/III and OM-1 bodies.
             0x2040 => {
-                let _ = parse_image_processing_subifd(&sub, val, info);
+                let _ = parse_image_processing_subifd(&sub, base_off as u32 + val, base_off, info);
             }
+            // ColorMatrix: SSHORT×9 — always a pointer (18 bytes > 4)
             0x1011 => {
                 if cnt == 9 {
-                    let p = val as usize;
+                    let p = abs(val);
                     let mut m = [[0f32; 3]; 3];
                     let mut ok = true;
                     'outer: for row in 0..3 {
@@ -284,7 +324,7 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
     }
 }
 
-fn parse_image_processing_subifd(r: &Reader, off: u32, info: &mut OrfInfo) -> Result<()> {
+fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &mut OrfInfo) -> Result<()> {
     let p = off as usize;
     if p + 2 > r.data.len() {
         return Ok(());
@@ -300,7 +340,9 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, info: &mut OrfInfo) -> Re
         let cnt = r.u32(e + 4)?;
         let val = r.u32(e + 8)?;
         if tag == 0x0100 && dtype == 3 && cnt >= 2 {
-            // Inline if cnt*2 ≤ 4 bytes, else value_off is a pointer.
+            // Format: [R_gain×256, B_gain×256, G_ref=256, G_ref=256].
+            // Inline when cnt==2 (4 bytes fits in value field); otherwise val is a
+            // MN-relative pointer — must add base_off to get absolute file offset.
             let (r_lvl, b_lvl) = if cnt == 2 {
                 let bytes = val.to_le_bytes();
                 let r_v = if r.le {
@@ -315,7 +357,8 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, info: &mut OrfInfo) -> Re
                 };
                 (r_v, b_v)
             } else {
-                (r.u16(val as usize)?, r.u16(val as usize + 2)?)
+                let ptr = base_off + val as usize;
+                (r.u16(ptr)?, r.u16(ptr + 2)?)
             };
             if r_lvl > 0 && b_lvl > 0 {
                 info.wb_r = Some(r_lvl as f32 / 256.0);

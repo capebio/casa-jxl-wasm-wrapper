@@ -273,9 +273,10 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
 
         // 2) Saturation + vibrance around luma.
         let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
-        let mx = r2.max(g2).max(b2).max(1.0);
+        let raw_mx = r2.max(g2).max(b2);
+        let mx = raw_mx.max(1.0);
         let mn = r2.min(g2).min(b2).max(0.0);
-        let pixel_sat = ((mx - mn) / mx).clamp(0.0, 1.0);
+        let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
         let vib_w = 1.0 - pixel_sat;
         let scale = sat * (1.0 + vib * vib_w * 0.6);
         r2 = luma + (r2 - luma) * scale;

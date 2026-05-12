@@ -10,7 +10,7 @@ const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
-const BUILD_TAG = '2026-05-11g / wb-subifd + colormatrix + texture-clarity';
+const BUILD_TAG = '2026-05-12a / makernote-wb-base_off-fix';
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -29,6 +29,12 @@ const lightboxInfo = lightbox.querySelector('.lightbox-info');
 const lightboxClose = lightbox.querySelector('.lightbox-close');
 const lightboxPrev = lightbox.querySelector('.lightbox-prev');
 const lightboxNext = lightbox.querySelector('.lightbox-next');
+const lbViewport = lightbox.querySelector('.lightbox-viewport');
+const lbZoomLabel = lightbox.querySelector('.lb-zoom-label');
+const lbZoomIn = lightbox.querySelector('.lb-zoom-in');
+const lbZoomOut = lightbox.querySelector('.lb-zoom-out');
+const lbZoomReset = lightbox.querySelector('.lb-zoom-reset');
+const lbDownloadBtn = lightbox.querySelector('.lb-download-btn');
 
 const qualityRange = document.getElementById('quality-range');
 const qualityLabel = document.getElementById('quality-label');
@@ -158,7 +164,7 @@ for (const el of lookInputs) {
 
 reprocessBtn.addEventListener('click', () => reprocessSelected());
 resetLookBtn.addEventListener('click', () => {
-    for (const el of lookInputs) el.value = el.dataset.look === 'exposureEv' ? '0' : '0';
+    for (const el of lookInputs) el.value = '0';
     refreshLookLabels();
 });
 
@@ -244,8 +250,10 @@ function makeCard(name) {
         <canvas></canvas>
         <div class="thumb-select" title="Select for re-process">·</div>
         <a class="download" hidden></a>
+        <button class="thumb-dl-btn" hidden title="Download JPEG">⬇ JPEG</button>
         <div class="meta">
             <span class="name"></span>
+            <span class="time"></span>
             <span class="size"></span>
         </div>
     `;
@@ -258,6 +266,19 @@ function makeCard(name) {
             card.classList.contains('selected') ? '✓' : '·';
         refreshReprocessLabel();
     });
+    card.querySelector('.thumb-dl-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const stem = (card._file?.name || 'image').replace(/\.orf$/i, '');
+        const cv = card.querySelector('canvas');
+        cv.toBlob((blob) => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = stem + '.jpg'; a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 30000);
+        }, 'image/jpeg', 0.95);
+    });
+    card.addEventListener('click', () => { if (card._lightbox) openLightbox(card); });
     return card;
 }
 
@@ -308,6 +329,9 @@ function startConvert(file, existingCard) {
                     drawCanvas(card.querySelector('canvas'), msg.w, msg.h, msg.rgb);
                     card._pipelineMs = msg.pipelineMs;
                     card._phaseMs = msg.phaseMs;
+                    card._wb = { r: msg.wbR, b: msg.wbB };
+                    card._camera = [msg.make, msg.model].filter(Boolean).join(' ') || '?';
+                    card.querySelector('.thumb-dl-btn').hidden = false;
                     // Show thumb immediately — JXL still encoding in background.
                     card.classList.remove('busy');
                     card.classList.add('encoding');
@@ -326,16 +350,25 @@ function startConvert(file, existingCard) {
                     link.hidden = false;
                     card.querySelector('.size').textContent =
                         `${(msg.jxl.byteLength / 1024).toFixed(0)} KB`;
+                    const totalMs = card._pipelineMs + msg.jxlMs;
+                    card.querySelector('.time').textContent =
+                        totalMs >= 60000
+                            ? `${Math.floor(totalMs / 60000)}m ${((totalMs % 60000) / 1000).toFixed(0)}s`
+                            : `${(totalMs / 1000).toFixed(1)}s`;
                     card._meta =
                         `${msg.w}×${msg.h} • pipeline ${card._pipelineMs.toFixed(0)} ms • JXL ${msg.jxlMs.toFixed(0)} ms`;
-                    card.addEventListener('click', () => openLightbox(card));
 
                     // Stats line — keeps everything one image needs on one row.
                     statSeq++;
                     const p = card._phaseMs || {};
+                    const wb = card._wb || {};
                     const name = file.name.padEnd(18, ' ').slice(0, 18);
+                    const wbStr = wb.r != null
+                        ? `wb R${wb.r.toFixed(3)} B${wb.b.toFixed(3)}`
+                        : 'wb ?';
                     pushStat(
                         `[${String(statSeq).padStart(3, ' ')}] ${name} ${msg.w}×${msg.h}  ` +
+                        `${wbStr}  ` +
                         `dec ${fmtMs(p.decompress)}  ` +
                         `dem ${fmtMs(p.demosaic)}  ` +
                         `tone ${fmtMs(p.tonemap)}  ` +
@@ -447,14 +480,52 @@ drop.addEventListener('drop', async (e) => {
 });
 
 // ---------------------------------------------------------------------------
-// Lightbox
+// Lightbox — zoom / pan / download
 // ---------------------------------------------------------------------------
 let lightboxIndex = -1;
 
+// Zoom state
+const LB_ZOOM_MIN = 0.05;
+const LB_ZOOM_MAX = 8.0;
+const LB_ZOOM_STEP = 1.25;
+let lbZoom = 1;
+let lbPanX = 0;
+let lbPanY = 0;
+
+function applyLbTransform() {
+    lightboxCanvas.style.transform = `translate(${lbPanX}px, ${lbPanY}px) scale(${lbZoom})`;
+    lbZoomLabel.textContent = Math.round(lbZoom * 100) + '%';
+}
+
+function resetLbZoom() {
+    const vp = lbViewport.getBoundingClientRect();
+    const cw = lightboxCanvas.width;
+    const ch = lightboxCanvas.height;
+    lbZoom = (cw > 0 && ch > 0) ? Math.min(vp.width / cw, vp.height / ch, 1) : 1;
+    lbPanX = 0;
+    lbPanY = 0;
+    applyLbTransform();
+}
+
+function zoomAtPoint(clientX, clientY, factor) {
+    const vp = lbViewport.getBoundingClientRect();
+    const mx = clientX - (vp.left + vp.width / 2);
+    const my = clientY - (vp.top + vp.height / 2);
+    const newZoom = Math.max(LB_ZOOM_MIN, Math.min(LB_ZOOM_MAX, lbZoom * factor));
+    const af = newZoom / lbZoom;
+    lbPanX = lbPanX * af + mx * (1 - af);
+    lbPanY = lbPanY * af + my * (1 - af);
+    lbZoom = newZoom;
+    applyLbTransform();
+}
+
 function openLightbox(card) {
     lightboxIndex = cards.indexOf(card);
-    drawLightbox();
+    const { rgb, w, h } = card._lightbox;
+    drawCanvas(lightboxCanvas, w, h, rgb);
+    lightboxInfo.textContent = card._meta || '';
     lightbox.hidden = false;
+    resetLbZoom();
 }
 
 function drawLightbox() {
@@ -463,6 +534,7 @@ function drawLightbox() {
     const { rgb, w, h } = card._lightbox;
     drawCanvas(lightboxCanvas, w, h, rgb);
     lightboxInfo.textContent = card._meta || '';
+    resetLbZoom();
 }
 
 function closeLightbox() {
@@ -473,16 +545,104 @@ function closeLightbox() {
 function nextInLightbox(dir) {
     if (lightboxIndex < 0) return;
     let i = lightboxIndex;
-    // Skip cards that haven't finished pipeline yet (no _lightbox data).
     for (let step = 0; step < cards.length; step++) {
         i = (i + dir + cards.length) % cards.length;
-        if (cards[i]._lightbox) {
-            lightboxIndex = i;
-            drawLightbox();
-            return;
-        }
+        if (cards[i]._lightbox) { lightboxIndex = i; drawLightbox(); return; }
     }
 }
+
+// Toolbar buttons
+lbZoomIn.addEventListener('click', () => {
+    const vp = lbViewport.getBoundingClientRect();
+    zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, LB_ZOOM_STEP);
+});
+lbZoomOut.addEventListener('click', () => {
+    const vp = lbViewport.getBoundingClientRect();
+    zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, 1 / LB_ZOOM_STEP);
+});
+lbZoomReset.addEventListener('click', resetLbZoom);
+
+// Download full-res from lightbox canvas
+lbDownloadBtn.addEventListener('click', () => {
+    const card = cards[lightboxIndex];
+    if (!card) return;
+    const stem = (card._file?.name || 'image').replace(/\.orf$/i, '');
+    lightboxCanvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = stem + '-fullres.jpg'; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+    }, 'image/jpeg', 0.95);
+});
+
+// Scroll-wheel zoom
+lbViewport.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    zoomAtPoint(e.clientX, e.clientY, e.deltaY < 0 ? LB_ZOOM_STEP : 1 / LB_ZOOM_STEP);
+}, { passive: false });
+
+// Mouse drag to pan
+let lbDragging = false;
+let lbDragLast = { x: 0, y: 0 };
+lbViewport.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    lbDragging = true;
+    lbDragLast = { x: e.clientX, y: e.clientY };
+    lbViewport.classList.add('dragging');
+    e.preventDefault();
+});
+window.addEventListener('mousemove', (e) => {
+    if (!lbDragging) return;
+    lbPanX += e.clientX - lbDragLast.x;
+    lbPanY += e.clientY - lbDragLast.y;
+    lbDragLast = { x: e.clientX, y: e.clientY };
+    applyLbTransform();
+});
+window.addEventListener('mouseup', () => {
+    if (!lbDragging) return;
+    lbDragging = false;
+    lbViewport.classList.remove('dragging');
+});
+
+// Pinch-to-zoom + single-finger pan (touch)
+let lbTouchPan = null;
+let lbPinchStart = { dist: 0, mx: 0, my: 0 };
+lbViewport.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+        lbTouchPan = null;
+        const t0 = e.touches[0], t1 = e.touches[1];
+        lbPinchStart = {
+            dist: Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY),
+            mx: (t0.clientX + t1.clientX) / 2,
+            my: (t0.clientY + t1.clientY) / 2,
+        };
+    } else if (e.touches.length === 1) {
+        lbTouchPan = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+    e.preventDefault();
+}, { passive: false });
+
+lbViewport.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2) {
+        const t0 = e.touches[0], t1 = e.touches[1];
+        const newDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        const mx = (t0.clientX + t1.clientX) / 2;
+        const my = (t0.clientY + t1.clientY) / 2;
+        if (lbPinchStart.dist > 0) {
+            zoomAtPoint(mx, my, newDist / lbPinchStart.dist);
+        }
+        lbPinchStart = { dist: newDist, mx, my };
+    } else if (e.touches.length === 1 && lbTouchPan) {
+        lbPanX += e.touches[0].clientX - lbTouchPan.x;
+        lbPanY += e.touches[0].clientY - lbTouchPan.y;
+        lbTouchPan = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        applyLbTransform();
+    }
+    e.preventDefault();
+}, { passive: false });
+
+lbViewport.addEventListener('touchend', () => { lbTouchPan = null; });
 
 lightboxClose.addEventListener('click', closeLightbox);
 lightboxPrev.addEventListener('click', () => nextInLightbox(-1));
@@ -496,6 +656,15 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeLightbox();
     else if (e.key === 'ArrowRight') nextInLightbox(1);
     else if (e.key === 'ArrowLeft') nextInLightbox(-1);
+    else if (e.key === '=' || e.key === '+') {
+        const vp = lbViewport.getBoundingClientRect();
+        zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, LB_ZOOM_STEP);
+    } else if (e.key === '-') {
+        const vp = lbViewport.getBoundingClientRect();
+        zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, 1 / LB_ZOOM_STEP);
+    } else if (e.key === '0') {
+        resetLbZoom();
+    }
 });
 
 // ---------------------------------------------------------------------------

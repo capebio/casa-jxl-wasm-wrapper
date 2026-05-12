@@ -79,12 +79,17 @@ self.addEventListener('message', async (ev) => {
             tonemap:    result.tonemap_ms,
             orient:     result.orient_ms,
         };
+        const wbR = result.wb_r_used;
+        const wbB = result.wb_b_used;
+        const make  = result.make;
+        const model = result.model;
 
         // ---- thumbnail (small) — send first so UI updates fast ------------
         const thumb = sized(w, h, THUMB_LONG_EDGE);
         const thumbRgb = downscale_rgb(fullRgb, w, h, thumb.w, thumb.h);
         self.postMessage(
-            { id, type: 'thumb', rgb: thumbRgb, w: thumb.w, h: thumb.h, pipelineMs, phaseMs },
+            { id, type: 'thumb', rgb: thumbRgb, w: thumb.w, h: thumb.h, pipelineMs, phaseMs,
+              wbR, wbB, make, model },
             [thumbRgb.buffer],
         );
 

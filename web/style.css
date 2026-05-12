@@ -249,10 +249,15 @@ main { padding: 24px 32px 64px; }
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.thumb .meta .time {
+    color: #6c7480;
+    flex-shrink: 0;
+    margin-left: auto;
+    padding-right: 6px;
+}
 .thumb .meta .size {
     color: #98a0a8;
     flex-shrink: 0;
-    margin-left: 6px;
 }
 .thumb .download {
     position: absolute;
@@ -365,13 +370,84 @@ main { padding: 24px 32px 64px; }
     align-items: center;
     justify-content: center;
     flex-direction: column;
+    gap: 0;
 }
-.lightbox canvas {
-    max-width: 92vw;
-    max-height: 86vh;
-    object-fit: contain;
+
+/* Viewport clips the canvas; canvas pans/zooms inside it */
+.lightbox-viewport {
+    position: relative;
+    width: 92vw;
+    height: 80vh;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+    touch-action: none;
+}
+.lightbox-viewport.dragging { cursor: grabbing; }
+
+#lightbox-canvas {
+    transform-origin: center center;
+    /* natural pixel size — JS sets scale via transform */
+    display: block;
     background: #000;
+    pointer-events: none;
 }
+
+.lightbox-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(0, 0, 0, 0.65);
+    padding: 6px 10px;
+    border-radius: 20px;
+    margin-bottom: 8px;
+    z-index: 10;
+}
+.lb-btn {
+    background: rgba(255, 255, 255, 0.12);
+    border: none;
+    color: #e7e9ec;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 100ms;
+    flex-shrink: 0;
+}
+.lb-btn:hover { background: rgba(44, 100, 255, 0.85); }
+.lb-zoom-label {
+    color: #c8ccd0;
+    font-size: 12px;
+    min-width: 44px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+.lb-sep {
+    width: 1px;
+    height: 20px;
+    background: rgba(255,255,255,0.15);
+    margin: 0 4px;
+}
+.lb-download-btn {
+    background: rgba(255, 255, 255, 0.12);
+    border: none;
+    color: #e7e9ec;
+    padding: 5px 12px;
+    border-radius: 14px;
+    cursor: pointer;
+    font-size: 12px;
+    letter-spacing: 0.3px;
+    transition: background 100ms;
+}
+.lb-download-btn:hover { background: rgba(44, 100, 255, 0.85); }
+
 .lightbox-close,
 .lightbox-prev,
 .lightbox-next {
@@ -386,6 +462,7 @@ main { padding: 24px 32px 64px; }
     height: 48px;
     line-height: 1;
     font-size: 30px;
+    z-index: 20;
 }
 .lightbox-close { top: 18px; right: 22px; font-size: 28px; }
 .lightbox-prev { left: 22px; top: 50%; transform: translateY(-50%); }
@@ -395,13 +472,29 @@ main { padding: 24px 32px 64px; }
 .lightbox-next:hover { background: rgba(40, 80, 200, 0.85); }
 
 .lightbox-info {
-    position: absolute;
-    bottom: 24px;
-    left: 50%;
-    transform: translateX(-50%);
+    margin-top: 8px;
     color: #98a0a8;
     font-size: 12px;
     background: rgba(0, 0, 0, 0.5);
-    padding: 6px 12px;
+    padding: 5px 12px;
     border-radius: 4px;
 }
+
+/* Thumbnail per-card download button */
+.thumb-dl-btn {
+    position: absolute;
+    bottom: 38px;
+    right: 6px;
+    background: rgba(0, 0, 0, 0.72);
+    border: none;
+    color: white;
+    padding: 4px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms;
+    z-index: 3;
+    letter-spacing: 0.2px;
+}
+.thumb:hover .thumb-dl-btn { opacity: 1; }

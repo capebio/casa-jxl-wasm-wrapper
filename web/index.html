@@ -127,7 +127,17 @@
         <button class="lightbox-close" aria-label="Close">×</button>
         <button class="lightbox-prev" aria-label="Previous">‹</button>
         <button class="lightbox-next" aria-label="Next">›</button>
-        <canvas id="lightbox-canvas"></canvas>
+        <div class="lightbox-toolbar">
+            <button class="lb-btn lb-zoom-out" aria-label="Zoom out">−</button>
+            <span class="lb-zoom-label">100%</span>
+            <button class="lb-btn lb-zoom-in" aria-label="Zoom in">+</button>
+            <button class="lb-btn lb-zoom-reset" aria-label="Fit image" title="Reset zoom">⊙</button>
+            <span class="lb-sep"></span>
+            <button class="lb-download-btn" aria-label="Download full-res JPEG">⬇ JPEG</button>
+        </div>
+        <div class="lightbox-viewport">
+            <canvas id="lightbox-canvas"></canvas>
+        </div>
         <div class="lightbox-info"></div>
     </div>
 

@@ -11,6 +11,9 @@ const HEADER_SKIP: usize = 7;
 
 pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Vec<u16> {
     let mut out = vec![0u16; width * height];
+    if compressed.len() <= HEADER_SKIP {
+        return out;
+    }
     let huff = build_huff();
     let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
 
