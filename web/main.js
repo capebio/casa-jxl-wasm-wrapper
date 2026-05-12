@@ -10,7 +10,7 @@ const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
-const BUILD_TAG = '2026-05-12b / sat-contrast-exp-tuned';
+const BUILD_TAG = '2026-05-12d / mn-colormatrix + ev1.25';
 
 // ---------------------------------------------------------------------------
 // DOM refs

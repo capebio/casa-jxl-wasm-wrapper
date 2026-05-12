@@ -23,7 +23,7 @@ const CAM_TO_SRGB: [[f32; 3]; 3] = [
 /// JPEG.  User look sliders adjust on top.
 const BASELINE_SAT: f32 = 1.20;        // chroma scale around luma
 const BASELINE_CONTRAST: f32 = 0.35;   // S-curve blend, [0,1]
-const BASELINE_EXP_EV: f32 = 0.70;     // +0.7 EV always-on lift
+const BASELINE_EXP_EV: f32 = 1.25;     // tuned to match embedded JPEG luminance (lum ~87)
 
 pub struct PipelineParams {
     pub black: u16,

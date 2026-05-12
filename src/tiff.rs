@@ -339,11 +339,12 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
         let dtype = r.u16(e + 2)?;
         let cnt = r.u32(e + 4)?;
         let val = r.u32(e + 8)?;
+        // WB_RGBGLevels: format [R_balance, B_balance, G_ref, G_ref] where
+        // each value is the channel gain ×256 (G_ref = 256 = unity).
+        // ptr+0 = R gain ×256, ptr+2 = B gain ×256.
         if tag == 0x0100 && dtype == 3 && cnt >= 2 {
-            // Format: [R_gain×256, B_gain×256, G_ref=256, G_ref=256].
-            // Inline when cnt==2 (4 bytes fits in value field); otherwise val is a
-            // MN-relative pointer — must add base_off to get absolute file offset.
             let (r_lvl, b_lvl) = if cnt == 2 {
+                // Inline: both SHORTs in the 4-byte value field.
                 let bytes = val.to_le_bytes();
                 let r_v = if r.le {
                     u16::from_le_bytes([bytes[0], bytes[1]])
@@ -364,6 +365,21 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
                 info.wb_r = Some(r_lvl as f32 / 256.0);
                 info.wb_b = Some(b_lvl as f32 / 256.0);
             }
+        }
+        // ColorMatrix: SSHORT×9 packed as CamRGB→sRGB (÷256).  Row sums ~1.
+        if tag == 0x0200 && cnt == 9 && (dtype == 3 || dtype == 8) {
+            let ptr = base_off + val as usize;
+            let mut m = [[0f32; 3]; 3];
+            let mut ok = true;
+            'cm: for row in 0..3 {
+                for col in 0..3 {
+                    match r.u16(ptr + (row * 3 + col) * 2) {
+                        Ok(v) => m[row][col] = (v as i16) as f32 / 256.0,
+                        Err(_) => { ok = false; break 'cm; }
+                    }
+                }
+            }
+            if ok { info.color_matrix = Some(m); }
         }
     }
     Ok(())
