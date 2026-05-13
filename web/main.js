@@ -10,7 +10,7 @@ const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
-const BUILD_TAG = '2026-05-13c / fast-preview + orientation';
+const BUILD_TAG = '2026-05-13j / live-lightbox + toggle fixes';
 
 // Visible build badge — top-left corner, always present.
 {
@@ -20,16 +20,32 @@ const BUILD_TAG = '2026-05-13c / fast-preview + orientation';
     document.body.appendChild(badge);
 }
 
-// Info popover
+// Info + effort popovers
 {
-    const btn = document.getElementById('info-btn');
-    const pop = document.getElementById('info-popover');
+    const allPopovers = () => [
+        document.getElementById('info-popover'),
+        document.getElementById('effort-popover'),
+    ];
+    function closeAllPopovers() { allPopovers().forEach(p => { if (p) p.hidden = true; }); }
+    function togglePopover(id, e) {
+        e.stopPropagation();
+        const target = document.getElementById(id);
+        const wasHidden = target.hidden;
+        closeAllPopovers();
+        target.hidden = !wasHidden;
+    }
+
+    const infoPop = document.getElementById('info-popover');
     document.getElementById('info-build-tag').textContent = BUILD_TAG;
     document.getElementById('info-pool-size').textContent = POOL_SIZE;
     document.getElementById('info-hw-cores').textContent = navigator.hardwareConcurrency || '?';
-    btn.addEventListener('click', (e) => { e.stopPropagation(); pop.hidden = !pop.hidden; });
-    pop.addEventListener('click', (e) => e.stopPropagation());
-    document.addEventListener('click', () => { pop.hidden = true; });
+    document.getElementById('info-btn').addEventListener('click', (e) => togglePopover('info-popover', e));
+    infoPop.addEventListener('click', (e) => e.stopPropagation());
+
+    document.getElementById('effort-info-btn').addEventListener('click', (e) => togglePopover('effort-popover', e));
+    document.getElementById('effort-popover').addEventListener('click', (e) => e.stopPropagation());
+
+    document.addEventListener('click', closeAllPopovers);
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +73,8 @@ const lbZoomReset = lightbox.querySelector('.lb-zoom-reset');
 const lbDownloadBtn = lightbox.querySelector('.lb-download-btn');
 const lbPreviewBadge = lightbox.querySelector('.lb-preview-badge');
 const lbLoadingBadge = lightbox.querySelector('.lb-loading-badge');
+const lbToggleJpegBtn = lightbox.querySelector('.lb-toggle-jpeg');
+const lbSourceBanner = lightbox.querySelector('#lb-source-banner');
 
 const qualityRange = document.getElementById('quality-range');
 const qualityLabel = document.getElementById('quality-label');
@@ -144,29 +162,13 @@ function fmtKb(v) { return (v / 1024).toFixed(0).padStart(5, ' ') + ' KB'; }
 let statSeq = 0;
 
 // ---------------------------------------------------------------------------
-// Look slider state persistence
+// Look slider helpers
 // ---------------------------------------------------------------------------
-const LOOK_STATE_KEY = 'orf-look-state';
-
-function saveLookState() {
-    const state = {};
-    for (const el of lookInputs) state[el.dataset.look] = el.value;
-    state['contrast-boost'] = contrastBoostEl.checked;
-    try { localStorage.setItem(LOOK_STATE_KEY, JSON.stringify(state)); } catch {}
+function resetLookSliders() {
+    for (const el of lookInputs) el.value = '0';
+    contrastBoostEl.checked = false;
+    refreshLookLabels();
 }
-
-function restoreLookState() {
-    try {
-        const state = JSON.parse(localStorage.getItem(LOOK_STATE_KEY));
-        if (!state) return;
-        for (const el of lookInputs) {
-            if (state[el.dataset.look] !== undefined) el.value = state[el.dataset.look];
-        }
-        if (state['contrast-boost'] !== undefined) contrastBoostEl.checked = !!state['contrast-boost'];
-        refreshLookLabels();
-    } catch {}
-}
-restoreLookState();
 
 // ---------------------------------------------------------------------------
 // Encoder option state
@@ -213,7 +215,6 @@ for (const el of lookInputs) {
         const name = el.dataset.look;
         const lbl = lookLabels.get(name);
         if (lbl) lbl.textContent = lookDisplay(name);
-        saveLookState();
         scheduleLiveUpdate();
         scheduleGalleryLiveUpdate();
     });
@@ -239,10 +240,7 @@ applyLookBtn.addEventListener('click', () => {
 });
 
 resetLookBtn.addEventListener('click', () => {
-    for (const el of lookInputs) el.value = '0';
-    contrastBoostEl.checked = false;
-    refreshLookLabels();
-    saveLookState();
+    resetLookSliders();
     scheduleLiveUpdate();
     scheduleGalleryLiveUpdate();
 });
@@ -311,6 +309,9 @@ class WorkerPool {
         this.tasks = new Map(); // id → handlers
         this.nextId = 1;
         this.workerForTask = new Map(); // taskId → worker (populated on _releaseWorker)
+        this._jxlWorker = null;
+        this._jxlDecodeCallbacks = new Map(); // decodeId → callback fn
+        this._jxlNextDecodeId    = 1;
     }
 
     init() {
@@ -379,21 +380,29 @@ class WorkerPool {
             if (this._thumbLiveHandler) this._thumbLiveHandler(ev.data);
             return;
         }
+        // RAW worker finished pipeline; forward RGBA to the JXL encode worker.
+        if (type === 'encode_request') {
+            if (this._jxlWorker) this._jxlWorker.postMessage(ev.data, [ev.data.rgba]);
+            return;
+        }
         const t = this.tasks.get(id);
         if (!t) return;
         const handlers = t.handlers;
         if (type === 'thumb' && handlers.onThumb) handlers.onThumb(ev.data);
         else if (type === 'lightbox' && handlers.onLightbox) {
             handlers.onLightbox(ev.data);
-            // Release worker immediately — JXL encode continues async in the worker
-            // (the async handler yields at await encode_jxl, so a new ORF message
-            // can be picked up concurrently without state collision).
+            // Release worker after lightbox — JXL encode is now handled by
+            // jxl-worker.js, so the RAW worker is free for the next file.
             this._releaseWorker(worker, id);
         }
         else if (type === 'done') {
             if (handlers.onDone) handlers.onDone(ev.data);
             this.tasks.delete(id);  // Worker already freed on lightbox
-            this.workerForTask.delete(id);
+            // KEEP workerForTask[id] alive — the owning worker still holds
+            // liveStateMap[id], so reprocess_live for the lightbox needs to
+            // know which worker to message even long after JXL is done.
+            // Mapping is overwritten if the same card is re-submitted (new
+            // taskId issued), so it doesn't leak.
         } else if (type === 'error') {
             if (handlers.onError) handlers.onError(ev.data);
             // Error may arrive before or after lightbox — only release worker if not yet done.
@@ -423,8 +432,42 @@ class WorkerPool {
         this._releaseWorker(worker, id);
     }
 
+    setJxlWorker(w) {
+        this._jxlWorker = w;
+        w.addEventListener('message', ({ data }) => {
+            // Decode responses use decodeId, not task id.
+            if (data.type === 'jxl_decoded' || data.type === 'decode_error') {
+                const cb = this._jxlDecodeCallbacks.get(data.decodeId);
+                if (cb) { this._jxlDecodeCallbacks.delete(data.decodeId); cb(data); }
+                return;
+            }
+            // Encode responses use task id.
+            const t = this.tasks.get(data.id);
+            if (!t) return;
+            if (data.type === 'done') {
+                if (t.handlers.onDone) t.handlers.onDone(data);
+            } else {
+                if (t.handlers.onError) t.handlers.onError({ type: 'error', error: data.error });
+            }
+            this.tasks.delete(data.id);
+            // KEEP workerForTask[id] alive — the RAW worker still holds the
+            // cached rgb16 for live re-render via reprocess_live.  The mapping
+            // is overwritten when the same card is re-submitted under a new
+            // taskId, so it doesn't accumulate beyond one entry per card.
+        });
+        w.addEventListener('error', (ev) => {
+            console.error('jxl-worker error:', ev.message);
+        });
+    }
+
     setLiveHandler(fn) { this._liveHandler = fn; }
     setThumbLiveHandler(fn) { this._thumbLiveHandler = fn; }
+
+    decodeJxl(url, callback) {
+        const decodeId = this._jxlNextDecodeId++;
+        this._jxlDecodeCallbacks.set(decodeId, callback);
+        this._jxlWorker.postMessage({ type: 'decode_jxl', decodeId, url });
+    }
 
     reprocessLive(taskId, look) {
         const worker = this.workerForTask.get(taskId);
@@ -446,6 +489,11 @@ class WorkerPool {
 
 const pool = new WorkerPool(POOL_SIZE);
 pool.init();
+
+// Spawn JXL encode worker from the page's main thread.  Emscripten Pthreads
+// require SharedArrayBuffer (COOP + COEP) and cannot bootstrap correctly when
+// the caller is itself a Web Worker — so this must live here, not in worker.js.
+pool.setJxlWorker(new Worker(new URL('./jxl-worker.js', import.meta.url), { type: 'module' }));
 
 // ---------------------------------------------------------------------------
 // Live lightbox re-render (debounced, in-flight gating)
@@ -501,7 +549,7 @@ pool.setLiveHandler((msg) => {
     }
 });
 
-contrastBoostEl.addEventListener('change', () => { saveLookState(); scheduleLiveUpdate(); scheduleGalleryLiveUpdate(); });
+contrastBoostEl.addEventListener('change', () => { scheduleLiveUpdate(); scheduleGalleryLiveUpdate(); });
 
 // ---------------------------------------------------------------------------
 // Gallery live thumb re-render (debounced, fans out to all selected cards)
@@ -523,7 +571,12 @@ function triggerGalleryLiveUpdate(look) {
 
 pool.setThumbLiveHandler((msg) => {
     const card = cardByTaskId.get(msg.id);
-    if (card) drawCanvas(card.querySelector('canvas'), msg.w, msg.h, msg.rgb);
+    if (card) {
+        card._thumbRgb = msg.rgb;
+        card._thumbW   = msg.w;
+        card._thumbH   = msg.h;
+        redrawThumbRotated(card);
+    }
 });
 
 // ---------------------------------------------------------------------------
@@ -531,12 +584,20 @@ pool.setThumbLiveHandler((msg) => {
 // ---------------------------------------------------------------------------
 const cards = []; // ordered list of card elements for lightbox prev/next
 
+const MAX_FILE_BYTES = 200 * 1024 * 1024; // 200 MB hard limit before WASM
+const seenFiles = new Set(); // "name|size|lastModified" — prevents duplicate-drop cards
+
+function fileKey(f) { return `${f.name}|${f.size}|${f.lastModified}`; }
+
 function makeCard(name) {
     const card = document.createElement('div');
     card.className = 'thumb busy';
     card.innerHTML = `
         <canvas></canvas>
         <div class="thumb-select" title="Select for re-process">·</div>
+        <button class="thumb-rot-cw"  title="Rotate 90° CW">↻</button>
+        <button class="thumb-rot-ccw" title="Rotate 90° CCW">↺</button>
+        <button class="thumb-toggle-jpeg" hidden title="Toggle camera JPEG view">JXL</button>
         <a class="download" hidden></a>
         <button class="thumb-dl-btn" hidden title="Download JPEG">⬇ JPEG</button>
         <div class="meta">
@@ -566,8 +627,40 @@ function makeCard(name) {
             setTimeout(() => URL.revokeObjectURL(url), 30000);
         }, 'image/jpeg', 0.95);
     });
+    card.querySelector('.thumb-rot-cw').addEventListener('click', (e) => { e.stopPropagation(); rotateCard(card, 90); });
+    card.querySelector('.thumb-rot-ccw').addEventListener('click', (e) => { e.stopPropagation(); rotateCard(card, -90); });
+    card.querySelector('.thumb-toggle-jpeg').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleJpegForCard(card);
+    });
     card.addEventListener('click', () => openLightbox(card));
     return card;
+}
+
+// Flip the JPEG/JXL display state for a card and re-render both the thumb and
+// (if open on this card) the lightbox.  Updates button label on both surfaces.
+function toggleJpegForCard(card) {
+    if (!card._embeddedPreview) return; // nothing to swap to
+    card._showJpeg = !card._showJpeg;
+    refreshThumbToggleButton(card);
+    redrawThumbRotated(card);
+    if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+        drawLightboxForCard(card);
+        flashSourceBanner();
+        // Toggled back to JXL: re-apply current look since drawLightboxForCard
+        // draws from the original rgb, not the live-rendered pixels.
+        if (!card._showJpeg) scheduleLiveUpdate();
+    }
+}
+
+function refreshThumbToggleButton(card) {
+    const btn = card.querySelector('.thumb-toggle-jpeg');
+    if (!btn) return;
+    const havePair = !!(card._embeddedPreview && card._thumbRgb);
+    btn.hidden = !havePair;
+    if (!havePair) return;
+    btn.textContent = card._showJpeg ? 'JPEG' : 'JXL';
+    btn.classList.toggle('showing-jpeg', !!card._showJpeg);
 }
 
 function refreshReprocessLabel() {
@@ -619,8 +712,76 @@ function drawCanvas(canvas, w, h, rgb) {
     ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
 }
 
+// Draw an RGB8 buffer into canvas with an arbitrary CW rotation (0/90/180/270).
+function drawRotatedCanvas(canvas, rgb, w, h, degrees) {
+    if (!canvas) return;
+    const d = ((degrees % 360) + 360) % 360;
+    const swap = d === 90 || d === 270;
+    const dW = swap ? h : w, dH = swap ? w : h;
+    canvas.width = dW; canvas.height = dH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const rgba = rgbToRgba(rgb, w, h);
+    if (d === 0) { ctx.putImageData(new ImageData(rgba, w, h), 0, 0); return; }
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const tctx = tmp.getContext('2d');
+    if (tctx) tctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+    ctx.save();
+    ctx.translate(dW / 2, dH / 2);
+    ctx.rotate(d * Math.PI / 180);
+    ctx.drawImage(tmp, -w / 2, -h / 2, w, h);
+    ctx.restore();
+}
+
+// Redraw a card's thumbnail applying the current userRotations entry.  Routes
+// through card._showJpeg: when true and we have an embedded preview cached,
+// the camera's JPEG is rendered at the same canvas pixel dims as the JXL/RGB
+// thumb so toggling doesn't change the viewport.
+function redrawThumbRotated(card) {
+    const deg = card._file?.name ? (userRotations[card._file.name] || 0) : 0;
+    const canvas = card.querySelector('canvas');
+    if (card._showJpeg && card._embeddedPreview && card._thumbW && card._thumbH) {
+        // Render JPEG into a hidden offscreen canvas matching the JXL thumb dims
+        // (so user-rotation pass below sees identical input geometry).
+        const off = document.createElement('canvas');
+        drawJpegToTargetDims(off, card._embeddedPreview.bmp,
+                             card._embeddedPreview.orientation || 1,
+                             card._thumbW, card._thumbH);
+        const ctx = off.getContext('2d');
+        const id = ctx.getImageData(0, 0, card._thumbW, card._thumbH);
+        // drawRotatedCanvas takes RGB (3 bytes/pixel); convert from RGBA.
+        const rgb = new Uint8Array(card._thumbW * card._thumbH * 3);
+        for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
+            rgb[i] = id.data[j]; rgb[i+1] = id.data[j+1]; rgb[i+2] = id.data[j+2];
+        }
+        drawRotatedCanvas(canvas, rgb, card._thumbW, card._thumbH, deg);
+        return;
+    }
+    if (!card._thumbRgb) return;
+    drawRotatedCanvas(canvas, card._thumbRgb, card._thumbW, card._thumbH, deg);
+}
+
+// Rotate a card by delta degrees and persist + sync lightbox if open.
+function rotateCard(card, delta) {
+    const name = card._file?.name;
+    if (!name) return;
+    userRotations[name] = (((userRotations[name] || 0) + delta) % 360 + 360) % 360;
+    saveUserRotations();
+    redrawThumbRotated(card);
+    if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+        lbRotation = userRotations[name];
+        resetLbZoom();
+    }
+}
+
 let totalSubmitted = 0;
 let totalDone = 0;
+
+const statusTimings = document.getElementById('status-timings');
+const EMA_A = 0.25;
+let emaPipeline = null; // Rust RAW pipeline (ms)
+let emaEncode = null;   // JXL encode (ms)
 
 // ---------------------------------------------------------------------------
 // Embedded JPEG thumbnail extraction + orientation (pure JS, before WASM)
@@ -694,6 +855,35 @@ function readJpegOrientation(bytes) {
     return 1;
 }
 
+// Parse orientation tag (0x0112) from an ORF/TIFF file's own IFD0.
+// The embedded JPEG previews often lack EXIF APP1 entirely; the RAW TIFF
+// header is always present and is the authoritative source.
+// Returns 1 (normal) when absent or unreadable.
+function readOrfOrientation(bytes) {
+    if (bytes.length < 8) return 1;
+    const le = bytes[0] === 0x49 && bytes[1] === 0x49; // 'II' = little-endian
+    if (!le && !(bytes[0] === 0x4D && bytes[1] === 0x4D)) return 1;
+    const r16 = o => le ? (bytes[o] | bytes[o+1]<<8) : (bytes[o]<<8 | bytes[o+1]);
+    const r32 = o => le
+        ? ((bytes[o] | bytes[o+1]<<8 | bytes[o+2]<<16 | bytes[o+3]<<24) >>> 0)
+        : ((bytes[o]<<24 | bytes[o+1]<<16 | bytes[o+2]<<8 | bytes[o+3]) >>> 0);
+    // Olympus ORF uses non-TIFF magic at bytes 2-3 (IIRO/IIRS/IIUS = 0x524F/5253/5553)
+    // rather than the standard TIFF 0x002A — skip the magic check entirely.
+    // IFD0 offset at bytes 4-7 is standard across all variants.
+    const ifd0 = r32(4);
+    if (ifd0 + 2 > bytes.length) return 1;
+    const n = r16(ifd0);
+    for (let i = 0; i < n; i++) {
+        const off = ifd0 + 2 + i * 12;
+        if (off + 12 > bytes.length) break;
+        if (r16(off) === 0x0112) {
+            const val = r16(off + 8); // SHORT, inline value
+            return (val >= 1 && val <= 8) ? val : 1;
+        }
+    }
+    return 1;
+}
+
 // Draw a bitmap into canvas at thumbnail size, applying EXIF orientation via
 // canvas transform (scaled to fit longEdge). Orientations 5-8 swap axes.
 // Transform derivation: scaled version of the standard EXIF canvas transforms.
@@ -748,11 +938,71 @@ function drawBitmapOriented(canvas, bmp, orientation) {
     ctx.restore();
 }
 
+// Draw an embedded-JPEG ImageBitmap into `canvas` so the resulting pixel grid
+// matches the JXL/RGB render exactly: same canvas.width/height and same EXIF
+// orientation applied.  The JPEG is rescaled (linear interpolation via the
+// canvas drawImage path) into target dims and oriented in pixel space.  CSS
+// zoom/pan/rotate transforms on the canvas then behave identically whether
+// the JXL pixels or JPEG pixels are showing — that's the whole point of the
+// JXL↔JPEG toggle: same viewport, just different pixel source.
+//
+// Implementation: instead of EXIF affine matrices on a fixed destination rect,
+// we translate the origin to the canvas centre, rotate/flip, then draw the
+// source bitmap centred at the pre-rotation rect.  Cleaner math, avoids the
+// off-canvas drift bug the matrix form had for orientations 5-8.
+function drawJpegToTargetDims(canvas, bmp, orientation, targetW, targetH) {
+    const o = (orientation >= 1 && orientation <= 8) ? orientation : 1;
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    if (o === 1) { ctx.drawImage(bmp, 0, 0, targetW, targetH); return; }
+    let rad = 0, flipX = 1, flipY = 1;
+    switch (o) {
+        case 2: flipX = -1; break;
+        case 3: rad = Math.PI; break;
+        case 4: flipY = -1; break;
+        case 5: rad =  Math.PI / 2; flipX = -1; break;
+        case 6: rad =  Math.PI / 2; break;
+        case 7: rad = -Math.PI / 2; flipX = -1; break;
+        case 8: rad = -Math.PI / 2; break;
+    }
+    // After rotation, the source maps onto the canvas like this: for
+    // 90°/270° orientations the source's long edge aligns with the canvas's
+    // long edge, so the pre-rotation dest-rect must use swapped dims.
+    const swap = o >= 5;
+    const dW = swap ? targetH : targetW;
+    const dH = swap ? targetW : targetH;
+    ctx.save();
+    ctx.translate(targetW / 2, targetH / 2);
+    ctx.rotate(rad);
+    ctx.scale(flipX, flipY);
+    ctx.drawImage(bmp, -dW / 2, -dH / 2, dW, dH);
+    ctx.restore();
+}
+
 // How many bytes to read upfront for embedded JPEG extraction.
 // Olympus ORF stores the embedded preview within the first ~1–2 MB; 3 MB is safe.
 const PREVIEW_SLICE = 3 * 1024 * 1024;
 
 function startConvert(file, existingCard) {
+    if (!existingCard) {
+        const key = fileKey(file);
+        if (seenFiles.has(key)) return; // duplicate drop — same file already queued
+        seenFiles.add(key);
+        if (file.size > MAX_FILE_BYTES) {
+            const card = makeCard(file.name);
+            cards.push(card);
+            grid.appendChild(card);
+            card.classList.remove('busy');
+            card.classList.add('error');
+            card.dataset.error = `File too large (${(file.size / 1024 / 1024).toFixed(0)} MB > ${MAX_FILE_BYTES / 1024 / 1024} MB limit)`;
+            totalSubmitted++; totalDone++; refreshStatus();
+            return;
+        }
+    }
     const card = existingCard || makeCard(file.name);
     if (!existingCard) {
         cards.push(card);
@@ -765,7 +1015,15 @@ function startConvert(file, existingCard) {
         link.hidden = true;
         link.removeAttribute('href');
         card._lightbox = null;
-        if (card._embeddedPreview) { card._embeddedPreview.bmp.close(); card._embeddedPreview = null; }
+        // Keep _embeddedPreview alive across reprocess — JPEG-vs-JXL toggle needs it.
+        // Force the JXL view back on so the user actually sees the result of
+        // pressing Apply/Re-process; otherwise they'd be staring at the
+        // (unchanged) camera JPEG and assume the action did nothing.
+        card._showJpeg = false;
+        refreshThumbToggleButton(card);
+        if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+            drawLightboxForCard(card);
+        }
     }
     totalSubmitted++;
     card._file = file;
@@ -776,11 +1034,14 @@ function startConvert(file, existingCard) {
     // Runs concurrently with the full read below; failure is non-fatal.
     file.slice(0, PREVIEW_SLICE).arrayBuffer().then(sliceBuf => {
         const bytes = new Uint8Array(sliceBuf);
+        // RAW TIFF orientation is authoritative — embedded JPEGs often lack EXIF.
+        // Fall back to JPEG EXIF only if the RAW header is unreadable.
+        const rawOrientation = readOrfOrientation(bytes);
         const candidates = extractEmbeddedJpegs(bytes);
         if (!candidates.length) return;
         Promise.allSettled(
             candidates.map(c => {
-                const orientation = readJpegOrientation(c);
+                const orientation = rawOrientation !== 1 ? rawOrientation : readJpegOrientation(c);
                 return createImageBitmap(new Blob([c], { type: 'image/jpeg' }))
                     .then(bmp => ({ bmp, pixels: bmp.width * bmp.height,
                                     w: bmp.width, h: bmp.height, orientation }));
@@ -804,9 +1065,15 @@ function startConvert(file, existingCard) {
 
             card._embeddedPreview = { bmp: largest.bmp, w: largest.w, h: largest.h,
                                       orientation: largest.orientation };
-            if (lightboxIndex >= 0 && cards[lightboxIndex] === card && !card._lightbox) {
-                drawLightboxForCard(card);
-                resetLbZoom();
+            refreshThumbToggleButton(card);
+            if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+                if (!card._lightbox) {
+                    drawLightboxForCard(card);
+                    resetLbZoom();
+                } else {
+                    // Refresh toggle button enabled-state now that the pair is complete.
+                    updateToggleButtonState(card);
+                }
             }
 
             for (let vi = 0; vi < valid.length - 1; vi++) valid[vi].bmp.close();
@@ -817,9 +1084,21 @@ function startConvert(file, existingCard) {
     file.arrayBuffer()
         .then((buf) => {
             const bytes = new Uint8Array(buf);
-            const taskId = pool.submit(bytes, currentOptions(), {
+            const opts = currentOptions();
+            opts.userRotation = userRotations[file.name] || 0;
+            const taskId = pool.submit(bytes, opts, {
                 onThumb(msg) {
-                    drawCanvas(card.querySelector('canvas'), msg.w, msg.h, msg.rgb);
+                    card._thumbRgb = msg.rgb;
+                    card._thumbW   = msg.w;
+                    card._thumbH   = msg.h;
+                    try {
+                        redrawThumbRotated(card);
+                    } catch (e) {
+                        console.error('redrawThumb error:', e);
+                        pushStat(`[redrawThumb ERROR] ${e?.message || e} (w=${msg.w} h=${msg.h} rgb=${msg.rgb?.byteLength})`);
+                        drawCanvas(card.querySelector('canvas'), msg.w, msg.h, msg.rgb);
+                    }
+                    refreshThumbToggleButton(card);
                     card._pipelineMs = msg.pipelineMs;
                     card._phaseMs = msg.phaseMs;
                     card._wb = { r: msg.wbR, b: msg.wbB };
@@ -832,11 +1111,8 @@ function startConvert(file, existingCard) {
                 },
                 onLightbox(msg) {
                     card._lightbox = { rgb: msg.rgb, w: msg.w, h: msg.h };
-                    // Free embedded preview bitmap — no longer needed.
-                    if (card._embeddedPreview) {
-                        card._embeddedPreview.bmp.close();
-                        card._embeddedPreview = null;
-                    }
+                    // Keep _embeddedPreview around — the JXL/JPEG toggle needs it.
+                    refreshThumbToggleButton(card);
                     if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
                         drawLightboxForCard(card);
                     }
@@ -856,12 +1132,14 @@ function startConvert(file, existingCard) {
                     card.querySelector('.size').textContent =
                         `${(msg.jxl.byteLength / 1024).toFixed(0)} KB`;
                     const totalMs = card._pipelineMs + msg.jxlMs;
+                    const effortNote = (msg.effortUsed && msg.effortRequested && msg.effortUsed < msg.effortRequested)
+                        ? ` (effort ${msg.effortRequested}→${msg.effortUsed}: OOM)` : '';
                     card.querySelector('.time').textContent =
-                        totalMs >= 60000
+                        (totalMs >= 60000
                             ? `${Math.floor(totalMs / 60000)}m ${((totalMs % 60000) / 1000).toFixed(0)}s`
-                            : `${(totalMs / 1000).toFixed(1)}s`;
+                            : `${(totalMs / 1000).toFixed(1)}s`) + effortNote;
                     card._meta =
-                        `${msg.w}×${msg.h} • pipeline ${card._pipelineMs.toFixed(0)} ms • JXL ${msg.jxlMs.toFixed(0)} ms`;
+                        `${msg.w}×${msg.h} • pipeline ${card._pipelineMs.toFixed(0)} ms • JXL ${msg.jxlMs.toFixed(0)} ms${effortNote}`;
 
                     // Stats line — keeps everything one image needs on one row.
                     statSeq++;
@@ -886,6 +1164,8 @@ function startConvert(file, existingCard) {
                         `out ${fmtKb(msg.jxl.byteLength)}`,
                     );
 
+                    emaPipeline = emaPipeline == null ? card._pipelineMs : EMA_A * card._pipelineMs + (1 - EMA_A) * emaPipeline;
+                    emaEncode   = emaEncode   == null ? msg.jxlMs        : EMA_A * msg.jxlMs        + (1 - EMA_A) * emaEncode;
                     totalDone++;
                     refreshStatus();
                 },
@@ -910,6 +1190,11 @@ function startConvert(file, existingCard) {
         });
 }
 
+function fmtAvg(ms) {
+    if (ms == null) return '—';
+    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms.toFixed(0)}ms`;
+}
+
 function refreshStatus() {
     if (totalSubmitted === 0) {
         statusBar.hidden = true;
@@ -919,9 +1204,16 @@ function refreshStatus() {
     progressEl.max = totalSubmitted;
     progressEl.value = totalDone;
     if (totalDone < totalSubmitted) {
-        statusText.textContent = `${totalDone} / ${totalSubmitted} done`;
+        statusText.textContent = `${totalDone} / ${totalSubmitted}`;
     } else {
         statusText.textContent = `done — ${totalSubmitted} file${totalSubmitted === 1 ? '' : 's'}`;
+    }
+    if (emaPipeline != null) {
+        const emaTotal = (emaPipeline ?? 0) + (emaEncode ?? 0);
+        statusTimings.textContent =
+            `RAW pipeline ${fmtAvg(emaPipeline)}  ·  JXL encode ${fmtAvg(emaEncode)}  ·  per file ${fmtAvg(emaTotal)}`;
+    } else {
+        statusTimings.textContent = '';
     }
 }
 
@@ -930,6 +1222,8 @@ function refreshStatus() {
 // ---------------------------------------------------------------------------
 async function handleFileList(fileList) {
     const orfs = [...fileList].filter(isOrf);
+    if (!orfs.length) return;
+    resetLookSliders();
     for (const f of orfs) startConvert(f);
 }
 
@@ -966,7 +1260,7 @@ async function gatherFromItems(items) {
 }
 
 pick.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', (e) => handleFileList(e.target.files));
+fileInput.addEventListener('change', async (e) => { await handleFileList(e.target.files); });
 
 // Window-level catch keeps the browser from saving a dropped file as a
 // download when the user misses the drop zone.
@@ -986,7 +1280,7 @@ drop.addEventListener('drop', async (e) => {
         files = await gatherFromItems(e.dataTransfer.items);
     }
     if (!files.length) files = [...e.dataTransfer.files].filter(isOrf);
-    handleFileList(files);
+    await handleFileList(files);
 });
 
 // ---------------------------------------------------------------------------
@@ -1003,11 +1297,18 @@ let lbPanX = 0;
 let lbPanY = 0;
 let lbRotation = 0; // 0 | 90 | 180 | 270
 
-const LB_ROTATION_KEY = 'orf-lb-rotations';
-let lbRotations = (() => {
-    try { return JSON.parse(localStorage.getItem(LB_ROTATION_KEY)) || {}; }
-    catch { return {}; }
+const USER_ROT_KEY    = 'orf-user-rotations';
+const LB_ROTATION_KEY = 'orf-lb-rotations'; // legacy — migrated on load
+let userRotations = (() => {
+    try {
+        const legacy = JSON.parse(localStorage.getItem(LB_ROTATION_KEY)) || {};
+        const saved  = JSON.parse(localStorage.getItem(USER_ROT_KEY))    || {};
+        return { ...legacy, ...saved };
+    } catch { return {}; }
 })();
+function saveUserRotations() {
+    try { localStorage.setItem(USER_ROT_KEY, JSON.stringify(userRotations)); } catch {}
+}
 
 function applyLbTransform() {
     lightboxCanvas.style.transform =
@@ -1033,10 +1334,11 @@ function rotateBy(delta) {
     lbRotation = ((lbRotation + delta) % 360 + 360) % 360;
     const card = cards[lightboxIndex];
     if (card?._file?.name) {
-        lbRotations[card._file.name] = lbRotation;
-        try { localStorage.setItem(LB_ROTATION_KEY, JSON.stringify(lbRotations)); } catch {}
+        userRotations[card._file.name] = lbRotation;
+        saveUserRotations();
+        redrawThumbRotated(card);
     }
-    resetLbZoom(); // recalculates fit with new rotation
+    resetLbZoom();
 }
 
 function zoomAtPoint(clientX, clientY, factor) {
@@ -1052,6 +1354,16 @@ function zoomAtPoint(clientX, clientY, factor) {
 }
 
 function drawLightboxForCard(card) {
+    // Toggle path: show embedded JPEG at JXL canvas dims so zoom/pan stays put.
+    if (card._showJpeg && card._embeddedPreview && card._lightbox) {
+        const { w, h } = card._lightbox;
+        const { bmp, orientation } = card._embeddedPreview;
+        drawJpegToTargetDims(lightboxCanvas, bmp, orientation || 1, w, h);
+        lbPreviewBadge.hidden = false;
+        lbLoadingBadge.hidden = true;
+        updateToggleButtonState(card);
+        return;
+    }
     if (card._lightbox) {
         const { rgb, w, h } = card._lightbox;
         drawCanvas(lightboxCanvas, w, h, rgb);
@@ -1069,6 +1381,40 @@ function drawLightboxForCard(card) {
         lbPreviewBadge.hidden = true;
         lbLoadingBadge.hidden = false;
     }
+    updateToggleButtonState(card);
+}
+
+function updateToggleButtonState(card) {
+    // Toolbar button — only meaningful when both sources are available.
+    const havePair = !!(card && card._lightbox && card._embeddedPreview);
+    if (lbToggleJpegBtn) {
+        lbToggleJpegBtn.disabled = !havePair;
+        lbToggleJpegBtn.textContent = card && card._showJpeg ? 'JPEG' : 'JXL';
+        lbToggleJpegBtn.classList.toggle('showing-jpeg', !!(card && card._showJpeg));
+    }
+    // Centre banner — always reflects the current pixel source.  Hidden if
+    // neither source is loaded yet so we don't lie about what's on screen.
+    if (lbSourceBanner) {
+        const showingJpeg = !!(card && card._showJpeg && card._embeddedPreview && card._lightbox);
+        const showingJxl  = !!(card && !card._showJpeg && card._lightbox);
+        const showingFallbackJpeg = !!(card && card._embeddedPreview && !card._lightbox);
+        const label = (showingJpeg || showingFallbackJpeg) ? 'JPEG' : 'JXL';
+        const src = label === 'JPEG' ? 'jpeg' : 'jxl';
+        lbSourceBanner.textContent = label;
+        lbSourceBanner.setAttribute('data-source', src);
+        lbSourceBanner.hidden = !(showingJxl || showingJpeg || showingFallbackJpeg);
+    }
+}
+
+// Briefly pulse the centre banner so a toggle press is unmissable.
+function flashSourceBanner() {
+    if (!lbSourceBanner) return;
+    lbSourceBanner.classList.remove('flash');
+    // Force reflow so re-adding the class restarts the transition.
+    void lbSourceBanner.offsetWidth;
+    lbSourceBanner.classList.add('flash');
+    clearTimeout(flashSourceBanner._t);
+    flashSourceBanner._t = setTimeout(() => lbSourceBanner.classList.remove('flash'), 1200);
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,8 +1551,10 @@ function renderInfoPanel(card) {
 
 function openLightbox(card) {
     lightboxIndex = cards.indexOf(card);
-    lbRotation = card._file?.name ? (lbRotations[card._file.name] ?? 0) : 0;
+    lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
+    resetLookSliders();
     drawLightboxForCard(card);
+    flashSourceBanner();
     renderInfoPanel(card);
     lightbox.hidden = false;
     resetLbZoom();
@@ -1215,7 +1563,7 @@ function openLightbox(card) {
 function drawLightbox() {
     const card = cards[lightboxIndex];
     if (!card) return;
-    lbRotation = card._file?.name ? (lbRotations[card._file.name] ?? 0) : 0;
+    lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
     drawLightboxForCard(card);
     renderInfoPanel(card);
     resetLbZoom();
@@ -1234,6 +1582,7 @@ function nextInLightbox(dir) {
     // Reset live-render state so the new image starts clean.
     liveInFlight = false;
     livePendingLook = null;
+    resetLookSliders();
     drawLightbox();
 }
 
@@ -1247,6 +1596,14 @@ lbZoomOut.addEventListener('click', () => {
     zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, 1 / LB_ZOOM_STEP);
 });
 lbZoomReset.addEventListener('click', resetLbZoom);
+
+if (lbToggleJpegBtn) {
+    lbToggleJpegBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (lightboxIndex < 0) return;
+        toggleJpegForCard(cards[lightboxIndex]);
+    });
+}
 
 // Download full-res from lightbox canvas
 lbDownloadBtn.addEventListener('click', () => {
@@ -1369,9 +1726,16 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (lightbox.hidden) return;
+    // Don't hijack typing in form controls (sliders, number inputs, prompts).
+    const tag = (e.target && e.target.tagName) || '';
+    const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
     if (e.key === 'Escape') closeLightbox();
-    else if (e.key === 'r' || e.key === 'R') rotateBy(90);
-    else if (e.key === 'l' || e.key === 'L') rotateBy(-90);
+    else if (!isInput && (e.key === 'r' || e.key === 'R')) rotateBy(90);
+    else if (!isInput && (e.key === 'l' || e.key === 'L')) rotateBy(-90);
+    else if (!isInput && (e.key === ' ' || e.code === 'Space')) {
+        e.preventDefault();
+        if (lightboxIndex >= 0) toggleJpegForCard(cards[lightboxIndex]);
+    }
     else if (e.key === 'ArrowRight') nextInLightbox(1);
     else if (e.key === 'ArrowLeft') nextInLightbox(-1);
     else if (e.key === '=' || e.key === '+') {
