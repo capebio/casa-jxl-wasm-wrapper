@@ -74,7 +74,8 @@ const lbDownloadBtn = lightbox.querySelector('.lb-download-btn');
 const lbPreviewBadge = lightbox.querySelector('.lb-preview-badge');
 const lbLoadingBadge = lightbox.querySelector('.lb-loading-badge');
 const lbToggleJpegBtn = lightbox.querySelector('.lb-toggle-jpeg');
-const lbSourceBanner = lightbox.querySelector('#lb-source-banner');
+const lbSourceBanner  = lightbox.querySelector('#lb-source-banner');
+const lbSourceLabelEl = document.getElementById('lb-source-label');
 
 const qualityRange = document.getElementById('quality-range');
 const qualityLabel = document.getElementById('quality-label');
@@ -631,26 +632,37 @@ function makeCard(name) {
     card.querySelector('.thumb-rot-ccw').addEventListener('click', (e) => { e.stopPropagation(); rotateCard(card, -90); });
     card.querySelector('.thumb-toggle-jpeg').addEventListener('click', (e) => {
         e.stopPropagation();
-        toggleJpegForCard(card);
+        cycleSourceForCard(card, 1);
     });
     card.addEventListener('click', () => openLightbox(card));
     return card;
 }
 
-// Flip the JPEG/JXL display state for a card and re-render both the thumb and
-// (if open on this card) the lightbox.  Updates button label on both surfaces.
-function toggleJpegForCard(card) {
-    if (!card._embeddedPreview) return; // nothing to swap to
-    card._showJpeg = !card._showJpeg;
+// Cycle the display source for a card: raw → jxl → jpeg → raw (dir=+1) or reverse (dir=-1).
+function cycleSourceForCard(card, dir = 1) {
+    const order = ['raw', 'jxl', 'jpeg'];
+    const available = order.filter(m => {
+        if (m === 'raw')  return !!card._lightbox;
+        if (m === 'jxl')  return !!card._blobUrl;
+        if (m === 'jpeg') return !!card._embeddedPreview;
+        return false;
+    });
+    if (available.length < 2) return;
+    const cur = available.indexOf(card._sourceMode ?? 'raw');
+    const next = available[(cur + dir + available.length) % available.length];
+    card._sourceMode = next;
+    const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
     refreshThumbToggleButton(card);
-    redrawThumbRotated(card);
     if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+        liveInFlight = false;
+        livePendingLook = null;
         drawLightboxForCard(card);
+        resetLbZoom();
         flashSourceBanner();
-        // Toggled back to JXL: re-apply current look since drawLightboxForCard
-        // draws from the original rgb, not the live-rendered pixels.
-        if (!card._showJpeg) scheduleLiveUpdate();
+        showSourceLabel(labels[next]);
+        if (next === 'raw') scheduleLiveUpdate();
     }
+    redrawThumbRotated(card);
 }
 
 function refreshThumbToggleButton(card) {
@@ -741,7 +753,7 @@ function drawRotatedCanvas(canvas, rgb, w, h, degrees) {
 function redrawThumbRotated(card) {
     const deg = card._file?.name ? (userRotations[card._file.name] || 0) : 0;
     const canvas = card.querySelector('canvas');
-    if (card._showJpeg && card._embeddedPreview && card._thumbW && card._thumbH) {
+    if (card._sourceMode === 'jpeg' && card._embeddedPreview && card._thumbW && card._thumbH) {
         // Render JPEG into a hidden offscreen canvas matching the JXL thumb dims
         // (so user-rotation pass below sees identical input geometry).
         const off = document.createElement('canvas');
@@ -1019,7 +1031,7 @@ function startConvert(file, existingCard) {
         // Force the JXL view back on so the user actually sees the result of
         // pressing Apply/Re-process; otherwise they'd be staring at the
         // (unchanged) camera JPEG and assume the action did nothing.
-        card._showJpeg = false;
+        card._sourceMode = 'raw';
         refreshThumbToggleButton(card);
         if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
             drawLightboxForCard(card);
@@ -1354,16 +1366,49 @@ function zoomAtPoint(clientX, clientY, factor) {
 }
 
 function drawLightboxForCard(card) {
-    // Toggle path: show embedded JPEG at JXL canvas dims so zoom/pan stays put.
-    if (card._showJpeg && card._embeddedPreview && card._lightbox) {
-        const { w, h } = card._lightbox;
-        const { bmp, orientation } = card._embeddedPreview;
-        drawJpegToTargetDims(lightboxCanvas, bmp, orientation || 1, w, h);
-        lbPreviewBadge.hidden = false;
-        lbLoadingBadge.hidden = true;
-        updateToggleButtonState(card);
-        return;
+    const mode = card._sourceMode ?? 'raw';
+
+    if (mode === 'jpeg') {
+        if (card._embeddedPreview && card._lightbox) {
+            const { w, h } = card._lightbox;
+            const { bmp, orientation } = card._embeddedPreview;
+            drawJpegToTargetDims(lightboxCanvas, bmp, orientation || 1, w, h);
+            lbPreviewBadge.hidden = false;
+            lbLoadingBadge.hidden = true;
+            updateToggleButtonState(card);
+            return;
+        }
+        // Fallback: lightbox not ready yet, treat as raw.
+        card._sourceMode = 'raw';
     }
+
+    if (mode === 'jxl') {
+        if (!card._blobUrl) {
+            // JXL not ready yet — fall back to raw.
+            card._sourceMode = 'raw';
+        } else {
+            lbPreviewBadge.hidden = true;
+            lbLoadingBadge.hidden = false;
+            updateToggleButtonState(card);
+            pool.decodeJxl(card._blobUrl, (msg) => {
+                if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
+                if (msg.type === 'decode_error') {
+                    console.warn('JXL decode error:', msg.error);
+                    lbLoadingBadge.hidden = true;
+                    return;
+                }
+                lightboxCanvas.width  = msg.w;
+                lightboxCanvas.height = msg.h;
+                const ctx = lightboxCanvas.getContext('2d');
+                ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                lbLoadingBadge.hidden = true;
+                resetLbZoom();
+            });
+            return;
+        }
+    }
+
+    // mode === 'raw' (or fallback from unavailable mode)
     if (card._lightbox) {
         const { rgb, w, h } = card._lightbox;
         drawCanvas(lightboxCanvas, w, h, rgb);
@@ -1375,7 +1420,6 @@ function drawLightboxForCard(card) {
         lbPreviewBadge.hidden = false;
         lbLoadingBadge.hidden = true;
     } else {
-        // Nothing ready yet — blank canvas + loading indicator.
         lightboxCanvas.width = 1;
         lightboxCanvas.height = 1;
         lbPreviewBadge.hidden = true;
@@ -1415,6 +1459,17 @@ function flashSourceBanner() {
     lbSourceBanner.classList.add('flash');
     clearTimeout(flashSourceBanner._t);
     flashSourceBanner._t = setTimeout(() => lbSourceBanner.classList.remove('flash'), 1200);
+}
+
+let _sourceLabelKey = 0;
+function showSourceLabel(text) {
+    if (!lbSourceLabelEl) return;
+    lbSourceLabelEl.textContent = text;
+    lbSourceLabelEl.classList.remove('active');
+    void lbSourceLabelEl.offsetWidth; // force reflow to restart animation
+    _sourceLabelKey++;
+    lbSourceLabelEl.dataset.key = _sourceLabelKey;
+    lbSourceLabelEl.classList.add('active');
 }
 
 // ---------------------------------------------------------------------------
@@ -1552,9 +1607,11 @@ function renderInfoPanel(card) {
 function openLightbox(card) {
     lightboxIndex = cards.indexOf(card);
     lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
+    card._sourceMode = 'raw';
     resetLookSliders();
     drawLightboxForCard(card);
     flashSourceBanner();
+    showSourceLabel('RAW');
     renderInfoPanel(card);
     lightbox.hidden = false;
     resetLbZoom();
@@ -1579,11 +1636,13 @@ function closeLightbox() {
 function nextInLightbox(dir) {
     if (lightboxIndex < 0) return;
     lightboxIndex = (lightboxIndex + dir + cards.length) % cards.length;
-    // Reset live-render state so the new image starts clean.
+    const card = cards[lightboxIndex];
+    if (card) card._sourceMode = 'raw';
     liveInFlight = false;
     livePendingLook = null;
     resetLookSliders();
     drawLightbox();
+    showSourceLabel('RAW');
 }
 
 // Toolbar buttons
@@ -1601,7 +1660,7 @@ if (lbToggleJpegBtn) {
     lbToggleJpegBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (lightboxIndex < 0) return;
-        toggleJpegForCard(cards[lightboxIndex]);
+        cycleSourceForCard(cards[lightboxIndex], 1);
     });
 }
 
@@ -1734,7 +1793,7 @@ document.addEventListener('keydown', (e) => {
     else if (!isInput && (e.key === 'l' || e.key === 'L')) rotateBy(-90);
     else if (!isInput && (e.key === ' ' || e.code === 'Space')) {
         e.preventDefault();
-        if (lightboxIndex >= 0) toggleJpegForCard(cards[lightboxIndex]);
+        if (lightboxIndex >= 0) cycleSourceForCard(cards[lightboxIndex], 1);
     }
     else if (e.key === 'ArrowRight') nextInLightbox(1);
     else if (e.key === 'ArrowLeft') nextInLightbox(-1);
