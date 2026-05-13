@@ -28,6 +28,22 @@ pub struct OrfInfo {
     pub black_level: u16,
     #[allow(dead_code)]
     pub little_endian: bool,
+    // Olympus CameraSettings WhiteBalance2 mode (0x0500). When set to a
+    // user-defined mode (One-Touch/Custom 256-259, 512-515) the stored
+    // 0x0100 WB_RBLevels is a fixed calibration that won't match per-shot
+    // lighting — caller can choose to discard it and gray-world instead.
+    pub wb_mode: Option<u16>,
+    pub lens: String,
+    pub datetime: String,
+    pub exposure: Option<(u32, u32)>,
+    pub fnumber: Option<(u32, u32)>,
+    pub iso: Option<u32>,
+    pub focal_length: Option<(u32, u32)>,
+    pub focal_length_35: Option<u16>,
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
+    pub gps_alt: Option<f64>,
+    pub quality: Option<u16>,
 }
 
 pub fn parse(data: &[u8]) -> Result<OrfInfo> {
@@ -53,10 +69,23 @@ pub fn parse(data: &[u8]) -> Result<OrfInfo> {
         color_matrix: None,
         black_level: 0,
         little_endian,
+        wb_mode: None,
+        lens: String::new(),
+        datetime: String::new(),
+        exposure: None,
+        fnumber: None,
+        iso: None,
+        focal_length: None,
+        focal_length_35: None,
+        gps_lat: None,
+        gps_lon: None,
+        gps_alt: None,
+        quality: None,
     };
 
     let ifd0 = read_ifd(&r, ifd0_offset)?;
     let mut exif_offset: u32 = 0;
+    let mut gps_offset: u32 = 0;
 
     for entry in &ifd0 {
         match entry.tag {
@@ -69,7 +98,9 @@ pub fn parse(data: &[u8]) -> Result<OrfInfo> {
             0x0117 => info.strip_byte_count = entry.as_u32(&r)?,
             0x010F => info.make = entry.as_ascii(&r),
             0x0110 => info.model = entry.as_ascii(&r),
+            0x0132 => if info.datetime.is_empty() { info.datetime = entry.as_ascii(&r); },
             0x8769 => exif_offset = entry.as_u32(&r)?,
+            0x8825 => gps_offset = entry.as_u32(&r)?,
             _ => {}
         }
     }
@@ -87,14 +118,63 @@ pub fn parse(data: &[u8]) -> Result<OrfInfo> {
     if exif_offset > 0 {
         if let Ok(exif) = read_ifd(&r, exif_offset) {
             for entry in &exif {
-                if entry.tag == 0x927C {
-                    parse_olympus_makernote(&r, entry, &mut info);
+                match entry.tag {
+                    0x829A => info.exposure = entry.as_rational(&r),
+                    0x829D => info.fnumber  = entry.as_rational(&r),
+                    0x8827 => info.iso      = entry.as_u32(&r).ok(),
+                    0x9003 => if info.datetime.is_empty() || info.datetime.starts_with("0000") {
+                        info.datetime = entry.as_ascii(&r);
+                    },
+                    0x920A => info.focal_length    = entry.as_rational(&r),
+                    0xA405 => info.focal_length_35 = entry.as_u32(&r).ok().map(|v| v as u16),
+                    0xA434 => if info.lens.is_empty() { info.lens = entry.as_ascii(&r); },
+                    0x927C => parse_olympus_makernote(&r, entry, &mut info),
+                    _ => {}
                 }
             }
         }
     }
 
+    if gps_offset > 0 {
+        if let Ok(gps) = read_ifd(&r, gps_offset) {
+            parse_gps_ifd(&r, &gps, &mut info);
+        }
+    }
+
     Ok(info)
+}
+
+fn parse_gps_ifd(r: &Reader, entries: &[IfdEntry], info: &mut OrfInfo) {
+    let mut lat_ref = b'N';
+    let mut lon_ref = b'E';
+    let mut alt_ref: u8 = 0;
+    let mut lat_dms: Option<[(u32, u32); 3]> = None;
+    let mut lon_dms: Option<[(u32, u32); 3]> = None;
+    let mut alt: Option<(u32, u32)> = None;
+    for e in entries {
+        match e.tag {
+            0x0001 => { let s = e.as_ascii(r); if let Some(c) = s.bytes().next() { lat_ref = c; } }
+            0x0002 => lat_dms = e.as_rational_triplet(r),
+            0x0003 => { let s = e.as_ascii(r); if let Some(c) = s.bytes().next() { lon_ref = c; } }
+            0x0004 => lon_dms = e.as_rational_triplet(r),
+            0x0005 => alt_ref = e.as_u32(r).unwrap_or(0) as u8,
+            0x0006 => alt = e.as_rational(r),
+            _ => {}
+        }
+    }
+    let to_deg = |dms: [(u32, u32); 3], r: u8| -> f64 {
+        let d = dms[0].0 as f64 / dms[0].1.max(1) as f64;
+        let m = dms[1].0 as f64 / dms[1].1.max(1) as f64;
+        let s = dms[2].0 as f64 / dms[2].1.max(1) as f64;
+        let v = d + m / 60.0 + s / 3600.0;
+        if r == b'S' || r == b'W' { -v } else { v }
+    };
+    if let Some(d) = lat_dms { info.gps_lat = Some(to_deg(d, lat_ref)); }
+    if let Some(d) = lon_dms { info.gps_lon = Some(to_deg(d, lon_ref)); }
+    if let Some((n, d)) = alt {
+        let v = n as f64 / d.max(1) as f64;
+        info.gps_alt = Some(if alt_ref == 1 { -v } else { v });
+    }
 }
 
 fn parse_header(data: &[u8]) -> Result<(bool, u32)> {
@@ -184,7 +264,32 @@ impl IfdEntry {
             .unwrap_or(&[]);
         String::from_utf8_lossy(bytes)
             .trim_end_matches('\0')
+            .trim_end()
             .to_string()
+    }
+
+    /// RATIONAL (dtype=5) or SRATIONAL (dtype=10): 8-byte numerator/denominator
+    /// pair stored at the value offset (always a pointer — 8 bytes > 4 inline).
+    fn as_rational(&self, r: &Reader) -> Option<(u32, u32)> {
+        if self.dtype != 5 && self.dtype != 10 { return None; }
+        let p = self.value_off as usize;
+        let n = r.u32(p).ok()?;
+        let d = r.u32(p + 4).ok()?;
+        Some((n, d))
+    }
+
+    /// Three RATIONAL values in a row (24 bytes via pointer). Used for GPS
+    /// latitude/longitude (degrees, minutes, seconds).
+    fn as_rational_triplet(&self, r: &Reader) -> Option<[(u32, u32); 3]> {
+        if self.dtype != 5 || self.count < 3 { return None; }
+        let p = self.value_off as usize;
+        let n0 = r.u32(p).ok()?;
+        let d0 = r.u32(p + 4).ok()?;
+        let n1 = r.u32(p + 8).ok()?;
+        let d1 = r.u32(p + 12).ok()?;
+        let n2 = r.u32(p + 16).ok()?;
+        let d2 = r.u32(p + 20).ok()?;
+        Some([(n0, d0), (n1, d1), (n2, d2)])
     }
 }
 
@@ -249,6 +354,18 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
         let Ok(cnt) = sub.u32(e_off + 4) else { return };
         let Ok(val) = sub.u32(e_off + 8) else { return };
         match tag {
+            // Top-level Olympus MakerNote Quality (SHORT[1]) — 1=SQ, 2=HQ, 3=SHQ, 4=RAW
+            0x0201 if dtype == 3 && cnt <= 2 => {
+                info.quality = Some(inline_u16(val));
+            }
+            // Equipment sub-IFD — has LensModel (0x0202).
+            0x2010 => {
+                let _ = parse_equipment_subifd(&sub, base_off as u32 + val, base_off, info);
+            }
+            // CameraSettings sub-IFD — has WhiteBalance2 (0x0500).
+            0x2020 => {
+                let _ = parse_camera_settings_subifd(&sub, base_off as u32 + val, base_off, info);
+            }
             // RedBalance: SHORT×1, inline value, × 256
             0x1017 => {
                 if dtype == 3 && cnt >= 1 {
@@ -324,6 +441,54 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
     }
 }
 
+fn parse_equipment_subifd(r: &Reader, off: u32, base_off: usize, info: &mut OrfInfo) -> Result<()> {
+    let p = off as usize;
+    if p + 2 > r.data.len() { return Ok(()); }
+    let count = r.u16(p)?;
+    for i in 0..count as usize {
+        let e = p + 2 + i * 12;
+        if e + 12 > r.data.len() { break; }
+        let tag = r.u16(e)?;
+        let dtype = r.u16(e + 2)?;
+        let cnt = r.u32(e + 4)?;
+        let val = r.u32(e + 8)?;
+        // 0x0203 LensModel (ASCII). Value offsets in Olympus sub-IFDs are
+        // relative to the MakerNote base (same as parse_image_processing_subifd).
+        // (0x0202 is LensSerialNumber — a hex string, not the human name.)
+        if tag == 0x0203 && dtype == 2 && cnt > 4 {
+            let start = base_off + val as usize;
+            let end = start + cnt as usize;
+            if let Some(bytes) = r.data.get(start..end.min(r.data.len())) {
+                info.lens = String::from_utf8_lossy(bytes)
+                    .trim_end_matches('\0')
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_camera_settings_subifd(r: &Reader, off: u32, _base_off: usize, info: &mut OrfInfo) -> Result<()> {
+    let p = off as usize;
+    if p + 2 > r.data.len() { return Ok(()); }
+    let count = r.u16(p)?;
+    for i in 0..count as usize {
+        let e = p + 2 + i * 12;
+        if e + 12 > r.data.len() { break; }
+        let tag = r.u16(e)?;
+        let dtype = r.u16(e + 2)?;
+        let _cnt = r.u32(e + 4)?;
+        let val = r.u32(e + 8)?;
+        // 0x0500 WhiteBalance2 — SHORT[1], inline. Low 16 bits on LE.
+        if tag == 0x0500 && dtype == 3 {
+            let v = if r.le { (val & 0xFFFF) as u16 } else { (val >> 16) as u16 };
+            info.wb_mode = Some(v);
+        }
+    }
+    Ok(())
+}
+
 fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &mut OrfInfo) -> Result<()> {
     let p = off as usize;
     if p + 2 > r.data.len() {
@@ -339,7 +504,7 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
         let dtype = r.u16(e + 2)?;
         let cnt = r.u32(e + 4)?;
         let val = r.u32(e + 8)?;
-        // WB_RGBGLevels: format [R_balance, B_balance, G_ref, G_ref] where
+        // WB_RBLevels: format [R_balance, B_balance, G_ref, G_ref] where
         // each value is the channel gain ×256 (G_ref = 256 = unity).
         // ptr+0 = R gain ×256, ptr+2 = B gain ×256.
         if tag == 0x0100 && dtype == 3 && cnt >= 2 {

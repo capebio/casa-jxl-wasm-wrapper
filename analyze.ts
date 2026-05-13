@@ -61,7 +61,7 @@ const result = process_orf(
     /* texture     */ 0,
     /* clarity     */ 0,
 );
-console.log(`Pipeline: ${(performance.now() - t0).toFixed(0)} ms`);
+console.log(`Pipeline: ${(performance.now() - t0).toFixed(0)} ms  (dec ${result.decompress_ms.toFixed(0)} / dem ${result.demosaic_ms.toFixed(0)} / tone ${result.tonemap_ms.toFixed(0)} / ori ${result.orient_ms.toFixed(0)})`);
 console.log(`Dims: ${result.width}×${result.height}  WB R=${result.wb_r_used.toFixed(3)} B=${result.wb_b_used.toFixed(3)}  matrix=${result.color_matrix_from_mn ? 'mn' : 'fallback'}`);
 
 const fullRgb = result.take_rgb();

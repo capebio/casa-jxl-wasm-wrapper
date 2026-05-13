@@ -10,7 +10,15 @@ const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
-const BUILD_TAG = '2026-05-12e / live-lightbox + contrast-toggle';
+const BUILD_TAG = '2026-05-13c / fast-preview + orientation';
+
+// Visible build badge — top-left corner, always present.
+{
+    const badge = document.createElement('div');
+    badge.id = 'build-badge';
+    badge.textContent = BUILD_TAG;
+    document.body.appendChild(badge);
+}
 
 // ---------------------------------------------------------------------------
 // DOM refs
@@ -35,6 +43,8 @@ const lbZoomIn = lightbox.querySelector('.lb-zoom-in');
 const lbZoomOut = lightbox.querySelector('.lb-zoom-out');
 const lbZoomReset = lightbox.querySelector('.lb-zoom-reset');
 const lbDownloadBtn = lightbox.querySelector('.lb-download-btn');
+const lbPreviewBadge = lightbox.querySelector('.lb-preview-badge');
+const lbLoadingBadge = lightbox.querySelector('.lb-loading-badge');
 
 const qualityRange = document.getElementById('quality-range');
 const qualityLabel = document.getElementById('quality-label');
@@ -42,8 +52,10 @@ const effortSelect = document.getElementById('effort-select');
 const losslessToggle = document.getElementById('lossless-toggle');
 
 const reprocessBtn = document.getElementById('reprocess-btn');
+const applyLookBtn = document.getElementById('apply-look');
 const resetLookBtn = document.getElementById('reset-look');
 const contrastBoostEl = document.getElementById('contrast-boost');
+const presetBtns = [...document.querySelectorAll('[data-preset]')];
 
 // LR-style controls are declared as <input data-look="<name>"> in the
 // markup; we discover them at runtime so the JS doesn't need to know every
@@ -165,15 +177,83 @@ for (const el of lookInputs) {
         const lbl = lookLabels.get(name);
         if (lbl) lbl.textContent = lookDisplay(name);
         scheduleLiveUpdate();
+        scheduleGalleryLiveUpdate();
     });
 }
 
 reprocessBtn.addEventListener('click', () => reprocessSelected());
+
+applyLookBtn.addEventListener('click', () => {
+    const selected = cards.filter(c => c.classList.contains('selected') && c._file);
+    const targets = selected.length ? selected : cards.filter(c => c._file);
+    if (!targets.length) return;
+    // Ensure only selected are targeted (not all).
+    if (!selected.length) {
+        // select all then reprocess
+        for (const c of cards) c.classList.add('selected');
+    }
+    reprocessSelected();
+});
+
 resetLookBtn.addEventListener('click', () => {
     for (const el of lookInputs) el.value = '0';
     contrastBoostEl.checked = false;
     refreshLookLabels();
+    scheduleLiveUpdate();
+    scheduleGalleryLiveUpdate();
 });
+
+// ---------------------------------------------------------------------------
+// Presets (1-10, stored in localStorage)
+// ---------------------------------------------------------------------------
+const PRESET_STORAGE_KEY = 'orf-converter-presets';
+let presets = (() => {
+    try { return JSON.parse(localStorage.getItem(PRESET_STORAGE_KEY)) || new Array(10).fill(null); }
+    catch { return new Array(10).fill(null); }
+})();
+
+function savePresetsToStorage() {
+    try { localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(presets)); } catch {}
+}
+
+function applyLookValues(look) {
+    for (const el of lookInputs) {
+        const name = el.dataset.look;
+        const v = look[name] ?? 0;
+        el.value = name === 'exposureEv' ? v : v * 100;
+    }
+    contrastBoostEl.checked = false;
+    refreshLookLabels();
+    scheduleLiveUpdate();
+    scheduleGalleryLiveUpdate();
+}
+
+function updatePresetButtons() {
+    for (const btn of presetBtns) {
+        const slot = Number(btn.dataset.preset);
+        const p = presets[slot];
+        btn.classList.toggle('assigned', !!p);
+        btn.title = p ? p.name : `Click to assign current look to slot ${slot + 1}`;
+    }
+}
+
+for (const btn of presetBtns) {
+    btn.addEventListener('click', (e) => {
+        const slot = Number(btn.dataset.preset);
+        if (e.shiftKey || !presets[slot]) {
+            // Assign current look to this slot
+            const defaultName = `Preset ${slot + 1}`;
+            const name = prompt('Name this preset:', defaultName);
+            if (name === null) return; // cancelled
+            presets[slot] = { name: name || defaultName, look: currentLook() };
+            savePresetsToStorage();
+            updatePresetButtons();
+        } else {
+            applyLookValues(presets[slot].look);
+        }
+    });
+}
+updatePresetButtons();
 
 // ---------------------------------------------------------------------------
 // Worker pool
@@ -202,7 +282,7 @@ class WorkerPool {
 
     submit(bytes, options, handlers) {
         const id = this.nextId++;
-        this.tasks.set(id, { handlers, worker: null });
+        this.tasks.set(id, { handlers, worker: null, released: false });
         this._dispatch({ id, bytes, options });
         return id;
     }
@@ -224,37 +304,69 @@ class WorkerPool {
             if (this._liveHandler) this._liveHandler(ev.data);
             return;
         }
+        if (type === 'thumb_live') {
+            if (this._thumbLiveHandler) this._thumbLiveHandler(ev.data);
+            return;
+        }
         const t = this.tasks.get(id);
         if (!t) return;
         const handlers = t.handlers;
         if (type === 'thumb' && handlers.onThumb) handlers.onThumb(ev.data);
-        else if (type === 'lightbox' && handlers.onLightbox) handlers.onLightbox(ev.data);
+        else if (type === 'lightbox' && handlers.onLightbox) {
+            handlers.onLightbox(ev.data);
+            // Release worker immediately — JXL encode continues async in the worker
+            // (the async handler yields at await encode_jxl, so a new ORF message
+            // can be picked up concurrently without state collision).
+            this._releaseWorker(worker, id);
+        }
         else if (type === 'done') {
             if (handlers.onDone) handlers.onDone(ev.data);
-            this._release(worker, id);
+            this.tasks.delete(id);  // Worker already freed on lightbox
         } else if (type === 'error') {
             if (handlers.onError) handlers.onError(ev.data);
-            this._release(worker, id);
+            // Error may arrive before or after lightbox — only release worker if not yet done.
+            if (!t.released) this._releaseWorker(worker, id);
+            this.tasks.delete(id);
         }
     }
 
-    _release(worker, id) {
+    // Release the worker slot for the next queued ORF without deleting the task
+    // (task stays alive until 'done' or 'error' arrives with the JXL result).
+    _releaseWorker(worker, id) {
+        const t = this.tasks.get(id);
+        if (t) t.released = true;
         worker._lastTaskId = id;
-        this.tasks.delete(id);
+        if (!worker._taskIds) worker._taskIds = new Set();
+        worker._taskIds.add(id);
         this.free.push(worker);
         const next = this.queue.shift();
         if (next) this._dispatch(next);
     }
 
-    setLiveHandler(fn) {
-        this._liveHandler = fn;
+    // Full release (error before lightbox, or legacy callers).
+    _release(worker, id) {
+        this.tasks.delete(id);
+        this._releaseWorker(worker, id);
     }
+
+    setLiveHandler(fn) { this._liveHandler = fn; }
+    setThumbLiveHandler(fn) { this._thumbLiveHandler = fn; }
 
     reprocessLive(taskId, look) {
         const worker = this.workers.find(w => w._lastTaskId === taskId);
         if (!worker) return false;
         worker.postMessage({ id: taskId, type: 'reprocess_live', look });
         return true;
+    }
+
+    reprocessAllLive(taskIds, look) {
+        if (!taskIds.length) return;
+        const wanted = new Set(taskIds);
+        for (const w of this.workers) {
+            if (!w._taskIds) continue;
+            const mine = [...w._taskIds].filter(id => wanted.has(id));
+            if (mine.length) w.postMessage({ type: 'reprocess_thumb_live', taskIds: mine, look });
+        }
     }
 }
 
@@ -309,7 +421,30 @@ pool.setLiveHandler((msg) => {
     }
 });
 
-contrastBoostEl.addEventListener('change', () => scheduleLiveUpdate());
+contrastBoostEl.addEventListener('change', () => { scheduleLiveUpdate(); scheduleGalleryLiveUpdate(); });
+
+// ---------------------------------------------------------------------------
+// Gallery live thumb re-render (debounced, fans out to all selected cards)
+// ---------------------------------------------------------------------------
+const cardByTaskId = new Map();
+let galleryDebounceTimer = null;
+
+function scheduleGalleryLiveUpdate() {
+    clearTimeout(galleryDebounceTimer);
+    galleryDebounceTimer = setTimeout(() => triggerGalleryLiveUpdate(currentLook()), 80);
+}
+
+function triggerGalleryLiveUpdate(look) {
+    const taskIds = cards
+        .filter(c => c.classList.contains('selected') && c._taskId)
+        .map(c => c._taskId);
+    pool.reprocessAllLive(taskIds, look);
+}
+
+pool.setThumbLiveHandler((msg) => {
+    const card = cardByTaskId.get(msg.id);
+    if (card) drawCanvas(card.querySelector('canvas'), msg.w, msg.h, msg.rgb);
+});
 
 // ---------------------------------------------------------------------------
 // Card grid + per-file state
@@ -351,7 +486,7 @@ function makeCard(name) {
             setTimeout(() => URL.revokeObjectURL(url), 30000);
         }, 'image/jpeg', 0.95);
     });
-    card.addEventListener('click', () => { if (card._lightbox) openLightbox(card); });
+    card.addEventListener('click', () => openLightbox(card));
     return card;
 }
 
@@ -359,6 +494,27 @@ function refreshReprocessLabel() {
     const n = document.querySelectorAll('.thumb.selected').length;
     reprocessBtn.textContent = n ? `Re-process ${n} selected` : 'Re-process all';
 }
+
+// ---------------------------------------------------------------------------
+// Gallery view mode (rect / square / natural) — persisted
+// ---------------------------------------------------------------------------
+const VIEW_MODE_KEY = 'orf-view-mode';
+const viewBtns = [...document.querySelectorAll('.view-btn')];
+
+function setViewMode(mode) {
+    grid.classList.remove('view-square', 'view-natural');
+    if (mode === 'square')  grid.classList.add('view-square');
+    if (mode === 'natural') grid.classList.add('view-natural');
+    for (const btn of viewBtns) btn.classList.toggle('active', btn.dataset.view === mode);
+    try { localStorage.setItem(VIEW_MODE_KEY, mode); } catch {}
+}
+
+for (const btn of viewBtns) {
+    btn.addEventListener('click', () => setViewMode(btn.dataset.view));
+}
+
+// Restore persisted mode (default: rect).
+setViewMode((() => { try { return localStorage.getItem(VIEW_MODE_KEY) || 'rect'; } catch { return 'rect'; } })());
 
 function drawCanvas(canvas, w, h, rgb) {
     canvas.width = w;
@@ -377,6 +533,136 @@ function drawCanvas(canvas, w, h, rgb) {
 let totalSubmitted = 0;
 let totalDone = 0;
 
+// ---------------------------------------------------------------------------
+// Embedded JPEG thumbnail extraction + orientation (pure JS, before WASM)
+// ---------------------------------------------------------------------------
+function sized(srcW, srcH, longEdge) {
+    if (srcW >= srcH) {
+        const w = Math.min(longEdge, srcW);
+        return { w, h: Math.max(1, Math.round((srcH * w) / srcW)) };
+    }
+    const h = Math.min(longEdge, srcH);
+    return { w: Math.max(1, Math.round((srcW * h) / srcH)), h };
+}
+
+// Extract all JPEG bitstreams embedded in a RAW/TIFF container.
+// Strategy: find every SOI (FF D8 FF). For each, take the LAST FF D9 before
+// the next SOI — this avoids truncation by entropy-coded FF D9 runs.
+// Returns an array of Uint8Array blobs (unvalidated; createImageBitmap filters).
+function extractEmbeddedJpegs(bytes) {
+    const sois = [];
+    for (let i = 0; i < bytes.length - 2; i++) {
+        if (bytes[i] === 0xFF && bytes[i + 1] === 0xD8 && bytes[i + 2] === 0xFF) {
+            sois.push(i);
+            i += 2;
+        }
+    }
+    const blobs = [];
+    for (let n = 0; n < sois.length; n++) {
+        const start = sois[n];
+        const end = n + 1 < sois.length ? sois[n + 1] : bytes.length;
+        let eoi = -1;
+        for (let j = end - 2; j >= start + 2; j--) {
+            if (bytes[j] === 0xFF && bytes[j + 1] === 0xD9) { eoi = j; break; }
+        }
+        if (eoi !== -1) blobs.push(bytes.slice(start, eoi + 2));
+    }
+    return blobs;
+}
+
+// Parse EXIF orientation (tag 0x0112) from a JPEG byte array.
+// Returns 1 (normal) when absent or unreadable.
+function readJpegOrientation(bytes) {
+    if (bytes.length < 4 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return 1;
+    let i = 2;
+    while (i + 4 <= bytes.length) {
+        if (bytes[i] !== 0xFF) break;
+        const marker = bytes[i + 1];
+        const segLen = (bytes[i + 2] << 8) | bytes[i + 3];
+        if (marker === 0xE1 && i + 10 <= bytes.length &&
+            bytes[i+4]===0x45&&bytes[i+5]===0x78&&bytes[i+6]===0x69&&
+            bytes[i+7]===0x66&&bytes[i+8]===0x00&&bytes[i+9]===0x00) {
+            const t = i + 10; // TIFF header base
+            const le = bytes[t] === 0x49;
+            const r16 = o => le ? (bytes[t+o] | bytes[t+o+1]<<8)
+                                : (bytes[t+o]<<8 | bytes[t+o+1]);
+            const r32 = o => le
+                ? ((bytes[t+o] | bytes[t+o+1]<<8 | bytes[t+o+2]<<16 | bytes[t+o+3]<<24) >>> 0)
+                : ((bytes[t+o]<<24 | bytes[t+o+1]<<16 | bytes[t+o+2]<<8 | bytes[t+o+3]) >>> 0);
+            const ifd0 = r32(4);
+            if (t + ifd0 + 2 > bytes.length) break;
+            const nEntries = r16(ifd0);
+            for (let e = 0; e < nEntries; e++) {
+                const off = ifd0 + 2 + e * 12;
+                if (t + off + 12 > bytes.length) break;
+                if (r16(off) === 0x0112) return r16(off + 8); // SHORT inline value
+            }
+            break;
+        }
+        if (marker === 0xDA || segLen < 2) break; // SOS — no more metadata
+        i += 2 + segLen;
+    }
+    return 1;
+}
+
+// Draw a bitmap into canvas at thumbnail size, applying EXIF orientation via
+// canvas transform (scaled to fit longEdge). Orientations 5-8 swap axes.
+// Transform derivation: scaled version of the standard EXIF canvas transforms.
+function drawOrientedThumb(canvas, bmp, orientation, longEdge) {
+    const o = (orientation >= 1 && orientation <= 8) ? orientation : 1;
+    const swap = o >= 5;
+    const srcW = bmp.width, srcH = bmp.height;
+    const dispW = swap ? srcH : srcW;
+    const dispH = swap ? srcW : srcH;
+    const { w: tw, h: th } = sized(dispW, dispH, longEdge);
+    canvas.width = tw;
+    canvas.height = th;
+    const ctx = canvas.getContext('2d');
+    if (o === 1) { ctx.drawImage(bmp, 0, 0, tw, th); return; }
+    const sx = tw / dispW, sy = th / dispH;
+    ctx.save();
+    // Each case is the full-size EXIF transform with (srcW,srcH) replaced by
+    // (tw/sx, th/sy) = (dispW, dispH) and translation scaled accordingly.
+    switch (o) {
+        case 2: ctx.transform(-sx,  0,   0,  sy,  tw,  0); break;
+        case 3: ctx.transform(-sx,  0,   0, -sy,  tw, th); break;
+        case 4: ctx.transform( sx,  0,   0, -sy,   0, th); break;
+        case 5: ctx.transform(  0, sx,  sy,   0,   0,  0); break;
+        case 6: ctx.transform(  0, sx, -sy,   0,  tw,  0); break;
+        case 7: ctx.transform(  0,-sx, -sy,   0,  tw, th); break;
+        case 8: ctx.transform(  0,-sx,  sy,   0,   0, th); break;
+    }
+    ctx.drawImage(bmp, 0, 0, srcW, srcH);
+    ctx.restore();
+}
+
+// Draw a bitmap at full display size with EXIF orientation (for lightbox).
+function drawBitmapOriented(canvas, bmp, orientation) {
+    const o = (orientation >= 1 && orientation <= 8) ? orientation : 1;
+    const swap = o >= 5;
+    const srcW = bmp.width, srcH = bmp.height;
+    const dW = swap ? srcH : srcW, dH = swap ? srcW : srcH;
+    canvas.width = dW; canvas.height = dH;
+    const ctx = canvas.getContext('2d');
+    if (o === 1) { ctx.drawImage(bmp, 0, 0); return; }
+    ctx.save();
+    switch (o) {
+        case 2: ctx.transform(-1, 0,  0,  1,  dW,  0); break;
+        case 3: ctx.transform(-1, 0,  0, -1,  dW, dH); break;
+        case 4: ctx.transform( 1, 0,  0, -1,   0, dH); break;
+        case 5: ctx.transform( 0, 1,  1,  0,   0,  0); break;
+        case 6: ctx.transform( 0, 1, -1,  0,  dW,  0); break;
+        case 7: ctx.transform( 0,-1, -1,  0,  dW, dH); break;
+        case 8: ctx.transform( 0,-1,  1,  0,   0, dH); break;
+    }
+    ctx.drawImage(bmp, 0, 0, srcW, srcH);
+    ctx.restore();
+}
+
+// How many bytes to read upfront for embedded JPEG extraction.
+// Olympus ORF stores the embedded preview within the first ~1–2 MB; 3 MB is safe.
+const PREVIEW_SLICE = 3 * 1024 * 1024;
+
 function startConvert(file, existingCard) {
     const card = existingCard || makeCard(file.name);
     if (!existingCard) {
@@ -384,20 +670,65 @@ function startConvert(file, existingCard) {
         grid.appendChild(card);
     } else {
         // Re-processing: clear prior download link + reset state classes.
-        card.classList.remove('encoding', 'error');
+        card.classList.remove('encoding', 'error', 'embedded-thumb');
         card.classList.add('busy');
         const link = card.querySelector('.download');
         link.hidden = true;
         link.removeAttribute('href');
         card._lightbox = null;
+        if (card._embeddedPreview) { card._embeddedPreview.bmp.close(); card._embeddedPreview = null; }
     }
     totalSubmitted++;
     card._file = file;
     refreshStatus();
 
+    // Phase A — fast: read only the first PREVIEW_SLICE bytes to extract the
+    // embedded JPEG preview and show an oriented thumbnail immediately.
+    // Runs concurrently with the full read below; failure is non-fatal.
+    file.slice(0, PREVIEW_SLICE).arrayBuffer().then(sliceBuf => {
+        const bytes = new Uint8Array(sliceBuf);
+        const candidates = extractEmbeddedJpegs(bytes);
+        if (!candidates.length) return;
+        Promise.allSettled(
+            candidates.map(c => {
+                const orientation = readJpegOrientation(c);
+                return createImageBitmap(new Blob([c], { type: 'image/jpeg' }))
+                    .then(bmp => ({ bmp, pixels: bmp.width * bmp.height,
+                                    w: bmp.width, h: bmp.height, orientation }));
+            })
+        ).then(results => {
+            const valid = results
+                .filter(r => r.status === 'fulfilled')
+                .map(r => r.value)
+                .sort((a, b) => a.pixels - b.pixels);
+            if (!valid.length) { pushStat('[jpeg] 0 valid'); return; }
+
+            pushStat('[jpeg] ' + valid.map(v => `${v.w}×${v.h} ori${v.orientation}`).join(' + '));
+
+            const largest = valid[valid.length - 1];
+
+            if (card.classList.contains('busy') || card.classList.contains('embedded-thumb')) {
+                drawOrientedThumb(card.querySelector('canvas'), largest.bmp, largest.orientation, 360);
+                card.classList.remove('busy');
+                card.classList.add('embedded-thumb');
+            }
+
+            card._embeddedPreview = { bmp: largest.bmp, w: largest.w, h: largest.h,
+                                      orientation: largest.orientation };
+            if (lightboxIndex >= 0 && cards[lightboxIndex] === card && !card._lightbox) {
+                drawLightboxForCard(card);
+                resetLbZoom();
+            }
+
+            for (let vi = 0; vi < valid.length - 1; vi++) valid[vi].bmp.close();
+        });
+    }).catch(() => {}); // preview failure is non-fatal
+
+    // Phase B+C — full file read for WASM pipeline + JXL encode.
     file.arrayBuffer()
         .then((buf) => {
-            const taskId = pool.submit(new Uint8Array(buf), currentOptions(), {
+            const bytes = new Uint8Array(buf);
+            const taskId = pool.submit(bytes, currentOptions(), {
                 onThumb(msg) {
                     drawCanvas(card.querySelector('canvas'), msg.w, msg.h, msg.rgb);
                     card._pipelineMs = msg.pipelineMs;
@@ -405,13 +736,21 @@ function startConvert(file, existingCard) {
                     card._wb = { r: msg.wbR, b: msg.wbB };
                     card._colorMatrixFromMn = msg.colorMatrixFromMn;
                     card._camera = [msg.make, msg.model].filter(Boolean).join(' ') || '?';
+                    card._exif = msg.exif || null;
                     card.querySelector('.thumb-dl-btn').hidden = false;
-                    // Show thumb immediately — JXL still encoding in background.
-                    card.classList.remove('busy');
+                    card.classList.remove('busy', 'embedded-thumb');
                     card.classList.add('encoding');
                 },
                 onLightbox(msg) {
                     card._lightbox = { rgb: msg.rgb, w: msg.w, h: msg.h };
+                    // Free embedded preview bitmap — no longer needed.
+                    if (card._embeddedPreview) {
+                        card._embeddedPreview.bmp.close();
+                        card._embeddedPreview = null;
+                    }
+                    if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+                        drawLightboxForCard(card);
+                    }
                 },
                 onDone(msg) {
                     card.classList.remove('encoding');
@@ -469,6 +808,7 @@ function startConvert(file, existingCard) {
                 },
             });
             card._taskId = taskId;
+            cardByTaskId.set(taskId, card);
         })
         .catch((e) => {
             card.classList.add('error');
@@ -597,36 +937,185 @@ function zoomAtPoint(clientX, clientY, factor) {
     applyLbTransform();
 }
 
+function drawLightboxForCard(card) {
+    if (card._lightbox) {
+        const { rgb, w, h } = card._lightbox;
+        drawCanvas(lightboxCanvas, w, h, rgb);
+        lbPreviewBadge.hidden = true;
+        lbLoadingBadge.hidden = true;
+    } else if (card._embeddedPreview) {
+        const { bmp, orientation } = card._embeddedPreview;
+        drawBitmapOriented(lightboxCanvas, bmp, orientation || 1);
+        lbPreviewBadge.hidden = false;
+        lbLoadingBadge.hidden = true;
+    } else {
+        // Nothing ready yet — blank canvas + loading indicator.
+        lightboxCanvas.width = 1;
+        lightboxCanvas.height = 1;
+        lbPreviewBadge.hidden = true;
+        lbLoadingBadge.hidden = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lightbox EXIF info panel
+// ---------------------------------------------------------------------------
+const INFO_COLLAPSED_KEY = 'lb-info-collapsed';
+const OLY_WB_MODE = {
+    0: 'Auto', 1: 'Auto (Keep Warm Off)',
+    16: '7500K Shade', 17: '6000K Cloudy', 18: '5300K Daylight',
+    20: '3000K Tungsten', 21: '3600K Tungsten-like',
+    22: 'Auto Setup', 23: '5500K Flash',
+    33: '6600K Daylight Fluorescent', 34: '4500K Neutral Fluorescent',
+    35: '4000K Cool White Fluorescent', 36: 'White Fluorescent',
+    48: '3600K Tungsten-like', 67: 'Underwater',
+    256: 'One Touch WB 1', 257: 'One Touch WB 2',
+    258: 'One Touch WB 3', 259: 'One Touch WB 4',
+    512: 'Custom WB 1', 513: 'Custom WB 2',
+    514: 'Custom WB 3', 515: 'Custom WB 4',
+};
+const ORIENTATION_LABEL = {
+    1: 'Normal', 2: 'Mirror H', 3: 'Rotate 180°',
+    4: 'Mirror V', 5: 'Transpose', 6: 'Rotate 90° CW',
+    7: 'Transverse', 8: 'Rotate 90° CCW',
+};
+
+function fmtShutter(rat) {
+    if (!rat || !rat.d) return null;
+    const v = rat.n / rat.d;
+    if (v >= 1) return `${v.toFixed(v < 10 ? 1 : 0)} s`;
+    // typical fractions — show 1/N rounded to a clean denominator
+    const denom = Math.round(1 / v);
+    return `1/${denom} s`;
+}
+function fmtFNumber(rat) {
+    if (!rat || !rat.d) return null;
+    return `ƒ/${(rat.n / rat.d).toFixed(1)}`;
+}
+function fmtFocal(rat, eq35) {
+    if (!rat || !rat.d) return null;
+    const mm = (rat.n / rat.d).toFixed(0);
+    return eq35 ? `${mm} mm (≡ ${eq35} mm @ 35mm)` : `${mm} mm`;
+}
+function fmtDateTime(s) {
+    if (!s) return null;
+    // EXIF format: "YYYY:MM:DD HH:MM:SS"
+    const m = /^(\d{4}):(\d{2}):(\d{2})\s+(\d{2}:\d{2}:\d{2})/.exec(s);
+    return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}` : s;
+}
+function fmtCoord(v, posChar, negChar) {
+    if (v == null) return null;
+    const abs = Math.abs(v);
+    const deg = Math.floor(abs);
+    const minF = (abs - deg) * 60;
+    const min = Math.floor(minF);
+    const sec = ((minF - min) * 60).toFixed(2);
+    return `${deg}° ${min}′ ${sec}″ ${v >= 0 ? posChar : negChar}`;
+}
+function fmtGps(g) {
+    if (!g) return null;
+    const lat = fmtCoord(g.lat, 'N', 'S');
+    const lon = fmtCoord(g.lon, 'E', 'W');
+    const alt = g.alt != null ? ` · ${g.alt.toFixed(0)} m` : '';
+    return `${lat}, ${lon}${alt}`;
+}
+function fmtQuality(q) {
+    return { 1: 'SQ', 2: 'HQ', 3: 'SHQ', 4: 'RAW', 5: 'RAW+JPEG', 6: 'Compressed RAW' }[q] || null;
+}
+function fmtWb(exif) {
+    if (!exif) return null;
+    const mode = exif.wbMode != null ? (OLY_WB_MODE[exif.wbMode] || `mode ${exif.wbMode}`) : null;
+    const gains = (exif.wbR != null && exif.wbB != null)
+        ? `R ${exif.wbR.toFixed(3)} · B ${exif.wbB.toFixed(3)}`
+        : null;
+    const source = exif.wbFromCamera ? 'camera' : 'gray-world (auto)';
+    return [mode, gains, `via ${source}`].filter(Boolean).join(' · ');
+}
+
+function buildInfoRows(card) {
+    const ex = card._exif;
+    if (!ex) return [];
+    const camera = [ex.make, ex.model].filter(Boolean).join(' ').trim() || '—';
+    const dim = (ex.width && ex.height) ? `${ex.width} × ${ex.height}` : null;
+    return [
+        ['Camera',    camera],
+        ['Lens',      ex.lens || null],
+        ['Date',      fmtDateTime(ex.datetime)],
+        ['Shutter',   fmtShutter(ex.exposure)],
+        ['Aperture',  fmtFNumber(ex.fnumber)],
+        ['ISO',       ex.iso != null ? String(ex.iso) : null],
+        ['Focal',     fmtFocal(ex.focalLength, ex.focalLength35)],
+        ['GPS',       fmtGps(ex.gps)],
+        ['WB',        fmtWb(ex)],
+        ['Orientation', ORIENTATION_LABEL[ex.orientation] || (ex.orientation != null ? String(ex.orientation) : null)],
+        ['Dimensions', dim],
+        ['Format',    'ORF (Olympus 12-bit)'],
+        ['Quality',   fmtQuality(ex.quality)],
+        ['Pipeline',  card._pipelineMs != null ? `${card._pipelineMs.toFixed(0)} ms` : null],
+    ].filter(([_, v]) => v != null);
+}
+
+function renderInfoPanel(card) {
+    lightboxInfo.innerHTML = '';
+    const panel = document.createElement('div');
+    panel.className = 'info-panel';
+    if (localStorage.getItem(INFO_COLLAPSED_KEY) === '1') panel.classList.add('collapsed');
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'info-toggle';
+    toggle.setAttribute('aria-label', 'Toggle EXIF info');
+    const updateToggle = () => {
+        const collapsed = panel.classList.contains('collapsed');
+        toggle.textContent = collapsed ? '▸ info' : '▾ info';
+        toggle.setAttribute('aria-expanded', String(!collapsed));
+    };
+    toggle.addEventListener('click', () => {
+        panel.classList.toggle('collapsed');
+        localStorage.setItem(INFO_COLLAPSED_KEY, panel.classList.contains('collapsed') ? '1' : '0');
+        updateToggle();
+    });
+    panel.appendChild(toggle);
+
+    const body = document.createElement('dl');
+    body.className = 'info-body';
+    for (const [label, value] of buildInfoRows(card)) {
+        const dt = document.createElement('dt'); dt.textContent = label;
+        const dd = document.createElement('dd'); dd.textContent = value;
+        body.appendChild(dt); body.appendChild(dd);
+    }
+    panel.appendChild(body);
+    updateToggle();
+    lightboxInfo.appendChild(panel);
+}
+
 function openLightbox(card) {
     lightboxIndex = cards.indexOf(card);
-    const { rgb, w, h } = card._lightbox;
-    drawCanvas(lightboxCanvas, w, h, rgb);
-    lightboxInfo.textContent = card._meta || '';
+    drawLightboxForCard(card);
+    renderInfoPanel(card);
     lightbox.hidden = false;
     resetLbZoom();
 }
 
 function drawLightbox() {
     const card = cards[lightboxIndex];
-    if (!card || !card._lightbox) return;
-    const { rgb, w, h } = card._lightbox;
-    drawCanvas(lightboxCanvas, w, h, rgb);
-    lightboxInfo.textContent = card._meta || '';
+    if (!card) return;
+    drawLightboxForCard(card);
+    renderInfoPanel(card);
     resetLbZoom();
 }
 
 function closeLightbox() {
     lightbox.hidden = true;
     lightboxIndex = -1;
+    lbPreviewBadge.hidden = true;
+    lbLoadingBadge.hidden = true;
 }
 
 function nextInLightbox(dir) {
     if (lightboxIndex < 0) return;
-    let i = lightboxIndex;
-    for (let step = 0; step < cards.length; step++) {
-        i = (i + dir + cards.length) % cards.length;
-        if (cards[i]._lightbox) { lightboxIndex = i; drawLightbox(); return; }
-    }
+    lightboxIndex = (lightboxIndex + dir + cards.length) % cards.length;
+    drawLightbox();
 }
 
 // Toolbar buttons
@@ -730,6 +1219,30 @@ lightbox.addEventListener('click', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+    // Ctrl/Cmd+A — select/deselect all thumbnails (global, any state)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        const allSelected = cards.length > 0 && cards.every(c => c.classList.contains('selected'));
+        for (const card of cards) {
+            card.classList.toggle('selected', !allSelected);
+            card.querySelector('.thumb-select').textContent = allSelected ? '·' : '✓';
+        }
+        refreshReprocessLabel();
+        scheduleGalleryLiveUpdate();
+        return;
+    }
+
+    // Digit keys 1-9, 0 → apply preset slot 0-9 (0 = slot 9 = "10th button")
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const digit = e.key >= '1' && e.key <= '9' ? Number(e.key) - 1
+                    : e.key === '0' ? 9 : -1;
+        if (digit >= 0 && presets[digit]) {
+            e.preventDefault();
+            applyLookValues(presets[digit].look);
+            return;
+        }
+    }
+
     if (lightbox.hidden) return;
     if (e.key === 'Escape') closeLightbox();
     else if (e.key === 'ArrowRight') nextInLightbox(1);

@@ -24,6 +24,21 @@ body > header {
     gap: 14px;
     padding: 18px 32px;
     border-bottom: 1px solid #1f242b;
+    position: sticky;
+    top: 0;
+    z-index: 101;
+    background: #0f1115;
+}
+
+#build-badge {
+    position: fixed;
+    top: 6px;
+    left: 8px;
+    font-size: 10px;
+    color: #4a5568;
+    pointer-events: none;
+    z-index: 200;
+    font-family: monospace;
 }
 body > header .title { min-width: 0; }
 body > header h1 {
@@ -146,6 +161,60 @@ body > header p {
     cursor: not-allowed;
 }
 
+.apply-btn {
+    background: #1a6640;
+    color: #b8ffd6;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    align-self: end;
+}
+.apply-btn:hover { background: #22884f; }
+
+.action-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-top: 6px;
+}
+
+.preset-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+.preset-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #6c7480;
+    margin-right: 4px;
+    flex-shrink: 0;
+}
+.preset-btn {
+    width: 28px;
+    height: 24px;
+    background: #1e2530;
+    color: #7a8494;
+    border: 1px solid #2a3038;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0;
+    text-align: center;
+}
+.preset-btn:hover { background: #2a3038; color: #c8ccd0; }
+.preset-btn.assigned {
+    background: #1a3a5c;
+    color: #7fbfff;
+    border-color: #2c64a0;
+}
+.preset-btn.assigned:hover { background: #1f4470; }
+
 /* Selection checkbox on each thumb */
 .thumb-select {
     position: absolute;
@@ -209,10 +278,65 @@ main { padding: 24px 32px 64px; }
 }
 .status progress { flex: 1; height: 6px; }
 
+/* ── Gallery toolbar / view toggle ─────────────────────────────── */
+.gallery-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 4px 0 10px;
+}
+.view-toggle { display: flex; gap: 3px; }
+.view-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    color: rgba(255, 255, 255, 0.50);
+    border-radius: 5px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 120ms, color 120ms, border-color 120ms;
+}
+.view-btn:hover {
+    background: rgba(255, 255, 255, 0.10);
+    color: #fff;
+}
+.view-btn.active {
+    background: rgba(44, 100, 255, 0.25);
+    border-color: rgba(44, 100, 255, 0.55);
+    color: #fff;
+}
+
+/* ── Grid layout modes ──────────────────────────────────────────── */
 .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     gap: 16px;
+}
+
+/* Square: same grid, square aspect ratio */
+.grid.view-square .thumb { aspect-ratio: 1 / 1; }
+
+/* Natural: flex wrap, each card sizes to canvas content */
+.grid.view-natural {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 12px;
+}
+.grid.view-natural .thumb {
+    aspect-ratio: unset;
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 120px;
+    min-height: 90px;
+}
+.grid.view-natural .thumb canvas {
+    width: auto;
+    height: auto;
+    max-width: 340px;
+    max-height: 300px;
+    object-fit: unset;
 }
 
 .thumb {
@@ -273,7 +397,19 @@ main { padding: 24px 32px 64px; }
     transition: opacity 120ms;
 }
 .thumb:hover .download { opacity: 1; }
-.thumb.busy, .thumb.encoding { pointer-events: none; }
+/* No pointer-events block: clicking any card opens lightbox in any state. */
+.thumb.embedded-thumb::after {
+    content: 'JPEG preview';
+    position: absolute;
+    left: 6px;
+    bottom: 6px;
+    background: rgba(60, 120, 0, 0.75);
+    color: #d4ffaa;
+    font-size: 10px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    letter-spacing: 0.3px;
+}
 .thumb.busy::after {
     content: 'decoding…';
     position: absolute;
@@ -472,13 +608,97 @@ main { padding: 24px 32px 64px; }
 .lightbox-next:hover { background: rgba(40, 80, 200, 0.85); }
 
 .lightbox-info {
-    margin-top: 8px;
-    color: #98a0a8;
-    font-size: 12px;
-    background: rgba(0, 0, 0, 0.5);
-    padding: 5px 12px;
-    border-radius: 4px;
+    position: absolute;
+    left: 22px;
+    bottom: 22px;
+    z-index: 5;
+    max-width: 360px;
 }
+
+.lb-preview-badge,
+.lb-loading-badge {
+    position: absolute;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 6;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    pointer-events: none;
+    white-space: nowrap;
+}
+.lb-preview-badge {
+    background: rgba(200, 140, 0, 0.75);
+    color: #fff;
+    border: 1px solid rgba(255, 200, 60, 0.35);
+}
+.lb-loading-badge {
+    background: rgba(30, 30, 40, 0.82);
+    color: rgba(255, 255, 255, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.info-panel {
+    background: rgba(12, 14, 18, 0.82);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    color: #d7dbe1;
+    font-size: 12px;
+    line-height: 1.35;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+    transition: max-height 180ms ease, padding 180ms ease;
+}
+
+.info-toggle {
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    color: #9aa3ad;
+    text-align: left;
+    padding: 7px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: color 120ms, background 120ms;
+}
+.info-toggle:hover { color: #fff; background: rgba(255, 255, 255, 0.04); }
+
+.info-body {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 14px;
+    margin: 0;
+    padding: 10px 14px 12px;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+.info-body dt {
+    color: #7a828c;
+    font-weight: 500;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    align-self: center;
+}
+.info-body dd {
+    margin: 0;
+    color: #e4e7eb;
+    font-variant-numeric: tabular-nums;
+    word-break: break-word;
+}
+
+.info-panel.collapsed .info-body { display: none; }
+.info-panel.collapsed .info-toggle { border-bottom: none; }
 
 /* Thumbnail per-card download button */
 .thumb-dl-btn {

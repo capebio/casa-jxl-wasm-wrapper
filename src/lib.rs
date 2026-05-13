@@ -46,7 +46,45 @@ pub struct ProcessResult {
     pub lb_w: u32,
     #[wasm_bindgen(readonly)]
     pub lb_h: u32,
+    rgb16_thumb: Vec<u8>,
+    #[wasm_bindgen(readonly)]
+    pub thumb_w: u32,
+    #[wasm_bindgen(readonly)]
+    pub thumb_h: u32,
     color_matrix_flat: [f32; 9],
+    // EXIF / metadata exposed for the lightbox info panel.
+    lens: String,
+    datetime: String,
+    #[wasm_bindgen(readonly)]
+    pub exposure_num: u32,
+    #[wasm_bindgen(readonly)]
+    pub exposure_den: u32,
+    #[wasm_bindgen(readonly)]
+    pub fnumber_num: u32,
+    #[wasm_bindgen(readonly)]
+    pub fnumber_den: u32,
+    #[wasm_bindgen(readonly)]
+    pub iso: u32,
+    #[wasm_bindgen(readonly)]
+    pub focal_length_num: u32,
+    #[wasm_bindgen(readonly)]
+    pub focal_length_den: u32,
+    #[wasm_bindgen(readonly)]
+    pub focal_length_35: u16,
+    #[wasm_bindgen(readonly)]
+    pub gps_lat: f64,
+    #[wasm_bindgen(readonly)]
+    pub gps_lon: f64,
+    #[wasm_bindgen(readonly)]
+    pub gps_alt: f64,
+    #[wasm_bindgen(readonly)]
+    pub has_gps: bool,
+    #[wasm_bindgen(readonly)]
+    pub quality: u16,
+    #[wasm_bindgen(readonly)]
+    pub wb_mode: u16,
+    #[wasm_bindgen(readonly)]
+    pub wb_from_camera: bool,
 }
 
 #[wasm_bindgen]
@@ -55,6 +93,10 @@ impl ProcessResult {
     pub fn make(&self) -> String { self.make.clone() }
     #[wasm_bindgen(getter)]
     pub fn model(&self) -> String { self.model.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn lens(&self) -> String { self.lens.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn datetime(&self) -> String { self.datetime.clone() }
 }
 
 #[wasm_bindgen]
@@ -72,6 +114,11 @@ impl ProcessResult {
     /// Move the lightbox-sized packed u16 LE buffer out.  Caller owns the bytes.
     pub fn take_rgb16_lb(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.rgb16_lb)
+    }
+
+    /// Move the thumb-sized packed u16 LE buffer out.  Caller owns the bytes.
+    pub fn take_rgb16_thumb(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.rgb16_thumb)
     }
 
     /// Return the color matrix used (9 floats, row-major).
@@ -178,14 +225,23 @@ pub fn process_orf(
     let decompress_ms = now_ms() - t;
 
     let mut params = pipeline::PipelineParams::default_olympus();
-    // Gray-world auto-WB whenever MakerNote didn't supply usable values;
-    // far better than the hardcoded 1.78/1.50 daylight fallback when the
-    // scene is mixed-light or the camera variant uses a tag layout we
-    // don't parse yet.
-    if info.wb_r.is_none() || info.wb_b.is_none() {
+    // If the camera was in a manual / preset / one-touch / custom WB mode,
+    // the stored ImageProcessing 0x0100 is a fixed calibration (often the
+    // user's grey-card reading or a daylight preset) that won't match the
+    // actual scene lighting.  In that case discard it and gray-world from
+    // the raw Bayer instead.
+    //   16..=67  : daylight / cloudy / tungsten / fluorescent / underwater presets
+    //   256..=259: One Touch WB 1-4 (user-calibrated against grey card)
+    //   512..=515: Custom WB 1-4
+    let wb_is_manual = matches!(
+        info.wb_mode,
+        Some(16..=67) | Some(256..=259) | Some(512..=515),
+    );
+    let wb_from_camera = info.wb_r.is_some() && info.wb_b.is_some() && !wb_is_manual;
+    if !wb_from_camera {
         let (ar, ab) = pipeline::auto_wb_rggb(&raw, w, h, params.black);
-        if info.wb_r.is_none() { params.wb_r = ar; }
-        if info.wb_b.is_none() { params.wb_b = ab; }
+        params.wb_r = ar;
+        params.wb_b = ab;
     } else {
         if let Some(r) = info.wb_r { params.wb_r = r; }
         if let Some(b) = info.wb_b { params.wb_b = b; }
@@ -204,7 +260,7 @@ pub fn process_orf(
     let demosaic_ms = now_ms() - t;
     drop(raw);
 
-    // Compute lightbox-sized rgb16 for live re-render cache (pre-tonemap, pre-orientation).
+    // Compute lightbox + thumb rgb16 caches (pre-tonemap, pre-orientation).
     const LB_LONG_EDGE: usize = 1800;
     let (lb_w, lb_h) = if w >= h {
         let lw = w.min(LB_LONG_EDGE);
@@ -214,6 +270,16 @@ pub fn process_orf(
         (((w * lh) / h).max(1), lh)
     };
     let rgb16_lb = downscale_rgb16_impl(&rgb16, w, h, lb_w, lb_h);
+
+    const THUMB_LONG_EDGE: usize = 360;
+    let (thumb_w, thumb_h) = if w >= h {
+        let tw = w.min(THUMB_LONG_EDGE);
+        (tw, ((h * tw) / w).max(1))
+    } else {
+        let th = h.min(THUMB_LONG_EDGE);
+        (((w * th) / h).max(1), th)
+    };
+    let rgb16_thumb = downscale_rgb16_impl(&rgb16, w, h, thumb_w, thumb_h);
 
     let t = now_ms();
     if wb_r_override.is_finite() && wb_r_override > 0.0 {
@@ -264,7 +330,27 @@ pub fn process_orf(
         rgb16_lb,
         lb_w: lb_w as u32,
         lb_h: lb_h as u32,
+        rgb16_thumb,
+        thumb_w: thumb_w as u32,
+        thumb_h: thumb_h as u32,
         color_matrix_flat,
+        lens: info.lens.clone(),
+        datetime: info.datetime.clone(),
+        exposure_num: info.exposure.map(|(n, _)| n).unwrap_or(0),
+        exposure_den: info.exposure.map(|(_, d)| d).unwrap_or(0),
+        fnumber_num:  info.fnumber.map(|(n, _)| n).unwrap_or(0),
+        fnumber_den:  info.fnumber.map(|(_, d)| d).unwrap_or(0),
+        iso: info.iso.unwrap_or(0),
+        focal_length_num: info.focal_length.map(|(n, _)| n).unwrap_or(0),
+        focal_length_den: info.focal_length.map(|(_, d)| d).unwrap_or(0),
+        focal_length_35: info.focal_length_35.unwrap_or(0),
+        gps_lat: info.gps_lat.unwrap_or(0.0),
+        gps_lon: info.gps_lon.unwrap_or(0.0),
+        gps_alt: info.gps_alt.unwrap_or(0.0),
+        has_gps: info.gps_lat.is_some() && info.gps_lon.is_some(),
+        quality: info.quality.unwrap_or(0),
+        wb_mode: info.wb_mode.unwrap_or(0xFFFF),
+        wb_from_camera,
     })
 }
 

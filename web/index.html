@@ -94,8 +94,24 @@
                     <span>saturation <strong data-label="saturation">0</strong></span>
                     <input type="range" data-look="saturation" min="-100" max="100" step="1" value="0" />
                 </label>
-                <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
-                <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
+                <div class="preset-row">
+                    <span class="preset-label">Presets</span>
+                    <button type="button" class="preset-btn" data-preset="0">1</button>
+                    <button type="button" class="preset-btn" data-preset="1">2</button>
+                    <button type="button" class="preset-btn" data-preset="2">3</button>
+                    <button type="button" class="preset-btn" data-preset="3">4</button>
+                    <button type="button" class="preset-btn" data-preset="4">5</button>
+                    <button type="button" class="preset-btn" data-preset="5">6</button>
+                    <button type="button" class="preset-btn" data-preset="6">7</button>
+                    <button type="button" class="preset-btn" data-preset="7">8</button>
+                    <button type="button" class="preset-btn" data-preset="8">9</button>
+                    <button type="button" class="preset-btn" data-preset="9">10</button>
+                </div>
+                <div class="action-row">
+                    <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
+                    <button id="apply-look" type="button" class="apply-btn" title="Bake current look into selected images (re-runs full pipeline)">Apply to selected</button>
+                    <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
+                </div>
             </fieldset>
         </div>
     </header>
@@ -111,6 +127,14 @@
             <progress id="progress" max="100" value="0"></progress>
             <span id="status-text"></span>
         </section>
+
+        <div class="gallery-toolbar">
+            <div class="view-toggle" role="group" aria-label="Gallery layout">
+                <button class="view-btn active" data-view="rect"    title="Portrait rectangles">Rect</button>
+                <button class="view-btn"         data-view="square"  title="Square crop">Square</button>
+                <button class="view-btn"         data-view="natural" title="Natural proportions">Natural</button>
+            </div>
+        </div>
 
         <section id="grid" class="grid"></section>
 
@@ -140,6 +164,8 @@
         </div>
         <div class="lightbox-viewport">
             <canvas id="lightbox-canvas"></canvas>
+            <div class="lb-preview-badge" hidden>Camera JPEG</div>
+            <div class="lb-loading-badge" hidden>Loading…</div>
         </div>
         <div class="lightbox-info"></div>
     </div>

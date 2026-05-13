@@ -79,6 +79,20 @@ export class ProcessResult {
     /**
      * @returns {number}
      */
+    get thumb_h() {
+        const ret = wasm.__wbg_get_processresult_thumb_h(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get thumb_w() {
+        const ret = wasm.__wbg_get_processresult_thumb_w(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     get tonemap_ms() {
         const ret = wasm.__wbg_get_processresult_tonemap_ms(this.__wbg_ptr);
         return ret;
@@ -170,6 +184,16 @@ export class ProcessResult {
      */
     take_rgb16_lb() {
         const ret = wasm.processresult_take_rgb16_lb(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * Move the thumb-sized packed u16 LE buffer out.  Caller owns the bytes.
+     * @returns {Uint8Array}
+     */
+    take_rgb16_thumb() {
+        const ret = wasm.processresult_take_rgb16_thumb(this.__wbg_ptr);
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
