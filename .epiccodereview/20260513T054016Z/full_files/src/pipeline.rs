@@ -73,16 +73,11 @@ impl PipelineParams {
     }
 }
 
-#[inline(always)]
+#[inline]
 fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.0031308 {
         v * 12.92
     } else {
-        // powf is already LLVM-intrinsified on wasm32; #[inline(always)] ensures
-        // it is inlined into the LUT build loop to avoid call overhead.
-        // LUT caching across process() calls should be done at the JS side
-        // (the wasm module instance is reused per worker, so a JS-level cache
-        // keyed on the tone params would eliminate all LUT rebuilds on re-renders).
         1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }
@@ -175,109 +170,60 @@ pub fn gaussian_kernel_13() -> [f32; 13] {
      0.1296, 0.1097, 0.0831, 0.0563, 0.0342, 0.0185]
 }
 
-/// Horizontal pass of separable blur into `temp`.  Channel loop is inside
-/// the kernel loop so LLVM can vectorize across the 3 channels together.
-fn separable_blur_into(src: &[u16], width: usize, height: usize,
-                       kernel: &[f32], temp: &mut [u16]) {
-    let half = kernel.len() / 2;
-    for y in 0..height {
-        for x in 0..width {
-            let mut acc = [0f32; 3];
-            for (ki, &kv) in kernel.iter().enumerate() {
-                let xi = (x as isize + ki as isize - half as isize)
-                    .clamp(0, width as isize - 1) as usize;
-                let base = (y * width + xi) * 3;
-                acc[0] += src[base]     as f32 * kv;
-                acc[1] += src[base + 1] as f32 * kv;
-                acc[2] += src[base + 2] as f32 * kv;
-            }
-            let base = (y * width + x) * 3;
-            temp[base]     = acc[0].round() as u16;
-            temp[base + 1] = acc[1].round() as u16;
-            temp[base + 2] = acc[2].round() as u16;
-        }
-    }
-}
-
 fn separable_blur(src: &[u16], width: usize, height: usize, kernel: &[f32]) -> Vec<u16> {
     let half = kernel.len() / 2;
     let n = width * height * 3;
     let mut temp = vec![0u16; n];
 
-    // Horizontal pass (channels interleaved inside kernel loop for vectorization).
-    separable_blur_into(src, width, height, kernel, &mut temp);
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..3 {
+                let mut acc = 0f32;
+                for (ki, &kv) in kernel.iter().enumerate() {
+                    let xi = (x as isize + ki as isize - half as isize)
+                        .clamp(0, width as isize - 1) as usize;
+                    acc += src[(y * width + xi) * 3 + c] as f32 * kv;
+                }
+                temp[(y * width + x) * 3 + c] = acc.round() as u16;
+            }
+        }
+    }
 
-    // Vertical pass.
     let mut out = vec![0u16; n];
     for y in 0..height {
         for x in 0..width {
-            let mut acc = [0f32; 3];
-            for (ki, &kv) in kernel.iter().enumerate() {
-                let yi = (y as isize + ki as isize - half as isize)
-                    .clamp(0, height as isize - 1) as usize;
-                let base = (yi * width + x) * 3;
-                acc[0] += temp[base]     as f32 * kv;
-                acc[1] += temp[base + 1] as f32 * kv;
-                acc[2] += temp[base + 2] as f32 * kv;
+            for c in 0..3 {
+                let mut acc = 0f32;
+                for (ki, &kv) in kernel.iter().enumerate() {
+                    let yi = (y as isize + ki as isize - half as isize)
+                        .clamp(0, height as isize - 1) as usize;
+                    acc += temp[(yi * width + x) * 3 + c] as f32 * kv;
+                }
+                out[(y * width + x) * 3 + c] = acc.round() as u16;
             }
-            let base = (y * width + x) * 3;
-            out[base]     = acc[0].round() as u16;
-            out[base + 1] = acc[1].round() as u16;
-            out[base + 2] = acc[2].round() as u16;
         }
     }
     out
 }
 
-fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[f32],
-                             temp: &mut Vec<u16>, out: &mut Vec<u16>) {
-    let half = kernel.len() / 2;
-    let n = width * height * 3;
-    temp.resize(n, 0);
-    out.resize(n, 0);
-    separable_blur_into(src, width, height, kernel, temp);
-    for y in 0..height {
-        for x in 0..width {
-            let mut acc = [0f32; 3];
-            for (ki, &kv) in kernel.iter().enumerate() {
-                let yi = (y as isize + ki as isize - half as isize)
-                    .clamp(0, height as isize - 1) as usize;
-                let base = (yi * width + x) * 3;
-                acc[0] += temp[base]     as f32 * kv;
-                acc[1] += temp[base + 1] as f32 * kv;
-                acc[2] += temp[base + 2] as f32 * kv;
-            }
-            let base = (y * width + x) * 3;
-            out[base]     = acc[0].round() as u16;
-            out[base + 1] = acc[1].round() as u16;
-            out[base + 2] = acc[2].round() as u16;
-        }
+pub fn apply_unsharp_mask(rgb16: &mut [u16], width: usize, height: usize,
+                           amount: f32, kernel: &[f32]) {
+    let blurred = separable_blur(rgb16, width, height, kernel);
+    for i in 0..rgb16.len() {
+        let orig = rgb16[i] as i32;
+        let blur = blurred[i] as i32;
+        let result = orig + (amount * (orig - blur) as f32).round() as i32;
+        rgb16[i] = result.clamp(0, 4095) as u16;
     }
 }
 
 pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                             params: &PipelineParams) {
-    // Two reusable scratch buffers across both passes: peak is always 2 full
-    // images rather than 4 (original) or 3 (prior incomplete fix).
-    let mut temp: Vec<u16> = Vec::new();
-    let mut blurred: Vec<u16> = Vec::new();
     if params.texture != 0.0 {
-        separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_5(), &mut temp, &mut blurred);
-        for i in 0..rgb16.len() {
-            let orig = rgb16[i] as i32;
-            let blur = blurred[i] as i32;
-            rgb16[i] = (orig + (params.texture * (orig - blur) as f32).round() as i32)
-                .clamp(0, 65535) as u16;
-        }
+        apply_unsharp_mask(rgb16, width, height, params.texture, &gaussian_kernel_5());
     }
     if params.clarity != 0.0 {
-        separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_13(), &mut temp, &mut blurred);
-        for i in 0..rgb16.len() {
-            let orig = rgb16[i] as i32;
-            let blur = blurred[i] as i32;
-            rgb16[i] = (orig + (params.clarity * (orig - blur) as f32).round() as i32)
-                .clamp(0, 65535) as u16;
-        }
+        apply_unsharp_mask(rgb16, width, height, params.clarity, &gaussian_kernel_13());
     }
 }
 
@@ -308,7 +254,6 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     // Saturation: baseline boost + user delta in [-0.8 .. +0.8] of unit scale.
     let sat = (BASELINE_SAT + params.saturation.clamp(-1.0, 1.0) * 0.8).max(0.0);
     let vib = params.vibrance.clamp(-1.0, 1.0);
-    let vib_zero = vib.abs() < 1e-6;
 
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
@@ -328,17 +273,12 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
 
         // 2) Saturation + vibrance around luma.
         let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
-        let scale = if vib_zero {
-            // Fast path: skip luma/pixel-sat computation when vibrance == 0.
-            sat
-        } else {
-            let raw_mx = r2.max(g2).max(b2);
-            let mx = raw_mx.max(1.0);
-            let mn = r2.min(g2).min(b2).max(0.0);
-            let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
-            let vib_w = 1.0 - pixel_sat;
-            sat * (1.0 + vib * vib_w * 0.6)
-        };
+        let raw_mx = r2.max(g2).max(b2);
+        let mx = raw_mx.max(1.0);
+        let mn = r2.min(g2).min(b2).max(0.0);
+        let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
+        let vib_w = 1.0 - pixel_sat;
+        let scale = sat * (1.0 + vib * vib_w * 0.6);
         r2 = luma + (r2 - luma) * scale;
         g2 = luma + (g2 - luma) * scale;
         b2 = luma + (b2 - luma) * scale;
@@ -392,10 +332,6 @@ pub fn auto_wb_rggb(raw: &[u16], w: usize, h: usize, black: u16) -> (f32, f32) {
 }
 
 /// Apply EXIF orientation tag to a packed RGB8 image.
-///
-/// Handles orientations 3 (180°), 6 (90° CW), 8 (90° CCW).
-/// Orientations 1 (normal), 2, 4, 5, 7 are passed through as-is.
-/// Mirror/transpose variants (2, 4, 5, 7) are rare in Olympus ORF and not implemented.
 pub fn apply_orientation(
     rgb: &[u8],
     width: usize,
@@ -471,7 +407,9 @@ fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
             let s_row = &src[r * row_bytes..(r + 1) * row_bytes];
             for c in 0..w {
                 let sc = w - 1 - c;
-                dst_row[c * 3..c * 3 + 3].copy_from_slice(&s_row[sc * 3..sc * 3 + 3]);
+                dst_row[c * 3] = s_row[sc * 3];
+                dst_row[c * 3 + 1] = s_row[sc * 3 + 1];
+                dst_row[c * 3 + 2] = s_row[sc * 3 + 2];
             }
         });
     dst

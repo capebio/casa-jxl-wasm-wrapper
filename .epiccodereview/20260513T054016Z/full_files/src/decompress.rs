@@ -9,15 +9,10 @@
 /// Skip count before the bitstream begins (dcraw `fseek(ifp, 7, SEEK_CUR)`).
 const HEADER_SKIP: usize = 7;
 
-pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Result<Vec<u16>, String> {
-    let n = width.checked_mul(height)
-        .ok_or_else(|| format!("decompress: {}×{} overflows", width, height))?;
-    let mut out = vec![0u16; n];
+pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Vec<u16> {
+    let mut out = vec![0u16; width * height];
     if compressed.len() <= HEADER_SKIP {
-        return Err(format!(
-            "decompress: input too short ({} bytes, need > {})",
-            compressed.len(), HEADER_SKIP
-        ));
+        return out;
     }
     let huff = build_huff();
     let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
@@ -26,8 +21,6 @@ pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Result<Vec<
         // acarry[parity] = [last_value, running_avg_signed, stable_counter]
         // Reset per row (dcraw: `memset(acarry, 0, sizeof acarry);`).
         let mut acarry = [[0i32; 3]; 2];
-        let row_base  = row * width;
-        let row2_base = if row >= 2 { (row - 2) * width } else { 0 };
         for col in 0..width {
             let parity = col & 1;
             let i = if acarry[parity][2] < 3 { 2 } else { 0 };
@@ -68,13 +61,13 @@ pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Result<Vec<
             let pred = if row < 2 && col < 2 {
                 0
             } else if row < 2 {
-                out[row_base + col - 2] as i32
+                out[row * width + col - 2] as i32
             } else if col < 2 {
-                out[row2_base + col] as i32
+                out[(row - 2) * width + col] as i32
             } else {
-                let w_ = out[row_base  + col - 2] as i32;
-                let n_ = out[row2_base + col] as i32;
-                let nw = out[row2_base + col - 2] as i32;
+                let w_ = out[row * width + col - 2] as i32;
+                let n_ = out[(row - 2) * width + col] as i32;
+                let nw = out[(row - 2) * width + col - 2] as i32;
                 if (w_ < nw && nw < n_) || (n_ < nw && nw < w_) {
                     if (w_ - nw).abs() > 32 || (n_ - nw).abs() > 32 {
                         w_ + n_ - nw
@@ -92,7 +85,7 @@ pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Result<Vec<
             out[row * width + col] = (v & 0xFFFF) as u16;
         }
     }
-    Ok(out)
+    out
 }
 
 fn build_huff() -> [u16; 4096] {

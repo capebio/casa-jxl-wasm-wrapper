@@ -1,0 +1,5 @@
+./web/main.js
+./web/pkg/raw_converter_wasm.d.ts
+./web/pkg/raw_converter_wasm.js
+./web/pkg/raw_converter_wasm_bg.wasm.d.ts
+./web/worker.js

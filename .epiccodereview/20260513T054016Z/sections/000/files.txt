@@ -1,0 +1,6 @@
+./analyze.ts
+./compare.ts
+./dump-makernote.ts
+./probe.ts
+./serve.ts
+./test.ts

@@ -1,0 +1,45 @@
+[
+  {
+    "name": "(root)",
+    "files": [
+      "./analyze.ts",
+      "./compare.ts",
+      "./dump-makernote.ts",
+      "./probe.ts",
+      "./serve.ts",
+      "./test.ts"
+    ],
+    "index": 0
+  },
+  {
+    "name": "pkg",
+    "files": [
+      "./pkg/raw_converter_wasm.d.ts",
+      "./pkg/raw_converter_wasm.js",
+      "./pkg/raw_converter_wasm_bg.wasm.d.ts"
+    ],
+    "index": 1
+  },
+  {
+    "name": "src",
+    "files": [
+      "./src/decompress.rs",
+      "./src/demosaic.rs",
+      "./src/lib.rs",
+      "./src/pipeline.rs",
+      "./src/tiff.rs"
+    ],
+    "index": 2
+  },
+  {
+    "name": "web",
+    "files": [
+      "./web/main.js",
+      "./web/pkg/raw_converter_wasm.d.ts",
+      "./web/pkg/raw_converter_wasm.js",
+      "./web/pkg/raw_converter_wasm_bg.wasm.d.ts",
+      "./web/worker.js"
+    ],
+    "index": 3
+  }
+]

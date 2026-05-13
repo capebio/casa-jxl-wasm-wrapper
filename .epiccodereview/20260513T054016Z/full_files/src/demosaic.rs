@@ -10,7 +10,6 @@
 
 #[inline(always)]
 fn at(plane: &[u16], stride: usize, r: usize, c: usize) -> i32 {
-    debug_assert!(r * stride + c < plane.len(), "at: OOB {}×{}+{} vs {}", r, stride, c, plane.len());
     unsafe { *plane.get_unchecked(r * stride + c) as i32 }
 }
 
@@ -24,21 +23,8 @@ fn clamp(v: isize, lo: isize, hi: isize) -> usize {
 ///   (even row, odd  col) = G (red row)
 ///   (odd  row, even col) = G (blue row)
 ///   (odd  row, odd  col) = B
-pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
-    let expected = width
-        .checked_mul(height)
-        .ok_or_else(|| format!("demosaic: {}×{} overflows usize", width, height))?;
-    if width == 0 || height == 0 {
-        return Err(format!("demosaic: zero dimension {}×{}", width, height));
-    }
-    if raw.len() != expected {
-        return Err(format!(
-            "demosaic: buffer length {} != {}×{}",
-            raw.len(),
-            width,
-            height
-        ));
-    }
+pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Vec<u16> {
+    assert_eq!(raw.len(), width * height);
     let mut rgb = vec![0u16; width * height * 3];
 
     let w_max = (width - 1) as isize;
@@ -111,5 +97,5 @@ pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16
             }
         });
 
-    Ok(rgb)
+    rgb
 }

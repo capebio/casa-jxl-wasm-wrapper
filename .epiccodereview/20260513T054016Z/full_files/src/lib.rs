@@ -81,7 +81,6 @@ pub struct ProcessResult {
     pub has_gps: bool,
     #[wasm_bindgen(readonly)]
     pub quality: u16,
-    // 0xFFFF = absent/unknown (mirrors has_gps pattern using explicit bool for GPS)
     #[wasm_bindgen(readonly)]
     pub wb_mode: u16,
     #[wasm_bindgen(readonly)]
@@ -103,7 +102,6 @@ impl ProcessResult {
 #[wasm_bindgen]
 impl ProcessResult {
     /// Move the RGB buffer out as a `Uint8Array`.  Caller owns the bytes.
-    // Transfers ownership; returns empty Vec<u8> on subsequent calls.
     pub fn take_rgb(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.rgb)
     }
@@ -114,13 +112,11 @@ impl ProcessResult {
     }
 
     /// Move the lightbox-sized packed u16 LE buffer out.  Caller owns the bytes.
-    // Transfers ownership; returns empty Vec<u8> on subsequent calls.
     pub fn take_rgb16_lb(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.rgb16_lb)
     }
 
     /// Move the thumb-sized packed u16 LE buffer out.  Caller owns the bytes.
-    // Transfers ownership; returns empty Vec<u8> on subsequent calls.
     pub fn take_rgb16_thumb(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.rgb16_thumb)
     }
@@ -150,20 +146,18 @@ fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize)
     let yr = sh as f32 / dh as f32;
     let mut out = vec![0u8; dw * dh * 6];
     for dy in 0..dh {
-        // y bounds depend only on dy — hoist outside dx loop.
         let y0 = (dy as f32 * yr) as usize;
-        let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
+        let y1 = (((dy as f32) + 1.0) * yr) as usize;
+        let y1 = y1.min(sh).max(y0 + 1);
         for dx in 0..dw {
             let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
+            let x1 = (((dx as f32) + 1.0) * xr) as usize;
+            let x1 = x1.min(sw).max(x0 + 1);
 
             let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
             for y in y0..y1 {
-                let row_base = y * sw;
                 for x in x0..x1 {
-                    let i = (row_base + x) * 3;
+                    let i = (y * sw + x) * 3;
                     rr += src[i]     as u32;
                     gg += src[i + 1] as u32;
                     bb += src[i + 2] as u32;
@@ -220,16 +214,14 @@ pub fn process_orf(
 
     let w = info.width as usize;
     let h = info.height as usize;
-    let strip_end = (info.strip_offset as usize)
-        .checked_add(info.strip_byte_count as usize)
-        .ok_or_else(|| JsError::new("strip offset+length overflows"))?;
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
     if strip_end > data.len() {
         return Err(JsError::new("strip extends past end of file"));
     }
     let strip = &data[info.strip_offset as usize..strip_end];
 
     let t = now_ms();
-    let raw = decompress::decompress(strip, w, h).map_err(|e| JsError::new(&e))?;
+    let raw = decompress::decompress(strip, w, h);
     let decompress_ms = now_ms() - t;
 
     let mut params = pipeline::PipelineParams::default_olympus();
@@ -264,7 +256,7 @@ pub fn process_orf(
     };
 
     let t = now_ms();
-    let mut rgb16 = demosaic::demosaic_rggb(&raw, w, h).map_err(|e| JsError::new(&e))?;
+    let mut rgb16 = demosaic::demosaic_rggb(&raw, w, h);
     let demosaic_ms = now_ms() - t;
     drop(raw);
 
@@ -344,7 +336,6 @@ pub fn process_orf(
         color_matrix_flat,
         lens: info.lens.clone(),
         datetime: info.datetime.clone(),
-        // Rational fields use 0/0 as absent-sentinel (JS checks den==0 before dividing).
         exposure_num: info.exposure.map(|(n, _)| n).unwrap_or(0),
         exposure_den: info.exposure.map(|(_, d)| d).unwrap_or(0),
         fnumber_num:  info.fnumber.map(|(n, _)| n).unwrap_or(0),
@@ -373,31 +364,25 @@ pub fn downscale_rgb(
     dst_h: u32,
 ) -> Result<Vec<u8>, JsError> {
     let (sw, sh, dw, dh) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
-    let expected_len = sw.checked_mul(sh).and_then(|n| n.checked_mul(3))
-        .ok_or_else(|| JsError::new("downscale_rgb: dimensions overflow"))?;
-    if src.len() != expected_len {
+    if src.len() != sw * sh * 3 {
         return Err(JsError::new("src length mismatch"));
-    }
-    if dst_w == 0 || dst_h == 0 {
-        return Err(JsError::new("downscale_rgb: dst dimensions must be > 0"));
     }
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
     let mut out = vec![0u8; dw * dh * 3];
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
-        let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
+        let y1 = (((dy as f32) + 1.0) * yr) as usize;
+        let y1 = y1.min(sh).max(y0 + 1);
         for dx in 0..dw {
             let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
+            let x1 = (((dx as f32) + 1.0) * xr) as usize;
+            let x1 = x1.min(sw).max(x0 + 1);
 
             let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
             for y in y0..y1 {
-                let row_base = y * sw;
                 for x in x0..x1 {
-                    let i = (row_base + x) * 3;
+                    let i = (y * sw + x) * 3;
                     rr += src[i] as u32;
                     gg += src[i + 1] as u32;
                     bb += src[i + 2] as u32;
@@ -443,24 +428,14 @@ pub fn apply_look(
 ) -> Result<Vec<u8>, JsError> {
     // 1. Unpack u16 LE bytes → Vec<u16>
     let n = rgb16_bytes.len() / 2;
-    let expected_pixels = (width as usize).checked_mul(height as usize)
-        .ok_or_else(|| JsError::new("apply_look: dimensions overflow"))?;
-    if n != expected_pixels * 3 {
-        return Err(JsError::new(&format!(
-            "apply_look: rgb16_bytes length {} != {}×{}×6",
-            rgb16_bytes.len(), width, height
-        )));
-    }
-    let mut rgb16: Vec<u16> = rgb16_bytes
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+    let mut rgb16: Vec<u16> = (0..n)
+        .map(|i| u16::from_le_bytes([rgb16_bytes[i * 2], rgb16_bytes[i * 2 + 1]]))
         .collect();
 
     // 2. Build PipelineParams
     let mut params = pipeline::PipelineParams::default_olympus();
     params.wb_r = wb_r;
     params.wb_b = wb_b;
-    // Falls back to built-in CAM_TO_SRGB if caller passes wrong-length slice.
     if color_matrix_flat.len() == 9 {
         let mut m = [[0f32; 3]; 3];
         for r in 0..3 {
@@ -495,13 +470,15 @@ pub fn apply_look(
 }
 
 /// Convert interleaved RGB8 → RGBA8 (alpha = 255).  HTML canvas wants RGBA.
-// Input must be a multiple of 3 bytes; trailing bytes are ignored.
 #[wasm_bindgen]
 pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     let n = rgb.len() / 3;
     let mut out = Vec::with_capacity(n * 4);
-    for chunk in rgb.chunks_exact(3) {
-        out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+    for i in 0..n {
+        out.push(rgb[i * 3]);
+        out.push(rgb[i * 3 + 1]);
+        out.push(rgb[i * 3 + 2]);
+        out.push(255);
     }
     out
 }

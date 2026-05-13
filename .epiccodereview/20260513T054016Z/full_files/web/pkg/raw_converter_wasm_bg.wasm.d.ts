@@ -1,0 +1,35 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_get_processresult_color_matrix_from_mn: (a: number) => number;
+export const __wbg_get_processresult_decompress_ms: (a: number) => number;
+export const __wbg_get_processresult_demosaic_ms: (a: number) => number;
+export const __wbg_get_processresult_height: (a: number) => number;
+export const __wbg_get_processresult_lb_h: (a: number) => number;
+export const __wbg_get_processresult_lb_w: (a: number) => number;
+export const __wbg_get_processresult_orient_ms: (a: number) => number;
+export const __wbg_get_processresult_orientation: (a: number) => number;
+export const __wbg_get_processresult_thumb_h: (a: number) => number;
+export const __wbg_get_processresult_thumb_w: (a: number) => number;
+export const __wbg_get_processresult_tonemap_ms: (a: number) => number;
+export const __wbg_get_processresult_wb_b_used: (a: number) => number;
+export const __wbg_get_processresult_wb_r_used: (a: number) => number;
+export const __wbg_get_processresult_width: (a: number) => number;
+export const __wbg_processresult_free: (a: number, b: number) => void;
+export const apply_look: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number) => [number, number, number, number];
+export const downscale_rgb: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const process_orf: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number) => [number, number, number];
+export const processresult_color_matrix_used: (a: number) => [number, number];
+export const processresult_make: (a: number) => [number, number];
+export const processresult_model: (a: number) => [number, number];
+export const processresult_rgb: (a: number) => [number, number];
+export const processresult_take_rgb: (a: number) => [number, number];
+export const processresult_take_rgb16_lb: (a: number) => [number, number];
+export const processresult_take_rgb16_thumb: (a: number) => [number, number];
+export const rgb_to_rgba: (a: number, b: number) => [number, number];
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;

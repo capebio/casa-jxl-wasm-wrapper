@@ -235,8 +235,10 @@ impl IfdEntry {
     fn as_u32(&self, r: &Reader) -> Result<u32> {
         match self.dtype {
             3 => {
-                if self.count <= 2 {
-                    // Inline SHORT: count==1 or count==2 both fit in the 4-byte value field.
+                if self.count == 1 {
+                    // Inline SHORT: occupies the first 2 bytes of the 4-byte value
+                    // field.  For LE files the value lands in the low 16 bits of the
+                    // already-decoded u32; for BE files it lands in the high 16 bits.
                     let v = if r.le {
                         self.value_off & 0xFFFF
                     } else {
@@ -256,12 +258,11 @@ impl IfdEntry {
         if self.count <= 4 {
             return String::new();
         }
-        let start = self.value_off as usize;
-        let end = match start.checked_add(self.count as usize) {
-            Some(e) if e <= r.data.len() => e,
-            _ => return String::new(),
-        };
-        String::from_utf8_lossy(&r.data[start..end])
+        let bytes = r
+            .data
+            .get(self.value_off as usize..(self.value_off + self.count) as usize)
+            .unwrap_or(&[]);
+        String::from_utf8_lossy(bytes)
             .trim_end_matches('\0')
             .trim_end()
             .to_string()
@@ -294,7 +295,7 @@ impl IfdEntry {
 
 fn read_ifd(r: &Reader, offset: u32) -> Result<Vec<IfdEntry>> {
     let off = offset as usize;
-    let count = (r.u16(off)? as usize).min(512); // cap to prevent DoS from crafted files
+    let count = r.u16(off)? as usize;
     let mut entries = Vec::with_capacity(count);
     for i in 0..count {
         let e = off + 2 + i * 12;
@@ -359,13 +360,11 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
             }
             // Equipment sub-IFD — has LensModel (0x0202).
             0x2010 => {
-                let sub_off_abs = (base_off as u32).checked_add(val).unwrap_or(u32::MAX);
-                let _ = parse_equipment_subifd(&sub, sub_off_abs, base_off, info);
+                let _ = parse_equipment_subifd(&sub, base_off as u32 + val, base_off, info);
             }
             // CameraSettings sub-IFD — has WhiteBalance2 (0x0500).
             0x2020 => {
-                let sub_off_abs = (base_off as u32).checked_add(val).unwrap_or(u32::MAX);
-                let _ = parse_camera_settings_subifd(&sub, sub_off_abs, base_off, info);
+                let _ = parse_camera_settings_subifd(&sub, base_off as u32 + val, base_off, info);
             }
             // RedBalance: SHORT×1, inline value, × 256
             0x1017 => {
@@ -416,8 +415,7 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
             // ImageProcessing sub-IFD — contains WB_RBLevels (tag 0x0100) on
             // modern E-M1 II/III and OM-1 bodies.
             0x2040 => {
-                let sub_off_abs = (base_off as u32).checked_add(val).unwrap_or(u32::MAX);
-                let _ = parse_image_processing_subifd(&sub, sub_off_abs, base_off, info);
+                let _ = parse_image_processing_subifd(&sub, base_off as u32 + val, base_off, info);
             }
             // ColorMatrix: SSHORT×9 — always a pointer (18 bytes > 4)
             0x1011 => {
@@ -511,13 +509,17 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
         // ptr+0 = R gain ×256, ptr+2 = B gain ×256.
         if tag == 0x0100 && dtype == 3 && cnt >= 2 {
             let (r_lvl, b_lvl) = if cnt == 2 {
-                // Inline: val was already decoded with correct endianness.
-                // LE: first SHORT in low 16 bits, second in high 16 bits.
-                // BE: first SHORT in high 16 bits, second in low 16 bits.
-                let (r_v, b_v) = if r.le {
-                    ((val & 0xFFFF) as u16, (val >> 16) as u16)
+                // Inline: both SHORTs in the 4-byte value field.
+                let bytes = val.to_le_bytes();
+                let r_v = if r.le {
+                    u16::from_le_bytes([bytes[0], bytes[1]])
                 } else {
-                    ((val >> 16) as u16, (val & 0xFFFF) as u16)
+                    u16::from_be_bytes([bytes[0], bytes[1]])
+                };
+                let b_v = if r.le {
+                    u16::from_le_bytes([bytes[2], bytes[3]])
+                } else {
+                    u16::from_be_bytes([bytes[2], bytes[3]])
                 };
                 (r_v, b_v)
             } else {
