@@ -1797,6 +1797,14 @@ document.addEventListener('keydown', (e) => {
     }
     else if (e.key === 'ArrowRight') nextInLightbox(1);
     else if (e.key === 'ArrowLeft') nextInLightbox(-1);
+    else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (lightboxIndex >= 0) cycleSourceForCard(cards[lightboxIndex], 1);
+    }
+    else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (lightboxIndex >= 0) cycleSourceForCard(cards[lightboxIndex], -1);
+    }
     else if (e.key === '=' || e.key === '+') {
         const vp = lbViewport.getBoundingClientRect();
         zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, LB_ZOOM_STEP);
