@@ -668,11 +668,17 @@ function cycleSourceForCard(card, dir = 1) {
 function refreshThumbToggleButton(card) {
     const btn = card.querySelector('.thumb-toggle-jpeg');
     if (!btn) return;
-    const havePair = !!(card._embeddedPreview && card._thumbRgb);
-    btn.hidden = !havePair;
-    if (!havePair) return;
-    btn.textContent = card._showJpeg ? 'JPEG' : 'JXL';
-    btn.classList.toggle('showing-jpeg', !!card._showJpeg);
+    const available = ['raw', 'jxl', 'jpeg'].filter(m => {
+        if (m === 'raw')  return !!card._lightbox;
+        if (m === 'jxl')  return !!card._blobUrl;
+        if (m === 'jpeg') return !!card._embeddedPreview;
+    });
+    btn.hidden = available.length < 2;
+    if (available.length < 2) return;
+    const mode   = card._sourceMode ?? 'raw';
+    const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
+    btn.textContent = labels[mode] ?? 'RAW';
+    btn.classList.toggle('showing-jpeg', mode === 'jpeg');
 }
 
 function refreshReprocessLabel() {
@@ -747,7 +753,7 @@ function drawRotatedCanvas(canvas, rgb, w, h, degrees) {
 }
 
 // Redraw a card's thumbnail applying the current userRotations entry.  Routes
-// through card._showJpeg: when true and we have an embedded preview cached,
+// through card._sourceMode: when 'jpeg' and we have an embedded preview cached,
 // the camera's JPEG is rendered at the same canvas pixel dims as the JXL/RGB
 // thumb so toggling doesn't change the viewport.
 function redrawThumbRotated(card) {
@@ -1429,24 +1435,18 @@ function drawLightboxForCard(card) {
 }
 
 function updateToggleButtonState(card) {
-    // Toolbar button — only meaningful when both sources are available.
-    const havePair = !!(card && card._lightbox && card._embeddedPreview);
+    const mode   = card?._sourceMode ?? 'raw';
+    const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
+    const havePair = !!(card && (card._lightbox || card._embeddedPreview || card._blobUrl));
     if (lbToggleJpegBtn) {
         lbToggleJpegBtn.disabled = !havePair;
-        lbToggleJpegBtn.textContent = card && card._showJpeg ? 'JPEG' : 'JXL';
-        lbToggleJpegBtn.classList.toggle('showing-jpeg', !!(card && card._showJpeg));
+        lbToggleJpegBtn.textContent = labels[mode] ?? 'RAW';
+        lbToggleJpegBtn.classList.toggle('showing-jpeg', mode === 'jpeg');
     }
-    // Centre banner — always reflects the current pixel source.  Hidden if
-    // neither source is loaded yet so we don't lie about what's on screen.
     if (lbSourceBanner) {
-        const showingJpeg = !!(card && card._showJpeg && card._embeddedPreview && card._lightbox);
-        const showingJxl  = !!(card && !card._showJpeg && card._lightbox);
-        const showingFallbackJpeg = !!(card && card._embeddedPreview && !card._lightbox);
-        const label = (showingJpeg || showingFallbackJpeg) ? 'JPEG' : 'JXL';
-        const src = label === 'JPEG' ? 'jpeg' : 'jxl';
-        lbSourceBanner.textContent = label;
-        lbSourceBanner.setAttribute('data-source', src);
-        lbSourceBanner.hidden = !(showingJxl || showingJpeg || showingFallbackJpeg);
+        lbSourceBanner.textContent = labels[mode] ?? 'RAW';
+        lbSourceBanner.setAttribute('data-source', mode);
+        lbSourceBanner.hidden = !havePair;
     }
 }
 

@@ -850,6 +850,11 @@ main { padding: 24px 32px 64px; }
     border-color: rgba(130, 180, 255, 0.4);
 }
 
+.lb-source-banner[data-source="raw"] {
+    background: rgba(20, 120, 40, 0.55);
+    border-color: rgba(100, 220, 120, 0.4);
+}
+
 /* Large centred flash label — appears briefly on every source switch. */
 @keyframes lb-source-flash {
     0%   { opacity: 0;    transform: translate(-50%, -50%) scale(0.85); }
