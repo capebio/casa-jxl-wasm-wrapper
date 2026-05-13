@@ -26,14 +26,25 @@
                     <input type="range" id="quality-range" min="50" max="100" step="1" value="90" />
                 </label>
                 <label class="jxl-row">
-                    <span class="jxl-lbl">effort</span>
+                    <span class="jxl-lbl">effort <button class="info-btn" id="effort-info-btn" type="button" aria-label="Effort level guide">ℹ</button></span>
                     <select id="effort-select">
-                        <option value="1">1 — Lightning</option>
-                        <option value="3" selected>3 — Falcon</option>
-                        <option value="5">5 — Hare</option>
-                        <option value="7">7 — Squirrel</option>
+                        <option value="1">1 — Lightning · fastest, biggest</option>
+                        <option value="3" selected>3 — Falcon · fast, default</option>
+                        <option value="5">5 — Hare · balanced</option>
+                        <option value="6">6 — Wombat · good compression</option>
+                        <option value="7">7 — Squirrel · slow, smallest</option>
                     </select>
                 </label>
+                <div class="effort-popover" id="effort-popover" hidden>
+                    <p class="effort-intro">Effort only affects <strong>encode speed and file size</strong> — not image quality. Quality slider controls that. All levels at the same quality setting look identical; effort decides how efficiently the data is packed.</p>
+                    <table class="effort-table">
+                        <tr><td class="et-n">1</td><td class="et-animal">⚡ Lightning</td><td class="et-desc">Ultra-fast encode. Files ~25–35% larger than Squirrel. Use for draft batches where speed beats size.</td></tr>
+                        <tr><td class="et-n">3</td><td class="et-animal">🦅 Falcon</td><td class="et-desc">Fast — roughly 3–5× faster than Hare. Good default for everyday shooting.</td></tr>
+                        <tr><td class="et-n">5</td><td class="et-animal">🐇 Hare</td><td class="et-desc">Balanced. Files ~5–10% smaller than Falcon.</td></tr>
+                        <tr><td class="et-n">6</td><td class="et-animal">🦘 Wombat</td><td class="et-desc">Good compression — slower than Hare, smaller files. Max practical effort for 20 MP+ images; higher efforts fall back here if they run out of WASM heap.</td></tr>
+                        <tr><td class="et-n">7</td><td class="et-animal">🐿 Squirrel</td><td class="et-desc">Best compression — ~3–5× slower than Hare. Falls back to Wombat on images larger than ~12 MP due to WASM memory limits.</td></tr>
+                    </table>
+                </div>
                 <label class="jxl-row">
                     <span class="jxl-lbl">lossless</span>
                     <input type="checkbox" id="lossless-toggle" />
@@ -131,6 +142,7 @@
         </section>
 
         <section id="status" class="status" hidden>
+            <span id="status-timings" class="status-timings"></span>
             <progress id="progress" max="100" value="0"></progress>
             <span id="status-text"></span>
         </section>
@@ -167,10 +179,15 @@
             <button class="lb-btn lb-zoom-in" aria-label="Zoom in">+</button>
             <button class="lb-btn lb-zoom-reset" aria-label="Fit image" title="Reset zoom">⊙</button>
             <span class="lb-sep"></span>
+            <button class="lb-btn lb-toggle-jpeg" aria-label="Toggle between JXL and embedded JPEG"
+                    title="Switch view between our JXL output and the camera's embedded JPEG (Space)">JXL</button>
+            <span class="lb-sep"></span>
             <button class="lb-download-btn" aria-label="Download full-res JPEG">⬇ JPEG</button>
         </div>
         <div class="lightbox-viewport">
             <canvas id="lightbox-canvas"></canvas>
+            <div id="lb-source-label" aria-live="polite"></div>
+            <div class="lb-source-banner" id="lb-source-banner" data-source="jxl">JXL</div>
             <div class="lb-preview-badge" hidden>Camera JPEG</div>
             <div class="lb-loading-badge" hidden>Loading…</div>
         </div>
