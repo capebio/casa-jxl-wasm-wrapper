@@ -9,21 +9,24 @@
 <body>
     <header>
         <div class="title">
-            <h1>ORF → JPEG XL — fully in the browser</h1>
-            <p>Olympus 12-bit predictive ORF decode + bilinear demosaic +
-               sRGB pipeline (Rust → wasm) + JXL encode (libjxl via jSquash
-               wasm).  Per-file Web Worker pool saturates all cores.
-               Nothing leaves your machine.</p>
+            <h1>ORF → JPEG XL — fully in the browser <button class="info-btn" id="info-btn" type="button" aria-label="About this tool">ℹ</button></h1>
+            <div class="info-popover" id="info-popover" hidden>
+                <p>Olympus 12-bit predictive ORF decode + bilinear demosaic +
+                   sRGB pipeline (Rust → wasm) + JXL encode (libjxl via jSquash
+                   wasm). Per-file Web Worker pool saturates all cores.
+                   Nothing leaves your machine.</p>
+                <p class="info-meta">Build: <strong id="info-build-tag">—</strong> &nbsp;·&nbsp; Workers: <strong id="info-pool-size">—</strong> &nbsp;·&nbsp; Cores: <strong id="info-hw-cores">—</strong></p>
+            </div>
         </div>
         <div class="controls">
-            <fieldset>
+            <fieldset class="jxl-fieldset">
                 <legend>JXL</legend>
-                <label>
-                    <span>quality <strong id="quality-label">90</strong></span>
+                <label class="jxl-row">
+                    <span class="jxl-lbl">quality <strong id="quality-label">90</strong></span>
                     <input type="range" id="quality-range" min="50" max="100" step="1" value="90" />
                 </label>
-                <label>
-                    <span>effort</span>
+                <label class="jxl-row">
+                    <span class="jxl-lbl">effort</span>
                     <select id="effort-select">
                         <option value="1">1 — Lightning</option>
                         <option value="3" selected>3 — Falcon</option>
@@ -31,9 +34,29 @@
                         <option value="7">7 — Squirrel</option>
                     </select>
                 </label>
-                <label class="toggle">
+                <label class="jxl-row">
+                    <span class="jxl-lbl">lossless</span>
                     <input type="checkbox" id="lossless-toggle" />
-                    <span>lossless</span>
+                </label>
+            </fieldset>
+
+            <fieldset class="look-fieldset color-fieldset">
+                <legend>Color <small>(centred at 0)</small></legend>
+                <label class="lr">
+                    <span>temp <strong data-label="temp">0</strong></span>
+                    <input type="range" data-look="temp" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>tint <strong data-label="tint">0</strong></span>
+                    <input type="range" data-look="tint" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>vibrance <strong data-label="vibrance">0</strong></span>
+                    <input type="range" data-look="vibrance" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>saturation <strong data-label="saturation">0</strong></span>
+                    <input type="range" data-look="saturation" min="-100" max="100" step="1" value="0" />
                 </label>
             </fieldset>
 
@@ -76,26 +99,9 @@
                 </label>
             </fieldset>
 
-            <fieldset class="look-fieldset">
-                <legend>Color <small>(centred at 0)</small></legend>
-                <label class="lr">
-                    <span>temp <strong data-label="temp">0</strong></span>
-                    <input type="range" data-look="temp" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>tint <strong data-label="tint">0</strong></span>
-                    <input type="range" data-look="tint" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>vibrance <strong data-label="vibrance">0</strong></span>
-                    <input type="range" data-look="vibrance" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>saturation <strong data-label="saturation">0</strong></span>
-                    <input type="range" data-look="saturation" min="-100" max="100" step="1" value="0" />
-                </label>
-                <div class="preset-row">
-                    <span class="preset-label">Presets</span>
+            <fieldset class="presets-fieldset">
+                <legend>Presets</legend>
+                <div class="preset-grid">
                     <button type="button" class="preset-btn" data-preset="0">1</button>
                     <button type="button" class="preset-btn" data-preset="1">2</button>
                     <button type="button" class="preset-btn" data-preset="2">3</button>
@@ -105,13 +111,14 @@
                     <button type="button" class="preset-btn" data-preset="6">7</button>
                     <button type="button" class="preset-btn" data-preset="7">8</button>
                     <button type="button" class="preset-btn" data-preset="8">9</button>
-                    <button type="button" class="preset-btn" data-preset="9">10</button>
                 </div>
-                <div class="action-row">
-                    <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
-                    <button id="apply-look" type="button" class="apply-btn" title="Bake current look into selected images (re-runs full pipeline)">Apply to selected</button>
-                    <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
-                </div>
+            </fieldset>
+
+            <fieldset class="apply-fieldset">
+                <legend>Apply</legend>
+                <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
+                <button id="apply-look" type="button" class="apply-btn" title="Bake current look into selected images (re-runs full pipeline)">Apply to selected</button>
+                <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
             </fieldset>
         </div>
     </header>

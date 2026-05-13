@@ -111,7 +111,7 @@ function zoneStat(rgb: Uint8Array | Buffer, zone: 'shadow' | 'midtone' | 'highli
     rs.sort((a, b) => a - b); gs.sort((a, b) => a - b); bs.sort((a, b) => a - b);
     const nn = rs.length;
     if (nn === 0) return { n: 0, rMean:0,gMean:0,bMean:0, rP10:0,gP10:0,bP10:0, rP50:0,gP50:0,bP50:0, rP90:0,gP90:0,bP90:0 };
-    const pct = (arr: number[], p: number) => arr[Math.round((p / 100) * (arr.length - 1))];
+    const pct = (arr: number[], p: number) => arr[Math.min(Math.floor((p / 100) * arr.length), arr.length - 1)];
     const avg = (arr: number[]) => arr.reduce((s, v) => s + v, 0) / arr.length;
     return {
         n: nn,

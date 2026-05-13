@@ -1,0 +1,47 @@
+[
+  {
+    "id": "security-a1b2c3",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "path-traversal",
+    "severity": "low",
+    "file": "serve.ts",
+    "line_start": 43,
+    "line_end": 45,
+    "title": "Path traversal check only rejects literal `..` segments but does not normalise the path before joining, allowing encoded or OS-specific bypass on Windows.",
+    "description": "The check `if (path.includes('..'))` catches URL-decoded `..` sequences because `decodeURIComponent` is called first (line 33). However, on Windows `normalize()` and `join()` from `node:path` resolve backslash-separated components, so a URL containing percent-encoded backslashes (`%5c..%5c`) would survive the `..` check but might resolve to a parent directory after `join(ROOT, ...parts)`. Since this server is local-dev only and bound to localhost by default with Bun, the practical risk is very low, but the defence-in-depth fix (checking the resolved path starts with ROOT after join) is straightforward.",
+    "code_excerpt": "        if (path.includes(\"..\")) return new Response(\"forbidden\", { status: 403 });\n        const parts = path.split(\"/\").filter((p) => p.length);\n        const fsPath = join(ROOT, ...parts);",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-d4e5f6",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "information-disclosure",
+    "severity": "low",
+    "file": "serve.ts",
+    "line_start": 59,
+    "line_end": 60,
+    "title": "404 response body echoes the user-controlled path components, which leaks filesystem structure in error messages.",
+    "description": "When a file is not found, the server responds with `'not found: ' + parts.join('/')`. The `parts` array is derived from the decoded URL pathname. While this is a local dev server and the information disclosed (the requested path) is already known to the requester, reflecting user input in responses is a minor bad-practice worth noting even in dev context.",
+    "code_excerpt": "        } catch {\n            return new Response(\"not found: \" + parts.join(\"/\"), { status: 404 });\n        }",
+    "confidence_self_reported": "low",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-g7h8i9",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "hardcoded-paths",
+    "severity": "info",
+    "file": "probe.ts",
+    "line_start": 7,
+    "line_end": 7,
+    "title": "Hardcoded absolute Windows path to a personal photos directory is embedded in source.",
+    "description": "The ORF path `c:\\995\\2026-01-09 Birthday at Cederberg\\P1100085.ORF` encodes personal photo library structure. This is a dev script committed to the repo, meaning the directory structure of the developer's personal files is disclosed in source history. Not a security vulnerability but a privacy note worth considering if the repo is ever made public.",
+    "code_excerpt": "const ORF = String.raw`c:\\995\\2026-01-09 Birthday at Cederberg\\P1100085.ORF`;",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  }
+]

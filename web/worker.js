@@ -36,11 +36,15 @@ let wasmReady;
 // Per-taskId state maps — survive across multiple files on this worker.
 const liveStateMap  = new Map(); // taskId → {rgb16,w,h,outW,outH,orientation,wbR,wbB,colorMatrix}
 const thumbStateMap = new Map(); // taskId → same shape but thumb-sized rgb16
-let liveState = null; // always points to most-recent entry (for reprocess_live compat)
 
 async function ensureWasm() {
     if (!wasmReady) wasmReady = init();
-    await wasmReady;
+    try {
+        await wasmReady;
+    } catch (err) {
+        wasmReady = null; // allow retry on next call
+        throw err;
+    }
 }
 
 function sized(srcW, srcH, longEdge) {
@@ -83,16 +87,17 @@ self.addEventListener('message', async (ev) => {
     // --- lightbox live reprocess (single image) ---
     if (ev.data.type === 'reprocess_live') {
         const { id, look } = ev.data;
-        if (!liveState) {
-            self.postMessage({ id, type: 'error_live', error: 'no live state' });
+        const state = liveStateMap.get(id);
+        if (!state) {
+            self.postMessage({ id, type: 'error_live', error: 'no live state for this task' });
             return;
         }
         try {
             const t0 = performance.now();
-            const rgb = applyLookToState(liveState, look);
+            const rgb = applyLookToState(state, look);
             const liveMs = performance.now() - t0;
             self.postMessage(
-                { id, type: 'lightbox_live', rgb, w: liveState.outW, h: liveState.outH, liveMs },
+                { id, type: 'lightbox_live', rgb, w: state.outW, h: state.outH, liveMs },
                 [rgb.buffer],
             );
         } catch (err) {
@@ -114,7 +119,7 @@ self.addEventListener('message', async (ev) => {
                     [rgb.buffer],
                 );
             } catch (err) {
-                // skip failed thumbs silently
+                self.postMessage({ id: tid, type: 'error_live', error: String(err?.message || err) });
             }
         }
         return;
@@ -122,6 +127,10 @@ self.addEventListener('message', async (ev) => {
 
     // --- full ORF pipeline ---
     const { id, bytes, options } = ev.data;
+    if (!id || !bytes) {
+        // Not a pipeline message — ignore unknown types silently
+        return;
+    }
     try {
         await ensureWasm();
 
@@ -184,8 +193,7 @@ self.addEventListener('message', async (ev) => {
 
         // Store lightbox liveState
         const lb16 = result.take_rgb16_lb();
-        liveState = makeLiveState(lb16, result.lb_w, result.lb_h, ori, wbR, wbB, colorMatrix);
-        liveStateMap.set(id, liveState);
+        liveStateMap.set(id, makeLiveState(lb16, result.lb_w, result.lb_h, ori, wbR, wbB, colorMatrix));
 
         // Store thumb liveState
         const thumb16 = result.take_rgb16_thumb();
@@ -208,9 +216,14 @@ self.addEventListener('message', async (ev) => {
             [bigRgb.buffer],
         );
 
-        // JXL encode (full-resolution)
+        // JXL encode (full-resolution) — convert to RGBA then drop fullRgb to allow GC
         const rgba = rgb_to_rgba(fullRgb);
-        const imageData = { data: new Uint8ClampedArray(rgba), width: w, height: h };
+        // fullRgb is no longer needed; allow GC before long JXL encode
+        let fullRgbRef = fullRgb; fullRgbRef = null; // eslint-disable-line no-unused-vars
+        const imageData = {
+            data: new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
+            width: w, height: h,
+        };
         const jT0 = performance.now();
         const jxlAB = await encode_jxl(imageData, {
             quality: options.lossless ? 100 : options.quality,

@@ -16,7 +16,23 @@ const data = readFileSync(ORF);
 const readMs = performance.now() - t0;
 
 const t1 = performance.now();
-const result = process_orf(new Uint8Array(data));
+const result = process_orf(
+    new Uint8Array(data),
+    /* exposure_ev */ 0,
+    /* contrast    */ 0,
+    /* highlights  */ 0,
+    /* shadows     */ 0,
+    /* whites      */ 0,
+    /* blacks      */ 0,
+    /* saturation  */ 0,
+    /* vibrance    */ 0,
+    /* temp        */ 0,
+    /* tint        */ 0,
+    /* wb_r_override */ NaN,
+    /* wb_b_override */ NaN,
+    /* texture     */ 0,
+    /* clarity     */ 0,
+);
 const totalMs = performance.now() - t1;
 
 console.log(`read ORF       : ${readMs.toFixed(1)} ms (${data.length} bytes)`);

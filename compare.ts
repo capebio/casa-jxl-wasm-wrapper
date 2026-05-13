@@ -18,7 +18,7 @@ const t0 = performance.now();
 // All zero controls — baseline only.
 const r = process_orf(
     new Uint8Array(data),
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0,
 );
 const took = performance.now() - t0;
 

@@ -7,6 +7,8 @@ const ORF_PATH = process.argv[2] ?? String.raw`c:\Foo\raw-converter\tests\P11102
 const buf = readFileSync(ORF_PATH);
 const data = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 
+if (data.byteLength < 8) throw new Error('File too short for TIFF header');
+
 // TIFF helpers
 const magic = data[0] === 0x49 && data[1] === 0x49;
 const le = magic; // II = little-endian
@@ -113,8 +115,8 @@ for (let i = 0; i < count; i++) {
     if (tag === 0x1017 || tag === 0x1018 || tag === 0x1029) {
         const name = tag===0x1017?'RedBalance':tag===0x1018?'BlueBalance':'WB_RBLevels';
         // inline shorts
-        const v0 = le ? (val & 0xFFFF) : (val >> 16);
-        const v1 = le ? (val >> 16) : (val & 0xFFFF);
+        const v0 = le ? (val & 0xFFFF) : (val >>> 16);
+        const v1 = le ? (val >>> 16) : (val & 0xFFFF);
         console.log(line + `  ← ${name}  inline=[${v0},${v1}]  /256=[${(v0/256).toFixed(3)},${(v1/256).toFixed(3)}]`);
         continue;
     }
@@ -130,21 +132,26 @@ const ip_mn_val = (() => {
     return null;
 })();
 
-// Direct read: tag 0x0200 (ColorMatrix) at known abs offset 0x280a
-{
-    const cmOff = 0x280a;
-    const vals: number[] = [];
-    for (let k = 0; k < 9; k++) vals.push(i16(cmOff + k * 2));
-    console.log(`\nColorMatrix (0x0200 in IP sub-IFD, direct read @ 0x${cmOff.toString(16)}):`);
-    for (let r = 0; r < 3; r++) {
-        const row = vals.slice(r*3, r*3+3);
-        const frow = row.map(v => (v/256).toFixed(4).padStart(8));
-        console.log(`  raw=[${row.join(', ')}]  /256=[${frow.join(', ')}]`);
-    }
-    // Also check if matrix row-sums ~1 (sanity)
-    const rowSums = [0,1,2].map(r => vals.slice(r*3,r*3+3).reduce((a,v)=>a+v/256,0));
-    console.log(`  row sums: [${rowSums.map(s=>s.toFixed(3)).join(', ')}]  (should be ~1.0 each)`);
-}
+// FILE-SPECIFIC DEBUG: Direct read of ColorMatrix at a hardcoded absolute offset.
+// 0x280a is where tag 0x0200 data lives in P1110226.ORF only — do NOT use for
+// other files.  The IFD-parsed version in the ImageProcessing sub-IFD block
+// below is the authoritative path.  Uncomment only for per-file offset probing.
+//
+// const SPECIFIC_FILE_OFFSET = 0x280a; // P1110226.ORF only
+// {
+//     const cmOff = SPECIFIC_FILE_OFFSET;
+//     if (cmOff + 18 > data.length) throw new Error('Hardcoded offset out of bounds');
+//     const vals: number[] = [];
+//     for (let k = 0; k < 9; k++) vals.push(i16(cmOff + k * 2));
+//     console.log(`\nColorMatrix (direct read @ 0x${cmOff.toString(16)}):`);
+//     for (let r = 0; r < 3; r++) {
+//         const row = vals.slice(r*3, r*3+3);
+//         const frow = row.map(v => (v/256).toFixed(4).padStart(8));
+//         console.log(`  raw=[${row.join(', ')}]  /256=[${frow.join(', ')}]`);
+//     }
+//     const rowSums = [0,1,2].map(r => vals.slice(r*3,r*3+3).reduce((a,v)=>a+v/256,0));
+//     console.log(`  row sums: [${rowSums.map(s=>s.toFixed(3)).join(', ')}]  (should be ~1.0 each)`);
+// }
 
 if (ip_mn_val) {
     const ip_off = abs(ip_mn_val.mn_rel);
@@ -161,7 +168,7 @@ if (ip_mn_val) {
         const tagHex = '0x'+tag.toString(16).padStart(4,'0');
         let extra = '';
         if (tag === 0x0200 && cnt === 9) { // ColorMatrix in IP sub-IFD
-        const p = base_off + val;
+        const p = ap; // ap = base_off + val, already computed above
         const vals: number[] = [];
         for (let k = 0; k < 9; k++) vals.push(i16(p + k*2));
         console.log(`   0x0200   SHORT  9  ← ColorMatrix`);

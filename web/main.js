@@ -20,6 +20,18 @@ const BUILD_TAG = '2026-05-13c / fast-preview + orientation';
     document.body.appendChild(badge);
 }
 
+// Info popover
+{
+    const btn = document.getElementById('info-btn');
+    const pop = document.getElementById('info-popover');
+    document.getElementById('info-build-tag').textContent = BUILD_TAG;
+    document.getElementById('info-pool-size').textContent = POOL_SIZE;
+    document.getElementById('info-hw-cores').textContent = navigator.hardwareConcurrency || '?';
+    btn.addEventListener('click', (e) => { e.stopPropagation(); pop.hidden = !pop.hidden; });
+    pop.addEventListener('click', (e) => e.stopPropagation());
+    document.addEventListener('click', () => { pop.hidden = true; });
+}
+
 // ---------------------------------------------------------------------------
 // DOM refs
 // ---------------------------------------------------------------------------
@@ -132,12 +144,37 @@ function fmtKb(v) { return (v / 1024).toFixed(0).padStart(5, ' ') + ' KB'; }
 let statSeq = 0;
 
 // ---------------------------------------------------------------------------
+// Look slider state persistence
+// ---------------------------------------------------------------------------
+const LOOK_STATE_KEY = 'orf-look-state';
+
+function saveLookState() {
+    const state = {};
+    for (const el of lookInputs) state[el.dataset.look] = el.value;
+    state['contrast-boost'] = contrastBoostEl.checked;
+    try { localStorage.setItem(LOOK_STATE_KEY, JSON.stringify(state)); } catch {}
+}
+
+function restoreLookState() {
+    try {
+        const state = JSON.parse(localStorage.getItem(LOOK_STATE_KEY));
+        if (!state) return;
+        for (const el of lookInputs) {
+            if (state[el.dataset.look] !== undefined) el.value = state[el.dataset.look];
+        }
+        if (state['contrast-boost'] !== undefined) contrastBoostEl.checked = !!state['contrast-boost'];
+        refreshLookLabels();
+    } catch {}
+}
+restoreLookState();
+
+// ---------------------------------------------------------------------------
 // Encoder option state
 // ---------------------------------------------------------------------------
 function currentLook() {
     return {
         exposureEv: lookValueFor('exposureEv'),
-        contrast:   lookValueFor('contrast') + (contrastBoostEl.checked ? 0.15 : 0.0),
+        contrast:   Math.max(-1, Math.min(1, lookValueFor('contrast') + (contrastBoostEl.checked ? 0.15 : 0.0))),
         highlights: lookValueFor('highlights'),
         shadows:    lookValueFor('shadows'),
         whites:     lookValueFor('whites'),
@@ -176,6 +213,7 @@ for (const el of lookInputs) {
         const name = el.dataset.look;
         const lbl = lookLabels.get(name);
         if (lbl) lbl.textContent = lookDisplay(name);
+        saveLookState();
         scheduleLiveUpdate();
         scheduleGalleryLiveUpdate();
     });
@@ -187,10 +225,15 @@ applyLookBtn.addEventListener('click', () => {
     const selected = cards.filter(c => c.classList.contains('selected') && c._file);
     const targets = selected.length ? selected : cards.filter(c => c._file);
     if (!targets.length) return;
-    // Ensure only selected are targeted (not all).
     if (!selected.length) {
-        // select all then reprocess
-        for (const c of cards) c.classList.add('selected');
+        // No explicit selection — select all, then reprocess all.
+        for (const c of cards) {
+            if (c._file) {
+                c.classList.add('selected');
+                c.querySelector('.thumb-select').textContent = '✓';
+            }
+        }
+        refreshReprocessLabel();
     }
     reprocessSelected();
 });
@@ -199,6 +242,7 @@ resetLookBtn.addEventListener('click', () => {
     for (const el of lookInputs) el.value = '0';
     contrastBoostEl.checked = false;
     refreshLookLabels();
+    saveLookState();
     scheduleLiveUpdate();
     scheduleGalleryLiveUpdate();
 });
@@ -266,18 +310,45 @@ class WorkerPool {
         this.queue = [];
         this.tasks = new Map(); // id → handlers
         this.nextId = 1;
+        this.workerForTask = new Map(); // taskId → worker (populated on _releaseWorker)
     }
 
     init() {
         for (let i = 0; i < this.size; i++) {
-            const w = new Worker(new URL('./worker.js', import.meta.url), {
-                type: 'module',
-            });
-            w.addEventListener('message', (ev) => this._onMessage(w, ev));
-            w.addEventListener('error', (ev) => console.error('worker error:', ev));
-            this.workers.push(w);
-            this.free.push(w);
+            this._spawnWorker();
         }
+    }
+
+    _spawnWorker() {
+        const w = new Worker(new URL('./worker.js', import.meta.url), {
+            type: 'module',
+        });
+        w.addEventListener('message', (ev) => this._onMessage(w, ev));
+        w.addEventListener('error', (ev) => {
+            console.error('worker error:', ev);
+            // Find any pending task assigned to this worker and unblock it.
+            for (const [id, t] of this.tasks) {
+                if (t.worker === w && !t.released) {
+                    if (t.handlers.onError) {
+                        t.handlers.onError({ type: 'error', error: ev.message || 'worker crashed' });
+                    }
+                    this.tasks.delete(id);
+                    break;
+                }
+            }
+            // Remove the dead worker — do NOT return it to free pool.
+            const wi = this.workers.indexOf(w);
+            if (wi !== -1) this.workers.splice(wi, 1);
+            const fi = this.free.indexOf(w);
+            if (fi !== -1) this.free.splice(fi, 1);
+            // Dispatch any queued task with remaining workers; also shrink size
+            // so subsequent submits don't wait forever.
+            this.size = Math.max(1, this.size - 1);
+            const next = this.queue.shift();
+            if (next) this._dispatch(next);
+        });
+        this.workers.push(w);
+        this.free.push(w);
     }
 
     submit(bytes, options, handlers) {
@@ -322,11 +393,13 @@ class WorkerPool {
         else if (type === 'done') {
             if (handlers.onDone) handlers.onDone(ev.data);
             this.tasks.delete(id);  // Worker already freed on lightbox
+            this.workerForTask.delete(id);
         } else if (type === 'error') {
             if (handlers.onError) handlers.onError(ev.data);
             // Error may arrive before or after lightbox — only release worker if not yet done.
             if (!t.released) this._releaseWorker(worker, id);
             this.tasks.delete(id);
+            this.workerForTask.delete(id);
         }
     }
 
@@ -335,7 +408,8 @@ class WorkerPool {
     _releaseWorker(worker, id) {
         const t = this.tasks.get(id);
         if (t) t.released = true;
-        worker._lastTaskId = id;
+        // Track which worker owns this taskId so reprocessLive can find it.
+        this.workerForTask.set(id, worker);
         if (!worker._taskIds) worker._taskIds = new Set();
         worker._taskIds.add(id);
         this.free.push(worker);
@@ -353,7 +427,7 @@ class WorkerPool {
     setThumbLiveHandler(fn) { this._thumbLiveHandler = fn; }
 
     reprocessLive(taskId, look) {
-        const worker = this.workers.find(w => w._lastTaskId === taskId);
+        const worker = this.workerForTask.get(taskId);
         if (!worker) return false;
         worker.postMessage({ id: taskId, type: 'reprocess_live', look });
         return true;
@@ -400,17 +474,23 @@ function triggerLiveUpdate(look) {
 }
 
 pool.setLiveHandler((msg) => {
+    if (msg.type === 'error_live') {
+        console.warn('live reprocess error:', msg.error);
+        liveInFlight = false;
+        if (livePendingLook) {
+            const pending = livePendingLook;
+            livePendingLook = null;
+            triggerLiveUpdate(pending);
+        }
+        return;
+    }
     liveInFlight = false;
     if (lightboxIndex >= 0) {
         const card = cards[lightboxIndex];
         if (msg.type === 'lightbox_live' && card && msg.id === card._taskId) {
             // Update pixels without resetting zoom
             const ctx = lightboxCanvas.getContext('2d');
-            const rgba = new Uint8ClampedArray(msg.w * msg.h * 4);
-            for (let i = 0, j = 0; i < msg.rgb.length; i += 3, j += 4) {
-                rgba[j] = msg.rgb[i]; rgba[j + 1] = msg.rgb[i + 1];
-                rgba[j + 2] = msg.rgb[i + 2]; rgba[j + 3] = 255;
-            }
+            const rgba = rgbToRgba(msg.rgb, msg.w, msg.h);
             ctx.putImageData(new ImageData(rgba, msg.w, msg.h), 0, 0);
         }
     }
@@ -421,7 +501,7 @@ pool.setLiveHandler((msg) => {
     }
 });
 
-contrastBoostEl.addEventListener('change', () => { scheduleLiveUpdate(); scheduleGalleryLiveUpdate(); });
+contrastBoostEl.addEventListener('change', () => { saveLookState(); scheduleLiveUpdate(); scheduleGalleryLiveUpdate(); });
 
 // ---------------------------------------------------------------------------
 // Gallery live thumb re-render (debounced, fans out to all selected cards)
@@ -516,17 +596,26 @@ for (const btn of viewBtns) {
 // Restore persisted mode (default: rect).
 setViewMode((() => { try { return localStorage.getItem(VIEW_MODE_KEY) || 'rect'; } catch { return 'rect'; } })());
 
-function drawCanvas(canvas, w, h, rgb) {
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    const rgba = new Uint8ClampedArray(w * h * 4);
-    for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
-        rgba[j] = rgb[i];
-        rgba[j + 1] = rgb[i + 1];
-        rgba[j + 2] = rgb[i + 2];
-        rgba[j + 3] = 255;
+function rgbToRgba(rgb, w, h) {
+    const n = w * h;
+    const buf = new ArrayBuffer(n * 4);
+    const rgba = new Uint8ClampedArray(buf);
+    const u32 = new Uint32Array(buf);
+    // Pack RGBA as little-endian 0xFFBBGGRR using Uint32 writes (~4x fewer stores).
+    for (let i = 0, p = 0; i < n; i++, p += 3) {
+        u32[i] = (rgb[p]) | (rgb[p + 1] << 8) | (rgb[p + 2] << 16) | 0xFF000000;
     }
+    return rgba;
+}
+
+function drawCanvas(canvas, w, h, rgb) {
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    // If worker already sent RGBA (byteLength === w*h*4) use it directly.
+    const rgba = (rgb.byteLength === w * h * 4)
+        ? (rgb instanceof Uint8ClampedArray ? rgb : new Uint8ClampedArray(rgb.buffer))
+        : rgbToRgba(rgb, w, h);
     ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
 }
 
@@ -755,7 +844,10 @@ function startConvert(file, existingCard) {
                 onDone(msg) {
                     card.classList.remove('encoding');
                     const blob = new Blob([msg.jxl], { type: 'image/jxl' });
+                    // Revoke any previous blob URL for this card before creating a new one.
+                    if (card._blobUrl) URL.revokeObjectURL(card._blobUrl);
                     const url = URL.createObjectURL(blob);
+                    card._blobUrl = url;
                     const link = card.querySelector('.download');
                     link.href = url;
                     link.download = file.name.replace(/\.orf$/i, '.jxl');
@@ -902,16 +994,24 @@ drop.addEventListener('drop', async (e) => {
 // ---------------------------------------------------------------------------
 let lightboxIndex = -1;
 
-// Zoom state
+// Zoom / pan / rotation state
 const LB_ZOOM_MIN = 0.05;
 const LB_ZOOM_MAX = 8.0;
 const LB_ZOOM_STEP = 1.25;
 let lbZoom = 1;
 let lbPanX = 0;
 let lbPanY = 0;
+let lbRotation = 0; // 0 | 90 | 180 | 270
+
+const LB_ROTATION_KEY = 'orf-lb-rotations';
+let lbRotations = (() => {
+    try { return JSON.parse(localStorage.getItem(LB_ROTATION_KEY)) || {}; }
+    catch { return {}; }
+})();
 
 function applyLbTransform() {
-    lightboxCanvas.style.transform = `translate(${lbPanX}px, ${lbPanY}px) scale(${lbZoom})`;
+    lightboxCanvas.style.transform =
+        `translate(${lbPanX}px, ${lbPanY}px) scale(${lbZoom}) rotate(${lbRotation}deg)`;
     lbZoomLabel.textContent = Math.round(lbZoom * 100) + '%';
 }
 
@@ -919,10 +1019,24 @@ function resetLbZoom() {
     const vp = lbViewport.getBoundingClientRect();
     const cw = lightboxCanvas.width;
     const ch = lightboxCanvas.height;
-    lbZoom = (cw > 0 && ch > 0) ? Math.min(vp.width / cw, vp.height / ch, 1) : 1;
+    // For 90°/270° the rendered image is sideways — swap fit dimensions.
+    const rotated = lbRotation === 90 || lbRotation === 270;
+    const fitW = rotated ? ch : cw;
+    const fitH = rotated ? cw : ch;
+    lbZoom = (fitW > 0 && fitH > 0) ? Math.min(vp.width / fitW, vp.height / fitH, 1) : 1;
     lbPanX = 0;
     lbPanY = 0;
     applyLbTransform();
+}
+
+function rotateBy(delta) {
+    lbRotation = ((lbRotation + delta) % 360 + 360) % 360;
+    const card = cards[lightboxIndex];
+    if (card?._file?.name) {
+        lbRotations[card._file.name] = lbRotation;
+        try { localStorage.setItem(LB_ROTATION_KEY, JSON.stringify(lbRotations)); } catch {}
+    }
+    resetLbZoom(); // recalculates fit with new rotation
 }
 
 function zoomAtPoint(clientX, clientY, factor) {
@@ -1091,6 +1205,7 @@ function renderInfoPanel(card) {
 
 function openLightbox(card) {
     lightboxIndex = cards.indexOf(card);
+    lbRotation = card._file?.name ? (lbRotations[card._file.name] ?? 0) : 0;
     drawLightboxForCard(card);
     renderInfoPanel(card);
     lightbox.hidden = false;
@@ -1100,6 +1215,7 @@ function openLightbox(card) {
 function drawLightbox() {
     const card = cards[lightboxIndex];
     if (!card) return;
+    lbRotation = card._file?.name ? (lbRotations[card._file.name] ?? 0) : 0;
     drawLightboxForCard(card);
     renderInfoPanel(card);
     resetLbZoom();
@@ -1115,6 +1231,9 @@ function closeLightbox() {
 function nextInLightbox(dir) {
     if (lightboxIndex < 0) return;
     lightboxIndex = (lightboxIndex + dir + cards.length) % cards.length;
+    // Reset live-render state so the new image starts clean.
+    liveInFlight = false;
+    livePendingLook = null;
     drawLightbox();
 }
 
@@ -1143,10 +1262,16 @@ lbDownloadBtn.addEventListener('click', () => {
     }, 'image/jpeg', 0.95);
 });
 
-// Scroll-wheel zoom
+// Scroll-wheel / trackpad zoom — proportional to deltaY so trackpad feels
+// smooth and deliberate while a mouse-wheel click still gives a meaningful step.
+// deltaMode 0 = pixels (trackpad), 1 = lines (mouse wheel), 2 = pages.
 lbViewport.addEventListener('wheel', (e) => {
     e.preventDefault();
-    zoomAtPoint(e.clientX, e.clientY, e.deltaY < 0 ? LB_ZOOM_STEP : 1 / LB_ZOOM_STEP);
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= 20;   // lines → pixel-equivalent
+    if (e.deltaMode === 2) dy *= 300;  // pages → pixel-equivalent
+    dy = Math.max(-200, Math.min(200, dy)); // cap runaway values
+    zoomAtPoint(e.clientX, e.clientY, Math.exp(-dy * 0.003));
 }, { passive: false });
 
 // Mouse drag to pan
@@ -1245,6 +1370,8 @@ document.addEventListener('keydown', (e) => {
 
     if (lightbox.hidden) return;
     if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'r' || e.key === 'R') rotateBy(90);
+    else if (e.key === 'l' || e.key === 'L') rotateBy(-90);
     else if (e.key === 'ArrowRight') nextInLightbox(1);
     else if (e.key === 'ArrowLeft') nextInLightbox(-1);
     else if (e.key === '=' || e.key === '+') {

@@ -1,0 +1,267 @@
+{
+  "section_index": 0,
+  "section_name": "(root)",
+  "mode": "workalone",
+  "tasks": [
+    {
+      "task_id": "000-logic-a1b2c3",
+      "finding_id": "logic-a1b2c3",
+      "finding_type": "issue",
+      "file": "analyze.ts",
+      "line_start": 114,
+      "line_end": 114,
+      "title": "Percentile indexing uses round() which can return the last index only at exactly p=100, but for p=90 on small arrays it can overshoot.",
+      "category": "arithmetic",
+      "severity": "medium",
+      "depends_on": [],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-contracts-a1b2c3",
+      "finding_id": "contracts-a1b2c3",
+      "finding_type": "issue",
+      "file": "compare.ts",
+      "line_start": 19,
+      "line_end": 22,
+      "title": "process_orf call in compare.ts passes 12 extra arguments while analyze.ts passes 15, indicating the call sites have diverged from the current WASM binding signature.",
+      "category": "type-mismatch",
+      "severity": "medium",
+      "depends_on": [
+        "000-logic-s1t2u3"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-logic-s1t2u3",
+      "finding_id": "logic-s1t2u3",
+      "finding_type": "issue",
+      "file": "compare.ts",
+      "line_start": 19,
+      "line_end": 22,
+      "title": "process_orf is called with 12 positional arguments but analyze.ts passes 15; the signatures differ, meaning compare.ts uses fewer controls than analyze.ts.",
+      "category": "wrong-assumption",
+      "severity": "medium",
+      "depends_on": [
+        "000-contracts-a1b2c3"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-logic-g7h8i9",
+      "finding_id": "logic-g7h8i9",
+      "finding_type": "issue",
+      "file": "dump-makernote.ts",
+      "line_start": 135,
+      "line_end": 147,
+      "title": "ColorMatrix direct-read block uses a hardcoded absolute offset (0x280a) that is file-specific and will silently produce garbage for any other ORF.",
+      "category": "hardcoded-offset",
+      "severity": "high",
+      "depends_on": [
+        "000-errors-g7h8i9",
+        "000-logic-j1k2l3",
+        "000-logic-p7q8r9"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-errors-g7h8i9",
+      "finding_id": "errors-g7h8i9",
+      "finding_type": "issue",
+      "file": "dump-makernote.ts",
+      "line_start": 11,
+      "line_end": 14,
+      "title": "TIFF header magic check and all subsequent offset reads have no bounds checks; a truncated or corrupt file will produce uncaught RangeError or silent garbage reads.",
+      "category": "unchecked-buffer-bounds",
+      "severity": "medium",
+      "depends_on": [
+        "000-logic-g7h8i9",
+        "000-logic-j1k2l3",
+        "000-logic-p7q8r9"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-logic-j1k2l3",
+      "finding_id": "logic-j1k2l3",
+      "finding_type": "issue",
+      "file": "dump-makernote.ts",
+      "line_start": 116,
+      "line_end": 118,
+      "title": "Inline SHORT extraction for WB tags splits val assuming the two 16-bit shorts are packed in a specific byte order, but the bit-shift logic doesn't match the LE/BE endian flag correctly for the high 16 bits.",
+      "category": "wrong-calculation",
+      "severity": "medium",
+      "depends_on": [
+        "000-errors-g7h8i9",
+        "000-logic-g7h8i9",
+        "000-logic-p7q8r9"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-logic-p7q8r9",
+      "finding_id": "logic-p7q8r9",
+      "finding_type": "issue",
+      "file": "dump-makernote.ts",
+      "line_start": 163,
+      "line_end": 173,
+      "title": "IP sub-IFD ColorMatrix branch reads from `base_off + val` but the outer loop already computes `ap = base_off + val`; the variable `p` is re-derived redundantly and shadows the outer `ap`, obscuring whether the same value is used.",
+      "category": "missing-check",
+      "severity": "medium",
+      "depends_on": [
+        "000-errors-g7h8i9",
+        "000-logic-g7h8i9",
+        "000-logic-j1k2l3"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-concurrency-a1b2c3",
+      "finding_id": "concurrency-a1b2c3",
+      "finding_type": "issue",
+      "file": "probe.ts",
+      "line_start": 60,
+      "line_end": 71,
+      "title": "browser.close() is called unconditionally in the finally-less structure, but if waitForSelector throws a non-timeout error the catch block may rethrow before browser.close() executes.",
+      "category": "missing-await",
+      "severity": "medium",
+      "depends_on": [
+        "000-concurrency-d4e5f6",
+        "000-contracts-g7h8i9",
+        "000-security-g7h8i9"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-contracts-g7h8i9",
+      "finding_id": "contracts-g7h8i9",
+      "finding_type": "issue",
+      "file": "probe.ts",
+      "line_start": 52,
+      "line_end": 55,
+      "title": "page.evaluate callback accesses `c._meta` which is a non-standard DOM property with no type declaration, returning implicitly typed `any`.",
+      "category": "implicit-any",
+      "severity": "low",
+      "depends_on": [
+        "000-concurrency-a1b2c3",
+        "000-concurrency-d4e5f6",
+        "000-security-g7h8i9"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-concurrency-d4e5f6",
+      "finding_id": "concurrency-d4e5f6",
+      "finding_type": "issue",
+      "file": "probe.ts",
+      "line_start": 65,
+      "line_end": 66,
+      "title": "Variable `err` inside the catch block is shadowed by a new `const err` from getAttribute, hiding the original caught error.",
+      "category": "variable-shadowing-in-async",
+      "severity": "low",
+      "depends_on": [
+        "000-concurrency-a1b2c3",
+        "000-contracts-g7h8i9",
+        "000-security-g7h8i9"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-security-g7h8i9",
+      "finding_id": "security-g7h8i9",
+      "finding_type": "issue",
+      "file": "probe.ts",
+      "line_start": 7,
+      "line_end": 7,
+      "title": "Hardcoded absolute Windows path to a personal photos directory is embedded in source.",
+      "category": "hardcoded-paths",
+      "severity": "info",
+      "depends_on": [
+        "000-concurrency-a1b2c3",
+        "000-concurrency-d4e5f6",
+        "000-contracts-g7h8i9"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-errors-a1b2c3",
+      "finding_id": "errors-a1b2c3",
+      "finding_type": "issue",
+      "file": "serve.ts",
+      "line_start": 59,
+      "line_end": 61,
+      "title": "The catch block in the request handler swallows all errors indiscriminately, treating permission errors, out-of-memory, and ENOENT identically as 404.",
+      "category": "swallowed-exception",
+      "severity": "medium",
+      "depends_on": [
+        "000-security-a1b2c3"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    },
+    {
+      "task_id": "000-security-a1b2c3",
+      "finding_id": "security-a1b2c3",
+      "finding_type": "issue",
+      "file": "serve.ts",
+      "line_start": 43,
+      "line_end": 45,
+      "title": "Path traversal check only rejects literal `..` segments but does not normalise the path before joining, allowing encoded or OS-specific bypass on Windows.",
+      "category": "path-traversal",
+      "severity": "low",
+      "depends_on": [
+        "000-errors-a1b2c3"
+      ],
+      "tier": "sonnet",
+      "task_kind": "direct_fix",
+      "reason_for_tier": "workalone mode: all tasks at sonnet",
+      "status": "pending"
+    }
+  ],
+  "counts": {
+    "total": 13,
+    "pending": 13,
+    "deferred": 0,
+    "issue": 13,
+    "opportunity": 0,
+    "direct_fix": 13,
+    "adr_draft": 0,
+    "haiku": 0,
+    "sonnet": 13,
+    "opus": 0
+  }
+}

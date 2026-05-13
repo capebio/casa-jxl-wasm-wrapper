@@ -39,10 +39,13 @@ serve({
             });
         }
 
-        // Reject parent-dir traversal in URL-space first, then convert to OS path.
-        if (path.includes("..")) return new Response("forbidden", { status: 403 });
         const parts = path.split("/").filter((p) => p.length);
-        const fsPath = join(ROOT, ...parts);
+        const fsPath = normalize(join(ROOT, ...parts));
+        // Reject any path that escapes ROOT (covers literal "..", URL-encoded,
+        // double-encoded, and Windows backslash variants after normalize()).
+        if (!fsPath.startsWith(ROOT + sep) && fsPath !== ROOT) {
+            return new Response("forbidden", { status: 403 });
+        }
         try {
             const data = await readFile(fsPath);
             const ext = extname(fsPath).toLowerCase();
@@ -56,8 +59,12 @@ serve({
                     "Cache-Control": "no-cache",
                 },
             });
-        } catch {
-            return new Response("not found: " + parts.join("/"), { status: 404 });
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === "ENOENT") return new Response("not found: " + parts.join("/"), { status: 404 });
+            if (code === "EACCES") return new Response("forbidden", { status: 403 });
+            console.error("serve error:", err);
+            return new Response("internal server error", { status: 500 });
         }
     },
 });

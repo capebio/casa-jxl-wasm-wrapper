@@ -40,18 +40,60 @@ body > header {
     z-index: 200;
     font-family: monospace;
 }
-body > header .title { min-width: 0; }
+body > header .title { min-width: 0; position: relative; }
 body > header h1 {
-    margin: 0 0 4px 0;
+    margin: 0;
     font-weight: 600;
     font-size: 17px;
+    display: flex;
+    align-items: center;
+    gap: 0;
 }
-body > header p {
-    margin: 0;
+
+.info-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    border: 1px solid #3a4250;
+    background: #1a1f27;
+    color: #6c7480;
+    font-size: 10px;
+    font-style: italic;
+    font-family: Georgia, serif;
+    font-weight: 400;
+    cursor: pointer;
+    margin-left: 8px;
+    padding: 0;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 120ms, border-color 120ms, background 120ms;
+}
+.info-btn:hover { color: #c8ccd0; border-color: #5a6370; background: #232930; }
+
+.info-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    z-index: 300;
+    background: #1a1f27;
+    border: 1px solid #2a3038;
+    border-radius: 6px;
+    padding: 12px 14px;
+    max-width: 480px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.55);
+}
+.info-popover p {
+    margin: 0 0 8px;
     color: #98a0a8;
     font-size: 12px;
-    max-width: 720px;
+    line-height: 1.55;
+    max-width: none;
 }
+.info-popover p:last-child { margin-bottom: 0; }
+.info-meta { color: #6c7480 !important; font-size: 11px !important; }
 
 .controls {
     display: flex;
@@ -100,6 +142,61 @@ body > header p {
     grid-template-columns: repeat(3, auto);
     gap: 8px 14px;
     align-items: end;
+}
+
+/* JXL — vertical 3-line layout */
+.jxl-fieldset {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+}
+.jxl-row {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 11px;
+    color: #98a0a8;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.jxl-lbl { white-space: nowrap; }
+.jxl-row input[type="checkbox"] { accent-color: #4f8cff; flex-shrink: 0; }
+.jxl-row input[type="range"] { width: 120px; }
+.jxl-row select { font-size: 11px; }
+
+/* Color — 2-col so vibrance sits next to saturation */
+.controls .look-fieldset.color-fieldset {
+    grid-template-columns: repeat(2, auto);
+}
+
+/* Presets — telephone 3×3 */
+.presets-fieldset {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 0 !important;
+}
+.preset-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 30px);
+    gap: 4px;
+}
+
+/* Apply — vertical stack */
+.apply-fieldset {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 6px !important;
+    min-width: 126px;
+}
+.apply-fieldset .reset-btn,
+.apply-fieldset .apply-btn,
+.apply-fieldset .reprocess-btn {
+    width: 100%;
+    margin: 0;
+    align-self: auto;
+    text-align: center;
 }
 .controls label.lr {
     min-width: 110px;
