@@ -21,9 +21,9 @@ pub const CAM_TO_SRGB: [[f32; 3]; 3] = [
 /// Always-applied baselines that emulate Olympus Picture-Mode (Natural).
 /// Without these, raw matrix output looks "flat" relative to the embedded
 /// JPEG.  User look sliders adjust on top.
-const BASELINE_SAT: f32 = 1.20;        // chroma scale around luma
-const BASELINE_CONTRAST: f32 = 0.35;   // S-curve blend, [0,1]
-const BASELINE_EXP_EV: f32 = 1.25;     // tuned to match embedded JPEG luminance (lum ~87)
+const BASELINE_SAT: f32 = 1.30;        // chroma scale around luma — tuned to embedded JPEG saturation
+const BASELINE_CONTRAST: f32 = 0.55;   // S-curve blend, [0,1] — tuned to embedded JPEG luma std-dev
+const BASELINE_EXP_EV: f32 = 1.40;     // tuned to embedded JPEG luminance
 
 pub struct PipelineParams {
     pub black: u16,
@@ -156,6 +156,36 @@ fn build_pre_lut(black: u16, white: u16, wb_eff: f32, exp_gain: f32) -> Vec<u16>
     lut
 }
 
+struct LutCache {
+    black: u16, white: u16,
+    wb_r_bits: u32, wb_g_bits: u32, wb_b_bits: u32, exp_gain_bits: u32,
+    contrast_bits: u32, highlights_bits: u32, shadows_bits: u32,
+    whites_bits: u32, blacks_bits: u32,
+    pre_r: Vec<u16>, pre_g: Vec<u16>, pre_b: Vec<u16>,
+    post: Vec<u8>,
+}
+
+impl LutCache {
+    fn matches(&self, black: u16, white: u16, wb_r: f32, wb_g: f32, wb_b: f32,
+               exp_gain: f32, tone: &TonePost) -> bool {
+        self.black == black && self.white == white
+            && self.wb_r_bits    == wb_r.to_bits()
+            && self.wb_g_bits    == wb_g.to_bits()
+            && self.wb_b_bits    == wb_b.to_bits()
+            && self.exp_gain_bits == exp_gain.to_bits()
+            && self.contrast_bits   == tone.contrast.to_bits()
+            && self.highlights_bits == tone.highlights.to_bits()
+            && self.shadows_bits    == tone.shadows.to_bits()
+            && self.whites_bits     == tone.whites.to_bits()
+            && self.blacks_bits     == tone.blacks.to_bits()
+    }
+}
+
+thread_local! {
+    static LUT_CACHE: std::cell::RefCell<Option<LutCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn build_post_lut(t: &TonePost) -> Vec<u8> {
     let mut lut = vec![0u8; 65536];
     for i in 0..65536u32 {
@@ -197,36 +227,6 @@ fn separable_blur_into(src: &[u16], width: usize, height: usize,
             temp[base + 2] = acc[2].round() as u16;
         }
     }
-}
-
-fn separable_blur(src: &[u16], width: usize, height: usize, kernel: &[f32]) -> Vec<u16> {
-    let half = kernel.len() / 2;
-    let n = width * height * 3;
-    let mut temp = vec![0u16; n];
-
-    // Horizontal pass (channels interleaved inside kernel loop for vectorization).
-    separable_blur_into(src, width, height, kernel, &mut temp);
-
-    // Vertical pass.
-    let mut out = vec![0u16; n];
-    for y in 0..height {
-        for x in 0..width {
-            let mut acc = [0f32; 3];
-            for (ki, &kv) in kernel.iter().enumerate() {
-                let yi = (y as isize + ki as isize - half as isize)
-                    .clamp(0, height as isize - 1) as usize;
-                let base = (yi * width + x) * 3;
-                acc[0] += temp[base]     as f32 * kv;
-                acc[1] += temp[base + 1] as f32 * kv;
-                acc[2] += temp[base + 2] as f32 * kv;
-            }
-            let base = (y * width + x) * 3;
-            out[base]     = acc[0].round() as u16;
-            out[base + 1] = acc[1].round() as u16;
-            out[base + 2] = acc[2].round() as u16;
-        }
-    }
-    out
 }
 
 fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[f32],
@@ -275,7 +275,11 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
         for i in 0..rgb16.len() {
             let orig = rgb16[i] as i32;
             let blur = blurred[i] as i32;
-            rgb16[i] = (orig + (params.clarity * (orig - blur) as f32).round() as i32)
+            // Midtone-weighted USM: weight peaks at 0.5 (midtones) and falls to 0
+            // at shadows/highlights, suppressing the dark halo artifact at high-contrast edges.
+            let v = orig as f32 / 65535.0;
+            let w = 4.0 * v * (1.0 - v);
+            rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
                 .clamp(0, 65535) as u16;
         }
     }
@@ -292,10 +296,6 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     let wb_g = params.wb_g * (1.0 - tint * 0.20);
     let wb_b = params.wb_b * (1.0 - temp * 0.40) * (1.0 + tint * 0.10);
 
-    let pre_r = build_pre_lut(params.black, params.white, wb_r, exp_gain);
-    let pre_g = build_pre_lut(params.black, params.white, wb_g, exp_gain);
-    let pre_b = build_pre_lut(params.black, params.white, wb_b, exp_gain);
-
     let tone = TonePost {
         contrast: params.contrast.clamp(-1.0, 1.0),
         highlights: params.highlights.clamp(-1.0, 1.0),
@@ -303,7 +303,6 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
         whites: params.whites.clamp(-1.0, 1.0),
         blacks: params.blacks.clamp(-1.0, 1.0),
     };
-    let post = build_post_lut(&tone);
 
     // Saturation: baseline boost + user delta in [-0.8 .. +0.8] of unit scale.
     let sat = (BASELINE_SAT + params.saturation.clamp(-1.0, 1.0) * 0.8).max(0.0);
@@ -316,41 +315,65 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 3];
 
-    for px in 0..n {
-        let r = pre_r[rgb16[px * 3]     as usize] as f32;
-        let g = pre_g[rgb16[px * 3 + 1] as usize] as f32;
-        let b = pre_b[rgb16[px * 3 + 2] as usize] as f32;
+    // LUT cache: rebuild only when params change.  Hot path: slider drag sends
+    // the same LUT key repeatedly — avoids 4×65536-entry rebuild per frame.
+    LUT_CACHE.with(|cache_cell| {
+        let mut cache = cache_cell.borrow_mut();
+        if cache.as_ref().map_or(true, |c| {
+            !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+        }) {
+            *cache = Some(LutCache {
+                black: params.black, white: params.white,
+                wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                contrast_bits:   tone.contrast.to_bits(),
+                highlights_bits: tone.highlights.to_bits(),
+                shadows_bits:    tone.shadows.to_bits(),
+                whites_bits:     tone.whites.to_bits(),
+                blacks_bits:     tone.blacks.to_bits(),
+                pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                post: build_post_lut(&tone),
+            });
+        }
+        let c = cache.as_ref().unwrap();
 
-        // 1) Matrix.
-        let mut r2 = m[0][0] * r + m[0][1] * g + m[0][2] * b;
-        let mut g2 = m[1][0] * r + m[1][1] * g + m[1][2] * b;
-        let mut b2 = m[2][0] * r + m[2][1] * g + m[2][2] * b;
+        for px in 0..n {
+            let r = c.pre_r[rgb16[px * 3]     as usize] as f32;
+            let g = c.pre_g[rgb16[px * 3 + 1] as usize] as f32;
+            let b = c.pre_b[rgb16[px * 3 + 2] as usize] as f32;
 
-        // 2) Saturation + vibrance around luma.
-        let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
-        let scale = if vib_zero {
-            // Fast path: skip luma/pixel-sat computation when vibrance == 0.
-            sat
-        } else {
-            let raw_mx = r2.max(g2).max(b2);
-            let mx = raw_mx.max(1.0);
-            let mn = r2.min(g2).min(b2).max(0.0);
-            let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
-            let vib_w = 1.0 - pixel_sat;
-            sat * (1.0 + vib * vib_w * 0.6)
-        };
-        r2 = luma + (r2 - luma) * scale;
-        g2 = luma + (g2 - luma) * scale;
-        b2 = luma + (b2 - luma) * scale;
+            // 1) Matrix.
+            let mut r2 = m[0][0] * r + m[0][1] * g + m[0][2] * b;
+            let mut g2 = m[1][0] * r + m[1][1] * g + m[1][2] * b;
+            let mut b2 = m[2][0] * r + m[2][1] * g + m[2][2] * b;
 
-        // 3) Tone curve + sRGB + u8 via post-LUT.
-        let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
-        let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
-        let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
-        out[px * 3]     = post[ri];
-        out[px * 3 + 1] = post[gi];
-        out[px * 3 + 2] = post[bi];
-    }
+            // 2) Saturation + vibrance around luma.
+            let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
+            let scale = if vib_zero {
+                sat
+            } else {
+                let raw_mx = r2.max(g2).max(b2);
+                let mx = raw_mx.max(1.0);
+                let mn = r2.min(g2).min(b2).max(0.0);
+                let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
+                let vib_w = 1.0 - pixel_sat;
+                sat * (1.0 + vib * vib_w * 0.6)
+            };
+            r2 = luma + (r2 - luma) * scale;
+            g2 = luma + (g2 - luma) * scale;
+            b2 = luma + (b2 - luma) * scale;
+
+            // 3) Tone curve + sRGB + u8 via post-LUT.
+            let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
+            let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
+            let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
+            out[px * 3]     = c.post[ri];
+            out[px * 3 + 1] = c.post[gi];
+            out[px * 3 + 2] = c.post[bi];
+        }
+    });
 
     out
 }
