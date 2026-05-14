@@ -8,7 +8,8 @@
 
 const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
 window.IS_TAURI = IS_TAURI;
-const { invoke, listen } = IS_TAURI ? window.__TAURI__.core : {};
+const { invoke } = IS_TAURI ? window.__TAURI__.core : {};
+const { listen } = IS_TAURI ? window.__TAURI__.event : {};
 
 const POOL_SIZE     = Math.min(navigator.hardwareConcurrency || 4, 12);
 const JXL_POOL_SIZE = Math.max(2, Math.min(4, Math.ceil((navigator.hardwareConcurrency || 4) / 4)));
