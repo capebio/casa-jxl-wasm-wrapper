@@ -6,7 +6,11 @@
 // encoder per worker, single-threaded inside.  Pool size scales with
 // `navigator.hardwareConcurrency` so a batch saturates all cores.
 
-const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
+const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
+const { invoke, listen } = IS_TAURI ? window.__TAURI__.core : {};
+
+const POOL_SIZE     = Math.min(navigator.hardwareConcurrency || 4, 12);
+const JXL_POOL_SIZE = Math.max(2, Math.min(4, Math.ceil((navigator.hardwareConcurrency || 4) / 4)));
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
@@ -310,7 +314,8 @@ class WorkerPool {
         this.tasks = new Map(); // id → handlers
         this.nextId = 1;
         this.workerForTask = new Map(); // taskId → worker (populated on _releaseWorker)
-        this._jxlWorker = null;
+        this._jxlWorkers = [];
+        this._jxlRR      = 0;
         this._jxlDecodeCallbacks = new Map(); // decodeId → callback fn
         this._jxlNextDecodeId    = 1;
     }
@@ -381,9 +386,13 @@ class WorkerPool {
             if (this._thumbLiveHandler) this._thumbLiveHandler(ev.data);
             return;
         }
-        // RAW worker finished pipeline; forward RGBA to the JXL encode worker.
+        // RAW worker finished pipeline; forward RGBA to the next JXL encode worker (round-robin).
         if (type === 'encode_request') {
-            if (this._jxlWorker) this._jxlWorker.postMessage(ev.data, [ev.data.rgba]);
+            if (this._jxlWorkers.length) {
+                const jw = this._jxlWorkers[this._jxlRR % this._jxlWorkers.length];
+                this._jxlRR++;
+                jw.postMessage(ev.data, [ev.data.rgba]);
+            }
             return;
         }
         const t = this.tasks.get(id);
@@ -433,8 +442,8 @@ class WorkerPool {
         this._releaseWorker(worker, id);
     }
 
-    setJxlWorker(w) {
-        this._jxlWorker = w;
+    addJxlWorker(w) {
+        this._jxlWorkers.push(w);
         w.addEventListener('message', ({ data }) => {
             // Decode responses use decodeId, not task id.
             if (data.type === 'jxl_decoded' || data.type === 'decode_error') {
@@ -464,10 +473,19 @@ class WorkerPool {
     setLiveHandler(fn) { this._liveHandler = fn; }
     setThumbLiveHandler(fn) { this._thumbLiveHandler = fn; }
 
+    setJxlDecodeWorker(w) {
+        this._jxlDecodeWorker = w;
+        w.addEventListener('message', ({ data }) => {
+            const cb = this._jxlDecodeCallbacks.get(data.decodeId);
+            if (cb) { this._jxlDecodeCallbacks.delete(data.decodeId); cb(data); }
+        });
+        w.addEventListener('error', (ev) => console.error('jxl-decode-worker error:', ev.message));
+    }
+
     decodeJxl(url, callback) {
         const decodeId = this._jxlNextDecodeId++;
         this._jxlDecodeCallbacks.set(decodeId, callback);
-        this._jxlWorker.postMessage({ type: 'decode_jxl', decodeId, url });
+        (this._jxlDecodeWorker ?? this._jxlWorkers[0]).postMessage({ type: 'decode_jxl', decodeId, url });
     }
 
     reprocessLive(taskId, look) {
@@ -494,7 +512,10 @@ pool.init();
 // Spawn JXL encode worker from the page's main thread.  Emscripten Pthreads
 // require SharedArrayBuffer (COOP + COEP) and cannot bootstrap correctly when
 // the caller is itself a Web Worker — so this must live here, not in worker.js.
-pool.setJxlWorker(new Worker(new URL('./jxl-worker.js', import.meta.url), { type: 'module' }));
+for (let i = 0; i < JXL_POOL_SIZE; i++) {
+    pool.addJxlWorker(new Worker(new URL('./jxl-worker.js', import.meta.url), { type: 'module' }));
+}
+pool.setJxlDecodeWorker(new Worker(new URL('./jxl-decode-worker.js', import.meta.url), { type: 'module' }));
 
 // ---------------------------------------------------------------------------
 // Live lightbox re-render (debounced, in-flight gating)
@@ -516,6 +537,7 @@ function scheduleLiveUpdate() {
 }
 
 function triggerLiveUpdate(look) {
+    if (IS_TAURI) { triggerLiveUpdateTauri(look); return; }
     const card = cards[lightboxIndex];
     if (!card || !card._taskId) return;
     if (!pool.reprocessLive(card._taskId, look)) return;
@@ -635,6 +657,34 @@ function makeCard(name) {
         cycleSourceForCard(card, 1);
     });
     card.addEventListener('click', () => openLightbox(card));
+
+    if (IS_TAURI) {
+        const uploadBtn = document.createElement('button');
+        uploadBtn.className = 'tauri-upload-btn';
+        uploadBtn.title = 'Upload to planner';
+        uploadBtn.textContent = '↑';
+        uploadBtn.style.cssText = 'position:absolute;bottom:24px;right:4px;padding:2px 6px;font-size:11px;background:#1a3a6a;color:#eee;border:none;border-radius:3px;cursor:pointer';
+        uploadBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!card._tauriResult) return;
+            uploadBtn.disabled = true; uploadBtn.textContent = '…';
+            try {
+                const [settings, token] = await Promise.all([invoke('get_settings'), invoke('get_token')]);
+                const { jxl, exif } = card._tauriResult;
+                const jxl_b64 = btoa(String.fromCharCode(...new Uint8Array(jxl)));
+                const result = await invoke('push_to_planner', {
+                    payload: { filename: name, jxl_b64, exif, planner_url: settings.planner_url, token: token ?? '' },
+                });
+                uploadBtn.textContent = result.ok ? '✓' : '✗';
+                uploadBtn.title = result.error ?? 'Uploaded';
+            } catch (err) {
+                uploadBtn.textContent = '✗'; uploadBtn.title = String(err);
+            }
+        });
+        card.style.position = 'relative';
+        card.appendChild(uploadBtn);
+    }
+
     return card;
 }
 
@@ -657,7 +707,6 @@ function cycleSourceForCard(card, dir = 1) {
         liveInFlight = false;
         livePendingLook = null;
         drawLightboxForCard(card);
-        resetLbZoom();
         flashSourceBanner();
         showSourceLabel(labels[next]);
         if (next === 'raw') scheduleLiveUpdate();
@@ -760,24 +809,15 @@ function redrawThumbRotated(card) {
     const deg = card._file?.name ? (userRotations[card._file.name] || 0) : 0;
     const canvas = card.querySelector('canvas');
     if (card._sourceMode === 'jpeg' && card._embeddedPreview && card._thumbW && card._thumbH) {
-        // Render JPEG into a hidden offscreen canvas matching the JXL thumb dims
-        // (so user-rotation pass below sees identical input geometry).
-        const off = document.createElement('canvas');
-        drawJpegToTargetDims(off, card._embeddedPreview.bmp,
+        drawJpegToTargetDims(canvas, card._embeddedPreview.bmp,
                              card._embeddedPreview.orientation || 1,
                              card._thumbW, card._thumbH);
-        const ctx = off.getContext('2d');
-        const id = ctx.getImageData(0, 0, card._thumbW, card._thumbH);
-        // drawRotatedCanvas takes RGB (3 bytes/pixel); convert from RGBA.
-        const rgb = new Uint8Array(card._thumbW * card._thumbH * 3);
-        for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
-            rgb[i] = id.data[j]; rgb[i+1] = id.data[j+1]; rgb[i+2] = id.data[j+2];
-        }
-        drawRotatedCanvas(canvas, rgb, card._thumbW, card._thumbH, deg);
+        canvas.style.transform = deg ? `rotate(${deg}deg)` : '';
         return;
     }
     if (!card._thumbRgb) return;
-    drawRotatedCanvas(canvas, card._thumbRgb, card._thumbW, card._thumbH, deg);
+    drawCanvas(canvas, card._thumbW, card._thumbH, card._thumbRgb);
+    canvas.style.transform = deg ? `rotate(${deg}deg)` : '';
 }
 
 // Rotate a card by delta degrees and persist + sync lightbox if open.
@@ -1277,29 +1317,40 @@ async function gatherFromItems(items) {
     return out;
 }
 
-pick.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', async (e) => { await handleFileList(e.target.files); });
+if (IS_TAURI) {
+    pick.addEventListener('click', async () => {
+        const paths = await invoke('pick_files');
+        if (paths.length > 0) startBatchTauri(paths);
+    });
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => e.preventDefault());
+    drop.addEventListener('dragover', (e) => e.preventDefault());
+    drop.addEventListener('drop', (e) => e.preventDefault());
+} else {
+    pick.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async (e) => { await handleFileList(e.target.files); });
 
-// Window-level catch keeps the browser from saving a dropped file as a
-// download when the user misses the drop zone.
-window.addEventListener('dragover', (e) => e.preventDefault());
-window.addEventListener('drop', (e) => e.preventDefault());
+    // Window-level catch keeps the browser from saving a dropped file as a
+    // download when the user misses the drop zone.
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => e.preventDefault());
 
-drop.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    drop.classList.add('dragging');
-});
-drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
-drop.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    drop.classList.remove('dragging');
-    let files = [];
-    if (e.dataTransfer.items && e.dataTransfer.items.length) {
-        files = await gatherFromItems(e.dataTransfer.items);
-    }
-    if (!files.length) files = [...e.dataTransfer.files].filter(isOrf);
-    await handleFileList(files);
-});
+    drop.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        drop.classList.add('dragging');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
+    drop.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        drop.classList.remove('dragging');
+        let files = [];
+        if (e.dataTransfer.items && e.dataTransfer.items.length) {
+            files = await gatherFromItems(e.dataTransfer.items);
+        }
+        if (!files.length) files = [...e.dataTransfer.files].filter(isOrf);
+        await handleFileList(files);
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Lightbox — zoom / pan / download
@@ -1408,7 +1459,7 @@ function drawLightboxForCard(card) {
                 const ctx = lightboxCanvas.getContext('2d');
                 ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
                 lbLoadingBadge.hidden = true;
-                resetLbZoom();
+                applyLbTransform();
             });
             return;
         }
@@ -1829,4 +1880,174 @@ function reprocessSelected() {
         .join(' ');
     pushStat(`--- reprocess (${targets.length}) ${ls || '(all zero)'} ---`);
     for (const card of targets) startConvert(card._file, card);
+}
+
+// ---------------------------------------------------------------------------
+// Tauri native code paths
+// ---------------------------------------------------------------------------
+function lookToSnake(look) {
+    return {
+        exposure_ev: look.exposureEv,
+        contrast:    look.contrast,
+        highlights:  look.highlights,
+        shadows:     look.shadows,
+        whites:      look.whites,
+        blacks:      look.blacks,
+        saturation:  look.saturation,
+        vibrance:    look.vibrance,
+        temp:        look.temp,
+        tint:        look.tint,
+        texture:     look.texture,
+        clarity:     look.clarity,
+    };
+}
+
+function rgbToRgbaArr(rgb) {
+    const rgba = new Uint8ClampedArray(rgb.length / 3 * 4);
+    for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
+        rgba[j] = rgb[i]; rgba[j+1] = rgb[i+1]; rgba[j+2] = rgb[i+2]; rgba[j+3] = 255;
+    }
+    return rgba;
+}
+
+const cardByFilename = new Map();
+
+function findTauriCard(path) {
+    const name = path.split(/[\\/]/).pop();
+    return cardByFilename.get(name);
+}
+
+function onFileDoneTauri(filename, result) {
+    const card = cardByFilename.get(filename);
+    if (!card) return;
+    card.classList.remove('busy');
+    const { data, width, height } = result.thumb;
+    const canvas = card.querySelector('canvas');
+    if (canvas) {
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').putImageData(
+            new ImageData(rgbToRgbaArr(data), width, height), 0, 0);
+    }
+    card._tauriResult = result;
+    const dl = card.querySelector('.download');
+    if (dl) {
+        dl.hidden = false;
+        dl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const blob = new Blob([new Uint8Array(result.jxl)], { type: 'image/jxl' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = filename.replace(/\.orf$/i, '.jxl');
+            a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+        });
+    }
+}
+
+async function startBatchTauri(paths) {
+    const opts = currentOptions();
+    for (const path of paths) {
+        const filename = path.split(/[\\/]/).pop();
+        const card = makeCard(filename);
+        cardByFilename.set(filename, card);
+        cards.push(card);
+        grid.appendChild(card);
+    }
+
+    const unlisten = await listen('file_progress', ({ payload }) => {
+        const card = findTauriCard(payload.path);
+        if (!card) return;
+        const meta = card.querySelector('.time');
+        if (meta) meta.textContent = payload.stage;
+    });
+
+    await Promise.allSettled(paths.map(async (path) => {
+        const filename = path.split(/[\\/]/).pop();
+        try {
+            const result = await invoke('process_file', {
+                path,
+                options: {
+                    quality: opts.quality,
+                    effort: opts.effort,
+                    lossless: opts.lossless,
+                    look: lookToSnake(opts.look),
+                    user_rotation: 0,
+                    wb_r: null,
+                    wb_b: null,
+                },
+            });
+            onFileDoneTauri(filename, result);
+        } catch (err) {
+            const card = cardByFilename.get(filename);
+            if (card) { card.classList.add('error'); card.querySelector('.time').textContent = String(err); }
+        }
+    }));
+
+    unlisten();
+}
+
+// Tauri live-look: invoked from triggerLiveUpdate when IS_TAURI
+let tauriLiveInFlight = false;
+let tauriLivePending = null;
+
+async function triggerLiveUpdateTauri(look) {
+    const card = cards[lightboxIndex];
+    if (!card || !card._tauriResult) return;
+    if (tauriLiveInFlight) { tauriLivePending = look; return; }
+    tauriLiveInFlight = true;
+    try {
+        const frame = await invoke('apply_look', {
+            id: card._tauriResult.id,
+            look: lookToSnake(look),
+        });
+        const ctx = lightboxCanvas.getContext('2d');
+        ctx.putImageData(new ImageData(rgbToRgbaArr(frame.data), frame.width, frame.height), 0, 0);
+    } catch (e) {
+        console.warn('apply_look error:', e);
+    }
+    tauriLiveInFlight = false;
+    if (tauriLivePending) { const p = tauriLivePending; tauriLivePending = null; triggerLiveUpdateTauri(p); }
+}
+
+// Settings modal (Tauri only)
+if (IS_TAURI) {
+    const settingsHtml = `
+        <dialog id="tauri-settings-dialog" style="padding:1.5rem;border-radius:8px;border:1px solid #444;background:#1a1a1a;color:#eee;min-width:320px">
+          <form method="dialog">
+            <h3 style="margin-top:0">Planner Settings</h3>
+            <label style="display:block;margin-bottom:0.75rem">Bearer token
+              <input id="tauri-token-input" type="password" autocomplete="off" style="display:block;width:100%;margin-top:4px;padding:4px;background:#2a2a2a;color:#eee;border:1px solid #555">
+            </label>
+            <label style="display:block;margin-bottom:1rem">Planner URL
+              <input id="tauri-url-input" type="url" value="http://localhost:3001" style="display:block;width:100%;margin-top:4px;padding:4px;background:#2a2a2a;color:#eee;border:1px solid #555">
+            </label>
+            <button type="submit" style="padding:4px 12px">Save</button>
+            <button type="button" onclick="document.getElementById('tauri-settings-dialog').close()" style="padding:4px 12px;margin-left:8px">Cancel</button>
+          </form>
+        </dialog>`;
+    document.body.insertAdjacentHTML('beforeend', settingsHtml);
+
+    const settingsBtn = document.createElement('button');
+    settingsBtn.id = 'tauri-settings-btn';
+    settingsBtn.title = 'Planner Settings';
+    settingsBtn.textContent = '⚙';
+    settingsBtn.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;padding:4px 8px;background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:4px;cursor:pointer';
+    document.body.appendChild(settingsBtn);
+
+    settingsBtn.addEventListener('click', async () => {
+        const dialog = document.getElementById('tauri-settings-dialog');
+        const [settings, token] = await Promise.all([invoke('get_settings'), invoke('get_token')]);
+        document.getElementById('tauri-url-input').value = settings.planner_url;
+        document.getElementById('tauri-token-input').value = token ? '••••••••' : '';
+        dialog.showModal();
+    });
+
+    document.getElementById('tauri-settings-dialog').addEventListener('close', async (e) => {
+        const dialog = e.target;
+        const tokenInput = document.getElementById('tauri-token-input');
+        const urlInput = document.getElementById('tauri-url-input');
+        if (tokenInput.value && !tokenInput.value.startsWith('•')) {
+            await invoke('set_token', { token: tokenInput.value });
+        }
+        await invoke('set_settings', { settings: { planner_url: urlInput.value } });
+    });
 }
