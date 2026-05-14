@@ -199,7 +199,14 @@
                             <rect x="13" y="8" width="2" height="9"/><rect x="16" y="12" width="2" height="5"/>
                         </svg>
                     </button>
-                    <div class="lb-panel-body" hidden></div>
+                    <div class="lb-panel-body" hidden>
+                      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                        <span style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em">Histogram</span>
+                        <button id="lb-hist-mode" class="lb-chip lb-chip-active" style="padding:2px 8px;font-size:11px">L</button>
+                      </div>
+                      <canvas id="lb-hist-canvas" width="220" height="80" style="width:220px;height:80px;display:block"></canvas>
+                      <!-- levels handles added in Task 3 -->
+                    </div>
                 </div>
                 <div id="lb-panel-c" class="lb-panel">
                     <button class="lb-panel-btn" data-panel="c" title="Colour Profiles (C)">

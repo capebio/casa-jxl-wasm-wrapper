@@ -1077,3 +1077,19 @@ main { padding: 24px 32px 64px; }
 .lb-vignette {
     background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.65) 100%);
 }
+
+/* ── Histogram ── */
+#lb-hist-canvas { border-radius: 4px; background: #0d0d0d; }
+
+.lb-chip {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 4px;
+    color: #bbb;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 3px 10px;
+    transition: background 0.12s, color 0.12s;
+}
+.lb-chip:hover  { background: rgba(255,255,255,0.14); color: #fff; }
+.lb-chip-active { background: rgba(255,255,255,0.22); color: #fff; border-color: rgba(255,255,255,0.35); }
