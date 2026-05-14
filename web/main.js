@@ -1690,8 +1690,9 @@ function openLightbox(card) {
     card._sourceMode = 'raw';
     resetLookSliders();
     // Auto-load sidecar if present
-    if (typeof loadSidecar === 'function' && card._file?.name) {
-        loadSidecar(card._file.name).then(sidecar => {
+    if (typeof loadSidecar === 'function' && (card._tauriPath || card._file?.name)) {
+        const sidecarPath = card._tauriPath || card._file?.name;
+        loadSidecar(sidecarPath).then(sidecar => {
             if (sidecar && typeof applySidecar === 'function') applySidecar(sidecar);
         });
     }
@@ -1873,8 +1874,8 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         if (!lightbox.hidden) {
             const card = cards[lightboxIndex];
-            const name = card?._file?.name;
-            if (name && typeof saveSidecar === 'function') saveSidecar(name);
+            const sidecarPath = card?._tauriPath || card?._file?.name;
+            if (sidecarPath && typeof saveSidecar === 'function') saveSidecar(sidecarPath);
         }
         return;
     }
@@ -2042,9 +2043,16 @@ async function startBatchTauri(paths) {
     for (const path of paths) {
         const filename = path.split(/[\\/]/).pop();
         const card = makeCard(filename);
+        card._file = { name: filename };
+        card._tauriPath = path;
         cardByFilename.set(filename, card);
         cards.push(card);
         grid.appendChild(card);
+        if (typeof loadSidecar === 'function') {
+            loadSidecar(path).then(s => {
+                if (s && typeof updateSidecarDot === 'function') updateSidecarDot(filename, true);
+            });
+        }
     }
 
     const unlisten = await listen('file_progress', ({ payload }) => {

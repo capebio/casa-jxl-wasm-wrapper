@@ -223,14 +223,20 @@ async function applySidecar(sidecar) {
   if (sidecar.look && typeof window.applyLookValues === 'function') {
     window.applyLookValues(sidecar.look);
   }
-  if (sidecar.profile && typeof window.setActiveProfile === 'function') {
-    window.setActiveProfile(sidecar.profile);
+  if (sidecar.profile !== undefined) {
+    activeProfile = sidecar.profile;
+    if (typeof renderProfileChips === 'function') renderProfileChips();
   }
-  if (sidecar.filter && typeof window.setActiveFilter === 'function') {
-    window.setActiveFilter(sidecar.filter);
+  if (sidecar.filter !== undefined) {
+    activeFilter = sidecar.filter;
+    if (typeof renderFilterChips === 'function') renderFilterChips();
   }
   if (sidecar.levels && window.levelsState) {
-    Object.assign(window.levelsState, sidecar.levels);
+    const ranges = { inBlack:[0,255], inMid:[0.1,10], inWhite:[0,255], outBlack:[0,255], outWhite:[0,255] };
+    for (const [k, [lo, hi]] of Object.entries(ranges)) {
+      const v = sidecar.levels[k];
+      if (typeof v === 'number' && v >= lo && v <= hi) window.levelsState[k] = v;
+    }
     if (typeof window.syncHandlePosition === 'function') {
       ['inBlack','inMid','inWhite','outBlack','outWhite'].forEach(k => window.syncHandlePosition(k));
     }
