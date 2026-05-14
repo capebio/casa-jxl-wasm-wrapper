@@ -2110,17 +2110,30 @@ function onFileDoneTauri(filename, result) {
     }
     card._tauriResult = result;
 
+    // Stash lightbox-sized RGB so drawLightboxForCard() can render it.
+    if (result?.lightbox) {
+        const lb = result.lightbox;
+        card._lightbox = {
+            rgb: (lb.data instanceof Uint8ClampedArray || lb.data instanceof Uint8Array)
+                ? lb.data : Uint8Array.from(lb.data),
+            w: lb.width,
+            h: lb.height,
+        };
+    }
+
     // Tauri-side per-file stat line.  `enc` (native libjxl) — distinct from
     // the WASM build's `jxl` so the source is obvious in pasted logs.
     const t = result?.timings || {};
     const exif = result?.exif || {};
     const pipeMs = (t.decompress_ms || 0) + (t.demosaic_ms || 0) + (t.tone_ms || 0);
-    const lbW = result?.lightbox?.width  ?? '?';
-    const lbH = result?.lightbox?.height ?? '?';
+    const totalMs = pipeMs + (t.encode_ms || 0);
+    // Show the real sensor dimensions, not the downscaled lightbox.
+    const imgW = exif.width  ?? result?.lightbox?.width  ?? '?';
+    const imgH = exif.height ?? result?.lightbox?.height ?? '?';
     tauriStatSeq++;
     const name = filename.padEnd(18, ' ').slice(0, 18);
     pushStat(
-        `[${String(tauriStatSeq).padStart(3, ' ')}] ${name} ${lbW}×${lbH}  ` +
+        `[${String(tauriStatSeq).padStart(3, ' ')}] ${name} ${imgW}×${imgH}  ` +
         `dec ${fmtMs(t.decompress_ms)}  ` +
         `dem ${fmtMs(t.demosaic_ms)}  ` +
         `tone ${fmtMs(t.tone_ms)}  ` +
@@ -2128,6 +2141,10 @@ function onFileDoneTauri(filename, result) {
         `enc ${fmtMs(t.encode_ms)}  ` +
         `out ${fmtKb(result?.jxl?.byteLength || result?.jxl?.length || 0)}`,
     );
+
+    // Replace the stuck "encoding" label with the final timing.
+    const tEl = card.querySelector('.time');
+    if (tEl) tEl.textContent = `${(totalMs / 1000).toFixed(1)}s`;
     if (exif.wb_r != null && exif.wb_b != null) {
         bumpWbMatrix(`wb R${exif.wb_r.toFixed(3)} B${exif.wb_b.toFixed(3)}`,
                      exif.wb_from_camera ? 'mn-matrix' : 'fallback-matrix');
