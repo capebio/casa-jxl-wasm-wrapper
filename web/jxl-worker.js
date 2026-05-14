@@ -16,11 +16,15 @@
 
 import { initEmscriptenModule } from './vendor/jsquash-jxl/utils.js';
 import { defaultOptions }        from './vendor/jsquash-jxl/meta.js';
+import jxlMtSIMDFactory          from './vendor/jsquash-jxl/codec/enc/jxl_enc_mt_simd.js';
 import jxlMtFactory              from './vendor/jsquash-jxl/codec/enc/jxl_enc_mt.js';
 import decode                    from './vendor/jsquash-jxl/decode.js';
+import { simd }                  from './vendor/wasm-feature-detect/index.js';
 
-function createModule() {
-    return initEmscriptenModule(jxlMtFactory);
+const _simdOk = simd(); // Promise<bool> — resolved once, reused on OOM retries
+
+async function createModule() {
+    return initEmscriptenModule(await _simdOk ? jxlMtSIMDFactory : jxlMtFactory);
 }
 
 // One live module instance; replaced after every abort.
@@ -52,7 +56,9 @@ self.onmessage = async ({ data }) => {
     const t0 = performance.now();
     try {
         let module = await moduleP;
-        let opts = { ...defaultOptions, quality, effort, lossless };
+        // Cap effort at 6 for images >15MP to avoid the OOM→reinit→retry cycle.
+        const safeEffort = (width * height > 15_000_000) ? Math.min(effort, 6) : effort;
+        let opts = { ...defaultOptions, quality, effort: safeEffort, lossless };
         let resultView;
 
         // Cascade down one effort level at a time on OOM (module is dead after
