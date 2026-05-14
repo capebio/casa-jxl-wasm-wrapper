@@ -2244,12 +2244,16 @@ async function startBatchTauri(paths) {
 // ─── Benchmark harness ─────────────────────────────────────────────────────
 // Runs the same set of files through several configs sequentially so the
 // user can A/B perf knobs on their machine.  No UI rendering — pure perf.
+// c = max files in flight (Rust file-semaphore size)
+// t = encoder threads per file (libjxl ThreadsRunner)
+// e = JXL effort (1 = lightning … 7 = squirrel)
+// Cores × c × t ≈ peak thread count during simultaneous encode.
 const BENCH_CONFIGS = [
-    { label: 'c=1 t=12 e=3', concurrency: 1, encoder_threads: 12, effort: 3 },
-    { label: 'c=2 t=6  e=3', concurrency: 2, encoder_threads: 6,  effort: 3 },
-    { label: 'c=4 t=3  e=3', concurrency: 4, encoder_threads: 3,  effort: 3 },
-    { label: 'c=1 t=12 e=1', concurrency: 1, encoder_threads: 12, effort: 1 },
-    { label: 'c=1 t=12 e=7', concurrency: 1, encoder_threads: 12, effort: 7 },
+    { label: 'c=4 t=3  e=3', concurrency: 4,  encoder_threads: 3,  effort: 3 },
+    { label: 'c=6 t=2  e=3', concurrency: 6,  encoder_threads: 2,  effort: 3 },
+    { label: 'c=12 t=1 e=3', concurrency: 12, encoder_threads: 1,  effort: 3 },
+    { label: 'c=3 t=4  e=3', concurrency: 3,  encoder_threads: 4,  effort: 3 },
+    { label: 'c=4 t=3  e=1', concurrency: 4,  encoder_threads: 3,  effort: 1 },
 ];
 
 async function runOneConfig(paths, cfg, opts) {
@@ -2316,13 +2320,16 @@ async function runBenchmark() {
         rows.push(r);
         const n = r.perFile.length;
         const ok = r.perFile.filter(p => !p.error);
-        const avgWall = ok.length ? ok.reduce((s, p) => s + p.wall_ms, 0) / ok.length : 0;
+        // amortised = wall / n (real cost per file in the batch).
+        // pipe/enc averages come from Rust timings — actual CPU work per file,
+        // not promise wait (which includes queue time and would be misleading).
+        const amortMs = r.wallMs / n;
         const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms,  0) / ok.length : 0;
         const avgPipe = ok.length ? ok.reduce((s, p) => s + p.dec_ms + p.dem_ms + p.tone_ms, 0) / ok.length : 0;
         pushStat(
             `[bench] ${cfg.label}  ` +
             `total ${(r.wallMs / 1000).toFixed(2)}s  ` +
-            `avg-file ${avgWall.toFixed(0)} ms  ` +
+            `amortised ${amortMs.toFixed(0)} ms/file  ` +
             `pipe ${avgPipe.toFixed(0)} ms  ` +
             `enc ${avgEnc.toFixed(0)} ms  ` +
             `tput ${(n / (r.wallMs / 1000)).toFixed(2)} files/s`
@@ -2341,8 +2348,8 @@ async function runBenchmark() {
     }
     updateStat('bench:status', `[bench] done — ${rows.length} configs, ${paths.length} files each`);
 
-    // Restore default for normal operation.
-    await invoke('set_concurrency', { n: 1 });
+    // Restore the default concurrency for normal operation.
+    await invoke('set_concurrency', { n: 4 });
 }
 
 // Wire the button at module init.
