@@ -390,6 +390,47 @@ pub fn process_orf(
     })
 }
 
+/// Rotated RGB8 buffer with updated dimensions.
+#[wasm_bindgen]
+pub struct RotateResult {
+    rgb: Vec<u8>,
+    #[wasm_bindgen(readonly)]
+    pub width: u32,
+    #[wasm_bindgen(readonly)]
+    pub height: u32,
+}
+
+#[wasm_bindgen]
+impl RotateResult {
+    // Transfers ownership; returns empty Vec<u8> on subsequent calls.
+    pub fn take_rgb(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.rgb)
+    }
+}
+
+/// Rotate an RGB8 buffer clockwise by `turns` × 90°  (0=0°, 1=90°, 2=180°, 3=270°).
+/// Returns the rotated buffer and new (width, height).
+#[wasm_bindgen]
+pub fn rotate_rgb8(src: &[u8], width: u32, height: u32, turns: u32) -> Result<RotateResult, JsError> {
+    let w = width as usize;
+    let h = height as usize;
+    let expected = w.checked_mul(h).and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| JsError::new("rotate_rgb8: dimensions overflow"))?;
+    if src.len() != expected {
+        return Err(JsError::new(&format!(
+            "rotate_rgb8: src length {} != {}×{}×3", src.len(), w, h
+        )));
+    }
+    let (rgb, nw, nh) = match turns % 4 {
+        0 => (src.to_vec(), w, h),
+        1 => (pipeline::rotate_90_cw(src, w, h),  h, w),
+        2 => (pipeline::rotate_180(src, w, h),     w, h),
+        3 => (pipeline::rotate_90_ccw(src, w, h), h, w),
+        _ => unreachable!(),
+    };
+    Ok(RotateResult { rgb, width: nw as u32, height: nh as u32 })
+}
+
 /// Box-filter downscale an RGB8 buffer.  Useful for thumbnail generation.
 #[wasm_bindgen]
 pub fn downscale_rgb(

@@ -25,6 +25,7 @@ import init, {
     downscale_rgb,
     rgb_to_rgba,
     apply_look,
+    rotate_rgb8,
 } from '../pkg/raw_converter_wasm.js';
 
 import encode_jxl from './vendor/jsquash-jxl/encode.js';
@@ -153,9 +154,9 @@ self.addEventListener('message', async (ev) => {
             look.texture ?? 0,
             look.clarity ?? 0,
         );
-        const w = result.width;
-        const h = result.height;
-        const fullRgb = result.take_rgb();
+        let w = result.width;
+        let h = result.height;
+        let fullRgb = result.take_rgb();
         const pipelineMs = performance.now() - pT0;
         const phaseMs = {
             decompress: result.decompress_ms,
@@ -215,6 +216,16 @@ self.addEventListener('message', async (ev) => {
             { id, type: 'lightbox', rgb: bigRgb, w: big.w, h: big.h },
             [bigRgb.buffer],
         );
+
+        // Bake user rotation into JXL pixels — display rotation is CSS-side in main thread
+        const userTurns = Math.round(((options.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
+        if (userTurns !== 0) {
+            const rotRes = rotate_rgb8(fullRgb, w, h, userTurns);
+            fullRgb = rotRes.take_rgb();
+            w = rotRes.width;
+            h = rotRes.height;
+            rotRes.free();
+        }
 
         // JXL encode (full-resolution) — convert to RGBA then drop fullRgb to allow GC
         const rgba = rgb_to_rgba(fullRgb);

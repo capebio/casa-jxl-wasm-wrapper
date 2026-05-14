@@ -412,7 +412,7 @@ pub fn apply_orientation(
 
 const TILE: usize = 32;
 
-fn rotate_90_cw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+pub fn rotate_90_cw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut dst = vec![0u8; src.len()];
     let w_dst = h;
     dst.chunks_mut(TILE * w_dst * 3)
@@ -436,7 +436,7 @@ fn rotate_90_cw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     dst
 }
 
-fn rotate_90_ccw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+pub fn rotate_90_ccw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut dst = vec![0u8; src.len()];
     let w_dst = h;
     dst.chunks_mut(TILE * w_dst * 3)
@@ -461,7 +461,7 @@ fn rotate_90_ccw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     dst
 }
 
-fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+pub fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut dst = vec![0u8; src.len()];
     let row_bytes = w * 3;
     dst.chunks_mut(row_bytes)
