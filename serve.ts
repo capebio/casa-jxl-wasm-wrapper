@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 
 const ROOT = import.meta.dir;
-const PORT = Number(process.env.PORT ?? 5173);
+const PORT = Number(process.env.PORT ?? 9000);
 
 const MIME: Record<string, string> = {
     ".html": "text/html; charset=utf-8",
@@ -49,14 +49,15 @@ serve({
         try {
             const data = await readFile(fsPath);
             const ext = extname(fsPath).toLowerCase();
-            // Note: deliberately NOT setting COOP/COEP.  Doing so enables
-            // SharedArrayBuffer, which then makes jSquash try to spawn a
-            // multi-thread worker from esm.sh — and cross-origin Workers
-            // are forbidden under COEP.  Single-thread SIMD path works fine.
+            // COOP + COEP enable SharedArrayBuffer for jxl-worker.js, which runs
+            // the Pthread-based libjxl MT codec.  All resources are same-origin
+            // (no CDN), so require-corp is safe.
             return new Response(data, {
                 headers: {
                     "Content-Type": MIME[ext] ?? "application/octet-stream",
                     "Cache-Control": "no-cache",
+                    "Cross-Origin-Opener-Policy":   "same-origin",
+                    "Cross-Origin-Embedder-Policy": "require-corp",
                 },
             });
         } catch (err) {
