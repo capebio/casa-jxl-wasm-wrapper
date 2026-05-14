@@ -7,6 +7,7 @@
 // `navigator.hardwareConcurrency` so a batch saturates all cores.
 
 const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
+window.IS_TAURI = IS_TAURI;
 const { invoke, listen } = IS_TAURI ? window.__TAURI__.core : {};
 
 const POOL_SIZE     = Math.min(navigator.hardwareConcurrency || 4, 12);
@@ -194,6 +195,7 @@ function currentLook() {
         clarity:    lookValueFor('clarity'),
     };
 }
+window.currentLook = currentLook;
 
 function currentOptions() {
     return {
@@ -274,6 +276,7 @@ function applyLookValues(look) {
     scheduleLiveUpdate();
     scheduleGalleryLiveUpdate();
 }
+window.applyLookValues = applyLookValues;
 
 function updatePresetButtons() {
     for (const btn of presetBtns) {
@@ -535,6 +538,7 @@ function scheduleLiveUpdate() {
         triggerLiveUpdate(currentLook());
     }, 80);
 }
+window.scheduleLiveUpdate = scheduleLiveUpdate;
 
 function triggerLiveUpdate(look) {
     if (IS_TAURI) { triggerLiveUpdateTauri(look); return; }
@@ -1839,6 +1843,21 @@ document.addEventListener('keydown', (e) => {
     // Don't hijack typing in form controls (sliders, number inputs, prompts).
     const tag = (e.target && e.target.tagName) || '';
     const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if (!isInput && (e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        if (typeof togglePanel === 'function') togglePanel('h');
+        return;
+    }
+    if (!isInput && (e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        if (typeof togglePanel === 'function') togglePanel('c');
+        return;
+    }
+    if (!isInput && (e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        if (typeof togglePanel === 'function') togglePanel('f');
+        return;
+    }
     if (e.key === 'Escape') closeLightbox();
     else if (!isInput && (e.key === 'r' || e.key === 'R')) rotateBy(90);
     else if (!isInput && (e.key === 'l' || e.key === 'L')) rotateBy(-90);

@@ -703,6 +703,7 @@ main { padding: 24px 32px 64px; }
     display: block;
     background: #000;
     pointer-events: none;
+    border-radius: 8px;
 }
 
 .lightbox-toolbar {
@@ -1018,3 +1019,61 @@ main { padding: 24px 32px 64px; }
 /* Lightbox toolbar version — match other .lb-btn styling but distinct state. */
 .lb-toggle-jpeg.showing-jpeg { background: rgba(220, 140, 0, 0.85); color: #fff; }
 .lb-toggle-jpeg:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Lightbox panel stack ── */
+.lb-panels {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 21;
+    pointer-events: auto;
+}
+
+.lb-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+}
+
+.lb-panel-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.15);
+    background: rgba(20,20,20,0.82);
+    color: #ccc;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+.lb-panel-btn:hover,
+.lb-panel-btn.active { background: rgba(60,60,60,0.92); color: #fff; }
+
+.lb-panel-body {
+    margin-top: 4px;
+    width: 240px;
+    background: rgba(18,18,18,0.92);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    padding: 10px;
+    color: #ddd;
+    font-size: 12px;
+}
+
+/* ── Overlay filters ── */
+.lb-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 15;
+}
+.lb-vignette {
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.65) 100%);
+}
