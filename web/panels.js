@@ -571,14 +571,12 @@ function updateHistogramAndLevels() {
 
 window.updateHistogramAndLevels = updateHistogramAndLevels;
 
-// ── Initialise on DOMContentLoaded ────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  initPanelToggles();
-  initHistogram();
-  initLevels();
-  initProfiles();
-  initFilters();
-  initSidecar();
-});
+// defer scripts run after DOMContentLoaded — call init directly
+initPanelToggles();
+initHistogram();
+initLevels();
+initProfiles();
+initFilters();
+initSidecar();
 
 })();
