@@ -49,10 +49,12 @@ let PIPELINE_FILTERS = {
 };
 
 const BW_NAMES       = ['B&W Natural','B&W Soft','B&W Strong','B&W Red','B&W Orange','B&W Yellow','B&W Green','B&W Blue','Infrared'];
+window.BW_NAMES = BW_NAMES;
 const CREATIVE_NAMES = ['Fade','Cross-process','Bleach bypass'];
 
 function setActiveFilter(name) {
-  activeFilter = (activeFilter === name) ? null : name;
+  if (name === null) { activeFilter = null; }
+  else { activeFilter = (activeFilter === name) ? null : name; }
   renderFilterChips();
   if (typeof window.scheduleLiveUpdate === 'function') window.scheduleLiveUpdate();
 }
