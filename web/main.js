@@ -1522,7 +1522,7 @@ function drawLightboxForCard(card) {
     }
 
     // mode === 'raw' (or fallback from unavailable mode)
-    if (card._lightbox) {
+    if (card._lightbox && card._lightbox.rgb) {
         const { rgb, w, h } = card._lightbox;
         drawCanvas(lightboxCanvas, w, h, rgb);
         if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
@@ -1531,6 +1531,31 @@ function drawLightboxForCard(card) {
         }
         lbPreviewBadge.hidden = true;
         lbLoadingBadge.hidden = true;
+    } else if (card._lightbox && card._lightbox.id != null && IS_TAURI) {
+        // Tauri lazy-fetch: pixels live server-side in lightbox_cache.  Pull
+        // on first open, repaint when ready.
+        lbPreviewBadge.hidden = true;
+        lbLoadingBadge.hidden = false;
+        if (!card._lightbox.fetching) {
+            card._lightbox.fetching = true;
+            invoke('get_lightbox', { id: card._lightbox.id })
+                .then((frame) => {
+                    const rgbU8 =
+                        (frame.data instanceof Uint8ClampedArray || frame.data instanceof Uint8Array)
+                            ? frame.data : Uint8Array.from(frame.data);
+                    card._lightbox.rgb = rgbU8;
+                    card._lightbox.w   = frame.width;
+                    card._lightbox.h   = frame.height;
+                    if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+                        drawLightboxForCard(card);
+                    }
+                })
+                .catch((e) => {
+                    console.warn('get_lightbox failed:', e);
+                    lbLoadingBadge.hidden = true;
+                })
+                .finally(() => { if (card._lightbox) card._lightbox.fetching = false; });
+        }
     } else if (card._embeddedPreview) {
         const { bmp, orientation } = card._embeddedPreview;
         drawBitmapOriented(lightboxCanvas, bmp, orientation || 1);
@@ -2110,14 +2135,17 @@ function onFileDoneTauri(filename, result) {
     }
     card._tauriResult = result;
 
-    // Stash lightbox-sized RGB so drawLightboxForCard() can render it.
-    if (result?.lightbox) {
-        const lb = result.lightbox;
+    // Tauri-only: ship dims now, fetch pixels lazily via get_lightbox(id) on
+    // first lightbox open.  Cuts per-file IPC payload by ~30 MB JSON, which
+    // benchmark showed is the dominant batch-queue gap.  card._lightbox stays
+    // truthy so existing _lightbox checks (havePair, raw-mode gating) work.
+    if (typeof result?.lightbox_width === 'number' && result?.id != null) {
         card._lightbox = {
-            rgb: (lb.data instanceof Uint8ClampedArray || lb.data instanceof Uint8Array)
-                ? lb.data : Uint8Array.from(lb.data),
-            w: lb.width,
-            h: lb.height,
+            rgb: null,
+            w: result.lightbox_width,
+            h: result.lightbox_height,
+            id: result.id,
+            fetching: false,
         };
     }
 
@@ -2128,8 +2156,8 @@ function onFileDoneTauri(filename, result) {
     const pipeMs = (t.decompress_ms || 0) + (t.demosaic_ms || 0) + (t.tone_ms || 0);
     const totalMs = pipeMs + (t.encode_ms || 0);
     // Show the real sensor dimensions, not the downscaled lightbox.
-    const imgW = exif.width  ?? result?.lightbox?.width  ?? '?';
-    const imgH = exif.height ?? result?.lightbox?.height ?? '?';
+    const imgW = exif.width  ?? result?.lightbox_width  ?? '?';
+    const imgH = exif.height ?? result?.lightbox_height ?? '?';
     tauriStatSeq++;
     const name = filename.padEnd(18, ' ').slice(0, 18);
     pushStat(
@@ -2364,7 +2392,7 @@ async function runBenchmark() {
     updateStat('bench:status', `[bench] done — ${rows.length} configs, ${paths.length} files each`);
 
     // Restore the default concurrency for normal operation.
-    await invoke('set_concurrency', { n: 4 });
+    await invoke('set_concurrency', { n: 3 });
 }
 
 // Wire the button at module init.

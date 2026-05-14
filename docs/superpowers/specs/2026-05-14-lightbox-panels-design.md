@@ -104,6 +104,8 @@ Displayed below built-ins as a second section "My Profiles". Slots 1–10 (expan
 - `Ctrl+Shift+S` — save current look as named profile (prompts for name, assigns next slot).
 - `Ctrl+Shift+L` — open profile picker modal.
 - `Ctrl+Shift+1` … `Ctrl+Shift+0` — load profile slots 1–10 directly.
+- `Ctrl+1` … `Ctrl+9` — quick-select B&W filter (1=Natural, 2=Soft, 3=Strong, 4=Red, 5=Orange, 6=Yellow, 7=Green, 8=Blue, 9=Infrared).
+- `Ctrl+0` — clear active filter.
 
 Profile = full look snapshot: all 12 slider values + active filter name.
 
