@@ -1,11 +1,9 @@
 // Per-file Web Worker.
 //
-// Owns its own wasm instance + its own jSquash encoder instance.  A pool of
-// these runs in the main thread so N files convert concurrently across N
-// CPU cores.  jSquash inside each worker stays single-threaded (we don't
-// enable SharedArrayBuffer at the page level, so it auto-picks the
-// non-threaded `jxl_enc.js` variant); file-level parallelism gives us the
-// throughput.
+// Owns its own wasm instance.  A pool of these runs in the main thread so N
+// files convert concurrently across N CPU cores.  JXL encoding is offloaded
+// to a separate pool of jxl-worker.js instances (SIMD+MT, spawned from the
+// main thread so Emscripten Pthreads bootstrap correctly under COOP/COEP).
 //
 // Protocol — main thread posts:
 //   { id, bytes: Uint8Array, options }
@@ -22,16 +20,12 @@
 
 import init, {
     process_orf,
-    downscale_rgb,
     rgb_to_rgba,
     apply_look,
     rotate_rgb8,
 } from '../pkg/raw_converter_wasm.js';
 
-import encode_jxl from './vendor/jsquash-jxl/encode.js';
-
-const THUMB_LONG_EDGE = 360;
-const LIGHTBOX_LONG_EDGE = 1800;
+// JXL encoding is handled by jxl-worker.js (spawned from the main thread).
 
 let wasmReady;
 // Per-taskId state maps — survive across multiple files on this worker.
@@ -45,16 +39,6 @@ async function ensureWasm() {
     } catch (err) {
         wasmReady = null; // allow retry on next call
         throw err;
-    }
-}
-
-function sized(srcW, srcH, longEdge) {
-    if (srcW >= srcH) {
-        const w = Math.min(longEdge, srcW);
-        return { w, h: Math.max(1, Math.round((srcH * w) / srcW)) };
-    } else {
-        const h = Math.min(longEdge, srcH);
-        return { w: Math.max(1, Math.round((srcW * h) / srcH)), h };
     }
 }
 
@@ -200,20 +184,21 @@ self.addEventListener('message', async (ev) => {
         const thumb16 = result.take_rgb16_thumb();
         thumbStateMap.set(id, makeLiveState(thumb16, result.thumb_w, result.thumb_h, ori, wbR, wbB, colorMatrix));
 
-        // thumb RGB8 — send first for fast UI feedback
-        const thumb = sized(w, h, THUMB_LONG_EDGE);
-        const thumbRgb = downscale_rgb(fullRgb, w, h, thumb.w, thumb.h);
+        // thumb RGB8 — apply look to the pre-scaled rgb16 (360px) already cached in thumbStateMap.
+        // Avoids downscaling the full 20MP fullRgb (~200× more pixels) for the same result.
+        const thumbState = thumbStateMap.get(id);
+        const thumbRgb = applyLookToState(thumbState, look);
         self.postMessage(
-            { id, type: 'thumb', rgb: thumbRgb, w: thumb.w, h: thumb.h, pipelineMs, phaseMs,
-              wbR, wbB, make, model, colorMatrixFromMn, exif },
+            { id, type: 'thumb', rgb: thumbRgb, w: thumbState.outW, h: thumbState.outH,
+              pipelineMs, phaseMs, wbR, wbB, make, model, colorMatrixFromMn, exif },
             [thumbRgb.buffer],
         );
 
-        // lightbox RGB8
-        const big = sized(w, h, LIGHTBOX_LONG_EDGE);
-        const bigRgb = downscale_rgb(fullRgb, w, h, big.w, big.h);
+        // lightbox RGB8 — same: apply look to the pre-scaled rgb16 (1800px) in liveStateMap.
+        const lbState = liveStateMap.get(id);
+        const bigRgb = applyLookToState(lbState, look);
         self.postMessage(
-            { id, type: 'lightbox', rgb: bigRgb, w: big.w, h: big.h },
+            { id, type: 'lightbox', rgb: bigRgb, w: lbState.outW, h: lbState.outH },
             [bigRgb.buffer],
         );
 
@@ -227,26 +212,18 @@ self.addEventListener('message', async (ev) => {
             rotRes.free();
         }
 
-        // JXL encode (full-resolution) — convert to RGBA then drop fullRgb to allow GC
+        // Hand off full-res RGBA to the dedicated JXL encode worker (main.js
+        // spawns it from the page thread so Emscripten Pthreads work under COOP/COEP).
         const rgba = rgb_to_rgba(fullRgb);
-        // fullRgb is no longer needed; allow GC before long JXL encode
-        let fullRgbRef = fullRgb; fullRgbRef = null; // eslint-disable-line no-unused-vars
-        const imageData = {
-            data: new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
-            width: w, height: h,
-        };
-        const jT0 = performance.now();
-        const jxlAB = await encode_jxl(imageData, {
-            quality: options.lossless ? 100 : options.quality,
-            effort: options.effort,
-            lossless: !!options.lossless,
-        });
-        const jxlMs = performance.now() - jT0;
-
-        const jxlBytes = new Uint8Array(jxlAB);
+        fullRgb = null; // allow GC
+        // Slice to a zero-offset owned buffer before transfer (rgba is a WASM heap view).
+        const rgbaBuf = rgba.buffer.slice(rgba.byteOffset, rgba.byteOffset + rgba.byteLength);
         self.postMessage(
-            { id, type: 'done', jxl: jxlBytes, jxlMs, w, h },
-            [jxlBytes.buffer],
+            { id, type: 'encode_request', rgba: rgbaBuf, width: w, height: h,
+              quality: options.lossless ? 100 : options.quality,
+              effort: options.effort ?? 3,
+              lossless: !!options.lossless },
+            [rgbaBuf],
         );
     } catch (err) {
         self.postMessage({
