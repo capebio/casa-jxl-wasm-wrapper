@@ -31,10 +31,76 @@ function togglePanel(key) {
 
 window.togglePanel = togglePanel;
 
-// ── Stubs for later tasks (replaced in Tasks 3-8) ─────────────────
-function initProfiles()  {}
+// ── Stubs for Tasks 5-8 ───────────────────────────────────────────
 function initFilters()   {}
 function initSidecar()   {}
+function getUserProfile() { return null; } // replaced in Task 5
+let activeFilter = null;                   // replaced in Task 6
+let PIPELINE_FILTERS = {};                 // populated in Task 6
+
+// ── Colour Profiles ───────────────────────────────────────────────
+const BUILTIN_PROFILES = {
+  'Natural':   { contrast:0, saturation:0, vibrance:0, temp:0, tint:0, highlights:0, shadows:0, whites:0, blacks:0, clarity:0 },
+  'Vivid':     { contrast:0.2, saturation:0.3, vibrance:0.2, temp:0, tint:0, highlights:0, shadows:0, whites:0, blacks:0, clarity:0 },
+  'Muted':     { contrast:-0.15, saturation:-0.3, vibrance:0, temp:0, tint:0, highlights:0, shadows:0.1, whites:0, blacks:0, clarity:0 },
+  'Portrait':  { contrast:0, saturation:0.1, vibrance:0, temp:0.05, tint:0, highlights:-0.1, shadows:0.15, whites:0, blacks:0, clarity:0 },
+  'Monotone':  { contrast:0, saturation:-1.0, vibrance:0, temp:0, tint:0, highlights:0, shadows:0, whites:0, blacks:0, clarity:0 },
+  'i-Enhance': { contrast:0.1, saturation:0.2, vibrance:0.3, temp:0, tint:0, highlights:0, shadows:0, whites:0, blacks:0, clarity:0.1 },
+  'Flat':      { contrast:-0.4, saturation:-0.1, vibrance:0, temp:0, tint:0, highlights:-0.3, shadows:0.3, whites:0, blacks:0, clarity:0 },
+};
+
+let activeProfile = null;
+
+const LOOK_PARAMS = ['exposureEv','contrast','highlights','shadows','whites','blacks',
+                     'saturation','vibrance','temp','tint','texture','clarity'];
+
+function clampLook(k, v) {
+  if (k === 'exposureEv') return Math.max(-3, Math.min(3, v));
+  return Math.max(-1, Math.min(1, v));
+}
+
+window.mergedLook = function mergedLook(baseLook) {
+  const pDeltas = activeProfile ? (BUILTIN_PROFILES[activeProfile] || getUserProfile(activeProfile) || {}) : {};
+  const fDeltas = activeFilter  ? (PIPELINE_FILTERS[activeFilter]  || {}) : {};
+  const out = Object.assign({}, baseLook);
+  for (const k of LOOK_PARAMS) {
+    out[k] = clampLook(k, (out[k] ?? 0) + (pDeltas[k] ?? 0) + (fDeltas[k] ?? 0));
+  }
+  return out;
+};
+
+function setActiveProfile(name) {
+  activeProfile = (activeProfile === name) ? null : name;
+  renderProfileChips();
+  if (typeof window.scheduleLiveUpdate === 'function') window.scheduleLiveUpdate();
+}
+
+window.setActiveProfile = setActiveProfile;
+
+function renderProfileChips() {
+  const el = document.getElementById('lb-profile-chips');
+  if (!el) return;
+  el.innerHTML = '';
+  Object.keys(BUILTIN_PROFILES).forEach(name => {
+    const btn = document.createElement('button');
+    btn.className = 'lb-chip' + (activeProfile === name ? ' lb-chip-active' : '');
+    btn.textContent = name;
+    btn.addEventListener('click', () => setActiveProfile(name));
+    el.appendChild(btn);
+  });
+  renderUserProfileChips();
+}
+
+function renderUserProfileChips() {
+  const el = document.getElementById('lb-user-profile-chips');
+  if (!el) return;
+  el.innerHTML = '';
+  // Task 5 populates this; no-op for now
+}
+
+function initProfiles() {
+  renderProfileChips();
+}
 // ── Clean canvas cache ────────────────────────────────────────────
 // Stores a copy of the last WASM-rendered pixels before levels are applied.
 // updateHistogramAndLevels always starts from this clean copy so dragging

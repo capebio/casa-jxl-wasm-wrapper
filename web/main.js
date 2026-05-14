@@ -532,10 +532,10 @@ function scheduleLiveUpdate() {
     clearTimeout(liveDebounceTimer);
     liveDebounceTimer = setTimeout(() => {
         if (liveInFlight) {
-            livePendingLook = currentLook();
+            livePendingLook = typeof mergedLook === 'function' ? mergedLook(currentLook()) : currentLook();
             return;
         }
-        triggerLiveUpdate(currentLook());
+        triggerLiveUpdate(typeof mergedLook === 'function' ? mergedLook(currentLook()) : currentLook());
     }, 80);
 }
 window.scheduleLiveUpdate = scheduleLiveUpdate;

@@ -1130,3 +1130,6 @@ main { padding: 24px 32px 64px; }
     top: 3px;
 }
 .lb-lvl-handle:hover { border-bottom-color: #ffdd44; }
+
+/* ── Chip groups ── */
+.lb-chip-group { display: flex; flex-wrap: wrap; gap: 5px; }
