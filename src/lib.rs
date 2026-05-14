@@ -186,6 +186,38 @@ fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize)
     out
 }
 
+/// Central structural validation for ORF inputs.  Runs before the pipeline so
+/// user-facing errors are produced in one place rather than scattered across
+/// individual functions.  Internal guards in demosaic/decompress remain as
+/// defence-in-depth but should never fire if this passes.
+fn validate_orf_structure(data: &[u8], info: &tiff::OrfInfo) -> Result<(), JsError> {
+    const MAX_DIM: u32 = 16_384;
+    const MAX_PIXELS: usize = 50_000_000; // 50 MP
+
+    if info.width == 0 || info.height == 0 {
+        return Err(JsError::new("ORF: zero image dimension"));
+    }
+    if info.width > MAX_DIM || info.height > MAX_DIM {
+        return Err(JsError::new(&format!(
+            "ORF: dimension {}×{} exceeds maximum {}",
+            info.width, info.height, MAX_DIM
+        )));
+    }
+    let n = (info.width as usize)
+        .checked_mul(info.height as usize)
+        .ok_or_else(|| JsError::new("ORF: width×height overflows"))?;
+    if n > MAX_PIXELS {
+        return Err(JsError::new(&format!("ORF: {} pixels exceeds 50 MP limit", n)));
+    }
+    let strip_end = (info.strip_offset as usize)
+        .checked_add(info.strip_byte_count as usize)
+        .ok_or_else(|| JsError::new("ORF: strip offset+length overflows"))?;
+    if strip_end > data.len() {
+        return Err(JsError::new("ORF: strip extends past end of file"));
+    }
+    Ok(())
+}
+
 /// Parse + decode an ORF file blob.  Returns an error string on failure.
 ///
 /// All look params are LR-style, zero-centred (-1..+1 normalised), except
@@ -218,14 +250,12 @@ pub fn process_orf(
         )));
     }
 
+    validate_orf_structure(data, &info)?;
+
     let w = info.width as usize;
     let h = info.height as usize;
-    let strip_end = (info.strip_offset as usize)
-        .checked_add(info.strip_byte_count as usize)
-        .ok_or_else(|| JsError::new("strip offset+length overflows"))?;
-    if strip_end > data.len() {
-        return Err(JsError::new("strip extends past end of file"));
-    }
+    // strip bounds already validated by validate_orf_structure above
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
     let strip = &data[info.strip_offset as usize..strip_end];
 
     let t = now_ms();
@@ -233,26 +263,23 @@ pub fn process_orf(
     let decompress_ms = now_ms() - t;
 
     let mut params = pipeline::PipelineParams::default_olympus();
-    // If the camera was in a manual / preset / one-touch / custom WB mode,
-    // the stored ImageProcessing 0x0100 is a fixed calibration (often the
-    // user's grey-card reading or a daylight preset) that won't match the
-    // actual scene lighting.  In that case discard it and gray-world from
-    // the raw Bayer instead.
-    //   16..=67  : daylight / cloudy / tungsten / fluorescent / underwater presets
-    //   256..=259: One Touch WB 1-4 (user-calibrated against grey card)
-    //   512..=515: Custom WB 1-4
-    let wb_is_manual = matches!(
-        info.wb_mode,
-        Some(16..=67) | Some(256..=259) | Some(512..=515),
-    );
-    let wb_from_camera = info.wb_r.is_some() && info.wb_b.is_some() && !wb_is_manual;
-    if !wb_from_camera {
+    // Trust camera WB_RBLevels (ImageProcessing 0x0100 / MakerNote 0x1017/1018/1029)
+    // unconditionally.  This is the calibration the in-camera JPEG uses, so
+    // matching it gives colour fidelity to the embedded preview.  Gray-world
+    // fallback only when the camera didn't store WB at all (very rare).
+    //
+    // Earlier versions discarded camera WB for "manual" modes 16..=67 (presets)
+    // and 256..=259 / 512..=515 (One-Touch / Custom) — but those modes still
+    // store the correct per-shot WB and discarding them produced washed-out,
+    // colour-cast output vs. the embedded JPEG.
+    let wb_from_camera = info.wb_r.is_some() && info.wb_b.is_some();
+    if wb_from_camera {
+        if let Some(r) = info.wb_r { params.wb_r = r; }
+        if let Some(b) = info.wb_b { params.wb_b = b; }
+    } else {
         let (ar, ab) = pipeline::auto_wb_rggb(&raw, w, h, params.black);
         params.wb_r = ar;
         params.wb_b = ab;
-    } else {
-        if let Some(r) = info.wb_r { params.wb_r = r; }
-        if let Some(b) = info.wb_b { params.wb_b = b; }
     }
     let color_matrix_from_mn = info.color_matrix.is_some();
     if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
