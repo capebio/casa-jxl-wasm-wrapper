@@ -2247,13 +2247,28 @@ async function startBatchTauri(paths) {
 // c = max files in flight (Rust file-semaphore size)
 // t = encoder threads per file (libjxl ThreadsRunner)
 // e = JXL effort (1 = lightning … 7 = squirrel)
-// Cores × c × t ≈ peak thread count during simultaneous encode.
+// peak threads during encode ≈ c × t.  12-core dev box → c × t = 12 saturates.
+//
+// 9-config probe (3-file runs).  With 3 files, c≥3 means all-in-flight, so
+// raising c past 3 is pointless — vary t and other axes there instead.
+// Each test isolates ONE question:
 const BENCH_CONFIGS = [
-    { label: 'c=4 t=3  e=3', concurrency: 4,  encoder_threads: 3,  effort: 3 },
-    { label: 'c=6 t=2  e=3', concurrency: 6,  encoder_threads: 2,  effort: 3 },
-    { label: 'c=12 t=1 e=3', concurrency: 12, encoder_threads: 1,  effort: 3 },
-    { label: 'c=3 t=4  e=3', concurrency: 3,  encoder_threads: 4,  effort: 3 },
-    { label: 'c=4 t=3  e=1', concurrency: 4,  encoder_threads: 3,  effort: 1 },
+    // === axis 1: serial vs parallel (everything else equal) ===
+    { label: 'c=1 t=12 e=3  serial baseline', concurrency: 1, encoder_threads: 12, effort: 3 },
+    { label: 'c=3 t=4  e=3  saturated 3×4=12', concurrency: 3, encoder_threads:  4, effort: 3 },
+
+    // === axis 2: inner-thread sweep at c=3 (does libjxl scale linearly?) ===
+    { label: 'c=3 t=1  e=3  libjxl single-thread × 3', concurrency: 3, encoder_threads:  1, effort: 3 },
+    { label: 'c=3 t=2  e=3  6 active threads (undersub)', concurrency: 3, encoder_threads:  2, effort: 3 },
+    { label: 'c=3 t=6  e=3  18 threads (1.5× oversub)', concurrency: 3, encoder_threads:  6, effort: 3 },
+    { label: 'c=3 t=12 e=3  36 threads (heavy oversub)', concurrency: 3, encoder_threads: 12, effort: 3 },
+
+    // === axis 3: alt outer/inner split at saturation ===
+    { label: 'c=2 t=6  e=3  2×6=12 alt split', concurrency: 2, encoder_threads:  6, effort: 3 },
+
+    // === axis 4: effort cost at winning topology ===
+    { label: 'c=3 t=4  e=1  lightning', concurrency: 3, encoder_threads:  4, effort: 1 },
+    { label: 'c=3 t=4  e=7  squirrel', concurrency: 3, encoder_threads:  4, effort: 7 },
 ];
 
 async function runOneConfig(paths, cfg, opts) {
