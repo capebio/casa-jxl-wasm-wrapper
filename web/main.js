@@ -2241,6 +2241,120 @@ async function startBatchTauri(paths) {
     );
 }
 
+// ─── Benchmark harness ─────────────────────────────────────────────────────
+// Runs the same set of files through several configs sequentially so the
+// user can A/B perf knobs on their machine.  No UI rendering — pure perf.
+const BENCH_CONFIGS = [
+    { label: 'c=1 t=12 e=3', concurrency: 1, encoder_threads: 12, effort: 3 },
+    { label: 'c=2 t=6  e=3', concurrency: 2, encoder_threads: 6,  effort: 3 },
+    { label: 'c=4 t=3  e=3', concurrency: 4, encoder_threads: 3,  effort: 3 },
+    { label: 'c=1 t=12 e=1', concurrency: 1, encoder_threads: 12, effort: 1 },
+    { label: 'c=1 t=12 e=7', concurrency: 1, encoder_threads: 12, effort: 7 },
+];
+
+async function runOneConfig(paths, cfg, opts) {
+    await invoke('set_concurrency', { n: cfg.concurrency });
+    const perFile = [];
+    const t0 = performance.now();
+    // Drive paths through the existing concurrency limit (Promise.allSettled
+    // dispatches all at once; Rust-side semaphore serialises to cfg.concurrency).
+    await Promise.allSettled(paths.map(async (path) => {
+        const tStart = performance.now();
+        try {
+            const result = await invoke('process_file', {
+                path,
+                options: {
+                    quality: opts.quality,
+                    effort: cfg.effort,
+                    lossless: opts.lossless,
+                    look: lookToSnake(opts.look),
+                    user_rotation: 0,
+                    wb_r: null,
+                    wb_b: null,
+                    encoder_threads: cfg.encoder_threads,
+                },
+            });
+            const tEnd = performance.now();
+            const t = result?.timings || {};
+            perFile.push({
+                wall_ms:    tEnd - tStart,
+                dec_ms:     t.decompress_ms || 0,
+                dem_ms:     t.demosaic_ms   || 0,
+                tone_ms:    t.tone_ms       || 0,
+                enc_ms:     t.encode_ms     || 0,
+                jxl_bytes:  result?.jxl?.length || 0,
+            });
+        } catch (err) {
+            perFile.push({ error: String(err) });
+        }
+    }));
+    const wallMs = performance.now() - t0;
+    return { cfg, wallMs, perFile };
+}
+
+async function runBenchmark() {
+    if (!IS_TAURI) {
+        pushStat('[bench] tauri-only — benchmark needs the native pipeline');
+        return;
+    }
+    let paths;
+    try {
+        paths = await invoke('pick_files');
+    } catch (err) {
+        pushStat(`[bench] pick_files failed: ${err}`);
+        return;
+    }
+    if (!paths?.length) { pushStat('[bench] cancelled — no files'); return; }
+    const opts = currentOptions();
+    pushStat(`[bench] ${paths.length} files × ${BENCH_CONFIGS.length} configs starting…`);
+
+    const rows = [];
+    for (let i = 0; i < BENCH_CONFIGS.length; i++) {
+        const cfg = BENCH_CONFIGS[i];
+        updateStat('bench:status', `[bench] running ${i + 1}/${BENCH_CONFIGS.length}  ${cfg.label}…`);
+        const r = await runOneConfig(paths, cfg, opts);
+        rows.push(r);
+        const n = r.perFile.length;
+        const ok = r.perFile.filter(p => !p.error);
+        const avgWall = ok.length ? ok.reduce((s, p) => s + p.wall_ms, 0) / ok.length : 0;
+        const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms,  0) / ok.length : 0;
+        const avgPipe = ok.length ? ok.reduce((s, p) => s + p.dec_ms + p.dem_ms + p.tone_ms, 0) / ok.length : 0;
+        pushStat(
+            `[bench] ${cfg.label}  ` +
+            `total ${(r.wallMs / 1000).toFixed(2)}s  ` +
+            `avg-file ${avgWall.toFixed(0)} ms  ` +
+            `pipe ${avgPipe.toFixed(0)} ms  ` +
+            `enc ${avgEnc.toFixed(0)} ms  ` +
+            `tput ${(n / (r.wallMs / 1000)).toFixed(2)} files/s`
+        );
+    }
+    // Final comparison table — sorted fastest first.
+    pushStat('');
+    pushStat('[bench] === results, sorted by wall time ===');
+    rows.sort((a, b) => a.wallMs - b.wallMs);
+    for (const r of rows) {
+        pushStat(
+            `[bench]  ${r.cfg.label.padEnd(14, ' ')}  ` +
+            `${(r.wallMs / 1000).toFixed(2).padStart(6, ' ')}s  ` +
+            `(${(r.perFile.length / (r.wallMs / 1000)).toFixed(2)} files/s)`
+        );
+    }
+    updateStat('bench:status', `[bench] done — ${rows.length} configs, ${paths.length} files each`);
+
+    // Restore default for normal operation.
+    await invoke('set_concurrency', { n: 1 });
+}
+
+// Wire the button at module init.
+const benchBtn = document.getElementById('run-benchmark');
+if (benchBtn) {
+    benchBtn.addEventListener('click', () => {
+        benchBtn.disabled = true;
+        runBenchmark().catch(e => pushStat(`[bench] ${e?.message || e}`))
+                      .finally(() => { benchBtn.disabled = false; });
+    });
+}
+
 // Tauri live-look: invoked from triggerLiveUpdate when IS_TAURI
 let tauriLiveInFlight = false;
 let tauriLivePending = null;
