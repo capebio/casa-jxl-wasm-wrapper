@@ -35,6 +35,7 @@ window.togglePanel = togglePanel;
 let activeFilter    = null;
 let grainActive     = false;
 let vignetteActive  = false;
+let _grainImgPending = null;
 let PIPELINE_FILTERS = {
   'B&W Natural': { saturation:-1.0, contrast:0,     temp:0,     tint:0,    highlights:0,     shadows:0,   whites:0,     blacks:0 },
   'B&W Soft':    { saturation:-1.0, contrast:-0.25, temp:0,     tint:0,    highlights:-0.15,  shadows:0.2, whites:0,     blacks:0 },
@@ -120,8 +121,10 @@ function toggleVignette() {
 }
 
 function drawGrain(canvas) {
-  const w = canvas.width  || canvas.offsetWidth  || 800;
-  const h = canvas.height || canvas.offsetHeight || 600;
+  if (_grainImgPending) { _grainImgPending.onload = null; _grainImgPending = null; }
+  const ref = document.getElementById('lightbox-canvas');
+  const w = (ref && ref.width)  || 800;
+  const h = (ref && ref.height) || 600;
   canvas.width  = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
@@ -135,7 +138,9 @@ function drawGrain(canvas) {
   const blob = new Blob([svg], {type: 'image/svg+xml'});
   const url  = URL.createObjectURL(blob);
   const img  = new Image();
+  _grainImgPending = img;
   img.onload = () => {
+    _grainImgPending = null;
     ctx.clearRect(0, 0, w, h);
     ctx.drawImage(img, 0, 0);
     URL.revokeObjectURL(url);
