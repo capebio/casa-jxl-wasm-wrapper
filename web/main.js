@@ -1093,6 +1093,12 @@ function startConvert(file, existingCard) {
     }
     totalSubmitted++;
     card._file = file;
+    // Check for existing sidecar dot
+    if (typeof loadSidecar === 'function' && file.name) {
+        loadSidecar(file.name).then(s => {
+            if (s && typeof updateSidecarDot === 'function') updateSidecarDot(file.name, true);
+        });
+    }
     refreshStatus();
 
     // Phase A — fast: read only the first PREVIEW_SLICE bytes to extract the
@@ -1683,6 +1689,12 @@ function openLightbox(card) {
     lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
     card._sourceMode = 'raw';
     resetLookSliders();
+    // Auto-load sidecar if present
+    if (typeof loadSidecar === 'function' && card._file?.name) {
+        loadSidecar(card._file.name).then(sidecar => {
+            if (sidecar && typeof applySidecar === 'function') applySidecar(sidecar);
+        });
+    }
     drawLightboxForCard(card);
     flashSourceBanner();
     showSourceLabel('RAW');
@@ -1854,6 +1866,16 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         const idx = e.key === '0' ? 9 : parseInt(e.key, 10) - 1;
         if (typeof loadUserProfileByIndex === 'function') loadUserProfileByIndex(idx);
+        return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 's') {
+        e.preventDefault();
+        if (!lightbox.hidden) {
+            const card = cards[lightboxIndex];
+            const name = card?._file?.name;
+            if (name && typeof saveSidecar === 'function') saveSidecar(name);
+        }
         return;
     }
 

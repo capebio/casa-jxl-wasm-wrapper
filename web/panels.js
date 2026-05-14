@@ -151,7 +151,102 @@ function drawGrain(canvas) {
 function initFilters() {
   renderFilterChips();
 }
-function initSidecar()   {}
+
+// ── Sidecar ───────────────────────────────────────────────────────
+const SIDECAR_PREFIX = 'raw-sidecar:';
+
+function getSidecarKey(filename) {
+  return SIDECAR_PREFIX + filename;
+}
+
+function buildSidecarData(filename) {
+  const look   = typeof window.currentLook   === 'function' ? window.currentLook()   : {};
+  const levels = window.levelsState ? {
+    inBlack:  window.levelsState.inBlack,
+    inMid:    window.levelsState.inMid,
+    inWhite:  window.levelsState.inWhite,
+    outBlack: window.levelsState.outBlack,
+    outWhite: window.levelsState.outWhite,
+  } : { inBlack:0, inMid:1.0, inWhite:255, outBlack:0, outWhite:255 };
+  return { filename, look, profile: activeProfile, filter: activeFilter, levels };
+}
+
+async function saveSidecar(filename) {
+  if (!filename) return;
+  const data = buildSidecarData(filename);
+  const json = JSON.stringify(data);
+  if (window.IS_TAURI && window.__TAURI__) {
+    try {
+      await window.__TAURI__.core.invoke('write_look', { path: filename, json });
+    } catch (e) {
+      console.error('saveSidecar Tauri error', e);
+    }
+  } else {
+    localStorage.setItem(getSidecarKey(filename), json);
+  }
+  updateSidecarDot(filename, true);
+}
+
+async function loadSidecar(filename) {
+  if (!filename) return null;
+  let json = null;
+  if (window.IS_TAURI && window.__TAURI__) {
+    try {
+      json = await window.__TAURI__.core.invoke('read_look', { path: filename });
+    } catch { json = null; }
+  } else {
+    json = localStorage.getItem(getSidecarKey(filename));
+  }
+  if (!json) return null;
+  try { return JSON.parse(json); }
+  catch { return null; }
+}
+
+function updateSidecarDot(filename, hasSidecar) {
+  // Find the card whose _file.name matches and update its dot badge
+  document.querySelectorAll('.thumb').forEach(card => {
+    if (card._file?.name === filename) {
+      let dot = card.querySelector('.sidecar-dot');
+      if (hasSidecar && !dot) {
+        dot = document.createElement('span');
+        dot.className = 'sidecar-dot';
+        card.appendChild(dot);
+      } else if (!hasSidecar && dot) {
+        dot.remove();
+      }
+    }
+  });
+}
+
+async function applySidecar(sidecar) {
+  if (!sidecar) return;
+  if (sidecar.look && typeof window.applyLookValues === 'function') {
+    window.applyLookValues(sidecar.look);
+  }
+  if (sidecar.profile && typeof window.setActiveProfile === 'function') {
+    window.setActiveProfile(sidecar.profile);
+  }
+  if (sidecar.filter && typeof window.setActiveFilter === 'function') {
+    window.setActiveFilter(sidecar.filter);
+  }
+  if (sidecar.levels && window.levelsState) {
+    Object.assign(window.levelsState, sidecar.levels);
+    if (typeof window.syncHandlePosition === 'function') {
+      ['inBlack','inMid','inWhite','outBlack','outWhite'].forEach(k => window.syncHandlePosition(k));
+    }
+    if (typeof window.updateHistogramAndLevels === 'function') window.updateHistogramAndLevels();
+  }
+}
+
+window.saveSidecar  = saveSidecar;
+window.loadSidecar  = loadSidecar;
+window.applySidecar = applySidecar;
+window.updateSidecarDot = updateSidecarDot;
+
+function initSidecar() {
+  // Ctrl+S handled in main.js
+}
+
 // ── User profiles ─────────────────────────────────────────────────
 const USER_PROFILES_KEY = 'raw-profiles';
 

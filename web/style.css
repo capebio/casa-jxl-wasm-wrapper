@@ -1137,3 +1137,15 @@ main { padding: 24px 32px 64px; }
 
 /* ── Chip groups ── */
 .lb-chip-group { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.sidecar-dot {
+    position: absolute;
+    bottom: 6px;
+    right: 6px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent, #4a9eff);
+    pointer-events: none;
+    z-index: 5;
+}
