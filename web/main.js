@@ -133,11 +133,28 @@ const clearStatsBtn = document.getElementById('clear-stats');
 
 // Seed the stats log with build / env info so the paste-back is self-describing.
 const statsLines = [];
+const statsKeyIdx = new Map();   // key → index into statsLines for mutable rows
 function pushStat(line) {
     statsLines.push(line);
     statsLog.textContent = statsLines.join('\n');
     statsLog.scrollTop = statsLog.scrollHeight;
 }
+// Mutable row that overwrites in place when the same key is pushed again.
+// Used to collapse "N files share this signature" rollups (jpeg sizes,
+// wb/matrix groups, etc) into one line that updates as the batch progresses.
+function updateStat(key, line) {
+    let idx = statsKeyIdx.get(key);
+    if (idx === undefined) {
+        idx = statsLines.length;
+        statsKeyIdx.set(key, idx);
+        statsLines.push(line);
+    } else {
+        statsLines[idx] = line;
+    }
+    statsLog.textContent = statsLines.join('\n');
+    statsLog.scrollTop = statsLog.scrollHeight;
+}
+function resetStatKeys() { statsKeyIdx.clear(); }
 pushStat(`build:        ${BUILD_TAG}`);
 pushStat(`pool size:    ${POOL_SIZE}`);
 pushStat(`hw cores:     ${navigator.hardwareConcurrency || '?'}`);
@@ -155,12 +172,29 @@ copyStatsBtn.addEventListener('click', async () => {
 });
 clearStatsBtn.addEventListener('click', () => {
     statsLines.length = 0;
+    resetStatKeys();
+    jpegSignatureCounts.clear();
+    wbMatrixCounts.clear();
     pushStat(`build:        ${BUILD_TAG}`);
     pushStat(`pool size:    ${POOL_SIZE}`);
     pushStat(`hw cores:     ${navigator.hardwareConcurrency || '?'}`);
     pushStat(`UA:           ${navigator.userAgent}`);
     pushStat('');
 });
+// Rolling counters for collapsed stat rows.
+const jpegSignatureCounts = new Map();  // "WxH oriN + WxH oriN" → count
+const wbMatrixCounts      = new Map();  // "wb R… B… | matrix" → count
+function bumpJpegSignature(sig) {
+    const n = (jpegSignatureCounts.get(sig) || 0) + 1;
+    jpegSignatureCounts.set(sig, n);
+    updateStat(`jpeg:${sig}`, `[jpeg] ${String(n).padStart(3,' ')} files  ${sig}`);
+}
+function bumpWbMatrix(wbStr, matrixStr) {
+    const sig = `${wbStr} | ${matrixStr || '—'}`;
+    const n = (wbMatrixCounts.get(sig) || 0) + 1;
+    wbMatrixCounts.set(sig, n);
+    updateStat(`wb:${sig}`, `[wb ] ${String(n).padStart(3,' ')} files  ${sig}`);
+}
 
 function fmtMs(v) { return (v ?? 0).toFixed(0).padStart(5, ' ') + ' ms'; }
 function fmtKb(v) { return (v / 1024).toFixed(0).padStart(5, ' ') + ' KB'; }
@@ -1125,7 +1159,7 @@ function startConvert(file, existingCard) {
                 .sort((a, b) => a.pixels - b.pixels);
             if (!valid.length) { pushStat('[jpeg] 0 valid'); return; }
 
-            pushStat('[jpeg] ' + valid.map(v => `${v.w}×${v.h} ori${v.orientation}`).join(' + '));
+            bumpJpegSignature(valid.map(v => `${v.w}×${v.h} ori${v.orientation}`).join(' + '));
 
             const largest = valid[valid.length - 1];
 
@@ -1224,9 +1258,9 @@ function startConvert(file, existingCard) {
                     const matrixStr = card._colorMatrixFromMn === true ? 'mn-matrix'
                                     : card._colorMatrixFromMn === false ? 'fallback-matrix'
                                     : '';
+                    bumpWbMatrix(wbStr, matrixStr);
                     pushStat(
                         `[${String(statSeq).padStart(3, ' ')}] ${name} ${msg.w}×${msg.h}  ` +
-                        `${wbStr}  ${matrixStr}  ` +
                         `dec ${fmtMs(p.decompress)}  ` +
                         `dem ${fmtMs(p.demosaic)}  ` +
                         `tone ${fmtMs(p.tonemap)}  ` +
@@ -2012,6 +2046,7 @@ function findTauriCard(path) {
     return cardByFilename.get(name);
 }
 
+let tauriStatSeq = 0;
 function onFileDoneTauri(filename, result) {
     const card = cardByFilename.get(filename);
     if (!card) return;
@@ -2024,6 +2059,29 @@ function onFileDoneTauri(filename, result) {
             new ImageData(rgbToRgbaArr(data), width, height), 0, 0);
     }
     card._tauriResult = result;
+
+    // Tauri-side per-file stat line.  `enc` (native libjxl) — distinct from
+    // the WASM build's `jxl` so the source is obvious in pasted logs.
+    const t = result.timings || {};
+    const exif = result.exif || {};
+    const pipeMs = (t.decompress_ms || 0) + (t.demosaic_ms || 0) + (t.tone_ms || 0);
+    const lbW = result.lightbox?.width  ?? '?';
+    const lbH = result.lightbox?.height ?? '?';
+    tauriStatSeq++;
+    const name = filename.padEnd(18, ' ').slice(0, 18);
+    pushStat(
+        `[${String(tauriStatSeq).padStart(3, ' ')}] ${name} ${lbW}×${lbH}  ` +
+        `dec ${fmtMs(t.decompress_ms)}  ` +
+        `dem ${fmtMs(t.demosaic_ms)}  ` +
+        `tone ${fmtMs(t.tone_ms)}  ` +
+        `pipe ${fmtMs(pipeMs)}  ` +
+        `enc ${fmtMs(t.encode_ms)}  ` +
+        `out ${fmtKb(result.jxl?.byteLength || result.jxl?.length || 0)}`,
+    );
+    if (exif.wb_r != null && exif.wb_b != null) {
+        bumpWbMatrix(`wb R${exif.wb_r.toFixed(3)} B${exif.wb_b.toFixed(3)}`,
+                     exif.wb_from_camera ? 'mn-matrix' : 'fallback-matrix');
+    }
     const dl = card.querySelector('.download');
     if (dl) {
         dl.hidden = false;
@@ -2040,6 +2098,11 @@ function onFileDoneTauri(filename, result) {
 
 async function startBatchTauri(paths) {
     const opts = currentOptions();
+    const batchT0 = performance.now();
+    let firstJxlT = null;   // time of first "encoding" event (first thumb done → JXL starts)
+    let lastJxlT  = null;   // time of last  "encoding" event (last  thumb done → JXL starts)
+    let thumbCount = 0;
+
     for (const path of paths) {
         const filename = path.split(/[\\/]/).pop();
         const card = makeCard(filename);
@@ -2060,6 +2123,13 @@ async function startBatchTauri(paths) {
         if (!card) return;
         const meta = card.querySelector('.time');
         if (meta) meta.textContent = payload.stage;
+        // "encoding" fires after thumbnail generation, just before JXL encode begins
+        if (payload.stage === 'encoding') {
+            const t = performance.now();
+            if (firstJxlT === null) firstJxlT = t;
+            lastJxlT = t;
+            thumbCount++;
+        }
     });
 
     await Promise.allSettled(paths.map(async (path) => {
@@ -2085,6 +2155,20 @@ async function startBatchTauri(paths) {
     }));
 
     unlisten();
+
+    const batchT3 = performance.now();
+    const fmt = ms => (ms / 1000).toFixed(1) + 's';
+    const n = paths.length;
+    console.log(
+        `[Batch] ${n} file${n === 1 ? '' : 's'} | total: ${fmt(batchT3 - batchT0)}\n` +
+        `  thumbnails: last ready at t+${firstJxlT !== null ? fmt(lastJxlT  - batchT0) : '?'} ` +
+            `(${thumbCount}/${n} events seen)\n` +
+        `  JXL start:  first at t+${firstJxlT !== null ? fmt(firstJxlT - batchT0) : '?'} | ` +
+            `last at t+${lastJxlT !== null ? fmt(lastJxlT - batchT0) : '?'}\n` +
+        `  JXL finish: t+${fmt(batchT3 - batchT0)} | ` +
+            `JXL phase: ${lastJxlT !== null ? fmt(batchT3 - firstJxlT) : '?'}\n` +
+        `  avg per file: ${fmt((batchT3 - batchT0) / n)}`
+    );
 }
 
 // Tauri live-look: invoked from triggerLiveUpdate when IS_TAURI
