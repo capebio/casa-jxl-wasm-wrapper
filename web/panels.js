@@ -32,7 +32,9 @@ function togglePanel(key) {
 window.togglePanel = togglePanel;
 
 // ── Pipeline Filters ──────────────────────────────────────────────
-let activeFilter = null;
+let activeFilter    = null;
+let grainActive     = false;
+let vignetteActive  = false;
 let PIPELINE_FILTERS = {
   'B&W Natural': { saturation:-1.0, contrast:0,     temp:0,     tint:0,    highlights:0,     shadows:0,   whites:0,     blacks:0 },
   'B&W Soft':    { saturation:-1.0, contrast:-0.25, temp:0,     tint:0,    highlights:-0.15,  shadows:0.2, whites:0,     blacks:0 },
@@ -79,7 +81,67 @@ function renderFilterChips() {
   buildOverlayChips();
 }
 
-function buildOverlayChips() { /* filled in Task 7 */ }
+function buildOverlayChips() {
+  const el = document.getElementById('lb-overlay-chips');
+  if (!el) return;
+  el.innerHTML = '';
+
+  const grainBtn = document.createElement('button');
+  grainBtn.className = 'lb-chip' + (grainActive ? ' lb-chip-active' : '');
+  grainBtn.textContent = 'Film grain';
+  grainBtn.addEventListener('click', toggleGrain);
+  el.appendChild(grainBtn);
+
+  const vigBtn = document.createElement('button');
+  vigBtn.className = 'lb-chip' + (vignetteActive ? ' lb-chip-active' : '');
+  vigBtn.textContent = 'Vignette';
+  vigBtn.addEventListener('click', toggleVignette);
+  el.appendChild(vigBtn);
+}
+
+function toggleGrain() {
+  grainActive = !grainActive;
+  const canvas = document.getElementById('lb-grain-overlay');
+  if (!canvas) return;
+  if (grainActive) {
+    canvas.style.display = 'block';
+    drawGrain(canvas);
+  } else {
+    canvas.style.display = 'none';
+  }
+  buildOverlayChips();
+}
+
+function toggleVignette() {
+  vignetteActive = !vignetteActive;
+  const el = document.getElementById('lb-vignette-overlay');
+  if (el) el.style.display = vignetteActive ? 'block' : 'none';
+  buildOverlayChips();
+}
+
+function drawGrain(canvas) {
+  const w = canvas.width  || canvas.offsetWidth  || 800;
+  const h = canvas.height || canvas.offsetHeight || 600;
+  canvas.width  = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+    <filter id="noise">
+      <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+    </filter>
+    <rect width="100%" height="100%" filter="url(#noise)" opacity="1"/>
+  </svg>`;
+  const blob = new Blob([svg], {type: 'image/svg+xml'});
+  const url  = URL.createObjectURL(blob);
+  const img  = new Image();
+  img.onload = () => {
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
 
 function initFilters() {
   renderFilterChips();

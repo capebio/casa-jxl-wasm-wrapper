@@ -1069,6 +1069,7 @@ main { padding: 24px 32px 64px; }
 
 /* ── Overlay filters ── */
 .lb-overlay {
+    display: none;
     position: absolute;
     inset: 0;
     pointer-events: none;
@@ -1076,6 +1077,9 @@ main { padding: 24px 32px 64px; }
 }
 .lb-vignette {
     background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.65) 100%);
+}
+#lb-grain-overlay {
+    opacity: 0.15;
 }
 
 /* ── Histogram ── */
