@@ -2047,26 +2047,75 @@ function findTauriCard(path) {
 }
 
 let tauriStatSeq = 0;
+// Batch-wide timing accumulators for the rollups the user asked for:
+// "N thumbs built in Xs, avg Y ms" / "first encode at +Xs, last at +Ys, Z files/s".
+let batchT0 = null;
+let thumbCount = 0;
+let firstEncodeT = null;
+let lastEncodeT  = null;
+let encodeMsSum = 0;
+function resetBatchCounters() {
+    batchT0 = performance.now();
+    thumbCount = 0;
+    firstEncodeT = null;
+    lastEncodeT  = null;
+    encodeMsSum = 0;
+    tauriStatSeq = 0;
+}
+function updateBatchRollups(encodeMs) {
+    const now = performance.now();
+    thumbCount++;
+    encodeMsSum += encodeMs || 0;
+    if (firstEncodeT === null) firstEncodeT = now;
+    lastEncodeT = now;
+    const dt = (now - batchT0) / 1000;
+    const avgThumbMs = ((now - batchT0) / thumbCount).toFixed(0);
+    updateStat('rollup:thumbs',
+        `[thumbs]  ${String(thumbCount).padStart(3,' ')} built  total ${dt.toFixed(1)}s  avg ${avgThumbMs} ms/file`);
+    const firstDt = ((firstEncodeT - batchT0) / 1000).toFixed(1);
+    const lastDt  = ((lastEncodeT  - batchT0) / 1000).toFixed(1);
+    const throughput = thumbCount / Math.max(0.001, (now - batchT0) / 1000);
+    const avgEnc = (encodeMsSum / thumbCount).toFixed(0);
+    updateStat('rollup:encode',
+        `[encode]  first +${firstDt}s  last +${lastDt}s  ` +
+        `avg ${avgEnc} ms/file  throughput ${throughput.toFixed(2)} files/s`);
+}
+
 function onFileDoneTauri(filename, result) {
     const card = cardByFilename.get(filename);
     if (!card) return;
     card.classList.remove('busy');
-    const { data, width, height } = result.thumb;
-    const canvas = card.querySelector('canvas');
-    if (canvas) {
-        canvas.width = width; canvas.height = height;
-        canvas.getContext('2d').putImageData(
-            new ImageData(rgbToRgbaArr(data), width, height), 0, 0);
+
+    // Defensive paint — surface failures instead of leaving a black canvas.
+    try {
+        if (!result || !result.thumb) {
+            throw new Error('result.thumb missing — IPC returned ' + JSON.stringify(Object.keys(result || {})));
+        }
+        const { data, width, height } = result.thumb;
+        if (!data || !width || !height) {
+            throw new Error(`thumb fields invalid: w=${width} h=${height} dataLen=${data?.length}`);
+        }
+        const canvas = card.querySelector('canvas');
+        if (canvas) {
+            canvas.width = width; canvas.height = height;
+            canvas.getContext('2d').putImageData(
+                new ImageData(rgbToRgbaArr(data), width, height), 0, 0);
+        }
+    } catch (e) {
+        console.error('[tauri-thumb] paint failed for', filename, e);
+        card.classList.add('error');
+        const tEl = card.querySelector('.time');
+        if (tEl) tEl.textContent = 'paint: ' + (e.message || e);
     }
     card._tauriResult = result;
 
     // Tauri-side per-file stat line.  `enc` (native libjxl) — distinct from
     // the WASM build's `jxl` so the source is obvious in pasted logs.
-    const t = result.timings || {};
-    const exif = result.exif || {};
+    const t = result?.timings || {};
+    const exif = result?.exif || {};
     const pipeMs = (t.decompress_ms || 0) + (t.demosaic_ms || 0) + (t.tone_ms || 0);
-    const lbW = result.lightbox?.width  ?? '?';
-    const lbH = result.lightbox?.height ?? '?';
+    const lbW = result?.lightbox?.width  ?? '?';
+    const lbH = result?.lightbox?.height ?? '?';
     tauriStatSeq++;
     const name = filename.padEnd(18, ' ').slice(0, 18);
     pushStat(
@@ -2076,12 +2125,13 @@ function onFileDoneTauri(filename, result) {
         `tone ${fmtMs(t.tone_ms)}  ` +
         `pipe ${fmtMs(pipeMs)}  ` +
         `enc ${fmtMs(t.encode_ms)}  ` +
-        `out ${fmtKb(result.jxl?.byteLength || result.jxl?.length || 0)}`,
+        `out ${fmtKb(result?.jxl?.byteLength || result?.jxl?.length || 0)}`,
     );
     if (exif.wb_r != null && exif.wb_b != null) {
         bumpWbMatrix(`wb R${exif.wb_r.toFixed(3)} B${exif.wb_b.toFixed(3)}`,
                      exif.wb_from_camera ? 'mn-matrix' : 'fallback-matrix');
     }
+    updateBatchRollups(t.encode_ms);
     const dl = card.querySelector('.download');
     if (dl) {
         dl.hidden = false;
@@ -2098,6 +2148,8 @@ function onFileDoneTauri(filename, result) {
 
 async function startBatchTauri(paths) {
     const opts = currentOptions();
+    pushStat(`[mode]  tauri (native libjxl)  ${paths.length} files queued`);
+    resetBatchCounters();
     const batchT0 = performance.now();
     let firstJxlT = null;   // time of first "encoding" event (first thumb done → JXL starts)
     let lastJxlT  = null;   // time of last  "encoding" event (last  thumb done → JXL starts)
