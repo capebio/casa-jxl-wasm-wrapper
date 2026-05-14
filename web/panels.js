@@ -32,7 +32,56 @@ function togglePanel(key) {
 window.togglePanel = togglePanel;
 
 // ── Stubs for Tasks 5-8 ───────────────────────────────────────────
-function initFilters()   {}
+// ── Pipeline Filters ──────────────────────────────────────────────
+Object.assign(PIPELINE_FILTERS, {
+  'B&W Natural': { saturation:-1.0, contrast:0,     temp:0,     tint:0,    highlights:0,    shadows:0,    whites:0,     blacks:0 },
+  'B&W Soft':    { saturation:-1.0, contrast:-0.25, temp:0,     tint:0,    highlights:-0.15, shadows:0.2,  whites:0,     blacks:0 },
+  'B&W Strong':  { saturation:-1.0, contrast:0.4,   temp:0,     tint:0,    highlights:0,    shadows:0,    whites:0.15,  blacks:-0.15 },
+  'B&W Red':     { saturation:-1.0, contrast:0,     temp:0.4,   tint:-0.1, highlights:0,    shadows:0,    whites:0,     blacks:0 },
+  'B&W Orange':  { saturation:-1.0, contrast:0,     temp:0.25,  tint:0,    highlights:0,    shadows:0,    whites:0,     blacks:0 },
+  'B&W Yellow':  { saturation:-1.0, contrast:0,     temp:0.12,  tint:0,    highlights:0,    shadows:0,    whites:0,     blacks:0 },
+  'B&W Green':   { saturation:-1.0, contrast:0,     temp:-0.15, tint:0.2,  highlights:0,    shadows:0,    whites:0,     blacks:0 },
+  'B&W Blue':    { saturation:-1.0, contrast:0,     temp:-0.35, tint:0,    highlights:0,    shadows:0,    whites:0,     blacks:0 },
+  'Infrared':    { saturation:-1.0, contrast:0,     temp:0.5,   tint:0,    highlights:0.4,  shadows:0,    whites:0.3,   blacks:0 },
+  'Fade':          { saturation:0,    contrast:-0.3,  temp:0, tint:0, highlights:0, shadows:0, whites:-0.1, blacks:0.15 },
+  'Cross-process': { saturation:0.3,  contrast:0.2,   temp:-0.2, tint:0.3, highlights:0, shadows:0, whites:0, blacks:0 },
+  'Bleach bypass': { saturation:-0.5, contrast:0.4,   temp:0, tint:0, highlights:0, shadows:0, whites:0, blacks:0, clarity:0.2 },
+});
+
+const BW_NAMES       = ['B&W Natural','B&W Soft','B&W Strong','B&W Red','B&W Orange','B&W Yellow','B&W Green','B&W Blue','Infrared'];
+const CREATIVE_NAMES = ['Fade','Cross-process','Bleach bypass'];
+
+function setActiveFilter(name) {
+  activeFilter = (activeFilter === name) ? null : name;
+  renderFilterChips();
+  if (typeof window.scheduleLiveUpdate === 'function') window.scheduleLiveUpdate();
+}
+
+window.setActiveFilter = setActiveFilter;
+
+function renderFilterChips() {
+  function buildChips(containerId, names) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.innerHTML = '';
+    names.forEach(name => {
+      const btn = document.createElement('button');
+      btn.className = 'lb-chip' + (activeFilter === name ? ' lb-chip-active' : '');
+      btn.textContent = name;
+      btn.addEventListener('click', () => setActiveFilter(name));
+      el.appendChild(btn);
+    });
+  }
+  buildChips('lb-bw-chips',       BW_NAMES);
+  buildChips('lb-creative-chips', CREATIVE_NAMES);
+  buildOverlayChips();
+}
+
+function buildOverlayChips() { /* filled in Task 7 */ }
+
+function initFilters() {
+  renderFilterChips();
+}
 function initSidecar()   {}
 let activeFilter = null;                   // populated in Task 6
 let PIPELINE_FILTERS = {};                 // populated in Task 6

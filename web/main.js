@@ -1882,6 +1882,19 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (lightbox.hidden) return;
+    // B&W quick-select (Ctrl+1–9 / Ctrl+0, lightbox only)
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && /^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        const BW_KEYS = ['B&W Natural','B&W Soft','B&W Strong','B&W Red','B&W Orange',
+                         'B&W Yellow','B&W Green','B&W Blue','Infrared'];
+        if (e.key === '0') {
+            if (typeof setActiveFilter === 'function') setActiveFilter(null);
+        } else {
+            const bwIdx = parseInt(e.key, 10) - 1;
+            if (typeof setActiveFilter === 'function') setActiveFilter(BW_KEYS[bwIdx]);
+        }
+        return;
+    }
     // Don't hijack typing in form controls (sliders, number inputs, prompts).
     const tag = (e.target && e.target.tagName) || '';
     const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
