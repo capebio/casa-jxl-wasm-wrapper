@@ -568,7 +568,9 @@ pool.setLiveHandler((msg) => {
             const rgba = rgbToRgba(msg.rgb, msg.w, msg.h);
             ctx.putImageData(new ImageData(rgba, msg.w, msg.h), 0, 0);
             // Histogram panel reads back canvas pixels — only runs when panel is open (guard inside)
-            if (typeof updateHistogramAndLevels === 'function') updateHistogramAndLevels();
+            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            }
         }
     }
     if (livePendingLook) {
@@ -1436,7 +1438,10 @@ function drawLightboxForCard(card) {
             const { w, h } = card._lightbox;
             const { bmp, orientation } = card._embeddedPreview;
             drawJpegToTargetDims(lightboxCanvas, bmp, orientation || 1, w, h);
-            if (typeof updateHistogramAndLevels === 'function') updateHistogramAndLevels();
+            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                const _ctx = lightboxCanvas.getContext('2d');
+                setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            }
             lbPreviewBadge.hidden = false;
             lbLoadingBadge.hidden = true;
             updateToggleButtonState(card);
@@ -1465,7 +1470,9 @@ function drawLightboxForCard(card) {
                 lightboxCanvas.height = msg.h;
                 const ctx = lightboxCanvas.getContext('2d');
                 ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
-                if (typeof updateHistogramAndLevels === 'function') updateHistogramAndLevels();
+                if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                    setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                }
                 lbLoadingBadge.hidden = true;
                 applyLbTransform();
             });
@@ -1477,13 +1484,19 @@ function drawLightboxForCard(card) {
     if (card._lightbox) {
         const { rgb, w, h } = card._lightbox;
         drawCanvas(lightboxCanvas, w, h, rgb);
-        if (typeof updateHistogramAndLevels === 'function') updateHistogramAndLevels();
+        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            const _ctx = lightboxCanvas.getContext('2d');
+            setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        }
         lbPreviewBadge.hidden = true;
         lbLoadingBadge.hidden = true;
     } else if (card._embeddedPreview) {
         const { bmp, orientation } = card._embeddedPreview;
         drawBitmapOriented(lightboxCanvas, bmp, orientation || 1);
-        if (typeof updateHistogramAndLevels === 'function') updateHistogramAndLevels();
+        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            const _ctx = lightboxCanvas.getContext('2d');
+            setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        }
         lbPreviewBadge.hidden = false;
         lbLoadingBadge.hidden = true;
     } else {
@@ -2026,7 +2039,9 @@ async function triggerLiveUpdateTauri(look) {
         });
         const ctx = lightboxCanvas.getContext('2d');
         ctx.putImageData(new ImageData(rgbToRgbaArr(frame.data), frame.width, frame.height), 0, 0);
-        if (typeof updateHistogramAndLevels === 'function') updateHistogramAndLevels();
+        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        }
     } catch (e) {
         console.warn('apply_look error:', e);
     }

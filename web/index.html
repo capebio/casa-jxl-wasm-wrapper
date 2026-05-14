@@ -205,7 +205,24 @@
                         <button id="lb-hist-mode" class="lb-chip lb-chip-active" style="padding:2px 8px;font-size:11px">L</button>
                       </div>
                       <canvas id="lb-hist-canvas" width="220" height="80" style="width:220px;height:80px;display:block"></canvas>
-                      <!-- levels handles added in Task 3 -->
+                      <div class="lb-levels-wrap">
+                        <div class="lb-levels-row lb-levels-input" title="Input levels">
+                          <div class="lb-levels-track">
+                            <div class="lb-lvl-handle" id="lb-lvl-in-black"  data-lvl="inBlack"  style="left:0%"    title="Black point"></div>
+                            <div class="lb-lvl-handle lb-lvl-mid" id="lb-lvl-in-mid" data-lvl="inMid" style="left:50%"  title="Midtone gamma"></div>
+                            <div class="lb-lvl-handle" id="lb-lvl-in-white"  data-lvl="inWhite"  style="left:100%"  title="White point"></div>
+                          </div>
+                        </div>
+                        <div class="lb-levels-row lb-levels-output" title="Output levels">
+                          <div class="lb-levels-track">
+                            <div class="lb-lvl-handle" id="lb-lvl-out-black" data-lvl="outBlack" style="left:0%"    title="Output black"></div>
+                            <div class="lb-lvl-handle" id="lb-lvl-out-white" data-lvl="outWhite" style="left:100%"  title="Output white"></div>
+                          </div>
+                        </div>
+                        <div style="display:flex;justify-content:flex-end;margin-top:6px">
+                          <button id="lb-levels-reset" class="lb-chip" style="font-size:11px;padding:2px 8px">Reset</button>
+                        </div>
+                      </div>
                     </div>
                 </div>
                 <div id="lb-panel-c" class="lb-panel">

@@ -35,8 +35,131 @@ window.togglePanel = togglePanel;
 function initProfiles()  {}
 function initFilters()   {}
 function initSidecar()   {}
-// Stub — replaced in Task 3
-function applyLevelsToImageData(_imageData) { /* no-op until Task 3 */ }
+// ── Clean canvas cache ────────────────────────────────────────────
+// Stores a copy of the last WASM-rendered pixels before levels are applied.
+// updateHistogramAndLevels always starts from this clean copy so dragging
+// a levels handle doesn't compound the transform on each tick.
+let _cleanData = null; // Uint8ClampedArray
+let _cleanW    = 0;
+let _cleanH    = 0;
+
+function setCleanCanvas(imageData) {
+  _cleanData = new Uint8ClampedArray(imageData.data); // deep copy
+  _cleanW    = imageData.width;
+  _cleanH    = imageData.height;
+  updateHistogramAndLevels();
+}
+
+window.setCleanCanvas = setCleanCanvas;
+
+// ── Levels ────────────────────────────────────────────────────────
+const levelsState = { inBlack: 0, inMid: 1.0, inWhite: 255, outBlack: 0, outWhite: 255 };
+
+const LEVELS_DEFAULTS = { inBlack: 0, inMid: 1.0, inWhite: 255, outBlack: 0, outWhite: 255 };
+
+function levelsIsDefault() {
+  return levelsState.inBlack === 0 && levelsState.inMid === 1.0 &&
+         levelsState.inWhite === 255 && levelsState.outBlack === 0 && levelsState.outWhite === 255;
+}
+
+function remapPixel(v, inB, inM, inW, outB, outW) {
+  const range = inW - inB;
+  if (range <= 0) return outB;
+  const normalized = Math.max(0, Math.min(1, (v - inB) / range));
+  const gamma = Math.pow(normalized, 1.0 / inM);
+  return Math.round(outB + gamma * (outW - outB));
+}
+
+function applyLevelsToImageData(imageData) {
+  if (levelsIsDefault()) return;
+  const { inBlack: inB, inMid: inM, inWhite: inW, outBlack: outB, outWhite: outW } = levelsState;
+  const lut = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) lut[i] = remapPixel(i, inB, inM, inW, outB, outW);
+  const d = imageData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i]   = lut[d[i]];
+    d[i+1] = lut[d[i+1]];
+    d[i+2] = lut[d[i+2]];
+    // alpha unchanged
+  }
+}
+
+function syncHandlePosition(key) {
+  const idMap = { inBlack: 'lb-lvl-in-black', inMid: 'lb-lvl-in-mid',
+                  inWhite: 'lb-lvl-in-white', outBlack: 'lb-lvl-out-black', outWhite: 'lb-lvl-out-white' };
+  const el = document.getElementById(idMap[key]);
+  if (!el) return;
+  let pct;
+  if (key === 'inBlack')  pct = (levelsState.inBlack  / 255) * 100;
+  else if (key === 'inWhite')  pct = (levelsState.inWhite  / 255) * 100;
+  else if (key === 'inMid') {
+    // gamma 0.1–10 mapped logarithmically: log10(1.0)=0 → 50%, larger=brighter(left)
+    const logVal = Math.log10(levelsState.inMid); // range -1 to +1
+    pct = (1 - (logVal + 1) / 2) * 100;
+    pct = Math.max(0, Math.min(100, pct));
+  }
+  else if (key === 'outBlack') pct = (levelsState.outBlack / 255) * 100;
+  else if (key === 'outWhite') pct = (levelsState.outWhite / 255) * 100;
+  el.style.left = pct.toFixed(1) + '%';
+}
+
+function initLevels() {
+  const handles = document.querySelectorAll('.lb-lvl-handle');
+
+  handles.forEach(handle => {
+    const key = handle.dataset.lvl;
+    let dragging = false, startX = 0, startVal = 0;
+
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault();
+      dragging = true;
+      startX   = e.clientX;
+      startVal = key === 'inMid' ? Math.log10(levelsState.inMid) : levelsState[key];
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup',  onUp);
+    });
+
+    function onMove(e) {
+      if (!dragging) return;
+      const track = handle.closest('.lb-levels-track');
+      const trackW = track.getBoundingClientRect().width;
+      if (trackW === 0) return;
+      const dx = e.clientX - startX;
+      const dpct = dx / trackW;
+
+      if (key === 'inMid') {
+        // log scale: left = brighter (gamma > 1), right = darker (gamma < 1)
+        const newLog = Math.max(-1, Math.min(1, startVal - dpct));
+        levelsState.inMid = Math.pow(10, newLog);
+      } else {
+        const dval = dpct * 255;
+        let newVal = Math.round(Math.max(0, Math.min(255, startVal + dval)));
+        if (key === 'inBlack')  newVal = Math.min(newVal, levelsState.inWhite  - 1);
+        if (key === 'inWhite')  newVal = Math.max(newVal, levelsState.inBlack  + 1);
+        if (key === 'outBlack') newVal = Math.min(newVal, levelsState.outWhite - 1);
+        if (key === 'outWhite') newVal = Math.max(newVal, levelsState.outBlack + 1);
+        levelsState[key] = newVal;
+      }
+      syncHandlePosition(key);
+      updateHistogramAndLevels();
+    }
+
+    function onUp() {
+      dragging = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup',  onUp);
+    }
+  });
+
+  document.getElementById('lb-levels-reset')?.addEventListener('click', () => {
+    Object.assign(levelsState, LEVELS_DEFAULTS);
+    ['inBlack','inMid','inWhite','outBlack','outWhite'].forEach(syncHandlePosition);
+    updateHistogramAndLevels();
+  });
+}
+
+window.levelsState = levelsState;
+window.syncHandlePosition = syncHandlePosition;
 
 // ── Histogram ─────────────────────────────────────────────────────
 let histMode = 'L'; // 'L' or 'RGB'
@@ -98,13 +221,18 @@ function drawHistogram(hist) {
 }
 
 function updateHistogramAndLevels() {
-  const lbCanvas = document.getElementById('lightbox-canvas');
   const hPanel = document.getElementById('lb-panel-h');
-  if (!lbCanvas || !hPanel) return;
+  if (!hPanel) return;
+  const lbCanvas = document.getElementById('lightbox-canvas');
+  if (!lbCanvas) return;
+  if (!_cleanData || _cleanW === 0 || _cleanH === 0) return;
   if (hPanel.querySelector('.lb-panel-body').hidden) return;
-  const ctx = lbCanvas.getContext('2d');
-  const imageData = ctx.getImageData(0, 0, lbCanvas.width, lbCanvas.height);
+
+  // Work from the clean pre-levels copy, never from the already-leveled canvas
+  const workBuf = new Uint8ClampedArray(_cleanData);
+  const imageData = new ImageData(workBuf, _cleanW, _cleanH);
   applyLevelsToImageData(imageData);
+  const ctx = lbCanvas.getContext('2d');
   ctx.putImageData(imageData, 0, 0);
   // imageData was modified in-place by applyLevelsToImageData — histogram reflects post-levels output
   const hist = computeHistogram(imageData.data);
@@ -117,6 +245,7 @@ window.updateHistogramAndLevels = updateHistogramAndLevels;
 document.addEventListener('DOMContentLoaded', () => {
   initPanelToggles();
   initHistogram();
+  initLevels();
   initProfiles();
   initFilters();
   initSidecar();
