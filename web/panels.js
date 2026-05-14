@@ -34,9 +34,48 @@ window.togglePanel = togglePanel;
 // ── Stubs for Tasks 5-8 ───────────────────────────────────────────
 function initFilters()   {}
 function initSidecar()   {}
-function getUserProfile() { return null; } // replaced in Task 5
-let activeFilter = null;                   // replaced in Task 6
+let activeFilter = null;                   // populated in Task 6
 let PIPELINE_FILTERS = {};                 // populated in Task 6
+// ── User profiles ─────────────────────────────────────────────────
+const USER_PROFILES_KEY = 'raw-profiles';
+
+function loadUserProfiles() {
+  try { return JSON.parse(localStorage.getItem(USER_PROFILES_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function saveUserProfiles(profiles) {
+  localStorage.setItem(USER_PROFILES_KEY, JSON.stringify(profiles));
+}
+
+function getUserProfile(name) {
+  return loadUserProfiles().find(p => p.name === name)?.look ?? null;
+}
+
+function saveCurrentAsProfile(name) {
+  if (!name || !name.trim()) return;
+  const profiles = loadUserProfiles();
+  const look = typeof window.currentLook === 'function' ? window.currentLook() : {};
+  const entry = { name: name.trim(), look, filter: activeFilter };
+  const existing = profiles.findIndex(p => p.name === name.trim());
+  if (existing >= 0) profiles[existing] = entry;
+  else profiles.push(entry);
+  saveUserProfiles(profiles);
+  renderUserProfileChips();
+}
+
+function loadUserProfileByIndex(idx) {
+  const profiles = loadUserProfiles();
+  const p = profiles[idx];
+  if (!p) return;
+  if (typeof window.applyLookValues === 'function') window.applyLookValues(p.look);
+  if (p.filter && typeof setActiveFilter === 'function') setActiveFilter(p.filter);
+  activeProfile = p.name;
+  renderProfileChips();
+}
+
+window.saveCurrentAsProfile  = saveCurrentAsProfile;
+window.loadUserProfileByIndex = loadUserProfileByIndex;
 
 // ── Colour Profiles ───────────────────────────────────────────────
 const BUILTIN_PROFILES = {
@@ -95,7 +134,15 @@ function renderUserProfileChips() {
   const el = document.getElementById('lb-user-profile-chips');
   if (!el) return;
   el.innerHTML = '';
-  // Task 5 populates this; no-op for now
+  const profiles = loadUserProfiles();
+  profiles.forEach((p, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'lb-chip' + (activeProfile === p.name ? ' lb-chip-active' : '');
+    btn.textContent = `${i + 1}. ${p.name}`;
+    btn.title = `Ctrl+Shift+${(i + 1) % 10}`;
+    btn.addEventListener('click', () => loadUserProfileByIndex(i));
+    el.appendChild(btn);
+  });
 }
 
 function initProfiles() {

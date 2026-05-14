@@ -1834,6 +1834,29 @@ lightbox.addEventListener('click', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+    // Colour profile shortcuts
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'S') {
+        e.preventDefault();
+        // TODO: replace with custom dialog in Tauri (prompt() may behave differently)
+        const name = prompt('Save profile as:');
+        if (name && typeof saveCurrentAsProfile === 'function') saveCurrentAsProfile(name);
+        return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'L') {
+        if (!lightbox.hidden) {
+            e.preventDefault();
+            if (typeof togglePanel === 'function') togglePanel('c');
+        }
+        return;
+    }
+    const slotMatch = (e.ctrlKey || e.metaKey) && e.shiftKey && /^[0-9]$/.test(e.key);
+    if (slotMatch) {
+        e.preventDefault();
+        const idx = e.key === '0' ? 9 : parseInt(e.key, 10) - 1;
+        if (typeof loadUserProfileByIndex === 'function') loadUserProfileByIndex(idx);
+        return;
+    }
+
     // Ctrl/Cmd+A — select/deselect all thumbnails (global, any state)
     if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
         e.preventDefault();
