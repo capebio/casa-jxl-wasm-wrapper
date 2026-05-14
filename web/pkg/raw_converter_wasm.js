@@ -44,8 +44,92 @@ export class ProcessResult {
     /**
      * @returns {number}
      */
+    get exposure_den() {
+        const ret = wasm.__wbg_get_processresult_exposure_den(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get exposure_num() {
+        const ret = wasm.__wbg_get_processresult_exposure_num(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get fnumber_den() {
+        const ret = wasm.__wbg_get_processresult_fnumber_den(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get fnumber_num() {
+        const ret = wasm.__wbg_get_processresult_fnumber_num(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get focal_length_35() {
+        const ret = wasm.__wbg_get_processresult_focal_length_35(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get focal_length_den() {
+        const ret = wasm.__wbg_get_processresult_focal_length_den(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get focal_length_num() {
+        const ret = wasm.__wbg_get_processresult_focal_length_num(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get gps_alt() {
+        const ret = wasm.__wbg_get_processresult_gps_alt(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get gps_lat() {
+        const ret = wasm.__wbg_get_processresult_gps_lat(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get gps_lon() {
+        const ret = wasm.__wbg_get_processresult_gps_lon(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {boolean}
+     */
+    get has_gps() {
+        const ret = wasm.__wbg_get_processresult_has_gps(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * @returns {number}
+     */
     get height() {
         const ret = wasm.__wbg_get_processresult_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get iso() {
+        const ret = wasm.__wbg_get_processresult_iso(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -79,6 +163,13 @@ export class ProcessResult {
     /**
      * @returns {number}
      */
+    get quality() {
+        const ret = wasm.__wbg_get_processresult_quality(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
     get thumb_h() {
         const ret = wasm.__wbg_get_processresult_thumb_h(this.__wbg_ptr);
         return ret >>> 0;
@@ -105,6 +196,20 @@ export class ProcessResult {
         return ret;
     }
     /**
+     * @returns {boolean}
+     */
+    get wb_from_camera() {
+        const ret = wasm.__wbg_get_processresult_wb_from_camera(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get wb_mode() {
+        const ret = wasm.__wbg_get_processresult_wb_mode(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {number}
      */
     get wb_r_used() {
@@ -127,6 +232,36 @@ export class ProcessResult {
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
         return v1;
+    }
+    /**
+     * @returns {string}
+     */
+    get datetime() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.processresult_datetime(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get lens() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.processresult_lens(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * @returns {string}
@@ -200,6 +335,52 @@ export class ProcessResult {
     }
 }
 if (Symbol.dispose) ProcessResult.prototype[Symbol.dispose] = ProcessResult.prototype.free;
+
+/**
+ * Rotated RGB8 buffer with updated dimensions.
+ */
+export class RotateResult {
+    static __wrap(ptr) {
+        const obj = Object.create(RotateResult.prototype);
+        obj.__wbg_ptr = ptr;
+        RotateResultFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RotateResultFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_rotateresult_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get height() {
+        const ret = wasm.__wbg_get_rotateresult_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get width() {
+        const ret = wasm.__wbg_get_rotateresult_width(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    take_rgb() {
+        const ret = wasm.rotateresult_take_rgb(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) RotateResult.prototype[Symbol.dispose] = RotateResult.prototype.free;
 
 /**
  * Re-apply tonemap + orientation to a cached lightbox-sized rgb16 buffer.
@@ -309,6 +490,25 @@ export function rgb_to_rgba(rgb) {
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
 }
+
+/**
+ * Rotate an RGB8 buffer clockwise by `turns` × 90°  (0=0°, 1=90°, 2=180°, 3=270°).
+ * Returns the rotated buffer and new (width, height).
+ * @param {Uint8Array} src
+ * @param {number} width
+ * @param {number} height
+ * @param {number} turns
+ * @returns {RotateResult}
+ */
+export function rotate_rgb8(src, width, height, turns) {
+    const ptr0 = passArray8ToWasm0(src, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.rotate_rgb8(ptr0, len0, width, height, turns);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return RotateResult.__wrap(ret[0]);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -390,6 +590,9 @@ function __wbg_get_imports() {
 const ProcessResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_processresult_free(ptr, 1));
+const RotateResultFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_rotateresult_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
