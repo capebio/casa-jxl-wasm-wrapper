@@ -109,6 +109,9 @@ function toggleGrain() {
     drawGrain(canvas);
   } else {
     canvas.style.display = 'none';
+    // Cancel any pending SVG-image load so it doesn't draw to the now-hidden
+    // canvas and so _grainImgPending doesn't interfere with the next toggle-on.
+    if (_grainImgPending) { _grainImgPending.onload = null; _grainImgPending = null; }
   }
   buildOverlayChips();
 }
@@ -156,7 +159,7 @@ function initFilters() {
 const SIDECAR_PREFIX = 'raw-sidecar:';
 
 function getSidecarKey(filename) {
-  return SIDECAR_PREFIX + filename;
+  return SIDECAR_PREFIX + filename.slice(0, 255);
 }
 
 function buildSidecarData(filename) {
@@ -182,7 +185,11 @@ async function saveSidecar(filename) {
       console.error('saveSidecar Tauri error', e);
     }
   } else {
-    localStorage.setItem(getSidecarKey(filename), json);
+    try {
+      localStorage.setItem(getSidecarKey(filename), json);
+    } catch (e) {
+      console.error('saveSidecar localStorage quota exceeded', e);
+    }
   }
   updateSidecarDot(filename, true);
 }
@@ -262,7 +269,11 @@ function loadUserProfiles() {
 }
 
 function saveUserProfiles(profiles) {
-  localStorage.setItem(USER_PROFILES_KEY, JSON.stringify(profiles));
+  try {
+    localStorage.setItem(USER_PROFILES_KEY, JSON.stringify(profiles));
+  } catch (e) {
+    console.error('saveUserProfiles localStorage quota exceeded', e);
+  }
 }
 
 function getUserProfile(name) {
@@ -272,7 +283,10 @@ function getUserProfile(name) {
 function saveCurrentAsProfile(name) {
   if (!name || !name.trim()) return;
   const profiles = loadUserProfiles();
-  const look = typeof window.currentLook === 'function' ? window.currentLook() : {};
+  const rawLook = typeof window.currentLook === 'function' ? window.currentLook() : {};
+  const look = Object.fromEntries(
+    LOOK_PARAMS.map(k => [k, k in rawLook ? clampLook(k, rawLook[k]) : 0])
+  );
   const entry = { name: name.trim(), look, filter: activeFilter };
   const existing = profiles.findIndex(p => p.name === name.trim());
   if (existing >= 0) profiles[existing] = entry;
