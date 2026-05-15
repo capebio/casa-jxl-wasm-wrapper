@@ -8,10 +8,10 @@
 //! All stages here are single-threaded; switch to `wasm-bindgen-rayon` if
 //! the host can set COOP/COEP and we want to use Web Workers.
 
-mod decompress;
-mod demosaic;
-mod pipeline;
-mod tiff;
+use raw_pipeline::decompress;
+use raw_pipeline::demosaic;
+use raw_pipeline::pipeline;
+use raw_pipeline::tiff;
 
 use wasm_bindgen::prelude::*;
 
@@ -103,7 +103,10 @@ impl ProcessResult {
 #[wasm_bindgen]
 impl ProcessResult {
     /// Move the RGB buffer out as a `Uint8Array`.  Caller owns the bytes.
-    // Transfers ownership; returns empty Vec<u8> on subsequent calls.
+    // wasm-bindgen copies Vec<u8> into a JS-owned Uint8Array via
+    // getUint8Memory0().slice() before returning, so the Uint8Array remains
+    // valid even after the caller calls result.free().
+    // Returns empty on subsequent calls (ownership transferred).
     pub fn take_rgb(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.rgb)
     }
@@ -114,7 +117,7 @@ impl ProcessResult {
     }
 
     /// Move the lightbox-sized packed u16 LE buffer out.  Caller owns the bytes.
-    // Transfers ownership; returns empty Vec<u8> on subsequent calls.
+    // Same copy semantics as take_rgb — safe to use after result.free().
     pub fn take_rgb16_lb(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.rgb16_lb)
     }
@@ -291,9 +294,20 @@ pub fn process_orf(
     };
 
     let t = now_ms();
-    let mut rgb16 = demosaic::demosaic_rggb(&raw, w, h).map_err(|e| JsError::new(&e))?;
+    let mut rgb16 = demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| JsError::new(&e))?;
     let demosaic_ms = now_ms() - t;
     drop(raw);
+
+    // ISO-gated luminance NR — applied pre-downscale so both lb and thumb benefit.
+    let nr_strength = match info.iso.unwrap_or(0) {
+        iso if iso >= 6400 => 0.50f32,
+        iso if iso >= 3200 => 0.35,
+        iso if iso >= 1600 => 0.20,
+        _ => 0.0,
+    };
+    if nr_strength > 0.0 {
+        pipeline::apply_luminance_nr(&mut rgb16, w, h, nr_strength);
+    }
 
     // Compute lightbox + thumb rgb16 caches (pre-tonemap, pre-orientation).
     const LB_LONG_EDGE: usize = 1800;
