@@ -318,10 +318,10 @@ pub fn process_orf(
 
     let t = now_ms();
     if wb_r_override.is_finite() && wb_r_override > 0.0 {
-        params.wb_r = wb_r_override;
+        params.wb_r = wb_r_override.min(8.0);
     }
     if wb_b_override.is_finite() && wb_b_override > 0.0 {
-        params.wb_b = wb_b_override;
+        params.wb_b = wb_b_override.min(8.0);
     }
     if exposure_ev.is_finite()  { params.exposure_ev = exposure_ev; }
     if contrast.is_finite()     { params.contrast    = contrast; }
@@ -449,6 +449,9 @@ pub fn downscale_rgb(
     if dst_w == 0 || dst_h == 0 {
         return Err(JsError::new("downscale_rgb: dst dimensions must be > 0"));
     }
+    if src_w == 0 || src_h == 0 {
+        return Err(JsError::new("downscale_rgb: src dimensions must be > 0"));
+    }
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
     let mut out = vec![0u8; dw * dh * 3];
@@ -526,8 +529,9 @@ pub fn apply_look(
 
     // 2. Build PipelineParams
     let mut params = pipeline::PipelineParams::default_olympus();
-    params.wb_r = wb_r;
-    params.wb_b = wb_b;
+    // Guard against 0/NaN/negative wb values from callers; use olympus defaults as fallback.
+    if wb_r.is_finite() && wb_r > 0.0 { params.wb_r = wb_r; }
+    if wb_b.is_finite() && wb_b > 0.0 { params.wb_b = wb_b; }
     // Falls back to built-in CAM_TO_SRGB if caller passes wrong-length slice.
     if color_matrix_flat.len() == 9 {
         let mut m = [[0f32; 3]; 3];

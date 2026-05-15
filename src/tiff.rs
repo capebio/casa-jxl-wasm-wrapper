@@ -253,8 +253,24 @@ impl IfdEntry {
     }
 
     fn as_ascii(&self, r: &Reader) -> String {
-        if self.count <= 4 {
+        if self.count == 0 {
             return String::new();
+        }
+        if self.count <= 4 {
+            // TIFF spec: ASCII with count≤4 is stored inline in the 4-byte value
+            // field, not as a file pointer.  Extract bytes in file-endian order.
+            // Fixes GPS LatitudeRef/LongitudeRef (count=2, 'N'/'S'/'E'/'W'+NUL)
+            // which were previously always returning empty → wrong hemisphere sign.
+            let raw = if r.le {
+                self.value_off.to_le_bytes()
+            } else {
+                self.value_off.to_be_bytes()
+            };
+            let n = (self.count as usize).min(4);
+            return String::from_utf8_lossy(&raw[..n])
+                .trim_end_matches('\0')
+                .trim_end()
+                .to_string();
         }
         let start = self.value_off as usize;
         let end = match start.checked_add(self.count as usize) {
@@ -334,10 +350,13 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
     let Ok(count) = sub.u16(sub_off) else {
         return;
     };
+    let count = count.min(512); // cap to match read_ifd; crafted files can set count=65535
 
     // OLYMPUS\0 / OM SYSTEM\0: IFD value-offsets are relative to the MakerNote start
     // (base_off). OLYMP\0 legacy uses absolute file offsets (base_off == 0).
-    let abs = |v: u32| base_off + v as usize;
+    // saturating_add: if base_off + v would overflow usize, the result is usize::MAX
+    // which is always out-of-bounds, so subsequent Reader calls will safely return Err.
+    let abs = |v: u32| base_off.saturating_add(v as usize);
 
     // Extract the first inline SHORT from an IFD value field.
     // TIFF stores SHORT[1] or SHORT[2] directly in the 4-byte value field when
@@ -446,8 +465,8 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
 fn parse_equipment_subifd(r: &Reader, off: u32, base_off: usize, info: &mut OrfInfo) -> Result<()> {
     let p = off as usize;
     if p + 2 > r.data.len() { return Ok(()); }
-    let count = r.u16(p)?;
-    for i in 0..count as usize {
+    let count = (r.u16(p)? as usize).min(512);
+    for i in 0..count {
         let e = p + 2 + i * 12;
         if e + 12 > r.data.len() { break; }
         let tag = r.u16(e)?;
@@ -458,8 +477,8 @@ fn parse_equipment_subifd(r: &Reader, off: u32, base_off: usize, info: &mut OrfI
         // relative to the MakerNote base (same as parse_image_processing_subifd).
         // (0x0202 is LensSerialNumber — a hex string, not the human name.)
         if tag == 0x0203 && dtype == 2 && cnt > 4 {
-            let start = base_off + val as usize;
-            let end = start + cnt as usize;
+            let start = base_off.saturating_add(val as usize);
+            let end = start.saturating_add(cnt as usize);
             if let Some(bytes) = r.data.get(start..end.min(r.data.len())) {
                 info.lens = String::from_utf8_lossy(bytes)
                     .trim_end_matches('\0')
@@ -474,8 +493,8 @@ fn parse_equipment_subifd(r: &Reader, off: u32, base_off: usize, info: &mut OrfI
 fn parse_camera_settings_subifd(r: &Reader, off: u32, _base_off: usize, info: &mut OrfInfo) -> Result<()> {
     let p = off as usize;
     if p + 2 > r.data.len() { return Ok(()); }
-    let count = r.u16(p)?;
-    for i in 0..count as usize {
+    let count = (r.u16(p)? as usize).min(512);
+    for i in 0..count {
         let e = p + 2 + i * 12;
         if e + 12 > r.data.len() { break; }
         let tag = r.u16(e)?;
@@ -496,8 +515,8 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
     if p + 2 > r.data.len() {
         return Ok(());
     }
-    let count = r.u16(p)?;
-    for i in 0..count as usize {
+    let count = (r.u16(p)? as usize).min(512);
+    for i in 0..count {
         let e = p + 2 + i * 12;
         if e + 12 > r.data.len() {
             break;
@@ -509,8 +528,9 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
         // WB_RBLevels: format [R_balance, B_balance, G_ref, G_ref] where
         // each value is the channel gain ×256 (G_ref = 256 = unity).
         // ptr+0 = R gain ×256, ptr+2 = B gain ×256.
+        // cnt<=2: both SHORTs fit inline in the 4-byte value field.
         if tag == 0x0100 && dtype == 3 && cnt >= 2 {
-            let (r_lvl, b_lvl) = if cnt == 2 {
+            let (r_lvl, b_lvl) = if cnt <= 2 {
                 // Inline: val was already decoded with correct endianness.
                 // LE: first SHORT in low 16 bits, second in high 16 bits.
                 // BE: first SHORT in high 16 bits, second in low 16 bits.
@@ -521,7 +541,7 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
                 };
                 (r_v, b_v)
             } else {
-                let ptr = base_off + val as usize;
+                let ptr = base_off.saturating_add(val as usize);
                 (r.u16(ptr)?, r.u16(ptr + 2)?)
             };
             if r_lvl > 0 && b_lvl > 0 {
@@ -531,7 +551,7 @@ fn parse_image_processing_subifd(r: &Reader, off: u32, base_off: usize, info: &m
         }
         // ColorMatrix: SSHORT×9 packed as CamRGB→sRGB (÷256).  Row sums ~1.
         if tag == 0x0200 && cnt == 9 && (dtype == 3 || dtype == 8) {
-            let ptr = base_off + val as usize;
+            let ptr = base_off.saturating_add(val as usize);
             let mut m = [[0f32; 3]; 3];
             let mut ok = true;
             'cm: for row in 0..3 {
