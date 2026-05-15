@@ -5,102 +5,103 @@ severity, and a concrete question.
 
 ---
 
-## Q1 — OM SYSTEM MakerNote offset (TIFF · HIGH)
+## ~~Q1 — OM SYSTEM MakerNote offset~~ CLOSED ✓
 
-**Context:** Olympus ORF files from the OM-1 / OM-5 / newer OM SYSTEM bodies embed
-a MakerNote block with a different magic header than older E-M series bodies.
-The current parser uses a fixed `+14` byte offset past the magic to reach the IFD.
-Forum research suggests OM SYSTEM bodies may use `+16`.
+**Answer (2026-05-15):**  Verified with two files:
 
-**Question:** Do you have an ORF from an OM-1, OM-5, or any OM SYSTEM body whose
-EXIF/WB data parses incorrectly? If so, share the file and we can confirm the
-correct offset and add a branch for it.
+| File | Camera | Header | IFD offset | WB R | WB B | WB mode |
+|------|--------|--------|-----------|------|------|---------|
+| P1100089.ORF | E-M1 Mark III | `OLYMPUS\0` | +12 ✓ | 1.797 | 1.797 | 257 (One-Touch 2) |
+| PA300002.ORF | OM-5 | `OM SYSTEM\0` | +16 ✓ | 1.852 | 2.031 | 0 (Auto) |
+
+Both parse correctly with the current code.  No change needed.
 
 ---
 
-## Q2 — wasm-bindgen Vec<u8> slice guarantee (CONTRACTS · LOW)
+## ~~Q2 — wasm-bindgen Vec<u8> slice guarantee~~ CLOSED ✓
 
-**Context:** Several WASM-exported functions return `Vec<u8>` (e.g. `take_rgb`,
-`take_rgb16_lb`). A finding flagged whether wasm-bindgen copies the heap slice
-into a JS-owned `Uint8Array` automatically, or whether the caller must `.slice()`
-it before the WASM heap is freed.
-
-**Question:** Is there an existing integration test that verifies the returned
-`Uint8Array` is still valid after calling `result.free()`? If not, should we add
-one (in `tests/` as a WASM test, or as a browser smoke test)?
+**Decision (2026-05-15):**  Skip the integration test.  wasm-bindgen converts
+`Vec<u8>` return values via `getUint8Memory0().slice()` — a JS-side copy —
+before `__wbindgen_free` is called.  The returned `Uint8Array` is owned by the
+JS heap and is valid after `result.free()`.  This is wasm-bindgen's
+documented contract, not our logic.  Added a comment to `take_rgb` /
+`take_rgb16_lb` in lib.rs documenting the copy guarantee.
 
 ---
 
 ## Q3 — Vertical-pass cache thrash in blur (PERF · MEDIUM)
 
-**Context:** `pipeline.rs` runs a separable Gaussian blur. The horizontal pass is
-cache-friendly (row-major). The vertical pass walks columns and is likely causing
-cache line thrash on large images (20 MP ≈ 60 MB of rgb16).
+**Benchmark results (2026-05-15)** — 13-tap kernel, 5240×3912 (20 MP / 117 MB rgb16),
+native release build, 5 runs each:
 
-Two options:
-- Transpose the image in-place, run horizontal again, transpose back.
-- Process vertical pass in tiles (e.g. 64-row tiles).
+### Vertical pass only (after shared horizontal pass)
 
-**Question:** Is blur latency on large images a real pain point for you, or is the
-encode step the only visible bottleneck? This guides whether the refactor is worth
-the complexity cost.
+| Method | min | median |
+|--------|-----|--------|
+| naive — current | 1598 ms | 1644 ms |
+| tiled-16 | 1539 ms | 2287 ms |
+| tiled-32 | 4132 ms | 4210 ms |
+| **tiled-128** | **983 ms** | **1019 ms** |
+| transpose + h-pass + transpose | 1032 ms | 1056 ms |
 
----
+### Full blur round-trip (h-pass + v-pass)
 
-## Q4 — Pre-LUT size: 65 536 vs 4 096 entries (PERF · LOW)
+| Method | min | median |
+|--------|-----|--------|
+| current (h + v-naive) | 3034 ms | 3214 ms |
+| h + v-tiled-128 | ~2430 ms | — |
+| h + transpose + h + transpose | 2529 ms | 2694 ms |
 
-**Context:** The tone-mapping LUT is built over all 65 536 possible u16 values.
-ORF sensor data is 12-bit (max 4 096 distinct values), so 93 % of LUT entries are
-unreachable until after demosaic scale-up. Shrinking to 4 096 entries and adjusting
-the index arithmetic would reduce LUT build time and L1 pressure.
+**Reading:**
+- tiled-128 saves ~38% on vertical pass (615 ms), ~20% on round-trip (~600 ms).
+- tiled-32 is 2.5× *slower* than naive — the const-generic tile size affects
+  SIMD codegen; smaller tiles give the vectorizer fewer iterations per inner loop.
+- transpose requires two extra full-image allocations (2 × 117 MB) and an extra
+  h-pass, offsetting its per-pass gains in the round-trip.
 
-**Question:** Are any non-ORF raw formats (e.g. DNG with 14-bit or 16-bit data)
-planned? That would invalidate the 12-bit assumption and require keeping the full LUT.
+**Recommendation:** replace the naive vertical loop in `separable_blur_with_bufs`
+with `tiled-128`.  No extra allocations.  Pure loop restructure.
 
----
-
-## Q5 — Histogram compute: throttle / downsample strategy (PERF · MEDIUM)
-
-**Context:** `computeHistogram` (main.js) runs on the full-resolution display canvas
-pixel-by-pixel in the main thread. On a 20 MP image at 1× zoom this processes
-millions of pixels synchronously. Two options:
-
-- Downsample: compute on a 256-wide version of the image (imperceptible accuracy loss).
-- Throttle: debounce to run at most once per animation frame.
-
-**Question:** Which accuracy level is acceptable — approximate histogram from a
-downscaled image, or exact histogram but capped to N frames/sec?
+**Implemented (2026-05-15):** tiled-128 vertical pass + horizontal interior split in
+`pipeline.rs`; demosaic interior split in `demosaic.rs`.
 
 ---
 
-## Q6 — liveStateMap leak on worker pool rotation (CONC · MEDIUM)
+## ~~Q4 — Pre-LUT size: 65 536 vs 4 096 entries~~ CLOSED ✓
 
-**Context:** When the user drops many files and the worker pool reuses workers, a
-task's `liveStateMap`/`thumbStateMap` entries are only removed on explicit error.
-If a worker is reused for a new task before the old task's state is explicitly
-released, both states co-exist indefinitely (the old one is orphaned).
-
-Proper fix requires a `release_state` message type sent by main.js when a task is
-garbage-collected on the UI side (e.g. when the card leaves the DOM).
-
-**Question:** Is there a card removal / eviction flow already, or would this need a
-new deletion hook in main.js? Given main.js has 1 200+ lines of in-progress stash
-changes, confirm whether it is safe to touch before the stash is landed.
+**Answer (2026-05-15):**  Non-ORF formats (14-bit or 16-bit DNG etc.) are
+planned.  Keep the full 65 536-entry LUT.
 
 ---
 
-## Q7 — strip_offset bounds validation (SECURITY · MEDIUM)
+## ~~Q5 — Histogram compute: throttle / downsample strategy~~ CLOSED ✓
 
-**Context:** `tiff.rs` reads `StripOffsets` and `StripByteCounts` tags and uses them
-to locate compressed pixel data. The offsets are not validated against file length
-before use, so a maliciously crafted ORF could direct reads to arbitrary positions.
+**Answer (2026-05-15):** Approximate is acceptable.  Implemented adaptive stride in
+`computeHistogram` (panels.js): samples ~500 K pixels regardless of resolution.
+For a 20 MP image this is a stride of ~40 — 40× faster, visually indistinguishable
+for 256 histogram bins.
 
-This is currently safe because `Reader::slice()` panics (then returns an error via
-`?`) if the range is out of bounds — but the error message leaks the raw offset value.
+---
 
-**Question:** Should we add explicit `if offset + count > file_len { return Err(…) }`
-validation with a sanitised error message, or is the current panic-then-error path
-acceptable given this is a local tool?
+## ~~Q6 — liveStateMap leak on worker pool rotation~~ CLOSED ✓
+
+**Answer (2026-05-15):** No card-removal eviction flow existed. Leak is triggered
+by re-processing the same card (new taskId issued, old liveStateMap entry orphaned).
+Worst case: reprocessing 20 files leaks ~300 MB in worker heaps.
+
+**Fix:** Three changes — `WorkerPool.releaseState(taskId)` added to main.js;
+called in `startConvert` before re-submission via `if (card._taskId) pool.releaseState(card._taskId)`;
+`release_state` message handler added to worker.js that deletes both
+`liveStateMap` and `thumbStateMap` entries.
+
+---
+
+## ~~Q7 — strip_offset bounds validation~~ CLOSED ✓
+
+**Answer (2026-05-15):** Already implemented — `validate_orf_structure()` in
+lib.rs does `checked_add` for overflow and an explicit `strip_end > data.len()`
+check with sanitised error messages before any slice. No raw offsets leaked.
+Time penalty: negligible (one comparison per file).
 
 ---
 
