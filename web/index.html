@@ -7,9 +7,53 @@
     <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+    <div id="timings-sidebar" class="timings-sidebar">
+        <div class="timings-sidebar-tab" id="timings-tab" aria-label="Open timings (T)">
+            <span class="sidebar-tab-label">Timings</span>
+        </div>
+        <div class="timings-sidebar-panel" id="timings-panel">
+            <div class="resize-handle" id="timings-resize"></div>
+            <section id="stats-panel" class="stats-panel">
+                <header class="stats-header">
+                    <h2>Timings</h2>
+                    <div class="stats-actions">
+                        <button id="run-benchmark" type="button" title="Run the same N files through a matrix of configs">Benchmark</button>
+                        <button id="run-effort-sweep" type="button" title="Sweep effort 1..9 on the picked files at c=3 t=4">Effort sweep</button>
+                        <button id="run-variance-bench" type="button" title="High-effort size/upload analysis on 5 size-spread files">Variance × effort</button>
+                        <button id="run-quality-sweep" type="button" title="Sweep quality 80/85/90/95 on 10 evenly-sampled files at e=3 Falcon">Quality sweep</button>
+                        <button id="run-pixel-peep" type="button" title="Pick photos, encode q=70/75/80/85/90/95 each, compare at 100% pixels">Pixel-peep quality</button>
+                        <button id="copy-stats" type="button">Copy</button>
+                        <button id="clear-stats" type="button">Clear</button>
+                        <button id="timings-close" type="button" title="Close">×</button>
+                    </div>
+                </header>
+                <pre id="stats-log" aria-live="polite"></pre>
+            </section>
+        </div>
+    </div>
+
+    <div id="file-sidebar" class="file-sidebar open">
+        <div class="file-sidebar-tab" id="sidebar-tab" aria-label="Open file picker (L)">
+            <span class="sidebar-tab-label">Files</span>
+        </div>
+        <div class="file-sidebar-panel" id="sidebar-panel">
+            <div class="resize-handle" id="files-resize"></div>
+            <section id="drop" class="drop-target">
+                <input type="file" id="file-input" multiple accept=".orf,.ORF" class="visually-hidden" />
+                <button id="pick">Pick ORF files</button>
+                <p class="hint">or drop files / folders here</p>
+            </section>
+        </div>
+    </div>
+
     <header>
         <div class="title">
             <h1>ORF → JPEG XL — fully in the browser <button class="info-btn" id="info-btn" type="button" aria-label="About this tool">ℹ</button></h1>
+            <div class="view-toggle" role="group" aria-label="Gallery layout">
+                <button class="view-btn active" data-view="rect"    title="Portrait rectangles">Rect</button>
+                <button class="view-btn"         data-view="square"  title="Square crop">Square</button>
+                <button class="view-btn"         data-view="natural" title="Natural proportions">Natural</button>
+            </div>
             <div class="info-popover" id="info-popover" hidden>
                 <p>Olympus 12-bit predictive ORF decode + bilinear demosaic +
                    sRGB pipeline (Rust → wasm) + JXL encode (libjxl via jSquash
@@ -19,37 +63,110 @@
             </div>
         </div>
         <div class="controls">
-            <fieldset class="jxl-fieldset">
-                <legend>JXL</legend>
-                <label class="jxl-row">
-                    <span class="jxl-lbl">quality <strong id="quality-label">90</strong></span>
-                    <input type="range" id="quality-range" min="50" max="100" step="1" value="90" />
-                </label>
-                <label class="jxl-row">
-                    <span class="jxl-lbl">effort <button class="info-btn" id="effort-info-btn" type="button" aria-label="Effort level guide">ℹ</button></span>
-                    <select id="effort-select">
-                        <option value="1">1 — Lightning · fastest, biggest</option>
-                        <option value="3" selected>3 — Falcon · fast, default</option>
-                        <option value="5">5 — Hare · balanced</option>
-                        <option value="6">6 — Wombat · good compression</option>
-                        <option value="7">7 — Squirrel · slow, smallest</option>
-                    </select>
-                </label>
-                <div class="effort-popover" id="effort-popover" hidden>
-                    <p class="effort-intro">Effort only affects <strong>encode speed and file size</strong> — not image quality. Quality slider controls that. All levels at the same quality setting look identical; effort decides how efficiently the data is packed.</p>
-                    <table class="effort-table">
-                        <tr><td class="et-n">1</td><td class="et-animal">⚡ Lightning</td><td class="et-desc">Ultra-fast encode. Files ~25–35% larger than Squirrel. Use for draft batches where speed beats size.</td></tr>
-                        <tr><td class="et-n">3</td><td class="et-animal">🦅 Falcon</td><td class="et-desc">Fast — roughly 3–5× faster than Hare. Good default for everyday shooting.</td></tr>
-                        <tr><td class="et-n">5</td><td class="et-animal">🐇 Hare</td><td class="et-desc">Balanced. Files ~5–10% smaller than Falcon.</td></tr>
-                        <tr><td class="et-n">6</td><td class="et-animal">🦘 Wombat</td><td class="et-desc">Good compression — slower than Hare, smaller files. Max practical effort for 20 MP+ images; higher efforts fall back here if they run out of WASM heap.</td></tr>
-                        <tr><td class="et-n">7</td><td class="et-animal">🐿 Squirrel</td><td class="et-desc">Best compression — ~3–5× slower than Hare. Falls back to Wombat on images larger than ~12 MP due to WASM memory limits.</td></tr>
-                    </table>
+            <div class="jxl-group">
+                <fieldset class="jxl-fieldset">
+                    <legend>JXL</legend>
+                    <label class="jxl-row">
+                        <span class="jxl-lbl">quality <strong id="quality-label">90</strong></span>
+                        <input type="range" id="quality-range" min="50" max="100" step="1" value="90" />
+                    </label>
+                    <label class="jxl-row">
+                        <span class="jxl-lbl">effort <button class="info-btn" id="effort-info-btn" type="button" aria-label="Effort level guide">ℹ</button></span>
+                        <select id="effort-select">
+                            <option value="1">1 — Lightning · fastest, biggest</option>
+                            <option value="3" selected>3 — Falcon · fast, default</option>
+                            <option value="5">5 — Hare · balanced</option>
+                            <option value="6">6 — Wombat · good compression</option>
+                            <option value="7">7 — Squirrel · slow, smallest</option>
+                        </select>
+                    </label>
+                    <div class="effort-popover" id="effort-popover" hidden>
+                        <p class="effort-intro">Effort only affects <strong>encode speed and file size</strong> — not image quality. Quality slider controls that. All levels at the same quality setting look identical; effort decides how efficiently the data is packed.</p>
+                        <table class="effort-table">
+                            <tr><td class="et-n">1</td><td class="et-animal">⚡ Lightning</td><td class="et-desc">Ultra-fast encode. Files ~25–35% larger than Squirrel. Use for draft batches where speed beats size.</td></tr>
+                            <tr><td class="et-n">3</td><td class="et-animal">🦅 Falcon</td><td class="et-desc">Fast — roughly 3–5× faster than Hare. Good default for everyday shooting.</td></tr>
+                            <tr><td class="et-n">5</td><td class="et-animal">🐇 Hare</td><td class="et-desc">Balanced. Files ~5–10% smaller than Falcon.</td></tr>
+                            <tr><td class="et-n">6</td><td class="et-animal">🦘 Wombat</td><td class="et-desc">Good compression — slower than Hare, smaller files. Max practical effort for 20 MP+ images; higher efforts fall back here if they run out of WASM heap.</td></tr>
+                            <tr><td class="et-n">7</td><td class="et-animal">🐿 Squirrel</td><td class="et-desc">Best compression — ~3–5× slower than Hare. Falls back to Wombat on images larger than ~12 MP due to WASM memory limits.</td></tr>
+                        </table>
+                    </div>
+                    <label class="jxl-row">
+                        <span class="jxl-lbl">lossless</span>
+                        <input type="checkbox" id="lossless-toggle" />
+                    </label>
+                </fieldset>
+                <div class="jxl-subrow">
+                    <fieldset class="presets-fieldset">
+                        <legend>Presets</legend>
+                        <div class="preset-grid">
+                            <button type="button" class="preset-btn" data-preset="0">1</button>
+                            <button type="button" class="preset-btn" data-preset="1">2</button>
+                            <button type="button" class="preset-btn" data-preset="2">3</button>
+                            <button type="button" class="preset-btn" data-preset="3">4</button>
+                            <button type="button" class="preset-btn" data-preset="4">5</button>
+                            <button type="button" class="preset-btn" data-preset="5">6</button>
+                            <button type="button" class="preset-btn" data-preset="6">7</button>
+                            <button type="button" class="preset-btn" data-preset="7">8</button>
+                            <button type="button" class="preset-btn" data-preset="8">9</button>
+                        </div>
+                    </fieldset>
+                    <fieldset class="apply-fieldset">
+                        <legend>Apply</legend>
+                        <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
+                        <button id="apply-look" type="button" class="apply-btn" title="Bake current look into selected images (re-runs full pipeline)">Apply to selected</button>
+                        <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
+                    </fieldset>
                 </div>
-                <label class="jxl-row">
-                    <span class="jxl-lbl">lossless</span>
-                    <input type="checkbox" id="lossless-toggle" />
-                </label>
-            </fieldset>
+            </div>
+
+            <div class="look-panels">
+                <fieldset class="look-column">
+                    <legend>Exposure</legend>
+                    <label class="lr">
+                        <span>exposure <strong data-label="exposureEv">0.00</strong></span>
+                        <input type="range" data-look="exposureEv" min="-3" max="3" step="0.05" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>highlights <strong data-label="highlights">0</strong></span>
+                        <input type="range" data-look="highlights" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>shadows <strong data-label="shadows">0</strong></span>
+                        <input type="range" data-look="shadows" min="-100" max="100" step="1" value="0" />
+                    </label>
+                </fieldset>
+
+                <fieldset class="look-column">
+                    <legend>Contrast</legend>
+                    <label class="lr">
+                        <span>contrast <strong data-label="contrast">0</strong></span>
+                        <input type="range" data-look="contrast" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>whites <strong data-label="whites">0</strong></span>
+                        <input type="range" data-look="whites" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>blacks <strong data-label="blacks">0</strong></span>
+                        <input type="range" data-look="blacks" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="toggle" title="Adds +0.15 to baseline contrast (Natural → Vivid)">
+                        <input type="checkbox" id="contrast-boost"> Hi-contrast
+                    </label>
+                </fieldset>
+
+                <fieldset class="look-column">
+                    <legend>Detail</legend>
+                    <label class="lr">
+                        <span>clarity <strong data-label="clarity">0</strong></span>
+                        <input type="range" data-look="clarity" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>texture <strong data-label="texture">0</strong></span>
+                        <input type="range" data-look="texture" min="-100" max="100" step="1" value="0" />
+                    </label>
+                </fieldset>
+            </div>
 
             <fieldset class="look-fieldset color-fieldset">
                 <legend>Color <small>(centred at 0)</small></legend>
@@ -70,104 +187,20 @@
                     <input type="range" data-look="saturation" min="-100" max="100" step="1" value="0" />
                 </label>
             </fieldset>
-
-            <fieldset class="look-fieldset">
-                <legend>Tone <small>(centred at 0)</small></legend>
-                <label class="lr">
-                    <span>exposure <strong data-label="exposureEv">0.00</strong></span>
-                    <input type="range" data-look="exposureEv" min="-3" max="3" step="0.05" value="0" />
-                </label>
-                <label class="lr">
-                    <span>contrast <strong data-label="contrast">0</strong></span>
-                    <input type="range" data-look="contrast" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>clarity <strong data-label="clarity">0</strong></span>
-                    <input type="range" data-look="clarity" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>texture <strong data-label="texture">0</strong></span>
-                    <input type="range" data-look="texture" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>highlights <strong data-label="highlights">0</strong></span>
-                    <input type="range" data-look="highlights" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>shadows <strong data-label="shadows">0</strong></span>
-                    <input type="range" data-look="shadows" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>whites <strong data-label="whites">0</strong></span>
-                    <input type="range" data-look="whites" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="lr">
-                    <span>blacks <strong data-label="blacks">0</strong></span>
-                    <input type="range" data-look="blacks" min="-100" max="100" step="1" value="0" />
-                </label>
-                <label class="toggle" title="Adds +0.15 to baseline contrast (Natural → Vivid)">
-                    <input type="checkbox" id="contrast-boost"> Hi-contrast
-                </label>
-            </fieldset>
-
-            <fieldset class="presets-fieldset">
-                <legend>Presets</legend>
-                <div class="preset-grid">
-                    <button type="button" class="preset-btn" data-preset="0">1</button>
-                    <button type="button" class="preset-btn" data-preset="1">2</button>
-                    <button type="button" class="preset-btn" data-preset="2">3</button>
-                    <button type="button" class="preset-btn" data-preset="3">4</button>
-                    <button type="button" class="preset-btn" data-preset="4">5</button>
-                    <button type="button" class="preset-btn" data-preset="5">6</button>
-                    <button type="button" class="preset-btn" data-preset="6">7</button>
-                    <button type="button" class="preset-btn" data-preset="7">8</button>
-                    <button type="button" class="preset-btn" data-preset="8">9</button>
-                </div>
-            </fieldset>
-
-            <fieldset class="apply-fieldset">
-                <legend>Apply</legend>
-                <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
-                <button id="apply-look" type="button" class="apply-btn" title="Bake current look into selected images (re-runs full pipeline)">Apply to selected</button>
-                <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
-            </fieldset>
         </div>
     </header>
 
     <main>
-        <section id="drop" class="drop-target">
-            <input type="file" id="file-input" multiple accept=".orf,.ORF" class="visually-hidden" />
-            <button id="pick">Pick ORF files</button>
-            <p class="hint">or drop ORF files / folders here</p>
-        </section>
-
         <section id="status" class="status" hidden>
             <span id="status-timings" class="status-timings"></span>
             <progress id="progress" max="100" value="0"></progress>
             <span id="status-text"></span>
         </section>
 
-        <div class="gallery-toolbar">
-            <div class="view-toggle" role="group" aria-label="Gallery layout">
-                <button class="view-btn active" data-view="rect"    title="Portrait rectangles">Rect</button>
-                <button class="view-btn"         data-view="square"  title="Square crop">Square</button>
-                <button class="view-btn"         data-view="natural" title="Natural proportions">Natural</button>
-            </div>
-        </div>
+
 
         <section id="grid" class="grid"></section>
 
-        <section id="stats-panel" class="stats-panel">
-            <header class="stats-header">
-                <h2>Timings (copy-paste back to chat)</h2>
-                <div class="stats-actions">
-                    <button id="run-benchmark" type="button" title="Run the same N files through a matrix of configs">Benchmark</button>
-                    <button id="copy-stats" type="button">Copy</button>
-                    <button id="clear-stats" type="button">Clear</button>
-                </div>
-            </header>
-            <pre id="stats-log" aria-live="polite"></pre>
-        </section>
     </main>
 
     <div id="lightbox" class="lightbox" hidden>
@@ -258,6 +291,7 @@
                       <div id="lb-creative-chips" class="lb-chip-group"></div>
                       <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 8px">Overlays</div>
                       <div id="lb-overlay-chips" class="lb-chip-group"></div>
+                      <div id="lb-vignette-controls" hidden></div>
                       <div style="margin-top:8px;font-size:11px;color:#666">Ctrl+1–9 B&amp;W · Ctrl+0 clear</div>
                     </div>
                 </div>

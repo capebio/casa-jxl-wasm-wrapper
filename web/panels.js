@@ -22,6 +22,13 @@ function togglePanel(key) {
   const btn  = panelBtns[key];
   if (!body || !btn) return;
   const opening = body.hidden;
+  // Accordion: close all other panels before toggling this one.
+  Object.keys(panelBodies).forEach(k => {
+    if (k !== key) {
+      panelBodies[k].hidden = true;
+      panelBtns[k].classList.remove('active');
+    }
+  });
   body.hidden = !opening;
   btn.classList.toggle('active', opening);
   if (key === 'h' && opening && typeof updateHistogramAndLevels === 'function') {
@@ -35,6 +42,9 @@ window.togglePanel = togglePanel;
 let activeFilter    = null;
 let grainActive     = false;
 let vignetteActive  = false;
+let vignetteAmount  = 0.65;
+let vignetteWidth   = 0.45;
+let vignetteColor   = 'black'; // 'black' | 'white' | 'grey'
 let _grainImgPending = null;
 let PIPELINE_FILTERS = {
   'B&W Natural': { saturation:-1.0, contrast:0,     temp:0,     tint:0,    highlights:0,     shadows:0,   whites:0,     blacks:0 },
@@ -98,6 +108,12 @@ function buildOverlayChips() {
   vigBtn.textContent = 'Vignette';
   vigBtn.addEventListener('click', toggleVignette);
   el.appendChild(vigBtn);
+
+  const ctrlsEl = document.getElementById('lb-vignette-controls');
+  if (ctrlsEl) {
+    ctrlsEl.hidden = !vignetteActive;
+    if (vignetteActive) buildVignetteControls(ctrlsEl);
+  }
 }
 
 function toggleGrain() {
@@ -116,18 +132,82 @@ function toggleGrain() {
   buildOverlayChips();
 }
 
+const VIG_COLORS = { black: '#000000', white: '#ffffff', grey: '#808080' };
+
+function applyVignetteStyle() {
+  const el = document.getElementById('lb-vignette-overlay');
+  if (!el) return;
+  const hex = VIG_COLORS[vignetteColor] || '#000000';
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const stop = Math.round((1 - vignetteWidth) * 100);
+  el.style.background = `radial-gradient(ellipse at center, transparent ${stop}%, rgba(${r},${g},${b},${vignetteAmount}) 100%)`;
+}
+
 function toggleVignette() {
   vignetteActive = !vignetteActive;
   const el = document.getElementById('lb-vignette-overlay');
-  if (el) el.style.display = vignetteActive ? 'block' : 'none';
+  if (vignetteActive) {
+    applyVignetteStyle();
+    if (el) el.style.display = 'block';
+  } else {
+    if (el) el.style.display = 'none';
+  }
   buildOverlayChips();
+}
+
+function buildVignetteControls(container) {
+  container.innerHTML = '';
+
+  function sliderRow(label, id, val, onChange) {
+    const row = document.createElement('div');
+    row.className = 'vig-slider-row';
+    const lbl = document.createElement('span');
+    lbl.className = 'vig-slider-label';
+    lbl.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'range'; input.id = id;
+    input.min = 0; input.max = 1; input.step = 0.01; input.value = val;
+    input.addEventListener('input', onChange);
+    row.appendChild(lbl); row.appendChild(input);
+    container.appendChild(row);
+  }
+
+  sliderRow('Amount', 'vig-amount', vignetteAmount, e => {
+    vignetteAmount = parseFloat(e.target.value);
+    applyVignetteStyle();
+  });
+  sliderRow('Width', 'vig-width', vignetteWidth, e => {
+    vignetteWidth = parseFloat(e.target.value);
+    applyVignetteStyle();
+  });
+
+  const swatchRow = document.createElement('div');
+  swatchRow.className = 'vig-swatch-row';
+  [['white', '#ffffff'], ['grey', '#808080'], ['black', '#000000']].forEach(([key, hex]) => {
+    const sw = document.createElement('button');
+    sw.className = 'vig-swatch' + (vignetteColor === key ? ' active' : '');
+    sw.style.background = hex;
+    sw.title = key.charAt(0).toUpperCase() + key.slice(1);
+    sw.addEventListener('click', () => {
+      vignetteColor = key;
+      applyVignetteStyle();
+      buildVignetteControls(container);
+    });
+    swatchRow.appendChild(sw);
+  });
+  container.appendChild(swatchRow);
 }
 
 function drawGrain(canvas) {
   if (_grainImgPending) { _grainImgPending.onload = null; _grainImgPending = null; }
-  const ref = document.getElementById('lightbox-canvas');
-  const w = (ref && ref.width)  || 800;
-  const h = (ref && ref.height) || 600;
+  // Use the viewport's CSS pixel dimensions, not the image buffer size.
+  // Setting canvas.width to the full image resolution (e.g. 1800px) would
+  // override the CSS inset:0 sizing and misplace the canvas.
+  const vp = canvas.parentElement;
+  const w = (vp ? vp.offsetWidth  : 0) || 800;
+  const h = (vp ? vp.offsetHeight : 0) || 600;
   canvas.width  = w;
   canvas.height = h;
   const ctx = canvas.getContext('2d');
@@ -171,7 +251,10 @@ function buildSidecarData(filename) {
     outBlack: window.levelsState.outBlack,
     outWhite: window.levelsState.outWhite,
   } : { inBlack:0, inMid:1.0, inWhite:255, outBlack:0, outWhite:255 };
-  return { filename, look, profile: activeProfile, filter: activeFilter, levels };
+  const vignette = vignetteActive
+    ? { amount: vignetteAmount, width: vignetteWidth, color: vignetteColor }
+    : null;
+  return { filename, look, profile: activeProfile, filter: activeFilter, levels, vignette };
 }
 
 async function saveSidecar(filename) {
@@ -237,6 +320,16 @@ async function applySidecar(sidecar) {
   if (sidecar.filter !== undefined) {
     activeFilter = sidecar.filter;
     if (typeof renderFilterChips === 'function') renderFilterChips();
+  }
+  if (sidecar.vignette) {
+    const v = sidecar.vignette;
+    if (typeof v.amount === 'number') vignetteAmount = Math.max(0, Math.min(1, v.amount));
+    if (typeof v.width  === 'number') vignetteWidth  = Math.max(0, Math.min(1, v.width));
+    if (['black', 'white', 'grey'].includes(v.color)) vignetteColor = v.color;
+    vignetteActive = true;
+    const vigEl = document.getElementById('lb-vignette-overlay');
+    if (vigEl) { applyVignetteStyle(); vigEl.style.display = 'block'; }
+    buildOverlayChips();
   }
   if (sidecar.levels && window.levelsState) {
     const ranges = { inBlack:[0,255], inMid:[0.1,10], inWhite:[0,255], outBlack:[0,255], outWhite:[0,255] };
@@ -321,7 +414,7 @@ const BUILTIN_PROFILES = {
 
 let activeProfile = null;
 
-const LOOK_PARAMS = ['exposureEv','contrast','highlights','shadows','whites','blacks',
+const LOOK_PARAMS = ['exposureEv','contrast','shadows','highlights','whites','blacks',
                      'saturation','vibrance','temp','tint','texture','clarity'];
 
 function clampLook(k, v) {
@@ -523,7 +616,10 @@ function computeHistogram(pixels) {
   const r   = new Uint32Array(256);
   const g   = new Uint32Array(256);
   const b   = new Uint32Array(256);
-  for (let i = 0; i < pixels.length; i += 4) {
+  // Sample ~500 K pixels regardless of resolution: imperceptible for 256-bin display,
+  // 40× faster on a 20 MP image vs iterating every pixel.
+  const stride = Math.max(1, Math.floor(pixels.length / 4 / 500_000)) * 4;
+  for (let i = 0; i < pixels.length; i += stride) {
     const rv = pixels[i], gv = pixels[i+1], bv = pixels[i+2];
     lum[Math.round(0.299 * rv + 0.587 * gv + 0.114 * bv)]++;
     r[rv]++; g[gv]++; b[bv]++;

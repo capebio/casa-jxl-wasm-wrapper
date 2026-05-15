@@ -128,6 +128,63 @@ function looksTouched() {
     return lookInputs.some((el) => Number(el.value) !== 0);
 }
 
+// Control visibility on adjust
+{
+    const controlsEl = document.querySelector('.controls');
+    const headerEl = document.querySelector('body > header');
+    const lookColumns = [...document.querySelectorAll('.look-column')];
+    let adjustTimer = null;
+
+    function getColumnForInput(input) {
+        for (const col of lookColumns) {
+            if (col.contains(input)) return col;
+        }
+        return null;
+    }
+
+    function startAdjusting(input) {
+        const col = getColumnForInput(input);
+        if (!col) return;
+
+        clearTimeout(adjustTimer);
+        controlsEl.classList.add('adjusting');
+        headerEl.classList.add('adjusting-control');
+        lookColumns.forEach(c => c.classList.remove('active'));
+        col.classList.add('active');
+
+        // Hide all labels in column, show only the one for this input
+        const allLabels = col.querySelectorAll('.lr');
+        allLabels.forEach(label => {
+            if (label.contains(input)) {
+                label.classList.add('active-control');
+            } else {
+                label.classList.remove('active-control');
+            }
+        });
+    }
+
+    function stopAdjusting() {
+        clearTimeout(adjustTimer);
+        adjustTimer = setTimeout(() => {
+            controlsEl.classList.remove('adjusting');
+            headerEl.classList.remove('adjusting-control');
+            lookColumns.forEach(c => c.classList.remove('active'));
+            lookInputs.forEach(input => {
+                const label = input.closest('.lr');
+                if (label) label.classList.remove('active-control');
+            });
+        }, 200);
+    }
+
+    for (const input of lookInputs) {
+        input.addEventListener('pointerdown', () => startAdjusting(input));
+        input.addEventListener('touchstart', () => startAdjusting(input));
+    }
+
+    document.addEventListener('pointerup', stopAdjusting);
+    document.addEventListener('touchend', stopAdjusting);
+}
+
 const statsLog = document.getElementById('stats-log');
 const copyStatsBtn = document.getElementById('copy-stats');
 const clearStatsBtn = document.getElementById('clear-stats');
@@ -252,7 +309,17 @@ losslessToggle.addEventListener('change', () => {
     qualityRange.disabled = losslessToggle.checked;
 });
 
+let focusedFieldset = null;
 for (const el of lookInputs) {
+    el.addEventListener('pointerdown', () => {
+        const fieldset = el.closest('fieldset');
+        if (fieldset && fieldset !== focusedFieldset) {
+            if (focusedFieldset) focusedFieldset.classList.remove('focused-control');
+            focusedFieldset = fieldset;
+            fieldset.classList.add('focused-control');
+            document.body.classList.add('control-focus-mode');
+        }
+    });
     el.addEventListener('input', () => {
         const name = el.dataset.look;
         const lbl = lookLabels.get(name);
@@ -261,6 +328,13 @@ for (const el of lookInputs) {
         scheduleGalleryLiveUpdate();
     });
 }
+document.addEventListener('pointerup', () => {
+    if (focusedFieldset) {
+        focusedFieldset.classList.remove('focused-control');
+        focusedFieldset = null;
+        document.body.classList.remove('control-focus-mode');
+    }
+});
 
 reprocessBtn.addEventListener('click', () => reprocessSelected());
 
@@ -354,8 +428,36 @@ class WorkerPool {
         this.workerForTask = new Map(); // taskId → worker (populated on _releaseWorker)
         this._jxlWorkers = [];
         this._jxlRR      = 0;
-        this._jxlDecodeCallbacks = new Map(); // decodeId → callback fn
+        this._jxlDecodeCallbacks = new Map(); // decodeId → { cb, url }
         this._jxlNextDecodeId    = 1;
+        this._jxlDecodeQueue = [];           // { decodeId, url, priority }
+        this._jxlDecodeBusy  = false;
+        this._jxlPendingByUrl = new Map();   // url → decodeId (dedupe)
+    }
+
+    _jxlPriorityRank(p) { return p === 'high' ? 0 : p === 'low' ? 2 : 1; }
+    _sortJxlQueue() {
+        const rank = this._jxlPriorityRank.bind(this);
+        this._jxlDecodeQueue.sort((a, b) => rank(a.priority) - rank(b.priority));
+    }
+    _pumpJxlQueue() {
+        if (this._jxlDecodeBusy) return;
+        const next = this._jxlDecodeQueue.shift();
+        if (!next) return;
+        this._jxlDecodeBusy = true;
+        (this._jxlDecodeWorker ?? this._jxlWorkers[0]).postMessage({
+            type: 'decode_jxl', decodeId: next.decodeId, url: next.url,
+        });
+    }
+    _onJxlDecodeResponse(data) {
+        const entry = this._jxlDecodeCallbacks.get(data.decodeId);
+        if (entry) {
+            this._jxlDecodeCallbacks.delete(data.decodeId);
+            this._jxlPendingByUrl.delete(entry.url);
+            entry.cb(data);
+        }
+        this._jxlDecodeBusy = false;
+        this._pumpJxlQueue();
     }
 
     init() {
@@ -396,17 +498,34 @@ class WorkerPool {
         this.free.push(w);
     }
 
-    submit(bytes, options, handlers) {
+    submit(bytes, options, handlers, priority = 'normal') {
         const id = this.nextId++;
-        this.tasks.set(id, { handlers, worker: null, released: false });
-        this._dispatch({ id, bytes, options });
+        this.tasks.set(id, { handlers, worker: null, released: false, priority });
+        this._dispatch({ id, bytes, options, priority });
         return id;
+    }
+
+    _rawPriorityRank(p) { return p === 'high' ? 0 : p === 'medium' ? 1 : p === 'low' ? 3 : 2; }
+    _sortQueue() {
+        const rank = this._rawPriorityRank.bind(this);
+        this.queue.sort((a, b) => rank(a.priority) - rank(b.priority));
+    }
+
+    setPriority(taskId, priority) {
+        const t = this.tasks.get(taskId);
+        if (t) t.priority = priority;
+        const q = this.queue.find(x => x.id === taskId);
+        if (q) {
+            q.priority = priority;
+            this._sortQueue();
+        }
     }
 
     _dispatch(task) {
         const w = this.free.pop();
         if (!w) {
             this.queue.push(task);
+            this._sortQueue();
             return;
         }
         this.tasks.get(task.id).worker = w;
@@ -485,8 +604,7 @@ class WorkerPool {
         w.addEventListener('message', ({ data }) => {
             // Decode responses use decodeId, not task id.
             if (data.type === 'jxl_decoded' || data.type === 'decode_error') {
-                const cb = this._jxlDecodeCallbacks.get(data.decodeId);
-                if (cb) { this._jxlDecodeCallbacks.delete(data.decodeId); cb(data); }
+                this._onJxlDecodeResponse(data);
                 return;
             }
             // Encode responses use task id.
@@ -513,17 +631,36 @@ class WorkerPool {
 
     setJxlDecodeWorker(w) {
         this._jxlDecodeWorker = w;
-        w.addEventListener('message', ({ data }) => {
-            const cb = this._jxlDecodeCallbacks.get(data.decodeId);
-            if (cb) { this._jxlDecodeCallbacks.delete(data.decodeId); cb(data); }
-        });
+        w.addEventListener('message', ({ data }) => this._onJxlDecodeResponse(data));
         w.addEventListener('error', (ev) => console.error('jxl-decode-worker error:', ev.message));
     }
 
-    decodeJxl(url, callback) {
+    decodeJxl(url, callback, priority = 'normal') {
+        // Dedupe — if same URL already pending, chain callback + promote priority.
+        const existingId = this._jxlPendingByUrl.get(url);
+        if (existingId != null) {
+            const entry = this._jxlDecodeCallbacks.get(existingId);
+            if (entry) {
+                const prevCb = entry.cb;
+                entry.cb = (msg) => { prevCb(msg); callback(msg); };
+            }
+            // Promote priority if higher
+            const newRank = this._jxlPriorityRank(priority);
+            for (const q of this._jxlDecodeQueue) {
+                if (q.decodeId === existingId) {
+                    if (newRank < this._jxlPriorityRank(q.priority)) q.priority = priority;
+                    break;
+                }
+            }
+            this._sortJxlQueue();
+            return;
+        }
         const decodeId = this._jxlNextDecodeId++;
-        this._jxlDecodeCallbacks.set(decodeId, callback);
-        (this._jxlDecodeWorker ?? this._jxlWorkers[0]).postMessage({ type: 'decode_jxl', decodeId, url });
+        this._jxlDecodeCallbacks.set(decodeId, { cb: callback, url });
+        this._jxlPendingByUrl.set(url, decodeId);
+        this._jxlDecodeQueue.push({ decodeId, url, priority });
+        this._sortJxlQueue();
+        this._pumpJxlQueue();
     }
 
     reprocessLive(taskId, look) {
@@ -541,6 +678,17 @@ class WorkerPool {
             const mine = [...w._taskIds].filter(id => wanted.has(id));
             if (mine.length) w.postMessage({ type: 'reprocess_thumb_live', taskIds: mine, look });
         }
+    }
+
+    // Drop the cached rgb16 live/thumb state for a task that is being
+    // re-submitted. Without this, re-processing the same file N times leaks
+    // ~15 MB per reprocess inside the worker's liveStateMap.
+    releaseState(taskId) {
+        const worker = this.workerForTask.get(taskId);
+        if (!worker) return;
+        worker.postMessage({ type: 'release_state', id: taskId });
+        this.workerForTask.delete(taskId);
+        if (worker._taskIds) worker._taskIds.delete(taskId);
     }
 }
 
@@ -664,7 +812,6 @@ function makeCard(name) {
         <button class="thumb-rot-cw"  title="Rotate 90° CW">↻</button>
         <button class="thumb-rot-ccw" title="Rotate 90° CCW">↺</button>
         <button class="thumb-toggle-jpeg" hidden title="Toggle camera JPEG view">JXL</button>
-        <a class="download" hidden></a>
         <button class="thumb-dl-btn" hidden title="Download JPEG">⬇ JPEG</button>
         <div class="meta">
             <span class="name"></span>
@@ -673,7 +820,6 @@ function makeCard(name) {
         </div>
     `;
     card.querySelector('.name').textContent = name.replace(/\.orf$/i, '');
-    card.querySelector('.download').addEventListener('click', (e) => e.stopPropagation());
     card.querySelector('.thumb-select').addEventListener('click', (e) => {
         e.stopPropagation();
         card.classList.toggle('selected');
@@ -706,7 +852,6 @@ function makeCard(name) {
         uploadBtn.className = 'tauri-upload-btn';
         uploadBtn.title = 'Upload to planner';
         uploadBtn.textContent = '↑';
-        uploadBtn.style.cssText = 'position:absolute;bottom:24px;right:4px;padding:2px 6px;font-size:11px;background:#1a3a6a;color:#eee;border:none;border-radius:3px;cursor:pointer';
         uploadBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
             if (!card._tauriResult) return;
@@ -1109,12 +1254,11 @@ function startConvert(file, existingCard) {
         cards.push(card);
         grid.appendChild(card);
     } else {
-        // Re-processing: clear prior download link + reset state classes.
+        // Re-processing: release old rgb16 state from the worker before re-submitting,
+        // otherwise liveStateMap accumulates ~15 MB per reprocess of the same card.
+        if (card._taskId) pool.releaseState(card._taskId);
         card.classList.remove('encoding', 'error', 'embedded-thumb');
         card.classList.add('busy');
-        const link = card.querySelector('.download');
-        link.hidden = true;
-        link.removeAttribute('href');
         card._lightbox = null;
         // Keep _embeddedPreview alive across reprocess — JPEG-vs-JXL toggle needs it.
         // Force the JXL view back on so the user actually sees the result of
@@ -1193,6 +1337,8 @@ function startConvert(file, existingCard) {
             const bytes = new Uint8Array(buf);
             const opts = currentOptions();
             opts.userRotation = userRotations[file.name] || 0;
+            const initialPriority = card._pendingPriority || 'normal';
+            card._pendingPriority = null;
             const taskId = pool.submit(bytes, opts, {
                 onThumb(msg) {
                     card._thumbRgb = msg.rgb;
@@ -1222,6 +1368,7 @@ function startConvert(file, existingCard) {
                     refreshThumbToggleButton(card);
                     if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
                         drawLightboxForCard(card);
+                        resetLbZoom();
                     }
                 },
                 onDone(msg) {
@@ -1231,11 +1378,7 @@ function startConvert(file, existingCard) {
                     if (card._blobUrl) URL.revokeObjectURL(card._blobUrl);
                     const url = URL.createObjectURL(blob);
                     card._blobUrl = url;
-                    const link = card.querySelector('.download');
-                    link.href = url;
-                    link.download = file.name.replace(/\.orf$/i, '.jxl');
-                    link.textContent = `JXL ${(msg.jxl.byteLength / 1024).toFixed(0)} KB`;
-                    link.hidden = false;
+                    card._jxlDecoded = null;  // cache stale once bytes change
                     card.querySelector('.size').textContent =
                         `${(msg.jxl.byteLength / 1024).toFixed(0)} KB`;
                     const totalMs = card._pipelineMs + msg.jxlMs;
@@ -1285,7 +1428,7 @@ function startConvert(file, existingCard) {
                     totalDone++;
                     refreshStatus();
                 },
-            });
+            }, initialPriority);
             card._taskId = taskId;
             cardByTaskId.set(taskId, card);
         })
@@ -1330,6 +1473,9 @@ function refreshStatus() {
 async function handleFileList(fileList) {
     const orfs = [...fileList].filter(isOrf);
     if (!orfs.length) return;
+
+    window.dockSidebar();
+
     resetLookSliders();
     for (const f of orfs) startConvert(f);
 }
@@ -1366,10 +1512,80 @@ async function gatherFromItems(items) {
     return out;
 }
 
+// Resize handle helper
+function makeResizable(handle, panel, minW, maxW) {
+    let startX, startW;
+    handle.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        startX = e.clientX;
+        startW = panel.offsetWidth;
+        handle.classList.add('dragging');
+        handle.setPointerCapture(e.pointerId);
+    });
+    handle.addEventListener('pointermove', (e) => {
+        if (!handle.classList.contains('dragging')) return;
+        const w = Math.min(maxW, Math.max(minW, startW + (e.clientX - startX)));
+        panel.style.width = w + 'px';
+    });
+    handle.addEventListener('pointerup', () => handle.classList.remove('dragging'));
+}
+
+// Timings sidebar — click-only, no hover
+{
+    const timingsSidebar = document.getElementById('timings-sidebar');
+    const timingsTab = document.getElementById('timings-tab');
+    const timingsClose = document.getElementById('timings-close');
+
+    function toggleTimings(e) { e.stopPropagation(); timingsSidebar.classList.toggle('open'); }
+    function closeTimings() { timingsSidebar.classList.remove('open'); }
+
+    timingsTab.addEventListener('click', toggleTimings);
+    timingsClose.addEventListener('click', closeTimings);
+
+    makeResizable(document.getElementById('timings-resize'), document.getElementById('timings-panel'), 280, 900);
+}
+
+{
+    makeResizable(document.getElementById('files-resize'), document.getElementById('sidebar-panel'), 160, 480);
+}
+
+// File sidebar open/close — runs regardless of Tauri/browser
+{
+    const sidebarEl = document.getElementById('file-sidebar');
+    const sidebarTab = document.getElementById('sidebar-tab');
+
+    function openSidebar() {
+        if (sidebarEl.dataset.docked === '1') sidebarEl.classList.add('open');
+    }
+    function closeSidebar() {
+        if (sidebarEl.dataset.docked === '1') sidebarEl.classList.remove('open');
+    }
+    function toggleSidebar() { sidebarEl.classList.toggle('open'); }
+
+    window.dockSidebar = () => {
+        sidebarEl.dataset.docked = '1';
+        sidebarEl.classList.remove('open');
+    };
+
+    sidebarTab.addEventListener('click', (e) => { e.stopPropagation(); toggleSidebar(); });
+    sidebarEl.addEventListener('mouseenter', openSidebar);
+    sidebarEl.addEventListener('mouseleave', closeSidebar);
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'l' || e.key === 'L') {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            toggleSidebar();
+        }
+    });
+}
+
 if (IS_TAURI) {
     pick.addEventListener('click', async () => {
         const paths = await invoke('pick_files');
-        if (paths.length > 0) startBatchTauri(paths);
+        if (paths.length > 0) {
+            window.dockSidebar();
+            startBatchTauri(paths);
+        }
     });
     window.addEventListener('dragover', (e) => e.preventDefault());
     window.addEventListener('drop', (e) => e.preventDefault());
@@ -1469,6 +1685,7 @@ function zoomAtPoint(clientX, clientY, factor) {
     lbPanY = lbPanY * af + my * (1 - af);
     lbZoom = newZoom;
     applyLbTransform();
+    if (pixelPeepActive) updatePeepBadges();
 }
 
 function drawLightboxForCard(card) {
@@ -1496,6 +1713,21 @@ function drawLightboxForCard(card) {
         if (!card._blobUrl) {
             // JXL not ready yet — fall back to raw.
             card._sourceMode = 'raw';
+        } else if (card._jxlDecoded) {
+            // Cached from prefetch — instant paint.
+            const { rgba, w, h } = card._jxlDecoded;
+            lightboxCanvas.width  = w;
+            lightboxCanvas.height = h;
+            const ctx = lightboxCanvas.getContext('2d');
+            ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            }
+            lbPreviewBadge.hidden = true;
+            lbLoadingBadge.hidden = true;
+            updateToggleButtonState(card);
+            applyLbTransform();
+            return;
         } else {
             lbPreviewBadge.hidden = true;
             lbLoadingBadge.hidden = false;
@@ -1507,6 +1739,7 @@ function drawLightboxForCard(card) {
                     lbLoadingBadge.hidden = true;
                     return;
                 }
+                card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
                 lightboxCanvas.width  = msg.w;
                 lightboxCanvas.height = msg.h;
                 const ctx = lightboxCanvas.getContext('2d');
@@ -1516,13 +1749,33 @@ function drawLightboxForCard(card) {
                 }
                 lbLoadingBadge.hidden = true;
                 applyLbTransform();
-            });
+            }, 'high');
             return;
         }
     }
 
-    // mode === 'raw' (or fallback from unavailable mode)
-    if (card._lightbox && card._lightbox.rgb) {
+    // mode === 'raw' (or fallback from unavailable mode).
+    //
+    // Always paint best-available source synchronously so no stale image from
+    // the previous card leaks through during async fetch.  Order of preference:
+    //   1. Full lightbox-sized RGB (best)
+    //   2. JXL (encoded final output — equivalent quality, in-browser, fast)
+    //   3. Embedded JPEG preview (placeholder, swapped when full arrives)
+    //   4. 1×1 clear (nothing available yet)
+    const hasFullRgb     = !!(card._lightbox && card._lightbox.rgb);
+    const needsTauriFetch = !!(card._lightbox && card._lightbox.id != null
+                               && !card._lightbox.rgb && IS_TAURI);
+    const hasEmbedded    = !!card._embeddedPreview;
+
+    // JXL already encoded but RAW rgb not displayable yet — promote to JXL
+    // so the user sees the real encoded output (no JPEG-preview placeholder).
+    if (!hasFullRgb && card._blobUrl) {
+        card._sourceMode = 'jxl';
+        drawLightboxForCard(card);
+        return;
+    }
+
+    if (hasFullRgb) {
         const { rgb, w, h } = card._lightbox;
         drawCanvas(lightboxCanvas, w, h, rgb);
         if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
@@ -1531,32 +1784,7 @@ function drawLightboxForCard(card) {
         }
         lbPreviewBadge.hidden = true;
         lbLoadingBadge.hidden = true;
-    } else if (card._lightbox && card._lightbox.id != null && IS_TAURI) {
-        // Tauri lazy-fetch: pixels live server-side in lightbox_cache.  Pull
-        // on first open, repaint when ready.
-        lbPreviewBadge.hidden = true;
-        lbLoadingBadge.hidden = false;
-        if (!card._lightbox.fetching) {
-            card._lightbox.fetching = true;
-            invoke('get_lightbox', { id: card._lightbox.id })
-                .then((frame) => {
-                    const rgbU8 =
-                        (frame.data instanceof Uint8ClampedArray || frame.data instanceof Uint8Array)
-                            ? frame.data : Uint8Array.from(frame.data);
-                    card._lightbox.rgb = rgbU8;
-                    card._lightbox.w   = frame.width;
-                    card._lightbox.h   = frame.height;
-                    if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
-                        drawLightboxForCard(card);
-                    }
-                })
-                .catch((e) => {
-                    console.warn('get_lightbox failed:', e);
-                    lbLoadingBadge.hidden = true;
-                })
-                .finally(() => { if (card._lightbox) card._lightbox.fetching = false; });
-        }
-    } else if (card._embeddedPreview) {
+    } else if (hasEmbedded) {
         const { bmp, orientation } = card._embeddedPreview;
         drawBitmapOriented(lightboxCanvas, bmp, orientation || 1);
         if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
@@ -1564,12 +1792,36 @@ function drawLightboxForCard(card) {
             setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
         }
         lbPreviewBadge.hidden = false;
-        lbLoadingBadge.hidden = true;
+        lbLoadingBadge.hidden = !needsTauriFetch;
     } else {
-        lightboxCanvas.width = 1;
+        // Clear to known state so prior card's pixels don't bleed through.
+        lightboxCanvas.width  = 1;
         lightboxCanvas.height = 1;
         lbPreviewBadge.hidden = true;
-        lbLoadingBadge.hidden = false;
+        lbLoadingBadge.hidden = !needsTauriFetch;
+    }
+
+    // Background fetch — when it lands, redraw and reset zoom to fit new dims.
+    if (needsTauriFetch && !card._lightbox.fetching) {
+        card._lightbox.fetching = true;
+        invoke('get_lightbox', { id: card._lightbox.id })
+            .then((frame) => {
+                const rgbU8 =
+                    (frame.data instanceof Uint8ClampedArray || frame.data instanceof Uint8Array)
+                        ? frame.data : Uint8Array.from(frame.data);
+                card._lightbox.rgb = rgbU8;
+                card._lightbox.w   = frame.width;
+                card._lightbox.h   = frame.height;
+                if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+                    drawLightboxForCard(card);
+                    resetLbZoom();
+                }
+            })
+            .catch((e) => {
+                console.warn('get_lightbox failed:', e);
+                lbLoadingBadge.hidden = true;
+            })
+            .finally(() => { if (card._lightbox) card._lightbox.fetching = false; });
     }
     updateToggleButtonState(card);
 }
@@ -1744,6 +1996,52 @@ function renderInfoPanel(card) {
     lightboxInfo.appendChild(panel);
 }
 
+// Background JXL prefetch — keeps RAW on display but stashes decoded JXL
+// pixels in card._jxlDecoded so manual toggle / zoom is instant.
+const PREFETCH_NEIGHBORS = 2;
+function prefetchJxl(card, priority = 'normal') {
+    if (!card || !card._blobUrl) return;
+    if (card._jxlDecoded) return;
+    if (card._jxlPrefetching) return;
+    card._jxlPrefetching = true;
+    pool.decodeJxl(card._blobUrl, (msg) => {
+        card._jxlPrefetching = false;
+        if (msg.type === 'decode_error') return;
+        card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+    }, priority);
+}
+function prefetchAroundCurrent() {
+    if (lightboxIndex < 0) return;
+    prefetchJxl(cards[lightboxIndex], 'high');
+    for (let off = 1; off <= PREFETCH_NEIGHBORS; off++) {
+        const a = (lightboxIndex + off + cards.length) % cards.length;
+        const b = (lightboxIndex - off + cards.length) % cards.length;
+        if (a !== lightboxIndex)             prefetchJxl(cards[a], 'low');
+        if (b !== lightboxIndex && b !== a)  prefetchJxl(cards[b], 'low');
+    }
+}
+
+// Promote the lightboxed card's RAW-pipeline task (and neighbours) to the
+// front of the pool queue so the next freed worker picks it up.  If the task
+// is already running we can't preempt; if it hasn't been submitted yet (file
+// arrayBuffer still pending), stash the priority on the card so submit picks
+// it up.
+function promoteRawAroundCurrent() {
+    if (lightboxIndex < 0) return;
+    const setRawPriority = (card, prio) => {
+        if (!card) return;
+        if (card._taskId != null) pool.setPriority(card._taskId, prio);
+        else card._pendingPriority = prio;
+    };
+    setRawPriority(cards[lightboxIndex], 'high');
+    for (let off = 1; off <= PREFETCH_NEIGHBORS; off++) {
+        const a = (lightboxIndex + off + cards.length) % cards.length;
+        const b = (lightboxIndex - off + cards.length) % cards.length;
+        if (a !== lightboxIndex)             setRawPriority(cards[a], 'medium');
+        if (b !== lightboxIndex && b !== a)  setRawPriority(cards[b], 'medium');
+    }
+}
+
 function openLightbox(card) {
     lightboxIndex = cards.indexOf(card);
     lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
@@ -1758,10 +2056,13 @@ function openLightbox(card) {
     }
     drawLightboxForCard(card);
     flashSourceBanner();
-    showSourceLabel('RAW');
+    const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
+    showSourceLabel(labels[card._sourceMode] ?? 'RAW');
     renderInfoPanel(card);
     lightbox.hidden = false;
     resetLbZoom();
+    promoteRawAroundCurrent();
+    prefetchAroundCurrent();
 }
 
 function drawLightbox() {
@@ -1789,7 +2090,10 @@ function nextInLightbox(dir) {
     livePendingLook = null;
     resetLookSliders();
     drawLightbox();
-    showSourceLabel('RAW');
+    const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
+    showSourceLabel(labels[card?._sourceMode] ?? 'RAW');
+    promoteRawAroundCurrent();
+    prefetchAroundCurrent();
 }
 
 // Toolbar buttons
@@ -1842,6 +2146,8 @@ let lbDragging = false;
 let lbDragLast = { x: 0, y: 0 };
 lbViewport.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    // Don't initiate pan when clicking inside panels (sliders, handles, chips, etc.)
+    if (e.target.closest('.lb-panels')) return;
     lbDragging = true;
     lbDragLast = { x: e.clientX, y: e.clientY };
     lbViewport.classList.add('dragging');
@@ -1899,11 +2205,13 @@ lbViewport.addEventListener('touchmove', (e) => {
 
 lbViewport.addEventListener('touchend', () => { lbTouchPan = null; });
 
-lightboxClose.addEventListener('click', closeLightbox);
-lightboxPrev.addEventListener('click', () => nextInLightbox(-1));
-lightboxNext.addEventListener('click', () => nextInLightbox(1));
+lightboxClose.addEventListener('click', () => pixelPeepActive ? exitPixelPeep() : closeLightbox());
+lightboxPrev.addEventListener('click', () => pixelPeepActive ? peepNavPhoto(-1) : nextInLightbox(-1));
+lightboxNext.addEventListener('click', () => pixelPeepActive ? peepNavPhoto(1)  : nextInLightbox(1));
 lightbox.addEventListener('click', (e) => {
-    if (e.target === lightbox) closeLightbox();
+    if (e.target === lightbox) {
+        if (pixelPeepActive) exitPixelPeep(); else closeLightbox();
+    }
 });
 
 document.addEventListener('keydown', (e) => {
@@ -1965,6 +2273,23 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (lightbox.hidden) return;
+
+    // Pixel-peep mode: intercept arrows, Esc, source-toggle/rotate hotkeys.
+    // Zoom keys (+/-/0) and wheel/drag pan fall through to existing handlers.
+    if (pixelPeepActive) {
+        if (e.key === 'Escape')     { e.preventDefault(); exitPixelPeep();      return; }
+        if (e.key === 'ArrowRight') { e.preventDefault(); peepNavPhoto(1);      return; }
+        if (e.key === 'ArrowLeft')  { e.preventDefault(); peepNavPhoto(-1);     return; }
+        if (e.key === 'ArrowUp')    { e.preventDefault(); peepCycleQuality(1);  return; }
+        if (e.key === 'ArrowDown')  { e.preventDefault(); peepCycleQuality(-1); return; }
+        // Block stale handlers from acting on no-card state.
+        if (e.key === ' ' || e.code === 'Space' || /^[rRlLhHcCfF]$/.test(e.key)) {
+            e.preventDefault();
+            return;
+        }
+        // Let +/-/0 zoom keys through.
+    }
+
     // B&W quick-select (Ctrl+1–9 / Ctrl+0, lightbox only)
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && /^[0-9]$/.test(e.key)) {
         e.preventDefault();
@@ -2149,6 +2474,28 @@ function onFileDoneTauri(filename, result) {
         };
     }
 
+    // Wire JXL blob URL so toggle/decode pipeline works in Tauri mode too.
+    if (result?.jxl && (result.jxl.length || result.jxl.byteLength)) {
+        const jxlBytes = typeof result.jxl === 'string'
+            ? Uint8Array.from(atob(result.jxl), c => c.charCodeAt(0))
+            : (result.jxl instanceof Uint8Array ? result.jxl : new Uint8Array(result.jxl));
+        const blob = new Blob([jxlBytes], { type: 'image/jxl' });
+        if (card._blobUrl) URL.revokeObjectURL(card._blobUrl);
+        card._blobUrl = URL.createObjectURL(blob);
+        card._jxlDecoded = null;
+        const dlBtn = card.querySelector('.thumb-dl-btn');
+        if (dlBtn) dlBtn.hidden = false;
+        refreshThumbToggleButton(card);
+        updateToggleButtonState(card);
+    }
+
+    // If user is already viewing this card in the lightbox, kick the lazy
+    // fetch + redraw now so they see the full-quality version instead of
+    // staying on the embedded preview placeholder.
+    if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
+        drawLightboxForCard(card);
+    }
+
     // Tauri-side per-file stat line.  `enc` (native libjxl) — distinct from
     // the WASM build's `jxl` so the source is obvious in pasted logs.
     const t = result?.timings || {};
@@ -2178,18 +2525,6 @@ function onFileDoneTauri(filename, result) {
                      exif.wb_from_camera ? 'mn-matrix' : 'fallback-matrix');
     }
     updateBatchRollups(t.encode_ms);
-    const dl = card.querySelector('.download');
-    if (dl) {
-        dl.hidden = false;
-        dl.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const blob = new Blob([new Uint8Array(result.jxl)], { type: 'image/jxl' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = filename.replace(/\.orf$/i, '.jxl');
-            a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
-        });
-    }
 }
 
 async function startBatchTauri(paths) {
@@ -2230,6 +2565,29 @@ async function startBatchTauri(paths) {
         }
     });
 
+    // file_thumb_fast: backend emits embedded JPEG bytes immediately after parse,
+    // before the ~500ms pipeline. Show camera-embedded preview so the grid fills
+    // instantly, then onFileDoneTauri replaces it with the pipeline thumbnail.
+    const unlistenFastThumb = await listen('file_thumb_fast', ({ payload }) => {
+        const card = findTauriCard(payload.path);
+        if (!card || !payload.jpeg?.length) return;
+        const blob = new Blob([new Uint8Array(payload.jpeg)], { type: 'image/jpeg' });
+        createImageBitmap(blob).then(bmp => {
+            const orientation = payload.orientation || 1;
+            if (card.classList.contains('busy') || card.classList.contains('embedded-thumb')) {
+                drawOrientedThumb(card.querySelector('canvas'), bmp, orientation, 360);
+                card.classList.remove('busy');
+                card.classList.add('embedded-thumb');
+            }
+            card._embeddedPreview = { bmp, w: bmp.width, h: bmp.height, orientation };
+            refreshThumbToggleButton(card);
+            if (lightboxIndex >= 0 && cards[lightboxIndex] === card && !card._lightbox) {
+                drawLightboxForCard(card);
+                if (typeof resetLbZoom === 'function') resetLbZoom();
+            }
+        }).catch(() => {});
+    });
+
     await Promise.allSettled(paths.map(async (path) => {
         const filename = path.split(/[\\/]/).pop();
         try {
@@ -2253,6 +2611,7 @@ async function startBatchTauri(paths) {
     }));
 
     unlisten();
+    unlistenFastThumb();
 
     const batchT3 = performance.now();
     const fmt = ms => (ms / 1000).toFixed(1) + 's';
@@ -2277,35 +2636,39 @@ async function startBatchTauri(paths) {
 // e = JXL effort (1 = lightning … 7 = squirrel)
 // peak threads during encode ≈ c × t.  12-core dev box → c × t = 12 saturates.
 //
-// 9-config probe (3-file runs).  With 3 files, c≥3 means all-in-flight, so
-// raising c past 3 is pointless — vary t and other axes there instead.
-// Each test isolates ONE question:
+// 2-config 200-file probe.  Topology axis exhausted (c=3 t=4 wins at 3/6/20
+// file scales).  Effort axis barely tested.  Two configs at champ topology
+// vary only effort: e=3 Falcon vs e=2 Thunder.  Hypothesis: Thunder is either
+// faster with similar size (free win) or a Lightning-style trap (bloated
+// output cancels speed gain).
 const BENCH_CONFIGS = [
-    // === axis 1: serial vs parallel (everything else equal) ===
-    { label: 'c=1 t=12 e=3  serial baseline', concurrency: 1, encoder_threads: 12, effort: 3 },
-    { label: 'c=3 t=4  e=3  saturated 3×4=12', concurrency: 3, encoder_threads:  4, effort: 3 },
-
-    // === axis 2: inner-thread sweep at c=3 (does libjxl scale linearly?) ===
-    { label: 'c=3 t=1  e=3  libjxl single-thread × 3', concurrency: 3, encoder_threads:  1, effort: 3 },
-    { label: 'c=3 t=2  e=3  6 active threads (undersub)', concurrency: 3, encoder_threads:  2, effort: 3 },
-    { label: 'c=3 t=6  e=3  18 threads (1.5× oversub)', concurrency: 3, encoder_threads:  6, effort: 3 },
-    { label: 'c=3 t=12 e=3  36 threads (heavy oversub)', concurrency: 3, encoder_threads: 12, effort: 3 },
-
-    // === axis 3: alt outer/inner split at saturation ===
-    { label: 'c=2 t=6  e=3  2×6=12 alt split', concurrency: 2, encoder_threads:  6, effort: 3 },
-
-    // === axis 4: effort cost at winning topology ===
-    { label: 'c=3 t=4  e=1  lightning', concurrency: 3, encoder_threads:  4, effort: 1 },
-    { label: 'c=3 t=4  e=7  squirrel', concurrency: 3, encoder_threads:  4, effort: 7 },
+    { label: 'c=3 t=4 e=3  Falcon (champ)',  concurrency: 3, encoder_threads: 4, effort: 3 },
+    { label: 'c=3 t=4 e=2  Thunder (probe)', concurrency: 3, encoder_threads: 4, effort: 2 },
 ];
+
+function _pct(arr, p) {
+    if (!arr.length) return 0;
+    const s = arr.slice().sort((a, b) => a - b);
+    const i = Math.min(s.length - 1, Math.floor(s.length * p));
+    return s[i];
+}
+function _stats(arr) {
+    if (!arr.length) return { avg: 0, p50: 0, p95: 0, min: 0, max: 0 };
+    return {
+        avg: arr.reduce((s, x) => s + x, 0) / arr.length,
+        p50: _pct(arr, 0.5),
+        p95: _pct(arr, 0.95),
+        min: arr.reduce((m, x) => Math.min(m, x), Infinity),
+        max: arr.reduce((m, x) => Math.max(m, x), -Infinity),
+    };
+}
 
 async function runOneConfig(paths, cfg, opts) {
     await invoke('set_concurrency', { n: cfg.concurrency });
-    const perFile = [];
+    // Pre-size + write-by-index so completion-race doesn't shuffle drift order.
+    const perFile = new Array(paths.length);
     const t0 = performance.now();
-    // Drive paths through the existing concurrency limit (Promise.allSettled
-    // dispatches all at once; Rust-side semaphore serialises to cfg.concurrency).
-    await Promise.allSettled(paths.map(async (path) => {
+    await Promise.allSettled(paths.map(async (path, idx) => {
         const tStart = performance.now();
         try {
             const result = await invoke('process_file', {
@@ -2323,20 +2686,74 @@ async function runOneConfig(paths, cfg, opts) {
             });
             const tEnd = performance.now();
             const t = result?.timings || {};
-            perFile.push({
+            perFile[idx] = {
+                path,
                 wall_ms:    tEnd - tStart,
+                start_ms:   tStart - t0,
+                end_ms:     tEnd - t0,
                 dec_ms:     t.decompress_ms || 0,
                 dem_ms:     t.demosaic_ms   || 0,
                 tone_ms:    t.tone_ms       || 0,
                 enc_ms:     t.encode_ms     || 0,
                 jxl_bytes:  result?.jxl?.length || 0,
-            });
+            };
         } catch (err) {
-            perFile.push({ error: String(err) });
+            perFile[idx] = { error: String(err), path };
         }
     }));
     const wallMs = performance.now() - t0;
     return { cfg, wallMs, perFile };
+}
+
+function reportConfig(r) {
+    const n = r.perFile.length;
+    const ok = r.perFile.filter(p => !p.error);
+    const errs = n - ok.length;
+    const amortMs = r.wallMs / n;
+    const tput = n / (r.wallMs / 1000);
+    pushStat(
+        `[bench] ${r.cfg.label}  total ${(r.wallMs / 1000).toFixed(2)}s  ` +
+        `amort ${amortMs.toFixed(0)} ms/f  tput ${tput.toFixed(2)} f/s` +
+        (errs ? `  ERRORS ${errs}` : '')
+    );
+    if (!ok.length) return;
+
+    const dec   = _stats(ok.map(p => p.dec_ms));
+    const dem   = _stats(ok.map(p => p.dem_ms));
+    const tone  = _stats(ok.map(p => p.tone_ms));
+    const enc   = _stats(ok.map(p => p.enc_ms));
+    const wall  = _stats(ok.map(p => p.wall_ms));
+    const sizes = _stats(ok.map(p => p.jxl_bytes / 1024));
+
+    pushStat(`[bench]   dec   avg ${dec.avg.toFixed(0)}  p50 ${dec.p50}  p95 ${dec.p95}  max ${dec.max} ms`);
+    pushStat(`[bench]   dem   avg ${dem.avg.toFixed(0)}  p50 ${dem.p50}  p95 ${dem.p95}  max ${dem.max} ms`);
+    pushStat(`[bench]   tone  avg ${tone.avg.toFixed(0)}  p50 ${tone.p50}  p95 ${tone.p95}  max ${tone.max} ms`);
+    pushStat(`[bench]   enc   avg ${enc.avg.toFixed(0)}  p50 ${enc.p50}  p95 ${enc.p95}  max ${enc.max} ms`);
+    pushStat(`[bench]   wall  avg ${wall.avg.toFixed(0)}  p50 ${wall.p50.toFixed(0)}  p95 ${wall.p95.toFixed(0)}  max ${wall.max.toFixed(0)} ms`);
+    pushStat(`[bench]   size  avg ${sizes.avg.toFixed(0)}  p50 ${sizes.p50.toFixed(0)}  p95 ${sizes.p95.toFixed(0)}  min ${sizes.min.toFixed(0)}  max ${sizes.max.toFixed(0)} KB  total ${(sizes.avg * ok.length / 1024).toFixed(1)} MB`);
+
+    // Drift: split by dispatch index, compare first vs last half stage averages
+    const half = Math.floor(ok.length / 2);
+    const firstHalf = ok.slice(0, half);
+    const lastHalf  = ok.slice(ok.length - half);
+    const avg = (arr, k) => arr.reduce((s, p) => s + p[k], 0) / arr.length;
+    const driftAmort  = (avg(lastHalf, 'wall_ms') - avg(firstHalf, 'wall_ms'));
+    const driftDec    = (avg(lastHalf, 'dec_ms')  - avg(firstHalf, 'dec_ms'));
+    const driftEnc    = (avg(lastHalf, 'enc_ms')  - avg(firstHalf, 'enc_ms'));
+    const pct = (delta, base) => base > 0 ? `${delta >= 0 ? '+' : ''}${(100 * delta / base).toFixed(1)}%` : 'n/a';
+    pushStat(
+        `[bench]   drift  wall ${avg(firstHalf, 'wall_ms').toFixed(0)}→${avg(lastHalf, 'wall_ms').toFixed(0)} ms (${pct(driftAmort, avg(firstHalf, 'wall_ms'))})  ` +
+        `dec ${pct(driftDec, avg(firstHalf, 'dec_ms'))}  enc ${pct(driftEnc, avg(firstHalf, 'enc_ms'))}`
+    );
+
+    // Top 3 slowest by wall_ms
+    const fname = (p) => (p.split(/[\\/]/).pop() || p);
+    const slowest = ok.slice().sort((a, b) => b.wall_ms - a.wall_ms).slice(0, 3);
+    pushStat('[bench]   slowest 3:');
+    for (const p of slowest) {
+        pushStat(`[bench]     ${fname(p.path)}  wall ${p.wall_ms.toFixed(0)} ms  dec ${p.dec_ms} dem ${p.dem_ms} tone ${p.tone_ms} enc ${p.enc_ms}  ${(p.jxl_bytes/1024).toFixed(0)} KB`);
+    }
+    pushStat('');
 }
 
 async function runBenchmark() {
@@ -2361,34 +2778,37 @@ async function runBenchmark() {
         updateStat('bench:status', `[bench] running ${i + 1}/${BENCH_CONFIGS.length}  ${cfg.label}…`);
         const r = await runOneConfig(paths, cfg, opts);
         rows.push(r);
-        const n = r.perFile.length;
-        const ok = r.perFile.filter(p => !p.error);
-        // amortised = wall / n (real cost per file in the batch).
-        // pipe/enc averages come from Rust timings — actual CPU work per file,
-        // not promise wait (which includes queue time and would be misleading).
-        const amortMs = r.wallMs / n;
-        const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms,  0) / ok.length : 0;
-        const avgPipe = ok.length ? ok.reduce((s, p) => s + p.dec_ms + p.dem_ms + p.tone_ms, 0) / ok.length : 0;
-        pushStat(
-            `[bench] ${cfg.label}  ` +
-            `total ${(r.wallMs / 1000).toFixed(2)}s  ` +
-            `amortised ${amortMs.toFixed(0)} ms/file  ` +
-            `pipe ${avgPipe.toFixed(0)} ms  ` +
-            `enc ${avgEnc.toFixed(0)} ms  ` +
-            `tput ${(n / (r.wallMs / 1000)).toFixed(2)} files/s`
-        );
+        reportConfig(r);
     }
-    // Final comparison table — sorted fastest first.
-    pushStat('');
-    pushStat('[bench] === results, sorted by wall time ===');
-    rows.sort((a, b) => a.wallMs - b.wallMs);
-    for (const r of rows) {
-        pushStat(
-            `[bench]  ${r.cfg.label.padEnd(14, ' ')}  ` +
-            `${(r.wallMs / 1000).toFixed(2).padStart(6, ' ')}s  ` +
-            `(${(r.perFile.length / (r.wallMs / 1000)).toFixed(2)} files/s)`
-        );
+
+    // A/B Pareto comparison (only meaningful for 2 configs).
+    if (rows.length === 2) {
+        pushStat('[bench] === A vs B Pareto ===');
+        const a = rows[0], b = rows[1];
+        const okA = a.perFile.filter(p => !p.error);
+        const okB = b.perFile.filter(p => !p.error);
+        const tputA = a.perFile.length / (a.wallMs / 1000);
+        const tputB = b.perFile.length / (b.wallMs / 1000);
+        const avgSizeA = okA.reduce((s, p) => s + p.jxl_bytes, 0) / okA.length / 1024;
+        const avgSizeB = okB.reduce((s, p) => s + p.jxl_bytes, 0) / okB.length / 1024;
+        const totalA = okA.reduce((s, p) => s + p.jxl_bytes, 0) / 1024 / 1024;
+        const totalB = okB.reduce((s, p) => s + p.jxl_bytes, 0) / 1024 / 1024;
+        const speedDelta = 100 * (tputB - tputA) / tputA;
+        const sizeDelta  = 100 * (avgSizeB - avgSizeA) / avgSizeA;
+        pushStat(`[bench]   A: ${a.cfg.label}`);
+        pushStat(`[bench]   B: ${b.cfg.label}`);
+        pushStat(`[bench]   speed  A ${tputA.toFixed(2)} f/s  →  B ${tputB.toFixed(2)} f/s  (${speedDelta >= 0 ? '+' : ''}${speedDelta.toFixed(1)}%)`);
+        pushStat(`[bench]   size   A ${avgSizeA.toFixed(0)} KB/f → B ${avgSizeB.toFixed(0)} KB/f  (${sizeDelta >= 0 ? '+' : ''}${sizeDelta.toFixed(1)}%)`);
+        pushStat(`[bench]   total  A ${totalA.toFixed(1)} MB    → B ${totalB.toFixed(1)} MB`);
+        let verdict;
+        if (speedDelta > 0 && sizeDelta <= 2) verdict = 'B WINS — faster, no size cost (replace default)';
+        else if (speedDelta > 0 && sizeDelta < speedDelta) verdict = 'B Pareto-wins on speed (gains > size cost)';
+        else if (speedDelta > 0)                          verdict = 'TRAP — B faster but size cost ≥ speed gain (Lightning-style)';
+        else if (Math.abs(speedDelta) < 2)                verdict = 'TIE — keep A (smaller)';
+        else                                              verdict = 'A holds — B slower';
+        pushStat(`[bench]   ⇒ ${verdict}`);
     }
+
     updateStat('bench:status', `[bench] done — ${rows.length} configs, ${paths.length} files each`);
 
     // Restore the default concurrency for normal operation.
@@ -2402,6 +2822,616 @@ if (benchBtn) {
         benchBtn.disabled = true;
         runBenchmark().catch(e => pushStat(`[bench] ${e?.message || e}`))
                       .finally(() => { benchBtn.disabled = false; });
+    });
+}
+
+// Effort sweep: e=1..9 at fixed c=3 t=4.  Reports per-file output size so we
+// can read the speed/size Pareto.  Same files run 9 times; quality + lossless
+// come from current UI settings (same as Benchmark).
+async function runEffortSweep() {
+    if (!IS_TAURI) {
+        pushStat('[sweep] tauri-only — needs the native pipeline');
+        return;
+    }
+    let paths;
+    try { paths = await invoke('pick_files'); }
+    catch (err) { pushStat(`[sweep] pick_files failed: ${err}`); return; }
+    if (!paths?.length) { pushStat('[sweep] cancelled — no files'); return; }
+    const opts = currentOptions();
+    const fname = (p) => (p.split(/[\\/]/).pop() || p);
+
+    pushStat(`[sweep] ${paths.length} files × 9 efforts (c=3 t=4, q=${opts.quality}, lossless=${opts.lossless})`);
+    pushStat('[sweep] effort key: 1 Lightning · 2 Thunder · 3 Falcon · 4 Cheetah · 5 Hare · 6 Wombat · 7 Squirrel · 8 Kitten · 9 Tortoise');
+
+    const rows = [];
+    for (let e = 1; e <= 9; e++) {
+        const cfg = { label: `c=3 t=4 e=${e}`, concurrency: 3, encoder_threads: 4, effort: e };
+        updateStat('bench:status', `[sweep] running e=${e}…`);
+        const r = await runOneConfig(paths, cfg, opts);
+        rows.push({ effort: e, ...r });
+        const ok = r.perFile.filter(p => !p.error);
+        const totalKB = ok.reduce((s, p) => s + p.jxl_bytes, 0) / 1024;
+        const avgKB   = ok.length ? totalKB / ok.length : 0;
+        const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length : 0;
+        const sizesStr = r.perFile.map((p, i) =>
+            p.error ? `${fname(paths[i])}=ERR` : `${fname(paths[i])}=${(p.jxl_bytes/1024).toFixed(0)}KB`
+        ).join(' · ');
+        pushStat(
+            `[sweep] e=${e}  ` +
+            `wall ${(r.wallMs/1000).toFixed(2)}s  ` +
+            `enc ${avgEnc.toFixed(0)} ms/file  ` +
+            `avg ${avgKB.toFixed(0)} KB  ` +
+            `total ${totalKB.toFixed(0)} KB`
+        );
+        pushStat(`[sweep]   sizes: ${sizesStr}`);
+    }
+
+    pushStat('');
+    pushStat('[sweep] === effort vs size table ===');
+    pushStat('[sweep]  e   wall_s   enc_ms   avg_KB   total_KB');
+    for (const r of rows) {
+        const ok = r.perFile.filter(p => !p.error);
+        const totalKB = ok.reduce((s, p) => s + p.jxl_bytes, 0) / 1024;
+        const avgKB   = ok.length ? totalKB / ok.length : 0;
+        const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length : 0;
+        pushStat(
+            `[sweep]  ${r.effort}` +
+            `   ${(r.wallMs/1000).toFixed(2).padStart(6)}` +
+            `   ${avgEnc.toFixed(0).padStart(6)}` +
+            `   ${avgKB.toFixed(0).padStart(6)}` +
+            `   ${totalKB.toFixed(0).padStart(8)}`
+        );
+    }
+    updateStat('bench:status', `[sweep] done — 9 efforts × ${paths.length} files`);
+    await invoke('set_concurrency', { n: 3 });
+}
+
+const sweepBtn = document.getElementById('run-effort-sweep');
+if (sweepBtn) {
+    sweepBtn.addEventListener('click', () => {
+        sweepBtn.disabled = true;
+        runEffortSweep().catch(e => pushStat(`[sweep] ${e?.message || e}`))
+                        .finally(() => { sweepBtn.disabled = false; });
+    });
+}
+
+// Variance × effort bench: picks 5 size-spread files from the user's
+// pick, sweeps effort 3/6/7/8/9, reports size matrix + upload-quota
+// economics.  Targets chosen from prior 20-file run to span ~6× output
+// size range (Falcon column values: 973 → 5575 KB).
+//
+// Match by filename prefix so '.ORF' / ' - Copy.ORF' suffix variants
+// resolve to the same logical target.
+const VARIANCE_TARGETS = [
+    'P1110187',  // ~973 KB Falcon — smooth scene, low entropy
+    'P1100086',  // ~1866 KB
+    'P1110179',  // ~3182 KB
+    'P1100149',  // ~4788 KB
+    'P1110202',  // ~5575 KB — high entropy
+];
+const VARIANCE_EFFORTS = [3, 6, 7, 8, 9];
+const VARIANCE_TOPOLOGY = { concurrency: 3, encoder_threads: 4 };
+// Starlink-ish assumptions for upload-time economics.  Edit as needed.
+const QUOTA_GB = 50;
+const UPLOAD_MBPS = 25;  // typical Starlink upload, MB-per-sec ≈ Mbps/8
+
+async function runVarianceBench() {
+    if (!IS_TAURI) { pushStat('[var] tauri-only'); return; }
+    let allPaths;
+    try { allPaths = await invoke('pick_files'); }
+    catch (err) { pushStat(`[var] pick_files failed: ${err}`); return; }
+    if (!allPaths?.length) { pushStat('[var] cancelled'); return; }
+
+    const fname = (p) => (p.split(/[\\/]/).pop() || p);
+    const baseUC = (p) => fname(p).replace(/\.[Oo][Rr][Ff]$/, '').toUpperCase();
+    const selected = [];
+    const missing = [];
+    for (const target of VARIANCE_TARGETS) {
+        const tu = target.toUpperCase();
+        const hit = allPaths.find(p => baseUC(p).startsWith(tu));
+        if (hit) selected.push({ target, path: hit });
+        else missing.push(target);
+    }
+    if (missing.length) pushStat(`[var] missing: ${missing.join(', ')}`);
+    if (!selected.length) { pushStat('[var] no targets found in selection'); return; }
+
+    const opts = currentOptions();
+    pushStat(`[var] ${selected.length} files × ${VARIANCE_EFFORTS.length} efforts  c=${VARIANCE_TOPOLOGY.concurrency} t=${VARIANCE_TOPOLOGY.encoder_threads} q=${opts.quality} lossless=${opts.lossless}`);
+    pushStat(`[var] targets: ${selected.map(s => fname(s.path)).join(', ')}`);
+    pushStat('[var] effort key: 3 Falcon · 5 Hare · 6 Wombat · 7 Squirrel · 8 Kitten · 9 Tortoise');
+
+    const paths = selected.map(s => s.path);
+    // matrix[effortIndex] = { e, perFile: [{path, enc_ms, jxl_bytes, ...}], wallMs }
+    const matrix = [];
+    for (let i = 0; i < VARIANCE_EFFORTS.length; i++) {
+        const e = VARIANCE_EFFORTS[i];
+        const cfg = { label: `e=${e}`, concurrency: VARIANCE_TOPOLOGY.concurrency, encoder_threads: VARIANCE_TOPOLOGY.encoder_threads, effort: e };
+        updateStat('bench:status', `[var] ${i+1}/${VARIANCE_EFFORTS.length}  effort ${e}…`);
+        const r = await runOneConfig(paths, cfg, opts);
+        matrix.push({ effort: e, ...r });
+        const ok = r.perFile.filter(p => !p.error);
+        const totalKB = ok.reduce((s, p) => s + p.jxl_bytes, 0) / 1024;
+        const avgKB   = totalKB / ok.length;
+        const avgEnc  = ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length;
+        pushStat(`[var] e=${e}  wall ${(r.wallMs/1000).toFixed(2)}s  enc ${avgEnc.toFixed(0)} ms/f  avg ${avgKB.toFixed(0)} KB  total ${totalKB.toFixed(0)} KB`);
+    }
+
+    // === size matrix: rows = files, columns = effort ===
+    pushStat('');
+    pushStat('[var] === size matrix (KB per file) ===');
+    const header = 'file              ' + VARIANCE_EFFORTS.map(e => `   e=${e}`).join('  ');
+    pushStat('[var] ' + header);
+    for (let f = 0; f < paths.length; f++) {
+        const row = VARIANCE_EFFORTS.map((_, ei) => {
+            const p = matrix[ei].perFile[f];
+            return p && !p.error ? (p.jxl_bytes/1024).toFixed(0).padStart(6) : '   ERR';
+        }).join('  ');
+        pushStat(`[var] ${fname(paths[f]).padEnd(18)}${row}`);
+    }
+
+    // === aggregate Pareto + quota economics ===
+    pushStat('');
+    pushStat('[var] === effort vs size + upload economics ===');
+    pushStat(`[var]  quota = ${QUOTA_GB} GB/mo  upload = ${UPLOAD_MBPS} Mbps (${(UPLOAD_MBPS/8).toFixed(1)} MB/s)`);
+    pushStat('[var]  e   avgKB   enc_s   vs_e3_size   vs_e3_enc   files/quota   upload_s   total_s');
+    const baseE3 = matrix[0];
+    const baseOk = baseE3.perFile.filter(p => !p.error);
+    const baseAvgKB = baseOk.reduce((s, p) => s + p.jxl_bytes, 0) / baseOk.length / 1024;
+    const baseAvgEnc = baseOk.reduce((s, p) => s + p.enc_ms, 0) / baseOk.length / 1000;
+    const uploadMBps = UPLOAD_MBPS / 8;
+    for (const r of matrix) {
+        const ok = r.perFile.filter(p => !p.error);
+        const avgKB  = ok.reduce((s, p) => s + p.jxl_bytes, 0) / ok.length / 1024;
+        const avgEnc = ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length / 1000;
+        const sizeDelta = 100 * (avgKB  - baseAvgKB)  / baseAvgKB;
+        const encDelta  = 100 * (avgEnc - baseAvgEnc) / baseAvgEnc;
+        const filesPerQuota = (QUOTA_GB * 1024 * 1024) / avgKB;
+        const uploadS = (avgKB / 1024) / uploadMBps;   // KB → MB → s
+        const totalS  = avgEnc + uploadS;
+        const sdStr = (sizeDelta >= 0 ? '+' : '') + sizeDelta.toFixed(1) + '%';
+        const edStr = (encDelta  >= 0 ? '+' : '') + encDelta.toFixed(1)  + '%';
+        pushStat(
+            `[var]  ${r.effort}` +
+            `  ${avgKB.toFixed(0).padStart(6)}` +
+            `  ${avgEnc.toFixed(2).padStart(6)}` +
+            `  ${sdStr.padStart(11)}` +
+            `  ${edStr.padStart(10)}` +
+            `  ${filesPerQuota.toFixed(0).padStart(12)}` +
+            `  ${uploadS.toFixed(2).padStart(8)}` +
+            `  ${totalS.toFixed(2).padStart(8)}`
+        );
+    }
+
+    // === verdict: pick the effort that minimises total time-to-upload ===
+    pushStat('');
+    let bestTotal = { effort: 0, totalS: Infinity };
+    let bestSize  = { effort: 0, avgKB: Infinity };
+    let bestQuota = { effort: 0, files: 0 };
+    for (const r of matrix) {
+        const ok = r.perFile.filter(p => !p.error);
+        const avgKB  = ok.reduce((s, p) => s + p.jxl_bytes, 0) / ok.length / 1024;
+        const avgEnc = ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length / 1000;
+        const totalS = avgEnc + (avgKB / 1024) / uploadMBps;
+        const files  = (QUOTA_GB * 1024 * 1024) / avgKB;
+        if (totalS < bestTotal.totalS) bestTotal = { effort: r.effort, totalS };
+        if (avgKB  < bestSize.avgKB)   bestSize  = { effort: r.effort, avgKB };
+        if (files  > bestQuota.files)  bestQuota = { effort: r.effort, files };
+    }
+    pushStat(`[var] BEST encode+upload total time:  e=${bestTotal.effort}  (${bestTotal.totalS.toFixed(2)} s/file)`);
+    pushStat(`[var] BEST output size:               e=${bestSize.effort}  (${bestSize.avgKB.toFixed(0)} KB/file)`);
+    pushStat(`[var] BEST files per ${QUOTA_GB} GB quota:        e=${bestQuota.effort}  (${bestQuota.files.toFixed(0)} files)`);
+    updateStat('bench:status', `[var] done`);
+    await invoke('set_concurrency', { n: 3 });
+}
+
+const varBtn = document.getElementById('run-variance-bench');
+if (varBtn) {
+    varBtn.addEventListener('click', () => {
+        varBtn.disabled = true;
+        runVarianceBench().catch(e => pushStat(`[var] ${e?.message || e}`))
+                          .finally(() => { varBtn.disabled = false; });
+    });
+}
+
+// Quality sweep: q=80/85/90/95 at fixed c=3 t=4 e=3 Falcon on 10 files
+// sampled with even spread across the picked folder.  Anchor size deltas at
+// q=90 (current production default).  Headline metric = files-per-50GB-quota.
+const QUALITY_VALUES = [80, 85, 90, 95];
+const QUALITY_TOPOLOGY = { concurrency: 3, encoder_threads: 4, effort: 3 };
+const QUALITY_SAMPLE_N = 10;
+
+async function runQualitySweep() {
+    if (!IS_TAURI) { pushStat('[q] tauri-only'); return; }
+    let allPaths;
+    try { allPaths = await invoke('pick_files'); }
+    catch (err) { pushStat(`[q] pick_files failed: ${err}`); return; }
+    if (!allPaths?.length) { pushStat('[q] cancelled'); return; }
+
+    const fname = (p) => (p.split(/[\\/]/).pop() || p);
+    const n = allPaths.length;
+    // Even-spread sampling: pick floor(i * n / N) for i in 0..N.  Avoids
+    // clustering that random sampling can produce.
+    const paths = [];
+    if (n <= QUALITY_SAMPLE_N) {
+        paths.push(...allPaths);
+    } else {
+        for (let i = 0; i < QUALITY_SAMPLE_N; i++) {
+            paths.push(allPaths[Math.floor(i * n / QUALITY_SAMPLE_N)]);
+        }
+    }
+
+    const baseOpts = currentOptions();
+    pushStat(`[q] picked ${n} files, sampling ${paths.length} with even spread`);
+    pushStat(`[q] sweep q=${QUALITY_VALUES.join('/')} at c=${QUALITY_TOPOLOGY.concurrency} t=${QUALITY_TOPOLOGY.encoder_threads} e=${QUALITY_TOPOLOGY.effort} Falcon  lossless=${baseOpts.lossless}`);
+    pushStat('[q] chosen files:');
+    for (let i = 0; i < paths.length; i++) {
+        pushStat(`[q]   ${String(i+1).padStart(2)}. ${fname(paths[i])}`);
+    }
+
+    // matrix[qIndex] = { quality, perFile, wallMs, cfg }
+    const matrix = [];
+    for (let i = 0; i < QUALITY_VALUES.length; i++) {
+        const q = QUALITY_VALUES[i];
+        const cfg = { label: `q=${q}`, ...QUALITY_TOPOLOGY };
+        const opts = { ...baseOpts, quality: q };
+        updateStat('bench:status', `[q] ${i+1}/${QUALITY_VALUES.length}  q=${q}…`);
+        const r = await runOneConfig(paths, cfg, opts);
+        matrix.push({ quality: q, ...r });
+        const ok = r.perFile.filter(p => !p.error);
+        const totalKB = ok.reduce((s, p) => s + p.jxl_bytes, 0) / 1024;
+        const avgKB   = ok.length ? totalKB / ok.length : 0;
+        const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length : 0;
+        pushStat(`[q] q=${q}  wall ${(r.wallMs/1000).toFixed(2)}s  enc ${avgEnc.toFixed(0)} ms/f  avg ${avgKB.toFixed(0)} KB  total ${totalKB.toFixed(0)} KB`);
+    }
+
+    // === size matrix: rows = files, columns = quality ===
+    pushStat('');
+    pushStat('[q] === size matrix (KB per file) ===');
+    const header = 'file                  ' + QUALITY_VALUES.map(q => `  q=${q}`).join('  ');
+    pushStat('[q] ' + header);
+    for (let f = 0; f < paths.length; f++) {
+        const row = QUALITY_VALUES.map((_, qi) => {
+            const p = matrix[qi].perFile[f];
+            return p && !p.error ? (p.jxl_bytes/1024).toFixed(0).padStart(5) : '  ERR';
+        }).join('  ');
+        pushStat(`[q] ${fname(paths[f]).padEnd(22)}${row}`);
+    }
+
+    // === aggregate Pareto + quota economics, anchored at q=90 ===
+    pushStat('');
+    pushStat('[q] === quality vs size + upload economics ===');
+    pushStat(`[q]  quota = ${QUOTA_GB} GB/mo  upload = ${UPLOAD_MBPS} Mbps (${(UPLOAD_MBPS/8).toFixed(1)} MB/s)  anchor = q=90`);
+    pushStat('[q]  q    avgKB   p50KB   p95KB   enc_ms   vs_q90_size   files/quota   upload_s   total_s');
+    const baseIdx = QUALITY_VALUES.indexOf(90);
+    const baseRow = matrix[baseIdx];
+    const baseOk = baseRow.perFile.filter(p => !p.error);
+    const baseAvgKB = baseOk.reduce((s, p) => s + p.jxl_bytes, 0) / baseOk.length / 1024;
+    const uploadMBps = UPLOAD_MBPS / 8;
+    for (const r of matrix) {
+        const ok = r.perFile.filter(p => !p.error);
+        const sizesKB = ok.map(p => p.jxl_bytes / 1024);
+        const sStats  = _stats(sizesKB);
+        const avgKB   = sStats.avg;
+        const avgEnc  = ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length;
+        const sizeDelta = 100 * (avgKB - baseAvgKB) / baseAvgKB;
+        const filesPerQuota = (QUOTA_GB * 1024 * 1024) / avgKB;
+        const uploadS = (avgKB / 1024) / uploadMBps;
+        const totalS  = (avgEnc / 1000) + uploadS;
+        const sdStr = (sizeDelta >= 0 ? '+' : '') + sizeDelta.toFixed(1) + '%';
+        pushStat(
+            `[q]  ${r.quality}` +
+            `  ${avgKB.toFixed(0).padStart(6)}` +
+            `  ${sStats.p50.toFixed(0).padStart(6)}` +
+            `  ${sStats.p95.toFixed(0).padStart(6)}` +
+            `  ${avgEnc.toFixed(0).padStart(7)}` +
+            `  ${sdStr.padStart(12)}` +
+            `  ${filesPerQuota.toFixed(0).padStart(12)}` +
+            `  ${uploadS.toFixed(2).padStart(8)}` +
+            `  ${totalS.toFixed(2).padStart(8)}`
+        );
+    }
+
+    // === verdicts ===
+    pushStat('');
+    let bestTotal = { quality: 0, totalS: Infinity };
+    let bestSize  = { quality: 0, avgKB: Infinity };
+    let bestQuota = { quality: 0, files: 0 };
+    for (const r of matrix) {
+        const ok = r.perFile.filter(p => !p.error);
+        const avgKB  = ok.reduce((s, p) => s + p.jxl_bytes, 0) / ok.length / 1024;
+        const avgEnc = ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length / 1000;
+        const totalS = avgEnc + (avgKB / 1024) / uploadMBps;
+        const files  = (QUOTA_GB * 1024 * 1024) / avgKB;
+        if (totalS < bestTotal.totalS) bestTotal = { quality: r.quality, totalS };
+        if (avgKB  < bestSize.avgKB)   bestSize  = { quality: r.quality, avgKB };
+        if (files  > bestQuota.files)  bestQuota = { quality: r.quality, files };
+    }
+    pushStat(`[q] BEST encode+upload total time:  q=${bestTotal.quality}  (${bestTotal.totalS.toFixed(2)} s/file)`);
+    pushStat(`[q] BEST output size:               q=${bestSize.quality}  (${bestSize.avgKB.toFixed(0)} KB/file)`);
+    pushStat(`[q] BEST files per ${QUOTA_GB} GB quota:        q=${bestQuota.quality}  (${bestQuota.files.toFixed(0)} files)`);
+    updateStat('bench:status', `[q] done`);
+    await invoke('set_concurrency', { n: 3 });
+}
+
+const qBtn = document.getElementById('run-quality-sweep');
+if (qBtn) {
+    qBtn.addEventListener('click', () => {
+        qBtn.disabled = true;
+        runQualitySweep().catch(e => pushStat(`[q] ${e?.message || e}`))
+                         .finally(() => { qBtn.disabled = false; });
+    });
+}
+
+// ============================================================================
+// Pixel-peep quality compare mode
+// ----------------------------------------------------------------------------
+// Pick N photos.  Queue encodes globally in priority order — q=80 for every
+// photo first (so all show up viewable fastest), then q=75/85, then 70/90/95.
+// Each photo: decode all available qualities; paint the current peepQuality
+// or fallback to nearest-decoded quality so something is always on screen.
+// Lightbox opens at 100% pixels (no fit-to-screen).  Up/Down cycle quality;
+// Left/Right switch photo preserving zoom+pan (tripod compare).  Esc exits.
+// ============================================================================
+// Full ladder: q=50..95 in steps of 5, then lossless JXL (bit-exact for RGB,
+// i.e. visually identical to uncompressed source — just much smaller bytes).
+const PEEP_QUALITIES = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 'lossless'];
+// Encode order: sweet-spot + anchors first so the most informative variants
+// are viewable early.  Tauri semaphore drains the rest in submission order.
+const PEEP_PRIORITY  = [80, 95, 'lossless', 70, 90, 60, 85, 50, 75, 65, 55];
+const PEEP_INITIAL_Q = 80;
+const fmtPeepQ = (q) => typeof q === 'number' ? `q=${q}` : q;
+const PEEP_EFFORT = 3;
+const PEEP_ENCODER_THREADS = 4;
+const PEEP_CONCURRENCY = 3;
+
+let pixelPeepActive = false;
+let peepPaths = [];
+let peepIdx = 0;
+let peepQuality = PEEP_INITIAL_Q;
+// peepCache: Map<photoIdx, { jxlBytes:{q:Uint8Array}, decoded:{q:{rgba,w,h}}, encodeMs:{q:number}, sizeBytes:{q:number}, doneCount:number }>
+const peepCache = new Map();
+
+async function runPixelPeep() {
+    if (!IS_TAURI) { pushStat('[peep] tauri-only'); return; }
+    let paths;
+    try { paths = await invoke('pick_files'); }
+    catch (err) { pushStat(`[peep] pick_files failed: ${err}`); return; }
+    if (!paths?.length) { pushStat('[peep] cancelled'); return; }
+
+    pixelPeepActive = true;
+    peepPaths = paths;
+    peepIdx = 0;
+    peepQuality = PEEP_INITIAL_Q;
+    peepCache.clear();
+    // Seed cache entries so .then() callbacks can locate their photo idx.
+    for (let i = 0; i < paths.length; i++) {
+        peepCache.set(i, { jxlBytes: {}, decoded: {}, encodeMs: {}, sizeBytes: {}, doneCount: 0 });
+    }
+
+    await invoke('set_concurrency', { n: PEEP_CONCURRENCY });
+    pushStat(`[peep] ${paths.length} photos  ladder=${PEEP_QUALITIES.join('/')}  e=${PEEP_EFFORT} Falcon`);
+    pushStat(`[peep] queue order: ${PEEP_PRIORITY.join(' → ')}  (all photos per step)`);
+    pushStat(`[peep] note: 'raw' aliases 'lossless' decode (lossless JXL is bit-exact); size shown as uncompressed RGB bytes`);
+    pushStat('[peep] keys: ↑/↓ quality · ←/→ photo · Esc exit · wheel zoom · drag pan');
+
+    openPeepLightbox();
+    queuePeepEncodes();
+}
+
+function openPeepLightbox() {
+    // Fresh canvas — pixel-peep starts blank until first decode arrives.
+    lightboxCanvas.width = 1;
+    lightboxCanvas.height = 1;
+    lbZoom = 1.0;   // 100% pixels, NOT fit-to-screen
+    lbPanX = 0;
+    lbPanY = 0;
+    lbRotation = 0;
+    applyLbTransform();
+    lbPreviewBadge.hidden = true;
+    lbLoadingBadge.hidden = false;
+    lightbox.hidden = false;
+    lightbox.classList.add('peep-mode');
+    // Clear stale lightbox state from any prior normal-mode open.
+    lightboxIndex = -1;
+    if (lightboxInfo) lightboxInfo.innerHTML = '';
+    // Source indicators repurposed: show current peep quality, not RAW/JXL/JPEG.
+    if (lbSourceBanner) {
+        lbSourceBanner.hidden = false;
+        lbSourceBanner.setAttribute('data-source', 'peep');
+        lbSourceBanner.textContent = fmtPeepQ(peepQuality);
+    }
+    if (lbToggleJpegBtn) {
+        lbToggleJpegBtn.disabled = true;
+    }
+    updatePeepBadges();
+    pushStat(`[peep] open: lightbox.hidden=${lightbox.hidden} canvas=${lightboxCanvas.width}x${lightboxCanvas.height} zoom=${lbZoom}`);
+}
+
+function _fmtMB(bytes) {
+    if (bytes == null) return '—';
+    const mb = bytes / (1024 * 1024);
+    return mb >= 10 ? `${mb.toFixed(1)} MB` : `${mb.toFixed(2)} MB`;
+}
+
+// Persistent HUD: current quality + compressed JXL bytes + uncompressed RGB
+// bytes (raw reference) + zoom %.  Replaces the old centred fade label.
+function updatePeepBadges() {
+    if (!lbSourceBanner) return;
+    const entry = peepCache.get(peepIdx);
+    const compBytes = entry?.sizeBytes?.[peepQuality];
+    // Raw RGB bytes from any decoded variant for this photo — dims are the
+    // same for every quality.
+    let rawBytes = null;
+    if (entry?.decoded) {
+        for (const k in entry.decoded) {
+            const d = entry.decoded[k];
+            if (d?.w && d?.h) { rawBytes = d.w * d.h * 3; break; }
+        }
+    }
+    const compStr = compBytes != null ? _fmtMB(compBytes) : 'loading';
+    const rawStr  = rawBytes  != null ? _fmtMB(rawBytes)  : '—';
+    const zoomStr = `${Math.round(lbZoom * 100)}%`;
+    const photoStr = peepPaths.length > 1 ? `  ${peepIdx + 1}/${peepPaths.length}` : '';
+    lbSourceBanner.textContent =
+        `${fmtPeepQ(peepQuality)}   ${compStr} / raw ${rawStr}   ${zoomStr}${photoStr}`;
+    if (lbToggleJpegBtn) lbToggleJpegBtn.textContent = fmtPeepQ(peepQuality);
+}
+
+// Fire all N×6 encodes in priority order.  Tauri's set_concurrency semaphore
+// queues excess work — order of submission decides what completes first.
+function queuePeepEncodes() {
+    for (const q of PEEP_PRIORITY) {
+        for (let idx = 0; idx < peepPaths.length; idx++) {
+            kickPeepEncode(idx, q);
+        }
+    }
+}
+
+function kickPeepEncode(idx, q) {
+    const path = peepPaths[idx];
+    const baseOpts = currentOptions();
+    const isLossless = q === 'lossless';
+    const t0 = performance.now();
+    invoke('process_file', {
+        path,
+        options: {
+            // Tauri side accepts quality even when lossless=true; libjxl ignores it.
+            quality: isLossless ? 100 : q,
+            effort: PEEP_EFFORT,
+            lossless: isLossless,
+            look: lookToSnake(baseOpts.look),
+            user_rotation: 0,
+            wb_r: null,
+            wb_b: null,
+            encoder_threads: PEEP_ENCODER_THREADS,
+        },
+    }).then((result) => {
+        if (!pixelPeepActive || !peepCache.has(idx)) return;
+        const e = peepCache.get(idx);
+        const bytes = new Uint8Array(result.jxl);
+        e.jxlBytes[q] = bytes;
+        e.encodeMs[q] = performance.now() - t0;
+        e.sizeBytes[q] = bytes.byteLength;
+        e.doneCount++;
+        pushStat(`[peep]   photo ${idx+1} ${fmtPeepQ(q)} ready  ${(e.encodeMs[q]/1000).toFixed(2)}s  ${(bytes.byteLength/1024).toFixed(0)} KB`);
+        decodePeepQuality(idx, q);
+        if (idx === peepIdx) updatePeepBadges();
+    }).catch((err) => {
+        if (!peepCache.has(idx)) return;
+        const e = peepCache.get(idx);
+        e.encodeMs[q] = -1;
+        e.doneCount++;
+        pushStat(`[peep]   photo ${idx+1} ${fmtPeepQ(q)} FAILED: ${err}`);
+    });
+}
+
+function decodePeepQuality(idx, q) {
+    const entry = peepCache.get(idx);
+    if (!entry || !entry.jxlBytes[q] || entry.decoded[q]) return;
+    const blob = new Blob([entry.jxlBytes[q]], { type: 'image/jxl' });
+    const url = URL.createObjectURL(blob);
+    pool.decodeJxl(url, (msg) => {
+        URL.revokeObjectURL(url);
+        if (!pixelPeepActive) return;
+        if (!peepCache.has(idx)) return;
+        if (msg.type === 'decode_error') {
+            pushStat(`[peep]   photo ${idx+1} q=${q} decode error: ${msg.error}`);
+            return;
+        }
+        const e = peepCache.get(idx);
+        e.decoded[q] = { rgba: msg.rgba, w: msg.w, h: msg.h };
+        pushStat(`[peep]   photo ${idx+1} ${fmtPeepQ(q)} decoded  ${msg.w}×${msg.h}`);
+        if (idx === peepIdx) { paintPeepCurrent(); updatePeepBadges(); }
+    });
+}
+
+// Walk outward from peepQuality to find the nearest decoded variant.
+function pickNearestDecoded(entry, want) {
+    if (entry.decoded[want]) return { dec: entry.decoded[want], q: want, fallback: false };
+    const idx = PEEP_QUALITIES.indexOf(want);
+    for (let d = 1; d < PEEP_QUALITIES.length; d++) {
+        const lo = idx - d, hi = idx + d;
+        if (hi < PEEP_QUALITIES.length) {
+            const q = PEEP_QUALITIES[hi];
+            if (entry.decoded[q]) return { dec: entry.decoded[q], q, fallback: true };
+        }
+        if (lo >= 0) {
+            const q = PEEP_QUALITIES[lo];
+            if (entry.decoded[q]) return { dec: entry.decoded[q], q, fallback: true };
+        }
+    }
+    return null;
+}
+
+function paintPeepCurrent() {
+    const entry = peepCache.get(peepIdx);
+    if (!entry) { lbLoadingBadge.hidden = false; return; }
+    const pick = pickNearestDecoded(entry, peepQuality);
+    if (!pick) {
+        if (entry.jxlBytes[peepQuality]) decodePeepQuality(peepIdx, peepQuality);
+        lbLoadingBadge.hidden = false;
+        return;
+    }
+    const { dec, q: paintedQ, fallback } = pick;
+    try {
+        lightboxCanvas.width = dec.w;
+        lightboxCanvas.height = dec.h;
+        const ctx = lightboxCanvas.getContext('2d');
+        // Force fresh ImageData even if rgba is plain Uint8Array (not Clamped).
+        const rgba = dec.rgba instanceof Uint8ClampedArray
+            ? dec.rgba
+            : new Uint8ClampedArray(dec.rgba.buffer, dec.rgba.byteOffset, dec.rgba.byteLength);
+        ctx.putImageData(new ImageData(rgba, dec.w, dec.h), 0, 0);
+        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        }
+        pushStat(`[peep] painted photo ${peepIdx+1} ${fmtPeepQ(paintedQ)}  ${dec.w}×${dec.h}`);
+    } catch (err) {
+        pushStat(`[peep] PAINT FAILED photo ${peepIdx+1} ${fmtPeepQ(paintedQ)}: ${err?.message || err}`);
+        console.error('paintPeepCurrent error', err, dec);
+        return;
+    }
+    lbLoadingBadge.hidden = !fallback;
+    applyLbTransform();
+    updatePeepBadges();
+}
+
+function peepNavPhoto(delta) {
+    const n = peepPaths.length;
+    if (n <= 1) return;
+    peepIdx = (peepIdx + delta + n) % n;
+    paintPeepCurrent();
+    updatePeepBadges();
+}
+
+function peepCycleQuality(delta) {
+    const i = PEEP_QUALITIES.indexOf(peepQuality);
+    const ni = (i + delta + PEEP_QUALITIES.length) % PEEP_QUALITIES.length;
+    peepQuality = PEEP_QUALITIES[ni];
+    const entry = peepCache.get(peepIdx);
+    if (entry && !entry.decoded[peepQuality] && entry.jxlBytes[peepQuality]) {
+        decodePeepQuality(peepIdx, peepQuality);
+    }
+    paintPeepCurrent();
+    updatePeepBadges();
+}
+
+function exitPixelPeep() {
+    pixelPeepActive = false;
+    peepCache.clear();
+    peepPaths = [];
+    lightbox.hidden = true;
+    lightbox.classList.remove('peep-mode');
+    lbLoadingBadge.hidden = true;
+    pushStat('[peep] exited');
+}
+
+const peepBtn = document.getElementById('run-pixel-peep');
+if (peepBtn) {
+    peepBtn.addEventListener('click', () => {
+        peepBtn.disabled = true;
+        runPixelPeep().catch(e => pushStat(`[peep] ${e?.message || e}`))
+                      .finally(() => { peepBtn.disabled = false; });
     });
 }
 
@@ -2453,8 +3483,8 @@ if (IS_TAURI) {
     settingsBtn.id = 'tauri-settings-btn';
     settingsBtn.title = 'Planner Settings';
     settingsBtn.textContent = '⚙';
-    settingsBtn.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;padding:4px 8px;background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:4px;cursor:pointer';
-    document.body.appendChild(settingsBtn);
+    settingsBtn.style.cssText = 'position:fixed;top:8px;right:8px;z-index:9999;padding:4px 8px;background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:4px;cursor:pointer;display:none';
+    // document.body.appendChild(settingsBtn);
 
     settingsBtn.addEventListener('click', async () => {
         const dialog = document.getElementById('tauri-settings-dialog');
