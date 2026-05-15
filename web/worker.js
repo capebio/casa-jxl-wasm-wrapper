@@ -72,6 +72,13 @@ function applyLookToState(state, look) {
 }
 
 self.addEventListener('message', async (ev) => {
+    // --- release cached rgb16 state for a re-submitted task ---
+    if (ev.data.type === 'release_state') {
+        liveStateMap.delete(ev.data.id);
+        thumbStateMap.delete(ev.data.id);
+        return;
+    }
+
     // --- lightbox live reprocess (single image) ---
     if (ev.data.type === 'reprocess_live') {
         const { id, look } = ev.data;
