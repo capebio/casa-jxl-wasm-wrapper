@@ -43,7 +43,10 @@ async function ensureWasm() {
 }
 
 function makeLiveState(rgb16, w, h, orientation, wbR, wbB, colorMatrix) {
-    const axisSwap = orientation >= 5 && orientation <= 8;
+    // Only orientations 6 (90° CW) and 8 (90° CCW) actually swap axes in
+    // apply_orientation (pipeline.rs).  Tags 5/7 are pass-through there, so
+    // using orientation >= 5 overreports axisSwap and mis-sizes the canvas.
+    const axisSwap = orientation === 6 || orientation === 8;
     return {
         rgb16,
         w, h,
@@ -226,6 +229,12 @@ self.addEventListener('message', async (ev) => {
             [rgbaBuf],
         );
     } catch (err) {
+        // Clean up any rgb16 state stored before the failure so the worker
+        // doesn't hold large buffers for tasks that will never re-render.
+        if (id !== undefined) {
+            liveStateMap.delete(id);
+            thumbStateMap.delete(id);
+        }
         self.postMessage({
             id,
             type: 'error',

@@ -68,12 +68,20 @@ self.onmessage = async ({ data }) => {
                 resultView = module.encode(new Uint8ClampedArray(rgba), width, height, opts);
                 break;
             } catch (encErr) {
-                if (opts.effort > 5 && isAbortError(encErr)) {
+                if (isAbortError(encErr) && opts.effort > 5) {
                     const next = opts.effort - 1;
                     console.warn(`[jxl-worker] effort ${opts.effort} OOM for ${width}×${height}, retry at ${next}`);
                     moduleP = createModule();
                     module  = await moduleP;
                     opts    = { ...opts, effort: next };
+                } else if (isAbortError(encErr)) {
+                    // Effort already at minimum (5) and still OOM.  Reinit the
+                    // module so subsequent encodes on this worker are not dead,
+                    // then throw a human-readable error instead of raw 'abort'.
+                    moduleP = createModule();
+                    throw new Error(
+                        `JXL encode OOM at minimum effort ${opts.effort} — image too large (${width}×${height})`
+                    );
                 } else {
                     throw encErr;
                 }
