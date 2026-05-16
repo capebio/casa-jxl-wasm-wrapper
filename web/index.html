@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ORF → JPEG XL (browser)</title>
     <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="casabio.css" />
 </head>
 <body>
     <div id="timings-sidebar" class="timings-sidebar">
@@ -54,6 +55,7 @@
     <header>
         <div class="title">
             <h1>ORF → JPEG XL — fully in the browser <button class="info-btn" id="info-btn" type="button" aria-label="About this tool">ℹ</button></h1>
+            <button id="casabio-toggle" class="casabio-toggle" type="button" title="Upload encoded JXLs to a Casabio expedition gallery">Upload to Casabio</button>
             <div class="view-toggle" role="group" aria-label="Gallery layout">
                 <button class="view-btn active" data-view="rect"    title="Portrait rectangles">Rect</button>
                 <button class="view-btn"         data-view="square"  title="Square crop">Square</button>
@@ -207,6 +209,44 @@
         <section id="grid" class="grid"></section>
 
     </main>
+
+    <section id="casabio-panel" class="casabio-panel" hidden>
+        <header class="casabio-header">
+            <h2>Upload to Casabio</h2>
+            <button id="casabio-close" class="casabio-close" type="button" aria-label="Close">×</button>
+        </header>
+
+        <div class="casabio-section" id="casabio-setup">
+            <label>Casabio base URL
+                <input id="casabio-base-url" type="url" placeholder="https://expeditions.casabio.org" />
+            </label>
+            <label>API token
+                <input id="casabio-token" type="password" autocomplete="off" />
+            </label>
+            <div class="casabio-row">
+                <button id="casabio-save-token" type="button">Save token</button>
+                <button id="casabio-clear-token" type="button">Clear stored token</button>
+            </div>
+        </div>
+
+        <div class="casabio-section">
+            <label>Expedition
+                <select id="casabio-expedition"></select>
+            </label>
+            <button id="casabio-refresh-expeditions" type="button">Refresh</button>
+        </div>
+
+        <label class="casabio-checkbox">
+            <input type="checkbox" id="casabio-hq-toggle" />
+            High-quality fullsize (forces q=95)
+        </label>
+
+        <div id="casabio-drop-zone" class="casabio-drop-zone" tabindex="0">
+            Click to choose files (RAW / JPEG / PNG / TIFF)
+        </div>
+
+        <ul id="casabio-queue" class="casabio-queue"></ul>
+    </section>
 
     <div id="lightbox" class="lightbox" hidden>
         <button class="lightbox-close" aria-label="Close">×</button>
