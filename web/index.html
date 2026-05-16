@@ -22,6 +22,11 @@
                         <button id="run-variance-bench" type="button" title="High-effort size/upload analysis on 5 size-spread files">Variance × effort</button>
                         <button id="run-quality-sweep" type="button" title="Sweep quality 80/85/90/95 on 10 evenly-sampled files at e=3 Falcon">Quality sweep</button>
                         <button id="run-pixel-peep" type="button" title="Pick photos, encode q=70/75/80/85/90/95 each, compare at 100% pixels">Pixel-peep quality</button>
+                        <button id="run-jxl-bench" type="button" title="Encode an ORF, then decode with jpegxl-rs vs jxl-oxide at multiple sizes and regions">JXL decode bench</button>
+                        <button id="run-jxl-sweep" type="button" title="Sweep: pick 5 ORFs across folder (start/end/quintile mids), run JXL decode bench on each">JXL sweep (5 imgs)</button>
+                        <button id="run-jxl-stress" type="button" title="Stress: 5 ORFs × 3 thumb sizes (180/480/1080) × 10 repeats × both decoders">JXL stress test</button>
+                        <button id="run-jxl-thumb" type="button" title="Encode thumbs at 150/300/640/1080/1920, save JXL, probe DC, gallery-simulate 100 decodes at 150 + 300">JXL thumb bench</button>
+                        <button id="run-jxl-disk" type="button" title="Cold-disk architecture bench: sidecar vs .jxlbundle for grid + lightbox workloads, with OS page-cache flush between phases">JXL disk arch bench</button>
                         <button id="copy-stats" type="button">Copy</button>
                         <button id="clear-stats" type="button">Clear</button>
                         <button id="timings-close" type="button" title="Close">×</button>
@@ -216,13 +221,28 @@
             <button class="lb-btn lb-toggle-jpeg" aria-label="Cycle source: RAW / JXL / JPEG"
                     title="Cycle source: RAW → JXL → JPEG (Space / ↑↓)">RAW</button>
             <span class="lb-sep"></span>
+            <button class="lb-btn lb-crop-btn" aria-label="Crop tool (C)" title="Crop / focal subjects (C)">✂ Crop</button>
+            <select class="lb-aspect-select" id="lb-aspect-select" hidden title="Aspect ratio">
+                <option value="free">Free</option>
+                <option value="original">Original</option>
+                <option value="1:1">1:1 square</option>
+                <option value="3:2">3:2</option>
+                <option value="4:3">4:3</option>
+                <option value="16:9">16:9</option>
+                <option value="5:4">5:4</option>
+            </select>
+            <button class="lb-btn lb-crop-mode-toggle" id="lb-crop-mode-toggle" hidden
+                    title="Switch between Frame crop and Focal subjects">Frame</button>
+            <button class="lb-btn lb-crop-apply" id="lb-crop-apply" hidden title="Save crop (Enter)">Apply</button>
+            <button class="lb-btn lb-crop-cancel" id="lb-crop-cancel" hidden title="Discard (Esc)">Cancel</button>
+            <span class="lb-sep"></span>
             <button class="lb-download-btn" aria-label="Download full-res JPEG">⬇ JPEG</button>
         </div>
         <div class="lightbox-viewport">
             <canvas id="lightbox-canvas"></canvas>
             <div id="lb-source-label" aria-live="polite"></div>
             <div class="lb-source-banner" id="lb-source-banner" data-source="jxl">JXL</div>
-            <div class="lb-preview-badge" hidden>Camera JPEG</div>
+            <div class="lb-preview-badge" data-source="raw" hidden>RAW</div>
             <div class="lb-loading-badge" hidden>Loading…</div>
             <div id="lb-panels" class="lb-panels">
                 <div id="lb-panel-h" class="lb-panel">
@@ -298,11 +318,36 @@
             </div>
             <canvas id="lb-grain-overlay" class="lb-overlay"></canvas>
             <div id="lb-vignette-overlay" class="lb-overlay lb-vignette"></div>
+            <!-- Crop / focal-subject overlay layer. Sits above canvas (z-index),
+                 below toolbar. crop.js manages all rectangles, handles, dimming. -->
+            <div id="lb-crop-layer" class="lb-crop-layer" hidden>
+                <div class="lb-crop-dim" id="lb-crop-dim"></div>
+                <div class="lb-crop-rect" id="lb-crop-rect" hidden>
+                    <div class="lb-crop-h" data-h="nw"></div>
+                    <div class="lb-crop-h" data-h="n"></div>
+                    <div class="lb-crop-h" data-h="ne"></div>
+                    <div class="lb-crop-h" data-h="e"></div>
+                    <div class="lb-crop-h" data-h="se"></div>
+                    <div class="lb-crop-h" data-h="s"></div>
+                    <div class="lb-crop-h" data-h="sw"></div>
+                    <div class="lb-crop-h" data-h="w"></div>
+                </div>
+                <div class="lb-subjects-overlay" id="lb-subjects-overlay"></div>
+            </div>
+            <!-- Subject editor panel (slides in from right when crop mode is "subjects") -->
+            <div id="lb-subjects-panel" class="lb-subjects-panel" hidden>
+                <header><span>Focal subjects</span>
+                    <button id="lb-subjects-close" class="lb-panel-x">×</button>
+                </header>
+                <div id="lb-subjects-list" class="lb-subjects-list"></div>
+                <p class="lb-subjects-hint">Drag on the image to add. Click a box to edit.</p>
+            </div>
         </div>
         <div class="lightbox-info"></div>
     </div>
 
     <script type="module" src="./main.js"></script>
     <script defer src="./panels.js"></script>
+    <script defer src="./crop.js"></script>
 </body>
 </html>

@@ -219,14 +219,38 @@ pushStat(`hw cores:     ${navigator.hardwareConcurrency || '?'}`);
 pushStat(`UA:           ${navigator.userAgent}`);
 pushStat('');
 
-copyStatsBtn.addEventListener('click', async () => {
+function copyTextToClipboard(text) {
+    // Tauri WebView2 lacks the clipboard permission so the async
+    // navigator.clipboard.writeText() promise can hang waiting for a grant
+    // that never arrives.  Use the synchronous textarea/execCommand fallback
+    // first, which works without permissions; fall back to the async API on
+    // the off chance execCommand is disabled.
     try {
-        await navigator.clipboard.writeText(statsLog.textContent);
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) return Promise.resolve();
+    } catch (_) { /* fall through */ }
+    return (navigator.clipboard && navigator.clipboard.writeText)
+        ? navigator.clipboard.writeText(text)
+        : Promise.reject(new Error('no clipboard API'));
+}
+
+copyStatsBtn.addEventListener('click', () => {
+    copyTextToClipboard(statsLog.textContent).then(() => {
         copyStatsBtn.textContent = 'copied';
         setTimeout(() => (copyStatsBtn.textContent = 'Copy'), 1200);
-    } catch (e) {
+    }).catch(() => {
         copyStatsBtn.textContent = 'copy failed';
-    }
+        setTimeout(() => (copyStatsBtn.textContent = 'Copy'), 1500);
+    });
 });
 clearStatsBtn.addEventListener('click', () => {
     statsLines.length = 0;
@@ -288,6 +312,70 @@ function currentLook() {
     };
 }
 window.currentLook = currentLook;
+// Accessor for sidecar / crop modules — returns the card currently displayed
+// in the lightbox, or null if no lightbox is open.
+window.lightboxCard = () => (lightboxIndex >= 0 ? cards[lightboxIndex] : null);
+window.lightboxRefreshDraw = () => {
+    if (lightboxIndex >= 0 && cards[lightboxIndex]) {
+        drawLightboxForCard(cards[lightboxIndex]);
+    }
+};
+window.allCards = () => cards;
+
+// Decode the parent's full-resolution JXL into card._jxlDecoded if not already
+// cached. Used by crop.js to render focal-subject thumbnails from the JXL
+// roundtrip. Returns a promise that resolves when the buffer is in place.
+window.decodeFullJxlFor = function decodeFullJxlFor(card) {
+    return new Promise((resolve) => {
+        if (!card?._blobUrl) { resolve(null); return; }
+        if (card._jxlDecoded) { resolve(card._jxlDecoded); return; }
+        pool.decodeJxl(card._blobUrl, (msg) => {
+            if (msg.type === 'decode_error') { resolve(null); return; }
+            card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+            resolve(card._jxlDecoded);
+        }, 'low');
+    });
+};
+
+// Open the lightbox on a parent card with a specific subject auto-focused —
+// the lightbox will paint as usual but immediately zoom to fit the subject
+// bounds so it occupies the viewport. Pressing arrow keys cycles through the
+// parent + its subjects (the "connected set").
+window.openLightboxAtSubject = function openLightboxAtSubject(parentCard, subjectId) {
+    if (!parentCard) return;
+    openLightbox(parentCard);
+    parentCard._focusedSubjectId = subjectId;
+    // After open, queue a frame to apply the subject zoom — the canvas needs
+    // to have been painted first.
+    requestAnimationFrame(() => focusOnSubject(parentCard, subjectId));
+};
+
+function focusOnSubject(card, subjectId) {
+    const subj = (card?._subjects || []).find(s => s.id === subjectId);
+    if (!subj) return;
+    focusOnRegion(subj.x, subj.y, subj.w, subj.h);
+}
+window.focusOnSubject = focusOnSubject;
+
+// Centre + fit a normalised rectangle of the current canvas into the viewport.
+// Used by both subject focus and crop "fit to crop" on open.
+function focusOnRegion(x, y, w, h) {
+    const canvas = lightboxCanvas;
+    if (canvas.width <= 1 || canvas.height <= 1) return;
+    const vp = lbViewport.getBoundingClientRect();
+    const regionPxW = w * canvas.width;
+    const regionPxH = h * canvas.height;
+    if (regionPxW <= 0 || regionPxH <= 0) return;
+    const fit = Math.min(vp.width / regionPxW, vp.height / regionPxH, LB_ZOOM_MAX);
+    lbZoom = fit;
+    const cx = (x + w / 2) * canvas.width;
+    const cy = (y + h / 2) * canvas.height;
+    lbPanX = (canvas.width  / 2 - cx) * lbZoom;
+    lbPanY = (canvas.height / 2 - cy) * lbZoom;
+    lbDisplayLongPx = Math.max(canvas.width, canvas.height) * lbZoom;
+    applyLbTransform();
+}
+window.focusOnRegion = focusOnRegion;
 
 function currentOptions() {
     return {
@@ -806,8 +894,14 @@ function fileKey(f) { return `${f.name}|${f.size}|${f.lastModified}`; }
 function makeCard(name) {
     const card = document.createElement('div');
     card.className = 'thumb busy';
+    // Pre-size canvas to the RAW-thumb default (360×270 landscape 4:3, the
+    // common Olympus aspect).  Without this, the canvas starts 0×0 and the
+    // card collapses to the CSS min in view-natural mode, then expands when
+    // the first thumb arrives — a visible layout pop.  Orientation may swap
+    // to portrait once file_thumb_fast lands; that's a smaller shift than
+    // empty→full.
     card.innerHTML = `
-        <canvas></canvas>
+        <canvas width="360" height="270"></canvas>
         <div class="thumb-select" title="Select for re-process">·</div>
         <button class="thumb-rot-cw"  title="Rotate 90° CW">↻</button>
         <button class="thumb-rot-ccw" title="Rotate 90° CCW">↺</button>
@@ -915,6 +1009,8 @@ function refreshThumbToggleButton(card) {
     const mode   = card._sourceMode ?? 'raw';
     const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
     btn.textContent = labels[mode] ?? 'RAW';
+    btn.setAttribute('data-mode', mode);
+    // Legacy class kept for external CSS hooks.
     btn.classList.toggle('showing-jpeg', mode === 'jpeg');
 }
 
@@ -1001,11 +1097,25 @@ function redrawThumbRotated(card) {
                              card._embeddedPreview.orientation || 1,
                              card._thumbW, card._thumbH);
         canvas.style.transform = deg ? `rotate(${deg}deg)` : '';
+        setThumbSource(card, classifyJpegThumbSource(
+            card._embeddedPreview.w, card._embeddedPreview.h));
+        return;
+    }
+    // Prefer the cached JXL-decoded thumb when it's available — the badge
+    // says "JXL thumb" so the pixels should match.
+    if (card._jxlThumbBmp && card._jxlThumbW && card._jxlThumbH) {
+        canvas.width  = card._jxlThumbW;
+        canvas.height = card._jxlThumbH;
+        canvas.getContext('2d').drawImage(card._jxlThumbBmp, 0, 0);
+        canvas.style.transform = deg ? `rotate(${deg}deg)` : '';
+        setThumbSource(card, 'jxl');
         return;
     }
     if (!card._thumbRgb) return;
     drawCanvas(canvas, card._thumbW, card._thumbH, card._thumbRgb);
     canvas.style.transform = deg ? `rotate(${deg}deg)` : '';
+    // RAW-pipeline thumb — no badge.
+    setThumbSource(card, null);
 }
 
 // Rotate a card by delta degrees and persist + sync lightbox if open.
@@ -1017,7 +1127,7 @@ function rotateCard(card, delta) {
     redrawThumbRotated(card);
     if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
         lbRotation = userRotations[name];
-        resetLbZoom();
+        fitLbZoom();
     }
 }
 
@@ -1272,10 +1382,15 @@ function startConvert(file, existingCard) {
     }
     totalSubmitted++;
     card._file = file;
-    // Check for existing sidecar dot
+    // Check for existing sidecar dot + hydrate crop/subjects so any focal
+    // subjects show up as sibling cards before the user opens the lightbox.
     if (typeof loadSidecar === 'function' && file.name) {
         loadSidecar(file.name).then(s => {
-            if (s && typeof updateSidecarDot === 'function') updateSidecarDot(file.name, true);
+            if (!s) return;
+            if (typeof updateSidecarDot === 'function') updateSidecarDot(file.name, true);
+            if (typeof window.applyCropAndSubjectsToCard === 'function') {
+                window.applyCropAndSubjectsToCard(card, s);
+            }
         });
     }
     refreshStatus();
@@ -1312,6 +1427,7 @@ function startConvert(file, existingCard) {
                 drawOrientedThumb(card.querySelector('canvas'), largest.bmp, largest.orientation, 360);
                 card.classList.remove('busy');
                 card.classList.add('embedded-thumb');
+                setThumbSource(card, classifyJpegThumbSource(largest.w, largest.h));
             }
 
             card._embeddedPreview = { bmp: largest.bmp, w: largest.w, h: largest.h,
@@ -1319,8 +1435,9 @@ function startConvert(file, existingCard) {
             refreshThumbToggleButton(card);
             if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
                 if (!card._lightbox) {
+                    // drawLightboxForCard ends with syncZoomToDisplayLong()
+                    // which preserves displayed size (or fits on first paint).
                     drawLightboxForCard(card);
-                    resetLbZoom();
                 } else {
                     // Refresh toggle button enabled-state now that the pair is complete.
                     updateToggleButtonState(card);
@@ -1344,6 +1461,13 @@ function startConvert(file, existingCard) {
                     card._thumbRgb = msg.rgb;
                     card._thumbW   = msg.w;
                     card._thumbH   = msg.h;
+                    // Fresh RAW thumb — drop any stale JXL bitmap from a prior
+                    // process so redrawThumbRotated paints the new RAW pixels
+                    // rather than the old JXL cache.
+                    if (card._jxlThumbBmp) {
+                        try { card._jxlThumbBmp.close(); } catch {}
+                        card._jxlThumbBmp = null;
+                    }
                     try {
                         redrawThumbRotated(card);
                     } catch (e) {
@@ -1361,6 +1485,7 @@ function startConvert(file, existingCard) {
                     card.querySelector('.thumb-dl-btn').hidden = false;
                     card.classList.remove('busy', 'embedded-thumb');
                     card.classList.add('encoding');
+                    setThumbSource(card, null);
                 },
                 onLightbox(msg) {
                     card._lightbox = { rgb: msg.rgb, w: msg.w, h: msg.h };
@@ -1368,7 +1493,6 @@ function startConvert(file, existingCard) {
                     refreshThumbToggleButton(card);
                     if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
                         drawLightboxForCard(card);
-                        resetLbZoom();
                     }
                 },
                 onDone(msg) {
@@ -1418,6 +1542,14 @@ function startConvert(file, existingCard) {
                     emaEncode   = emaEncode   == null ? msg.jxlMs        : EMA_A * msg.jxlMs        + (1 - EMA_A) * emaEncode;
                     totalDone++;
                     refreshStatus();
+                    // Replace the RAW-pipeline thumb with a JXL-decoded one so
+                    // the grid shows what the JXL roundtrip looks like.
+                    repaintThumbFromJxl(card);
+                    // Subject sibling cards: now that JXL is ready, render
+                    // their thumbnails from the parent's full-res JXL pixels.
+                    if (card._subjects?.length && typeof window.renderSubjectThumb === 'function') {
+                        window.renderSubjectThumb(card).catch(() => {});
+                    }
                 },
                 onError(msg) {
                     card.classList.remove('busy', 'encoding');
@@ -1626,10 +1758,17 @@ let lightboxIndex = -1;
 const LB_ZOOM_MIN = 0.05;
 const LB_ZOOM_MAX = 8.0;
 const LB_ZOOM_STEP = 1.25;
+// Cap fit-to-viewport at 2× so tiny placeholders don't stretch absurdly while
+// still filling the viewport rather than sitting at 100% pixel size.
+const LB_FIT_CAP = 2.0;
 let lbZoom = 1;
 let lbPanX = 0;
 let lbPanY = 0;
 let lbRotation = 0; // 0 | 90 | 180 | 270
+// Tracks the desired displayed long-edge in CSS pixels so a source swap
+// (RAW ↔ JXL ↔ JPEG) keeps the image at the same visible size even though the
+// underlying canvas pixel dimensions differ. null = "fit on next paint".
+let lbDisplayLongPx = null;
 
 const USER_ROT_KEY    = 'orf-user-rotations';
 const LB_ROTATION_KEY = 'orf-lb-rotations'; // legacy — migrated on load
@@ -1644,23 +1783,127 @@ function saveUserRotations() {
     try { localStorage.setItem(USER_ROT_KEY, JSON.stringify(userRotations)); } catch {}
 }
 
+// Label what's actually on the thumb canvas right now.
+//   'embedded'  — small camera IFD1 thumb pulled straight from the RAW
+//   'downsized' — a larger embedded JPEG preview scaled down for the grid
+//   'jxl'       — decoded back from the encoded JXL bytes
+//   null        — RAW-pipeline thumb (no badge — that's the "real" output)
+function setThumbSource(card, src) {
+    if (src) card.setAttribute('data-thumb-src', src);
+    else card.removeAttribute('data-thumb-src');
+}
+
+// Heuristic: anything wider than ~480px on the long edge was a full preview
+// JPEG (e.g. Olympus ~1620×1080) that got scaled down for the grid; smaller
+// images came from the tiny IFD1 thumb embedded in the RAW container.
+const THUMB_EMBEDDED_MAX_LONG = 480;
+function classifyJpegThumbSource(w, h) {
+    return Math.max(w | 0, h | 0) > THUMB_EMBEDDED_MAX_LONG ? 'downsized' : 'embedded';
+}
+
+// After JXL encode finishes, decode and downsample to thumb dims so the grid
+// shows what the JXL roundtrip actually looks like (replacing whatever embedded
+// or RAW-pipeline thumb was there). Best-effort — failures stay silent.
+function repaintThumbFromJxl(card) {
+    if (!card?._blobUrl) return;
+    pool.decodeJxl(card._blobUrl, (msg) => {
+        if (msg.type === 'decode_error') {
+            console.warn('JXL thumb decode error:', msg.error);
+            return;
+        }
+        const canvas = card.querySelector('canvas');
+        if (!canvas) return;
+        const { rgba, w, h } = msg;
+        const LONG_EDGE = 360;
+        const long = Math.max(w, h);
+        const targetW = long > LONG_EDGE ? Math.max(1, Math.round(w * LONG_EDGE / long)) : w;
+        const targetH = long > LONG_EDGE ? Math.max(1, Math.round(h * LONG_EDGE / long)) : h;
+        // Build the source ImageBitmap then high-quality draw into the thumb.
+        // Cache the downsampled bitmap so rotation can repaint without
+        // re-decoding the full JXL.
+        createImageBitmap(new ImageData(rgba, w, h), {
+            resizeWidth: targetW, resizeHeight: targetH, resizeQuality: 'high',
+        }).then(bmp => {
+            canvas.width = targetW;
+            canvas.height = targetH;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(bmp, 0, 0);
+            if (card._jxlThumbBmp && card._jxlThumbBmp !== bmp) {
+                try { card._jxlThumbBmp.close(); } catch {}
+            }
+            card._jxlThumbBmp = bmp;
+            card._jxlThumbW   = targetW;
+            card._jxlThumbH   = targetH;
+            card.classList.remove('embedded-thumb');
+            setThumbSource(card, 'jxl');
+        }).catch(e => console.warn('JXL thumb bitmap failed:', e));
+    }, 'low');
+}
+
 function applyLbTransform() {
     lightboxCanvas.style.transform =
         `translate(${lbPanX}px, ${lbPanY}px) scale(${lbZoom}) rotate(${lbRotation}deg)`;
     lbZoomLabel.textContent = Math.round(lbZoom * 100) + '%';
 }
 
-function resetLbZoom() {
+// Returns {fitW, fitH, vp} accounting for rotation, or null if canvas invalid.
+function _lbFitDims() {
     const vp = lbViewport.getBoundingClientRect();
     const cw = lightboxCanvas.width;
     const ch = lightboxCanvas.height;
-    // For 90°/270° the rendered image is sideways — swap fit dimensions.
+    if (cw <= 1 || ch <= 1 || vp.width <= 0 || vp.height <= 0) return null;
     const rotated = lbRotation === 90 || lbRotation === 270;
-    const fitW = rotated ? ch : cw;
-    const fitH = rotated ? cw : ch;
-    lbZoom = (fitW > 0 && fitH > 0) ? Math.min(vp.width / fitW, vp.height / fitH, 1) : 1;
+    return { fitW: rotated ? ch : cw, fitH: rotated ? cw : ch, vp };
+}
+
+function _lbFitZoom() {
+    const d = _lbFitDims();
+    if (!d) return 1;
+    return Math.min(d.vp.width / d.fitW, d.vp.height / d.fitH, LB_FIT_CAP);
+}
+
+function _lbCanvasLongPx() {
+    const d = _lbFitDims();
+    return d ? Math.max(d.fitW, d.fitH) : null;
+}
+
+// Set lbZoom from current lbDisplayLongPx (preserving displayed size across
+// source swaps). If lbDisplayLongPx is null or canvas is a placeholder, fall
+// back to fit-to-viewport. Call after every canvas-paint that changed dims.
+function syncZoomToDisplayLong() {
+    const canvasLong = _lbCanvasLongPx();
+    if (canvasLong == null) {
+        applyLbTransform();
+        return;
+    }
+    if (lbDisplayLongPx == null) {
+        lbZoom = _lbFitZoom();
+        lbPanX = 0;
+        lbPanY = 0;
+        lbDisplayLongPx = canvasLong * lbZoom;
+    } else {
+        lbZoom = lbDisplayLongPx / canvasLong;
+    }
+    applyLbTransform();
+}
+
+// Force-fit (without toggling to 100%). Used after rotation / new image opens.
+function fitLbZoom() {
+    lbDisplayLongPx = null;
+    syncZoomToDisplayLong();
+}
+
+// Toolbar ⊙ button: toggle between fit-to-viewport and 100% (actual pixels).
+// First press from any other zoom level snaps to fit.
+function resetLbZoom() {
+    const canvasLong = _lbCanvasLongPx();
+    if (canvasLong == null) { lbZoom = 1; lbDisplayLongPx = null; applyLbTransform(); return; }
+    const fitZoom = _lbFitZoom();
+    const atFit = Math.abs(lbZoom - fitZoom) < 0.005;
+    lbZoom = atFit ? 1.0 : fitZoom;
     lbPanX = 0;
     lbPanY = 0;
+    lbDisplayLongPx = canvasLong * lbZoom;
     applyLbTransform();
 }
 
@@ -1672,7 +1915,8 @@ function rotateBy(delta) {
         saveUserRotations();
         redrawThumbRotated(card);
     }
-    resetLbZoom();
+    // Rotation swaps long-edge orientation → refit.
+    fitLbZoom();
 }
 
 function zoomAtPoint(clientX, clientY, factor) {
@@ -1684,6 +1928,8 @@ function zoomAtPoint(clientX, clientY, factor) {
     lbPanX = lbPanX * af + mx * (1 - af);
     lbPanY = lbPanY * af + my * (1 - af);
     lbZoom = newZoom;
+    const canvasLong = _lbCanvasLongPx();
+    if (canvasLong != null) lbDisplayLongPx = canvasLong * lbZoom;
     applyLbTransform();
     if (pixelPeepActive) updatePeepBadges();
 }
@@ -1700,9 +1946,10 @@ function drawLightboxForCard(card) {
                 const _ctx = lightboxCanvas.getContext('2d');
                 setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
-            lbPreviewBadge.hidden = false;
+            setPaintedSourceBadge('jpeg');
             lbLoadingBadge.hidden = true;
             updateToggleButtonState(card);
+            syncZoomToDisplayLong();
             return;
         }
         // Fallback: lightbox not ready yet, treat as raw.
@@ -1723,13 +1970,13 @@ function drawLightboxForCard(card) {
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                 setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
-            lbPreviewBadge.hidden = true;
+            setPaintedSourceBadge('jxl');
             lbLoadingBadge.hidden = true;
             updateToggleButtonState(card);
-            applyLbTransform();
+            syncZoomToDisplayLong();
             return;
         } else {
-            lbPreviewBadge.hidden = true;
+            // Decode in flight — keep whatever pixels are on screen, show loader.
             lbLoadingBadge.hidden = false;
             updateToggleButtonState(card);
             pool.decodeJxl(card._blobUrl, (msg) => {
@@ -1747,8 +1994,9 @@ function drawLightboxForCard(card) {
                 if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                     setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
                 }
+                setPaintedSourceBadge('jxl');
                 lbLoadingBadge.hidden = true;
-                applyLbTransform();
+                syncZoomToDisplayLong();
             }, 'high');
             return;
         }
@@ -1756,20 +2004,31 @@ function drawLightboxForCard(card) {
 
     // mode === 'raw' (or fallback from unavailable mode).
     //
-    // Always paint best-available source synchronously so no stale image from
-    // the previous card leaks through during async fetch.  Order of preference:
-    //   1. Full lightbox-sized RGB (best)
-    //   2. JXL (encoded final output — equivalent quality, in-browser, fast)
-    //   3. Embedded JPEG preview (placeholder, swapped when full arrives)
+    // Tauri-mode policy: embedded JPEG preview is the PRIMARY lightbox source.
+    // The RAW pipeline runs in the background to populate the rgb16 cache (so
+    // sliders work) and to encode JXL for export, but the lightbox never waits
+    // for that work.  When the user moves a slider, `apply_look` returns a
+    // fresh RGB frame which `triggerLiveUpdateTauri` paints directly.
+    //
+    // WASM-mode keeps the original flow: the WASM worker emits the lightbox
+    // RGB so card._lightbox.rgb is set without needing a fetch; if JXL is
+    // ready first, auto-promote to JXL mode so the user sees real output.
+    //
+    // Order of preference:
+    //   1. Full lightbox-sized RGB (best — only set in WASM mode, or after
+    //      a slider edit in Tauri)
+    //   2. Embedded JPEG preview (the fast-arriving JPEG, swapped to the
+    //      larger ~1620×1080 preview via fetchLargePreviewIfNeeded)
+    //   3. JXL decode (WASM only — Tauri stays on embedded)
     //   4. 1×1 clear (nothing available yet)
     const hasFullRgb     = !!(card._lightbox && card._lightbox.rgb);
-    const needsTauriFetch = !!(card._lightbox && card._lightbox.id != null
-                               && !card._lightbox.rgb && IS_TAURI);
     const hasEmbedded    = !!card._embeddedPreview;
 
-    // JXL already encoded but RAW rgb not displayable yet — promote to JXL
-    // so the user sees the real encoded output (no JPEG-preview placeholder).
-    if (!hasFullRgb && card._blobUrl) {
+    // WASM only: when JXL bytes arrive before RGB, jump to JXL mode so the
+    // user sees real encoded output instead of the JPEG preview placeholder.
+    // Tauri intentionally skips this — embedded JPEG stays primary until a
+    // slider edit triggers `apply_look`.
+    if (!hasFullRgb && card._blobUrl && !IS_TAURI) {
         card._sourceMode = 'jxl';
         drawLightboxForCard(card);
         return;
@@ -1782,48 +2041,68 @@ function drawLightboxForCard(card) {
             const _ctx = lightboxCanvas.getContext('2d');
             setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
         }
-        lbPreviewBadge.hidden = true;
+        setPaintedSourceBadge('raw');
         lbLoadingBadge.hidden = true;
     } else if (hasEmbedded) {
         const { bmp, orientation } = card._embeddedPreview;
-        drawBitmapOriented(lightboxCanvas, bmp, orientation || 1);
-        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-            const _ctx = lightboxCanvas.getContext('2d');
-            setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        // In Tauri mode, the initial fast-emit JPEG is the tiny ~160×120 IFD1
+        // thumbnail.  Drawing it would size the lightbox canvas to that, then
+        // jump bigger when fetchLargePreviewIfNeeded swaps in the ~1620×1080
+        // preview (different aspect ratio — 4:3 vs 3:2).  Defer until the
+        // large preview lands so the lightbox starts at the correct size.
+        const isSmallInTauri = IS_TAURI && Math.max(bmp.width, bmp.height) < 600
+                              && !card._largePreviewFetched;
+        if (isSmallInTauri) {
+            lightboxCanvas.width = 1;
+            lightboxCanvas.height = 1;
+            if (lbPreviewBadge) lbPreviewBadge.hidden = true;
+            lbLoadingBadge.hidden = false;
+            fetchLargePreviewIfNeeded(card);
+        } else {
+            // Render to a stable lightbox-sized canvas.  Long edge matches
+            // backend's LB_LONG_EDGE (1800) — when apply_look later returns a
+            // RAW frame at the same long edge, the canvas only needs an
+            // aspect-ratio adjustment, not a full rescale.
+            const LB_LONG = 1800;
+            const o = (orientation >= 1 && orientation <= 8) ? orientation : 1;
+            const swap = o >= 5;
+            const srcDispW = swap ? bmp.height : bmp.width;
+            const srcDispH = swap ? bmp.width  : bmp.height;
+            const knownW = card._lightbox?.w;
+            const knownH = card._lightbox?.h;
+            let targetW, targetH;
+            if (knownW > 0 && knownH > 0) {
+                targetW = knownW; targetH = knownH;
+            } else if (srcDispW >= srcDispH) {
+                targetW = Math.min(srcDispW, LB_LONG);
+                targetH = Math.max(1, Math.round(srcDispH * targetW / srcDispW));
+            } else {
+                targetH = Math.min(srcDispH, LB_LONG);
+                targetW = Math.max(1, Math.round(srcDispW * targetH / srcDispH));
+            }
+            drawJpegToTargetDims(lightboxCanvas, bmp, o, targetW, targetH);
+            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                const _ctx = lightboxCanvas.getContext('2d');
+                setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            }
+            // Actual painted source is the embedded JPEG even though mode='raw'.
+            setPaintedSourceBadge('jpeg');
+            lbLoadingBadge.hidden = true;
         }
-        lbPreviewBadge.hidden = false;
-        lbLoadingBadge.hidden = !needsTauriFetch;
     } else {
         // Clear to known state so prior card's pixels don't bleed through.
         lightboxCanvas.width  = 1;
         lightboxCanvas.height = 1;
-        lbPreviewBadge.hidden = true;
-        lbLoadingBadge.hidden = !needsTauriFetch;
+        if (lbPreviewBadge) lbPreviewBadge.hidden = true;
+        lbLoadingBadge.hidden = false;
     }
-
-    // Background fetch — when it lands, redraw and reset zoom to fit new dims.
-    if (needsTauriFetch && !card._lightbox.fetching) {
-        card._lightbox.fetching = true;
-        invoke('get_lightbox', { id: card._lightbox.id })
-            .then((frame) => {
-                const rgbU8 =
-                    (frame.data instanceof Uint8ClampedArray || frame.data instanceof Uint8Array)
-                        ? frame.data : Uint8Array.from(frame.data);
-                card._lightbox.rgb = rgbU8;
-                card._lightbox.w   = frame.width;
-                card._lightbox.h   = frame.height;
-                if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
-                    drawLightboxForCard(card);
-                    resetLbZoom();
-                }
-            })
-            .catch((e) => {
-                console.warn('get_lightbox failed:', e);
-                lbLoadingBadge.hidden = true;
-            })
-            .finally(() => { if (card._lightbox) card._lightbox.fetching = false; });
-    }
+    // Tauri lightbox no longer eagerly fetches the RAW RGB on open — that
+    // happens only when the user moves a slider (triggerLiveUpdateTauri →
+    // apply_look returns a fresh RAW frame and paints it directly).  This
+    // keeps lightbox display latency bounded by the embedded preview path
+    // instead of the full RAW pipeline + JXL queue.
     updateToggleButtonState(card);
+    syncZoomToDisplayLong();
 }
 
 function updateToggleButtonState(card) {
@@ -1833,13 +2112,27 @@ function updateToggleButtonState(card) {
     if (lbToggleJpegBtn) {
         lbToggleJpegBtn.disabled = !havePair;
         lbToggleJpegBtn.textContent = labels[mode] ?? 'RAW';
+        lbToggleJpegBtn.setAttribute('data-mode', mode);
+        // Legacy class kept for any external CSS hooks.
         lbToggleJpegBtn.classList.toggle('showing-jpeg', mode === 'jpeg');
     }
-    if (lbSourceBanner) {
-        lbSourceBanner.textContent = labels[mode] ?? 'RAW';
-        lbSourceBanner.setAttribute('data-source', mode);
-        lbSourceBanner.hidden = !havePair;
-    }
+}
+
+// Single source-of-truth badge for the actually painted source. Colour-coded:
+// JPEG=green, JXL=blue, RAW=brown. Always visible in normal lightbox mode.
+// Dims are read from the canvas — that is the natural pixel size of the
+// painted source, which the user wants to see so they can correlate apparent
+// sharpness with source resolution (Embedded JPEG ~1620×1080 vs JXL ~5184×3888).
+function setPaintedSourceBadge(source) {
+    if (!lbPreviewBadge) return;
+    const labels = { raw: 'RAW', jxl: 'JPEG XL', jpeg: 'Embedded JPEG' };
+    const label = labels[source] ?? labels.raw;
+    const cw = lightboxCanvas.width | 0;
+    const ch = lightboxCanvas.height | 0;
+    const dims = (cw > 1 && ch > 1) ? `  ${cw}×${ch}` : '';
+    lbPreviewBadge.textContent = label + dims;
+    lbPreviewBadge.setAttribute('data-source', source);
+    lbPreviewBadge.hidden = false;
 }
 
 // Briefly pulse the centre banner so a toggle press is unmissable.
@@ -2032,14 +2325,72 @@ function promoteRawAroundCurrent() {
         if (!card) return;
         if (card._taskId != null) pool.setPriority(card._taskId, prio);
         else card._pendingPriority = prio;
+        // Tauri side: each promote_file call allocates a fresh ever-decreasing
+        // priority on the backend, so the LAST call wins the front of the
+        // queue.  Order matters here — neighbours first, current last.
+        if (IS_TAURI && card._tauriPath) {
+            invoke('promote_file', { path: card._tauriPath }).catch(() => {});
+        }
     };
-    setRawPriority(cards[lightboxIndex], 'high');
-    for (let off = 1; off <= PREFETCH_NEIGHBORS; off++) {
+    // Promote neighbours first (lowest urgency), then current LAST.  Backend
+    // priority allocation: each call gets a fresher (more negative) priority,
+    // so the most recent call jumps ahead of every prior promote.  Without
+    // this ordering, the right-arrow target would queue behind the file that
+    // was clicked first, defeating the priority bump on navigation.
+    for (let off = PREFETCH_NEIGHBORS; off >= 1; off--) {
         const a = (lightboxIndex + off + cards.length) % cards.length;
         const b = (lightboxIndex - off + cards.length) % cards.length;
         if (a !== lightboxIndex)             setRawPriority(cards[a], 'medium');
         if (b !== lightboxIndex && b !== a)  setRawPriority(cards[b], 'medium');
     }
+    setRawPriority(cards[lightboxIndex], 'high');
+}
+
+// Tauri-only: fetch the larger embedded preview JPEG on demand and swap
+// it into card._embeddedPreview so the lightbox shows a high-quality placeholder
+// while the RAW pipeline finishes.  No-op if the full RAW lightbox is already
+// drawn or a fetch is already pending.
+//
+// Debounced — spamming right-arrow through unprocessed files would otherwise
+// queue a get_large_preview RPC per step.  We wait until the user stays on
+// the same card for 80 ms before firing.
+let _largePrevDebounceTimer = null;
+let _largePrevDebounceTarget = null;
+function fetchLargePreviewIfNeeded(card) {
+    if (!IS_TAURI || !card || !card._tauriPath) return;
+    if (card._largePreviewFetched || card._largePreviewFetching) return;
+    if (card._lightbox && card._lightbox.rgb) return; // RAW already there
+    _largePrevDebounceTarget = card;
+    clearTimeout(_largePrevDebounceTimer);
+    _largePrevDebounceTimer = setTimeout(() => {
+        if (_largePrevDebounceTarget !== card) return;
+        if (card._largePreviewFetched || card._largePreviewFetching) return;
+        if (card._lightbox && card._lightbox.rgb) return;
+        card._largePreviewFetching = true;
+        invoke('get_large_preview', { path: card._tauriPath })
+            .then((bytes) => {
+                const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+                const orientation = card._embeddedPreview?.orientation || 1;
+                return createImageBitmap(new Blob([u8], { type: 'image/jpeg' }))
+                    .then(bmp => ({ bmp, orientation }));
+            })
+            .then(({ bmp, orientation }) => {
+                const prev = card._embeddedPreview;
+                if (!prev || bmp.width * bmp.height > prev.bmp.width * prev.bmp.height) {
+                    if (prev?.bmp && prev.bmp !== bmp) try { prev.bmp.close(); } catch {}
+                    card._embeddedPreview = { bmp, w: bmp.width, h: bmp.height, orientation };
+                } else {
+                    try { bmp.close(); } catch {}
+                }
+                card._largePreviewFetched = true;
+                if (lightboxIndex >= 0 && cards[lightboxIndex] === card &&
+                    !(card._lightbox && card._lightbox.rgb)) {
+                    drawLightboxForCard(card);
+                }
+            })
+            .catch((e) => { console.warn('get_large_preview failed:', e); })
+            .finally(() => { card._largePreviewFetching = false; });
+    }, 80);
 }
 
 function openLightbox(card) {
@@ -2052,17 +2403,25 @@ function openLightbox(card) {
         const sidecarPath = card._tauriPath || card._file?.name;
         loadSidecar(sidecarPath).then(sidecar => {
             if (sidecar && typeof applySidecar === 'function') applySidecar(sidecar);
+            // After sidecar applied, sync sibling cards in the grid and queue
+            // JXL-based thumbnail rendering once the JXL is ready.
+            if (typeof window.rebuildSubjectCards === 'function') window.rebuildSubjectCards(card);
         });
     }
-    drawLightboxForCard(card);
-    flashSourceBanner();
-    const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
-    showSourceLabel(labels[card._sourceMode] ?? 'RAW');
-    renderInfoPanel(card);
+    // Fresh open → start fitted to viewport. drawLightboxForCard ends with
+    // syncZoomToDisplayLong() which will compute fit when lbDisplayLongPx is null.
+    lbDisplayLongPx = null;
+    lbPanX = 0; lbPanY = 0;
     lightbox.hidden = false;
-    resetLbZoom();
+    drawLightboxForCard(card);
+    renderInfoPanel(card);
+    // If a crop is saved on this card, fit-to-crop instead of fit-to-image.
+    if (card._crop) {
+        requestAnimationFrame(() => focusOnRegion(card._crop.x, card._crop.y, card._crop.w, card._crop.h));
+    }
     promoteRawAroundCurrent();
     prefetchAroundCurrent();
+    fetchLargePreviewIfNeeded(card);
 }
 
 function drawLightbox() {
@@ -2071,29 +2430,56 @@ function drawLightbox() {
     lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
     drawLightboxForCard(card);
     renderInfoPanel(card);
-    resetLbZoom();
 }
 
 function closeLightbox() {
     lightbox.hidden = true;
     lightboxIndex = -1;
-    lbPreviewBadge.hidden = true;
+    if (lbPreviewBadge) lbPreviewBadge.hidden = true;
     lbLoadingBadge.hidden = true;
+    lbDisplayLongPx = null;
 }
 
 function nextInLightbox(dir) {
     if (lightboxIndex < 0) return;
+    // Connected-set traversal: if the user is currently focused on a subject
+    // of the active parent card, arrow keys cycle parent + subjects rather
+    // than jumping to the next/previous top-level photo. Falling off either
+    // end returns to top-level navigation.
+    const cur = cards[lightboxIndex];
+    if (cur && cur._focusedSubjectId !== undefined && cur._subjects?.length) {
+        const ids = [null, ...cur._subjects.map(s => s.id)];
+        const at  = ids.indexOf(cur._focusedSubjectId);
+        const nextAt = at + dir;
+        if (nextAt >= 0 && nextAt < ids.length) {
+            const nextId = ids[nextAt];
+            cur._focusedSubjectId = nextId;
+            if (nextId == null) {
+                // Back to full parent — refit zoom to viewport.
+                lbDisplayLongPx = null; lbPanX = 0; lbPanY = 0;
+                syncZoomToDisplayLong();
+            } else {
+                focusOnSubject(cur, nextId);
+            }
+            return;
+        }
+        // Falling off the connected set → fall through to normal cycle and
+        // clear focus.
+        cur._focusedSubjectId = undefined;
+    }
     lightboxIndex = (lightboxIndex + dir + cards.length) % cards.length;
     const card = cards[lightboxIndex];
     if (card) card._sourceMode = 'raw';
     liveInFlight = false;
     livePendingLook = null;
     resetLookSliders();
+    // New image → start fitted to viewport.
+    lbDisplayLongPx = null;
+    lbPanX = 0; lbPanY = 0;
     drawLightbox();
-    const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
-    showSourceLabel(labels[card?._sourceMode] ?? 'RAW');
     promoteRawAroundCurrent();
     prefetchAroundCurrent();
+    if (card) fetchLargePreviewIfNeeded(card);
 }
 
 // Toolbar buttons
@@ -2106,6 +2492,24 @@ lbZoomOut.addEventListener('click', () => {
     zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, 1 / LB_ZOOM_STEP);
 });
 lbZoomReset.addEventListener('click', resetLbZoom);
+
+// Keep displayed size honest across viewport resizes. If the user was at fit,
+// stay at fit (long-edge tracks the new viewport); otherwise leave lbZoom alone
+// so absolute displayed-pixel size is preserved.
+let _lbResizeRaf = 0;
+window.addEventListener('resize', () => {
+    if (lightbox.hidden || lightbox.classList.contains('peep-mode')) return;
+    if (_lbResizeRaf) return;
+    _lbResizeRaf = requestAnimationFrame(() => {
+        _lbResizeRaf = 0;
+        const canvasLong = _lbCanvasLongPx();
+        if (canvasLong == null) return;
+        const prevFit = _lbFitZoom();
+        const wasAtFit = Math.abs(lbZoom - prevFit) < 0.005;
+        if (wasAtFit) fitLbZoom();
+        // else: preserve absolute displayed-pixel size (lbZoom unchanged).
+    });
+});
 
 if (lbToggleJpegBtn) {
     lbToggleJpegBtn.addEventListener('click', (e) => {
@@ -2319,7 +2723,19 @@ document.addEventListener('keydown', (e) => {
         if (typeof togglePanel === 'function') togglePanel('f');
         return;
     }
-    if (e.key === 'Escape') closeLightbox();
+    if (e.key === 'Escape') {
+        // If a subject is focused, clear focus and refit parent first; only
+        // close the lightbox when there's no subject context to back out of.
+        const cur = cards[lightboxIndex];
+        if (cur && cur._focusedSubjectId) {
+            cur._focusedSubjectId = undefined;
+            lbDisplayLongPx = null; lbPanX = 0; lbPanY = 0;
+            syncZoomToDisplayLong();
+            e.preventDefault();
+            return;
+        }
+        closeLightbox();
+    }
     else if (!isInput && (e.key === 'r' || e.key === 'R')) rotateBy(90);
     else if (!isInput && (e.key === 'l' || e.key === 'L')) rotateBy(-90);
     else if (!isInput && (e.key === ' ' || e.code === 'Space')) {
@@ -2437,6 +2853,12 @@ function onFileDoneTauri(filename, result) {
     if (!card) return;
     card.classList.remove('busy');
 
+    // Drop any stale JXL bitmap from a prior process so the new RAW thumb
+    // doesn't get masked by a redrawThumbRotated call that prefers the cache.
+    if (card._jxlThumbBmp) {
+        try { card._jxlThumbBmp.close(); } catch {}
+        card._jxlThumbBmp = null;
+    }
     // Defensive paint — surface failures instead of leaving a black canvas.
     try {
         if (!result || !result.thumb) {
@@ -2452,6 +2874,9 @@ function onFileDoneTauri(filename, result) {
             canvas.getContext('2d').putImageData(
                 new ImageData(rgbToRgbaArr(data), width, height), 0, 0);
         }
+        // RAW-pipeline thumb is in place; clear the embedded-source label.
+        card.classList.remove('embedded-thumb');
+        setThumbSource(card, null);
     } catch (e) {
         console.error('[tauri-thumb] paint failed for', filename, e);
         card.classList.add('error');
@@ -2487,6 +2912,12 @@ function onFileDoneTauri(filename, result) {
         if (dlBtn) dlBtn.hidden = false;
         refreshThumbToggleButton(card);
         updateToggleButtonState(card);
+        // Repaint thumb from the JXL roundtrip so the grid shows JXL output.
+        repaintThumbFromJxl(card);
+        // Subject sibling cards: render their thumbs now that JXL is ready.
+        if (card._subjects?.length && typeof window.renderSubjectThumb === 'function') {
+            window.renderSubjectThumb(card).catch(() => {});
+        }
     }
 
     // If user is already viewing this card in the lightbox, kick the lazy
@@ -2546,7 +2977,11 @@ async function startBatchTauri(paths) {
         grid.appendChild(card);
         if (typeof loadSidecar === 'function') {
             loadSidecar(path).then(s => {
-                if (s && typeof updateSidecarDot === 'function') updateSidecarDot(filename, true);
+                if (!s) return;
+                if (typeof updateSidecarDot === 'function') updateSidecarDot(filename, true);
+                if (typeof window.applyCropAndSubjectsToCard === 'function') {
+                    window.applyCropAndSubjectsToCard(card, s);
+                }
             });
         }
     }
@@ -2574,16 +3009,49 @@ async function startBatchTauri(paths) {
         const blob = new Blob([new Uint8Array(payload.jpeg)], { type: 'image/jpeg' });
         createImageBitmap(blob).then(bmp => {
             const orientation = payload.orientation || 1;
+            // Compute the RAW-pipeline thumb dims from sensor dims so the
+            // canvas is sized correctly from the FIRST draw.  Pipeline uses
+            // THUMB_LONG_EDGE=360 + sensor aspect (post-orientation).  Drawing
+            // the small embedded JPEG into a canvas of those exact dims means
+            // the RAW thumb arriving later replaces pixels without resizing
+            // the canvas — no layout shift in view-natural mode.
+            const sensorW = payload.sensor_width  | 0;
+            const sensorH = payload.sensor_height | 0;
+            const LONG_EDGE = 360;
+            let targetW, targetH;
+            if (sensorW > 0 && sensorH > 0) {
+                const swap = orientation >= 5;
+                const dispW = swap ? sensorH : sensorW;
+                const dispH = swap ? sensorW : sensorH;
+                if (dispW >= dispH) {
+                    targetW = Math.min(dispW, LONG_EDGE);
+                    targetH = Math.max(1, Math.round(dispH * targetW / dispW));
+                } else {
+                    targetH = Math.min(dispH, LONG_EDGE);
+                    targetW = Math.max(1, Math.round(dispW * targetH / dispH));
+                }
+            }
             if (card.classList.contains('busy') || card.classList.contains('embedded-thumb')) {
-                drawOrientedThumb(card.querySelector('canvas'), bmp, orientation, 360);
+                const canvas = card.querySelector('canvas');
+                if (targetW && targetH) {
+                    // Draw the embedded JPEG stretched to the RAW-thumb target
+                    // dims. May look slightly blurry (160→360 upscale) but the
+                    // size is correct and stable.
+                    drawJpegToTargetDims(canvas, bmp, orientation, targetW, targetH);
+                } else {
+                    drawOrientedThumb(canvas, bmp, orientation, LONG_EDGE);
+                }
                 card.classList.remove('busy');
                 card.classList.add('embedded-thumb');
+                // Tauri's file_thumb_fast always emits the small IFD1 preview.
+                setThumbSource(card, classifyJpegThumbSource(bmp.width, bmp.height));
             }
             card._embeddedPreview = { bmp, w: bmp.width, h: bmp.height, orientation };
+            card._sensorW = sensorW;
+            card._sensorH = sensorH;
             refreshThumbToggleButton(card);
             if (lightboxIndex >= 0 && cards[lightboxIndex] === card && !card._lightbox) {
                 drawLightboxForCard(card);
-                if (typeof resetLbZoom === 'function') resetLbZoom();
             }
         }).catch(() => {});
     });
@@ -3435,6 +3903,365 @@ if (peepBtn) {
     });
 }
 
+// Measure canvas paint cost (putImageData) at each unique W×H in the bench
+// rows. Paint cost depends only on dimensions, not on which decoder produced
+// the buffer — so a synthetic RGBA of the right size gives an accurate paint
+// timing without round-tripping the real decoded pixels through IPC (which
+// would dominate the measurement with JSON-array encoding overhead).
+function measurePaintTimings(rows) {
+    const canvas = document.createElement('canvas');
+    canvas.style.position = 'fixed';
+    canvas.style.left = '-99999px';
+    canvas.style.top = '0';
+    document.body.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    const cache = new Map();
+    const ITERS = 3;
+    for (const r of rows) {
+        if (!r.width || !r.height) { r.paint_ms = 0; continue; }
+        const key = `${r.width}x${r.height}`;
+        if (cache.has(key)) { r.paint_ms = cache.get(key); continue; }
+        canvas.width = r.width;
+        canvas.height = r.height;
+        const rgba = new Uint8ClampedArray(r.width * r.height * 4);
+        // Mid-grey opaque; avoids any all-zero fast-path the browser might take.
+        for (let i = 0; i < rgba.length; i += 4) {
+            rgba[i] = 128; rgba[i+1] = 128; rgba[i+2] = 128; rgba[i+3] = 255;
+        }
+        const imgData = new ImageData(rgba, r.width, r.height);
+        // Warm up — first putImageData on a fresh canvas size pays extra cost.
+        ctx.putImageData(imgData, 0, 0);
+        const t0 = performance.now();
+        for (let i = 0; i < ITERS; i++) ctx.putImageData(imgData, 0, 0);
+        const ms = (performance.now() - t0) / ITERS;
+        cache.set(key, ms);
+        r.paint_ms = ms;
+    }
+    canvas.remove();
+}
+
+// JXL decoder bench — encodes a chosen ORF then decodes it with jpegxl-rs
+// (libjxl, current encoder) and jxl-oxide (pure-Rust) at a ladder of sizes
+// and regions, printing the timing matrix to the stats panel.
+const _benchPad = (s, n) => String(s).padEnd(n, ' ');
+const _benchPadN = (s, n) => String(s).padStart(n, ' ');
+const _benchFmtMs1 = (ms) => `${(ms || 0).toFixed(1)}ms`;
+
+function printBenchResult(label, result) {
+    pushStat(`[${label}] file ${result.source_path}`);
+    pushStat(`[${label}] full ${result.full_width}×${result.full_height}  jxl ${(result.encoded_bytes/1024).toFixed(0)} KB  encode ${result.encode_ms} ms`);
+    measurePaintTimings(result.rows);
+    pushStat(`[${label}] ${_benchPad('library', 11)} ${_benchPad('operation', 22)} ${_benchPadN('w', 5)}×${_benchPadN('h', 5)} ${_benchPadN('decode', 9)} ${_benchPadN('post', 8)} ${_benchPadN('paint', 9)} ${_benchPadN('total', 9)}  note`);
+    for (const r of result.rows) {
+        const totalWithPaint = (r.decode_ms || 0) + (r.resize_ms || 0) + (r.paint_ms || 0);
+        pushStat(
+            `[${label}] ${_benchPad(r.library, 11)} ${_benchPad(r.operation, 22)} ${_benchPadN(r.width, 5)}×${_benchPadN(r.height, 5)} ` +
+            `${_benchPadN(r.decode_ms + 'ms', 9)} ${_benchPadN(r.resize_ms + 'ms', 8)} ${_benchPadN(_benchFmtMs1(r.paint_ms), 9)} ` +
+            `${_benchPadN(totalWithPaint.toFixed(1) + 'ms', 9)}  ${r.note}`,
+        );
+    }
+}
+
+async function runJxlDecodeBench() {
+    if (!IS_TAURI) {
+        pushStat('[jxl-bench] Tauri-only — run inside the desktop app');
+        return;
+    }
+    const defaultPath = 'C:\\995\\2026-01-09 Birthday at Cederberg\\P1100080.ORF';
+    const path = prompt('JXL bench — ORF path to encode + decode:', defaultPath) || defaultPath;
+    pushStat(`[jxl-bench] starting on ${path}`);
+    const t0 = performance.now();
+    let result;
+    try {
+        result = await invoke('bench_jxl_decode', { path });
+    } catch (e) {
+        pushStat(`[jxl-bench] FAILED: ${e?.message || e}`);
+        return;
+    }
+    const wallMs = (performance.now() - t0).toFixed(0);
+    pushStat(`[jxl-bench] wall ${wallMs} ms`);
+    printBenchResult('jxl-bench', result);
+    pushStat('[jxl-bench] done');
+}
+
+async function runJxlSweep() {
+    if (!IS_TAURI) {
+        pushStat('[jxl-sweep] Tauri-only — run inside the desktop app');
+        return;
+    }
+    const defaultFolder = 'C:\\995\\2026-01-09 Birthday at Cederberg';
+    const folder = prompt('JXL sweep — folder of ORFs:', defaultFolder) || defaultFolder;
+    pushStat(`[jxl-sweep] starting on folder ${folder}`);
+    const t0 = performance.now();
+    const unlisten = await listen('bench_progress', ({ payload }) => {
+        if (payload?.stage === 'sweep') pushStat(`[jxl-sweep] ${payload.msg}`);
+    });
+    let sweep;
+    try {
+        sweep = await invoke('bench_jxl_sweep', { folder });
+    } catch (e) {
+        pushStat(`[jxl-sweep] FAILED: ${e?.message || e}`);
+        unlisten();
+        return;
+    }
+    unlisten();
+    const wallMs = (performance.now() - t0).toFixed(0);
+    pushStat(`[jxl-sweep] ${sweep.per_image.length} images  wall ${wallMs} ms`);
+    sweep.picks.forEach((p, i) => pushStat(`[jxl-sweep] pick ${i + 1}/${sweep.picks.length}  ${p}`));
+    sweep.per_image.forEach((res, i) => {
+        pushStat(`[jxl-sweep] ─── image ${i + 1}/${sweep.per_image.length} ───`);
+        printBenchResult('jxl-sweep', res);
+    });
+    pushStat('[jxl-sweep] done');
+}
+
+async function runJxlStress() {
+    if (!IS_TAURI) {
+        pushStat('[jxl-stress] Tauri-only — run inside the desktop app');
+        return;
+    }
+    const defaultFolder = 'C:\\995\\2026-01-09 Birthday at Cederberg';
+    const folder = prompt('JXL stress — folder of ORFs:', defaultFolder) || defaultFolder;
+    const sizes = [180, 480, 1080];
+    const repeats = 3;
+    pushStat(`[jxl-stress] starting on folder ${folder}  sizes ${sizes.join('/')}  repeats ${repeats}`);
+    const t0 = performance.now();
+    const unlisten = await listen('bench_progress', ({ payload }) => {
+        if (payload?.stage === 'stress') pushStat(`[jxl-stress] ${payload.msg}`);
+    });
+    let stress;
+    try {
+        stress = await invoke('bench_jxl_stress', { folder, sizes, repeats });
+    } catch (e) {
+        pushStat(`[jxl-stress] FAILED: ${e?.message || e}`);
+        unlisten();
+        return;
+    }
+    unlisten();
+    const wallMs = (performance.now() - t0).toFixed(0);
+    pushStat(`[jxl-stress] picks=${stress.picks.length} sizes=${stress.sizes.length} repeats=${stress.repeats}  wall ${wallMs} ms`);
+    stress.picks.forEach((p, i) => {
+        const enc = stress.encode_ms_per_image[i];
+        const sz = (stress.encoded_bytes_per_image[i] / 1024).toFixed(0);
+        pushStat(`[jxl-stress] pick ${i + 1}  enc ${enc} ms  ${sz} KB  ${p}`);
+    });
+
+    pushStat(`[jxl-stress] ${_benchPad('image', 32)} ${_benchPad('lib', 11)} ${_benchPadN('size', 5)} ${_benchPadN('min', 8)} ${_benchPadN('mean', 8)} ${_benchPadN('p50', 8)} ${_benchPadN('p95', 8)} ${_benchPadN('max', 8)} ${_benchPadN('rs-mean', 9)} ${_benchPadN('total', 9)}`);
+    const fmt = (v) => `${(v || 0).toFixed(1)}ms`;
+    for (const r of stress.rows) {
+        const name = r.source_path.split(/[\\/]/).pop();
+        pushStat(
+            `[jxl-stress] ${_benchPad(name, 32)} ${_benchPad(r.library, 11)} ${_benchPadN(r.target_long_edge, 5)} ` +
+            `${_benchPadN(fmt(r.decode_min_ms), 8)} ${_benchPadN(fmt(r.decode_mean_ms), 8)} ${_benchPadN(fmt(r.decode_p50_ms), 8)} ` +
+            `${_benchPadN(fmt(r.decode_p95_ms), 8)} ${_benchPadN(fmt(r.decode_max_ms), 8)} ` +
+            `${_benchPadN(fmt(r.resize_mean_ms), 9)} ${_benchPadN(fmt(r.total_mean_ms), 9)}`,
+        );
+    }
+
+    // Library × size aggregate across all picks (decode mean).
+    const agg = new Map();
+    for (const r of stress.rows) {
+        const k = `${r.library}|${r.target_long_edge}`;
+        if (!agg.has(k)) agg.set(k, { lib: r.library, size: r.target_long_edge, n: 0, decode: 0, resize: 0 });
+        const a = agg.get(k);
+        a.n += 1;
+        a.decode += r.decode_mean_ms;
+        a.resize += r.resize_mean_ms;
+    }
+    pushStat(`[jxl-stress] ─── aggregate (mean across ${stress.picks.length} images) ───`);
+    for (const a of [...agg.values()].sort((x, y) => x.size - y.size || x.lib.localeCompare(y.lib))) {
+        const d = a.decode / a.n;
+        const rs = a.resize / a.n;
+        pushStat(`[jxl-stress] ${_benchPad(a.lib, 11)} size ${_benchPadN(a.size, 5)}  decode ${fmt(d)}  resize ${fmt(rs)}  total ${fmt(d + rs)}`);
+    }
+    pushStat('[jxl-stress] done');
+}
+
+const jxlBenchBtn = document.getElementById('run-jxl-bench');
+if (jxlBenchBtn) {
+    jxlBenchBtn.addEventListener('click', () => {
+        jxlBenchBtn.disabled = true;
+        runJxlDecodeBench().catch(e => pushStat(`[jxl-bench] ${e?.message || e}`))
+                           .finally(() => { jxlBenchBtn.disabled = false; });
+    });
+}
+
+const jxlSweepBtn = document.getElementById('run-jxl-sweep');
+if (jxlSweepBtn) {
+    jxlSweepBtn.addEventListener('click', () => {
+        jxlSweepBtn.disabled = true;
+        runJxlSweep().catch(e => pushStat(`[jxl-sweep] ${e?.message || e}`))
+                     .finally(() => { jxlSweepBtn.disabled = false; });
+    });
+}
+
+const jxlStressBtn = document.getElementById('run-jxl-stress');
+if (jxlStressBtn) {
+    jxlStressBtn.addEventListener('click', () => {
+        jxlStressBtn.disabled = true;
+        runJxlStress().catch(e => pushStat(`[jxl-stress] ${e?.message || e}`))
+                      .finally(() => { jxlStressBtn.disabled = false; });
+    });
+}
+
+async function runJxlThumb() {
+    if (!IS_TAURI) {
+        pushStat('[jxl-thumb] Tauri-only — run inside the desktop app');
+        return;
+    }
+    const defaultFolder = 'C:\\995\\2026-01-09 Birthday at Cederberg';
+    const folder = prompt('JXL thumb bench — folder of ORFs:', defaultFolder) || defaultFolder;
+    const quality = 95;
+    const defaultOut = `C:\\foo\\raw-converter-tauri\\bench-output\\thumbs_q${quality}`;
+    const outputDir = prompt('Output directory for thumb JXLs:', defaultOut) || defaultOut;
+    const sizes = [150, 300, 640, 1080, 1920];
+    const gallerySizes = [150, 300];
+    const galleryCount = 100;
+    const repeats = 3;
+    const effort = 3;
+    pushStat(`[jxl-thumb] starting  folder=${folder}  out=${outputDir}  sizes=${sizes.join('/')}  gallery=${gallerySizes.join('/')} ×${galleryCount}  reps=${repeats}  q=${quality}  e=${effort}`);
+    const t0 = performance.now();
+    const unlisten = await listen('bench_progress', ({ payload }) => {
+        if (payload?.stage === 'thumb') pushStat(`[jxl-thumb] ${payload.msg}`);
+    });
+    let result;
+    try {
+        result = await invoke('bench_jxl_thumb', {
+            folder,
+            outputDir,
+            sizes,
+            gallerySizes,
+            galleryCount,
+            repeats,
+            quality,
+            effort,
+        });
+    } catch (e) {
+        pushStat(`[jxl-thumb] FAILED: ${e?.message || e}`);
+        unlisten();
+        return;
+    }
+    unlisten();
+    const wallMs = (performance.now() - t0).toFixed(0);
+    pushStat(`[jxl-thumb] picks=${result.picks.length} sizes=${result.sizes.length}  wall ${wallMs} ms`);
+
+    // Per-image per-size table.
+    pushStat(`[jxl-thumb] ${_benchPad('image', 24)} ${_benchPadN('size', 5)} ${_benchPadN('wxh', 11)} ${_benchPadN('bytes', 8)} ${_benchPadN('enc', 7)} ${_benchPadN('libjxl', 9)} ${_benchPadN('oxide', 9)}`);
+    for (const r of result.size_rows) {
+        const name = r.source_path.split(/[\\/]/).pop();
+        const dim = `${r.width}×${r.height}`;
+        const kb = `${(r.encoded_bytes/1024).toFixed(1)}KB`;
+        pushStat(
+            `[jxl-thumb] ${_benchPad(name, 24)} ${_benchPadN(r.long_edge, 5)} ${_benchPadN(dim, 11)} ${_benchPadN(kb, 8)} ` +
+            `${_benchPadN(r.encode_ms + 'ms', 7)} ${_benchPadN(r.libjxl_decode_mean_ms.toFixed(0) + 'ms', 9)} ${_benchPadN(r.oxide_decode_mean_ms.toFixed(0) + 'ms', 9)}`
+        );
+    }
+
+    // Aggregate per size (mean across images).
+    const sizeAgg = new Map();
+    for (const r of result.size_rows) {
+        const a = sizeAgg.get(r.long_edge) || { n: 0, bytes: 0, enc: 0, libjxl: 0, oxide: 0 };
+        a.n += 1;
+        a.bytes += r.encoded_bytes;
+        a.enc += r.encode_ms;
+        a.libjxl += r.libjxl_decode_mean_ms;
+        a.oxide += r.oxide_decode_mean_ms;
+        sizeAgg.set(r.long_edge, a);
+    }
+    pushStat(`[jxl-thumb] ─── per-size mean (across ${result.picks.length} images) ───`);
+    for (const [size, a] of [...sizeAgg.entries()].sort((x, y) => x[0] - y[0])) {
+        const kb = (a.bytes / a.n / 1024).toFixed(1);
+        pushStat(`[jxl-thumb] size ${_benchPadN(size, 4)}  ${_benchPadN(kb + 'KB', 9)}  enc ${(a.enc/a.n).toFixed(0)}ms  libjxl ${(a.libjxl/a.n).toFixed(0)}ms  oxide ${(a.oxide/a.n).toFixed(0)}ms`);
+    }
+
+    // DC probe.
+    pushStat(`[jxl-thumb] ─── DC-only probe (libjxl progressive flush) ───`);
+    pushStat(`[jxl-thumb] ${_benchPad('image', 24)} ${_benchPadN('full-dec', 10)} ${_benchPadN('dc-dec', 10)} ${_benchPadN('speedup', 9)} note`);
+    for (const r of result.dc_rows) {
+        const name = r.source_path.split(/[\\/]/).pop();
+        const full = `${r.libjxl_full_decode_ms}ms`;
+        if (r.libjxl_dc_decode_ms != null) {
+            const dc = `${r.libjxl_dc_decode_ms}ms`;
+            const sp = (r.libjxl_full_decode_ms / Math.max(r.libjxl_dc_decode_ms, 1)).toFixed(1) + '×';
+            pushStat(`[jxl-thumb] ${_benchPad(name, 24)} ${_benchPadN(full, 10)} ${_benchPadN(dc, 10)} ${_benchPadN(sp, 9)} ok`);
+        } else {
+            pushStat(`[jxl-thumb] ${_benchPad(name, 24)} ${_benchPadN(full, 10)} ${_benchPadN('—', 10)} ${_benchPadN('—', 9)} ${r.libjxl_dc_error || 'no DC stage'}`);
+        }
+    }
+
+    // Gallery simulation.
+    pushStat(`[jxl-thumb] ─── gallery simulation (${galleryCount} decodes, ${result.gallery_rows[0]?.unique_thumbs || 0} unique cycled) ───`);
+    pushStat(`[jxl-thumb] ${_benchPadN('size', 5)} ${_benchPad('library', 11)} ${_benchPadN('total', 9)} ${_benchPadN('mean/dec', 11)}`);
+    for (const r of result.gallery_rows) {
+        pushStat(`[jxl-thumb] ${_benchPadN(r.long_edge, 5)} ${_benchPad(r.library, 11)} ${_benchPadN(r.total_ms + 'ms', 9)} ${_benchPadN(r.mean_per_decode_ms.toFixed(1) + 'ms', 11)}`);
+    }
+    pushStat('[jxl-thumb] done');
+}
+
+const jxlThumbBtn = document.getElementById('run-jxl-thumb');
+if (jxlThumbBtn) {
+    jxlThumbBtn.addEventListener('click', () => {
+        jxlThumbBtn.disabled = true;
+        runJxlThumb().catch(e => pushStat(`[jxl-thumb] ${e?.message || e}`))
+                     .finally(() => { jxlThumbBtn.disabled = false; });
+    });
+}
+
+async function runJxlDisk() {
+    if (!IS_TAURI) {
+        pushStat('[jxl-disk] Tauri-only — run inside the desktop app');
+        return;
+    }
+    const folder = prompt('JXL disk arch bench — source ORF folder:', 'C:\\995\\2026-01-09 Birthday at Cederberg') || 'C:\\995\\2026-01-09 Birthday at Cederberg';
+    const workDir = prompt('Working directory for sidecar + bundle:', 'C:\\foo\\raw-converter-tauri\\bench-output\\disk') || 'C:\\foo\\raw-converter-tauri\\bench-output\\disk';
+    const flushFile = prompt('Flush file path (will be created if absent):', 'C:\\foo\\raw-converter-tauri\\bench-output\\flush.bin') || 'C:\\foo\\raw-converter-tauri\\bench-output\\flush.bin';
+    const flushGbStr = prompt('Flush file size in GB (set ≥ system RAM for reliable cold reads):', '20') || '20';
+    const flushSizeGb = parseInt(flushGbStr, 10) || 20;
+    const nStr = prompt('Number of test files (≤ folder size):', '50') || '50';
+    const nFiles = parseInt(nStr, 10) || 50;
+
+    pushStat(`[jxl-disk] starting  folder=${folder}  work=${workDir}  flush=${flushFile} (${flushSizeGb} GB)  n=${nFiles}`);
+    const t0 = performance.now();
+    const unlisten = await listen('bench_progress', ({ payload }) => {
+        if (payload?.stage === 'disk') pushStat(`[jxl-disk] ${payload.msg}`);
+    });
+    let result;
+    try {
+        result = await invoke('bench_jxl_disk', {
+            folder,
+            workDir,
+            flushFile,
+            flushSizeGb,
+            nFiles,
+        });
+    } catch (e) {
+        pushStat(`[jxl-disk] FAILED: ${e?.message || e}`);
+        unlisten();
+        return;
+    }
+    unlisten();
+    const wallMs = (performance.now() - t0).toFixed(0);
+    pushStat(`[jxl-disk] setup ${result.setup_ms} ms  wall ${wallMs} ms`);
+    pushStat(`[jxl-disk] ${_benchPad('arch', 18)} ${_benchPad('operation', 14)} ${_benchPadN('n', 4)} ${_benchPadN('read', 9)} ${_benchPadN('decode', 9)} ${_benchPadN('total', 9)} ${_benchPadN('mean/ea', 9)} ${_benchPadN('MB', 8)}`);
+    for (const r of result.rows) {
+        pushStat(
+            `[jxl-disk] ${_benchPad(r.architecture, 18)} ${_benchPad(r.operation, 14)} ${_benchPadN(r.n_files, 4)} ` +
+            `${_benchPadN(r.read_total_ms + 'ms', 9)} ${_benchPadN(r.decode_total_ms + 'ms', 9)} ${_benchPadN(r.total_ms + 'ms', 9)} ` +
+            `${_benchPadN(r.mean_per_file_ms.toFixed(1) + 'ms', 9)} ${_benchPadN((r.bytes_read / 1024 / 1024).toFixed(1), 8)}`
+        );
+    }
+    pushStat('[jxl-disk] done');
+}
+
+const jxlDiskBtn = document.getElementById('run-jxl-disk');
+if (jxlDiskBtn) {
+    jxlDiskBtn.addEventListener('click', () => {
+        jxlDiskBtn.disabled = true;
+        runJxlDisk().catch(e => pushStat(`[jxl-disk] ${e?.message || e}`))
+                    .finally(() => { jxlDiskBtn.disabled = false; });
+    });
+}
+
 // Tauri live-look: invoked from triggerLiveUpdate when IS_TAURI
 let tauriLiveInFlight = false;
 let tauriLivePending = null;
@@ -3449,11 +4276,29 @@ async function triggerLiveUpdateTauri(look) {
             id: card._tauriResult.id,
             look: lookToSnake(look),
         });
+        // First slider edit on a card flips the lightbox from embedded JPEG
+        // preview (potentially 3:2 ~1620×1080) to the RAW pipeline output
+        // (4:3 1800×1350 for Olympus).  Resize the canvas to the RAW dims so
+        // putImageData paints the full frame, not just the overlapping rect.
+        const dimsChanged = (lightboxCanvas.width !== frame.width || lightboxCanvas.height !== frame.height);
+        if (dimsChanged) {
+            lightboxCanvas.width = frame.width;
+            lightboxCanvas.height = frame.height;
+            // Also cache on card so subsequent draws know the RAW dims and
+            // the embedded fallback branch matches.
+            if (!card._lightbox) card._lightbox = {};
+            card._lightbox.w = frame.width;
+            card._lightbox.h = frame.height;
+        }
         const ctx = lightboxCanvas.getContext('2d');
         ctx.putImageData(new ImageData(rgbToRgbaArr(frame.data), frame.width, frame.height), 0, 0);
         if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
             setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
         }
+        // Real RAW pixels now on screen → update colour-coded badge accordingly,
+        // and preserve displayed size if the canvas just got resized.
+        setPaintedSourceBadge('raw');
+        if (dimsChanged) syncZoomToDisplayLong();
     } catch (e) {
         console.warn('apply_look error:', e);
     }

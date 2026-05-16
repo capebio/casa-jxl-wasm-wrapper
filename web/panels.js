@@ -254,7 +254,12 @@ function buildSidecarData(filename) {
   const vignette = vignetteActive
     ? { amount: vignetteAmount, width: vignetteWidth, color: vignetteColor }
     : null;
-  return { filename, look, profile: activeProfile, filter: activeFilter, levels, vignette };
+  // Crop + subjects come from the lightbox's currently-displayed card.
+  const card = (typeof window.lightboxCard === 'function') ? window.lightboxCard() : null;
+  const crop     = card?._crop ?? null;
+  const subjects = Array.isArray(card?._subjects) ? card._subjects : [];
+  return { filename, look, profile: activeProfile, filter: activeFilter, levels, vignette,
+           crop, subjects };
 }
 
 async function saveSidecar(filename) {
@@ -330,6 +335,38 @@ async function applySidecar(sidecar) {
     const vigEl = document.getElementById('lb-vignette-overlay');
     if (vigEl) { applyVignetteStyle(); vigEl.style.display = 'block'; }
     buildOverlayChips();
+  }
+  // Apply crop + subjects onto the current lightbox card.
+  const card = (typeof window.lightboxCard === 'function') ? window.lightboxCard() : null;
+  if (card) {
+    if (sidecar.crop && typeof sidecar.crop === 'object'
+        && Number.isFinite(sidecar.crop.x) && Number.isFinite(sidecar.crop.y)
+        && Number.isFinite(sidecar.crop.w) && Number.isFinite(sidecar.crop.h)) {
+      card._crop = {
+        x: Math.max(0, Math.min(1, sidecar.crop.x)),
+        y: Math.max(0, Math.min(1, sidecar.crop.y)),
+        w: Math.max(0.001, Math.min(1, sidecar.crop.w)),
+        h: Math.max(0.001, Math.min(1, sidecar.crop.h)),
+        ratio: typeof sidecar.crop.ratio === 'string' ? sidecar.crop.ratio : 'free',
+      };
+    } else {
+      card._crop = null;
+    }
+    card._subjects = Array.isArray(sidecar.subjects)
+      ? sidecar.subjects.filter(s => s && Number.isFinite(s.x) && Number.isFinite(s.y)
+                                   && Number.isFinite(s.w) && Number.isFinite(s.h))
+                        .map(s => ({
+          id: s.id || ('s-' + Math.random().toString(36).slice(2, 8)),
+          x: Math.max(0, Math.min(1, s.x)),
+          y: Math.max(0, Math.min(1, s.y)),
+          w: Math.max(0.001, Math.min(1, s.w)),
+          h: Math.max(0.001, Math.min(1, s.h)),
+          label: typeof s.label === 'string' ? s.label : '',
+          note: typeof s.note === 'string' ? s.note : '',
+          status: ['unknown','tentative','confirmed'].includes(s.status) ? s.status : 'unknown',
+        }))
+      : [];
+    if (typeof window.cropApplyToCard === 'function') window.cropApplyToCard(card);
   }
   if (sidecar.levels && window.levelsState) {
     const ranges = { inBlack:[0,255], inMid:[0.1,10], inWhite:[0,255], outBlack:[0,255], outWhite:[0,255] };
