@@ -48,6 +48,12 @@ export class DecodeSessionImpl implements DecodeSession {
       budgetMs: opts.budgetMs ?? null,
     };
 
+    // A caller may use only frames() and never call done(). Attach a no-op
+    // catch so a rejected done() promise with no caller handler does not
+    // surface as an unhandledRejection. Callers that do call done() attach
+    // their own handler independently.
+    void this.doneDeferred.promise.catch(() => undefined);
+
     // Register the message handler BEFORE acquireSlot sends decode_start,
     // so decode_header is never missed.
     this.scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));

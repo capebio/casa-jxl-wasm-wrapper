@@ -78,6 +78,12 @@ The PGO driver reads `jxl-test-corpus/pgo-manifest.json`, which is owned by the 
 - IndexedDB compiled-module caching keyed by `${buildId}:${wasmSha}`
 - Node compile-once-and-reuse behavior
 
+## Codec Facade
+
+The package root exports the worker-facing `createDecoder` and `createEncoder`
+contract. In this workspace the facade reports `CapabilityMissing` until the
+generated libjxl WASM glue is installed behind it.
+
 ## Current Blockers
 
 See [`BLOCKED.md`](./BLOCKED.md).

@@ -21,6 +21,8 @@ export declare class EncodeHandler {
     onCancel(reason?: string): Promise<void>;
     private run;
     private waitForPixels;
+    private feedEncoder;
+    private readEncoderChunks;
     private failSession;
 }
 export {};

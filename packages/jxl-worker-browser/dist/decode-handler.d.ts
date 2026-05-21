@@ -21,8 +21,11 @@ export declare class DecodeHandler {
     onCancel(reason?: string): Promise<void>;
     private run;
     private waitForChunk;
+    private feedDecoder;
+    private readDecoderEvents;
     private checkBudget;
     private failSession;
+    private postBudgetExceeded;
     private postMetric;
 }
 export {};

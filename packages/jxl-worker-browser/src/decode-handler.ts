@@ -2,13 +2,11 @@
 // Decode session handler. Owns one libjxl decoder instance per session.
 // Spec: Sections 10, 8, 9, 16.1.
 //
-// BLOCKED on T-WASM-BUILD + T-DECODE-WASM for real codec calls.
-// This file implements the state machine, message protocol, and lifecycle.
-// Codec calls are stubbed and marked for T-DECODE-WASM to fill in.
+// Drives the WASM codec facade; generated libjxl adapter lands with T-WASM-BUILD.
 
 /// <reference lib="webworker" />
 
-import type { JxlModule } from "./wasm-loader.js";
+import type { BrowserDecoder, JxlModule } from "./wasm-loader.js";
 import type {
   MsgDecodeStart,
   MsgDecodeHeader,
@@ -89,8 +87,6 @@ export class DecodeHandler {
     this.cancelled = true;
     this.state = "cancelled";
 
-    // STUB: in real impl, call JxlDecoderDestroy here.
-
     const msg: MsgDecodeCancelled = {
       type: "decode_cancelled",
       sessionId: this.sessionId,
@@ -104,53 +100,21 @@ export class DecodeHandler {
   // ---------------------------------------------------------------------------
 
   private async run(): Promise<void> {
-    // STUB: real implementation provided by T-DECODE-WASM.
-    //
-    // Real flow:
-    //   1. Create JxlDecoder via jxl-wasm.
-    //   2. JxlDecoderSubscribeEvents(JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
-    //        JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE | JXL_DEC_FRAME_PROGRESSION)
-    //   3. Loop: pull chunks from this.chunkQueue, feed via JxlDecoderSetInput.
-    //   4. On JXL_DEC_BASIC_INFO: emit decode_header, transition to "headers".
-    //   5. On JXL_DEC_FRAME_PROGRESSION: JxlDecoderFlushImage, transfer buffer,
-    //        emit decode_progress, check budget.
-    //   6. On JXL_DEC_FULL_IMAGE: emit decode_final, transition to "final".
-    //   7. On error: failSession.
-    //
-    // For now: emit a stub header so callers can observe the protocol shape.
+    const decoder = this.wasm.createDecoder({
+      format: this.opts.format,
+      region: this.opts.region,
+      downsample: this.opts.downsample,
+      progressionTarget: this.opts.progressionTarget,
+      emitEveryPass: this.opts.emitEveryPass,
+      preserveIcc: this.opts.preserveIcc,
+      preserveMetadata: this.opts.preserveMetadata,
+    });
 
-    // Wait briefly for first chunk.
-    await this.waitForChunk();
-    if (this.cancelled) return;
-
-    // Emit stub header
-    this.state = "headers";
-    const stubInfo: ImageInfo = {
-      width: 0,
-      height: 0,
-      bitsPerSample: 8,
-      hasAlpha: false,
-      hasAnimation: false,
-      jpegReconstructionAvailable: false,
-    };
-    const headerMsg: MsgDecodeHeader = {
-      type: "decode_header",
-      sessionId: this.sessionId,
-      info: stubInfo,
-    };
-    self.postMessage(headerMsg);
-
-    if (this.opts.progressionTarget === "header") {
-      this.state = "final";
-      this.callbacks.onSessionEnd(this.sessionId);
-      return;
+    try {
+      await Promise.all([this.feedDecoder(decoder), this.readDecoderEvents(decoder)]);
+    } finally {
+      await decoder.dispose();
     }
-
-    // STUB: fail with a clear message so T-DECODE-WASM can take over.
-    this.failSession(
-      "Internal",
-      "[jxl-worker-browser] decode stub: awaiting T-DECODE-WASM for real codec.",
-    );
   }
 
   // ---------------------------------------------------------------------------
@@ -162,12 +126,99 @@ export class DecodeHandler {
       const check = () => {
         if (this.chunkQueue.length > 0 || this.inputClosed || this.cancelled) {
           resolve();
+        } else if (this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
+          resolve();
         } else {
           setTimeout(check, 2);
         }
       };
       check();
     });
+  }
+
+  private async feedDecoder(decoder: BrowserDecoder): Promise<void> {
+    while (!this.cancelled && this.state !== "final" && this.state !== "error") {
+      await this.waitForChunk();
+      while (this.chunkQueue.length > 0) {
+        const chunk = this.chunkQueue.shift();
+        if (chunk === undefined) break;
+        this.queueDepth--;
+        await decoder.push(chunk);
+        if (this.queueDepth < CHUNK_HWM) {
+          self.postMessage({ type: "worker_drain", sessionId: this.sessionId });
+        }
+      }
+      if (this.inputClosed) {
+        await decoder.close();
+        return;
+      }
+    }
+  }
+
+  private async readDecoderEvents(decoder: BrowserDecoder): Promise<void> {
+    for await (const event of decoder.events()) {
+      if (this.cancelled || this.state === "final" || this.state === "error") return;
+      switch (event.type) {
+        case "header": {
+          this.state = "headers";
+          const msg: MsgDecodeHeader = { type: "decode_header", sessionId: this.sessionId, info: event.info };
+          self.postMessage(msg);
+          this.postMetric("time_to_header_ms", performance.now() - this.stageStartMs);
+          if (this.opts.progressionTarget === "header") {
+            this.state = "final";
+            this.callbacks.onSessionEnd(this.sessionId);
+            return;
+          }
+          break;
+        }
+        case "progress": {
+          this.state = "progressive";
+          const pixels = toArrayBuffer(event.pixels);
+          const msg: MsgDecodeProgress = {
+            type: "decode_progress",
+            sessionId: this.sessionId,
+            stage: event.stage,
+            info: event.info,
+            pixels,
+            format: event.format,
+            pixelStride: event.pixelStride,
+          };
+          if (event.region !== undefined) msg.region = event.region;
+          self.postMessage(msg, [pixels]);
+          this.postMetric("time_to_first_pixel_ms", performance.now() - this.stageStartMs);
+          if (this.checkBudget(event.stage)) {
+            this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride);
+            return;
+          }
+          break;
+        }
+        case "final": {
+          const pixels = toArrayBuffer(event.pixels);
+          const msg: MsgDecodeFinal = {
+            type: "decode_final",
+            sessionId: this.sessionId,
+            info: event.info,
+            pixels,
+            format: event.format,
+            pixelStride: event.pixelStride,
+          };
+          if (event.region !== undefined) msg.region = event.region;
+          this.state = "final";
+          self.postMessage(msg, [pixels]);
+          this.postMetric("time_to_final_ms", performance.now() - this.stageStartMs);
+          this.callbacks.onSessionEnd(this.sessionId);
+          return;
+        }
+        case "budget_exceeded": {
+          this.postBudgetExceeded(event.stage, event.info, toArrayBuffer(event.pixels), event.format, event.pixelStride);
+          return;
+        }
+        case "error": {
+          this.failSession(event.code, event.message);
+          return;
+        }
+      }
+    }
   }
 
   private checkBudget(stage: DecodeStage): boolean {
@@ -190,6 +241,28 @@ export class DecodeHandler {
     this.callbacks.onSessionEnd(this.sessionId);
   }
 
+  private postBudgetExceeded(
+    stage: DecodeStage,
+    info: ImageInfo,
+    pixels: ArrayBuffer,
+    format: MsgDecodeBudgetExceeded["format"],
+    pixelStride: number,
+  ): void {
+    if (this.cancelled || this.state === "final") return;
+    this.state = "budget_exceeded";
+    const msg: MsgDecodeBudgetExceeded = {
+      type: "decode_budget_exceeded",
+      sessionId: this.sessionId,
+      stage,
+      pixels,
+      info,
+      format,
+      pixelStride,
+    };
+    self.postMessage(msg, [pixels]);
+    this.callbacks.onSessionEnd(this.sessionId);
+  }
+
   private postMetric(name: string, value: number): void {
     self.postMessage({
       type: "metric",
@@ -197,4 +270,11 @@ export class DecodeHandler {
       metric: { name, value },
     });
   }
+}
+
+function toArrayBuffer(value: ArrayBuffer | Uint8Array): ArrayBuffer {
+  if (value instanceof ArrayBuffer) return value;
+  return value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
+    ? value.buffer
+    : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
 }

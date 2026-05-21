@@ -13,7 +13,8 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test --test-force-exit dist-test/test/*.test.js"
   },
   "dependencies": {
     "@casabio/jxl-core": "file:../jxl-core",
@@ -23,6 +24,7 @@
     "@casabio/jxl-capabilities": "file:../jxl-capabilities"
   },
   "devDependencies": {
-    "typescript": "5.5.4"
+    "typescript": "5.5.4",
+    "@types/node": "22.5.0"
   }
 }

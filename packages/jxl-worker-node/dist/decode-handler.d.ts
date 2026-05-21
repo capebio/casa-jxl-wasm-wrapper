@@ -16,13 +16,19 @@ export declare class DecodeHandler {
     private queueDepth;
     private cancelled;
     private inputClosed;
+    private stageStartMs;
     constructor(opts: MsgDecodeStart, backend: Backend, callbacks: DecodeHandlerCallbacks);
     onChunk(chunk: ArrayBuffer | Uint8Array | Buffer): void;
     onClose(): void;
     onCancel(reason?: string): Promise<void>;
     private run;
     private waitForChunk;
+    private feedDecoder;
+    private readDecoderEvents;
     private failSession;
+    private checkBudget;
+    private postBudgetExceeded;
+    private postMetric;
 }
 export {};
 //# sourceMappingURL=decode-handler.d.ts.map

@@ -13,6 +13,8 @@ T-WASM-BUILD
 - Added `tsconfig.json`, ambient shims, and source typecheck coverage.
 - Added a package-root export surface via `src/index.ts` and `package.json` `exports`.
 - Declared the package as a file dependency of the browser and node worker packages.
+- Added the worker-facing `createDecoder` / `createEncoder` facade contract.
+- Added deterministic `CapabilityMissing` behavior until generated libjxl WASM glue is installed.
 
 ## Next
 
@@ -29,7 +31,7 @@ T-NATIVE-BIND
 - Toolchain execution is blocked in this workspace because `emcc` and `docker` are unavailable.
 - PGO input is blocked until `jxl-test-corpus/pgo-manifest.json` lands from the Gemini branch.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
-- The actual libjxl WASM codec still needs the real T-WASM-BUILD toolchain/artifact before decode/encode workers can do meaningful codec work.
+- The facade is present, but the actual libjxl WASM codec still needs the real T-WASM-BUILD toolchain/artifact before decode/encode workers can do meaningful codec work.
 
 ## Files Touched
 
@@ -45,6 +47,7 @@ T-NATIVE-BIND
 - `packages/jxl-wasm/scripts/build-pgo.mjs`
 - `packages/jxl-wasm/scripts/write-manifest.mjs`
 - `packages/jxl-wasm/src/loader.ts`
+- `packages/jxl-wasm/src/facade.ts`
 - `packages/jxl-wasm/src/index.ts`
 - `packages/jxl-wasm/src/shims.d.ts`
 - `packages/jxl-wasm/tsconfig.json`
