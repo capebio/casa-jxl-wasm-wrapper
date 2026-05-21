@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "jxl-core/encode_start",
+  "title": "MsgEncodeStart",
+  "type": "object",
+  "required": [
+    "type", "sessionId", "format", "width", "height", "hasAlpha",
+    "iccProfile", "exif", "xmp", "distance", "quality", "effort",
+    "progressive", "previewFirst", "chunked", "priority"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "encode_start" },
+    "sessionId": { "type": "string" },
+    "format": { "enum": ["rgba8", "rgba16", "rgbaf32"] },
+    "width": { "type": "integer", "minimum": 1 },
+    "height": { "type": "integer", "minimum": 1 },
+    "hasAlpha": { "type": "boolean" },
+    "iccProfile": { "oneOf": [{ "type": "null" }, { "description": "ArrayBuffer — transferred" }] },
+    "exif": { "oneOf": [{ "type": "null" }, { "description": "ArrayBuffer — transferred" }] },
+    "xmp": { "oneOf": [{ "type": "null" }, { "description": "ArrayBuffer — transferred" }] },
+    "distance": { "oneOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }] },
+    "quality": { "oneOf": [{ "type": "null" }, { "type": "number", "minimum": 0, "maximum": 100 }] },
+    "effort": { "enum": [1, 2, 3, 4, 5, 6, 7, 8, 9] },
+    "progressive": { "type": "boolean" },
+    "previewFirst": { "type": "boolean" },
+    "chunked": { "type": "boolean" },
+    "priority": { "enum": ["visible", "near", "background"] }
+  }
+}

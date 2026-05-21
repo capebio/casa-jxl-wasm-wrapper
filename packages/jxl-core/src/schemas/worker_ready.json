@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "jxl-core/worker_ready",
+  "title": "MsgWorkerReady",
+  "type": "object",
+  "required": ["type", "backend"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "worker_ready" },
+    "backend": { "enum": ["wasm", "native"] },
+    "wasmBuild": { "enum": ["relaxed-simd-mt", "simd-mt", "simd", "scalar"] }
+  }
+}
