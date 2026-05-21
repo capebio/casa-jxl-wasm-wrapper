@@ -2,7 +2,7 @@
 
 ## Current Task
 
-T-WASM-BUILD
+none
 
 ## Completed
 
@@ -23,6 +23,7 @@ T-WASM-BUILD
 - Added Docker Hub `emscripten/emsdk:4.0.13` fallback for GHCR anonymous pull denial, with `EMSDK_IMAGE` override for pinned custom images.
 - Added an early Docker daemon check with a specific "start Docker Desktop/Linux engine" error before the GHCR pull/build path runs.
 - Enabled the package-local `FindAtomics.cmake` shim inside Docker/Emscripten builds, not only host-toolchain builds.
+- T-NATIVE-BIND: Added browser tier detection (relaxed-simd-mt / simd-mt / simd / scalar) to facade loadGeneratedLibjxlModule.
 
 ## Next
 
@@ -40,7 +41,6 @@ T-NATIVE-BIND
 - Local non-Docker toolchain execution is blocked because `emcc` is unavailable.
 - PGO input is blocked until `jxl-test-corpus/pgo-manifest.json` lands from the Gemini branch.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
-- The facade now targets real libjxl ABI glue, but progressive flushes, metadata/ICC extraction, rgba16/rgbaf32, chunked region encode, and the pinned four-tier build matrix still need the generated T-WASM-BUILD artifacts and a runnable Emscripten container.
 - Metadata/ICC extraction, rgba16/rgbaf32, chunked region encode, and the pinned four-tier build matrix still need the generated T-WASM-BUILD artifacts and a runnable Emscripten container.
 
 ## Files Touched

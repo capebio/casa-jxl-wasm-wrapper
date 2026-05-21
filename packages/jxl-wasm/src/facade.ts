@@ -148,6 +148,48 @@ export class CapabilityMissing extends Error {
   }
 }
 
+export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
+
+export function detectTier(): Tier {
+  if (typeof process !== "undefined" && !!process.versions?.node) return "scalar";
+  if (typeof WebAssembly === "undefined") return "scalar";
+  const hasSimd = probeSimd();
+  if (!hasSimd) return "scalar";
+  const hasSab = typeof SharedArrayBuffer !== "undefined";
+  const hasRelaxedSimd = probeRelaxedSimd();
+  if (hasSab && hasRelaxedSimd) return "relaxed-simd-mt";
+  if (hasSab) return "simd-mt";
+  return "simd";
+}
+
+function probeSimd(): boolean {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
+      0x03, 0x02, 0x01, 0x00,
+      0x0a, 0x08, 0x01, 0x06, 0x00,
+      0x41, 0x00, 0xfd, 0x0f, 0x0b,
+    ]));
+  } catch {
+    return false;
+  }
+}
+
+function probeRelaxedSimd(): boolean {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x07, 0x01, 0x60, 0x02, 0x7b, 0x7b, 0x01, 0x7b,
+      0x03, 0x02, 0x01, 0x00,
+      0x0a, 0x0b, 0x01, 0x09, 0x00,
+      0x20, 0x00, 0x20, 0x01, 0xfd, 0x80, 0x02, 0x0b,
+    ]));
+  } catch {
+    return false;
+  }
+}
+
 let modulePromise: Promise<LibjxlWasmModule> | undefined;
 let testModuleFactory: JxlModuleFactory | null = null;
 
@@ -565,23 +607,8 @@ async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
   return modulePromise;
 }
 
-function isSimdSupported(): boolean {
-  try {
-    // Minimal WASM module using v128.const — validates iff SIMD-128 is supported.
-    return WebAssembly.validate(new Uint8Array([
-      0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,253,15,0,0,0,0,0,0,0,0,11
-    ]));
-  } catch { return false; }
-}
-
-function detectBestTier(): string {
-  if (!isSimdSupported()) return "scalar";
-  const threads = typeof SharedArrayBuffer !== "undefined" && typeof Atomics !== "undefined";
-  return threads ? "simd-mt" : "simd";
-}
-
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
-  const tier = detectBestTier();
+  const tier = detectTier();
   const modulePath = `./jxl-core.${tier}.js`;
   const imported = await import(modulePath) as { default?: unknown };
   const factory = imported.default;
