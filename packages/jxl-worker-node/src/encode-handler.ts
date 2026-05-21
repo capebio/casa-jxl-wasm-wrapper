@@ -1,6 +1,6 @@
 // jxl-worker-node/src/encode-handler.ts
 // Encode session handler for node:worker_threads.
-// BLOCKED on T-NATIVE-BIND + T-ENCODE-NATIVE for real codec calls.
+// Drives the selected native/WASM backend facade.
 
 import type { MessagePort } from "node:worker_threads";
 import type { Backend } from "./backend-selector.js";

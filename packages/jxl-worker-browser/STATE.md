@@ -1,21 +1,21 @@
 # jxl-worker-browser — STATE.md
 
-## Status: COMPLETE (stubs in place; blocked on T-WASM-BUILD, T-DECODE-WASM, T-ENCODE-WASM)
+## Status: COMPLETE (handler facade loops in place; real codec adapter blocked on T-WASM-BUILD)
 
 ## Tasks complete
 - [x] src/worker.ts — message router, session maps, shutdown logic
 - [x] src/spawn.ts — WorkerHandle, spawnWorker(), shutdown with timeout
-- [x] src/wasm-loader.ts — stub, documented blocker B-001
-- [x] src/decode-handler.ts — state machine shell, stub run(), blocker B-002
-- [x] src/encode-handler.ts — state machine shell, stub run(), blocker B-003
+- [x] src/wasm-loader.ts — facade validation and clear capability errors, blocker B-001
+- [x] src/decode-handler.ts — facade-driven decode loop, blocker B-002 now in jxl-wasm adapter
+- [x] src/encode-handler.ts — facade-driven encode loop, blocker B-003 now in jxl-wasm adapter
 - [x] package.json, tsconfig.json
 - [x] tsc --noEmit passes clean
 - [x] BLOCKED.md, DECISIONS.md, CHANGELOG.md
 
 ## Blockers
-- B-001: WASM artifact (T-WASM-BUILD)
-- B-002: Decode implementation (T-DECODE-WASM)
-- B-003: Encode implementation (T-ENCODE-WASM)
+- B-001: WASM codec facade/artifact (T-WASM-BUILD)
+- B-002: WASM decoder facade adapter (T-WASM-BUILD)
+- B-003: WASM encoder facade adapter (T-WASM-BUILD)
 
 ## Files touched
 - packages/jxl-worker-browser/src/worker.ts

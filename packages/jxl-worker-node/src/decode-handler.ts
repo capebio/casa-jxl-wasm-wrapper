@@ -1,7 +1,7 @@
 // jxl-worker-node/src/decode-handler.ts
 // Decode session handler for node:worker_threads.
 // Same protocol as jxl-worker-browser/decode-handler.ts.
-// BLOCKED on T-NATIVE-BIND + T-DECODE-NATIVE for real codec calls.
+// Drives the selected native/WASM backend facade.
 
 import type { MessagePort } from "node:worker_threads";
 import type { Backend } from "./backend-selector.js";

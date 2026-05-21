@@ -14,14 +14,18 @@ export declare class EncodeHandler {
     private readonly callbacks;
     private state;
     private pixelQueue;
+    private queueDepth;
     private cancelled;
     private finished;
+    private firstByteEmitted;
     constructor(opts: MsgEncodeStart, backend: Backend, callbacks: EncodeHandlerCallbacks);
     onPixels(chunk: ArrayBuffer | Uint8Array | Buffer, region?: Region): void;
     onFinish(): void;
     onCancel(reason?: string): Promise<void>;
     private run;
     private waitForPixels;
+    private feedEncoder;
+    private readEncoderChunks;
     private failSession;
 }
 export {};

@@ -140,13 +140,13 @@ describe("browser codec handlers", () => {
 
     await waitFor(() => ended.length === 1);
 
-    expect(messages.map((msg) => msg.type)).toEqual([
+    expect(messages.filter((msg) => msg.type.startsWith("encode_")).map((msg) => msg.type)).toEqual([
       "encode_first_byte_ready",
       "encode_chunk",
       "encode_chunk",
       "encode_done",
     ]);
-    expect(messages.at(-1)).toEqual({ type: "encode_done", sessionId: "encode-1", totalBytes: 5 });
+    expect(messages.findLast((msg) => msg.type.startsWith("encode_"))).toEqual({ type: "encode_done", sessionId: "encode-1", totalBytes: 5 });
   });
 });
 

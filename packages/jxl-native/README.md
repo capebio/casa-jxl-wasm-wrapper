@@ -19,6 +19,7 @@ It tracks Section 15 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 - `binding.gyp` for source builds
 - `src/native.cc` as the addon entry point
 - `src/index.ts` loader that tries prebuilt binaries first, then a source-build binary, then throws `CapabilityMissing`
+- package-root `createDecoder` and `createEncoder` facade functions that delegate to a loaded libjxl-capable addon
 
 ## Loader order
 

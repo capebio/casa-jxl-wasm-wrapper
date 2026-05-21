@@ -2,7 +2,7 @@
 // Encode session handler. Owns one libjxl encoder instance per session.
 // Spec: Sections 11, 16.2.
 //
-// BLOCKED on T-WASM-BUILD + T-ENCODE-WASM for real codec calls.
+// Drives the WASM codec facade; generated libjxl adapter lands with T-WASM-BUILD.
 
 /// <reference lib="webworker" />
 

@@ -2,7 +2,7 @@
 // Encode session handler. Owns one libjxl encoder instance per session.
 // Spec: Sections 11, 16.2.
 //
-// BLOCKED on T-WASM-BUILD + T-ENCODE-WASM for real codec calls.
+// Drives the WASM codec facade; generated libjxl adapter lands with T-WASM-BUILD.
 const CHUNK_HWM = 4;
 export class EncodeHandler {
     sessionId;
@@ -42,7 +42,6 @@ export class EncodeHandler {
             return;
         this.cancelled = true;
         this.state = "cancelled";
-        // STUB: call JxlEncoderDestroy in real impl.
         const msg = {
             type: "encode_cancelled",
             sessionId: this.sessionId,
@@ -54,22 +53,28 @@ export class EncodeHandler {
     // Main encode loop
     // ---------------------------------------------------------------------------
     async run() {
-        // STUB: real implementation provided by T-ENCODE-WASM.
-        //
-        // Real flow:
-        //   1. Create JxlEncoder, configure JxlEncoderFrameSettings from opts.
-        //   2. Map quality→distance via JxlEncoderDistanceFromQuality when needed.
-        //   3. Attach iccProfile/exif/xmp boxes.
-        //   4. For chunked: false — await finish(), then JxlEncoderAddImageFrame.
-        //   5. For chunked: true — loop pixel queue, JxlEncoderAddChunkedFrame.
-        //   6. Pump output via JxlEncoderSetOutputProcessor; emit encode_chunk.
-        //   7. Emit encode_first_byte_ready on first output chunk.
-        //   8. On done: emit encode_done with totalBytes.
-        await this.waitForPixels();
-        if (this.cancelled)
-            return;
+        const encoder = this.wasm.createEncoder({
+            format: this.opts.format,
+            width: this.opts.width,
+            height: this.opts.height,
+            hasAlpha: this.opts.hasAlpha,
+            iccProfile: this.opts.iccProfile,
+            exif: this.opts.exif,
+            xmp: this.opts.xmp,
+            distance: this.opts.distance,
+            quality: this.opts.quality,
+            effort: this.opts.effort,
+            progressive: this.opts.progressive,
+            previewFirst: this.opts.previewFirst,
+            chunked: this.opts.chunked,
+        });
         this.state = "configured";
-        this.failSession("Internal", "[jxl-worker-browser] encode stub: awaiting T-ENCODE-WASM for real codec.");
+        try {
+            await Promise.all([this.feedEncoder(encoder), this.readEncoderChunks(encoder)]);
+        }
+        finally {
+            await encoder.dispose();
+        }
     }
     // ---------------------------------------------------------------------------
     // Helpers
@@ -80,12 +85,69 @@ export class EncodeHandler {
                 if (this.pixelQueue.length > 0 || this.finished || this.cancelled) {
                     resolve();
                 }
+                else if (this.state === "done" || this.state === "error") {
+                    resolve();
+                }
                 else {
                     setTimeout(check, 2);
                 }
             };
             check();
         });
+    }
+    async feedEncoder(encoder) {
+        while (!this.cancelled && this.state !== "done" && this.state !== "error") {
+            await this.waitForPixels();
+            while (this.pixelQueue.length > 0) {
+                const entry = this.pixelQueue.shift();
+                if (entry === undefined)
+                    break;
+                this.queueDepth--;
+                await encoder.pushPixels(entry.chunk, entry.region);
+                if (this.queueDepth < CHUNK_HWM) {
+                    self.postMessage({ type: "worker_drain", sessionId: this.sessionId });
+                }
+            }
+            if (this.finished) {
+                this.state = "finalising";
+                await encoder.finish();
+                return;
+            }
+        }
+    }
+    async readEncoderChunks(encoder) {
+        let totalBytes = 0;
+        for await (const chunk of encoder.chunks()) {
+            if (this.cancelled || this.state === "done" || this.state === "error")
+                return;
+            const buffer = toArrayBuffer(chunk);
+            if (!this.firstByteEmitted) {
+                this.firstByteEmitted = true;
+                const firstByteMsg = {
+                    type: "encode_first_byte_ready",
+                    sessionId: this.sessionId,
+                };
+                self.postMessage(firstByteMsg);
+            }
+            totalBytes += buffer.byteLength;
+            const msg = {
+                type: "encode_chunk",
+                sessionId: this.sessionId,
+                chunk: buffer,
+            };
+            this.state = "streaming";
+            self.postMessage(msg, [buffer]);
+        }
+        if (this.cancelled || this.state === "done" || this.state === "error")
+            return;
+        this.state = "done";
+        const doneMsg = {
+            type: "encode_done",
+            sessionId: this.sessionId,
+            totalBytes,
+        };
+        self.postMessage(doneMsg);
+        this.callbacks.onSessionEnd(this.sessionId);
     }
     failSession(code, message) {
         if (this.cancelled || this.state === "done")
@@ -100,5 +162,12 @@ export class EncodeHandler {
         self.postMessage(msg);
         this.callbacks.onSessionEnd(this.sessionId);
     }
+}
+function toArrayBuffer(value) {
+    if (value instanceof ArrayBuffer)
+        return value;
+    return value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
+        ? value.buffer
+        : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
 }
 //# sourceMappingURL=encode-handler.js.map

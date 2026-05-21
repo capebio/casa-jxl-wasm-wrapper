@@ -4,58 +4,93 @@
 
 export interface Backend {
   type: "native" | "wasm";
-  // The actual module reference; typed as unknown until T-NATIVE-BIND/T-WASM-BUILD land.
-  module: unknown;
+  module: CodecModule;
 }
 
-// BLOCKED: jxl-native (T-NATIVE-BIND) and jxl-wasm (T-WASM-BUILD) not yet available.
-//
-// Real logic:
-//   1. If process.env.JXL_FORCE_WASM === '1', skip native and go to step 3.
-//   2. Try require('jxl-native'). On success, return { type: 'native', module }.
-//   3. Try require('@casabio/jxl-wasm'). On success, return { type: 'wasm', module }.
-//   4. Throw CapabilityMissing.
+export interface CodecModule {
+  createDecoder: (...args: never[]) => unknown;
+  createEncoder: (...args: never[]) => unknown;
+}
 
-export async function selectBackend(): Promise<Backend> {
-  const forceWasm = process.env["JXL_FORCE_WASM"] === "1";
+export interface BackendSelectorOptions {
+  env?: Record<string, string | undefined>;
+  importNative?: () => Promise<unknown>;
+  importWasm?: () => Promise<unknown>;
+}
+
+export async function selectBackend(options: BackendSelectorOptions = {}): Promise<Backend> {
+  const env = options.env ?? process.env;
+  const forceWasm = env["JXL_FORCE_WASM"] === "1";
 
   if (!forceWasm) {
-    const native = await tryNative();
+    const native = await tryNative(options);
     if (native !== null) return native;
   }
 
-  const wasm = await tryWasm();
+  const wasm = await tryWasm(options);
   if (wasm !== null) return wasm;
 
   throw new Error(
-    "[jxl-worker-node] Neither jxl-native nor jxl-wasm is available. " +
-      "Install @casabio/jxl-native or set JXL_FORCE_WASM=0.",
+    "[jxl-worker-node] Neither jxl-native nor jxl-wasm exposes a codec facade. " +
+      "Install usable @casabio/jxl-native or @casabio/jxl-wasm artifacts.",
   );
 }
 
-async function tryNative(): Promise<Backend | null> {
+async function tryNative(options: BackendSelectorOptions): Promise<Backend | null> {
   try {
-    // T-NATIVE-BIND will publish @casabio/jxl-native. Dynamic import so
-    // a missing package does not crash at startup.
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore — module does not exist until T-NATIVE-BIND lands
-    const mod = await import("@casabio/jxl-native").catch(() => null) as unknown;
-    if (mod === null) return null;
-    return { type: "native", module: mod };
+    const imported = await (options.importNative ?? defaultImportNative)();
+    const module = resolveCodecModule(imported);
+    if (module === null) return null;
+    return { type: "native", module };
   } catch {
     return null;
   }
 }
 
-async function tryWasm(): Promise<Backend | null> {
+async function tryWasm(options: BackendSelectorOptions): Promise<Backend | null> {
   try {
-    // T-WASM-BUILD will publish @casabio/jxl-wasm.
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore — module does not exist until T-WASM-BUILD lands
-    const mod = await import("@casabio/jxl-wasm").catch(() => null) as unknown;
-    if (mod === null) return null;
-    return { type: "wasm", module: mod };
+    const imported = await (options.importWasm ?? defaultImportWasm)();
+    const module = resolveCodecModule(imported);
+    if (module === null) return null;
+    return { type: "wasm", module };
   } catch {
     return null;
   }
+}
+
+async function defaultImportNative(): Promise<unknown> {
+  // Dynamic import keeps worker startup clean when optional package absent.
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore - module may be absent until local packages are installed
+  return await import("@casabio/jxl-native").catch(() => null) as unknown;
+}
+
+async function defaultImportWasm(): Promise<unknown> {
+  // Dynamic import keeps worker startup clean when optional package absent.
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore - module may be absent until local packages are installed
+  return await import("@casabio/jxl-wasm").catch(() => null) as unknown;
+}
+
+function resolveCodecModule(value: unknown): CodecModule | null {
+  if (isRecord(value) && typeof value["loadNativeBinding"] === "function") {
+    try {
+      const binding = value["loadNativeBinding"]();
+      return isCodecModule(binding) ? binding : null;
+    } catch {
+      return null;
+    }
+  }
+
+  if (isCodecModule(value)) return value;
+  if (isRecord(value) && isCodecModule(value["default"])) return value["default"];
+  return null;
+}
+
+function isCodecModule(value: unknown): value is CodecModule {
+  return isRecord(value) && typeof value["createDecoder"] === "function" && typeof value["createEncoder"] === "function";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

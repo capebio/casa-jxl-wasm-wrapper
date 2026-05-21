@@ -2,9 +2,7 @@
 // Decode session handler. Owns one libjxl decoder instance per session.
 // Spec: Sections 10, 8, 9, 16.1.
 //
-// BLOCKED on T-WASM-BUILD + T-DECODE-WASM for real codec calls.
-// This file implements the state machine, message protocol, and lifecycle.
-// Codec calls are stubbed and marked for T-DECODE-WASM to fill in.
+// Drives the WASM codec facade; generated libjxl adapter lands with T-WASM-BUILD.
 
 /// <reference lib="webworker" />
 
