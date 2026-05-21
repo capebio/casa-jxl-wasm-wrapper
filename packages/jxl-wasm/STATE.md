@@ -2,7 +2,7 @@
 
 ## Current Task
 
-T-WASM-BUILD
+none
 
 ## Completed
 
@@ -17,6 +17,7 @@ T-WASM-BUILD
 - Replaced the temporary bridge with package-local libjxl WASM ABI glue in `src/facade.ts` and `src/bridge.cpp`.
 - Added facade round-trip coverage and rebuilt `dist`.
 - Added facade coverage for `header`, `progress`, and `final` decode events.
+- T-NATIVE-BIND: Added browser tier detection (relaxed-simd-mt / simd-mt / simd / scalar) to facade loadGeneratedLibjxlModule.
 
 ## Next
 
@@ -34,7 +35,6 @@ T-NATIVE-BIND
 - Toolchain execution is blocked in this workspace because `emcc` and `docker` are unavailable.
 - PGO input is blocked until `jxl-test-corpus/pgo-manifest.json` lands from the Gemini branch.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
-- The facade now targets real libjxl ABI glue, but progressive flushes, metadata/ICC extraction, rgba16/rgbaf32, chunked region encode, and the pinned four-tier build matrix still need the generated T-WASM-BUILD artifacts and a runnable Emscripten container.
 - Metadata/ICC extraction, rgba16/rgbaf32, chunked region encode, and the pinned four-tier build matrix still need the generated T-WASM-BUILD artifacts and a runnable Emscripten container.
 
 ## Files Touched
