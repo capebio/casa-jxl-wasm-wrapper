@@ -6,11 +6,13 @@
 // wasm-bindgen-rayon later — harmless if not.
 
 import { serve } from "bun";
-import { readFile } from "node:fs/promises";
-import { extname, join, normalize, sep } from "node:path";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { basename, extname, join, normalize, sep } from "node:path";
 
 const ROOT = import.meta.dir;
 const PORT = Number(process.env.PORT ?? 9000);
+const RANDOM_ORF_FOLDER = String.raw`C:\995\2026-02-17 Dave at Kyffhauser`;
+const TIMINGS_DIR = join(ROOT, "timings");
 
 const MIME: Record<string, string> = {
     ".html": "text/html; charset=utf-8",
@@ -29,7 +31,52 @@ serve({
     port: PORT,
     async fetch(req) {
         const url = new URL(req.url);
-        let path = decodeURIComponent(url.pathname);
+        const path = decodeURIComponent(url.pathname);
+        if (path === "/api/timings" && req.method === "POST") {
+            try {
+                const payload = (await req.json()) as { filename?: string; markdown?: string };
+                const markdown = String(payload?.markdown ?? "");
+                if (!markdown) return new Response("missing markdown", { status: 400 });
+                const rawName = String(payload?.filename ?? "");
+                const safeName = basename(rawName || `${new Date().toISOString().replace(/[:.]/g, "-")}.md`);
+                const filename = safeName.toLowerCase().endsWith(".md") ? safeName : `${safeName}.md`;
+                await mkdir(TIMINGS_DIR, { recursive: true });
+                const fsPath = join(TIMINGS_DIR, filename);
+                await writeFile(fsPath, markdown, "utf8");
+                return new Response(JSON.stringify({ path: fsPath }), {
+                    headers: { "Content-Type": "application/json" },
+                });
+            } catch (err) {
+                console.error("timings write error:", err);
+                return new Response("failed to write timings", { status: 500 });
+            }
+        }
+        if (path === "/api/random-orf") {
+            try {
+                const entries = await readdir(RANDOM_ORF_FOLDER, { withFileTypes: true });
+                const orfs = entries
+                    .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === ".orf")
+                    .map((entry) => entry.name);
+                if (!orfs.length) return new Response("no ORF files found", { status: 404 });
+                const name = orfs[Math.floor(Math.random() * orfs.length)];
+                const fsPath = join(RANDOM_ORF_FOLDER, name);
+                const data = await readFile(fsPath);
+                return new Response(data, {
+                    headers: {
+                        "Content-Type": "application/octet-stream",
+                        "Cache-Control": "no-cache",
+                        "Cross-Origin-Opener-Policy":   "same-origin",
+                        "Cross-Origin-Embedder-Policy": "require-corp",
+                        "X-File-Name": name,
+                        "X-File-Size": String(data.byteLength),
+                        "X-Source-Folder": RANDOM_ORF_FOLDER,
+                    },
+                });
+            } catch (err) {
+                console.error("random orf error:", err);
+                return new Response("failed to load random orf", { status: 500 });
+            }
+        }
         if (path === "/") {
             // Redirect rather than internal rewrite so relative URLs in the
             // page resolve against /web/ not /.

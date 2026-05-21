@@ -591,3 +591,171 @@ pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     }
     out
 }
+
+/// Parse + decode a DNG file blob. Returns an error string on failure.
+/// Single-threaded (no rayon in WASM).  Look params: LR-style (-1..+1), except
+/// exposure_ev in stops.  Pass NaN/≤0 for wb_r_override/wb_b_override to use defaults.
+#[wasm_bindgen]
+pub fn process_dng(
+    data: &[u8],
+    exposure_ev: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    saturation: f32,
+    vibrance: f32,
+    temp: f32,
+    tint: f32,
+    wb_r_override: f32,
+    wb_b_override: f32,
+    texture: f32,
+    clarity: f32,
+) -> Result<ProcessResult, JsError> {
+    const MAX_DIM: u32 = 8192;
+    const MAX_PIXELS: usize = 50_000_000;
+
+    let t = now_ms();
+    let dng_img = raw_pipeline::dng::decode_bytes(data)
+        .map_err(|e| JsError::new(&format!("DNG decode: {}", e)))?;
+    let decode_ms = now_ms() - t;
+
+    let w = dng_img.width;
+    let h = dng_img.height;
+    if w == 0 || h == 0 {
+        return Err(JsError::new("DNG: zero image dimension"));
+    }
+    if (w as u32) > MAX_DIM || (h as u32) > MAX_DIM {
+        return Err(JsError::new(&format!(
+            "DNG: dimension {}×{} exceeds maximum {}",
+            w, h, MAX_DIM
+        )));
+    }
+    if w.checked_mul(h).unwrap_or(MAX_PIXELS + 1) > MAX_PIXELS {
+        return Err(JsError::new(&format!("DNG: {} pixels exceeds 50 MP limit", w * h)));
+    }
+
+    // Align to RGGB (CFA-dependent)
+    let (raw_aligned, aw, ah) = raw_pipeline::dng::align_to_rggb(&dng_img.raw, w, h, dng_img.cfa);
+
+    let t = now_ms();
+    let mut rgb16 = demosaic::demosaic_rggb_mhc(&raw_aligned, aw, ah)
+        .map_err(|e| JsError::new(&format!("demosaic: {}", e)))?;
+    let demosaic_ms = now_ms() - t;
+
+    // Build pipeline params from DNG metadata
+    let mut params = pipeline::PipelineParams::default_olympus();
+    params.black = dng_img.black;
+    params.white = dng_img.white;
+    params.wb_r = dng_img.wb_r;
+    params.wb_b = dng_img.wb_b;
+
+    // Apply luminance NR for high-ISO
+    let nr_strength = match 100u32 { // DNG doesn't always have ISO; use default
+        iso if iso >= 6400 => 0.50f32,
+        iso if iso >= 3200 => 0.35,
+        iso if iso >= 1600 => 0.20,
+        _ => 0.0,
+    };
+    if nr_strength > 0.0 {
+        pipeline::apply_luminance_nr(&mut rgb16, aw, ah, nr_strength);
+    }
+
+    // Compute lightbox + thumb caches (pre-tonemap, pre-orientation)
+    const LB_LONG_EDGE: usize = 1800;
+    let (lb_w, lb_h) = if aw >= ah {
+        let lw = aw.min(LB_LONG_EDGE);
+        (lw, ((ah * lw) / aw).max(1))
+    } else {
+        let lh = ah.min(LB_LONG_EDGE);
+        (((aw * lh) / ah).max(1), lh)
+    };
+    let rgb16_lb = downscale_rgb16_impl(&rgb16, aw, ah, lb_w, lb_h);
+
+    const THUMB_LONG_EDGE: usize = 360;
+    let (thumb_w, thumb_h) = if aw >= ah {
+        let tw = aw.min(THUMB_LONG_EDGE);
+        (tw, ((ah * tw) / aw).max(1))
+    } else {
+        let th = ah.min(THUMB_LONG_EDGE);
+        (((aw * th) / ah).max(1), th)
+    };
+    let rgb16_thumb = downscale_rgb16_impl(&rgb16, aw, ah, thumb_w, thumb_h);
+
+    // Apply look parameters
+    let t = now_ms();
+    if wb_r_override.is_finite() && wb_r_override > 0.0 {
+        params.wb_r = wb_r_override.min(8.0);
+    }
+    if wb_b_override.is_finite() && wb_b_override > 0.0 {
+        params.wb_b = wb_b_override.min(8.0);
+    }
+    if exposure_ev.is_finite() { params.exposure_ev = exposure_ev; }
+    if contrast.is_finite() { params.contrast = contrast; }
+    if highlights.is_finite() { params.highlights = highlights; }
+    if shadows.is_finite() { params.shadows = shadows; }
+    if whites.is_finite() { params.whites = whites; }
+    if blacks.is_finite() { params.blacks = blacks; }
+    if saturation.is_finite() { params.saturation = saturation; }
+    if vibrance.is_finite() { params.vibrance = vibrance; }
+    if temp.is_finite() { params.temp = temp; }
+    if tint.is_finite() { params.tint = tint; }
+    if texture.is_finite() { params.texture = texture; }
+    if clarity.is_finite() { params.clarity = clarity; }
+    if params.texture != 0.0 || params.clarity != 0.0 {
+        pipeline::apply_unsharp_masks(&mut rgb16, aw, ah, &params);
+    }
+    let rgb8 = pipeline::process(&rgb16, &params);
+    let tonemap_ms = now_ms() - t;
+
+    // Apply orientation (DNG orientation tag)
+    let t = now_ms();
+    let (final_rgb, final_w, final_h) =
+        pipeline::apply_orientation(&rgb8, aw, ah, dng_img.orientation);
+    let orient_ms = now_ms() - t;
+
+    Ok(ProcessResult {
+        rgb: final_rgb,
+        width: final_w as u32,
+        height: final_h as u32,
+        orientation: dng_img.orientation,
+        decompress_ms: decode_ms,
+        demosaic_ms,
+        tonemap_ms,
+        orient_ms,
+        wb_r_used: params.wb_r,
+        wb_b_used: params.wb_b,
+        color_matrix_from_mn: false, // DNG always uses standard, no maker-specific matrix
+        make: dng_img.make,
+        model: dng_img.model,
+        rgb16_lb,
+        lb_w: lb_w as u32,
+        lb_h: lb_h as u32,
+        rgb16_thumb,
+        thumb_w: thumb_w as u32,
+        thumb_h: thumb_h as u32,
+        color_matrix_flat: [
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ], // Identity placeholder
+        lens: String::new(),
+        datetime: String::new(),
+        exposure_num: 0,
+        exposure_den: 1,
+        fnumber_num: 0,
+        fnumber_den: 1,
+        iso: 100,
+        focal_length_num: 0,
+        focal_length_den: 1,
+        focal_length_35: 0,
+        gps_lat: 0.0,
+        gps_lon: 0.0,
+        gps_alt: 0.0,
+        has_gps: false,
+        quality: 0,
+        wb_mode: 0xFFFF,
+        wb_from_camera: true,
+    })
+}

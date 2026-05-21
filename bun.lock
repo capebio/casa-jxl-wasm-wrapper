@@ -5,6 +5,7 @@
     "": {
       "dependencies": {
         "@jsquash/jxl": "^1.3.0",
+        "icodec": "0.6.0",
       },
       "devDependencies": {
         "playwright": "^1.59.1",
@@ -70,6 +71,8 @@
     "detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
 
     "fsevents": ["fsevents@2.3.2", "", { "os": "darwin" }, "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="],
+
+    "icodec": ["icodec@0.6.0", "", {}, "sha512-m9ptjNaqBTmnTOc7CkNgTXFrAY6QBjiyri6Ba66AGfGN1+OWPBej8cKgeZ+LwKH53zwDu36zukX2PaO8NTUMbw=="],
 
     "playwright": ["playwright@1.59.1", "", { "dependencies": { "playwright-core": "1.59.1" }, "optionalDependencies": { "fsevents": "2.3.2" }, "bin": { "playwright": "cli.js" } }, "sha512-C8oWjPR3F81yljW9o5OxcWzfh6avkVwDD2VYdwIGqTkl+OGFISgypqzfu7dOe4QNLL2aqcWBmI3PMtLIK233lw=="],
 

@@ -70,6 +70,10 @@ All designated utility packages (`jxl-capabilities`, `jxl-test-corpus`, `jxl-str
 
 - `T-WASM-BUILD`: Created `packages/jxl-wasm` with pinned libjxl/Emscripten build scaffolding, canonical flags, exports allowlist, loader, Dockerfile, and manifest tooling.
 - `T-NATIVE-BIND`: Created `packages/jxl-native` with a pure N-API addon stub, prebuild/source-load scaffold, `binding.gyp`, and package docs.
+- Scoped both packages to `@casabio/jxl-wasm` and `@casabio/jxl-native` so the worker import paths line up.
+- Added package-local `tsconfig.json` files, ambient shims, and package-root `exports` maps.
+- Verified source typecheck for `packages/jxl-wasm` and `packages/jxl-native` with the local TypeScript compiler.
+- Declared `@casabio/jxl-wasm` and `@casabio/jxl-native` as file dependencies of the worker packages.
 
 ### Tasks Blocked / Deferred
 
@@ -84,6 +88,7 @@ All designated utility packages (`jxl-capabilities`, `jxl-test-corpus`, `jxl-str
 - `emcc` and `docker` are not available in this workspace, so the WASM build pipeline cannot be executed locally.
 - The native toolchain and libjxl headers are not installed here, so the native binding cannot be compiled locally.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
+- The real codec work for `T-DECODE-WASM`, `T-ENCODE-WASM`, `T-DECODE-NATIVE`, and `T-ENCODE-NATIVE` is still blocked on the actual libjxl WASM/native implementations.
 
 ### Files Created
 
@@ -102,6 +107,9 @@ All designated utility packages (`jxl-capabilities`, `jxl-test-corpus`, `jxl-str
 - `packages/jxl-wasm/scripts/postprocess-tier.mjs`
 - `packages/jxl-wasm/src/loader.ts`
 - `packages/jxl-wasm/src/bridge.cpp`
+- `packages/jxl-wasm/src/index.ts`
+- `packages/jxl-wasm/src/shims.d.ts`
+- `packages/jxl-wasm/tsconfig.json`
 
 ### jxl-native
 - `packages/jxl-native/package.json`
@@ -113,6 +121,8 @@ All designated utility packages (`jxl-capabilities`, `jxl-test-corpus`, `jxl-str
 - `packages/jxl-native/binding.gyp`
 - `packages/jxl-native/src/index.ts`
 - `packages/jxl-native/src/native.cc`
+- `packages/jxl-native/src/shims.d.ts`
+- `packages/jxl-native/tsconfig.json`
 
 ### Suggested Next Steps
 

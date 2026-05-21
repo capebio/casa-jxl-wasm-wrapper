@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JPEG XL Progressive Test</title>
+    <link rel="stylesheet" href="./jxl-progressive.css" />
+</head>
+<body>
+    <main class="page-shell">
+        <section class="hero">
+            <div class="eyebrow">JPEG XL progressive ladder</div>
+            <h1>Three sizes. One scene. Fast visual recognition.</h1>
+            <p class="lede">
+                A random ORF from <code>C:\995\2026-02-17 Dave at Kyffhauser</code> gets loaded on demand.
+                Then the 300-long, 800-long, and full-size JXL variants stream in with bytes loaded against total bytes.
+                Flip between a full decode and a stepped progressive preview.
+            </p>
+
+            <div class="source-panel">
+                <button id="run-btn" class="run-btn" type="button">Load random ORF</button>
+                <button id="replay-btn" class="ghost-btn" type="button" disabled>Replay decode</button>
+                <button id="reset-btn" class="ghost-btn" type="button">Load another</button>
+                <a class="home-link" href="./index.html">Back to converter</a>
+                <div class="backend-panel">
+                    <span class="panel-label">Encode backend</span>
+                    <div class="decode-toggle" role="group" aria-label="Encode backend">
+                        <button id="encode-backend-jsquash" class="toggle-btn is-active" type="button" data-encode-backend="jsquash" aria-pressed="true">jsquash</button>
+                        <button id="encode-backend-libjxl" class="toggle-btn" type="button" data-encode-backend="libjxl" aria-pressed="false">libjxl</button>
+                    </div>
+                    <p class="panel-note">Encode the same cached ORF with either worker.</p>
+                </div>
+                <div class="backend-panel">
+                    <span class="panel-label">Decode backend</span>
+                    <div class="decode-toggle" role="group" aria-label="Decode backend">
+                        <button id="decode-backend-jsquash" class="toggle-btn is-active" type="button" data-decode-backend="jsquash" aria-pressed="true">jsquash</button>
+                        <button id="decode-backend-libjxl" class="toggle-btn" type="button" data-decode-backend="libjxl" aria-pressed="false">libjxl</button>
+                    </div>
+                    <p class="panel-note">Decode the same JXL bytes with either worker, including the progressive preview path.</p>
+                </div>
+                <div class="decode-panel">
+                    <div class="decode-toggle" role="group" aria-label="Decode mode">
+                        <button id="mode-final" class="toggle-btn is-active" type="button" data-decode-mode="final" aria-pressed="true">Final decode</button>
+                        <button id="mode-progressive" class="toggle-btn" type="button" data-decode-mode="progressive" aria-pressed="false">Progressive preview</button>
+                    </div>
+                    <label class="step-control" for="progressive-steps">
+                        <span>Progressive steps</span>
+                        <input id="progressive-steps" type="range" min="2" max="8" step="1" value="4" />
+                        <strong id="progressive-steps-value">4</strong>
+                    </label>
+                </div>
+                <div class="backend-panel" data-preview-panel>
+                    <span class="panel-label">Progressive preview</span>
+                    <div class="decode-toggle is-tight" role="group" aria-label="Progressive preview">
+                        <button id="preview-mode-source" class="toggle-btn is-active" type="button" data-preview-mode="source" aria-pressed="true">Source playback</button>
+                        <button id="preview-mode-stream" class="toggle-btn" type="button" data-preview-mode="stream" aria-pressed="false">Stream decode</button>
+                    </div>
+                    <p class="panel-note">Source playback animates from the ORF while encode runs. Stream decode keeps trying the growing JXL codestream.</p>
+                </div>
+            </div>
+
+            <div class="status-strip">
+                <div>
+                    <span class="status-label">Status</span>
+                    <strong id="status-text">Loading random ORF.</strong>
+                </div>
+                <div>
+                    <span class="status-label">Source</span>
+                    <strong id="source-meta">No file loaded.</strong>
+                </div>
+            </div>
+        </section>
+
+        <section class="ladder" aria-label="Progressive JXL variants">
+            <article class="card" data-slot="thumb">
+                <header>
+                    <div>
+                        <p class="slot-label">Variant 1</p>
+                        <h2>300 long</h2>
+                    </div>
+                    <div class="badge">small thumb</div>
+                </header>
+                <canvas class="preview" width="16" height="16"></canvas>
+                <div class="metrics">
+                    <div class="progress-line"><span class="fill"></span></div>
+                    <div class="bytes">0 / 0</div>
+                    <div class="encode">encode: --</div>
+                    <div class="timings">1/3: -- · 2/3: -- · end: --</div>
+                    <div class="notes">Waiting for source.</div>
+                </div>
+            </article>
+
+            <article class="card" data-slot="mid">
+                <header>
+                    <div>
+                        <p class="slot-label">Variant 2</p>
+                        <h2>800 long</h2>
+                    </div>
+                    <div class="badge">large thumb</div>
+                </header>
+                <canvas class="preview" width="16" height="16"></canvas>
+                <div class="metrics">
+                    <div class="progress-line"><span class="fill"></span></div>
+                    <div class="bytes">0 / 0</div>
+                    <div class="encode">encode: --</div>
+                    <div class="timings">1/3: -- · 2/3: -- · end: --</div>
+                    <div class="notes">Waiting for source.</div>
+                </div>
+            </article>
+
+            <article class="card" data-slot="full">
+                <header>
+                    <div>
+                        <p class="slot-label">Variant 3</p>
+                        <h2>Full size</h2>
+                    </div>
+                    <div class="badge">reference</div>
+                </header>
+                <canvas class="preview" width="16" height="16"></canvas>
+                <div class="metrics">
+                    <div class="progress-line"><span class="fill"></span></div>
+                    <div class="bytes">0 / 0</div>
+                    <div class="encode">encode: --</div>
+                    <div class="timings">1/3: -- · 2/3: -- · end: --</div>
+                    <div class="notes">Waiting for source.</div>
+                </div>
+            </article>
+        </section>
+
+        <section class="thumb-bench" aria-label="Browser thumb benchmark">
+            <header class="thumb-bench-header">
+                <div>
+                    <p class="slot-label">Browser bench</p>
+                    <h2>100 thumbs, 20px each</h2>
+                </div>
+                <button id="thumb-bench-run" class="run-btn" type="button">Run thumb bench</button>
+            </header>
+
+            <p class="thumb-bench-lede">
+                Five random ORFs, repeated 20 times each. Uses the page's current encode and decode backend toggles.
+                The report is written to <code>timings/</code> at the end of the run. DC vs AC only applies when the encode backend is <code>libjxl</code>.
+            </p>
+
+            <div class="thumb-bench-controls">
+                <label class="bench-control">
+                    <span>Worker concurrency</span>
+                    <input id="thumb-bench-concurrency" type="range" min="1" max="8" step="1" value="4" />
+                    <strong id="thumb-bench-concurrency-value">4</strong>
+                </label>
+
+                <div class="decode-toggle is-tight" role="group" aria-label="Thumb source sizes">
+                    <button id="thumb-bench-size-300" class="toggle-btn is-active" type="button" data-thumb-size="300" aria-pressed="true">300 long</button>
+                    <button id="thumb-bench-size-800" class="toggle-btn is-active" type="button" data-thumb-size="800" aria-pressed="true">800 long</button>
+                </div>
+
+                <div class="decode-toggle is-tight" role="group" aria-label="Thumb progressive">
+                    <button id="thumb-bench-prog-off" class="toggle-btn" type="button" data-thumb-progressive="off" aria-pressed="false">Progressive off</button>
+                    <button id="thumb-bench-prog-on" class="toggle-btn is-active" type="button" data-thumb-progressive="on" aria-pressed="true">Progressive on</button>
+                </div>
+
+                <div class="decode-toggle is-tight" role="group" aria-label="Thumb progressive detail">
+                    <button id="thumb-bench-detail-dc" class="toggle-btn is-active" type="button" data-thumb-detail="dc" aria-pressed="true">DC only</button>
+                    <button id="thumb-bench-detail-ac" class="toggle-btn" type="button" data-thumb-detail="ac" aria-pressed="false">DC + AC</button>
+                </div>
+            </div>
+
+            <div class="thumb-bench-meta">
+                <strong id="thumb-bench-status">Idle.</strong>
+                <span id="thumb-bench-settings">No run yet.</span>
+            </div>
+
+            <div class="thumb-bench-grid">
+                <article class="thumb-bench-card" data-thumb-bench-card="300">
+                    <header>
+                        <div>
+                            <p class="slot-label">Source size</p>
+                            <h3>300 long</h3>
+                        </div>
+                        <div class="badge">5 images × 20</div>
+                    </header>
+                    <div class="thumb-grid" data-thumb-grid="300" aria-label="300 long thumbnail grid"></div>
+                    <pre class="thumb-log" data-thumb-log="300">Waiting for run.</pre>
+                </article>
+
+                <article class="thumb-bench-card" data-thumb-bench-card="800">
+                    <header>
+                        <div>
+                            <p class="slot-label">Source size</p>
+                            <h3>800 long</h3>
+                        </div>
+                        <div class="badge">5 images × 20</div>
+                    </header>
+                    <div class="thumb-grid" data-thumb-grid="800" aria-label="800 long thumbnail grid"></div>
+                    <pre class="thumb-log" data-thumb-log="800">Waiting for run.</pre>
+                </article>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-progressive.js"></script>
+</body>
+</html>
