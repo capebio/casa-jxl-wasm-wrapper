@@ -32,6 +32,14 @@ Spec Section 16.2 calls `iccProfile` transferable. But `scheduler.acquireSlot()`
 
 Section 12.1: browser `min(4, hardwareConcurrency-1)`, server `cpus().length-1`. Node >= 21 exposes `globalThis.navigator.hardwareConcurrency`, which equals `cpus().length`. Using it for both avoids importing `node:os` into a file that browsers also load. Falls back to 4 if `navigator` is absent.
 
+## D-010 T-TEST unit suite uses a real Scheduler + FakeWorker
+
+The jxl-session test suite drives a genuine `Scheduler` (from jxl-scheduler) backed by `FakeWorker`s, rather than mocking the scheduler. This exercises the real jxl-session ↔ jxl-scheduler contract — message routing, slot acquisition, backpressure — without needing a real codec. `waitForWorker()` gates on `worker.messages.length >= 1` (the start message), because the factory pushes a worker synchronously while `assignWorker()` runs a microtask later; gating on `workers.length` alone returns a worker whose handler is not yet wired.
+
+## D-011 done() promise gets a no-op catch in the constructor
+
+A caller may use only `frames()`/`chunks()` and never call `done()`. When the session then errors or is cancelled, `doneDeferred.promise` rejects with no handler → `unhandledRejection`. Both `DecodeSessionImpl` and `EncodeSessionImpl` now attach `void this.doneDeferred.promise.catch(() => undefined)` in the constructor. Callers that do call `done()` attach their own handler independently; multiple handlers on one promise is fine. Found by the T-TEST suite.
+
 ## D-009 WorkerHandle cast at the factory boundary
 
 The worker packages' `WorkerHandle` and the scheduler's `WorkerHandle` differ only in the `send` transfer-list param type (`Transferable[]` / `unknown[]` vs `ArrayBuffer[]`). Structurally compatible; an `as unknown as` cast at the factory return keeps the boundary explicit without weakening either package's own types.

@@ -40,6 +40,9 @@ export class EncodeSessionImpl {
             chunked: opts.chunked ?? false,
             priority: opts.priority ?? "visible",
         };
+        // No-op catch so a rejected done() promise with no caller handler (caller
+        // used only chunks()) does not surface as an unhandledRejection.
+        void this.doneDeferred.promise.catch(() => undefined);
         this.scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
         this.acquirePromise = this.scheduler
             .acquireSlot({
