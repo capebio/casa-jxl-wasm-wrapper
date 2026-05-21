@@ -21,5 +21,6 @@
     "build:pgo": "node scripts/build-pgo.mjs",
     "manifest": "node scripts/write-manifest.mjs",
     "typecheck": "tsc --noEmit"
-  }
+  },
+  "dependencies": {}
 }

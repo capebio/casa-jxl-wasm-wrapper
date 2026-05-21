@@ -81,8 +81,12 @@ The PGO driver reads `jxl-test-corpus/pgo-manifest.json`, which is owned by the 
 ## Codec Facade
 
 The package root exports the worker-facing `createDecoder` and `createEncoder`
-contract. In this workspace the facade reports `CapabilityMissing` until the
-generated libjxl WASM glue is installed behind it.
+contract. The facade now targets package-local generated libjxl Emscripten
+modules through `src/bridge.cpp` and a small exported C ABI. Current coverage is
+rgba8 full-buffer encode/decode plus header, progress, and final facade events
+for `progressionTarget` and `emitEveryPass`. True metadata/ICC extraction,
+rgba16/rgbaf32, chunked region encode, and generated four-tier artifacts remain
+blocked until the pinned Docker build runs successfully.
 
 ## Current Blockers
 

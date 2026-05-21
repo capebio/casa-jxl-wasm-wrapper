@@ -29,6 +29,26 @@ describe("selectBackend", () => {
     expect(backend.type).toBe("wasm");
   });
 
+  test("rejects a native binding that reports loaded false", async () => {
+    const backend = await selectBackend({
+      env: {},
+      importNative: async () => ({
+        loadNativeBinding() {
+          return {
+            probe() {
+              return { loaded: false, path: "stub" };
+            },
+            createDecoder() {},
+            createEncoder() {},
+          };
+        },
+      }),
+      importWasm: async () => fakeCodecModule(),
+    });
+
+    expect(backend.type).toBe("wasm");
+  });
+
   test("JXL_FORCE_WASM skips native import", async () => {
     let nativeImported = false;
     const backend = await selectBackend({

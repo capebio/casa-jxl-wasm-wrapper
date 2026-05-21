@@ -1,6 +1,7 @@
 import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from '../pkg/raw_converter_wasm.js';
 import { createProgressiveSession } from './jxl-progressive-session.js';
 import { encodeBackendForTarget } from './jxl-progressive-policy.js';
+import { createProgressiveDecodeRequest } from './jxl-progressive-decode.js';
 
 const runBtn = document.getElementById('run-btn');
 const replayBtn = document.getElementById('replay-btn');
@@ -65,6 +66,7 @@ const decodeWorkers = new Map();
 let workerId = 1;
 
 function getWorkerScript(type, backend) {
+    if (type === 'decode' && backend === 'libjxl') return './jxl-worker.js';
     if (backend === 'libjxl') return './icodec-jxl-worker.js';
     return type === 'encode' ? './jxl-worker.js' : './jxl-decode-worker.js';
 }
@@ -304,6 +306,7 @@ function paintFrame(card, frame, targetDims) {
 function makeWorker(type, backend) {
     const worker = new Worker(new URL(getWorkerScript(type, backend), import.meta.url), { type: 'module' });
     worker._nextId = workerId++;
+    worker._supportsProgressiveDecode = type === 'decode' && backend === 'libjxl';
     return worker;
 }
 
@@ -378,7 +381,7 @@ function encodeJxl(worker, rgba, width, height, quality = 90, effort = 3, extra 
     });
 }
 
-function decodeJxl(worker, url) {
+function decodeJxlFallback(worker, url) {
     return new Promise((resolve, reject) => {
         const id = worker._nextId++;
         const onMessage = ({ data }) => {
@@ -392,13 +395,62 @@ function decodeJxl(worker, url) {
     });
 }
 
-async function decodeJxlBytes(worker, bytes) {
+async function decodeJxlBlob(worker, bytes) {
     const blob = new Blob([bytes], { type: 'image/jxl' });
     const url = URL.createObjectURL(blob);
     try {
-        return await decodeJxl(worker, url);
+        return await decodeJxlFallback(worker, url);
     } finally {
         URL.revokeObjectURL(url);
+    }
+}
+
+async function decodeJxlFinal(worker, bytes) {
+    if (!worker._supportsProgressiveDecode) {
+        return decodeJxlBlob(worker, bytes);
+    }
+
+    const id = worker._nextId++;
+    const request = createProgressiveDecodeRequest({
+        worker,
+        sessionId: `decode-${id}`,
+    });
+    request.start();
+    try {
+        request.push(bytes.slice());
+        request.close();
+        return await request.done;
+    } catch (error) {
+        request.cancel(String(error?.message ?? error));
+        throw error;
+    }
+}
+
+async function streamDecodeJxl(worker, bytes, { onChunk, onFrame } = {}, pacingMs = 8) {
+    const id = worker._nextId++;
+    const request = createProgressiveDecodeRequest({
+        worker,
+        sessionId: `decode-${id}`,
+        onProgress: onFrame,
+    });
+    let cancelled = false;
+    request.start();
+    try {
+        const streamedResult = await streamBytes(bytes, async (loaded, total, times, chunk) => {
+            const shouldContinue = await onChunk?.(loaded, total, times);
+            if (shouldContinue === false) {
+                cancelled = true;
+                request.cancel('decode superseded');
+                throw new Error('decode superseded');
+            }
+            request.push(chunk);
+        }, pacingMs);
+        request.close();
+        const decoded = await request.done;
+        return { decoded, streamedResult };
+    } catch (error) {
+        if (!cancelled) request.cancel(String(error?.message ?? error));
+        throw error;
     }
 }
 
@@ -406,28 +458,21 @@ async function streamBytes(bytes, onProgress, pacingMs = 8) {
     const total = bytes.byteLength;
     const chunkSize = Math.max(32 * 1024, Math.floor(total / 20));
     let loaded = 0;
-    const parts = [];
     const started = performance.now();
     const marks = [total / 3, (total * 2) / 3, total];
     const times = [null, null, null];
     while (loaded < total) {
         const next = Math.min(total, loaded + chunkSize);
-        parts.push(bytes.slice(loaded, next));
+        const chunk = bytes.slice(loaded, next);
         loaded = next;
         const elapsed = performance.now() - started;
         for (let i = 0; i < marks.length; i++) {
             if (times[i] == null && loaded >= marks[i]) times[i] = elapsed;
         }
-        await onProgress(loaded, total, times.slice(), bytes.slice(0, loaded));
+        await onProgress(loaded, total, times.slice(), chunk);
         await new Promise((resolve) => setTimeout(resolve, pacingMs));
     }
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const part of parts) {
-        merged.set(part, offset);
-        offset += part.byteLength;
-    }
-    return { bytes: merged, times };
+    return { bytes, times };
 }
 
 async function loadRandomSource() {
@@ -727,7 +772,7 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
                 const encodeMs = performance.now() - encodeStart;
 
                 const decodeStart = performance.now();
-                const decoded = await decodeJxlBytes(lane.decode, encoded.jxl);
+                const decoded = await decodeJxlFinal(lane.decode, encoded.jxl);
                 const decodeMs = performance.now() - decodeStart;
 
                 const paintStart = performance.now();
@@ -943,43 +988,50 @@ async function runVariant(source, target, runId) {
     card.el.dataset.state = 'streaming';
     card.notes.textContent = `Streaming JXL bytes for ${target.label}.`;
     const decodeStart = performance.now();
-    const streamedResult = await streamBytes(jxlBytes, async (loaded, total, times, currentBytes) => {
-        if (runId !== activeRunId) return;
+    const pacingMs = target.slot === 'full' ? 12 : 8;
+    const updateStreamProgress = (loaded, total, times) => {
+        if (runId !== activeRunId) return false;
         updateCardProgress(card, loaded, total, `Loaded ${fmtBytes(loaded)} of ${fmtBytes(total)}.`);
         const formatMs = (ms) => (ms == null ? '--' : `${ms.toFixed(0)} ms`);
         card.timings.textContent = `1/3: ${formatMs(times[0])} · 2/3: ${formatMs(times[1])} · end: ${formatMs(times[2])}`;
-        if (mode === 'progressive' && decodeBackend === 'libjxl' && progressivePreview === 'stream') {
-            try {
-                const decoded = await decodeJxlBytes(decodeWorker, currentBytes);
+        return true;
+    };
+
+    if (mode === 'progressive' && decodeBackend === 'libjxl' && progressivePreview === 'stream') {
+        const { decoded, streamedResult } = await streamDecodeJxl(decodeWorker, jxlBytes, {
+            onChunk: updateStreamProgress,
+            onFrame: (frame) => {
                 if (runId !== activeRunId) return;
-                rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
-                card.notes.textContent = `libjxl preview ${decoded.w}×${decoded.h} · loaded ${fmtBytes(loaded)} of ${fmtBytes(total)}.`;
-                return;
-            } catch {
-                // Partial codestream not decodable yet. Keep the last preview frame.
-            }
-        }
-    }, target.slot === 'full' ? 12 : 8);
+                rgbaToCanvas(card, frame.rgba, frame.w, frame.h);
+                card.notes.textContent = `libjxl preview ${frame.w}×${frame.h}.`;
+            },
+        }, pacingMs);
+        if (runId !== activeRunId) return;
+        stopPreviewPlayback(card);
+        rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
+        card.el.dataset.state = 'done';
+        card.fill.style.width = '100%';
+        card.bytes.textContent = `${fmtBytes(jxlBytes.byteLength)} / ${fmtBytes(jxlBytes.byteLength)}`;
+        card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} · 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} · end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
+        card.notes.textContent = `Decoded ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+        return;
+    }
+
+    const streamedResult = await streamBytes(jxlBytes, updateStreamProgress, pacingMs);
     const streamed = streamedResult.bytes;
 
     if (runId !== activeRunId) return;
     card.el.dataset.state = 'decoding';
     card.notes.textContent = `Decoding ${target.label} from JXL.`;
     stopPreviewPlayback(card);
-    const blob = new Blob([streamed], { type: 'image/jxl' });
-    const url = URL.createObjectURL(blob);
-    try {
-        const decoded = await decodeJxl(decodeWorker, url);
-        if (runId !== activeRunId) return;
-        rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
-        card.el.dataset.state = 'done';
-        card.fill.style.width = '100%';
-        card.bytes.textContent = `${fmtBytes(streamed.byteLength)} / ${fmtBytes(streamed.byteLength)}`;
-        card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} · 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} · end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
-        card.notes.textContent = `Decoded ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
-    } finally {
-        URL.revokeObjectURL(url);
-    }
+    const decoded = await decodeJxlFinal(decodeWorker, streamed);
+    if (runId !== activeRunId) return;
+    rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
+    card.el.dataset.state = 'done';
+    card.fill.style.width = '100%';
+    card.bytes.textContent = `${fmtBytes(streamed.byteLength)} / ${fmtBytes(streamed.byteLength)}`;
+    card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} · 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} · end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
+    card.notes.textContent = `Decoded ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
 }
 
 async function replayDecodeCard(card, runId) {
@@ -1021,39 +1073,47 @@ async function replayDecodeCard(card, runId) {
     if (mode === 'progressive' && canShowSourcePlayback) {
         card.notes.textContent = `Progressive preview enabled (${card._previewFrames.length} steps).`;
     }
-    const streamedResult = await streamBytes(card._jxlBytes, async (loaded, total, times, currentBytes) => {
-        if (runId !== activeRunId) return;
+    const pacingMs = card.slot === 'full' ? 12 : 8;
+    const updateStreamProgress = (loaded, total, times) => {
+        if (runId !== activeRunId) return false;
         updateCardProgress(card, loaded, total, `Loaded ${fmtBytes(loaded)} of ${fmtBytes(total)}.`);
         const formatMs = (ms) => (ms == null ? '--' : `${ms.toFixed(0)} ms`);
         card.timings.textContent = `1/3: ${formatMs(times[0])} · 2/3: ${formatMs(times[1])} · end: ${formatMs(times[2])}`;
-        if (mode === 'progressive' && decodeBackend === 'libjxl' && progressivePreview === 'stream') {
-            try {
-                const decoded = await decodeJxlBytes(decodeWorker, currentBytes);
-                if (runId !== activeRunId) return;
-                rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
-                card.notes.textContent = `libjxl preview ${decoded.w}×${decoded.h} · loaded ${fmtBytes(loaded)} of ${fmtBytes(total)}.`;
-                return;
-            } catch {
-                // Keep streaming until the codestream becomes decodable.
-            }
-        }
-    }, card.slot === 'full' ? 12 : 8);
-    if (runId !== activeRunId) return;
+        return true;
+    };
 
-    stopPreviewPlayback(card);
-    const blob = new Blob([streamedResult.bytes], { type: 'image/jxl' });
-    const url = URL.createObjectURL(blob);
-    try {
-        const decoded = await decodeJxl(decodeWorker, url);
+    if (mode === 'progressive' && decodeBackend === 'libjxl' && progressivePreview === 'stream') {
+        const { decoded, streamedResult } = await streamDecodeJxl(decodeWorker, card._jxlBytes, {
+            onChunk: updateStreamProgress,
+            onFrame: (frame) => {
+                if (runId !== activeRunId) return;
+                rgbaToCanvas(card, frame.rgba, frame.w, frame.h);
+                card.notes.textContent = `libjxl preview ${frame.w}×${frame.h}.`;
+            },
+        }, pacingMs);
         if (runId !== activeRunId) return;
+
+        stopPreviewPlayback(card);
         rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
         card.el.dataset.state = 'done';
         card.fill.style.width = '100%';
-        card.bytes.textContent = `${fmtBytes(streamedResult.bytes.byteLength)} / ${fmtBytes(streamedResult.bytes.byteLength)}`;
+        card.bytes.textContent = `${fmtBytes(card._jxlBytes.byteLength)} / ${fmtBytes(card._jxlBytes.byteLength)}`;
+        card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} · 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} · end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
         card.notes.textContent = `Replay decode: ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
-    } finally {
-        URL.revokeObjectURL(url);
+        return;
     }
+
+    const streamedResult = await streamBytes(card._jxlBytes, updateStreamProgress, pacingMs);
+    if (runId !== activeRunId) return;
+
+    stopPreviewPlayback(card);
+    const decoded = await decodeJxlFinal(decodeWorker, streamedResult.bytes);
+    if (runId !== activeRunId) return;
+    rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
+    card.el.dataset.state = 'done';
+    card.fill.style.width = '100%';
+    card.bytes.textContent = `${fmtBytes(streamedResult.bytes.byteLength)} / ${fmtBytes(streamedResult.bytes.byteLength)}`;
+    card.notes.textContent = `Replay decode: ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
 }
 
 function wireModeControls() {

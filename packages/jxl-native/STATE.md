@@ -14,6 +14,7 @@ T-NATIVE-BIND
 - Declared the package as a file dependency of the node worker package.
 - Added the worker-facing `createDecoder` / `createEncoder` facade contract.
 - Added binding delegation through `createNativeCodecFacade()` and clean `CapabilityMissing` when the addon is absent or lacks codec functions.
+- Added codec-shaped addon exports in `src/native.cc` so the native surface matches the facade contract.
 
 ## Next
 
@@ -29,6 +30,7 @@ T-DECODE-WASM
 - Native compilation is not runnable here because `node-gyp`/`prebuildify` toolchain dependencies and libjxl headers are not available.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
 - The facade is present, but the real `T-NATIVE-BIND` build still needs libjxl headers and the native toolchain before the addon can bind actual codec functions.
+- The facade is present, but the real `T-NATIVE-BIND` build still needs libjxl headers and the native toolchain before the addon can bind actual codec functions. The current addon methods are stubs.
 
 ## Files Touched
 

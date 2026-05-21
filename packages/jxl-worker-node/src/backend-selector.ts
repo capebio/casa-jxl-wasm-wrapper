@@ -76,6 +76,7 @@ function resolveCodecModule(value: unknown): CodecModule | null {
   if (isRecord(value) && typeof value["loadNativeBinding"] === "function") {
     try {
       const binding = value["loadNativeBinding"]();
+      if (!isLoadedBinding(binding)) return null;
       return isCodecModule(binding) ? binding : null;
     } catch {
       return null;
@@ -89,6 +90,15 @@ function resolveCodecModule(value: unknown): CodecModule | null {
 
 function isCodecModule(value: unknown): value is CodecModule {
   return isRecord(value) && typeof value["createDecoder"] === "function" && typeof value["createEncoder"] === "function";
+}
+
+function isLoadedBinding(value: unknown): value is CodecModule {
+  if (!isRecord(value)) return false;
+  if (typeof value["probe"] === "function") {
+    const probe = value["probe"]();
+    if (!isRecord(probe) || probe["loaded"] !== true) return false;
+  }
+  return true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

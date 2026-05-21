@@ -17,7 +17,7 @@ It tracks Section 15 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 ## What ships here
 
 - `binding.gyp` for source builds
-- `src/native.cc` as the addon entry point
+- `src/native.cc` as the addon entry point, exporting `version`, `probe`, `createDecoder`, and `createEncoder`
 - `src/index.ts` loader that tries prebuilt binaries first, then a source-build binary, then throws `CapabilityMissing`
 - package-root `createDecoder` and `createEncoder` facade functions that delegate to a loaded libjxl-capable addon
 
@@ -33,7 +33,7 @@ It tracks Section 15 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 pnpm build
 ```
 
-The build path is scaffolded, but not validated in this workspace because the native toolchain and libjxl headers are not installed here.
+The build path is scaffolded, but not validated in this workspace because the native toolchain and libjxl headers are not installed here. The addon surface currently returns codec-shaped stubs; real libjxl binding logic lands later.
 
 ## Publish
 

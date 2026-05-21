@@ -42,6 +42,17 @@ describe("@casabio/jxl-native facade", () => {
     expect(facade.createEncoder(encodeOptions)).toBe(encoder);
   });
 
+  test("rejects a native addon that reports loaded false", () => {
+    expect(() =>
+      createNativeCodecFacade({
+        version: () => "test",
+        probe: () => ({ loaded: false, path: "stub" }),
+        createDecoder: () => ({}) as never,
+        createEncoder: () => ({}) as never,
+      }),
+    ).toThrow(CapabilityMissing);
+  });
+
   test("top-level decoder and encoder throw CapabilityMissing when addon is unavailable", () => {
     expect(() => createDecoder(decodeOptions)).toThrow(CapabilityMissing);
     expect(() => createEncoder(encodeOptions)).toThrow(CapabilityMissing);

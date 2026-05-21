@@ -109,7 +109,9 @@ export function loadNativeBinding(options: NativeLoaderOptions = {}): NativeBind
   let lastError: unknown;
   for (const candidate of candidates) {
     try {
-      return require(candidate) as NativeBinding;
+      const binding = require(candidate) as NativeBinding;
+      ensureBindingLoaded(binding, candidate);
+      return binding;
     } catch (error) {
       lastError = error;
     }
@@ -122,6 +124,7 @@ export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFaca
   if (typeof binding.createDecoder !== "function" || typeof binding.createEncoder !== "function") {
     throw new CapabilityMissing("jxl-native addon does not expose createDecoder/createEncoder");
   }
+  ensureBindingLoaded(binding, "native binding");
   return {
     createDecoder(options) {
       return binding.createDecoder!(options);
@@ -160,5 +163,13 @@ function fileExists(path: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function ensureBindingLoaded(binding: NativeBinding, label: string): void {
+  if (typeof binding.probe !== "function") return;
+  const probe = binding.probe();
+  if (probe.loaded !== true) {
+    throw new CapabilityMissing(`jxl-native addon at ${label} is present but not loaded`, probe);
   }
 }

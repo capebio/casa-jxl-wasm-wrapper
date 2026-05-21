@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile, access, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, access, stat, readdir } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -9,7 +10,11 @@ import { spawn } from "node:child_process";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, "..");
 const distDir = join(packageRoot, "dist");
-const workDir = join(packageRoot, ".work");
+const workDir = join(os.tmpdir(), "jxl-wasm-work");
+const dockerBinary = resolveDockerBinary();
+const emcmakeBinary = resolveEmscriptenBinary("emcmake");
+const emppBinary = resolveEmscriptenBinary("em++");
+const bashBinary = resolveBashBinary();
 const config = {
   buildId: "jxl-wasm-0.1.0",
   libjxlRepo: process.env.LIBJXL_REPO ?? "https://github.com/libjxl/libjxl.git",
@@ -46,7 +51,6 @@ const baseFlags = [
   "-sASSERTIONS=0",
   "-sINVOKE_RUN=0",
   "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
-  "-sEXPORTED_FUNCTIONS=@exports.txt",
   "-flto",
   "-fno-rtti",
   "-fno-exceptions"
@@ -56,24 +60,28 @@ const sourceDir = join(workDir, "libjxl");
 
 async function main() {
   const insideDocker = process.argv.includes("--inside-docker");
+  const hostToolchain = process.argv.includes("--host-toolchain");
   await mkdir(distDir, { recursive: true });
   await mkdir(workDir, { recursive: true });
-
-  await ensureLibjxlSource();
 
   const manifest = {
     buildId: config.buildId,
     libjxlCommit: config.libjxlCommit,
     emscriptenTag: config.emscriptenTag,
     emscriptenCommit: config.emscriptenCommit,
+    buildMode: hostToolchain ? "host-toolchain" : insideDocker ? "docker" : "local",
     generatedAt: new Date().toISOString(),
-    tiers: {}
+    tiers: {},
+    skippedTiers: hostToolchain ? config.tiers.filter((tier) => tier.threads).map((tier) => tier.name) : []
   };
 
-  for (const tier of config.tiers) {
+  const activeTiers = hostToolchain ? config.tiers.filter((tier) => !tier.threads) : config.tiers;
+
+  for (const tier of activeTiers) {
     const outJs = join(distDir, `jxl-core.${tier.name}.js`);
     const outWasm = join(distDir, `jxl-core.${tier.name}.wasm`);
     const buildDir = join(workDir, tier.name);
+    await rmDir(buildDir);
     await mkdir(buildDir, { recursive: true });
 
     const tierFlags = [
@@ -91,7 +99,15 @@ async function main() {
       "-G",
       "Ninja",
       "-DCMAKE_BUILD_TYPE=Release",
-      "-DBUILD_TESTING=OFF"
+      "-DBUILD_TESTING=OFF",
+      "-DTHREADS_PREFER_PTHREAD_FLAG=ON",
+      "-DCMAKE_HAVE_LIBC_PTHREAD=1",
+      "-DCMAKE_USE_PTHREADS_INIT=1",
+      "-DCMAKE_THREAD_LIBS_INIT=-pthread",
+      "-DCMAKE_REQUIRED_FLAGS=-pthread",
+      "-DCMAKE_REQUIRED_LIBRARIES=-latomic",
+      "-DCMAKE_REQUIRED_LINK_OPTIONS=-pthread",
+      ...(hostToolchain ? [`-DCMAKE_MODULE_PATH=${toCmakePath(join(packageRoot, "cmake-shims"))}`] : [])
     ];
     const tierEnv = {
       ...process.env,
@@ -99,11 +115,16 @@ async function main() {
       CXXFLAGS: tierFlags.join(" "),
       LDFLAGS: tierFlags.join(" ")
     };
+    const dockerEnv = {
+      ...process.env,
+      DOCKER_CONFIG: join(os.tmpdir(), "docker-config")
+    };
+    await mkdir(dockerEnv.DOCKER_CONFIG, { recursive: true });
 
-    if (!insideDocker) {
-      await assertBinary("docker");
+    if (!insideDocker && !hostToolchain) {
       const image = "jxl-wasm-builder:local";
-      await run("docker", [
+      await assertBinary(dockerBinary);
+      await run(dockerBinary, [
         "build",
         "-t",
         image,
@@ -114,8 +135,8 @@ async function main() {
         "-f",
         join(packageRoot, "Dockerfile"),
         packageRoot
-      ], { cwd: packageRoot });
-      await run("docker", [
+      ], { cwd: packageRoot, env: dockerEnv });
+      await run(dockerBinary, [
         "run",
         "--rm",
         "-v",
@@ -126,13 +147,15 @@ async function main() {
         "node",
         "scripts/build.mjs",
         "--inside-docker"
-      ], { cwd: packageRoot });
+      ], { cwd: packageRoot, env: dockerEnv });
       return;
     }
 
-    await run("emcmake", ["cmake", ...cmakeArgs], { cwd: packageRoot, env: tierEnv });
+    await ensureLibjxlSource();
+    await ensureLibjxlDeps(hostToolchain);
+    await run("cmd", ["/c", emcmakeBinary, "cmake", ...cmakeArgs], { cwd: packageRoot, env: tierEnv });
     await run("cmake", ["--build", buildDir, "--", "-j", `${Math.max(1, osCpusMinusOne())}`], { cwd: packageRoot, env: tierEnv });
-    await run("node", [join(__dirname, "postprocess-tier.mjs"), buildDir, outJs, outWasm], { cwd: packageRoot, env: { ...tierEnv, JXL_WASM_TIER: tier.name, JXL_WASM_FLAGS: JSON.stringify(tierFlags) } });
+    await linkBridge(buildDir, outJs, tierFlags, tierEnv);
 
     const jsStats = await stat(outJs);
     const wasmStats = await stat(outWasm);
@@ -157,9 +180,67 @@ async function main() {
     }
   }
 
-  if (process.argv.includes("--inside-docker")) {
-    await writeManifest(manifest);
+  await writeManifest(manifest);
+}
+
+async function linkBridge(buildDir, outJs, tierFlags, env) {
+  const archives = await findStaticArchives(buildDir);
+  const preferred = sortArchivesForLink(archives);
+  const includeDirs = [
+    join(sourceDir, "lib", "include"),
+    sourceDir,
+    buildDir,
+    join(buildDir, "lib", "include")
+  ];
+  await run("cmd", ["/c", emppBinary,
+    join(packageRoot, "src", "bridge.cpp"),
+    ...includeDirs.flatMap((dir) => ["-I", dir]),
+    ...preferred,
+    "-o",
+    outJs,
+    ...tierFlags,
+    "-sMODULARIZE=1",
+    "-sEXPORT_ES6=1",
+    "-sEXPORT_NAME=createJxlModule",
+    "-sALLOW_MEMORY_GROWTH=1",
+    "-sINITIAL_MEMORY=33554432",
+    "-sMAXIMUM_MEMORY=4294967296",
+    "-sFILESYSTEM=0",
+    "-sASSERTIONS=0",
+    "-sINVOKE_RUN=0",
+    "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
+    `-sEXPORTED_FUNCTIONS=@${toCmakePath(join(packageRoot, "exports.txt"))}`,
+    "-flto",
+    "-fno-rtti",
+    "-fno-exceptions"
+  ], { cwd: packageRoot, env });
+}
+
+async function findStaticArchives(root) {
+  const out = [];
+  async function visit(dir) {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else if (entry.isFile() && entry.name.endsWith(".a")) {
+        out.push(path);
+      }
+    }
   }
+  await visit(root);
+  return out;
+}
+
+function sortArchivesForLink(archives) {
+  const priority = (path) => {
+    const name = path.replaceAll("\\", "/").split("/").pop() ?? "";
+    if (name === "libjxl.a") return 0;
+    if (name === "libjxl_threads.a") return 1;
+    if (name === "libjxl_cms.a") return 2;
+    return 10;
+  };
+  return [...archives].sort((a, b) => priority(a) - priority(b) || a.localeCompare(b));
 }
 
 async function ensureLibjxlSource() {
@@ -175,6 +256,13 @@ async function ensureLibjxlSource() {
   } catch {}
 
   await clonePinnedSource();
+}
+
+async function ensureLibjxlDeps(hostToolchain) {
+  if (!hostToolchain) {
+    return;
+  }
+  await run(bashBinary, ["deps.sh"], { cwd: sourceDir });
 }
 
 async function clonePinnedSource() {
@@ -257,6 +345,34 @@ async function assertBinary(name) {
   } catch (error) {
     throw new Error(`${name} is required for this build: ${error.message}`);
   }
+}
+
+function resolveDockerBinary() {
+  if (process.env.DOCKER_BIN) return process.env.DOCKER_BIN;
+  if (process.platform === "win32") {
+    return "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
+  }
+  return "docker";
+}
+
+function resolveEmscriptenBinary(name) {
+  const root = process.env.EMSDK;
+  if (!root) return name;
+  if (process.platform === "win32") {
+    return join(root, "upstream", "emscripten", `${name}.bat`);
+  }
+  return join(root, name);
+}
+
+function resolveBashBinary() {
+  if (process.platform === "win32") {
+    return "C:\\Program Files\\Git\\bin\\bash.exe";
+  }
+  return "bash";
+}
+
+function toCmakePath(path) {
+  return path.replaceAll("\\", "/");
 }
 
 async function rmDir(path) {

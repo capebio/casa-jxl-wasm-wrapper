@@ -1,0 +1,63 @@
+{
+  "buildId": "jxl-wasm-0.1.0",
+  "libjxlCommit": "332feb17d17311c748445f7ee75c4fb55cc38530",
+  "emscriptenTag": "4.0.13",
+  "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
+  "buildMode": "host-toolchain",
+  "generatedAt": "2026-05-21T00:00:00.000Z",
+  "tiers": {
+    "scalar": {
+      "jsBytes": 12789,
+      "wasmBytes": 2586038,
+      "jsSha256": "e896018a10ce2566e50dce6844caacd3642f8cdda56152b45f0517fd43e48b5f",
+      "wasmSha256": "8a509f151c76c38bcc5d7f7f035ee839eb8b069ce90e3af0eba210e81251a45a",
+      "flags": [
+        "-O3",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=33554432",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
+        "-sEXPORTED_FUNCTIONS=@exports.txt",
+        "-flto",
+        "-fno-rtti",
+        "-fno-exceptions"
+      ]
+    },
+    "simd": {
+      "jsBytes": 12785,
+      "wasmBytes": 2796374,
+      "jsSha256": "b7460799a657da7fd716af9f89f1be792c8fb9797b3ae97780f5b1939384ec28",
+      "wasmSha256": "572ecea321e0069629763c3aee9890affdef2ad610cb5622ffb44a8011617311",
+      "flags": [
+        "-O3",
+        "-msimd128",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=33554432",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
+        "-sEXPORTED_FUNCTIONS=@exports.txt",
+        "-flto",
+        "-fno-rtti",
+        "-fno-exceptions"
+      ]
+    }
+  },
+  "skippedTiers": [
+    "relaxed-simd-mt",
+    "simd-mt"
+  ]
+}

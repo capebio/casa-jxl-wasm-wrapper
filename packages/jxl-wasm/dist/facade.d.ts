@@ -71,24 +71,56 @@ export interface EncoderOptions {
     chunked: boolean;
 }
 export interface JxlDecoder {
-    push(chunk: ArrayBuffer): void | Promise<void>;
+    push(chunk: ArrayBuffer | Uint8Array): void | Promise<void>;
     close(): void | Promise<void>;
     events(): AsyncIterable<DecodeEvent>;
     cancel(reason?: string): void | Promise<void>;
     dispose(): void | Promise<void>;
 }
 export interface JxlEncoder {
-    pushPixels(chunk: ArrayBuffer, region?: Region): void | Promise<void>;
+    pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): void | Promise<void>;
     finish(): void | Promise<void>;
     chunks(): AsyncIterable<ArrayBuffer | Uint8Array>;
     cancel(reason?: string): void | Promise<void>;
     dispose(): void | Promise<void>;
 }
+interface LibjxlWasmModule {
+    HEAPU8: Uint8Array;
+    HEAPU32?: Uint32Array;
+    _malloc(size: number): number;
+    _free(ptr: number): void;
+    _jxl_wasm_decode_rgba8(inputPtr: number, inputSize: number, downsample: number): number;
+    _jxl_wasm_decode_rgba16?(inputPtr: number, inputSize: number, downsample: number): number;
+    _jxl_wasm_decode_rgbaf32?(inputPtr: number, inputSize: number, downsample: number): number;
+    _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
+    _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
+    _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
+    _jxl_wasm_buffer_data(handle: number): number;
+    _jxl_wasm_buffer_size(handle: number): number;
+    _jxl_wasm_buffer_width(handle: number): number;
+    _jxl_wasm_buffer_height(handle: number): number;
+    _jxl_wasm_buffer_bits_per_sample(handle: number): number;
+    _jxl_wasm_buffer_has_alpha(handle: number): number;
+    _jxl_wasm_buffer_error?(handle: number): number;
+    _jxl_wasm_buffer_free(handle: number): void;
+    _jxl_wasm_dec_create?(format: number): number;
+    _jxl_wasm_dec_push?(state: number, dataPtr: number, size: number): number;
+    _jxl_wasm_dec_close_input?(state: number): void;
+    _jxl_wasm_dec_width?(state: number): number;
+    _jxl_wasm_dec_height?(state: number): number;
+    _jxl_wasm_dec_error?(state: number): number;
+    _jxl_wasm_dec_take_flushed?(state: number): number;
+    _jxl_wasm_dec_take_final?(state: number): number;
+    _jxl_wasm_dec_free?(state: number): void;
+}
+type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
 export declare class CapabilityMissing extends Error {
     readonly code = "CapabilityMissing";
     readonly cause?: unknown;
     constructor(message: string, cause?: unknown);
 }
-export declare function createDecoder(_options: DecoderOptions): JxlDecoder;
-export declare function createEncoder(_options: EncoderOptions): JxlEncoder;
+export declare function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null): void;
+export declare function createDecoder(options: DecoderOptions): JxlDecoder;
+export declare function createEncoder(options: EncoderOptions): JxlEncoder;
+export {};
 //# sourceMappingURL=facade.d.ts.map
