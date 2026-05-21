@@ -7,3 +7,4 @@
 - Chose Docker-first builds so the toolchain is reproducible and the manifest can record the exact container inputs.
 - Kept the loader free of framework-specific assumptions. It uses browser `compileStreaming` when available and falls back to bytes + `WebAssembly.compile` when needed.
 - Treated the PGO corpus path as externally supplied by the Gemini branch. The package documents the dependency instead of inventing a local corpus manifest.
+- Aligned the published package name with the rest of the monorepo: `@casabio/jxl-wasm`.

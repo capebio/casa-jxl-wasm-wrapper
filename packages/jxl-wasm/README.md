@@ -1,6 +1,6 @@
-# jxl-wasm
+# @casabio/jxl-wasm
 
-`jxl-wasm` is the build package for the browser-side libjxl WebAssembly artifacts.
+`@casabio/jxl-wasm` is the build package for the browser-side libjxl WebAssembly artifacts.
 It tracks Section 6 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 
 ## Pins

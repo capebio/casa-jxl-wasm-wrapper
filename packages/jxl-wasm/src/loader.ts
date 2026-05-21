@@ -92,19 +92,17 @@ async function writeIndexedDbModule(key: string, module: WebAssembly.Module, opt
 }
 
 async function openCacheDb(factory: IDBFactory, name: string): Promise<IDBDatabase> {
-  const db = await requestToPromise(factory.open(name, 1), (db) => {
-    db.createObjectStore("modules", { keyPath: "key" });
-  });
-  return db;
+  const request = factory.open(name, 1);
+  request.onupgradeneeded = () => {
+    request.result.createObjectStore("modules", { keyPath: "key" });
+  };
+  return requestToPromise(request);
 }
 
-function requestToPromise<T>(request: IDBRequest<T>, onUpgrade?: (db: IDBDatabase) => void): Promise<T> {
+function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
-    if (onUpgrade) {
-      request.onupgradeneeded = () => onUpgrade(request.result as IDBDatabase);
-    }
   });
 }
 

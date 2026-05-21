@@ -28,8 +28,8 @@ export interface NativeLoaderOptions {
   sourcePath?: string;
 }
 
-const require = createRequire(import.meta.url);
-const packageRoot = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(String(import.meta.url));
+const packageRoot = dirname(fileURLToPath(String(import.meta.url)));
 
 export function loadNativeBinding(options: NativeLoaderOptions = {}): NativeBinding {
   const candidates = [
@@ -50,8 +50,8 @@ export function loadNativeBinding(options: NativeLoaderOptions = {}): NativeBind
 }
 
 function resolvePrebuiltBinary(): string {
-  const platform = process.platform;
-  const arch = process.arch;
+  const platform = process?.platform ?? "unknown";
+  const arch = process?.arch ?? "unknown";
   const base = join(packageRoot, "..", "prebuilds");
   const candidate = resolve(base, `${platform}-${arch}`, "jxl-native.node");
   return candidate;

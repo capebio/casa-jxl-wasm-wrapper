@@ -1,6 +1,6 @@
-# jxl-native
+# @casabio/jxl-native
 
-`jxl-native` is the server-side libjxl binding package for `jxl-worker-node`.
+`@casabio/jxl-native` is the server-side libjxl binding package for `jxl-worker-node`.
 It tracks Section 15 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 
 ## Pins
