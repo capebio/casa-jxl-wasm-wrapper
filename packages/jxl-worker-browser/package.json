@@ -1,0 +1,28 @@
+{
+  "name": "@casabio/jxl-worker-browser",
+  "version": "0.1.0",
+  "description": "DedicatedWorker host for WASM JXL codec sessions (browser)",
+  "type": "module",
+  "sideEffects": ["./dist/worker.js"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@casabio/jxl-core": "file:../jxl-core"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
+  }
+}
