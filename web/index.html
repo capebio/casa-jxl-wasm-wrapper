@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ORF → JPEG XL (browser)</title>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="casabio.css" />
+</head>
+<body>
+    <div id="timings-sidebar" class="timings-sidebar">
+        <div class="timings-sidebar-tab" id="timings-tab" aria-label="Open timings (T)">
+            <span class="sidebar-tab-label">Timings</span>
+        </div>
+        <div class="timings-sidebar-panel" id="timings-panel">
+            <div class="resize-handle" id="timings-resize"></div>
+            <section id="stats-panel" class="stats-panel">
+                <header class="stats-header">
+                    <h2>Timings</h2>
+                    <div class="stats-actions">
+                        <button id="run-benchmark" type="button" title="Run the same N files through a matrix of configs">Benchmark</button>
+                        <button id="run-effort-sweep" type="button" title="Sweep effort 1..9 on the picked files at c=3 t=4">Effort sweep</button>
+                        <button id="run-variance-bench" type="button" title="High-effort size/upload analysis on 5 size-spread files">Variance × effort</button>
+                        <button id="run-quality-sweep" type="button" title="Sweep quality 80/85/90/95 on 10 evenly-sampled files at e=3 Falcon">Quality sweep</button>
+                        <button id="run-pixel-peep" type="button" title="Pick photos, encode q=70/75/80/85/90/95 each, compare at 100% pixels">Pixel-peep quality</button>
+                        <button id="run-jxl-bench" type="button" title="Encode an ORF, then decode with jpegxl-rs vs jxl-oxide at multiple sizes and regions">JXL decode bench</button>
+                        <button id="run-jxl-sweep" type="button" title="Sweep: pick 5 ORFs across folder (start/end/quintile mids), run JXL decode bench on each">JXL sweep (5 imgs)</button>
+                        <button id="run-jxl-stress" type="button" title="Stress: 5 ORFs × 3 thumb sizes (180/480/1080) × 10 repeats × both decoders">JXL stress test</button>
+                        <button id="run-jxl-thumb" type="button" title="Encode thumbs at 150/300/640/1080/1920, save JXL, probe DC, gallery-simulate 100 decodes at 150 + 300">JXL thumb bench</button>
+                        <button id="run-jxl-disk" type="button" title="Cold-disk architecture bench: sidecar vs .jxlbundle for grid + lightbox workloads, with OS page-cache flush between phases">JXL disk arch bench</button>
+                        <button id="copy-stats" type="button">Copy</button>
+                        <button id="clear-stats" type="button">Clear</button>
+                        <button id="timings-close" type="button" title="Close">×</button>
+                    </div>
+                </header>
+                <pre id="stats-log" aria-live="polite"></pre>
+            </section>
+        </div>
+    </div>
+
+    <div id="file-sidebar" class="file-sidebar open">
+        <div class="file-sidebar-tab" id="sidebar-tab" aria-label="Open file picker (L)">
+            <span class="sidebar-tab-label">Files</span>
+        </div>
+        <div class="file-sidebar-panel" id="sidebar-panel">
+            <div class="resize-handle" id="files-resize"></div>
+            <section id="drop" class="drop-target">
+                <input type="file" id="file-input" multiple accept=".orf,.ORF" class="visually-hidden" />
+                <button id="pick">Pick ORF files</button>
+                <p class="hint">or drop files / folders here</p>
+            </section>
+        </div>
+    </div>
+
+    <header>
+        <div class="title">
+            <h1>ORF → JPEG XL — fully in the browser <button class="info-btn" id="info-btn" type="button" aria-label="About this tool">ℹ</button></h1>
+            <button id="casabio-toggle" class="casabio-toggle" type="button" title="Upload encoded JXLs to a Casabio expedition gallery">Upload to Casabio</button>
+            <div class="view-toggle" role="group" aria-label="Gallery layout">
+                <button class="view-btn active" data-view="rect"    title="Portrait rectangles">Rect</button>
+                <button class="view-btn"         data-view="square"  title="Square crop">Square</button>
+                <button class="view-btn"         data-view="natural" title="Natural proportions">Natural</button>
+            </div>
+            <div class="info-popover" id="info-popover" hidden>
+                <p>Olympus 12-bit predictive ORF decode + bilinear demosaic +
+                   sRGB pipeline (Rust → wasm) + JXL encode (libjxl via jSquash
+                   wasm). Per-file Web Worker pool saturates all cores.
+                   Nothing leaves your machine.</p>
+                <p class="info-meta">Build: <strong id="info-build-tag">—</strong> &nbsp;·&nbsp; Workers: <strong id="info-pool-size">—</strong> &nbsp;·&nbsp; Cores: <strong id="info-hw-cores">—</strong></p>
+            </div>
+        </div>
+        <div class="controls">
+            <div class="jxl-group">
+                <fieldset class="jxl-fieldset">
+                    <legend>JXL</legend>
+                    <label class="jxl-row">
+                        <span class="jxl-lbl">quality <strong id="quality-label">90</strong></span>
+                        <input type="range" id="quality-range" min="50" max="100" step="1" value="90" />
+                    </label>
+                    <label class="jxl-row">
+                        <span class="jxl-lbl">effort <button class="info-btn" id="effort-info-btn" type="button" aria-label="Effort level guide">ℹ</button></span>
+                        <select id="effort-select">
+                            <option value="1">1 — Lightning · fastest, biggest</option>
+                            <option value="3" selected>3 — Falcon · fast, default</option>
+                            <option value="5">5 — Hare · balanced</option>
+                            <option value="6">6 — Wombat · good compression</option>
+                            <option value="7">7 — Squirrel · slow, smallest</option>
+                        </select>
+                    </label>
+                    <div class="effort-popover" id="effort-popover" hidden>
+                        <p class="effort-intro">Effort only affects <strong>encode speed and file size</strong> — not image quality. Quality slider controls that. All levels at the same quality setting look identical; effort decides how efficiently the data is packed.</p>
+                        <table class="effort-table">
+                            <tr><td class="et-n">1</td><td class="et-animal">⚡ Lightning</td><td class="et-desc">Ultra-fast encode. Files ~25–35% larger than Squirrel. Use for draft batches where speed beats size.</td></tr>
+                            <tr><td class="et-n">3</td><td class="et-animal">🦅 Falcon</td><td class="et-desc">Fast — roughly 3–5× faster than Hare. Good default for everyday shooting.</td></tr>
+                            <tr><td class="et-n">5</td><td class="et-animal">🐇 Hare</td><td class="et-desc">Balanced. Files ~5–10% smaller than Falcon.</td></tr>
+                            <tr><td class="et-n">6</td><td class="et-animal">🦘 Wombat</td><td class="et-desc">Good compression — slower than Hare, smaller files. Max practical effort for 20 MP+ images; higher efforts fall back here if they run out of WASM heap.</td></tr>
+                            <tr><td class="et-n">7</td><td class="et-animal">🐿 Squirrel</td><td class="et-desc">Best compression — ~3–5× slower than Hare. Falls back to Wombat on images larger than ~12 MP due to WASM memory limits.</td></tr>
+                        </table>
+                    </div>
+                    <label class="jxl-row">
+                        <span class="jxl-lbl">lossless</span>
+                        <input type="checkbox" id="lossless-toggle" />
+                    </label>
+                </fieldset>
+                <div class="jxl-subrow">
+                    <fieldset class="presets-fieldset">
+                        <legend>Presets</legend>
+                        <div class="preset-grid">
+                            <button type="button" class="preset-btn" data-preset="0">1</button>
+                            <button type="button" class="preset-btn" data-preset="1">2</button>
+                            <button type="button" class="preset-btn" data-preset="2">3</button>
+                            <button type="button" class="preset-btn" data-preset="3">4</button>
+                            <button type="button" class="preset-btn" data-preset="4">5</button>
+                            <button type="button" class="preset-btn" data-preset="5">6</button>
+                            <button type="button" class="preset-btn" data-preset="6">7</button>
+                            <button type="button" class="preset-btn" data-preset="7">8</button>
+                            <button type="button" class="preset-btn" data-preset="8">9</button>
+                        </div>
+                    </fieldset>
+                    <fieldset class="apply-fieldset">
+                        <legend>Apply</legend>
+                        <button id="reset-look" type="button" class="reset-btn" title="Reset all look controls to 0">Reset</button>
+                        <button id="apply-look" type="button" class="apply-btn" title="Bake current look into selected images (re-runs full pipeline)">Apply to selected</button>
+                        <button id="reprocess-btn" type="button" class="reprocess-btn">Re-process all</button>
+                    </fieldset>
+                </div>
+            </div>
+
+            <div class="look-panels">
+                <fieldset class="look-column">
+                    <legend>Exposure</legend>
+                    <label class="lr">
+                        <span>exposure <strong data-label="exposureEv">0.00</strong></span>
+                        <input type="range" data-look="exposureEv" min="-3" max="3" step="0.05" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>highlights <strong data-label="highlights">0</strong></span>
+                        <input type="range" data-look="highlights" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>shadows <strong data-label="shadows">0</strong></span>
+                        <input type="range" data-look="shadows" min="-100" max="100" step="1" value="0" />
+                    </label>
+                </fieldset>
+
+                <fieldset class="look-column">
+                    <legend>Contrast</legend>
+                    <label class="lr">
+                        <span>contrast <strong data-label="contrast">0</strong></span>
+                        <input type="range" data-look="contrast" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>whites <strong data-label="whites">0</strong></span>
+                        <input type="range" data-look="whites" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>blacks <strong data-label="blacks">0</strong></span>
+                        <input type="range" data-look="blacks" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="toggle" title="Adds +0.15 to baseline contrast (Natural → Vivid)">
+                        <input type="checkbox" id="contrast-boost"> Hi-contrast
+                    </label>
+                </fieldset>
+
+                <fieldset class="look-column">
+                    <legend>Detail</legend>
+                    <label class="lr">
+                        <span>clarity <strong data-label="clarity">0</strong></span>
+                        <input type="range" data-look="clarity" min="-100" max="100" step="1" value="0" />
+                    </label>
+                    <label class="lr">
+                        <span>texture <strong data-label="texture">0</strong></span>
+                        <input type="range" data-look="texture" min="-100" max="100" step="1" value="0" />
+                    </label>
+                </fieldset>
+            </div>
+
+            <fieldset class="look-fieldset color-fieldset">
+                <legend>Color <small>(centred at 0)</small></legend>
+                <label class="lr">
+                    <span>temp <strong data-label="temp">0</strong></span>
+                    <input type="range" data-look="temp" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>tint <strong data-label="tint">0</strong></span>
+                    <input type="range" data-look="tint" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>vibrance <strong data-label="vibrance">0</strong></span>
+                    <input type="range" data-look="vibrance" min="-100" max="100" step="1" value="0" />
+                </label>
+                <label class="lr">
+                    <span>saturation <strong data-label="saturation">0</strong></span>
+                    <input type="range" data-look="saturation" min="-100" max="100" step="1" value="0" />
+                </label>
+            </fieldset>
+        </div>
+    </header>
+
+    <main>
+        <section id="status" class="status" hidden>
+            <span id="status-timings" class="status-timings"></span>
+            <progress id="progress" max="100" value="0"></progress>
+            <span id="status-text"></span>
+        </section>
+
+
+
+        <section id="grid" class="grid"></section>
+
+    </main>
+
+    <section id="casabio-panel" class="casabio-panel" hidden>
+        <header class="casabio-header">
+            <h2>Upload to Casabio</h2>
+            <button id="casabio-close" class="casabio-close" type="button" aria-label="Close">×</button>
+        </header>
+
+        <div class="casabio-section" id="casabio-setup">
+            <label>Casabio base URL
+                <input id="casabio-base-url" type="url" placeholder="https://expeditions.casabio.org" />
+            </label>
+            <label>API token
+                <input id="casabio-token" type="password" autocomplete="off" />
+            </label>
+            <div class="casabio-row">
+                <button id="casabio-save-token" type="button">Save token</button>
+                <button id="casabio-clear-token" type="button">Clear stored token</button>
+            </div>
+        </div>
+
+        <div class="casabio-section">
+            <label>Expedition
+                <select id="casabio-expedition"></select>
+            </label>
+            <button id="casabio-refresh-expeditions" type="button">Refresh</button>
+        </div>
+
+        <label class="casabio-checkbox">
+            <input type="checkbox" id="casabio-hq-toggle" />
+            High-quality fullsize (forces q=95)
+        </label>
+
+        <div id="casabio-drop-zone" class="casabio-drop-zone" tabindex="0">
+            Click to choose files (RAW / JPEG / PNG / TIFF)
+        </div>
+
+        <ul id="casabio-queue" class="casabio-queue"></ul>
+    </section>
+
+    <div id="lightbox" class="lightbox" hidden>
+        <button class="lightbox-close" aria-label="Close">×</button>
+        <button class="lightbox-prev" aria-label="Previous">‹</button>
+        <button class="lightbox-next" aria-label="Next">›</button>
+        <div class="lightbox-toolbar">
+            <button class="lb-btn lb-zoom-out" aria-label="Zoom out">−</button>
+            <span class="lb-zoom-label">100%</span>
+            <button class="lb-btn lb-zoom-in" aria-label="Zoom in">+</button>
+            <button class="lb-btn lb-zoom-reset" aria-label="Fit image" title="Reset zoom">⊙</button>
+            <span class="lb-sep"></span>
+            <button class="lb-btn lb-toggle-jpeg" aria-label="Cycle source: RAW / JXL / JPEG"
+                    title="Cycle source: RAW → JXL → JPEG (Space / ↑↓)">RAW</button>
+            <span class="lb-sep"></span>
+            <button class="lb-btn lb-crop-btn" aria-label="Crop tool (C)" title="Crop / focal subjects (C)">✂ Crop</button>
+            <select class="lb-aspect-select" id="lb-aspect-select" hidden title="Aspect ratio">
+                <option value="free">Free</option>
+                <option value="original">Original</option>
+                <option value="1:1">1:1 square</option>
+                <option value="3:2">3:2</option>
+                <option value="4:3">4:3</option>
+                <option value="16:9">16:9</option>
+                <option value="5:4">5:4</option>
+            </select>
+            <button class="lb-btn lb-crop-mode-toggle" id="lb-crop-mode-toggle" hidden
+                    title="Switch between Frame crop and Focal subjects">Frame</button>
+            <button class="lb-btn lb-crop-apply" id="lb-crop-apply" hidden title="Save crop (Enter)">Apply</button>
+            <button class="lb-btn lb-crop-cancel" id="lb-crop-cancel" hidden title="Discard (Esc)">Cancel</button>
+            <span class="lb-sep"></span>
+            <button class="lb-download-btn" aria-label="Download full-res JPEG">⬇ JPEG</button>
+        </div>
+        <div class="lightbox-viewport">
+            <canvas id="lightbox-canvas"></canvas>
+            <div id="lb-source-label" aria-live="polite"></div>
+            <div class="lb-source-banner" id="lb-source-banner" data-source="jxl">JXL</div>
+            <div class="lb-preview-badge" data-source="raw" hidden>RAW</div>
+            <div class="lb-loading-badge" hidden>Loading…</div>
+            <div id="lb-panels" class="lb-panels">
+                <div id="lb-panel-h" class="lb-panel">
+                    <button class="lb-panel-btn" data-panel="h" title="Histogram (H)">
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
+                            <rect x="1" y="10" width="2" height="7"/><rect x="4" y="6" width="2" height="11"/>
+                            <rect x="7" y="3" width="2" height="14"/><rect x="10" y="5" width="2" height="12"/>
+                            <rect x="13" y="8" width="2" height="9"/><rect x="16" y="12" width="2" height="5"/>
+                        </svg>
+                    </button>
+                    <div class="lb-panel-body" hidden>
+                      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                        <span style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em">Histogram</span>
+                        <button id="lb-hist-mode" class="lb-chip lb-chip-active" style="padding:2px 8px;font-size:11px">L</button>
+                      </div>
+                      <canvas id="lb-hist-canvas" width="220" height="80" style="width:220px;height:80px;display:block"></canvas>
+                      <div class="lb-levels-wrap">
+                        <div class="lb-levels-row lb-levels-input" title="Input levels">
+                          <div class="lb-levels-track">
+                            <div class="lb-lvl-handle" id="lb-lvl-in-black"  data-lvl="inBlack"  style="left:0%"    title="Black point"></div>
+                            <div class="lb-lvl-handle lb-lvl-mid" id="lb-lvl-in-mid" data-lvl="inMid" style="left:50%"  title="Midtone gamma"></div>
+                            <div class="lb-lvl-handle" id="lb-lvl-in-white"  data-lvl="inWhite"  style="left:100%"  title="White point"></div>
+                          </div>
+                        </div>
+                        <div class="lb-levels-row lb-levels-output" title="Output levels">
+                          <div class="lb-levels-track">
+                            <div class="lb-lvl-handle" id="lb-lvl-out-black" data-lvl="outBlack" style="left:0%"    title="Output black"></div>
+                            <div class="lb-lvl-handle" id="lb-lvl-out-white" data-lvl="outWhite" style="left:100%"  title="Output white"></div>
+                          </div>
+                        </div>
+                        <div style="display:flex;justify-content:flex-end;margin-top:6px">
+                          <button id="lb-levels-reset" class="lb-chip" style="font-size:11px;padding:2px 8px">Reset</button>
+                        </div>
+                      </div>
+                    </div>
+                </div>
+                <div id="lb-panel-c" class="lb-panel">
+                    <button class="lb-panel-btn" data-panel="c" title="Colour Profiles (C)">
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <circle cx="9" cy="9" r="7"/>
+                            <circle cx="6" cy="7" r="2" fill="currentColor" stroke="none"/>
+                            <circle cx="12" cy="7" r="2" fill="currentColor" stroke="none"/>
+                            <circle cx="9" cy="12" r="2" fill="currentColor" stroke="none"/>
+                        </svg>
+                    </button>
+                    <div class="lb-panel-body" hidden>
+                      <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Built-in</div>
+                      <div id="lb-profile-chips" class="lb-chip-group"></div>
+                      <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 8px">My Profiles</div>
+                      <div id="lb-user-profile-chips" class="lb-chip-group"></div>
+                      <div style="margin-top:8px;font-size:11px;color:#666">
+                        Ctrl+Shift+S save &nbsp;·&nbsp; Ctrl+Shift+L open panel &nbsp;·&nbsp; Ctrl+Shift+1–0 quick-load
+                      </div>
+                    </div>
+                </div>
+                <div id="lb-panel-f" class="lb-panel">
+                    <button class="lb-panel-btn" data-panel="f" title="Filters (F)">
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
+                            <path d="M2 4h14v2L10 12v4l-2-1v-3L2 6V4z"/>
+                        </svg>
+                    </button>
+                    <div class="lb-panel-body" hidden>
+                      <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">B&amp;W</div>
+                      <div id="lb-bw-chips" class="lb-chip-group"></div>
+                      <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 8px">Creative</div>
+                      <div id="lb-creative-chips" class="lb-chip-group"></div>
+                      <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin:10px 0 8px">Overlays</div>
+                      <div id="lb-overlay-chips" class="lb-chip-group"></div>
+                      <div id="lb-vignette-controls" hidden></div>
+                      <div style="margin-top:8px;font-size:11px;color:#666">Ctrl+1–9 B&amp;W · Ctrl+0 clear</div>
+                    </div>
+                </div>
+            </div>
+            <canvas id="lb-grain-overlay" class="lb-overlay"></canvas>
+            <div id="lb-vignette-overlay" class="lb-overlay lb-vignette"></div>
+            <!-- Crop / focal-subject overlay layer. Sits above canvas (z-index),
+                 below toolbar. crop.js manages all rectangles, handles, dimming. -->
+            <div id="lb-crop-layer" class="lb-crop-layer" hidden>
+                <div class="lb-crop-dim" id="lb-crop-dim"></div>
+                <div class="lb-crop-rect" id="lb-crop-rect" hidden>
+                    <div class="lb-crop-h" data-h="nw"></div>
+                    <div class="lb-crop-h" data-h="n"></div>
+                    <div class="lb-crop-h" data-h="ne"></div>
+                    <div class="lb-crop-h" data-h="e"></div>
+                    <div class="lb-crop-h" data-h="se"></div>
+                    <div class="lb-crop-h" data-h="s"></div>
+                    <div class="lb-crop-h" data-h="sw"></div>
+                    <div class="lb-crop-h" data-h="w"></div>
+                </div>
+                <div class="lb-subjects-overlay" id="lb-subjects-overlay"></div>
+            </div>
+            <!-- Subject editor panel (slides in from right when crop mode is "subjects") -->
+            <div id="lb-subjects-panel" class="lb-subjects-panel" hidden>
+                <header><span>Focal subjects</span>
+                    <button id="lb-subjects-close" class="lb-panel-x">×</button>
+                </header>
+                <div id="lb-subjects-list" class="lb-subjects-list"></div>
+                <p class="lb-subjects-hint">Drag on the image to add. Click a box to edit.</p>
+            </div>
+        </div>
+        <div class="lightbox-info"></div>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+    <script defer src="./panels.js"></script>
+    <script defer src="./crop.js"></script>
+    <script defer src="./casabio.js"></script>
+</body>
+</html>

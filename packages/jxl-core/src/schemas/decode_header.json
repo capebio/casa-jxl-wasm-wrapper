@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "jxl-core/decode_header",
+  "title": "MsgDecodeHeader",
+  "type": "object",
+  "required": ["type", "sessionId", "info"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "decode_header" },
+    "sessionId": { "type": "string" },
+    "info": { "$ref": "#/definitions/ImageInfo" }
+  },
+  "definitions": {
+    "ImageInfo": {
+      "type": "object",
+      "required": ["width", "height", "bitsPerSample", "hasAlpha", "hasAnimation", "jpegReconstructionAvailable"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "bitsPerSample": { "enum": [8, 16, 32] },
+        "hasAlpha": { "type": "boolean" },
+        "hasAnimation": { "type": "boolean" },
+        "iccProfile": { "description": "Uint8Array when present" },
+        "colorSpace": { "enum": ["srgb", "display-p3", "rec2020-pq", "rec2020-hlg", "linear-srgb", "unknown"] },
+        "exif": { "description": "Uint8Array when present" },
+        "xmp": { "description": "Uint8Array when present" },
+        "jpegReconstructionAvailable": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "@casabio/jxl-worker-node",
+  "version": "0.1.0",
+  "description": "node:worker_threads host for JXL codec sessions (server)",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    }
+  },
+  "files": ["dist"],
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@casabio/jxl-core": "file:../jxl-core",
+    "@casabio/jxl-native": "file:../jxl-native",
+    "@casabio/jxl-wasm": "file:../jxl-wasm"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4",
+    "@types/node": "22.5.0"
+  }
+}

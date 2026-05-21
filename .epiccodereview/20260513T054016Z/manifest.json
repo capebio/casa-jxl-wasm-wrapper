@@ -1,0 +1,15 @@
+{
+  "target": ".",
+  "target_label": ".",
+  "mode": "workalone",
+  "languages": [
+    "javascript",
+    "rust",
+    "typescript"
+  ],
+  "file_count": 19,
+  "section_count": 4,
+  "generated_utc": "2026-05-13T05:40:18.538017Z",
+  "failed_workers": [],
+  "deferred_questions": []
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@casabio/jxl-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./loader": {
+      "types": "./dist/loader.d.ts",
+      "import": "./dist/loader.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:pgo": "node scripts/build-pgo.mjs",
+    "manifest": "node scripts/write-manifest.mjs",
+    "typecheck": "tsc --noEmit"
+  }
+}

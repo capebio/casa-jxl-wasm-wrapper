@@ -1,0 +1,153 @@
+// jxl-core/src/types.ts
+// Contract: Section 5 of casabio-jxl-wrapper-construction-spec-v2.md
+// Do not add fields not present in the spec.
+
+export type PixelFormat =
+  | "rgba8"     // 4 channels, 8-bit, premultiplied alpha = false
+  | "rgba16"    // 4 channels, 16-bit
+  | "rgbaf32";  // 4 channels, 32-bit float (linear)
+
+export interface ImageInfo {
+  width: number;
+  height: number;
+  bitsPerSample: 8 | 16 | 32;
+  hasAlpha: boolean;
+  hasAnimation: boolean;
+  iccProfile?: Uint8Array;          // present when the file carries one
+  colorSpace?: ColorSpaceHint;      // hint derived when no ICC is present
+  exif?: Uint8Array;                // raw EXIF box
+  xmp?: Uint8Array;                 // raw XMP box
+  jpegReconstructionAvailable: boolean;
+}
+
+export type ColorSpaceHint =
+  | "srgb" | "display-p3" | "rec2020-pq" | "rec2020-hlg" | "linear-srgb" | "unknown";
+
+export type DecodeStage =
+  | "header"       // ImageInfo available
+  | "dc"           // first useful low-frequency preview
+  | "pass"         // intermediate progressive refinement
+  | "final";       // full image complete
+
+export interface DecodeFrameEvent {
+  stage: DecodeStage;
+  info: ImageInfo;
+  pixels: ArrayBuffer;              // transferred
+  format: PixelFormat;
+  region?: Region;                  // present for tile/region decodes
+  pixelStride: number;              // bytes per row (may exceed width * channels * bpc/8)
+}
+
+export interface Region {
+  x: number; y: number; w: number; h: number;
+}
+
+export interface DecodeOptions {
+  // What the caller wants out
+  format: PixelFormat;              // requested output format
+  preserveIcc?: boolean;            // default true
+  preserveMetadata?: boolean;       // default true (EXIF + XMP)
+  region?: Region;                  // crop decode
+  downsample?: 1 | 2 | 4 | 8;       // request power-of-two downsample if codestream supports
+  // Progression
+  progressionTarget?: "header" | "dc" | "pass" | "final"; // earliest stage to stop
+  emitEveryPass?: boolean;          // default true for viewer, false for thumbnail
+  // Scheduling
+  priority?: "visible" | "near" | "background";
+  budgetMs?: number;
+  signal?: AbortSignal;
+  // Telemetry
+  onMetric?: (m: CodecMetric) => void;
+}
+
+export interface DecodeSession {
+  readonly id: string;
+  // Stream the bytes in; resolves when worker has accepted the chunk
+  push(chunk: ArrayBuffer | Uint8Array): Promise<void>;
+  // Signal end of input
+  close(): Promise<void>;
+  // Iterate frames as they emit
+  frames(): AsyncIterable<DecodeFrameEvent>;
+  // Await final completion; rejects on error or abort
+  done(): Promise<ImageInfo>;
+  // Cancel and release codec resources
+  cancel(reason?: string): Promise<void>;
+}
+
+export interface EncodeOptions {
+  format: PixelFormat;
+  width: number;
+  height: number;
+  hasAlpha: boolean;
+  // Color and metadata
+  iccProfile?: Uint8Array;          // attach to output
+  exif?: Uint8Array;
+  xmp?: Uint8Array;
+  // Quality knobs
+  distance?: number;                // libjxl distance; 0 = lossless
+  quality?: number;                 // 0-100, mapped via JxlEncoderDistanceFromQuality
+  effort?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  // Progressive / streaming
+  progressive?: boolean;            // enable progressive frames
+  previewFirst?: boolean;           // bias for early bytes over compression
+  chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs
+  // Scheduling
+  priority?: "visible" | "near" | "background";
+  signal?: AbortSignal;
+  onMetric?: (m: CodecMetric) => void;
+}
+
+export interface EncodeSession {
+  readonly id: string;
+  // Push pixels (one or many chunks for chunked encodes)
+  pushPixels(chunk: ArrayBuffer, region?: Region): Promise<void>;
+  // Signal end of pixel input
+  finish(): Promise<void>;
+  // Iterate output byte chunks as they emit
+  chunks(): AsyncIterable<ArrayBuffer>;
+  // Await completion; resolves with total bytes written
+  done(): Promise<number>;
+  cancel(reason?: string): Promise<void>;
+}
+
+export type CodecMetric =
+  | { name: "time_to_header_ms"; value: number }
+  | { name: "time_to_first_pixel_ms"; value: number }
+  | { name: "time_to_final_ms"; value: number }
+  | { name: "time_to_first_byte_ms"; value: number }
+  | { name: "input_bytes"; value: number }
+  | { name: "output_bytes"; value: number }
+  | { name: "peak_memory_bytes"; value: number }
+  | { name: "format_downcast"; value: number }      // emitted when output bpc < source bpc
+  | { name: "region_fallback_full_frame"; value: 1 }; // emitted when region decode falls back
+
+// Capabilities shape (spec Section 17)
+export interface Capabilities {
+  wasm: boolean;
+  wasmSimd: boolean;
+  wasmRelaxedSimd: boolean;    // requires wasmSimd
+  wasmThreads: boolean;        // requires SAB + crossOriginIsolated
+  crossOriginIsolated: boolean;
+  sharedArrayBuffer: boolean;
+  offscreenCanvas: boolean;
+  imageBitmap: boolean;
+  nativeJxlDecoder: boolean;
+  selectedWasmBuild: "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar" | "none";
+  libjxlVersion: string;
+}
+
+// Context options (spec Section 5 prose)
+export interface ContextOptions {
+  poolSize?: number;
+  memoryCapBytes?: number;
+  idleTimeoutMs?: number;
+  wasmUrl?: string;
+  cache?: CacheOptions;
+}
+
+export interface CacheOptions {
+  persistent?: boolean;
+  hotMaxBytes?: number;           // in-memory LRU cap; default 128 MiB browser
+  persistentMaxBytes?: number;    // OPFS/fs cap; default 1 GiB
+  persistentPath?: string;        // node: filesystem path
+}

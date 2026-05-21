@@ -1,0 +1,107 @@
+[
+  {
+    "task_id": "003-conc-a1b2c3",
+    "status": "confirmed",
+    "evidence": "The module-level `let liveState = null` is gone; worker.js line 37 shows only `liveStateMap` and `thumbStateMap`. The `reprocess_live` handler (lines 88-107) reads `liveStateMap.get(id)` and the pipeline at line 196 writes directly to `liveStateMap.set(id, makeLiveState(...))` with no module-level variable assignment. Failure mode eliminated."
+  },
+  {
+    "task_id": "003-err-d4e5f6",
+    "status": "confirmed",
+    "evidence": "`ensureWasm` (lines 40-48) now wraps `await wasmReady` in a try/catch that sets `wasmReady = null` before re-throwing. On a failed `init()` the next call to `ensureWasm` re-enters the `if (!wasmReady)` branch and retries. Failure mode eliminated."
+  },
+  {
+    "task_id": "003-cont-a1b2c3",
+    "status": "confirmed",
+    "evidence": "Lines 129-133 in worker.js now destructure `{ id, bytes, options }` and immediately guard with `if (!id || !bytes) { return; }` before entering the pipeline. Unknown message types that are not `reprocess_live` or `reprocess_thumb_live` silently exit instead of falling through to `process_orf`. Failure mode eliminated."
+  },
+  {
+    "task_id": "003-err-g7h8i9",
+    "status": "confirmed",
+    "evidence": "The `reprocess_thumb_live` catch block (lines 121-123) now posts `{ id: tid, type: 'error_live', error: String(err?.message || err) }` instead of swallowing silently. The main thread `_onMessage` at line 374 routes `error_live` to `_liveHandler`, which now handles it (see 003-cont-m3n4o5). Failure mode eliminated."
+  },
+  {
+    "task_id": "003-perf-g7h8i9",
+    "status": "confirmed",
+    "evidence": "`rgb_to_rgba(fullRgb)` is called at line 220 after both `downscale_rgb` calls, and the null-out pattern (`let fullRgbRef = fullRgb; fullRgbRef = null`) at line 222 drops the local reference before the long `await encode_jxl`. Additionally the `Uint8ClampedArray` now uses the zero-copy 3-argument constructor (line 224: `new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength)`). Both sub-fixes present and correct."
+  },
+  {
+    "task_id": "003-err-a1b2c3",
+    "status": "confirmed",
+    "evidence": "`_spawnWorker` (lines 322-352) replaces the inline `new Worker` block. The `error` handler (lines 327-349) iterates `this.tasks` to find the task owned by the crashed worker, calls `onError`, deletes the task, removes the worker from `this.workers` and `this.free`, decrements `this.size`, and dispatches the next queued task. All four required behaviours are present."
+  },
+  {
+    "task_id": "003-logic-a1b2c3",
+    "status": "confirmed",
+    "evidence": "`this.workerForTask = new Map()` is in the constructor (line 313). `_releaseWorker` (lines 408-418) calls `this.workerForTask.set(id, worker)`. `reprocessLive` (lines 429-434) does `this.workerForTask.get(taskId)` — exact O(1) lookup. `workerForTask.delete(id)` is called in both the `done` (line 396) and `error` (line 402) branches. `_lastTaskId`-based search is gone."
+  },
+  {
+    "task_id": "003-perf-a1b2c3",
+    "status": "confirmed",
+    "evidence": "`rgbToRgba` (lines 599-609) uses a `Uint32Array` overlay to write four channels per pixel in one 32-bit store, replacing the old byte-by-byte loop. `drawCanvas` (lines 611-620) calls `rgbToRgba` and also has an early-exit path when the buffer is already RGBA (`byteLength === w*h*4`). The old inline loop is absent."
+  },
+  {
+    "task_id": "003-perf-d4e5f6",
+    "status": "confirmed",
+    "evidence": "The live handler (lines 490-495) now calls `rgbToRgba(msg.rgb, msg.w, msg.h)` instead of an inline RGB→RGBA loop. The previous inline `for` loop over `msg.rgb` is gone from the handler body."
+  },
+  {
+    "task_id": "003-logic-j0k1l2",
+    "status": "confirmed",
+    "evidence": "`currentLook` line 177: `contrast: Math.max(-1, Math.min(1, lookValueFor('contrast') + (contrastBoostEl.checked ? 0.15 : 0.0)))`. The clamp is present. Maximum value when boost is checked and slider is at +100 is now 1.0, not 1.15."
+  },
+  {
+    "task_id": "003-cont-m3n4o5",
+    "status": "confirmed",
+    "evidence": "The live handler (lines 477-486) has a leading `if (msg.type === 'error_live')` branch that calls `console.warn`, sets `liveInFlight = false`, and drains `livePendingLook` via `triggerLiveUpdate`. The `_onMessage` routing at line 374 already sends both `lightbox_live` and `error_live` to `_liveHandler`, and now the handler explicitly acts on both types."
+  },
+  {
+    "task_id": "003-conc-d4e5f6",
+    "status": "confirmed",
+    "evidence": "`nextInLightbox` (lines 1207-1214) now sets `liveInFlight = false; livePendingLook = null;` before calling `drawLightbox()`. This resets in-flight live state on every lightbox navigation so stale round-trip responses from the previous image cannot corrupt the new image's state."
+  },
+  {
+    "task_id": "003-perf-p6q7r8",
+    "status": "confirmed",
+    "evidence": "`drawCanvas` lines 612-613: `if (canvas.width !== w) canvas.width = w;` and `if (canvas.height !== h) canvas.height = h;` — conditional guards are present. Unconditional assignment is gone."
+  },
+  {
+    "task_id": "003-err-j0k1l2",
+    "status": "confirmed",
+    "evidence": "`onDone` (lines 847-849): `if (card._blobUrl) URL.revokeObjectURL(card._blobUrl);` is called before `URL.createObjectURL(blob)`, and the new URL is stored at `card._blobUrl`. Old URL is revoked before the new one is created on every re-process."
+  },
+  {
+    "task_id": "003-logic-s9t0u1",
+    "status": "confirmed",
+    "evidence": "`applyLookBtn` handler (lines 224-238): when no cards are selected, the code iterates all cards, adds `selected` class, and also sets `c.querySelector('.thumb-select').textContent = '✓'` (line 233) and calls `refreshReprocessLabel()` (line 235). The visual checkmark is updated before `reprocessSelected()` is called, fixing the inconsistency."
+  },
+  {
+    "task_id": "003-perf-j0k1l2",
+    "status": "deferred",
+    "evidence": "Fix log notes this was 'already correct' — `c._taskId` is used directly without `getAttribute`. The finding was not an active bug; no change was needed or made. Deferred correctly per fixer's assessment."
+  },
+  {
+    "task_id": "003-perf-m3n4o5",
+    "status": "deferred",
+    "evidence": "Fix log explicitly defers this (querySelector caching as minor low-severity concern). Current code still calls `card.querySelector` multiple times in `onThumb`/`onDone` (lines 822, 829, 848, 857, 858). Deferred intentionally."
+  },
+  {
+    "task_id": "003-conc-j0k1l2",
+    "status": "deferred",
+    "evidence": "Fix log explicitly defers this alongside logic-m3n4o5 and sec-g7h8i9 as requiring broader context. `handleFileList` is still called without `await` at lines 933 (file input) and 989 (drop handler). Intentionally deferred."
+  },
+  {
+    "task_id": "003-logic-m3n4o5",
+    "status": "deferred",
+    "evidence": "Fix log explicitly defers. `handleFileList` (lines 931-934) still has no deduplication check. Intentionally deferred."
+  },
+  {
+    "task_id": "003-sec-g7h8i9",
+    "status": "deferred",
+    "evidence": "Fix log explicitly defers. `isOrf` (lines 936-938) still performs only a filename extension check with no size guard. Intentionally deferred."
+  },
+  {
+    "task_id": "003-perf-q7r8s9",
+    "status": "confirmed",
+    "evidence": "Worker.js line 224: `new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength)` — the zero-copy 3-argument constructor is used. The old copy-constructor form `new Uint8ClampedArray(rgba)` is gone. The ADR was satisfied by a direct code fix instead of a draft, which is a stricter resolution."
+  }
+]
