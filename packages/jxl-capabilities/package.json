@@ -1,0 +1,20 @@
+{
+  "name": "@casabio/jxl-capabilities",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "wasm-feature-detect": "1.8.0"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5"
+  }
+}

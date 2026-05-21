@@ -1,0 +1,21 @@
+{
+  "name": "@casabio/jxl-cache",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "peerDependencies": {
+    "@casabio/jxl-core": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "@casabio/jxl-core": "file:../jxl-core"
+  }
+}

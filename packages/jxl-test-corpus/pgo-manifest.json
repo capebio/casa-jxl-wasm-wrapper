@@ -1,0 +1,7 @@
+{
+  "pgo_fixtures": [
+    "srgb-8bit",
+    "srgb-alpha-8bit",
+    "adobe-rgb-16bit"
+  ]
+}
