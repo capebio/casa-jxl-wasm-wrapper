@@ -6,13 +6,14 @@
 // encoder per worker, single-threaded inside.  Pool size scales with
 // `navigator.hardwareConcurrency` so a batch saturates all cores.
 
+import { getContext } from './jxl-browser-context.js';
+
 const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
 window.IS_TAURI = IS_TAURI;
 const { invoke } = IS_TAURI ? window.__TAURI__.core : {};
 const { listen } = IS_TAURI ? window.__TAURI__.event : {};
 
-const POOL_SIZE     = Math.min(navigator.hardwareConcurrency || 4, 12);
-const JXL_POOL_SIZE = Math.max(2, Math.min(4, Math.ceil((navigator.hardwareConcurrency || 4) / 4)));
+const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
@@ -514,8 +515,6 @@ class WorkerPool {
         this.tasks = new Map(); // id → handlers
         this.nextId = 1;
         this.workerForTask = new Map(); // taskId → worker (populated on _releaseWorker)
-        this._jxlWorkers = [];
-        this._jxlRR      = 0;
         this._jxlDecodeCallbacks = new Map(); // decodeId → { cb, url }
         this._jxlNextDecodeId    = 1;
         this._jxlDecodeQueue = [];           // { decodeId, url, priority }
@@ -533,7 +532,7 @@ class WorkerPool {
         const next = this._jxlDecodeQueue.shift();
         if (!next) return;
         this._jxlDecodeBusy = true;
-        (this._jxlDecodeWorker ?? this._jxlWorkers[0]).postMessage({
+        this._jxlDecodeWorker.postMessage({
             type: 'decode_jxl', decodeId: next.decodeId, url: next.url,
         });
     }
@@ -631,13 +630,25 @@ class WorkerPool {
             if (this._thumbLiveHandler) this._thumbLiveHandler(ev.data);
             return;
         }
-        // RAW worker finished pipeline; forward RGBA to the next JXL encode worker (round-robin).
         if (type === 'encode_request') {
-            if (this._jxlWorkers.length) {
-                const jw = this._jxlWorkers[this._jxlRR % this._jxlWorkers.length];
-                this._jxlRR++;
-                jw.postMessage(ev.data, [ev.data.rgba]);
-            }
+            const { id, rgba, width, height, quality, effort, lossless, progressive } = ev.data;
+            const t0 = performance.now();
+            encodeJxlSession(rgba, width, height, quality, effort, Boolean(lossless), Boolean(progressive))
+                .then((jxl) => {
+                    const jxlMs = performance.now() - t0;
+                    const t = this.tasks.get(id);
+                    if (t?.handlers.onDone) {
+                        t.handlers.onDone({ id, type: 'done', jxl, jxlMs, w: width, h: height, effortUsed: effort, effortRequested: effort });
+                    }
+                    this.tasks.delete(id);
+                })
+                .catch((err) => {
+                    const t = this.tasks.get(id);
+                    if (t?.handlers.onError) {
+                        t.handlers.onError({ type: 'error', error: String(err?.message ?? err) });
+                    }
+                    this.tasks.delete(id);
+                });
             return;
         }
         const t = this.tasks.get(id);
@@ -685,33 +696,6 @@ class WorkerPool {
     _release(worker, id) {
         this.tasks.delete(id);
         this._releaseWorker(worker, id);
-    }
-
-    addJxlWorker(w) {
-        this._jxlWorkers.push(w);
-        w.addEventListener('message', ({ data }) => {
-            // Decode responses use decodeId, not task id.
-            if (data.type === 'jxl_decoded' || data.type === 'decode_error') {
-                this._onJxlDecodeResponse(data);
-                return;
-            }
-            // Encode responses use task id.
-            const t = this.tasks.get(data.id);
-            if (!t) return;
-            if (data.type === 'done') {
-                if (t.handlers.onDone) t.handlers.onDone(data);
-            } else {
-                if (t.handlers.onError) t.handlers.onError({ type: 'error', error: data.error });
-            }
-            this.tasks.delete(data.id);
-            // KEEP workerForTask[id] alive — the RAW worker still holds the
-            // cached rgb16 for live re-render via reprocess_live.  The mapping
-            // is overwritten when the same card is re-submitted under a new
-            // taskId, so it doesn't accumulate beyond one entry per card.
-        });
-        w.addEventListener('error', (ev) => {
-            console.error('jxl-worker error:', ev.message);
-        });
     }
 
     setLiveHandler(fn) { this._liveHandler = fn; }
@@ -783,13 +767,33 @@ class WorkerPool {
 const pool = new WorkerPool(POOL_SIZE);
 pool.init();
 
-// Spawn JXL encode worker from the page's main thread.  Emscripten Pthreads
-// require SharedArrayBuffer (COOP + COEP) and cannot bootstrap correctly when
-// the caller is itself a Web Worker — so this must live here, not in worker.js.
-for (let i = 0; i < JXL_POOL_SIZE; i++) {
-    pool.addJxlWorker(new Worker(new URL('./jxl-worker.js', import.meta.url), { type: 'module' }));
-}
 pool.setJxlDecodeWorker(new Worker(new URL('./jxl-decode-worker.js', import.meta.url), { type: 'module' }));
+
+async function encodeJxlSession(rgba, width, height, quality, effort, lossless, progressive) {
+    const session = getContext().encode({
+        format: 'rgba8',
+        width,
+        height,
+        hasAlpha: true,
+        distance: lossless ? 0 : null,
+        quality: lossless ? null : quality,
+        effort,
+        progressive,
+        priority: 'visible',
+    });
+    const buf = rgba instanceof ArrayBuffer ? rgba : rgba.buffer;
+    await session.pushPixels(buf);
+    await session.finish();
+    const parts = [];
+    for await (const chunk of session.chunks()) {
+        parts.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    }
+    const total = parts.reduce((n, a) => n + a.byteLength, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.byteLength; }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // Live lightbox re-render (debounced, in-flight gating)
