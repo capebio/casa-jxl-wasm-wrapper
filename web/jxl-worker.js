@@ -39,32 +39,42 @@ self.onmessage = async ({ data }) => {
     const { id, rgba, width, height, quality, effort, lossless, progressive } = data;
     const t0 = performance.now();
     try {
-        let module = await moduleP;
-        const opts = { ...defaultOptions, quality, effort, lossless, progressive: Boolean(progressive) };
-        let resultView;
+        const encoder = createEncoder({
+            format: 'rgba8',
+            width,
+            height,
+            hasAlpha: true,
+            iccProfile: null,
+            exif: null,
+            xmp: null,
+            distance: lossless ? 0 : null,
+            quality: lossless ? null : quality,
+            effort,
+            progressive: Boolean(progressive),
+            previewFirst: false,
+            chunked: false,
+        });
+        encoder.pushPixels(rgba);
+        encoder.finish();
+
+        const parts = [];
         try {
-            resultView = module.encode(new Uint8ClampedArray(rgba), width, height, opts);
-        } catch (encErr) {
-            if (isAbortError(encErr)) {
-                // Re-init so the worker is usable for later, smaller jobs.
-                moduleP = createModule();
-                throw new Error(
-                    `JXL encode OOM at effort ${opts.effort} — image too large (${width}×${height})`
-                );
+            for await (const chunk of encoder.chunks()) {
+                parts.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
             }
-            throw encErr;
+        } finally {
+            encoder.dispose();
         }
 
-        if (!resultView) throw new Error('Encoding error (null result).');
+        const totalLen = parts.reduce((n, a) => n + a.byteLength, 0);
+        const jxlBytes = new Uint8Array(totalLen);
+        let off = 0;
+        for (const p of parts) { jxlBytes.set(p, off); off += p.byteLength; }
+
         const jxlMs = performance.now() - t0;
-
-        const jxlBytes = new Uint8Array(
-            resultView.buffer, resultView.byteOffset, resultView.byteLength,
-        ).slice();
-
         self.postMessage(
             { id, type: 'done', jxl: jxlBytes, jxlMs, w: width, h: height,
-              effortUsed: opts.effort, effortRequested: effort },
+              effortUsed: effort, effortRequested: effort },
             [jxlBytes.buffer],
         );
     } catch (err) {
