@@ -2,8 +2,7 @@
 
 ## 2026-05-21
 
-- Source and prebuild compilation are blocked in this workspace because the native toolchain is not installed and libjxl headers are not present.
-- Exact npm version pinning for `prebuildify` and helper packages was not resolved because registry lookups failed in this workspace.
+- Source and prebuild compilation require a native toolchain plus libjxl headers/libs. The addon now has a libjxl-backed implementation path, but this workspace still does not expose a confirmed host libjxl install.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
-- `createDecoder` / `createEncoder` are exported, but they delegate to the loaded addon and report `CapabilityMissing` until a libjxl-capable native binding is built.
-- The current addon entry point exports codec-shaped stubs only; actual libjxl decode/encode behavior still needs the native toolchain and headers.
+- `createDecoder` / `createEncoder` report `CapabilityMissing` when the built addon probes as unavailable.
+- Native metadata boxes, region decode, chunked encode, and full progressive pass fidelity remain follow-up work.

@@ -167,8 +167,14 @@ function fileExists(path: string): boolean {
 }
 
 function ensureBindingLoaded(binding: NativeBinding, label: string): void {
+  if (typeof binding.version === "function" && binding.version().includes("scaffold")) {
+    throw new CapabilityMissing(`jxl-native addon at ${label} is still the scaffold stub`);
+  }
   if (typeof binding.probe !== "function") return;
   const probe = binding.probe();
+  if (typeof probe.path === "string" && probe.path.toLowerCase().includes("stub")) {
+    throw new CapabilityMissing(`jxl-native addon at ${label} is still the scaffold stub`, probe);
+  }
   if (probe.loaded !== true) {
     throw new CapabilityMissing(`jxl-native addon at ${label} is present but not loaded`, probe);
   }

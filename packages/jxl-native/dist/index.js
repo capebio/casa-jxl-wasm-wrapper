@@ -22,7 +22,9 @@ export function loadNativeBinding(options = {}) {
     let lastError;
     for (const candidate of candidates) {
         try {
-            return require(candidate);
+            const binding = require(candidate);
+            ensureBindingLoaded(binding, candidate);
+            return binding;
         }
         catch (error) {
             lastError = error;
@@ -34,6 +36,7 @@ export function createNativeCodecFacade(binding) {
     if (typeof binding.createDecoder !== "function" || typeof binding.createEncoder !== "function") {
         throw new CapabilityMissing("jxl-native addon does not expose createDecoder/createEncoder");
     }
+    ensureBindingLoaded(binding, "native binding");
     return {
         createDecoder(options) {
             return binding.createDecoder(options);
@@ -68,6 +71,20 @@ function fileExists(path) {
     }
     catch {
         return false;
+    }
+}
+function ensureBindingLoaded(binding, label) {
+    if (typeof binding.version === "function" && binding.version().includes("scaffold")) {
+        throw new CapabilityMissing(`jxl-native addon at ${label} is still the scaffold stub`);
+    }
+    if (typeof binding.probe !== "function")
+        return;
+    const probe = binding.probe();
+    if (typeof probe.path === "string" && probe.path.toLowerCase().includes("stub")) {
+        throw new CapabilityMissing(`jxl-native addon at ${label} is still the scaffold stub`, probe);
+    }
+    if (probe.loaded !== true) {
+        throw new CapabilityMissing(`jxl-native addon at ${label} is present but not loaded`, probe);
     }
 }
 //# sourceMappingURL=index.js.map

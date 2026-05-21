@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CapabilityMissing, createDecoder, createEncoder, createNativeCodecFacade } from "../src/index";
+import { CapabilityMissing, createNativeCodecFacade, loadNativeBinding } from "../src/index";
 
 const decodeOptions = {
   format: "rgba8" as const,
@@ -53,8 +53,23 @@ describe("@casabio/jxl-native facade", () => {
     ).toThrow(CapabilityMissing);
   });
 
-  test("top-level decoder and encoder throw CapabilityMissing when addon is unavailable", () => {
-    expect(() => createDecoder(decodeOptions)).toThrow(CapabilityMissing);
-    expect(() => createEncoder(encodeOptions)).toThrow(CapabilityMissing);
+  test("rejects a codec-shaped addon that still reports a stub identity", () => {
+    expect(() =>
+      createNativeCodecFacade({
+        version: () => "0.1.0-scaffold",
+        probe: () => ({ loaded: true, path: "source stub" }),
+        createDecoder: () => ({}) as never,
+        createEncoder: () => ({}) as never,
+      }),
+    ).toThrow(CapabilityMissing);
+  });
+
+  test("loader throws CapabilityMissing when explicit addon paths are unavailable", () => {
+    expect(() =>
+      loadNativeBinding({
+        prebuiltPath: "C:\\missing\\jxl-native-prebuilt.node",
+        sourcePath: "C:\\missing\\jxl-native-source.node",
+      }),
+    ).toThrow(CapabilityMissing);
   });
 });

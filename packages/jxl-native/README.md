@@ -33,11 +33,23 @@ It tracks Section 15 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 pnpm build
 ```
 
-The build path is scaffolded, but not validated in this workspace because the native toolchain and libjxl headers are not installed here. The addon surface currently returns codec-shaped stubs; real libjxl binding logic lands later.
+The addon now binds libjxl directly when the build host exposes libjxl headers and libraries.
+
+Linux/macOS can use `pkg-config libjxl`, or explicit paths:
+
+```bash
+JXL_NATIVE_INCLUDE_DIR=/path/to/include \
+JXL_NATIVE_LIB_DIR=/path/to/lib \
+npm run build
+```
+
+Windows builds expect `JXL_NATIVE_INCLUDE_DIR` and `JXL_NATIVE_LIB_DIR` pointing at a libjxl install containing `jxl.lib` and `jxl_threads.lib`.
+
+If libjxl headers are missing, the addon compiles as unavailable and `probe()` returns `loaded: false`; the JS loader rejects that binding and the caller must fall back to WASM.
 
 ## Publish
 
-The package is set up for `prebuildify` output, but the actual publish step stays in the integration pass.
+The package is set up for `prebuildify` output through `build:prebuild*` scripts, but the actual publish step stays in the integration pass.
 
 ## Current Blockers
 
