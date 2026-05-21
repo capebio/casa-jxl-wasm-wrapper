@@ -2,6 +2,7 @@ import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from '../pkg/raw_con
 import { createProgressiveSession } from './jxl-progressive-session.js';
 import { encodeBackendForTarget } from './jxl-progressive-policy.js';
 import { createProgressiveDecodeRequest } from './jxl-progressive-decode.js';
+import { getContext } from './jxl-browser-context.js';
 
 const runBtn = document.getElementById('run-btn');
 const replayBtn = document.getElementById('replay-btn');
@@ -65,10 +66,9 @@ const encodeWorkers = new Map();
 const decodeWorkers = new Map();
 let workerId = 1;
 
-function getWorkerScript(type, backend) {
-    if (type === 'decode' && backend === 'libjxl') return './jxl-worker.js';
-    if (backend === 'libjxl') return './icodec-jxl-worker.js';
-    return type === 'encode' ? './jxl-worker.js' : './jxl-decode-worker.js';
+function getWorkerScript(_type, _backend) {
+    // Only jsquash decode still uses a raw worker.
+    return './jxl-decode-worker.js';
 }
 
 function fmtBytes(n) {
@@ -475,6 +475,106 @@ async function streamBytes(bytes, onProgress, pacingMs = 8) {
     return { bytes, times };
 }
 
+function normalizeSessionFrame(ev) {
+    return {
+        w: ev.info.width,
+        h: ev.info.height,
+        rgba: ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels),
+        info: ev.info,
+        stage: ev.stage,
+        format: ev.format,
+        pixelStride: ev.pixelStride,
+        region: ev.region ?? null,
+    };
+}
+
+async function encodeJxlWithSession(rgba, width, height, quality = 90, effort = 3, { lossless = false, progressive = true } = {}) {
+    const t0 = performance.now();
+    const session = getContext().encode({
+        format: 'rgba8',
+        width,
+        height,
+        hasAlpha: true,
+        distance: lossless ? 0 : null,
+        quality: lossless ? null : quality,
+        effort,
+        progressive,
+        priority: 'visible',
+    });
+    const buf = rgba instanceof ArrayBuffer ? rgba : rgba.buffer;
+    await session.pushPixels(buf);
+    await session.finish();
+    const parts = [];
+    for await (const chunk of session.chunks()) {
+        parts.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    }
+    const total = parts.reduce((n, a) => n + a.byteLength, 0);
+    const jxl = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { jxl.set(p, off); off += p.byteLength; }
+    return { jxl, jxlMs: performance.now() - t0, w: width, h: height, effortUsed: effort, effortRequested: effort };
+}
+
+async function decodeJxlFinalSession(bytes, priority = 'visible') {
+    const session = getContext().decode({ format: 'rgba8', priority });
+    const buf = bytes instanceof ArrayBuffer ? bytes : bytes.buffer;
+    await session.push(buf);
+    await session.close();
+    let lastFrame = null;
+    for await (const ev of session.frames()) {
+        lastFrame = normalizeSessionFrame(ev);
+        if (ev.stage === 'final') break;
+    }
+    if (lastFrame === null) throw new Error('JXL decode produced no frames');
+    return lastFrame;
+}
+
+async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, pacingMs = 8, priority = 'visible') {
+    const session = getContext().decode({
+        format: 'rgba8',
+        progressionTarget: 'final',
+        emitEveryPass: true,
+        priority,
+    });
+
+    let cancelled = false;
+
+    const pushTask = streamBytes(bytes, async (loaded, total, times, chunk) => {
+        const shouldContinue = await onChunk?.(loaded, total, times);
+        if (shouldContinue === false) {
+            cancelled = true;
+            await session.cancel('decode superseded').catch(() => {});
+            throw new Error('decode superseded');
+        }
+        const buf = chunk instanceof ArrayBuffer ? chunk : chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+        await session.push(buf);
+    }, pacingMs).then(async (streamedResult) => {
+        await session.close();
+        return streamedResult;
+    });
+
+    let lastFrame = null;
+    const frameTask = (async () => {
+        for await (const ev of session.frames()) {
+            const frame = normalizeSessionFrame(ev);
+            if (ev.stage !== 'final') {
+                onFrame?.(frame);
+            } else {
+                lastFrame = frame;
+            }
+        }
+    })();
+
+    try {
+        const [streamedResult] = await Promise.all([pushTask, frameTask]);
+        if (lastFrame === null) throw new Error('JXL stream decode produced no final frame');
+        return { decoded: lastFrame, streamedResult };
+    } catch (error) {
+        if (!cancelled) await session.cancel(String(error?.message ?? error)).catch(() => {});
+        throw error;
+    }
+}
+
 async function loadRandomSource() {
     const resp = await fetch('/api/random-orf', { cache: 'no-store' });
     if (!resp.ok) throw new Error(`random ORF request failed: ${resp.status}`);
@@ -557,16 +657,18 @@ function makeStandaloneWorker(type, backend) {
 
 function makeWorkerLane(encodeBackend, decodeBackend) {
     return {
-        encode: makeStandaloneWorker('encode', encodeBackend),
-        decode: makeStandaloneWorker('decode', decodeBackend),
+        // Encode always goes through encodeJxlWithSession; no raw worker needed.
+        encode: null,
+        // libjxl decode goes through decodeJxlFinalSession; jsquash needs a raw worker.
+        decode: decodeBackend !== 'libjxl' ? makeStandaloneWorker('decode', decodeBackend) : null,
         encodeId: 1,
         decodeId: 1,
     };
 }
 
 function destroyWorkerLane(lane) {
-    lane.encode.terminate();
-    lane.decode.terminate();
+    lane.encode?.terminate();
+    lane.decode?.terminate();
 }
 
 async function loadRandomDistinctSources(count) {
@@ -760,19 +862,21 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
             let row;
             try {
                 const encodeStart = performance.now();
-                const encoded = await encodeJxl(
-                    lane.encode,
+                const opts = buildThumbBenchEncodeOptions(prepared.targetDims.width, prepared.targetDims.height, encodeBackend);
+                const encoded = await encodeJxlWithSession(
                     prepared.rgba.slice(),
                     prepared.targetDims.width,
                     prepared.targetDims.height,
                     90,
                     3,
-                    buildThumbBenchEncodeOptions(prepared.targetDims.width, prepared.targetDims.height, encodeBackend),
+                    { progressive: opts.progressive ?? true },
                 );
                 const encodeMs = performance.now() - encodeStart;
 
                 const decodeStart = performance.now();
-                const decoded = await decodeJxlFinal(lane.decode, encoded.jxl);
+                const decoded = await (decodeBackend === 'libjxl'
+                    ? decodeJxlFinalSession(encoded.jxl, 'background')
+                    : decodeJxlFinal(lane.decode, encoded.jxl));
                 const decodeMs = performance.now() - decodeStart;
 
                 const paintStart = performance.now();
@@ -932,8 +1036,7 @@ async function runVariant(source, target, runId) {
     const card = cards.find((entry) => entry.slot === target.slot);
     const targetDims = target.longEdge ? sizeForLongEdge(source.width, source.height, target.longEdge) : { width: source.width, height: source.height };
     const actualEncodeBackend = encodeBackendForTarget(encodeBackend, targetDims.width, targetDims.height);
-    const worker = getWorker('encode', actualEncodeBackend, target.slot);
-    const decodeWorker = getWorker('decode', decodeBackend, target.slot);
+    const decodeWorker = decodeBackend !== 'libjxl' ? getWorker('decode', decodeBackend, target.slot) : null;
 
     card.el.dataset.state = 'working';
     const encodeLabel = actualEncodeBackend === encodeBackend ? encodeBackend : `${encodeBackend}→${actualEncodeBackend}`;
@@ -976,7 +1079,7 @@ async function runVariant(source, target, runId) {
         card._previewFrames = null;
         card._previewStep = -1;
     }
-    const encodeResult = await encodeJxl(worker, new Uint8Array(rgba.buffer.slice(0)), targetDims.width, targetDims.height, 90, 3);
+    const encodeResult = await encodeJxlWithSession(new Uint8Array(rgba.buffer.slice(0)), targetDims.width, targetDims.height, 90, 3);
     if (runId !== activeRunId) return;
     card._source = source;
     card._targetDims = targetDims;
@@ -998,7 +1101,7 @@ async function runVariant(source, target, runId) {
     };
 
     if (mode === 'progressive' && decodeBackend === 'libjxl' && progressivePreview === 'stream') {
-        const { decoded, streamedResult } = await streamDecodeJxl(decodeWorker, jxlBytes, {
+        const { decoded, streamedResult } = await streamDecodeJxlSession(jxlBytes, {
             onChunk: updateStreamProgress,
             onFrame: (frame) => {
                 if (runId !== activeRunId) return;
@@ -1024,7 +1127,9 @@ async function runVariant(source, target, runId) {
     card.el.dataset.state = 'decoding';
     card.notes.textContent = `Decoding ${target.label} from JXL.`;
     stopPreviewPlayback(card);
-    const decoded = await decodeJxlFinal(decodeWorker, streamed);
+    const decoded = await (decodeBackend === 'libjxl'
+        ? decodeJxlFinalSession(streamed, 'visible')
+        : decodeJxlFinal(decodeWorker, streamed));
     if (runId !== activeRunId) return;
     rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
     card.el.dataset.state = 'done';
@@ -1048,7 +1153,7 @@ async function replayDecodeCard(card, runId) {
         card._previewFrames = null;
         card._previewStep = -1;
     }
-    const decodeWorker = getWorker('decode', decodeBackend, card.slot);
+    const decodeWorker = decodeBackend !== 'libjxl' ? getWorker('decode', decodeBackend, card.slot) : null;
     card.el.dataset.state = 'decoding';
     card.fill.style.width = '0%';
     card.bytes.textContent = `0 / ${fmtBytes(card._jxlBytes.byteLength)}`;
@@ -1083,7 +1188,7 @@ async function replayDecodeCard(card, runId) {
     };
 
     if (mode === 'progressive' && decodeBackend === 'libjxl' && progressivePreview === 'stream') {
-        const { decoded, streamedResult } = await streamDecodeJxl(decodeWorker, card._jxlBytes, {
+        const { decoded, streamedResult } = await streamDecodeJxlSession(card._jxlBytes, {
             onChunk: updateStreamProgress,
             onFrame: (frame) => {
                 if (runId !== activeRunId) return;
@@ -1107,7 +1212,9 @@ async function replayDecodeCard(card, runId) {
     if (runId !== activeRunId) return;
 
     stopPreviewPlayback(card);
-    const decoded = await decodeJxlFinal(decodeWorker, streamedResult.bytes);
+    const decoded = await (decodeBackend === 'libjxl'
+        ? decodeJxlFinalSession(streamedResult.bytes, 'visible')
+        : decodeJxlFinal(decodeWorker, streamedResult.bytes));
     if (runId !== activeRunId) return;
     rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
     card.el.dataset.state = 'done';
