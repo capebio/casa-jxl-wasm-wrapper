@@ -22,6 +22,7 @@ const config = {
   libjxlTag: "v0.11.2",
   emscriptenTag: "4.0.13",
   emscriptenCommit: "404dc1ec13f64fce1af1eaf5c007e18212f63527",
+  emsdkImages: resolveEmsdkImages(),
   tiers: [
     { name: "relaxed-simd-mt", threads: true, simd: true, relaxedSimd: true },
     { name: "simd-mt", threads: true, simd: true, relaxedSimd: false },
@@ -45,12 +46,13 @@ const baseFlags = [
   "-sEXPORT_ES6=1",
   "-sEXPORT_NAME=createJxlModule",
   "-sALLOW_MEMORY_GROWTH=1",
-  "-sINITIAL_MEMORY=33554432",
+  "-sINITIAL_MEMORY=67108864",
   "-sMAXIMUM_MEMORY=4294967296",
   "-sFILESYSTEM=0",
   "-sASSERTIONS=0",
   "-sINVOKE_RUN=0",
   "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+  "-sWASM_BIGINT=1",
   "-flto",
   "-fno-rtti",
   "-fno-exceptions"
@@ -64,11 +66,17 @@ async function main() {
   await mkdir(distDir, { recursive: true });
   await mkdir(workDir, { recursive: true });
 
+  if (!insideDocker && !hostToolchain) {
+    await runDockerBuild();
+    return;
+  }
+
   const manifest = {
     buildId: config.buildId,
     libjxlCommit: config.libjxlCommit,
     emscriptenTag: config.emscriptenTag,
     emscriptenCommit: config.emscriptenCommit,
+    emsdkImage: process.env.JXL_WASM_EMSDK_IMAGE ?? null,
     buildMode: hostToolchain ? "host-toolchain" : insideDocker ? "docker" : "local",
     generatedAt: new Date().toISOString(),
     tiers: {},
@@ -107,7 +115,7 @@ async function main() {
       "-DCMAKE_REQUIRED_FLAGS=-pthread",
       "-DCMAKE_REQUIRED_LIBRARIES=-latomic",
       "-DCMAKE_REQUIRED_LINK_OPTIONS=-pthread",
-      ...(hostToolchain ? [`-DCMAKE_MODULE_PATH=${toCmakePath(join(packageRoot, "cmake-shims"))}`] : [])
+      `-DCMAKE_MODULE_PATH=${toCmakePath(join(packageRoot, "cmake-shims"))}`
     ];
     const tierEnv = {
       ...process.env,
@@ -115,45 +123,9 @@ async function main() {
       CXXFLAGS: tierFlags.join(" "),
       LDFLAGS: tierFlags.join(" ")
     };
-    const dockerEnv = {
-      ...process.env,
-      DOCKER_CONFIG: join(os.tmpdir(), "docker-config")
-    };
-    await mkdir(dockerEnv.DOCKER_CONFIG, { recursive: true });
-
-    if (!insideDocker && !hostToolchain) {
-      const image = "jxl-wasm-builder:local";
-      await assertBinary(dockerBinary);
-      await run(dockerBinary, [
-        "build",
-        "-t",
-        image,
-        "--build-arg",
-        `LIBJXL_COMMIT=${config.libjxlCommit}`,
-        "--build-arg",
-        `LIBJXL_REPO=${config.libjxlRepo}`,
-        "-f",
-        join(packageRoot, "Dockerfile"),
-        packageRoot
-      ], { cwd: packageRoot, env: dockerEnv });
-      await run(dockerBinary, [
-        "run",
-        "--rm",
-        "-v",
-        `${packageRoot}:/work/jxl-wasm`,
-        "-w",
-        "/work/jxl-wasm",
-        image,
-        "node",
-        "scripts/build.mjs",
-        "--inside-docker"
-      ], { cwd: packageRoot, env: dockerEnv });
-      return;
-    }
-
     await ensureLibjxlSource();
     await ensureLibjxlDeps(hostToolchain);
-    await run("cmd", ["/c", emcmakeBinary, "cmake", ...cmakeArgs], { cwd: packageRoot, env: tierEnv });
+    await runEmscripten(emcmakeBinary, ["cmake", ...cmakeArgs], { cwd: packageRoot, env: tierEnv });
     await run("cmake", ["--build", buildDir, "--", "-j", `${Math.max(1, osCpusMinusOne())}`], { cwd: packageRoot, env: tierEnv });
     await linkBridge(buildDir, outJs, tierFlags, tierEnv);
 
@@ -183,6 +155,55 @@ async function main() {
   await writeManifest(manifest);
 }
 
+async function runDockerBuild() {
+  const image = "jxl-wasm-builder:local";
+  const dockerEnv = { ...process.env };
+  await assertBinary(dockerBinary);
+  await assertDockerDaemon(dockerEnv);
+  const emsdkImage = await buildDockerImage(image, dockerEnv);
+  await run(dockerBinary, [
+    "run",
+    "--rm",
+    "-e",
+    `JXL_WASM_EMSDK_IMAGE=${emsdkImage}`,
+    "-v",
+    `${packageRoot}:/work/jxl-wasm`,
+    "-w",
+    "/work/jxl-wasm",
+    image,
+    "node",
+    "scripts/build.mjs",
+    "--inside-docker"
+  ], { cwd: packageRoot, env: dockerEnv });
+}
+
+async function buildDockerImage(image, dockerEnv) {
+  let lastError;
+  for (const emsdkImage of config.emsdkImages) {
+    try {
+      await run(dockerBinary, [
+        "build",
+        "-t",
+        image,
+        "--build-arg",
+        `EMSDK_IMAGE=${emsdkImage}`,
+        "--build-arg",
+        `LIBJXL_COMMIT=${config.libjxlCommit}`,
+        "--build-arg",
+        `LIBJXL_REPO=${config.libjxlRepo}`,
+        "-f",
+        join(packageRoot, "Dockerfile"),
+        packageRoot
+      ], { cwd: packageRoot, env: { ...dockerEnv, JXL_WASM_EMSDK_IMAGE: emsdkImage } });
+      return emsdkImage;
+    } catch (error) {
+      lastError = error;
+      console.warn(`Emscripten Docker image failed: ${emsdkImage}`);
+    }
+  }
+  throw lastError ?? new Error("No Emscripten Docker images configured");
+}
+
 async function linkBridge(buildDir, outJs, tierFlags, env) {
   const archives = await findStaticArchives(buildDir);
   const preferred = sortArchivesForLink(archives);
@@ -192,7 +213,7 @@ async function linkBridge(buildDir, outJs, tierFlags, env) {
     buildDir,
     join(buildDir, "lib", "include")
   ];
-  await run("cmd", ["/c", emppBinary,
+  await runEmscripten(emppBinary, [
     join(packageRoot, "src", "bridge.cpp"),
     ...includeDirs.flatMap((dir) => ["-I", dir]),
     ...preferred,
@@ -203,13 +224,14 @@ async function linkBridge(buildDir, outJs, tierFlags, env) {
     "-sEXPORT_ES6=1",
     "-sEXPORT_NAME=createJxlModule",
     "-sALLOW_MEMORY_GROWTH=1",
-    "-sINITIAL_MEMORY=33554432",
+    "-sINITIAL_MEMORY=67108864",
     "-sMAXIMUM_MEMORY=4294967296",
     "-sFILESYSTEM=0",
     "-sASSERTIONS=0",
     "-sINVOKE_RUN=0",
     "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
     `-sEXPORTED_FUNCTIONS=@${toCmakePath(join(packageRoot, "exports.txt"))}`,
+    "-sWASM_BIGINT=1",
     "-flto",
     "-fno-rtti",
     "-fno-exceptions"
@@ -347,6 +369,23 @@ async function assertBinary(name) {
   }
 }
 
+async function assertDockerDaemon(env) {
+  try {
+    await run(dockerBinary, ["info"], { cwd: packageRoot, env });
+  } catch (error) {
+    throw new Error(
+      `Docker CLI is installed, but the Docker daemon is not reachable. Start Docker Desktop/Linux engine and retry. ${error.message}`
+    );
+  }
+}
+
+function runEmscripten(command, args, options = {}) {
+  if (process.platform === "win32" && command.endsWith(".bat")) {
+    return run("cmd", ["/c", command, ...args], options);
+  }
+  return run(command, args, options);
+}
+
 function resolveDockerBinary() {
   if (process.env.DOCKER_BIN) return process.env.DOCKER_BIN;
   if (process.platform === "win32") {
@@ -361,7 +400,17 @@ function resolveEmscriptenBinary(name) {
   if (process.platform === "win32") {
     return join(root, "upstream", "emscripten", `${name}.bat`);
   }
-  return join(root, name);
+  return join(root, "upstream", "emscripten", name);
+}
+
+function resolveEmsdkImages() {
+  if (process.env.EMSDK_IMAGE) {
+    return [process.env.EMSDK_IMAGE];
+  }
+  return [
+    "ghcr.io/emscripten-core/emsdk:4.0.13",
+    "docker.io/emscripten/emsdk:4.0.13"
+  ];
 }
 
 function resolveBashBinary() {

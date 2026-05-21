@@ -8,6 +8,7 @@ It tracks Section 6 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 - libjxl commit: `332feb17d17311c748445f7ee75c4fb55cc38530`
 - Emscripten SDK tag: `4.0.13`
 - Docker base image: `ghcr.io/emscripten-core/emsdk:4.0.13`
+- Docker fallback image: `docker.io/emscripten/emsdk:4.0.13`
 
 ## Outputs
 
@@ -55,6 +56,14 @@ The default build path is Docker-first. The container:
 - uses the canonical Section 6.2 Emscripten flags
 - emits the four build tiers
 - writes `dist/build-manifest.json`
+
+On Windows, Docker Desktop must be running before invoking the build. A stopped
+Docker service leaves the CLI installed but the daemon pipe absent; the build
+will fail before pulling GHCR with a daemon-reachability error.
+
+If GHCR denies anonymous pulls, the build automatically falls back to the
+Docker Hub `emscripten/emsdk` image with the same tag. Set `EMSDK_IMAGE` to
+force a specific pinned image.
 
 ## PGO
 

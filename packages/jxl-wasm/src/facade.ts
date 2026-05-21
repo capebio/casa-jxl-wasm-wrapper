@@ -70,6 +70,8 @@ export interface EncoderOptions {
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
+  /** Max dimensions (px) of sidecar thumbnails to yield before the full image. Sorted ascending. */
+  sidecarSizes?: readonly number[];
 }
 
 export interface JxlDecoder {
@@ -105,9 +107,9 @@ interface LibjxlWasmModule {
   _jxl_wasm_decode_rgba8(inputPtr: number, inputSize: number, downsample: number): number;
   _jxl_wasm_decode_rgba16?(inputPtr: number, inputSize: number, downsample: number): number;
   _jxl_wasm_decode_rgbaf32?(inputPtr: number, inputSize: number, downsample: number): number;
-  _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
-  _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
-  _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
+  _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
+  _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
+  _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
   _jxl_wasm_buffer_data(handle: number): number;
   _jxl_wasm_buffer_size(handle: number): number;
   _jxl_wasm_buffer_width(handle: number): number;
@@ -117,7 +119,7 @@ interface LibjxlWasmModule {
   _jxl_wasm_buffer_error?(handle: number): number;
   _jxl_wasm_buffer_free(handle: number): void;
   // Stateful progressive decoder (present after WASM rebuild with new bridge)
-  _jxl_wasm_dec_create?(format: number): number;
+  _jxl_wasm_dec_create?(format: number, wantProgressive: number): number;
   _jxl_wasm_dec_push?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_dec_close_input?(state: number): void;
   _jxl_wasm_dec_width?(state: number): number;
@@ -126,6 +128,9 @@ interface LibjxlWasmModule {
   _jxl_wasm_dec_take_flushed?(state: number): number;
   _jxl_wasm_dec_take_final?(state: number): number;
   _jxl_wasm_dec_free?(state: number): void;
+  // Sidecar thumbnail encode (present after WASM rebuild with sidecar bridge)
+  _jxl_wasm_encode_rgba8_with_sidecars?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number): number;
+  _jxl_wasm_buffer_next?(handle: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -159,6 +164,11 @@ export function createEncoder(options: EncoderOptions): JxlEncoder {
   return new LibjxlEncoder(options);
 }
 
+/** Start loading the WASM module immediately. Call during app startup to hide cold-start latency. */
+export function preloadJxlModule(): void {
+  void loadLibjxlModule();
+}
+
 class LibjxlDecoder implements JxlDecoder {
   // null sentinel = input closed
   private chunkQueue: Array<Uint8Array | null> = [];
@@ -169,7 +179,9 @@ class LibjxlDecoder implements JxlDecoder {
 
   push(chunk: ArrayBuffer | Uint8Array): void {
     if (this.cancelled) return;
-    this.chunkQueue.push(toUint8Array(chunk).slice());
+    // ArrayBuffer callers transfer ownership — no copy needed. Uint8Array callers may
+    // reuse the underlying buffer, so we must copy.
+    this.chunkQueue.push(chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : toUint8Array(chunk).slice());
     this.wakeResolve?.();
     this.wakeResolve = null;
   }
@@ -212,8 +224,11 @@ class LibjxlDecoder implements JxlDecoder {
 
   private async *eventsProgressive(module: LibjxlWasmModule): AsyncIterable<DecodeEvent> {
     const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-    const dec = module._jxl_wasm_dec_create!(fmtIndex);
+    const wantProgressive = (this.options.progressionTarget !== "final" || this.options.emitEveryPass) ? 1 : 0;
+    const dec = module._jxl_wasm_dec_create!(fmtIndex, wantProgressive);
     if (dec === 0) throw new Error("JXL progressive decoder creation failed");
+    let chunkBufPtr = 0;
+    let chunkBufCap = 0;
     try {
       let headerEmitted = false;
       let info: ImageInfo | undefined;
@@ -237,46 +252,65 @@ class LibjxlDecoder implements JxlDecoder {
         return { pixels, evInfo };
       };
 
-      // Process chunks reactively as they arrive via chunkQueue
+      // IMPROVEMENT-7: Batch all queued data chunks into one WASM write per tick.
+      // IMPROVEMENT-9: Guard dec_width/dec_height calls behind !headerEmitted — skip 2 WASM
+      // FFI calls per chunk once the header has been emitted.
       while (!done && !this.cancelled) {
-        await this.waitForQueueItem();
-        if (this.cancelled) return;
+        if (this.chunkQueue.length === 0) {
+          await this.waitForQueueItem();
+          if (this.cancelled) return;
+        }
 
-        const item = this.chunkQueue.shift()!;
+        // Collect pending byte count up to first close sentinel
+        let batchBytes = 0;
+        for (const it of this.chunkQueue) {
+          if (it === null) break;
+          batchBytes += it.byteLength;
+        }
 
-        if (item === null) {
-          // Input closed — flush remaining
+        if (batchBytes > 0) {
+          if (batchBytes > chunkBufCap) {
+            if (chunkBufPtr !== 0) module._free(chunkBufPtr);
+            chunkBufPtr = module._malloc(batchBytes);
+            chunkBufCap = batchBytes;
+          }
+          let woff = 0;
+          while (this.chunkQueue.length > 0 && this.chunkQueue[0] !== null) {
+            const chunk = this.chunkQueue.shift() as Uint8Array;
+            module.HEAPU8.set(chunk, chunkBufPtr + woff);
+            woff += chunk.byteLength;
+          }
+          const result = module._jxl_wasm_dec_push!(dec, chunkBufPtr, batchBytes);
+          if (result < 0) throw new Error(`JXL decode error: ${module._jxl_wasm_dec_error!(dec)}`);
+
+          if (!headerEmitted) {
+            const w = module._jxl_wasm_dec_width!(dec);
+            const h = module._jxl_wasm_dec_height!(dec);
+            if (w > 0 && h > 0) {
+              headerEmitted = true;
+              yield { type: "header", info: buildInfo(w, h) };
+              if (this.options.progressionTarget === "header") return;
+            }
+          }
+
+          if (result === 1) {
+            gotRealFlush = true;
+            const wrapped = takeAndWrap(module._jxl_wasm_dec_take_flushed!(dec));
+            if (wrapped !== null) {
+              const { pixels, evInfo } = wrapped;
+              yield { type: "progress", stage: "dc", info: evInfo, pixels: pixels.data, format: fmt, pixelStride, ...(pixels.region === undefined ? {} : { region: pixels.region }) };
+              if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
+            }
+          } else if (result === 2) {
+            done = true;
+          }
+        } else if (this.chunkQueue.length > 0 && this.chunkQueue[0] === null) {
+          // Close sentinel — flush remaining decoder state
+          this.chunkQueue.shift();
           module._jxl_wasm_dec_close_input!(dec);
           const result = module._jxl_wasm_dec_push!(dec, 0, 0);
           done = result === 2;
           break;
-        }
-
-        const ptr = module._malloc(item.byteLength);
-        module.HEAPU8.set(item, ptr);
-        const result = module._jxl_wasm_dec_push!(dec, ptr, item.byteLength);
-        module._free(ptr);
-
-        if (result < 0) throw new Error(`JXL decode error: ${module._jxl_wasm_dec_error!(dec)}`);
-
-        const w = module._jxl_wasm_dec_width!(dec);
-        const h = module._jxl_wasm_dec_height!(dec);
-        if (!headerEmitted && w > 0 && h > 0) {
-          headerEmitted = true;
-          yield { type: "header", info: buildInfo(w, h) };
-          if (this.options.progressionTarget === "header") return;
-        }
-
-        if (result === 1) {
-          gotRealFlush = true;
-          const wrapped = takeAndWrap(module._jxl_wasm_dec_take_flushed!(dec));
-          if (wrapped !== null) {
-            const { pixels, evInfo } = wrapped;
-            yield { type: "progress", stage: "dc", info: evInfo, pixels: pixels.data.slice(), format: fmt, pixelStride, ...(pixels.region === undefined ? {} : { region: pixels.region }) };
-            if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
-          }
-        } else if (result === 2) {
-          done = true;
         }
       }
 
@@ -293,6 +327,7 @@ class LibjxlDecoder implements JxlDecoder {
         }
       }
     } finally {
+      if (chunkBufPtr !== 0) module._free(chunkBufPtr);
       module._jxl_wasm_dec_free!(dec);
     }
   }
@@ -312,13 +347,24 @@ class LibjxlDecoder implements JxlDecoder {
     const fmt = this.options.format;
     const bpc = fmt === "rgbaf32" ? 4 : fmt === "rgba16" ? 2 : 1;
     const pixelStride = 4 * bpc;
-    const decoded = callDecode(module, concatBytes(allChunks), this.options.downsample, fmt);
+    const input = concatBytes(allChunks);
+    allChunks.length = 0;
+    const decoded = callDecode(module, input, this.options.downsample, fmt);
+    // C++ already applied downsampling; decoded.width/height are the actual output dimensions.
+    // Scale any region crop into the downsampled coordinate space and pass downsample=1.
+    const ds = this.options.downsample;
+    const scaledRegion = this.options.region !== null ? {
+      x: Math.trunc(this.options.region.x / ds),
+      y: Math.trunc(this.options.region.y / ds),
+      w: Math.ceil(this.options.region.w / ds),
+      h: Math.ceil(this.options.region.h / ds),
+    } : null;
     const pixels = applyRegionAndDownsample(
       decoded.data,
       decoded.width,
       decoded.height,
-      this.options.region,
-      this.options.downsample,
+      scaledRegion,
+      1,
       bpc,
     );
     const info: ImageInfo = {
@@ -379,6 +425,7 @@ class LibjxlEncoder implements JxlEncoder {
   private pixelChunks: Uint8Array[] = [];
   private finished = false;
   private cancelled = false;
+  private finishResolve: (() => void) | null = null;
 
   constructor(private readonly options: EncoderOptions) {}
 
@@ -387,19 +434,21 @@ class LibjxlEncoder implements JxlEncoder {
     if (region !== undefined) {
       throw new CapabilityMissing("libjxl WASM facade does not support chunked region encode yet");
     }
-    this.pixelChunks.push(toUint8Array(chunk).slice());
+    this.pixelChunks.push(chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : toUint8Array(chunk).slice());
   }
 
   finish(): void {
     this.finished = true;
+    this.finishResolve?.();
+    this.finishResolve = null;
   }
 
   async *chunks(): AsyncIterable<ArrayBuffer | Uint8Array> {
     await this.waitUntilFinished();
     if (this.cancelled) return;
 
+    const module = await loadLibjxlModule();
     if (this.options.format === "rgba16" || this.options.format === "rgbaf32") {
-      const module = await loadLibjxlModule();
       const encFn = this.options.format === "rgba16" ? "_jxl_wasm_encode_rgba16" : "_jxl_wasm_encode_rgbaf32";
       if (typeof module[encFn] !== "function") {
         throw new CapabilityMissing(`${this.options.format} encode requires a rebuilt WASM with multi-format bridge`);
@@ -407,35 +456,107 @@ class LibjxlEncoder implements JxlEncoder {
     }
 
     const bytesPerChannel = this.options.format === "rgbaf32" ? 4 : this.options.format === "rgba16" ? 2 : 1;
-    const pixels = concatBytes(this.pixelChunks);
     const expectedBytes = this.options.width * this.options.height * 4 * bytesPerChannel;
-    if (pixels.byteLength !== expectedBytes) {
-      throw new Error(`JXL encode expected ${expectedBytes} bytes for ${this.options.format}, got ${pixels.byteLength}`);
+    const totalBytes = this.pixelChunks.reduce((s, c) => s + c.byteLength, 0);
+    if (totalBytes !== expectedBytes) {
+      throw new Error(`JXL encode expected ${expectedBytes} bytes for ${this.options.format}, got ${totalBytes}`);
     }
 
-    const module = await loadLibjxlModule();
-    const encoded = callEncode(module, pixels, this.options);
-    yield encoded.data.slice();
-    module._jxl_wasm_buffer_free(encoded.handle);
+    // IMPROVEMENT-6: Write pixel chunks directly into WASM heap — no concatBytes allocation.
+    const ptr = module._malloc(totalBytes);
+    try {
+      let offset = 0;
+      for (const chunk of this.pixelChunks) {
+        module.HEAPU8.set(chunk, ptr + offset);
+        offset += chunk.byteLength;
+      }
+      this.pixelChunks = [];
+      const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
+      const hasAlpha = this.options.hasAlpha ? 1 : 0;
+
+      // IMPROVEMENT-5: Sidecar thumbnails — yield smallest first for faster first-paint.
+      if (this.options.sidecarSizes && this.options.sidecarSizes.length > 0
+          && module._jxl_wasm_encode_rgba8_with_sidecars
+          && module._jxl_wasm_buffer_next) {
+        const sortedSizes = [...this.options.sidecarSizes].sort((a, b) => a - b);
+        const dimsPtr = module._malloc(sortedSizes.length * 4);
+        try {
+          // Write uint32[] into WASM heap (HEAPU32 if available, byte-by-byte otherwise)
+          if (module.HEAPU32) {
+            const base32 = dimsPtr >>> 2;
+            for (let i = 0; i < sortedSizes.length; i++) module.HEAPU32[base32 + i] = (sortedSizes[i] ?? 0) >>> 0;
+          } else {
+            for (let i = 0; i < sortedSizes.length; i++) {
+              const v = (sortedSizes[i] ?? 0) >>> 0;
+              module.HEAPU8[dimsPtr + i * 4]     =  v         & 0xff;
+              module.HEAPU8[dimsPtr + i * 4 + 1] = (v >>>  8) & 0xff;
+              module.HEAPU8[dimsPtr + i * 4 + 2] = (v >>> 16) & 0xff;
+              module.HEAPU8[dimsPtr + i * 4 + 3] = (v >>> 24) & 0xff;
+            }
+          }
+          let handle = module._jxl_wasm_encode_rgba8_with_sidecars(
+            ptr, this.options.width, this.options.height,
+            distance, this.options.effort, hasAlpha,
+            dimsPtr, sortedSizes.length,
+          );
+          while (handle !== 0) {
+            // Read next BEFORE readBuffer — it may free `handle` on error.
+            const next = module._jxl_wasm_buffer_next(handle);
+            try {
+              const buf = readBuffer(module, handle, "encode");
+              // IMPROVEMENT-10: buf.data is already a copy (HEAPU8.slice in readBuffer).
+              yield buf.data;
+              module._jxl_wasm_buffer_free(handle);
+            } catch (err) {
+              // handle was freed inside readBuffer; free remaining chain, then rethrow.
+              let cur = next;
+              while (cur !== 0) {
+                const nxt = module._jxl_wasm_buffer_next(cur);
+                module._jxl_wasm_buffer_free(cur);
+                cur = nxt;
+              }
+              throw err;
+            }
+            handle = next;
+          }
+        } finally {
+          module._free(dimsPtr);
+        }
+      } else {
+        // Standard single-image encode path
+        let handle: number;
+        if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
+          handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+        } else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
+          handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+        } else {
+          handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+        }
+        const encoded = readBuffer(module, handle, "encode");
+        yield encoded.data;  // IMPROVEMENT-10: already a copy from readBuffer — no .slice() needed
+        module._jxl_wasm_buffer_free(encoded.handle);
+      }
+    } finally {
+      module._free(ptr);
+    }
   }
 
   cancel(_reason?: string): void {
     this.cancelled = true;
+    this.finishResolve?.();
+    this.finishResolve = null;
   }
 
   dispose(): void {
     this.pixelChunks = [];
     this.cancelled = true;
+    this.finishResolve?.();
+    this.finishResolve = null;
   }
 
   private waitUntilFinished(): Promise<void> {
-    return new Promise((resolve) => {
-      const check = () => {
-        if (this.finished || this.cancelled) resolve();
-        else setTimeout(check, 1);
-      };
-      check();
-    });
+    if (this.finished || this.cancelled) return Promise.resolve();
+    return new Promise<void>((resolve) => { this.finishResolve = resolve; });
   }
 }
 
@@ -444,8 +565,24 @@ async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
   return modulePromise;
 }
 
+function isSimdSupported(): boolean {
+  try {
+    // Minimal WASM module using v128.const — validates iff SIMD-128 is supported.
+    return WebAssembly.validate(new Uint8Array([
+      0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,253,15,0,0,0,0,0,0,0,0,11
+    ]));
+  } catch { return false; }
+}
+
+function detectBestTier(): string {
+  if (!isSimdSupported()) return "scalar";
+  const threads = typeof SharedArrayBuffer !== "undefined" && typeof Atomics !== "undefined";
+  return threads ? "simd-mt" : "simd";
+}
+
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
-  const modulePath = "./jxl-core.scalar.js";
+  const tier = detectBestTier();
+  const modulePath = `./jxl-core.${tier}.js`;
   const imported = await import(modulePath) as { default?: unknown };
   const factory = imported.default;
   if (typeof factory !== "function") {
@@ -455,13 +592,16 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
   const options: Record<string, unknown> = {
     locateFile: (path: string) => new URL(path, baseUrl).href,
   };
-  // Emscripten web-only output lacks Node file loading; pre-read binary so it can instantiate in Bun/Node
-  try {
-    const fsMod = await import("node:fs/promises" as string) as { readFile: (p: URL | string) => Promise<Uint8Array> };
-    const urlMod = await import("node:url" as string) as { fileURLToPath: (u: URL | string) => string };
-    options["wasmBinary"] = await fsMod.readFile(urlMod.fileURLToPath(new URL("jxl-core.scalar.wasm", baseUrl)));
-  } catch {
-    // Not in Node/Bun, or WASM binary not found; Emscripten will load via fetch
+  // Emscripten web output can fetch the .wasm in the browser. Pre-read the
+  // binary only in Node/Bun so the same bundle works in both environments.
+  if (typeof process !== "undefined" && !!process.versions?.node) {
+    try {
+      const fsMod = await import("node:fs/promises") as { readFile: (p: URL | string) => Promise<Uint8Array> };
+      const urlMod = await import("node:url") as { fileURLToPath: (u: URL | string) => string };
+      options["wasmBinary"] = await fsMod.readFile(urlMod.fileURLToPath(new URL(`jxl-core.${tier}.wasm`, baseUrl)));
+    } catch {
+      // Node/Bun but binary unavailable; let Emscripten resolve it another way.
+    }
   }
   return await (factory as (options: Record<string, unknown>) => Promise<LibjxlWasmModule>)(options);
 }
@@ -489,13 +629,14 @@ function callEncode(module: LibjxlWasmModule, pixels: Uint8Array, options: Encod
   try {
     module.HEAPU8.set(pixels, ptr);
     const distance = options.distance ?? distanceFromQuality(options.quality);
+    const hasAlpha = options.hasAlpha ? 1 : 0;
     let handle: number;
     if (options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
-      handle = module._jxl_wasm_encode_rgba16(ptr, options.width, options.height, distance, options.effort);
+      handle = module._jxl_wasm_encode_rgba16(ptr, options.width, options.height, distance, options.effort, hasAlpha);
     } else if (options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
-      handle = module._jxl_wasm_encode_rgbaf32(ptr, options.width, options.height, distance, options.effort);
+      handle = module._jxl_wasm_encode_rgbaf32(ptr, options.width, options.height, distance, options.effort, hasAlpha);
     } else {
-      handle = module._jxl_wasm_encode_rgba8(ptr, options.width, options.height, distance, options.effort);
+      handle = module._jxl_wasm_encode_rgba8(ptr, options.width, options.height, distance, options.effort, hasAlpha);
     }
     return readBuffer(module, handle, "encode");
   } finally {
@@ -504,23 +645,45 @@ function callEncode(module: LibjxlWasmModule, pixels: Uint8Array, options: Encod
 }
 
 function readBuffer(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
-  if (handle === 0) {
-    throw new Error(`JXL ${operation} failed`);
+  if (handle === 0) throw new Error(`JXL ${operation} failed`);
+
+  // JxlWasmBuffer (WASM32): all fields are 4 bytes — data*, size_t, width, height, bits, has_alpha, error.
+  // Read the entire struct in one contiguous HEAPU32 window instead of 6 separate FFI calls.
+  let dataPtr: number, size: number, width: number, height: number, bitsVal: number, alphaVal: number, errorCode: number;
+  const h32 = module.HEAPU32;
+  // Only use the HEAPU32 direct-read fast path when `handle` looks like a real WASM heap
+  // address: 4-byte aligned and above the minimum reserved region. Test fake modules use
+  // sequential integers (1, 2, 3…) that would read garbage at the wrong HEAPU32 index.
+  if (h32 && (handle & 3) === 0 && handle >= 16) {
+    const b = handle >>> 2;
+    dataPtr   = h32[b] ?? 0;
+    size      = h32[b + 1] ?? 0;
+    width     = h32[b + 2] ?? 0;
+    height    = h32[b + 3] ?? 0;
+    bitsVal   = h32[b + 4] ?? 0;
+    alphaVal  = h32[b + 5] ?? 0;
+    errorCode = h32[b + 6] ?? 0;
+  } else {
+    dataPtr   = module._jxl_wasm_buffer_data(handle);
+    size      = module._jxl_wasm_buffer_size(handle);
+    width     = module._jxl_wasm_buffer_width(handle);
+    height    = module._jxl_wasm_buffer_height(handle);
+    bitsVal   = module._jxl_wasm_buffer_bits_per_sample(handle);
+    alphaVal  = module._jxl_wasm_buffer_has_alpha(handle);
+    errorCode = module._jxl_wasm_buffer_error?.(handle) ?? 0;
   }
-  const dataPtr = module._jxl_wasm_buffer_data(handle);
-  const size = module._jxl_wasm_buffer_size(handle);
+
   if (dataPtr === 0 || size === 0) {
-    const code = module._jxl_wasm_buffer_error?.(handle) ?? 0;
     module._jxl_wasm_buffer_free(handle);
-    throw new Error(`JXL ${operation} failed${code === 0 ? "" : ` (${code})`}`);
+    throw new Error(`JXL ${operation} failed${errorCode === 0 ? "" : ` (${errorCode})`}`);
   }
   return {
     handle,
     data: module.HEAPU8.slice(dataPtr, dataPtr + size),
-    width: module._jxl_wasm_buffer_width(handle),
-    height: module._jxl_wasm_buffer_height(handle),
-    bitsPerSample: normalizeBitsPerSample(module._jxl_wasm_buffer_bits_per_sample(handle)),
-    hasAlpha: module._jxl_wasm_buffer_has_alpha(handle) !== 0,
+    width,
+    height,
+    bitsPerSample: normalizeBitsPerSample(bitsVal),
+    hasAlpha: alphaVal !== 0,
   };
 }
 
@@ -542,8 +705,19 @@ function applyRegionAndDownsample(
   downsample: 1 | 2 | 4 | 8,
   bytesPerChannel = 1,
 ): { data: Uint8Array; width: number; height: number; region?: Region } {
+  // IMPROVEMENT-8: Hottest path — no crop, no downsample — skip normalizeRegion entirely.
+  if (downsample === 1 && region === null) return { data, width, height };
+
   const stride = 4 * bytesPerChannel;
   const sourceRegion = normalizeRegion(region, width, height);
+
+  // Secondary fast path: region present but maps to full image after clamping
+  if (downsample === 1 && sourceRegion.x === 0 && sourceRegion.y === 0 && sourceRegion.w === width && sourceRegion.h === height) {
+    const result: { data: Uint8Array; width: number; height: number; region?: Region } = { data, width, height };
+    if (region !== null) result.region = { x: 0, y: 0, w: width, h: height };
+    return result;
+  }
+
   const outWidth = Math.max(1, Math.ceil(sourceRegion.w / downsample));
   const outHeight = Math.max(1, Math.ceil(sourceRegion.h / downsample));
   const out = new Uint8Array(outWidth * outHeight * stride);
@@ -554,9 +728,7 @@ function applyRegionAndDownsample(
       const sy = sourceRegion.y + Math.min(sourceRegion.h - 1, y * downsample);
       const src = (sy * width + sx) * stride;
       const dst = (y * outWidth + x) * stride;
-      for (let b = 0; b < stride; b++) {
-        out[dst + b] = data[src + b] ?? (b === stride - 1 && bytesPerChannel === 1 ? 255 : 0);
-      }
+      out.set(data.subarray(src, src + stride), dst);
     }
   }
 
@@ -586,6 +758,7 @@ function normalizeRegion(region: Region | null, width: number, height: number): 
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  if (chunks.length === 1) return chunks[0]!;
   const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   const out = new Uint8Array(total);
   let offset = 0;

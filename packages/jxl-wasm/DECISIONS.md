@@ -8,3 +8,5 @@
 - Kept the loader free of framework-specific assumptions. It uses browser `compileStreaming` when available and falls back to bytes + `WebAssembly.compile` when needed.
 - Treated the PGO corpus path as externally supplied by the Gemini branch. The package documents the dependency instead of inventing a local corpus manifest.
 - Aligned the published package name with the rest of the monorepo: `@casabio/jxl-wasm`.
+- Do not override `DOCKER_CONFIG` during Docker builds; GHCR pulls must use the caller's existing Docker credential store.
+- Use `docker.io/emscripten/emsdk:4.0.13` as fallback when GHCR denies anonymous `ghcr.io/emscripten-core/emsdk:4.0.13` pulls.

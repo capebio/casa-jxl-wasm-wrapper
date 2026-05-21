@@ -3,14 +3,15 @@
   "libjxlCommit": "332feb17d17311c748445f7ee75c4fb55cc38530",
   "emscriptenTag": "4.0.13",
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
-  "buildMode": "host-toolchain",
-  "generatedAt": "2026-05-21T00:00:00.000Z",
+  "emsdkImage": "docker.io/emscripten/emsdk:4.0.13",
+  "buildMode": "docker",
+  "generatedAt": "2026-05-21T11:57:22.800Z",
   "tiers": {
-    "scalar": {
-      "jsBytes": 12789,
-      "wasmBytes": 2586038,
-      "jsSha256": "e896018a10ce2566e50dce6844caacd3642f8cdda56152b45f0517fd43e48b5f",
-      "wasmSha256": "8a509f151c76c38bcc5d7f7f035ee839eb8b069ce90e3af0eba210e81251a45a",
+    "relaxed-simd-mt": {
+      "jsBytes": 24560,
+      "wasmBytes": 2858519,
+      "jsSha256": "9a36f09f60abbd360756e80b78da4449d5b25a2b989ef0a521f1bcb80d652f70",
+      "wasmSha256": "2fb2c295a8fef4bf87156f371805bb6453be8999d2118167ef2f97f76415199a",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -23,21 +24,51 @@
         "-sFILESYSTEM=0",
         "-sASSERTIONS=0",
         "-sINVOKE_RUN=0",
-        "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
-        "-sEXPORTED_FUNCTIONS=@exports.txt",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
         "-flto",
         "-fno-rtti",
-        "-fno-exceptions"
+        "-fno-exceptions",
+        "-pthread",
+        "-sUSE_PTHREADS=1",
+        "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency",
+        "-msimd128",
+        "-mrelaxed-simd"
+      ]
+    },
+    "simd-mt": {
+      "jsBytes": 24536,
+      "wasmBytes": 2858519,
+      "jsSha256": "5b10b2d053e1f8fb15a77e94f421a0a29a15971f7a647fd6d237e0c368f1f2e3",
+      "wasmSha256": "2fb2c295a8fef4bf87156f371805bb6453be8999d2118167ef2f97f76415199a",
+      "flags": [
+        "-O3",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=33554432",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+        "-flto",
+        "-fno-rtti",
+        "-fno-exceptions",
+        "-pthread",
+        "-sUSE_PTHREADS=1",
+        "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency",
+        "-msimd128"
       ]
     },
     "simd": {
-      "jsBytes": 12785,
-      "wasmBytes": 2796374,
-      "jsSha256": "b7460799a657da7fd716af9f89f1be792c8fb9797b3ae97780f5b1939384ec28",
-      "wasmSha256": "572ecea321e0069629763c3aee9890affdef2ad610cb5622ffb44a8011617311",
+      "jsBytes": 12783,
+      "wasmBytes": 2796339,
+      "jsSha256": "8e86298a8aa524adc33e158ea22c2406d5c3de21a8446db826e8ff275cf38485",
+      "wasmSha256": "2464846d0efbbad482ee743bb18a81a595d740e81f3e6c877a84ce88a7dda4a6",
       "flags": [
         "-O3",
-        "-msimd128",
         "-sENVIRONMENT=web,worker",
         "-sMODULARIZE=1",
         "-sEXPORT_ES6=1",
@@ -48,16 +79,36 @@
         "-sFILESYSTEM=0",
         "-sASSERTIONS=0",
         "-sINVOKE_RUN=0",
-        "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
-        "-sEXPORTED_FUNCTIONS=@exports.txt",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+        "-flto",
+        "-fno-rtti",
+        "-fno-exceptions",
+        "-msimd128"
+      ]
+    },
+    "scalar": {
+      "jsBytes": 12787,
+      "wasmBytes": 2586003,
+      "jsSha256": "5914baf512f7c7f28cb170bea5501c4b435280a13116e19e22df7bf9c171925e",
+      "wasmSha256": "839e72d62a453f1e402b02b368e6e8a1701e0aa8452c1f52eec1dc4045cdc229",
+      "flags": [
+        "-O3",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=33554432",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
         "-flto",
         "-fno-rtti",
         "-fno-exceptions"
       ]
     }
   },
-  "skippedTiers": [
-    "relaxed-simd-mt",
-    "simd-mt"
-  ]
+  "skippedTiers": []
 }

@@ -43,6 +43,13 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(manifest).not.toContain("jsquash");
   });
 
+  test("drops JS-side staging queues after bytes move into WASM", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("this.pixelChunks = []");
+    expect(source).toContain("allChunks.length = 0");
+  });
+
   test("encodes and decodes rgba8 pixels through the WASM codec facade", async () => {
     setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
     const rgba = new Uint8Array([255, 0, 0, 255]);

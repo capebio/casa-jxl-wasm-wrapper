@@ -7,7 +7,7 @@ T-WASM-BUILD
 ## Completed
 
 - Read Sections 6, 15, 22, 27, 28.2, and the T-WASM-BUILD brief.
-- Confirmed the local workspace has no `emcc` or `docker` binary, so the actual container build is not runnable here.
+- Confirmed the local workspace has no `emcc`; Docker CLI is installed now, but the daemon is not running.
 - Created the `jxl-wasm` package scaffold and build-facing docs.
 - Aligned the package name with the worker import path: `@casabio/jxl-wasm`.
 - Added `tsconfig.json`, ambient shims, and source typecheck coverage.
@@ -17,6 +17,12 @@ T-WASM-BUILD
 - Replaced the temporary bridge with package-local libjxl WASM ABI glue in `src/facade.ts` and `src/bridge.cpp`.
 - Added facade round-trip coverage and rebuilt `dist`.
 - Added facade coverage for `header`, `progress`, and `final` decode events.
+- Fixed the Docker T-WASM-BUILD path so the Dockerfile is a reusable pinned toolchain image instead of running a hidden build during `docker build`.
+- Fixed `scripts/build.mjs --inside-docker` so Linux containers invoke `emcmake` / `em++` directly instead of Windows `cmd /c`.
+- Stopped overriding `DOCKER_CONFIG` with an empty temp directory so GHCR credentials from `docker login ghcr.io` are honored.
+- Added Docker Hub `emscripten/emsdk:4.0.13` fallback for GHCR anonymous pull denial, with `EMSDK_IMAGE` override for pinned custom images.
+- Added an early Docker daemon check with a specific "start Docker Desktop/Linux engine" error before the GHCR pull/build path runs.
+- Enabled the package-local `FindAtomics.cmake` shim inside Docker/Emscripten builds, not only host-toolchain builds.
 
 ## Next
 
@@ -31,7 +37,7 @@ T-NATIVE-BIND
 
 ## Blockers
 
-- Toolchain execution is blocked in this workspace because `emcc` and `docker` are unavailable.
+- Local non-Docker toolchain execution is blocked because `emcc` is unavailable.
 - PGO input is blocked until `jxl-test-corpus/pgo-manifest.json` lands from the Gemini branch.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
 - The facade now targets real libjxl ABI glue, but progressive flushes, metadata/ICC extraction, rgba16/rgbaf32, chunked region encode, and the pinned four-tier build matrix still need the generated T-WASM-BUILD artifacts and a runnable Emscripten container.

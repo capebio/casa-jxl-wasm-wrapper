@@ -1,4 +1,5 @@
-FROM ghcr.io/emscripten-core/emsdk:4.0.13
+ARG EMSDK_IMAGE=ghcr.io/emscripten-core/emsdk:4.0.13
+FROM ${EMSDK_IMAGE}
 
 SHELL ["/bin/bash", "-lc"]
 
@@ -17,9 +18,6 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work/jxl-wasm
-COPY . .
 
 ENV LIBJXL_COMMIT=${LIBJXL_COMMIT}
 ENV LIBJXL_REPO=${LIBJXL_REPO}
-
-RUN node scripts/build.mjs --inside-docker
