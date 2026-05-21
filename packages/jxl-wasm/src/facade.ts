@@ -143,6 +143,48 @@ export class CapabilityMissing extends Error {
   }
 }
 
+export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
+
+export function detectTier(): Tier {
+  if (typeof process !== "undefined" && !!process.versions?.node) return "scalar";
+  if (typeof WebAssembly === "undefined") return "scalar";
+  const hasSimd = probeSimd();
+  if (!hasSimd) return "scalar";
+  const hasSab = typeof SharedArrayBuffer !== "undefined";
+  const hasRelaxedSimd = probeRelaxedSimd();
+  if (hasSab && hasRelaxedSimd) return "relaxed-simd-mt";
+  if (hasSab) return "simd-mt";
+  return "simd";
+}
+
+function probeSimd(): boolean {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
+      0x03, 0x02, 0x01, 0x00,
+      0x0a, 0x08, 0x01, 0x06, 0x00,
+      0x41, 0x00, 0xfd, 0x0f, 0x0b,
+    ]));
+  } catch {
+    return false;
+  }
+}
+
+function probeRelaxedSimd(): boolean {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x07, 0x01, 0x60, 0x02, 0x7b, 0x7b, 0x01, 0x7b,
+      0x03, 0x02, 0x01, 0x00,
+      0x0a, 0x0b, 0x01, 0x09, 0x00,
+      0x20, 0x00, 0x20, 0x01, 0xfd, 0x80, 0x02, 0x0b,
+    ]));
+  } catch {
+    return false;
+  }
+}
+
 let modulePromise: Promise<LibjxlWasmModule> | undefined;
 let testModuleFactory: JxlModuleFactory | null = null;
 
@@ -445,7 +487,8 @@ async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
 }
 
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
-  const modulePath = "./jxl-core.scalar.js";
+  const tier = detectTier();
+  const modulePath = `./jxl-core.${tier}.js`;
   const imported = await import(modulePath) as { default?: unknown };
   const factory = imported.default;
   if (typeof factory !== "function") {
@@ -455,13 +498,12 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
   const options: Record<string, unknown> = {
     locateFile: (path: string) => new URL(path, baseUrl).href,
   };
-  // Emscripten web-only output lacks Node file loading; pre-read binary so it can instantiate in Bun/Node
   try {
     const fsMod = await import("node:fs/promises" as string) as { readFile: (p: URL | string) => Promise<Uint8Array> };
     const urlMod = await import("node:url" as string) as { fileURLToPath: (u: URL | string) => string };
-    options["wasmBinary"] = await fsMod.readFile(urlMod.fileURLToPath(new URL("jxl-core.scalar.wasm", baseUrl)));
+    options["wasmBinary"] = await fsMod.readFile(urlMod.fileURLToPath(new URL(`jxl-core.${tier}.wasm`, baseUrl)));
   } catch {
-    // Not in Node/Bun, or WASM binary not found; Emscripten will load via fetch
+    // Not in Node/Bun; Emscripten loads via fetch
   }
   return await (factory as (options: Record<string, unknown>) => Promise<LibjxlWasmModule>)(options);
 }

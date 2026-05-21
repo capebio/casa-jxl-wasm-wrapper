@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { createDecoder, createEncoder, setJxlModuleFactoryForTesting } from "../src/index";
+import { createDecoder, createEncoder, detectTier, setJxlModuleFactoryForTesting } from "../src/index";
 
 const decodeOptions = {
   format: "rgba8" as const,
@@ -162,6 +162,18 @@ describe("@casabio/jxl-wasm facade", () => {
     const final = await nextWithin(iterator, 100);
     expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
     await decoder.dispose();
+  });
+});
+
+describe("detectTier", () => {
+  test("returns a valid tier string", () => {
+    const tier = detectTier();
+    expect(["relaxed-simd-mt", "simd-mt", "simd", "scalar"]).toContain(tier);
+  });
+
+  test("returns scalar in Node/Bun (no cross-origin isolation)", () => {
+    const tier = detectTier();
+    expect(tier).toBe("scalar");
   });
 });
 
