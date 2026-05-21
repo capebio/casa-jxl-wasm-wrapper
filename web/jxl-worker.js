@@ -1,39 +1,18 @@
-// Dedicated JXL encode worker.  Must be spawned from the page's main thread
-// (not from within another worker) so that Emscripten Pthreads can bootstrap
-// correctly under COOP + COEP headers.
+// Dedicated JXL encode worker.
 //
 // Protocol:
-//   main → worker: { id, type:'encode_request', rgba: ArrayBuffer, width, height,
-//                    quality, effort, lossless }
-//   worker → main: { id, type:'done',         jxl: Uint8Array, jxlMs, w, h,
+//   main → worker: { id, rgba: ArrayBuffer, width, height, quality, effort, lossless, progressive }
+//   worker → main: { id, type:'done',        jxl: Uint8Array, jxlMs, w, h,
 //                    effortUsed, effortRequested }
-//               or { id, type:'encode_error',  error: string }
+//               or { id, type:'encode_error', error: string }
 //
-// At high effort on large images the WASM heap can run out.  When that
-// happens the module becomes permanently unusable (ABORT flag is set).
-// Fail fast instead of retrying lower efforts: the lower-effort ladder never
-// recovered large-image encodes reliably and only poisoned the worker.
+// Progressive decode sessions use the libjxl facade directly.
+// One-shot URL decode (decode_jxl) is handled by jxl-decode-worker.js.
 
-import { initEmscriptenModule } from './vendor/jsquash-jxl/utils.js';
-import { defaultOptions }        from './vendor/jsquash-jxl/meta.js';
-import jxlMtSIMDFactory          from './vendor/jsquash-jxl/codec/enc/jxl_enc_mt_simd.js';
-import jxlMtFactory              from './vendor/jsquash-jxl/codec/enc/jxl_enc_mt.js';
-import decode                    from './vendor/jsquash-jxl/decode.js';
-import { simd }                  from './vendor/wasm-feature-detect/index.js';
-import { createDecoder as createLibjxlDecoder } from '../packages/jxl-wasm/dist/facade.js';
-const _simdOk = simd(); // Promise<bool> — resolved once, reused on OOM retries
+import { createDecoder as createLibjxlDecoder, createEncoder }
+    from '../packages/jxl-wasm/dist/facade.js';
 
-async function createModule() {
-    return initEmscriptenModule(await _simdOk ? jxlMtSIMDFactory : jxlMtFactory);
-}
-
-// One live module instance; replaced after every abort.
-let moduleP = createModule();
 const decodeSessions = new Map();
-
-function isAbortError(err) {
-    return (err instanceof WebAssembly.RuntimeError) || String(err).includes('Abort');
-}
 
 self.onmessage = async ({ data }) => {
     if (data.type === 'decode_start') {
@@ -53,22 +32,6 @@ self.onmessage = async ({ data }) => {
 
     if (data.type === 'decode_cancel') {
         await decodeSessions.get(data.sessionId)?.cancel(data.reason);
-        return;
-    }
-
-    if (data.type === 'decode_jxl') {
-        const { decodeId, url } = data;
-        try {
-            const resp = await fetch(url);
-            const buf  = await resp.arrayBuffer();
-            const img  = await decode(buf); // returns { data: Uint8ClampedArray, width, height }
-            self.postMessage(
-                { type: 'jxl_decoded', decodeId, rgba: img.data, w: img.width, h: img.height },
-                [img.data.buffer],
-            );
-        } catch (err) {
-            self.postMessage({ type: 'decode_error', decodeId, error: String(err?.message ?? err) });
-        }
         return;
     }
 
