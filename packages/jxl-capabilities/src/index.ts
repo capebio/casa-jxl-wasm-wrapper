@@ -70,7 +70,8 @@ async function probeNativeJxl(): Promise<boolean> {
 
 export async function getCapabilities(): Promise<Capabilities> {
   const isBrowser = typeof window !== 'undefined' || typeof self !== 'undefined';
-  const isNode = typeof process !== 'undefined' && process.versions && process.versions.node;
+  const proc = (globalThis as { process?: { versions?: { node?: string } } }).process;
+  const isNode = !!proc?.versions?.node;
 
   let wasm = false;
   try {

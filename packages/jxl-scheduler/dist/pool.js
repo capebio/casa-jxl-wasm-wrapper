@@ -24,6 +24,8 @@ export class WorkerPool {
     }
     // Acquire an idle worker, spawning one if the pool is not full.
     // Returns null if no worker is available and pool is at capacity.
+    // The returned worker is immediately marked as reserved (activeSessionId = "__reserved__")
+    // so a subsequent acquire() before bind() does not return the same worker.
     async acquire() {
         if (this.destroyed)
             return null;
@@ -31,10 +33,13 @@ export class WorkerPool {
         if (idle.length > 0) {
             const worker = idle[0];
             this.clearIdleTimer(worker);
+            worker.activeSessionId = "__reserved__";
             return worker;
         }
         if (this.workers.size < this.maxSize) {
-            return this.spawn();
+            const w = await this.spawn();
+            w.activeSessionId = "__reserved__";
+            return w;
         }
         return null;
     }

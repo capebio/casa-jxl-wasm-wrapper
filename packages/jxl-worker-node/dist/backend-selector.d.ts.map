@@ -1,0 +1,1 @@
+{"version":3,"file":"backend-selector.d.ts","sourceRoot":"","sources":["../src/backend-selector.ts"],"names":[],"mappings":"AAIA,MAAM,WAAW,OAAO;IACtB,IAAI,EAAE,QAAQ,GAAG,MAAM,CAAC;IAExB,MAAM,EAAE,OAAO,CAAC;CACjB;AAUD,wBAAsB,aAAa,IAAI,OAAO,CAAC,OAAO,CAAC,CAetD"}

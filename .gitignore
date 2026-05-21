@@ -2,3 +2,11 @@ node_modules/
 target/
 *.orig
 .epiccodereview/
+.claude/
+bun-chrome-*/
+node-cdp-*/
+node-persist-*/
+node-ps-cdp-*/
+pw-local-*/
+tmp/
+debug.log

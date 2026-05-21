@@ -1,0 +1,28 @@
+{
+  "name": "@casabio/jxl-session",
+  "version": "0.1.0",
+  "description": "Session facade for the Casabio JXL wrapper — the only module callers import to drive codec work",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@casabio/jxl-core": "file:../jxl-core",
+    "@casabio/jxl-scheduler": "file:../jxl-scheduler",
+    "@casabio/jxl-worker-browser": "file:../jxl-worker-browser",
+    "@casabio/jxl-worker-node": "file:../jxl-worker-node",
+    "@casabio/jxl-capabilities": "file:../jxl-capabilities"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
+  }
+}
