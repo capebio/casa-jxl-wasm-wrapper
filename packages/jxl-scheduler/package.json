@@ -1,0 +1,26 @@
+{
+  "name": "@casabio/jxl-scheduler",
+  "version": "0.1.0",
+  "description": "Worker pool, priority lanes, preemption, dedupe, and budget enforcement for the Casabio JXL wrapper",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  },
+  "dependencies": {
+    "@casabio/jxl-core": "file:../jxl-core"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4",
+    "@types/node": "22.5.0"
+  }
+}
