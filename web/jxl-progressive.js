@@ -1,8 +1,16 @@
-import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from '../pkg/raw_converter_wasm.js';
+﻿import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from '../pkg/raw_converter_wasm.js';
 import { createProgressiveSession } from './jxl-progressive-session.js';
 import { encodeBackendForTarget } from './jxl-progressive-policy.js';
 import { createProgressiveDecodeRequest } from './jxl-progressive-decode.js';
 import { getContext } from './jxl-browser-context.js';
+import {
+    bindRangeLabel,
+    clamp,
+    setCssVar,
+    setGroupDisabled,
+    wireHelpPopovers,
+    wireSlideoutPanel,
+} from './jxl-dashboard-ui.js';
 
 const runBtn = document.getElementById('run-btn');
 const replayBtn = document.getElementById('replay-btn');
@@ -27,6 +35,20 @@ const thumbBenchCards = [...document.querySelectorAll('[data-thumb-bench-card]')
 }));
 const progressiveStepsInput = document.getElementById('progressive-steps');
 const progressiveStepsValue = document.getElementById('progressive-steps-value');
+const transportChunkKbInput = document.getElementById('transport-chunk-kb');
+const transportChunkKbValue = document.getElementById('transport-chunk-kb-value');
+const transportIterationsInput = document.getElementById('transport-iterations');
+const transportIterationsValue = document.getElementById('transport-iterations-value');
+const transportPacingInput = document.getElementById('transport-pacing-ms');
+const transportPacingValue = document.getElementById('transport-pacing-ms-value');
+const transportNoPacingInput = document.getElementById('transport-no-pacing');
+const transportPreviewFirstInput = document.getElementById('transport-preview-first');
+const transportChunkedInput = document.getElementById('transport-chunked');
+const thumbDisplayInput = document.getElementById('thumb-display-size');
+const thumbDisplayValue = document.getElementById('thumb-display-size-value');
+const progressiveDashboard = document.getElementById('progressive-dashboard');
+const progressiveControlsBtn = document.getElementById('progressive-controls-btn');
+const progressiveControlsClose = document.getElementById('progressive-controls-close');
 const statusText = document.getElementById('status-text');
 const sourceMeta = document.getElementById('source-meta');
 const cards = [...document.querySelectorAll('.card')].map((card) => ({
@@ -56,6 +78,14 @@ let thumbBenchConcurrency = Number(thumbBenchConcurrencyInput?.value) || 4;
 let thumbBenchProgressive = true;
 let thumbBenchProgressiveDetail = 'dc';
 let thumbBenchSizes = new Set([300, 800]);
+let transportChunkKb = Number(transportChunkKbInput?.value) || 32;
+let transportIterations = Number(transportIterationsInput?.value) || 20;
+let transportPacingMs = Number(transportPacingInput?.value) || 8;
+let transportNoPacing = Boolean(transportNoPacingInput?.checked);
+let transportPreviewFirst = Boolean(transportPreviewFirstInput?.checked ?? true);
+let transportChunked = Boolean(transportChunkedInput?.checked ?? true);
+let thumbDisplaySize = Number(thumbDisplayInput?.value) || 20;
+let thumbBenchSources = null;
 const session = createProgressiveSession({
     initialEncodeBackend: 'jsquash',
     initialDecodeBackend: 'jsquash',
@@ -99,12 +129,44 @@ function setThumbBenchSettings(text) {
     if (thumbBenchSettings) thumbBenchSettings.textContent = text;
 }
 
+function fmtTiming(ms) {
+    return ms == null ? '--' : `${ms.toFixed(0)} ms`;
+}
+
+function formatProgressiveTimings(timings = {}) {
+    const parts = [];
+    parts.push(`load ${fmtTiming(timings.loadMs)}`);
+    parts.push(`encode ${fmtTiming(timings.encodeMs)}`);
+    parts.push(`first piece ${fmtTiming(timings.firstPieceMs)}`);
+    parts.push(`first paint ${fmtTiming(timings.firstPaintMs)}`);
+    if (timings.decodeMs != null) parts.push(`decode ${fmtTiming(timings.decodeMs)}`);
+    if (timings.totalMs != null) parts.push(`total ${fmtTiming(timings.totalMs)}`);
+    return parts.join(' Â· ');
+}
+
+function refreshThumbBenchSummary() {
+    setThumbBenchSettings(
+        `${session.encodeBackend} â†’ ${session.decodeBackend} Â· progressive ${thumbBenchProgressive ? 'on' : 'off'}`
+        + `${thumbBenchProgressive ? ` Â· ${thumbBenchProgressiveDetail.toUpperCase()}` : ''}`
+        + ` Â· chunk ${transportChunkKb} KB`
+        + ` Â· iterations ${transportIterations}`
+        + ` Â· pace ${transportNoPacing ? 'none' : `${transportPacingMs} ms`}`
+        + ` Â· preview-first ${transportPreviewFirst ? 'on' : 'off'}`
+        + ` Â· chunked ${transportChunked ? 'on' : 'off'}`
+    );
+}
+
 function resetCard(card, note = 'Waiting for source.') {
     card.el.dataset.state = 'idle';
     card.fill.style.width = '0%';
     card.bytes.textContent = '0 / 0';
     card.encode.textContent = 'encode: --';
-    card.timings.textContent = '1/3: -- · 2/3: -- · end: --';
+    card._timingStartedAt = performance.now();
+    card._firstPaintMs = null;
+    card.loadMs = card._source?.loadMs ?? null;
+    card.firstPieceMs = null;
+    card.decodeMs = null;
+    card.timings.textContent = formatProgressiveTimings({ loadMs: card.loadMs });
     card.notes.textContent = note;
     card.badge.textContent = card.defaultBadge;
     card._jxlBytes = null;
@@ -114,6 +176,9 @@ function resetCard(card, note = 'Waiting for source.') {
     card._previewStep = -1;
     card.encodeMs = null;
     card.decodeMs = null;
+    card.loadMs = null;
+    card.firstPieceMs = null;
+    card.firstPaintMs = null;
     card.countdown = null;
     stopPreviewPlayback(card);
     const ctx = card.canvas.getContext('2d');
@@ -128,10 +193,6 @@ function resetAllCards() {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
 }
 
 function getProgressiveStepCount() {
@@ -169,6 +230,7 @@ function setThumbBenchConcurrency(value) {
     thumbBenchConcurrency = clamp(Number(value) || 1, 1, 8);
     if (thumbBenchConcurrencyInput) thumbBenchConcurrencyInput.value = String(thumbBenchConcurrency);
     if (thumbBenchConcurrencyValue) thumbBenchConcurrencyValue.textContent = String(thumbBenchConcurrency);
+    refreshThumbBenchSummary();
 }
 
 function setThumbBenchProgressive(enabled) {
@@ -178,6 +240,7 @@ function setThumbBenchProgressive(enabled) {
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
     }
+    refreshThumbBenchSummary();
 }
 
 function setThumbBenchDetail(detail) {
@@ -187,6 +250,7 @@ function setThumbBenchDetail(detail) {
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
     }
+    refreshThumbBenchSummary();
 }
 
 function setThumbBenchSize(size, enabled) {
@@ -206,6 +270,44 @@ function setThumbBenchSize(size, enabled) {
             button.classList.toggle('is-active', active);
             button.setAttribute('aria-pressed', active ? 'true' : 'false');
         }
+    }
+}
+
+function syncTransportControls() {
+    if (transportChunkKbInput) {
+        transportChunkKb = clamp(Number(transportChunkKbInput.value) || 32, 16, 512);
+        transportChunkKbInput.value = String(transportChunkKb);
+        if (transportChunkKbValue) transportChunkKbValue.textContent = String(transportChunkKb);
+    }
+    if (transportIterationsInput) {
+        transportIterations = clamp(Number(transportIterationsInput.value) || 20, 4, 60);
+        transportIterationsInput.value = String(transportIterations);
+        if (transportIterationsValue) transportIterationsValue.textContent = String(transportIterations);
+    }
+    if (transportPacingInput) {
+        transportPacingMs = clamp(Number(transportPacingInput.value) || 8, 0, 80);
+        transportPacingInput.value = String(transportPacingMs);
+        if (transportPacingValue) transportPacingValue.textContent = String(transportPacingMs);
+    }
+    transportNoPacing = Boolean(transportNoPacingInput?.checked);
+    if (transportNoPacing) {
+        transportPacingMs = 0;
+        if (transportPacingInput) transportPacingInput.value = '0';
+        if (transportPacingValue) transportPacingValue.textContent = '0';
+    }
+    if (transportPacingInput) transportPacingInput.disabled = transportNoPacing;
+    transportPacingInput?.closest('.setting')?.classList.toggle('is-disabled', transportNoPacing);
+    transportPreviewFirst = Boolean(transportPreviewFirstInput?.checked ?? true);
+    transportChunked = Boolean(transportChunkedInput?.checked ?? true);
+    refreshThumbBenchSummary();
+}
+
+function syncDisplayControls() {
+    if (thumbDisplayInput) {
+        thumbDisplaySize = clamp(Number(thumbDisplayInput.value) || 20, 12, 64);
+        thumbDisplayInput.value = String(thumbDisplaySize);
+        if (thumbDisplayValue) thumbDisplayValue.textContent = String(thumbDisplaySize);
+        setCssVar('--thumb-size', `${thumbDisplaySize}px`);
     }
 }
 
@@ -233,7 +335,8 @@ function startPreviewPlayback(card, source, targetDims, stepCount, runId) {
         if (stepIndex !== card._previewStep) {
             card._previewStep = stepIndex;
             paintFrame(card, card._previewFrames[stepIndex], targetDims);
-            card.notes.textContent = `Source playback ${card._previewFrames[stepIndex].label} · waiting for JXL encode.`;
+            markFirstPaint(card);
+            card.notes.textContent = `Source playback ${card._previewFrames[stepIndex].label} Â· waiting for JXL encode.`;
         }
     };
     paintAtElapsed();
@@ -301,6 +404,12 @@ function buildProgressiveFrames(source, targetDims, stepCount) {
 
 function paintFrame(card, frame, targetDims) {
     scaleImageDataToCanvas(frame.canvas, card.canvas, targetDims.width, targetDims.height);
+}
+
+function markFirstPaint(card) {
+    if (card._firstPaintMs == null && card._timingStartedAt != null) {
+        card._firstPaintMs = performance.now() - card._timingStartedAt;
+    }
 }
 
 function makeWorker(type, backend) {
@@ -444,7 +553,7 @@ async function streamDecodeJxl(worker, bytes, { onChunk, onFrame } = {}, pacingM
                 throw new Error('decode superseded');
             }
             request.push(chunk);
-        }, pacingMs);
+        }, { pacingMs, chunkSize: transportChunkKb * 1024, iterations: transportIterations });
         request.close();
         const decoded = await request.done;
         return { decoded, streamedResult };
@@ -454,25 +563,34 @@ async function streamDecodeJxl(worker, bytes, { onChunk, onFrame } = {}, pacingM
     }
 }
 
-async function streamBytes(bytes, onProgress, pacingMs = 8) {
+async function streamBytes(bytes, onProgress, { pacingMs = transportNoPacing ? 0 : transportPacingMs, chunkSize = transportChunkKb * 1024, iterations = transportIterations } = {}) {
     const total = bytes.byteLength;
-    const chunkSize = Math.max(32 * 1024, Math.floor(total / 20));
+    const requestedIterations = clamp(Number(iterations) || 0, 1, 120);
+    const resolvedChunkSize = clamp(
+        requestedIterations > 0 ? Math.ceil(total / requestedIterations) : (chunkSize || Math.max(32 * 1024, Math.floor(total / 20))),
+        4 * 1024,
+        Math.max(4 * 1024, total),
+    );
     let loaded = 0;
     const started = performance.now();
     const marks = [total / 3, (total * 2) / 3, total];
     const times = [null, null, null];
+    let firstChunkMs = null;
     while (loaded < total) {
-        const next = Math.min(total, loaded + chunkSize);
+        const next = Math.min(total, loaded + resolvedChunkSize);
         const chunk = bytes.slice(loaded, next);
         loaded = next;
         const elapsed = performance.now() - started;
+        if (firstChunkMs == null) firstChunkMs = elapsed;
         for (let i = 0; i < marks.length; i++) {
             if (times[i] == null && loaded >= marks[i]) times[i] = elapsed;
         }
         await onProgress(loaded, total, times.slice(), chunk);
-        await new Promise((resolve) => setTimeout(resolve, pacingMs));
+        if (pacingMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, pacingMs));
+        }
     }
-    return { bytes, times };
+    return { bytes, times, firstChunkMs, iterations: requestedIterations, chunkSize: resolvedChunkSize };
 }
 
 function normalizeSessionFrame(ev) {
@@ -488,7 +606,14 @@ function normalizeSessionFrame(ev) {
     };
 }
 
-async function encodeJxlWithSession(rgba, width, height, quality = 90, effort = 3, { lossless = false, progressive = true } = {}) {
+async function encodeJxlWithSession(
+    rgba,
+    width,
+    height,
+    quality = 90,
+    effort = 3,
+    { lossless = false, progressive = true, previewFirst = transportPreviewFirst, chunked = transportChunked } = {},
+) {
     const t0 = performance.now();
     const session = getContext().encode({
         format: 'rgba8',
@@ -499,20 +624,35 @@ async function encodeJxlWithSession(rgba, width, height, quality = 90, effort = 
         quality: lossless ? null : quality,
         effort,
         progressive,
+        previewFirst,
+        chunked,
         priority: 'visible',
     });
     const buf = rgba instanceof ArrayBuffer ? rgba : rgba.buffer;
+    let firstChunkMs = null;
+    const parts = [];
+    const chunkTask = (async () => {
+        for await (const chunk of session.chunks()) {
+            if (firstChunkMs == null) firstChunkMs = performance.now() - t0;
+            parts.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+        }
+    })();
     await session.pushPixels(buf);
     await session.finish();
-    const parts = [];
-    for await (const chunk of session.chunks()) {
-        parts.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
-    }
+    await chunkTask;
     const total = parts.reduce((n, a) => n + a.byteLength, 0);
     const jxl = new Uint8Array(total);
     let off = 0;
     for (const p of parts) { jxl.set(p, off); off += p.byteLength; }
-    return { jxl, jxlMs: performance.now() - t0, w: width, h: height, effortUsed: effort, effortRequested: effort };
+    return {
+        jxl,
+        jxlMs: performance.now() - t0,
+        firstChunkMs,
+        w: width,
+        h: height,
+        effortUsed: effort,
+        effortRequested: effort,
+    };
 }
 
 async function decodeJxlFinalSession(bytes, priority = 'visible') {
@@ -529,7 +669,12 @@ async function decodeJxlFinalSession(bytes, priority = 'visible') {
     return lastFrame;
 }
 
-async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, pacingMs = 8, priority = 'visible') {
+async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, streamOptions = {}, priority = 'visible') {
+    const {
+        pacingMs = transportNoPacing ? 0 : transportPacingMs,
+        chunkSize = transportChunkKb * 1024,
+        iterations = transportIterations,
+    } = streamOptions;
     const session = getContext().decode({
         format: 'rgba8',
         progressionTarget: 'final',
@@ -548,7 +693,7 @@ async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, pacingMs
         }
         const buf = chunk instanceof ArrayBuffer ? chunk : chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
         await session.push(buf);
-    }, pacingMs).then(async (streamedResult) => {
+    }, { pacingMs, chunkSize, iterations }).then(async (streamedResult) => {
         await session.close();
         return streamedResult;
     });
@@ -576,6 +721,7 @@ async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, pacingMs
 }
 
 async function loadRandomSource() {
+    const started = performance.now();
     const resp = await fetch('/api/random-orf', { cache: 'no-store' });
     if (!resp.ok) throw new Error(`random ORF request failed: ${resp.status}`);
     const raw = new Uint8Array(await resp.arrayBuffer());
@@ -592,8 +738,9 @@ async function loadRandomSource() {
             height: result.height,
             rgb,
             rgba,
-            label: `${name} · ORF · ${result.width}×${result.height}`,
-            meta: `${folder} · ${fmtBytes(raw.byteLength)}`,
+            label: `${name} Â· ORF Â· ${result.width}Ã—${result.height}`,
+            meta: `${folder} Â· ${fmtBytes(raw.byteLength)}`,
+            loadMs: performance.now() - started,
         };
     } finally {
         result.free();
@@ -722,15 +869,17 @@ function prepareBenchVariant(source, longEdge) {
 
 function buildThumbBenchEncodeOptions(width, height, encodeBackend) {
     if (!thumbBenchProgressive) {
-        return { progressive: false };
+        return { progressive: false, previewFirst: false, chunked: false };
     }
     const progressiveFlavor = thumbBenchProgressiveDetail;
     if (encodeBackend !== 'libjxl') {
-        return { progressive: true };
+        return { progressive: true, previewFirst: transportPreviewFirst, chunked: transportChunked };
     }
     return {
         progressive: true,
         progressiveFlavor,
+        previewFirst: transportPreviewFirst,
+        chunked: transportChunked,
         width,
         height,
     };
@@ -749,14 +898,16 @@ function paintThumbBenchTile(decoded) {
 }
 
 function makeThumbBenchReportLine(label, row) {
-    return `| ${escapeMdCell(label)} | ${escapeMdCell(row.source)} | ${row.repeat + 1} | ${row.encodeMs.toFixed(0)} | ${row.decodeMs.toFixed(0)} | ${row.paintMs.toFixed(0)} | ${row.totalMs.toFixed(0)} | ${escapeMdCell(row.note)} |`;
+    return `| ${escapeMdCell(label)} | ${escapeMdCell(row.source)} | ${row.repeat + 1} | ${fmtTiming(row.loadMs)} | ${fmtTiming(row.encodeMs)} | ${fmtTiming(row.firstPieceMs)} | ${fmtTiming(row.decodeMs)} | ${fmtTiming(row.paintMs)} | ${fmtTiming(row.totalMs)} | ${escapeMdCell(row.note)} |`;
 }
 
 function summarizeThumbBenchBlock(rows) {
     const sum = (key) => rows.reduce((acc, row) => acc + (Number.isFinite(row[key]) ? row[key] : 0), 0);
     const count = rows.length || 1;
     return {
+        loadAvg: sum('loadMs') / count,
         encodeAvg: sum('encodeMs') / count,
+        firstPieceAvg: sum('firstPieceMs') / count,
         decodeAvg: sum('decodeMs') / count,
         paintAvg: sum('paintMs') / count,
         totalAvg: sum('totalMs') / count,
@@ -776,6 +927,7 @@ function buildThumbBenchMarkdown({ encodeBackend, decodeBackend, concurrency, de
     lines.push(`- progressive detail: ${progressive ? detail.toUpperCase() : 'n/a'}`);
     lines.push(`- source count: ${sources.length}`);
     lines.push(`- repeats per source: 20`);
+    lines.push(`- progressive iterations: ${transportIterations}`);
     lines.push(`- thumbnail display size: 20px`);
     lines.push(`- encode quality: 90`);
     lines.push(`- encode effort: 3`);
@@ -789,8 +941,8 @@ function buildThumbBenchMarkdown({ encodeBackend, decodeBackend, concurrency, de
     for (const sizeRun of runs) {
         lines.push(`## ${sizeRun.longEdge} long`);
         lines.push('');
-        lines.push('| # | source | repeat | encode | decode | paint | total | note |');
-        lines.push('| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |');
+        lines.push('| # | source | repeat | load | encode | first piece | decode | paint | total | note |');
+        lines.push('| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |');
         for (const row of sizeRun.rows) {
             lines.push(makeThumbBenchReportLine(String(row.sequence), row));
         }
@@ -847,7 +999,7 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
     const sizeStarted = performance.now();
     let nextJob = 0;
 
-    const formatSourceLine = () => preparedSources.map((s) => s.source.label).join(' · ');
+    const formatSourceLine = () => preparedSources.map((s) => s.source.label).join(' Â· ');
 
     const runLane = async (laneIndex) => {
         const lane = pool[laneIndex];
@@ -858,7 +1010,7 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
             const job = jobs[jobIndex];
             const prepared = preparedSources[job.sourceIndex];
             const rowStart = performance.now();
-            const label = `${size} long · ${prepared.source.label} · rep ${job.repeat + 1}`;
+            const label = `${size} long Â· ${prepared.source.label} Â· rep ${job.repeat + 1}`;
             let row;
             try {
                 const encodeStart = performance.now();
@@ -869,7 +1021,11 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
                     prepared.targetDims.height,
                     90,
                     3,
-                    { progressive: opts.progressive ?? true },
+                    {
+                        progressive: opts.progressive ?? true,
+                        previewFirst: opts.previewFirst ?? transportPreviewFirst,
+                        chunked: opts.chunked ?? transportChunked,
+                    },
                 );
                 const encodeMs = performance.now() - encodeStart;
 
@@ -882,18 +1038,22 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
                 const paintStart = performance.now();
                 const tile = paintThumbBenchTile(decoded);
                 const paintMs = performance.now() - paintStart;
+                const firstPaintMs = performance.now() - rowStart;
 
                 const totalMs = performance.now() - rowStart;
-                const title = `${prepared.source.label} · ${size} long · rep ${job.repeat + 1} · enc ${encodeMs.toFixed(0)} ms · dec ${decodeMs.toFixed(0)} ms · paint ${paintMs.toFixed(0)} ms`;
+                const title = `${prepared.source.label} Â· ${size} long Â· rep ${job.repeat + 1} Â· load ${fmtTiming(prepared.source.loadMs)} Â· enc ${fmtTiming(encodeMs)} Â· first ${fmtTiming(encoded.firstChunkMs)} Â· dec ${fmtTiming(decodeMs)} Â· paint ${fmtTiming(paintMs)}`;
                 appendThumbBenchTile(card, tile, title);
                 row = {
                     sequence: rows.length + 1,
                     index: jobIndex,
                     source: prepared.source.label,
                     repeat: job.repeat,
+                    loadMs: prepared.source.loadMs ?? null,
                     encodeMs,
+                    firstPieceMs: encoded.firstChunkMs ?? null,
                     decodeMs,
                     paintMs,
+                    firstPaintMs,
                     totalMs,
                     note: 'ok',
                 };
@@ -902,15 +1062,18 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
                 const totalMs = performance.now() - rowStart;
                 const message = error?.message || String(error);
                 const tile = makeErrorThumbCanvas(message);
-                appendThumbBenchTile(card, tile, `${label} · error: ${message}`);
+                appendThumbBenchTile(card, tile, `${label} Â· error: ${message}`);
                 row = {
                     sequence: rows.length + 1,
                     index: jobIndex,
                     source: prepared.source.label,
                     repeat: job.repeat,
+                    loadMs: prepared.source.loadMs ?? null,
                     encodeMs: 0,
+                    firstPieceMs: null,
                     decodeMs: 0,
                     paintMs: 0,
+                    firstPaintMs: totalMs,
                     totalMs,
                     note: message,
                 };
@@ -935,12 +1098,14 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
                     `files: ${formatSourceLine()}`,
                     `done: ${completed}/${jobs.length}`,
                     `wall: ${wallMs.toFixed(0)} ms`,
+                    `last load: ${fmtTiming(prepared.source.loadMs)}`,
                     `block avg encode: ${block.encodeAvg.toFixed(0)} ms`,
+                    `block avg first piece: ${block.firstPieceAvg.toFixed(0)} ms`,
                     `block avg decode: ${block.decodeAvg.toFixed(0)} ms`,
                     `block avg paint: ${block.paintAvg.toFixed(0)} ms`,
                     `errors: ${errors}`,
                     '',
-                    ...checkpoints.map((cp) => `${cp.done}/${jobs.length} | wall ${cp.wallMs.toFixed(0)} ms | enc ${cp.encodeAvg.toFixed(0)} | dec ${cp.decodeAvg.toFixed(0)} | paint ${cp.paintAvg.toFixed(0)} | total ${cp.totalAvg.toFixed(0)}`),
+                    ...checkpoints.map((cp) => `${cp.done}/${jobs.length} | wall ${cp.wallMs.toFixed(0)} ms | load ${cp.loadAvg.toFixed(0)} | enc ${cp.encodeAvg.toFixed(0)} | first ${cp.firstPieceAvg.toFixed(0)} | dec ${cp.decodeAvg.toFixed(0)} | paint ${cp.paintAvg.toFixed(0)} | total ${cp.totalAvg.toFixed(0)}`),
                 ].join('\n');
                 blockRows = [];
             }
@@ -948,7 +1113,7 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
     };
 
     thumbBenchStatus.textContent = `Running ${size} long with ${concurrency} workers.`;
-    thumbBenchSettings.textContent = `${encodeBackend} → ${decodeBackend} · progressive ${thumbBenchProgressive ? 'on' : 'off'} ${thumbBenchProgressive ? `· ${thumbBenchProgressiveDetail.toUpperCase()}` : ''}`;
+    thumbBenchSettings.textContent = `${encodeBackend} â†’ ${decodeBackend} Â· progressive ${thumbBenchProgressive ? 'on' : 'off'} ${thumbBenchProgressive ? `Â· ${thumbBenchProgressiveDetail.toUpperCase()}` : ''}`;
     await Promise.all(pool.map((_, laneIndex) => runLane(laneIndex)));
     const wallMs = performance.now() - sizeStarted;
     for (const lane of pool) destroyWorkerLane(lane);
@@ -959,7 +1124,7 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
         `wall: ${wallMs.toFixed(0)} ms`,
         `errors: ${errors}`,
         '',
-        ...checkpoints.map((cp) => `${cp.done}/${jobs.length} | wall ${cp.wallMs.toFixed(0)} ms | enc ${cp.encodeAvg.toFixed(0)} | dec ${cp.decodeAvg.toFixed(0)} | paint ${cp.paintAvg.toFixed(0)} | total ${cp.totalAvg.toFixed(0)}`),
+        ...checkpoints.map((cp) => `${cp.done}/${jobs.length} | wall ${cp.wallMs.toFixed(0)} ms | load ${cp.loadAvg.toFixed(0)} | enc ${cp.encodeAvg.toFixed(0)} | first ${cp.firstPieceAvg.toFixed(0)} | dec ${cp.decodeAvg.toFixed(0)} | paint ${cp.paintAvg.toFixed(0)} | total ${cp.totalAvg.toFixed(0)}`),
     ].join('\n');
 
     return {
@@ -983,11 +1148,14 @@ async function runThumbBench() {
     }
 
     thumbBenchStatus.textContent = 'Loading 5 random ORFs.';
-    thumbBenchSettings.textContent = `${encodeBackend} → ${decodeBackend} · progressive ${thumbBenchProgressive ? 'on' : 'off'} ${thumbBenchProgressive ? `· ${thumbBenchProgressiveDetail.toUpperCase()}` : ''} · concurrency ${thumbBenchConcurrency}`;
+    thumbBenchSettings.textContent = `${encodeBackend} â†’ ${decodeBackend} Â· progressive ${thumbBenchProgressive ? 'on' : 'off'} ${thumbBenchProgressive ? `Â· ${thumbBenchProgressiveDetail.toUpperCase()}` : ''} Â· concurrency ${thumbBenchConcurrency}`;
 
     try {
         await initRaw();
-        const sources = await loadRandomDistinctSources(5);
+        if (!thumbBenchSources) {
+            thumbBenchSources = await loadRandomDistinctSources(5);
+        }
+        const sources = thumbBenchSources;
         if (runId !== thumbBenchRunId) return;
 
         const runs = [];
@@ -1015,7 +1183,7 @@ async function runThumbBench() {
         const writeResult = await writeThumbBenchReport(filename, markdown);
         if (runId !== thumbBenchRunId) return;
         thumbBenchStatus.textContent = `Done. Saved ${writeResult.path || filename}.`;
-        thumbBenchSettings.textContent = `${encodeBackend} → ${decodeBackend} · progressive ${thumbBenchProgressive ? 'on' : 'off'} ${thumbBenchProgressive ? `· ${thumbBenchProgressiveDetail.toUpperCase()}` : ''} · concurrency ${thumbBenchConcurrency}`;
+        thumbBenchSettings.textContent = `${encodeBackend} â†’ ${decodeBackend} Â· progressive ${thumbBenchProgressive ? 'on' : 'off'} ${thumbBenchProgressive ? `Â· ${thumbBenchProgressiveDetail.toUpperCase()}` : ''} Â· concurrency ${thumbBenchConcurrency}`;
         setStatus(`Thumb bench done. Saved ${writeResult.path || filename}.`);
     } catch (error) {
         if (runId !== thumbBenchRunId) return;
@@ -1039,12 +1207,18 @@ async function runVariant(source, target, runId) {
     const decodeWorker = decodeBackend !== 'libjxl' ? getWorker('decode', decodeBackend, target.slot) : null;
 
     card.el.dataset.state = 'working';
-    const encodeLabel = actualEncodeBackend === encodeBackend ? encodeBackend : `${encodeBackend}→${actualEncodeBackend}`;
-    card.badge.textContent = `${target.badge} · enc ${encodeLabel} · dec ${decodeBackend}`;
+    const encodeLabel = actualEncodeBackend === encodeBackend ? encodeBackend : `${encodeBackend}â†’${actualEncodeBackend}`;
+    card.badge.textContent = `${target.badge} Â· enc ${encodeLabel} Â· dec ${decodeBackend}`;
     card.notes.textContent = `Preparing ${target.label} with enc ${encodeLabel} / dec ${decodeBackend}.`;
     card.fill.style.width = '0%';
     card.bytes.textContent = '0 / 0';
-    card.timings.textContent = '1/3: -- · 2/3: -- · end: --';
+    card._timingStartedAt = performance.now();
+    card._firstPaintMs = null;
+    card.loadMs = source.loadMs ?? null;
+    card.firstPieceMs = null;
+    card.encodeMs = null;
+    card.decodeMs = null;
+    card.timings.textContent = formatProgressiveTimings({ loadMs: card.loadMs });
 
     let rgba;
     if (source.kind === 'orf') {
@@ -1086,17 +1260,28 @@ async function runVariant(source, target, runId) {
     const jxlBytes = encodeResult.jxl;
     card._jxlBytes = new Uint8Array(jxlBytes.buffer.slice(0));
     card.encodeMs = encodeResult.jxlMs;
+    card.firstPieceMs = encodeResult.firstChunkMs ?? null;
     card.encode.textContent = `encode: ${encodeResult.jxlMs.toFixed(0)} ms`;
+    card.timings.textContent = formatProgressiveTimings({
+        loadMs: card.loadMs,
+        encodeMs: card.encodeMs,
+        firstPieceMs: card.firstPieceMs,
+        firstPaintMs: card._firstPaintMs,
+    });
 
     card.el.dataset.state = 'streaming';
     card.notes.textContent = `Streaming JXL bytes for ${target.label}.`;
     const decodeStart = performance.now();
-    const pacingMs = target.slot === 'full' ? 12 : 8;
+    const pacingMs = transportNoPacing ? 0 : transportPacingMs;
     const updateStreamProgress = (loaded, total, times) => {
         if (runId !== activeRunId) return false;
         updateCardProgress(card, loaded, total, `Loaded ${fmtBytes(loaded)} of ${fmtBytes(total)}.`);
-        const formatMs = (ms) => (ms == null ? '--' : `${ms.toFixed(0)} ms`);
-        card.timings.textContent = `1/3: ${formatMs(times[0])} · 2/3: ${formatMs(times[1])} · end: ${formatMs(times[2])}`;
+        card.timings.textContent = `${formatProgressiveTimings({
+            loadMs: card.loadMs,
+            encodeMs: card.encodeMs,
+            firstPieceMs: card.firstPieceMs,
+            firstPaintMs: card._firstPaintMs,
+        })} Â· stream 1/3 ${fmtTiming(times[0])} Â· 2/3 ${fmtTiming(times[1])} Â· end ${fmtTiming(times[2])}`;
         return true;
     };
 
@@ -1106,21 +1291,31 @@ async function runVariant(source, target, runId) {
             onFrame: (frame) => {
                 if (runId !== activeRunId) return;
                 rgbaToCanvas(card, frame.rgba, frame.w, frame.h);
-                card.notes.textContent = `libjxl preview ${frame.w}×${frame.h}.`;
+                markFirstPaint(card);
+                card.notes.textContent = `libjxl preview ${frame.w}Ã—${frame.h}.`;
             },
-        }, pacingMs);
+        }, { pacingMs, chunkSize: transportChunkKb * 1024, iterations: transportIterations });
         if (runId !== activeRunId) return;
         stopPreviewPlayback(card);
         rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
+        markFirstPaint(card);
         card.el.dataset.state = 'done';
         card.fill.style.width = '100%';
         card.bytes.textContent = `${fmtBytes(jxlBytes.byteLength)} / ${fmtBytes(jxlBytes.byteLength)}`;
-        card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} · 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} · end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
-        card.notes.textContent = `Decoded ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+        card.firstPieceMs = streamedResult.firstChunkMs ?? card.firstPieceMs;
+        card.timings.textContent = `${formatProgressiveTimings({
+            loadMs: card.loadMs,
+            encodeMs: card.encodeMs,
+            firstPieceMs: card.firstPieceMs,
+            firstPaintMs: card._firstPaintMs,
+            decodeMs: performance.now() - decodeStart,
+            totalMs: performance.now() - card._timingStartedAt,
+        })} Â· stream 1/3 ${fmtTiming(streamedResult.times[0])} Â· 2/3 ${fmtTiming(streamedResult.times[1])} Â· end ${fmtTiming(streamedResult.times[2])}`;
+        card.notes.textContent = `Decoded ${decoded.w}Ã—${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
         return;
     }
 
-    const streamedResult = await streamBytes(jxlBytes, updateStreamProgress, pacingMs);
+    const streamedResult = await streamBytes(jxlBytes, updateStreamProgress, { pacingMs, chunkSize: transportChunkKb * 1024, iterations: transportIterations });
     const streamed = streamedResult.bytes;
 
     if (runId !== activeRunId) return;
@@ -1132,11 +1327,21 @@ async function runVariant(source, target, runId) {
         : decodeJxlFinal(decodeWorker, streamed));
     if (runId !== activeRunId) return;
     rgbaToCanvas(card, decoded.rgba, decoded.w, decoded.h);
+    markFirstPaint(card);
     card.el.dataset.state = 'done';
     card.fill.style.width = '100%';
     card.bytes.textContent = `${fmtBytes(streamed.byteLength)} / ${fmtBytes(streamed.byteLength)}`;
-    card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} · 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} · end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
-    card.notes.textContent = `Decoded ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+    card.firstPieceMs = streamedResult.firstChunkMs ?? card.firstPieceMs;
+    card.decodeMs = performance.now() - decodeStart;
+    card.timings.textContent = `${formatProgressiveTimings({
+        loadMs: card.loadMs,
+        encodeMs: card.encodeMs,
+        firstPieceMs: card.firstPieceMs,
+        firstPaintMs: card._firstPaintMs,
+        decodeMs: card.decodeMs,
+        totalMs: performance.now() - card._timingStartedAt,
+    })} Â· stream 1/3 ${fmtTiming(streamedResult.times[0])} Â· 2/3 ${fmtTiming(streamedResult.times[1])} Â· end ${fmtTiming(streamedResult.times[2])}`;
+    card.notes.textContent = `Decoded ${decoded.w}Ã—${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
 }
 
 async function replayDecodeCard(card, runId) {
@@ -1157,7 +1362,7 @@ async function replayDecodeCard(card, runId) {
     card.el.dataset.state = 'decoding';
     card.fill.style.width = '0%';
     card.bytes.textContent = `0 / ${fmtBytes(card._jxlBytes.byteLength)}`;
-    card.timings.textContent = '1/3: -- · 2/3: -- · end: --';
+    card.timings.textContent = '1/3: -- Â· 2/3: -- Â· end: --';
     card.notes.classList.add('replay-countdown');
     card.notes.textContent = '1000 ms';
     const ctx = card.canvas.getContext('2d');
@@ -1178,12 +1383,16 @@ async function replayDecodeCard(card, runId) {
     if (mode === 'progressive' && canShowSourcePlayback) {
         card.notes.textContent = `Progressive preview enabled (${card._previewFrames.length} steps).`;
     }
-    const pacingMs = card.slot === 'full' ? 12 : 8;
+    const pacingMs = transportNoPacing ? 0 : transportPacingMs;
     const updateStreamProgress = (loaded, total, times) => {
         if (runId !== activeRunId) return false;
         updateCardProgress(card, loaded, total, `Loaded ${fmtBytes(loaded)} of ${fmtBytes(total)}.`);
-        const formatMs = (ms) => (ms == null ? '--' : `${ms.toFixed(0)} ms`);
-        card.timings.textContent = `1/3: ${formatMs(times[0])} · 2/3: ${formatMs(times[1])} · end: ${formatMs(times[2])}`;
+        card.timings.textContent = `${formatProgressiveTimings({
+            loadMs: card.loadMs,
+            encodeMs: card.encodeMs,
+            firstPieceMs: card.firstPieceMs,
+            firstPaintMs: card._firstPaintMs,
+        })} Â· stream 1/3 ${fmtTiming(times[0])} Â· 2/3 ${fmtTiming(times[1])} Â· end ${fmtTiming(times[2])}`;
         return true;
     };
 
@@ -1193,9 +1402,9 @@ async function replayDecodeCard(card, runId) {
             onFrame: (frame) => {
                 if (runId !== activeRunId) return;
                 rgbaToCanvas(card, frame.rgba, frame.w, frame.h);
-                card.notes.textContent = `libjxl preview ${frame.w}×${frame.h}.`;
+                card.notes.textContent = `libjxl preview ${frame.w}Ã—${frame.h}.`;
             },
-        }, pacingMs);
+        }, { pacingMs, chunkSize: transportChunkKb * 1024, iterations: transportIterations });
         if (runId !== activeRunId) return;
 
         stopPreviewPlayback(card);
@@ -1203,12 +1412,23 @@ async function replayDecodeCard(card, runId) {
         card.el.dataset.state = 'done';
         card.fill.style.width = '100%';
         card.bytes.textContent = `${fmtBytes(card._jxlBytes.byteLength)} / ${fmtBytes(card._jxlBytes.byteLength)}`;
-        card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} · 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} · end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
-        card.notes.textContent = `Replay decode: ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+        card.timings.textContent = `1/3: ${streamedResult.times[0] == null ? '--' : `${streamedResult.times[0].toFixed(0)} ms`} Â· 2/3: ${streamedResult.times[1] == null ? '--' : `${streamedResult.times[1].toFixed(0)} ms`} Â· end: ${streamedResult.times[2] == null ? '--' : `${streamedResult.times[2].toFixed(0)} ms`}`;
+        markFirstPaint(card);
+        card.firstPieceMs = streamedResult.firstChunkMs ?? card.firstPieceMs;
+        card.decodeMs = performance.now() - decodeStart;
+        card.timings.textContent = `${formatProgressiveTimings({
+            loadMs: card.loadMs,
+            encodeMs: card.encodeMs,
+            firstPieceMs: card.firstPieceMs,
+            firstPaintMs: card._firstPaintMs,
+            decodeMs: card.decodeMs,
+            totalMs: performance.now() - card._timingStartedAt,
+        })} · stream 1/3 ${fmtTiming(streamedResult.times[0])} · 2/3 ${fmtTiming(streamedResult.times[1])} · end ${fmtTiming(streamedResult.times[2])}`;
+        card.notes.textContent = `Replay decode: ${decoded.w}Ã—${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
         return;
     }
 
-    const streamedResult = await streamBytes(card._jxlBytes, updateStreamProgress, pacingMs);
+    const streamedResult = await streamBytes(card._jxlBytes, updateStreamProgress, { pacingMs, chunkSize: transportChunkKb * 1024, iterations: transportIterations });
     if (runId !== activeRunId) return;
 
     stopPreviewPlayback(card);
@@ -1220,7 +1440,18 @@ async function replayDecodeCard(card, runId) {
     card.el.dataset.state = 'done';
     card.fill.style.width = '100%';
     card.bytes.textContent = `${fmtBytes(streamedResult.bytes.byteLength)} / ${fmtBytes(streamedResult.bytes.byteLength)}`;
-    card.notes.textContent = `Replay decode: ${decoded.w}×${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+        markFirstPaint(card);
+        card.firstPieceMs = streamedResult.firstChunkMs ?? card.firstPieceMs;
+        card.decodeMs = performance.now() - decodeStart;
+        card.timings.textContent = `${formatProgressiveTimings({
+            loadMs: card.loadMs,
+            encodeMs: card.encodeMs,
+            firstPieceMs: card.firstPieceMs,
+            firstPaintMs: card._firstPaintMs,
+            decodeMs: card.decodeMs,
+            totalMs: performance.now() - card._timingStartedAt,
+        })} · stream 1/3 ${fmtTiming(streamedResult.times[0])} · 2/3 ${fmtTiming(streamedResult.times[1])} · end ${fmtTiming(streamedResult.times[2])}`;
+    card.notes.textContent = `Replay decode: ${decoded.w}Ã—${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
 }
 
 function wireModeControls() {
@@ -1323,6 +1554,34 @@ function wireBackendControls() {
     }
 }
 
+function wireDashboardControls() {
+    wireSlideoutPanel({
+        panel: progressiveDashboard,
+        openButton: progressiveControlsBtn,
+        closeButton: progressiveControlsClose,
+    });
+    wireHelpPopovers(progressiveDashboard);
+
+    bindRangeLabel(transportChunkKbInput, transportChunkKbValue, (value) => String(value));
+    bindRangeLabel(transportPacingInput, transportPacingValue, (value) => String(value));
+    bindRangeLabel(thumbDisplayInput, thumbDisplayValue, (value) => String(value));
+
+    setGroupDisabled(progressiveDashboard?.querySelector('[data-group="batch"]'), true, 'Batch controls live on the wrapper lab page.');
+    setGroupDisabled(progressiveDashboard?.querySelector('[data-group="transport"]'), false);
+    setGroupDisabled(progressiveDashboard?.querySelector('[data-group="display"]'), false);
+    setGroupDisabled(progressiveDashboard?.querySelector('[data-group="source"]'), false);
+
+    transportChunkKbInput?.addEventListener('input', syncTransportControls);
+    transportPacingInput?.addEventListener('input', syncTransportControls);
+    transportNoPacingInput?.addEventListener('change', syncTransportControls);
+    transportPreviewFirstInput?.addEventListener('change', syncTransportControls);
+    transportChunkedInput?.addEventListener('change', syncTransportControls);
+    thumbDisplayInput?.addEventListener('input', syncDisplayControls);
+
+    syncTransportControls();
+    syncDisplayControls();
+}
+
 async function runLadder() {
     activeRunId++;
     const runId = activeRunId;
@@ -1404,12 +1663,13 @@ resetBtn.addEventListener('click', async () => {
 resetAllCards();
 setSourceMeta('Ready to load a random ORF.');
 setStatus('Loading random ORF.');
+wireDashboardControls();
 wireModeControls();
 wireBackendControls();
 wirePreviewControls();
 wireThumbBenchControls();
 setThumbBenchStatus('Idle.');
-setThumbBenchSettings(`encode ${session.encodeBackend} · decode ${session.decodeBackend} · progressive ${thumbBenchProgressive ? 'on' : 'off'} · concurrency ${thumbBenchConcurrency}`);
+refreshThumbBenchSummary();
 runLadder().catch((error) => {
     setStatus(`Failed: ${error?.message || error}`);
 });

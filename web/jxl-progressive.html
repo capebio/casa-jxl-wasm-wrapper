@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>JPEG XL Progressive Test</title>
     <link rel="stylesheet" href="./jxl-progressive.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
     <script type="importmap">
     {
       "imports": {
@@ -32,60 +33,190 @@
                 Then the 300-long, 800-long, and full-size JXL variants stream in with bytes loaded against total bytes.
                 Flip between a full decode and a stepped progressive preview.
             </p>
+            <button id="progressive-controls-btn" class="dashboard-toggle" type="button" aria-expanded="false">Controls</button>
+        </section>
 
-            <div class="source-panel">
-                <button id="run-btn" class="run-btn" type="button">Load random ORF</button>
-                <button id="replay-btn" class="ghost-btn" type="button" disabled>Replay decode</button>
-                <button id="reset-btn" class="ghost-btn" type="button">Load another</button>
-                <a class="home-link" href="./index.html">Back to converter</a>
-                <div class="backend-panel">
-                    <span class="panel-label">Encode backend</span>
-                    <div class="decode-toggle" role="group" aria-label="Encode backend">
-                        <button id="encode-backend-jsquash" class="toggle-btn is-active" type="button" data-encode-backend="jsquash" aria-pressed="true">jsquash</button>
-                        <button id="encode-backend-libjxl" class="toggle-btn" type="button" data-encode-backend="libjxl" aria-pressed="false">libjxl</button>
-                    </div>
-                    <p class="panel-note">Encode the same cached ORF with either worker.</p>
+        <aside id="progressive-dashboard" class="dashboard" aria-hidden="true" data-open="false">
+            <div class="dashboard-head">
+                <div>
+                    <p class="dashboard-eyebrow">Progressive controls</p>
+                    <h2>Encode, download, decode</h2>
                 </div>
-                <div class="backend-panel">
-                    <span class="panel-label">Decode backend</span>
-                    <div class="decode-toggle" role="group" aria-label="Decode backend">
-                        <button id="decode-backend-jsquash" class="toggle-btn is-active" type="button" data-decode-backend="jsquash" aria-pressed="true">jsquash</button>
-                        <button id="decode-backend-libjxl" class="toggle-btn" type="button" data-decode-backend="libjxl" aria-pressed="false">libjxl</button>
+                <button id="progressive-controls-close" class="dashboard-close" type="button">Close</button>
+            </div>
+
+            <section class="dashboard-group" data-group="source">
+                <header class="dashboard-group-head">
+                    <div>
+                        <span class="dashboard-label">Source</span>
+                        <strong>Load and replay</strong>
                     </div>
-                    <p class="panel-note">Decode the same JXL bytes with either worker, including the progressive preview path.</p>
+                    <button class="info-btn" type="button" data-help-target="progressive-source" aria-label="Source help">i</button>
+                </header>
+                <div class="dashboard-actions">
+                    <button id="run-btn" class="run-btn" type="button">Load random ORF</button>
+                    <button id="replay-btn" class="ghost-btn" type="button" disabled>Replay decode</button>
+                    <button id="reset-btn" class="ghost-btn" type="button">Load another</button>
+                    <a class="home-link" href="./index.html">Back to converter</a>
                 </div>
-                <div class="decode-panel">
-                    <div class="decode-toggle" role="group" aria-label="Decode mode">
-                        <button id="mode-final" class="toggle-btn is-active" type="button" data-decode-mode="final" aria-pressed="true">Final decode</button>
-                        <button id="mode-progressive" class="toggle-btn" type="button" data-decode-mode="progressive" aria-pressed="false">Progressive preview</button>
+                <div class="source-panel">
+                    <div class="backend-panel">
+                        <span class="panel-label">Encode backend</span>
+                        <div class="decode-toggle" role="group" aria-label="Encode backend">
+                            <button id="encode-backend-jsquash" class="toggle-btn is-active" type="button" data-encode-backend="jsquash" aria-pressed="true">jsquash</button>
+                            <button id="encode-backend-libjxl" class="toggle-btn" type="button" data-encode-backend="libjxl" aria-pressed="false">libjxl</button>
+                        </div>
+                        <p class="panel-note">Encode the same cached ORF with either worker.</p>
                     </div>
-                    <label class="step-control" for="progressive-steps">
-                        <span>Progressive steps</span>
-                        <input id="progressive-steps" type="range" min="2" max="8" step="1" value="4" />
-                        <strong id="progressive-steps-value">4</strong>
+                    <div class="backend-panel">
+                        <span class="panel-label">Decode backend</span>
+                        <div class="decode-toggle" role="group" aria-label="Decode backend">
+                            <button id="decode-backend-jsquash" class="toggle-btn is-active" type="button" data-decode-backend="jsquash" aria-pressed="true">jsquash</button>
+                            <button id="decode-backend-libjxl" class="toggle-btn" type="button" data-decode-backend="libjxl" aria-pressed="false">libjxl</button>
+                        </div>
+                        <p class="panel-note">Decode the same JXL bytes with either worker, including the progressive preview path.</p>
+                    </div>
+                    <div class="decode-panel">
+                        <div class="decode-toggle" role="group" aria-label="Decode mode">
+                            <button id="mode-final" class="toggle-btn is-active" type="button" data-decode-mode="final" aria-pressed="true">Final decode</button>
+                            <button id="mode-progressive" class="toggle-btn" type="button" data-decode-mode="progressive" aria-pressed="false">Progressive preview</button>
+                        </div>
+                        <label class="step-control" for="progressive-steps">
+                            <span>Progressive steps</span>
+                            <input id="progressive-steps" type="range" min="2" max="8" step="1" value="4" />
+                            <strong id="progressive-steps-value">4</strong>
+                        </label>
+                    </div>
+                    <div class="backend-panel" data-preview-panel>
+                        <span class="panel-label">Progressive preview</span>
+                        <div class="decode-toggle is-tight" role="group" aria-label="Progressive preview">
+                            <button id="preview-mode-source" class="toggle-btn is-active" type="button" data-preview-mode="source" aria-pressed="true">Source playback</button>
+                            <button id="preview-mode-stream" class="toggle-btn" type="button" data-preview-mode="stream" aria-pressed="false">Stream decode</button>
+                        </div>
+                        <p class="panel-note">Source playback animates from the ORF while encode runs. Stream decode keeps trying the growing JXL codestream.</p>
+                    </div>
+                    <div class="help-popover" data-help-popover="progressive-source" hidden>
+                        Load a fresh ORF, replay the current JXL decode, or swap backends without reloading the page.
+                    </div>
+                </div>
+                <div class="status-strip">
+                    <div>
+                        <span class="status-label">Status</span>
+                        <strong id="status-text">Loading random ORF.</strong>
+                    </div>
+                    <div>
+                        <span class="status-label">Source</span>
+                        <strong id="source-meta">No file loaded.</strong>
+                    </div>
+                </div>
+            </section>
+
+            <section class="dashboard-group" data-group="transport">
+                <header class="dashboard-group-head">
+                    <div>
+                        <span class="dashboard-label">Transport</span>
+                        <strong>Chunking and pacing</strong>
+                    </div>
+                    <button class="info-btn" type="button" data-help-target="progressive-transport" aria-label="Transport help">i</button>
+                </header>
+                <div class="dashboard-controls">
+                    <label class="setting">
+                        <span>Chunk size</span>
+                        <input id="transport-chunk-kb" type="range" min="16" max="512" step="16" value="32" />
+                        <strong id="transport-chunk-kb-value">32</strong>
+                    </label>
+                    <label class="setting">
+                        <span>Iterations</span>
+                        <input id="transport-iterations" type="range" min="4" max="60" step="1" value="20" />
+                        <strong id="transport-iterations-value">20</strong>
+                    </label>
+                    <label class="setting">
+                        <span>Pacing</span>
+                        <input id="transport-pacing-ms" type="range" min="0" max="80" step="1" value="8" />
+                        <strong id="transport-pacing-ms-value">8</strong>
+                    </label>
+                    <label class="toggle-setting">
+                        <span>No pacing</span>
+                        <input id="transport-no-pacing" type="checkbox" />
+                    </label>
+                    <label class="toggle-setting">
+                        <span>Preview first</span>
+                        <input id="transport-preview-first" type="checkbox" checked />
+                    </label>
+                    <label class="toggle-setting">
+                        <span>Chunked encode</span>
+                        <input id="transport-chunked" type="checkbox" checked />
                     </label>
                 </div>
-                <div class="backend-panel" data-preview-panel>
-                    <span class="panel-label">Progressive preview</span>
-                    <div class="decode-toggle is-tight" role="group" aria-label="Progressive preview">
-                        <button id="preview-mode-source" class="toggle-btn is-active" type="button" data-preview-mode="source" aria-pressed="true">Source playback</button>
-                        <button id="preview-mode-stream" class="toggle-btn" type="button" data-preview-mode="stream" aria-pressed="false">Stream decode</button>
-                    </div>
-                    <p class="panel-note">Source playback animates from the ORF while encode runs. Stream decode keeps trying the growing JXL codestream.</p>
+                <div class="help-popover" data-help-popover="progressive-transport" hidden>
+                    Reduce or remove artificial delay here if you want to measure codec speed instead of a synthetic download crawl.
                 </div>
-            </div>
+            </section>
 
-            <div class="status-strip">
-                <div>
-                    <span class="status-label">Status</span>
-                    <strong id="status-text">Loading random ORF.</strong>
+            <section class="dashboard-group" data-group="display">
+                <header class="dashboard-group-head">
+                    <div>
+                        <span class="dashboard-label">Display</span>
+                        <strong>Thumbnail sizing</strong>
+                    </div>
+                    <button class="info-btn" type="button" data-help-target="progressive-display" aria-label="Display help">i</button>
+                </header>
+                <label class="setting">
+                    <span>Bottom thumbs</span>
+                    <input id="thumb-display-size" type="range" min="12" max="64" step="1" value="20" />
+                    <strong id="thumb-display-size-value">20</strong>
+                </label>
+                <p class="panel-note">Resizes the thumbnail grid at the bottom of this page. The source image size stays the same.</p>
+                <div class="help-popover" data-help-popover="progressive-display" hidden>
+                    Bigger values make the thumb bench easier to inspect. Smaller values squeeze more tiles on screen.
                 </div>
-                <div>
-                    <span class="status-label">Source</span>
-                    <strong id="source-meta">No file loaded.</strong>
+            </section>
+
+            <section class="dashboard-group" data-group="bench">
+                <header class="dashboard-group-head">
+                    <div>
+                        <span class="dashboard-label">Bench</span>
+                        <strong>300 / 800 long</strong>
+                    </div>
+                    <button class="info-btn" type="button" data-help-target="progressive-bench" aria-label="Bench help">i</button>
+                </header>
+                <div class="dashboard-actions">
+                    <button class="toggle-btn is-active" type="button" data-thumb-size="300" aria-pressed="true">300 long</button>
+                    <button class="toggle-btn is-active" type="button" data-thumb-size="800" aria-pressed="true">800 long</button>
                 </div>
-            </div>
-        </section>
+                <div class="dashboard-actions">
+                    <button class="toggle-btn" type="button" data-thumb-progressive="off" aria-pressed="false">Progressive off</button>
+                    <button class="toggle-btn is-active" type="button" data-thumb-progressive="on" aria-pressed="true">Progressive on</button>
+                    <button class="toggle-btn is-active" type="button" data-thumb-detail="dc" aria-pressed="true">DC only</button>
+                    <button class="toggle-btn" type="button" data-thumb-detail="ac" aria-pressed="false">DC + AC</button>
+                </div>
+                <p class="panel-note">These buttons mirror the bottom thumb bench so you can switch sizes without scrolling.</p>
+                <div class="help-popover" data-help-popover="progressive-bench" hidden>
+                    The 300-long and 800-long runs are the two size targets you asked to test, and the DC / AC toggles drive the thumb-bench progressive behavior.
+                </div>
+            </section>
+
+            <section class="dashboard-group is-dimmed" data-group="batch">
+                <header class="dashboard-group-head">
+                    <div>
+                        <span class="dashboard-label">Batch mode</span>
+                        <strong>Wrapper lab only</strong>
+                    </div>
+                    <button class="info-btn" type="button" data-help-target="progressive-batch" aria-label="Batch help">i</button>
+                </header>
+                <div class="dashboard-actions is-disabled">
+                    <button class="ghost-btn" type="button" disabled>Batch limit</button>
+                    <button class="ghost-btn" type="button" disabled>Concurrency</button>
+                    <button class="ghost-btn" type="button" disabled>Quality</button>
+                    <button class="ghost-btn" type="button" disabled>Effort</button>
+                    <button class="ghost-btn" type="button" disabled>Lossless</button>
+                </div>
+                <p class="panel-note">Disabled here. Open the wrapper lab for the batch grid and compare modes.</p>
+                <div class="help-popover" data-help-popover="progressive-batch" hidden>
+                    Batch controls live on the wrapper-lab page. They are still shown here so the panel stays consistent across pages.
+                </div>
+            </section>
+        </aside>
 
         <section class="ladder" aria-label="Progressive JXL variants">
             <article class="card" data-slot="thumb">

@@ -12,6 +12,7 @@ import { basename, extname, join, normalize, sep } from "node:path";
 const ROOT = import.meta.dir;
 const PORT = Number(process.env.PORT ?? 9000);
 const RANDOM_ORF_FOLDER = String.raw`C:\995\2026-02-17 Dave at Kyffhauser`;
+const RANDOM_GOBABEB_FOLDER = String.raw`C:\995\2026-02-20 Gobabeb To Windhoek`;
 const TIMINGS_DIR = join(ROOT, "timings");
 
 const MIME: Record<string, string> = {
@@ -75,6 +76,32 @@ serve({
             } catch (err) {
                 console.error("random orf error:", err);
                 return new Response("failed to load random orf", { status: 500 });
+            }
+        }
+        if (path === "/api/random-gobabeb") {
+            try {
+                const entries = await readdir(RANDOM_GOBABEB_FOLDER, { withFileTypes: true });
+                const files = entries
+                    .filter((entry) => entry.isFile())
+                    .map((entry) => entry.name);
+                if (!files.length) return new Response("no files found", { status: 404 });
+                const name = files[Math.floor(Math.random() * files.length)];
+                const fsPath = join(RANDOM_GOBABEB_FOLDER, name);
+                const data = await readFile(fsPath);
+                return new Response(data, {
+                    headers: {
+                        "Content-Type": "application/octet-stream",
+                        "Cache-Control": "no-cache",
+                        "Cross-Origin-Opener-Policy":   "same-origin",
+                        "Cross-Origin-Embedder-Policy": "require-corp",
+                        "X-File-Name": name,
+                        "X-File-Size": String(data.byteLength),
+                        "X-Source-Folder": RANDOM_GOBABEB_FOLDER,
+                    },
+                });
+            } catch (err) {
+                console.error("random gobabeb error:", err);
+                return new Response("failed to load random gobabeb file", { status: 500 });
             }
         }
         if (path === "/") {

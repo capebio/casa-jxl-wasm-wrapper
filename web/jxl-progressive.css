@@ -502,16 +502,16 @@ code {
 
 .thumb-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, 20px);
-    grid-auto-rows: 20px;
+    grid-template-columns: repeat(auto-fill, var(--thumb-size));
+    grid-auto-rows: var(--thumb-size);
     gap: 4px;
     min-height: 140px;
     align-content: start;
 }
 
 .thumb-grid canvas {
-    width: 20px;
-    height: 20px;
+    width: var(--thumb-size);
+    height: var(--thumb-size);
     border-radius: 4px;
     background: rgba(255,255,255,0.04);
     border: 1px solid rgba(255,255,255,0.05);

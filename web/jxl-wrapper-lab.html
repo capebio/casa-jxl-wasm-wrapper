@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JXL Wrapper Lab</title>
+    <link rel="stylesheet" href="./jxl-wrapper-lab.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body data-mode="existing">
+    <main class="shell">
+        <section class="hero compact">
+            <div class="hero-copy">
+                <p class="eyebrow">JPEG XL wrapper lab</p>
+                <h1>JXL Race Lab</h1>
+                <p class="lede">
+                    Compare JXL, WEBP, and JPEG performance in a drag-race track. Overlapping cards show relative paint positions.
+                </p>
+            </div>
+
+            <div class="hero-actions">
+                <div class="mode-switch" role="group" aria-label="Test mode">
+                    <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
+                    <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session</button>
+                    <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Wrapper</button>
+                    <button class="mode-btn" type="button" data-mode="compare" aria-pressed="false">Compare</button>
+                </div>
+                <button id="wrapper-controls-btn" class="dashboard-toggle" type="button" aria-expanded="false">Controls</button>
+            </div>
+        </section>
+
+        <section id="race-container" class="race-container">
+            <header class="race-header">
+                <div class="race-controls">
+                    <div class="format-chips">
+                        <label class="chip-label"><input type="checkbox" name="race-format" value="jxl" checked /> <span>JXL</span></label>
+                        <label class="chip-label"><input type="checkbox" name="race-format" value="webp" checked /> <span>WEBP</span></label>
+                        <label class="chip-label"><input type="checkbox" name="race-format" value="jpeg" checked /> <span>JPEG</span></label>
+                    </div>
+                    <div class="size-chips">
+                        <label class="chip-label"><input type="radio" name="race-size" value="125" /> <span>125px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="256" checked /> <span>256px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="600" /> <span>600px</span></label>
+                    </div>
+                    <button id="start-race" class="primary-btn">Start Race</button>
+                </div>
+            </header>
+            <div class="race-track-shell">
+                <div id="race-track" class="race-track">
+                    <div class="track-line"></div>
+                    <!-- Images will be injected here -->
+                </div>
+                <div id="previous-runs" class="previous-runs">
+                    <!-- Progress bars for previous runs -->
+                </div>
+            </div>
+        </section>
+
+        <aside id="wrapper-dashboard" class="dashboard" aria-hidden="true" data-open="false">
+            <div class="dashboard-head">
+                <div>
+                    <p class="dashboard-eyebrow">Wrapper controls</p>
+                    <h2>Batch, compare, display</h2>
+                </div>
+                <button id="wrapper-controls-close" class="dashboard-close" type="button">Close</button>
+            </div>
+
+            <section class="dashboard-group" data-group="display">
+                <header class="dashboard-group-head">
+                    <div>
+                        <span class="dashboard-label">Display</span>
+                        <strong>Batch thumbnail size</strong>
+                    </div>
+                    <button class="info-btn" type="button" data-help-target="wrapper-display" aria-label="Display help">i</button>
+                </header>
+                <label class="setting">
+                    <span>Bottom thumbs</span>
+                    <input id="batch-thumb-size" type="range" min="120" max="320" step="8" value="180" />
+                    <strong id="batch-thumb-size-value">180</strong>
+                </label>
+                <p class="panel-note">Resizes the bottom batch grid without changing the source files or compare math.</p>
+                <div class="help-popover" data-help-popover="wrapper-display" hidden>
+                    Bigger cells make the tiles easier to read. Smaller cells let more compare cards fit on screen.
+                </div>
+            </section>
+
+            <section class="dashboard-group is-dimmed" data-group="progressive">
+                <header class="dashboard-group-head">
+                    <div>
+                        <span class="dashboard-label">Progressive</span>
+                        <strong>Progressive encode / download</strong>
+                    </div>
+                    <button class="info-btn" type="button" data-help-target="wrapper-progressive" aria-label="Progressive help">i</button>
+                </header>
+                <div class="dashboard-actions is-disabled">
+                    <button class="ghost-btn" type="button" disabled>Preview first</button>
+                    <button class="ghost-btn" type="button" disabled>Chunked encode</button>
+                    <button class="ghost-btn" type="button" disabled>Transport pacing</button>
+                    <button class="ghost-btn" type="button" disabled>DC / AC</button>
+                </div>
+                <p class="panel-note">Disabled here. Open the progressive page to test download pacing, DC-only runs, and stepped decode.</p>
+                <div class="help-popover" data-help-popover="wrapper-progressive" hidden>
+                    The wrapper lab focuses on existing-vs-wrapper compare. Progressive transport knobs live on the progressive page.
+                </div>
+            </section>
+        </aside>
+
+        <section class="control-band compact">
+            <div class="source-panel">
+                <label class="file-drop" for="source-input" id="source-drop">
+                    <input id="source-input" type="file" multiple accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
+                    <strong>Pick files</strong>
+                    <span>ORF, JPEG, PNG, TIFF, JXL</span>
+                </label>
+                <div class="control-row">
+                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
+                    <button id="run-batch" class="secondary-btn" type="button">Run batch</button>
+                    <button id="clear-batch" class="secondary-btn" type="button">Clear</button>
+                </div>
+            </div>
+
+            <div class="settings-panel">
+                <label class="setting">
+                    <span>Batch limit</span>
+                    <input id="batch-limit" type="range" min="1" max="100" step="1" value="5" />
+                    <strong id="batch-limit-value">5</strong>
+                </label>
+                <label class="setting">
+                    <span>Concurrency</span>
+                    <input id="batch-concurrency" type="range" min="1" max="16" step="1" value="6" />
+                    <strong id="batch-concurrency-value">6</strong>
+                </label>
+                <label class="setting">
+                    <span>Quality</span>
+                    <input id="batch-quality" type="range" min="50" max="100" step="1" value="90" />
+                    <strong id="batch-quality-value">90</strong>
+                </label>
+                <label class="setting toggle-setting">
+                    <span>Lossless</span>
+                    <input id="batch-lossless" type="checkbox" />
+                </label>
+            </div>
+        </section>
+
+        <section class="status-grid compact" aria-label="Batch status">
+            <div class="status-card">
+                <span class="label">Selection</span>
+                <strong id="selection-status">No files.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Batch</span>
+                <strong id="batch-status">Idle.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Timing</span>
+                <strong id="timing-status">Ready.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Metrics</span>
+                <div class="mini-metrics">
+                    L:<span id="loaded-count">0</span>
+                    Q:<span id="queued-count">0</span>
+                    D:<span id="done-count">0</span>
+                    E:<span id="error-count">0</span>
+                </div>
+            </div>
+        </section>
+
+
+        <section class="batch-grid-shell">
+            <header class="batch-header">
+                <div>
+                    <p class="eyebrow">100-picture batch</p>
+                    <h2>Existing session vs wrapper libjxl</h2>
+                </div>
+                <a class="page-link" href="./jxl-progressive.html">Open progressive page</a>
+            </header>
+            <div id="batch-grid" class="batch-grid" aria-live="polite"></div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-wrapper-lab.js"></script>
+</body>
+</html>

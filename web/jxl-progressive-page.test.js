@@ -7,4 +7,7 @@ test('libjxl progressive stream path uses session chunks instead of blob decode 
     expect(source).not.toContain('decodeJxlBytes');
     expect(source).toContain('createProgressiveDecodeRequest');
     expect(source).toContain('request.push(chunk)');
+    expect(source).toContain('transport-chunk-kb');
+    expect(source).toContain('thumb-display-size');
+    expect(source).toContain('wireSlideoutPanel');
 });
