@@ -311,8 +311,9 @@ class LibjxlDecoder implements JxlDecoder {
 
   push(chunk: ArrayBuffer | Uint8Array): void {
     if (this.cancelled) return;
-    // ArrayBuffer callers transfer ownership — no copy needed. Uint8Array callers may
-    // reuse the underlying buffer, so we copy unless copyInput=false.
+    // ArrayBuffer callers (primary path: worker receives transferred chunks via postMessage)
+    // are always zero-copy — new Uint8Array(ab) is a view, not a copy. Uint8Array callers
+    // may reuse the underlying buffer, so we copy unless copyInput=false.
     const copy = this.options.copyInput !== false;
     const view = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : (copy ? toUint8Array(chunk).slice() : toUint8Array(chunk));
     this.queuedBytes += view.byteLength;

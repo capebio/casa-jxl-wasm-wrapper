@@ -188,6 +188,8 @@ static JxlWasmBuffer* DecodeRgba(const uint8_t* input, size_t input_size, uint32
         if (pixels_raw == nullptr) { JxlDecoderDestroy(dec); return MakeError(14); }
         pixels_size = buf_size;
       }
+      // Direct-buffer decode: libjxl writes pixels straight into pixels_raw — no intermediate
+      // copy. Result is returned via MakeBufferFromOwned (ownership transfer, no memcpy).
       if (JxlDecoderSetImageOutBuffer(dec, &pf, pixels_raw, pixels_size) != JXL_DEC_SUCCESS) { free(pixels_raw); JxlDecoderDestroy(dec); return MakeError(12); }
       continue;
     }

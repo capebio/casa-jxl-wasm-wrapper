@@ -24,6 +24,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 *   **Preemption & Re-queuing:** A "visible" task can interrupt and preempt a "background" task, which is then gracefully re-queued.
 *   **Deduplication (Fan-out):** Multiple requests for the same source URL are consolidated into a single decode session to save CPU and memory.
 *   **Integrated Backpressure:** Uses WHATWG/Node stream adapters to prevent memory bloat during massive transfers.
+*   **Pipelined I/O Prefetch:** `fromReadableStream` in `jxl-stream` prefetches the next network chunk immediately after each chunk arrives (before awaiting `session.push`), so network delivery of chunk N+1 overlaps with scheduler backpressure resolution on chunk N. Eliminates idle I/O time during push-wait on bandwidth-constrained connections.
 *   **Execution Budgets:** Stage-based time budgets prevent long-running decodes from hanging the worker or UI.
 
 ### 3. Scientific Correctness & Fidelity
