@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ORF → JPEG XL (browser)</title>
     <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="test-nav.css" />
     <link rel="stylesheet" href="casabio.css" />
     <script type="importmap">
     {
@@ -23,7 +24,17 @@
     }
     </script>
 </head>
-<body>
+<body class="has-home-bar">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link is-active" href="./index.html" aria-current="page">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+        </div>
+    </nav>
+
     <div id="timings-sidebar" class="timings-sidebar">
         <div class="timings-sidebar-tab" id="timings-tab" aria-label="Open timings (T)">
             <span class="sidebar-tab-label">Timings</span>
@@ -70,7 +81,13 @@
 
     <header>
         <div class="title">
-            <h1>ORF → JPEG XL — fully in the browser <button class="info-btn" id="info-btn" type="button" aria-label="About this tool">ℹ</button></h1>
+            <div class="title-copy">
+                <div class="title-line">
+                    <h1>ORF to JPEG XL browser test bench</h1>
+                    <button class="info-btn" id="info-btn" type="button" aria-label="About this tool">ℹ</button>
+                </div>
+                <p class="title-subcopy">Encode, benchmark, and inspect timing across the browser pipeline.</p>
+            </div>
             <button id="casabio-toggle" class="casabio-toggle" type="button" title="Upload encoded JXLs to a Casabio expedition gallery">Upload to Casabio</button>
             <div class="view-toggle" role="group" aria-label="Gallery layout">
                 <button class="view-btn active" data-view="rect"    title="Portrait rectangles">Rect</button>

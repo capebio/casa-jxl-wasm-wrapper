@@ -109,10 +109,14 @@ export async function loadWasmModule(wasmUrl: string, options: WasmLoaderOptions
 }
 
 async function defaultImportWasm(): Promise<unknown> {
-  // Dynamic import keeps worker startup clean when package/artifact absent.
-  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-  // @ts-ignore - module may be absent until local packages are installed
-  return await import("@casabio/jxl-wasm").catch(() => null) as unknown;
+  // Workers do not reliably inherit the page import map, so resolve the sibling
+  // package by URL before falling back to the package specifier for bundled use.
+  const packageUrl = new URL("../../jxl-wasm/dist/index.js", import.meta.url).href;
+  return await import(packageUrl).catch(async () => {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore - module may be absent until local packages are installed
+    return await import("@casabio/jxl-wasm").catch(() => null) as unknown;
+  }) as unknown;
 }
 
 function resolveJxlModule(value: unknown): JxlModule | null {

@@ -24,3 +24,13 @@ export function getContext() {
     }
     return _ctx;
 }
+
+export async function resetContext() {
+    if (_ctx?.shutdown) {
+        try {
+            await _ctx.shutdown();
+        } catch {}
+    }
+    _ctx = null;
+    return getContext();
+}

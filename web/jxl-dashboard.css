@@ -10,10 +10,12 @@
     z-index: 30;
     border: 1px solid var(--border, rgba(255,255,255,0.12));
     border-radius: 999px;
-    padding: 10px 14px;
+    padding: 7px 10px;
     background: rgba(16, 20, 27, 0.92);
     color: var(--text, #ebeff5);
     font: inherit;
+    font-size: 12px;
+    line-height: 1.1;
     font-weight: 700;
     cursor: pointer;
 }
@@ -49,7 +51,7 @@
 
 .dashboard-head h2 {
     margin: 2px 0 0;
-    font-size: 22px;
+    font-size: 18px;
     line-height: 1.05;
 }
 
@@ -73,24 +75,27 @@
 }
 
 .dashboard-close {
-    padding: 8px 12px;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.1;
 }
 
 .info-btn {
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     display: inline-grid;
     place-items: center;
     font-weight: 800;
+    font-size: 11px;
     color: var(--cool, #7dd3fc);
 }
 
 .dashboard-group {
     position: relative;
     display: grid;
-    gap: 12px;
-    margin-bottom: 14px;
-    padding: 14px;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding: 12px;
     border: 1px solid var(--border, rgba(255,255,255,0.12));
     border-radius: 20px;
     background: rgba(255,255,255,0.04);
@@ -108,18 +113,18 @@
     color: var(--faint, #6c7482);
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
 }
 
 .dashboard-group strong {
-    font-size: 14px;
+    font-size: 12.5px;
 }
 
 .dashboard-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
+    gap: 8px;
 }
 
 .dashboard-actions .run-btn,
@@ -153,7 +158,7 @@
     border-radius: 16px;
     border: 1px solid var(--border, rgba(255,255,255,0.12));
     background: rgba(255,255,255,0.05);
-    padding: 10px 12px;
+    padding: 8px 10px;
 }
 
 .dashboard .setting {
@@ -173,10 +178,12 @@
 .dashboard .toggle-btn {
     border: 1px solid var(--border, rgba(255,255,255,0.12));
     border-radius: 999px;
-    padding: 10px 14px;
+    padding: 6px 10px;
     background: rgba(255,255,255,0.05);
     color: var(--muted, #9ea7b6);
     font: inherit;
+    font-size: 12px;
+    line-height: 1.1;
     cursor: pointer;
 }
 
@@ -201,12 +208,12 @@
 }
 
 .help-popover {
-    padding: 10px 12px;
+    padding: 8px 10px;
     border-radius: 14px;
     border: 1px solid var(--border, rgba(255,255,255,0.12));
     background: rgba(0, 0, 0, 0.22);
     color: var(--muted, #9ea7b6);
-    font-size: 12px;
+    font-size: 11px;
 }
 
 .is-dimmed,

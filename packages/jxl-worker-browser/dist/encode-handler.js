@@ -11,10 +11,12 @@ export class EncodeHandler {
     callbacks;
     state = "created";
     pixelQueue = [];
+    pixelReadIndex = 0;
     queueDepth = 0;
     cancelled = false;
     finished = false;
     firstByteEmitted = false;
+    wakeResolve = null;
     constructor(opts, wasm, callbacks) {
         this.sessionId = opts.sessionId;
         this.opts = opts;
@@ -33,15 +35,21 @@ export class EncodeHandler {
             entry.region = region;
         this.pixelQueue.push(entry);
         this.queueDepth++;
+        this.wakeResolve?.();
+        this.wakeResolve = null;
     }
     onFinish() {
         this.finished = true;
+        this.wakeResolve?.();
+        this.wakeResolve = null;
     }
     async onCancel(reason) {
         if (this.cancelled)
             return;
         this.cancelled = true;
         this.state = "cancelled";
+        this.wakeResolve?.();
+        this.wakeResolve = null;
         const msg = {
             type: "encode_cancelled",
             sessionId: this.sessionId,
@@ -80,28 +88,23 @@ export class EncodeHandler {
     // Helpers
     // ---------------------------------------------------------------------------
     waitForPixels() {
-        return new Promise((resolve) => {
-            const check = () => {
-                if (this.pixelQueue.length > 0 || this.finished || this.cancelled) {
-                    resolve();
-                }
-                else if (this.state === "done" || this.state === "error") {
-                    resolve();
-                }
-                else {
-                    setTimeout(check, 2);
-                }
-            };
-            check();
-        });
+        if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled
+            || this.state === "done" || this.state === "error") {
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => { this.wakeResolve = resolve; });
     }
     async feedEncoder(encoder) {
         while (!this.cancelled && this.state !== "done" && this.state !== "error") {
             await this.waitForPixels();
-            while (this.pixelQueue.length > 0) {
-                const entry = this.pixelQueue.shift();
+            while (this.pixelQueue.length > this.pixelReadIndex) {
+                const entry = this.pixelQueue[this.pixelReadIndex++];
                 if (entry === undefined)
                     break;
+                if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
+                    this.pixelQueue = this.pixelQueue.slice(this.pixelReadIndex);
+                    this.pixelReadIndex = 0;
+                }
                 this.queueDepth--;
                 await encoder.pushPixels(entry.chunk, entry.region);
                 if (this.queueDepth < CHUNK_HWM) {

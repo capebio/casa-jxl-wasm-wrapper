@@ -99,6 +99,14 @@ body > header {
     transition: background 200ms ease, border-color 200ms ease;
 }
 
+body.has-home-bar {
+    padding-top: 46px;
+}
+
+body.has-home-bar > header {
+    top: 46px;
+}
+
 body > header:hover {
     background: #0f1115;
     border-bottom-color: #1f242b;
@@ -117,17 +125,40 @@ body > header:hover {
 body > header .title {
     min-width: 0;
     position: relative;
+    display: grid;
+    gap: 8px;
+    align-items: start;
+}
+
+body > header .title-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+body > header .title-line {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 8px;
+    min-width: 0;
+}
+
+body > header .title-subcopy {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+    max-width: 72ch;
 }
 body > header h1 {
     margin: 0;
     font-weight: 600;
-    font-size: 17px;
-    display: flex;
-    align-items: center;
-    gap: 0;
+    font-size: 16px;
+    line-height: 1.15;
+    max-width: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .info-btn {
@@ -231,14 +262,14 @@ body:has(.lb-panel-btn.active) > header:hover .controls {
 .controls fieldset {
     border: 1px solid #2a3038;
     border-radius: 6px;
-    padding: 8px 12px 10px;
+    padding: 6px 10px 8px;
     margin: 0;
     display: flex;
-    gap: 14px;
+    gap: 10px;
     align-items: center;
 }
 .controls legend {
-    font-size: 10px;
+    font-size: 9px;
     text-transform: uppercase;
     letter-spacing: 0.6px;
     color: #6c7480;
@@ -248,13 +279,13 @@ body:has(.lb-panel-btn.active) > header:hover .controls {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 11px;
+    font-size: 10px;
     color: #98a0a8;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 .controls input[type="range"] {
-    width: 130px;
+    width: 110px;
     accent-color: #4f8cff;
 }
 .controls legend small {
@@ -262,7 +293,7 @@ body:has(.lb-panel-btn.active) > header:hover .controls {
     letter-spacing: 0;
     margin-left: 4px;
     color: #4a5260;
-    font-size: 9px;
+    font-size: 8px;
 }
 .controls .look-fieldset {
     display: grid;
@@ -280,7 +311,7 @@ body:has(.lb-panel-btn.active) > header:hover .controls {
 .controls .look-column {
     border: 1px solid #2a3038;
     border-radius: 6px;
-    padding: 8px 12px 10px;
+    padding: 6px 10px 8px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -359,7 +390,7 @@ body > header.adjusting-control .look-column.active {
 .jxl-fieldset {
     flex-direction: column !important;
     align-items: stretch !important;
-    gap: 8px !important;
+    gap: 6px !important;
     position: relative;
 }
 
@@ -368,7 +399,7 @@ body > header.adjusting-control .look-column.active {
 .jxl-group {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
 }
 
 .jxl-subrow {
@@ -430,15 +461,15 @@ body > header.adjusting-control .look-column.active {
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    font-size: 11px;
+    font-size: 10px;
     color: #98a0a8;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 .jxl-lbl { white-space: nowrap; }
 .jxl-row input[type="checkbox"] { accent-color: #4f8cff; flex-shrink: 0; }
-.jxl-row input[type="range"] { width: 120px; }
-.jxl-row select { font-size: 11px; }
+.jxl-row input[type="range"] { width: 104px; }
+.jxl-row select { font-size: 10px; }
 
 /* Color — 2-col so vibrance sits next to saturation */
 .controls .look-fieldset.color-fieldset {
@@ -473,17 +504,17 @@ body > header.adjusting-control .look-column.active {
     text-align: center;
 }
 .controls label.lr {
-    min-width: 110px;
+    min-width: 100px;
 }
 .controls label.lr input[type="range"] {
-    width: 110px;
+    width: 100px;
 }
 .controls label.lr strong { color: #e7e9ec; font-weight: 600; min-width: 32px; display: inline-block; text-align: right; }
 .reset-btn {
     background: #2a3038;
     color: #c8ccd0;
     border: 1px solid #353c46;
-    padding: 6px 10px;
+    padding: 4px 8px;
     border-radius: 4px;
     font-size: 11px;
     cursor: pointer;
@@ -498,16 +529,16 @@ body > header.adjusting-control .look-column.active {
     color: #e7e9ec;
     border: 1px solid #2a3038;
     border-radius: 4px;
-    padding: 4px 6px;
+    padding: 3px 5px;
     font: inherit;
-    font-size: 12px;
+    font-size: 11px;
 }
 .controls .toggle {
     flex-direction: row;
     align-items: center;
     gap: 6px;
     text-transform: none;
-    font-size: 13px;
+    font-size: 12px;
     color: #c8ccd0;
     cursor: pointer;
 }
@@ -518,7 +549,7 @@ body > header.adjusting-control .look-column.active {
     background: #2c64ff;
     color: white;
     border: none;
-    padding: 6px 12px;
+    padding: 4px 10px;
     border-radius: 4px;
     font-size: 12px;
     cursor: pointer;
@@ -536,7 +567,7 @@ body > header.adjusting-control .look-column.active {
     background: #1a6640;
     color: #b8ffd6;
     border: none;
-    padding: 6px 12px;
+    padding: 4px 10px;
     border-radius: 4px;
     font-size: 12px;
     cursor: pointer;
@@ -567,13 +598,13 @@ body > header.adjusting-control .look-column.active {
     flex-shrink: 0;
 }
 .preset-btn {
-    width: 28px;
-    height: 24px;
+    width: 24px;
+    height: 20px;
     background: #1e2530;
     color: #7a8494;
     border: 1px solid #2a3038;
     border-radius: 4px;
-    font-size: 11px;
+    font-size: 10px;
     cursor: pointer;
     padding: 0;
     text-align: center;
@@ -625,7 +656,7 @@ main { padding: 24px 32px 64px; }
 .drop-target {
     border: 2px dashed #2a3038;
     border-radius: 10px;
-    padding: 36px;
+    padding: 24px;
     text-align: center;
     background: #141820;
     transition: border-color 120ms, background 120ms;
@@ -639,9 +670,9 @@ main { padding: 24px 32px 64px; }
     background: #2c64ff;
     color: white;
     border: none;
-    padding: 10px 18px;
+    padding: 6px 10px;
     border-radius: 6px;
-    font-size: 14px;
+    font-size: 12px;
     cursor: pointer;
 }
 .drop-target button:hover { background: #3974ff; }

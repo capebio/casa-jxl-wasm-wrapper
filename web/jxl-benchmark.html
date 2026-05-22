@@ -58,6 +58,7 @@
                 <div class="control-row">
                     <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
                     <button id="start-benchmark" class="primary-btn" type="button" disabled title="Press Random Gobabeb first">Run benchmark</button>
+                    <button id="add-permutation" class="secondary-btn" type="button" disabled title="Run benchmark first, then add permutation">Add Permutation</button>
                     <button id="clear-results" class="secondary-btn" type="button">Clear</button>
                     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
                     <button id="save-settings" class="ghost-btn" type="button">Save settings</button>
@@ -77,6 +78,7 @@
                             <label class="spinbox-label"># of test files</label>
                             <input id="max-files" class="spinbox" type="number" min="1" max="20" value="5" />
                         </div>
+                        <button id="optimize-btn" class="secondary-btn" type="button" disabled title="Load files first, then optimize codec toggles for this device">Optimize</button>
                     </div>
 
                     <div class="quality-section quality-inline">
@@ -178,6 +180,10 @@
                                     <input type="checkbox" id="opt-threading" />
                                     <span class="opt-label">Threading</span>
                                 </label>
+                                <div class="tier-display-wrap" style="grid-column: 1 / -1; margin-top: 2px;">
+                                    <span class="tier-label">Tier:</span>
+                                    <span id="tier-display" class="tier-value">detecting…</span>
+                                </div>
                                 <label class="toggle-opt">
                                     <input type="checkbox" id="opt-progressive" checked />
                                     <span class="opt-label">Progressive</span>
@@ -201,6 +207,10 @@
                                 <label class="toggle-opt">
                                     <input type="checkbox" id="opt-preview-first" />
                                     <span class="opt-label">Preview 1st</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-skip-copy" />
+                                    <span class="opt-label">Zero-copy buf</span>
                                 </label>
                             </div>
                         </div>
@@ -250,6 +260,8 @@
                 <h2>Latency, distribution, and file size analysis</h2>
                 <div class="graph-caption" id="graph-caption"></div>
             </header>
+
+            <div id="perm-selector-bar" class="perm-selector-bar" hidden></div>
 
             <div class="graphs-grid">
                 <div class="graph-item">

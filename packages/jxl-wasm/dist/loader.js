@@ -13,7 +13,9 @@ async function loadNodeModule(manifest, options) {
     const fs = options.nodeFs ?? (await import("node:fs/promises"));
     const wasmUrl = options.wasmUrl ?? manifest.wasmUrl;
     const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""));
-    return WebAssembly.compile(bytes);
+    // fs.readFile returns Buffer (Uint8Array<ArrayBufferLike>) but WebAssembly.compile
+    // requires BufferSource. Copy into a plain ArrayBuffer to satisfy strict TS lib types.
+    return WebAssembly.compile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
 }
 async function loadBrowserModule(manifest, options) {
     const key = `${manifest.buildId}:${manifest.wasmSha}`;

@@ -20,8 +20,14 @@ test('wrapper lab page is a separate page with three-way mode and 100-picture ba
     expect(html).toContain('id="batch-limit"');
     expect(html).toContain('id="run-batch"');
     expect(html).toContain('id="batch-grid"');
+    expect(html).toContain('id="dbg-console-btn"');
+    expect(html).toContain('Session worker');
+    expect(html).toContain('Direct wrapper');
+    expect(html).toContain('Batch tiles encode and decode resized thumbnails, not full-size source frames.');
+    expect(html).toContain('Session worker routes JPEG XL through the browser session stack');
     expect(js).toContain('createEncoder');
     expect(js).toContain('createDecoder');
     expect(js).toContain('MAX_BATCH_LIMIT = 100');
+    expect(js).toContain('initDebugConsole(dbgConsoleBtn)');
     expect(js).toContain('wireSlideoutPanel');
 });

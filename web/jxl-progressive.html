@@ -2,10 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>JPEG XL Progressive Test</title>
+    <link rel="stylesheet" href="./test-nav.css" />
     <link rel="stylesheet" href="./jxl-progressive.css" />
     <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <link rel="stylesheet" href="./jxl-debug-console.css" />
     <script type="importmap">
     {
       "imports": {
@@ -23,20 +26,30 @@
     }
     </script>
 </head>
-<body>
+<body class="has-home-bar">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link is-active" href="./jxl-progressive.html" aria-current="page">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+        </div>
+    </nav>
+
     <main class="page-shell">
         <section class="hero">
             <div class="eyebrow">JPEG XL progressive ladder</div>
-            <h1>Three sizes. One scene. Fast visual recognition.</h1>
+            <h1>JPEG XL progressive decode test bench</h1>
             <p class="lede">
-                A random ORF from <code>C:\995\2026-02-17 Dave at Kyffhauser</code> gets loaded on demand.
-                Then the 300-long, 800-long, and full-size JXL variants stream in with bytes loaded against total bytes.
-                Flip between a full decode and a stepped progressive preview.
+                Load a random ORF, keep the controls in view, and watch the 300-long, 800-long, and full-size JXL variants fill in as bytes arrive.
+                Switch decode mode, transport pace, and benchmark size without opening extra panels.
             </p>
             <button id="progressive-controls-btn" class="dashboard-toggle" type="button" aria-expanded="false">Controls</button>
+            <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
         </section>
 
-        <aside id="progressive-dashboard" class="dashboard" aria-hidden="true" data-open="false">
+        <aside id="progressive-dashboard" class="dashboard" aria-hidden="false" data-open="true">
             <div class="dashboard-head">
                 <div>
                     <p class="dashboard-eyebrow">Progressive controls</p>
@@ -63,23 +76,23 @@
                     <div class="backend-panel">
                         <span class="panel-label">Encode backend</span>
                         <div class="decode-toggle" role="group" aria-label="Encode backend">
-                            <button id="encode-backend-jsquash" class="toggle-btn is-active" type="button" data-encode-backend="jsquash" aria-pressed="true">jsquash</button>
-                            <button id="encode-backend-libjxl" class="toggle-btn" type="button" data-encode-backend="libjxl" aria-pressed="false">libjxl</button>
+                            <button id="encode-backend-jsquash" class="toggle-btn" type="button" data-encode-backend="jsquash" aria-pressed="false">jsquash</button>
+                            <button id="encode-backend-libjxl" class="toggle-btn is-active" type="button" data-encode-backend="libjxl" aria-pressed="true">libjxl</button>
                         </div>
                         <p class="panel-note">Encode the same cached ORF with either worker.</p>
                     </div>
                     <div class="backend-panel">
                         <span class="panel-label">Decode backend</span>
                         <div class="decode-toggle" role="group" aria-label="Decode backend">
-                            <button id="decode-backend-jsquash" class="toggle-btn is-active" type="button" data-decode-backend="jsquash" aria-pressed="true">jsquash</button>
-                            <button id="decode-backend-libjxl" class="toggle-btn" type="button" data-decode-backend="libjxl" aria-pressed="false">libjxl</button>
+                            <button id="decode-backend-jsquash" class="toggle-btn" type="button" data-decode-backend="jsquash" aria-pressed="false">jsquash</button>
+                            <button id="decode-backend-libjxl" class="toggle-btn is-active" type="button" data-decode-backend="libjxl" aria-pressed="true">libjxl</button>
                         </div>
                         <p class="panel-note">Decode the same JXL bytes with either worker, including the progressive preview path.</p>
                     </div>
                     <div class="decode-panel">
                         <div class="decode-toggle" role="group" aria-label="Decode mode">
-                            <button id="mode-final" class="toggle-btn is-active" type="button" data-decode-mode="final" aria-pressed="true">Final decode</button>
-                            <button id="mode-progressive" class="toggle-btn" type="button" data-decode-mode="progressive" aria-pressed="false">Progressive preview</button>
+                            <button id="mode-final" class="toggle-btn" type="button" data-decode-mode="final" aria-pressed="false">Final decode</button>
+                            <button id="mode-progressive" class="toggle-btn is-active" type="button" data-decode-mode="progressive" aria-pressed="true">Progressive preview</button>
                         </div>
                         <label class="step-control" for="progressive-steps">
                             <span>Progressive steps</span>
@@ -90,8 +103,8 @@
                     <div class="backend-panel" data-preview-panel>
                         <span class="panel-label">Progressive preview</span>
                         <div class="decode-toggle is-tight" role="group" aria-label="Progressive preview">
-                            <button id="preview-mode-source" class="toggle-btn is-active" type="button" data-preview-mode="source" aria-pressed="true">Source playback</button>
-                            <button id="preview-mode-stream" class="toggle-btn" type="button" data-preview-mode="stream" aria-pressed="false">Stream decode</button>
+                            <button id="preview-mode-source" class="toggle-btn" type="button" data-preview-mode="source" aria-pressed="false">Source playback</button>
+                            <button id="preview-mode-stream" class="toggle-btn is-active" type="button" data-preview-mode="stream" aria-pressed="true">Stream decode</button>
                         </div>
                         <p class="panel-note">Source playback animates from the ORF while encode runs. Stream decode keeps trying the growing JXL codestream.</p>
                     </div>
@@ -235,6 +248,10 @@
                     <div class="timings">1/3: -- · 2/3: -- · end: --</div>
                     <div class="notes">Waiting for source.</div>
                 </div>
+                <div class="error-detail">
+                    <pre class="error-text"></pre>
+                    <button class="error-copy-btn" type="button">Copy</button>
+                </div>
             </article>
 
             <article class="card" data-slot="mid">
@@ -253,6 +270,10 @@
                     <div class="timings">1/3: -- · 2/3: -- · end: --</div>
                     <div class="notes">Waiting for source.</div>
                 </div>
+                <div class="error-detail">
+                    <pre class="error-text"></pre>
+                    <button class="error-copy-btn" type="button">Copy</button>
+                </div>
             </article>
 
             <article class="card" data-slot="full">
@@ -270,6 +291,10 @@
                     <div class="encode">encode: --</div>
                     <div class="timings">1/3: -- · 2/3: -- · end: --</div>
                     <div class="notes">Waiting for source.</div>
+                </div>
+                <div class="error-detail">
+                    <pre class="error-text"></pre>
+                    <button class="error-copy-btn" type="button">Copy</button>
                 </div>
             </article>
         </section>

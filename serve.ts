@@ -82,7 +82,7 @@ serve({
             try {
                 const entries = await readdir(RANDOM_GOBABEB_FOLDER, { withFileTypes: true });
                 const files = entries
-                    .filter((entry) => entry.isFile())
+                    .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === ".orf")
                     .map((entry) => entry.name);
                 if (!files.length) return new Response("no files found", { status: 404 });
                 const name = files[Math.floor(Math.random() * files.length)];
@@ -102,6 +102,24 @@ serve({
             } catch (err) {
                 console.error("random gobabeb error:", err);
                 return new Response("failed to load random gobabeb file", { status: 500 });
+            }
+        }
+        // Worker falls back to this URL when import maps aren't available (pre-Chrome 114).
+        // Serve the scalar WASM so the worker can bootstrap without T-WASM-BUILD.
+        if (path === "/packages/jxl-worker-browser/dist/jxl-core.wasm") {
+            const wasmPath = join(ROOT, "packages", "jxl-wasm", "dist", "jxl-core.scalar.wasm");
+            try {
+                const data = await readFile(wasmPath);
+                return new Response(data, {
+                    headers: {
+                        "Content-Type": "application/wasm",
+                        "Cache-Control": "no-cache",
+                        "Cross-Origin-Opener-Policy":   "same-origin",
+                        "Cross-Origin-Embedder-Policy": "require-corp",
+                    },
+                });
+            } catch {
+                return new Response("jxl-core.scalar.wasm not found", { status: 404 });
             }
         }
         if (path === "/") {

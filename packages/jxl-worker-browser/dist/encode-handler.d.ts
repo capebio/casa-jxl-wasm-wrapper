@@ -11,10 +11,12 @@ export declare class EncodeHandler {
     private readonly callbacks;
     private state;
     private pixelQueue;
+    private pixelReadIndex;
     private queueDepth;
     private cancelled;
     private finished;
     private firstByteEmitted;
+    private wakeResolve;
     constructor(opts: MsgEncodeStart, wasm: JxlModule, callbacks: EncodeHandlerCallbacks);
     onPixels(chunk: ArrayBuffer, region?: Region): void;
     onFinish(): void;

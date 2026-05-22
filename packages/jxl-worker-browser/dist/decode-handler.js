@@ -12,9 +12,11 @@ export class DecodeHandler {
     callbacks;
     state = "created";
     chunkQueue = [];
+    chunkReadIndex = 0;
     queueDepth = 0;
     cancelled = false;
     inputClosed = false;
+    wakeResolve = null;
     // Stage budget tracking
     stageStartMs = performance.now();
     currentStage = "header";
@@ -34,19 +36,21 @@ export class DecodeHandler {
             return;
         this.chunkQueue.push(chunk);
         this.queueDepth++;
-        // Signal backpressure if above HWM.
-        if (this.queueDepth >= CHUNK_HWM) {
-            // Drain signal will be posted after the handler processes chunks.
-        }
+        this.wakeResolve?.();
+        this.wakeResolve = null;
     }
     onClose() {
         this.inputClosed = true;
+        this.wakeResolve?.();
+        this.wakeResolve = null;
     }
     async onCancel(reason) {
         if (this.cancelled)
             return;
         this.cancelled = true;
         this.state = "cancelled";
+        this.wakeResolve?.();
+        this.wakeResolve = null;
         const msg = {
             type: "decode_cancelled",
             sessionId: this.sessionId,
@@ -78,28 +82,23 @@ export class DecodeHandler {
     // Helpers
     // ---------------------------------------------------------------------------
     waitForChunk() {
-        return new Promise((resolve) => {
-            const check = () => {
-                if (this.chunkQueue.length > 0 || this.inputClosed || this.cancelled) {
-                    resolve();
-                }
-                else if (this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
-                    resolve();
-                }
-                else {
-                    setTimeout(check, 2);
-                }
-            };
-            check();
-        });
+        if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.cancelled
+            || this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => { this.wakeResolve = resolve; });
     }
     async feedDecoder(decoder) {
         while (!this.cancelled && this.state !== "final" && this.state !== "error") {
             await this.waitForChunk();
-            while (this.chunkQueue.length > 0) {
-                const chunk = this.chunkQueue.shift();
+            while (this.chunkQueue.length > this.chunkReadIndex) {
+                const chunk = this.chunkQueue[this.chunkReadIndex++];
                 if (chunk === undefined)
                     break;
+                if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
+                    this.chunkQueue = this.chunkQueue.slice(this.chunkReadIndex);
+                    this.chunkReadIndex = 0;
+                }
                 this.queueDepth--;
                 await decoder.push(chunk);
                 if (this.queueDepth < CHUNK_HWM) {

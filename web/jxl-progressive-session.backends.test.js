@@ -1,6 +1,18 @@
 import { expect, test } from 'bun:test';
 import { createProgressiveSession } from './jxl-progressive-session.js';
 
+test('defaults encode and decode backends to libjxl', () => {
+    const session = createProgressiveSession({
+        loadSource: async () => ({
+            name: 'sample.orf',
+            bytes: new Uint8Array([1, 2]),
+        }),
+    });
+
+    expect(session.encodeBackend).toBe('libjxl');
+    expect(session.decodeBackend).toBe('libjxl');
+});
+
 test('tracks encode and decode backends independently while reusing the same source', async () => {
     let loads = 0;
     const session = createProgressiveSession({

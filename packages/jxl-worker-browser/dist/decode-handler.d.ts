@@ -10,9 +10,11 @@ export declare class DecodeHandler {
     private readonly callbacks;
     private state;
     private chunkQueue;
+    private chunkReadIndex;
     private queueDepth;
     private cancelled;
     private inputClosed;
+    private wakeResolve;
     private stageStartMs;
     private currentStage;
     constructor(opts: MsgDecodeStart, wasm: JxlModule, callbacks: DecodeHandlerCallbacks);

@@ -5,7 +5,6 @@ const source = readFileSync(new URL('./jxl-wrapper-lab.js', import.meta.url), 'u
 
 describe('JXL wrapper lab performance safeguards', () => {
     test('keeps batch hot paths from doing avoidable work', () => {
-        expect(source).toContain('preloadJxlModule');
         expect(source).toContain('WRAPPER_FILE_LOAD_CONCURRENCY');
         expect(source).toContain('RANDOM_LOAD_CONCURRENCY');
         expect(source).toContain('STATUS_UPDATE_INTERVAL_MS');
@@ -24,6 +23,16 @@ describe('JXL wrapper lab performance safeguards', () => {
         expect(source).toContain('await decoder.dispose()');
         expect(source).toContain('exactBuffer(source.rgba)');
         expect(source).toContain('exactBuffer(bytes)');
+        expect(source).toContain('const attemptSource = { ...source, rgba: source.rgba.slice() };');
+        expect(source).toContain("dbgLog(`  session enc →");
+        expect(source).toContain("dbgLog(`  ${label} dec ←");
+        expect(source).toContain('initDebugConsole(dbgConsoleBtn)');
+        expect(source).toContain('SESSION_STAGE_TIMEOUT_MS = 1000');
+        expect(source).toContain('sessionBackendBroken = false');
+        expect(source).toContain('runExistingSessionPipeline');
+        expect(source).toContain('runWrapperPipeline');
+        expect(source).toContain("session fallback → wrapper");
+        expect(source).toContain("session bypass → wrapper");
         expect(source).toContain('const decodeStart = performance.now()');
         expect(source).not.toContain('const events = []');
     });

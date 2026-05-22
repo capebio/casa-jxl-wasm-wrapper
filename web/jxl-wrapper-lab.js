@@ -1,6 +1,6 @@
 ﻿import initRaw, { process_orf, rgb_to_rgba } from '../pkg/raw_converter_wasm.js';
-import { createDecoder, createEncoder, preloadJxlModule } from '@casabio/jxl-wasm';
-import { getContext } from './jxl-browser-context.js';
+import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { getContext, resetContext } from './jxl-browser-context.js';
 import {
     bindRangeLabel,
     clamp,
@@ -9,14 +9,16 @@ import {
     wireHelpPopovers,
     wireSlideoutPanel,
 } from './jxl-dashboard-ui.js';
+import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
 const MAX_BATCH_LIMIT = 100;
 const RANDOM_LOAD_CONCURRENCY = 4;
 const WRAPPER_FILE_LOAD_CONCURRENCY = 4;
 const STATUS_UPDATE_INTERVAL_MS = 120;
 const TILE_CANVAS_MAX_EDGE = 256;
+const SESSION_STAGE_TIMEOUT_MS = 1000;
 
-const modeButtons = [...document.querySelectorAll('[data-mode]')];
+const modeButtons = [...document.querySelectorAll('button[data-mode]')];
 const sourceInput = document.getElementById('source-input');
 const sourceDrop = document.getElementById('source-drop');
 const loadRandomBtn = document.getElementById('load-random');
@@ -47,16 +49,19 @@ const errorCount = document.getElementById('error-count');
 const batchGrid = document.getElementById('batch-grid');
 const controlBand = document.querySelector('.control-band');
 const statusGrid = document.querySelector('.status-grid');
+const dbgConsoleBtn = document.getElementById('dbg-console-btn');
 
-const existingContext = getContext();
+let existingContext = getContext();
 const paintScratchCanvas = document.createElement('canvas');
 const sourceCache = new Map();
 
 let currentMode = 'existing';
 let selectedSources = [];
 let activeRunId = 0;
+let activeLoadId = 0;
 let batchThumbSize = Number(batchThumbSizeInput?.value) || 220;
 let lastProgressStatusAt = 0;
+let sessionBackendBroken = false;
 
 function setMode(mode) {
     currentMode = mode;
@@ -66,14 +71,14 @@ function setMode(mode) {
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
     }
-    modeStatus.textContent =
+    if (modeStatus) modeStatus.textContent =
         mode === 'existing'
-            ? 'Existing session.'
+            ? 'Session worker'
             : mode === 'wrapper'
-                ? 'Wrapper libjxl.'
+                ? 'Direct wrapper'
                 : mode === 'race'
                     ? 'Drag race mode.'
-                    : 'Compare mode.';
+                    : 'Compare mode';
 }
 
 const startRaceBtn = document.getElementById('start-race');
@@ -260,7 +265,7 @@ function syncSettingLabels() {
     batchLimitValue.textContent = String(getBatchLimit());
     batchConcurrencyValue.textContent = String(getConcurrency());
     batchQualityValue.textContent = String(getQuality());
-    batchEffortValue.textContent = String(getEffort());
+    if (batchEffortValue) batchEffortValue.textContent = String(getEffort());
     loadRandomBtn.textContent = `Load ${getBatchLimit()} random Gobabeb file${getBatchLimit() === 1 ? '' : 's'}`;
 }
 
@@ -350,6 +355,16 @@ function transferableBuffer(view) {
     return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 }
 
+function withTimeout(promise, ms, label) {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timer !== null) clearTimeout(timer);
+    });
+}
+
 function resultByteLength(result) {
     return result.byteLength ?? result.bytes?.byteLength ?? 0;
 }
@@ -418,6 +433,10 @@ function makeTile(index) {
             <div class="metric-line" data-kind="timing"><span>Timing</span><strong>--</strong></div>
             <div class="metric-line" data-kind="compare"><span>Compare</span><strong>--</strong></div>
         </div>
+        <div class="error-detail">
+            <pre class="error-text"></pre>
+            <button class="error-copy-btn" type="button">Copy</button>
+        </div>
     `;
     return {
         el: tile,
@@ -428,11 +447,30 @@ function makeTile(index) {
         wrapper: tile.querySelector('.metric-line[data-kind="wrapper"] strong'),
         timing: tile.querySelector('.metric-line[data-kind="timing"] strong'),
         compare: tile.querySelector('.metric-line[data-kind="compare"] strong'),
+        errorDetail: tile.querySelector('.error-detail'),
+        errorText: tile.querySelector('.error-text'),
+        errorCopyBtn: tile.querySelector('.error-copy-btn'),
     };
 }
 
 const tiles = Array.from({ length: MAX_BATCH_LIMIT }, (_, index) => makeTile(index));
-for (const tile of tiles) batchGrid.appendChild(tile.el);
+for (const tile of tiles) {
+    batchGrid.appendChild(tile.el);
+    tile.chip.addEventListener('click', () => {
+        if (tile.el.dataset.state !== 'error') return;
+        tile.errorDetail.classList.toggle('is-open');
+    });
+    tile.errorCopyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(tile.errorText.textContent).then(() => {
+            tile.errorCopyBtn.textContent = 'Copied!';
+            tile.errorCopyBtn.classList.add('copied');
+            setTimeout(() => {
+                tile.errorCopyBtn.textContent = 'Copy';
+                tile.errorCopyBtn.classList.remove('copied');
+            }, 2000);
+        });
+    });
+}
 
 function resetTile(tile, label = 'Waiting for source') {
     tile.el.dataset.state = 'idle';
@@ -442,6 +480,8 @@ function resetTile(tile, label = 'Waiting for source') {
     tile.wrapper.textContent = '--';
     tile.timing.textContent = '--';
     tile.compare.textContent = '--';
+    tile.errorDetail.classList.remove('is-open');
+    tile.errorText.textContent = '';
     tile._timings = null;
     const ctx = tile.canvas.getContext('2d');
     tile.canvas.width = 96;
@@ -506,7 +546,7 @@ async function loadFileSource(file) {
 
     if (ext === 'jxl') {
         const bytes = new Uint8Array(await file.arrayBuffer());
-        const source = await decodeBytesToSource(bytes, `${file.name} Â· JXL Â· ${fmtBytes(file.size)}`);
+        const source = await decodeBytesToSource(bytes, `${file.name} · JXL · ${fmtBytes(file.size)}`);
         source.loadMs = performance.now() - started;
         return source;
     }
@@ -521,7 +561,7 @@ async function loadFileSource(file) {
     bitmap.close?.();
     return {
         name: file.name,
-        label: `${file.name} Â· ${canvas.width}Ã—${canvas.height}`,
+        label: `${file.name} · ${canvas.width}×${canvas.height}`,
         meta: fmtBytes(file.size),
         width: canvas.width,
         height: canvas.height,
@@ -568,7 +608,7 @@ async function loadBytesSourceByName(bytes, name, folder = '', sizeLabel = '') {
         return source;
     }
     if (ext === 'jxl') {
-        const source = await decodeBytesToSource(bytes, `${name} Â· JXL Â· ${sizeLabel || fmtBytes(bytes.byteLength)}`);
+        const source = await decodeBytesToSource(bytes, `${name} · JXL · ${sizeLabel || fmtBytes(bytes.byteLength)}`);
         source.loadMs = performance.now() - started;
         return source;
     }
@@ -584,8 +624,8 @@ async function loadBytesSourceByName(bytes, name, folder = '', sizeLabel = '') {
         bitmap.close?.();
         return {
             name,
-            label: `${name} Â· ${canvas.width}Ã—${canvas.height}`,
-            meta: [folder, sizeLabel || fmtBytes(bytes.byteLength)].filter(Boolean).join(' Â· '),
+            label: `${name} · ${canvas.width}×${canvas.height}`,
+            meta: [folder, sizeLabel || fmtBytes(bytes.byteLength)].filter(Boolean).join(' · '),
             width: canvas.width,
             height: canvas.height,
             rgba: new Uint8Array(pixels.buffer.slice(0)),
@@ -594,8 +634,8 @@ async function loadBytesSourceByName(bytes, name, folder = '', sizeLabel = '') {
     }
     return {
         name,
-        label: `${name} Â· ${fmtBytes(bytes.byteLength)}`,
-        meta: [folder, 'unsupported'].filter(Boolean).join(' Â· '),
+        label: `${name} · ${fmtBytes(bytes.byteLength)}`,
+        meta: [folder, 'unsupported'].filter(Boolean).join(' · '),
         width: 1,
         height: 1,
         rgba: new Uint8Array([255, 0, 255, 255]),
@@ -610,8 +650,8 @@ function loadBytesAsSource(bytes, name, folder = '', sizeLabel = '') {
         const rgb = result.take_rgb();
         return {
             name,
-            label: `${name} Â· ORF Â· ${result.width}Ã—${result.height}`,
-            meta: [folder, sizeLabel].filter(Boolean).join(' Â· '),
+            label: `${name} · ORF · ${result.width}×${result.height}`,
+            meta: [folder, sizeLabel].filter(Boolean).join(' · '),
             width: result.width,
             height: result.height,
             rgba: rgb_to_rgba(rgb),
@@ -643,7 +683,7 @@ async function decodeBytesToSource(bytes, label) {
         if (!final) throw new Error('JXL decode produced no final frame');
         return {
             name: label,
-            label: `${label} Â· JXL Â· ${final.info.width}Ã—${final.info.height}`,
+            label: `${label} · JXL · ${final.info.width}×${final.info.height}`,
             meta: 'decoded by wrapper',
             width: final.info.width,
             height: final.info.height,
@@ -679,16 +719,19 @@ async function loadSourcesFromFiles(fileList) {
 }
 
 async function loadRandomSources(count = MAX_BATCH_LIMIT) {
+    const loadId = ++activeLoadId;
     const total = clamp(count, 1, MAX_BATCH_LIMIT);
     const started = performance.now();
+    loadRandomBtn.disabled = true;
     batchStatus.textContent = `Loading Gobabeb files 0/${total}...`;
     const loaded = Array(total);
     let nextIndex = 0;
     let completed = 0;
     const workers = Array.from({ length: Math.min(RANDOM_LOAD_CONCURRENCY, total) }, async () => {
-        while (nextIndex < total) {
+        while (nextIndex < total && loadId === activeLoadId) {
             const index = nextIndex++;
             loaded[index] = await loadRandomFileSource();
+            if (loadId !== activeLoadId) return;
             completed++;
             batchStatus.textContent = `Loading Gobabeb files ${completed}/${total}...`;
             selectionStatus.textContent = `Loaded ${completed}/${total} random Gobabeb files.`;
@@ -696,6 +739,8 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
         }
     });
     await Promise.all(workers);
+    loadRandomBtn.disabled = false;
+    if (loadId !== activeLoadId) return;
     selectedSources = loaded;
     const elapsed = performance.now() - started;
     selectionStatus.textContent = `${loaded.length} random Gobabeb files ready in ${fmtTiming(elapsed)}.`;
@@ -710,9 +755,6 @@ function makeEncoderOptions(source) {
         width: source.width,
         height: source.height,
         hasAlpha: true,
-        iccProfile: null,
-        exif: null,
-        xmp: null,
         distance: lossless ? 0 : null,
         quality: lossless ? null : getQuality(),
         effort: getEffort(),
@@ -782,22 +824,90 @@ async function encodeWithSession(source) {
             chunks.push(chunk);
         }
     })();
-    await session.pushPixels(exactBuffer(source.rgba));
-    await session.finish();
-    await chunkTask;
-    return { bytes: concatChunks(chunks), encodeMs: performance.now() - started, firstChunkMs };
+    try {
+        await withTimeout(session.pushPixels(exactBuffer(source.rgba)), SESSION_STAGE_TIMEOUT_MS, 'session encode pushPixels');
+        await withTimeout(session.finish(), SESSION_STAGE_TIMEOUT_MS, 'session encode finish');
+        const [totalBytes] = await withTimeout(
+            Promise.all([session.done(), chunkTask]).then(([doneBytes]) => [doneBytes]),
+            SESSION_STAGE_TIMEOUT_MS,
+            'session encode completion',
+        );
+        if (chunks.length === 0) {
+            throw new Error(`session encode finished with ${totalBytes} bytes but yielded no chunks`);
+        }
+        return { bytes: concatChunks(chunks), encodeMs: performance.now() - started, firstChunkMs };
+    } catch (error) {
+        await session.cancel?.(`wrapper lab encode failed: ${error?.message || error}`).catch(() => {});
+        throw error;
+    }
 }
 
 async function decodeWithSession(bytes) {
     const session = existingContext.decode(makeDecoderOptions());
-    await session.push(transferableBuffer(bytes));
-    await session.close();
-    let final = null;
-    for await (const ev of session.frames()) {
-        if (ev.stage === 'final') final = ev;
+    try {
+        await withTimeout(session.push(transferableBuffer(bytes)), SESSION_STAGE_TIMEOUT_MS, 'session decode push');
+        await withTimeout(session.close(), SESSION_STAGE_TIMEOUT_MS, 'session decode close');
+        let final = null;
+        const doneTask = withTimeout(session.done(), SESSION_STAGE_TIMEOUT_MS, 'session decode completion');
+        for await (const ev of session.frames()) {
+            if (ev.stage === 'final') final = ev;
+        }
+        await doneTask;
+        if (!final) throw new Error('existing session decode produced no final frame');
+        return { final };
+    } catch (error) {
+        await session.cancel?.(`wrapper lab decode failed: ${error?.message || error}`).catch(() => {});
+        throw error;
     }
-    if (!final) throw new Error('existing session decode produced no final frame');
-    return { final };
+}
+
+async function runExistingSessionPipeline(source, attempt = 1) {
+    const attemptSource = { ...source, rgba: source.rgba.slice() };
+    if (attempt > 1) {
+        dbgLog(`  session retry → attempt ${attempt}`, `${attemptSource.width}×${attemptSource.height}`);
+    }
+    const encodeStart = performance.now();
+    const encoded = await encodeWithSession(attemptSource);
+    const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
+    dbgLog(`  session enc ← ${fmtBytes(encoded.bytes.byteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
+
+    dbgLog(`  session dec → ${fmtBytes(encoded.bytes.byteLength)} jxl`);
+    const decodeStart = performance.now();
+    const decoded = await decodeWithSession(encoded.bytes);
+    const decodeMs = performance.now() - decodeStart;
+    dbgLog(`  session dec ← ${decoded.final?.info?.width}×${decoded.final?.info?.height} · ${fmtMs(decodeMs)}`);
+
+    return {
+        bytes: encoded.bytes,
+        byteLength: encoded.bytes.byteLength,
+        encodeMs,
+        firstPieceMs: encoded.firstChunkMs ?? null,
+        decodeMs,
+        final: decoded.final,
+    };
+}
+
+async function runWrapperPipeline(source, label = 'wrapper') {
+    dbgLog(`  ${label} enc → ${source.width}×${source.height} · q=${getQuality()} effort=${getEffort()}`);
+    const encodeStart = performance.now();
+    const encoded = await encodeWithWrapper(source);
+    const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
+    dbgLog(`  ${label} enc ← ${fmtBytes(encoded.bytes.byteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
+
+    dbgLog(`  ${label} dec → ${fmtBytes(encoded.bytes.byteLength)} jxl`);
+    const decodeStart = performance.now();
+    const decoded = await decodeWithWrapper(encoded.bytes);
+    const decodeMs = performance.now() - decodeStart;
+    dbgLog(`  ${label} dec ← ${decoded.final?.info?.width}×${decoded.final?.info?.height} · ${fmtMs(decodeMs)}`);
+
+    return {
+        bytes: encoded.bytes,
+        byteLength: encoded.bytes.byteLength,
+        encodeMs,
+        firstPieceMs: encoded.firstChunkMs ?? null,
+        decodeMs,
+        final: decoded.final,
+    };
 }
 
 function paintTileResult(tile, source, existingResult, wrapperResult, startedAt) {
@@ -815,18 +925,18 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
     tile.chip.textContent = currentMode === 'compare' ? 'Compare' : currentMode === 'wrapper' ? 'Wrapper' : 'Existing';
     tile.title.textContent = source.label;
     tile.existing.textContent = existingResult
-        ? `${fmtBytes(resultByteLength(existingResult))} Â· ${fmtMs(existingResult.encodeMs)} Â· ${fmtMs(existingResult.decodeMs)}`
+        ? `${fmtBytes(resultByteLength(existingResult))} · ${fmtMs(existingResult.encodeMs)} · ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
         : '--';
     tile.wrapper.textContent = wrapperResult
-        ? `${fmtBytes(resultByteLength(wrapperResult))} Â· ${fmtMs(wrapperResult.encodeMs)} Â· ${fmtMs(wrapperResult.decodeMs)}`
+        ? `${fmtBytes(resultByteLength(wrapperResult))} · ${fmtMs(wrapperResult.encodeMs)} · ${fmtMs(wrapperResult.decodeMs)}`
         : '--';
     tile.existing.textContent = existingResult
-        ? `${fmtBytes(resultByteLength(existingResult))} Â· load ${fmtMs(existingResult.loadMs)} Â· enc ${fmtMs(existingResult.encodeMs)} Â· first ${fmtMs(existingResult.firstPieceMs)} Â· dec ${fmtMs(existingResult.decodeMs)}`
+        ? `${fmtBytes(resultByteLength(existingResult))} · load ${fmtMs(existingResult.loadMs)} · enc ${fmtMs(existingResult.encodeMs)} · first ${fmtMs(existingResult.firstPieceMs)} · dec ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
         : '--';
     tile.wrapper.textContent = wrapperResult
-        ? `${fmtBytes(resultByteLength(wrapperResult))} Â· load ${fmtMs(wrapperResult.loadMs)} Â· enc ${fmtMs(wrapperResult.encodeMs)} Â· first ${fmtMs(wrapperResult.firstPieceMs)} Â· dec ${fmtMs(wrapperResult.decodeMs)}`
+        ? `${fmtBytes(resultByteLength(wrapperResult))} · load ${fmtMs(wrapperResult.loadMs)} · enc ${fmtMs(wrapperResult.encodeMs)} · first ${fmtMs(wrapperResult.firstPieceMs)} · dec ${fmtMs(wrapperResult.decodeMs)}`
         : '--';
-    tile.timing.textContent = `first paint ${fmtMs(firstPaintMs)} Â· draw ${fmtMs(paintMs)}`;
+    tile.timing.textContent = `first paint ${fmtMs(firstPaintMs)} · draw ${fmtMs(paintMs)}`;
     if (existingResult && wrapperResult) {
         const byteDelta = resultByteLength(wrapperResult) - resultByteLength(existingResult);
         const msDelta = wrapperResult.totalMs - existingResult.totalMs;
@@ -851,50 +961,57 @@ async function processOneSource(source, index, runId) {
     tile.chip.textContent = 'Working';
     const startedAt = performance.now();
 
+    dbgLog(`▶ [${index + 1}] ${source.label}`, `orig ${source.width}×${source.height} · ${fmtBytes(source.rgba.byteLength)} rgba`);
+
+    const maxEdge = batchThumbSize || TILE_CANVAS_MAX_EDGE;
+    const needsResize = source.width > maxEdge || source.height > maxEdge;
+    const thumbW = needsResize
+        ? (source.width >= source.height ? maxEdge : Math.round(source.width * maxEdge / source.height))
+        : source.width;
+
+    let encodeSource = source;
+    if (needsResize) {
+        const rt0 = performance.now();
+        const resized = await resizeRgba(source.rgba, source.width, source.height, thumbW);
+        encodeSource = { ...source, ...resized };
+        dbgLog(`  resize → ${resized.width}×${resized.height} · ${fmtBytes(resized.rgba.byteLength)} rgba · ${fmtMs(performance.now() - rt0)}`);
+    }
+
     let existingResult = null;
     let wrapperResult = null;
 
     try {
         if (currentMode === 'existing' || currentMode === 'compare') {
-            const encodeStart = performance.now();
-            const encoded = await encodeWithSession(source);
-            const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
-            const byteLength = encoded.bytes.byteLength;
-            const decodeStart = performance.now();
-            const decoded = await decodeWithSession(encoded.bytes);
-            const decodeMs = performance.now() - decodeStart;
-            existingResult = {
-                bytes: encoded.bytes,
-                byteLength,
-                encodeMs,
-                firstPieceMs: encoded.firstChunkMs ?? null,
-                decodeMs,
-                totalMs: performance.now() - startedAt,
-                loadMs: source.loadMs ?? null,
-                firstPaintMs: null,
-                final: decoded.final,
-            };
+            const sessionSource = encodeSource;
+
+            if (sessionBackendBroken && currentMode === 'existing') {
+                dbgLog('  session bypass → wrapper', 'session backend marked broken for this page', 'error');
+                existingResult = await runWrapperPipeline(encodeSource, 'fallback');
+                existingResult.fallback = 'wrapper';
+            } else {
+                dbgLog(`  session enc → ${sessionSource.width}×${sessionSource.height} · q=${getQuality()} effort=${getEffort()}`);
+                try {
+                    existingResult = await runExistingSessionPipeline(sessionSource, 1);
+                } catch (error) {
+                    const msg = error?.message || String(error);
+                    dbgLog(`  session stall`, msg, 'error');
+                    sessionBackendBroken = true;
+                    if (currentMode !== 'existing') throw error;
+                    dbgLog('  session fallback → wrapper', msg, 'error');
+                    existingResult = await runWrapperPipeline(encodeSource, 'fallback');
+                    existingResult.fallback = 'wrapper';
+                }
+            }
+            existingResult.totalMs = performance.now() - startedAt;
+            existingResult.loadMs = source.loadMs ?? null;
+            existingResult.firstPaintMs = null;
         }
 
         if (currentMode === 'wrapper' || currentMode === 'compare') {
-            const encodeStart = performance.now();
-            const encoded = await encodeWithWrapper(source);
-            const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
-            const byteLength = encoded.bytes.byteLength;
-            const decodeStart = performance.now();
-            const decoded = await decodeWithWrapper(encoded.bytes);
-            const decodeMs = performance.now() - decodeStart;
-            wrapperResult = {
-                bytes: encoded.bytes,
-                byteLength,
-                encodeMs,
-                firstPieceMs: encoded.firstChunkMs ?? null,
-                decodeMs,
-                totalMs: performance.now() - startedAt,
-                loadMs: source.loadMs ?? null,
-                firstPaintMs: null,
-                final: decoded.final,
-            };
+            wrapperResult = await runWrapperPipeline(encodeSource, 'wrapper');
+            wrapperResult.totalMs = performance.now() - startedAt;
+            wrapperResult.loadMs = source.loadMs ?? null;
+            wrapperResult.firstPaintMs = null;
         }
 
         if (runId !== activeRunId) return;
@@ -915,12 +1032,17 @@ async function processOneSource(source, index, runId) {
             render: renderTiming,
         };
         tile.el.dataset.state = 'done';
+        dbgLog(`  ✓ done · first paint ${fmtMs(renderTiming?.firstPaintMs)} · total ${fmtMs(performance.now() - startedAt)}`, '', 'ok');
         return true;
     } catch (error) {
         if (runId !== activeRunId) return;
+        const msg = error?.message || String(error);
         tile.el.dataset.state = 'error';
-        tile.chip.textContent = 'Error';
-        tile.compare.textContent = error?.message || String(error);
+        tile.chip.textContent = 'Error ▸';
+        tile.compare.textContent = msg;
+        tile.errorText.textContent = error?.stack || msg;
+        tile.errorDetail.classList.remove('is-open');
+        dbgLog(`  ✗ error: ${msg}`, error?.stack || '', 'error');
         return false;
     }
 }
@@ -971,6 +1093,7 @@ async function runBatch() {
 function clearBatch() {
     activeRunId++;
     selectedSources = [];
+    sessionBackendBroken = false;
     sourceInput.value = '';
     selectionStatus.textContent = 'No files loaded.';
     resetGrid();
@@ -1035,7 +1158,7 @@ function wireControls() {
     batchLimitInput.addEventListener('input', syncSettingLabels);
     batchConcurrencyInput.addEventListener('input', syncSettingLabels);
     batchQualityInput.addEventListener('input', syncSettingLabels);
-    batchEffortInput.addEventListener('input', syncSettingLabels);
+    batchEffortInput?.addEventListener('input', syncSettingLabels);
 }
 
 function wireDashboardControls() {
@@ -1057,8 +1180,12 @@ function wireDashboardControls() {
     setGroupDisabled(wrapperDashboard?.querySelector('[data-group="display"]'), false);
 }
 
-preloadJxlModule();
 await initRaw();
+if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
+void resetContext().then((ctx) => {
+    existingContext = ctx;
+    sessionBackendBroken = false;
+}).catch(() => {});
 wireDashboardControls();
 wireControls();
 setCounters({ loaded: 0, queued: 0, done: 0, errors: 0 });

@@ -69,6 +69,8 @@ export interface EncoderOptions {
     progressive: boolean;
     previewFirst: boolean;
     chunked: boolean;
+    /** Max dimensions (px) of sidecar thumbnails to yield before the full image. Sorted ascending. */
+    sidecarSizes?: readonly number[];
 }
 export interface JxlDecoder {
     push(chunk: ArrayBuffer | Uint8Array): void | Promise<void>;
@@ -92,9 +94,9 @@ interface LibjxlWasmModule {
     _jxl_wasm_decode_rgba8(inputPtr: number, inputSize: number, downsample: number): number;
     _jxl_wasm_decode_rgba16?(inputPtr: number, inputSize: number, downsample: number): number;
     _jxl_wasm_decode_rgbaf32?(inputPtr: number, inputSize: number, downsample: number): number;
-    _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
-    _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
-    _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number): number;
+    _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
+    _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
+    _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
     _jxl_wasm_buffer_data(handle: number): number;
     _jxl_wasm_buffer_size(handle: number): number;
     _jxl_wasm_buffer_width(handle: number): number;
@@ -103,7 +105,7 @@ interface LibjxlWasmModule {
     _jxl_wasm_buffer_has_alpha(handle: number): number;
     _jxl_wasm_buffer_error?(handle: number): number;
     _jxl_wasm_buffer_free(handle: number): void;
-    _jxl_wasm_dec_create?(format: number): number;
+    _jxl_wasm_dec_create?(format: number, wantProgressive: number): number;
     _jxl_wasm_dec_push?(state: number, dataPtr: number, size: number): number;
     _jxl_wasm_dec_close_input?(state: number): void;
     _jxl_wasm_dec_width?(state: number): number;
@@ -112,6 +114,8 @@ interface LibjxlWasmModule {
     _jxl_wasm_dec_take_flushed?(state: number): number;
     _jxl_wasm_dec_take_final?(state: number): number;
     _jxl_wasm_dec_free?(state: number): void;
+    _jxl_wasm_encode_rgba8_with_sidecars?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number): number;
+    _jxl_wasm_buffer_next?(handle: number): number;
 }
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
 export declare class CapabilityMissing extends Error {
@@ -119,8 +123,19 @@ export declare class CapabilityMissing extends Error {
     readonly cause?: unknown;
     constructor(message: string, cause?: unknown);
 }
+export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
+export declare function detectTier(): Tier;
 export declare function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null): void;
+/**
+ * Override the WASM tier used on the next module load.
+ * Pass null to restore auto-detection via detectTier().
+ * Resets the cached module so the next encode/decode reloads with the new tier.
+ */
+export declare function setForcedTier(tier: Tier | null): void;
+export declare function getForcedTier(): Tier | null;
 export declare function createDecoder(options: DecoderOptions): JxlDecoder;
 export declare function createEncoder(options: EncoderOptions): JxlEncoder;
+/** Start loading the WASM module immediately. Call during app startup to hide cold-start latency. */
+export declare function preloadJxlModule(): void;
 export {};
 //# sourceMappingURL=facade.d.ts.map

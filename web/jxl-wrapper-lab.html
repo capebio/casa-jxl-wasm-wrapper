@@ -2,10 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>JXL Wrapper Lab</title>
+    <link rel="stylesheet" href="./test-nav.css" />
     <link rel="stylesheet" href="./jxl-wrapper-lab.css" />
     <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <link rel="stylesheet" href="./jxl-debug-console.css" />
     <script type="importmap">
     {
       "imports": {
@@ -23,25 +26,42 @@
     }
     </script>
 </head>
-<body data-mode="existing">
+<body class="has-home-bar" data-mode="existing">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link is-active" href="./jxl-wrapper-lab.html" aria-current="page">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+        </div>
+    </nav>
+
     <main class="shell">
         <section class="hero compact">
             <div class="hero-copy">
-                <p class="eyebrow">JPEG XL wrapper lab</p>
-                <h1>JXL Race Lab</h1>
+                <p class="eyebrow">JPEG XL wrapper lab &middot; <span id="mode-status">Drag Race</span></p>
+                <h1>JPEG XL wrapper and compare test lab</h1>
                 <p class="lede">
                     Compare JXL, WEBP, and JPEG performance in a drag-race track. Overlapping cards show relative paint positions.
+                </p>
+                <p class="lede">
+                    Session worker routes JPEG XL through the browser session stack: context, scheduler, and worker messaging before the codec runs. Direct wrapper calls the wrapper facade straight against libjxl wasm with no session layer in between. Compare mode runs both paths on the same prepared thumbnail so you can see whether overhead comes from the session plumbing or the codec itself.
+                </p>
+                <p class="lede">
+                    Batch tiles encode and decode resized thumbnails, not full-size source frames. The console shows both the original source dimensions and the smaller working size used for each tile, so thumbnail timings are not mistaken for full-resolution timings.
                 </p>
             </div>
 
             <div class="hero-actions">
                 <div class="mode-switch" role="group" aria-label="Test mode">
                     <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
-                    <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session</button>
-                    <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Wrapper</button>
+                    <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
+                    <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
                     <button class="mode-btn" type="button" data-mode="compare" aria-pressed="false">Compare</button>
                 </div>
                 <button id="wrapper-controls-btn" class="dashboard-toggle" type="button" aria-expanded="false">Controls</button>
+                <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
             </div>
         </section>
 
@@ -151,6 +171,11 @@
                     <input id="batch-quality" type="range" min="50" max="100" step="1" value="90" />
                     <strong id="batch-quality-value">90</strong>
                 </label>
+                <label class="setting">
+                    <span>Effort</span>
+                    <input id="batch-effort" type="range" min="1" max="9" step="1" value="3" />
+                    <strong id="batch-effort-value">3</strong>
+                </label>
                 <label class="setting toggle-setting">
                     <span>Lossless</span>
                     <input id="batch-lossless" type="checkbox" />
@@ -187,7 +212,7 @@
             <header class="batch-header">
                 <div>
                     <p class="eyebrow">100-picture batch</p>
-                    <h2>Existing session vs wrapper libjxl</h2>
+                    <h2>Session worker vs direct wrapper on thumbnail tiles</h2>
                 </div>
                 <a class="page-link" href="./jxl-progressive.html">Open progressive page</a>
             </header>

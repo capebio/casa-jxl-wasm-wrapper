@@ -42,9 +42,11 @@ export class DecodeHandler {
 
   private state: DecodeState = "created";
   private chunkQueue: ArrayBuffer[] = [];
+  private chunkReadIndex = 0;
   private queueDepth = 0;
   private cancelled = false;
   private inputClosed = false;
+  private wakeResolve: (() => void) | null = null;
 
   // Stage budget tracking
   private stageStartMs: number = performance.now();
@@ -72,20 +74,22 @@ export class DecodeHandler {
     if (this.cancelled || this.state === "final") return;
     this.chunkQueue.push(chunk);
     this.queueDepth++;
-    // Signal backpressure if above HWM.
-    if (this.queueDepth >= CHUNK_HWM) {
-      // Drain signal will be posted after the handler processes chunks.
-    }
+    this.wakeResolve?.();
+    this.wakeResolve = null;
   }
 
   onClose(): void {
     this.inputClosed = true;
+    this.wakeResolve?.();
+    this.wakeResolve = null;
   }
 
   async onCancel(reason?: string): Promise<void> {
     if (this.cancelled) return;
     this.cancelled = true;
     this.state = "cancelled";
+    this.wakeResolve?.();
+    this.wakeResolve = null;
 
     const msg: MsgDecodeCancelled = {
       type: "decode_cancelled",
@@ -122,26 +126,23 @@ export class DecodeHandler {
   // ---------------------------------------------------------------------------
 
   private waitForChunk(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const check = () => {
-        if (this.chunkQueue.length > 0 || this.inputClosed || this.cancelled) {
-          resolve();
-        } else if (this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
-          resolve();
-        } else {
-          setTimeout(check, 2);
-        }
-      };
-      check();
-    });
+    if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.cancelled
+        || this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
   }
 
   private async feedDecoder(decoder: BrowserDecoder): Promise<void> {
     while (!this.cancelled && this.state !== "final" && this.state !== "error") {
       await this.waitForChunk();
-      while (this.chunkQueue.length > 0) {
-        const chunk = this.chunkQueue.shift();
+      while (this.chunkQueue.length > this.chunkReadIndex) {
+        const chunk = this.chunkQueue[this.chunkReadIndex++];
         if (chunk === undefined) break;
+        if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
+          this.chunkQueue = this.chunkQueue.slice(this.chunkReadIndex);
+          this.chunkReadIndex = 0;
+        }
         this.queueDepth--;
         await decoder.push(chunk);
         if (this.queueDepth < CHUNK_HWM) {

@@ -1,12 +1,12 @@
 .casabio-toggle {
     margin-left: 12px;
-    padding: 4px 10px;
+    padding: 3px 8px;
     border: 1px solid #4a90e2;
     background: transparent;
     color: #4a90e2;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12px;
 }
 .casabio-toggle:hover {
     background: #4a90e2;

@@ -61,6 +61,7 @@ export class DecodeHandler {
 
   private state: DecodeState = "created";
   private chunkQueue: Buffer[] = [];
+  private chunkReadIndex = 0;
   private queueDepth = 0;
   private cancelled = false;
   private inputClosed = false;
@@ -120,7 +121,7 @@ export class DecodeHandler {
   private waitForChunk(): Promise<void> {
     return new Promise<void>((resolve) => {
       const check = () => {
-        if (this.chunkQueue.length > 0 || this.inputClosed || this.cancelled) {
+        if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.cancelled) {
           resolve();
         } else if (this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
           resolve();
@@ -135,9 +136,13 @@ export class DecodeHandler {
   private async feedDecoder(decoder: NodeDecoder): Promise<void> {
     while (!this.cancelled && this.state !== "final" && this.state !== "error" && this.state !== "budget_exceeded") {
       await this.waitForChunk();
-      while (this.chunkQueue.length > 0) {
-        const chunk = this.chunkQueue.shift();
+      while (this.chunkQueue.length > this.chunkReadIndex) {
+        const chunk = this.chunkQueue[this.chunkReadIndex++];
         if (chunk === undefined) break;
+        if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
+          this.chunkQueue = this.chunkQueue.slice(this.chunkReadIndex);
+          this.chunkReadIndex = 0;
+        }
         this.queueDepth--;
         await decoder.push(chunk);
         if (this.queueDepth < CHUNK_HWM) {

@@ -1,5 +1,5 @@
 import initRaw, { process_orf, rgb_to_rgba } from '../pkg/raw_converter_wasm.js';
-import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { createDecoder, createEncoder, detectTier, setForcedTier } from '@casabio/jxl-wasm';
 import { bindRangeLabel } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
@@ -8,6 +8,7 @@ const DEFAULT_SIZES = [128, 512, 1080];
 const QUALITIES = [85, 95];
 const EFFORT = 3;
 const STATUS_UPDATE_INTERVAL_MS = 120;
+const PERM_COLORS = ['#3b82f6', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#f97316', '#06b6d4', '#ec4899'];
 
 function getSystemInfo() {
     const ua = navigator.userAgent;
@@ -136,6 +137,7 @@ function loadSettings(settings) {
             if (settings.options.chunked !== undefined) document.getElementById('opt-chunked').checked = settings.options.chunked;
             if (settings.options.lossless !== undefined) document.getElementById('opt-lossless').checked = settings.options.lossless;
             if (settings.options.previewFirst !== undefined) document.getElementById('opt-preview-first').checked = settings.options.previewFirst;
+            if (settings.options.skipCopy !== undefined) document.getElementById('opt-skip-copy').checked = settings.options.skipCopy;
             if (settings.options.modular !== undefined) document.getElementById('opt-modular').checked = settings.options.modular;
             if (settings.options.butteraugliTarget !== undefined) document.getElementById('butteraugli-target').value = settings.options.butteraugliTarget;
             if (settings.options.brotliEffort !== undefined) document.getElementById('brotli-effort').value = settings.options.brotliEffort;
@@ -145,6 +147,7 @@ function loadSettings(settings) {
             }
         }
 
+        updateTierFromToggles();
         dbgLog('Settings loaded');
     } catch (err) {
         dbgLog('Failed to load settings: ' + err.message, '', 'error');
@@ -170,9 +173,47 @@ let benchmarkResults = {
     encodeMs: new Map(),
     fileSize: new Map(),
 };
+let permutations = [];      // { id, label, color, visible, results }
+let addPermutationMode = false;
 let activeBenchmarkId = 0;
 let lastProgressStatusAt = 0;
 let wasmReady = false;
+
+function makePermLabel(opts, id) {
+    const tags = [];
+    if (opts.simd) tags.push('SIMD');
+    if (opts.threading) tags.push('MT');
+    if (opts.lossless) tags.push('LL');
+    if (opts.modular) tags.push('Mod');
+    if (opts.skipCopy) tags.push('ZC');
+    if (!opts.progressive) tags.push('1shot');
+    return `Run ${id}` + (tags.length ? ` · ${tags.join('+')}` : '');
+}
+
+function snapshotResults() {
+    return {
+        decodeMs: new Map(benchmarkResults.decodeMs),
+        encodeMs: new Map(benchmarkResults.encodeMs),
+        fileSize: new Map(benchmarkResults.fileSize),
+    };
+}
+
+function addPermutation() {
+    const opts = getAdvancedOptions();
+    const id = permutations.length + 1;
+    permutations.push({
+        id,
+        label: makePermLabel(opts, id),
+        color: PERM_COLORS[(id - 1) % PERM_COLORS.length],
+        visible: true,
+        results: snapshotResults(),
+    });
+    addPermutationMode = true;
+    renderPermutationSelector();
+    drawGraphs();
+    const btn = document.getElementById('add-permutation');
+    if (btn) btn.disabled = true;
+}
 
 // Verify DOM elements exist
 if (!sourceInput || !loadRandomBtn || !startBenchmarkBtn) {
@@ -187,6 +228,14 @@ if (dbgConsoleBtn) {
 } else {
     console.error('dbgConsoleBtn not found');
 }
+
+// Wire tier toggles
+const optSimd = document.getElementById('opt-simd');
+const optThreading = document.getElementById('opt-threading');
+if (optSimd) optSimd.addEventListener('change', updateTierFromToggles);
+if (optThreading) optThreading.addEventListener('change', updateTierFromToggles);
+// Reflect auto-detected tier immediately
+updateTierFromToggles();
 
 // Initialize sizes checkboxes
 DEFAULT_SIZES.forEach(size => {
@@ -233,11 +282,28 @@ function getAdvancedOptions() {
         chunked: document.getElementById('opt-chunked').checked,
         lossless: document.getElementById('opt-lossless').checked,
         previewFirst: document.getElementById('opt-preview-first').checked,
+        skipCopy: document.getElementById('opt-skip-copy').checked,
         modular: document.getElementById('opt-modular').checked,
         butteraugliTarget: Number(document.getElementById('butteraugli-target').value),
         brotliEffort: Number(document.getElementById('brotli-effort').value),
         downsample: downsample ? Number(downsample.value) : 1,
     };
+}
+
+function resolvedTierLabel(simd, threading) {
+    if (!simd) return 'scalar';
+    if (!threading) return 'simd';
+    return detectTier(); // auto — use best available
+}
+
+function updateTierFromToggles() {
+    const simd = document.getElementById('opt-simd').checked;
+    const threading = document.getElementById('opt-threading').checked;
+    const tier = !simd ? 'scalar' : !threading ? 'simd' : null; // null = auto
+    setForcedTier(tier);
+    const label = resolvedTierLabel(simd, threading);
+    const el = document.getElementById('tier-display');
+    if (el) el.textContent = label;
 }
 
 // Initialize wasm
@@ -283,6 +349,16 @@ if (clearResultsBtn) {
     });
 } else console.error('clearResultsBtn missing');
 
+const addPermBtn = document.getElementById('add-permutation');
+if (addPermBtn) {
+    addPermBtn.addEventListener('click', () => addPermutation());
+} else console.error('add-permutation btn missing');
+
+const optimizeBtn = document.getElementById('optimize-btn');
+if (optimizeBtn) {
+    optimizeBtn.addEventListener('click', () => runOptimizer());
+}
+
 const saveSettingsBtn = document.getElementById('save-settings');
 const loadSettingsInput = document.getElementById('load-settings-input');
 
@@ -312,16 +388,19 @@ if (loadSettingsInput) {
     });
 }
 
+let optimizerRunning = false;
+
 function updateSelectionStatus() {
     const ready = selectedSources.length > 0;
     selectionStatus.textContent = ready
         ? `${selectedSources.length} file${selectedSources.length !== 1 ? 's' : ''} ready.`
         : 'No files.';
     startBenchmarkBtn.disabled = !ready;
-    if (ready) {
-        startBenchmarkBtn.title = '';
-    } else {
-        startBenchmarkBtn.title = 'Press Random Gobabeb first';
+    startBenchmarkBtn.title = ready ? '' : 'Press Random Gobabeb first';
+    const optBtn = document.getElementById('optimize-btn');
+    if (optBtn && !optimizerRunning) {
+        optBtn.disabled = !ready;
+        optBtn.title = ready ? 'Auto-optimize codec toggles for this device' : 'Load files first, then optimize codec toggles for this device';
     }
 }
 
@@ -437,8 +516,17 @@ async function processImageFile(file, arrayBuffer) {
 async function loadRandomImages() {
     const maxFiles = Number(maxFilesInput.value);
     selectedSources = [];
+
+    if (!wasmReady) {
+        setProgress('WASM not ready — wait a moment and try again.');
+        dbgLog('✗ loadRandomImages: WASM not ready');
+        return;
+    }
+
     setProgress('Loading random Gobabeb images...');
     dbgLog('Loading random images...');
+
+    let lastError = null;
 
     for (let i = 0; i < maxFiles; i++) {
         try {
@@ -447,7 +535,9 @@ async function loadRandomImages() {
             const fetchMs = performance.now() - fetchStart;
 
             if (!resp.ok) {
-                dbgLog(`✗ API error: ${resp.status}`);
+                const msg = `API error ${resp.status} (${resp.statusText})`;
+                dbgLog(`✗ ${msg}`);
+                lastError = msg;
                 break;
             }
             const arrayBuffer = await resp.arrayBuffer();
@@ -462,16 +552,23 @@ async function loadRandomImages() {
                 selectedSources.push({ file: fileName, ...rgba });
                 dbgLog(`✓ ${fileName}`, `${rgba.width}×${rgba.height} | fetch ${fetchMs.toFixed(1)}ms + decode ${processMs.toFixed(1)}ms | ${fileSizeKB} KB`);
             } else {
-                dbgLog(`✗ ${fileName} - processing failed`);
+                lastError = `Processing failed for ${fileName}`;
+                dbgLog(`✗ ${lastError}`);
             }
         } catch (err) {
+            lastError = err.message;
             dbgLog(`✗ Error: ${err.message}`);
+            console.error('loadRandomImages error:', err);
             break;
         }
     }
 
     updateSelectionStatus();
-    setProgress(selectedSources.length ? 'Random files loaded.' : 'No files loaded.');
+    if (selectedSources.length) {
+        setProgress(`Loaded ${selectedSources.length} random file${selectedSources.length !== 1 ? 's' : ''}.`);
+    } else {
+        setProgress(lastError ? `No files loaded — ${lastError}` : 'No files loaded.');
+    }
     dbgLog(`Loaded ${selectedSources.length} random files`);
 }
 
@@ -544,6 +641,7 @@ async function encodeJxl(rgba, width, height, quality, effort = null) {
             chunked: opts.chunked,
             modular: opts.modular,
             brotliEffort: opts.brotliEffort,
+            copyInput: !opts.skipCopy,
         };
         const encoder = createEncoder(encoderConfig);
         const chunks = [];
@@ -552,7 +650,9 @@ async function encodeJxl(rgba, width, height, quality, effort = null) {
                 chunks.push(chunk);
             }
         })();
-        await encoder.pushPixels(exactBuffer(rgba));
+        // Zero-copy mode: pass Uint8Array so the copyInput=false path is exercised.
+        // Standard mode: pass ArrayBuffer (ownership transfer — no copy either way).
+        await encoder.pushPixels(opts.skipCopy ? toU8(rgba) : exactBuffer(rgba));
         await encoder.finish();
         await chunkTask;
         const bytes = concatChunks(chunks);
@@ -573,12 +673,13 @@ async function decodeJxl(bytes) {
             format: 'rgba8',
             region: null,
             downsample: opts.downsample,
-            progressionTarget: opts.progressive ? 'all' : 'final',
-            emitEveryPass: opts.progressive,
+            progressionTarget: 'final',
+            emitEveryPass: false,
             preserveIcc: opts.preserveIcc,
             preserveMetadata: opts.preserveMetadata,
+            copyInput: !opts.skipCopy,
         });
-        await decoder.push(exactBuffer(bytes));
+        await decoder.push(opts.skipCopy ? toU8(bytes) : exactBuffer(bytes));
         await decoder.close();
         let final = null;
         for await (const ev of decoder.events()) {
@@ -594,13 +695,123 @@ async function decodeJxl(bytes) {
     }
 }
 
+async function runOptimizer() {
+    if (optimizerRunning) return;
+    if (!selectedSources.length) { setProgress('Optimizer: load files first.'); return; }
+    if (!wasmReady) { setProgress('Optimizer: WASM not ready.'); return; }
+
+    const WARMUP = 2, REPS = 3;
+    const OPT_SIZE = 512, OPT_QUALITY = 85, OPT_EFFORT = 3;
+
+    optimizerRunning = true;
+    const optBtn = document.getElementById('optimize-btn');
+    if (optBtn) { optBtn.disabled = true; optBtn.textContent = 'Optimizing…'; }
+    startBenchmarkBtn.disabled = true;
+
+    dbgLog('═══ AUTO-OPTIMIZER START ═══', `${OPT_SIZE}px Q${OPT_QUALITY} E${OPT_EFFORT} × ${WARMUP}warm+${REPS}reps`, 'info');
+
+    try {
+        const src = selectedSources[0];
+        const resized = await resizeRgba(src.rgba, src.width, src.height, OPT_SIZE);
+
+        // Runs one encode+decode cycle with current toggle state; returns total ms.
+        async function oneCycle() {
+            const enc = await encodeJxl(resized.rgba, resized.width, resized.height, OPT_QUALITY, OPT_EFFORT);
+            const dec = await decodeJxl(enc.bytes);
+            return enc.encodeMs + dec.decodeMs;
+        }
+
+        // Sets all four toggles, runs warmup then REPS measured cycles, returns median ms.
+        async function probe(simd, threading, progressive, skipCopy) {
+            document.getElementById('opt-simd').checked = simd;
+            document.getElementById('opt-threading').checked = threading;
+            document.getElementById('opt-progressive').checked = progressive;
+            document.getElementById('opt-skip-copy').checked = skipCopy;
+            updateTierFromToggles();
+            for (let i = 0; i < WARMUP; i++) { try { await oneCycle(); } catch { /* absorb module load + errors */ } }
+            const times = [];
+            for (let i = 0; i < REPS; i++) times.push(await oneCycle());
+            times.sort((a, b) => a - b);
+            return times[Math.floor(times.length / 2)]; // median
+        }
+
+        // Capture current toggle state as baseline
+        const cur = {
+            simd: document.getElementById('opt-simd').checked,
+            threading: document.getElementById('opt-threading').checked,
+            progressive: document.getElementById('opt-progressive').checked,
+            skipCopy: document.getElementById('opt-skip-copy').checked,
+        };
+
+        // Phase 1: tier — test scalar / simd / simd-mt
+        setProgress('Optimizer: probing tiers…');
+        const tierCombos = [
+            { simd: false, threading: false, label: 'scalar' },
+            { simd: true,  threading: false, label: 'simd' },
+            { simd: true,  threading: true,  label: 'simd-mt' },
+        ];
+        const tierTimes = {};
+        for (const c of tierCombos) {
+            try {
+                const t = await probe(c.simd, c.threading, cur.progressive, cur.skipCopy);
+                tierTimes[c.label] = t;
+                dbgLog(`  tier ${c.label}: ${t.toFixed(1)}ms`, '', 'info');
+            } catch (err) {
+                dbgLog(`  tier ${c.label}: unavailable`, err.message, 'warn');
+            }
+        }
+        let bestTier = tierCombos[0];
+        let bestTierMs = Infinity;
+        for (const c of tierCombos) {
+            if (tierTimes[c.label] !== undefined && tierTimes[c.label] < bestTierMs) {
+                bestTierMs = tierTimes[c.label];
+                bestTier = c;
+            }
+        }
+        dbgLog(`  → best tier: ${bestTier.label} (${bestTierMs.toFixed(1)}ms)`, '', 'success');
+
+        // Phase 2: progressive — test on/off at best tier
+        setProgress('Optimizer: probing progressive…');
+        const tProgOff = await probe(bestTier.simd, bestTier.threading, false, cur.skipCopy);
+        const tProgOn  = await probe(bestTier.simd, bestTier.threading, true,  cur.skipCopy);
+        const bestProg = tProgOn < tProgOff;
+        dbgLog(`  progressive: off=${tProgOff.toFixed(1)}ms on=${tProgOn.toFixed(1)}ms → ${bestProg ? 'ON' : 'OFF'}`, '', 'info');
+
+        // Phase 3: zero-copy — test on/off at best tier + best progressive
+        setProgress('Optimizer: probing zero-copy…');
+        const tCopyOff = await probe(bestTier.simd, bestTier.threading, bestProg, false);
+        const tCopyOn  = await probe(bestTier.simd, bestTier.threading, bestProg, true);
+        const bestSkipCopy = tCopyOn < tCopyOff;
+        dbgLog(`  zero-copy: off=${tCopyOff.toFixed(1)}ms on=${tCopyOn.toFixed(1)}ms → ${bestSkipCopy ? 'ON' : 'OFF'}`, '', 'info');
+
+        // Apply best settings
+        document.getElementById('opt-simd').checked = bestTier.simd;
+        document.getElementById('opt-threading').checked = bestTier.threading;
+        document.getElementById('opt-progressive').checked = bestProg;
+        document.getElementById('opt-skip-copy').checked = bestSkipCopy;
+        updateTierFromToggles();
+
+        dbgLog('═══ AUTO-OPTIMIZER DONE ═══', `tier=${bestTier.label} progressive=${bestProg} zero-copy=${bestSkipCopy}`, 'success');
+        setProgress(`Optimizer done — ${bestTier.label}, progressive ${bestProg ? 'on' : 'off'}, zero-copy ${bestSkipCopy ? 'on' : 'off'}.`);
+
+    } catch (err) {
+        dbgLog('✗ Optimizer failed', err.message, 'error');
+        setProgress(`Optimizer failed: ${err.message}`);
+    } finally {
+        optimizerRunning = false;
+        if (optBtn) { optBtn.disabled = false; optBtn.textContent = 'Optimize'; }
+        updateSelectionStatus();
+    }
+}
+
 async function runBenchmark() {
     const benchmarkId = ++activeBenchmarkId;
     if (!selectedSources.length) {
-        setProgress('Load files first.');
+        setProgress('Load files first — use Random Gobabeb or Pick Files.');
         return;
     }
 
+    updateTierFromToggles();
     const iterations = Number(iterationsInput.value);
     const selectedSizes = getSelectedSizes();
     const selectedQualities = getSelectedQualities();
@@ -640,6 +851,7 @@ async function runBenchmark() {
     dbgLog(`  Downsampling: ${advOpts.downsample}×`, '', 'info');
     dbgLog(`OPTIMIZATION TOGGLES`, '', 'info');
     dbgLog(`  SIMD: ${advOpts.simd}`, `Threading: ${advOpts.threading}`, 'info');
+    dbgLog(`  Progressive: ${advOpts.progressive}`, `Zero-copy: ${advOpts.skipCopy}`, 'info');
     dbgLog(`═══════════════════════════════════════`, '', 'info');
     dbgLog(`BENCHMARK START`, `${selectedSources.length} files × ${selectedSizes.length} sizes × ${selectedQualities.length} qualities × ${selectedEfforts.length} efforts × ${iterations} iter = ${totalSteps} ops`, 'info');
     dbgLog(`Sizes: ${selectedSizes.join(', ')} px`, `Qualities: ${selectedQualities.join(', ')}`, 'info');
@@ -740,6 +952,25 @@ async function runBenchmark() {
         dbgLog(`  Heap after: ${memAfter.usedJSHeapSize} MB / ${memAfter.totalJSHeapSize} MB`, `Δ ${deltaSym}${heapDelta} MB`, heapDelta > 50 ? 'warn' : 'info');
     }
     dbgLog(`═══════════════════════════════════════`, '', 'info');
+
+    if (addPermutationMode) {
+        const opts = getAdvancedOptions();
+        const id = permutations.length + 1;
+        permutations.push({
+            id,
+            label: makePermLabel(opts, id),
+            color: PERM_COLORS[(id - 1) % PERM_COLORS.length],
+            visible: true,
+            results: snapshotResults(),
+        });
+        renderPermutationSelector();
+        const btn = document.getElementById('add-permutation');
+        if (btn) btn.disabled = true;
+    } else {
+        const btn = document.getElementById('add-permutation');
+        if (btn) btn.disabled = false;
+    }
+
     displayResults();
 }
 
@@ -827,21 +1058,12 @@ function displayResults() {
     for (const size of selectedSizes) {
         for (const quality of selectedQualities) {
             for (const effort of selectedEfforts) {
-                const card = document.createElement('div');
-                card.className = 'detail-card';
+                const row = document.createElement('div');
+                row.className = 'detail-inline-row';
                 const key = `${size}x${quality}xe${effort}`;
                 const encodeMs = getAverageTiming(benchmarkResults.encodeMs.get(key));
-
-                card.innerHTML = `
-                    <h3>${size}px Q${quality} E${effort}</h3>
-                    <div class="detail-rows">
-                        <div class="detail-row">
-                            <span class="detail-row-label">Encode:</span>
-                            <span class="detail-row-value">${encodeMs} ms</span>
-                        </div>
-                    </div>
-                `;
-                encodeDetailBody.appendChild(card);
+                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> <span class="detail-inline-label">Encode:</span> <span class="detail-inline-value">${encodeMs} ms</span>`;
+                encodeDetailBody.appendChild(row);
             }
         }
     }
@@ -852,28 +1074,17 @@ function displayResults() {
     for (const size of selectedSizes) {
         for (const quality of selectedQualities) {
             for (const effort of selectedEfforts) {
-                const card = document.createElement('div');
-                card.className = 'detail-card';
+                const row = document.createElement('div');
+                row.className = 'detail-inline-row';
                 const key = `${size}x${quality}xe${effort}`;
                 const decodeMs = getAverageTiming(benchmarkResults.decodeMs.get(key));
-
-                card.innerHTML = `
-                    <h3>${size}px Q${quality} E${effort}</h3>
-                    <div class="detail-rows">
-                        <div class="detail-row">
-                            <span class="detail-row-label">Decode:</span>
-                            <span class="detail-row-value">${decodeMs} ms</span>
-                        </div>
-                    </div>
-                `;
-                decodeDetailBody.appendChild(card);
+                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> <span class="detail-inline-label">Decode:</span> <span class="detail-inline-value">${decodeMs} ms</span>`;
+                decodeDetailBody.appendChild(row);
             }
         }
     }
 
     // Detect thermal degradation (use first quality and effort combination at fullsize)
-    const selectedQualities = getSelectedQualities();
-    const selectedEfforts = getSelectedEfforts();
     if (selectedQualities.length > 0 && selectedEfforts.length > 0) {
         const fullsizeKey = `fullsizex${selectedQualities[0]}xe${selectedEfforts[0]}`;
         const fullsizeDecodeMs = benchmarkResults.decodeMs.get(fullsizeKey) || [];
@@ -887,17 +1098,57 @@ function displayResults() {
     drawGraphs();
 }
 
+function renderPermutationSelector() {
+    const bar = document.getElementById('perm-selector-bar');
+    if (!bar) return;
+    if (permutations.length === 0) {
+        bar.hidden = true;
+        return;
+    }
+    bar.hidden = false;
+    bar.innerHTML = '';
+    const label = document.createElement('span');
+    label.className = 'perm-bar-label';
+    label.textContent = 'Permutations:';
+    bar.appendChild(label);
+    for (const perm of permutations) {
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'perm-pill' + (perm.visible ? ' is-active' : '');
+        pill.style.setProperty('--perm-color', perm.color);
+        pill.innerHTML = `<span class="perm-pill-dot"></span><span class="perm-pill-label">${perm.label}</span><span class="perm-pill-x" data-id="${perm.id}" title="Remove">×</span>`;
+        pill.addEventListener('click', e => {
+            if (e.target.classList.contains('perm-pill-x')) {
+                permutations = permutations.filter(p => p.id !== perm.id);
+                if (permutations.length === 0) { addPermutationMode = false; }
+                renderPermutationSelector();
+                drawGraphs();
+                return;
+            }
+            perm.visible = !perm.visible;
+            renderPermutationSelector();
+            drawGraphs();
+        });
+        bar.appendChild(pill);
+    }
+}
+
 function clearResults() {
     benchmarkResults = {
         decodeMs: new Map(),
         encodeMs: new Map(),
         fileSize: new Map(),
     };
+    permutations = [];
+    addPermutationMode = false;
     selectedSources = [];
     updateSelectionStatus();
     setProgress('Idle.');
     setFileStatus('—');
     setTiming('Ready.');
+    renderPermutationSelector();
+    const addBtn = document.getElementById('add-permutation');
+    if (addBtn) addBtn.disabled = true;
 
     document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
     document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
@@ -914,16 +1165,25 @@ const chartInstances = {
     'filesize': null,
 };
 
+function getPermSources() {
+    const visible = permutations.filter(p => p.visible);
+    if (visible.length > 0) return visible;
+    return [{ label: null, color: null, results: benchmarkResults }];
+}
+
 function drawGraphs() {
     const selectedSizes = getSelectedSizes();
     const selectedQualities = getSelectedQualities();
     const selectedEfforts = getSelectedEfforts();
     if (!selectedSizes.length) return;
 
-    // Update graph caption
-    const advOpts = getAdvancedOptions();
-    const caption = `Enc: Lossless=${advOpts.lossless} Modular=${advOpts.modular} Progressive=${advOpts.progressive} Chunked=${advOpts.chunked} PreviewFirst=${advOpts.previewFirst} Butteraugli=${advOpts.butteraugliTarget} BrotliEffort=${advOpts.brotliEffort} | Dec: ICC=${advOpts.preserveIcc} Metadata=${advOpts.preserveMetadata} Downsample=${advOpts.downsample}× | Platform: SIMD=${advOpts.simd} Threading=${advOpts.threading}`;
-    document.getElementById('graph-caption').textContent = caption;
+    const captionEl = document.getElementById('graph-caption');
+    if (permutations.length > 0) {
+        captionEl.textContent = permutations.map(p => `${p.label}: ${p.visible ? 'visible' : 'hidden'}`).join(' | ');
+    } else {
+        const advOpts = getAdvancedOptions();
+        captionEl.textContent = `Enc: Lossless=${advOpts.lossless} Modular=${advOpts.modular} Progressive=${advOpts.progressive} Chunked=${advOpts.chunked} PreviewFirst=${advOpts.previewFirst} Butteraugli=${advOpts.butteraugliTarget} BrotliEffort=${advOpts.brotliEffort} | Dec: ICC=${advOpts.preserveIcc} Metadata=${advOpts.preserveMetadata} Downsample=${advOpts.downsample}× | Platform: SIMD=${advOpts.simd} Threading=${advOpts.threading}`;
+    }
 
     drawDecodeLatencyGraph(selectedSizes, selectedQualities, selectedEfforts);
     drawEncodeLatencyGraph(selectedSizes, selectedQualities, selectedEfforts);
@@ -934,62 +1194,49 @@ function drawGraphs() {
 function drawDecodeLatencyGraph(selectedSizes, selectedQualities, selectedEfforts) {
     const canvas = document.getElementById('graph-decode-latency');
     if (!canvas) return;
-
-    if (chartInstances['decode-latency']) {
-        chartInstances['decode-latency'].destroy();
-    }
+    if (chartInstances['decode-latency']) chartInstances['decode-latency'].destroy();
 
     const sizeLabels = selectedSizes.map(s => s === 'fullsize' ? 'Full' : `${s}px`);
+    const sources = getPermSources();
+    const multiPerm = sources.length > 1 || sources[0].label !== null;
     const datasets = [];
-    const colors = ['#0f766e', '#16a34a', '#ea580c', '#ca8a04'];
-    let colorIdx = 0;
+    const dashPatterns = [[],[5,3],[2,3],[8,3,2,3]];
+    let dsIdx = 0;
 
-    for (const quality of selectedQualities) {
-        for (const effort of selectedEfforts) {
-            const data = selectedSizes.map(s => Number(getAverageTiming(benchmarkResults.decodeMs.get(`${s}x${quality}xe${effort}`))));
-            datasets.push({
-                label: `Q${quality} E${effort}`,
-                data: data,
-                borderColor: colors[colorIdx % colors.length],
-                backgroundColor: colors[colorIdx % colors.length] + '20',
-                tension: 0.3,
-                fill: false,
-                pointRadius: 4,
-                pointHoverRadius: 6,
-            });
-            colorIdx++;
+    for (const src of sources) {
+        for (const quality of selectedQualities) {
+            for (const effort of selectedEfforts) {
+                const color = src.color || '#0f766e';
+                const data = selectedSizes.map(s => Number(getAverageTiming(src.results.decodeMs.get(`${s}x${quality}xe${effort}`))));
+                const suffix = selectedQualities.length > 1 || selectedEfforts.length > 1 ? ` Q${quality} E${effort}` : '';
+                datasets.push({
+                    label: multiPerm ? `${src.label}${suffix}` : `Q${quality} E${effort}`,
+                    data,
+                    borderColor: color,
+                    backgroundColor: color + '20',
+                    borderDash: dashPatterns[dsIdx % dashPatterns.length],
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                });
+                dsIdx++;
+            }
         }
     }
 
     chartInstances['decode-latency'] = new Chart(canvas, {
         type: 'line',
-        data: {
-            labels: sizeLabels,
-            datasets: datasets,
-        },
+        data: { labels: sizeLabels, datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: {
-                    position: 'bottom',
-                },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            return context.dataset.label + ': ' + context.parsed.y.toFixed(1) + 'ms';
-                        }
-                    }
-                }
+                legend: { position: 'bottom' },
+                tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + 'ms' } }
             },
             scales: {
-                y: {
-                    title: {
-                        display: true,
-                        text: 'Time (ms)'
-                    },
-                    beginAtZero: true,
-                }
+                y: { title: { display: true, text: 'Time (ms)' }, beginAtZero: true }
             }
         }
     });
@@ -998,59 +1245,48 @@ function drawDecodeLatencyGraph(selectedSizes, selectedQualities, selectedEffort
 function drawEncodeLatencyGraph(selectedSizes, selectedQualities, selectedEfforts) {
     const canvas = document.getElementById('graph-encode-latency');
     if (!canvas) return;
-
-    if (chartInstances['encode-latency']) {
-        chartInstances['encode-latency'].destroy();
-    }
+    if (chartInstances['encode-latency']) chartInstances['encode-latency'].destroy();
 
     const sizeLabels = selectedSizes.map(s => s === 'fullsize' ? 'Full' : `${s}px`);
+    const sources = getPermSources();
+    const multiPerm = sources.length > 1 || sources[0].label !== null;
     const datasets = [];
-    const colors = ['#ca8a04', '#f97316', '#0f766e', '#16a34a'];
-    let colorIdx = 0;
+    const dashPatterns = [[],[5,3],[2,3],[8,3,2,3]];
+    let dsIdx = 0;
 
-    for (const quality of selectedQualities) {
-        for (const effort of selectedEfforts) {
-            const data = selectedSizes.map(s => Number(getAverageTiming(benchmarkResults.encodeMs.get(`${s}x${quality}xe${effort}`))));
-            datasets.push({
-                label: `Q${quality} E${effort}`,
-                data: data,
-                borderColor: colors[colorIdx % colors.length],
-                backgroundColor: colors[colorIdx % colors.length] + '20',
-                tension: 0.3,
-                fill: false,
-                pointRadius: 4,
-                pointHoverRadius: 6,
-            });
-            colorIdx++;
+    for (const src of sources) {
+        for (const quality of selectedQualities) {
+            for (const effort of selectedEfforts) {
+                const color = src.color || '#ca8a04';
+                const data = selectedSizes.map(s => Number(getAverageTiming(src.results.encodeMs.get(`${s}x${quality}xe${effort}`))));
+                const suffix = selectedQualities.length > 1 || selectedEfforts.length > 1 ? ` Q${quality} E${effort}` : '';
+                datasets.push({
+                    label: multiPerm ? `${src.label}${suffix}` : `Q${quality} E${effort}`,
+                    data,
+                    borderColor: color,
+                    backgroundColor: color + '20',
+                    borderDash: dashPatterns[dsIdx % dashPatterns.length],
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                });
+                dsIdx++;
+            }
         }
     }
 
     chartInstances['encode-latency'] = new Chart(canvas, {
         type: 'line',
-        data: {
-            labels: sizeLabels,
-            datasets: datasets,
-        },
+        data: { labels: sizeLabels, datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: {
-                    position: 'bottom',
-                },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            return context.dataset.label + ': ' + context.parsed.y.toFixed(1) + 'ms';
-                        }
-                    }
-                }
+                legend: { position: 'bottom' },
+                tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + 'ms' } }
             },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                }
-            }
+            scales: { y: { beginAtZero: true } }
         }
     });
 }
@@ -1058,80 +1294,47 @@ function drawEncodeLatencyGraph(selectedSizes, selectedQualities, selectedEffort
 function drawDecodeDistributionGraph(selectedSizes, selectedQualities, selectedEfforts) {
     const canvas = document.getElementById('graph-decode-distribution');
     if (!canvas) return;
-
-    if (chartInstances['decode-distribution']) {
-        chartInstances['decode-distribution'].destroy();
-    }
+    if (chartInstances['decode-distribution']) chartInstances['decode-distribution'].destroy();
 
     const sizeLabels = selectedSizes.map(s => s === 'fullsize' ? 'Full' : `${s}px`);
-    const datasets = [];
-    const colors = ['#0f766e', '#16a34a', '#ea580c', '#ca8a04'];
-    let colorIdx = 0;
+    const sources = getPermSources();
+    const bubbleDatasets = [];
 
-    // For distribution, show box plots by quality/effort at each size
-    for (const quality of selectedQualities) {
-        for (const effort of selectedEfforts) {
-            const data = selectedSizes.map(s => benchmarkResults.decodeMs.get(`${s}x${quality}xe${effort}`) || []);
-            datasets.push({
-                label: `Q${quality} E${effort}`,
-                data: data.map(v => ({x: sizeLabels[selectedSizes.indexOf(selectedSizes[data.indexOf(v)])], y: v})),
-            });
-            colorIdx++;
-        }
-    }
-
-    // Use a simpler bubble chart for distribution
-    const allData = [];
-    for (const quality of selectedQualities) {
-        for (const effort of selectedEfforts) {
-            for (let i = 0; i < selectedSizes.length; i++) {
-                const size = selectedSizes[i];
-                const timings = benchmarkResults.decodeMs.get(`${size}x${quality}xe${effort}`) || [];
-                timings.forEach((val, idx) => {
-                    allData.push({
-                        x: i + Math.random() * 0.3 - 0.15,
-                        y: val,
-                        r: 3
-                    });
-                });
+    for (const src of sources) {
+        const color = src.color || '#0f766e';
+        const pts = [];
+        for (const quality of selectedQualities) {
+            for (const effort of selectedEfforts) {
+                for (let i = 0; i < selectedSizes.length; i++) {
+                    const timings = src.results.decodeMs.get(`${selectedSizes[i]}x${quality}xe${effort}`) || [];
+                    timings.forEach(val => pts.push({ x: i + Math.random() * 0.3 - 0.15, y: val, r: 3 }));
+                }
             }
         }
+        bubbleDatasets.push({
+            label: src.label || 'Decode distribution',
+            data: pts,
+            borderColor: color,
+            backgroundColor: color + '40',
+        });
     }
 
     chartInstances['decode-distribution'] = new Chart(canvas, {
         type: 'bubble',
-        data: {
-            labels: sizeLabels,
-            datasets: [{
-                label: 'Decode distribution',
-                data: allData,
-                borderColor: '#0f766e',
-                backgroundColor: '#0f766e40',
-            }]
-        },
+        data: { labels: sizeLabels, datasets: bubbleDatasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
                 legend: { position: 'bottom' },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            return context.parsed.y.toFixed(1) + 'ms';
-                        }
-                    }
-                }
+                tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + 'ms' } }
             },
             scales: {
                 x: {
                     type: 'linear',
                     min: -0.5,
                     max: sizeLabels.length - 0.5,
-                    ticks: {
-                        callback: function(value) {
-                            return sizeLabels[Math.round(value)] || '';
-                        }
-                    }
+                    ticks: { callback: value => sizeLabels[Math.round(value)] || '' }
                 },
                 y: { beginAtZero: true }
             }
@@ -1142,55 +1345,41 @@ function drawDecodeDistributionGraph(selectedSizes, selectedQualities, selectedE
 function drawFileSizeGraph(selectedSizes, selectedQualities, selectedEfforts) {
     const canvas = document.getElementById('graph-filesize');
     if (!canvas) return;
-
-    if (chartInstances['filesize']) {
-        chartInstances['filesize'].destroy();
-    }
+    if (chartInstances['filesize']) chartInstances['filesize'].destroy();
 
     const sizeLabels = selectedSizes.map(s => s === 'fullsize' ? 'Full' : `${s}px`);
+    const sources = getPermSources();
+    const multiPerm = sources.length > 1 || sources[0].label !== null;
     const datasets = [];
-    const colors = ['#0f766e', '#16a34a', '#ea580c', '#ca8a04'];
-    let colorIdx = 0;
 
-    for (const quality of selectedQualities) {
-        for (const effort of selectedEfforts) {
-            const data = selectedSizes.map(s => (benchmarkResults.fileSize.get(`${s}x${quality}xe${effort}`) || 0) / 1024);
-            datasets.push({
-                label: `Q${quality} E${effort}`,
-                data: data,
-                backgroundColor: colors[colorIdx % colors.length] + '80',
-                borderColor: colors[colorIdx % colors.length],
-                borderWidth: 1,
-            });
-            colorIdx++;
+    for (const src of sources) {
+        for (const quality of selectedQualities) {
+            for (const effort of selectedEfforts) {
+                const color = src.color || '#0f766e';
+                const data = selectedSizes.map(s => (src.results.fileSize.get(`${s}x${quality}xe${effort}`) || 0) / 1024);
+                const suffix = selectedQualities.length > 1 || selectedEfforts.length > 1 ? ` Q${quality} E${effort}` : '';
+                datasets.push({
+                    label: multiPerm ? `${src.label}${suffix}` : `Q${quality} E${effort}`,
+                    data,
+                    backgroundColor: color + '80',
+                    borderColor: color,
+                    borderWidth: 1,
+                });
+            }
         }
     }
 
     chartInstances['filesize'] = new Chart(canvas, {
         type: 'bar',
-        data: {
-            labels: sizeLabels,
-            datasets: datasets,
-        },
+        data: { labels: sizeLabels, datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
                 legend: { position: 'bottom' },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            return context.dataset.label + ': ' + context.parsed.y.toFixed(1) + ' KB';
-                        }
-                    }
-                }
+                tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + ' KB' } }
             },
-            scales: {
-                y: {
-                    stacked: false,
-                    beginAtZero: true,
-                }
-            }
+            scales: { y: { stacked: false, beginAtZero: true } }
         }
     });
 }

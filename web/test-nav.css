@@ -1,0 +1,84 @@
+:root {
+    --home-bar-height: 46px;
+}
+
+body.has-home-bar {
+    padding-top: var(--home-bar-height);
+}
+
+body.has-home-bar > header {
+    top: var(--home-bar-height);
+}
+
+.home-bar {
+    position: fixed;
+    inset: 0 0 auto 0;
+    z-index: 260;
+    height: var(--home-bar-height);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(8, 11, 15, 0.94);
+    color: var(--text, #ebeff5);
+    backdrop-filter: blur(16px);
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+}
+
+.home-bar-label {
+    color: var(--faint, #6c7482);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 10px;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.home-bar-links {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.home-bar-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 5px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #ebeff5;
+    text-decoration: none;
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 650;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    transition: all 200ms;
+}
+
+.home-bar-link:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #ffffff;
+}
+
+.home-bar-link:active {
+    background: rgba(255, 255, 255, 0.16);
+    transform: scale(0.96);
+}
+
+.home-bar-link.is-active,
+.home-bar-link[aria-current="page"] {
+    background: linear-gradient(135deg, #ca8a04, #0f766e);
+    border-color: #ca8a04;
+    color: #ffffff;
+    font-weight: 700;
+}

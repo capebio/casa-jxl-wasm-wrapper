@@ -1,0 +1,121 @@
+.dbg-panel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 9000;
+    height: 320px;
+    display: flex;
+    flex-direction: column;
+    background: #0d1017;
+    border-top: 1px solid rgba(255,255,255,0.10);
+    box-shadow: 0 -8px 32px rgba(0,0,0,0.5);
+    font: 12px/1.45 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+    color: #c9d1dc;
+}
+
+.dbg-bar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 14px;
+    background: #171c27;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+
+.dbg-bar-title {
+    font-weight: 700;
+    color: #e2e8f0;
+    letter-spacing: 0.06em;
+    font-size: 11px;
+    text-transform: uppercase;
+}
+
+.dbg-bar-count {
+    flex: 1;
+    color: #64748b;
+    font-size: 11px;
+}
+
+.dbg-bar-action {
+    padding: 3px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.06);
+    color: #94a3b8;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.dbg-bar-action:hover {
+    background: rgba(255,255,255,0.12);
+    color: #e2e8f0;
+}
+
+.dbg-bar-close {
+    border-color: rgba(248,113,113,0.25);
+    color: #fca5a5;
+}
+
+.dbg-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 0;
+}
+
+.dbg-row {
+    padding: 1px 14px;
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 8px;
+    align-items: baseline;
+}
+
+.dbg-row:hover {
+    background: rgba(255,255,255,0.03);
+}
+
+.dbg-row.dbg-error {
+    color: #fca5a5;
+}
+
+.dbg-row.dbg-ok {
+    color: #86efac;
+}
+
+.dbg-row.dbg-warn {
+    color: #fde68a;
+}
+
+.dbg-ts {
+    color: #475569;
+    font-size: 10px;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.dbg-msg {
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.dbg-detail {
+    grid-column: 2;
+    margin: 0;
+    color: #64748b;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* Ensure [hidden] wins over the display:flex rule above in all browsers */
+.dbg-panel[hidden] { display: none !important; }
+
+/* Console toggle button gets badge when entries exist */
+#dbg-console-btn.is-active {
+    background: rgba(15, 118, 110, 0.20) !important;
+    border-color: rgba(15, 118, 110, 0.35) !important;
+    color: #99f6e4 !important;
+}

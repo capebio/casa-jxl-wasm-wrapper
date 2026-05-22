@@ -18,6 +18,21 @@ describe("loadWasmModule", () => {
     expect(fetched).toBe(false);
   });
 
+  test("default import resolves the built jxl-wasm facade from browser package layout", async () => {
+    let fetched = false;
+
+    const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
+      fetchImpl: async () => {
+        fetched = true;
+        throw new Error("not used");
+      },
+    });
+
+    expect(typeof module.createDecoder).toBe("function");
+    expect(typeof module.createEncoder).toBe("function");
+    expect(fetched).toBe(false);
+  });
+
   test("rejects fetched wasm bytes when package lacks codec facade", async () => {
     await expect(
       loadWasmModule("https://example.invalid/jxl.wasm", {

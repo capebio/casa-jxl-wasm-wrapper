@@ -1,5 +1,5 @@
 export function createProgressiveSession({
-    initialBackend = 'jsquash',
+    initialBackend = 'libjxl',
     initialEncodeBackend,
     initialDecodeBackend,
     loadSource,

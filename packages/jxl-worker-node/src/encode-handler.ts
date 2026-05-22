@@ -58,6 +58,7 @@ export class EncodeHandler {
 
   private state: EncodeState = "created";
   private pixelQueue: Array<{ chunk: Buffer; region?: Region }> = [];
+  private pixelReadIndex = 0;
   private queueDepth = 0;
   private cancelled = false;
   private finished = false;
@@ -125,7 +126,7 @@ export class EncodeHandler {
   private waitForPixels(): Promise<void> {
     return new Promise<void>((resolve) => {
       const check = () => {
-        if (this.pixelQueue.length > 0 || this.finished || this.cancelled) resolve();
+        if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled) resolve();
         else if (this.state === "done" || this.state === "error") resolve();
         else setTimeout(check, 2);
       };
@@ -136,9 +137,13 @@ export class EncodeHandler {
   private async feedEncoder(encoder: NodeEncoder): Promise<void> {
     while (!this.cancelled && this.state !== "done" && this.state !== "error") {
       await this.waitForPixels();
-      while (this.pixelQueue.length > 0) {
-        const entry = this.pixelQueue.shift();
+      while (this.pixelQueue.length > this.pixelReadIndex) {
+        const entry = this.pixelQueue[this.pixelReadIndex++];
         if (entry === undefined) break;
+        if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
+          this.pixelQueue = this.pixelQueue.slice(this.pixelReadIndex);
+          this.pixelReadIndex = 0;
+        }
         this.queueDepth--;
         await encoder.pushPixels(entry.chunk, entry.region);
         if (this.queueDepth < CHUNK_HWM) {
