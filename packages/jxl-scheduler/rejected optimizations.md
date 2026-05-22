@@ -68,3 +68,65 @@ Requires a `pool.acquirePreferred(hint)` API addition and evidence that WASM mod
 
 ## 23. Preemption rate limiting / cooldown
 With typical `maxWorkers` (4–8), sustained preemption storms require that many simultaneous `visible` arrivals with all slots occupied by `background` — not a realistic steady state; add if benchmarks show otherwise.
+
+---
+
+# Rejected Optimizations — facade.ts (jxl-wasm)
+
+Evaluated against `packages/jxl-wasm/src/facade.ts`. Two rounds of external suggestions; decisions recorded below.
+
+## Round 1 (Grok batch)
+
+### R1-1. `onDrain` callback on `JxlDecoder` interface
+`scheduler.ts:309` (`waitForDrain`) + `decode-handler.ts:148` (`worker_drain` message) already implement full backpressure at the scheduler/worker boundary. The facade runs inside the worker; adding `onDrain` to `JxlDecoder` would duplicate this at the wrong layer and push scheduler concerns into the WASM bridge.
+
+### R1-2. Shared pixel buffer pool in `applyRegionAndDownsample` / `readBuffer`
+Output pixel buffers are caller-owned after yield. In the worker path `decode-handler.ts:188` transfers them via `postMessage(msg, [pixels])`, zeroing the reference — they cannot be recycled. In direct facade use, the caller holds an arbitrary-lifetime reference. No release lifecycle exists. The WASM input buffer (`chunkBufPtr`/`chunkBufCap`) is already reused across chunks in `eventsProgressive`.
+
+### R1-3. `decodeLowResFirst` option
+`DecoderOptions.downsample: 1|2|4|8` and `progressionTarget: "dc"` already exist. The caller uses `downsample: 8` + `progressionTarget: "dc"` for a fast preview, then a new session for the region of interest. No facade change needed.
+
+### R1-4. `decodeBatch()` on facade
+The scheduler + session layer is the batch API (`acquireSlot` with priority, sourceKey dedupe, AbortSignal). Duplicating batch logic in the facade would bypass preemption, dedupe, and backpressure entirely. Wrong layer.
+
+### R1-5. Direct WASM write in `eventsOneShot` — IMPLEMENTED
+`eventsOneShot` now writes chunks directly into a `_malloc`'d WASM heap buffer. `callDecode` (took a `Uint8Array`, did its own malloc) replaced by `callDecodeFromPtr` (takes pre-allocated ptr). `concatBytes` removed. Handle free consolidated into a single `try/finally`.
+
+### R1-6. Sidecar + progressive preview strategy
+Already implemented: `EncoderOptions.sidecarSizes`, `_jxl_wasm_encode_rgba8_with_sidecars`, chain traversal with `_jxl_wasm_buffer_next`, sidecars yielded smallest-first.
+
+### R1-7. Adaptive quality / distance based on connection speed
+Application logic. `EncoderOptions.distance` and `effort` are already first-class params. The facade has no access to network state and should not acquire it.
+
+### R1-8. Worker-side header caching
+`DedupeRegistry` in `scheduler.ts` fans out to existing sessions on matching `sourceKey`, avoiding re-parse. Caching decoded header state across session lifetimes would require stateful workers, breaking the stateless model and making `recycle()` unsafe.
+
+### R1-9. `ReadableStream` / `WritableStream` API on `JxlDecoder` / `JxlEncoder`
+Facade runs inside the worker; zero-copy transfer is already handled by `decode-handler.ts:188` (`postMessage(msg, [pixels])`). `ReadableStream` would be a thin API wrapper for direct (non-worker) use only — useful ergonomics, but not a performance improvement. Separate utility if desired.
+
+### R1-10. Error recovery + partial decode resume from byte offset
+JXL C API has no seek or resume-from-container-position function. Not implementable without a new C++ bridge.
+
+## Round 2 (Grok batch)
+
+### R2-1. Streaming `EncodeEvent` from `chunks()` (done/error events in the async iterable)
+Changes `chunks()` return type from `AsyncIterable<ArrayBuffer | Uint8Array>` to a discriminated union — a breaking API change. `getStats()` already covers this: populated after the iterable completes normally, null on error, without forcing callers to discriminate event types in the hot receive path.
+`ratio` field added to `EncodeStats` as a convenience (trivially derived but worth having in one place).
+
+### R2-2. Shared pixel buffer pool (round 2)
+Same rejection as R1-2. No safe ownership model without an explicit `release()` call that no current consumer implements.
+
+### R2-3. `setBackpressureHandler` on `JxlDecoder`
+Same rejection as R1-1. Scheduler/worker layer already handles this. The async iterator provides implicit pull-based backpressure for direct facade use.
+
+### R2-4. `refineRegion()` on `JxlDecoder`
+Would require caching the entire compressed input after decode completes (the chunk queue is drained and cleared). Increased memory for all decoders to support a minority use case. Application concern: caller creates a new session with a tighter `region` + lower `downsample`.
+
+### R2-5. `createDecoderStream()` (WritableStream + ReadableStream wrapper)
+Thin wrapper with no performance impact. Not a facade improvement. If wanted, belongs in a separate utilities export so it can be tree-shaken.
+
+### R2-6. Memory-aware `eventsOneShot` (avoid `concatBytes`)
+**Already implemented in Round 1** (R1-5 above). Grok did not have knowledge of the prior change.
+
+### R2-7. Adaptive effort based on WASM tier — IMPLEMENTED
+`recommendedEffort()` exported from `facade.ts`. Maps `scalar→4`, `simd→6`, `simd-mt|relaxed-simd-mt→7`. Non-breaking; callers opt in by passing `recommendedEffort()` as the `effort` field.

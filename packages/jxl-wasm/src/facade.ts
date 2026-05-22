@@ -91,6 +91,8 @@ export interface EncodeStats {
   originalBytes: number;
   /** Total JXL bytes yielded across all chunks and sidecars. */
   compressedBytes: number;
+  /** compressedBytes / originalBytes. Values below 1.0 indicate net compression. */
+  ratio: number;
 }
 
 export interface JxlEncoder {
@@ -194,6 +196,18 @@ export function detectTier(): Tier {
   }
   _cachedDetectedTier = tier;
   return tier;
+}
+
+/**
+ * Returns a sensible default effort level for the current WASM tier.
+ * Scalar workers get a lower effort to avoid blocking the thread; SIMD-MT
+ * workers get full effort since they can use parallel libjxl codepaths.
+ */
+export function recommendedEffort(): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 {
+  const tier = detectTier();
+  if (tier === "scalar") return 4;
+  if (tier === "simd") return 6;
+  return 7; // simd-mt, relaxed-simd-mt
 }
 
 function probeSimd(): boolean {
@@ -723,7 +737,7 @@ class LibjxlEncoder implements JxlEncoder {
     } finally {
       module._free(ptr);
     }
-    this.encodeStats = { originalBytes: expectedBytes, compressedBytes };
+    this.encodeStats = { originalBytes: expectedBytes, compressedBytes, ratio: expectedBytes > 0 ? compressedBytes / expectedBytes : 0 };
   }
 
   getStats(): EncodeStats | null { return this.encodeStats; }
