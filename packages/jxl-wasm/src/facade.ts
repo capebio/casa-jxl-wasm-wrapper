@@ -86,12 +86,21 @@ export interface JxlDecoder {
   dispose(): void | Promise<void>;
 }
 
+export interface EncodeStats {
+  /** Raw pixel bytes: width × height × 4 × bytesPerChannel. */
+  originalBytes: number;
+  /** Total JXL bytes yielded across all chunks and sidecars. */
+  compressedBytes: number;
+}
+
 export interface JxlEncoder {
   pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): void | Promise<void>;
   finish(): void | Promise<void>;
   chunks(): AsyncIterable<ArrayBuffer | Uint8Array>;
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
+  /** Populated after chunks() completes normally. Null before or on error. */
+  getStats(): EncodeStats | null;
 }
 
 interface LibjxlBuffer {
@@ -476,74 +485,81 @@ class LibjxlDecoder implements JxlDecoder {
     const fmt = this.options.format;
     const bpc = fmt === "rgbaf32" ? 4 : fmt === "rgba16" ? 2 : 1;
     const pixelStride = 4 * bpc;
-    const input = concatBytes(allChunks);
-    allChunks.length = 0;
-    // #10: pass region to callDecode — if C++ region bridge present it crops in WASM,
-    // avoiding shipping full-image pixels to JS. JS fallback still works via applyRegionAndDownsample.
-    const regionForDecode = this.options.region;
-    const cppDidCrop = regionForDecode !== null && (
-      (fmt === "rgba8" && !!module._jxl_wasm_decode_rgba8_region) ||
-      (fmt === "rgba16" && !!module._jxl_wasm_decode_rgba16_region) ||
-      (fmt === "rgbaf32" && !!module._jxl_wasm_decode_rgbaf32_region)
-    );
-    const decoded = callDecode(module, input, this.options.downsample, fmt, cppDidCrop ? regionForDecode : null);
-    // If C++ did the crop, decoded.width/height already reflect the region; no further JS crop.
-    // Otherwise, scale region into downsampled coords and apply in JS.
-    const ds = this.options.downsample;
-    const scaledRegion = (!cppDidCrop && regionForDecode !== null) ? {
-      x: Math.trunc(regionForDecode.x / ds),
-      y: Math.trunc(regionForDecode.y / ds),
-      w: Math.ceil(regionForDecode.w / ds),
-      h: Math.ceil(regionForDecode.h / ds),
-    } : null;
-    const pixels = applyRegionAndDownsample(
-      decoded.data,
-      decoded.width,
-      decoded.height,
-      scaledRegion,
-      1,
-      bpc,
-    );
-    // C++ crop path skips applyRegionAndDownsample's region-setter; restore it to match JS path.
-    if (cppDidCrop) pixels.region = { x: 0, y: 0, w: pixels.width, h: pixels.height };
-    const info: ImageInfo = {
-      width: pixels.width,
-      height: pixels.height,
-      bitsPerSample: decoded.bitsPerSample,
-      hasAlpha: decoded.hasAlpha,
-      hasAnimation: false,
-      jpegReconstructionAvailable: false,
-    };
+    // Write all chunks directly into a single WASM heap buffer — no intermediate JS allocation.
+    const totalSize = allChunks.reduce((s, c) => s + c.byteLength, 0);
+    const inputPtr = module._malloc(totalSize);
+    let decodedHandle = 0;
+    try {
+      let woff = 0;
+      for (const chunk of allChunks) {
+        module.HEAPU8.set(chunk, inputPtr + woff);
+        woff += chunk.byteLength;
+      }
+      allChunks.length = 0;
+      // #10: pass region to callDecodeFromPtr — if C++ region bridge present it crops in WASM,
+      // avoiding shipping full-image pixels to JS. JS fallback still works via applyRegionAndDownsample.
+      const regionForDecode = this.options.region;
+      const cppDidCrop = regionForDecode !== null && (
+        (fmt === "rgba8" && !!module._jxl_wasm_decode_rgba8_region) ||
+        (fmt === "rgba16" && !!module._jxl_wasm_decode_rgba16_region) ||
+        (fmt === "rgbaf32" && !!module._jxl_wasm_decode_rgbaf32_region)
+      );
+      const decoded = callDecodeFromPtr(module, inputPtr, totalSize, this.options.downsample, fmt, cppDidCrop ? regionForDecode : null);
+      decodedHandle = decoded.handle;
+      // If C++ did the crop, decoded.width/height already reflect the region; no further JS crop.
+      // Otherwise, scale region into downsampled coords and apply in JS.
+      const ds = this.options.downsample;
+      const scaledRegion = (!cppDidCrop && regionForDecode !== null) ? {
+        x: Math.trunc(regionForDecode.x / ds),
+        y: Math.trunc(regionForDecode.y / ds),
+        w: Math.ceil(regionForDecode.w / ds),
+        h: Math.ceil(regionForDecode.h / ds),
+      } : null;
+      const pixels = applyRegionAndDownsample(
+        decoded.data,
+        decoded.width,
+        decoded.height,
+        scaledRegion,
+        1,
+        bpc,
+      );
+      // C++ crop path skips applyRegionAndDownsample's region-setter; restore it to match JS path.
+      if (cppDidCrop) pixels.region = { x: 0, y: 0, w: pixels.width, h: pixels.height };
+      const info: ImageInfo = {
+        width: pixels.width,
+        height: pixels.height,
+        bitsPerSample: decoded.bitsPerSample,
+        hasAlpha: decoded.hasAlpha,
+        hasAnimation: false,
+        jpegReconstructionAvailable: false,
+      };
 
-    yield { type: "header", info };
-    if (this.options.progressionTarget === "header") {
-      module._jxl_wasm_buffer_free(decoded.handle);
-      return;
-    }
-    if (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass") {
+      yield { type: "header", info };
+      if (this.options.progressionTarget === "header") return;
+      if (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass") {
+        yield {
+          type: "progress",
+          stage: this.options.progressionTarget === "dc" ? "dc" : "pass",
+          info,
+          pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(),
+          format: fmt,
+          pixelStride,
+          ...(pixels.region === undefined ? {} : { region: pixels.region }),
+        };
+        if (this.options.progressionTarget !== "final") return;
+      }
       yield {
-        type: "progress",
-        stage: this.options.progressionTarget === "dc" ? "dc" : "pass",
+        type: "final",
         info,
-        pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(),
+        pixels: pixels.data,
         format: fmt,
         pixelStride,
         ...(pixels.region === undefined ? {} : { region: pixels.region }),
       };
-      if (this.options.progressionTarget !== "final") {
-        module._jxl_wasm_buffer_free(decoded.handle);
-        return;
-      }
+    } finally {
+      module._free(inputPtr);
+      if (decodedHandle !== 0) module._jxl_wasm_buffer_free(decodedHandle);
     }
-    yield {
-      type: "final",
-      info,
-      pixels: pixels.data,
-      format: fmt,
-      pixelStride,
-      ...(pixels.region === undefined ? {} : { region: pixels.region }),
-    };
-    module._jxl_wasm_buffer_free(decoded.handle);
   }
 
   cancel(_reason?: string): void {
@@ -568,6 +584,7 @@ class LibjxlEncoder implements JxlEncoder {
   private cancelled = false;
   private finishResolve: (() => void) | null = null;
   private readonly sortedSidecarSizes: readonly number[];
+  private encodeStats: EncodeStats | null = null;
 
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
@@ -607,7 +624,8 @@ class LibjxlEncoder implements JxlEncoder {
       throw new Error(`JXL encode expected ${expectedBytes} bytes for ${this.options.format}, got ${totalBytes}`);
     }
 
-    // IMPROVEMENT-6: Write pixel chunks directly into WASM heap — no concatBytes allocation.
+    // Write pixel chunks directly into WASM heap — no concatBytes allocation.
+    let compressedBytes = 0;
     const ptr = module._malloc(totalBytes);
     try {
       let offset = 0;
@@ -619,7 +637,7 @@ class LibjxlEncoder implements JxlEncoder {
       const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
       const hasAlpha = this.options.hasAlpha ? 1 : 0;
 
-      // IMPROVEMENT-5: Sidecar thumbnails — yield smallest first for faster first-paint.
+      // Sidecar thumbnails — yield smallest first for faster first-paint.
       if (this.sortedSidecarSizes.length > 0
           && module._jxl_wasm_encode_rgba8_with_sidecars
           && module._jxl_wasm_buffer_next) {
@@ -649,7 +667,7 @@ class LibjxlEncoder implements JxlEncoder {
             const next = module._jxl_wasm_buffer_next(handle);
             try {
               const buf = readBuffer(module, handle, "encode");
-              // IMPROVEMENT-10: buf.data is already a copy (HEAPU8.slice in readBuffer).
+              compressedBytes += buf.data.byteLength;
               yield buf.data;
               module._jxl_wasm_buffer_free(handle);
             } catch (err) {
@@ -679,6 +697,7 @@ class LibjxlEncoder implements JxlEncoder {
             let chunkHandle: number;
             while ((chunkHandle = module._jxl_wasm_enc_take_chunk(encState)) !== 0) {
               const chunk = readBuffer(module, chunkHandle, "encode");
+              compressedBytes += chunk.data.byteLength;
               yield chunk.data;
               module._jxl_wasm_buffer_free(chunkHandle);
             }
@@ -696,6 +715,7 @@ class LibjxlEncoder implements JxlEncoder {
             handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
           }
           const encoded = readBuffer(module, handle, "encode");
+          compressedBytes += encoded.data.byteLength;
           yield encoded.data;
           module._jxl_wasm_buffer_free(encoded.handle);
         }
@@ -703,7 +723,10 @@ class LibjxlEncoder implements JxlEncoder {
     } finally {
       module._free(ptr);
     }
+    this.encodeStats = { originalBytes: expectedBytes, compressedBytes };
   }
+
+  getStats(): EncodeStats | null { return this.encodeStats; }
 
   cancel(_reason?: string): void {
     this.cancelled = true;
@@ -755,29 +778,23 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
   return await (factory as (options: Record<string, unknown>) => Promise<LibjxlWasmModule>)(options);
 }
 
-function callDecode(module: LibjxlWasmModule, input: Uint8Array, downsample: number, format: PixelFormat, region?: Region | null): LibjxlBuffer {
-  const ptr = module._malloc(input.byteLength);
-  try {
-    module.HEAPU8.set(input, ptr);
-    let handle: number;
-    // #10: use C++ region crop when available — avoids shipping full-image pixels to JS.
-    if (region != null) {
-      if (format === "rgba16" && module._jxl_wasm_decode_rgba16_region) {
-        handle = module._jxl_wasm_decode_rgba16_region(ptr, input.byteLength, region.x, region.y, region.w, region.h, downsample);
-      } else if (format === "rgbaf32" && module._jxl_wasm_decode_rgbaf32_region) {
-        handle = module._jxl_wasm_decode_rgbaf32_region(ptr, input.byteLength, region.x, region.y, region.w, region.h, downsample);
-      } else if (module._jxl_wasm_decode_rgba8_region) {
-        handle = module._jxl_wasm_decode_rgba8_region(ptr, input.byteLength, region.x, region.y, region.w, region.h, downsample);
-      } else {
-        handle = callDecodeNoRegion(module, ptr, input.byteLength, downsample, format);
-      }
+function callDecodeFromPtr(module: LibjxlWasmModule, ptr: number, size: number, downsample: number, format: PixelFormat, region?: Region | null): LibjxlBuffer {
+  let handle: number;
+  // #10: use C++ region crop when available — avoids shipping full-image pixels to JS.
+  if (region != null) {
+    if (format === "rgba16" && module._jxl_wasm_decode_rgba16_region) {
+      handle = module._jxl_wasm_decode_rgba16_region(ptr, size, region.x, region.y, region.w, region.h, downsample);
+    } else if (format === "rgbaf32" && module._jxl_wasm_decode_rgbaf32_region) {
+      handle = module._jxl_wasm_decode_rgbaf32_region(ptr, size, region.x, region.y, region.w, region.h, downsample);
+    } else if (module._jxl_wasm_decode_rgba8_region) {
+      handle = module._jxl_wasm_decode_rgba8_region(ptr, size, region.x, region.y, region.w, region.h, downsample);
     } else {
-      handle = callDecodeNoRegion(module, ptr, input.byteLength, downsample, format);
+      handle = callDecodeNoRegion(module, ptr, size, downsample, format);
     }
-    return readBuffer(module, handle, "decode");
-  } finally {
-    module._free(ptr);
+  } else {
+    handle = callDecodeNoRegion(module, ptr, size, downsample, format);
   }
+  return readBuffer(module, handle, "decode");
 }
 
 function callDecodeNoRegion(module: LibjxlWasmModule, ptr: number, size: number, downsample: number, format: PixelFormat): number {
@@ -923,18 +940,6 @@ function normalizeRegion(region: Region | null, width: number, height: number): 
     w: Math.max(1, Math.min(maxW, Math.trunc(region.w))),
     h: Math.max(1, Math.min(maxH, Math.trunc(region.h))),
   };
-}
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  if (chunks.length === 1) return chunks[0]!;
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
 }
 
 function toUint8Array(value: ArrayBuffer | Uint8Array): Uint8Array {
