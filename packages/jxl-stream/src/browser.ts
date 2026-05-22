@@ -35,9 +35,14 @@ export async function fromReadableStream(
   signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
+    // Prefetch: start reading chunk N+1 immediately after chunk N arrives, before
+    // awaiting session.push(N). This pipelines I/O with push dispatch so network
+    // delivery of the next chunk overlaps with scheduler backpressure on the current one.
+    let pending = reader.read();
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await pending;
       if (done) break;
+      pending = reader.read();
       await session.push(value);
     }
     await session.close();

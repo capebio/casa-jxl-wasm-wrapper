@@ -130,3 +130,29 @@ Thin wrapper with no performance impact. Not a facade improvement. If wanted, be
 
 ### R2-7. Adaptive effort based on WASM tier — IMPLEMENTED
 `recommendedEffort()` exported from `facade.ts`. Maps `scalar→4`, `simd→6`, `simd-mt|relaxed-simd-mt→7`. Non-breaking; callers opt in by passing `recommendedEffort()` as the `effort` field.
+
+---
+
+# Rejected / False Bottleneck Claims — bridge.cpp + facade.ts + browser.ts
+
+Evaluated against `packages/jxl-wasm/src/bridge.cpp`, `packages/jxl-wasm/src/facade.ts`, and `packages/jxl-stream/src/browser.ts`.
+
+## B-1. "Redundant Copy in bridge.cpp" — CLAIM FALSE, NO FIX NEEDED
+
+Claim: "libjxl fills its own buffer and the bridge memcpys between them."
+
+Reality: `DecodeRgba` (`bridge.cpp:182–191`) allocates `pixels_raw` via `malloc`, then calls `JxlDecoderSetImageOutBuffer(dec, &pf, pixels_raw, pixels_size)` — libjxl writes directly into our buffer. No intermediate copy. Result returned via `MakeBufferFromOwned` which transfers pointer ownership without copying (`bridge.cpp:79–89`). The progressive decoder follows the same pattern: `JxlDecoderSetImageOutBuffer` → direct write → `MakeBufferFromOwned` on `take_flushed`/`take_final`. `MakeBuffer` (which does an inline memcpy) is only used for 256 KB encoder output slices in `jxl_wasm_enc_take_chunk` — that's unavoidable chunking, not an image-sized copy.
+
+## B-2. "Defensive Slicing in facade.ts" — CLAIM FALSE, NO FIX NEEDED
+
+Claim: "The TS wrapper often copies the Uint8Array before passing it to WASM."
+
+Reality: `LibjxlDecoder.push()` (`facade.ts`) branches on input type: `ArrayBuffer` → `new Uint8Array(chunk)` (zero-copy view); `Uint8Array` → slices only when `copyInput !== false`. The primary production path (`decode-handler.ts`) sends `ArrayBuffer` chunks via `postMessage` transfer — these are transferred (not shared), so the wrapper wraps them with zero copy. The `copyInput: false` opt-out already exists for callers that own their `Uint8Array` buffers. Inverting the default to "no-copy unless explicitly requested" would be a breaking change with no production benefit since the hot path never hits the slice.
+
+## B-3. "Wait-and-Read Loop in browser.ts" — CLAIM TRUE, FIXED
+
+Claim: "strict read→push→wait cycle prevents I/O prefetch from overlapping with push dispatch."
+
+Reality confirmed. Original loop awaited `reader.read()` only after `session.push()` resolved, serializing network I/O with scheduler backpressure. For network-streamed inputs, `session.push()` can block at the adaptive HWM; during that block the next network chunk wasn't even being fetched.
+
+Fix (`packages/jxl-stream/src/browser.ts`): prefetch pattern — start `pending = reader.read()` for chunk N+1 immediately after chunk N arrives (before `await session.push(N)`). The scheduler's backpressure still governs how many chunks the worker can buffer; the fix only pipelines the I/O prefetch with the push round-trip, masking network latency during backpressure wait.
