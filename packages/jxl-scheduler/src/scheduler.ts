@@ -71,8 +71,6 @@ export class Scheduler {
   private readonly queue: PriorityQueue<PendingSession>;
   private readonly dedupe: DedupeRegistry;
 
-  // sessionId → worker id (for sessions currently running)
-  private readonly sessionToWorker = new Map<number, string>(); // workerId → sessionId
   private readonly workerToSession = new Map<string, number>(); // sessionId → workerId
   // sessionId → message handler (so messages can be fanned out to subscribers)
   private readonly messageHandlers = new Map<string, Array<(msg: WorkerToMainMessage) => void>>();
@@ -80,6 +78,7 @@ export class Scheduler {
   private readonly backpressure = new Map<string, BackpressureState>();
 
   private destroyed = false;
+  private drainingQueue = false;
 
   constructor(opts: SchedulerOptions) {
     this.pool = new WorkerPool({
@@ -338,15 +337,8 @@ export class Scheduler {
 
   private findBackgroundWorker(): PoolWorker | null {
     for (const worker of this.pool.activeWorkers) {
-      const sessionId = worker.activeSessionId;
-      if (sessionId === null || worker.cancelling) continue;
-      // Determine the priority of the running session.
-      const pending = this.findQueuedSession(sessionId);
-      if (pending?.priority === "background") return worker;
-      // Check active session priority from start message.
-      // We need to track this — store it in a map.
-      const prio = this.sessionPriority.get(sessionId);
-      if (prio === "background") return worker;
+      if (worker.cancelling || worker.activeSessionId === null) continue;
+      if (this.sessionPriority.get(worker.activeSessionId) === "background") return worker;
     }
     return null;
   }
@@ -431,31 +423,33 @@ export class Scheduler {
   // ---------------------------------------------------------------------------
 
   private drainQueue(): void {
-    if (this.queue.isEmpty) return;
+    if (this.queue.isEmpty || this.drainingQueue) return;
+    this.drainingQueue = true;
 
-    // Try to assign queued sessions to available workers.
     void (async () => {
-      while (!this.queue.isEmpty) {
-        const worker = await this.pool.acquire();
-        if (worker === null) break;
+      try {
+        while (!this.queue.isEmpty) {
+          const worker = await this.pool.acquire();
+          if (worker === null) break;
 
-        const entry = this.queue.dequeue();
-        if (entry === null) {
-          // Queue emptied between check and dequeue; release the worker.
-          this.pool.release(worker);
-          break;
+          const entry = this.queue.dequeue();
+          if (entry === null) {
+            this.pool.release(worker);
+            break;
+          }
+
+          const { payload: pending } = entry;
+          this.assignWorker(worker, pending.sessionId, pending.startMsg);
+          this.setupSignalAbort(pending.sessionId, pending.signal);
+
+          for (const { msg, transfer } of pending.bufferedChunks) {
+            worker.handle.send(msg, transfer);
+          }
+
+          pending.resolve();
         }
-
-        const { payload: pending } = entry;
-        this.assignWorker(worker, pending.sessionId, pending.startMsg);
-        this.setupSignalAbort(pending.sessionId, pending.signal);
-
-        // Flush buffered chunks.
-        for (const { msg, transfer } of pending.bufferedChunks) {
-          worker.handle.send(msg, transfer);
-        }
-
-        pending.resolve();
+      } finally {
+        this.drainingQueue = false;
       }
     })();
   }
@@ -465,16 +459,7 @@ export class Scheduler {
   // ---------------------------------------------------------------------------
 
   private findQueuedSession(sessionId: string): PendingSession | null {
-    // Walk queue lanes — O(n) but queue is small.
-    const entry = this.queue.peek();
-    if (entry === null) return null;
-    // Drain the queue to find by sessionId.
-    // (PriorityQueue does not expose a find-by-id method.)
-    // This is acceptable: queue sizes are bounded by pool size (small constant).
-    const lanes: PendingSession[] = [];
-    // We don't have direct access to internal lanes — return null and
-    // rely on bufferedChunks being handled via send().
-    return null;
+    return this.queue.findBySessionId(sessionId)?.payload ?? null;
   }
 
   private getWorkerById(workerId: number): PoolWorker | null {
@@ -496,7 +481,6 @@ export class Scheduler {
     await this.pool.shutdown();
     this.messageHandlers.clear();
     this.backpressure.clear();
-    this.sessionToWorker.clear();
     this.workerToSession.clear();
     this.sessionPriority.clear();
   }
