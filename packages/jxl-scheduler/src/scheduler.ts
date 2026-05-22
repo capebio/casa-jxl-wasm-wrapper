@@ -71,7 +71,7 @@ interface PendingSession {
 
 interface BackpressureState {
   queueDepth: number;
-  pendingPushes: Array<{ resolve: () => void }>;
+  pendingPushes: Array<{ resolve: () => void; waitedAt: number }>;
 }
 
 // Single record per active session. Replaces six separate Maps that previously
@@ -87,9 +87,11 @@ interface SessionRecord {
   // Set only while queued; cleared when a worker is assigned.
   pending?: PendingSession;
   backpressure?: BackpressureState;
-  // Wall-clock time the session was created. Used for victim selection: we
-  // prefer to preempt the oldest background session (least expected re-work).
+  // Wall-clock time the session was created. Used for victim scoring.
   createdAt: number;
+  // Fractional decode progress [0, 1]. Updated from decode_progress stage messages.
+  // Encode sessions stay at 0 (no protocol progress messages exist for encode).
+  progress: number;
 }
 
 const DEFAULT_PUSH_HWM = 4;
@@ -124,6 +126,17 @@ export class Scheduler {
   private drainingQueue = false;
   private preemptionCount = 0;
   private totalSessionCount = 0;
+
+  // Preemption victim scoring weights.
+  private readonly PREEMPT_PROGRESS_W = 3.0;
+  private readonly PREEMPT_AGE_W = 1.0;
+  // Age is normalised over this window before scoring (sessions older than this score identically on age).
+  private readonly PREEMPT_AGE_NORM_MS = 60_000;
+
+  // Adaptive backpressure: EMA of how long a push actually blocked (ms).
+  // Initialised to 50ms so the HWM starts neutral (no change from the configured base).
+  private drainLatencyEma = 50;
+  private readonly DRAIN_EMA_ALPHA = 0.2;
 
   constructor(opts: SchedulerOptions) {
     this.pool = new WorkerPool({
@@ -162,6 +175,7 @@ export class Scheduler {
           kind: params.startMsg.type === "encode_start" ? "encode" : "decode",
           handlers: [],
           createdAt: Date.now(),
+          progress: 0,
         });
         this.totalSessionCount++;
         const primaryRecord = this.sessions.get(primaryId);
@@ -204,6 +218,7 @@ export class Scheduler {
         handlers: [],
         pending,
         createdAt: Date.now(),
+        progress: 0,
       });
       this.totalSessionCount++;
       this.queue.enqueue({ priority: params.priority, sessionId: params.sessionId, payload: pending });
@@ -301,10 +316,10 @@ export class Scheduler {
 
     const bp = record.backpressure;
     bp.queueDepth++;
-    if (bp.queueDepth < this.pushHwm) return;
+    if (bp.queueDepth < this.adaptiveHwm()) return;
 
     return new Promise<void>((resolve) => {
-      bp.pendingPushes.push({ resolve });
+      bp.pendingPushes.push({ resolve, waitedAt: Date.now() });
     });
   }
 
@@ -313,7 +328,23 @@ export class Scheduler {
     if (bp === undefined) return;
     bp.queueDepth = Math.max(0, bp.queueDepth - 1);
     const waiter = bp.pendingPushes.shift();
-    if (waiter !== undefined) waiter.resolve();
+    if (waiter !== undefined) {
+      this.updateDrainEma(Date.now() - waiter.waitedAt);
+      waiter.resolve();
+    }
+  }
+
+  // Scale HWM up when draining fast, down when slow.
+  // At 50ms EMA (init): factor ≈ 1 → HWM = pushHwm (neutral).
+  // At 10ms: factor = 2 (capped) → HWM = pushHwm * 2, up to 16.
+  // At 200ms: factor = 0.25 (floor) → HWM = max(2, pushHwm * 0.25).
+  private adaptiveHwm(): number {
+    const factor = Math.max(0.25, Math.min(2, 50 / (this.drainLatencyEma + 1)));
+    return Math.max(2, Math.round(this.pushHwm * factor));
+  }
+
+  private updateDrainEma(latencyMs: number): void {
+    this.drainLatencyEma = this.DRAIN_EMA_ALPHA * latencyMs + (1 - this.DRAIN_EMA_ALPHA) * this.drainLatencyEma;
   }
 
   // Unblock all pending waitForDrain calls — used on cancel/shutdown so callers don't hang.
@@ -419,20 +450,26 @@ export class Scheduler {
     return null;
   }
 
-  // Return the oldest running background worker as the preemption victim.
-  // Oldest = smallest createdAt. Preempting the oldest minimises the expected
-  // re-work cost for the background caller on resubmit, since newer sessions
-  // are more likely to still be near the start of their decode.
+  // Score a candidate preemption victim. Lower score = better victim.
+  // Prefer sessions with low progress (less re-work on resubmit) and low age
+  // (less wall-clock time invested). Age is normalised to [0,1] to keep it
+  // on the same scale as progress.
+  private scoreVictim(record: SessionRecord): number {
+    const ageNorm = Math.min(1, (Date.now() - record.createdAt) / this.PREEMPT_AGE_NORM_MS);
+    return record.progress * this.PREEMPT_PROGRESS_W + ageNorm * this.PREEMPT_AGE_W;
+  }
+
   private findBackgroundWorker(): PoolWorker | null {
     let bestWorker: PoolWorker | null = null;
-    let oldestCreatedAt = Infinity;
+    let bestScore = Infinity;
 
     for (const worker of this.backgroundWorkers) {
       if (worker.cancelling || worker.activeSessionId === null) continue;
       const record = this.sessions.get(worker.activeSessionId);
-      const createdAt = record?.createdAt ?? Date.now();
-      if (createdAt < oldestCreatedAt) {
-        oldestCreatedAt = createdAt;
+      if (record === undefined) continue;
+      const score = this.scoreVictim(record);
+      if (score < bestScore) {
+        bestScore = score;
         bestWorker = worker;
       }
     }
@@ -465,6 +502,7 @@ export class Scheduler {
         handlers: [],
         worker,
         createdAt: Date.now(),
+        progress: 0,
       });
       this.totalSessionCount++;
     }
@@ -489,6 +527,13 @@ export class Scheduler {
     });
   }
 
+  private static readonly STAGE_PROGRESS: Readonly<Record<string, number>> = {
+    header: 0.1,
+    dc: 0.3,
+    pass: 0.6,
+    final: 0.95,
+  };
+
   private handleWorkerMessage(sessionId: string, worker: PoolWorker, msg: WorkerToMainMessage): void {
     const record = this.sessions.get(sessionId);
     const handlers = record?.handlers ?? EMPTY_HANDLERS;
@@ -501,6 +546,13 @@ export class Scheduler {
       const subHandlers = subRecord?.handlers ?? EMPTY_HANDLERS;
       for (const h of subHandlers) h(msg);
     });
+
+    // Track decode progress for victim scoring. The stage is used as a proxy for
+    // fractional completion so that nearly-done sessions are spared from preemption.
+    if (record !== undefined && msg.type === "decode_progress") {
+      const p = Scheduler.STAGE_PROGRESS[msg.stage];
+      if (p !== undefined) record.progress = Math.max(record.progress, p);
+    }
 
     if (msg.type === "worker_drain" && msg.sessionId === sessionId) {
       this.signalDrain(sessionId);
