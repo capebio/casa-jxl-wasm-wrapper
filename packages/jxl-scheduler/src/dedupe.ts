@@ -15,6 +15,8 @@ export interface Subscription {
 export class DedupeRegistry {
   // sourceKey → primary sessionId
   private readonly keyToSession = new Map<string, string>();
+  // primary sessionId → sourceKey (reverse of keyToSession, avoids O(n) scan)
+  private readonly sessionToKey = new Map<string, string>();
   // primary sessionId → Set of subscriber session IDs
   private readonly sessionToSubscribers = new Map<string, Set<string>>();
   // subscriber sessionId → primary sessionId (for reverse lookup)
@@ -23,6 +25,7 @@ export class DedupeRegistry {
   // Register a new primary session for a source key.
   register(sessionId: string, sourceKey: string): void {
     this.keyToSession.set(sourceKey, sessionId);
+    this.sessionToKey.set(sessionId, sourceKey);
     this.sessionToSubscribers.set(sessionId, new Set([sessionId]));
   }
 
@@ -56,8 +59,9 @@ export class DedupeRegistry {
 
     if (subs.size === 0) {
       // All subscribers gone: clean up and signal caller to cancel primary.
-      const key = this.keyForSession(primaryId);
-      if (key !== null) this.keyToSession.delete(key);
+      const key = this.sessionToKey.get(primaryId);
+      if (key !== undefined) this.keyToSession.delete(key);
+      this.sessionToKey.delete(primaryId);
       this.sessionToSubscribers.delete(primaryId);
       return true;
     }
@@ -67,8 +71,9 @@ export class DedupeRegistry {
 
   // Clean up a completed or errored primary session.
   complete(sessionId: string): void {
-    const key = this.keyForSession(sessionId);
-    if (key !== null) this.keyToSession.delete(key);
+    const key = this.sessionToKey.get(sessionId);
+    if (key !== undefined) this.keyToSession.delete(key);
+    this.sessionToKey.delete(sessionId);
 
     const subs = this.sessionToSubscribers.get(sessionId);
     if (subs !== undefined) {
@@ -84,10 +89,11 @@ export class DedupeRegistry {
     return [...(this.sessionToSubscribers.get(primaryId) ?? [])];
   }
 
-  private keyForSession(sessionId: string): string | null {
-    for (const [k, v] of this.keyToSession) {
-      if (v === sessionId) return k;
-    }
-    return null;
+  // Iterates subscriber IDs without allocating an intermediate array.
+  forEachSubscriber(primaryId: string, fn: (subId: string) => void): void {
+    const subs = this.sessionToSubscribers.get(primaryId);
+    if (subs === undefined) return;
+    for (const sub of subs) fn(sub);
   }
+
 }
