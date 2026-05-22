@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JXL Benchmark</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <link rel="stylesheet" href="./jxl-debug-console.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar" data-mode="benchmark">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link is-active" href="./jxl-benchmark.html" aria-current="page">Benchmark</a>
+        </div>
+    </nav>
+
+    <main class="shell">
+        <section class="hero compact hero-with-picker">
+            <div class="hero-copy">
+                <p class="eyebrow">JXL Codec Benchmark &middot; <span id="mode-status">Performance analysis</span></p>
+                <h1>Decoder and encoder performance benchmark</h1>
+            </div>
+            <label class="file-drop file-drop-compact" for="source-input" id="source-drop">
+                <input id="source-input" type="file" multiple accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
+                <strong>Pick files</strong>
+                <span>ORF, JPEG, PNG, TIFF, JXL</span>
+            </label>
+        </section>
+
+        <section class="control-band compact">
+            <div class="source-panel">
+                <div class="control-row">
+                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
+                    <button id="start-benchmark" class="primary-btn" type="button" disabled title="Press Random Gobabeb first">Run benchmark</button>
+                    <button id="clear-results" class="secondary-btn" type="button">Clear</button>
+                    <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
+                    <button id="save-settings" class="ghost-btn" type="button">Save settings</button>
+                    <label class="upload-settings">
+                        <input id="load-settings-input" type="file" accept=".json,.txt" hidden />
+                        <span class="ghost-btn" style="cursor: pointer;">Load settings</span>
+                    </label>
+                </div>
+
+                <div class="settings-inline">
+                    <div class="spinbox-inline-group">
+                        <label class="spinbox-label">Iterations per size</label>
+                        <input id="iterations" class="spinbox" type="number" min="1" max="10" value="3" />
+                    </div>
+                    <div class="spinbox-inline-group">
+                        <label class="spinbox-label"># of test files</label>
+                        <input id="max-files" class="spinbox" type="number" min="1" max="20" value="5" />
+                    </div>
+
+                    <div class="quality-section quality-inline">
+                        <label class="section-label">Quality</label>
+                        <div class="quality-buttons">
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="50" /> 50</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="55" /> 55</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="60" /> 60</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="65" /> 65</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="70" /> 70</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="75" /> 75</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="80" /> 80</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="85" checked /> 85</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="90" /> 90</label>
+                            <label class="quality-btn"><input type="checkbox" name="quality" value="95" /> 95</label>
+                        </div>
+                    </div>
+
+                    <div class="sizes-inline">
+                        <span class="sizes-label">Benchmark sizes:</span>
+                        <div class="sizes-buttons">
+                            <label class="size-btn">
+                                <input type="checkbox" name="benchmark-size" value="128" />
+                                <span>128</span>
+                            </label>
+                            <label class="size-btn">
+                                <input type="checkbox" name="benchmark-size" value="256" />
+                                <span>256</span>
+                            </label>
+                            <label class="size-btn">
+                                <input type="checkbox" name="benchmark-size" value="512" />
+                                <span>512</span>
+                            </label>
+                            <label class="size-btn">
+                                <input type="checkbox" name="benchmark-size" value="1080" />
+                                <span>1080</span>
+                            </label>
+                            <label class="size-btn">
+                                <input type="checkbox" name="benchmark-size" value="1920" />
+                                <span>1920</span>
+                            </label>
+                            <label class="size-btn">
+                                <input type="checkbox" name="benchmark-size" value="fullsize" />
+                                <span>Full</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="effort-section effort-inline">
+                        <label class="section-label">Effort</label>
+                        <div class="effort-buttons">
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="1" /> 1</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="2" /> 2</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="3" checked /> 3</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="4" /> 4</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="5" /> 5</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="6" /> 6</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="7" /> 7</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="8" /> 8</label>
+                            <label class="effort-btn"><input type="checkbox" name="effort" value="9" /> 9</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="options-column">
+                <div class="settings-panel">
+                    <div class="encoder-decoder-wrap">
+                        <div class="encoder-options">
+                            <div class="section-header">Encoder advanced</div>
+                            <div class="encoder-grid">
+                                <div class="option-group">
+                                    <label class="toggle-opt">
+                                        <input type="checkbox" id="opt-modular" />
+                                        <span class="opt-label">Modular</span>
+                                    </label>
+                                </div>
+                                <div class="option-row">
+                                    <div class="option-group">
+                                        <label class="section-label">Butteraugli target</label>
+                                        <input id="butteraugli-target" class="spinbox" type="number" min="0.1" max="15" step="0.1" value="1.0" />
+                                    </div>
+                                    <div class="option-group">
+                                        <label class="section-label">Brotli effort</label>
+                                        <input id="brotli-effort" class="spinbox" type="number" min="0" max="11" step="1" value="9" />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="advanced-options">
+                            <div class="advanced-header">Codec toggles</div>
+                            <div class="options-grid">
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-simd" />
+                                    <span class="opt-label">SIMD</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-threading" />
+                                    <span class="opt-label">Threading</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-progressive" checked />
+                                    <span class="opt-label">Progressive</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-preserve-icc" checked />
+                                    <span class="opt-label">Preserve ICC</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-preserve-metadata" />
+                                    <span class="opt-label">Metadata</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-chunked" />
+                                    <span class="opt-label">Chunked</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-lossless" />
+                                    <span class="opt-label">Lossless</span>
+                                </label>
+                                <label class="toggle-opt">
+                                    <input type="checkbox" id="opt-preview-first" />
+                                    <span class="opt-label">Preview 1st</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="decoder-options">
+                        <div class="section-header">Decoder advanced</div>
+                        <div class="decoder-grid">
+                            <div class="downsampling-row">
+                                <label class="section-label">Downsampling</label>
+                                <div class="downsample-buttons">
+                                    <label class="downsample-btn"><input type="radio" name="downsample" value="1" checked /> 1×</label>
+                                    <label class="downsample-btn"><input type="radio" name="downsample" value="2" /> 2×</label>
+                                    <label class="downsample-btn"><input type="radio" name="downsample" value="4" /> 4×</label>
+                                    <label class="downsample-btn"><input type="radio" name="downsample" value="8" /> 8×</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+
+        <section class="status-grid compact" aria-label="Benchmark status">
+            <div class="status-card">
+                <span class="label">Selection</span>
+                <strong id="selection-status">No files.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Progress</span>
+                <strong id="progress-status">Idle.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">File</span>
+                <strong id="file-status">—</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Timing</span>
+                <strong id="timing-status">Ready.</strong>
+            </div>
+        </section>
+
+        <section class="graph-shell">
+            <header class="graph-header">
+                <p class="eyebrow">Performance graphs</p>
+                <h2>Latency, distribution, and file size analysis</h2>
+                <div class="graph-caption" id="graph-caption"></div>
+            </header>
+
+            <div class="graphs-grid">
+                <div class="graph-item">
+                    <div class="graph-container" id="decode-latency-container">
+                        <canvas id="graph-decode-latency"></canvas>
+                        <div class="graph-export-buttons">
+                            <button class="export-btn export-webp" data-chart="decode-latency" title="Export as WebP">WebP</button>
+                            <button class="export-btn export-csv" data-chart="decode-latency" title="Export as CSV">CSV</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="graph-item">
+                    <div class="graph-container" id="encode-latency-container">
+                        <canvas id="graph-encode-latency"></canvas>
+                        <div class="graph-export-buttons">
+                            <button class="export-btn export-webp" data-chart="encode-latency" title="Export as WebP">WebP</button>
+                            <button class="export-btn export-csv" data-chart="encode-latency" title="Export as CSV">CSV</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="graph-item">
+                    <div class="graph-container" id="decode-distribution-container">
+                        <canvas id="graph-decode-distribution"></canvas>
+                        <div class="graph-export-buttons">
+                            <button class="export-btn export-webp" data-chart="decode-distribution" title="Export as WebP">WebP</button>
+                            <button class="export-btn export-csv" data-chart="decode-distribution" title="Export as CSV">CSV</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="graph-item">
+                    <div class="graph-container" id="filesize-container">
+                        <canvas id="graph-filesize"></canvas>
+                        <div class="graph-export-buttons">
+                            <button class="export-btn export-webp" data-chart="filesize" title="Export as WebP">WebP</button>
+                            <button class="export-btn export-csv" data-chart="filesize" title="Export as CSV">CSV</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="results-shell">
+            <header class="results-header">
+                <div>
+                    <p class="eyebrow">Benchmark results</p>
+                    <h2>Detailed tables</h2>
+                </div>
+            </header>
+
+            <div class="results-tabs">
+                <button class="results-tab is-active" data-tab="decode-summary" type="button">Decode summary</button>
+                <button class="results-tab" data-tab="encode-summary" type="button">Encode summary</button>
+                <button class="results-tab" data-tab="encode-detail" type="button">Encode detail</button>
+                <button class="results-tab" data-tab="decode-detail" type="button">Decode detail</button>
+                <button class="results-tab" data-tab="file-size" type="button">File size</button>
+            </div>
+
+            <div id="decode-summary" class="results-panel is-active">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Size</th>
+                            <th>Q=85</th>
+                            <th>Q=95</th>
+                            <th>Lossless</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="decode-summary-body">
+                        <tr>
+                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="encode-summary" class="results-panel">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Size</th>
+                            <th>Q=85</th>
+                            <th>Q=95</th>
+                            <th>Effort</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="encode-summary-body">
+                        <tr>
+                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="encode-detail" class="results-panel">
+                <div id="encode-detail-body" class="detail-container">
+                    <div class="empty-state">Run benchmark to populate results.</div>
+                </div>
+            </div>
+
+            <div id="decode-detail" class="results-panel">
+                <div id="decode-detail-body" class="detail-container">
+                    <div class="empty-state">Run benchmark to populate results.</div>
+                </div>
+            </div>
+
+            <div id="file-size" class="results-panel">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Size</th>
+                            <th>Q=85 (KB)</th>
+                            <th>Q=95 (KB)</th>
+                            <th>Ratio</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="file-size-body">
+                        <tr>
+                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="recommendations-shell">
+            <header class="recommendations-header">
+                <p class="eyebrow">Architecture recommendations</p>
+                <h2>Decoder selection by use case</h2>
+            </header>
+            <div id="recommendations" class="recommendations-list">
+                <div class="rec-card">
+                    <h3>Grid thumbnail (300px)</h3>
+                    <p>Decode with libjxl. Target: ~6 ms per image.</p>
+                    <p>Pre-render at q=85 during ingest (~40 ms encode cost).</p>
+                </div>
+                <div class="rec-card">
+                    <h3>Lightbox preview (1080px)</h3>
+                    <p>Decode with libjxl. Target: ~25 ms per image.</p>
+                    <p>Pre-render at q=95 during ingest (~35 ms encode cost).</p>
+                </div>
+                <div class="rec-card">
+                    <h3>Full resolution (2000px+)</h3>
+                    <p>Lossless encode + decode. jxl-oxide wins above ~3000px.</p>
+                    <p>Use libjxl for lossy content, oxide for lossless.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-benchmark.js"></script>
+</body>
+</html>
