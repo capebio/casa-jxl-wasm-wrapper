@@ -23,7 +23,7 @@ import type {
 } from "@casabio/jxl-core/protocol";
 
 import type { Priority, PoolWorker, WorkerFactory, WorkerHandle } from "./types.js";
-import { WorkerPool } from "./pool.js";
+import { WorkerPool, RESERVED_SESSION_ID } from "./pool.js";
 import { PriorityQueue } from "./queue.js";
 import { DedupeRegistry } from "./dedupe.js";
 
@@ -622,7 +622,7 @@ export class Scheduler {
     this.wiredWorkers.add(worker);
     worker.handle.onMessage((msg) => {
       const sessionId = worker.activeSessionId;
-      if (sessionId === null || sessionId === "__reserved__") return;
+      if (sessionId === null || sessionId === RESERVED_SESSION_ID) return;
       this.handleWorkerMessage(sessionId, worker, msg);
     });
   }

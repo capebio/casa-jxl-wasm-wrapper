@@ -24,6 +24,7 @@ This document records optimization proposals that were evaluated and rejected.
 
 ## `packages/jxl-scheduler/src/pool.ts`
 *   **Worker warmup / adaptive concurrency (11, 12):** Same reasoning as above.
+*   **`PoolWorkerState` discriminated union (Round11-3b):** Splitting `activeSessionId` into a separate `state: "idle" | "reserved" | "active" | "cancelling"` field was rejected. The reserved sentinel constant (`RESERVED_SESSION_ID`) achieves the same lifecycle guard with no interface churn. Adding a state field would require updating `PoolWorker` in `types.ts` plus every read site in `scheduler.ts`, for no measurable correctness gain beyond what `bind()` validation already provides.
 
 ## `packages/jxl-wasm/src/facade.ts`
 *   **onDrain callback on JxlDecoder (R1-1, R2-3, DH6-B):** Backpressure is managed at the scheduler/worker boundary. Pushing it into the WASM bridge duplicates logic at the wrong layer.
