@@ -217,6 +217,29 @@ describe("@casabio/jxl-wasm facade", () => {
     await encoder.dispose();
     await decoder.dispose();
   });
+
+  test("encodes with ICC profile, EXIF, and XMP metadata", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+    const rgba = new Uint8Array([255, 128, 64, 255]);
+    const iccProfile = new Uint8Array([1, 2, 3, 4]); // dummy ICC profile
+    const exif = new Uint8Array([5, 6, 7, 8]); // dummy EXIF
+    const xmp = new Uint8Array([9, 10, 11, 12]); // dummy XMP
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      quality: 90,
+      iccProfile,
+      exif,
+      xmp,
+    });
+    encoder.pushPixels(rgba);
+    encoder.finish();
+
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+    expect(encoded.done).toBe(false);
+    expect(encoded.value.byteLength).toBeGreaterThan(0);
+    await encoder.dispose();
+  });
 });
 
 describe("detectTier", () => {

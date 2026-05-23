@@ -125,6 +125,7 @@ interface LibjxlWasmModule {
   _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
   _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
   _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
+  _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
   _jxl_wasm_buffer_data(handle: number): number;
   _jxl_wasm_buffer_size(handle: number): number;
   _jxl_wasm_buffer_width(handle: number): number;
@@ -826,12 +827,43 @@ class LibjxlEncoder implements JxlEncoder {
         } else {
           // Standard single-image encode path
           let handle: number;
-          if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
-            handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
-          } else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
-            handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+
+          // Use metadata path if any metadata is present
+          const hasMetadata = this.options.iccProfile !== null || this.options.exif !== null || this.options.xmp !== null;
+          if (hasMetadata && module._jxl_wasm_encode_rgba8_with_metadata && this.options.format === "rgba8") {
+            const iccView = this.options.iccProfile ? copyOrBorrowInput(this.options.iccProfile, false) : new Uint8Array(0);
+            const exifView = this.options.exif ? copyOrBorrowInput(this.options.exif, false) : new Uint8Array(0);
+            const xmpView = this.options.xmp ? copyOrBorrowInput(this.options.xmp, false) : new Uint8Array(0);
+
+            const iccPtr = iccView.byteLength > 0 ? module._malloc(iccView.byteLength) : 0;
+            const exifPtr = exifView.byteLength > 0 ? module._malloc(exifView.byteLength) : 0;
+            const xmpPtr = xmpView.byteLength > 0 ? module._malloc(xmpView.byteLength) : 0;
+
+            try {
+              if (iccPtr !== 0) module.HEAPU8.set(iccView, iccPtr);
+              if (exifPtr !== 0) module.HEAPU8.set(exifView, exifPtr);
+              if (xmpPtr !== 0) module.HEAPU8.set(xmpView, xmpPtr);
+
+              handle = module._jxl_wasm_encode_rgba8_with_metadata(
+                ptr, this.options.width, this.options.height,
+                distance, this.options.effort, 0, hasAlpha,
+                iccPtr, iccView.byteLength,
+                exifPtr, exifView.byteLength,
+                xmpPtr, xmpView.byteLength
+              );
+            } finally {
+              if (iccPtr !== 0) module._free(iccPtr);
+              if (exifPtr !== 0) module._free(exifPtr);
+              if (xmpPtr !== 0) module._free(xmpPtr);
+            }
           } else {
-            handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
+              handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            } else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
+              handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            } else {
+              handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            }
           }
           const encoded = takeBuffer(module, handle, "encode");
           compressedBytes += encoded.data.byteLength;
