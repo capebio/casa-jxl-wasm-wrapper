@@ -146,6 +146,27 @@ fn now_ms() -> f64 {
     perf.map(|p| p.now()).unwrap_or(0.0)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn apply_look_params(
+    params: &mut pipeline::PipelineParams,
+    exposure_ev: f32, contrast: f32, highlights: f32, shadows: f32,
+    whites: f32, blacks: f32, saturation: f32, vibrance: f32,
+    temp: f32, tint: f32, texture: f32, clarity: f32,
+) {
+    if exposure_ev.is_finite()  { params.exposure_ev = exposure_ev; }
+    if contrast.is_finite()     { params.contrast    = contrast; }
+    if highlights.is_finite()   { params.highlights  = highlights; }
+    if shadows.is_finite()      { params.shadows     = shadows; }
+    if whites.is_finite()       { params.whites      = whites; }
+    if blacks.is_finite()       { params.blacks      = blacks; }
+    if saturation.is_finite()   { params.saturation  = saturation; }
+    if vibrance.is_finite()     { params.vibrance    = vibrance; }
+    if temp.is_finite()         { params.temp        = temp; }
+    if tint.is_finite()         { params.tint        = tint; }
+    if texture.is_finite()      { params.texture     = texture; }
+    if clarity.is_finite()      { params.clarity     = clarity; }
+}
+
 /// Box-filter downscale an RGB16 (u16) buffer, outputting packed u16 LE bytes
 /// (6 bytes per pixel).  Used to cache a lightbox-sized buffer for live re-render.
 fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
@@ -187,6 +208,10 @@ fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize)
         }
     }
     out
+}
+
+fn unpack_rgb16_le(src: &[u8]) -> Vec<u16> {
+    src.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect()
 }
 
 /// Central structural validation for ORF inputs.  Runs before the pipeline so
@@ -328,7 +353,7 @@ pub fn process_orf(
         let th = h.min(THUMB_LONG_EDGE);
         (((w * th) / h).max(1), th)
     };
-    let rgb16_thumb = downscale_rgb16_impl(&rgb16, w, h, thumb_w, thumb_h);
+    let rgb16_thumb = downscale_rgb16_impl(&unpack_rgb16_le(&rgb16_lb), lb_w, lb_h, thumb_w, thumb_h);
 
     let t = now_ms();
     if wb_r_override.is_finite() && wb_r_override > 0.0 {
@@ -337,18 +362,8 @@ pub fn process_orf(
     if wb_b_override.is_finite() && wb_b_override > 0.0 {
         params.wb_b = wb_b_override.min(8.0);
     }
-    if exposure_ev.is_finite()  { params.exposure_ev = exposure_ev; }
-    if contrast.is_finite()     { params.contrast    = contrast; }
-    if highlights.is_finite()   { params.highlights  = highlights; }
-    if shadows.is_finite()      { params.shadows     = shadows; }
-    if whites.is_finite()       { params.whites      = whites; }
-    if blacks.is_finite()       { params.blacks      = blacks; }
-    if saturation.is_finite()   { params.saturation  = saturation; }
-    if vibrance.is_finite()     { params.vibrance    = vibrance; }
-    if temp.is_finite()         { params.temp        = temp; }
-    if tint.is_finite()         { params.tint        = tint; }
-    if texture.is_finite()      { params.texture     = texture; }
-    if clarity.is_finite()      { params.clarity     = clarity; }
+    apply_look_params(&mut params, exposure_ev, contrast, highlights, shadows,
+        whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
     if params.texture != 0.0 || params.clarity != 0.0 {
         pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
     }
@@ -357,10 +372,12 @@ pub fn process_orf(
     drop(rgb16);
 
     let t = now_ms();
-    let (final_rgb, final_w, final_h) =
-        pipeline::apply_orientation(&rgb8, w, h, info.orientation);
+    let (final_rgb, final_w, final_h) = if info.orientation == 1 {
+        (rgb8, w, h)
+    } else {
+        pipeline::apply_orientation(&rgb8, w, h, info.orientation)
+    };
     let orient_ms = now_ms() - t;
-    drop(rgb8);
 
     Ok(ProcessResult {
         rgb: final_rgb,
@@ -374,8 +391,8 @@ pub fn process_orf(
         wb_r_used: params.wb_r,
         wb_b_used: params.wb_b,
         color_matrix_from_mn,
-        make: info.make.clone(),
-        model: info.model.clone(),
+        make: info.make,
+        model: info.model,
         rgb16_lb,
         lb_w: lb_w as u32,
         lb_h: lb_h as u32,
@@ -383,8 +400,8 @@ pub fn process_orf(
         thumb_w: thumb_w as u32,
         thumb_h: thumb_h as u32,
         color_matrix_flat,
-        lens: info.lens.clone(),
-        datetime: info.datetime.clone(),
+        lens: info.lens,
+        datetime: info.datetime,
         // Rational fields use 0/0 as absent-sentinel (JS checks den==0 before dividing).
         exposure_num: info.exposure.map(|(n, _)| n).unwrap_or(0),
         exposure_den: info.exposure.map(|(_, d)| d).unwrap_or(0),
@@ -611,18 +628,8 @@ pub fn apply_look(
         }
         params.color_matrix = Some(m);
     }
-    if exposure_ev.is_finite()  { params.exposure_ev = exposure_ev; }
-    if contrast.is_finite()     { params.contrast    = contrast; }
-    if highlights.is_finite()   { params.highlights  = highlights; }
-    if shadows.is_finite()      { params.shadows     = shadows; }
-    if whites.is_finite()       { params.whites      = whites; }
-    if blacks.is_finite()       { params.blacks      = blacks; }
-    if saturation.is_finite()   { params.saturation  = saturation; }
-    if vibrance.is_finite()     { params.vibrance    = vibrance; }
-    if temp.is_finite()         { params.temp        = temp; }
-    if tint.is_finite()         { params.tint        = tint; }
-    if texture.is_finite()      { params.texture     = texture; }
-    if clarity.is_finite()      { params.clarity     = clarity; }
+    apply_look_params(&mut params, exposure_ev, contrast, highlights, shadows,
+        whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
 
     let w = width as usize;
     let h = height as usize;
@@ -631,8 +638,12 @@ pub fn apply_look(
         pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
     }
     let rgb8 = pipeline::process(&rgb16, &params);
-    let (final_rgb, _, _) = pipeline::apply_orientation(&rgb8, w, h, orientation);
-    Ok(final_rgb)
+    if orientation == 1 {
+        Ok(rgb8)
+    } else {
+        let (final_rgb, _, _) = pipeline::apply_orientation(&rgb8, w, h, orientation);
+        Ok(final_rgb)
+    }
 }
 
 /// Convert interleaved RGB8 → RGBA8 (alpha = 255).  HTML canvas wants RGBA.
@@ -640,11 +651,108 @@ pub fn apply_look(
 #[wasm_bindgen]
 pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     let n = rgb.len() / 3;
-    let mut out = Vec::with_capacity(n * 4);
-    for chunk in rgb.chunks_exact(3) {
-        out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+    let mut out = vec![0u8; n * 4];
+    for (src, dst) in rgb.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+        dst[3] = 255;
     }
     out
+}
+
+/// EXIF metadata extracted without demosaic/tonemap.  Use for gallery thumbnails,
+/// batch preflight, and sort-by-date/lens/GPS without a full decode.
+#[wasm_bindgen]
+pub struct OrfMetadata {
+    make: String,
+    model: String,
+    lens: String,
+    datetime: String,
+    #[wasm_bindgen(readonly)]
+    pub width: u32,
+    #[wasm_bindgen(readonly)]
+    pub height: u32,
+    #[wasm_bindgen(readonly)]
+    pub orientation: u16,
+    #[wasm_bindgen(readonly)]
+    pub iso: u32,
+    #[wasm_bindgen(readonly)]
+    pub has_gps: bool,
+    #[wasm_bindgen(readonly)]
+    pub gps_lat: f64,
+    #[wasm_bindgen(readonly)]
+    pub gps_lon: f64,
+}
+
+#[wasm_bindgen]
+impl OrfMetadata {
+    #[wasm_bindgen(getter)]
+    pub fn make(&self) -> String { self.make.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn model(&self) -> String { self.model.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn lens(&self) -> String { self.lens.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn datetime(&self) -> String { self.datetime.clone() }
+}
+
+/// Parse ORF EXIF metadata only — no decompress, no demosaic, no tonemap.
+/// Returns camera, lens, exposure, GPS for batch ingest and gallery views.
+#[wasm_bindgen]
+pub fn parse_orf_metadata(data: &[u8]) -> Result<OrfMetadata, JsError> {
+    let info = tiff::parse(data).map_err(|e| JsError::new(&e))?;
+    Ok(OrfMetadata {
+        make: info.make,
+        model: info.model,
+        lens: info.lens,
+        datetime: info.datetime,
+        width: info.width,
+        height: info.height,
+        orientation: info.orientation,
+        iso: info.iso.unwrap_or(0),
+        has_gps: info.gps_lat.is_some() && info.gps_lon.is_some(),
+        gps_lat: info.gps_lat.unwrap_or(0.0),
+        gps_lon: info.gps_lon.unwrap_or(0.0),
+    })
+}
+
+/// Timing results for the decompress + demosaic stages only.
+/// Skips tonemap, downscale, and orientation — isolates raw decode cost.
+#[wasm_bindgen]
+pub struct DecodeBench {
+    #[wasm_bindgen(readonly)]
+    pub decompress_ms: f64,
+    #[wasm_bindgen(readonly)]
+    pub demosaic_ms: f64,
+    #[wasm_bindgen(readonly)]
+    pub width: u32,
+    #[wasm_bindgen(readonly)]
+    pub height: u32,
+}
+
+/// Benchmark ORF decompress + demosaic without tonemap/downscale/orientation.
+/// Use to measure decoder cost in isolation when tuning WASM flags or algorithms.
+#[wasm_bindgen]
+pub fn bench_decode_orf(data: &[u8]) -> Result<DecodeBench, JsError> {
+    let info = tiff::parse(data).map_err(|e| JsError::new(&e))?;
+    validate_orf_structure(data, &info)?;
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    let strip = &data[info.strip_offset as usize..strip_end];
+    let t = now_ms();
+    let raw = decompress::decompress(strip, w, h).map_err(|e| JsError::new(&e))?;
+    let decompress_ms = now_ms() - t;
+    let t = now_ms();
+    let _rgb16 = demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| JsError::new(&e))?;
+    let demosaic_ms = now_ms() - t;
+    Ok(DecodeBench {
+        decompress_ms,
+        demosaic_ms,
+        width: info.width,
+        height: info.height,
+    })
 }
 
 /// Parse + decode a DNG file blob. Returns an error string on failure.
@@ -736,7 +844,7 @@ pub fn process_dng(
         let th = ah.min(THUMB_LONG_EDGE);
         (((aw * th) / ah).max(1), th)
     };
-    let rgb16_thumb = downscale_rgb16_impl(&rgb16, aw, ah, thumb_w, thumb_h);
+    let rgb16_thumb = downscale_rgb16_impl(&unpack_rgb16_le(&rgb16_lb), lb_w, lb_h, thumb_w, thumb_h);
 
     // Apply look parameters
     let t = now_ms();
@@ -746,18 +854,8 @@ pub fn process_dng(
     if wb_b_override.is_finite() && wb_b_override > 0.0 {
         params.wb_b = wb_b_override.min(8.0);
     }
-    if exposure_ev.is_finite() { params.exposure_ev = exposure_ev; }
-    if contrast.is_finite() { params.contrast = contrast; }
-    if highlights.is_finite() { params.highlights = highlights; }
-    if shadows.is_finite() { params.shadows = shadows; }
-    if whites.is_finite() { params.whites = whites; }
-    if blacks.is_finite() { params.blacks = blacks; }
-    if saturation.is_finite() { params.saturation = saturation; }
-    if vibrance.is_finite() { params.vibrance = vibrance; }
-    if temp.is_finite() { params.temp = temp; }
-    if tint.is_finite() { params.tint = tint; }
-    if texture.is_finite() { params.texture = texture; }
-    if clarity.is_finite() { params.clarity = clarity; }
+    apply_look_params(&mut params, exposure_ev, contrast, highlights, shadows,
+        whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
     if params.texture != 0.0 || params.clarity != 0.0 {
         pipeline::apply_unsharp_masks(&mut rgb16, aw, ah, &params);
     }
@@ -766,8 +864,11 @@ pub fn process_dng(
 
     // Apply orientation (DNG orientation tag)
     let t = now_ms();
-    let (final_rgb, final_w, final_h) =
-        pipeline::apply_orientation(&rgb8, aw, ah, dng_img.orientation);
+    let (final_rgb, final_w, final_h) = if dng_img.orientation == 1 {
+        (rgb8, aw, ah)
+    } else {
+        pipeline::apply_orientation(&rgb8, aw, ah, dng_img.orientation)
+    };
     let orient_ms = now_ms() - t;
 
     Ok(ProcessResult {
