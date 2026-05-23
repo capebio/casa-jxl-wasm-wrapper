@@ -568,3 +568,29 @@ Proposal: after reading a buffer from OPFS, call `isValidJxlBuffer(buffer)` to c
 The cache is content-agnostic — it stores arbitrary `ArrayBuffer` values, not necessarily JXL data. Adding format-specific validation inside the cache breaks the abstraction boundary. OPFS file corruption is extremely rare and is already handled gracefully: libjxl rejects invalid input via the `"error"` decode event, which routes to `failSession`. JXL also has two valid container start sequences (`0xFF 0x0A` bare codestream, `0x00 0x00 0x00 0x0C` ISO BMFF), making a simple magic-byte check fragile. Same reasoning as DH6-6.
 
 Affected file: `packages/jxl-cache/src/browser.ts`.
+
+---
+
+# Round 10 — jxl-cache/browser.ts + jxl-stream/browser.ts (Grok batch 2)
+
+Evaluated against `packages/jxl-cache/src/browser.ts` and `packages/jxl-stream/src/browser.ts`. Items 1, 2, 4 (partial), 5 (partial), 7, and 8 were implemented.
+
+## G3-3. `getSafeName()` Helper — REJECTED
+
+Proposal: extract `entry?.name ?? safeCacheName(key)` into a `private getSafeName(key: string): string` helper that calls `this.persistentTracker.get(key)` internally.
+
+`getPersistent` and `removePersistentEntry` both call `this.persistentTracker.get(key)` to retrieve the entry for purposes beyond just the name (e.g., `getPersistent` checks `if (entry === undefined)` to decide whether to add a new tracker record). A `getSafeName` helper would cause a second `get()` call for the same key in the same operation, updating LRU order twice — once inside `getSafeName`, once for the caller's own entry lookup. In `setPersistent`, calling `getSafeName` would perform an unnecessary tracker read on a key that is about to be overwritten. The duplicated pattern (`entry?.name ?? safeCacheName(key)`) appears in only three private methods; DRY benefit does not outweigh the double-LRU-update side effect.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G3-6. `fromReadableStream` Rewrite (Stronger Backpressure) — REJECTED
+
+Proposal: rewrite `fromReadableStream` using a `lastPushPromise` variable — store `session.push(value)` without awaiting, then `await lastPushPromise` at the top of the next iteration.
+
+This is a regression on two fronts:
+
+1. **Prefetch removed.** The current implementation starts `reader.read()` for chunk N+1 immediately after chunk N arrives, before awaiting `session.push(N)`, pipelining network I/O with scheduler backpressure. The proposal awaits the previous push before reading, re-serializing I/O with push and eliminating the prefetch. This was explicitly fixed and documented (B-3 in this file).
+
+2. **Abort hardening removed.** The proposal omits the `cancelBoth()` helper, the `onAbort` event listener, abort checks inside the loop, and the `signal?.aborted` check before `session.close()`. All of these were added in Round 8 (commit `d272432`) as deliberate correctness fixes for abort lifecycle edge cases.
+
+Affected file: `packages/jxl-stream/src/browser.ts`.

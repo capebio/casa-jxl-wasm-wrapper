@@ -121,12 +121,16 @@ export class JxlCacheBrowser {
 
     if (!this.opfsRoot) return;
 
-    for await (const name of (this.opfsRoot as IterableDirectoryHandle).keys()) {
-      try {
-        await this.opfsRoot.removeEntry(name);
-      } catch {
-        // Continue clearing.
+    try {
+      for await (const name of (this.opfsRoot as IterableDirectoryHandle).keys()) {
+        try {
+          await this.opfsRoot.removeEntry(name);
+        } catch {
+          // Continue clearing remaining entries.
+        }
       }
+    } catch (e) {
+      console.warn('[JxlCacheBrowser] Partial clear failure — OPFS directory iteration failed', e);
     }
   }
 
@@ -161,6 +165,9 @@ export class JxlCacheBrowser {
 
       const fileHandle = await this.opfsRoot.getFileHandle(name);
       const file = await fileHandle.getFile();
+
+      if (file.size === 0) return undefined;
+
       const buffer = await file.arrayBuffer();
 
       this.memoryCache.set(key, buffer, buffer.byteLength);
@@ -170,7 +177,10 @@ export class JxlCacheBrowser {
       }
 
       return buffer;
-    } catch {
+    } catch (e) {
+      if (e instanceof DOMException && e.name !== 'NotFoundError') {
+        console.warn(`[JxlCacheBrowser] Failed to read persistent entry for "${key}"`, e);
+      }
       return undefined;
     }
   }
@@ -188,10 +198,12 @@ export class JxlCacheBrowser {
       this.persistentTracker.set(key, { name }, size);
     } catch (e) {
       if (e instanceof Error && e.name === 'QuotaExceededError') {
-        await this.evictPersistentFraction(0.5);
+        console.info(`[JxlCacheBrowser] Quota exceeded for "${key}", evicting aggressively`);
+        await this.evictPersistentFraction(0.75);
         await this.writePersistentFile(name, buffer);
         this.persistentTracker.set(key, { name }, size);
       } else {
+        console.error(`[JxlCacheBrowser] Failed to persist "${key}"`, e);
         throw e;
       }
     }
@@ -282,26 +294,26 @@ export class JxlCacheBrowser {
   private async drainManifest(): Promise<void> {
     while (this.manifestDirty) {
       this.manifestDirty = false;
-      try {
-        await this.writeManifest();
-      } catch {
-        // Non-fatal.
-      }
+      await this.writeManifest();
     }
   }
 
   private async writeManifest(): Promise<void> {
     if (!this.opfsRoot) return;
 
-    const entries: Array<{ key: string; name: string; size: number }> = [];
+    try {
+      const entries: Array<{ key: string; name: string; size: number }> = [];
 
-    for (const [key, entry, size] of this.persistentTracker.entriesOldestFirst()) {
-      entries.push({ key, name: entry.name, size });
+      for (const [key, entry, size] of this.persistentTracker.entriesOldestFirst()) {
+        entries.push({ key, name: entry.name, size });
+      }
+
+      const manifest = { version: 1 as const, entries };
+      const encoded = new TextEncoder().encode(JSON.stringify(manifest));
+
+      await this.writePersistentFile(MANIFEST_NAME, encoded.buffer as ArrayBuffer);
+    } catch (e) {
+      console.warn('[JxlCacheBrowser] Failed to write manifest (non-fatal)', e);
     }
-
-    const manifest = { version: 1 as const, entries };
-    const encoded = new TextEncoder().encode(JSON.stringify(manifest));
-
-    await this.writePersistentFile(MANIFEST_NAME, encoded.buffer as ArrayBuffer);
   }
 }

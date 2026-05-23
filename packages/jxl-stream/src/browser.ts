@@ -115,9 +115,8 @@ export function toReadableStream(
           controller.enqueue(value);
         }
       } catch (e) {
-        if (signal?.aborted) return;
         removeAbortHandler();
-        controller.error(e);
+        if (!signal?.aborted) controller.error(e);
       }
     },
 
@@ -131,6 +130,18 @@ export function toReadableStream(
       await session.cancel(reason);
     },
   });
+}
+
+/**
+ * Helper to pipe a fetch Response body into a DecodeSession.
+ */
+export async function fromResponse(
+  response: Response,
+  session: DecodeSession,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!response.body) throw new Error('[jxl-stream] Response has no body');
+  return fromReadableStream(response.body, session, signal);
 }
 
 /**
