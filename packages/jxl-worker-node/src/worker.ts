@@ -201,32 +201,54 @@ function queueEncodeMessage(sessionId: string, msg: QueuedEncodeMessage): void {
   queue.push(msg);
 }
 
+function routeToDecodeHandler(handler: DecodeHandler, msg: QueuedDecodeMessage): void {
+  switch (msg.type) {
+    case "decode_chunk":  handler.onChunk(msg.chunk);            break;
+    case "decode_close":  handler.onClose();                     break;
+    case "decode_cancel": void handler.onCancel(msg.reason);     break;
+    case "decode_pause":  handler.onPause();                     break;
+    case "decode_resume": handler.onResume();                    break;
+  }
+}
+
+function routeDecodeMessage(msg: QueuedDecodeMessage): void {
+  const handler = decodeSessions.get(msg.sessionId);
+  if (handler !== undefined) {
+    routeToDecodeHandler(handler, msg);
+  } else if (pendingDecodeStarts.has(msg.sessionId)) {
+    queueDecodeMessage(msg.sessionId, msg);
+  }
+}
+
+function routeToEncodeHandler(handler: EncodeHandler, msg: QueuedEncodeMessage): void {
+  switch (msg.type) {
+    case "encode_pixels": handler.onPixels(msg.chunk, msg.region); break;
+    case "encode_finish": handler.onFinish();                      break;
+    case "encode_cancel": void handler.onCancel(msg.reason);       break;
+  }
+}
+
+function routeEncodeMessage(msg: QueuedEncodeMessage): void {
+  const handler = encodeSessions.get(msg.sessionId);
+  if (handler !== undefined) {
+    routeToEncodeHandler(handler, msg);
+  } else if (pendingEncodeStarts.has(msg.sessionId)) {
+    queueEncodeMessage(msg.sessionId, msg);
+  }
+}
+
 function flushQueuedDecodeMessages(sessionId: string, handler: DecodeHandler): void {
   const queue = queuedDecodeMessages.get(sessionId);
   if (queue === undefined) return;
   clearQueuedDecode(sessionId);
-  for (const msg of queue) {
-    switch (msg.type) {
-      case "decode_chunk":  handler.onChunk(msg.chunk);            break;
-      case "decode_close":  handler.onClose();                     break;
-      case "decode_cancel": void handler.onCancel(msg.reason);     break;
-      case "decode_pause":  handler.onPause();                     break;
-      case "decode_resume": handler.onResume();                    break;
-    }
-  }
+  for (const msg of queue) routeToDecodeHandler(handler, msg);
 }
 
 function flushQueuedEncodeMessages(sessionId: string, handler: EncodeHandler): void {
   const queue = queuedEncodeMessages.get(sessionId);
   if (queue === undefined) return;
   clearQueuedEncode(sessionId);
-  for (const msg of queue) {
-    switch (msg.type) {
-      case "encode_pixels": handler.onPixels(msg.chunk, msg.region); break;
-      case "encode_finish": handler.onFinish();                      break;
-      case "encode_cancel": void handler.onCancel(msg.reason);       break;
-    }
-  }
+  for (const msg of queue) routeToEncodeHandler(handler, msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,93 +263,23 @@ port.on("message", (msg: MainToWorkerMessage) => {
       void handleDecodeStart(msg);
       break;
 
-    case "decode_chunk": {
-      const m = msg as MsgDecodeChunk;
-      const handler = decodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        handler.onChunk(m.chunk);
-      } else if (pendingDecodeStarts.has(m.sessionId)) {
-        queueDecodeMessage(m.sessionId, m);
-      }
+    case "decode_chunk":
+    case "decode_close":
+    case "decode_cancel":
+    case "decode_pause":
+    case "decode_resume":
+      routeDecodeMessage(msg);
       break;
-    }
-
-    case "decode_close": {
-      const handler = decodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onClose();
-      } else if (pendingDecodeStarts.has(msg.sessionId)) {
-        queueDecodeMessage(msg.sessionId, msg);
-      }
-      break;
-    }
-
-    case "decode_cancel": {
-      const m = msg as MsgDecodeCancel;
-      const handler = decodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        void handler.onCancel(m.reason);
-      } else if (pendingDecodeStarts.has(m.sessionId)) {
-        queueDecodeMessage(m.sessionId, m);
-      }
-      break;
-    }
-
-    case "decode_pause": {
-      const handler = decodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onPause();
-      } else if (pendingDecodeStarts.has(msg.sessionId)) {
-        queueDecodeMessage(msg.sessionId, msg as MsgDecodePause);
-      }
-      break;
-    }
-
-    case "decode_resume": {
-      const handler = decodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onResume();
-      } else if (pendingDecodeStarts.has(msg.sessionId)) {
-        queueDecodeMessage(msg.sessionId, msg as MsgDecodeResume);
-      }
-      break;
-    }
 
     case "encode_start":
       void handleEncodeStart(msg);
       break;
 
-    case "encode_pixels": {
-      const m = msg as MsgEncodePixels;
-      const handler = encodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        handler.onPixels(m.chunk, m.region);
-      } else if (pendingEncodeStarts.has(m.sessionId)) {
-        queueEncodeMessage(m.sessionId, m);
-      }
+    case "encode_pixels":
+    case "encode_finish":
+    case "encode_cancel":
+      routeEncodeMessage(msg);
       break;
-    }
-
-    case "encode_finish": {
-      const handler = encodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onFinish();
-      } else if (pendingEncodeStarts.has(msg.sessionId)) {
-        queueEncodeMessage(msg.sessionId, msg as MsgEncodeFinish);
-      }
-      break;
-    }
-
-    case "encode_cancel": {
-      const m = msg as MsgEncodeCancel;
-      const handler = encodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        void handler.onCancel(m.reason);
-      } else if (pendingEncodeStarts.has(m.sessionId)) {
-        queueEncodeMessage(m.sessionId, m);
-      }
-      break;
-    }
 
     case "worker_shutdown":
       void handleShutdown();
@@ -348,7 +300,7 @@ port.on("message", (msg: MainToWorkerMessage) => {
 
 async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
   if (hasAnySession(msg.sessionId)) {
-    port.postMessage({
+    safePostMessage({
       type: "decode_error",
       sessionId: msg.sessionId,
       code: "DuplicateSession",
@@ -365,7 +317,7 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
       pendingDecodeStarts.delete(msg.sessionId);
       clearQueuedDecode(msg.sessionId);
       if (!cancelledPendingStarts.delete(msg.sessionId)) {
-        port.postMessage({
+        safePostMessage({
           type: "decode_error",
           sessionId: msg.sessionId,
           code: "CapabilityMissing",
@@ -399,7 +351,7 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
 
 async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
   if (hasAnySession(msg.sessionId)) {
-    port.postMessage({
+    safePostMessage({
       type: "encode_error",
       sessionId: msg.sessionId,
       code: "DuplicateSession",
@@ -416,7 +368,7 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
       pendingEncodeStarts.delete(msg.sessionId);
       clearQueuedEncode(msg.sessionId);
       if (!cancelledPendingStarts.delete(msg.sessionId)) {
-        port.postMessage({
+        safePostMessage({
           type: "encode_error",
           sessionId: msg.sessionId,
           code: "CapabilityMissing",
@@ -488,8 +440,8 @@ async function doShutdown(): Promise<void> {
   ]);
 
   const cancelPromises: Promise<void>[] = [];
-  for (const [, h] of decodeSessions) cancelPromises.push(h.onCancel("worker_shutdown").catch(() => undefined));
-  for (const [, h] of encodeSessions) cancelPromises.push(h.onCancel("worker_shutdown").catch(() => undefined));
+  for (const h of decodeSessions.values()) cancelPromises.push(h.onCancel("worker_shutdown").catch(() => undefined));
+  for (const h of encodeSessions.values()) cancelPromises.push(h.onCancel("worker_shutdown").catch(() => undefined));
   await Promise.allSettled(cancelPromises);
 
   decodeSessions.clear();
@@ -502,6 +454,8 @@ async function doShutdown(): Promise<void> {
   queuedEncodeBytes.clear();
   cancelledPendingStarts.clear();
 
+  // port.postMessage is used directly (not safePostMessage) because shuttingDown=true
+  // would otherwise suppress this ack.
   const ack: MsgWorkerShutdownAck = { type: "worker_shutdown_ack" };
   port.postMessage(ack);
   port.close();
