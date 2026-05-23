@@ -274,7 +274,12 @@ static JxlWasmBuffer* DecodeRgbaRegion(const uint8_t* input, size_t input_size,
   return result != nullptr ? result : MakeError(31);
 }
 
-static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha) {
+static JxlWasmBuffer* EncodeRgbaWithMetadata(
+    const uint8_t* pixels, uint32_t width, uint32_t height,
+    float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
+    const uint8_t* icc_profile, size_t icc_size,
+    const uint8_t* exif, size_t exif_size,
+    const uint8_t* xmp, size_t xmp_size) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -295,6 +300,13 @@ static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t
   info.alpha_exponent_bits    = has_alpha ? exp_bits : 0u;
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
+
+  if (icc_profile != nullptr && icc_size > 0) {
+    if (JxlEncoderSetICCProfile(enc, icc_profile, icc_size) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return MakeError(51);
+    }
+  }
 
   JxlColorEncoding color;
   JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
@@ -329,11 +341,27 @@ static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t
   const JxlEncoderStatus add_status = JxlEncoderAddImageFrame(frame, &pf, encode_src, pixel_size);
   free(rgb_pixels);
   if (add_status != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(24); }
+
+  if (exif != nullptr && exif_size > 0) {
+    if (JxlEncoderAddBox(enc, "Exif", exif, exif_size, JXL_FALSE) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return MakeError(52);
+    }
+  }
+
+  if (xmp != nullptr && xmp_size > 0) {
+    if (JxlEncoderAddBox(enc, "xml ", xmp, xmp_size, JXL_FALSE) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return MakeError(53);
+    }
+  }
+
   JxlEncoderCloseInput(enc);
 
-  // Lossless (distance==0) compresses ~2×; lossy photos ~10×; low-effort lossy ~8×.
   const size_t initial_size = std::max(size_t(65536),
-      distance == 0.0f ? pixel_size / 2 : effort <= 3 ? pixel_size / 12 : pixel_size / 10);
+      distance == 0.0f ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 2
+                       : effort <= 3 ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 12
+                       : (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 10);
   uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_size));
   if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(25); }
   size_t outbuf_cap = initial_size;
@@ -367,6 +395,10 @@ static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t
     free(outbuf);
     JxlEncoderDestroy(enc); return MakeError(static_cast<int>(status));
   }
+}
+
+static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, nullptr, 0, nullptr, 0, nullptr, 0);
 }
 
 // IMPROVEMENT-5: Integer box-filter downscale for RGBA8 thumbnail generation.
@@ -571,6 +603,10 @@ JxlWasmBuffer* jxl_wasm_encode_rgba16(const uint8_t* pixels, uint32_t width, uin
 }
 JxlWasmBuffer* jxl_wasm_encode_rgbaf32(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha) {
   return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha);
+}
+
+JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha, const uint8_t* icc_profile, size_t icc_size, const uint8_t* exif, size_t exif_size, const uint8_t* xmp, size_t xmp_size) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, 0, has_alpha, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
 }
 
 // Routes JPEG bytes to lossless transcode; otherwise encodes as RGBA pixels.

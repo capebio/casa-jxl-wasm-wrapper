@@ -7,6 +7,7 @@ _jxl_wasm_decode_rgbaf32
 _jxl_wasm_encode_rgba8
 _jxl_wasm_encode_rgba16
 _jxl_wasm_encode_rgbaf32
+_jxl_wasm_encode_rgba8_with_metadata
 _jxl_wasm_buffer_data
 _jxl_wasm_buffer_size
 _jxl_wasm_buffer_width
