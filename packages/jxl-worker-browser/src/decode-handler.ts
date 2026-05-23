@@ -48,10 +48,12 @@ export class DecodeHandler {
   private readonly callbacks: DecodeHandlerCallbacks;
 
   private state: DecodeState = "created";
-  private chunkQueue: ArrayBuffer[] = [];
+  private chunkQueue: Array<ArrayBuffer | undefined> = [];
   private chunkReadIndex = 0;
   private queueDepth = 0;
+  private queuedBytes = 0;
   private cancelled = false;
+  private ended = false;
   private inputClosed = false;
   private wakeResolve: (() => void) | null = null;
   private paused = false;
@@ -59,12 +61,10 @@ export class DecodeHandler {
 
   // Adaptive drain HWM: EMA of decoder.push() duration (ms).
   private pushLatencyEma = 0;
-  // Bytes currently queued but not yet pushed to decoder.
-  private queuedBytes = 0;
+  // Elapsed from session creation; used for both budget and timing metrics.
+  private readonly stageStartMs: number = performance.now();
 
-  // Stage budget tracking
-  private stageStartMs: number = performance.now();
-  private currentStage: DecodeStage = "header";
+  private firstPixelMetricPosted = false;
 
   constructor(
     opts: MsgDecodeStart,
@@ -76,7 +76,6 @@ export class DecodeHandler {
     this.wasm = wasm;
     this.callbacks = callbacks;
 
-    // Start processing asynchronously.
     this.run().catch((err: unknown) => this.failSession("Internal", String(err)));
   }
 
@@ -85,7 +84,7 @@ export class DecodeHandler {
   // ---------------------------------------------------------------------------
 
   onChunk(chunk: ArrayBuffer): void {
-    if (this.cancelled || this.state === "final") return;
+    if (this.isTerminal() || this.inputClosed) return;
     if (chunk.byteLength === 0) return;
     if (this.queuedBytes + chunk.byteLength > MAX_QUEUED_BYTES) {
       this.failSession("QueueOverflow", `Input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
@@ -94,43 +93,31 @@ export class DecodeHandler {
     this.chunkQueue.push(chunk);
     this.queuedBytes += chunk.byteLength;
     this.queueDepth++;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 
   onClose(): void {
+    if (this.isTerminal() || this.inputClosed) return;
     this.inputClosed = true;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 
-  async onCancel(reason?: string): Promise<void> {
-    if (this.cancelled) return;
+  async onCancel(_reason?: string): Promise<void> {
+    if (this.ended || this.cancelled) return;
     this.cancelled = true;
-    // Unblock waitForResume if paused so feedDecoder can exit.
-    if (this.paused) {
-      this.paused = false;
-      this.resumeResolve?.();
-      this.resumeResolve = null;
-    }
-    this.state = "cancelled";
-    this.wakeResolve?.();
-    this.wakeResolve = null;
-
+    this.paused = false;
     const msg: MsgDecodeCancelled = {
       type: "decode_cancelled",
       sessionId: this.sessionId,
     };
     self.postMessage(msg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.finishSession("cancelled");
   }
 
   onPause(): void {
     if (this.cancelled || this.paused || this.state === "final" || this.state === "error") return;
     this.paused = true;
-    // Wake any sleeping waitForChunk so feedDecoder reaches the pause check immediately.
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake(); // wake feedDecoder so it reaches the pause check immediately
     const msg: MsgDecodePaused = { type: "decode_paused", sessionId: this.sessionId };
     self.postMessage(msg);
   }
@@ -138,8 +125,7 @@ export class DecodeHandler {
   onResume(): void {
     if (!this.paused) return;
     this.paused = false;
-    this.resumeResolve?.();
-    this.resumeResolve = null;
+    this.wakeResume();
   }
 
   // ---------------------------------------------------------------------------
@@ -159,8 +145,63 @@ export class DecodeHandler {
 
     try {
       await Promise.all([this.feedDecoder(decoder), this.readDecoderEvents(decoder)]);
+    } catch (err: unknown) {
+      this.failSession("Internal", err instanceof Error ? err.message : String(err));
     } finally {
+      // no-op when already ended via a normal terminal path; guards against
+      // both loops completing without reaching a terminal (should not occur).
+      this.finishSession(this.state);
       await decoder.dispose();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Terminal-state helpers
+  // ---------------------------------------------------------------------------
+
+  private isTerminal(): boolean {
+    return (
+      this.cancelled ||
+      this.state === "final" ||
+      this.state === "cancelled" ||
+      this.state === "error" ||
+      this.state === "budget_exceeded"
+    );
+  }
+
+  // Single path for all session endings. Sets state, clears the input queue,
+  // and wakes both sleeping loops so Promise.all resolves and decoder.dispose runs.
+  private finishSession(state: DecodeState): boolean {
+    if (this.ended) return false;
+    this.ended = true;
+    this.state = state;
+    this.clearInputQueue();
+    this.wake();       // unblock feedDecoder sleeping in waitForChunk
+    this.wakeResume(); // unblock feedDecoder sleeping in waitForResume
+    this.callbacks.onSessionEnd(this.sessionId);
+    return true;
+  }
+
+  private clearInputQueue(): void {
+    this.chunkQueue.length = 0;
+    this.chunkReadIndex = 0;
+    this.queueDepth = 0;
+    this.queuedBytes = 0;
+  }
+
+  private wake(): void {
+    const resolve = this.wakeResolve;
+    if (resolve !== null) {
+      this.wakeResolve = null;
+      resolve();
+    }
+  }
+
+  private wakeResume(): void {
+    const resolve = this.resumeResolve;
+    if (resolve !== null) {
+      this.resumeResolve = null;
+      resolve();
     }
   }
 
@@ -169,8 +210,7 @@ export class DecodeHandler {
   // ---------------------------------------------------------------------------
 
   private waitForChunk(): Promise<void> {
-    if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.cancelled
-        || this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
+    if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.isTerminal()) {
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
@@ -181,29 +221,40 @@ export class DecodeHandler {
     return new Promise<void>((resolve) => { this.resumeResolve = resolve; });
   }
 
+  private takeNextChunk(): ArrayBuffer | null {
+    const chunk = this.chunkQueue[this.chunkReadIndex];
+    this.chunkQueue[this.chunkReadIndex++] = undefined;
+    if (chunk === undefined) {
+      this.compactQueue();
+      return null;
+    }
+    this.queueDepth--;
+    this.queuedBytes -= chunk.byteLength;
+    this.compactQueue();
+    return chunk;
+  }
+
+  private compactQueue(): void {
+    if (this.chunkReadIndex >= this.chunkQueue.length) {
+      this.chunkQueue.length = 0;
+      this.chunkReadIndex = 0;
+    } else if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
+      this.chunkQueue = this.chunkQueue.slice(this.chunkReadIndex);
+      this.chunkReadIndex = 0;
+    }
+  }
+
   private async feedDecoder(decoder: BrowserDecoder): Promise<void> {
-    while (!this.cancelled && this.state !== "final" && this.state !== "error") {
+    while (!this.isTerminal()) {
       if (this.paused) {
         await this.waitForResume();
         continue;
       }
       await this.waitForChunk();
-      if (this.paused) continue;
-      while (this.chunkQueue.length > this.chunkReadIndex) {
-        const chunk = this.chunkQueue[this.chunkReadIndex];
-        // Null the slot immediately so GC can reclaim the transferred ArrayBuffer
-        // without waiting for the compaction threshold.
-        this.chunkQueue[this.chunkReadIndex++] = undefined as any;
-        if (chunk === undefined) break;
-        if (this.chunkReadIndex >= this.chunkQueue.length) {
-          this.chunkQueue.length = 0;
-          this.chunkReadIndex = 0;
-        } else if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
-          this.chunkQueue = this.chunkQueue.slice(this.chunkReadIndex);
-          this.chunkReadIndex = 0;
-        }
-        this.queueDepth--;
-        this.queuedBytes -= chunk.byteLength;
+      if (this.isTerminal() || this.paused) continue;
+      while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
+        const chunk = this.takeNextChunk();
+        if (chunk === null) break;
         const t0 = performance.now();
         await decoder.push(chunk);
         const pushMs = performance.now() - t0;
@@ -216,7 +267,7 @@ export class DecodeHandler {
           });
         }
       }
-      if (this.inputClosed) {
+      if (this.inputClosed && !this.isTerminal()) {
         await decoder.close();
         return;
       }
@@ -225,7 +276,7 @@ export class DecodeHandler {
 
   private async readDecoderEvents(decoder: BrowserDecoder): Promise<void> {
     for await (const event of decoder.events()) {
-      if (this.cancelled || this.state === "final" || this.state === "error") return;
+      if (this.isTerminal()) return;
       switch (event.type) {
         case "header": {
           this.state = "headers";
@@ -233,8 +284,7 @@ export class DecodeHandler {
           self.postMessage(msg);
           this.postMetric("time_to_header_ms", performance.now() - this.stageStartMs);
           if (this.opts.progressionTarget === "header") {
-            this.state = "final";
-            this.callbacks.onSessionEnd(this.sessionId);
+            this.finishSession("final");
             return;
           }
           break;
@@ -242,6 +292,12 @@ export class DecodeHandler {
         case "progress": {
           this.state = "progressive";
           const pixels = toArrayBuffer(event.pixels);
+          // Budget check BEFORE transferring pixels. postMessage([pixels]) detaches the
+          // buffer — reusing it in postBudgetExceeded would send a zero-length payload.
+          if (this.checkBudget()) {
+            this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride);
+            return;
+          }
           const msg: MsgDecodeProgress = {
             type: "decode_progress",
             sessionId: this.sessionId,
@@ -253,11 +309,7 @@ export class DecodeHandler {
           };
           if (event.region !== undefined) msg.region = event.region;
           self.postMessage(msg, [pixels]);
-          this.postMetric("time_to_first_pixel_ms", performance.now() - this.stageStartMs);
-          if (this.checkBudget(event.stage)) {
-            this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride);
-            return;
-          }
+          this.postFirstPixelMetric();
           break;
         }
         case "final": {
@@ -271,10 +323,9 @@ export class DecodeHandler {
             pixelStride: event.pixelStride,
           };
           if (event.region !== undefined) msg.region = event.region;
-          this.state = "final";
           self.postMessage(msg, [pixels]);
           this.postMetric("time_to_final_ms", performance.now() - this.stageStartMs);
-          this.callbacks.onSessionEnd(this.sessionId);
+          this.finishSession("final");
           return;
         }
         case "budget_exceeded": {
@@ -294,16 +345,13 @@ export class DecodeHandler {
     return Math.floor(HWM_BASE * factor);
   }
 
-  private checkBudget(stage: DecodeStage): boolean {
+  private checkBudget(): boolean {
     if (this.opts.budgetMs === null) return false;
-    const elapsed = performance.now() - this.stageStartMs;
-    return elapsed > this.opts.budgetMs;
+    return performance.now() - this.stageStartMs > this.opts.budgetMs;
   }
 
   private failSession(code: string, message: string): void {
-    if (this.cancelled || this.state === "final") return;
-    this.state = "error";
-
+    if (this.ended) return;
     const msg: MsgDecodeError = {
       type: "decode_error",
       sessionId: this.sessionId,
@@ -311,7 +359,7 @@ export class DecodeHandler {
       message,
     };
     self.postMessage(msg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.finishSession("error");
   }
 
   private postBudgetExceeded(
@@ -321,8 +369,7 @@ export class DecodeHandler {
     format: MsgDecodeBudgetExceeded["format"],
     pixelStride: number,
   ): void {
-    if (this.cancelled || this.state === "final") return;
-    this.state = "budget_exceeded";
+    if (this.ended) return;
     const msg: MsgDecodeBudgetExceeded = {
       type: "decode_budget_exceeded",
       sessionId: this.sessionId,
@@ -333,7 +380,13 @@ export class DecodeHandler {
       pixelStride,
     };
     self.postMessage(msg, [pixels]);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.finishSession("budget_exceeded");
+  }
+
+  private postFirstPixelMetric(): void {
+    if (this.firstPixelMetricPosted) return;
+    this.firstPixelMetricPosted = true;
+    this.postMetric("time_to_first_pixel_ms", performance.now() - this.stageStartMs);
   }
 
   private postMetric(name: string, value: number): void {

@@ -426,3 +426,65 @@ Proposed code is identical to current implementation. No change.
 - **C** (sourceKey-aware header caching): DedupeRegistry already fans out events from the primary session; caching `ImageInfo` separately requires new protocol plumbing with no current consumer.
 - **D** (tier-aware worker assignment): Scheduler concern; no mechanism to query worker tier at assignment time without a new protocol message.
 - **E** (global memory pressure broadcast): Major architecture change (SharedArrayBuffer or BroadcastChannel across workers); no concrete scenario requiring cross-worker memory coordination at this scale.
+
+---
+
+# Round 7 — decode-handler.ts (12-item correctness batch)
+
+Evaluated against both `packages/jxl-worker-browser/src/decode-handler.ts` and `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH7-1. Central `finishSession` + `wake`/`wakeResume` helpers — IMPLEMENTED
+
+**Real bug.** `waitForChunk()` performs its fast-path check before creating the promise; once `feedDecoder` is awaiting the stored `wakeResolve`, a subsequent state change to `"final"`, `"error"`, or `"budget_exceeded"` in `readDecoderEvents` does not call `wakeResolve` — `feedDecoder` hangs indefinitely and `decoder.dispose()` never runs (WASM memory leak). Affected terminal paths: `progressionTarget === "header"`, `"final"` event, `"error"` event, `"budget_exceeded"` event.
+
+Fix: `finishSession(state)` sets `ended`, clears the input queue, calls `wake()` and `wakeResume()` to unblock both sleeping loops, then calls `onSessionEnd`. `wake()` and `wakeResume()` are extracted helpers replacing the inline `this.wakeResolve?.(); this.wakeResolve = null` pattern. Node handler uses a polling `waitForChunk` (no explicit wake required), but gets the same `finishSession` / `clearInputQueue` / `isTerminal` structure for consistency and early queue release.
+
+Also: `ended` flag makes all terminal guards single-field checks instead of multi-state unions; `isTerminal()` helper covers all five terminal states.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH7-2. Budget check before pixel transfer — IMPLEMENTED
+
+**Real bug.** `self.postMessage(msg, [pixels])` transfers and detaches `pixels`. The subsequent `checkBudget()` call, if true, passed the now-zero-length detached buffer to `postBudgetExceeded`. Fix: move `checkBudget()` before the `postMessage` call; if budget is exceeded, send `decode_budget_exceeded` with the live buffer; otherwise send `decode_progress` and transfer normally.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH7-3. `feedDecoder` outer loop covers all terminal states — IMPLEMENTED
+
+Previous condition `while (!this.cancelled && this.state !== "final" && this.state !== "error")` missed `"budget_exceeded"`. Replaced with `while (!this.isTerminal())`. Inner loop also guards with `!this.isTerminal()` for prompt exit mid-batch.
+
+## DH7-4. Typed chunk queue (`Array<ArrayBuffer | undefined>`) — IMPLEMENTED
+
+`ArrayBuffer[]` + `undefined as any` was a type escape in the hot path. Changed to `Array<ArrayBuffer | undefined>`. Slot null'ing in `takeNextChunk()` no longer requires a cast. Compaction logic extracted to `compactQueue()`. Node handler likewise changed to `Array<Buffer | undefined>`.
+
+## DH7-5. `onClose` idempotency + `onChunk` post-close guard — IMPLEMENTED
+
+`onClose()` now early-returns when `inputClosed` is already true. `onChunk()` guards on `inputClosed` in addition to `isTerminal()`. Mirrors the facade-side push-after-close hardening (R3-2).
+
+## DH7-6. `time_to_first_pixel_ms` emitted once — IMPLEMENTED
+
+Previously posted on every `"progress"` event. `firstPixelMetricPosted` flag ensures the metric fires exactly once per session — on the first progressive frame.
+
+## DH7-7. Edge-triggered `worker_drain` — REJECTED
+
+Drain fires only when crossing from ≥HWM to <HWM. Risk: if queue starts below HWM (common in single-chunk-at-a-time slow-network delivery), no crossing ever occurs, no drain signal is sent, and the scheduler stalls. Current level-triggered behavior (drain after every push where depth < HWM) is the correct 1:1 drain-per-chunk protocol.
+
+## DH7-8. Remove dead `currentStage` field — IMPLEMENTED
+
+Initialized to `"header"`, never updated after construction, never read. Removed.
+
+## DH7-9. `onCancel` via `finishSession` — IMPLEMENTED
+
+Consequence of DH7-1. `onCancel` now posts `decode_cancelled` then calls `finishSession("cancelled")` instead of manually setting state, waking resolvers, and calling `onSessionEnd`.
+
+## DH7-10. `readDecoderEvents` terminal paths via `finishSession` — IMPLEMENTED
+
+Consequence of DH7-1. All four terminal paths (`progressionTarget === "header"`, `"final"`, `"budget_exceeded"`, `"error"`) delegate to `finishSession` / `failSession` / `postBudgetExceeded`, which in turn call `finishSession`.
+
+## DH7-11. `run()` internal `catch` + `finally` cleanup — IMPLEMENTED
+
+Inner `try/catch` on `Promise.all` catches errors from either coroutine without bubbling. `finally` block calls `finishSession(this.state)` (no-op when already ended) to guarantee `onSessionEnd` fires even on unexpected completion, then awaits `decoder.dispose()`.
+
+## DH7-12. `attachRegion` helper — REJECTED
+
+Two call sites (`"progress"` and `"final"` cases). CLAUDE.md: simplicity first, no speculative abstractions; two uses do not justify a helper method.
