@@ -34,6 +34,10 @@ export class JxlCacheBrowser {
   private readonly inflightSets = new Map<string, Promise<void>>();
 
   private opfsRoot: FileSystemDirectoryHandle | null = null;
+  private hitCount = 0;
+  private missCount = 0;
+  private manifestDirty = false;
+  private manifestPendingWrite: Promise<void> | null = null;
 
   constructor(private readonly opts: CacheOptions) {
     this.memoryCache = new LRUCache(opts.memoryLimit);
@@ -56,18 +60,30 @@ export class JxlCacheBrowser {
 
   async get(key: string): Promise<ArrayBuffer | undefined> {
     const mem = this.memoryCache.get(key);
-    if (mem !== undefined) return mem;
+    if (mem !== undefined) {
+      this.hitCount++;
+      return mem;
+    }
 
-    if (!this.opfsRoot) return undefined;
+    if (!this.opfsRoot) {
+      this.missCount++;
+      return undefined;
+    }
 
     const existing = this.inflightGets.get(key);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) {
+      const result = await existing;
+      if (result !== undefined) this.hitCount++; else this.missCount++;
+      return result;
+    }
 
     const pending = this.getPersistent(key);
     this.inflightGets.set(key, pending);
 
     try {
-      return await pending;
+      const result = await pending;
+      if (result !== undefined) this.hitCount++; else this.missCount++;
+      return result;
     } finally {
       this.inflightGets.delete(key);
     }
@@ -101,6 +117,7 @@ export class JxlCacheBrowser {
     this.persistentTracker.clear();
     this.inflightGets.clear();
     this.inflightSets.clear();
+    this.manifestDirty = false;
 
     if (!this.opfsRoot) return;
 
@@ -114,6 +131,7 @@ export class JxlCacheBrowser {
   }
 
   stats() {
+    const total = this.hitCount + this.missCount;
     return {
       memory: {
         count: this.memoryCache.count,
@@ -126,6 +144,11 @@ export class JxlCacheBrowser {
         limit: this.opts.persistentLimit,
         enabled: this.opfsRoot !== null,
       },
+      inflight: {
+        gets: this.inflightGets.size,
+        sets: this.inflightSets.size,
+      },
+      hitRate: total > 0 ? this.hitCount / total : null,
     };
   }
 
@@ -173,11 +196,7 @@ export class JxlCacheBrowser {
       }
     }
 
-    try {
-      await this.writeManifest();
-    } catch {
-      // Non-fatal: manifest is a convenience for cross-reload recovery.
-    }
+    this.scheduleManifestWrite();
   }
 
   private async writePersistentFile(name: string, buffer: ArrayBuffer): Promise<void> {
@@ -247,6 +266,27 @@ export class JxlCacheBrowser {
       }
     } catch {
       // No manifest yet.
+    }
+  }
+
+  private scheduleManifestWrite(): void {
+    this.manifestDirty = true;
+
+    if (this.manifestPendingWrite !== null) return;
+
+    this.manifestPendingWrite = Promise.resolve()
+      .then(() => this.drainManifest())
+      .finally(() => { this.manifestPendingWrite = null; });
+  }
+
+  private async drainManifest(): Promise<void> {
+    while (this.manifestDirty) {
+      this.manifestDirty = false;
+      try {
+        await this.writeManifest();
+      } catch {
+        // Non-fatal.
+      }
     }
   }
 
