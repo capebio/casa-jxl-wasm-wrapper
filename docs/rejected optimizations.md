@@ -500,3 +500,71 @@ Evaluated against `packages/jxl-cache/src/browser.ts` and `packages/jxl-stream/s
 `FileSystemSyncAccessHandle` is only available inside dedicated workers; `JxlCacheBrowser` runs in a regular browser context (main thread or shared worker). The async OPFS API (`createWritable`, `getFile`) is the correct path here. A worker-specialised `JxlCacheWorker` variant could use sync handles, but no current consumer runs the cache inside a dedicated worker. Adding this now would introduce dead code and split the implementation without a concrete performance benchmark to justify it.
 
 Affected file: `packages/jxl-cache/src/browser.ts`.
+
+---
+
+# Round 9 — jxl-cache/browser.ts + jxl-stream/browser.ts (Grok batch)
+
+Evaluated against `packages/jxl-cache/src/browser.ts`, `packages/jxl-cache/src/lru.ts`, and `packages/jxl-stream/src/browser.ts`. Items 4 (manifest write throttling, implemented as coalescing) and 10 (stats expansion, implemented) are not listed here.
+
+## G2-1. Deduplication-Aware Caching (`sourceKey` parameter on `set()`) — REJECTED
+
+Proposal: add optional `sourceKey` to `set()`; if it differs from `key`, call `set(sourceKey, buffer)` recursively to store the same buffer under both keys.
+
+Wrong layer. The scheduler's `DedupeRegistry` owns source-key deduplication and fans out to existing sessions. Storing the same buffer under two keys in the cache doubles the `persistentTracker` size accounting (the LRU counts both entries toward the limit) and conflates cache identity with scheduler routing logic. Callers that need a second key can call `set()` twice directly.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G2-2. Memory Pressure-Aware Eviction (`performance.memorypressure`) — REJECTED
+
+Proposal: listen to `performance.addEventListener('memorypressure', ...)` and evict 30% of memory cache on pressure events.
+
+`memorypressure` is not a standard Web API and is not implemented in any major browser (Chrome, Firefox, Safari). Wiring a listener to a non-existent event is dead code. Additionally, the suggestion calls `this.memoryCache.evictFraction(0.3)` — a method that does not exist on `LRUCache`. The memory cache is already LRU-evicting when new entries push it over `memoryLimit`; that is the correct pressure response.
+
+Affected files: `packages/jxl-cache/src/browser.ts`, `packages/jxl-cache/src/lru.ts`.
+
+## G2-3. Concurrent Set Coalescing — REJECTED
+
+Proposal: in `setPersistent`, if a promise for the key is already inflight, return it immediately (`if (pending) return pending`) so only the first write runs.
+
+This inverts the correct semantics. The current chaining approach serializes writes per key so the **last** caller wins (most recent buffer is what ultimately lands in OPFS). The proposal makes the **first** caller win and silently discards all subsequent writes for that key while the first is in flight. In a gallery reload scenario, a newer buffer (e.g. higher quality re-encode) would be dropped in favour of an older one. CLAUDE.md: correctness over brevity.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G2-5. `getStream()` Helper on `JxlCacheBrowser` — REJECTED
+
+Proposal: add `getStream(key)` to `JxlCacheBrowser` that calls `get(key)` and wraps the result in a one-chunk `ReadableStream<Uint8Array>`.
+
+Thin wrapper with no performance value. `jxl-cache` and `jxl-stream` are separate packages; introducing a stream return type into the cache package would create a cross-package coupling or require duplicating the `ReadableStream` construction inline. Callers that need a stream from a cached buffer can do this in one line themselves. Same reasoning as R1-9 (facade) and R2-5 (facade). If wanted, belongs in a separate utilities export so it can be tree-shaken.
+
+Affected files: `packages/jxl-cache/src/browser.ts`, `packages/jxl-stream/src/browser.ts`.
+
+## G2-6. OPFS Write Retry Loop in `writePersistentFile` — REJECTED
+
+Proposal: wrap `writePersistentFile` in a `for` loop that retries up to 2 times on `QuotaExceededError`, evicting 60% between attempts.
+
+`setPersistent` already handles `QuotaExceededError`: it evicts 50% via `evictPersistentFraction` and retries the write once. Moving the retry into `writePersistentFile` would duplicate this logic at the wrong level (the file-write primitive should not know about tracker eviction), and the two retry mechanisms would interfere. The existing handling is sufficient.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G2-7. Cache-Aware `DecodeSession` Wrapper (`createCachedDecoder`) — REJECTED
+
+Proposal: `createCachedDecoder(cache, key, options)` checks the cache first; on a hit it returns a fake `DecodeSession` with no-op `push`/`close`/`cancel`; on a miss it runs a real decode and populates the cache on finish.
+
+`DecodeSession` is event-driven — the decoder emits progressive frames, header info, and metrics via the `events()` async iterable, not via a return value. A no-op fake session cannot replay those events, so callers would receive no pixels on a cache hit. Wiring the real decode + cache write would require knowledge of `DecodeOptions`, `JxlContext`, and the event protocol — all jxl-core/jxl-session concerns that do not belong in jxl-cache or jxl-stream. Wrong abstraction layer.
+
+Affected files: `packages/jxl-cache/src/browser.ts`, `packages/jxl-stream/src/browser.ts`.
+
+## G2-8. Adaptive Prefetch Depth in `fromReadableStream` — REJECTED
+
+The proposal adds a `prefetchDepth` variable initialized to 2 but never uses it — the loop body still calls `reader.read()` exactly once per iteration. The snippet does not implement actual multi-depth prefetch. Beyond that: multi-ahead prefetch would fetch chunks from the network before `session.push()` backpressure has been applied, potentially queueing more than the worker's adaptive HWM allows and risking the 128 MiB input queue cap. The existing one-ahead prefetch (chunk N+1 starts fetching while `session.push(N)` awaits) is the correct depth.
+
+Affected file: `packages/jxl-stream/src/browser.ts`.
+
+## G2-9. Persistent Cache Buffer Validation (JXL Magic Bytes) — REJECTED
+
+Proposal: after reading a buffer from OPFS, call `isValidJxlBuffer(buffer)` to check magic bytes and discard corrupted entries.
+
+The cache is content-agnostic — it stores arbitrary `ArrayBuffer` values, not necessarily JXL data. Adding format-specific validation inside the cache breaks the abstraction boundary. OPFS file corruption is extremely rare and is already handled gracefully: libjxl rejects invalid input via the `"error"` decode event, which routes to `failSession`. JXL also has two valid container start sequences (`0xFF 0x0A` bare codestream, `0x00 0x00 0x00 0x0C` ISO BMFF), making a simple magic-byte check fragile. Same reasoning as DH6-6.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
