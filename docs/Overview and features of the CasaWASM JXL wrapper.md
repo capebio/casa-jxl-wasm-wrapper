@@ -17,7 +17,9 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 *   **PGO (Profile-Guided Optimization):** Optimized WASM artifacts based on real-world training data from the Casabio image corpus.
 *   **Zero-Copy WASM Writes:** Both the encoder and the fallback one-shot decoder write chunk data directly into the WASM heap (`HEAPU8.set` into a pre-allocated region) rather than creating an intermediate JS `Uint8Array` via `concatBytes`, eliminating one full-image allocation and copy per operation.
 *   **Grow-only WASM Allocator:** Pixel and flushed-frame buffers in the C++ bridge are sized at `JXL_DEC_BASIC_INFO` (dimensions known) and grown with `realloc` rather than `free`+`malloc`. Subsequent `NEED_IMAGE_OUT_BUFFER` events rarely need to resize, and in-flight decoded data is never needlessly copied. (`packages/jxl-wasm/src/bridge.cpp`)
-*   **Immediate Chunk Slot Release:** The progressive decode input queue nulls each slot immediately after the chunk is copied to the WASM heap, making the `Uint8Array` backing store GC-eligible during long progressive decodes without waiting for the queue to drain or `dispose()` to be called. (`packages/jxl-wasm/src/facade.ts`)
+*   **Immediate Chunk Slot Release:** Both the progressive decode input queue and the encoder pixel-chunk array null each slot immediately after the chunk is copied to the WASM heap, making the `Uint8Array` backing store GC-eligible during long operations without waiting for the queue to drain or `dispose()` to be called. (`packages/jxl-wasm/src/facade.ts`)
+*   **Streaming Input Encoder:** Pixel data is pushed into the WASM encoder one chunk at a time via `_jxl_wasm_enc_create_image` / `_jxl_wasm_enc_push_chunk` / `_jxl_wasm_enc_finish`, so peak encoder memory drops from 2× pixel data (full JS buffer + full WASM copy simultaneously live) to ~1× pixel data plus one chunk temporary. Older WASM builds fall back to the buffered path automatically via capability detection. (`packages/jxl-wasm/src/bridge.cpp`, `packages/jxl-wasm/src/facade.ts`, `packages/jxl-wasm/exports.txt`)
+*   **Safe Pixel Allocation:** `expectedPixelBytes()` validates image dimensions, checks safe-integer bounds, and rejects allocations above 1 GiB before any WASM memory is touched. (`packages/jxl-wasm/src/facade.ts`)
 *   **FFI Overhead Reduction:** Bridge function references are cached once per decode session, avoiding repeated property lookups on the WASM module object at the per-chunk hot path.
 *   **Module Caching:** Compiled WASM modules are cached in IndexedDB, eliminating re-compilation time on repeat visits.
 
@@ -53,6 +55,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 ### 6. Developer & Debugging Tools
 *   **Comprehensive Benchmark UI:** A built-in dashboard for testing throughput across different WASM tiers and file types.
 *   **Capability Probing:** A specialized runtime probe (`jxl-capabilities`) that detects SIMD, Threads, and Relaxed SIMD support.
+*   **Module Capability Detection:** `getCapabilities(module)` probes available bridge functions once per module instance and caches the result in a `WeakMap<LibjxlWasmModule, JxlCapabilities>`. Covers `progressiveDecode`, `streamingEncode`, `sidecars`, and `jpegTranscode`. Replaces per-operation `typeof` checks at call sites, ensuring fallback paths are only taken when a feature is genuinely absent. (`packages/jxl-wasm/src/facade.ts`)
 *   **Telemetry Hooks:** `onMetric` callbacks provide detailed timing for "time to header," "time to first pixel," and peak memory usage.
 
 ---

@@ -177,9 +177,13 @@ Single-slot invariant is structurally guaranteed: only one generator can consume
 
 Copy loop in `chunks()` now sets `this.pixelChunks[i] = EMPTY_U8` immediately after each chunk is copied to WASM heap. The module-level `EMPTY_U8 = new Uint8Array(0)` constant avoids per-iteration allocation. Peak JS heap overlap (all input chunks + full WASM copy simultaneously alive) is reduced to one-chunk granularity.
 
-## R3-6. Streaming input encoder (new bridge functions) — DEFERRED, BRIDGE WORK REQUIRED
+## R3-6. Streaming input encoder (new bridge functions) — IMPLEMENTED (build pending)
 
-Requires `_jxl_wasm_enc_create_image`, `_jxl_wasm_enc_push_chunk`, `_jxl_wasm_enc_finish` in C++ bridge — none present. The JS facade cannot implement this without a bridge rebuild. Largest remaining peak-memory win for large images; track as a bridge task.
+Code complete across all three layers. `bridge.cpp`: `JxlWasmEncState` extended with `pixels_buf`/`size`/`written` and encode params; `jxl_wasm_enc_create_image`, `jxl_wasm_enc_push_chunk`, `jxl_wasm_enc_finish` added and exported; `jxl_wasm_enc_free` updated to free `pixels_buf`. `exports.txt`: three new exports. `facade.ts`: `LibjxlEncoder.pushPixels()` is now async; first push calls `ensureModule()` and initialises WASM state via `enc_create_image`; `chunks()` detects the streaming path and calls `enc_finish`/`enc_take_chunk`; `cancel()`/`dispose()` call `freeWasmState()` on abort; buffered path preserved as fallback for sidecars and old WASM builds.
+
+Build blocked pending: (1) forward-declaration fix for `jxl_wasm_transcode_jpeg_to_jxl` in `bridge.cpp` line 575 (pre-existing, not caused by this change), (2) Docker registry auth for `ghcr.io/emscripten-core/emsdk` — switch primary to `docker.io/emscripten/emsdk` in `build.mjs:resolveEmsdkImages()`, then run `node scripts/build.mjs` from `packages/jxl-wasm`.
+
+Affected files: `packages/jxl-wasm/src/bridge.cpp`, `packages/jxl-wasm/src/facade.ts`, `packages/jxl-wasm/exports.txt`.
 
 ## R3-7. Pooled WASM input buffer for transcode / one-shot decode — REJECTED
 
