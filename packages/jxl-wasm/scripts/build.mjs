@@ -408,8 +408,8 @@ function resolveEmsdkImages() {
     return [process.env.EMSDK_IMAGE];
   }
   return [
-    "ghcr.io/emscripten-core/emsdk:4.0.13",
-    "docker.io/emscripten/emsdk:4.0.13"
+    "docker.io/emscripten/emsdk:4.0.13",
+    "ghcr.io/emscripten-core/emsdk:4.0.13"
   ];
 }
 

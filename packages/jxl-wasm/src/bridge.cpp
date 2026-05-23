@@ -406,6 +406,9 @@ extern "C" {
 
 void jxl_wasm_bridge_anchor(void) {}
 
+// Forward declaration for transcode used in encode_auto.
+JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_size);
+
 // --- Stateful progressive decoder ---
 
 JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t want_progressive) {
