@@ -250,3 +250,73 @@ Claim: "strict read→push→wait cycle prevents I/O prefetch from overlapping w
 Reality confirmed. Original loop awaited `reader.read()` only after `session.push()` resolved, serializing network I/O with scheduler backpressure. For network-streamed inputs, `session.push()` can block at the adaptive HWM; during that block the next network chunk wasn't even being fetched.
 
 Fix (`packages/jxl-stream/src/browser.ts`): prefetch pattern — start `pending = reader.read()` for chunk N+1 immediately after chunk N arrives (before `await session.push(N)`). The scheduler's backpressure still governs how many chunks the worker can buffer; the fix only pipelines the I/O prefetch with the push round-trip, masking network latency during backpressure wait.
+
+---
+
+# Round 4 — scheduler / facade / bridge (10-item batch)
+
+Evaluated against `packages/jxl-scheduler/src/scheduler.ts`, `packages/jxl-scheduler/src/pool.ts`, `packages/jxl-wasm/src/facade.ts`, and `packages/jxl-worker-browser/src/decode-handler.ts`.
+
+## R4-1. Pool Pre-warming — IMPLEMENTED
+
+`prewarmSize?: number` added to `SchedulerOptions`. `WorkerPool.prewarm(count)` spawns workers eagerly at construction (fire-and-forget, respects `maxSize`). Workers start idle timers immediately so they are reaped normally if unused within `idleTimeoutMs`. Eliminates 100–200 ms first-image cold-start penalty.
+
+Affected files: `packages/jxl-scheduler/src/pool.ts`, `packages/jxl-scheduler/src/scheduler.ts`.
+
+## R4-2. Worker-side createImageBitmap — REJECTED
+
+Proposal: call `createImageBitmap(new Blob([pixels], { type: "image/x-rgba8" }))` inside the decode worker; transfer `ImageBitmap` to main thread.
+
+Rejected for three reasons:
+
+1. **Invalid MIME type.** `"image/x-rgba8"` is not a registered image format; `Blob` + `createImageBitmap` expect encoded image data (PNG, JPEG, etc.), not raw RGBA pixel bytes. The proposal's code snippet would throw or produce a black bitmap.
+
+2. **Breaks non-rgba8 paths.** The worker handles `rgba16` and `rgbaf32` (HDR) formats. `ImageData` (the correct raw-pixel path) only accepts `Uint8ClampedArray`, which cannot represent 16-bit or float precision. Inserting `createImageBitmap` here would silently corrupt scientific data.
+
+3. **Wrong layer.** `decode-handler.ts` is browser/Node-agnostic at the protocol level. Adding a browser-only canvas API call ties it to the DOM. Consumer code already has the decoded `ArrayBuffer` and can call `createImageBitmap(new ImageData(new Uint8ClampedArray(pixels), w, h))` in one call on the main thread for rgba8 previews.
+
+## R4-3. AsyncEventStream Promise Fast-Path — CLAIM FALSE, NO FIX NEEDED
+
+Claim: every `next()` call allocates a new Promise.
+
+Reality: `waitForQueueItem()` (`facade.ts`) already fast-paths: `if (this.chunkQueue.length > this.readIndex) return Promise.resolve()`. The surrounding loop in `eventsProgressive` only calls `waitForQueueItem` when no items are buffered (`if (this.chunkQueue.length <= this.readIndex)`), so the fast path is always taken when data is available.
+
+## R4-4. Redundant Slicing for Transfers — CLAIM FALSE, NO FIX NEEDED
+
+Claim: `toTransferableBuffer` causes redundant copies.
+
+Reality: `toTransferableBuffer` does not exist in this codebase. `copyOrBorrowInput()` (`facade.ts`) already handles ownership: `ArrayBuffer` → zero-copy `new Uint8Array(ab)` view; `Uint8Array` → copies only when `copyInput !== false`, which callers opt out of via `copyInput: false`. The primary production path (transferred `ArrayBuffer` chunks from `postMessage`) never hits the copy branch. `SharedArrayBuffer` would require COOP/COEP headers and complicates ownership; not appropriate here.
+
+## R4-5. WASM Heap 64 MB Initial Memory — CLAIM FALSE, ALREADY AT 64 MB
+
+Claim: initial WASM memory should be raised from 32 MB to 64 MB.
+
+Reality: `build.mjs` already sets `-sINITIAL_MEMORY=67108864` (64 MB) in both `baseFlags` (line 49) and `linkBridge` (line 229). The HANDOFF.md fast-relink recipe shows 33554432 (32 MB) but that is an illustrative manual snippet, not the production build path.
+
+## R4-6. Synchronous Slot Booking — REJECTED
+
+Proposal: reserve the slot synchronously, resolve the worker assignment later.
+
+Rejected: `acquireSlot` is already O(1) for the common case — `pool.acquire()` returns in one microtask when an idle worker exists. The queue enqueue is synchronous. The async cost is one `pool.acquire()` check per session, not N ticks per N sessions. A fully synchronous booking path would bypass the preemption check and the dedupe lookup, both of which require async coordination. No profiling data shows this as a measurable bottleneck.
+
+## R4-7. Encoder Pixel Chunk Aggregation — REJECTED
+
+Proposal: buffer pixel pushes below a 256 KB threshold before sending to the worker.
+
+Rejected: No evidence callers push sub-256 KB chunks. The streaming input path (R3-6) copies each chunk directly to the WASM pixel buffer at the moment it arrives — the worker-side cost per message is a single `HEAPU8.set`. Adding aggregation introduces a partial-buffer state that complicates `finish()` (must flush remainder), adds latency for callers that push one large chunk, and solves a problem for which no benchmark data exists.
+
+## R4-8. UUID → Monotonic Counter — REJECTED
+
+100 `crypto.randomUUID()` calls ≈ 100–300 µs total — below measurement noise for a gallery load. A counter wraps on integer overflow, collides across page reloads, and degrades log readability. The proposal's own impact rating is "Low." Not worth the churn.
+
+## R4-9. Tier Detection Re-Probing — CLAIM FALSE, NO FIX NEEDED
+
+Claim: `detectTier()` re-runs WASM probes on every call.
+
+Reality: `_cachedDetectedTier` module-level variable (`facade.ts`) caches the result after the first call. `detectTier()` returns on the first line when `_cachedDetectedTier !== undefined`. The proposed `window.__JXL_TIER__` global would pollute the namespace and conflict with multiple module instances.
+
+## R4-10. Single-Trip Metadata Pass — REJECTED
+
+Claim: EXIF/XMP/ICC ArrayBuffers are transferred multiple times across threads.
+
+Reality: metadata is set once in `EncoderOptions` and flows into the `LibjxlEncoder` constructor. There is no multi-hop routing — it does not travel Main → Scheduler → Worker → Bridge as the proposal suggests. The actual issue is that `bridge.cpp`'s `EncodeRgba()` ignores `iccProfile`, `exif`, and `xmp` entirely (HANDOFF.md §4 — wiring ICC/EXIF/XMP in the C++ bridge is the correct fix, not changing the JS routing).

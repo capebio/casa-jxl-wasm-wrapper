@@ -37,6 +37,8 @@ export interface SchedulerOptions {
   idleTimeoutMs?: number;
   // Backpressure high-water mark: pushes after this depth block until worker drains. Default: 4.
   pushHwm?: number;
+  // Number of workers to spawn eagerly at construction to eliminate first-image boot latency. Default: 0.
+  prewarmSize?: number;
 }
 
 export interface SchedulerMetrics {
@@ -155,6 +157,9 @@ export class Scheduler {
     this.queue = new PriorityQueue<PendingSession>();
     this.dedupe = new DedupeRegistry();
     this.pushHwm = opts.pushHwm ?? DEFAULT_PUSH_HWM;
+    if (opts.prewarmSize && opts.prewarmSize > 0) {
+      this.pool.prewarm(opts.prewarmSize);
+    }
   }
 
   // ---------------------------------------------------------------------------

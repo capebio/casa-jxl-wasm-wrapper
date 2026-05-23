@@ -128,6 +128,23 @@ export class WorkerPool {
     void worker.handle.shutdown(1000).catch(() => undefined);
   }
 
+  // Spawn workers eagerly so the first acquire() hits an idle worker rather than
+  // paying the factory boot cost. Workers start their idle timers immediately and
+  // are reaped normally if unused within idleTimeoutMs.
+  prewarm(count: number): void {
+    if (this.destroyed) return;
+    const toSpawn = Math.min(count, this.maxSize - this.workers.size);
+    for (let i = 0; i < toSpawn; i++) {
+      void this.spawn().then((w) => {
+        if (this.destroyed) {
+          this.destroyWorker(w);
+          return;
+        }
+        w.idleTimer = setTimeout(() => this.reap(w), this.idleTimeoutMs);
+      }).catch(() => undefined);
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.destroyed = true;
     const shutdowns = [...this.workers.values()].map((w) => {
