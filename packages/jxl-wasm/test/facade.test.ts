@@ -170,6 +170,53 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
     await decoder.dispose();
   });
+
+  test("decoder cancel prevents event generation", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeProgressiveLibjxlModule());
+    const decoder = createDecoder(decodeOptions);
+
+    decoder.cancel("prevent generation");
+    const iterator = decoder.events()[Symbol.asyncIterator]();
+    const result = await nextWithin(iterator, 100);
+    expect(result.done).toBe(true);
+
+    await decoder.dispose();
+  });
+
+  test("encoder cancel prevents chunk generation", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
+
+    encoder.cancel("prevent generation");
+    const chunksIter = encoder.chunks()[Symbol.asyncIterator]();
+    const result = await nextWithin(chunksIter, 100);
+    expect(result.done).toBe(true);
+
+    await encoder.dispose();
+  });
+
+  test("decoder fallback to oneshot when progressive unavailable", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeLibjxlModule());
+    const rgba = new Uint8Array([0, 255, 0, 255]);
+    const encoder = createEncoder(encodeOptions);
+    encoder.pushPixels(rgba);
+    encoder.finish();
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const decoder = createDecoder(decodeOptions);
+    decoder.push(encoded.value);
+    decoder.close();
+
+    const events = [];
+    for await (const event of decoder.events()) {
+      events.push(event);
+    }
+
+    expect(events.map((e) => e.type)).toContain("final");
+    expect(events.map((e) => e.type)).not.toContain("error");
+    await encoder.dispose();
+    await decoder.dispose();
+  });
 });
 
 describe("detectTier", () => {
