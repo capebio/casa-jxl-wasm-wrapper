@@ -25,6 +25,7 @@ interface DecodeHandlerCallbacks {
 }
 
 const CHUNK_HWM = 4;
+const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB safety cap — see browser handler
 
 type NodeDecodeEvent =
   | { type: "header"; info: ImageInfo }
@@ -64,6 +65,7 @@ export class DecodeHandler {
   private chunkQueue: Buffer[] = [];
   private chunkReadIndex = 0;
   private queueDepth = 0;
+  private queuedBytes = 0;
   private cancelled = false;
   private inputClosed = false;
   private paused = false;
@@ -82,8 +84,14 @@ export class DecodeHandler {
   // Accept both Buffer and Uint8Array per spec Section 15.2
   onChunk(chunk: ArrayBuffer | Uint8Array | Buffer): void {
     if (this.cancelled || this.state === "final") return;
+    if (chunk.byteLength === 0) return;
+    if (this.queuedBytes + chunk.byteLength > MAX_QUEUED_BYTES) {
+      this.failSession("QueueOverflow", `Input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
+      return;
+    }
     const buf = Buffer.from(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, chunk instanceof ArrayBuffer ? 0 : (chunk as Uint8Array).byteOffset, chunk instanceof ArrayBuffer ? chunk.byteLength : (chunk as Uint8Array).byteLength);
     this.chunkQueue.push(buf);
+    this.queuedBytes += chunk.byteLength;
     this.queueDepth++;
   }
 
@@ -103,7 +111,7 @@ export class DecodeHandler {
   }
 
   onPause(): void {
-    if (this.cancelled || this.state === "final" || this.state === "error") return;
+    if (this.cancelled || this.paused || this.state === "final" || this.state === "error") return;
     this.paused = true;
     const msg: MsgDecodePaused = { type: "decode_paused", sessionId: this.sessionId };
     this.port.postMessage(msg);
@@ -159,6 +167,7 @@ export class DecodeHandler {
           this.chunkReadIndex = 0;
         }
         this.queueDepth--;
+        this.queuedBytes -= chunk.byteLength;
         await decoder.push(chunk);
         if (this.queueDepth < CHUNK_HWM) {
           this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });

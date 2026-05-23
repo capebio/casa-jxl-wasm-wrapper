@@ -37,6 +37,9 @@ interface DecodeHandlerCallbacks {
 // Slow workers → lower HWM → earlier drain signal → less queued memory.
 const HWM_BASE = 6;
 const HWM_EMA_ALPHA = 0.25;
+// Safety cap on total queued bytes. Scheduler's adaptive HWM keeps queued bytes well
+// below this (~2 MiB) in normal use; cap only fires for scheduler-free or buggy callers.
+const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB
 
 export class DecodeHandler {
   private readonly sessionId: string;
@@ -56,6 +59,8 @@ export class DecodeHandler {
 
   // Adaptive drain HWM: EMA of decoder.push() duration (ms).
   private pushLatencyEma = 0;
+  // Bytes currently queued but not yet pushed to decoder.
+  private queuedBytes = 0;
 
   // Stage budget tracking
   private stageStartMs: number = performance.now();
@@ -81,7 +86,13 @@ export class DecodeHandler {
 
   onChunk(chunk: ArrayBuffer): void {
     if (this.cancelled || this.state === "final") return;
+    if (chunk.byteLength === 0) return;
+    if (this.queuedBytes + chunk.byteLength > MAX_QUEUED_BYTES) {
+      this.failSession("QueueOverflow", `Input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
+      return;
+    }
     this.chunkQueue.push(chunk);
+    this.queuedBytes += chunk.byteLength;
     this.queueDepth++;
     this.wakeResolve?.();
     this.wakeResolve = null;
@@ -115,7 +126,7 @@ export class DecodeHandler {
   }
 
   onPause(): void {
-    if (this.cancelled || this.state === "final" || this.state === "error") return;
+    if (this.cancelled || this.paused || this.state === "final" || this.state === "error") return;
     this.paused = true;
     // Wake any sleeping waitForChunk so feedDecoder reaches the pause check immediately.
     this.wakeResolve?.();
@@ -192,6 +203,7 @@ export class DecodeHandler {
           this.chunkReadIndex = 0;
         }
         this.queueDepth--;
+        this.queuedBytes -= chunk.byteLength;
         const t0 = performance.now();
         await decoder.push(chunk);
         const pushMs = performance.now() - t0;

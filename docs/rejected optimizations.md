@@ -368,3 +368,61 @@ Same rejection as DH-2 and R1-2/R2-2. No safe ownership model for transferred bu
 ## DH-10. Explicit dispose() method — REJECTED
 
 Proposed: add a `dispose()` separate from `onCancel()` for scheduler-driven cleanup. `onCancel()` already handles the full teardown: sets `cancelled`, unblocks `waitForResume`, transitions state, posts `decode_cancelled`, invokes `onSessionEnd`. `run()`'s `finally` block calls `decoder.dispose()`. Adding a second cleanup path creates ambiguity about which to call when.
+
+---
+
+# Round 6 — decode-handler.ts (10-item batch + 5-item Part 2)
+
+Evaluated against `packages/jxl-worker-browser/src/decode-handler.ts` and `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH6-1. Preemption-aware soft yield (Patch 1) — REJECTED
+
+`onCancel()` sets `this.cancelled = true` before `this.softYieldRequested = true`. `feedDecoder`'s outer loop condition is `while (!this.cancelled …)` — the loop exits at the next iteration check, before any `softYieldRequested` branch is evaluated. The soft-yield path is structurally unreachable. Additionally, `decoder.push(new ArrayBuffer(0))` is not a valid libjxl flush operation — an empty push would either be a no-op or could confuse the container parser. Soft preemption is already provided by `onPause()`/`onResume()`.
+
+## DH6-2. Early header propagation hint — REJECTED
+
+`decode_header` already flows to the scheduler. A second `decode_header_ready` message carries zero new information. Protocol complexity for no information gain.
+
+## DH6-3. Internal diagnostic metrics with `debugMetrics` flag — REJECTED
+
+`MsgDecodeStart.debugMetrics?` requires a protocol change; `internal_metric` would fall outside the `WorkerToMainMessage` union. Queue depth is already derivable from the `worker_drain` message stream (drain fires when depth drops below adaptive HWM). No concrete consumer exists.
+
+## DH6-4. Adaptive chunk batching in feedDecoder (Patch 2) — REJECTED
+
+Batching chunks and then `for...of`-pushing them still issues N `await decoder.push()` calls for N chunks — no semantic change. Moving the drain check to once-per-batch makes backpressure less granular (scheduler receives no signal while the batch is being processed). The proposed compaction logic also drops the `chunkQueue.length = 0; chunkReadIndex = 0` fast-path from the current code.
+
+## DH6-5. Per-stage budget reset — REJECTED
+
+Silently changes `budgetMs` semantics from session-level to per-stage without any API change. `stageStartMs` is set in the constructor (global elapsed from session creation), which is the correct interpretation — each stage would inherit the full budget, potentially extending total session time to `budgetMs × N_stages`. Same rejection as DH-5 (Round 5).
+
+## DH6-6. JXL signature check on first chunk — REJECTED
+
+libjxl already rejects invalid input via the `"error"` event, which routes to `failSession`. JS magic-bytes validation duplicates library logic and risks false positives: JXL has two valid start sequences (bare codestream `FF 0A` and ISO BMFF container `00 00 00 0C …`), and the first chunk might arrive mid-way into a container box in some proxy architectures.
+
+## DH6-7. `onPause` idempotency guard — IMPLEMENTED
+
+Both browser and Node handlers were missing `if (this.paused) return;` — repeated `onPause()` calls re-sent `decode_paused` acknowledgements. Guard added to both handlers.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH6-8. Worker-side decode timeout — REJECTED
+
+Duplicates scheduler responsibility. An absolute 30 s wall-clock timeout incorrectly fires on valid slow-network or large-file sessions. The scheduler owns session lifecycle; `budgetMs` already covers the decode-time budget case.
+
+## DH6-9. Queue byte cap (byte cap only; signature check rejected per DH6-6) — IMPLEMENTED
+
+Both handlers enforce a 128 MiB per-session cap on total queued (not-yet-pushed) bytes. Empty chunks rejected immediately in `onChunk`. `queuedBytes` is decremented as each chunk is consumed from the queue in `feedDecoder`. In normal scheduler operation, adaptive HWM keeps queued bytes well under 2 MiB; cap only fires for scheduler-free callers or pathological inputs.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH6-10. Final event consolidation — REJECTED
+
+Proposed code is identical to current implementation. No change.
+
+## DH6-A through DH6-E (Part 2 — Scheduler/Facade integration ideas) — REJECTED
+
+- **A** (`progressIntervalMs?`): Significant protocol and scheduler change, no concrete consumer.
+- **B** (facade `backpressureHandler` forwarded as `worker_drain`): Same rejection as R1-1/R2-3 — drain signal is correctly at the worker layer, not inside the facade.
+- **C** (sourceKey-aware header caching): DedupeRegistry already fans out events from the primary session; caching `ImageInfo` separately requires new protocol plumbing with no current consumer.
+- **D** (tier-aware worker assignment): Scheduler concern; no mechanism to query worker tier at assignment time without a new protocol message.
+- **E** (global memory pressure broadcast): Major architecture change (SharedArrayBuffer or BroadcastChannel across workers); no concrete scenario requiring cross-worker memory coordination at this scale.
