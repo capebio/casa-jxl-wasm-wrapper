@@ -1,15 +1,19 @@
 // jxl-scheduler/src/pool.ts
 // Worker pool: creation, idle reaping, recycling on poison.
 // Spec: Section 12.1, 7.2.
+//
+// WorkerPool owns only worker lifecycle hygiene:
+// spawn, reserve, bind, release, recycle, reap, shutdown.
+// Scheduling policy — priority, preemption, dedupe, fairness — belongs in Scheduler.
 
 import type { PoolWorker, WorkerFactory, WorkerHandle } from "./types.js";
-
-let workerIdCounter = 0;
 
 const DEV =
   typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
 
 const DEFAULT_SPAWN_TIMEOUT_MS = 15_000;
+const RECYCLE_SHUTDOWN_TIMEOUT_MS = 1_000;
+const POOL_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 export const RESERVED_SESSION_ID = "__jxl_reserved__" as const;
 
@@ -41,6 +45,8 @@ export class WorkerPool {
   private destroyed = false;
   private spawning = 0;
   private generation = 0;
+  private nextWorkerId = 0;
+  private shutdownPromise: Promise<void> | null = null;
 
   private lastSpawnFailureMs = 0;
   private consecutiveSpawnFailures = 0;
@@ -88,6 +94,14 @@ export class WorkerPool {
     return this.spawning;
   }
 
+  get hasCapacity(): boolean {
+    return !this.destroyed && this.workers.size + this.spawning < this.maxSize;
+  }
+
+  get capacityRemaining(): number {
+    return Math.max(0, this.maxSize - this.workers.size - this.spawning);
+  }
+
   /** Returns a shallow copy for safe external iteration. */
   get idleWorkers(): readonly PoolWorker[] {
     return [...this.idle];
@@ -125,7 +139,7 @@ export class WorkerPool {
       active: this.active.size,
       spawning: this.spawning,
       spawnPromises: this.spawnPromises.size,
-      capacityRemaining: Math.max(0, this.maxSize - this.workers.size - this.spawning),
+      capacityRemaining: this.capacityRemaining,
       workers: [...this.workers.values()].map((w) => ({
         id: w.id,
         activeSessionId: w.activeSessionId,
@@ -234,7 +248,17 @@ export class WorkerPool {
     return count;
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise !== null) return this.shutdownPromise;
+    this.shutdownPromise = this.shutdownInner();
+    return this.shutdownPromise;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Private Implementation
+  // ─────────────────────────────────────────────────────────────
+
+  private async shutdownInner(): Promise<void> {
     this.destroyed = true;
     this.generation++;
 
@@ -242,7 +266,7 @@ export class WorkerPool {
     await Promise.allSettled([...this.spawnPromises]);
 
     const shutdownPromises = [...this.workers.values()].map((worker) =>
-      this.cleanupAndRemove(worker, true, 5000),
+      this.cleanupAndRemove(worker, true, POOL_SHUTDOWN_TIMEOUT_MS),
     );
 
     await Promise.allSettled(shutdownPromises);
@@ -252,9 +276,9 @@ export class WorkerPool {
     this.workers.clear();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Private Implementation
-  // ─────────────────────────────────────────────────────────────
+  private allocateWorkerId(): number {
+    return ++this.nextWorkerId;
+  }
 
   private canAttemptSpawn(): boolean {
     if (this.consecutiveSpawnFailures === 0) return true;
@@ -314,7 +338,7 @@ export class WorkerPool {
 
   private async spawnInner(): Promise<PoolWorker> {
     const generation = this.generation;
-    const id = ++workerIdCounter;
+    const id = this.allocateWorkerId();
     const handle = await this.createWorkerWithTimeout();
 
     const worker: PoolWorker = {
@@ -326,7 +350,7 @@ export class WorkerPool {
     };
 
     if (this.destroyed || generation !== this.generation) {
-      void handle.shutdown(1000).catch(() => undefined);
+      void handle.shutdown(RECYCLE_SHUTDOWN_TIMEOUT_MS).catch(() => undefined);
       return worker;
     }
 
@@ -484,7 +508,7 @@ export class WorkerPool {
   private cleanupAndRemove(
     worker: PoolWorker,
     shouldShutdown = true,
-    shutdownTimeoutMs = 1000,
+    shutdownTimeoutMs = RECYCLE_SHUTDOWN_TIMEOUT_MS,
   ): Promise<void> {
     this.clearIdleTimer(worker);
     this.idle.delete(worker);
