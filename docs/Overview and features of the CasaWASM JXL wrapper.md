@@ -22,6 +22,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 *   **Safe Pixel Allocation:** `expectedPixelBytes()` validates image dimensions, checks safe-integer bounds, and rejects allocations above 1 GiB before any WASM memory is touched. (`packages/jxl-wasm/src/facade.ts`)
 *   **FFI Overhead Reduction:** Bridge function references are cached once per decode session, avoiding repeated property lookups on the WASM module object at the per-chunk hot path.
 *   **Module Caching:** Compiled WASM modules are cached in IndexedDB, eliminating re-compilation time on repeat visits.
+*   **WASM-Side RGBA Resize (`downscale_rgba`):** The canvas-based `resizeRgba` path in `jxl-wrapper-lab.js` and `jxl-benchmark.js` previously round-tripped pixel data through GPU memory (`putImageData` → `drawImage` → `getImageData`). `getImageData` stalls the GPU pipeline and reads back up to ~100 MB for a 25 MP image — 50–150 ms on integrated graphics. Replaced by a synchronous WASM box-filter (`downscale_rgba` in `src/lib.rs`), keeping pixel data in CPU/WASM linear memory throughout. Mirrors the existing `downscale_rgb` function (4-channel variant). Compiled with `+simd128`. Expected resize speedup: 2–5× for large images. (`src/lib.rs`, `web/jxl-wrapper-lab.js`, `web/jxl-benchmark.js`)
 
 ### 2. Advanced Scheduling & Flow Control
 *   **Prioritized Task Lanes:** Three priority tiers—`visible`, `near`, and `background`—ensure the user's current view is always processed first.

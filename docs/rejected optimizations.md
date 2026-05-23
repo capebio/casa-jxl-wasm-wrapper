@@ -79,6 +79,10 @@ This document records optimization proposals that were evaluated and rejected.
 ## `packages/jxl-stream/src/browser.ts`
 *   **Adaptive Prefetch Depth (G2-8):** Multi-ahead prefetch risks queueing beyond worker limits (128MiB cap). The current one-ahead prefetch is correct.
 
+## `src/lib.rs` / `web/jxl-wrapper-lab.js` / `web/jxl-benchmark.js` (WASM Resizer)
+*   **`fast_image_resize` crate (Gemini spec):** Rejected. The crate's v2 API (`NonZeroU32`, `Image::from_slice_u8`, `Resizer::new(ResizeAlg::...)`) is outdated — v3 changed the interface. Introduces a new build dependency for no quality benefit over a box filter for thumbnails. Existing `downscale_rgb` pattern extended to 4 channels instead.
+*   **`ResizedImage` struct with `unsafe take_rgba` (Gemini spec):** Rejected. `take_rgba(self)` consumes the struct, dropping `self.pixels`; `Uint8Array::view` then points to freed memory — undefined behaviour. Correct pattern (`Vec<u8>` return via wasm-bindgen copy) follows `downscale_rgb` and is used by `downscale_rgba`.
+
 ## `packages/jxl-worker-browser/src/worker.ts`
 *   **Generic `handleSessionStart<T>` with `SessionStartOptions<T>` (Facade-R1-1):** Correctness bug — success path never calls `pendingStarts.delete(sessionId)`. After `onSessionEnd` removes the session from `decodeSessions`, the resolved promise remains in `pendingDecodeStarts`, causing `hasAnySession()` to return `true` and subsequent reconnect attempts to get a false `DuplicateSession` error. Also: `SessionStartOptions<T>` interface adds cognitive overhead for ~20 lines of honest duplication between two clearly distinct functions.
 *   **Generic `queueMessage` / generic `flushQueuedMessages` (Facade-R1-2):** `Map<string, any[]>` parameter and `(handler: T, msg: any) => void` callback regress type safety relative to the existing explicit typed functions. The `instanceof DecodeHandler` check inside the flush callback leaks abstraction internals and signals the generic boundary is wrong.

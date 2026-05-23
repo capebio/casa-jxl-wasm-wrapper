@@ -499,6 +499,61 @@ pub fn downscale_rgb(
     Ok(out)
 }
 
+/// Box-filter downscale an RGBA8 buffer.  Useful for thumbnail generation.
+#[wasm_bindgen]
+pub fn downscale_rgba(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> Result<Vec<u8>, JsError> {
+    let (sw, sh, dw, dh) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
+    let expected_len = sw.checked_mul(sh).and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| JsError::new("downscale_rgba: dimensions overflow"))?;
+    if src.len() != expected_len {
+        return Err(JsError::new("src length mismatch"));
+    }
+    if dst_w == 0 || dst_h == 0 {
+        return Err(JsError::new("downscale_rgba: dst dimensions must be > 0"));
+    }
+    if src_w == 0 || src_h == 0 {
+        return Err(JsError::new("downscale_rgba: src dimensions must be > 0"));
+    }
+    let xr = sw as f32 / dw as f32;
+    let yr = sh as f32 / dh as f32;
+    let mut out = vec![0u8; dw * dh * 4];
+    for dy in 0..dh {
+        let y0 = (dy as f32 * yr) as usize;
+        let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
+        let y1 = y1.max(y0 + 1);
+        for dx in 0..dw {
+            let x0 = (dx as f32 * xr) as usize;
+            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
+            let x1 = x1.max(x0 + 1);
+            let (mut rr, mut gg, mut bb, mut aa, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for y in y0..y1 {
+                let row_base = y * sw;
+                for x in x0..x1 {
+                    let i = (row_base + x) * 4;
+                    rr += src[i] as u32;
+                    gg += src[i + 1] as u32;
+                    bb += src[i + 2] as u32;
+                    aa += src[i + 3] as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let o = (dy * dw + dx) * 4;
+            out[o]     = (rr / n) as u8;
+            out[o + 1] = (gg / n) as u8;
+            out[o + 2] = (bb / n) as u8;
+            out[o + 3] = (aa / n) as u8;
+        }
+    }
+    Ok(out)
+}
+
 /// Re-apply tonemap + orientation to a cached lightbox-sized rgb16 buffer.
 ///
 /// `rgb16_bytes` is packed u16 LE (6 bytes per pixel).

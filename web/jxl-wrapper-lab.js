@@ -1,4 +1,4 @@
-﻿import initRaw, { process_orf, rgb_to_rgba } from '../pkg/raw_converter_wasm.js';
+﻿import initRaw, { process_orf, rgb_to_rgba, downscale_rgba } from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
 import {
@@ -121,24 +121,11 @@ async function encodeToWebp(rgba, width, height, quality) {
     return { bytes: new Uint8Array(await blob.arrayBuffer()), encodeMs };
 }
 
-async function resizeRgba(rgba, width, height, targetWidth) {
+function resizeRgba(rgba, width, height, targetWidth) {
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height), 0, 0);
-
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = targetWidth;
-    outCanvas.height = targetHeight;
-    const outCtx = outCanvas.getContext('2d');
-    outCtx.imageSmoothingEnabled = true;
-    outCtx.imageSmoothingQuality = 'high';
-    outCtx.drawImage(canvas, 0, 0, width, height, 0, 0, targetWidth, targetHeight);
     return {
-        rgba: new Uint8Array(outCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer),
+        rgba: downscale_rgba(rgba, width, height, targetWidth, targetHeight),
         width: targetWidth,
         height: targetHeight
     };
