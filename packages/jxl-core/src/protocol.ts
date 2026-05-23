@@ -211,6 +211,7 @@ export interface MsgWorkerShutdownAck {
 export interface MsgWorkerDrain {
   type: "worker_drain";
   sessionId: string;
+  latencyMs?: number;  // EMA of decoder.push() duration; drives scheduler pushHwm tuning
 }
 
 // Metric passthrough

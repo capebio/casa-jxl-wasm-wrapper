@@ -32,8 +32,11 @@ interface DecodeHandlerCallbacks {
   onSessionEnd: (sessionId: string) => void;
 }
 
-// High-water mark for incoming chunk queue depth before signalling drain.
-const CHUNK_HWM = 4;
+// Adaptive high-water mark: EMA of decoder.push() latency scales the drain threshold.
+// Fast workers → higher HWM (buffer more) → fewer drain round-trips.
+// Slow workers → lower HWM → earlier drain signal → less queued memory.
+const HWM_BASE = 6;
+const HWM_EMA_ALPHA = 0.25;
 
 export class DecodeHandler {
   private readonly sessionId: string;
@@ -50,6 +53,9 @@ export class DecodeHandler {
   private wakeResolve: (() => void) | null = null;
   private paused = false;
   private resumeResolve: (() => void) | null = null;
+
+  // Adaptive drain HWM: EMA of decoder.push() duration (ms).
+  private pushLatencyEma = 0;
 
   // Stage budget tracking
   private stageStartMs: number = performance.now();
@@ -186,9 +192,16 @@ export class DecodeHandler {
           this.chunkReadIndex = 0;
         }
         this.queueDepth--;
+        const t0 = performance.now();
         await decoder.push(chunk);
-        if (this.queueDepth < CHUNK_HWM) {
-          self.postMessage({ type: "worker_drain", sessionId: this.sessionId });
+        const pushMs = performance.now() - t0;
+        this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
+        if (this.queueDepth < this.adaptiveHwm()) {
+          self.postMessage({
+            type: "worker_drain",
+            sessionId: this.sessionId,
+            latencyMs: Math.round(this.pushLatencyEma),
+          });
         }
       }
       if (this.inputClosed) {
@@ -262,6 +275,11 @@ export class DecodeHandler {
         }
       }
     }
+  }
+
+  private adaptiveHwm(): number {
+    const factor = Math.max(0.6, Math.min(2.0, 120 / (this.pushLatencyEma + 10)));
+    return Math.floor(HWM_BASE * factor);
   }
 
   private checkBudget(stage: DecodeStage): boolean {

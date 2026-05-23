@@ -320,3 +320,51 @@ Reality: `_cachedDetectedTier` module-level variable (`facade.ts`) caches the re
 Claim: EXIF/XMP/ICC ArrayBuffers are transferred multiple times across threads.
 
 Reality: metadata is set once in `EncoderOptions` and flows into the `LibjxlEncoder` constructor. There is no multi-hop routing — it does not travel Main → Scheduler → Worker → Bridge as the proposal suggests. The actual issue is that `bridge.cpp`'s `EncodeRgba()` ignores `iccProfile`, `exif`, and `xmp` entirely (HANDOFF.md §4 — wiring ICC/EXIF/XMP in the C++ bridge is the correct fix, not changing the JS routing).
+
+---
+
+# Round 5 — decode-handler.ts (10-item batch)
+
+Evaluated against `packages/jxl-worker-browser/src/decode-handler.ts`.
+
+## DH-1. Adaptive drain HWM + latencyMs in drain message — IMPLEMENTED
+
+Static `CHUNK_HWM = 4` replaced by EMA-based `adaptiveHwm()`. Each `decoder.push(chunk)` call is timed; EMA (α = 0.25) tracks per-chunk WASM decode latency. `adaptiveHwm()` scales `HWM_BASE = 6` by `clamp(0.6, 2.0, 120 / (ema + 10))`, giving range [3, 12]. Fast workers push the HWM up (fewer drain round-trips); slow workers bring it down (earlier drain signal, less queued memory). Drain message gains optional `latencyMs` field, giving the scheduler real-time data to tune its own `pushHwm`. `MsgWorkerDrain` in `protocol.ts` updated with `latencyMs?: number`.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-core/src/protocol.ts`.
+
+## DH-2. Pixel buffer pool for output transfers — REJECTED
+
+Proposed module-level pool for pixel output `ArrayBuffer`s. `postMessage(msg, [pixels])` transfers the buffer, detaching it — it cannot be returned to any pool (the reference becomes a zero-length neutered buffer). Same rejection as R1-2 and R2-2 (facade.ts rounds 1 and 2). No safe ownership model without an explicit `release()` call that no current consumer implements.
+
+## DH-3. Progress event throttling (50 ms) — REJECTED
+
+Adds a `PROGRESS_THROTTLE_MS` gate to suppress intermediate `decode_progress` postMessages. Progressive frame delivery is a first-class UX feature; suppressing frames defeats it. For typical JXL images (DC + 1–3 refinement passes) throttling saves at most 2–3 messages per decode — not worth the complexity or the UX regression. No benchmark data showing inter-thread message rate is a bottleneck.
+
+## DH-4. Improved compactQueue() — REJECTED
+
+Proposed: extract inline compaction into a helper method; lower threshold from 64 to 32; add explicit null loop before `slice`. The current inline loop (line 179) already nulls each slot immediately on consumption (`this.chunkQueue[this.chunkReadIndex++] = undefined as any`), so the proposed null loop is redundant. Threshold 64 avoids needless `slice()` allocations in typical burst-feed patterns; lowering it increases array churn for no GC benefit.
+
+## DH-5. Global + rolling-window budget — REJECTED
+
+Proposed adding `globalStartMs` alongside `stageStartMs`. `stageStartMs` is set in the constructor (`performance.now()`) and never reset — `checkBudget()` already measures global elapsed time from session creation, not per-stage elapsed time. The field name is misleading but the measurement is correct. Adding a second timer duplicates the measurement.
+
+## DH-6. Pixel dump on pause — REJECTED
+
+Proposed: on `onPause()`, optionally send current partial pixels as a `"paused"` message for UI continuity. The most recent `decode_progress` message already delivered the last emitted partial frame to the main thread. Re-sending on pause is redundant and would require new facade API (a "dump current partial frame" method that the facade does not expose).
+
+## DH-7. Metrics expansion (add stage/queueDepth) — REJECTED
+
+`CodecMetric` is a closed discriminated union; adding `stage` or `queueDepth` requires modifying every variant or restructuring `MsgMetric`. Protocol churn for marginal debugging value that can be derived from existing timing metrics.
+
+## DH-8. Error context enrichment (add stage + bytesProcessed) — REJECTED
+
+Adding `stage` to `decode_error` requires a `MsgDecodeError` protocol change. The proposed `bytesProcessed` computation is also incorrect: the chunk queue slots are null'd on consumption, so `chunkQueue.reduce(...)` would return 0 for processed bytes and nonzero only for still-queued bytes — the opposite of the label.
+
+## DH-9. Facade buffer pool integration — REJECTED
+
+Same rejection as DH-2 and R1-2/R2-2. No safe ownership model for transferred buffers.
+
+## DH-10. Explicit dispose() method — REJECTED
+
+Proposed: add a `dispose()` separate from `onCancel()` for scheduler-driven cleanup. `onCancel()` already handles the full teardown: sets `cancelled`, unblocks `waitForResume`, transitions state, posts `decode_cancelled`, invokes `onSessionEnd`. `run()`'s `finally` block calls `decoder.dispose()`. Adding a second cleanup path creates ambiguity about which to call when.
