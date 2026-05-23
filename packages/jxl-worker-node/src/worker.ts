@@ -127,7 +127,9 @@ function hasAnySession(sessionId: string): boolean {
     decodeSessions.has(sessionId) ||
     encodeSessions.has(sessionId) ||
     pendingDecodeStarts.has(sessionId) ||
-    pendingEncodeStarts.has(sessionId)
+    pendingEncodeStarts.has(sessionId) ||
+    queuedDecodeMessages.has(sessionId) ||
+    queuedEncodeMessages.has(sessionId)
   );
 }
 
@@ -298,6 +300,16 @@ port.on("message", (msg: MainToWorkerMessage) => {
 // Decode session start
 // ---------------------------------------------------------------------------
 
+function cleanupFailedBackendStart(sessionId: string, isDecode: boolean): void {
+  if (isDecode) {
+    pendingDecodeStarts.delete(sessionId);
+    clearQueuedDecode(sessionId);
+  } else {
+    pendingEncodeStarts.delete(sessionId);
+    clearQueuedEncode(sessionId);
+  }
+}
+
 async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
   if (hasAnySession(msg.sessionId)) {
     safePostMessage({
@@ -314,8 +326,7 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
     try {
       b = await initBackend();
     } catch (err) {
-      pendingDecodeStarts.delete(msg.sessionId);
-      clearQueuedDecode(msg.sessionId);
+      cleanupFailedBackendStart(msg.sessionId, true);
       if (!cancelledPendingStarts.delete(msg.sessionId)) {
         safePostMessage({
           type: "decode_error",
@@ -365,8 +376,7 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
     try {
       b = await initBackend();
     } catch (err) {
-      pendingEncodeStarts.delete(msg.sessionId);
-      clearQueuedEncode(msg.sessionId);
+      cleanupFailedBackendStart(msg.sessionId, false);
       if (!cancelledPendingStarts.delete(msg.sessionId)) {
         safePostMessage({
           type: "encode_error",
