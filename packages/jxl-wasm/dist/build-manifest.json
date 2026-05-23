@@ -5,13 +5,13 @@
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
   "emsdkImage": "docker.io/emscripten/emsdk:4.0.13",
   "buildMode": "docker",
-  "generatedAt": "2026-05-22T08:16:15.222Z",
+  "generatedAt": "2026-05-23T03:43:41.729Z",
   "tiers": {
     "relaxed-simd-mt": {
-      "jsBytes": 25756,
-      "wasmBytes": 2893384,
-      "jsSha256": "ed8186884bb42d07d3b5336193aa985df56563e5d0cdb5d9d60f8af6add2cae1",
-      "wasmSha256": "8292b212edfdd559fbd26673675dac275037023e2fa1b57c47715aeec40ff025",
+      "jsBytes": 26153,
+      "wasmBytes": 2894123,
+      "jsSha256": "78324f2226eb387858ec77bd423ab4dadca6e34fb20161c14e1828a10f230567",
+      "wasmSha256": "73e46a82a8b46b0c641c8316a9e483b7261f0ded3bbeefa93039bbbbfcf8cb19",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -37,10 +37,10 @@
       ]
     },
     "simd-mt": {
-      "jsBytes": 25732,
-      "wasmBytes": 2893384,
-      "jsSha256": "8318bdee7b5b01458a123a1cc5cbe7b7a8a49a1a14b6293ca1a2645bb790b7fa",
-      "wasmSha256": "8292b212edfdd559fbd26673675dac275037023e2fa1b57c47715aeec40ff025",
+      "jsBytes": 26129,
+      "wasmBytes": 2894123,
+      "jsSha256": "9941b4cbc543b4115d463686a34cacbd0c5b7e477f59caf5c376d35d1d5ddfdb",
+      "wasmSha256": "73e46a82a8b46b0c641c8316a9e483b7261f0ded3bbeefa93039bbbbfcf8cb19",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -65,10 +65,10 @@
       ]
     },
     "simd": {
-      "jsBytes": 13965,
-      "wasmBytes": 2832246,
-      "jsSha256": "eca46f7a535d9f280750b60783c969cc95d9bd0b726827d0b212833bdc75cf49",
-      "wasmSha256": "fa48695d388dec606cdea74510363015c2d8b349e926fb28117ea3474ef7c57c",
+      "jsBytes": 14358,
+      "wasmBytes": 2832989,
+      "jsSha256": "d75ae869ea872e1f7c445e995bfe1aea947cd80e338076616255aa2c8a908ca5",
+      "wasmSha256": "fdabfc2d8dfd0684a7762c1d6cd69b90aac8db3b6bda3c780d5b0962098650e3",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -90,10 +90,10 @@
       ]
     },
     "scalar": {
-      "jsBytes": 13969,
-      "wasmBytes": 2619529,
-      "jsSha256": "8c03410b2a19bfda9fb8cef5001405c287b9e3b8db24eeae488b7bcd6808e10d",
-      "wasmSha256": "f6f92bb7a9f313d4fb8c238dea7cff6febe442bec02e2adab9902833b0242e5c",
+      "jsBytes": 14362,
+      "wasmBytes": 2620546,
+      "jsSha256": "df486e8899b37a70e03163c00e6fcd0992b992ae152d1c4d193d7401ef880246",
+      "wasmSha256": "1a6011fabba9576612d562677a975e5e2b97cae1874f5ac82fe9d97d87a9911b",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",

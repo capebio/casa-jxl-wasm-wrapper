@@ -1,4 +1,4 @@
 Tier simd exceeded the size budget.
 Budget: 1363148.8 bytes
-Actual: 2832246 bytes
+Actual: 2832989 bytes
 Run the linked map/size-report helper to identify the heaviest objects.
