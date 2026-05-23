@@ -149,6 +149,94 @@ Claim: "The TS wrapper often copies the Uint8Array before passing it to WASM."
 
 Reality: `LibjxlDecoder.push()` (`facade.ts`) branches on input type: `ArrayBuffer` → `new Uint8Array(chunk)` (zero-copy view); `Uint8Array` → slices only when `copyInput !== false`. The primary production path (`decode-handler.ts`) sends `ArrayBuffer` chunks via `postMessage` transfer — these are transferred (not shared), so the wrapper wraps them with zero copy. The `copyInput: false` opt-out already exists for callers that own their `Uint8Array` buffers. Inverting the default to "no-copy unless explicitly requested" would be a breaking change with no production benefit since the hot path never hits the slice.
 
+---
+
+# Round 3 — facade.ts (20-item batch)
+
+Evaluated against `packages/jxl-wasm/src/facade.ts` as of commit `b2b9c2d`.
+
+## R3-1. Single-consumer guards on `events()` / `chunks()` — IMPLEMENTED
+
+`eventsStarted` flag added to `LibjxlDecoder`; `chunksStarted` flag added to `LibjxlEncoder`. Second call to `events()` yields an `{ type: "error", code: "InvalidState" }` event and returns. Second call to `chunks()` throws synchronously (no error-event channel on that type). Both guards prevent zombie sessions from duplicate iteration.
+
+## R3-2. Push-after-close guard + duplicate-close guard + `wake()` helper — IMPLEMENTED
+
+`closed: boolean` added to `LibjxlDecoder`. `push()` and `close()` both early-return when `cancelled || closed`. `close()` sets `closed = true` before pushing the null sentinel — prevents multiple sentinels on repeated calls. Inline `wakeResolve?.(); wakeResolve = null` pattern replaced by `private wake()` method used in `push`, `close`, `cancel`, and `dispose`.
+
+## R3-3. `DeferredVoid` class replacing single-slot wake — REJECTED
+
+Single-slot invariant is structurally guaranteed: only one generator can consume the decoder (enforced by R3-1), and only `waitForQueueItem()` ever awaits, called sequentially within that generator. `DeferredVoid` adds a class + allocation per wait with no correctness gain. Reject.
+
+## R3-4. Encoder incremental byte counter + early rejection — IMPLEMENTED
+
+`queuedPixelBytes: number` added to `LibjxlEncoder`, incremented in `pushPixels()`. Early rejection throws if `queuedPixelBytes + incoming > pixelByteTotal`. `chunks()` uses `this.queuedPixelBytes` directly (no reduce scan). `pixelByteTotal` computed once in constructor via `expectedPixelBytes()`.
+
+## R3-5. Progressive pixel chunk release during WASM copy — IMPLEMENTED
+
+Copy loop in `chunks()` now sets `this.pixelChunks[i] = EMPTY_U8` immediately after each chunk is copied to WASM heap. The module-level `EMPTY_U8 = new Uint8Array(0)` constant avoids per-iteration allocation. Peak JS heap overlap (all input chunks + full WASM copy simultaneously alive) is reduced to one-chunk granularity.
+
+## R3-6. Streaming input encoder (new bridge functions) — DEFERRED, BRIDGE WORK REQUIRED
+
+Requires `_jxl_wasm_enc_create_image`, `_jxl_wasm_enc_push_chunk`, `_jxl_wasm_enc_finish` in C++ bridge — none present. The JS facade cannot implement this without a bridge rebuild. Largest remaining peak-memory win for large images; track as a bridge task.
+
+## R3-7. Pooled WASM input buffer for transcode / one-shot decode — REJECTED
+
+Module-level scratch buffer is unsafe with concurrent sessions sharing one module instance. Instance-owned version saves one `malloc`/`free` per decode — marginal vs. the decode cost itself. `eventsProgressive` already reuses `chunkBufPtr`/`chunkBufCap` across chunks, which is the hot allocation. `eventsOneShot` makes one large allocation per call — geometric growth buys nothing since each decode has a different total size. Reject.
+
+## R3-8. `takeBuffer()` / `readBufferView()` ownership split — IMPLEMENTED
+
+`readBuffer()` had mixed ownership: freed handle on error, left it to caller on success. The "Read next BEFORE readBuffer" comment in the sidecar chain was a footgun. Replaced with:
+- `readBufferView()` — never frees; caller owns handle in all cases.
+- `takeBuffer()` — frees in `finally`; use when caller wants to consume and discard.
+- `callDecodeFromPtr()` now catches `readBufferView` failures and frees the handle itself before rethrowing — prevents leak when decode succeeds but buffer is malformed.
+- All encode call sites (`chunks()` sidecar chain, streaming path, standard path, transcode) converted to `takeBuffer()`. Sidecar error path simplified — no more catch-free-rethrow boilerplate.
+
+## R3-9. Overflow-safe pixel byte calculation — IMPLEMENTED
+
+`bytesPerChannelForFormat(format)` helper added. `expectedPixelBytes(width, height, format)` validates integer dimensions, checks `Number.isSafeInteger`, and rejects allocations above 1 GiB. Used in `LibjxlEncoder` constructor (once) and replaces the inline multiply in `chunks()`.
+
+## R3-10. Option normalisation into constructor — REJECTED
+
+`fmtIndex`, `bpc`, `pixelStride`, `distance`, `hasAlpha` are cheap derivations from immutable options. Moving them to constructor requires new `NormalizedDecoderOptions` / `NormalizedEncoderOptions` interfaces, adding ~30 LOC for no runtime win measurable against WASM call overhead. CLAUDE.md: simplicity first, no speculative abstractions. Reject.
+
+## R3-11. `distanceFromQuality()` exact formula — IMPLEMENTED
+
+`(100 - quality) / 6.67` → `((100 - q) * 15) / 100`. Avoids floating-point rounding from the approximated denominator. Added `Number.isFinite` guard for non-finite inputs. Clamp applied before multiply.
+
+## R3-12. `copyOrBorrowInput()` helper replacing inline ternaries — IMPLEMENTED
+
+Replaces three identical copy-or-borrow ternaries in `push()`, `pushPixels()`, and `transcodeJpegToJxl()`. `ArrayBuffer` → zero-copy view; `Uint8Array` → slice or borrow depending on `copy` flag. `toUint8Array()` removed.
+
+## R3-13. `pushBorrowed()` / `pushOwned()` per-call copy control — REJECTED
+
+Per-call ownership control is a niche API extension. The `copyInput` constructor option covers production use cases. Adding optional interface methods for rare mixed-ownership callers bloats the public API without a concrete consumer. Reject.
+
+## R3-14 + R3-15. Bounded input queue + async backpressure push — DEFERRED
+
+`maxQueuedBytes` option and async push backpressure are valid for direct (non-worker) facade use. In the worker path, the scheduler's `waitForDrain` / adaptive HWM already throttles input at the session boundary — a second layer in the facade would be redundant. Deferring until a direct-use consumer exists that needs the limit. The interface already declares `push(): void | Promise<void>` so the async upgrade is non-breaking when needed.
+
+## R3-16. Cap first progressive push to 64 KB for faster header — REJECTED
+
+Adds `currentChunkOffset` partial-chunk tracking, significantly complicating `eventsProgressive`'s inner loop. In practice, callers push data as it arrives from the network/worker; large upfront queues before `events()` starts are not the common case. Header latency is better addressed at the caller level (start iterating `events()` before pushing bulk data). The throughput benefit of batching outweighs the latency cost in the steady state. Reject.
+
+## R3-17. Downsample-only full-image fast path in `applyRegionAndDownsample()` — ALREADY HANDLED
+
+The `stride === 4` branch (line 908 of original) already handles `region === null` + `downsample !== 1` for rgba8 — `sourceRegion` becomes `{x:0, y:0, w:width, h:height}` from `normalizeRegion`, so the loop address math is identical to the proposed specialisation. The only overhead avoided is the `normalizeRegion` call itself, which is trivial. No code change needed.
+
+## R3-18. Avoid object spread in hot emitted events — IMPLEMENTED
+
+`...(pixels.region === undefined ? {} : { region: pixels.region })` replaced with `const ev: Extract<DecodeEvent, {type: T}> = {...}; if (pixels.region !== undefined) ev.region = pixels.region;` across all yield sites in `eventsProgressive` and `eventsOneShot`. Eliminates one temporary object allocation per emitted pixel event.
+
+## R3-19. Module capability detection cached once — IMPLEMENTED
+
+`JxlCapabilities` interface + `capabilityCache: WeakMap<LibjxlWasmModule, JxlCapabilities>` + `getCapabilities(module)` function added. Covers `progressiveDecode`, `streamingEncode`, `sidecars`, `jpegTranscode`. `typeof module._xxx === "function"` checks in `events()`, `chunks()`, and `transcodeJpegToJxl()` replaced with single `getCapabilities(module)` call per operation.
+
+## R3-20. Deterministic JS queue release in `events()` / `chunks()` finally — IMPLEMENTED
+
+`events()` outer `try/catch` gains a `finally` block clearing `chunkQueue`, `readIndex`, `queuedBytes`. `chunks()` `finally` block clears `pixelChunks` and `queuedPixelBytes` as belt-and-suspenders after normal or error exit. On normal completion the queue is effectively drained already; on error or cancel this ensures prompt GC eligibility without waiting for caller to call `dispose()`.
+
+---
+
 ## B-3. "Wait-and-Read Loop in browser.ts" — CLAIM TRUE, FIXED
 
 Claim: "strict read→push→wait cycle prevents I/O prefetch from overlapping with push dispatch."
