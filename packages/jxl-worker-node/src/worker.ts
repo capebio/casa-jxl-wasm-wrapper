@@ -62,21 +62,60 @@ const pendingDecodeStarts = new Map<string, Promise<void>>();
 const pendingEncodeStarts = new Map<string, Promise<void>>();
 const queuedDecodeMessages = new Map<string, QueuedDecodeMessage[]>();
 const queuedEncodeMessages = new Map<string, QueuedEncodeMessage[]>();
+const queuedDecodeBytes = new Map<string, number>();
+const queuedEncodeBytes = new Map<string, number>();
+
+// Sessions whose pending start was cancelled (overflow or release_state) before backend init
+// completed. Guards against zombie handler creation when the start promise eventually resolves.
+const cancelledPendingStarts = new Set<string>();
 
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
 let backend: Backend | null = null;
+let backendPromise: Promise<Backend> | null = null;
 
 const MAX_QUEUED_MESSAGES_PER_SESSION = 256;
+const MAX_QUEUED_BYTES_PER_SESSION = 128 * 1024 * 1024;
+const FORCE_EXIT_AFTER_SHUTDOWN_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // Backend selection (native vs WASM)
 // ---------------------------------------------------------------------------
 
+// Shared promise ensures startup and any concurrent first-session call race-free
+// through a single selectBackend() invocation. Cleared on failure to allow retry.
 async function initBackend(): Promise<Backend> {
   if (backend !== null) return backend;
-  backend = await selectBackend();
-  return backend;
+  if (backendPromise === null) {
+    backendPromise = selectBackend()
+      .then((b) => {
+        backend = b;
+        return b;
+      })
+      .catch((err) => {
+        backendPromise = null;
+        throw err;
+      });
+  }
+  return backendPromise;
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) return err.stack ?? err.message;
+  return String(err);
+}
+
+function safePostMessage(msg: unknown): void {
+  if (shuttingDown) return;
+  try {
+    port.postMessage(msg);
+  } catch {
+    // port may already be closed during late shutdown callbacks
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +131,30 @@ function hasAnySession(sessionId: string): boolean {
   );
 }
 
+function clearQueuedDecode(sessionId: string): void {
+  queuedDecodeMessages.delete(sessionId);
+  queuedDecodeBytes.delete(sessionId);
+}
+
+function clearQueuedEncode(sessionId: string): void {
+  queuedEncodeMessages.delete(sessionId);
+  queuedEncodeBytes.delete(sessionId);
+}
+
+function failPendingDecode(sessionId: string, code: string, message: string): void {
+  cancelledPendingStarts.add(sessionId);
+  pendingDecodeStarts.delete(sessionId);
+  clearQueuedDecode(sessionId);
+  port.postMessage({ type: "decode_error", sessionId, code, message });
+}
+
+function failPendingEncode(sessionId: string, code: string, message: string): void {
+  cancelledPendingStarts.add(sessionId);
+  pendingEncodeStarts.delete(sessionId);
+  clearQueuedEncode(sessionId);
+  port.postMessage({ type: "encode_error", sessionId, code, message });
+}
+
 function queueDecodeMessage(sessionId: string, msg: QueuedDecodeMessage): void {
   let queue = queuedDecodeMessages.get(sessionId);
   if (queue === undefined) {
@@ -99,15 +162,18 @@ function queueDecodeMessage(sessionId: string, msg: QueuedDecodeMessage): void {
     queuedDecodeMessages.set(sessionId, queue);
   }
   if (queue.length >= MAX_QUEUED_MESSAGES_PER_SESSION) {
-    queuedDecodeMessages.delete(sessionId);
-    pendingDecodeStarts.delete(sessionId);
-    port.postMessage({
-      type: "decode_error",
-      sessionId,
-      code: "QueueOverflow",
-      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`,
-    });
+    failPendingDecode(sessionId, "QueueOverflow",
+      `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`);
     return;
+  }
+  if (msg.type === "decode_chunk") {
+    const nextBytes = (queuedDecodeBytes.get(sessionId) ?? 0) + msg.chunk.byteLength;
+    if (nextBytes > MAX_QUEUED_BYTES_PER_SESSION) {
+      failPendingDecode(sessionId, "QueueOverflow",
+        `Cold-start decode queue exceeded ${MAX_QUEUED_BYTES_PER_SESSION >> 20} MiB`);
+      return;
+    }
+    queuedDecodeBytes.set(sessionId, nextBytes);
   }
   queue.push(msg);
 }
@@ -119,15 +185,18 @@ function queueEncodeMessage(sessionId: string, msg: QueuedEncodeMessage): void {
     queuedEncodeMessages.set(sessionId, queue);
   }
   if (queue.length >= MAX_QUEUED_MESSAGES_PER_SESSION) {
-    queuedEncodeMessages.delete(sessionId);
-    pendingEncodeStarts.delete(sessionId);
-    port.postMessage({
-      type: "encode_error",
-      sessionId,
-      code: "QueueOverflow",
-      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`,
-    });
+    failPendingEncode(sessionId, "QueueOverflow",
+      `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`);
     return;
+  }
+  if (msg.type === "encode_pixels") {
+    const nextBytes = (queuedEncodeBytes.get(sessionId) ?? 0) + msg.chunk.byteLength;
+    if (nextBytes > MAX_QUEUED_BYTES_PER_SESSION) {
+      failPendingEncode(sessionId, "QueueOverflow",
+        `Cold-start encode queue exceeded ${MAX_QUEUED_BYTES_PER_SESSION >> 20} MiB`);
+      return;
+    }
+    queuedEncodeBytes.set(sessionId, nextBytes);
   }
   queue.push(msg);
 }
@@ -135,7 +204,7 @@ function queueEncodeMessage(sessionId: string, msg: QueuedEncodeMessage): void {
 function flushQueuedDecodeMessages(sessionId: string, handler: DecodeHandler): void {
   const queue = queuedDecodeMessages.get(sessionId);
   if (queue === undefined) return;
-  queuedDecodeMessages.delete(sessionId);
+  clearQueuedDecode(sessionId);
   for (const msg of queue) {
     switch (msg.type) {
       case "decode_chunk":  handler.onChunk(msg.chunk);            break;
@@ -150,7 +219,7 @@ function flushQueuedDecodeMessages(sessionId: string, handler: DecodeHandler): v
 function flushQueuedEncodeMessages(sessionId: string, handler: EncodeHandler): void {
   const queue = queuedEncodeMessages.get(sessionId);
   if (queue === undefined) return;
-  queuedEncodeMessages.delete(sessionId);
+  clearQueuedEncode(sessionId);
   for (const msg of queue) {
     switch (msg.type) {
       case "encode_pixels": handler.onPixels(msg.chunk, msg.region); break;
@@ -264,22 +333,9 @@ port.on("message", (msg: MainToWorkerMessage) => {
       void handleShutdown();
       break;
 
-    case "release_state": {
-      const { sessionId } = msg;
-      const decode = decodeSessions.get(sessionId);
-      if (decode !== undefined) {
-        decodeSessions.delete(sessionId);
-        void decode.onCancel("release_state").catch(() => undefined);
-      }
-      const encode = encodeSessions.get(sessionId);
-      if (encode !== undefined) {
-        encodeSessions.delete(sessionId);
-        void encode.onCancel("release_state").catch(() => undefined);
-      }
-      queuedDecodeMessages.delete(sessionId);
-      queuedEncodeMessages.delete(sessionId);
+    case "release_state":
+      void releaseSessionState(msg.sessionId);
       break;
-    }
 
     default:
       break;
@@ -307,20 +363,22 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
       b = await initBackend();
     } catch (err) {
       pendingDecodeStarts.delete(msg.sessionId);
-      queuedDecodeMessages.delete(msg.sessionId);
-      port.postMessage({
-        type: "decode_error",
-        sessionId: msg.sessionId,
-        code: "CapabilityMissing",
-        message: `Backend init failed: ${String(err)}`,
-      });
+      clearQueuedDecode(msg.sessionId);
+      if (!cancelledPendingStarts.delete(msg.sessionId)) {
+        port.postMessage({
+          type: "decode_error",
+          sessionId: msg.sessionId,
+          code: "CapabilityMissing",
+          message: `Backend init failed: ${formatError(err)}`,
+        });
+      }
       return;
     }
 
     pendingDecodeStarts.delete(msg.sessionId);
 
-    if (shuttingDown) {
-      queuedDecodeMessages.delete(msg.sessionId);
+    if (shuttingDown || cancelledPendingStarts.delete(msg.sessionId)) {
+      clearQueuedDecode(msg.sessionId);
       return;
     }
 
@@ -356,20 +414,22 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
       b = await initBackend();
     } catch (err) {
       pendingEncodeStarts.delete(msg.sessionId);
-      queuedEncodeMessages.delete(msg.sessionId);
-      port.postMessage({
-        type: "encode_error",
-        sessionId: msg.sessionId,
-        code: "CapabilityMissing",
-        message: `Backend init failed: ${String(err)}`,
-      });
+      clearQueuedEncode(msg.sessionId);
+      if (!cancelledPendingStarts.delete(msg.sessionId)) {
+        port.postMessage({
+          type: "encode_error",
+          sessionId: msg.sessionId,
+          code: "CapabilityMissing",
+          message: `Backend init failed: ${formatError(err)}`,
+        });
+      }
       return;
     }
 
     pendingEncodeStarts.delete(msg.sessionId);
 
-    if (shuttingDown) {
-      queuedEncodeMessages.delete(msg.sessionId);
+    if (shuttingDown || cancelledPendingStarts.delete(msg.sessionId)) {
+      clearQueuedEncode(msg.sessionId);
       return;
     }
 
@@ -382,6 +442,30 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
   })();
 
   pendingEncodeStarts.set(msg.sessionId, startPromise);
+}
+
+// ---------------------------------------------------------------------------
+// Release session state
+// ---------------------------------------------------------------------------
+
+async function releaseSessionState(sessionId: string): Promise<void> {
+  cancelledPendingStarts.add(sessionId);
+  pendingDecodeStarts.delete(sessionId);
+  pendingEncodeStarts.delete(sessionId);
+  clearQueuedDecode(sessionId);
+  clearQueuedEncode(sessionId);
+
+  const decode = decodeSessions.get(sessionId);
+  if (decode !== undefined) {
+    decodeSessions.delete(sessionId);
+    await decode.onCancel("release_state").catch(() => undefined);
+  }
+
+  const encode = encodeSessions.get(sessionId);
+  if (encode !== undefined) {
+    encodeSessions.delete(sessionId);
+    await encode.onCancel("release_state").catch(() => undefined);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -414,10 +498,18 @@ async function doShutdown(): Promise<void> {
   pendingEncodeStarts.clear();
   queuedDecodeMessages.clear();
   queuedEncodeMessages.clear();
+  queuedDecodeBytes.clear();
+  queuedEncodeBytes.clear();
+  cancelledPendingStarts.clear();
 
   const ack: MsgWorkerShutdownAck = { type: "worker_shutdown_ack" };
   port.postMessage(ack);
-  process.exit(0);
+  port.close();
+
+  // Fallback: force-exit if the event loop doesn't drain naturally.
+  setTimeout(() => {
+    process.exit(0);
+  }, FORCE_EXIT_AFTER_SHUTDOWN_MS).unref();
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +517,7 @@ async function doShutdown(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 process.on("uncaughtException", (err: Error) => {
-  port.postMessage({
+  safePostMessage({
     type: "worker_error",
     code: "UnhandledError",
     message: err.message,
@@ -433,7 +525,7 @@ process.on("uncaughtException", (err: Error) => {
 });
 
 process.on("unhandledRejection", (reason: unknown) => {
-  port.postMessage({
+  safePostMessage({
     type: "worker_error",
     code: "UnhandledRejection",
     message: reason instanceof Error ? reason.message : String(reason),
@@ -445,11 +537,14 @@ process.on("unhandledRejection", (reason: unknown) => {
 // ---------------------------------------------------------------------------
 
 void (async () => {
-  const b = await selectBackend().catch(() => null);
-  const ready: MsgWorkerReady = {
-    type: "worker_ready",
-    backend: b?.type ?? "wasm",
-  };
+  let backendType: MsgWorkerReady["backend"] = "wasm";
+  try {
+    const b = await initBackend();
+    backendType = b.type;
+  } catch {
+    // Keep reporting wasm as the intended fallback if backend init failed.
+    // The first actual session will report CapabilityMissing if it still cannot initialise.
+  }
+  const ready: MsgWorkerReady = { type: "worker_ready", backend: backendType };
   port.postMessage(ready);
-  backend = b;
 })();
