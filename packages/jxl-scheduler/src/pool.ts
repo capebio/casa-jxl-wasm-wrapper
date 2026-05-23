@@ -6,7 +6,7 @@ import type { PoolWorker, WorkerFactory } from "./types.js";
 
 let workerIdCounter = 0;
 
-export const RESERVED_SESSION_ID = "__jxl_reserved__";
+export const RESERVED_SESSION_ID = "__jxl_reserved__" as const;
 
 export class WorkerPool {
   private readonly factory: WorkerFactory;
@@ -43,11 +43,13 @@ export class WorkerPool {
     return this.spawning;
   }
 
-  get idleWorkers(): PoolWorker[] {
+  /** Returns a shallow copy for safe external iteration. */
+  get idleWorkers(): readonly PoolWorker[] {
     return [...this.idle];
   }
 
-  get activeWorkers(): PoolWorker[] {
+  /** Returns a shallow copy for safe external iteration. */
+  get activeWorkers(): readonly PoolWorker[] {
     return [...this.active];
   }
 
@@ -62,29 +64,17 @@ export class WorkerPool {
   async acquire(): Promise<PoolWorker | null> {
     if (this.destroyed) return null;
 
-    const idle = this.takeIdleWorker();
-    if (idle !== null) {
-      this.reserve(idle);
-      return idle;
+    const idleWorker = this.takeIdleWorker();
+    if (idleWorker) {
+      this.reserve(idleWorker);
+      return idleWorker;
     }
 
     if (this.totalAllocatedOrSpawning >= this.maxSize) {
       return null;
     }
 
-    try {
-      const worker = await this.spawn();
-
-      if (this.destroyed || worker.handle.terminated || !this.workers.has(worker.id)) {
-        this.destroyWorker(worker);
-        return null;
-      }
-
-      this.reserve(worker);
-      return worker;
-    } catch {
-      return null;
-    }
+    return this.spawnAndReserve();
   }
 
   bind(worker: PoolWorker, sessionId: string): void {
@@ -103,44 +93,18 @@ export class WorkerPool {
       );
     }
 
-    this.clearIdleTimer(worker);
-    this.idle.delete(worker);
-    this.active.add(worker);
-    worker.activeSessionId = sessionId;
-    worker.cancelling = false;
+    this.transitionToActive(worker, sessionId);
   }
 
   release(worker: PoolWorker): void {
     if (!this.workers.has(worker.id)) return;
-
-    this.clearIdleTimer(worker);
-    this.active.delete(worker);
-    worker.activeSessionId = null;
-    worker.cancelling = false;
-
-    if (this.destroyed || worker.handle.terminated) {
-      this.destroyWorker(worker);
-      return;
-    }
-
-    this.idle.add(worker);
-    this.armIdleTimer(worker);
+    this.transitionToIdle(worker);
   }
 
-  // Destroy and remove a poisoned or crashed worker.
+  /** Destroy and remove a poisoned or crashed worker. */
   recycle(worker: PoolWorker): void {
     if (!this.workers.has(worker.id)) return;
-
-    this.clearIdleTimer(worker);
-    this.idle.delete(worker);
-    this.active.delete(worker);
-    this.workers.delete(worker.id);
-    worker.activeSessionId = null;
-    worker.cancelling = false;
-
-    if (!worker.handle.terminated) {
-      void worker.handle.shutdown(1000).catch(() => undefined);
-    }
+    void this.cleanupAndRemove(worker);
   }
 
   // Spawn workers eagerly so the first acquire() hits an idle worker rather than
@@ -149,25 +113,9 @@ export class WorkerPool {
     if (this.destroyed || count <= 0) return;
 
     const toSpawn = Math.min(count, this.maxSize - this.totalAllocatedOrSpawning);
-
     for (let i = 0; i < toSpawn; i++) {
       void this.spawn()
-        .then((worker) => {
-          if (this.destroyed) {
-            this.destroyWorker(worker);
-            return;
-          }
-
-          // Only arm timer if worker is still idle — acquire() may have taken it.
-          if (
-            this.workers.has(worker.id) &&
-            worker.activeSessionId === null &&
-            this.idle.has(worker) &&
-            !worker.handle.terminated
-          ) {
-            this.armIdleTimer(worker);
-          }
-        })
+        .then((worker) => this.handlePrewarmSuccess(worker))
         .catch(() => undefined);
     }
   }
@@ -175,19 +123,39 @@ export class WorkerPool {
   async shutdown(): Promise<void> {
     this.destroyed = true;
 
-    // Wait for any in-flight spawns so no worker escapes cleanup.
+    // Wait for in-flight spawns so no worker escapes cleanup.
     await Promise.allSettled([...this.spawnPromises]);
 
-    const shutdowns = [...this.workers.values()].map((worker) => {
-      this.clearIdleTimer(worker);
-      return worker.handle.shutdown(5000).catch(() => undefined);
-    });
+    const shutdownPromises = [...this.workers.values()].map((worker) =>
+      this.cleanupAndRemove(worker, true, 5000),
+    );
 
-    await Promise.allSettled(shutdowns);
+    await Promise.allSettled(shutdownPromises);
 
     this.idle.clear();
     this.active.clear();
     this.workers.clear();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Private Implementation
+  // ─────────────────────────────────────────────────────────────
+
+  private async spawnAndReserve(): Promise<PoolWorker | null> {
+    let worker: PoolWorker;
+    try {
+      worker = await this.spawn();
+    } catch {
+      return null;
+    }
+
+    if (this.destroyed || worker.handle.terminated || !this.workers.has(worker.id)) {
+      this.destroyWorker(worker);
+      return null;
+    }
+
+    this.reserve(worker);
+    return worker;
   }
 
   private async spawn(): Promise<PoolWorker> {
@@ -236,13 +204,8 @@ export class WorkerPool {
       onExit?: (handler: () => void) => void;
     };
 
-    handle.onError?.(() => {
-      this.recycle(worker);
-    });
-
-    handle.onExit?.(() => {
-      this.recycle(worker);
-    });
+    handle.onError?.(() => this.recycle(worker));
+    handle.onExit?.(() => this.recycle(worker));
   }
 
   private takeIdleWorker(): PoolWorker | null {
@@ -260,7 +223,6 @@ export class WorkerPool {
 
       this.recycle(worker);
     }
-
     return null;
   }
 
@@ -270,6 +232,46 @@ export class WorkerPool {
     this.active.add(worker);
     worker.activeSessionId = RESERVED_SESSION_ID;
     worker.cancelling = false;
+  }
+
+  private transitionToActive(worker: PoolWorker, sessionId: string): void {
+    this.clearIdleTimer(worker);
+    this.idle.delete(worker);
+    this.active.add(worker);
+    worker.activeSessionId = sessionId;
+    worker.cancelling = false;
+  }
+
+  private transitionToIdle(worker: PoolWorker): void {
+    this.clearIdleTimer(worker);
+    this.active.delete(worker);
+    worker.activeSessionId = null;
+    worker.cancelling = false;
+
+    if (this.destroyed || worker.handle.terminated) {
+      this.destroyWorker(worker);
+      return;
+    }
+
+    this.idle.add(worker);
+    this.armIdleTimer(worker);
+  }
+
+  private handlePrewarmSuccess(worker: PoolWorker): void {
+    if (this.destroyed) {
+      this.destroyWorker(worker);
+      return;
+    }
+
+    // Only arm timer if worker is still idle — acquire() may have taken it.
+    if (
+      this.workers.has(worker.id) &&
+      worker.activeSessionId === null &&
+      this.idle.has(worker) &&
+      !worker.handle.terminated
+    ) {
+      this.armIdleTimer(worker);
+    }
   }
 
   private reap(worker: PoolWorker): void {
@@ -286,9 +288,7 @@ export class WorkerPool {
       return;
     }
 
-    worker.idleTimer = setTimeout(() => {
-      this.reap(worker);
-    }, this.idleTimeoutMs);
+    worker.idleTimer = setTimeout(() => this.reap(worker), this.idleTimeoutMs);
   }
 
   private clearIdleTimer(worker: PoolWorker): void {
@@ -298,13 +298,27 @@ export class WorkerPool {
     }
   }
 
-  private destroyWorker(worker: PoolWorker): void {
+  /** Centralised cleanup path. Returns a promise so shutdown() can await all workers. */
+  private cleanupAndRemove(
+    worker: PoolWorker,
+    shouldShutdown = true,
+    shutdownTimeoutMs = 1000,
+  ): Promise<void> {
     this.clearIdleTimer(worker);
     this.idle.delete(worker);
     this.active.delete(worker);
     this.workers.delete(worker.id);
+
     worker.activeSessionId = null;
     worker.cancelling = false;
-    void worker.handle.shutdown(1000).catch(() => undefined);
+
+    if (shouldShutdown && !worker.handle.terminated) {
+      return worker.handle.shutdown(shutdownTimeoutMs).catch(() => undefined);
+    }
+    return Promise.resolve();
+  }
+
+  private destroyWorker(worker: PoolWorker): void {
+    void this.cleanupAndRemove(worker);
   }
 }
