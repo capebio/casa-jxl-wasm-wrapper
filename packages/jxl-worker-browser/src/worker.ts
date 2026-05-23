@@ -4,8 +4,8 @@
 //
 // This file is the worker entry point. It owns the WASM module lifecycle and
 // routes messages by sessionId to decode or encode handlers.
-// The WASM codec (jxl-wasm) is imported dynamically via wasmUrl; stubs are
-// used until T-WASM-BUILD lands and provides real artifacts.
+// The WASM codec (jxl-wasm) is imported dynamically; stubs are used until
+// T-WASM-BUILD lands and provides real artifacts.
 
 /// <reference lib="webworker" />
 
@@ -16,6 +16,8 @@ import type {
   MsgDecodeChunk,
   MsgDecodeClose,
   MsgDecodeCancel,
+  MsgDecodePause,
+  MsgDecodeResume,
   MsgEncodePixels,
   MsgEncodeFinish,
   MsgEncodeCancel,
@@ -28,40 +30,146 @@ import { EncodeHandler } from "./encode-handler.js";
 import { loadWasmModule, type JxlModule } from "./wasm-loader.js";
 
 // ---------------------------------------------------------------------------
+// Queued-message types (messages arriving while a session start is in-flight)
+// ---------------------------------------------------------------------------
+
+type QueuedDecodeMessage =
+  | MsgDecodeChunk
+  | MsgDecodeClose
+  | MsgDecodeCancel
+  | MsgDecodePause
+  | MsgDecodeResume;
+
+type QueuedEncodeMessage =
+  | MsgEncodePixels
+  | MsgEncodeFinish
+  | MsgEncodeCancel;
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 const decodeSessions = new Map<string, DecodeHandler>();
 const encodeSessions = new Map<string, EncodeHandler>();
+const pendingDecodeStarts = new Map<string, Promise<void>>();
+const pendingEncodeStarts = new Map<string, Promise<void>>();
+const queuedDecodeMessages = new Map<string, QueuedDecodeMessage[]>();
+const queuedEncodeMessages = new Map<string, QueuedEncodeMessage[]>();
+
 let wasmModule: JxlModule | null = null;
 let wasmLoadPromise: Promise<JxlModule> | null = null;
 let shuttingDown = false;
+let shutdownPromise: Promise<void> | null = null;
+
+// Cap per session to avoid unbounded cold-start buffering.
+const MAX_QUEUED_MESSAGES_PER_SESSION = 256;
 
 // ---------------------------------------------------------------------------
-// WASM acquisition (lazy, singleton)
+// WASM acquisition (lazy, singleton; resets on failure to allow retry)
 // ---------------------------------------------------------------------------
 
 async function getWasm(): Promise<JxlModule> {
   if (wasmModule !== null) return wasmModule;
   if (wasmLoadPromise === null) {
-    // wasmUrl may be overridden by an init message before the first session.
-    wasmLoadPromise = loadWasmModule(resolvedWasmUrl()).then((m) => {
-      wasmModule = m;
-      return m;
-    });
+    wasmLoadPromise = loadWasmModule(resolvedWasmUrl())
+      .then((m) => {
+        wasmModule = m;
+        return m;
+      })
+      .catch((err: unknown) => {
+        wasmLoadPromise = null;
+        throw err;
+      });
   }
   return wasmLoadPromise;
 }
 
-// wasmUrl is injected by the caller via a query param or an init message.
-// Default path assumes the worker script and WASM live in the same directory.
 let _wasmUrl: string | null = null;
 
 function resolvedWasmUrl(): string {
   if (_wasmUrl !== null) return _wasmUrl;
-  // Fall back to same-origin relative path; callers may override via
-  // MsgWorkerInit (not a spec message — handled below as a local extension).
   return new URL("./jxl-core.wasm", self.location.href).href;
+}
+
+// ---------------------------------------------------------------------------
+// Session helpers
+// ---------------------------------------------------------------------------
+
+function hasAnySession(sessionId: string): boolean {
+  return (
+    decodeSessions.has(sessionId) ||
+    encodeSessions.has(sessionId) ||
+    pendingDecodeStarts.has(sessionId) ||
+    pendingEncodeStarts.has(sessionId)
+  );
+}
+
+function queueDecodeMessage(sessionId: string, msg: QueuedDecodeMessage): void {
+  let queue = queuedDecodeMessages.get(sessionId);
+  if (queue === undefined) {
+    queue = [];
+    queuedDecodeMessages.set(sessionId, queue);
+  }
+  if (queue.length >= MAX_QUEUED_MESSAGES_PER_SESSION) {
+    queuedDecodeMessages.delete(sessionId);
+    pendingDecodeStarts.delete(sessionId);
+    self.postMessage({
+      type: "decode_error",
+      sessionId,
+      code: "QueueOverflow",
+      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`,
+    });
+    return;
+  }
+  queue.push(msg);
+}
+
+function queueEncodeMessage(sessionId: string, msg: QueuedEncodeMessage): void {
+  let queue = queuedEncodeMessages.get(sessionId);
+  if (queue === undefined) {
+    queue = [];
+    queuedEncodeMessages.set(sessionId, queue);
+  }
+  if (queue.length >= MAX_QUEUED_MESSAGES_PER_SESSION) {
+    queuedEncodeMessages.delete(sessionId);
+    pendingEncodeStarts.delete(sessionId);
+    self.postMessage({
+      type: "encode_error",
+      sessionId,
+      code: "QueueOverflow",
+      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`,
+    });
+    return;
+  }
+  queue.push(msg);
+}
+
+function flushQueuedDecodeMessages(sessionId: string, handler: DecodeHandler): void {
+  const queue = queuedDecodeMessages.get(sessionId);
+  if (queue === undefined) return;
+  queuedDecodeMessages.delete(sessionId);
+  for (const msg of queue) {
+    switch (msg.type) {
+      case "decode_chunk":  handler.onChunk(msg.chunk);            break;
+      case "decode_close":  handler.onClose();                     break;
+      case "decode_cancel": void handler.onCancel(msg.reason);     break;
+      case "decode_pause":  handler.onPause();                     break;
+      case "decode_resume": handler.onResume();                    break;
+    }
+  }
+}
+
+function flushQueuedEncodeMessages(sessionId: string, handler: EncodeHandler): void {
+  const queue = queuedEncodeMessages.get(sessionId);
+  if (queue === undefined) return;
+  queuedEncodeMessages.delete(sessionId);
+  for (const msg of queue) {
+    switch (msg.type) {
+      case "encode_pixels": handler.onPixels(msg.chunk, msg.region); break;
+      case "encode_finish": handler.onFinish();                      break;
+      case "encode_cancel": void handler.onCancel(msg.reason);       break;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -72,79 +180,124 @@ self.onmessage = (ev: MessageEvent<MainToWorkerMessage>) => {
   const msg = ev.data;
 
   if (shuttingDown && msg.type !== "worker_shutdown") {
-    // Drain: reject new sessions during shutdown.
     return;
   }
 
   switch (msg.type) {
     case "decode_start":
-      handleDecodeStart(msg);
+      void handleDecodeStart(msg);
       break;
 
     case "decode_chunk": {
-      const { sessionId, chunk } = msg as MsgDecodeChunk;
-      decodeSessions.get(sessionId)?.onChunk(chunk);
+      const m = msg as MsgDecodeChunk;
+      const handler = decodeSessions.get(m.sessionId);
+      if (handler !== undefined) {
+        handler.onChunk(m.chunk);
+      } else if (pendingDecodeStarts.has(m.sessionId)) {
+        queueDecodeMessage(m.sessionId, m);
+      }
       break;
     }
 
     case "decode_close": {
-      const { sessionId } = msg;
-      decodeSessions.get(sessionId)?.onClose();
+      const handler = decodeSessions.get(msg.sessionId);
+      if (handler !== undefined) {
+        handler.onClose();
+      } else if (pendingDecodeStarts.has(msg.sessionId)) {
+        queueDecodeMessage(msg.sessionId, msg);
+      }
       break;
     }
 
     case "decode_cancel": {
       const m = msg as MsgDecodeCancel;
-      decodeSessions.get(m.sessionId)?.onCancel(m.reason);
+      const handler = decodeSessions.get(m.sessionId);
+      if (handler !== undefined) {
+        void handler.onCancel(m.reason);
+      } else if (pendingDecodeStarts.has(m.sessionId)) {
+        queueDecodeMessage(m.sessionId, m);
+      }
       break;
     }
 
     case "decode_pause": {
-      decodeSessions.get(msg.sessionId)?.onPause();
+      const handler = decodeSessions.get(msg.sessionId);
+      if (handler !== undefined) {
+        handler.onPause();
+      } else if (pendingDecodeStarts.has(msg.sessionId)) {
+        queueDecodeMessage(msg.sessionId, msg as MsgDecodePause);
+      }
       break;
     }
 
     case "decode_resume": {
-      decodeSessions.get(msg.sessionId)?.onResume();
+      const handler = decodeSessions.get(msg.sessionId);
+      if (handler !== undefined) {
+        handler.onResume();
+      } else if (pendingDecodeStarts.has(msg.sessionId)) {
+        queueDecodeMessage(msg.sessionId, msg as MsgDecodeResume);
+      }
       break;
     }
 
     case "encode_start":
-      handleEncodeStart(msg);
+      void handleEncodeStart(msg);
       break;
 
     case "encode_pixels": {
       const m = msg as MsgEncodePixels;
-      encodeSessions.get(m.sessionId)?.onPixels(m.chunk, m.region);
+      const handler = encodeSessions.get(m.sessionId);
+      if (handler !== undefined) {
+        handler.onPixels(m.chunk, m.region);
+      } else if (pendingEncodeStarts.has(m.sessionId)) {
+        queueEncodeMessage(m.sessionId, m);
+      }
       break;
     }
 
     case "encode_finish": {
-      const { sessionId } = msg;
-      encodeSessions.get(sessionId)?.onFinish();
+      const handler = encodeSessions.get(msg.sessionId);
+      if (handler !== undefined) {
+        handler.onFinish();
+      } else if (pendingEncodeStarts.has(msg.sessionId)) {
+        queueEncodeMessage(msg.sessionId, msg as MsgEncodeFinish);
+      }
       break;
     }
 
     case "encode_cancel": {
       const m = msg as MsgEncodeCancel;
-      encodeSessions.get(m.sessionId)?.onCancel(m.reason);
+      const handler = encodeSessions.get(m.sessionId);
+      if (handler !== undefined) {
+        void handler.onCancel(m.reason);
+      } else if (pendingEncodeStarts.has(m.sessionId)) {
+        queueEncodeMessage(m.sessionId, m);
+      }
       break;
     }
 
     case "worker_shutdown":
-      handleShutdown();
+      void handleShutdown();
       break;
 
     case "release_state": {
-      // Clean up any stale session state from a re-submitted task.
       const { sessionId } = msg;
-      decodeSessions.delete(sessionId);
-      encodeSessions.delete(sessionId);
+      const decode = decodeSessions.get(sessionId);
+      if (decode !== undefined) {
+        decodeSessions.delete(sessionId);
+        void decode.onCancel("release_state").catch(() => undefined);
+      }
+      const encode = encodeSessions.get(sessionId);
+      if (encode !== undefined) {
+        encodeSessions.delete(sessionId);
+        void encode.onCancel("release_state").catch(() => undefined);
+      }
+      queuedDecodeMessages.delete(sessionId);
+      queuedEncodeMessages.delete(sessionId);
       break;
     }
 
     default:
-      // Unknown message — ignore; forward-compatibility.
       break;
   }
 };
@@ -154,23 +307,47 @@ self.onmessage = (ev: MessageEvent<MainToWorkerMessage>) => {
 // ---------------------------------------------------------------------------
 
 async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
-  let wasm: JxlModule;
-  try {
-    wasm = await getWasm();
-  } catch (err) {
+  if (hasAnySession(msg.sessionId)) {
     self.postMessage({
       type: "decode_error",
       sessionId: msg.sessionId,
-      code: "CapabilityMissing",
-      message: `WASM module failed to load: ${String(err)}`,
+      code: "DuplicateSession",
+      message: `Session already exists: ${msg.sessionId}`,
     });
     return;
   }
 
-  const handler = new DecodeHandler(msg, wasm, {
-    onSessionEnd: (sessionId) => decodeSessions.delete(sessionId),
-  });
-  decodeSessions.set(msg.sessionId, handler);
+  const startPromise = (async () => {
+    let wasm: JxlModule;
+    try {
+      wasm = await getWasm();
+    } catch (err) {
+      pendingDecodeStarts.delete(msg.sessionId);
+      queuedDecodeMessages.delete(msg.sessionId);
+      self.postMessage({
+        type: "decode_error",
+        sessionId: msg.sessionId,
+        code: "CapabilityMissing",
+        message: `WASM module failed to load: ${String(err)}`,
+      });
+      return;
+    }
+
+    pendingDecodeStarts.delete(msg.sessionId);
+
+    if (shuttingDown) {
+      queuedDecodeMessages.delete(msg.sessionId);
+      return;
+    }
+
+    const handler = new DecodeHandler(msg, wasm, {
+      onSessionEnd: (sessionId) => decodeSessions.delete(sessionId),
+    });
+    decodeSessions.set(msg.sessionId, handler);
+    flushQueuedDecodeMessages(msg.sessionId, handler);
+  })();
+
+  pendingDecodeStarts.set(msg.sessionId, startPromise);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,46 +355,83 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
-  let wasm: JxlModule;
-  try {
-    wasm = await getWasm();
-  } catch (err) {
+  if (hasAnySession(msg.sessionId)) {
     self.postMessage({
       type: "encode_error",
       sessionId: msg.sessionId,
-      code: "CapabilityMissing",
-      message: `WASM module failed to load: ${String(err)}`,
+      code: "DuplicateSession",
+      message: `Session already exists: ${msg.sessionId}`,
     });
     return;
   }
 
-  const handler = new EncodeHandler(msg, wasm, {
-    onSessionEnd: (sessionId) => encodeSessions.delete(sessionId),
-  });
-  encodeSessions.set(msg.sessionId, handler);
+  const startPromise = (async () => {
+    let wasm: JxlModule;
+    try {
+      wasm = await getWasm();
+    } catch (err) {
+      pendingEncodeStarts.delete(msg.sessionId);
+      queuedEncodeMessages.delete(msg.sessionId);
+      self.postMessage({
+        type: "encode_error",
+        sessionId: msg.sessionId,
+        code: "CapabilityMissing",
+        message: `WASM module failed to load: ${String(err)}`,
+      });
+      return;
+    }
+
+    pendingEncodeStarts.delete(msg.sessionId);
+
+    if (shuttingDown) {
+      queuedEncodeMessages.delete(msg.sessionId);
+      return;
+    }
+
+    const handler = new EncodeHandler(msg, wasm, {
+      onSessionEnd: (sessionId) => encodeSessions.delete(sessionId),
+    });
+    encodeSessions.set(msg.sessionId, handler);
+    flushQueuedEncodeMessages(msg.sessionId, handler);
+  })();
+
+  pendingEncodeStarts.set(msg.sessionId, startPromise);
 }
 
 // ---------------------------------------------------------------------------
-// Graceful shutdown
+// Graceful shutdown (idempotent)
 // ---------------------------------------------------------------------------
 
-async function handleShutdown(): Promise<void> {
+function handleShutdown(): Promise<void> {
+  if (shutdownPromise !== null) return shutdownPromise;
+  shutdownPromise = doShutdown();
+  return shutdownPromise;
+}
+
+async function doShutdown(): Promise<void> {
   shuttingDown = true;
 
-  // Cancel all active sessions.
-  const cancelPromises: Promise<void>[] = [];
+  // Wait for any in-flight session starts before cancelling their handlers.
+  await Promise.allSettled([
+    ...pendingDecodeStarts.values(),
+    ...pendingEncodeStarts.values(),
+  ]);
 
+  const cancelPromises: Promise<void>[] = [];
   for (const [, handler] of decodeSessions) {
     cancelPromises.push(handler.onCancel("worker_shutdown").catch(() => undefined));
   }
   for (const [, handler] of encodeSessions) {
     cancelPromises.push(handler.onCancel("worker_shutdown").catch(() => undefined));
   }
-
   await Promise.allSettled(cancelPromises);
 
   decodeSessions.clear();
   encodeSessions.clear();
+  pendingDecodeStarts.clear();
+  pendingEncodeStarts.clear();
+  queuedDecodeMessages.clear();
+  queuedEncodeMessages.clear();
   wasmModule = null;
   wasmLoadPromise = null;
 
@@ -227,10 +441,28 @@ async function handleShutdown(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Uncaught error reporting
+// ---------------------------------------------------------------------------
+
+self.addEventListener("error", (event) => {
+  self.postMessage({
+    type: "worker_error",
+    code: "UnhandledError",
+    message: event.message,
+  });
+});
+
+self.addEventListener("unhandledrejection", (event) => {
+  self.postMessage({
+    type: "worker_error",
+    code: "UnhandledRejection",
+    message: event.reason instanceof Error ? event.reason.message : String(event.reason),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Startup announcement
 // ---------------------------------------------------------------------------
 
-// Post worker_ready once the script has loaded. WASM is loaded lazily on
-// first session to avoid blocking worker startup.
 const ready: MsgWorkerReady = { type: "worker_ready", backend: "wasm" };
 self.postMessage(ready);

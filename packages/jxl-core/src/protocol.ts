@@ -207,6 +207,12 @@ export interface MsgWorkerShutdownAck {
   type: "worker_shutdown_ack";
 }
 
+export interface MsgWorkerError {
+  type: "worker_error";
+  code: string;
+  message: string;
+}
+
 // Backpressure: worker tells main that its queue is below high-water mark
 export interface MsgWorkerDrain {
   type: "worker_drain";
@@ -263,5 +269,6 @@ export type WorkerToMainMessage =
   | MsgEncodeCancelled
   | MsgWorkerReady
   | MsgWorkerShutdownAck
+  | MsgWorkerError
   | MsgWorkerDrain
   | MsgMetric;
