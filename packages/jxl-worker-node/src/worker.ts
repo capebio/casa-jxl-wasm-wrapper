@@ -81,6 +81,16 @@ port.on("message", (msg: MainToWorkerMessage) => {
       break;
     }
 
+    case "decode_pause": {
+      decodeSessions.get(msg.sessionId)?.onPause();
+      break;
+    }
+
+    case "decode_resume": {
+      decodeSessions.get(msg.sessionId)?.onResume();
+      break;
+    }
+
     case "encode_start":
       void handleEncodeStart(msg);
       break;

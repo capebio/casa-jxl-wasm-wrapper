@@ -45,6 +45,16 @@ export interface MsgDecodeCancel {
   reason?: string;
 }
 
+export interface MsgDecodePause {
+  type: "decode_pause";
+  sessionId: string;
+}
+
+export interface MsgDecodeResume {
+  type: "decode_resume";
+  sessionId: string;
+}
+
 // ---------------------------------------------------------------------------
 // Worker → Main: Decode
 // ---------------------------------------------------------------------------
@@ -87,6 +97,11 @@ export interface MsgDecodeError {
 
 export interface MsgDecodeCancelled {
   type: "decode_cancelled";
+  sessionId: string;
+}
+
+export interface MsgDecodePaused {
+  type: "decode_paused";
   sessionId: string;
 }
 
@@ -223,6 +238,8 @@ export type MainToWorkerMessage =
   | MsgDecodeChunk
   | MsgDecodeClose
   | MsgDecodeCancel
+  | MsgDecodePause
+  | MsgDecodeResume
   | MsgEncodeStart
   | MsgEncodePixels
   | MsgEncodeFinish
@@ -236,6 +253,7 @@ export type WorkerToMainMessage =
   | MsgDecodeFinal
   | MsgDecodeError
   | MsgDecodeCancelled
+  | MsgDecodePaused
   | MsgDecodeBudgetExceeded
   | MsgEncodeChunk
   | MsgEncodeFirstByteReady

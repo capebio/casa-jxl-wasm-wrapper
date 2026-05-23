@@ -99,6 +99,16 @@ self.onmessage = (ev: MessageEvent<MainToWorkerMessage>) => {
       break;
     }
 
+    case "decode_pause": {
+      decodeSessions.get(msg.sessionId)?.onPause();
+      break;
+    }
+
+    case "decode_resume": {
+      decodeSessions.get(msg.sessionId)?.onResume();
+      break;
+    }
+
     case "encode_start":
       handleEncodeStart(msg);
       break;

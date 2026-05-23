@@ -44,6 +44,8 @@ export interface SchedulerMetrics {
   running: number;
   /** Sessions waiting in the priority queue for a worker slot. */
   queued: number;
+  /** Decode sessions paused on a worker, awaiting a resume slot. */
+  paused: number;
   /** Running sessions with background priority. */
   background: number;
   /** Total preemptions performed since construction. */
@@ -78,7 +80,7 @@ interface BackpressureState {
 // tracked worker, pending, handlers, backpressure, priority, and kind independently.
 interface SessionRecord {
   sessionId: string;
-  state: "queued" | "running" | "cancelling";
+  state: "queued" | "running" | "cancelling" | "paused";
   priority: Priority;
   kind: "decode" | "encode";
   handlers: Array<(msg: WorkerToMainMessage) => void>;
@@ -87,6 +89,8 @@ interface SessionRecord {
   // Set only while queued; cleared when a worker is assigned.
   pending?: PendingSession;
   backpressure?: BackpressureState;
+  // Worker holding the paused WASM decoder state. Set only for "paused" sessions.
+  pausedOnWorker?: PoolWorker;
   // Wall-clock time the session was created. Used for victim scoring.
   createdAt: number;
   // Fractional decode progress [0, 1]. Updated from decode_progress stage messages.
@@ -115,6 +119,10 @@ export class Scheduler {
   // Workers currently running background-priority sessions — enables O(n_background)
   // candidate scan for preemption without iterating the full session map.
   private readonly backgroundWorkers = new Set<PoolWorker>();
+
+  // Maps worker id → paused session id. A worker holds at most one paused decode session
+  // (the WASM decoder state is bound to that worker's heap and cannot migrate).
+  private readonly workerPausedSession = new Map<number, string>();
 
   // Workers whose onMessage handler has already been wired — prevents stale-closure
   // accumulation when a worker handles multiple sessions across its lifetime.
@@ -239,6 +247,13 @@ export class Scheduler {
       return;
     }
 
+    // Paused: decoder lives in pausedOnWorker's WASM heap; forward directly so
+    // chunks queue up inside the handler and are ready when the session resumes.
+    if (record.state === "paused" && record.pausedOnWorker !== undefined) {
+      record.pausedOnWorker.handle.send(msg, transfer);
+      return;
+    }
+
     // Queued: buffer the chunk for delivery once a worker is assigned.
     if (record.pending !== undefined) {
       record.pending.bufferedChunks.push({ msg, transfer });
@@ -263,6 +278,19 @@ export class Scheduler {
 
   cancelSession(sessionId: string): boolean {
     const record = this.sessions.get(sessionId);
+
+    // Paused: send cancel to the worker hosting the dormant decoder, notify caller,
+    // clean up immediately. The decode_cancelled ack arrives later but is silently
+    // dropped since the session record is already gone.
+    if (record?.state === "paused" && record.pausedOnWorker !== undefined) {
+      this.workerPausedSession.delete(record.pausedOnWorker.id);
+      record.pausedOnWorker.handle.send({ type: "decode_cancel", sessionId });
+      delete record.pausedOnWorker;
+      for (const h of record.handlers) h({ type: "decode_cancelled", sessionId });
+      this.dedupe.cancelSubscriber(sessionId);
+      this.sessions.delete(sessionId);
+      return true;
+    }
 
     // Queued: remove from queue and reject the pending promise.
     if (record?.state === "queued" && record.pending !== undefined) {
@@ -361,13 +389,16 @@ export class Scheduler {
   getMetrics(): SchedulerMetrics {
     let running = 0;
     let queued = 0;
+    let paused = 0;
     for (const record of this.sessions.values()) {
       if (record.state === "running" || record.state === "cancelling") running++;
       else if (record.state === "queued") queued++;
+      else if (record.state === "paused") paused++;
     }
     return {
       running,
       queued,
+      paused,
       background: this.backgroundWorkers.size,
       preemptions: this.preemptionCount,
       totalSessions: this.totalSessionCount,
@@ -391,45 +422,81 @@ export class Scheduler {
     const victimRecord = this.sessions.get(victimSessionId);
     const victimKind = victimRecord?.kind ?? "decode";
 
-    // Send cancel and await ack.
+    // Decode victims are paused (WASM state preserved for resume).
+    // Encode victims are cancelled (no in-progress state worth preserving).
+    const usePause = victimKind === "decode";
+
     backgroundWorker.cancelling = true;
-    const cancelAck = new Promise<void>((resolve) => {
-      const prevHandlers = victimRecord?.handlers ?? [];
-      const cancelHandler = (msg: WorkerToMainMessage) => {
-        if (
-          (msg.type === "decode_cancelled" || msg.type === "encode_cancelled") &&
-          msg.sessionId === victimSessionId
-        ) {
+    const prevHandlers = victimRecord?.handlers ?? [];
+    let ackResolved = false;
+
+    const ack = new Promise<void>((resolve) => {
+      const handler = (msg: WorkerToMainMessage) => {
+        const matched = usePause
+          ? (msg.type === "decode_paused" && msg.sessionId === victimSessionId)
+          : ((msg.type === "decode_cancelled" || msg.type === "encode_cancelled") && msg.sessionId === victimSessionId);
+        if (matched) {
+          ackResolved = true;
           resolve();
-          // Restore so the victim's caller receives the cancellation notification.
           if (victimRecord) victimRecord.handlers = prevHandlers;
         }
       };
-      if (victimRecord) victimRecord.handlers = [cancelHandler, ...prevHandlers];
-      backgroundWorker.handle.send({
-        type: victimKind === "encode" ? "encode_cancel" : "decode_cancel",
-        sessionId: victimSessionId,
-        reason: "preempted",
-      });
+      if (victimRecord) victimRecord.handlers = [handler, ...prevHandlers];
+
+      if (usePause) {
+        backgroundWorker.handle.send({ type: "decode_pause", sessionId: victimSessionId });
+      } else if (victimKind === "encode") {
+        backgroundWorker.handle.send({ type: "encode_cancel", sessionId: victimSessionId, reason: "preempted" });
+      } else {
+        backgroundWorker.handle.send({ type: "decode_cancel", sessionId: victimSessionId, reason: "preempted" });
+      }
     });
 
     // 2-second timeout prevents indefinite wait on an unresponsive worker.
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        cancelAck,
+        ack,
         new Promise<void>((_, reject) => {
           timeout = setTimeout(() => reject(new Error("preempt-timeout")), 2000);
         }),
       ]);
     } catch {
+      if (victimRecord) victimRecord.handlers = prevHandlers;
       this.pool.recycle(backgroundWorker);
     } finally {
       clearTimeout(timeout);
     }
+    backgroundWorker.cancelling = false;
 
-    // The victim's caller receives the cancelled message and handles resubmit.
-    this.releaseSession(victimSessionId);
+    if (!ackResolved) {
+      // Timed out: worker recycled. Victim session will receive decode_cancelled
+      // from the worker's shutdown sequence; clean up our side now.
+      this.releaseSession(victimSessionId);
+      const newWorker = await this.pool.acquire();
+      if (newWorker !== null) {
+        this.assignWorker(newWorker, params.sessionId, params.startMsg);
+        this.setupSignalAbort(params.sessionId, params.signal);
+        this.preemptionCount++;
+        return newWorker.id;
+      }
+      return null;
+    }
+
+    if (usePause) {
+      // Park the victim: keep its session record alive but detach from the active worker.
+      // The WASM decoder state remains in the worker's heap until the session resumes.
+      if (victimRecord !== undefined) {
+        victimRecord.state = "paused";
+        delete victimRecord.worker;
+        victimRecord.pausedOnWorker = backgroundWorker;
+        this.backgroundWorkers.delete(backgroundWorker);
+      }
+      this.workerPausedSession.set(backgroundWorker.id, victimSessionId);
+    } else {
+      // Cancel: victim's caller receives the cancellation and handles resubmit.
+      this.releaseSession(victimSessionId);
+    }
 
     if (!backgroundWorker.handle.terminated) {
       this.assignWorker(backgroundWorker, params.sessionId, params.startMsg);
@@ -438,7 +505,15 @@ export class Scheduler {
       return backgroundWorker.id;
     }
 
-    // Worker was recycled during cancel; try acquiring a fresh one.
+    // Worker died between ack and reassign (rare). If paused, clean up the parked session.
+    if (usePause) {
+      this.workerPausedSession.delete(backgroundWorker.id);
+      if (victimRecord !== undefined) {
+        victimRecord.state = "cancelling";
+        delete victimRecord.pausedOnWorker;
+      }
+      this.releaseSession(victimSessionId);
+    }
     const newWorker = await this.pool.acquire();
     if (newWorker !== null) {
       this.assignWorker(newWorker, params.sessionId, params.startMsg);
@@ -446,7 +521,6 @@ export class Scheduler {
       this.preemptionCount++;
       return newWorker.id;
     }
-
     return null;
   }
 
@@ -465,6 +539,8 @@ export class Scheduler {
 
     for (const worker of this.backgroundWorkers) {
       if (worker.cancelling || worker.activeSessionId === null) continue;
+      // Skip workers already holding a paused session — their decoder slot is occupied.
+      if (this.workerPausedSession.has(worker.id)) continue;
       const record = this.sessions.get(worker.activeSessionId);
       if (record === undefined) continue;
       const score = this.scoreVictim(record);
@@ -474,6 +550,25 @@ export class Scheduler {
       }
     }
     return bestWorker;
+  }
+
+  // Resume a paused session on the worker that holds its decoder state.
+  private resumePausedSession(worker: PoolWorker, sessionId: string): void {
+    const record = this.sessions.get(sessionId);
+    if (record === undefined || record.state !== "paused") {
+      // Session was cancelled while paused; release the worker normally.
+      this.pool.release(worker);
+      this.drainQueue();
+      return;
+    }
+    this.pool.bind(worker, sessionId);
+    record.state = "running";
+    record.worker = worker;
+    delete record.pausedOnWorker;
+    if (record.priority === "background") this.backgroundWorkers.add(worker);
+    else this.backgroundWorkers.delete(worker);
+    this.ensureWorkerWired(worker);
+    worker.handle.send({ type: "decode_resume", sessionId });
   }
 
   // ---------------------------------------------------------------------------
@@ -558,12 +653,18 @@ export class Scheduler {
       this.signalDrain(sessionId);
     }
 
-    // On completion: clean up, release the worker, then drain so the pool slot
-    // is available before drainQueue calls pool.acquire().
+    // On completion: clean up, then either resume a parked session on this worker
+    // or release it to the pool for the queue drain.
     if (this.isTerminalMessage(msg) && msg.sessionId === sessionId) {
       this.cleanupSession(sessionId);
-      this.pool.release(worker);
-      this.drainQueue();
+      const pausedId = this.workerPausedSession.get(worker.id);
+      if (pausedId !== undefined) {
+        this.workerPausedSession.delete(worker.id);
+        this.resumePausedSession(worker, pausedId);
+      } else {
+        this.pool.release(worker);
+        this.drainQueue();
+      }
     }
   }
 
@@ -602,6 +703,10 @@ export class Scheduler {
     const record = this.sessions.get(sessionId);
     if (record?.worker !== undefined) {
       this.backgroundWorkers.delete(record.worker);
+    }
+    if (record?.pausedOnWorker !== undefined) {
+      this.backgroundWorkers.delete(record.pausedOnWorker);
+      this.workerPausedSession.delete(record.pausedOnWorker.id);
     }
   }
 
@@ -648,17 +753,21 @@ export class Scheduler {
   async shutdown(): Promise<void> {
     this.destroyed = true;
 
-    // Reject all queued sessions so their callers don't hang.
+    // Reject/notify all non-running sessions so their callers don't hang.
     const shutdownErr = new Error("[jxl-scheduler] Scheduler shut down.");
     for (const record of this.sessions.values()) {
       if (record.state === "queued" && record.pending !== undefined) {
         this.unblockBackpressure(record);
         record.pending.reject(shutdownErr);
+      } else if (record.state === "paused") {
+        // Notify paused-session callers with a synthetic cancelled message.
+        for (const h of record.handlers) h({ type: "decode_cancelled", sessionId: record.sessionId });
       }
     }
 
     await this.pool.shutdown();
     this.sessions.clear();
     this.backgroundWorkers.clear();
+    this.workerPausedSession.clear();
   }
 }

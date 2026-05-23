@@ -36,3 +36,6 @@ _jxl_wasm_enc_push_pixels
 _jxl_wasm_enc_take_chunk
 _jxl_wasm_enc_error
 _jxl_wasm_enc_free
+_jxl_wasm_enc_create_image
+_jxl_wasm_enc_push_chunk
+_jxl_wasm_enc_finish

@@ -12,6 +12,7 @@ import type {
   MsgDecodeFinal,
   MsgDecodeError,
   MsgDecodeCancelled,
+  MsgDecodePaused,
   MsgDecodeBudgetExceeded,
 } from "@casabio/jxl-core/protocol";
 import type { DecodeStage, ImageInfo, PixelFormat, Region } from "@casabio/jxl-core/types";
@@ -65,6 +66,7 @@ export class DecodeHandler {
   private queueDepth = 0;
   private cancelled = false;
   private inputClosed = false;
+  private paused = false;
   private stageStartMs = performance.now();
 
   constructor(opts: MsgDecodeStart, backend: Backend, callbacks: DecodeHandlerCallbacks) {
@@ -92,11 +94,24 @@ export class DecodeHandler {
   async onCancel(reason?: string): Promise<void> {
     if (this.cancelled) return;
     this.cancelled = true;
+    this.paused = false;
     this.state = "cancelled";
 
     const msg: MsgDecodeCancelled = { type: "decode_cancelled", sessionId: this.sessionId };
     this.port.postMessage(msg);
     this.callbacks.onSessionEnd(this.sessionId);
+  }
+
+  onPause(): void {
+    if (this.cancelled || this.state === "final" || this.state === "error") return;
+    this.paused = true;
+    const msg: MsgDecodePaused = { type: "decode_paused", sessionId: this.sessionId };
+    this.port.postMessage(msg);
+  }
+
+  onResume(): void {
+    this.paused = false;
+    // The waitForChunk polling loop notices paused=false within 2ms.
   }
 
   private async run(): Promise<void> {
@@ -121,13 +136,13 @@ export class DecodeHandler {
   private waitForChunk(): Promise<void> {
     return new Promise<void>((resolve) => {
       const check = () => {
-        if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.cancelled) {
-          resolve();
-        } else if (this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
-          resolve();
-        } else {
-          setTimeout(check, 2);
+        if (this.cancelled || this.state === "final" || this.state === "error" || this.state === "budget_exceeded") {
+          resolve(); return;
         }
+        if (!this.paused && (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed)) {
+          resolve(); return;
+        }
+        setTimeout(check, 2);
       };
       check();
     });

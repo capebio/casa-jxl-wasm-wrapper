@@ -14,6 +14,7 @@ import type {
   MsgDecodeFinal,
   MsgDecodeError,
   MsgDecodeCancelled,
+  MsgDecodePaused,
   MsgDecodeBudgetExceeded,
 } from "@casabio/jxl-core/protocol";
 import type { ImageInfo, DecodeStage } from "@casabio/jxl-core/types";
@@ -47,6 +48,8 @@ export class DecodeHandler {
   private cancelled = false;
   private inputClosed = false;
   private wakeResolve: (() => void) | null = null;
+  private paused = false;
+  private resumeResolve: (() => void) | null = null;
 
   // Stage budget tracking
   private stageStartMs: number = performance.now();
@@ -87,6 +90,12 @@ export class DecodeHandler {
   async onCancel(reason?: string): Promise<void> {
     if (this.cancelled) return;
     this.cancelled = true;
+    // Unblock waitForResume if paused so feedDecoder can exit.
+    if (this.paused) {
+      this.paused = false;
+      this.resumeResolve?.();
+      this.resumeResolve = null;
+    }
     this.state = "cancelled";
     this.wakeResolve?.();
     this.wakeResolve = null;
@@ -97,6 +106,23 @@ export class DecodeHandler {
     };
     self.postMessage(msg);
     this.callbacks.onSessionEnd(this.sessionId);
+  }
+
+  onPause(): void {
+    if (this.cancelled || this.state === "final" || this.state === "error") return;
+    this.paused = true;
+    // Wake any sleeping waitForChunk so feedDecoder reaches the pause check immediately.
+    this.wakeResolve?.();
+    this.wakeResolve = null;
+    const msg: MsgDecodePaused = { type: "decode_paused", sessionId: this.sessionId };
+    self.postMessage(msg);
+  }
+
+  onResume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    this.resumeResolve?.();
+    this.resumeResolve = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -133,13 +159,29 @@ export class DecodeHandler {
     return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
   }
 
+  private waitForResume(): Promise<void> {
+    if (!this.paused) return Promise.resolve();
+    return new Promise<void>((resolve) => { this.resumeResolve = resolve; });
+  }
+
   private async feedDecoder(decoder: BrowserDecoder): Promise<void> {
     while (!this.cancelled && this.state !== "final" && this.state !== "error") {
+      if (this.paused) {
+        await this.waitForResume();
+        continue;
+      }
       await this.waitForChunk();
+      if (this.paused) continue;
       while (this.chunkQueue.length > this.chunkReadIndex) {
-        const chunk = this.chunkQueue[this.chunkReadIndex++];
+        const chunk = this.chunkQueue[this.chunkReadIndex];
+        // Null the slot immediately so GC can reclaim the transferred ArrayBuffer
+        // without waiting for the compaction threshold.
+        this.chunkQueue[this.chunkReadIndex++] = undefined as any;
         if (chunk === undefined) break;
-        if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
+        if (this.chunkReadIndex >= this.chunkQueue.length) {
+          this.chunkQueue.length = 0;
+          this.chunkReadIndex = 0;
+        } else if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
           this.chunkQueue = this.chunkQueue.slice(this.chunkReadIndex);
           this.chunkReadIndex = 0;
         }

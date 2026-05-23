@@ -16,12 +16,14 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
     *   **SIMD & Scalar:** Fallbacks for restricted or non-cross-origin-isolated contexts.
 *   **PGO (Profile-Guided Optimization):** Optimized WASM artifacts based on real-world training data from the Casabio image corpus.
 *   **Zero-Copy WASM Writes:** Both the encoder and the fallback one-shot decoder write chunk data directly into the WASM heap (`HEAPU8.set` into a pre-allocated region) rather than creating an intermediate JS `Uint8Array` via `concatBytes`, eliminating one full-image allocation and copy per operation.
+*   **Grow-only WASM Allocator:** Pixel and flushed-frame buffers in the C++ bridge are sized at `JXL_DEC_BASIC_INFO` (dimensions known) and grown with `realloc` rather than `free`+`malloc`. Subsequent `NEED_IMAGE_OUT_BUFFER` events rarely need to resize, and in-flight decoded data is never needlessly copied. (`packages/jxl-wasm/src/bridge.cpp`)
+*   **Immediate Chunk Slot Release:** The progressive decode input queue nulls each slot immediately after the chunk is copied to the WASM heap, making the `Uint8Array` backing store GC-eligible during long progressive decodes without waiting for the queue to drain or `dispose()` to be called. (`packages/jxl-wasm/src/facade.ts`)
 *   **FFI Overhead Reduction:** Bridge function references are cached once per decode session, avoiding repeated property lookups on the WASM module object at the per-chunk hot path.
 *   **Module Caching:** Compiled WASM modules are cached in IndexedDB, eliminating re-compilation time on repeat visits.
 
 ### 2. Advanced Scheduling & Flow Control
 *   **Prioritized Task Lanes:** Three priority tiers—`visible`, `near`, and `background`—ensure the user's current view is always processed first.
-*   **Preemption & Re-queuing:** A "visible" task can interrupt and preempt a "background" task, which is then gracefully re-queued.
+*   **Preemption with Pause/Resume:** A "visible" task can interrupt a "background" task; the background session is *suspended in-place* — the WASM decoder state remains live in the worker heap — and resumed on the same worker once the high-priority task completes. This avoids a full decode restart and preserves partial-progressive state. (`packages/jxl-core/src/protocol.ts`, `packages/jxl-scheduler/src/scheduler.ts`, `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`)
 *   **Deduplication (Fan-out):** Multiple requests for the same source URL are consolidated into a single decode session to save CPU and memory.
 *   **Integrated Backpressure:** Uses WHATWG/Node stream adapters to prevent memory bloat during massive transfers.
 *   **Pipelined I/O Prefetch:** `fromReadableStream` in `jxl-stream` prefetches the next network chunk immediately after each chunk arrives (before awaiting `session.push`), so network delivery of chunk N+1 overlaps with scheduler backpressure resolution on chunk N. Eliminates idle I/O time during push-wait on bandwidth-constrained connections.
@@ -63,7 +65,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 | **Progressive Support** | **Full (DC/Passes)** | Limited (One-shot) | None (Full-frame) | Limited |
 | **ROI / Region Decode** | **Yes (Tile-aware)** | No | No | No |
 | **WASM Optimization** | **Multi-tier + Relaxed SIMD** | Single-tier SIMD | N/A (Native) | Single-tier |
-| **Scheduler** | **Preemptive / Priority** | Basic Queue | Internal (libvips) | None |
+| **Scheduler** | **Preemptive / Priority / Pause-Resume** | Basic Queue | Internal (libvips) | None |
 | **Metadata Fidelity** | **Scientific (EXIF/XMP/ICC)** | Partial | Good | Minimal |
 | **Streaming** | Full (Backpressure) | Minimal | Native Streams | No |
 | **Caching Layer** | **Integrated (OPFS/fs)** | External Only | External Only | No |

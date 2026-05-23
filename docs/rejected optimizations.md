@@ -17,18 +17,20 @@ tsc would inline them, but the churn of touching every priority comparison outwe
 ## 6. Smarter preemption victim selection — superseded
 Resolved: `createdAt` (client-side, no protocol change) is sufficient; implemented in the SessionRecord refactor.
 
-## 7. Soft preemption
+## 7. Soft preemption via yield message
 Proposed: send `decode_yield_request` to the victim worker; if it responds with `decode_yielded` within 300ms, avoid a hard cancel.
 
-Rejected for three compounding reasons:
+Rejected for two reasons (a third reason, originally listed here, has since been resolved — see note below):
 
 1. **No benefit at the natural yield point.** `DecodeHandler.feedDecoder` already exits cleanly at chunk boundaries: `onCancel` sets `this.cancelled` and wakes `wakeResolve`, so the loop terminates at its next iteration. Hard cancel is already "soft" when the decoder is between chunks.
 
 2. **No benefit mid-push either.** When `decoder.push(chunk)` is actively running, WASM executes synchronously to completion — it cannot be interrupted. The 300ms grace window would simply time out and fall back to hard cancel, adding latency without saving anything.
 
-3. **"Pause and resume" is not available.** To make yield genuinely useful (spare the caller a full resubmit), the decoder would need to serialise its internal state and resume on the same worker later. libjxl has no such API and the WASM adapter does not expose one. A yield that still destroys decoder state is indistinguishable from cancel with extra round-trips.
-
 Progress-aware victim scoring (implemented) is the correct lever: avoid preempting nearly-done sessions entirely rather than trying to preempt them gently.
+
+**Note — full pause/resume is now implemented.** The original reason 3 claimed "pause and resume is not available" because "the decoder would need to serialise its internal state." This is no longer accurate. The implemented approach does not require state serialisation: the WASM decoder object lives in the worker's heap and is left alive while the worker services the high-priority session. The victim session is suspended in-place (`decode_pause` → `decode_paused` ack → worker continues on high-priority task), then resumed on the same worker (`decode_resume`) once that task completes. A `workerPausedSession` map in the scheduler tracks which worker holds a suspended session to ensure chunk routing and resume land on the correct worker. The `decode_yield_request` message design (this proposal) is still rejected — but the capability it was trying to achieve is covered by the structural pause/resume.
+
+Affected files: `packages/jxl-core/src/protocol.ts`, `packages/jxl-scheduler/src/scheduler.ts`, `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-browser/src/worker.ts`, `packages/jxl-worker-node/src/decode-handler.ts`, `packages/jxl-worker-node/src/worker.ts`.
 
 ## 8. SessionRecord consolidation — implemented
 All 6 maps collapsed into `sessions: Map<string, SessionRecord>`.
