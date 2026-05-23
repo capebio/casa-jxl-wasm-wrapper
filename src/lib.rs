@@ -214,61 +214,44 @@ fn unpack_rgb16_le(src: &[u8]) -> Vec<u16> {
     src.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect()
 }
 
-/// Central structural validation for ORF inputs.  Runs before the pipeline so
-/// user-facing errors are produced in one place rather than scattered across
-/// individual functions.  Internal guards in demosaic/decompress remain as
-/// defence-in-depth but should never fire if this passes.
-fn validate_orf_structure(data: &[u8], info: &tiff::OrfInfo) -> Result<(), JsError> {
-    const MAX_DIM: u32 = 16_384;
-    const MAX_PIXELS: usize = 50_000_000; // 50 MP
-
-    if info.width == 0 || info.height == 0 {
-        return Err(JsError::new("ORF: zero image dimension"));
+fn target_dims(w: usize, h: usize, long_edge: usize) -> (usize, usize) {
+    if w >= h {
+        let lw = w.min(long_edge);
+        (lw, ((h * lw) / w).max(1))
+    } else {
+        let lh = h.min(long_edge);
+        (((w * lh) / h).max(1), lh)
     }
-    if info.width > MAX_DIM || info.height > MAX_DIM {
-        return Err(JsError::new(&format!(
-            "ORF: dimension {}×{} exceeds maximum {}",
-            info.width, info.height, MAX_DIM
-        )));
-    }
-    let n = (info.width as usize)
-        .checked_mul(info.height as usize)
-        .ok_or_else(|| JsError::new("ORF: width×height overflows"))?;
-    if n > MAX_PIXELS {
-        return Err(JsError::new(&format!("ORF: {} pixels exceeds 50 MP limit", n)));
-    }
-    let strip_end = (info.strip_offset as usize)
-        .checked_add(info.strip_byte_count as usize)
-        .ok_or_else(|| JsError::new("ORF: strip offset+length overflows"))?;
-    if strip_end > data.len() {
-        return Err(JsError::new("ORF: strip extends past end of file"));
-    }
-    Ok(())
 }
 
-/// Parse + decode an ORF file blob.  Returns an error string on failure.
-///
-/// All look params are LR-style, zero-centred (-1..+1 normalised), except
-/// `exposure_ev` which is in stops.  `wb_r_override` / `wb_b_override`:
-/// pass NaN (or ≤0) to use MakerNote / defaults.
-#[wasm_bindgen]
-pub fn process_orf(
-    data: &[u8],
-    exposure_ev: f32,
-    contrast: f32,
-    highlights: f32,
-    shadows: f32,
-    whites: f32,
-    blacks: f32,
-    saturation: f32,
-    vibrance: f32,
-    temp: f32,
-    tint: f32,
-    wb_r_override: f32,
-    wb_b_override: f32,
-    texture: f32,
-    clarity: f32,
-) -> Result<ProcessResult, JsError> {
+// Output flag bits for process_orf_with_flags.
+const OUT_FULL_RGB8: u32 = 1; // full-resolution RGB8 for JXL encoding
+const OUT_LIGHTBOX:  u32 = 2; // 1800 px RGB16 for LookRenderer
+const OUT_THUMB:     u32 = 4; // 360 px RGB16 for thumb LookRenderer
+
+struct LookOverrides {
+    wb_r: f32, wb_b: f32,
+    exposure_ev: f32, contrast: f32, highlights: f32, shadows: f32,
+    whites: f32, blacks: f32, saturation: f32, vibrance: f32,
+    temp: f32, tint: f32, texture: f32, clarity: f32,
+}
+
+struct OrfDecoded {
+    rgb16: Vec<u16>,
+    w: usize,
+    h: usize,
+    info: tiff::OrfInfo,
+    decompress_ms: f64,
+    demosaic_ms: f64,
+    wb_from_camera: bool,
+    params: pipeline::PipelineParams,
+    color_matrix_from_mn: bool,
+    color_matrix_flat: [f32; 9],
+}
+
+/// Shared ORF decode path: parse → validate → decompress → demosaic → NR → WB/matrix setup.
+/// Returns pre-tonemapped RGB16 and all metadata.  Called by process_orf_impl.
+fn decode_orf_raw(data: &[u8]) -> Result<OrfDecoded, JsError> {
     let info = tiff::parse(data).map_err(|e| JsError::new(&e))?;
 
     if info.compression != 1 {
@@ -312,7 +295,6 @@ pub fn process_orf(
     let color_matrix_from_mn = info.color_matrix.is_some();
     if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
 
-    // Capture which matrix will be used (MakerNote or fallback).
     let color_matrix_flat: [f32; 9] = {
         let m = params.color_matrix.unwrap_or(pipeline::CAM_TO_SRGB);
         [m[0][0],m[0][1],m[0][2], m[1][0],m[1][1],m[1][2], m[2][0],m[2][1],m[2][2]]
@@ -334,50 +316,63 @@ pub fn process_orf(
         pipeline::apply_luminance_nr(&mut rgb16, w, h, nr_strength);
     }
 
-    // Compute lightbox + thumb rgb16 caches (pre-tonemap, pre-orientation).
-    const LB_LONG_EDGE: usize = 1800;
-    let (lb_w, lb_h) = if w >= h {
-        let lw = w.min(LB_LONG_EDGE);
-        (lw, ((h * lw) / w).max(1))
-    } else {
-        let lh = h.min(LB_LONG_EDGE);
-        (((w * lh) / h).max(1), lh)
-    };
-    let rgb16_lb = downscale_rgb16_impl(&rgb16, w, h, lb_w, lb_h);
+    Ok(OrfDecoded { rgb16, w, h, info, decompress_ms, demosaic_ms, wb_from_camera, params, color_matrix_from_mn, color_matrix_flat })
+}
 
-    const THUMB_LONG_EDGE: usize = 360;
-    let (thumb_w, thumb_h) = if w >= h {
-        let tw = w.min(THUMB_LONG_EDGE);
-        (tw, ((h * tw) / w).max(1))
+/// Shared output stage: conditionally compute lb, thumb, and full RGB8 from
+/// pre-decoded ORF data according to `output_flags`.  Absent outputs have empty
+/// buffers and zero dims in the returned `ProcessResult`.
+fn process_orf_impl(
+    decoded: OrfDecoded,
+    output_flags: u32,
+    look: &LookOverrides,
+) -> Result<ProcessResult, JsError> {
+    let OrfDecoded { mut rgb16, w, h, info, decompress_ms, demosaic_ms, wb_from_camera, mut params, color_matrix_from_mn, color_matrix_flat } = decoded;
+
+    let (lb_w, lb_h) = target_dims(w, h, 1800);
+    let (rgb16_lb, out_lb_w, out_lb_h) = if output_flags & OUT_LIGHTBOX != 0 {
+        let lb = downscale_rgb16_impl(&rgb16, w, h, lb_w, lb_h);
+        (lb, lb_w, lb_h)
     } else {
-        let th = h.min(THUMB_LONG_EDGE);
-        (((w * th) / h).max(1), th)
+        (vec![], 0, 0)
     };
-    let rgb16_thumb = downscale_rgb16_impl(&unpack_rgb16_le(&rgb16_lb), lb_w, lb_h, thumb_w, thumb_h);
+
+    let (thumb_w, thumb_h) = target_dims(w, h, 360);
+    let (rgb16_thumb, out_thumb_w, out_thumb_h) = if output_flags & OUT_THUMB != 0 {
+        let thumb = if output_flags & OUT_LIGHTBOX != 0 {
+            downscale_rgb16_impl(&unpack_rgb16_le(&rgb16_lb), lb_w, lb_h, thumb_w, thumb_h)
+        } else {
+            downscale_rgb16_impl(&rgb16, w, h, thumb_w, thumb_h)
+        };
+        (thumb, thumb_w, thumb_h)
+    } else {
+        (vec![], 0, 0)
+    };
+
+    if look.wb_r.is_finite() && look.wb_r > 0.0 { params.wb_r = look.wb_r.min(8.0); }
+    if look.wb_b.is_finite() && look.wb_b > 0.0 { params.wb_b = look.wb_b.min(8.0); }
+    apply_look_params(&mut params, look.exposure_ev, look.contrast, look.highlights, look.shadows,
+        look.whites, look.blacks, look.saturation, look.vibrance, look.temp, look.tint, look.texture, look.clarity);
 
     let t = now_ms();
-    if wb_r_override.is_finite() && wb_r_override > 0.0 {
-        params.wb_r = wb_r_override.min(8.0);
-    }
-    if wb_b_override.is_finite() && wb_b_override > 0.0 {
-        params.wb_b = wb_b_override.min(8.0);
-    }
-    apply_look_params(&mut params, exposure_ev, contrast, highlights, shadows,
-        whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
-    if params.texture != 0.0 || params.clarity != 0.0 {
-        pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
-    }
-    let rgb8 = pipeline::process(&rgb16, &params);
-    let tonemap_ms = now_ms() - t;
-    drop(rgb16);
-
-    let t = now_ms();
-    let (final_rgb, final_w, final_h) = if info.orientation == 1 {
-        (rgb8, w, h)
+    let (final_rgb, final_w, final_h, tonemap_ms, orient_ms) = if output_flags & OUT_FULL_RGB8 != 0 {
+        if params.texture != 0.0 || params.clarity != 0.0 {
+            pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
+        }
+        let rgb8 = pipeline::process(&rgb16, &params);
+        let tonemap_ms = now_ms() - t;
+        drop(rgb16);
+        let t2 = now_ms();
+        let (fr, fw, fh) = if info.orientation == 1 {
+            (rgb8, w, h)
+        } else {
+            pipeline::apply_orientation(&rgb8, w, h, info.orientation)
+        };
+        (fr, fw, fh, tonemap_ms, now_ms() - t2)
     } else {
-        pipeline::apply_orientation(&rgb8, w, h, info.orientation)
+        drop(rgb16);
+        (vec![], 0, 0, 0.0, 0.0)
     };
-    let orient_ms = now_ms() - t;
 
     Ok(ProcessResult {
         rgb: final_rgb,
@@ -394,11 +389,11 @@ pub fn process_orf(
         make: info.make,
         model: info.model,
         rgb16_lb,
-        lb_w: lb_w as u32,
-        lb_h: lb_h as u32,
+        lb_w: out_lb_w as u32,
+        lb_h: out_lb_h as u32,
         rgb16_thumb,
-        thumb_w: thumb_w as u32,
-        thumb_h: thumb_h as u32,
+        thumb_w: out_thumb_w as u32,
+        thumb_h: out_thumb_h as u32,
         color_matrix_flat,
         lens: info.lens,
         datetime: info.datetime,
@@ -419,6 +414,111 @@ pub fn process_orf(
         wb_mode: info.wb_mode.unwrap_or(0xFFFF),
         wb_from_camera,
     })
+}
+
+/// Central structural validation for ORF inputs.  Runs before the pipeline so
+/// user-facing errors are produced in one place rather than scattered across
+/// individual functions.  Internal guards in demosaic/decompress remain as
+/// defence-in-depth but should never fire if this passes.
+fn validate_orf_structure(data: &[u8], info: &tiff::OrfInfo) -> Result<(), JsError> {
+    const MAX_DIM: u32 = 16_384;
+    const MAX_PIXELS: usize = 50_000_000; // 50 MP
+
+    if info.width == 0 || info.height == 0 {
+        return Err(JsError::new("ORF: zero image dimension"));
+    }
+    if info.width > MAX_DIM || info.height > MAX_DIM {
+        return Err(JsError::new(&format!(
+            "ORF: dimension {}×{} exceeds maximum {}",
+            info.width, info.height, MAX_DIM
+        )));
+    }
+    let n = (info.width as usize)
+        .checked_mul(info.height as usize)
+        .ok_or_else(|| JsError::new("ORF: width×height overflows"))?;
+    if n > MAX_PIXELS {
+        return Err(JsError::new(&format!("ORF: {} pixels exceeds 50 MP limit", n)));
+    }
+    let strip_end = (info.strip_offset as usize)
+        .checked_add(info.strip_byte_count as usize)
+        .ok_or_else(|| JsError::new("ORF: strip offset+length overflows"))?;
+    if strip_end > data.len() {
+        return Err(JsError::new("ORF: strip extends past end of file"));
+    }
+    Ok(())
+}
+
+/// Parse + decode an ORF file blob.  Returns an error string on failure.
+///
+/// All look params are LR-style, zero-centred (-1..+1 normalised), except
+/// `exposure_ev` which is in stops.  `wb_r_override` / `wb_b_override`:
+/// pass NaN (or ≤0) to use MakerNote / defaults.
+///
+/// Always generates full RGB8, 1800 px lightbox RGB16, and 360 px thumbnail RGB16.
+/// Use `process_orf_with_flags` to skip unused outputs (e.g. batch JXL encoding
+/// only needs full RGB8, not lb/thumb).
+#[wasm_bindgen]
+pub fn process_orf(
+    data: &[u8],
+    exposure_ev: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    saturation: f32,
+    vibrance: f32,
+    temp: f32,
+    tint: f32,
+    wb_r_override: f32,
+    wb_b_override: f32,
+    texture: f32,
+    clarity: f32,
+) -> Result<ProcessResult, JsError> {
+    let look = LookOverrides {
+        wb_r: wb_r_override, wb_b: wb_b_override,
+        exposure_ev, contrast, highlights, shadows,
+        whites, blacks, saturation, vibrance,
+        temp, tint, texture, clarity,
+    };
+    process_orf_impl(decode_orf_raw(data)?, OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB, &look)
+}
+
+/// Variant of `process_orf` with explicit output flags to skip unused pipeline stages.
+///
+/// `output_flags` is a bitmask of:
+/// - `1`: full-resolution RGB8 (needed for JXL encoding)
+/// - `2`: 1800 px lightbox RGB16 cache (needed to construct a `LookRenderer`)
+/// - `4`: 360 px thumbnail RGB16 cache (needed to construct a thumb `LookRenderer`)
+///
+/// Absent outputs have empty buffers and zero dims in `ProcessResult`.
+/// Pass `7` to match the behaviour of `process_orf`.
+#[wasm_bindgen]
+pub fn process_orf_with_flags(
+    data: &[u8],
+    output_flags: u32,
+    exposure_ev: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    saturation: f32,
+    vibrance: f32,
+    temp: f32,
+    tint: f32,
+    wb_r_override: f32,
+    wb_b_override: f32,
+    texture: f32,
+    clarity: f32,
+) -> Result<ProcessResult, JsError> {
+    let look = LookOverrides {
+        wb_r: wb_r_override, wb_b: wb_b_override,
+        exposure_ev, contrast, highlights, shadows,
+        whites, blacks, saturation, vibrance,
+        temp, tint, texture, clarity,
+    };
+    process_orf_impl(decode_orf_raw(data)?, output_flags, &look)
 }
 
 /// Rotated RGB8 buffer with updated dimensions.
@@ -659,6 +759,105 @@ pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
         dst[3] = 255;
     }
     out
+}
+
+/// WASM-resident rendering state for a single image (lightbox or thumbnail).
+///
+/// Owns the pre-tonemapped RGB16 buffer.  Slider changes call `render()` without
+/// transferring pixel data between JS and WASM — the JS→WASM transfer happens once
+/// at construction; every subsequent edit stays inside WASM.
+///
+/// When `texture` and `clarity` are both zero (the common case), `render` reads the
+/// internal buffer without cloning.  When either is nonzero, a clone is made before
+/// in-place sharpening so the cached buffer is never mutated.
+#[wasm_bindgen]
+pub struct LookRenderer {
+    rgb16: Vec<u16>,
+    width: usize,
+    height: usize,
+    orientation: u16,
+    color_matrix: [[f32; 3]; 3],
+}
+
+#[wasm_bindgen]
+impl LookRenderer {
+    /// Construct from a packed u16-LE buffer (6 bytes per pixel, as returned by
+    /// `take_rgb16_lb` / `take_rgb16_thumb`), dims, EXIF orientation, and a
+    /// 9-element row-major colour matrix.  Pass a slice of length != 9 to use
+    /// the built-in `CAM_TO_SRGB` fallback.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        rgb16_bytes: &[u8],
+        width: u32,
+        height: u32,
+        orientation: u16,
+        color_matrix_flat: &[f32],
+    ) -> Result<LookRenderer, JsError> {
+        let w = width as usize;
+        let h = height as usize;
+        let expected = w.checked_mul(h)
+            .and_then(|px| px.checked_mul(6))
+            .ok_or_else(|| JsError::new("LookRenderer: dimensions overflow"))?;
+        if rgb16_bytes.len() != expected {
+            return Err(JsError::new(&format!(
+                "LookRenderer: bytes {} != {}×{}×6", rgb16_bytes.len(), w, h
+            )));
+        }
+        let rgb16 = unpack_rgb16_le(rgb16_bytes);
+        let color_matrix = if color_matrix_flat.len() == 9 {
+            [
+                [color_matrix_flat[0], color_matrix_flat[1], color_matrix_flat[2]],
+                [color_matrix_flat[3], color_matrix_flat[4], color_matrix_flat[5]],
+                [color_matrix_flat[6], color_matrix_flat[7], color_matrix_flat[8]],
+            ]
+        } else {
+            pipeline::CAM_TO_SRGB
+        };
+        Ok(Self { rgb16, width: w, height: h, orientation, color_matrix })
+    }
+
+    /// Apply look parameters and return an RGB8 buffer (post-orientation).
+    /// Only the output RGB8 crosses the WASM boundary on each call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(
+        &self,
+        wb_r: f32,
+        wb_b: f32,
+        exposure_ev: f32,
+        contrast: f32,
+        highlights: f32,
+        shadows: f32,
+        whites: f32,
+        blacks: f32,
+        saturation: f32,
+        vibrance: f32,
+        temp: f32,
+        tint: f32,
+        texture: f32,
+        clarity: f32,
+    ) -> Result<Vec<u8>, JsError> {
+        let mut params = pipeline::PipelineParams::default_olympus();
+        if wb_r.is_finite() && wb_r > 0.0 { params.wb_r = wb_r; }
+        if wb_b.is_finite() && wb_b > 0.0 { params.wb_b = wb_b; }
+        params.color_matrix = Some(self.color_matrix);
+        apply_look_params(&mut params, exposure_ev, contrast, highlights, shadows,
+            whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
+
+        let rgb8 = if params.texture != 0.0 || params.clarity != 0.0 {
+            let mut rgb16 = self.rgb16.clone();
+            pipeline::apply_unsharp_masks(&mut rgb16, self.width, self.height, &params);
+            pipeline::process(&rgb16, &params)
+        } else {
+            pipeline::process(&self.rgb16, &params)
+        };
+
+        if self.orientation == 1 {
+            Ok(rgb8)
+        } else {
+            let (final_rgb, _, _) = pipeline::apply_orientation(&rgb8, self.width, self.height, self.orientation);
+            Ok(final_rgb)
+        }
+    }
 }
 
 /// EXIF metadata extracted without demosaic/tonemap.  Use for gallery thumbnails,
