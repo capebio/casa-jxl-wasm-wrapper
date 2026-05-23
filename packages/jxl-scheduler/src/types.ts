@@ -21,6 +21,8 @@ export interface Session {
   subscribers: string[];
 }
 
+export type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
+
 // A worker slot in the pool.
 export interface PoolWorker {
   id: number;
@@ -29,7 +31,7 @@ export interface PoolWorker {
   activeSessionId: string | null;
   // True while a cancel is in flight (decode_cancel sent, awaiting decode_cancelled).
   cancelling: boolean;
-  idleTimer: ReturnType<typeof setTimeout> | null;
+  idleTimer: TimerHandle | null;
 }
 
 // Minimal handle surface needed by scheduler. Implemented by jxl-worker-browser/spawn.ts

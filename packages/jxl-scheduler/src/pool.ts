@@ -2,16 +2,36 @@
 // Worker pool: creation, idle reaping, recycling on poison.
 // Spec: Section 12.1, 7.2.
 
-import type { PoolWorker, WorkerFactory } from "./types.js";
+import type { PoolWorker, WorkerFactory, WorkerHandle } from "./types.js";
 
 let workerIdCounter = 0;
 
+const DEV =
+  typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
+
+const DEFAULT_SPAWN_TIMEOUT_MS = 15_000;
+
 export const RESERVED_SESSION_ID = "__jxl_reserved__" as const;
+
+export interface WorkerPoolMetrics {
+  spawned: number;
+  spawnFailed: number;
+  acquiredIdle: number;
+  acquiredSpawned: number;
+  acquireMiss: number;
+  released: number;
+  recycled: number;
+  reaped: number;
+  maxObservedSize: number;
+  maxObservedSpawning: number;
+}
 
 export class WorkerPool {
   private readonly factory: WorkerFactory;
   private readonly maxSize: number;
   private readonly idleTimeoutMs: number;
+  private readonly spawnTimeoutMs: number;
+  private readonly minIdle: number;
 
   private readonly workers = new Map<number, PoolWorker>();
   private readonly idle = new Set<PoolWorker>();
@@ -20,11 +40,36 @@ export class WorkerPool {
 
   private destroyed = false;
   private spawning = 0;
+  private generation = 0;
 
-  constructor(opts: { factory: WorkerFactory; maxSize: number; idleTimeoutMs: number }) {
+  private lastSpawnFailureMs = 0;
+  private consecutiveSpawnFailures = 0;
+
+  private readonly metrics: WorkerPoolMetrics = {
+    spawned: 0,
+    spawnFailed: 0,
+    acquiredIdle: 0,
+    acquiredSpawned: 0,
+    acquireMiss: 0,
+    released: 0,
+    recycled: 0,
+    reaped: 0,
+    maxObservedSize: 0,
+    maxObservedSpawning: 0,
+  };
+
+  constructor(opts: {
+    factory: WorkerFactory;
+    maxSize: number;
+    idleTimeoutMs: number;
+    spawnTimeoutMs?: number;
+    minIdle?: number;
+  }) {
     this.factory = opts.factory;
     this.maxSize = Math.max(0, opts.maxSize);
     this.idleTimeoutMs = Math.max(0, opts.idleTimeoutMs);
+    this.spawnTimeoutMs = opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
+    this.minIdle = Math.max(0, Math.min(opts.minIdle ?? 0, this.maxSize));
   }
 
   get size(): number {
@@ -53,8 +98,44 @@ export class WorkerPool {
     return [...this.active];
   }
 
+  /** Zero-allocation iterator for hot scheduler paths. */
+  idleWorkerValues(): IterableIterator<PoolWorker> {
+    return this.idle.values();
+  }
+
+  /** Zero-allocation iterator for hot scheduler paths. */
+  activeWorkerValues(): IterableIterator<PoolWorker> {
+    return this.active.values();
+  }
+
   private get totalAllocatedOrSpawning(): number {
     return this.workers.size + this.spawning;
+  }
+
+  getMetrics(): WorkerPoolMetrics {
+    return { ...this.metrics };
+  }
+
+  healthSnapshot() {
+    return {
+      destroyed: this.destroyed,
+      maxSize: this.maxSize,
+      size: this.workers.size,
+      idle: this.idle.size,
+      active: this.active.size,
+      spawning: this.spawning,
+      spawnPromises: this.spawnPromises.size,
+      capacityRemaining: Math.max(0, this.maxSize - this.workers.size - this.spawning),
+      workers: [...this.workers.values()].map((w) => ({
+        id: w.id,
+        activeSessionId: w.activeSessionId,
+        cancelling: w.cancelling,
+        terminated: w.handle.terminated,
+        hasIdleTimer: w.idleTimer !== null,
+        indexedIdle: this.idle.has(w),
+        indexedActive: this.active.has(w),
+      })),
+    };
   }
 
   // Acquire an idle worker, spawning one if the pool is not full.
@@ -65,16 +146,33 @@ export class WorkerPool {
     if (this.destroyed) return null;
 
     const idleWorker = this.takeIdleWorker();
-    if (idleWorker) {
-      this.reserve(idleWorker);
-      return idleWorker;
+    if (idleWorker !== null) {
+      if (this.reserve(idleWorker)) {
+        this.metrics.acquiredIdle++;
+        this.assertInvariants();
+        return idleWorker;
+      }
+      // reserve() returned false — stale worker recycled, fall through to spawn
     }
 
     if (this.totalAllocatedOrSpawning >= this.maxSize) {
+      this.metrics.acquireMiss++;
       return null;
     }
 
-    return this.spawnAndReserve();
+    if (!this.canAttemptSpawn()) {
+      this.metrics.acquireMiss++;
+      return null;
+    }
+
+    const worker = await this.spawnAndReserve();
+    if (worker === null) {
+      this.metrics.acquireMiss++;
+    } else {
+      this.metrics.acquiredSpawned++;
+    }
+    this.assertInvariants();
+    return worker;
   }
 
   bind(worker: PoolWorker, sessionId: string): void {
@@ -94,17 +192,21 @@ export class WorkerPool {
     }
 
     this.transitionToActive(worker, sessionId);
+    this.assertInvariants();
   }
 
   release(worker: PoolWorker): void {
     if (!this.workers.has(worker.id)) return;
     this.transitionToIdle(worker);
+    this.metrics.released++;
+    this.assertInvariants();
   }
 
   /** Destroy and remove a poisoned or crashed worker. */
   recycle(worker: PoolWorker): void {
     if (!this.workers.has(worker.id)) return;
     void this.cleanupAndRemove(worker);
+    this.metrics.recycled++;
   }
 
   // Spawn workers eagerly so the first acquire() hits an idle worker rather than
@@ -118,10 +220,23 @@ export class WorkerPool {
         .then((worker) => this.handlePrewarmSuccess(worker))
         .catch(() => undefined);
     }
+    this.assertInvariants();
+  }
+
+  /** Manually evict idle workers, e.g. on memory pressure. Returns count reaped. */
+  reapIdle({ preserveMinIdle = true } = {}): number {
+    let count = 0;
+    for (const worker of [...this.idle]) {
+      if (preserveMinIdle && this.idle.size <= this.minIdle) break;
+      this.recycle(worker);
+      count++;
+    }
+    return count;
   }
 
   async shutdown(): Promise<void> {
     this.destroyed = true;
+    this.generation++;
 
     // Wait for in-flight spawns so no worker escapes cleanup.
     await Promise.allSettled([...this.spawnPromises]);
@@ -141,11 +256,35 @@ export class WorkerPool {
   // Private Implementation
   // ─────────────────────────────────────────────────────────────
 
+  private canAttemptSpawn(): boolean {
+    if (this.consecutiveSpawnFailures === 0) return true;
+    const backoffMs = Math.min(5_000, 100 * 2 ** Math.min(6, this.consecutiveSpawnFailures - 1));
+    return performance.now() - this.lastSpawnFailureMs >= backoffMs;
+  }
+
+  private noteSpawnFailure(): void {
+    this.consecutiveSpawnFailures++;
+    this.lastSpawnFailureMs = performance.now();
+    this.metrics.spawnFailed++;
+  }
+
+  private noteSpawnSuccess(): void {
+    this.consecutiveSpawnFailures = 0;
+    this.lastSpawnFailureMs = 0;
+  }
+
+  private noteSize(): void {
+    this.metrics.maxObservedSize = Math.max(this.metrics.maxObservedSize, this.workers.size);
+    this.metrics.maxObservedSpawning = Math.max(this.metrics.maxObservedSpawning, this.spawning);
+  }
+
   private async spawnAndReserve(): Promise<PoolWorker | null> {
     let worker: PoolWorker;
     try {
       worker = await this.spawn();
+      this.noteSpawnSuccess();
     } catch {
+      this.noteSpawnFailure();
       return null;
     }
 
@@ -154,12 +293,13 @@ export class WorkerPool {
       return null;
     }
 
-    this.reserve(worker);
+    if (!this.reserve(worker)) return null;
     return worker;
   }
 
   private async spawn(): Promise<PoolWorker> {
     this.spawning++;
+    this.noteSize();
 
     const promise = this.spawnInner();
     this.spawnPromises.add(promise);
@@ -173,8 +313,9 @@ export class WorkerPool {
   }
 
   private async spawnInner(): Promise<PoolWorker> {
+    const generation = this.generation;
     const id = ++workerIdCounter;
-    const handle = await this.factory();
+    const handle = await this.createWorkerWithTimeout();
 
     const worker: PoolWorker = {
       id,
@@ -184,7 +325,7 @@ export class WorkerPool {
       idleTimer: null,
     };
 
-    if (this.destroyed) {
+    if (this.destroyed || generation !== this.generation) {
       void handle.shutdown(1000).catch(() => undefined);
       return worker;
     }
@@ -192,8 +333,32 @@ export class WorkerPool {
     this.workers.set(id, worker);
     this.idle.add(worker);
     this.wireWorker(worker);
+    this.metrics.spawned++;
+    this.noteSize();
 
     return worker;
+  }
+
+  private async createWorkerWithTimeout(): Promise<WorkerHandle> {
+    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.factory(),
+        new Promise<never>((_, reject) => {
+          timeout = globalThis.setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`,
+                ),
+              ),
+            this.spawnTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) globalThis.clearTimeout(timeout);
+    }
   }
 
   private wireWorker(worker: PoolWorker): void {
@@ -226,12 +391,23 @@ export class WorkerPool {
     return null;
   }
 
-  private reserve(worker: PoolWorker): void {
+  private reserve(worker: PoolWorker): boolean {
+    if (
+      this.destroyed ||
+      !this.workers.has(worker.id) ||
+      worker.handle.terminated ||
+      worker.cancelling
+    ) {
+      this.recycle(worker);
+      return false;
+    }
+
     this.clearIdleTimer(worker);
     this.idle.delete(worker);
     this.active.add(worker);
     worker.activeSessionId = RESERVED_SESSION_ID;
     worker.cancelling = false;
+    return true;
   }
 
   private transitionToActive(worker: PoolWorker, sessionId: string): void {
@@ -277,23 +453,29 @@ export class WorkerPool {
   private reap(worker: PoolWorker): void {
     if (!this.workers.has(worker.id)) return;
     if (worker.activeSessionId !== null) return;
-    this.recycle(worker);
+    void this.cleanupAndRemove(worker);
+    this.metrics.reaped++;
   }
 
   private armIdleTimer(worker: PoolWorker): void {
     this.clearIdleTimer(worker);
 
     if (this.idleTimeoutMs <= 0) {
-      this.reap(worker);
+      if (this.idle.size > this.minIdle) this.reap(worker);
       return;
     }
 
-    worker.idleTimer = setTimeout(() => this.reap(worker), this.idleTimeoutMs);
+    // Keep below minIdle floor warm indefinitely.
+    if (this.idle.size <= this.minIdle) return;
+
+    worker.idleTimer = globalThis.setTimeout(() => {
+      if (this.idle.size > this.minIdle) this.reap(worker);
+    }, this.idleTimeoutMs);
   }
 
   private clearIdleTimer(worker: PoolWorker): void {
     if (worker.idleTimer !== null) {
-      clearTimeout(worker.idleTimer);
+      globalThis.clearTimeout(worker.idleTimer);
       worker.idleTimer = null;
     }
   }
@@ -320,5 +502,48 @@ export class WorkerPool {
 
   private destroyWorker(worker: PoolWorker): void {
     void this.cleanupAndRemove(worker);
+  }
+
+  private assertInvariants(): void {
+    if (!DEV) return;
+
+    for (const worker of this.idle) {
+      if (!this.workers.has(worker.id)) {
+        throw new Error(`[jxl-scheduler] Idle worker ${worker.id} missing from workers map`);
+      }
+      if (this.active.has(worker)) {
+        throw new Error(`[jxl-scheduler] Worker ${worker.id} is both idle and active`);
+      }
+      if (worker.activeSessionId !== null) {
+        throw new Error(
+          `[jxl-scheduler] Idle worker ${worker.id} has activeSessionId=${worker.activeSessionId}`,
+        );
+      }
+      if (worker.handle.terminated) {
+        throw new Error(`[jxl-scheduler] Idle worker ${worker.id} is terminated`);
+      }
+    }
+
+    for (const worker of this.active) {
+      if (!this.workers.has(worker.id)) {
+        throw new Error(`[jxl-scheduler] Active worker ${worker.id} missing from workers map`);
+      }
+      if (worker.activeSessionId === null) {
+        throw new Error(`[jxl-scheduler] Active worker ${worker.id} has no activeSessionId`);
+      }
+      if (worker.handle.terminated) {
+        throw new Error(`[jxl-scheduler] Active worker ${worker.id} is terminated`);
+      }
+    }
+
+    if (this.idle.size + this.active.size > this.workers.size) {
+      throw new Error("[jxl-scheduler] Worker index sizes exceed workers map size");
+    }
+
+    if (this.workers.size + this.spawning > this.maxSize) {
+      throw new Error(
+        `[jxl-scheduler] Pool exceeds maxSize: workers=${this.workers.size}, spawning=${this.spawning}, max=${this.maxSize}`,
+      );
+    }
   }
 }
