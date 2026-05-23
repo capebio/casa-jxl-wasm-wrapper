@@ -117,7 +117,7 @@ function queueDecodeMessage(sessionId: string, msg: QueuedDecodeMessage): void {
       type: "decode_error",
       sessionId,
       code: "QueueOverflow",
-      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`,
+      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages for session ${sessionId}`,
     });
     return;
   }
@@ -137,7 +137,7 @@ function queueEncodeMessage(sessionId: string, msg: QueuedEncodeMessage): void {
       type: "encode_error",
       sessionId,
       code: "QueueOverflow",
-      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages`,
+      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages for session ${sessionId}`,
     });
     return;
   }
@@ -149,13 +149,7 @@ function flushQueuedDecodeMessages(sessionId: string, handler: DecodeHandler): v
   if (queue === undefined) return;
   queuedDecodeMessages.delete(sessionId);
   for (const msg of queue) {
-    switch (msg.type) {
-      case "decode_chunk":  handler.onChunk(msg.chunk);            break;
-      case "decode_close":  handler.onClose();                     break;
-      case "decode_cancel": void handler.onCancel(msg.reason);     break;
-      case "decode_pause":  handler.onPause();                     break;
-      case "decode_resume": handler.onResume();                    break;
-    }
+    routeToDecodeHandler(handler, msg);
   }
 }
 
@@ -164,12 +158,63 @@ function flushQueuedEncodeMessages(sessionId: string, handler: EncodeHandler): v
   if (queue === undefined) return;
   queuedEncodeMessages.delete(sessionId);
   for (const msg of queue) {
-    switch (msg.type) {
-      case "encode_pixels": handler.onPixels(msg.chunk, msg.region); break;
-      case "encode_finish": handler.onFinish();                      break;
-      case "encode_cancel": void handler.onCancel(msg.reason);       break;
-    }
+    routeToEncodeHandler(handler, msg);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-type dispatch and lookup-or-queue routing
+// ---------------------------------------------------------------------------
+
+function routeToDecodeHandler(handler: DecodeHandler, msg: QueuedDecodeMessage): void {
+  switch (msg.type) {
+    case "decode_chunk":  handler.onChunk(msg.chunk);        break;
+    case "decode_close":  handler.onClose();                  break;
+    case "decode_cancel": void handler.onCancel(msg.reason); break;
+    case "decode_pause":  handler.onPause();                  break;
+    case "decode_resume": handler.onResume();                 break;
+  }
+}
+
+function routeToEncodeHandler(handler: EncodeHandler, msg: QueuedEncodeMessage): void {
+  switch (msg.type) {
+    case "encode_pixels": handler.onPixels(msg.chunk, msg.region); break;
+    case "encode_finish": handler.onFinish();                       break;
+    case "encode_cancel": void handler.onCancel(msg.reason);       break;
+  }
+}
+
+function routeDecodeMessage(msg: QueuedDecodeMessage): void {
+  const handler = decodeSessions.get(msg.sessionId);
+  if (handler !== undefined) {
+    routeToDecodeHandler(handler, msg);
+  } else if (pendingDecodeStarts.has(msg.sessionId)) {
+    queueDecodeMessage(msg.sessionId, msg);
+  }
+}
+
+function routeEncodeMessage(msg: QueuedEncodeMessage): void {
+  const handler = encodeSessions.get(msg.sessionId);
+  if (handler !== undefined) {
+    routeToEncodeHandler(handler, msg);
+  } else if (pendingEncodeStarts.has(msg.sessionId)) {
+    queueEncodeMessage(msg.sessionId, msg);
+  }
+}
+
+function handleReleaseState(sessionId: string): void {
+  const decode = decodeSessions.get(sessionId);
+  if (decode !== undefined) {
+    decodeSessions.delete(sessionId);
+    void decode.onCancel("release_state").catch(() => undefined);
+  }
+  const encode = encodeSessions.get(sessionId);
+  if (encode !== undefined) {
+    encodeSessions.delete(sessionId);
+    void encode.onCancel("release_state").catch(() => undefined);
+  }
+  queuedDecodeMessages.delete(sessionId);
+  queuedEncodeMessages.delete(sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,114 +233,31 @@ self.onmessage = (ev: MessageEvent<MainToWorkerMessage>) => {
       void handleDecodeStart(msg);
       break;
 
-    case "decode_chunk": {
-      const m = msg as MsgDecodeChunk;
-      const handler = decodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        handler.onChunk(m.chunk);
-      } else if (pendingDecodeStarts.has(m.sessionId)) {
-        queueDecodeMessage(m.sessionId, m);
-      }
+    case "decode_chunk":
+    case "decode_close":
+    case "decode_cancel":
+    case "decode_pause":
+    case "decode_resume":
+      routeDecodeMessage(msg);
       break;
-    }
-
-    case "decode_close": {
-      const handler = decodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onClose();
-      } else if (pendingDecodeStarts.has(msg.sessionId)) {
-        queueDecodeMessage(msg.sessionId, msg);
-      }
-      break;
-    }
-
-    case "decode_cancel": {
-      const m = msg as MsgDecodeCancel;
-      const handler = decodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        void handler.onCancel(m.reason);
-      } else if (pendingDecodeStarts.has(m.sessionId)) {
-        queueDecodeMessage(m.sessionId, m);
-      }
-      break;
-    }
-
-    case "decode_pause": {
-      const handler = decodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onPause();
-      } else if (pendingDecodeStarts.has(msg.sessionId)) {
-        queueDecodeMessage(msg.sessionId, msg as MsgDecodePause);
-      }
-      break;
-    }
-
-    case "decode_resume": {
-      const handler = decodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onResume();
-      } else if (pendingDecodeStarts.has(msg.sessionId)) {
-        queueDecodeMessage(msg.sessionId, msg as MsgDecodeResume);
-      }
-      break;
-    }
 
     case "encode_start":
       void handleEncodeStart(msg);
       break;
 
-    case "encode_pixels": {
-      const m = msg as MsgEncodePixels;
-      const handler = encodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        handler.onPixels(m.chunk, m.region);
-      } else if (pendingEncodeStarts.has(m.sessionId)) {
-        queueEncodeMessage(m.sessionId, m);
-      }
+    case "encode_pixels":
+    case "encode_finish":
+    case "encode_cancel":
+      routeEncodeMessage(msg);
       break;
-    }
 
-    case "encode_finish": {
-      const handler = encodeSessions.get(msg.sessionId);
-      if (handler !== undefined) {
-        handler.onFinish();
-      } else if (pendingEncodeStarts.has(msg.sessionId)) {
-        queueEncodeMessage(msg.sessionId, msg as MsgEncodeFinish);
-      }
+    case "release_state":
+      handleReleaseState(msg.sessionId);
       break;
-    }
-
-    case "encode_cancel": {
-      const m = msg as MsgEncodeCancel;
-      const handler = encodeSessions.get(m.sessionId);
-      if (handler !== undefined) {
-        void handler.onCancel(m.reason);
-      } else if (pendingEncodeStarts.has(m.sessionId)) {
-        queueEncodeMessage(m.sessionId, m);
-      }
-      break;
-    }
 
     case "worker_shutdown":
       void handleShutdown();
       break;
-
-    case "release_state": {
-      const { sessionId } = msg;
-      const decode = decodeSessions.get(sessionId);
-      if (decode !== undefined) {
-        decodeSessions.delete(sessionId);
-        void decode.onCancel("release_state").catch(() => undefined);
-      }
-      const encode = encodeSessions.get(sessionId);
-      if (encode !== undefined) {
-        encodeSessions.delete(sessionId);
-        void encode.onCancel("release_state").catch(() => undefined);
-      }
-      queuedDecodeMessages.delete(sessionId);
-      queuedEncodeMessages.delete(sessionId);
-      break;
-    }
 
     default:
       break;
@@ -418,10 +380,10 @@ async function doShutdown(): Promise<void> {
   ]);
 
   const cancelPromises: Promise<void>[] = [];
-  for (const [, handler] of decodeSessions) {
+  for (const handler of decodeSessions.values()) {
     cancelPromises.push(handler.onCancel("worker_shutdown").catch(() => undefined));
   }
-  for (const [, handler] of encodeSessions) {
+  for (const handler of encodeSessions.values()) {
     cancelPromises.push(handler.onCancel("worker_shutdown").catch(() => undefined));
   }
   await Promise.allSettled(cancelPromises);
@@ -448,7 +410,7 @@ self.addEventListener("error", (event) => {
   self.postMessage({
     type: "worker_error",
     code: "UnhandledError",
-    message: event.message,
+    message: event.message ?? "Unknown worker error",
   });
 });
 
