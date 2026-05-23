@@ -488,3 +488,15 @@ Inner `try/catch` on `Promise.all` catches errors from either coroutine without 
 ## DH7-12. `attachRegion` helper — REJECTED
 
 Two call sites (`"progress"` and `"final"` cases). CLAUDE.md: simplicity first, no speculative abstractions; two uses do not justify a helper method.
+
+---
+
+# Round 8 — jxl-cache/browser.ts + jxl-stream/browser.ts (Facade Round 1)
+
+Evaluated against `packages/jxl-cache/src/browser.ts` and `packages/jxl-stream/src/browser.ts`.
+
+## Cache-9. OPFS `FileSystemSyncAccessHandle` — REJECTED
+
+`FileSystemSyncAccessHandle` is only available inside dedicated workers; `JxlCacheBrowser` runs in a regular browser context (main thread or shared worker). The async OPFS API (`createWritable`, `getFile`) is the correct path here. A worker-specialised `JxlCacheWorker` variant could use sync handles, but no current consumer runs the cache inside a dedicated worker. Adding this now would introduce dead code and split the implementation without a concrete performance benchmark to justify it.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.

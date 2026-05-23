@@ -36,6 +36,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 *   **Budget Check Before Pixel Transfer:** In the `"progress"` event handler, `checkBudget()` runs before `postMessage(msg, [pixels])`. Previously the check ran after transfer, making the `pixels` ArrayBuffer detached; `postBudgetExceeded` would send a zero-length payload. (`packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`)
 *   **`time_to_first_pixel_ms` emitted once:** A `firstPixelMetricPosted` flag ensures the metric fires only on the first progressive frame, not on every subsequent pass. (`packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`)
 *   **Pipelined I/O Prefetch:** `fromReadableStream` in `jxl-stream` prefetches the next network chunk immediately after each chunk arrives (before awaiting `session.push`), so network delivery of chunk N+1 overlaps with scheduler backpressure resolution on chunk N. Eliminates idle I/O time during push-wait on bandwidth-constrained connections.
+*   **Stream Abort Lifecycle Hardening:** `fromReadableStream` and `toReadableStream` in `jxl-stream` properly await abort cancellation with `Promise.allSettled`, cancel the reader on push failure, check abort after prefetched reads resolve (preventing missed aborts between read and push), and clean up the abort event listener on natural stream close. `toReadableStream` wires an abort listener in `start()` so a signal that fires before `pull()` is ever called still cancels the encode session correctly. `EncodeSession.chunks()` now types as `AsyncIterable<ArrayBuffer | Uint8Array>` to match actual encoder output without a copy.
 *   **Execution Budgets:** Stage-based time budgets prevent long-running decodes from hanging the worker or UI.
 
 ### 3. Scientific Correctness & Fidelity
@@ -57,7 +58,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 *   **Native Node.js Fallback:** High-speed N-API bindings for server-side processing, with a WASM fallback for restricted cloud environments.
 *   **Two-Layer Caching:**
     *   **Hot In-Memory LRU:** Instant retrieval of recently viewed frames.
-    *   **Persistent Cache:** Uses **OPFS (Origin Private File System)** in browsers and the local filesystem in Node for durable storage.
+    *   **Persistent Cache:** Uses **OPFS (Origin Private File System)** in browsers and the local filesystem in Node for durable storage. Key features: safe OPFS filename encoding (percent-encoding via `safeCacheName`), inflight get/set deduplication (concurrent requests for the same key collapse to one OPFS read/write), oversized-item guard (items exceeding `persistentLimit` are kept in memory only), and a JSON manifest (`__jxl_cache_manifest.json`) that survives page reloads, making the OPFS cache warm across sessions without an OPFS directory scan.
 
 ### 6. Developer & Debugging Tools
 *   **Comprehensive Benchmark UI:** A built-in dashboard for testing throughput across different WASM tiers and file types.
