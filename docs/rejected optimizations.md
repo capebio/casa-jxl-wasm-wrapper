@@ -64,6 +64,7 @@ This document records optimization proposals that were evaluated and rejected.
 *   **JXL signature check on first chunk (DH6-6):** Duplicates libjxl logic. Fragile due to multiple valid container starts (bare vs BMFF).
 *   **Worker-side decode timeout (DH6-8):** Duplicates scheduler `budgetMs`. Wall-clock timeouts fail on valid slow networks.
 *   **Edge-triggered worker_drain (DH7-7):** Risks stalling if queue starts below HWM and never crosses the threshold.
+*   **Dev-mode decode telemetry metric message (ChatGPT-R11-T):** Proposed posting a `{ type: "metric", metric: { name: "decode_queue_status", ... } }` message on every chunk. Same rejection as DH6-3 and DH-7: requires protocol changes (a new `decode_queue_status` name falls outside the closed `CodecMetric` union), and queue depth / latency are already observable from the `worker_drain` stream which now carries `queueDepth`, `queuedBytes`, and `adaptiveHwm` directly.
 *   **attachRegion helper (DH7-12):** Not enough call sites to justify abstraction.
 
 ## `packages/jxl-cache/src/browser.ts` & `packages/jxl-cache/src/lru.ts`

@@ -40,6 +40,8 @@ const HWM_EMA_ALPHA = 0.25;
 // Safety cap on total queued bytes. Scheduler's adaptive HWM keeps queued bytes well
 // below this (~2 MiB) in normal use; cap only fires for scheduler-free or buggy callers.
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB
+const DRAIN_MIN_INTERVAL_MS = 8;
+const BYTE_DRAIN_HWM = 2 * 1024 * 1024; // 2 MiB — byte-level secondary drain gate
 
 export class DecodeHandler {
   private readonly sessionId: string;
@@ -58,6 +60,14 @@ export class DecodeHandler {
   private wakeResolve: (() => void) | null = null;
   private paused = false;
   private resumeResolve: (() => void) | null = null;
+  
+  // Active decoder instance and disposal guard.
+  private decoder: BrowserDecoder | null = null;
+  private disposingDecoder = false;
+
+  // Drain coalescing state.
+  private lastDrainPostedMs = 0;
+  private lastDrainAllowed = false;
 
   // Adaptive drain HWM: EMA of decoder.push() duration (ms).
   private pushLatencyEma = 0;
@@ -112,6 +122,9 @@ export class DecodeHandler {
     };
     self.postMessage(msg);
     this.finishSession("cancelled");
+
+    // Best-effort: dispose the active decoder so any blocked event iterator is unblocked.
+    void this.disposeActiveDecoder();
   }
 
   onPause(): void {
@@ -143,15 +156,18 @@ export class DecodeHandler {
       preserveMetadata: this.opts.preserveMetadata,
     });
 
+    // Store decoder reference so terminal paths can actively dispose it.
+    this.decoder = decoder;
+
     try {
       await Promise.all([this.feedDecoder(decoder), this.readDecoderEvents(decoder)]);
     } catch (err: unknown) {
       this.failSession("Internal", err instanceof Error ? err.message : String(err));
     } finally {
-      // no-op when already ended via a normal terminal path; guards against
-      // both loops completing without reaching a terminal (should not occur).
+      // Ensure session finish and best-effort disposal of decoder to unblock
+      // any pending async iterators inside the decoder implementation.
       this.finishSession(this.state);
-      await decoder.dispose();
+      await this.disposeActiveDecoder();
     }
   }
 
@@ -205,6 +221,19 @@ export class DecodeHandler {
     }
   }
 
+  private async disposeActiveDecoder(): Promise<void> {
+    if (this.disposingDecoder) return;
+    const decoder = this.decoder;
+    if (decoder === null) return;
+    this.disposingDecoder = true;
+    this.decoder = null;
+    try {
+      await decoder.dispose();
+    } catch {
+      // best-effort during terminal cleanup
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
@@ -250,28 +279,63 @@ export class DecodeHandler {
         await this.waitForResume();
         continue;
       }
+
       await this.waitForChunk();
       if (this.isTerminal() || this.paused) continue;
+
       while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
+        if (this.checkBudget()) {
+          this.finishSession("budget_exceeded");
+          return;
+        }
+
         const chunk = this.takeNextChunk();
         if (chunk === null) break;
+
         const t0 = performance.now();
         await decoder.push(chunk);
         const pushMs = performance.now() - t0;
         this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
-        if (this.queueDepth < this.adaptiveHwm()) {
-          self.postMessage({
-            type: "worker_drain",
-            sessionId: this.sessionId,
-            latencyMs: Math.round(this.pushLatencyEma),
-          });
+
+        if (this.checkBudget()) {
+          this.finishSession("budget_exceeded");
+          return;
         }
+
+        this.maybePostDrain();
       }
+
       if (this.inputClosed && !this.isTerminal()) {
         await decoder.close();
         return;
       }
     }
+  }
+
+  private maybePostDrain(): void {
+    const now = performance.now();
+    const hwm = this.adaptiveHwm();
+
+    const drainAllowed = this.queueDepth < hwm && this.queuedBytes < BYTE_DRAIN_HWM;
+
+    const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
+    const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
+
+    this.lastDrainAllowed = drainAllowed;
+
+    if (!drainAllowed) return;
+    if (!crossedIntoDrain && !intervalElapsed) return;
+
+    this.lastDrainPostedMs = now;
+
+    self.postMessage({
+      type: "worker_drain",
+      sessionId: this.sessionId,
+      latencyMs: Math.round(this.pushLatencyEma),
+      queueDepth: this.queueDepth,
+      queuedBytes: this.queuedBytes,
+      adaptiveHwm: hwm,
+    });
   }
 
   private async readDecoderEvents(decoder: BrowserDecoder): Promise<void> {
@@ -346,7 +410,7 @@ export class DecodeHandler {
   }
 
   private checkBudget(): boolean {
-    if (this.opts.budgetMs === null) return false;
+    if (this.opts.budgetMs == null) return false;
     return performance.now() - this.stageStartMs > this.opts.budgetMs;
   }
 
@@ -360,6 +424,8 @@ export class DecodeHandler {
     };
     self.postMessage(msg);
     this.finishSession("error");
+    // Best-effort unblock of decoder.events().
+    void this.disposeActiveDecoder();
   }
 
   private postBudgetExceeded(
@@ -381,6 +447,8 @@ export class DecodeHandler {
     };
     self.postMessage(msg, [pixels]);
     this.finishSession("budget_exceeded");
+    // Best-effort unblock of decoder.events().
+    void this.disposeActiveDecoder();
   }
 
   private postFirstPixelMetric(): void {

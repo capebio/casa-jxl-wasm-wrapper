@@ -72,6 +72,8 @@ export class DecodeHandler {
   private paused = false;
   private readonly stageStartMs = performance.now();
   private firstPixelMetricPosted = false;
+  private decoder: NodeDecoder | null = null;
+  private disposingDecoder = false;
 
   constructor(opts: MsgDecodeStart, backend: Backend, callbacks: DecodeHandlerCallbacks) {
     this.sessionId = opts.sessionId;
@@ -113,6 +115,7 @@ export class DecodeHandler {
     const msg: MsgDecodeCancelled = { type: "decode_cancelled", sessionId: this.sessionId };
     this.port.postMessage(msg);
     this.finishSession("cancelled");
+    void this.disposeActiveDecoder();
   }
 
   onPause(): void {
@@ -175,14 +178,30 @@ export class DecodeHandler {
       preserveIcc: this.opts.preserveIcc,
       preserveMetadata: this.opts.preserveMetadata,
     });
+    this.decoder = decoder;
 
     try {
       await Promise.all([this.feedDecoder(decoder), this.readDecoderEvents(decoder)]);
     } catch (err: unknown) {
-      this.failSession("Internal", err instanceof Error ? err.message : String(err));
+      if (!this.isTerminal()) {
+        this.failSession("Internal", err instanceof Error ? err.message : String(err));
+      }
     } finally {
       this.finishSession(this.state);
+      await this.disposeActiveDecoder();
+    }
+  }
+
+  private async disposeActiveDecoder(): Promise<void> {
+    if (this.disposingDecoder) return;
+    const decoder = this.decoder;
+    if (decoder === null) return;
+    this.disposingDecoder = true;
+    this.decoder = null;
+    try {
       await decoder.dispose();
+    } catch {
+      // best-effort during terminal cleanup
     }
   }
 
@@ -233,6 +252,10 @@ export class DecodeHandler {
         const chunk = this.takeNextChunk();
         if (chunk === null) break;
         await decoder.push(chunk);
+        if (this.checkBudget()) {
+          this.finishSession("budget_exceeded");
+          return;
+        }
         if (this.queueDepth < CHUNK_HWM) {
           this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });
         }
@@ -319,7 +342,7 @@ export class DecodeHandler {
   }
 
   private checkBudget(): boolean {
-    if (this.opts.budgetMs === null) return false;
+    if (this.opts.budgetMs == null) return false;
     return performance.now() - this.stageStartMs > this.opts.budgetMs;
   }
 

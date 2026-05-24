@@ -217,7 +217,10 @@ export interface MsgWorkerError {
 export interface MsgWorkerDrain {
   type: "worker_drain";
   sessionId: string;
-  latencyMs?: number;  // EMA of decoder.push() duration; drives scheduler pushHwm tuning
+  latencyMs?: number;   // EMA of decoder.push() duration; drives scheduler pushHwm tuning
+  queueDepth?: number;  // unprocessed chunk count at drain time
+  queuedBytes?: number; // unprocessed byte count at drain time
+  adaptiveHwm?: number; // computed HWM that triggered drain
 }
 
 // Metric passthrough
