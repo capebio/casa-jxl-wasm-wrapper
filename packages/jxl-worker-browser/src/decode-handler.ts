@@ -268,7 +268,8 @@ export class DecodeHandler {
       this.chunkQueue.length = 0;
       this.chunkReadIndex = 0;
     } else if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
-      this.chunkQueue = this.chunkQueue.slice(this.chunkReadIndex);
+      this.chunkQueue.copyWithin(0, this.chunkReadIndex);
+      this.chunkQueue.length -= this.chunkReadIndex;
       this.chunkReadIndex = 0;
     }
   }
