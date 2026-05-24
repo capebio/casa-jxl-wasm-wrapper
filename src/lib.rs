@@ -673,12 +673,14 @@ pub fn downscale_rgba(
 
 /// Re-apply tonemap + orientation to a cached lightbox-sized rgb16 buffer.
 ///
-/// `rgb16_bytes` is packed u16 LE (6 bytes per pixel).
+/// `rgb16_src` is flat RGB16 (3 u16 per pixel, interleaved).  For repeated slider
+/// edits prefer `LookRenderer`, which owns the buffer inside WASM and avoids the
+/// JS→WASM transfer on each call.
 /// `color_matrix_flat` is 9 f32s row-major; pass a slice of len != 9 to use the
 /// built-in fallback.
 #[wasm_bindgen]
 pub fn apply_look(
-    rgb16_bytes: &[u8],
+    rgb16_src: &[u16],
     width: u32,
     height: u32,
     orientation: u16,
@@ -698,27 +700,22 @@ pub fn apply_look(
     texture: f32,
     clarity: f32,
 ) -> Result<Vec<u8>, JsError> {
-    // 1. Unpack u16 LE bytes → Vec<u16>
-    let n = rgb16_bytes.len() / 2;
-    let expected_pixels = (width as usize).checked_mul(height as usize)
+    let w = width as usize;
+    let h = height as usize;
+    let expected_len = w.checked_mul(h)
+        .and_then(|px| px.checked_mul(3))
         .ok_or_else(|| JsError::new("apply_look: dimensions overflow"))?;
-    if n != expected_pixels * 3 {
+    if rgb16_src.len() != expected_len {
         return Err(JsError::new(&format!(
-            "apply_look: rgb16_bytes length {} != {}×{}×6",
-            rgb16_bytes.len(), width, height
+            "apply_look: rgb16 length {} != {}×{}×3",
+            rgb16_src.len(), w, h
         )));
     }
-    let mut rgb16: Vec<u16> = rgb16_bytes
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .collect();
+    let mut rgb16 = rgb16_src.to_vec();
 
-    // 2. Build PipelineParams
     let mut params = pipeline::PipelineParams::default_olympus();
-    // Guard against 0/NaN/negative wb values from callers; use olympus defaults as fallback.
     if wb_r.is_finite() && wb_r > 0.0 { params.wb_r = wb_r; }
     if wb_b.is_finite() && wb_b > 0.0 { params.wb_b = wb_b; }
-    // Falls back to built-in CAM_TO_SRGB if caller passes wrong-length slice.
     if color_matrix_flat.len() == 9 {
         let mut m = [[0f32; 3]; 3];
         for r in 0..3 {
@@ -730,9 +727,6 @@ pub fn apply_look(
     }
     apply_look_params(&mut params, exposure_ev, contrast, highlights, shadows,
         whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
-
-    let w = width as usize;
-    let h = height as usize;
 
     if params.texture != 0.0 || params.clarity != 0.0 {
         pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
