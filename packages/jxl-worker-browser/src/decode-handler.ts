@@ -61,9 +61,9 @@ export class DecodeHandler {
   private paused = false;
   private resumeResolve: (() => void) | null = null;
   
-  // Active decoder instance and disposal guard.
+  // Active decoder instance; shared disposal promise makes every awaiter join the same operation.
   private decoder: BrowserDecoder | null = null;
-  private disposingDecoder = false;
+  private disposePromise: Promise<void> | null = null;
 
   // Drain coalescing state.
   private lastDrainPostedMs = 0;
@@ -128,7 +128,7 @@ export class DecodeHandler {
   }
 
   onPause(): void {
-    if (this.cancelled || this.paused || this.state === "final" || this.state === "error") return;
+    if (this.isTerminal() || this.paused) return;
     this.paused = true;
     this.wake(); // wake feedDecoder so it reaches the pause check immediately
     const msg: MsgDecodePaused = { type: "decode_paused", sessionId: this.sessionId };
@@ -221,17 +221,13 @@ export class DecodeHandler {
     }
   }
 
-  private async disposeActiveDecoder(): Promise<void> {
-    if (this.disposingDecoder) return;
+  private disposeActiveDecoder(): Promise<void> {
+    if (this.disposePromise !== null) return this.disposePromise;
     const decoder = this.decoder;
-    if (decoder === null) return;
-    this.disposingDecoder = true;
+    if (decoder === null) return Promise.resolve();
     this.decoder = null;
-    try {
-      await decoder.dispose();
-    } catch {
-      // best-effort during terminal cleanup
-    }
+    this.disposePromise = Promise.resolve(decoder.dispose()).catch(() => {});
+    return this.disposePromise;
   }
 
   // ---------------------------------------------------------------------------
@@ -285,11 +281,6 @@ export class DecodeHandler {
       if (this.isTerminal() || this.paused) continue;
 
       while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
-        if (this.checkBudget()) {
-          this.finishSession("budget_exceeded");
-          return;
-        }
-
         const chunk = this.takeNextChunk();
         if (chunk === null) break;
 
@@ -297,11 +288,6 @@ export class DecodeHandler {
         await decoder.push(chunk);
         const pushMs = performance.now() - t0;
         this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
-
-        if (this.checkBudget()) {
-          this.finishSession("budget_exceeded");
-          return;
-        }
 
         this.maybePostDrain();
       }
@@ -389,6 +375,7 @@ export class DecodeHandler {
           };
           if (event.region !== undefined) msg.region = event.region;
           self.postMessage(msg, [pixels]);
+          this.postFirstPixelMetric();
           this.postMetric("time_to_final_ms", performance.now() - this.stageStartMs);
           this.finishSession("final");
           return;
