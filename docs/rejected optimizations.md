@@ -132,3 +132,35 @@ Evaluated against `packages/jxl-session/src/decode-session.ts` on branch `Facade
 *   **Update lastInfo on decode_budget_exceeded (ChatGPT-DS-5):** ALREADY IMPLEMENTED. Line 185: `this.lastInfo = msg.info;` already present.
 *   **Move KNOWN_JXL_ERROR_CODES to module-level ReadonlySet (ChatGPT-DS-6):** ALREADY IMPLEMENTED. Lines 19–22: module-level `ReadonlySet<string>` already exists. ChatGPT reviewed a stale version.
 *   **try/catch on scheduler.send() in close() (ChatGPT-DS-7):** REJECTED. Labeled "optional" by the reviewer and conditional on `scheduler.send()` throwing. `send()` is fire-and-forget by design; no evidence it throws on dead sessions. CLAUDE.md: no error handling for scenarios that cannot happen.
+
+## `packages/jxl-session/src/encode-session.ts` (ChatGPT batch — encode-session lifecycle)
+
+Evaluated against `packages/jxl-session/src/encode-session.ts` on branch `encoder`. Items 1, 3, 4 were implemented (post-await lifecycle rechecks, abort signal lifecycle, module-level error codes). Items 2, 5, 6, 7 rejected.
+
+*   **Add comment to finish() explaining acquirePromise invariant (ChatGPT-ES-2):** REJECTED. The WHY is not non-obvious — the `if (this.terminated) return` guard two lines below the await is self-documenting. CLAUDE.md: no comments unless WHY would surprise a reader.
+*   **Immediate cancel() — call cancelSession before awaiting acquirePromise (ChatGPT-ES-5):** REJECTED. `decode-session.cancel()` (the reference implementation) uses the same await-before-cancel ordering. Changing the ordering without verifying scheduler behaviour for sessions mid-acquisition is an unwarranted protocol risk. The scheduler's `cancelSession` already handles all states (queued, running, paused); the await ensures the session is in a defined state before the cancel call, consistent with the established pattern.
+*   **Local variable extraction for iccProfile/exif/xmp before startMsg (ChatGPT-ES-6):** REJECTED. Cosmetic only. CLAUDE.md: no opportunistic refactors.
+*   **try/catch around onMetric callback (ChatGPT-ES-7):** REJECTED. `decode-session.ts` does not guard onMetric. Silent swallow hides user callback bugs without benefit; if onMetric throws, a session error is more informative than silent suppression. Same class of rejection as ChatGPT-DS-7.
+
+## `packages/jxl-session/src/encode-session.ts` (Grok batch — encode-session polish)
+
+All 7 proposals rejected. No code changes.
+
+*   **Abort handler via async cancel() fire-and-forget (Grok-ES-1a):** REJECTED. `decode-session.ts` calls `fail()` directly in the abort handler; async `cancel()` with `.catch(() => {})` adds scheduler cancellation in a fire-and-forget that cannot be awaited by the abort event. Diverges from the reference pattern without correctness benefit. The abort handler is synchronous by contract.
+*   **cancel() post-await recheck + signal-aware error message (Grok-ES-1b):** REJECTED. The updated `cancel()` has a JS operator-precedence bug: `reason ?? this.abortSignal?.aborted ? "Encode aborted by signal" : "Encode cancelled"` parses as `(reason ?? this.abortSignal?.aborted) ? "..." : "..."`, not the intended conditional on `.aborted`. `decode-session.cancel()` does not have the extra post-await recheck either; `scheduler.cancelSession()` on an already-terminated session is a no-op and `terminate()` has its own guard.
+*   **onChunk callback option (Grok-ES-2):** REJECTED. New public API requiring `EncodeOptions` type change in the `@casabio/jxl-core` package. `chunks()` already provides the same data as an `AsyncIterable`. YAGNI; no caller demonstrates the need.
+*   **Throw on both distance+quality provided (Grok-ES-3):** REJECTED. Breaking behavioral change to existing callers. Current silent-precedence (distance wins) is explicit logic, not ambiguity. Requires a spec and explicit user decision.
+*   **state / totalBytes read-only getters (Grok-ES-4):** REJECTED. New public API surface with no current consumer. YAGNI.
+*   **pushPixels fast path via !acquirePromise (Grok-ES-5):** REJECTED. `acquirePromise` is assigned in the constructor and is always a `Promise<unknown>` — never `null` or `undefined`. `if (!this.acquirePromise)` is always `false`; the proposed fast path never executes. Logic bug. Also speculative; no profiling evidence that `acquirePromise` resolution is hot.
+*   **dispose() method (Grok-ES-6):** REJECTED. Matches already-rejected DH-10 ("Explicit dispose() method: Ambiguous. `onCancel()` and `finally` blocks already handle full teardown."). `terminate()` via `cancel()` or abort covers all teardown paths.
+*   **JSDoc class comment + richer error context (Grok-ES-7):** REJECTED. CLAUDE.md: comments only when WHY would surprise a reader. `@see EncodeSession` adds nothing beyond the class declaration. Commented-out `this.scheduler.removeMessageListener(this.id)` is code-smell; `onMessage` returns `void` with no unsubscribe API.
+
+## `packages/jxl-session/src/encode-session.ts` (Grok batch 2 — micro-opts)
+
+All 5 proposals rejected. No code changes.
+
+*   **Reuse one-element pixelTransferList across pushPixels() calls (Grok-ES2-1):** REJECTED. `scheduler.send()` has a queued path (line 264 of `scheduler.ts`) that stores `{ msg, transfer }` into `record.pending.bufferedChunks` by reference. Reusing the same array means all buffered chunk entries share one reference — a second `pushPixels` call would overwrite `pixelTransferList[0]` and then `length = 0` would empty the array before the first chunk is flushed to the worker. Corrupts transfer lists for any session that pushes pixels before acquiring a worker. The proposal's own acceptance caveat ("only if scheduler.send() does not retain the transfer list") triggers: **it does retain it in the queued path**.
+*   **Post-waitForDrain() recheck (Grok-ES2-2):** ALREADY IMPLEMENTED. Lines 121–122 of `encode-session.ts`: `if (this.terminated || this.finished) return;` already follows `waitForDrain()`. Landed in the ChatGPT batch (suggestion 1).
+*   **switch instead of module-level ReadonlySet in normalizeCode() (Grok-ES2-3):** REJECTED. Module-level `KNOWN_JXL_ERROR_CODES: ReadonlySet<string>` is already in place — allocated once at module load, O(1) hash lookup, matches `decode-session.ts` pattern. Replacing it with a `switch` removes the pattern consistency with `decode-session` without performance benefit; both are O(1) for 10 entries.
+*   **Cache opts.onMetric in a class field (Grok-ES2-4):** REJECTED. Metric path is not hot. V8 hidden-class caching makes `this.opts.onMetric` and `this.onMetric` cost-equivalent. Speculative micro-opt with no profiling data.
+*   **Drop encode_first_byte_ready case (Grok-ES2-5):** REJECTED. The explicit case with its comment documents intentional protocol handling — the message type exists in the wire protocol, its timing data arrives redundantly via the `metric` message, and the comment says why this is correct. Removing it falls to `default: break`, functionally identical, but erases the explanation. CLAUDE.md: keep comments that document non-obvious protocol invariants.
