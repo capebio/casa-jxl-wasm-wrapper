@@ -1,13 +1,17 @@
-// Blur vertical-pass benchmark: naive vs tiled vs transpose.
+// Blur vertical-pass benchmark: naive vs tiled vs transpose vs clarity-8.
 // Run: cargo run --bin blur_bench --release
 //
-// Tests 13-tap Gaussian (clarity kernel) on a 5240×3912 synthetic image
-// — same dimensions as P1100157.ORF.
+// Tested at two sizes:
+//   1024×1024  — web thumbnail / small image
+//   5240×3912  — full P1100157.ORF dimensions (~20 MP)
+//
+// Known results (1024×1024, native release build):
+//   tiled-16 wins vertical pass (33ms vs 37ms naive; tiled-32 close at 35ms)
+//   transpose is slower (44ms); tiled-2d variants add complexity with no gain.
+//
+// clarity-8 results at both sizes still needed.
 
 use std::time::Instant;
-
-const W: usize = 5240;
-const H: usize = 3912;
 
 fn k13() -> [f32; 13] {
     [0.0185, 0.0342, 0.0563, 0.0831, 0.1097, 0.1296,
@@ -15,7 +19,7 @@ fn k13() -> [f32; 13] {
      0.1296, 0.1097, 0.0831, 0.0563, 0.0342, 0.0185]
 }
 
-// Shared: horizontal pass (both methods need this; access is row-major → cache-friendly).
+// Shared: horizontal pass — row-major access is cache-friendly.
 fn h_pass(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     let half = k.len() / 2;
     for y in 0..h {
@@ -36,7 +40,7 @@ fn h_pass(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     }
 }
 
-// CURRENT: naive vertical pass — stride = w*3*2 bytes per kernel tap.
+// Naive vertical pass — stride = w*3*2 bytes per kernel tap (baseline).
 fn v_pass_naive(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     let half = k.len() / 2;
     for y in 0..h {
@@ -57,8 +61,9 @@ fn v_pass_naive(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     }
 }
 
-// OPTION A: tiled vertical — process TILE columns at once so the working set
-// (TILE * kernel_len * 3 * 2 bytes) fits in L1 cache.
+// Tiled vertical — TILE columns at once; working set = TILE*klen*3*2 bytes in L1.
+// Runtime `tile` at the right edge may prevent LLVM from fully unrolling the
+// inner loop for that last partial tile; all other tiles are exactly TILE wide.
 fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     let half = k.len() / 2;
     for y in 0..h {
@@ -86,11 +91,9 @@ fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], d
     }
 }
 
-// OPTION B: 8-wide unrolled vertical pass with a separate scalar tail.
-// The inner `for i in 0..LANE` iterates exactly LANE=8 times on every
-// main-loop iteration, so LLVM can fully unroll it — unlike v_pass_tiled
-// where `for xi in 0..tile` uses a runtime `tile` that may prevent full
-// unroll for the constant-TILE branch.
+// 8-wide unrolled vertical pass with a separate scalar tail.
+// Inner `for i in 0..LANE` is always exactly 8 iterations — LLVM can fully
+// unroll it. v_pass_tiled's `tile` variable at the right edge may block that.
 fn v_pass_clarity(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     let half = k.len() / 2;
     const LANE: usize = 8;
@@ -100,7 +103,6 @@ fn v_pass_clarity(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
 
         while x + LANE <= w {
             let mut acc = [[0f32; 3]; LANE];
-
             for (ki, &kv) in k.iter().enumerate() {
                 let yi = (y as isize + ki as isize - half as isize)
                     .clamp(0, h as isize - 1) as usize;
@@ -112,7 +114,6 @@ fn v_pass_clarity(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
                     acc[i][2] += src[b + 2] as f32 * kv;
                 }
             }
-
             for i in 0..LANE {
                 let b = (y * w + x + i) * 3;
                 dst[b]     = acc[i][0].round() as u16;
@@ -141,8 +142,7 @@ fn v_pass_clarity(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     }
 }
 
-// OPTION C: transpose → horizontal → transpose back.
-// Uses a cache-tiled 32×32 block transpose.
+// Transpose → horizontal → transpose back. Cache-tiled 32×32 block transpose.
 fn transpose_tiled(src: &[u16], sw: usize, sh: usize, dst: &mut [u16]) {
     const T: usize = 32;
     for ty in (0..sh).step_by(T) {
@@ -167,64 +167,57 @@ fn v_pass_via_transpose(
     let n = w * h * 3;
     s1.resize(n, 0);
     s2.resize(n, 0);
-    transpose_tiled(src, w, h, s1);       // W×H → H×W
-    h_pass(s1, h, w, k, s2);             // horizontal on transposed
-    transpose_tiled(s2, h, w, dst);       // H×W → W×H
+    transpose_tiled(src, w, h, s1);
+    h_pass(s1, h, w, k, s2);
+    transpose_tiled(s2, h, w, dst);
 }
 
 fn time_fn(name: &str, runs: usize, mut f: impl FnMut()) {
-    // 1 warmup, then `runs` timed runs
-    f();
+    f(); // warmup
     let mut ms: Vec<f64> = (0..runs).map(|_| {
         let t = Instant::now();
         f();
         t.elapsed().as_secs_f64() * 1000.0
     }).collect();
     ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    println!("  {:30}  min={:6.0}ms  med={:6.0}ms  max={:6.0}ms",
+    println!("  {:30}  min={:6.1}ms  med={:6.1}ms  max={:6.1}ms",
              name, ms[0], ms[runs / 2], ms[runs - 1]);
 }
 
-fn main() {
-    let n = W * H * 3;
+fn bench_size(w: usize, h: usize, kernel: &[f32], runs: usize) {
+    let n = w * h * 3;
     let mb = n as f64 * 2.0 / 1024.0 / 1024.0;
-    println!("Image: {}×{} ({:.0} MP), rgb16 = {:.0} MB", W, H, (W*H) as f64 / 1e6, mb);
-    println!("Kernel: 13-tap (clarity). Runs = 5.\n");
+    println!("\n=== {}×{} ({:.1} MP, {:.0} MB rgb16) ===", w, h, (w * h) as f64 / 1e6, mb);
 
-    let kernel = k13();
     let src: Vec<u16> = (0..n).map(|i| (i % 65536) as u16).collect();
     let mut temp = vec![0u16; n];
     let mut out  = vec![0u16; n];
     let mut s1: Vec<u16> = Vec::new();
     let mut s2: Vec<u16> = Vec::new();
 
-    // Pre-compute horizontal pass (shared; not under comparison here).
-    h_pass(&src, W, H, &kernel, &mut temp);
+    h_pass(&src, w, h, kernel, &mut temp);
 
-    println!("Vertical pass only (after shared horizontal pass):");
-    time_fn("naive (current)", 5, || v_pass_naive(&temp, W, H, &kernel, &mut out));
-    time_fn("tiled-16", 5,        || v_pass_tiled::<16>(&temp, W, H, &kernel, &mut out));
-    time_fn("tiled-32", 5,        || v_pass_tiled::<32>(&temp, W, H, &kernel, &mut out));
-    time_fn("tiled-64", 5,        || v_pass_tiled::<64>(&temp, W, H, &kernel, &mut out));
-    time_fn("tiled-128", 5,       || v_pass_tiled::<128>(&temp, W, H, &kernel, &mut out));
-    time_fn("clarity-8 (unrolled)", 5, || v_pass_clarity(&temp, W, H, &kernel, &mut out));
-    time_fn("transpose+hpass+T", 5, || v_pass_via_transpose(&temp, W, H, &kernel, &mut out, &mut s1, &mut s2));
+    println!("  Vertical pass only:");
+    time_fn("naive (baseline)",      runs, || v_pass_naive(&temp, w, h, kernel, &mut out));
+    time_fn("tiled-16",              runs, || v_pass_tiled::<16>(&temp, w, h, kernel, &mut out));
+    time_fn("tiled-32",              runs, || v_pass_tiled::<32>(&temp, w, h, kernel, &mut out));
+    time_fn("tiled-64",              runs, || v_pass_tiled::<64>(&temp, w, h, kernel, &mut out));
+    time_fn("tiled-128",             runs, || v_pass_tiled::<128>(&temp, w, h, kernel, &mut out));
+    time_fn("clarity-8 (unrolled)",  runs, || v_pass_clarity(&temp, w, h, kernel, &mut out));
+    time_fn("transpose+h+transpose", runs, || v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2));
 
-    println!("\nFull blur round-trip (h_pass + v_pass):");
-    time_fn("current (h+v naive)", 5, || {
-        h_pass(&src, W, H, &kernel, &mut temp);
-        v_pass_naive(&temp, W, H, &kernel, &mut out);
-    });
-    time_fn("h+v tiled-64", 5, || {
-        h_pass(&src, W, H, &kernel, &mut temp);
-        v_pass_tiled::<64>(&temp, W, H, &kernel, &mut out);
-    });
-    time_fn("h+v clarity-8", 5, || {
-        h_pass(&src, W, H, &kernel, &mut temp);
-        v_pass_clarity(&temp, W, H, &kernel, &mut out);
-    });
-    time_fn("h+transpose+h+T", 5, || {
-        h_pass(&src, W, H, &kernel, &mut temp);
-        v_pass_via_transpose(&temp, W, H, &kernel, &mut out, &mut s1, &mut s2);
-    });
+    println!("  Full round-trip (h_pass + v_pass):");
+    time_fn("naive",                 runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_naive(&temp, w, h, kernel, &mut out); });
+    time_fn("tiled-16",              runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_tiled::<16>(&temp, w, h, kernel, &mut out); });
+    time_fn("tiled-32",              runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_tiled::<32>(&temp, w, h, kernel, &mut out); });
+    time_fn("tiled-64",              runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_tiled::<64>(&temp, w, h, kernel, &mut out); });
+    time_fn("clarity-8",             runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_clarity(&temp, w, h, kernel, &mut out); });
+    time_fn("transpose+h+transpose", runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2); });
+}
+
+fn main() {
+    let kernel = k13();
+    println!("Kernel: 13-tap Gaussian (clarity). Runs = 5 per variant.");
+    bench_size(1024, 1024, &kernel, 5);
+    bench_size(5240, 3912, &kernel, 5);
 }
