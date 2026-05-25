@@ -4,6 +4,10 @@
 import { JxlError } from "@casabio/jxl-core/errors";
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer } from "./util.js";
+const KNOWN_JXL_ERROR_CODES = new Set([
+    "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
+    "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError", "Internal",
+]);
 export class DecodeSessionImpl {
     id;
     scheduler;
@@ -11,6 +15,8 @@ export class DecodeSessionImpl {
     frameStream = new AsyncEventStream();
     doneDeferred = deferred();
     acquirePromise;
+    abortSignal;
+    abortHandler;
     lastInfo = null;
     closed = false;
     terminated = false;
@@ -48,11 +54,24 @@ export class DecodeSessionImpl {
             signal: opts.signal ?? null,
         })
             .catch((err) => {
-            this.terminate(new JxlError("Internal", `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
+            this.fail(new JxlError("Internal", `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
         });
-        // Settle done() on external abort even if the session never reached a worker.
-        if (opts.signal != null) {
-            opts.signal.addEventListener("abort", () => this.terminate(new JxlError("Cancelled", "Decode aborted by signal", { sessionId: this.id })), { once: true });
+        // Set up abort signal handling. Check aborted immediately to handle signals
+        // that were already triggered before this session was constructed.
+        this.abortSignal = opts.signal ?? null;
+        if (this.abortSignal !== null) {
+            this.abortHandler = () => {
+                this.fail(new JxlError("Cancelled", "Decode aborted by signal", { sessionId: this.id }));
+            };
+            if (this.abortSignal.aborted) {
+                this.abortHandler();
+            }
+            else {
+                this.abortSignal.addEventListener("abort", this.abortHandler, { once: true });
+            }
+        }
+        else {
+            this.abortHandler = null;
         }
     }
     // ---------------------------------------------------------------------------
@@ -67,6 +86,9 @@ export class DecodeSessionImpl {
             return;
         // Backpressure: resolves when the worker queue is below the high-water mark.
         await this.scheduler.waitForDrain(this.id);
+        // Re-check: cancellation or worker error may have arrived during drain wait.
+        if (this.terminated || this.closed)
+            return;
         const ab = toTransferableBuffer(chunk);
         this.scheduler.send(this.id, { type: "decode_chunk", sessionId: this.id, chunk: ab }, [ab]);
     }
@@ -90,7 +112,7 @@ export class DecodeSessionImpl {
             return;
         await this.acquirePromise.catch(() => undefined);
         this.scheduler.cancelSession(this.id);
-        this.terminate(new JxlError("Cancelled", reason ?? "Decode cancelled", { sessionId: this.id }));
+        this.fail(new JxlError("Cancelled", reason ?? "Decode cancelled", { sessionId: this.id }));
     }
     // ---------------------------------------------------------------------------
     // Worker message handling
@@ -134,14 +156,13 @@ export class DecodeSessionImpl {
                 if (msg.region !== undefined)
                     ev.region = msg.region;
                 this.frameStream.push(ev);
-                this.frameStream.end();
-                this.doneDeferred.resolve(msg.info);
-                this.terminated = true;
+                this.finish(msg.info);
                 break;
             }
             case "decode_budget_exceeded": {
                 if (msg.sessionId !== this.id)
                     return;
+                this.lastInfo = msg.info;
                 const ev = {
                     stage: msg.stage,
                     info: msg.info,
@@ -150,13 +171,10 @@ export class DecodeSessionImpl {
                     pixelStride: msg.pixelStride,
                 };
                 this.frameStream.push(ev);
-                this.frameStream.end();
-                // done() rejects: budget breach is a terminal non-final stop (Section 10.1).
-                this.doneDeferred.reject(new JxlError("BudgetExceeded", "Per-stage budget exceeded", {
+                this.finishWithError(new JxlError("BudgetExceeded", "Per-stage budget exceeded", {
                     sessionId: this.id,
                     partial: ev,
                 }));
-                this.terminated = true;
                 break;
             }
             case "decode_error": {
@@ -177,13 +195,13 @@ export class DecodeSessionImpl {
                     sessionId: this.id,
                     ...(partial !== undefined ? { partial } : {}),
                 });
-                this.terminate(err);
+                this.fail(err);
                 break;
             }
             case "decode_cancelled":
                 if (msg.sessionId !== this.id)
                     return;
-                this.terminate(new JxlError("Cancelled", "Decode cancelled by worker", { sessionId: this.id }));
+                this.fail(new JxlError("Cancelled", "Decode cancelled by worker", { sessionId: this.id }));
                 break;
             case "metric":
                 if (msg.sessionId === this.id && this.opts.onMetric !== undefined) {
@@ -194,22 +212,49 @@ export class DecodeSessionImpl {
                 break;
         }
     }
-    // Terminate the session with an error: fail streams, reject done() if pending.
-    terminate(err) {
+    // ---------------------------------------------------------------------------
+    // Terminal helpers — all terminal paths funnel through finish() or fail()
+    // ---------------------------------------------------------------------------
+    cleanup() {
+        if (this.abortSignal !== null && this.abortHandler !== null) {
+            this.abortSignal.removeEventListener("abort", this.abortHandler);
+        }
+    }
+    finish(info) {
         if (this.terminated)
             return;
         this.terminated = true;
+        this.cleanup();
+        this.frameStream.end();
+        if (!this.doneDeferred.settled) {
+            this.doneDeferred.resolve(info);
+        }
+    }
+    // Frame stream ends gracefully (consumers see all buffered frames), but
+    // done() rejects. Used for budget_exceeded where the partial frame was
+    // already pushed before this is called.
+    finishWithError(err) {
+        if (this.terminated)
+            return;
+        this.terminated = true;
+        this.cleanup();
+        this.frameStream.end();
+        if (!this.doneDeferred.settled) {
+            this.doneDeferred.reject(err);
+        }
+    }
+    fail(err) {
+        if (this.terminated)
+            return;
+        this.terminated = true;
+        this.cleanup();
         this.frameStream.fail(err);
         if (!this.doneDeferred.settled) {
             this.doneDeferred.reject(err);
         }
     }
     normalizeCode(code) {
-        const known = [
-            "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
-            "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError", "Internal",
-        ];
-        return known.includes(code) ? code : "Internal";
+        return KNOWN_JXL_ERROR_CODES.has(code) ? code : "Internal";
     }
 }
 //# sourceMappingURL=decode-session.js.map

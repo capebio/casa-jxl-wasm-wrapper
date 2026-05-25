@@ -4,6 +4,18 @@
 import { JxlError } from "@casabio/jxl-core/errors";
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer } from "./util.js";
+const KNOWN_JXL_ERROR_CODES = new Set([
+    "MalformedCodestream",
+    "TruncatedStream",
+    "UnsupportedFeature",
+    "OutOfMemory",
+    "BudgetExceeded",
+    "Cancelled",
+    "WorkerCrashed",
+    "CapabilityMissing",
+    "ConfigError",
+    "Internal",
+]);
 export class EncodeSessionImpl {
     id;
     scheduler;
@@ -11,6 +23,8 @@ export class EncodeSessionImpl {
     chunkStream = new AsyncEventStream();
     doneDeferred = deferred();
     acquirePromise;
+    abortSignal;
+    abortHandler;
     finished = false;
     terminated = false;
     constructor(scheduler, opts) {
@@ -55,8 +69,22 @@ export class EncodeSessionImpl {
             .catch((err) => {
             this.terminate(new JxlError("Internal", `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
         });
-        if (opts.signal != null) {
-            opts.signal.addEventListener("abort", () => this.terminate(new JxlError("Cancelled", "Encode aborted by signal", { sessionId: this.id })), { once: true });
+        // Set up abort signal handling. Check aborted immediately to handle signals
+        // that were already triggered before this session was constructed.
+        this.abortSignal = opts.signal ?? null;
+        if (this.abortSignal !== null) {
+            this.abortHandler = () => {
+                this.terminate(new JxlError("Cancelled", "Encode aborted by signal", { sessionId: this.id }));
+            };
+            if (this.abortSignal.aborted) {
+                this.abortHandler();
+            }
+            else {
+                this.abortSignal.addEventListener("abort", this.abortHandler, { once: true });
+            }
+        }
+        else {
+            this.abortHandler = null;
         }
     }
     // ---------------------------------------------------------------------------
@@ -67,9 +95,11 @@ export class EncodeSessionImpl {
             throw new JxlError("ConfigError", "pushPixels() after finish/cancel/error", { sessionId: this.id });
         }
         await this.acquirePromise;
-        if (this.terminated)
+        if (this.terminated || this.finished)
             return;
         await this.scheduler.waitForDrain(this.id);
+        if (this.terminated || this.finished)
+            return;
         const ab = toTransferableBuffer(chunk);
         this.scheduler.send(this.id, region !== undefined
             ? { type: "encode_pixels", sessionId: this.id, chunk: ab, region }
@@ -118,6 +148,7 @@ export class EncodeSessionImpl {
                 this.chunkStream.end();
                 this.doneDeferred.resolve(msg.totalBytes);
                 this.terminated = true;
+                this.cleanup();
                 break;
             case "encode_error": {
                 if (msg.sessionId !== this.id)
@@ -139,21 +170,26 @@ export class EncodeSessionImpl {
                 break;
         }
     }
+    // ---------------------------------------------------------------------------
+    // Terminal helpers
+    // ---------------------------------------------------------------------------
+    cleanup() {
+        if (this.abortSignal !== null && this.abortHandler !== null) {
+            this.abortSignal.removeEventListener("abort", this.abortHandler);
+        }
+    }
     terminate(err) {
         if (this.terminated)
             return;
         this.terminated = true;
+        this.cleanup();
         this.chunkStream.fail(err);
         if (!this.doneDeferred.settled) {
             this.doneDeferred.reject(err);
         }
     }
     normalizeCode(code) {
-        const known = [
-            "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
-            "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError", "Internal",
-        ];
-        return known.includes(code) ? code : "Internal";
+        return KNOWN_JXL_ERROR_CODES.has(code) ? code : "Internal";
     }
 }
 //# sourceMappingURL=encode-session.js.map

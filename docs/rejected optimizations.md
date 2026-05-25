@@ -132,3 +132,12 @@ Evaluated against `packages/jxl-session/src/decode-session.ts` on branch `Facade
 *   **Update lastInfo on decode_budget_exceeded (ChatGPT-DS-5):** ALREADY IMPLEMENTED. Line 185: `this.lastInfo = msg.info;` already present.
 *   **Move KNOWN_JXL_ERROR_CODES to module-level ReadonlySet (ChatGPT-DS-6):** ALREADY IMPLEMENTED. Lines 19–22: module-level `ReadonlySet<string>` already exists. ChatGPT reviewed a stale version.
 *   **try/catch on scheduler.send() in close() (ChatGPT-DS-7):** REJECTED. Labeled "optional" by the reviewer and conditional on `scheduler.send()` throwing. `send()` is fire-and-forget by design; no evidence it throws on dead sessions. CLAUDE.md: no error handling for scenarios that cannot happen.
+
+## `packages/jxl-session/src/encode-session.ts` (ChatGPT batch — encode-session lifecycle)
+
+Evaluated against `packages/jxl-session/src/encode-session.ts` on branch `encoder`. Items 1, 3, 4 were implemented (post-await lifecycle rechecks, abort signal lifecycle, module-level error codes). Items 2, 5, 6, 7 rejected.
+
+*   **Add comment to finish() explaining acquirePromise invariant (ChatGPT-ES-2):** REJECTED. The WHY is not non-obvious — the `if (this.terminated) return` guard two lines below the await is self-documenting. CLAUDE.md: no comments unless WHY would surprise a reader.
+*   **Immediate cancel() — call cancelSession before awaiting acquirePromise (ChatGPT-ES-5):** REJECTED. `decode-session.cancel()` (the reference implementation) uses the same await-before-cancel ordering. Changing the ordering without verifying scheduler behaviour for sessions mid-acquisition is an unwarranted protocol risk. The scheduler's `cancelSession` already handles all states (queued, running, paused); the await ensures the session is in a defined state before the cancel call, consistent with the established pattern.
+*   **Local variable extraction for iccProfile/exif/xmp before startMsg (ChatGPT-ES-6):** REJECTED. Cosmetic only. CLAUDE.md: no opportunistic refactors.
+*   **try/catch around onMetric callback (ChatGPT-ES-7):** REJECTED. `decode-session.ts` does not guard onMetric. Silent swallow hides user callback bugs without benefit; if onMetric throws, a session error is more informative than silent suppression. Same class of rejection as ChatGPT-DS-7.

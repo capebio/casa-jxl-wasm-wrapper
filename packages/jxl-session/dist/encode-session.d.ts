@@ -7,6 +7,8 @@ export declare class EncodeSessionImpl implements EncodeSession {
     private readonly chunkStream;
     private readonly doneDeferred;
     private readonly acquirePromise;
+    private readonly abortSignal;
+    private readonly abortHandler;
     private finished;
     private terminated;
     constructor(scheduler: Scheduler, opts: EncodeOptions);
@@ -16,6 +18,7 @@ export declare class EncodeSessionImpl implements EncodeSession {
     done(): Promise<number>;
     cancel(reason?: string): Promise<void>;
     private handleMessage;
+    private cleanup;
     private terminate;
     private normalizeCode;
 }
