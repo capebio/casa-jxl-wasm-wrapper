@@ -135,6 +135,7 @@ export interface MsgEncodeStart {
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
+  sidecarSizes?: readonly number[];
   priority: "visible" | "near" | "background";
 }
 

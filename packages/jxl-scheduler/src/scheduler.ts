@@ -745,6 +745,12 @@ export class Scheduler {
 
           pending.resolve();
         }
+      } catch (err: unknown) {
+        // Log the error so it's visible in diagnostics rather than silently consumed.
+        // Re-trigger after a short delay so queued sessions are not permanently stuck
+        // waiting for a drain that never comes.
+        console.error("[jxl-scheduler] drainQueue error:", err);
+        setTimeout(() => this.drainQueue(), 50);
       } finally {
         this.drainingQueue = false;
       }

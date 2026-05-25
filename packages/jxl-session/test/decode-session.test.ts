@@ -127,6 +127,49 @@ describe("DecodeSessionImpl cancel paths", () => {
     await scheduler.shutdown();
   });
 
+  it("already-aborted signal rejects done() with Cancelled immediately", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const { scheduler } = makeScheduler();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8", signal: ac.signal });
+    await assert.rejects(session.done(), (err: unknown) => {
+      assert.ok(err instanceof JxlError);
+      assert.equal(err.code, "Cancelled");
+      return true;
+    });
+    await scheduler.shutdown();
+  });
+
+  it("does not send decode_chunk after session is cancelled while push waits on drain", async () => {
+    const { scheduler, workers } = makeScheduler();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8" });
+    const worker = await waitForWorker(workers);
+
+    // Default adaptive HWM ≈ 4. Push 3 chunks (non-blocking: queueDepth 1-3 < 4).
+    // No worker_drain emitted, so queueDepth keeps growing.
+    for (let i = 0; i < 3; i++) {
+      await session.push(new Uint8Array([i]));
+    }
+
+    // 4th push increments queueDepth to 4 (>= HWM), blocks at waitForDrain.
+    const pushPromise = session.push(new Uint8Array([99]));
+
+    await tick(); // let the 4th push reach and block inside waitForDrain
+
+    const chunksBefore = worker.messages.filter((m) => m.type === "decode_chunk").length;
+    assert.equal(chunksBefore, 3);
+
+    // cancel() unblocks the drain waiter, then sets terminated = true before
+    // the resumed push() coroutine can run.
+    await session.cancel();
+    await pushPromise;
+
+    const chunksAfter = worker.messages.filter((m) => m.type === "decode_chunk").length;
+    assert.equal(chunksAfter, 3, "4th chunk must not be sent after cancellation");
+
+    await scheduler.shutdown();
+  });
+
   it("push() after close throws ConfigError", async () => {
     const { scheduler, workers } = makeScheduler();
     const session = new DecodeSessionImpl(scheduler, { format: "rgba8" });

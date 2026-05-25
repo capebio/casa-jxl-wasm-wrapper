@@ -5,12 +5,14 @@
 import type {
   EncodeOptions,
   EncodeSession,
+  EncodeStats,
   Region,
   WorkerToMainMessage,
   MsgEncodeStart,
 } from "@casabio/jxl-core";
 import { JxlError, type JxlErrorCode } from "@casabio/jxl-core/errors";
 import type { Scheduler } from "@casabio/jxl-scheduler";
+import { recommendedEffort } from "@casabio/jxl-capabilities";
 
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer, type Deferred } from "./util.js";
@@ -42,6 +44,7 @@ export class EncodeSessionImpl implements EncodeSession {
 
   private finished = false;
   private terminated = false;
+  private totalBytesWritten: number | null = null;
 
   constructor(scheduler: Scheduler, opts: EncodeOptions) {
     this.scheduler = scheduler;
@@ -66,10 +69,11 @@ export class EncodeSessionImpl implements EncodeSession {
       xmp: opts.xmp != null ? toTransferableBuffer(opts.xmp) : null,
       distance,
       quality,
-      effort: opts.effort ?? 4,
+      effort: opts.effort ?? recommendedEffort(),
       progressive: opts.progressive ?? false,
       previewFirst: opts.previewFirst ?? false,
       chunked: opts.chunked ?? false,
+      sidecarSizes: opts.sidecarSizes,
       priority: opts.priority ?? "visible",
     };
 
@@ -146,6 +150,14 @@ export class EncodeSessionImpl implements EncodeSession {
     return this.doneDeferred.promise;
   }
 
+  getStats(): EncodeStats | null {
+    if (this.totalBytesWritten === null) return null;
+    const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : 16;
+    const originalBytes = this.opts.width * this.opts.height * bpp;
+    const compressedBytes = this.totalBytesWritten;
+    return { originalBytes, compressedBytes, ratio: compressedBytes / originalBytes };
+  }
+
   async cancel(reason?: string): Promise<void> {
     if (this.terminated) return;
     await this.acquirePromise.catch(() => undefined);
@@ -172,6 +184,7 @@ export class EncodeSessionImpl implements EncodeSession {
 
       case "encode_done":
         if (msg.sessionId !== this.id) return;
+        this.totalBytesWritten = msg.totalBytes;
         this.chunkStream.end();
         this.doneDeferred.resolve(msg.totalBytes);
         this.terminated = true;

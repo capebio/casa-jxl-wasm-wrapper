@@ -74,6 +74,15 @@ export interface DecodeSession {
   cancel(reason?: string): Promise<void>;
 }
 
+export interface EncodeStats {
+  /** Raw pixel bytes: width × height × channels × bytesPerChannel. */
+  originalBytes: number;
+  /** Total JXL bytes written across all chunks (including sidecars). */
+  compressedBytes: number;
+  /** compressedBytes / originalBytes. Values below 1.0 indicate net compression. */
+  ratio: number;
+}
+
 export interface EncodeOptions {
   format: PixelFormat;
   width: number;
@@ -91,6 +100,14 @@ export interface EncodeOptions {
   progressive?: boolean;            // enable progressive frames
   previewFirst?: boolean;           // bias for early bytes over compression
   chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs
+  /**
+   * Max dimension (px, long edge) of sidecar thumbnail(s) to yield BEFORE the
+   * main image chunks. Sorted ascending so the smallest preview arrives first.
+   * Requires a WASM build with the sidecar bridge (_jxl_wasm_encode_rgba8_with_sidecars).
+   * Falls back to plain encode when the bridge is absent.
+   * The leading `sidecarSizes.length` chunks from `chunks()` are the thumbnails.
+   */
+  sidecarSizes?: readonly number[];
   // Scheduling
   priority?: "visible" | "near" | "background";
   signal?: AbortSignal;
@@ -103,10 +120,13 @@ export interface EncodeSession {
   pushPixels(chunk: ArrayBuffer, region?: Region): Promise<void>;
   // Signal end of pixel input
   finish(): Promise<void>;
-  // Iterate output byte chunks as they emit
+  // Iterate output byte chunks as they emit.
+  // If sidecarSizes was specified, the first sidecarSizes.length chunks are thumbnail JXLs.
   chunks(): AsyncIterable<ArrayBuffer>;
   // Await completion; resolves with total bytes written
   done(): Promise<number>;
+  // Available after done() resolves. Null before completion or on error.
+  getStats(): EncodeStats | null;
   cancel(reason?: string): Promise<void>;
 }
 

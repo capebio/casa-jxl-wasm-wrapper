@@ -306,11 +306,14 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
       JxlEncoderDestroy(enc);
       return MakeError(51);
     }
+    // ICC profile already fully describes the colour space. Setting sRGB color
+    // encoding afterwards is redundant and may produce undefined behaviour in
+    // some libjxl versions when both are set. Skip when ICC is present.
+  } else {
+    JxlColorEncoding color;
+    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(23); }
   }
-
-  JxlColorEncoding color;
-  JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
-  if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(23); }
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
   JxlEncoderSetFrameDistance(frame, distance);
@@ -605,8 +608,11 @@ JxlWasmBuffer* jxl_wasm_encode_rgbaf32(const uint8_t* pixels, uint32_t width, ui
   return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha);
 }
 
-JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha, const uint8_t* icc_profile, size_t icc_size, const uint8_t* exif, size_t exif_size, const uint8_t* xmp, size_t xmp_size) {
-  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, 0, has_alpha, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
+// fmt: 0=rgba8, 1=rgba16, 2=rgbaf32.  Matches the TypeScript facade type.
+// Previously this function had no fmt param and hardcoded 0, which also
+// shifted every subsequent argument by one slot in the WASM call frame.
+JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha, const uint8_t* icc_profile, size_t icc_size, const uint8_t* exif, size_t exif_size, const uint8_t* xmp, size_t xmp_size) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
 }
 
 // Routes JPEG bytes to lossless transcode; otherwise encodes as RGBA pixels.

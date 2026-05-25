@@ -69,6 +69,17 @@ export interface EncoderOptions {
   distance: number | null;
   quality: number | null;
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  /**
+   * NOTE: `progressive`, `previewFirst`, and `chunked` are accepted in the API
+   * but are NOT forwarded to any WASM bridge call. The current bridge functions
+   * (_jxl_wasm_enc_create_image, _jxl_wasm_enc_push_pixels, _jxl_wasm_encode_rgba8,
+   * _jxl_wasm_enc_push_pixels) have no progressive parameter. The encoder always
+   * produces a non-progressive JXL file. To enable true progressive encode
+   * (DC+AC refinement passes in the output), the C++ bridge must be rebuilt with
+   * a progressive flag and a new wantProgressive parameter exposed.
+   *
+   * For early-preview use, use `sidecarSizes` instead — that path IS implemented.
+   */
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
@@ -408,6 +419,9 @@ class LibjxlDecoder implements JxlDecoder {
       let info: ImageInfo | undefined;
       let gotRealFlush = false;
       let done = false;
+      // Count flushed intermediate frames: first flush is the DC pass,
+      // subsequent flushes are AC refinement passes.
+      let flushCount = 0;
 
       const buildInfo = (w: number, h: number): ImageInfo => {
         info ??= { width: w, height: h, bitsPerSample: 8, hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false };
@@ -421,7 +435,14 @@ class LibjxlDecoder implements JxlDecoder {
         if (handle === 0) return null;
         const buf = takeBuffer(module, handle, "decode");
         const pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region, this.options.downsample, bpc);
-        const evInfo = buildInfo(pixels.width, pixels.height);
+        // When ROI/downsample crops the frame, pixels.width/height differ from full image dims.
+        // buildInfo memoizes on first call (full dims from header), so we must not pass it
+        // cropped dims — it would return the already-memoized full-dim object regardless.
+        // Instead, derive evInfo from the base info with actual pixel dimensions.
+        const baseInfo = buildInfo(buf.width, buf.height);
+        const evInfo: ImageInfo = (pixels.width !== buf.width || pixels.height !== buf.height)
+          ? { ...baseInfo, width: pixels.width, height: pixels.height }
+          : baseInfo;
         return { pixels, evInfo };
       };
 
@@ -468,10 +489,12 @@ class LibjxlDecoder implements JxlDecoder {
 
           if (result === 1) {
             gotRealFlush = true;
+            flushCount++;
+            const stage: DecodeStage = flushCount === 1 ? "dc" : "pass";
             const wrapped = takeAndWrap(decTakeFlushed(dec));
             if (wrapped !== null) {
               const { pixels, evInfo } = wrapped;
-              const ev: Extract<DecodeEvent, { type: "progress" }> = { type: "progress", stage: "dc", info: evInfo, pixels: pixels.data, format: fmt, pixelStride };
+              const ev: Extract<DecodeEvent, { type: "progress" }> = { type: "progress", stage, info: evInfo, pixels: pixels.data, format: fmt, pixelStride };
               if (pixels.region !== undefined) ev.region = pixels.region;
               yield ev;
               if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
@@ -485,6 +508,10 @@ class LibjxlDecoder implements JxlDecoder {
           this.compactQueue();
           decCloseInput(dec);
           const result = decPush(dec, 0, 0);
+          // result < 0 means libjxl signalled an error (e.g. truncated stream).
+          // Without this throw, the generator returns silently with no terminal
+          // event, leaving the decode session permanently unresolved on the main thread.
+          if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
           done = result === 2;
           break;
         }
@@ -682,8 +709,13 @@ class LibjxlEncoder implements JxlEncoder {
     const caps = getCapabilities(module);
     // Use streaming input only when sidecars are not requested — sidecar path takes
     // a complete RGBA8 pixel pointer and cannot be fed incrementally.
+    // Also skip streaming input when metadata (ICC/EXIF/XMP) is present: the
+    // streaming input path calls enc_finish → EncodeRgba which has no metadata
+    // parameter. Fall back to the buffered path which routes through
+    // encode_rgba8_with_metadata so metadata is preserved for all pixel formats.
     const wantSidecars = this.sortedSidecarSizes.length > 0 && caps.sidecars;
-    if (!wantSidecars && caps.streamingInput) {
+    const hasMetadataOpts = this.options.iccProfile !== null || this.options.exif !== null || this.options.xmp !== null;
+    if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
       const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
       this.wasmEncState = module._jxl_wasm_enc_create_image!(
@@ -711,6 +743,16 @@ class LibjxlEncoder implements JxlEncoder {
 
     await this.waitUntilFinished();
     if (this.cancelled) return;
+
+    // Progressive encode is accepted in the API but the current WASM bridge does
+    // not implement a progressive parameter. Throw here rather than silently
+    // producing a non-progressive file.
+    if (this.options.progressive) {
+      throw new CapabilityMissing(
+        "Progressive JXL encode requires a rebuilt WASM with a progressive bridge flag. " +
+        "Use sidecarSizes for fast first-paint previews instead."
+      );
+    }
 
     // Module may not be loaded yet if no pixels were pushed (zero-byte edge case).
     const module = this.wasmModule ?? await loadLibjxlModule();
@@ -828,9 +870,11 @@ class LibjxlEncoder implements JxlEncoder {
           // Standard single-image encode path
           let handle: number;
 
-          // Use metadata path if any metadata is present
+          // Use metadata path if any metadata is present.
+          // fmt: 0=rgba8, 1=rgba16, 2=rgbaf32 — matches bridge parameter order.
+          const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
           const hasMetadata = this.options.iccProfile !== null || this.options.exif !== null || this.options.xmp !== null;
-          if (hasMetadata && module._jxl_wasm_encode_rgba8_with_metadata && this.options.format === "rgba8") {
+          if (hasMetadata && module._jxl_wasm_encode_rgba8_with_metadata) {
             const iccView = this.options.iccProfile ? copyOrBorrowInput(this.options.iccProfile, false) : new Uint8Array(0);
             const exifView = this.options.exif ? copyOrBorrowInput(this.options.exif, false) : new Uint8Array(0);
             const xmpView = this.options.xmp ? copyOrBorrowInput(this.options.xmp, false) : new Uint8Array(0);
@@ -846,7 +890,7 @@ class LibjxlEncoder implements JxlEncoder {
 
               handle = module._jxl_wasm_encode_rgba8_with_metadata(
                 ptr, this.options.width, this.options.height,
-                distance, this.options.effort, 0, hasAlpha,
+                distance, this.options.effort, fmt, hasAlpha,
                 iccPtr, iccView.byteLength,
                 exifPtr, exifView.byteLength,
                 xmpPtr, xmpView.byteLength
@@ -857,6 +901,8 @@ class LibjxlEncoder implements JxlEncoder {
               if (xmpPtr !== 0) module._free(xmpPtr);
             }
           } else {
+            // Fallback: plain encode (no metadata) used when bridge fn absent
+            // or when no metadata was provided.
             if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
               handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
             } else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {

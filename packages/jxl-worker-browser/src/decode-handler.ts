@@ -365,6 +365,13 @@ export class DecodeHandler {
         }
         case "final": {
           const pixels = toArrayBuffer(event.pixels);
+          // Budget check BEFORE transferring pixels — same pattern as "progress".
+          // postMessage([pixels]) detaches the buffer; reusing it in postBudgetExceeded
+          // would send a zero-length payload.
+          if (this.checkBudget()) {
+            this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride);
+            return;
+          }
           const msg: MsgDecodeFinal = {
             type: "decode_final",
             sessionId: this.sessionId,

@@ -237,6 +237,44 @@ describe("browser codec handlers", () => {
     ]);
     expect(messages.findLast((msg) => msg.type.startsWith("encode_"))).toEqual({ type: "encode_done", sessionId: "encode-1", totalBytes: 5 });
   });
+
+  test("encode handler coalesces worker_drain while queue stays below HWM", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    let nowMs = 0;
+    const restoreNow = mockPerformanceNow(() => nowMs);
+
+    const codec = {
+      createEncoder() {
+        return {
+          pushPixels() {
+            nowMs += 0;
+          },
+          finish() {},
+          cancel() {},
+          dispose() {},
+          async *chunks() {
+            yield new Uint8Array([0]).buffer;
+          },
+        };
+      },
+    };
+
+    const handler = new EncodeHandler(baseEncodeStart, codec as never, {
+      onSessionEnd: (sessionId) => ended.push(sessionId),
+    });
+    handler.onPixels(new Uint8Array([1, 0, 0, 255]).buffer);
+    handler.onPixels(new Uint8Array([2, 0, 0, 255]).buffer);
+    handler.onPixels(new Uint8Array([3, 0, 0, 255]).buffer);
+    handler.onFinish();
+
+    await waitFor(() => ended.length === 1);
+    restoreNow();
+
+    expect(messages.filter((msg) => msg.type === "worker_drain")).toHaveLength(1);
+  });
 });
 
 function installWorkerPostMessage(messages: WorkerToMainMessage[]): void {
@@ -258,4 +296,18 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
+}
+
+function mockPerformanceNow(getNow: () => number): () => void {
+  const original = performance.now.bind(performance);
+  Object.defineProperty(performance, "now", {
+    configurable: true,
+    value: getNow,
+  });
+  return () => {
+    Object.defineProperty(performance, "now", {
+      configurable: true,
+      value: original,
+    });
+  };
 }

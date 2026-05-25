@@ -31,6 +31,7 @@ interface EncodeHandlerCallbacks {
 }
 
 const CHUNK_HWM = 4;
+const DRAIN_MIN_INTERVAL_MS = 8;
 
 export class EncodeHandler {
   private readonly sessionId: string;
@@ -46,6 +47,8 @@ export class EncodeHandler {
   private finished = false;
   private firstByteEmitted = false;
   private wakeResolve: (() => void) | null = null;
+  private lastDrainPostedMs = 0;
+  private lastDrainAllowed = false;
 
   constructor(
     opts: MsgEncodeStart,
@@ -81,7 +84,7 @@ export class EncodeHandler {
   }
 
   async onCancel(reason?: string): Promise<void> {
-    if (this.cancelled) return;
+    if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.cancelled = true;
     this.state = "cancelled";
     this.wakeResolve?.();
@@ -114,6 +117,7 @@ export class EncodeHandler {
       progressive: this.opts.progressive,
       previewFirst: this.opts.previewFirst,
       chunked: this.opts.chunked,
+      sidecarSizes: this.opts.sidecarSizes,
     });
     this.state = "configured";
     try {
@@ -142,14 +146,13 @@ export class EncodeHandler {
         const entry = this.pixelQueue[this.pixelReadIndex++];
         if (entry === undefined) break;
         if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
-          this.pixelQueue = this.pixelQueue.slice(this.pixelReadIndex);
+          this.pixelQueue.copyWithin(0, this.pixelReadIndex);
+          this.pixelQueue.length -= this.pixelReadIndex;
           this.pixelReadIndex = 0;
         }
         this.queueDepth--;
         await encoder.pushPixels(entry.chunk, entry.region);
-        if (this.queueDepth < CHUNK_HWM) {
-          self.postMessage({ type: "worker_drain", sessionId: this.sessionId });
-        }
+        this.maybePostDrain();
       }
       if (this.finished) {
         this.state = "finalising";
@@ -157,6 +160,23 @@ export class EncodeHandler {
         return;
       }
     }
+  }
+
+  private maybePostDrain(): void {
+    const now = performance.now();
+    const drainAllowed = this.queueDepth < CHUNK_HWM;
+
+    const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
+    const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
+
+    this.lastDrainAllowed = drainAllowed;
+
+    if (!drainAllowed) return;
+    if (!crossedIntoDrain && !intervalElapsed) return;
+
+    this.lastDrainPostedMs = now;
+
+    self.postMessage({ type: "worker_drain", sessionId: this.sessionId });
   }
 
   private async readEncoderChunks(encoder: BrowserEncoder): Promise<void> {
@@ -194,8 +214,11 @@ export class EncodeHandler {
   }
 
   private failSession(code: string, message: string): void {
-    if (this.cancelled || this.state === "done") return;
+    if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.state = "error";
+    // Unblock feedEncoder if it's sleeping in waitForPixels.
+    this.wakeResolve?.();
+    this.wakeResolve = null;
 
     const msg: MsgEncodeError = {
       type: "encode_error",
