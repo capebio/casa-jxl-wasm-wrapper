@@ -45,6 +45,16 @@ export interface MsgDecodeCancel {
   reason?: string;
 }
 
+export interface MsgDecodePause {
+  type: "decode_pause";
+  sessionId: string;
+}
+
+export interface MsgDecodeResume {
+  type: "decode_resume";
+  sessionId: string;
+}
+
 // ---------------------------------------------------------------------------
 // Worker → Main: Decode
 // ---------------------------------------------------------------------------
@@ -90,6 +100,11 @@ export interface MsgDecodeCancelled {
   sessionId: string;
 }
 
+export interface MsgDecodePaused {
+  type: "decode_paused";
+  sessionId: string;
+}
+
 export interface MsgDecodeBudgetExceeded {
   type: "decode_budget_exceeded";
   sessionId: string;
@@ -120,6 +135,7 @@ export interface MsgEncodeStart {
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
+  sidecarSizes?: readonly number[];
   priority: "visible" | "near" | "background";
 }
 
@@ -192,10 +208,20 @@ export interface MsgWorkerShutdownAck {
   type: "worker_shutdown_ack";
 }
 
+export interface MsgWorkerError {
+  type: "worker_error";
+  code: string;
+  message: string;
+}
+
 // Backpressure: worker tells main that its queue is below high-water mark
 export interface MsgWorkerDrain {
   type: "worker_drain";
   sessionId: string;
+  latencyMs?: number;   // EMA of decoder.push() duration; drives scheduler pushHwm tuning
+  queueDepth?: number;  // unprocessed chunk count at drain time
+  queuedBytes?: number; // unprocessed byte count at drain time
+  adaptiveHwm?: number; // computed HWM that triggered drain
 }
 
 // Metric passthrough
@@ -223,6 +249,8 @@ export type MainToWorkerMessage =
   | MsgDecodeChunk
   | MsgDecodeClose
   | MsgDecodeCancel
+  | MsgDecodePause
+  | MsgDecodeResume
   | MsgEncodeStart
   | MsgEncodePixels
   | MsgEncodeFinish
@@ -236,6 +264,7 @@ export type WorkerToMainMessage =
   | MsgDecodeFinal
   | MsgDecodeError
   | MsgDecodeCancelled
+  | MsgDecodePaused
   | MsgDecodeBudgetExceeded
   | MsgEncodeChunk
   | MsgEncodeFirstByteReady
@@ -244,5 +273,6 @@ export type WorkerToMainMessage =
   | MsgEncodeCancelled
   | MsgWorkerReady
   | MsgWorkerShutdownAck
+  | MsgWorkerError
   | MsgWorkerDrain
   | MsgMetric;

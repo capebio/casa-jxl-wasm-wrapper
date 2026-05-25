@@ -15,6 +15,7 @@ export type {
   DecodeFrameEvent,
   EncodeOptions,
   EncodeSession,
+  EncodeStats,
   ImageInfo,
   Capabilities,
   PixelFormat,

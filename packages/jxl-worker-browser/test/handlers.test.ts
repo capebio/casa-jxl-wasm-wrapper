@@ -112,6 +112,95 @@ describe("browser codec handlers", () => {
     expect(ended).toEqual(["decode-1"]);
   });
 
+  test("budget_exceeded before first progress emits terminal message, not silent death", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    const info = {
+      width: 1, height: 1, bitsPerSample: 8,
+      hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+    };
+    const codec = {
+      createDecoder() {
+        return {
+          push() {},
+          close() {},
+          cancel() {},
+          dispose() {},
+          async *events() {
+            yield { type: "header", info };
+            yield { type: "final", info, pixels: new Uint8Array([1, 2, 3, 4]).buffer, format: "rgba8", pixelStride: 4 };
+          },
+        };
+      },
+    };
+
+    const handler = new DecodeHandler(
+      { ...baseDecodeStart, sessionId: "budget-pre-progress", budgetMs: 0 },
+      codec as never,
+      { onSessionEnd: (sessionId) => ended.push(sessionId) },
+    );
+    handler.onChunk(new Uint8Array([0xff]).buffer);
+    handler.onClose();
+
+    await waitFor(() => ended.length === 1);
+
+    // Session must emit a terminal decode_ message; previously the feed-loop
+    // budget check called finishSession("budget_exceeded") with no protocol
+    // message and left readDecoderEvents blocked — silent death.
+    const terminalMessages = messages.filter((msg) =>
+      msg.type === "decode_final" ||
+      msg.type === "decode_budget_exceeded" ||
+      msg.type === "decode_error" ||
+      msg.type === "decode_cancelled",
+    );
+    expect(terminalMessages.length).toBeGreaterThan(0);
+  });
+
+  test("posts time_to_first_pixel_ms for final-only decode (no progress events)", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    const info = {
+      width: 1, height: 1, bitsPerSample: 8,
+      hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+    };
+    const codec = {
+      createDecoder() {
+        return {
+          push() {},
+          close() {},
+          cancel() {},
+          dispose() {},
+          async *events() {
+            yield { type: "header", info };
+            yield { type: "final", info, pixels: new Uint8Array([1, 2, 3, 4]).buffer, format: "rgba8", pixelStride: 4 };
+          },
+        };
+      },
+    };
+
+    const handler = new DecodeHandler(
+      { ...baseDecodeStart, sessionId: "final-only-metrics" },
+      codec as never,
+      { onSessionEnd: (sessionId) => ended.push(sessionId) },
+    );
+    handler.onChunk(new Uint8Array([0xff]).buffer);
+    handler.onClose();
+
+    await waitFor(() => ended.length === 1);
+
+    const metricNames = messages
+      .filter((msg) => msg.type === "metric")
+      .map((msg) => (msg as { type: "metric"; metric: { name: string } }).metric.name);
+
+    expect(metricNames).toContain("time_to_header_ms");
+    expect(metricNames).toContain("time_to_first_pixel_ms");
+    expect(metricNames).toContain("time_to_final_ms");
+  });
+
   test("encode handler streams codec output chunks and done", async () => {
     const messages: WorkerToMainMessage[] = [];
     const ended: string[] = [];
@@ -148,6 +237,44 @@ describe("browser codec handlers", () => {
     ]);
     expect(messages.findLast((msg) => msg.type.startsWith("encode_"))).toEqual({ type: "encode_done", sessionId: "encode-1", totalBytes: 5 });
   });
+
+  test("encode handler coalesces worker_drain while queue stays below HWM", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    let nowMs = 0;
+    const restoreNow = mockPerformanceNow(() => nowMs);
+
+    const codec = {
+      createEncoder() {
+        return {
+          pushPixels() {
+            nowMs += 0;
+          },
+          finish() {},
+          cancel() {},
+          dispose() {},
+          async *chunks() {
+            yield new Uint8Array([0]).buffer;
+          },
+        };
+      },
+    };
+
+    const handler = new EncodeHandler(baseEncodeStart, codec as never, {
+      onSessionEnd: (sessionId) => ended.push(sessionId),
+    });
+    handler.onPixels(new Uint8Array([1, 0, 0, 255]).buffer);
+    handler.onPixels(new Uint8Array([2, 0, 0, 255]).buffer);
+    handler.onPixels(new Uint8Array([3, 0, 0, 255]).buffer);
+    handler.onFinish();
+
+    await waitFor(() => ended.length === 1);
+    restoreNow();
+
+    expect(messages.filter((msg) => msg.type === "worker_drain")).toHaveLength(1);
+  });
 });
 
 function installWorkerPostMessage(messages: WorkerToMainMessage[]): void {
@@ -169,4 +296,18 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
+}
+
+function mockPerformanceNow(getNow: () => number): () => void {
+  const original = performance.now.bind(performance);
+  Object.defineProperty(performance, "now", {
+    configurable: true,
+    value: getNow,
+  });
+  return () => {
+    Object.defineProperty(performance, "now", {
+      configurable: true,
+      value: original,
+    });
+  };
 }

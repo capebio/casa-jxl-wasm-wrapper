@@ -1,4 +1,4 @@
-﻿import initRaw, { process_orf, rgb_to_rgba } from '../pkg/raw_converter_wasm.js';
+﻿import initRaw, { process_orf, rgb_to_rgba, downscale_rgba } from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
 import {
@@ -121,24 +121,11 @@ async function encodeToWebp(rgba, width, height, quality) {
     return { bytes: new Uint8Array(await blob.arrayBuffer()), encodeMs };
 }
 
-async function resizeRgba(rgba, width, height, targetWidth) {
+function resizeRgba(rgba, width, height, targetWidth) {
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height), 0, 0);
-
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = targetWidth;
-    outCanvas.height = targetHeight;
-    const outCtx = outCanvas.getContext('2d');
-    outCtx.imageSmoothingEnabled = true;
-    outCtx.imageSmoothingQuality = 'high';
-    outCtx.drawImage(canvas, 0, 0, width, height, 0, 0, targetWidth, targetHeight);
     return {
-        rgba: new Uint8Array(outCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer),
+        rgba: downscale_rgba(rgba, width, height, targetWidth, targetHeight),
         width: targetWidth,
         height: targetHeight
     };
@@ -913,23 +900,26 @@ async function runWrapperPipeline(source, label = 'wrapper') {
 function paintTileResult(tile, source, existingResult, wrapperResult, startedAt) {
     const canvas = tile.canvas;
     const decoded = currentMode === 'existing'
-        ? existingResult.final
-        : currentMode === 'wrapper'
-            ? wrapperResult.final
-            : wrapperResult.final;
+        ? existingResult?.final
+        : (wrapperResult?.final || existingResult?.final);
+
+    if (!decoded) {
+        throw new Error('No decoded result to paint');
+    }
+
     const paintStarted = performance.now();
     paintDecodedToTileCanvas(canvas, decoded);
     const paintMs = performance.now() - paintStarted;
     const firstPaintMs = performance.now() - startedAt;
     tile.el.dataset.state = 'done';
-    tile.chip.textContent = currentMode === 'compare' ? 'Compare' : currentMode === 'wrapper' ? 'Wrapper' : 'Existing';
+    
+    let modeLabel = 'Existing';
+    if (currentMode === 'compare' || currentMode === 'race') modeLabel = 'Compare';
+    else if (currentMode === 'wrapper') modeLabel = 'Wrapper';
+    
+    tile.chip.textContent = modeLabel;
     tile.title.textContent = source.label;
-    tile.existing.textContent = existingResult
-        ? `${fmtBytes(resultByteLength(existingResult))} · ${fmtMs(existingResult.encodeMs)} · ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
-        : '--';
-    tile.wrapper.textContent = wrapperResult
-        ? `${fmtBytes(resultByteLength(wrapperResult))} · ${fmtMs(wrapperResult.encodeMs)} · ${fmtMs(wrapperResult.decodeMs)}`
-        : '--';
+    
     tile.existing.textContent = existingResult
         ? `${fmtBytes(resultByteLength(existingResult))} · load ${fmtMs(existingResult.loadMs)} · enc ${fmtMs(existingResult.encodeMs)} · first ${fmtMs(existingResult.firstPieceMs)} · dec ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
         : '--';
@@ -946,7 +936,7 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
         tile.compare.textContent = '--';
     }
     const ms = performance.now() - startedAt;
-    if (currentMode === 'compare') {
+    if (currentMode === 'compare' || currentMode === 'race') {
         tile.chip.textContent = 'Compare';
     }
     tile.el.title = `${source.label} · first paint ${fmtTiming(firstPaintMs)} · total ${fmtTiming(ms)}`;
@@ -981,10 +971,10 @@ async function processOneSource(source, index, runId) {
     let wrapperResult = null;
 
     try {
-        if (currentMode === 'existing' || currentMode === 'compare') {
+        if (currentMode === 'existing' || currentMode === 'compare' || currentMode === 'race') {
             const sessionSource = encodeSource;
 
-            if (sessionBackendBroken && currentMode === 'existing') {
+            if (sessionBackendBroken && (currentMode === 'existing' || currentMode === 'race')) {
                 dbgLog('  session bypass → wrapper', 'session backend marked broken for this page', 'error');
                 existingResult = await runWrapperPipeline(encodeSource, 'fallback');
                 existingResult.fallback = 'wrapper';
@@ -996,7 +986,7 @@ async function processOneSource(source, index, runId) {
                     const msg = error?.message || String(error);
                     dbgLog(`  session stall`, msg, 'error');
                     sessionBackendBroken = true;
-                    if (currentMode !== 'existing') throw error;
+                    if (currentMode !== 'existing' && currentMode !== 'race') throw error;
                     dbgLog('  session fallback → wrapper', msg, 'error');
                     existingResult = await runWrapperPipeline(encodeSource, 'fallback');
                     existingResult.fallback = 'wrapper';
@@ -1007,7 +997,7 @@ async function processOneSource(source, index, runId) {
             existingResult.firstPaintMs = null;
         }
 
-        if (currentMode === 'wrapper' || currentMode === 'compare') {
+        if (currentMode === 'wrapper' || currentMode === 'compare' || currentMode === 'race') {
             wrapperResult = await runWrapperPipeline(encodeSource, 'wrapper');
             wrapperResult.totalMs = performance.now() - startedAt;
             wrapperResult.loadMs = source.loadMs ?? null;
@@ -1088,6 +1078,76 @@ async function runBatch() {
     const finishedTiles = tiles.slice(0, jobs.length).map((tile) => tile._timings).filter(Boolean);
     const summary = formatRunSummary(finishedTiles);
     setStatus(errors ? `Done with ${errors} error(s).` : 'Done.', `${fmtMs(performance.now() - started)} elapsed · ${summary}`);
+    drawBatchGraphs(finishedTiles);
+}
+
+function drawBatchGraphs(tiles) {
+    if (!window.Chart) return;
+    const shell = document.getElementById('batch-graph-shell');
+    if (shell) shell.hidden = false;
+
+    const existingDecodes = [];
+    const wrapperDecodes = [];
+    const existingEncodes = [];
+    const wrapperEncodes = [];
+
+    tiles.forEach((t, i) => {
+        if (t.existing && typeof t.existing.decodeMs === 'number') {
+            existingDecodes.push({ x: i, y: t.existing.decodeMs });
+        }
+        if (t.existing && typeof t.existing.encodeMs === 'number') {
+            existingEncodes.push({ x: i, y: t.existing.encodeMs });
+        }
+        if (t.wrapper && typeof t.wrapper.decodeMs === 'number') {
+            wrapperDecodes.push({ x: i, y: t.wrapper.decodeMs });
+        }
+        if (t.wrapper && typeof t.wrapper.encodeMs === 'number') {
+            wrapperEncodes.push({ x: i, y: t.wrapper.encodeMs });
+        }
+    });
+
+    const distCanvas = document.getElementById('graph-batch-distribution');
+    if (distCanvas) {
+        if (chartInstances['dist']) chartInstances['dist'].destroy();
+        chartInstances['dist'] = new Chart(distCanvas, {
+            type: 'scatter',
+            data: {
+                datasets: [
+                    { label: 'Session Decode', data: existingDecodes, backgroundColor: '#0f766e' },
+                    { label: 'Wrapper Decode', data: wrapperDecodes, backgroundColor: '#ca8a04' }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom' } },
+                scales: { 
+                    x: { title: { display: true, text: 'Image Index' }, min: -1 },
+                    y: { title: { display: true, text: 'Decode Time (ms)' }, beginAtZero: true } 
+                }
+            }
+        });
+    }
+
+    const avgCanvas = document.getElementById('graph-batch-averages');
+    if (avgCanvas) {
+        const avg = (arr) => arr.length ? arr.reduce((sum, val) => sum + val.y, 0) / arr.length : 0;
+        if (chartInstances['avg']) chartInstances['avg'].destroy();
+        chartInstances['avg'] = new Chart(avgCanvas, {
+            type: 'bar',
+            data: {
+                labels: ['Encode', 'Decode'],
+                datasets: [
+                    { label: 'Session Worker', data: [avg(existingEncodes), avg(existingDecodes)], backgroundColor: '#0f766e' },
+                    { label: 'Direct Wrapper', data: [avg(wrapperEncodes), avg(wrapperDecodes)], backgroundColor: '#ca8a04' }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom' } },
+                scales: { y: { title: { display: true, text: 'Average Time (ms)' }, beginAtZero: true } }
+            }
+        });
+    }
 }
 
 function clearBatch() {

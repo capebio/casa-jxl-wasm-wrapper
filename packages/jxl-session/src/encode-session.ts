@@ -5,15 +5,30 @@
 import type {
   EncodeOptions,
   EncodeSession,
+  EncodeStats,
   Region,
   WorkerToMainMessage,
   MsgEncodeStart,
 } from "@casabio/jxl-core";
 import { JxlError, type JxlErrorCode } from "@casabio/jxl-core/errors";
 import type { Scheduler } from "@casabio/jxl-scheduler";
+import { recommendedEffort } from "@casabio/jxl-capabilities";
 
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer, type Deferred } from "./util.js";
+
+const KNOWN_JXL_ERROR_CODES: ReadonlySet<string> = new Set([
+  "MalformedCodestream",
+  "TruncatedStream",
+  "UnsupportedFeature",
+  "OutOfMemory",
+  "BudgetExceeded",
+  "Cancelled",
+  "WorkerCrashed",
+  "CapabilityMissing",
+  "ConfigError",
+  "Internal",
+]);
 
 export class EncodeSessionImpl implements EncodeSession {
   readonly id: string;
@@ -24,8 +39,12 @@ export class EncodeSessionImpl implements EncodeSession {
   private readonly doneDeferred: Deferred<number> = deferred<number>();
   private readonly acquirePromise: Promise<unknown>;
 
+  private readonly abortSignal: AbortSignal | null;
+  private readonly abortHandler: (() => void) | null;
+
   private finished = false;
   private terminated = false;
+  private totalBytesWritten: number | null = null;
 
   constructor(scheduler: Scheduler, opts: EncodeOptions) {
     this.scheduler = scheduler;
@@ -50,10 +69,11 @@ export class EncodeSessionImpl implements EncodeSession {
       xmp: opts.xmp != null ? toTransferableBuffer(opts.xmp) : null,
       distance,
       quality,
-      effort: opts.effort ?? 4,
+      effort: opts.effort ?? recommendedEffort(),
       progressive: opts.progressive ?? false,
       previewFirst: opts.previewFirst ?? false,
       chunked: opts.chunked ?? false,
+      sidecarSizes: opts.sidecarSizes,
       priority: opts.priority ?? "visible",
     };
 
@@ -75,12 +95,20 @@ export class EncodeSessionImpl implements EncodeSession {
         this.terminate(new JxlError("Internal", `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
       });
 
-    if (opts.signal != null) {
-      opts.signal.addEventListener(
-        "abort",
-        () => this.terminate(new JxlError("Cancelled", "Encode aborted by signal", { sessionId: this.id })),
-        { once: true },
-      );
+    // Set up abort signal handling. Check aborted immediately to handle signals
+    // that were already triggered before this session was constructed.
+    this.abortSignal = opts.signal ?? null;
+    if (this.abortSignal !== null) {
+      this.abortHandler = () => {
+        this.terminate(new JxlError("Cancelled", "Encode aborted by signal", { sessionId: this.id }));
+      };
+      if (this.abortSignal.aborted) {
+        this.abortHandler();
+      } else {
+        this.abortSignal.addEventListener("abort", this.abortHandler, { once: true });
+      }
+    } else {
+      this.abortHandler = null;
     }
   }
 
@@ -93,8 +121,9 @@ export class EncodeSessionImpl implements EncodeSession {
       throw new JxlError("ConfigError", "pushPixels() after finish/cancel/error", { sessionId: this.id });
     }
     await this.acquirePromise;
-    if (this.terminated) return;
+    if (this.terminated || this.finished) return;
     await this.scheduler.waitForDrain(this.id);
+    if (this.terminated || this.finished) return;
     const ab = toTransferableBuffer(chunk);
     this.scheduler.send(
       this.id,
@@ -119,6 +148,14 @@ export class EncodeSessionImpl implements EncodeSession {
 
   done(): Promise<number> {
     return this.doneDeferred.promise;
+  }
+
+  getStats(): EncodeStats | null {
+    if (this.totalBytesWritten === null) return null;
+    const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : 16;
+    const originalBytes = this.opts.width * this.opts.height * bpp;
+    const compressedBytes = this.totalBytesWritten;
+    return { originalBytes, compressedBytes, ratio: compressedBytes / originalBytes };
   }
 
   async cancel(reason?: string): Promise<void> {
@@ -147,9 +184,11 @@ export class EncodeSessionImpl implements EncodeSession {
 
       case "encode_done":
         if (msg.sessionId !== this.id) return;
+        this.totalBytesWritten = msg.totalBytes;
         this.chunkStream.end();
         this.doneDeferred.resolve(msg.totalBytes);
         this.terminated = true;
+        this.cleanup();
         break;
 
       case "encode_error": {
@@ -174,9 +213,20 @@ export class EncodeSessionImpl implements EncodeSession {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Terminal helpers
+  // ---------------------------------------------------------------------------
+
+  private cleanup(): void {
+    if (this.abortSignal !== null && this.abortHandler !== null) {
+      this.abortSignal.removeEventListener("abort", this.abortHandler);
+    }
+  }
+
   private terminate(err: JxlError): void {
     if (this.terminated) return;
     this.terminated = true;
+    this.cleanup();
     this.chunkStream.fail(err);
     if (!this.doneDeferred.settled) {
       this.doneDeferred.reject(err);
@@ -184,10 +234,6 @@ export class EncodeSessionImpl implements EncodeSession {
   }
 
   private normalizeCode(code: string): JxlErrorCode {
-    const known: JxlErrorCode[] = [
-      "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
-      "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError", "Internal",
-    ];
-    return (known as string[]).includes(code) ? (code as JxlErrorCode) : "Internal";
+    return KNOWN_JXL_ERROR_CODES.has(code) ? (code as JxlErrorCode) : "Internal";
   }
 }

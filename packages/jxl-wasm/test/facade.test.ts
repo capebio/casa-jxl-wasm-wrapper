@@ -170,6 +170,76 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
     await decoder.dispose();
   });
+
+  test("decoder cancel prevents event generation", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeProgressiveLibjxlModule());
+    const decoder = createDecoder(decodeOptions);
+
+    decoder.cancel("prevent generation");
+    const iterator = decoder.events()[Symbol.asyncIterator]();
+    const result = await nextWithin(iterator, 100);
+    expect(result.done).toBe(true);
+
+    await decoder.dispose();
+  });
+
+  test("encoder cancel prevents chunk generation", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
+
+    encoder.cancel("prevent generation");
+    const chunksIter = encoder.chunks()[Symbol.asyncIterator]();
+    const result = await nextWithin(chunksIter, 100);
+    expect(result.done).toBe(true);
+
+    await encoder.dispose();
+  });
+
+  test("decoder fallback to oneshot when progressive unavailable", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeLibjxlModule());
+    const rgba = new Uint8Array([0, 255, 0, 255]);
+    const encoder = createEncoder(encodeOptions);
+    encoder.pushPixels(rgba);
+    encoder.finish();
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const decoder = createDecoder(decodeOptions);
+    decoder.push(encoded.value);
+    decoder.close();
+
+    const events = [];
+    for await (const event of decoder.events()) {
+      events.push(event);
+    }
+
+    expect(events.map((e) => e.type)).toContain("final");
+    expect(events.map((e) => e.type)).not.toContain("error");
+    await encoder.dispose();
+    await decoder.dispose();
+  });
+
+  test("encodes with ICC profile, EXIF, and XMP metadata", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+    const rgba = new Uint8Array([255, 128, 64, 255]);
+    const iccProfile = new Uint8Array([1, 2, 3, 4]); // dummy ICC profile
+    const exif = new Uint8Array([5, 6, 7, 8]); // dummy EXIF
+    const xmp = new Uint8Array([9, 10, 11, 12]); // dummy XMP
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      quality: 90,
+      iccProfile,
+      exif,
+      xmp,
+    });
+    encoder.pushPixels(rgba);
+    encoder.finish();
+
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+    expect(encoded.done).toBe(false);
+    expect(encoded.value.byteLength).toBeGreaterThan(0);
+    await encoder.dispose();
+  });
 });
 
 describe("detectTier", () => {

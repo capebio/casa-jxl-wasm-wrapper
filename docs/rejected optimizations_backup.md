@@ -1,0 +1,596 @@
+# Rejected Optimizations — jxl-scheduler
+
+---
+
+## 1. Micro-batched send
+Worker protocol has no `batch` message type; can't implement the scheduler half without the worker half.
+
+## 2. Pull-based worker input
+Correct long-term direction, but requires protocol inversion (`worker_ready_for_chunk`), per-session ring buffers, and a new backpressure model — too large to do safely in isolation.
+
+## 3. DispatchGroup fan-out collapse
+`forEachSubscriber` is already zero-alloc; a merged flat list would add invalidation on every `subscribe`/`onMessage`/`cancelSession` call (common path) to benefit the multiple-subscriber case (uncommon).
+
+## 4. Numeric priority lanes (`const enum`)
+tsc would inline them, but the churn of touching every priority comparison outweighs a marginal branch-prediction gain.
+
+## 6. Smarter preemption victim selection — superseded
+Resolved: `createdAt` (client-side, no protocol change) is sufficient; implemented in the SessionRecord refactor.
+
+## 7. Soft preemption via yield message
+Proposed: send `decode_yield_request` to the victim worker; if it responds with `decode_yielded` within 300ms, avoid a hard cancel.
+
+Rejected for two reasons (a third reason, originally listed here, has since been resolved — see note below):
+
+1. **No benefit at the natural yield point.** `DecodeHandler.feedDecoder` already exits cleanly at chunk boundaries: `onCancel` sets `this.cancelled` and wakes `wakeResolve`, so the loop terminates at its next iteration. Hard cancel is already "soft" when the decoder is between chunks.
+
+2. **No benefit mid-push either.** When `decoder.push(chunk)` is actively running, WASM executes synchronously to completion — it cannot be interrupted. The 300ms grace window would simply time out and fall back to hard cancel, adding latency without saving anything.
+
+Progress-aware victim scoring (implemented) is the correct lever: avoid preempting nearly-done sessions entirely rather than trying to preempt them gently.
+
+**Note — full pause/resume is now implemented.** The original reason 3 claimed "pause and resume is not available" because "the decoder would need to serialise its internal state." This is no longer accurate. The implemented approach does not require state serialisation: the WASM decoder object lives in the worker's heap and is left alive while the worker services the high-priority session. The victim session is suspended in-place (`decode_pause` → `decode_paused` ack → worker continues on high-priority task), then resumed on the same worker (`decode_resume`) once that task completes. A `workerPausedSession` map in the scheduler tracks which worker holds a suspended session to ensure chunk routing and resume land on the correct worker. The `decode_yield_request` message design (this proposal) is still rejected — but the capability it was trying to achieve is covered by the structural pause/resume.
+
+Affected files: `packages/jxl-core/src/protocol.ts`, `packages/jxl-scheduler/src/scheduler.ts`, `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-browser/src/worker.ts`, `packages/jxl-worker-node/src/decode-handler.ts`, `packages/jxl-worker-node/src/worker.ts`.
+
+## 8. SessionRecord consolidation — implemented
+All 6 maps collapsed into `sessions: Map<string, SessionRecord>`.
+
+## 10. Promise-per-session alternatives
+Premature — needs profiling evidence that promise churn is material before adding complexity.
+
+## 11 & 12. Worker warmup / adaptive concurrency
+Heuristics require real benchmark data to tune; wrong to add machinery for thresholds that aren't grounded yet.
+
+## 14. Latest-frame coalescing
+Only useful for progressive decode previews; the actual message cadence through this path wasn't confirmed, so adding it without that knowledge would be speculative.
+
+## 15. Dev-mode transfer guard
+Zero performance impact; not worth the complexity gate.
+
+## 16. CircularBuffer for `bufferedChunks`
+Queued sessions are the minority case and the array is drained and GC'd the instant a worker is assigned — ring buffer adds ~40 LOC with no measurable gain.
+
+## 17. Flat merged handler list for dedupe fan-out
+Same conclusion as #3 post-SessionRecord: the per-subscriber lookup is already O(1) per subscriber; merged list invalidation costs more than it saves at typical subscriber counts.
+
+## 18. `onMetrics` callback
+Fires on every `assignWorker`, preemption, and terminal message even with no consumer — non-zero overhead at the hottest points; replaced by polling via `getMetrics()`.
+
+## 19. Session-level `timeoutMs` on `acquireSlot`
+`AbortSignal.any()` isn't universally available, manual signal combination has listener-leak risk, and no current caller needs it.
+
+## 20. Third priority lane
+`"near"` is in the `Priority` type but unused in scheduling logic; no current consumer justifies wiring it through.
+
+## 21. DrainQueue batch-acquire
+The drain loop already acquires workers as fast as `pool.acquire()` resolves — workers become free asynchronously so there is nothing to collapse into a batch.
+
+## 22. Worker reuse hinting (session-type affinity)
+Requires a `pool.acquirePreferred(hint)` API addition and evidence that WASM module re-initialisation (not cache) is the actual bottleneck; no benchmark data for either.
+
+## 23. Preemption rate limiting / cooldown
+With typical `maxWorkers` (4–8), sustained preemption storms require that many simultaneous `visible` arrivals with all slots occupied by `background` — not a realistic steady state; add if benchmarks show otherwise.
+
+---
+
+# Rejected Optimizations — facade.ts (jxl-wasm)
+
+Evaluated against `packages/jxl-wasm/src/facade.ts`. Two rounds of external suggestions; decisions recorded below.
+
+## Round 1 (Grok batch)
+
+### R1-1. `onDrain` callback on `JxlDecoder` interface
+`scheduler.ts:309` (`waitForDrain`) + `decode-handler.ts:148` (`worker_drain` message) already implement full backpressure at the scheduler/worker boundary. The facade runs inside the worker; adding `onDrain` to `JxlDecoder` would duplicate this at the wrong layer and push scheduler concerns into the WASM bridge.
+
+### R1-2. Shared pixel buffer pool in `applyRegionAndDownsample` / `readBuffer`
+Output pixel buffers are caller-owned after yield. In the worker path `decode-handler.ts:188` transfers them via `postMessage(msg, [pixels])`, zeroing the reference — they cannot be recycled. In direct facade use, the caller holds an arbitrary-lifetime reference. No release lifecycle exists. The WASM input buffer (`chunkBufPtr`/`chunkBufCap`) is already reused across chunks in `eventsProgressive`.
+
+### R1-3. `decodeLowResFirst` option
+`DecoderOptions.downsample: 1|2|4|8` and `progressionTarget: "dc"` already exist. The caller uses `downsample: 8` + `progressionTarget: "dc"` for a fast preview, then a new session for the region of interest. No facade change needed.
+
+### R1-4. `decodeBatch()` on facade
+The scheduler + session layer is the batch API (`acquireSlot` with priority, sourceKey dedupe, AbortSignal). Duplicating batch logic in the facade would bypass preemption, dedupe, and backpressure entirely. Wrong layer.
+
+### R1-5. Direct WASM write in `eventsOneShot` — IMPLEMENTED
+`eventsOneShot` now writes chunks directly into a `_malloc`'d WASM heap buffer. `callDecode` (took a `Uint8Array`, did its own malloc) replaced by `callDecodeFromPtr` (takes pre-allocated ptr). `concatBytes` removed. Handle free consolidated into a single `try/finally`.
+
+### R1-6. Sidecar + progressive preview strategy
+Already implemented: `EncoderOptions.sidecarSizes`, `_jxl_wasm_encode_rgba8_with_sidecars`, chain traversal with `_jxl_wasm_buffer_next`, sidecars yielded smallest-first.
+
+### R1-7. Adaptive quality / distance based on connection speed
+Application logic. `EncoderOptions.distance` and `effort` are already first-class params. The facade has no access to network state and should not acquire it.
+
+### R1-8. Worker-side header caching
+`DedupeRegistry` in `scheduler.ts` fans out to existing sessions on matching `sourceKey`, avoiding re-parse. Caching decoded header state across session lifetimes would require stateful workers, breaking the stateless model and making `recycle()` unsafe.
+
+### R1-9. `ReadableStream` / `WritableStream` API on `JxlDecoder` / `JxlEncoder`
+Facade runs inside the worker; zero-copy transfer is already handled by `decode-handler.ts:188` (`postMessage(msg, [pixels])`). `ReadableStream` would be a thin API wrapper for direct (non-worker) use only — useful ergonomics, but not a performance improvement. Separate utility if desired.
+
+### R1-10. Error recovery + partial decode resume from byte offset
+JXL C API has no seek or resume-from-container-position function. Not implementable without a new C++ bridge.
+
+## Round 2 (Grok batch)
+
+### R2-1. Streaming `EncodeEvent` from `chunks()` (done/error events in the async iterable)
+Changes `chunks()` return type from `AsyncIterable<ArrayBuffer | Uint8Array>` to a discriminated union — a breaking API change. `getStats()` already covers this: populated after the iterable completes normally, null on error, without forcing callers to discriminate event types in the hot receive path.
+`ratio` field added to `EncodeStats` as a convenience (trivially derived but worth having in one place).
+
+### R2-2. Shared pixel buffer pool (round 2)
+Same rejection as R1-2. No safe ownership model without an explicit `release()` call that no current consumer implements.
+
+### R2-3. `setBackpressureHandler` on `JxlDecoder`
+Same rejection as R1-1. Scheduler/worker layer already handles this. The async iterator provides implicit pull-based backpressure for direct facade use.
+
+### R2-4. `refineRegion()` on `JxlDecoder`
+Would require caching the entire compressed input after decode completes (the chunk queue is drained and cleared). Increased memory for all decoders to support a minority use case. Application concern: caller creates a new session with a tighter `region` + lower `downsample`.
+
+### R2-5. `createDecoderStream()` (WritableStream + ReadableStream wrapper)
+Thin wrapper with no performance impact. Not a facade improvement. If wanted, belongs in a separate utilities export so it can be tree-shaken.
+
+### R2-6. Memory-aware `eventsOneShot` (avoid `concatBytes`)
+**Already implemented in Round 1** (R1-5 above). Grok did not have knowledge of the prior change.
+
+### R2-7. Adaptive effort based on WASM tier — IMPLEMENTED
+`recommendedEffort()` exported from `facade.ts`. Maps `scalar→4`, `simd→6`, `simd-mt|relaxed-simd-mt→7`. Non-breaking; callers opt in by passing `recommendedEffort()` as the `effort` field.
+
+---
+
+# Rejected / False Bottleneck Claims — bridge.cpp + facade.ts + browser.ts
+
+Evaluated against `packages/jxl-wasm/src/bridge.cpp`, `packages/jxl-wasm/src/facade.ts`, and `packages/jxl-stream/src/browser.ts`.
+
+## B-1. "Redundant Copy in bridge.cpp" — CLAIM FALSE, NO FIX NEEDED
+
+Claim: "libjxl fills its own buffer and the bridge memcpys between them."
+
+Reality: `DecodeRgba` (`bridge.cpp:182–191`) allocates `pixels_raw` via `malloc`, then calls `JxlDecoderSetImageOutBuffer(dec, &pf, pixels_raw, pixels_size)` — libjxl writes directly into our buffer. No intermediate copy. Result returned via `MakeBufferFromOwned` which transfers pointer ownership without copying (`bridge.cpp:79–89`). The progressive decoder follows the same pattern: `JxlDecoderSetImageOutBuffer` → direct write → `MakeBufferFromOwned` on `take_flushed`/`take_final`. `MakeBuffer` (which does an inline memcpy) is only used for 256 KB encoder output slices in `jxl_wasm_enc_take_chunk` — that's unavoidable chunking, not an image-sized copy.
+
+## B-2. "Defensive Slicing in facade.ts" — CLAIM FALSE, NO FIX NEEDED
+
+Claim: "The TS wrapper often copies the Uint8Array before passing it to WASM."
+
+Reality: `LibjxlDecoder.push()` (`facade.ts`) branches on input type: `ArrayBuffer` → `new Uint8Array(chunk)` (zero-copy view); `Uint8Array` → slices only when `copyInput !== false`. The primary production path (`decode-handler.ts`) sends `ArrayBuffer` chunks via `postMessage` transfer — these are transferred (not shared), so the wrapper wraps them with zero copy. The `copyInput: false` opt-out already exists for callers that own their `Uint8Array` buffers. Inverting the default to "no-copy unless explicitly requested" would be a breaking change with no production benefit since the hot path never hits the slice.
+
+---
+
+# Round 3 — facade.ts (20-item batch)
+
+Evaluated against `packages/jxl-wasm/src/facade.ts` as of commit `b2b9c2d`.
+
+## R3-1. Single-consumer guards on `events()` / `chunks()` — IMPLEMENTED
+
+`eventsStarted` flag added to `LibjxlDecoder`; `chunksStarted` flag added to `LibjxlEncoder`. Second call to `events()` yields an `{ type: "error", code: "InvalidState" }` event and returns. Second call to `chunks()` throws synchronously (no error-event channel on that type). Both guards prevent zombie sessions from duplicate iteration.
+
+## R3-2. Push-after-close guard + duplicate-close guard + `wake()` helper — IMPLEMENTED
+
+`closed: boolean` added to `LibjxlDecoder`. `push()` and `close()` both early-return when `cancelled || closed`. `close()` sets `closed = true` before pushing the null sentinel — prevents multiple sentinels on repeated calls. Inline `wakeResolve?.(); wakeResolve = null` pattern replaced by `private wake()` method used in `push`, `close`, `cancel`, and `dispose`.
+
+## R3-3. `DeferredVoid` class replacing single-slot wake — REJECTED
+
+Single-slot invariant is structurally guaranteed: only one generator can consume the decoder (enforced by R3-1), and only `waitForQueueItem()` ever awaits, called sequentially within that generator. `DeferredVoid` adds a class + allocation per wait with no correctness gain. Reject.
+
+## R3-4. Encoder incremental byte counter + early rejection — IMPLEMENTED
+
+`queuedPixelBytes: number` added to `LibjxlEncoder`, incremented in `pushPixels()`. Early rejection throws if `queuedPixelBytes + incoming > pixelByteTotal`. `chunks()` uses `this.queuedPixelBytes` directly (no reduce scan). `pixelByteTotal` computed once in constructor via `expectedPixelBytes()`.
+
+## R3-5. Progressive pixel chunk release during WASM copy — IMPLEMENTED
+
+Copy loop in `chunks()` now sets `this.pixelChunks[i] = EMPTY_U8` immediately after each chunk is copied to WASM heap. The module-level `EMPTY_U8 = new Uint8Array(0)` constant avoids per-iteration allocation. Peak JS heap overlap (all input chunks + full WASM copy simultaneously alive) is reduced to one-chunk granularity.
+
+## R3-6. Streaming input encoder (new bridge functions) — IMPLEMENTED (build pending)
+
+Code complete across all three layers. `bridge.cpp`: `JxlWasmEncState` extended with `pixels_buf`/`size`/`written` and encode params; `jxl_wasm_enc_create_image`, `jxl_wasm_enc_push_chunk`, `jxl_wasm_enc_finish` added and exported; `jxl_wasm_enc_free` updated to free `pixels_buf`. `exports.txt`: three new exports. `facade.ts`: `LibjxlEncoder.pushPixels()` is now async; first push calls `ensureModule()` and initialises WASM state via `enc_create_image`; `chunks()` detects the streaming path and calls `enc_finish`/`enc_take_chunk`; `cancel()`/`dispose()` call `freeWasmState()` on abort; buffered path preserved as fallback for sidecars and old WASM builds.
+
+Build blocked pending: (1) forward-declaration fix for `jxl_wasm_transcode_jpeg_to_jxl` in `bridge.cpp` line 575 (pre-existing, not caused by this change), (2) Docker registry auth for `ghcr.io/emscripten-core/emsdk` — switch primary to `docker.io/emscripten/emsdk` in `build.mjs:resolveEmsdkImages()`, then run `node scripts/build.mjs` from `packages/jxl-wasm`.
+
+Affected files: `packages/jxl-wasm/src/bridge.cpp`, `packages/jxl-wasm/src/facade.ts`, `packages/jxl-wasm/exports.txt`.
+
+## R3-7. Pooled WASM input buffer for transcode / one-shot decode — REJECTED
+
+Module-level scratch buffer is unsafe with concurrent sessions sharing one module instance. Instance-owned version saves one `malloc`/`free` per decode — marginal vs. the decode cost itself. `eventsProgressive` already reuses `chunkBufPtr`/`chunkBufCap` across chunks, which is the hot allocation. `eventsOneShot` makes one large allocation per call — geometric growth buys nothing since each decode has a different total size. Reject.
+
+## R3-8. `takeBuffer()` / `readBufferView()` ownership split — IMPLEMENTED
+
+`readBuffer()` had mixed ownership: freed handle on error, left it to caller on success. The "Read next BEFORE readBuffer" comment in the sidecar chain was a footgun. Replaced with:
+- `readBufferView()` — never frees; caller owns handle in all cases.
+- `takeBuffer()` — frees in `finally`; use when caller wants to consume and discard.
+- `callDecodeFromPtr()` now catches `readBufferView` failures and frees the handle itself before rethrowing — prevents leak when decode succeeds but buffer is malformed.
+- All encode call sites (`chunks()` sidecar chain, streaming path, standard path, transcode) converted to `takeBuffer()`. Sidecar error path simplified — no more catch-free-rethrow boilerplate.
+
+## R3-9. Overflow-safe pixel byte calculation — IMPLEMENTED
+
+`bytesPerChannelForFormat(format)` helper added. `expectedPixelBytes(width, height, format)` validates integer dimensions, checks `Number.isSafeInteger`, and rejects allocations above 1 GiB. Used in `LibjxlEncoder` constructor (once) and replaces the inline multiply in `chunks()`.
+
+## R3-10. Option normalisation into constructor — REJECTED
+
+`fmtIndex`, `bpc`, `pixelStride`, `distance`, `hasAlpha` are cheap derivations from immutable options. Moving them to constructor requires new `NormalizedDecoderOptions` / `NormalizedEncoderOptions` interfaces, adding ~30 LOC for no runtime win measurable against WASM call overhead. CLAUDE.md: simplicity first, no speculative abstractions. Reject.
+
+## R3-11. `distanceFromQuality()` exact formula — IMPLEMENTED
+
+`(100 - quality) / 6.67` → `((100 - q) * 15) / 100`. Avoids floating-point rounding from the approximated denominator. Added `Number.isFinite` guard for non-finite inputs. Clamp applied before multiply.
+
+## R3-12. `copyOrBorrowInput()` helper replacing inline ternaries — IMPLEMENTED
+
+Replaces three identical copy-or-borrow ternaries in `push()`, `pushPixels()`, and `transcodeJpegToJxl()`. `ArrayBuffer` → zero-copy view; `Uint8Array` → slice or borrow depending on `copy` flag. `toUint8Array()` removed.
+
+## R3-13. `pushBorrowed()` / `pushOwned()` per-call copy control — REJECTED
+
+Per-call ownership control is a niche API extension. The `copyInput` constructor option covers production use cases. Adding optional interface methods for rare mixed-ownership callers bloats the public API without a concrete consumer. Reject.
+
+## R3-14 + R3-15. Bounded input queue + async backpressure push — DEFERRED
+
+`maxQueuedBytes` option and async push backpressure are valid for direct (non-worker) facade use. In the worker path, the scheduler's `waitForDrain` / adaptive HWM already throttles input at the session boundary — a second layer in the facade would be redundant. Deferring until a direct-use consumer exists that needs the limit. The interface already declares `push(): void | Promise<void>` so the async upgrade is non-breaking when needed.
+
+## R3-16. Cap first progressive push to 64 KB for faster header — REJECTED
+
+Adds `currentChunkOffset` partial-chunk tracking, significantly complicating `eventsProgressive`'s inner loop. In practice, callers push data as it arrives from the network/worker; large upfront queues before `events()` starts are not the common case. Header latency is better addressed at the caller level (start iterating `events()` before pushing bulk data). The throughput benefit of batching outweighs the latency cost in the steady state. Reject.
+
+## R3-17. Downsample-only full-image fast path in `applyRegionAndDownsample()` — ALREADY HANDLED
+
+The `stride === 4` branch (line 908 of original) already handles `region === null` + `downsample !== 1` for rgba8 — `sourceRegion` becomes `{x:0, y:0, w:width, h:height}` from `normalizeRegion`, so the loop address math is identical to the proposed specialisation. The only overhead avoided is the `normalizeRegion` call itself, which is trivial. No code change needed.
+
+## R3-18. Avoid object spread in hot emitted events — IMPLEMENTED
+
+`...(pixels.region === undefined ? {} : { region: pixels.region })` replaced with `const ev: Extract<DecodeEvent, {type: T}> = {...}; if (pixels.region !== undefined) ev.region = pixels.region;` across all yield sites in `eventsProgressive` and `eventsOneShot`. Eliminates one temporary object allocation per emitted pixel event.
+
+## R3-19. Module capability detection cached once — IMPLEMENTED
+
+`JxlCapabilities` interface + `capabilityCache: WeakMap<LibjxlWasmModule, JxlCapabilities>` + `getCapabilities(module)` function added. Covers `progressiveDecode`, `streamingEncode`, `sidecars`, `jpegTranscode`. `typeof module._xxx === "function"` checks in `events()`, `chunks()`, and `transcodeJpegToJxl()` replaced with single `getCapabilities(module)` call per operation.
+
+## R3-20. Deterministic JS queue release in `events()` / `chunks()` finally — IMPLEMENTED
+
+`events()` outer `try/catch` gains a `finally` block clearing `chunkQueue`, `readIndex`, `queuedBytes`. `chunks()` `finally` block clears `pixelChunks` and `queuedPixelBytes` as belt-and-suspenders after normal or error exit. On normal completion the queue is effectively drained already; on error or cancel this ensures prompt GC eligibility without waiting for caller to call `dispose()`.
+
+---
+
+## B-3. "Wait-and-Read Loop in browser.ts" — CLAIM TRUE, FIXED
+
+Claim: "strict read→push→wait cycle prevents I/O prefetch from overlapping with push dispatch."
+
+Reality confirmed. Original loop awaited `reader.read()` only after `session.push()` resolved, serializing network I/O with scheduler backpressure. For network-streamed inputs, `session.push()` can block at the adaptive HWM; during that block the next network chunk wasn't even being fetched.
+
+Fix (`packages/jxl-stream/src/browser.ts`): prefetch pattern — start `pending = reader.read()` for chunk N+1 immediately after chunk N arrives (before `await session.push(N)`). The scheduler's backpressure still governs how many chunks the worker can buffer; the fix only pipelines the I/O prefetch with the push round-trip, masking network latency during backpressure wait.
+
+---
+
+# Round 4 — scheduler / facade / bridge (10-item batch)
+
+Evaluated against `packages/jxl-scheduler/src/scheduler.ts`, `packages/jxl-scheduler/src/pool.ts`, `packages/jxl-wasm/src/facade.ts`, and `packages/jxl-worker-browser/src/decode-handler.ts`.
+
+## R4-1. Pool Pre-warming — IMPLEMENTED
+
+`prewarmSize?: number` added to `SchedulerOptions`. `WorkerPool.prewarm(count)` spawns workers eagerly at construction (fire-and-forget, respects `maxSize`). Workers start idle timers immediately so they are reaped normally if unused within `idleTimeoutMs`. Eliminates 100–200 ms first-image cold-start penalty.
+
+Affected files: `packages/jxl-scheduler/src/pool.ts`, `packages/jxl-scheduler/src/scheduler.ts`.
+
+## R4-2. Worker-side createImageBitmap — REJECTED
+
+Proposal: call `createImageBitmap(new Blob([pixels], { type: "image/x-rgba8" }))` inside the decode worker; transfer `ImageBitmap` to main thread.
+
+Rejected for three reasons:
+
+1. **Invalid MIME type.** `"image/x-rgba8"` is not a registered image format; `Blob` + `createImageBitmap` expect encoded image data (PNG, JPEG, etc.), not raw RGBA pixel bytes. The proposal's code snippet would throw or produce a black bitmap.
+
+2. **Breaks non-rgba8 paths.** The worker handles `rgba16` and `rgbaf32` (HDR) formats. `ImageData` (the correct raw-pixel path) only accepts `Uint8ClampedArray`, which cannot represent 16-bit or float precision. Inserting `createImageBitmap` here would silently corrupt scientific data.
+
+3. **Wrong layer.** `decode-handler.ts` is browser/Node-agnostic at the protocol level. Adding a browser-only canvas API call ties it to the DOM. Consumer code already has the decoded `ArrayBuffer` and can call `createImageBitmap(new ImageData(new Uint8ClampedArray(pixels), w, h))` in one call on the main thread for rgba8 previews.
+
+## R4-3. AsyncEventStream Promise Fast-Path — CLAIM FALSE, NO FIX NEEDED
+
+Claim: every `next()` call allocates a new Promise.
+
+Reality: `waitForQueueItem()` (`facade.ts`) already fast-paths: `if (this.chunkQueue.length > this.readIndex) return Promise.resolve()`. The surrounding loop in `eventsProgressive` only calls `waitForQueueItem` when no items are buffered (`if (this.chunkQueue.length <= this.readIndex)`), so the fast path is always taken when data is available.
+
+## R4-4. Redundant Slicing for Transfers — CLAIM FALSE, NO FIX NEEDED
+
+Claim: `toTransferableBuffer` causes redundant copies.
+
+Reality: `toTransferableBuffer` does not exist in this codebase. `copyOrBorrowInput()` (`facade.ts`) already handles ownership: `ArrayBuffer` → zero-copy `new Uint8Array(ab)` view; `Uint8Array` → copies only when `copyInput !== false`, which callers opt out of via `copyInput: false`. The primary production path (transferred `ArrayBuffer` chunks from `postMessage`) never hits the copy branch. `SharedArrayBuffer` would require COOP/COEP headers and complicates ownership; not appropriate here.
+
+## R4-5. WASM Heap 64 MB Initial Memory — CLAIM FALSE, ALREADY AT 64 MB
+
+Claim: initial WASM memory should be raised from 32 MB to 64 MB.
+
+Reality: `build.mjs` already sets `-sINITIAL_MEMORY=67108864` (64 MB) in both `baseFlags` (line 49) and `linkBridge` (line 229). The HANDOFF.md fast-relink recipe shows 33554432 (32 MB) but that is an illustrative manual snippet, not the production build path.
+
+## R4-6. Synchronous Slot Booking — REJECTED
+
+Proposal: reserve the slot synchronously, resolve the worker assignment later.
+
+Rejected: `acquireSlot` is already O(1) for the common case — `pool.acquire()` returns in one microtask when an idle worker exists. The queue enqueue is synchronous. The async cost is one `pool.acquire()` check per session, not N ticks per N sessions. A fully synchronous booking path would bypass the preemption check and the dedupe lookup, both of which require async coordination. No profiling data shows this as a measurable bottleneck.
+
+## R4-7. Encoder Pixel Chunk Aggregation — REJECTED
+
+Proposal: buffer pixel pushes below a 256 KB threshold before sending to the worker.
+
+Rejected: No evidence callers push sub-256 KB chunks. The streaming input path (R3-6) copies each chunk directly to the WASM pixel buffer at the moment it arrives — the worker-side cost per message is a single `HEAPU8.set`. Adding aggregation introduces a partial-buffer state that complicates `finish()` (must flush remainder), adds latency for callers that push one large chunk, and solves a problem for which no benchmark data exists.
+
+## R4-8. UUID → Monotonic Counter — REJECTED
+
+100 `crypto.randomUUID()` calls ≈ 100–300 µs total — below measurement noise for a gallery load. A counter wraps on integer overflow, collides across page reloads, and degrades log readability. The proposal's own impact rating is "Low." Not worth the churn.
+
+## R4-9. Tier Detection Re-Probing — CLAIM FALSE, NO FIX NEEDED
+
+Claim: `detectTier()` re-runs WASM probes on every call.
+
+Reality: `_cachedDetectedTier` module-level variable (`facade.ts`) caches the result after the first call. `detectTier()` returns on the first line when `_cachedDetectedTier !== undefined`. The proposed `window.__JXL_TIER__` global would pollute the namespace and conflict with multiple module instances.
+
+## R4-10. Single-Trip Metadata Pass — REJECTED
+
+Claim: EXIF/XMP/ICC ArrayBuffers are transferred multiple times across threads.
+
+Reality: metadata is set once in `EncoderOptions` and flows into the `LibjxlEncoder` constructor. There is no multi-hop routing — it does not travel Main → Scheduler → Worker → Bridge as the proposal suggests. The actual issue is that `bridge.cpp`'s `EncodeRgba()` ignores `iccProfile`, `exif`, and `xmp` entirely (HANDOFF.md §4 — wiring ICC/EXIF/XMP in the C++ bridge is the correct fix, not changing the JS routing).
+
+---
+
+# Round 5 — decode-handler.ts (10-item batch)
+
+Evaluated against `packages/jxl-worker-browser/src/decode-handler.ts`.
+
+## DH-1. Adaptive drain HWM + latencyMs in drain message — IMPLEMENTED
+
+Static `CHUNK_HWM = 4` replaced by EMA-based `adaptiveHwm()`. Each `decoder.push(chunk)` call is timed; EMA (α = 0.25) tracks per-chunk WASM decode latency. `adaptiveHwm()` scales `HWM_BASE = 6` by `clamp(0.6, 2.0, 120 / (ema + 10))`, giving range [3, 12]. Fast workers push the HWM up (fewer drain round-trips); slow workers bring it down (earlier drain signal, less queued memory). Drain message gains optional `latencyMs` field, giving the scheduler real-time data to tune its own `pushHwm`. `MsgWorkerDrain` in `protocol.ts` updated with `latencyMs?: number`.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-core/src/protocol.ts`.
+
+## DH-2. Pixel buffer pool for output transfers — REJECTED
+
+Proposed module-level pool for pixel output `ArrayBuffer`s. `postMessage(msg, [pixels])` transfers the buffer, detaching it — it cannot be returned to any pool (the reference becomes a zero-length neutered buffer). Same rejection as R1-2 and R2-2 (facade.ts rounds 1 and 2). No safe ownership model without an explicit `release()` call that no current consumer implements.
+
+## DH-3. Progress event throttling (50 ms) — REJECTED
+
+Adds a `PROGRESS_THROTTLE_MS` gate to suppress intermediate `decode_progress` postMessages. Progressive frame delivery is a first-class UX feature; suppressing frames defeats it. For typical JXL images (DC + 1–3 refinement passes) throttling saves at most 2–3 messages per decode — not worth the complexity or the UX regression. No benchmark data showing inter-thread message rate is a bottleneck.
+
+## DH-4. Improved compactQueue() — REJECTED
+
+Proposed: extract inline compaction into a helper method; lower threshold from 64 to 32; add explicit null loop before `slice`. The current inline loop (line 179) already nulls each slot immediately on consumption (`this.chunkQueue[this.chunkReadIndex++] = undefined as any`), so the proposed null loop is redundant. Threshold 64 avoids needless `slice()` allocations in typical burst-feed patterns; lowering it increases array churn for no GC benefit.
+
+## DH-5. Global + rolling-window budget — REJECTED
+
+Proposed adding `globalStartMs` alongside `stageStartMs`. `stageStartMs` is set in the constructor (`performance.now()`) and never reset — `checkBudget()` already measures global elapsed time from session creation, not per-stage elapsed time. The field name is misleading but the measurement is correct. Adding a second timer duplicates the measurement.
+
+## DH-6. Pixel dump on pause — REJECTED
+
+Proposed: on `onPause()`, optionally send current partial pixels as a `"paused"` message for UI continuity. The most recent `decode_progress` message already delivered the last emitted partial frame to the main thread. Re-sending on pause is redundant and would require new facade API (a "dump current partial frame" method that the facade does not expose).
+
+## DH-7. Metrics expansion (add stage/queueDepth) — REJECTED
+
+`CodecMetric` is a closed discriminated union; adding `stage` or `queueDepth` requires modifying every variant or restructuring `MsgMetric`. Protocol churn for marginal debugging value that can be derived from existing timing metrics.
+
+## DH-8. Error context enrichment (add stage + bytesProcessed) — REJECTED
+
+Adding `stage` to `decode_error` requires a `MsgDecodeError` protocol change. The proposed `bytesProcessed` computation is also incorrect: the chunk queue slots are null'd on consumption, so `chunkQueue.reduce(...)` would return 0 for processed bytes and nonzero only for still-queued bytes — the opposite of the label.
+
+## DH-9. Facade buffer pool integration — REJECTED
+
+Same rejection as DH-2 and R1-2/R2-2. No safe ownership model for transferred buffers.
+
+## DH-10. Explicit dispose() method — REJECTED
+
+Proposed: add a `dispose()` separate from `onCancel()` for scheduler-driven cleanup. `onCancel()` already handles the full teardown: sets `cancelled`, unblocks `waitForResume`, transitions state, posts `decode_cancelled`, invokes `onSessionEnd`. `run()`'s `finally` block calls `decoder.dispose()`. Adding a second cleanup path creates ambiguity about which to call when.
+
+---
+
+# Round 6 — decode-handler.ts (10-item batch + 5-item Part 2)
+
+Evaluated against `packages/jxl-worker-browser/src/decode-handler.ts` and `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH6-1. Preemption-aware soft yield (Patch 1) — REJECTED
+
+`onCancel()` sets `this.cancelled = true` before `this.softYieldRequested = true`. `feedDecoder`'s outer loop condition is `while (!this.cancelled …)` — the loop exits at the next iteration check, before any `softYieldRequested` branch is evaluated. The soft-yield path is structurally unreachable. Additionally, `decoder.push(new ArrayBuffer(0))` is not a valid libjxl flush operation — an empty push would either be a no-op or could confuse the container parser. Soft preemption is already provided by `onPause()`/`onResume()`.
+
+## DH6-2. Early header propagation hint — REJECTED
+
+`decode_header` already flows to the scheduler. A second `decode_header_ready` message carries zero new information. Protocol complexity for no information gain.
+
+## DH6-3. Internal diagnostic metrics with `debugMetrics` flag — REJECTED
+
+`MsgDecodeStart.debugMetrics?` requires a protocol change; `internal_metric` would fall outside the `WorkerToMainMessage` union. Queue depth is already derivable from the `worker_drain` message stream (drain fires when depth drops below adaptive HWM). No concrete consumer exists.
+
+## DH6-4. Adaptive chunk batching in feedDecoder (Patch 2) — REJECTED
+
+Batching chunks and then `for...of`-pushing them still issues N `await decoder.push()` calls for N chunks — no semantic change. Moving the drain check to once-per-batch makes backpressure less granular (scheduler receives no signal while the batch is being processed). The proposed compaction logic also drops the `chunkQueue.length = 0; chunkReadIndex = 0` fast-path from the current code.
+
+## DH6-5. Per-stage budget reset — REJECTED
+
+Silently changes `budgetMs` semantics from session-level to per-stage without any API change. `stageStartMs` is set in the constructor (global elapsed from session creation), which is the correct interpretation — each stage would inherit the full budget, potentially extending total session time to `budgetMs × N_stages`. Same rejection as DH-5 (Round 5).
+
+## DH6-6. JXL signature check on first chunk — REJECTED
+
+libjxl already rejects invalid input via the `"error"` event, which routes to `failSession`. JS magic-bytes validation duplicates library logic and risks false positives: JXL has two valid start sequences (bare codestream `FF 0A` and ISO BMFF container `00 00 00 0C …`), and the first chunk might arrive mid-way into a container box in some proxy architectures.
+
+## DH6-7. `onPause` idempotency guard — IMPLEMENTED
+
+Both browser and Node handlers were missing `if (this.paused) return;` — repeated `onPause()` calls re-sent `decode_paused` acknowledgements. Guard added to both handlers.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH6-8. Worker-side decode timeout — REJECTED
+
+Duplicates scheduler responsibility. An absolute 30 s wall-clock timeout incorrectly fires on valid slow-network or large-file sessions. The scheduler owns session lifecycle; `budgetMs` already covers the decode-time budget case.
+
+## DH6-9. Queue byte cap (byte cap only; signature check rejected per DH6-6) — IMPLEMENTED
+
+Both handlers enforce a 128 MiB per-session cap on total queued (not-yet-pushed) bytes. Empty chunks rejected immediately in `onChunk`. `queuedBytes` is decremented as each chunk is consumed from the queue in `feedDecoder`. In normal scheduler operation, adaptive HWM keeps queued bytes well under 2 MiB; cap only fires for scheduler-free callers or pathological inputs.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH6-10. Final event consolidation — REJECTED
+
+Proposed code is identical to current implementation. No change.
+
+## DH6-A through DH6-E (Part 2 — Scheduler/Facade integration ideas) — REJECTED
+
+- **A** (`progressIntervalMs?`): Significant protocol and scheduler change, no concrete consumer.
+- **B** (facade `backpressureHandler` forwarded as `worker_drain`): Same rejection as R1-1/R2-3 — drain signal is correctly at the worker layer, not inside the facade.
+- **C** (sourceKey-aware header caching): DedupeRegistry already fans out events from the primary session; caching `ImageInfo` separately requires new protocol plumbing with no current consumer.
+- **D** (tier-aware worker assignment): Scheduler concern; no mechanism to query worker tier at assignment time without a new protocol message.
+- **E** (global memory pressure broadcast): Major architecture change (SharedArrayBuffer or BroadcastChannel across workers); no concrete scenario requiring cross-worker memory coordination at this scale.
+
+---
+
+# Round 7 — decode-handler.ts (12-item correctness batch)
+
+Evaluated against both `packages/jxl-worker-browser/src/decode-handler.ts` and `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH7-1. Central `finishSession` + `wake`/`wakeResume` helpers — IMPLEMENTED
+
+**Real bug.** `waitForChunk()` performs its fast-path check before creating the promise; once `feedDecoder` is awaiting the stored `wakeResolve`, a subsequent state change to `"final"`, `"error"`, or `"budget_exceeded"` in `readDecoderEvents` does not call `wakeResolve` — `feedDecoder` hangs indefinitely and `decoder.dispose()` never runs (WASM memory leak). Affected terminal paths: `progressionTarget === "header"`, `"final"` event, `"error"` event, `"budget_exceeded"` event.
+
+Fix: `finishSession(state)` sets `ended`, clears the input queue, calls `wake()` and `wakeResume()` to unblock both sleeping loops, then calls `onSessionEnd`. `wake()` and `wakeResume()` are extracted helpers replacing the inline `this.wakeResolve?.(); this.wakeResolve = null` pattern. Node handler uses a polling `waitForChunk` (no explicit wake required), but gets the same `finishSession` / `clearInputQueue` / `isTerminal` structure for consistency and early queue release.
+
+Also: `ended` flag makes all terminal guards single-field checks instead of multi-state unions; `isTerminal()` helper covers all five terminal states.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH7-2. Budget check before pixel transfer — IMPLEMENTED
+
+**Real bug.** `self.postMessage(msg, [pixels])` transfers and detaches `pixels`. The subsequent `checkBudget()` call, if true, passed the now-zero-length detached buffer to `postBudgetExceeded`. Fix: move `checkBudget()` before the `postMessage` call; if budget is exceeded, send `decode_budget_exceeded` with the live buffer; otherwise send `decode_progress` and transfer normally.
+
+Affected files: `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-worker-node/src/decode-handler.ts`.
+
+## DH7-3. `feedDecoder` outer loop covers all terminal states — IMPLEMENTED
+
+Previous condition `while (!this.cancelled && this.state !== "final" && this.state !== "error")` missed `"budget_exceeded"`. Replaced with `while (!this.isTerminal())`. Inner loop also guards with `!this.isTerminal()` for prompt exit mid-batch.
+
+## DH7-4. Typed chunk queue (`Array<ArrayBuffer | undefined>`) — IMPLEMENTED
+
+`ArrayBuffer[]` + `undefined as any` was a type escape in the hot path. Changed to `Array<ArrayBuffer | undefined>`. Slot null'ing in `takeNextChunk()` no longer requires a cast. Compaction logic extracted to `compactQueue()`. Node handler likewise changed to `Array<Buffer | undefined>`.
+
+## DH7-5. `onClose` idempotency + `onChunk` post-close guard — IMPLEMENTED
+
+`onClose()` now early-returns when `inputClosed` is already true. `onChunk()` guards on `inputClosed` in addition to `isTerminal()`. Mirrors the facade-side push-after-close hardening (R3-2).
+
+## DH7-6. `time_to_first_pixel_ms` emitted once — IMPLEMENTED
+
+Previously posted on every `"progress"` event. `firstPixelMetricPosted` flag ensures the metric fires exactly once per session — on the first progressive frame.
+
+## DH7-7. Edge-triggered `worker_drain` — REJECTED
+
+Drain fires only when crossing from ≥HWM to <HWM. Risk: if queue starts below HWM (common in single-chunk-at-a-time slow-network delivery), no crossing ever occurs, no drain signal is sent, and the scheduler stalls. Current level-triggered behavior (drain after every push where depth < HWM) is the correct 1:1 drain-per-chunk protocol.
+
+## DH7-8. Remove dead `currentStage` field — IMPLEMENTED
+
+Initialized to `"header"`, never updated after construction, never read. Removed.
+
+## DH7-9. `onCancel` via `finishSession` — IMPLEMENTED
+
+Consequence of DH7-1. `onCancel` now posts `decode_cancelled` then calls `finishSession("cancelled")` instead of manually setting state, waking resolvers, and calling `onSessionEnd`.
+
+## DH7-10. `readDecoderEvents` terminal paths via `finishSession` — IMPLEMENTED
+
+Consequence of DH7-1. All four terminal paths (`progressionTarget === "header"`, `"final"`, `"budget_exceeded"`, `"error"`) delegate to `finishSession` / `failSession` / `postBudgetExceeded`, which in turn call `finishSession`.
+
+## DH7-11. `run()` internal `catch` + `finally` cleanup — IMPLEMENTED
+
+Inner `try/catch` on `Promise.all` catches errors from either coroutine without bubbling. `finally` block calls `finishSession(this.state)` (no-op when already ended) to guarantee `onSessionEnd` fires even on unexpected completion, then awaits `decoder.dispose()`.
+
+## DH7-12. `attachRegion` helper — REJECTED
+
+Two call sites (`"progress"` and `"final"` cases). CLAUDE.md: simplicity first, no speculative abstractions; two uses do not justify a helper method.
+
+---
+
+# Round 8 — jxl-cache/browser.ts + jxl-stream/browser.ts (Facade Round 1)
+
+Evaluated against `packages/jxl-cache/src/browser.ts` and `packages/jxl-stream/src/browser.ts`.
+
+## Cache-9. OPFS `FileSystemSyncAccessHandle` — REJECTED
+
+`FileSystemSyncAccessHandle` is only available inside dedicated workers; `JxlCacheBrowser` runs in a regular browser context (main thread or shared worker). The async OPFS API (`createWritable`, `getFile`) is the correct path here. A worker-specialised `JxlCacheWorker` variant could use sync handles, but no current consumer runs the cache inside a dedicated worker. Adding this now would introduce dead code and split the implementation without a concrete performance benchmark to justify it.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+---
+
+# Round 9 — jxl-cache/browser.ts + jxl-stream/browser.ts (Grok batch)
+
+Evaluated against `packages/jxl-cache/src/browser.ts`, `packages/jxl-cache/src/lru.ts`, and `packages/jxl-stream/src/browser.ts`. Items 4 (manifest write throttling, implemented as coalescing) and 10 (stats expansion, implemented) are not listed here.
+
+## G2-1. Deduplication-Aware Caching (`sourceKey` parameter on `set()`) — REJECTED
+
+Proposal: add optional `sourceKey` to `set()`; if it differs from `key`, call `set(sourceKey, buffer)` recursively to store the same buffer under both keys.
+
+Wrong layer. The scheduler's `DedupeRegistry` owns source-key deduplication and fans out to existing sessions. Storing the same buffer under two keys in the cache doubles the `persistentTracker` size accounting (the LRU counts both entries toward the limit) and conflates cache identity with scheduler routing logic. Callers that need a second key can call `set()` twice directly.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G2-2. Memory Pressure-Aware Eviction (`performance.memorypressure`) — REJECTED
+
+Proposal: listen to `performance.addEventListener('memorypressure', ...)` and evict 30% of memory cache on pressure events.
+
+`memorypressure` is not a standard Web API and is not implemented in any major browser (Chrome, Firefox, Safari). Wiring a listener to a non-existent event is dead code. Additionally, the suggestion calls `this.memoryCache.evictFraction(0.3)` — a method that does not exist on `LRUCache`. The memory cache is already LRU-evicting when new entries push it over `memoryLimit`; that is the correct pressure response.
+
+Affected files: `packages/jxl-cache/src/browser.ts`, `packages/jxl-cache/src/lru.ts`.
+
+## G2-3. Concurrent Set Coalescing — REJECTED
+
+Proposal: in `setPersistent`, if a promise for the key is already inflight, return it immediately (`if (pending) return pending`) so only the first write runs.
+
+This inverts the correct semantics. The current chaining approach serializes writes per key so the **last** caller wins (most recent buffer is what ultimately lands in OPFS). The proposal makes the **first** caller win and silently discards all subsequent writes for that key while the first is in flight. In a gallery reload scenario, a newer buffer (e.g. higher quality re-encode) would be dropped in favour of an older one. CLAUDE.md: correctness over brevity.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G2-5. `getStream()` Helper on `JxlCacheBrowser` — REJECTED
+
+Proposal: add `getStream(key)` to `JxlCacheBrowser` that calls `get(key)` and wraps the result in a one-chunk `ReadableStream<Uint8Array>`.
+
+Thin wrapper with no performance value. `jxl-cache` and `jxl-stream` are separate packages; introducing a stream return type into the cache package would create a cross-package coupling or require duplicating the `ReadableStream` construction inline. Callers that need a stream from a cached buffer can do this in one line themselves. Same reasoning as R1-9 (facade) and R2-5 (facade). If wanted, belongs in a separate utilities export so it can be tree-shaken.
+
+Affected files: `packages/jxl-cache/src/browser.ts`, `packages/jxl-stream/src/browser.ts`.
+
+## G2-6. OPFS Write Retry Loop in `writePersistentFile` — REJECTED
+
+Proposal: wrap `writePersistentFile` in a `for` loop that retries up to 2 times on `QuotaExceededError`, evicting 60% between attempts.
+
+`setPersistent` already handles `QuotaExceededError`: it evicts 50% via `evictPersistentFraction` and retries the write once. Moving the retry into `writePersistentFile` would duplicate this logic at the wrong level (the file-write primitive should not know about tracker eviction), and the two retry mechanisms would interfere. The existing handling is sufficient.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G2-7. Cache-Aware `DecodeSession` Wrapper (`createCachedDecoder`) — REJECTED
+
+Proposal: `createCachedDecoder(cache, key, options)` checks the cache first; on a hit it returns a fake `DecodeSession` with no-op `push`/`close`/`cancel`; on a miss it runs a real decode and populates the cache on finish.
+
+`DecodeSession` is event-driven — the decoder emits progressive frames, header info, and metrics via the `events()` async iterable, not via a return value. A no-op fake session cannot replay those events, so callers would receive no pixels on a cache hit. Wiring the real decode + cache write would require knowledge of `DecodeOptions`, `JxlContext`, and the event protocol — all jxl-core/jxl-session concerns that do not belong in jxl-cache or jxl-stream. Wrong abstraction layer.
+
+Affected files: `packages/jxl-cache/src/browser.ts`, `packages/jxl-stream/src/browser.ts`.
+
+## G2-8. Adaptive Prefetch Depth in `fromReadableStream` — REJECTED
+
+The proposal adds a `prefetchDepth` variable initialized to 2 but never uses it — the loop body still calls `reader.read()` exactly once per iteration. The snippet does not implement actual multi-depth prefetch. Beyond that: multi-ahead prefetch would fetch chunks from the network before `session.push()` backpressure has been applied, potentially queueing more than the worker's adaptive HWM allows and risking the 128 MiB input queue cap. The existing one-ahead prefetch (chunk N+1 starts fetching while `session.push(N)` awaits) is the correct depth.
+
+Affected file: `packages/jxl-stream/src/browser.ts`.
+
+## G2-9. Persistent Cache Buffer Validation (JXL Magic Bytes) — REJECTED
+
+Proposal: after reading a buffer from OPFS, call `isValidJxlBuffer(buffer)` to check magic bytes and discard corrupted entries.
+
+The cache is content-agnostic — it stores arbitrary `ArrayBuffer` values, not necessarily JXL data. Adding format-specific validation inside the cache breaks the abstraction boundary. OPFS file corruption is extremely rare and is already handled gracefully: libjxl rejects invalid input via the `"error"` decode event, which routes to `failSession`. JXL also has two valid container start sequences (`0xFF 0x0A` bare codestream, `0x00 0x00 0x00 0x0C` ISO BMFF), making a simple magic-byte check fragile. Same reasoning as DH6-6.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+---
+
+# Round 10 — jxl-cache/browser.ts + jxl-stream/browser.ts (Grok batch 2)
+
+Evaluated against `packages/jxl-cache/src/browser.ts` and `packages/jxl-stream/src/browser.ts`. Items 1, 2, 4 (partial), 5 (partial), 7, and 8 were implemented.
+
+## G3-3. `getSafeName()` Helper — REJECTED
+
+Proposal: extract `entry?.name ?? safeCacheName(key)` into a `private getSafeName(key: string): string` helper that calls `this.persistentTracker.get(key)` internally.
+
+`getPersistent` and `removePersistentEntry` both call `this.persistentTracker.get(key)` to retrieve the entry for purposes beyond just the name (e.g., `getPersistent` checks `if (entry === undefined)` to decide whether to add a new tracker record). A `getSafeName` helper would cause a second `get()` call for the same key in the same operation, updating LRU order twice — once inside `getSafeName`, once for the caller's own entry lookup. In `setPersistent`, calling `getSafeName` would perform an unnecessary tracker read on a key that is about to be overwritten. The duplicated pattern (`entry?.name ?? safeCacheName(key)`) appears in only three private methods; DRY benefit does not outweigh the double-LRU-update side effect.
+
+Affected file: `packages/jxl-cache/src/browser.ts`.
+
+## G3-6. `fromReadableStream` Rewrite (Stronger Backpressure) — REJECTED
+
+Proposal: rewrite `fromReadableStream` using a `lastPushPromise` variable — store `session.push(value)` without awaiting, then `await lastPushPromise` at the top of the next iteration.
+
+This is a regression on two fronts:
+
+1. **Prefetch removed.** The current implementation starts `reader.read()` for chunk N+1 immediately after chunk N arrives, before awaiting `session.push(N)`, pipelining network I/O with scheduler backpressure. The proposal awaits the previous push before reading, re-serializing I/O with push and eliminating the prefetch. This was explicitly fixed and documented (B-3 in this file).
+
+2. **Abort hardening removed.** The proposal omits the `cancelBoth()` helper, the `onAbort` event listener, abort checks inside the loop, and the `signal?.aborted` check before `session.close()`. All of these were added in Round 8 (commit `d272432`) as deliberate correctness fixes for abort lifecycle edge cases.
+
+Affected file: `packages/jxl-stream/src/browser.ts`.

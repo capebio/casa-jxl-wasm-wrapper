@@ -21,7 +21,7 @@
 import init, {
     process_orf,
     rgb_to_rgba,
-    apply_look,
+    LookRenderer,
     rotate_rgb8,
 } from '../pkg/raw_converter_wasm.js';
 
@@ -29,8 +29,8 @@ import init, {
 
 let wasmReady;
 // Per-taskId state maps — survive across multiple files on this worker.
-const liveStateMap  = new Map(); // taskId → {rgb16,w,h,outW,outH,orientation,wbR,wbB,colorMatrix}
-const thumbStateMap = new Map(); // taskId → same shape but thumb-sized rgb16
+const liveStateMap  = new Map(); // taskId → {renderer: LookRenderer, outW, outH, wbR, wbB}
+const thumbStateMap = new Map(); // taskId → same shape but thumb-sized LookRenderer
 
 async function ensureWasm() {
     if (!wasmReady) wasmReady = init();
@@ -42,26 +42,26 @@ async function ensureWasm() {
     }
 }
 
-function makeLiveState(rgb16, w, h, orientation, wbR, wbB, colorMatrix) {
+// makeLiveState constructs a LookRenderer (WASM-resident) from packed rgb16 bytes.
+// The renderer owns the RGB16 buffer inside WASM; subsequent render() calls
+// transfer only the output RGB8, not the cached buffer.
+function makeLiveState(rgb16Bytes, w, h, orientation, wbR, wbB, colorMatrix) {
     // Only orientations 6 (90° CW) and 8 (90° CCW) actually swap axes in
     // apply_orientation (pipeline.rs).  Tags 5/7 are pass-through there, so
     // using orientation >= 5 overreports axisSwap and mis-sizes the canvas.
     const axisSwap = orientation === 6 || orientation === 8;
+    const renderer = new LookRenderer(rgb16Bytes, w, h, orientation, colorMatrix);
     return {
-        rgb16,
-        w, h,
+        renderer,
         outW: axisSwap ? h : w,
         outH: axisSwap ? w : h,
-        orientation, wbR, wbB, colorMatrix,
+        wbR, wbB,
     };
 }
 
 function applyLookToState(state, look) {
-    return apply_look(
-        state.rgb16,
-        state.w, state.h, state.orientation,
+    return state.renderer.render(
         state.wbR, state.wbB,
-        state.colorMatrix,
         look.exposureEv  ?? 0, look.contrast   ?? 0,
         look.highlights  ?? 0, look.shadows    ?? 0,
         look.whites      ?? 0, look.blacks      ?? 0,
@@ -72,10 +72,12 @@ function applyLookToState(state, look) {
 }
 
 self.addEventListener('message', async (ev) => {
-    // --- release cached rgb16 state for a re-submitted task ---
+    // --- release cached LookRenderer state for a re-submitted task ---
     if (ev.data.type === 'release_state') {
-        liveStateMap.delete(ev.data.id);
-        thumbStateMap.delete(ev.data.id);
+        const lbState = liveStateMap.get(ev.data.id);
+        if (lbState) { lbState.renderer.free(); liveStateMap.delete(ev.data.id); }
+        const tState = thumbStateMap.get(ev.data.id);
+        if (tState) { tState.renderer.free(); thumbStateMap.delete(ev.data.id); }
         return;
     }
 
@@ -236,10 +238,14 @@ self.addEventListener('message', async (ev) => {
             [rgbaBuf],
         );
     } catch (err) {
-        // Clean up any rgb16 state stored before the failure so the worker
-        // doesn't hold large buffers for tasks that will never re-render.
+        // Free any LookRenderer objects stored before the failure so WASM memory
+        // is not leaked for tasks that will never re-render.
         if (id !== undefined) {
+            const lbState = liveStateMap.get(id);
+            if (lbState) { lbState.renderer.free(); }
             liveStateMap.delete(id);
+            const tState = thumbStateMap.get(id);
+            if (tState) { tState.renderer.free(); }
             thumbStateMap.delete(id);
         }
         self.postMessage({

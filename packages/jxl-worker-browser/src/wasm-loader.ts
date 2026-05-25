@@ -81,6 +81,7 @@ export interface JxlModule {
     progressive: boolean;
     previewFirst: boolean;
     chunked: boolean;
+    sidecarSizes?: readonly number[];
   }): BrowserEncoder;
 }
 

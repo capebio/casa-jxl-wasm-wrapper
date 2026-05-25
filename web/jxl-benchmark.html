@@ -326,16 +326,14 @@
                 <table class="results-table">
                     <thead>
                         <tr>
-                            <th>Size</th>
-                            <th>Q=85</th>
-                            <th>Q=95</th>
-                            <th>Lossless</th>
+                            <th>Config</th>
+                            <th>Decode (ms)</th>
                             <th>Note</th>
                         </tr>
                     </thead>
                     <tbody id="decode-summary-body">
                         <tr>
-                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -345,16 +343,14 @@
                 <table class="results-table">
                     <thead>
                         <tr>
-                            <th>Size</th>
-                            <th>Q=85</th>
-                            <th>Q=95</th>
-                            <th>Effort</th>
+                            <th>Config</th>
+                            <th>Encode (ms)</th>
                             <th>Note</th>
                         </tr>
                     </thead>
                     <tbody id="encode-summary-body">
                         <tr>
-                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -376,17 +372,95 @@
                 <table class="results-table">
                     <thead>
                         <tr>
-                            <th>Size</th>
-                            <th>Q=85 (KB)</th>
-                            <th>Q=95 (KB)</th>
-                            <th>Ratio</th>
+                            <th>Config</th>
+                            <th>File size (KB)</th>
                             <th>Note</th>
                         </tr>
                     </thead>
                     <tbody id="file-size-body">
                         <tr>
-                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
                         </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="progressive-shell">
+            <header class="progressive-header">
+                <p class="eyebrow">Progressive paint test</p>
+                <h2>Per-pass timing and visual quality viewer</h2>
+            </header>
+
+            <div class="progressive-controls">
+                <button id="run-progressive" class="primary-btn" type="button" disabled title="Load files first">Run progressive paint</button>
+
+                <div class="prog-option-group">
+                    <span class="prog-setting-label">Size:</span>
+                    <div class="prog-radio-group">
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="512" /> 512</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1080" checked /> 1080</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1920" /> 1920</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="fullsize" /> Full</label>
+                    </div>
+                </div>
+
+                <div class="prog-option-group">
+                    <span class="prog-setting-label">Quality:</span>
+                    <div class="prog-radio-group">
+                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="75" /> 75</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="85" checked /> 85</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="95" /> 95</label>
+                    </div>
+                </div>
+
+                <label class="toggle-opt">
+                    <input type="checkbox" id="prog-preview-first" />
+                    <span class="opt-label">Preview 1st</span>
+                </label>
+
+                <span class="prog-status" id="prog-status">Load files to begin.</span>
+            </div>
+
+            <div class="viewport-trio" id="viewport-trio">
+                <div class="viewport-item">
+                    <div class="viewport-label">Overview (fit)</div>
+                    <div class="viewport-canvas-wrap">
+                        <canvas id="vp-overview" width="480" height="300" class="viewport-canvas"></canvas>
+                    </div>
+                    <div class="viewport-info" id="vp-overview-info">—</div>
+                </div>
+                <div class="viewport-item">
+                    <div class="viewport-label">1∶1 pixels (center)</div>
+                    <div class="viewport-canvas-wrap">
+                        <canvas id="vp-pixel" width="480" height="300" class="viewport-canvas"></canvas>
+                    </div>
+                    <div class="viewport-info" id="vp-pixel-info">—</div>
+                </div>
+                <div class="viewport-item">
+                    <div class="viewport-label">4× zoom (center)</div>
+                    <div class="viewport-canvas-wrap">
+                        <canvas id="vp-zoom" width="480" height="300" class="viewport-canvas"></canvas>
+                    </div>
+                    <div class="viewport-info" id="vp-zoom-info">—</div>
+                </div>
+            </div>
+
+            <div class="pass-timeline" id="pass-timeline"></div>
+
+            <div class="prog-comparison-wrap">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Mode</th>
+                            <th>Passes</th>
+                            <th>First frame (ms)</th>
+                            <th>Final (ms)</th>
+                            <th>1st-frame speedup</th>
+                        </tr>
+                    </thead>
+                    <tbody id="prog-comparison-body">
+                        <tr><td colspan="5" class="empty-state">Run progressive paint to populate.</td></tr>
                     </tbody>
                 </table>
             </div>

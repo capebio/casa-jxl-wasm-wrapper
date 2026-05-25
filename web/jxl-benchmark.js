@@ -1,4 +1,4 @@
-import initRaw, { process_orf, rgb_to_rgba } from '../pkg/raw_converter_wasm.js';
+import initRaw, { process_orf, rgb_to_rgba, downscale_rgba } from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder, detectTier, setForcedTier } from '@casabio/jxl-wasm';
 import { bindRangeLabel } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
@@ -402,6 +402,16 @@ function updateSelectionStatus() {
         optBtn.disabled = !ready;
         optBtn.title = ready ? 'Auto-optimize codec toggles for this device' : 'Load files first, then optimize codec toggles for this device';
     }
+    const progBtn = document.getElementById('run-progressive');
+    if (progBtn && progBtn.textContent !== 'Running…') {
+        progBtn.disabled = !ready;
+        progBtn.title = ready ? '' : 'Load files first';
+    }
+    if (ready) {
+        setProgStatus(`${selectedSources.length} file${selectedSources.length !== 1 ? 's' : ''} ready — click Run progressive paint.`);
+    } else {
+        setProgStatus('Load files to begin.');
+    }
 }
 
 function setProgress(text) {
@@ -523,44 +533,51 @@ async function loadRandomImages() {
         return;
     }
 
+    loadRandomBtn.disabled = true;
+    loadRandomBtn.textContent = 'Loading…';
     setProgress('Loading random Gobabeb images...');
     dbgLog('Loading random images...');
 
     let lastError = null;
 
-    for (let i = 0; i < maxFiles; i++) {
-        try {
-            const fetchStart = performance.now();
-            const resp = await fetch('/api/random-gobabeb');
-            const fetchMs = performance.now() - fetchStart;
+    try {
+        for (let i = 0; i < maxFiles; i++) {
+            try {
+                const fetchStart = performance.now();
+                const resp = await fetch('/api/random-gobabeb');
+                const fetchMs = performance.now() - fetchStart;
 
-            if (!resp.ok) {
-                const msg = `API error ${resp.status} (${resp.statusText})`;
-                dbgLog(`✗ ${msg}`);
-                lastError = msg;
+                if (!resp.ok) {
+                    const msg = `API error ${resp.status} (${resp.statusText})`;
+                    dbgLog(`✗ ${msg}`);
+                    lastError = msg;
+                    break;
+                }
+                const arrayBuffer = await resp.arrayBuffer();
+                const fileName = resp.headers.get('X-File-Name') || `random-${i}.orf`;
+                const fileSizeKB = (arrayBuffer.byteLength / 1024).toFixed(1);
+
+                const processStart = performance.now();
+                const rgba = await processImageFile({ name: fileName, type: 'application/octet-stream' }, arrayBuffer);
+                const processMs = performance.now() - processStart;
+
+                if (rgba) {
+                    selectedSources.push({ file: fileName, ...rgba });
+                    dbgLog(`✓ ${fileName}`, `${rgba.width}×${rgba.height} | fetch ${fetchMs.toFixed(1)}ms + decode ${processMs.toFixed(1)}ms | ${fileSizeKB} KB`);
+                } else {
+                    lastError = `Processing failed for ${fileName}`;
+                    dbgLog(`✗ ${lastError}`);
+                }
+            } catch (err) {
+                lastError = err.message;
+                dbgLog(`✗ Error: ${err.message}`);
+                console.error('loadRandomImages error:', err);
                 break;
             }
-            const arrayBuffer = await resp.arrayBuffer();
-            const fileName = resp.headers.get('X-File-Name') || `random-${i}.orf`;
-            const fileSizeKB = (arrayBuffer.byteLength / 1024).toFixed(1);
-
-            const processStart = performance.now();
-            const rgba = await processImageFile({ name: fileName, type: 'application/octet-stream' }, arrayBuffer);
-            const processMs = performance.now() - processStart;
-
-            if (rgba) {
-                selectedSources.push({ file: fileName, ...rgba });
-                dbgLog(`✓ ${fileName}`, `${rgba.width}×${rgba.height} | fetch ${fetchMs.toFixed(1)}ms + decode ${processMs.toFixed(1)}ms | ${fileSizeKB} KB`);
-            } else {
-                lastError = `Processing failed for ${fileName}`;
-                dbgLog(`✗ ${lastError}`);
-            }
-        } catch (err) {
-            lastError = err.message;
-            dbgLog(`✗ Error: ${err.message}`);
-            console.error('loadRandomImages error:', err);
-            break;
         }
+    } finally {
+        loadRandomBtn.disabled = false;
+        loadRandomBtn.textContent = 'Random Gobabeb';
     }
 
     updateSelectionStatus();
@@ -572,29 +589,14 @@ async function loadRandomImages() {
     dbgLog(`Loaded ${selectedSources.length} random files`);
 }
 
-async function resizeRgba(rgba, width, height, targetWidth) {
-    // Handle fullsize - use original dimensions
+function resizeRgba(rgba, width, height, targetWidth) {
     if (targetWidth === 'fullsize') {
         return { rgba, width, height };
     }
-
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height), 0, 0);
-
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = targetWidth;
-    outCanvas.height = targetHeight;
-    const outCtx = outCanvas.getContext('2d');
-    outCtx.imageSmoothingEnabled = true;
-    outCtx.imageSmoothingQuality = 'high';
-    outCtx.drawImage(canvas, 0, 0, width, height, 0, 0, targetWidth, targetHeight);
     return {
-        rgba: new Uint8Array(outCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer),
+        rgba: downscale_rgba(rgba, width, height, targetWidth, targetHeight),
         width: targetWidth,
         height: targetHeight
     };
@@ -994,14 +996,7 @@ function displayResults() {
                 const key = `${size}x${quality}xe${effort}`;
                 const decodeMs = getAverageTiming(benchmarkResults.decodeMs.get(key));
                 const note = size === 128 || size === 256 ? 'Thumb' : size === 512 ? 'Med' : size === 1080 ? 'Preview' : '';
-
-                row.innerHTML = `
-                    <td>${size}px Q${quality} E${effort}</td>
-                    <td>${decodeMs} ms</td>
-                    <td>—</td>
-                    <td>—</td>
-                    <td>${note}</td>
-                `;
+                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${decodeMs} ms</td><td>${note}</td>`;
                 decodeSummary.appendChild(row);
             }
         }
@@ -1016,14 +1011,7 @@ function displayResults() {
                 const row = document.createElement('tr');
                 const key = `${size}x${quality}xe${effort}`;
                 const encodeMs = getAverageTiming(benchmarkResults.encodeMs.get(key));
-
-                row.innerHTML = `
-                    <td>${size}px Q${quality} E${effort}</td>
-                    <td>${encodeMs} ms</td>
-                    <td>—</td>
-                    <td>—</td>
-                    <td></td>
-                `;
+                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${encodeMs} ms</td><td></td>`;
                 encodeSummary.appendChild(row);
             }
         }
@@ -1039,14 +1027,7 @@ function displayResults() {
                 const key = `${size}x${quality}xe${effort}`;
                 const fileSizeBytes = benchmarkResults.fileSize.get(key) || 0;
                 const sizeKB = (fileSizeBytes / 1024).toFixed(1);
-
-                row.innerHTML = `
-                    <td>${size}px Q${quality} E${effort}</td>
-                    <td>${sizeKB}</td>
-                    <td>—</td>
-                    <td>—</td>
-                    <td></td>
-                `;
+                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${sizeKB}</td><td></td>`;
                 fileSize.appendChild(row);
             }
         }
@@ -1150,9 +1131,9 @@ function clearResults() {
     const addBtn = document.getElementById('add-permutation');
     if (addBtn) addBtn.disabled = true;
 
-    document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
-    document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
-    document.getElementById('file-size-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('file-size-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
     document.getElementById('decode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
 
     dbgLog('Cleared');
@@ -1467,5 +1448,281 @@ document.querySelectorAll('.export-csv').forEach(btn => {
         exportGraphAsCSV(chartId);
     });
 });
+
+// ─── Progressive Paint Test ──────────────────────────────────────────────────
+
+function getProgSize() {
+    const radio = document.querySelector('input[name="prog-size"]:checked');
+    if (!radio) return 1080;
+    return radio.value === 'fullsize' ? 'fullsize' : Number(radio.value);
+}
+
+function getProgQuality() {
+    const radio = document.querySelector('input[name="prog-quality"]:checked');
+    return radio ? Number(radio.value) : 85;
+}
+
+function setProgStatus(text) {
+    const el = document.getElementById('prog-status');
+    if (el) el.textContent = text;
+}
+
+function clearViewports() {
+    for (const id of ['vp-overview', 'vp-pixel', 'vp-zoom']) {
+        const canvas = document.getElementById(id);
+        if (!canvas) continue;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'rgba(0,0,0,0.04)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    for (const id of ['vp-overview-info', 'vp-pixel-info', 'vp-zoom-info']) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = '—';
+    }
+}
+
+function clearPassTimeline() {
+    const el = document.getElementById('pass-timeline');
+    if (el) el.innerHTML = '';
+}
+
+// Returns the overview canvas element for use as a thumbnail source.
+function renderPassToViewports(pixels, width, height) {
+    const arr = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
+    const imgData = new ImageData(new Uint8ClampedArray(arr.buffer, arr.byteOffset, arr.byteLength), width, height);
+
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = width;
+    srcCanvas.height = height;
+    srcCanvas.getContext('2d').putImageData(imgData, 0, 0);
+
+    // Overview — fit whole image
+    const ovCanvas = document.getElementById('vp-overview');
+    if (ovCanvas) {
+        const ctx = ovCanvas.getContext('2d');
+        const scale = Math.min(ovCanvas.width / width, ovCanvas.height / height);
+        const dw = Math.round(width * scale);
+        const dh = Math.round(height * scale);
+        ctx.clearRect(0, 0, ovCanvas.width, ovCanvas.height);
+        ctx.drawImage(srcCanvas, Math.round((ovCanvas.width - dw) / 2), Math.round((ovCanvas.height - dh) / 2), dw, dh);
+    }
+
+    // 1:1 pixels — center crop at actual resolution
+    const pxCanvas = document.getElementById('vp-pixel');
+    if (pxCanvas) {
+        const cw = Math.min(pxCanvas.width, width);
+        const ch = Math.min(pxCanvas.height, height);
+        const sx = Math.floor((width - cw) / 2);
+        const sy = Math.floor((height - ch) / 2);
+        const ctx = pxCanvas.getContext('2d');
+        ctx.clearRect(0, 0, pxCanvas.width, pxCanvas.height);
+        ctx.drawImage(srcCanvas, sx, sy, cw, ch, 0, 0, cw, ch);
+    }
+
+    // 4× zoom — small center crop scaled up, pixelated
+    const zmCanvas = document.getElementById('vp-zoom');
+    if (zmCanvas) {
+        const srcW = Math.max(1, Math.floor(zmCanvas.width / 4));
+        const srcH = Math.max(1, Math.floor(zmCanvas.height / 4));
+        const sx = Math.max(0, Math.floor((width - srcW) / 2));
+        const sy = Math.max(0, Math.floor((height - srcH) / 2));
+        const ctx = zmCanvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.clearRect(0, 0, zmCanvas.width, zmCanvas.height);
+        ctx.drawImage(srcCanvas, sx, sy, Math.min(srcW, width - sx), Math.min(srcH, height - sy), 0, 0, zmCanvas.width, zmCanvas.height);
+    }
+
+    return srcCanvas;
+}
+
+function addPassToTimeline(srcCanvas, passIdx, t, isFinal) {
+    const timeline = document.getElementById('pass-timeline');
+    if (!timeline) return;
+
+    const TW = 80, TH = 50;
+    const thumb = document.createElement('canvas');
+    thumb.width = TW;
+    thumb.height = TH;
+    const ctx = thumb.getContext('2d');
+    const scale = Math.min(TW / srcCanvas.width, TH / srcCanvas.height);
+    const dw = Math.round(srcCanvas.width * scale);
+    const dh = Math.round(srcCanvas.height * scale);
+    ctx.drawImage(srcCanvas, Math.round((TW - dw) / 2), Math.round((TH - dh) / 2), dw, dh);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'pass-thumb' + (isFinal ? ' is-final' : '');
+    wrap.title = `Pass ${passIdx + 1} · ${t.toFixed(1)} ms${isFinal ? ' · final' : ''}`;
+
+    const label = document.createElement('div');
+    label.className = 'pass-thumb-label';
+    label.textContent = isFinal ? `${t.toFixed(0)}ms ✓` : `${t.toFixed(0)}ms`;
+
+    wrap.appendChild(thumb);
+    wrap.appendChild(label);
+    timeline.appendChild(wrap);
+}
+
+function updateViewportInfo(passIdx, t, isFinal) {
+    const text = `Pass ${passIdx + 1} · ${t.toFixed(1)} ms${isFinal ? ' · final' : ' · partial'}`;
+    for (const id of ['vp-overview-info', 'vp-pixel-info', 'vp-zoom-info']) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+    }
+}
+
+function renderProgressiveComparison({ passCount, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB, encodeMs, previewFirst }) {
+    const body = document.getElementById('prog-comparison-body');
+    if (!body) return;
+
+    const speedup = (oneShotFinalMs && progressiveFirstMs)
+        ? `${(oneShotFinalMs / progressiveFirstMs).toFixed(1)}×`
+        : '—';
+
+    body.innerHTML = `
+        <tr>
+            <td><strong>Progressive (emitEveryPass)</strong></td>
+            <td>${passCount}</td>
+            <td><strong>${progressiveFirstMs != null ? progressiveFirstMs.toFixed(1) + ' ms' : '—'}</strong></td>
+            <td>${progressiveFinalMs != null ? progressiveFinalMs.toFixed(1) + ' ms' : '—'}</td>
+            <td>${speedup} faster 1st frame</td>
+        </tr>
+        <tr>
+            <td>One-shot (final only)</td>
+            <td>1</td>
+            <td>—</td>
+            <td>${oneShotFinalMs != null ? oneShotFinalMs.toFixed(1) + ' ms' : '—'}</td>
+            <td>baseline</td>
+        </tr>
+        <tr>
+            <td colspan="5" style="font-size:11px;color:var(--muted);padding:6px 12px;">
+                Encoded ${fileSizeKB.toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · progressive=true previewFirst=${previewFirst}
+            </td>
+        </tr>
+    `;
+}
+
+async function runProgressivePaintTest() {
+    if (!selectedSources.length) { setProgStatus('Load files first.'); return; }
+    if (!wasmReady) { setProgStatus('WASM not ready.'); return; }
+
+    const btn = document.getElementById('run-progressive');
+    if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+    clearViewports();
+    clearPassTimeline();
+
+    try {
+        const source = selectedSources[0];
+        const size = getProgSize();
+        const quality = getProgQuality();
+        const previewFirst = !!(document.getElementById('prog-preview-first')?.checked);
+
+        setProgStatus(`Resizing to ${size === 'fullsize' ? 'full' : size + 'px'}…`);
+        const resized = resizeRgba(source.rgba, source.width, source.height, size);
+
+        setProgStatus(`Encoding ${resized.width}×${resized.height} Q${quality} progressive…`);
+
+        const opts = getAdvancedOptions();
+        const encoder = createEncoder({
+            format: 'rgba8',
+            width: resized.width,
+            height: resized.height,
+            hasAlpha: true,
+            quality,
+            effort: 3,
+            progressive: true,
+            previewFirst,
+            chunked: opts.chunked,
+            modular: opts.modular,
+            brotliEffort: opts.brotliEffort,
+            copyInput: true,
+        });
+        const encChunks = [];
+        const chunkTask = (async () => { for await (const c of encoder.chunks()) encChunks.push(c); })();
+        const encStart = performance.now();
+        await encoder.pushPixels(exactBuffer(resized.rgba));
+        await encoder.finish();
+        await chunkTask;
+        const encodeMs = performance.now() - encStart;
+        await encoder.dispose();
+        const jxlBytes = concatChunks(encChunks);
+
+        setProgStatus(`Encoded ${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · decoding progressively…`);
+        dbgLog('Progressive paint: encoded', `${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms`, 'info');
+
+        // Progressive decode — collect all passes
+        const decoder = createDecoder({
+            format: 'rgba8',
+            progressionTarget: 'final',
+            emitEveryPass: true,
+            preserveIcc: false,
+            preserveMetadata: false,
+        });
+        decoder.push(jxlBytes);
+        decoder.close();
+
+        const decStart = performance.now();
+        const passes = [];
+        let passIdx = 0;
+
+        for await (const ev of decoder.events()) {
+            if (ev.type === 'progress' || ev.type === 'final') {
+                const t = performance.now() - decStart;
+                const isFinal = ev.type === 'final';
+                const srcCanvas = renderPassToViewports(ev.pixels, ev.info.width, ev.info.height);
+                addPassToTimeline(srcCanvas, passIdx, t, isFinal);
+                updateViewportInfo(passIdx, t, isFinal);
+                passes.push({ passIdx, t, isFinal });
+                dbgLog(`  pass ${passIdx + 1}${isFinal ? ' (final)' : ''}`, `${t.toFixed(1)} ms`, 'info');
+                passIdx++;
+            } else if (ev.type === 'error') {
+                throw new Error(ev.message);
+            }
+        }
+        decoder.dispose();
+
+        const progressiveFirstMs = passes.length ? passes[0].t : null;
+        const progressiveFinalMs = passes.length ? passes[passes.length - 1].t : null;
+
+        // One-shot decode for comparison
+        setProgStatus('Running one-shot decode for comparison…');
+        const decoder2 = createDecoder({
+            format: 'rgba8',
+            progressionTarget: 'final',
+            emitEveryPass: false,
+            preserveIcc: false,
+            preserveMetadata: false,
+        });
+        decoder2.push(jxlBytes.slice());
+        decoder2.close();
+        const oneShotStart = performance.now();
+        let oneShotFinalMs = null;
+        for await (const ev of decoder2.events()) {
+            if (ev.type === 'final') oneShotFinalMs = performance.now() - oneShotStart;
+            else if (ev.type === 'error') throw new Error(ev.message);
+        }
+        decoder2.dispose();
+
+        renderProgressiveComparison({ passCount: passes.length, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB: jxlBytes.length / 1024, encodeMs, previewFirst });
+
+        const summary = `${passes.length} passes · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
+        setProgStatus(`Done. ${summary}`);
+        dbgLog('Progressive paint done', summary, 'success');
+
+    } catch (err) {
+        setProgStatus(`Error: ${err.message}`);
+        dbgLog('Progressive paint error', err.message, 'error');
+    } finally {
+        if (btn) {
+            btn.textContent = 'Run progressive paint';
+            btn.disabled = !selectedSources.length;
+        }
+    }
+}
+
+const runProgressiveBtn = document.getElementById('run-progressive');
+if (runProgressiveBtn) {
+    runProgressiveBtn.addEventListener('click', () => runProgressivePaintTest());
+}
 
 dbgLog('Benchmark initialized');

@@ -1145,7 +1145,195 @@ canvas {
 }
 
 
+/* ─── Progressive Paint Test ─────────────────────────────────────────────── */
+
+.progressive-shell {
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(12px);
+    margin-top: 16px;
+    padding: 20px;
+}
+
+.progressive-header {
+    margin-bottom: 16px;
+}
+
+.progressive-header h2 {
+    margin: 6px 0 0 0;
+    font-size: 18px;
+}
+
+.progressive-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px 0 16px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 16px;
+}
+
+.prog-option-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.prog-setting-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.prog-radio-group {
+    display: flex;
+    gap: 4px;
+}
+
+.prog-radio-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.6);
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 150ms;
+}
+
+.prog-radio-btn:hover {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: var(--accent);
+}
+
+.prog-radio-btn input[type="radio"] {
+    cursor: pointer;
+    width: 12px;
+    height: 12px;
+    accent-color: var(--accent);
+    margin: 0;
+}
+
+.prog-radio-btn input[type="radio"]:checked + * {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.prog-status {
+    font-size: 12px;
+    color: var(--muted);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.viewport-trio {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.viewport-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.viewport-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.viewport-canvas-wrap {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.06);
+    aspect-ratio: 8 / 5;
+}
+
+.viewport-canvas {
+    width: 100% !important;
+    height: 100% !important;
+    display: block;
+}
+
+.viewport-info {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: "Cascadia Mono", monospace;
+    text-align: center;
+    min-height: 16px;
+}
+
+.pass-timeline {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 10px 0 14px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 16px;
+    min-height: 24px;
+}
+
+.pass-thumb {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    cursor: default;
+    border-radius: 6px;
+    padding: 3px;
+    border: 1.5px solid var(--line);
+    background: rgba(255, 255, 255, 0.4);
+    transition: border-color 150ms;
+}
+
+.pass-thumb canvas {
+    border-radius: 4px;
+    display: block;
+}
+
+.pass-thumb.is-final {
+    border-color: var(--accent);
+    background: rgba(15, 118, 110, 0.08);
+}
+
+.pass-thumb-label {
+    font-size: 10px;
+    font-family: "Cascadia Mono", monospace;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.pass-thumb.is-final .pass-thumb-label {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.prog-comparison-wrap {
+    margin-top: 4px;
+}
+
 @media (max-width: 768px) {
+    .viewport-trio {
+        grid-template-columns: 1fr;
+    }
+
     .control-band {
         flex-direction: column;
         gap: 16px;

@@ -57,4 +57,8 @@ export class LRUCache<V> {
   get count(): number {
     return this.cache.size;
   }
+
+  entriesOldestFirst(): Array<[string, V, number]> {
+    return Array.from(this.cache.entries(), ([key, { value, size }]) => [key, value, size]);
+  }
 }

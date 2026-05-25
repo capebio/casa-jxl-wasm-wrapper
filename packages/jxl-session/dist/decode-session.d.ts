@@ -7,6 +7,8 @@ export declare class DecodeSessionImpl implements DecodeSession {
     private readonly frameStream;
     private readonly doneDeferred;
     private readonly acquirePromise;
+    private readonly abortSignal;
+    private readonly abortHandler;
     private lastInfo;
     private closed;
     private terminated;
@@ -17,7 +19,10 @@ export declare class DecodeSessionImpl implements DecodeSession {
     done(): Promise<ImageInfo>;
     cancel(reason?: string): Promise<void>;
     private handleMessage;
-    private terminate;
+    private cleanup;
+    private finish;
+    private finishWithError;
+    private fail;
     private normalizeCode;
 }
 //# sourceMappingURL=decode-session.d.ts.map

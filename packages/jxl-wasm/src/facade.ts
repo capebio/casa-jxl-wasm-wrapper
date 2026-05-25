@@ -69,6 +69,17 @@ export interface EncoderOptions {
   distance: number | null;
   quality: number | null;
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  /**
+   * NOTE: `progressive`, `previewFirst`, and `chunked` are accepted in the API
+   * but are NOT forwarded to any WASM bridge call. The current bridge functions
+   * (_jxl_wasm_enc_create_image, _jxl_wasm_enc_push_pixels, _jxl_wasm_encode_rgba8,
+   * _jxl_wasm_enc_push_pixels) have no progressive parameter. The encoder always
+   * produces a non-progressive JXL file. To enable true progressive encode
+   * (DC+AC refinement passes in the output), the C++ bridge must be rebuilt with
+   * a progressive flag and a new wantProgressive parameter exposed.
+   *
+   * For early-preview use, use `sidecarSizes` instead — that path IS implemented.
+   */
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
@@ -86,12 +97,23 @@ export interface JxlDecoder {
   dispose(): void | Promise<void>;
 }
 
+export interface EncodeStats {
+  /** Raw pixel bytes: width × height × 4 × bytesPerChannel. */
+  originalBytes: number;
+  /** Total JXL bytes yielded across all chunks and sidecars. */
+  compressedBytes: number;
+  /** compressedBytes / originalBytes. Values below 1.0 indicate net compression. */
+  ratio: number;
+}
+
 export interface JxlEncoder {
   pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): void | Promise<void>;
   finish(): void | Promise<void>;
   chunks(): AsyncIterable<ArrayBuffer | Uint8Array>;
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
+  /** Populated after chunks() completes normally. Null before or on error. */
+  getStats(): EncodeStats | null;
 }
 
 interface LibjxlBuffer {
@@ -114,6 +136,7 @@ interface LibjxlWasmModule {
   _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
   _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
   _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
+  _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
   _jxl_wasm_buffer_data(handle: number): number;
   _jxl_wasm_buffer_size(handle: number): number;
   _jxl_wasm_buffer_width(handle: number): number;
@@ -147,6 +170,10 @@ interface LibjxlWasmModule {
   _jxl_wasm_enc_free?(state: number): void;
   // #15: Lossless JPEG → JXL transcode
   _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
+  // #16: Streaming input encoder — pre-allocate pixel buffer in WASM, push chunks, finish
+  _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number): number;
+  _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
+  _jxl_wasm_enc_finish?(state: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -185,6 +212,18 @@ export function detectTier(): Tier {
   }
   _cachedDetectedTier = tier;
   return tier;
+}
+
+/**
+ * Returns a sensible default effort level for the current WASM tier.
+ * Scalar workers get a lower effort to avoid blocking the thread; SIMD-MT
+ * workers get full effort since they can use parallel libjxl codepaths.
+ */
+export function recommendedEffort(): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 {
+  const tier = detectTier();
+  if (tier === "scalar") return 4;
+  if (tier === "simd") return 6;
+  return 7; // simd-mt, relaxed-simd-mt
 }
 
 function probeSimd(): boolean {
@@ -254,18 +293,15 @@ export function createEncoder(options: EncoderOptions): JxlEncoder {
  */
 export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promise<Uint8Array> {
   const module = await loadLibjxlModule();
-  if (typeof module._jxl_wasm_transcode_jpeg_to_jxl !== "function") {
+  if (!getCapabilities(module).jpegTranscode) {
     throw new CapabilityMissing("JPEG→JXL transcode requires a rebuilt WASM with transcode bridge");
   }
-  const view = jpeg instanceof ArrayBuffer ? new Uint8Array(jpeg) : toUint8Array(jpeg);
+  const view = copyOrBorrowInput(jpeg, false);
   const ptr = module._malloc(view.byteLength);
   try {
     module.HEAPU8.set(view, ptr);
-    const handle = module._jxl_wasm_transcode_jpeg_to_jxl(ptr, view.byteLength);
-    const buf = readBuffer(module, handle, "transcode");
-    const result = buf.data;
-    module._jxl_wasm_buffer_free(handle);
-    return result;
+    const handle = module._jxl_wasm_transcode_jpeg_to_jxl!(ptr, view.byteLength);
+    return takeBuffer(module, handle, "transcode").data;
   } finally {
     module._free(ptr);
   }
@@ -276,6 +312,9 @@ export function preloadJxlModule(): void {
   void loadLibjxlModule();
 }
 
+// Shared zero-length sentinel used to null out pixelChunks slots during progressive WASM copy.
+const EMPTY_U8 = new Uint8Array(0);
+
 class LibjxlDecoder implements JxlDecoder {
   // null sentinel = input closed
   private chunkQueue: Array<Uint8Array | null> = [];
@@ -283,26 +322,35 @@ class LibjxlDecoder implements JxlDecoder {
   private queuedBytes = 0;
   private wakeResolve: (() => void) | null = null;
   private cancelled = false;
+  private closed = false;
+  private eventsStarted = false;
 
   constructor(private readonly options: DecoderOptions) {}
 
   push(chunk: ArrayBuffer | Uint8Array): void {
-    if (this.cancelled) return;
-    // ArrayBuffer callers transfer ownership — no copy needed. Uint8Array callers may
-    // reuse the underlying buffer, so we copy unless copyInput=false.
-    const copy = this.options.copyInput !== false;
-    const view = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : (copy ? toUint8Array(chunk).slice() : toUint8Array(chunk));
+    if (this.cancelled || this.closed) return;
+    // ArrayBuffer callers (primary path: worker receives transferred chunks via postMessage)
+    // are always zero-copy — new Uint8Array(ab) is a view, not a copy. Uint8Array callers
+    // may reuse the underlying buffer, so we copy unless copyInput=false.
+    const view = copyOrBorrowInput(chunk, this.options.copyInput !== false);
     this.queuedBytes += view.byteLength;
     this.chunkQueue.push(view);
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 
   close(): void {
-    if (this.cancelled) return;
+    if (this.cancelled || this.closed) return;
+    this.closed = true;
     this.chunkQueue.push(null);
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
+  }
+
+  private wake(): void {
+    const resolve = this.wakeResolve;
+    if (resolve !== null) {
+      this.wakeResolve = null;
+      resolve();
+    }
   }
 
   private waitForQueueItem(): Promise<void> {
@@ -318,6 +366,11 @@ class LibjxlDecoder implements JxlDecoder {
   }
 
   async *events(): AsyncIterable<DecodeEvent> {
+    if (this.eventsStarted) {
+      yield { type: "error", code: "InvalidState", message: "Decoder events() may only be consumed once." };
+      return;
+    }
+    this.eventsStarted = true;
     try {
       if (this.cancelled) return;
       const module = await loadLibjxlModule();
@@ -327,7 +380,7 @@ class LibjxlDecoder implements JxlDecoder {
           throw new CapabilityMissing(`${this.options.format} decode requires a rebuilt WASM with multi-format bridge`);
         }
       }
-      if (typeof module._jxl_wasm_dec_create === "function") {
+      if (getCapabilities(module).progressiveDecode) {
         yield* this.eventsProgressive(module);
       } else {
         yield* this.eventsOneShot(module);
@@ -338,6 +391,10 @@ class LibjxlDecoder implements JxlDecoder {
         code: error instanceof CapabilityMissing ? error.code : "DecodeFailed",
         message: error instanceof Error ? error.message : String(error),
       };
+    } finally {
+      this.chunkQueue = [];
+      this.readIndex = 0;
+      this.queuedBytes = 0;
     }
   }
 
@@ -362,6 +419,9 @@ class LibjxlDecoder implements JxlDecoder {
       let info: ImageInfo | undefined;
       let gotRealFlush = false;
       let done = false;
+      // Count flushed intermediate frames: first flush is the DC pass,
+      // subsequent flushes are AC refinement passes.
+      let flushCount = 0;
 
       const buildInfo = (w: number, h: number): ImageInfo => {
         info ??= { width: w, height: h, bitsPerSample: 8, hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false };
@@ -373,10 +433,16 @@ class LibjxlDecoder implements JxlDecoder {
       const fmt = this.options.format;
       const takeAndWrap = (handle: number): { pixels: { data: Uint8Array; width: number; height: number; region?: Region }; evInfo: ImageInfo } | null => {
         if (handle === 0) return null;
-        const buf = readBuffer(module, handle, "decode");
-        module._jxl_wasm_buffer_free(handle);
+        const buf = takeBuffer(module, handle, "decode");
         const pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region, this.options.downsample, bpc);
-        const evInfo = buildInfo(pixels.width, pixels.height);
+        // When ROI/downsample crops the frame, pixels.width/height differ from full image dims.
+        // buildInfo memoizes on first call (full dims from header), so we must not pass it
+        // cropped dims — it would return the already-memoized full-dim object regardless.
+        // Instead, derive evInfo from the base info with actual pixel dimensions.
+        const baseInfo = buildInfo(buf.width, buf.height);
+        const evInfo: ImageInfo = (pixels.width !== buf.width || pixels.height !== buf.height)
+          ? { ...baseInfo, width: pixels.width, height: pixels.height }
+          : baseInfo;
         return { pixels, evInfo };
       };
 
@@ -400,7 +466,9 @@ class LibjxlDecoder implements JxlDecoder {
           }
           let woff = 0;
           while (this.chunkQueue.length > this.readIndex && this.chunkQueue[this.readIndex] !== null) {
-            const chunk = this.chunkQueue[this.readIndex++] as Uint8Array;
+            const chunk = this.chunkQueue[this.readIndex] as Uint8Array;
+            // Null slot immediately so GC can reclaim the Uint8Array after the HEAPU8.set copy.
+            this.chunkQueue[this.readIndex++] = null;
             this.queuedBytes -= chunk.byteLength;
             module.HEAPU8.set(chunk, chunkBufPtr + woff);
             woff += chunk.byteLength;
@@ -421,10 +489,14 @@ class LibjxlDecoder implements JxlDecoder {
 
           if (result === 1) {
             gotRealFlush = true;
+            flushCount++;
+            const stage: DecodeStage = flushCount === 1 ? "dc" : "pass";
             const wrapped = takeAndWrap(decTakeFlushed(dec));
             if (wrapped !== null) {
               const { pixels, evInfo } = wrapped;
-              yield { type: "progress", stage: "dc", info: evInfo, pixels: pixels.data, format: fmt, pixelStride, ...(pixels.region === undefined ? {} : { region: pixels.region }) };
+              const ev: Extract<DecodeEvent, { type: "progress" }> = { type: "progress", stage, info: evInfo, pixels: pixels.data, format: fmt, pixelStride };
+              if (pixels.region !== undefined) ev.region = pixels.region;
+              yield ev;
               if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
             }
           } else if (result === 2) {
@@ -436,6 +508,10 @@ class LibjxlDecoder implements JxlDecoder {
           this.compactQueue();
           decCloseInput(dec);
           const result = decPush(dec, 0, 0);
+          // result < 0 means libjxl signalled an error (e.g. truncated stream).
+          // Without this throw, the generator returns silently with no terminal
+          // event, leaving the decode session permanently unresolved on the main thread.
+          if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
           done = result === 2;
           break;
         }
@@ -447,10 +523,14 @@ class LibjxlDecoder implements JxlDecoder {
           const { pixels, evInfo } = wrapped;
           if (!gotRealFlush && (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass")) {
             const stage: DecodeStage = this.options.progressionTarget === "dc" ? "dc" : "pass";
-            yield { type: "progress", stage, info: evInfo, pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(), format: fmt, pixelStride, ...(pixels.region === undefined ? {} : { region: pixels.region }) };
+            const ev: Extract<DecodeEvent, { type: "progress" }> = { type: "progress", stage, info: evInfo, pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(), format: fmt, pixelStride };
+            if (pixels.region !== undefined) ev.region = pixels.region;
+            yield ev;
             if (this.options.progressionTarget !== "final") return;
           }
-          yield { type: "final", info: evInfo, pixels: pixels.data, format: fmt, pixelStride, ...(pixels.region === undefined ? {} : { region: pixels.region }) };
+          const ev: Extract<DecodeEvent, { type: "final" }> = { type: "final", info: evInfo, pixels: pixels.data, format: fmt, pixelStride };
+          if (pixels.region !== undefined) ev.region = pixels.region;
+          yield ev;
         }
       }
     } finally {
@@ -476,80 +556,82 @@ class LibjxlDecoder implements JxlDecoder {
     const fmt = this.options.format;
     const bpc = fmt === "rgbaf32" ? 4 : fmt === "rgba16" ? 2 : 1;
     const pixelStride = 4 * bpc;
-    const input = concatBytes(allChunks);
-    allChunks.length = 0;
-    // #10: pass region to callDecode — if C++ region bridge present it crops in WASM,
-    // avoiding shipping full-image pixels to JS. JS fallback still works via applyRegionAndDownsample.
-    const regionForDecode = this.options.region;
-    const cppDidCrop = regionForDecode !== null && (
-      (fmt === "rgba8" && !!module._jxl_wasm_decode_rgba8_region) ||
-      (fmt === "rgba16" && !!module._jxl_wasm_decode_rgba16_region) ||
-      (fmt === "rgbaf32" && !!module._jxl_wasm_decode_rgbaf32_region)
-    );
-    const decoded = callDecode(module, input, this.options.downsample, fmt, cppDidCrop ? regionForDecode : null);
-    // If C++ did the crop, decoded.width/height already reflect the region; no further JS crop.
-    // Otherwise, scale region into downsampled coords and apply in JS.
-    const ds = this.options.downsample;
-    const scaledRegion = (!cppDidCrop && regionForDecode !== null) ? {
-      x: Math.trunc(regionForDecode.x / ds),
-      y: Math.trunc(regionForDecode.y / ds),
-      w: Math.ceil(regionForDecode.w / ds),
-      h: Math.ceil(regionForDecode.h / ds),
-    } : null;
-    const pixels = applyRegionAndDownsample(
-      decoded.data,
-      decoded.width,
-      decoded.height,
-      scaledRegion,
-      1,
-      bpc,
-    );
-    // C++ crop path skips applyRegionAndDownsample's region-setter; restore it to match JS path.
-    if (cppDidCrop) pixels.region = { x: 0, y: 0, w: pixels.width, h: pixels.height };
-    const info: ImageInfo = {
-      width: pixels.width,
-      height: pixels.height,
-      bitsPerSample: decoded.bitsPerSample,
-      hasAlpha: decoded.hasAlpha,
-      hasAnimation: false,
-      jpegReconstructionAvailable: false,
-    };
-
-    yield { type: "header", info };
-    if (this.options.progressionTarget === "header") {
-      module._jxl_wasm_buffer_free(decoded.handle);
-      return;
-    }
-    if (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass") {
-      yield {
-        type: "progress",
-        stage: this.options.progressionTarget === "dc" ? "dc" : "pass",
-        info,
-        pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(),
-        format: fmt,
-        pixelStride,
-        ...(pixels.region === undefined ? {} : { region: pixels.region }),
-      };
-      if (this.options.progressionTarget !== "final") {
-        module._jxl_wasm_buffer_free(decoded.handle);
-        return;
+    // Write all chunks directly into a single WASM heap buffer — no intermediate JS allocation.
+    const totalSize = allChunks.reduce((s, c) => s + c.byteLength, 0);
+    const inputPtr = module._malloc(totalSize);
+    let decodedHandle = 0;
+    try {
+      let woff = 0;
+      for (const chunk of allChunks) {
+        module.HEAPU8.set(chunk, inputPtr + woff);
+        woff += chunk.byteLength;
       }
+      allChunks.length = 0;
+      // #10: pass region to callDecodeFromPtr — if C++ region bridge present it crops in WASM,
+      // avoiding shipping full-image pixels to JS. JS fallback still works via applyRegionAndDownsample.
+      const regionForDecode = this.options.region;
+      const cppDidCrop = regionForDecode !== null && (
+        (fmt === "rgba8" && !!module._jxl_wasm_decode_rgba8_region) ||
+        (fmt === "rgba16" && !!module._jxl_wasm_decode_rgba16_region) ||
+        (fmt === "rgbaf32" && !!module._jxl_wasm_decode_rgbaf32_region)
+      );
+      const decoded = callDecodeFromPtr(module, inputPtr, totalSize, this.options.downsample, fmt, cppDidCrop ? regionForDecode : null);
+      decodedHandle = decoded.handle;
+      // If C++ did the crop, decoded.width/height already reflect the region; no further JS crop.
+      // Otherwise, scale region into downsampled coords and apply in JS.
+      const ds = this.options.downsample;
+      const scaledRegion = (!cppDidCrop && regionForDecode !== null) ? {
+        x: Math.trunc(regionForDecode.x / ds),
+        y: Math.trunc(regionForDecode.y / ds),
+        w: Math.ceil(regionForDecode.w / ds),
+        h: Math.ceil(regionForDecode.h / ds),
+      } : null;
+      const pixels = applyRegionAndDownsample(
+        decoded.data,
+        decoded.width,
+        decoded.height,
+        scaledRegion,
+        1,
+        bpc,
+      );
+      // C++ crop path skips applyRegionAndDownsample's region-setter; restore it to match JS path.
+      if (cppDidCrop) pixels.region = { x: 0, y: 0, w: pixels.width, h: pixels.height };
+      const info: ImageInfo = {
+        width: pixels.width,
+        height: pixels.height,
+        bitsPerSample: decoded.bitsPerSample,
+        hasAlpha: decoded.hasAlpha,
+        hasAnimation: false,
+        jpegReconstructionAvailable: false,
+      };
+
+      yield { type: "header", info };
+      if (this.options.progressionTarget === "header") return;
+      if (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass") {
+        const ev: Extract<DecodeEvent, { type: "progress" }> = {
+          type: "progress",
+          stage: this.options.progressionTarget === "dc" ? "dc" : "pass",
+          info,
+          pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(),
+          format: fmt,
+          pixelStride,
+        };
+        if (pixels.region !== undefined) ev.region = pixels.region;
+        yield ev;
+        if (this.options.progressionTarget !== "final") return;
+      }
+      const ev: Extract<DecodeEvent, { type: "final" }> = { type: "final", info, pixels: pixels.data, format: fmt, pixelStride };
+      if (pixels.region !== undefined) ev.region = pixels.region;
+      yield ev;
+    } finally {
+      module._free(inputPtr);
+      if (decodedHandle !== 0) module._jxl_wasm_buffer_free(decodedHandle);
     }
-    yield {
-      type: "final",
-      info,
-      pixels: pixels.data,
-      format: fmt,
-      pixelStride,
-      ...(pixels.region === undefined ? {} : { region: pixels.region }),
-    };
-    module._jxl_wasm_buffer_free(decoded.handle);
   }
 
   cancel(_reason?: string): void {
     this.cancelled = true;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 
   dispose(): void {
@@ -557,29 +639,94 @@ class LibjxlDecoder implements JxlDecoder {
     this.readIndex = 0;
     this.queuedBytes = 0;
     this.cancelled = true;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 }
 
 class LibjxlEncoder implements JxlEncoder {
+  // Buffered path fallback (used when streaming input not available or sidecars active)
   private pixelChunks: Uint8Array[] = [];
   private finished = false;
   private cancelled = false;
   private finishResolve: (() => void) | null = null;
   private readonly sortedSidecarSizes: readonly number[];
+  private encodeStats: EncodeStats | null = null;
+  private chunksStarted = false;
+  private queuedPixelBytes = 0;
+  private readonly pixelByteTotal: number;
+  // #16: Streaming input — module loaded on first pushPixels, state allocated immediately.
+  // JS never accumulates pixelChunks[] when this path is active.
+  private wasmModule: LibjxlWasmModule | null = null;
+  private wasmEncState = 0;
+  private streamingInputActive = false;
+  private moduleInitPromise: Promise<LibjxlWasmModule> | null = null;
 
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
+    this.pixelByteTotal = expectedPixelBytes(options.width, options.height, options.format);
   }
 
-  pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): void {
+  async pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): Promise<void> {
     if (this.cancelled || this.finished) return;
     if (region !== undefined) {
       throw new CapabilityMissing("libjxl WASM facade does not support chunked region encode yet");
     }
-    const copy = this.options.copyInput !== false;
-    this.pixelChunks.push(chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : (copy ? toUint8Array(chunk).slice() : toUint8Array(chunk)));
+    const view = copyOrBorrowInput(chunk, this.options.copyInput !== false);
+    if (this.queuedPixelBytes + view.byteLength > this.pixelByteTotal) {
+      throw new Error(`JXL encode received too many pixel bytes: expected ${this.pixelByteTotal}, got at least ${this.queuedPixelBytes + view.byteLength}`);
+    }
+
+    const module = await this.ensureModule();
+    if (this.cancelled) return;
+
+    if (this.streamingInputActive) {
+      // #16: copy chunk into WASM pixel buffer; JS ref can be discarded immediately after.
+      const ptr = module._malloc(view.byteLength);
+      try {
+        module.HEAPU8.set(view, ptr);
+        const rc = module._jxl_wasm_enc_push_chunk!(this.wasmEncState, ptr, view.byteLength);
+        if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
+      } finally {
+        module._free(ptr);
+      }
+    } else {
+      this.pixelChunks.push(view);
+    }
+
+    this.queuedPixelBytes += view.byteLength;
+  }
+
+  private ensureModule(): Promise<LibjxlWasmModule> {
+    this.moduleInitPromise ??= this.initModule();
+    return this.moduleInitPromise;
+  }
+
+  private async initModule(): Promise<LibjxlWasmModule> {
+    const module = await loadLibjxlModule();
+    this.wasmModule = module;
+    if (this.cancelled) return module;
+
+    const caps = getCapabilities(module);
+    // Use streaming input only when sidecars are not requested — sidecar path takes
+    // a complete RGBA8 pixel pointer and cannot be fed incrementally.
+    // Also skip streaming input when metadata (ICC/EXIF/XMP) is present: the
+    // streaming input path calls enc_finish → EncodeRgba which has no metadata
+    // parameter. Fall back to the buffered path which routes through
+    // encode_rgba8_with_metadata so metadata is preserved for all pixel formats.
+    const wantSidecars = this.sortedSidecarSizes.length > 0 && caps.sidecars;
+    const hasMetadataOpts = this.options.iccProfile !== null || this.options.exif !== null || this.options.xmp !== null;
+    if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
+      const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
+      const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
+      this.wasmEncState = module._jxl_wasm_enc_create_image!(
+        this.options.width, this.options.height,
+        distance, this.options.effort,
+        fmtIndex, this.options.hasAlpha ? 1 : 0,
+      );
+      if (this.wasmEncState === 0) throw new Error("JXL streaming encoder: pixel buffer allocation failed");
+      this.streamingInputActive = true;
+    }
+    return module;
   }
 
   finish(): void {
@@ -589,10 +736,26 @@ class LibjxlEncoder implements JxlEncoder {
   }
 
   async *chunks(): AsyncIterable<ArrayBuffer | Uint8Array> {
+    if (this.chunksStarted) {
+      throw new Error("Encoder chunks() may only be consumed once.");
+    }
+    this.chunksStarted = true;
+
     await this.waitUntilFinished();
     if (this.cancelled) return;
 
-    const module = await loadLibjxlModule();
+    // Progressive encode is accepted in the API but the current WASM bridge does
+    // not implement a progressive parameter. Throw here rather than silently
+    // producing a non-progressive file.
+    if (this.options.progressive) {
+      throw new CapabilityMissing(
+        "Progressive JXL encode requires a rebuilt WASM with a progressive bridge flag. " +
+        "Use sidecarSizes for fast first-paint previews instead."
+      );
+    }
+
+    // Module may not be loaded yet if no pixels were pushed (zero-byte edge case).
+    const module = this.wasmModule ?? await loadLibjxlModule();
     if (this.options.format === "rgba16" || this.options.format === "rgbaf32") {
       const encFn = this.options.format === "rgba16" ? "_jxl_wasm_encode_rgba16" : "_jxl_wasm_encode_rgbaf32";
       if (typeof module[encFn] !== "function") {
@@ -600,122 +763,191 @@ class LibjxlEncoder implements JxlEncoder {
       }
     }
 
-    const bytesPerChannel = this.options.format === "rgbaf32" ? 4 : this.options.format === "rgba16" ? 2 : 1;
-    const expectedBytes = this.options.width * this.options.height * 4 * bytesPerChannel;
-    const totalBytes = this.pixelChunks.reduce((s, c) => s + c.byteLength, 0);
-    if (totalBytes !== expectedBytes) {
-      throw new Error(`JXL encode expected ${expectedBytes} bytes for ${this.options.format}, got ${totalBytes}`);
+    if (this.queuedPixelBytes !== this.pixelByteTotal) {
+      throw new Error(`JXL encode expected ${this.pixelByteTotal} bytes for ${this.options.format}, got ${this.queuedPixelBytes}`);
     }
 
-    // IMPROVEMENT-6: Write pixel chunks directly into WASM heap — no concatBytes allocation.
-    const ptr = module._malloc(totalBytes);
-    try {
-      let offset = 0;
-      for (const chunk of this.pixelChunks) {
-        module.HEAPU8.set(chunk, ptr + offset);
-        offset += chunk.byteLength;
-      }
-      this.pixelChunks = [];
-      const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
-      const hasAlpha = this.options.hasAlpha ? 1 : 0;
+    let compressedBytes = 0;
 
-      // IMPROVEMENT-5: Sidecar thumbnails — yield smallest first for faster first-paint.
-      if (this.sortedSidecarSizes.length > 0
-          && module._jxl_wasm_encode_rgba8_with_sidecars
-          && module._jxl_wasm_buffer_next) {
-        const sortedSizes = this.sortedSidecarSizes;
-        const dimsPtr = module._malloc(sortedSizes.length * 4);
-        try {
-          // Write uint32[] into WASM heap (HEAPU32 if available, byte-by-byte otherwise)
-          if (module.HEAPU32) {
-            const base32 = dimsPtr >>> 2;
-            for (let i = 0; i < sortedSizes.length; i++) module.HEAPU32[base32 + i] = (sortedSizes[i] ?? 0) >>> 0;
-          } else {
-            for (let i = 0; i < sortedSizes.length; i++) {
-              const v = (sortedSizes[i] ?? 0) >>> 0;
-              module.HEAPU8[dimsPtr + i * 4]     =  v         & 0xff;
-              module.HEAPU8[dimsPtr + i * 4 + 1] = (v >>>  8) & 0xff;
-              module.HEAPU8[dimsPtr + i * 4 + 2] = (v >>> 16) & 0xff;
-              module.HEAPU8[dimsPtr + i * 4 + 3] = (v >>> 24) & 0xff;
-            }
-          }
-          let handle = module._jxl_wasm_encode_rgba8_with_sidecars(
-            ptr, this.options.width, this.options.height,
-            distance, this.options.effort, hasAlpha,
-            dimsPtr, sortedSizes.length,
-          );
-          while (handle !== 0) {
-            // Read next BEFORE readBuffer — it may free `handle` on error.
-            const next = module._jxl_wasm_buffer_next(handle);
-            try {
-              const buf = readBuffer(module, handle, "encode");
-              // IMPROVEMENT-10: buf.data is already a copy (HEAPU8.slice in readBuffer).
-              yield buf.data;
-              module._jxl_wasm_buffer_free(handle);
-            } catch (err) {
-              // handle was freed inside readBuffer; free remaining chain, then rethrow.
-              let cur = next;
-              while (cur !== 0) {
-                const nxt = module._jxl_wasm_buffer_next(cur);
-                module._jxl_wasm_buffer_free(cur);
-                cur = nxt;
-              }
-              throw err;
-            }
-            handle = next;
-          }
-        } finally {
-          module._free(dimsPtr);
+    if (this.streamingInputActive && this.wasmEncState !== 0) {
+      // #16: Streaming input path — pixels already in WASM pixel buffer.
+      // enc_finish runs the encode; enc_take_chunk drains the output.
+      try {
+        const rc = module._jxl_wasm_enc_finish!(this.wasmEncState);
+        if (rc !== 0) throw new Error(`JXL streaming encode finish failed (${rc})`);
+        let chunkHandle: number;
+        while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(this.wasmEncState)) !== 0) {
+          const chunk = takeBuffer(module, chunkHandle, "encode");
+          compressedBytes += chunk.data.byteLength;
+          yield chunk.data;
         }
-      } else {
-        // #11: streaming encoder — yields 64 KB chunks, reducing peak JS heap usage.
-        if (module._jxl_wasm_enc_create && module._jxl_wasm_enc_push_pixels &&
-            module._jxl_wasm_enc_take_chunk && module._jxl_wasm_enc_free) {
-          const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-          const encState = module._jxl_wasm_enc_create();
+      } finally {
+        module._jxl_wasm_enc_free!(this.wasmEncState);
+        this.wasmEncState = 0;
+      }
+    } else {
+      // Buffered path — accumulate pixelChunks in JS, copy to WASM, then encode.
+      // Write pixel chunks directly into WASM heap — no concatBytes allocation.
+      // Release each JS chunk reference immediately after copying to reduce peak JS heap overlap.
+      const ptr = module._malloc(this.pixelByteTotal);
+      try {
+        let offset = 0;
+        for (let i = 0; i < this.pixelChunks.length; i++) {
+          const ch = this.pixelChunks[i]!;
+          module.HEAPU8.set(ch, ptr + offset);
+          offset += ch.byteLength;
+          this.pixelChunks[i] = EMPTY_U8;
+        }
+        this.pixelChunks = [];
+        this.queuedPixelBytes = 0;
+
+        const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
+        const hasAlpha = this.options.hasAlpha ? 1 : 0;
+        const caps = getCapabilities(module);
+
+        // Sidecar thumbnails — yield smallest first for faster first-paint.
+        if (this.sortedSidecarSizes.length > 0 && caps.sidecars) {
+          const sortedSizes = this.sortedSidecarSizes;
+          const dimsPtr = module._malloc(sortedSizes.length * 4);
           try {
-            const rc = module._jxl_wasm_enc_push_pixels(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha);
-            if (rc !== 0) throw new Error(`JXL streaming encode failed (${rc})`);
-            let chunkHandle: number;
-            while ((chunkHandle = module._jxl_wasm_enc_take_chunk(encState)) !== 0) {
-              const chunk = readBuffer(module, chunkHandle, "encode");
-              yield chunk.data;
-              module._jxl_wasm_buffer_free(chunkHandle);
+            // Write uint32[] into WASM heap (HEAPU32 if available, byte-by-byte otherwise)
+            if (module.HEAPU32) {
+              const base32 = dimsPtr >>> 2;
+              for (let i = 0; i < sortedSizes.length; i++) module.HEAPU32[base32 + i] = (sortedSizes[i] ?? 0) >>> 0;
+            } else {
+              for (let i = 0; i < sortedSizes.length; i++) {
+                const v = (sortedSizes[i] ?? 0) >>> 0;
+                module.HEAPU8[dimsPtr + i * 4]     =  v         & 0xff;
+                module.HEAPU8[dimsPtr + i * 4 + 1] = (v >>>  8) & 0xff;
+                module.HEAPU8[dimsPtr + i * 4 + 2] = (v >>> 16) & 0xff;
+                module.HEAPU8[dimsPtr + i * 4 + 3] = (v >>> 24) & 0xff;
+              }
+            }
+            let handle = module._jxl_wasm_encode_rgba8_with_sidecars!(
+              ptr, this.options.width, this.options.height,
+              distance, this.options.effort, hasAlpha,
+              dimsPtr, sortedSizes.length,
+            );
+            while (handle !== 0) {
+              // Capture next pointer before takeBuffer frees handle.
+              const next = module._jxl_wasm_buffer_next!(handle);
+              try {
+                const buf = takeBuffer(module, handle, "encode");
+                compressedBytes += buf.data.byteLength;
+                yield buf.data;
+              } catch (err) {
+                // takeBuffer already freed handle; free remaining chain, then rethrow.
+                let cur = next;
+                while (cur !== 0) {
+                  const nxt = module._jxl_wasm_buffer_next!(cur);
+                  module._jxl_wasm_buffer_free(cur);
+                  cur = nxt;
+                }
+                throw err;
+              }
+              handle = next;
             }
           } finally {
-            module._jxl_wasm_enc_free(encState);
+            module._free(dimsPtr);
+          }
+        } else if (caps.streamingEncode) {
+          // #11: streaming encoder — yields 256 KB chunks, reducing peak JS heap usage.
+          const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
+          const encState = module._jxl_wasm_enc_create!();
+          try {
+            const rc = module._jxl_wasm_enc_push_pixels!(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha);
+            if (rc !== 0) throw new Error(`JXL streaming encode failed (${rc})`);
+            let chunkHandle: number;
+            while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(encState)) !== 0) {
+              const chunk = takeBuffer(module, chunkHandle, "encode");
+              compressedBytes += chunk.data.byteLength;
+              yield chunk.data;
+            }
+          } finally {
+            module._jxl_wasm_enc_free!(encState);
           }
         } else {
           // Standard single-image encode path
           let handle: number;
-          if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
-            handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
-          } else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
-            handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+
+          // Use metadata path if any metadata is present.
+          // fmt: 0=rgba8, 1=rgba16, 2=rgbaf32 — matches bridge parameter order.
+          const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
+          const hasMetadata = this.options.iccProfile !== null || this.options.exif !== null || this.options.xmp !== null;
+          if (hasMetadata && module._jxl_wasm_encode_rgba8_with_metadata) {
+            const iccView = this.options.iccProfile ? copyOrBorrowInput(this.options.iccProfile, false) : new Uint8Array(0);
+            const exifView = this.options.exif ? copyOrBorrowInput(this.options.exif, false) : new Uint8Array(0);
+            const xmpView = this.options.xmp ? copyOrBorrowInput(this.options.xmp, false) : new Uint8Array(0);
+
+            const iccPtr = iccView.byteLength > 0 ? module._malloc(iccView.byteLength) : 0;
+            const exifPtr = exifView.byteLength > 0 ? module._malloc(exifView.byteLength) : 0;
+            const xmpPtr = xmpView.byteLength > 0 ? module._malloc(xmpView.byteLength) : 0;
+
+            try {
+              if (iccPtr !== 0) module.HEAPU8.set(iccView, iccPtr);
+              if (exifPtr !== 0) module.HEAPU8.set(exifView, exifPtr);
+              if (xmpPtr !== 0) module.HEAPU8.set(xmpView, xmpPtr);
+
+              handle = module._jxl_wasm_encode_rgba8_with_metadata(
+                ptr, this.options.width, this.options.height,
+                distance, this.options.effort, fmt, hasAlpha,
+                iccPtr, iccView.byteLength,
+                exifPtr, exifView.byteLength,
+                xmpPtr, xmpView.byteLength
+              );
+            } finally {
+              if (iccPtr !== 0) module._free(iccPtr);
+              if (exifPtr !== 0) module._free(exifPtr);
+              if (xmpPtr !== 0) module._free(xmpPtr);
+            }
           } else {
-            handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            // Fallback: plain encode (no metadata) used when bridge fn absent
+            // or when no metadata was provided.
+            if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
+              handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            } else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
+              handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            } else {
+              handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+            }
           }
-          const encoded = readBuffer(module, handle, "encode");
+          const encoded = takeBuffer(module, handle, "encode");
+          compressedBytes += encoded.data.byteLength;
           yield encoded.data;
-          module._jxl_wasm_buffer_free(encoded.handle);
         }
+      } finally {
+        module._free(ptr);
+        this.pixelChunks = [];
+        this.queuedPixelBytes = 0;
       }
-    } finally {
-      module._free(ptr);
     }
+
+    this.encodeStats = { originalBytes: this.pixelByteTotal, compressedBytes, ratio: this.pixelByteTotal > 0 ? compressedBytes / this.pixelByteTotal : 0 };
   }
+
+  getStats(): EncodeStats | null { return this.encodeStats; }
 
   cancel(_reason?: string): void {
     this.cancelled = true;
+    this.freeWasmState();
     this.finishResolve?.();
     this.finishResolve = null;
   }
 
   dispose(): void {
     this.pixelChunks = [];
+    this.queuedPixelBytes = 0;
     this.cancelled = true;
+    this.freeWasmState();
     this.finishResolve?.();
     this.finishResolve = null;
+  }
+
+  private freeWasmState(): void {
+    if (this.wasmEncState !== 0 && this.wasmModule !== null) {
+      this.wasmModule._jxl_wasm_enc_free!(this.wasmEncState);
+      this.wasmEncState = 0;
+    }
   }
 
   private waitUntilFinished(): Promise<void> {
@@ -755,28 +987,63 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
   return await (factory as (options: Record<string, unknown>) => Promise<LibjxlWasmModule>)(options);
 }
 
-function callDecode(module: LibjxlWasmModule, input: Uint8Array, downsample: number, format: PixelFormat, region?: Region | null): LibjxlBuffer {
-  const ptr = module._malloc(input.byteLength);
+interface JxlCapabilities {
+  progressiveDecode: boolean;
+  streamingEncode: boolean;
+  streamingInput: boolean;
+  sidecars: boolean;
+  jpegTranscode: boolean;
+}
+
+const capabilityCache = new WeakMap<LibjxlWasmModule, JxlCapabilities>();
+
+function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
+  let caps = capabilityCache.get(module);
+  if (caps !== undefined) return caps;
+  caps = {
+    progressiveDecode: typeof module._jxl_wasm_dec_create === "function",
+    streamingEncode:
+      typeof module._jxl_wasm_enc_create === "function" &&
+      typeof module._jxl_wasm_enc_push_pixels === "function" &&
+      typeof module._jxl_wasm_enc_take_chunk === "function" &&
+      typeof module._jxl_wasm_enc_free === "function",
+    streamingInput:
+      typeof module._jxl_wasm_enc_create_image === "function" &&
+      typeof module._jxl_wasm_enc_push_chunk === "function" &&
+      typeof module._jxl_wasm_enc_finish === "function" &&
+      typeof module._jxl_wasm_enc_take_chunk === "function" &&
+      typeof module._jxl_wasm_enc_free === "function",
+    sidecars:
+      typeof module._jxl_wasm_encode_rgba8_with_sidecars === "function" &&
+      typeof module._jxl_wasm_buffer_next === "function",
+    jpegTranscode: typeof module._jxl_wasm_transcode_jpeg_to_jxl === "function",
+  };
+  capabilityCache.set(module, caps);
+  return caps;
+}
+
+function callDecodeFromPtr(module: LibjxlWasmModule, ptr: number, size: number, downsample: number, format: PixelFormat, region?: Region | null): LibjxlBuffer {
+  let handle = 0;
   try {
-    module.HEAPU8.set(input, ptr);
-    let handle: number;
     // #10: use C++ region crop when available — avoids shipping full-image pixels to JS.
     if (region != null) {
       if (format === "rgba16" && module._jxl_wasm_decode_rgba16_region) {
-        handle = module._jxl_wasm_decode_rgba16_region(ptr, input.byteLength, region.x, region.y, region.w, region.h, downsample);
+        handle = module._jxl_wasm_decode_rgba16_region(ptr, size, region.x, region.y, region.w, region.h, downsample);
       } else if (format === "rgbaf32" && module._jxl_wasm_decode_rgbaf32_region) {
-        handle = module._jxl_wasm_decode_rgbaf32_region(ptr, input.byteLength, region.x, region.y, region.w, region.h, downsample);
+        handle = module._jxl_wasm_decode_rgbaf32_region(ptr, size, region.x, region.y, region.w, region.h, downsample);
       } else if (module._jxl_wasm_decode_rgba8_region) {
-        handle = module._jxl_wasm_decode_rgba8_region(ptr, input.byteLength, region.x, region.y, region.w, region.h, downsample);
+        handle = module._jxl_wasm_decode_rgba8_region(ptr, size, region.x, region.y, region.w, region.h, downsample);
       } else {
-        handle = callDecodeNoRegion(module, ptr, input.byteLength, downsample, format);
+        handle = callDecodeNoRegion(module, ptr, size, downsample, format);
       }
     } else {
-      handle = callDecodeNoRegion(module, ptr, input.byteLength, downsample, format);
+      handle = callDecodeNoRegion(module, ptr, size, downsample, format);
     }
-    return readBuffer(module, handle, "decode");
-  } finally {
-    module._free(ptr);
+    return readBufferView(module, handle, "decode");
+  } catch (err) {
+    // readBufferView does not free on error — we own handle here.
+    if (handle !== 0) module._jxl_wasm_buffer_free(handle);
+    throw err;
   }
 }
 
@@ -789,7 +1056,8 @@ function callDecodeNoRegion(module: LibjxlWasmModule, ptr: number, size: number,
   return module._jxl_wasm_decode_rgba8(ptr, size, downsample);
 }
 
-function readBuffer(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
+// Read buffer metadata without freeing handle. Caller is responsible for freeing.
+function readBufferView(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
   if (handle === 0) throw new Error(`JXL ${operation} failed`);
 
   // JxlWasmBuffer (WASM32): all fields are 4 bytes — data*, size_t, width, height, bits, has_alpha, error.
@@ -819,7 +1087,6 @@ function readBuffer(module: LibjxlWasmModule, handle: number, operation: string)
   }
 
   if (dataPtr === 0 || size === 0) {
-    module._jxl_wasm_buffer_free(handle);
     throw new Error(`JXL ${operation} failed${errorCode === 0 ? "" : ` (${errorCode})`}`);
   }
   return {
@@ -832,14 +1099,52 @@ function readBuffer(module: LibjxlWasmModule, handle: number, operation: string)
   };
 }
 
+// Read buffer and always free handle (in finally), whether success or failure.
+function takeBuffer(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
+  try {
+    return readBufferView(module, handle, operation);
+  } finally {
+    if (handle !== 0) module._jxl_wasm_buffer_free(handle);
+  }
+}
+
 function normalizeBitsPerSample(value: number): 8 | 16 | 32 {
   if (value === 16 || value === 32) return value;
   return 8;
 }
 
+function bytesPerChannelForFormat(format: PixelFormat): 1 | 2 | 4 {
+  return format === "rgbaf32" ? 4 : format === "rgba16" ? 2 : 1;
+}
+
+const MAX_PIXEL_BYTES = 1024 * 1024 * 1024; // 1 GiB hard limit before WASM malloc
+
+function expectedPixelBytes(width: number, height: number, format: PixelFormat, maxBytes = MAX_PIXEL_BYTES): number {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new Error(`Invalid image dimensions: ${width} × ${height}`);
+  }
+  const bpc = bytesPerChannelForFormat(format);
+  const bytes = width * height * 4 * bpc;
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+    throw new Error(`Pixel byte size overflow for ${width} × ${height} ${format}`);
+  }
+  if (bytes > maxBytes) {
+    throw new Error(`Image too large for WASM encode: ${bytes} bytes exceeds limit ${maxBytes}`);
+  }
+  return bytes;
+}
+
 function distanceFromQuality(quality: number | null): number {
   if (quality === null) return 1;
-  return Math.max(0, Math.min(15, (100 - quality) / 6.67));
+  if (!Number.isFinite(quality)) throw new Error(`Invalid JXL quality: ${quality}`);
+  const q = Math.max(0, Math.min(100, quality));
+  return ((100 - q) * 15) / 100;
+}
+
+// Borrow or copy input depending on caller's ownership. ArrayBuffer is always zero-copy (view only).
+function copyOrBorrowInput(value: ArrayBuffer | Uint8Array, copy: boolean): Uint8Array {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return copy ? value.slice() : value;
 }
 
 function applyRegionAndDownsample(
@@ -923,21 +1228,4 @@ function normalizeRegion(region: Region | null, width: number, height: number): 
     w: Math.max(1, Math.min(maxW, Math.trunc(region.w))),
     h: Math.max(1, Math.min(maxH, Math.trunc(region.h))),
   };
-}
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  if (chunks.length === 1) return chunks[0]!;
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
-}
-
-function toUint8Array(value: ArrayBuffer | Uint8Array): Uint8Array {
-  if (value instanceof Uint8Array) return value;
-  return new Uint8Array(value);
 }

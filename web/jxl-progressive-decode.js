@@ -5,6 +5,8 @@ export function createProgressiveDecodeRequest({
     onFinal,
     onHeader,
     onError,
+    onFrame,
+    signal,
     progressionTarget = 'final',
     emitEveryPass = true,
     preserveIcc = true,
@@ -21,10 +23,17 @@ export function createProgressiveDecodeRequest({
     if (!sessionId) {
         throw new TypeError('createProgressiveDecodeRequest requires a sessionId');
     }
+    if (signal?.aborted) {
+        throw new DOMException('Decode already aborted', 'AbortError');
+    }
+
+    const wantsProgressFrames = !!(onProgress || onFrame);
 
     let started = false;
     let closed = false;
     let settled = false;
+    let lastInfo = null;
+    let currentStage = 'pending';
     let resolveDone;
     let rejectDone;
 
@@ -32,10 +41,6 @@ export function createProgressiveDecodeRequest({
         resolveDone = resolve;
         rejectDone = reject;
     });
-
-    const cleanup = () => {
-        worker.removeEventListener('message', onMessage);
-    };
 
     const finish = (value) => {
         if (settled) return;
@@ -53,29 +58,69 @@ export function createProgressiveDecodeRequest({
         rejectDone(error);
     };
 
+    const cancelDecode = (reason = 'cancelled') => {
+        if (settled) return;
+        closed = true;
+        worker.postMessage({ type: 'decode_cancel', sessionId, reason });
+        fail(reason, 'DecodeCancelled');
+    };
+
+    const callUser = (fn, value, code) => {
+        if (!fn) return true;
+        try {
+            fn(value);
+            return true;
+        } catch (error) {
+            fail(error?.message || 'Decode callback failed', code);
+            return false;
+        }
+    };
+
+    let abortHandler = null;
+    if (signal) {
+        abortHandler = () => cancelDecode('aborted by signal');
+        signal.addEventListener('abort', abortHandler, { once: true });
+    }
+
+    const cleanup = () => {
+        worker.removeEventListener('message', onMessage);
+        if (abortHandler) signal.removeEventListener('abort', abortHandler);
+    };
+
     const onMessage = ({ data }) => {
-        if (!data || data.sessionId !== sessionId) return;
+        if (!data || getMessageSessionId(data) !== sessionId) return;
 
         if (data.type === 'decode_header') {
-            onHeader?.(normalizeFrame(data));
+            callUser(onHeader, normalizeHeader(data), 'DecodeHeaderCallbackFailed');
             return;
         }
 
         if (data.type === 'decode_progress') {
-            onProgress?.(normalizeFrame(data));
+            if (data.info) lastInfo = data.info;
+            if (data.stage) currentStage = data.stage;
+            if (!wantsProgressFrames) return;
+            const frame = normalizeFrame(data);
+            if (onProgress && !callUser(onProgress, frame, 'DecodeProgressCallbackFailed')) return;
+            if (onFrame) callUser(onFrame, frame, 'DecodeFrameCallbackFailed');
             return;
         }
 
         if (data.type === 'decode_final') {
             const frame = normalizeFrame(data);
-            onFinal?.(frame);
+            if (data.info) lastInfo = data.info;
+            currentStage = 'final';
+            if (onFrame && !callUser(onFrame, frame, 'DecodeFrameCallbackFailed')) return;
+            if (onFinal && !callUser(onFinal, frame, 'DecodeFinalCallbackFailed')) return;
             finish(frame);
             return;
         }
 
         if (data.type === 'decode_error') {
-            onError?.(data);
-            fail(data.message || data.error || 'Decode failed', data.code || 'DecodeFailed');
+            try {
+                onError?.(data);
+            } finally {
+                fail(data.message || data.error || 'Decode failed', data.code || 'DecodeFailed');
+            }
             return;
         }
 
@@ -84,7 +129,8 @@ export function createProgressiveDecodeRequest({
                 ? normalizeLegacyFrame(data)
                 : null;
             if (frame !== null) {
-                onFinal?.(frame);
+                if (onFrame && !callUser(onFrame, frame, 'DecodeFrameCallbackFailed')) return;
+                if (onFinal && !callUser(onFinal, frame, 'DecodeFinalCallbackFailed')) return;
                 finish(frame);
                 return;
             }
@@ -96,6 +142,8 @@ export function createProgressiveDecodeRequest({
 
     return {
         done,
+        get lastInfo() { return lastInfo; },
+        get currentStage() { return currentStage; },
         start() {
             if (started) return;
             started = true;
@@ -124,23 +172,45 @@ export function createProgressiveDecodeRequest({
             worker.postMessage({ type: 'decode_close', sessionId });
         },
         cancel(reason = 'cancelled') {
-            if (settled) return;
-            closed = true;
-            worker.postMessage({ type: 'decode_cancel', sessionId, reason });
-            fail(reason, 'DecodeCancelled');
+            cancelDecode(reason);
         },
-        dispose() {
-            cleanup();
+        dispose(reason = 'disposed') {
+            fail(reason, 'DecodeDisposed');
         },
     };
 }
 
-function normalizeFrame(data) {
+const getMessageSessionId = (data) => data?.sessionId ?? data?.decodeId;
+
+function normalizeHeader(data) {
     return {
         sessionId: data.sessionId,
         w: data.info?.width ?? data.w ?? 0,
         h: data.info?.height ?? data.h ?? 0,
-        rgba: toUint8Array(data.pixels),
+        info: data.info ?? null,
+        stage: data.stage ?? 'header',
+        format: data.format ?? null,
+        pixelStride: data.pixelStride ?? null,
+        region: data.region ?? null,
+    };
+}
+
+function normalizeFrame(data) {
+    const rgba = toUint8Array(data.pixels);
+    const w = data.info?.width ?? data.w ?? 0;
+    const h = data.info?.height ?? data.h ?? 0;
+    return {
+        sessionId: data.sessionId,
+        w,
+        h,
+        rgba,
+        getImageData() {
+            return new ImageData(
+                new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
+                w,
+                h,
+            );
+        },
         info: data.info ?? null,
         stage: data.stage ?? 'final',
         format: data.format ?? 'rgba8',
@@ -150,12 +220,22 @@ function normalizeFrame(data) {
 }
 
 function normalizeLegacyFrame(data) {
+    const rgba = toUint8Array(data.rgba);
+    const w = data.w ?? 0;
+    const h = data.h ?? 0;
     return {
         sessionId: data.decodeId ?? data.sessionId,
-        w: data.w ?? 0,
-        h: data.h ?? 0,
-        rgba: toUint8Array(data.rgba),
-        info: { width: data.w ?? 0, height: data.h ?? 0 },
+        w,
+        h,
+        rgba,
+        getImageData() {
+            return new ImageData(
+                new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
+                w,
+                h,
+            );
+        },
+        info: { width: w, height: h },
         stage: 'final',
         format: 'rgba8',
         pixelStride: 4,
@@ -165,16 +245,19 @@ function normalizeLegacyFrame(data) {
 
 function toTransferableArrayBuffer(value) {
     if (value instanceof ArrayBuffer) return value;
-    if (value instanceof Uint8Array) {
+    if (ArrayBuffer.isView(value)) {
         return value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
             ? value.buffer
             : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
     }
-    throw new TypeError('decode chunk must be an ArrayBuffer or Uint8Array');
+    throw new TypeError('decode chunk must be an ArrayBuffer or ArrayBufferView');
 }
 
 function toUint8Array(value) {
     if (value instanceof Uint8Array) return value;
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) {
+        return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
     return new Uint8Array(toTransferableArrayBuffer(value));
 }

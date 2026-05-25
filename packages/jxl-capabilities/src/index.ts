@@ -1,3 +1,59 @@
+export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
+
+let _cachedTier: Tier | undefined;
+
+function _probeSimd(): boolean {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
+      0x03, 0x02, 0x01, 0x00,
+      0x0a, 0x08, 0x01, 0x06, 0x00,
+      0x41, 0x00, 0xfd, 0x0f, 0x0b,
+    ]));
+  } catch { return false; }
+}
+
+function _probeRelaxedSimd(): boolean {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x07, 0x01, 0x60, 0x02, 0x7b, 0x7b, 0x01, 0x7b,
+      0x03, 0x02, 0x01, 0x00,
+      0x0a, 0x0b, 0x01, 0x09, 0x00,
+      0x20, 0x00, 0x20, 0x01, 0xfd, 0x80, 0x02, 0x0b,
+    ]));
+  } catch { return false; }
+}
+
+export function detectTier(): Tier {
+  if (_cachedTier !== undefined) return _cachedTier;
+  let tier: Tier;
+  if (typeof WebAssembly === "undefined") {
+    tier = "scalar";
+  } else {
+    const hasSimd = _probeSimd();
+    if (!hasSimd) {
+      tier = "scalar";
+    } else {
+      const hasSab = typeof SharedArrayBuffer !== "undefined";
+      const hasRelaxedSimd = _probeRelaxedSimd();
+      if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
+      else if (hasSab) tier = "simd-mt";
+      else tier = "simd";
+    }
+  }
+  _cachedTier = tier;
+  return tier;
+}
+
+export function recommendedEffort(): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 {
+  const tier = detectTier();
+  if (tier === "scalar") return 4;
+  if (tier === "simd") return 6;
+  return 7;
+}
+
 export interface Capabilities {
   wasm: boolean;
   wasmSimd: boolean;

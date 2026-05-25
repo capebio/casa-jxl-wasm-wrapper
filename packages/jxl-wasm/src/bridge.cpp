@@ -23,11 +23,24 @@ struct JxlWasmBuffer {
 // WASM32 layout: 8 × 4 bytes = 32 bytes, all 4-byte aligned — safe for HEAPU32 direct reads.
 
 // #11: Streaming encoder state — encode once, yield output in 64 KB chunks.
+// #16: Extended with streaming input fields: pre-allocate pixel buffer in WASM,
+// push chunks directly, encode on finish — eliminates JS-side pixel accumulation.
 struct JxlWasmEncState {
+  // Output side (streaming output — shared by both paths)
   uint8_t* outbuf;
   size_t   outbuf_size;
-  size_t   taken;       // bytes already returned via enc_take_chunk
+  size_t   taken;         // bytes already returned via enc_take_chunk
   int      error_code;
+  // Input side (#16: streaming input — only used when created via enc_create_image)
+  uint8_t* pixels_buf;    // pre-allocated full pixel buffer; freed after enc_finish
+  size_t   pixels_size;   // total expected bytes: width × height × 4 × bpc
+  size_t   pixels_written;
+  uint32_t enc_width;
+  uint32_t enc_height;
+  float    enc_distance;
+  uint32_t enc_effort;
+  uint32_t enc_fmt;
+  uint32_t enc_has_alpha;
 };
 
 // IMPROVEMENT-3: raw malloc for progressive decoder avoids std::vector<uint8_t> zero-init.
@@ -188,6 +201,8 @@ static JxlWasmBuffer* DecodeRgba(const uint8_t* input, size_t input_size, uint32
         if (pixels_raw == nullptr) { JxlDecoderDestroy(dec); return MakeError(14); }
         pixels_size = buf_size;
       }
+      // Direct-buffer decode: libjxl writes pixels straight into pixels_raw — no intermediate
+      // copy. Result is returned via MakeBufferFromOwned (ownership transfer, no memcpy).
       if (JxlDecoderSetImageOutBuffer(dec, &pf, pixels_raw, pixels_size) != JXL_DEC_SUCCESS) { free(pixels_raw); JxlDecoderDestroy(dec); return MakeError(12); }
       continue;
     }
@@ -259,7 +274,12 @@ static JxlWasmBuffer* DecodeRgbaRegion(const uint8_t* input, size_t input_size,
   return result != nullptr ? result : MakeError(31);
 }
 
-static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha) {
+static JxlWasmBuffer* EncodeRgbaWithMetadata(
+    const uint8_t* pixels, uint32_t width, uint32_t height,
+    float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
+    const uint8_t* icc_profile, size_t icc_size,
+    const uint8_t* exif, size_t exif_size,
+    const uint8_t* xmp, size_t xmp_size) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -281,9 +301,19 @@ static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
 
-  JxlColorEncoding color;
-  JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
-  if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(23); }
+  if (icc_profile != nullptr && icc_size > 0) {
+    if (JxlEncoderSetICCProfile(enc, icc_profile, icc_size) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return MakeError(51);
+    }
+    // ICC profile already fully describes the colour space. Setting sRGB color
+    // encoding afterwards is redundant and may produce undefined behaviour in
+    // some libjxl versions when both are set. Skip when ICC is present.
+  } else {
+    JxlColorEncoding color;
+    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(23); }
+  }
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
   JxlEncoderSetFrameDistance(frame, distance);
@@ -314,11 +344,27 @@ static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t
   const JxlEncoderStatus add_status = JxlEncoderAddImageFrame(frame, &pf, encode_src, pixel_size);
   free(rgb_pixels);
   if (add_status != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(24); }
+
+  if (exif != nullptr && exif_size > 0) {
+    if (JxlEncoderAddBox(enc, "Exif", exif, exif_size, JXL_FALSE) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return MakeError(52);
+    }
+  }
+
+  if (xmp != nullptr && xmp_size > 0) {
+    if (JxlEncoderAddBox(enc, "xml ", xmp, xmp_size, JXL_FALSE) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return MakeError(53);
+    }
+  }
+
   JxlEncoderCloseInput(enc);
 
-  // Lossless (distance==0) compresses ~2×; lossy photos ~10×; low-effort lossy ~8×.
   const size_t initial_size = std::max(size_t(65536),
-      distance == 0.0f ? pixel_size / 2 : effort <= 3 ? pixel_size / 12 : pixel_size / 10);
+      distance == 0.0f ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 2
+                       : effort <= 3 ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 12
+                       : (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 10);
   uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_size));
   if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(25); }
   size_t outbuf_cap = initial_size;
@@ -352,6 +398,10 @@ static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t
     free(outbuf);
     JxlEncoderDestroy(enc); return MakeError(static_cast<int>(status));
   }
+}
+
+static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, nullptr, 0, nullptr, 0, nullptr, 0);
 }
 
 // IMPROVEMENT-5: Integer box-filter downscale for RGBA8 thumbnail generation.
@@ -391,6 +441,9 @@ extern "C" {
 
 void jxl_wasm_bridge_anchor(void) {}
 
+// Forward declaration for transcode used in encode_auto.
+JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_size);
+
 // --- Stateful progressive decoder ---
 
 JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t want_progressive) {
@@ -427,8 +480,18 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
     if (status == JXL_DEC_ERROR) { s->error_code = static_cast<int>(status); return JXL_DEC_RESULT_ERROR; }
 
     if (status == JXL_DEC_BASIC_INFO) {
-      if (JxlDecoderGetBasicInfo(s->dec, &s->info) == JXL_DEC_SUCCESS)
+      if (JxlDecoderGetBasicInfo(s->dec, &s->info) == JXL_DEC_SUCCESS) {
         s->info_known = true;
+        // Pre-allocate pixels buffer now that dimensions are known — avoids the first
+        // malloc on NEED_IMAGE_OUT_BUFFER and lets realloc extend in-place later.
+        const size_t bpc = (s->pixel_format.data_type == JXL_TYPE_FLOAT) ? 4u :
+                           (s->pixel_format.data_type == JXL_TYPE_UINT16) ? 2u : 1u;
+        const size_t expected = static_cast<size_t>(s->info.xsize) * s->info.ysize * 4u * bpc;
+        if (expected > 0 && expected > s->pixels_size) {
+          uint8_t* grown = static_cast<uint8_t*>(realloc(s->pixels, expected));
+          if (grown != nullptr) { s->pixels = grown; s->pixels_size = expected; }
+        }
+      }
       continue;
     }
     if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
@@ -436,11 +499,12 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
       if (JxlDecoderImageOutBufferSize(s->dec, &s->pixel_format, &buf_size) != JXL_DEC_SUCCESS) {
         s->error_code = 11; return JXL_DEC_RESULT_ERROR;
       }
-      // IMPROVEMENT-3: Grow-only realloc avoids repeated free/malloc for same-sized frames.
+      // Grow-only: realloc can extend in-place (no content copy needed since libjxl
+      // overwrites the entire buffer); falls back to relocate when in-place not possible.
       if (buf_size > s->pixels_size) {
-        free(s->pixels);
-        s->pixels = static_cast<uint8_t*>(malloc(buf_size));
-        if (s->pixels == nullptr) { s->pixels_size = 0; s->error_code = 14; return JXL_DEC_RESULT_ERROR; }
+        uint8_t* grown = static_cast<uint8_t*>(realloc(s->pixels, buf_size));
+        if (grown == nullptr) { s->error_code = 14; return JXL_DEC_RESULT_ERROR; }
+        s->pixels = grown;
         s->pixels_size = buf_size;
       }
       if (JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->pixels, s->pixels_size) != JXL_DEC_SUCCESS) {
@@ -453,9 +517,9 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
       size_t flush_size = 0;
       if (JxlDecoderImageOutBufferSize(s->dec, &s->pixel_format, &flush_size) != JXL_DEC_SUCCESS) continue;
       if (flush_size > s->flushed_size) {
-        free(s->flushed);
-        s->flushed = static_cast<uint8_t*>(malloc(flush_size));
-        if (s->flushed == nullptr) { s->flushed_size = 0; continue; }
+        uint8_t* grown = static_cast<uint8_t*>(realloc(s->flushed, flush_size));
+        if (grown == nullptr) { s->flushed_size = 0; continue; }
+        s->flushed = grown;
         s->flushed_size = flush_size;
       }
       if (JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->flushed, s->flushed_size) == JXL_DEC_SUCCESS) {
@@ -542,6 +606,13 @@ JxlWasmBuffer* jxl_wasm_encode_rgba16(const uint8_t* pixels, uint32_t width, uin
 }
 JxlWasmBuffer* jxl_wasm_encode_rgbaf32(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha) {
   return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha);
+}
+
+// fmt: 0=rgba8, 1=rgba16, 2=rgbaf32.  Matches the TypeScript facade type.
+// Previously this function had no fmt param and hardcoded 0, which also
+// shifted every subsequent argument by one slot in the WASM call frame.
+JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha, const uint8_t* icc_profile, size_t icc_size, const uint8_t* exif, size_t exif_size, const uint8_t* xmp, size_t xmp_size) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
 }
 
 // Routes JPEG bytes to lossless transcode; otherwise encodes as RGBA pixels.
@@ -743,8 +814,78 @@ int jxl_wasm_enc_error(const JxlWasmEncState* s) {
   return s != nullptr ? s->error_code : -1;
 }
 
+// --- #16: Streaming input encoder ---
+
+// Pre-allocate the full pixel buffer in WASM so JS never needs to accumulate pixels.
+// Returns nullptr on invalid dimensions or malloc failure.
+JxlWasmEncState* jxl_wasm_enc_create_image(
+    uint32_t width, uint32_t height,
+    float distance, uint32_t effort,
+    uint32_t fmt, uint32_t has_alpha) {
+  if (width == 0 || height == 0) return nullptr;
+  const size_t bpc        = (fmt == 2u) ? 4u : (fmt == 1u) ? 2u : 1u;
+  const size_t pixel_size = static_cast<size_t>(width) * height * 4u * bpc;
+
+  JxlWasmEncState* s = static_cast<JxlWasmEncState*>(calloc(1, sizeof(JxlWasmEncState)));
+  if (s == nullptr) return nullptr;
+  s->pixels_buf = static_cast<uint8_t*>(malloc(pixel_size));
+  if (s->pixels_buf == nullptr) { free(s); return nullptr; }
+
+  s->pixels_size   = pixel_size;
+  s->enc_width     = width;
+  s->enc_height    = height;
+  s->enc_distance  = distance;
+  s->enc_effort    = effort;
+  s->enc_fmt       = fmt;
+  s->enc_has_alpha = has_alpha;
+  return s;
+}
+
+// Copy `size` bytes from `data` into the pixel buffer at the current write offset.
+// Returns 0 on success, non-zero on error (overflow or bad state).
+int jxl_wasm_enc_push_chunk(JxlWasmEncState* s, const uint8_t* data, size_t size) {
+  if (s == nullptr || data == nullptr) return -1;
+  if (s->error_code != 0) return s->error_code;
+  if (s->pixels_buf == nullptr) { s->error_code = -2; return -2; }
+  if (size == 0) return 0;
+  if (s->pixels_written + size > s->pixels_size) { s->error_code = -3; return -3; }
+  memcpy(s->pixels_buf + s->pixels_written, data, size);
+  s->pixels_written += size;
+  return 0;
+}
+
+// Encode the accumulated pixel buffer. Frees pixels_buf on completion (success or error).
+// Output becomes available via enc_take_chunk. Returns 0 on success, non-zero on error.
+int jxl_wasm_enc_finish(JxlWasmEncState* s) {
+  if (s == nullptr) return -1;
+  if (s->error_code != 0) return s->error_code;
+  if (s->pixels_buf == nullptr) { s->error_code = -2; return -2; }
+  if (s->pixels_written != s->pixels_size) { s->error_code = -4; return -4; }
+
+  JxlWasmBuffer* buf = EncodeRgba(
+      s->pixels_buf, s->enc_width, s->enc_height,
+      s->enc_distance, s->enc_effort, s->enc_fmt, s->enc_has_alpha);
+
+  // libjxl is done with the pixel data — free it now to reclaim memory.
+  free(s->pixels_buf);
+  s->pixels_buf    = nullptr;
+  s->pixels_size   = 0;
+  s->pixels_written = 0;
+
+  if (buf == nullptr) { s->error_code = 25; return 25; }
+  if (buf->error != 0) { int ec = buf->error; FreeBufferNoChain(buf); s->error_code = ec; return ec; }
+
+  // Steal the output buffer pointer from JxlWasmBuffer — avoids a memcpy.
+  s->outbuf      = buf->data;
+  s->outbuf_size = buf->size;
+  buf->data = nullptr;
+  FreeBufferNoChain(buf);
+  return 0;
+}
+
 void jxl_wasm_enc_free(JxlWasmEncState* s) {
   if (s == nullptr) return;
+  free(s->pixels_buf);  // no-op after enc_finish (set to nullptr); safety net on cancel
   free(s->outbuf);
   free(s);
 }
