@@ -98,6 +98,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 *   **Capability Probing:** A specialized runtime probe (`jxl-capabilities`) that detects SIMD, Threads, and Relaxed SIMD support.
 *   **Module Capability Detection:** `getCapabilities(module)` probes available bridge functions once per module instance and caches the result in a `WeakMap<LibjxlWasmModule, JxlCapabilities>`. Covers `progressiveDecode`, `streamingEncode`, `sidecars`, and `jpegTranscode`. Replaces per-operation `typeof` checks at call sites, ensuring fallback paths are only taken when a feature is genuinely absent. (`packages/jxl-wasm/src/facade.ts`)
 *   **Telemetry Hooks:** `onMetric` callbacks provide detailed timing for "time to header," "time to first pixel," and peak memory usage.
+*   **Blur Vertical-Pass Benchmark (`blur_bench`):** `src/bin/blur_bench.rs` benchmarks candidate vertical-pass implementations for the separable Gaussian blur used by clarity/texture (13-tap kernel, 5240×3912 synthetic image). Variants: `v_pass_naive` (current production), `v_pass_tiled<TILE>` (cache-tiled, TILE = 16/32/64/128), `v_pass_clarity` (8-wide unrolled with separate scalar tail — inner `for i in 0..LANE` is always exactly 8 iterations, enabling full loop unroll unlike `v_pass_tiled` whose runtime `tile` variable may block unroll), and transpose+horizontal+transpose. Run with `cargo run --bin blur_bench --release`. (`src/bin/blur_bench.rs`)
 
 ---
 

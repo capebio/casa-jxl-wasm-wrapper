@@ -86,7 +86,62 @@ fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], d
     }
 }
 
-// OPTION B: transpose → horizontal → transpose back.
+// OPTION B: 8-wide unrolled vertical pass with a separate scalar tail.
+// The inner `for i in 0..LANE` iterates exactly LANE=8 times on every
+// main-loop iteration, so LLVM can fully unroll it — unlike v_pass_tiled
+// where `for xi in 0..tile` uses a runtime `tile` that may prevent full
+// unroll for the constant-TILE branch.
+fn v_pass_clarity(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
+    let half = k.len() / 2;
+    const LANE: usize = 8;
+
+    for y in 0..h {
+        let mut x = 0;
+
+        while x + LANE <= w {
+            let mut acc = [[0f32; 3]; LANE];
+
+            for (ki, &kv) in k.iter().enumerate() {
+                let yi = (y as isize + ki as isize - half as isize)
+                    .clamp(0, h as isize - 1) as usize;
+                let row = yi * w * 3;
+                for i in 0..LANE {
+                    let b = row + (x + i) * 3;
+                    acc[i][0] += src[b]     as f32 * kv;
+                    acc[i][1] += src[b + 1] as f32 * kv;
+                    acc[i][2] += src[b + 2] as f32 * kv;
+                }
+            }
+
+            for i in 0..LANE {
+                let b = (y * w + x + i) * 3;
+                dst[b]     = acc[i][0].round() as u16;
+                dst[b + 1] = acc[i][1].round() as u16;
+                dst[b + 2] = acc[i][2].round() as u16;
+            }
+            x += LANE;
+        }
+
+        // Scalar tail for widths not divisible by LANE.
+        for xi in x..w {
+            let mut acc = [0f32; 3];
+            for (ki, &kv) in k.iter().enumerate() {
+                let yi = (y as isize + ki as isize - half as isize)
+                    .clamp(0, h as isize - 1) as usize;
+                let b = (yi * w + xi) * 3;
+                acc[0] += src[b]     as f32 * kv;
+                acc[1] += src[b + 1] as f32 * kv;
+                acc[2] += src[b + 2] as f32 * kv;
+            }
+            let b = (y * w + xi) * 3;
+            dst[b]     = acc[0].round() as u16;
+            dst[b + 1] = acc[1].round() as u16;
+            dst[b + 2] = acc[2].round() as u16;
+        }
+    }
+}
+
+// OPTION C: transpose → horizontal → transpose back.
 // Uses a cache-tiled 32×32 block transpose.
 fn transpose_tiled(src: &[u16], sw: usize, sh: usize, dst: &mut [u16]) {
     const T: usize = 32;
@@ -152,6 +207,7 @@ fn main() {
     time_fn("tiled-32", 5,        || v_pass_tiled::<32>(&temp, W, H, &kernel, &mut out));
     time_fn("tiled-64", 5,        || v_pass_tiled::<64>(&temp, W, H, &kernel, &mut out));
     time_fn("tiled-128", 5,       || v_pass_tiled::<128>(&temp, W, H, &kernel, &mut out));
+    time_fn("clarity-8 (unrolled)", 5, || v_pass_clarity(&temp, W, H, &kernel, &mut out));
     time_fn("transpose+hpass+T", 5, || v_pass_via_transpose(&temp, W, H, &kernel, &mut out, &mut s1, &mut s2));
 
     println!("\nFull blur round-trip (h_pass + v_pass):");
@@ -162,6 +218,10 @@ fn main() {
     time_fn("h+v tiled-64", 5, || {
         h_pass(&src, W, H, &kernel, &mut temp);
         v_pass_tiled::<64>(&temp, W, H, &kernel, &mut out);
+    });
+    time_fn("h+v clarity-8", 5, || {
+        h_pass(&src, W, H, &kernel, &mut temp);
+        v_pass_clarity(&temp, W, H, &kernel, &mut out);
     });
     time_fn("h+transpose+h+T", 5, || {
         h_pass(&src, W, H, &kernel, &mut temp);

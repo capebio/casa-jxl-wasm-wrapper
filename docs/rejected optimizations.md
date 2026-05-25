@@ -164,3 +164,31 @@ All 5 proposals rejected. No code changes.
 *   **switch instead of module-level ReadonlySet in normalizeCode() (Grok-ES2-3):** REJECTED. Module-level `KNOWN_JXL_ERROR_CODES: ReadonlySet<string>` is already in place — allocated once at module load, O(1) hash lookup, matches `decode-session.ts` pattern. Replacing it with a `switch` removes the pattern consistency with `decode-session` without performance benefit; both are O(1) for 10 entries.
 *   **Cache opts.onMetric in a class field (Grok-ES2-4):** REJECTED. Metric path is not hot. V8 hidden-class caching makes `this.opts.onMetric` and `this.onMetric` cost-equivalent. Speculative micro-opt with no profiling data.
 *   **Drop encode_first_byte_ready case (Grok-ES2-5):** REJECTED. The explicit case with its comment documents intentional protocol handling — the message type exists in the wire protocol, its timing data arrives redundantly via the `metric` message, and the comment says why this is correct. Removing it falls to `default: break`, functionally identical, but erases the explanation. CLAUDE.md: keep comments that document non-obvious protocol invariants.
+
+## `web/jxl-progressive-decode.js` + `encode-session.ts` + `src/bin/blur_bench.rs` (Grok/GPT combined batch)
+
+### `web/jxl-progressive-decode.js`
+
+All 5 proposals ALREADY IMPLEMENTED. No code changes.
+
+*   **AbortSignal support (1.1):** ALREADY IMPLEMENTED. `signal` param (line 9), pre-aborted check (lines 26–28), abort handler registered (lines 79–83), removed in `cleanup()` (line 87).
+*   **onFrame callback (1.2):** ALREADY IMPLEMENTED. `onFrame` param (line 8), called on `decode_progress` (line 104) and `decode_final` (line 112). `wantsProgressFrames` accounts for it (line 30).
+*   **getImageData() on normalizeFrame (1.3):** ALREADY IMPLEMENTED. `normalizeFrame` returns `getImageData()` method (lines 206–213 in current file).
+*   **currentStage / lastInfo exposure (nice-to-haves):** ALREADY IMPLEMENTED. `currentStage` tracked (lines 36, 111); `lastInfo` tracked (lines 35, 99, 110); both exposed as getters on the returned object (lines 145–146).
+*   **Smart default budgetMs:** Already defaults to `null` (line 16), which is the correct "no budget" sentinel — matches spec.
+
+### `encode-session.ts`
+
+All 4 proposals are re-submissions of previously rejected items. No code changes.
+
+*   **Strengthen AbortSignal / abort handler calls cancel() (2.1):** Re-submission of Grok-ES-1a. See that entry.
+*   **onChunk callback (2.2):** Re-submission of Grok-ES-2. See that entry.
+*   **Throw on both distance+quality (2.3):** Re-submission of Grok-ES-3. See that entry.
+*   **state / totalBytes getters (2.4):** Re-submission of Grok-ES-4. See that entry.
+
+### `src/bin/blur_bench.rs`
+
+`v_pass_clarity` added to bench as a new candidate variant. Production integration deferred.
+
+*   **v_pass_clarity added to blur_bench.rs (ACCEPTED):** 8-wide unrolled vertical pass with separate scalar tail. Inner `for i in 0..LANE` iterates exactly LANE=8 times per main-loop iteration, allowing LLVM to fully unroll it — unlike `v_pass_tiled` where `for xi in 0..tile` uses a runtime `tile` variable that may block full unroll even though TILE is a const generic. Timing entry added alongside tiled variants for direct comparison. (`src/bin/blur_bench.rs`)
+*   **Production integration of v_pass_clarity (DEFERRED):** Production `separable_blur` is in `../raw-converter-tauri/raw-pipeline` — a separate repository (`Cargo.toml: raw-pipeline = { path = "../raw-converter-tauri/raw-pipeline" }`). Cannot integrate from this repo. Additionally, benchmark results are needed before declaring a winner — the "8-12% gain" claim is unverified and both v_pass_clarity and v_pass_tiled::<8> are structurally similar for the benchmark's W=5240 (exactly divisible by 8, so the tail never runs). Run `cargo run --bin blur_bench --release` to establish data before integration.
