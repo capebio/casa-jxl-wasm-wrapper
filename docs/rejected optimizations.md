@@ -120,3 +120,15 @@ This document records optimization proposals that were evaluated and rejected.
 *   **`cleanupSessionForAll()` for shutdown (Facade-R1-4):** Extracts 6 already-clear `.clear()` calls into a named function. No semantic gain; the existing inline block is self-evident.
 *   **`queuedDecodeMessages`/`queuedEncodeMessages` checks in `hasAnySession` (Facade-R1-5):** Queued message entries only exist while a pending start entry for the same session is present — they are created and deleted together. Adding checks for this impossible orphan state adds noise without enforcing the invariant at the write site. If the invariant can be violated, the fix belongs at the point of mutation.
 *   **Parameterized `errorType` in `queueDecodeMessage`/`queueEncodeMessage` (Facade-R1-6):** These are separate, type-specific functions; the hardcoded strings are correct by construction. Adding an `errorType` parameter adds indirection with no benefit unless the functions are merged into a generic — which was itself rejected.
+
+## `packages/jxl-session/src/decode-session.ts` (ChatGPT batch — decode-session lifecycle)
+
+Evaluated against `packages/jxl-session/src/decode-session.ts` on branch `Facade-Round1`. All 7 proposals were already implemented or not applicable; no code changes made.
+
+*   **Post-drain re-check in push() (ChatGPT-DS-1):** ALREADY IMPLEMENTED. Lines 103–111: early throw at entry (`terminated || closed`), re-check after `acquirePromise`, re-check after `waitForDrain()` with an inline comment. ChatGPT reviewed a stale version of the file.
+*   **Pre-aborted signal handling (ChatGPT-DS-2):** ALREADY IMPLEMENTED. Constructor checks `this.abortSignal.aborted` immediately (line 88) and calls `abortHandler()` synchronously. Listener registered only for non-aborted signals. `cleanup()` removes it on all terminal paths.
+*   **Unsubscribe scheduler onMessage handler (ChatGPT-DS-3):** NOT APPLICABLE. `Scheduler.onMessage(sessionId, handler)` returns `void` (`dist/scheduler.d.ts`). No unsubscribe function is returned; nothing to store or call.
+*   **Centralise finalisation into finish() / fail() (ChatGPT-DS-4):** ALREADY IMPLEMENTED. `finish()`, `finishWithError()`, and `fail()` all exist and call `cleanup()`. The proposal collapsed `finishWithError()` into `fail()`, which would break `decode_budget_exceeded` semantics — the frame stream must end gracefully (not fail) so consumers receive the partial frame while `done()` rejects.
+*   **Update lastInfo on decode_budget_exceeded (ChatGPT-DS-5):** ALREADY IMPLEMENTED. Line 185: `this.lastInfo = msg.info;` already present.
+*   **Move KNOWN_JXL_ERROR_CODES to module-level ReadonlySet (ChatGPT-DS-6):** ALREADY IMPLEMENTED. Lines 19–22: module-level `ReadonlySet<string>` already exists. ChatGPT reviewed a stale version.
+*   **try/catch on scheduler.send() in close() (ChatGPT-DS-7):** REJECTED. Labeled "optional" by the reviewer and conditional on `scheduler.send()` throwing. `send()` is fire-and-forget by design; no evidence it throws on dead sessions. CLAUDE.md: no error handling for scenarios that cannot happen.
