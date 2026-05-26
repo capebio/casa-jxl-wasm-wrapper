@@ -704,3 +704,10 @@ body[data-mode="compare"] .metric-line[data-kind="compare"] {
         grid-template-columns: 1fr;
     }
 }
+
+#run-batch:disabled,
+#start-race:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+}
