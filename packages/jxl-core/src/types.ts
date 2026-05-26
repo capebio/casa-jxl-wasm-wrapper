@@ -36,6 +36,9 @@ export interface DecodeFrameEvent {
   format: PixelFormat;
   region?: Region;                  // present for tile/region decodes
   pixelStride: number;              // bytes per row (may exceed width * channels * bpc/8)
+  sourceScale?: number;
+  progressiveRegion?: boolean;
+  regionFallback?: "full-frame-then-crop";
 }
 
 export interface Region {
@@ -49,6 +52,9 @@ export interface DecodeOptions {
   preserveMetadata?: boolean;       // default true (EXIF + XMP)
   region?: Region;                  // crop decode
   downsample?: 1 | 2 | 4 | 8;       // request power-of-two downsample if codestream supports
+  targetWidth?: number;
+  targetHeight?: number;
+  fitMode?: "contain" | "cover" | "stretch";
   // Progression
   progressionTarget?: "header" | "dc" | "pass" | "final"; // earliest stage to stop
   emitEveryPass?: boolean;          // default true for viewer, false for thumbnail
@@ -81,6 +87,18 @@ export interface EncodeStats {
   compressedBytes: number;
   /** compressedBytes / originalBytes. Values below 1.0 indicate net compression. */
   ratio: number;
+  /**
+   * Cumulative byte offsets at sidecar boundaries. Length === sidecarSizes.length.
+   * Entry i = number of bytes emitted after the i-th sidecar chunk; equivalently
+   * the byte offset where the (i+1)-th chunk begins. The final main-image
+   * codestream starts at sidecarOffsets[sidecarOffsets.length - 1] and ends at
+   * compressedBytes. Omitted when no sidecars were requested or produced.
+   *
+   * Use with jxl-stream `fromRangePrefix` to fetch only the smallest sidecar:
+   *   const firstSidecar = sidecarOffsets[0];
+   *   stream.fromRangePrefix(url, { byteCount: firstSidecar });
+   */
+  sidecarOffsets?: readonly number[];
 }
 
 export interface EncodeOptions {
@@ -98,6 +116,7 @@ export interface EncodeOptions {
   effort?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   // Progressive / streaming
   progressive?: boolean;            // enable progressive frames
+  progressiveFlavor?: "dc" | "ac";  // DC-only or DC+AC refinement progression
   previewFirst?: boolean;           // bias for early bytes over compression
   chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs
   /**
@@ -139,7 +158,10 @@ export type CodecMetric =
   | { name: "output_bytes"; value: number }
   | { name: "peak_memory_bytes"; value: number }
   | { name: "format_downcast"; value: number }      // emitted when output bpc < source bpc
-  | { name: "region_fallback_full_frame"; value: 1 }; // emitted when region decode falls back
+  | { name: "region_fallback_full_frame"; value: 1 } // emitted when region decode falls back
+  | { name: "decode_scale_used"; value: number }
+  | { name: "decode_region_area"; value: number }
+  | { name: "source_pixels_decoded"; value: number };
 
 // Capabilities shape (spec Section 17)
 export interface Capabilities {
@@ -170,4 +192,28 @@ export interface CacheOptions {
   hotMaxBytes?: number;           // in-memory LRU cap; default 128 MiB browser
   persistentMaxBytes?: number;    // OPFS/fs cap; default 1 GiB
   persistentPath?: string;        // node: filesystem path
+}
+
+export interface ViewportResult {
+  pixels: ArrayBuffer;
+  width: number;
+  height: number;
+  sourceRegion: Region;
+  sourceScale: number;
+}
+
+export interface DecodeGridInfo {
+  tileWidth?: number;
+  tileHeight?: number;
+  preferredRegionAlign?: number;
+  lodLevels?: number[];
+}
+
+export interface WrapperCapabilities {
+  regionDecode: boolean;
+  exactSizeDecode: boolean;
+  progressiveRegionDecode: boolean;
+  tileAlignedRegionDecode: boolean;
+  arbitraryRegionDecode: boolean;
+  availableDownsampleFactors: number[];
 }
