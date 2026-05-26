@@ -217,6 +217,22 @@ export class CapabilityMissing extends Error {
 
 export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
 
+export interface WrapperCapabilities {
+  regionDecode: boolean;
+  exactSizeDecode: boolean;
+  progressiveRegionDecode: boolean;
+  tileAlignedRegionDecode: boolean;
+  arbitraryRegionDecode: boolean;
+  availableDownsampleFactors: readonly number[];
+}
+
+export interface DecodeGridInfo {
+  tileWidth?: number;
+  tileHeight?: number;
+  preferredRegionAlign?: number;
+  lodLevels?: readonly number[];
+}
+
 export function detectTier(): Tier {
   if (_cachedDetectedTier !== undefined) return _cachedDetectedTier;
   let tier: Tier;
@@ -334,6 +350,95 @@ export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promis
 /** Start loading the WASM module immediately. Call during app startup to hide cold-start latency. */
 export function preloadJxlModule(): void {
   void loadLibjxlModule();
+}
+
+export function getWrapperCapabilities(): WrapperCapabilities {
+  return {
+    regionDecode: true,
+    exactSizeDecode: true,
+    progressiveRegionDecode: false,
+    tileAlignedRegionDecode: false,
+    arbitraryRegionDecode: true,
+    availableDownsampleFactors: [1, 2, 4, 8],
+  };
+}
+
+export function getDecodeGridInfo(): DecodeGridInfo {
+  return {};
+}
+
+export interface DecodeViewportOptions {
+  format: PixelFormat;
+  region?: Region | null;
+  targetWidth?: number;
+  targetHeight?: number;
+  fitMode?: "contain" | "cover" | "stretch";
+  preserveIcc?: boolean;
+  preserveMetadata?: boolean;
+  progressionTarget?: "header" | "dc" | "pass" | "final";
+  emitEveryPass?: boolean;
+}
+
+export function decodeViewport(options: DecodeViewportOptions): JxlDecoder {
+  return createDecoder({
+    format: options.format,
+    region: options.region ?? null,
+    downsample: pickDownsample(options),
+    progressionTarget: options.progressionTarget ?? "final",
+    emitEveryPass: options.emitEveryPass ?? false,
+    preserveIcc: options.preserveIcc ?? true,
+    preserveMetadata: options.preserveMetadata ?? false,
+    targetWidth: options.targetWidth ?? null,
+    targetHeight: options.targetHeight ?? null,
+    fitMode: options.fitMode ?? null,
+  });
+}
+
+export interface DecodeRegionLodOptions {
+  format: PixelFormat;
+  region?: Region | null;
+  targetLongEdge: number;
+}
+
+export function decodeRegionLod(options: DecodeRegionLodOptions): JxlDecoder {
+  return createDecoder({
+    format: options.format,
+    region: options.region ?? null,
+    downsample: 1,
+    progressionTarget: "final",
+    emitEveryPass: false,
+    preserveIcc: false,
+    preserveMetadata: false,
+    targetWidth: options.targetLongEdge,
+    targetHeight: options.targetLongEdge,
+    fitMode: "contain",
+  });
+}
+
+export function normalizedToPixelExtent(
+  norm: { x: number; y: number; w: number; h: number },
+  imageWidth: number,
+  imageHeight: number,
+): Region {
+  return {
+    x: Math.round(norm.x * imageWidth),
+    y: Math.round(norm.y * imageHeight),
+    w: Math.max(1, Math.round(norm.w * imageWidth)),
+    h: Math.max(1, Math.round(norm.h * imageHeight)),
+  };
+}
+
+export function pixelToNormalizedExtent(
+  region: Region,
+  imageWidth: number,
+  imageHeight: number,
+): { x: number; y: number; w: number; h: number } {
+  return {
+    x: region.x / imageWidth,
+    y: region.y / imageHeight,
+    w: region.w / imageWidth,
+    h: region.h / imageHeight,
+  };
 }
 
 // Shared zero-length sentinel used to null out pixelChunks slots during progressive WASM copy.
