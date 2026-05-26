@@ -7,7 +7,6 @@
     <title>JXL Wrapper Lab</title>
     <link rel="stylesheet" href="./test-nav.css" />
     <link rel="stylesheet" href="./jxl-wrapper-lab.css" />
-    <link rel="stylesheet" href="./jxl-dashboard.css" />
     <link rel="stylesheet" href="./jxl-debug-console.css" />
     <script type="importmap">
     {
@@ -60,7 +59,6 @@
                     <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
                     <button class="mode-btn" type="button" data-mode="compare" aria-pressed="false">Compare</button>
                 </div>
-                <button id="wrapper-controls-btn" class="dashboard-toggle" type="button" aria-expanded="false">Controls</button>
                 <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
             </div>
         </section>
@@ -78,7 +76,7 @@
                         <label class="chip-label"><input type="radio" name="race-size" value="256" checked /> <span>256px</span></label>
                         <label class="chip-label"><input type="radio" name="race-size" value="600" /> <span>600px</span></label>
                     </div>
-                    <button id="start-race" class="primary-btn">Start Race</button>
+                    <button id="start-race" class="primary-btn" disabled>Start Race</button>
                 </div>
             </header>
             <div class="race-track-shell">
@@ -92,54 +90,6 @@
             </div>
         </section>
 
-        <aside id="wrapper-dashboard" class="dashboard" aria-hidden="true" data-open="false">
-            <div class="dashboard-head">
-                <div>
-                    <p class="dashboard-eyebrow">Wrapper controls</p>
-                    <h2>Batch, compare, display</h2>
-                </div>
-                <button id="wrapper-controls-close" class="dashboard-close" type="button">Close</button>
-            </div>
-
-            <section class="dashboard-group" data-group="display">
-                <header class="dashboard-group-head">
-                    <div>
-                        <span class="dashboard-label">Display</span>
-                        <strong>Batch thumbnail size</strong>
-                    </div>
-                    <button class="info-btn" type="button" data-help-target="wrapper-display" aria-label="Display help">i</button>
-                </header>
-                <label class="setting">
-                    <span>Bottom thumbs</span>
-                    <input id="batch-thumb-size" type="range" min="120" max="320" step="8" value="180" />
-                    <strong id="batch-thumb-size-value">180</strong>
-                </label>
-                <p class="panel-note">Resizes the bottom batch grid without changing the source files or compare math.</p>
-                <div class="help-popover" data-help-popover="wrapper-display" hidden>
-                    Bigger cells make the tiles easier to read. Smaller cells let more compare cards fit on screen.
-                </div>
-            </section>
-
-            <section class="dashboard-group is-dimmed" data-group="progressive">
-                <header class="dashboard-group-head">
-                    <div>
-                        <span class="dashboard-label">Progressive</span>
-                        <strong>Progressive encode / download</strong>
-                    </div>
-                    <button class="info-btn" type="button" data-help-target="wrapper-progressive" aria-label="Progressive help">i</button>
-                </header>
-                <div class="dashboard-actions is-disabled">
-                    <button class="ghost-btn" type="button" disabled>Preview first</button>
-                    <button class="ghost-btn" type="button" disabled>Chunked encode</button>
-                    <button class="ghost-btn" type="button" disabled>Transport pacing</button>
-                    <button class="ghost-btn" type="button" disabled>DC / AC</button>
-                </div>
-                <p class="panel-note">Disabled here. Open the progressive page to test download pacing, DC-only runs, and stepped decode.</p>
-                <div class="help-popover" data-help-popover="wrapper-progressive" hidden>
-                    The wrapper lab focuses on existing-vs-wrapper compare. Progressive transport knobs live on the progressive page.
-                </div>
-            </section>
-        </aside>
 
         <section class="control-band compact">
             <div class="source-panel">
@@ -150,7 +100,7 @@
                 </label>
                 <div class="control-row">
                     <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
-                    <button id="run-batch" class="secondary-btn" type="button">Run batch</button>
+                    <button id="run-batch" class="secondary-btn" type="button" disabled>Run batch</button>
                     <button id="clear-batch" class="secondary-btn" type="button">Clear</button>
                 </div>
             </div>
@@ -179,6 +129,11 @@
                 <label class="setting toggle-setting">
                     <span>Lossless</span>
                     <input id="batch-lossless" type="checkbox" />
+                </label>
+                <label class="setting">
+                    <span>Thumb size</span>
+                    <input id="batch-thumb-size" type="range" min="120" max="320" step="8" value="180" />
+                    <strong id="batch-thumb-size-value">180</strong>
                 </label>
             </div>
         </section>
