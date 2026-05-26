@@ -894,9 +894,11 @@ async function runWrapperPipeline(source, label = 'wrapper') {
     const encodeStart = performance.now();
     const encoded = await encodeWithWrapper(source);
     const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
-    dbgLog(`  ${label} enc ← ${fmtBytes(encoded.bytes.byteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
+    // Capture byteLength before decodeWithWrapper transfers encoded.bytes.buffer.
+    const encodedByteLength = encoded.bytes.byteLength;
+    dbgLog(`  ${label} enc ← ${fmtBytes(encodedByteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
 
-    dbgLog(`  ${label} dec → ${fmtBytes(encoded.bytes.byteLength)} jxl`);
+    dbgLog(`  ${label} dec → ${fmtBytes(encodedByteLength)} jxl`);
     const decodeStart = performance.now();
     const decoded = await decodeWithWrapper(encoded.bytes);
     const decodeMs = performance.now() - decodeStart;
@@ -904,7 +906,7 @@ async function runWrapperPipeline(source, label = 'wrapper') {
 
     return {
         bytes: encoded.bytes,
-        byteLength: encoded.bytes.byteLength,
+        byteLength: encodedByteLength,
         encodeMs,
         firstPieceMs: encoded.firstChunkMs ?? null,
         decodeMs,
