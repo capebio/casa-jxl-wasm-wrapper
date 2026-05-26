@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Progressive Paint Test</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <link rel="stylesheet" href="./jxl-debug-console.css" />
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar" data-mode="progressive-paint">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link is-active" href="./jxl-progressive-paint.html" aria-current="page">Progressive paint</a>
+        </div>
+    </nav>
+
+    <main class="shell">
+        <section class="hero compact hero-with-picker">
+            <div class="hero-copy">
+                <p class="eyebrow">JXL Progressive Paint &middot; <span id="mode-status">Per-pass timing and visual quality</span></p>
+                <h1>Progressive paint test</h1>
+            </div>
+            <label class="file-drop file-drop-compact" for="source-input" id="source-drop">
+                <input id="source-input" type="file" accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
+                <strong>Pick file</strong>
+                <span>ORF, JPEG, PNG, TIFF, JXL</span>
+            </label>
+        </section>
+
+        <section class="control-band compact">
+            <div class="source-panel">
+                <div class="control-row">
+                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
+                    <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="progressive-shell">
+            <header class="progressive-header">
+                <p class="eyebrow">Progressive paint test</p>
+                <h2>Per-pass timing and visual quality viewer</h2>
+            </header>
+
+            <div class="progressive-controls">
+                <button id="run-progressive" class="primary-btn" type="button" disabled title="Load a file first">Run progressive paint</button>
+
+                <div class="prog-option-group">
+                    <span class="prog-setting-label">Size:</span>
+                    <div class="prog-radio-group">
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="512" /> 512</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1080" checked /> 1080</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1920" /> 1920</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="fullsize" /> Full</label>
+                    </div>
+                </div>
+
+                <div class="prog-option-group">
+                    <span class="prog-setting-label">Quality:</span>
+                    <div class="prog-radio-group">
+                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="75" /> 75</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="85" checked /> 85</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="95" /> 95</label>
+                    </div>
+                </div>
+
+                <label class="toggle-opt">
+                    <input type="checkbox" id="prog-preview-first" />
+                    <span class="opt-label">Preview 1st</span>
+                </label>
+
+                <span class="prog-status" id="prog-status">Load a file to begin.</span>
+            </div>
+
+            <div class="viewport-trio" id="viewport-trio">
+                <div class="viewport-item">
+                    <div class="viewport-label">Overview (fit)</div>
+                    <div class="viewport-canvas-wrap">
+                        <canvas id="vp-overview" width="480" height="300" class="viewport-canvas"></canvas>
+                    </div>
+                    <div class="viewport-info" id="vp-overview-info">—</div>
+                </div>
+                <div class="viewport-item">
+                    <div class="viewport-label">1∶1 pixels (center)</div>
+                    <div class="viewport-canvas-wrap">
+                        <canvas id="vp-pixel" width="480" height="300" class="viewport-canvas"></canvas>
+                    </div>
+                    <div class="viewport-info" id="vp-pixel-info">—</div>
+                </div>
+                <div class="viewport-item">
+                    <div class="viewport-label">4× zoom (center)</div>
+                    <div class="viewport-canvas-wrap">
+                        <canvas id="vp-zoom" width="480" height="300" class="viewport-canvas"></canvas>
+                    </div>
+                    <div class="viewport-info" id="vp-zoom-info">—</div>
+                </div>
+            </div>
+
+            <div class="pass-timeline" id="pass-timeline"></div>
+
+            <div class="prog-comparison-wrap">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Mode</th>
+                            <th>Passes</th>
+                            <th>First frame (ms)</th>
+                            <th>Final (ms)</th>
+                            <th>1st-frame speedup</th>
+                        </tr>
+                    </thead>
+                    <tbody id="prog-comparison-body">
+                        <tr><td colspan="5" class="empty-state">Run progressive paint to populate.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-progressive-paint.js"></script>
+</body>
+</html>

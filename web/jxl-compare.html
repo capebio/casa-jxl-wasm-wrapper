@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Format Race — JXL vs JPEG vs WebP</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-compare.css" />
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link is-active" href="./jxl-compare.html" aria-current="page">Format race</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Settings explorer</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+        </div>
+    </nav>
+
+    <main class="compare-shell">
+
+        <section class="compare-hero">
+            <div class="eyebrow">Format race</div>
+            <h1>JXL vs JPEG vs WebP</h1>
+            <p class="lede">Encodes the same ORF with all three formats at a matched quality tier, decodes each in the browser, and surfaces encode time, decode time, and compressed file size side-by-side. Click any size row header to open the full-detail quality lightbox.</p>
+        </section>
+
+        <section class="compare-controls">
+            <div class="compare-controls-row">
+                <button id="run-btn" class="run-btn" type="button">Load &amp; run race</button>
+                <button id="reset-btn" class="ghost-btn" type="button">New source</button>
+            </div>
+
+            <div class="compare-option-group">
+                <span class="compare-option-label">Quality tier</span>
+                <div class="compare-radio-row">
+                    <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="high" checked /> High &nbsp;&nbsp;<span class="tier-hint">JXL q=90 · JPEG q=90 · WebP q=90</span></label>
+                    <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="medium" /> Medium <span class="tier-hint">JXL q=80 · JPEG q=80 · WebP q=80</span></label>
+                    <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="low" /> Low &nbsp;&nbsp;&nbsp;<span class="tier-hint">JXL q=70 · JPEG q=70 · WebP q=70</span></label>
+                </div>
+            </div>
+
+            <div class="compare-option-group">
+                <span class="compare-option-label">JXL effort</span>
+                <div class="compare-radio-row">
+                    <label class="compare-radio-btn"><input type="radio" name="effort" value="1" /> 1 — fastest encode</label>
+                    <label class="compare-radio-btn"><input type="radio" name="effort" value="3" checked /> 3 — balanced</label>
+                    <label class="compare-radio-btn"><input type="radio" name="effort" value="7" /> 7 — thorough</label>
+                </div>
+            </div>
+
+            <div class="compare-option-group">
+                <span class="compare-option-label">Sizes to test</span>
+                <div class="compare-radio-row">
+                    <label class="compare-check-btn"><input type="checkbox" class="size-check" value="300" checked /> 300 long — thumbnail</label>
+                    <label class="compare-check-btn"><input type="checkbox" class="size-check" value="800" checked /> 800 long — gallery card</label>
+                    <label class="compare-check-btn"><input type="checkbox" class="size-check" value="1920" /> 1920 long — display</label>
+                    <label class="compare-check-btn"><input type="checkbox" class="size-check" value="full" /> Full size — archive</label>
+                </div>
+            </div>
+
+            <div class="compare-status-row">
+                <span class="compare-status-label">Status</span>
+                <strong id="compare-status">Ready — click "Load &amp; run race".</strong>
+                <span id="source-meta" class="compare-source-meta"></span>
+            </div>
+        </section>
+
+        <!-- Results grid: one row per size, three columns per format -->
+        <section id="compare-results" class="compare-results" aria-label="Format comparison results">
+            <div class="compare-empty">Run the race to see results here.</div>
+        </section>
+
+        <!-- Quality lightbox: full-detail side-by-side canvases -->
+        <div id="lightbox" class="lightbox" hidden aria-modal="true" role="dialog">
+            <div class="lightbox-inner">
+                <header class="lightbox-header">
+                    <div>
+                        <p class="slot-label">Quality comparison</p>
+                        <h2 id="lightbox-title">—</h2>
+                    </div>
+                    <button id="lightbox-close" class="ghost-btn" type="button">Close ✕</button>
+                </header>
+                <div class="lightbox-trio" id="lightbox-trio"></div>
+                <p class="lightbox-hint">Images rendered at native pixels, capped to 1200 px long edge. Zoom your browser to inspect fine detail.</p>
+            </div>
+        </div>
+
+    </main>
+
+    <script type="module" src="./jxl-compare.js"></script>
+</body>
+</html>

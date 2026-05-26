@@ -36,7 +36,9 @@
             <a class="home-bar-link" href="./index.html">Home</a>
             <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link is-active" href="./jxl-benchmark.html" aria-current="page">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
         </div>
     </nav>
 
@@ -59,7 +61,7 @@
                     <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
                     <button id="start-benchmark" class="primary-btn" type="button" disabled title="Press Random Gobabeb first">Run benchmark</button>
                     <button id="add-permutation" class="secondary-btn" type="button" disabled title="Run benchmark first, then add permutation">Add Permutation</button>
-                    <button id="clear-results" class="secondary-btn" type="button">Clear</button>
+                    <button id="clear-results" class="secondary-btn" type="button" disabled title="Load files first">Clear</button>
                     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
                     <button id="save-settings" class="ghost-btn" type="button">Save settings</button>
                     <label class="upload-settings">
@@ -265,16 +267,6 @@
 
             <div class="graphs-grid">
                 <div class="graph-item">
-                    <div class="graph-container" id="decode-latency-container">
-                        <canvas id="graph-decode-latency"></canvas>
-                        <div class="graph-export-buttons">
-                            <button class="export-btn export-webp" data-chart="decode-latency" title="Export as WebP">WebP</button>
-                            <button class="export-btn export-csv" data-chart="decode-latency" title="Export as CSV">CSV</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="graph-item">
                     <div class="graph-container" id="encode-latency-container">
                         <canvas id="graph-encode-latency"></canvas>
                         <div class="graph-export-buttons">
@@ -282,6 +274,18 @@
                             <button class="export-btn export-csv" data-chart="encode-latency" title="Export as CSV">CSV</button>
                         </div>
                     </div>
+                    <div class="graph-caption">Average encode time by output size and selected encoder settings.</div>
+                </div>
+
+                <div class="graph-item">
+                    <div class="graph-container" id="decode-latency-container">
+                        <canvas id="graph-decode-latency"></canvas>
+                        <div class="graph-export-buttons">
+                            <button class="export-btn export-webp" data-chart="decode-latency" title="Export as WebP">WebP</button>
+                            <button class="export-btn export-csv" data-chart="decode-latency" title="Export as CSV">CSV</button>
+                        </div>
+                    </div>
+                    <div class="graph-caption">Average decode time by output size and selected decoder settings.</div>
                 </div>
 
                 <div class="graph-item">
@@ -292,6 +296,7 @@
                             <button class="export-btn export-csv" data-chart="decode-distribution" title="Export as CSV">CSV</button>
                         </div>
                     </div>
+                    <div class="graph-caption">Per-run decode timings, showing spread and outliers across selected sizes and configs.</div>
                 </div>
 
                 <div class="graph-item">
@@ -302,6 +307,7 @@
                             <button class="export-btn export-csv" data-chart="filesize" title="Export as CSV">CSV</button>
                         </div>
                     </div>
+                    <div class="graph-caption">Encoded JXL file size for each selected output size and quality/effort combination.</div>
                 </div>
             </div>
         </section>
@@ -315,31 +321,14 @@
             </header>
 
             <div class="results-tabs">
-                <button class="results-tab is-active" data-tab="decode-summary" type="button">Decode summary</button>
-                <button class="results-tab" data-tab="encode-summary" type="button">Encode summary</button>
+                <button class="results-tab is-active" data-tab="encode-summary" type="button">Encode summary</button>
+                <button class="results-tab" data-tab="decode-summary" type="button">Decode summary</button>
                 <button class="results-tab" data-tab="encode-detail" type="button">Encode detail</button>
                 <button class="results-tab" data-tab="decode-detail" type="button">Decode detail</button>
                 <button class="results-tab" data-tab="file-size" type="button">File size</button>
             </div>
 
-            <div id="decode-summary" class="results-panel is-active">
-                <table class="results-table">
-                    <thead>
-                        <tr>
-                            <th>Config</th>
-                            <th>Decode (ms)</th>
-                            <th>Note</th>
-                        </tr>
-                    </thead>
-                    <tbody id="decode-summary-body">
-                        <tr>
-                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <div id="encode-summary" class="results-panel">
+            <div id="encode-summary" class="results-panel is-active">
                 <table class="results-table">
                     <thead>
                         <tr>
@@ -349,6 +338,23 @@
                         </tr>
                     </thead>
                     <tbody id="encode-summary-body">
+                        <tr>
+                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="decode-summary" class="results-panel">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Config</th>
+                            <th>Decode (ms)</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="decode-summary-body">
                         <tr>
                             <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
                         </tr>
@@ -381,86 +387,6 @@
                         <tr>
                             <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
                         </tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <section class="progressive-shell">
-            <header class="progressive-header">
-                <p class="eyebrow">Progressive paint test</p>
-                <h2>Per-pass timing and visual quality viewer</h2>
-            </header>
-
-            <div class="progressive-controls">
-                <button id="run-progressive" class="primary-btn" type="button" disabled title="Load files first">Run progressive paint</button>
-
-                <div class="prog-option-group">
-                    <span class="prog-setting-label">Size:</span>
-                    <div class="prog-radio-group">
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="512" /> 512</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1080" checked /> 1080</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1920" /> 1920</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="fullsize" /> Full</label>
-                    </div>
-                </div>
-
-                <div class="prog-option-group">
-                    <span class="prog-setting-label">Quality:</span>
-                    <div class="prog-radio-group">
-                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="75" /> 75</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="85" checked /> 85</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="95" /> 95</label>
-                    </div>
-                </div>
-
-                <label class="toggle-opt">
-                    <input type="checkbox" id="prog-preview-first" />
-                    <span class="opt-label">Preview 1st</span>
-                </label>
-
-                <span class="prog-status" id="prog-status">Load files to begin.</span>
-            </div>
-
-            <div class="viewport-trio" id="viewport-trio">
-                <div class="viewport-item">
-                    <div class="viewport-label">Overview (fit)</div>
-                    <div class="viewport-canvas-wrap">
-                        <canvas id="vp-overview" width="480" height="300" class="viewport-canvas"></canvas>
-                    </div>
-                    <div class="viewport-info" id="vp-overview-info">—</div>
-                </div>
-                <div class="viewport-item">
-                    <div class="viewport-label">1∶1 pixels (center)</div>
-                    <div class="viewport-canvas-wrap">
-                        <canvas id="vp-pixel" width="480" height="300" class="viewport-canvas"></canvas>
-                    </div>
-                    <div class="viewport-info" id="vp-pixel-info">—</div>
-                </div>
-                <div class="viewport-item">
-                    <div class="viewport-label">4× zoom (center)</div>
-                    <div class="viewport-canvas-wrap">
-                        <canvas id="vp-zoom" width="480" height="300" class="viewport-canvas"></canvas>
-                    </div>
-                    <div class="viewport-info" id="vp-zoom-info">—</div>
-                </div>
-            </div>
-
-            <div class="pass-timeline" id="pass-timeline"></div>
-
-            <div class="prog-comparison-wrap">
-                <table class="results-table">
-                    <thead>
-                        <tr>
-                            <th>Mode</th>
-                            <th>Passes</th>
-                            <th>First frame (ms)</th>
-                            <th>Final (ms)</th>
-                            <th>1st-frame speedup</th>
-                        </tr>
-                    </thead>
-                    <tbody id="prog-comparison-body">
-                        <tr><td colspan="5" class="empty-state">Run progressive paint to populate.</td></tr>
                     </tbody>
                 </table>
             </div>
