@@ -361,6 +361,7 @@ describe("bilinear resize via targetWidth/targetHeight", () => {
     const events = [];
     for await (const event of decoder.events()) events.push(event);
     const final = events.find((e) => e.type === "final");
+    expect(final).toBeDefined();
     if (final?.type === "final") {
       expect(final.info.width).toBe(2);
       expect(final.info.height).toBe(2);
@@ -369,9 +370,8 @@ describe("bilinear resize via targetWidth/targetHeight", () => {
     await encoder.dispose();
   });
 
-  test("contain fit: wide image targetWidth:1 targetHeight:1 returns 1x1 or smaller height", async () => {
+  test("contain fit: 4x1 image to targetWidth:2 targetHeight:2 returns 2x1", async () => {
     setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
-    // 4x1 image, contain fit to 2x2 — result should be 2x1 (width fills, height contained)
     const rgba = new Uint8Array(4 * 1 * 4).fill(128);
     const encoder = createEncoder({ ...encodeOptions, width: 4, height: 1 });
     encoder.pushPixels(rgba);
@@ -389,8 +389,8 @@ describe("bilinear resize via targetWidth/targetHeight", () => {
     const events = [];
     for await (const event of decoder.events()) events.push(event);
     const final = events.find((e) => e.type === "final");
+    expect(final).toBeDefined();
     if (final?.type === "final") {
-      // contain: scale = min(2/4, 2/1) = 0.5 → 2x0.5 = 2x1 (rounded)
       expect(final.info.width).toBe(2);
       expect(final.info.height).toBe(1);
     }
