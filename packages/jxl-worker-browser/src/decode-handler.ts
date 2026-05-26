@@ -154,6 +154,10 @@ export class DecodeHandler {
       emitEveryPass: this.opts.emitEveryPass,
       preserveIcc: this.opts.preserveIcc,
       preserveMetadata: this.opts.preserveMetadata,
+      targetWidth: this.opts.targetWidth,
+      targetHeight: this.opts.targetHeight,
+      fitMode: this.opts.fitMode,
+      onMetric: (name, value) => this.postMetric(name, value),
     });
 
     // Store decoder reference so terminal paths can actively dispose it.
@@ -381,6 +385,7 @@ export class DecodeHandler {
             pixelStride: event.pixelStride,
           };
           if (event.region !== undefined) msg.region = event.region;
+          this.postMetric("output_bytes", pixels.byteLength);
           self.postMessage(msg, [pixels]);
           this.postFirstPixelMetric();
           this.postMetric("time_to_final_ms", performance.now() - this.stageStartMs);
@@ -464,6 +469,7 @@ export class DecodeHandler {
       pixelStride,
     };
     if (region !== undefined) msg.region = region;
+    this.postMetric("output_bytes", pixels.byteLength);
     self.postMessage(msg, [pixels]);
     this.finishSession("budget_exceeded");
     // Best-effort unblock of decoder.events().

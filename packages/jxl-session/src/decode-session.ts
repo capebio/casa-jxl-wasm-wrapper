@@ -55,6 +55,9 @@ export class DecodeSessionImpl implements DecodeSession {
       preserveMetadata: opts.preserveMetadata ?? true,
       priority: opts.priority ?? "visible",
       budgetMs: opts.budgetMs ?? null,
+      targetWidth: opts.targetWidth ?? null,
+      targetHeight: opts.targetHeight ?? null,
+      fitMode: opts.fitMode ?? null,
     };
 
     // A caller may use only frames() and never call done(). Attach a no-op
