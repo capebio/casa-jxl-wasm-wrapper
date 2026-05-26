@@ -19,14 +19,14 @@ function shuffled(arr) {
 
 // --- State ---
 
-let orfHandles = [];   // FileSystemFileHandle[] — handles only, no content loaded
+let orfFiles   = [];   // File[] from file input
 let wasmReady  = false;
 let running    = false;
 let abortController = null;
 
 // --- DOM refs ---
 
-const btnPickFolder      = document.getElementById('btn-pick-folder');
+const orfFileInput       = document.getElementById('orf-file-input');
 const btnRun             = document.getElementById('btn-run');
 const btnClear           = document.getElementById('btn-clear');
 const folderLabel        = document.getElementById('folder-label');
@@ -46,27 +46,20 @@ function setStatusFile(text)     { statusFile.textContent      = text; }
 function setStatusStage(text)    { statusStage.textContent     = text; }
 function setStatusFolder(text)   { statusFolder.textContent    = text; }
 
-// --- Folder picker ---
+// --- File picker ---
 
-async function pickFolder() {
-    try {
-        const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
-
-        // Enumerate ORF handles — no file content read here.
-        const handles = [];
-        for await (const [name, entry] of dirHandle.entries()) {
-            if (entry.kind === 'file' && /\.orf$/i.test(name)) handles.push(entry);
-        }
-
-        orfHandles = handles;
-        const label = `${dirHandle.name}  (${handles.length} ORF files)`;
-        folderLabel.textContent = handles.length ? label : `${dirHandle.name}  — no ORF files`;
-        setStatusFolder(dirHandle.name);
-        btnRun.disabled = !wasmReady || !handles.length;
-    } catch (err) {
-        if (err.name !== 'AbortError') console.error('showDirectoryPicker:', err);
+orfFileInput.addEventListener('change', () => {
+    orfFiles = Array.from(orfFileInput.files).filter(f => /\.orf$/i.test(f.name));
+    if (!orfFiles.length) {
+        folderLabel.textContent = 'No ORF files in selection';
+        setStatusFolder('—');
+        btnRun.disabled = true;
+        return;
     }
-}
+    folderLabel.textContent = `${orfFiles.length} ORF file${orfFiles.length !== 1 ? 's' : ''} selected`;
+    setStatusFolder(`${orfFiles.length} files`);
+    btnRun.disabled = !wasmReady;
+});
 
 // --- WASM encode/decode ---
 
@@ -221,7 +214,7 @@ function markSkipped(slot, reason) {
 // --- Benchmark loop ---
 
 async function runBenchmark() {
-    if (!orfHandles.length || !wasmReady) return;
+    if (!orfFiles.length || !wasmReady) return;
 
     running = true;
     abortController = new AbortController();
@@ -237,22 +230,22 @@ async function runBenchmark() {
 
     if (!sizes.length) { setStatusProgress('No crop sizes selected.'); endRun(); return; }
 
-    const handles = shuffled(orfHandles).slice(0, fileCount);
-    setStatusProgress(`0 / ${handles.length}`);
+    const files = shuffled(orfFiles).slice(0, fileCount);
+    setStatusProgress(`0 / ${files.length}`);
 
-    for (let i = 0; i < handles.length; i++) {
+    for (let i = 0; i < files.length; i++) {
         if (signal.aborted) break;
 
-        const fh = handles[i];
-        setStatusFile(fh.name);
+        const file = files[i];
+        setStatusFile(file.name);
         setStatusStage('Reading…');
-        setStatusProgress(`${i + 1} / ${handles.length}`);
+        setStatusProgress(`${i + 1} / ${files.length}`);
 
         let arrayBuffer;
         try {
-            arrayBuffer = await (await fh.getFile()).arrayBuffer();
+            arrayBuffer = await file.arrayBuffer();
         } catch (err) {
-            console.error('Read error:', fh.name, err);
+            console.error('Read error:', file.name, err);
             continue;
         }
 
@@ -266,7 +259,7 @@ async function runBenchmark() {
                 imgHeight = result.height;
             } finally { result.free(); }
         } catch (err) {
-            console.error('RAW error:', fh.name, err);
+            console.error('RAW error:', file.name, err);
             setStatusStage(`RAW error: ${err.message}`);
             continue;
         }
@@ -277,16 +270,16 @@ async function runBenchmark() {
         try {
             jxlBytes = await encodeToJxl(rgba, imgWidth, imgHeight, effort, distance);
         } catch (err) {
-            console.error('Encode error:', fh.name, err);
+            console.error('Encode error:', file.name, err);
             setStatusStage(`Encode error: ${err.message}`);
             continue;
         }
         const encodeMs = performance.now() - t0enc;
 
-        const { cards, meta } = createFileRow(fh.name, imgWidth, imgHeight, sizes);
+        const { cards, meta } = createFileRow(file.name, imgWidth, imgHeight, sizes);
         meta.textContent = `${imgWidth} × ${imgHeight} px  ·  encode ${encodeMs.toFixed(0)} ms  ·  ${(jxlBytes.byteLength / 1024).toFixed(0)} KB`;
 
-        console.group(`Crop benchmark: ${fh.name}`);
+        console.group(`Crop benchmark: ${file.name}`);
         console.log(`${imgWidth}×${imgHeight}  encode ${encodeMs.toFixed(1)} ms  JXL ${(jxlBytes.byteLength / 1024).toFixed(0)} KB`);
 
         for (const size of sizes) {
@@ -343,7 +336,6 @@ function clearResults() {
 
 // --- Events ---
 
-btnPickFolder.addEventListener('click', pickFolder);
 btnRun.addEventListener('click',   () => running ? abortController?.abort() : runBenchmark());
 btnClear.addEventListener('click', clearResults);
 

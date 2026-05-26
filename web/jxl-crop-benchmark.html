@@ -51,8 +51,9 @@
         <section class="control-band compact">
             <div class="source-panel">
                 <div class="control-row">
-                    <button id="btn-pick-folder" class="secondary-btn" type="button">Pick folder…</button>
-                    <span id="folder-label" class="folder-label">No folder selected</span>
+                    <label class="secondary-btn" for="orf-file-input" style="cursor:pointer;">Pick ORF files…</label>
+                    <input id="orf-file-input" type="file" multiple accept=".orf,.ORF" hidden />
+                    <span id="folder-label" class="folder-label">No files selected</span>
                     <button id="btn-run" class="primary-btn" type="button" disabled>Run</button>
                     <button id="btn-clear" class="secondary-btn" type="button" disabled>Clear</button>
                 </div>
