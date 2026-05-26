@@ -620,14 +620,35 @@ class LibjxlDecoder implements JxlDecoder {
       );
       // C++ crop path skips applyRegionAndDownsample's region-setter; restore it to match JS path.
       if (cppDidCrop) pixels.region = { x: 0, y: 0, w: pixels.width, h: pixels.height };
+      // P1: apply bilinear resize to exact target size if requested.
+      const targetW = this.options.targetWidth;
+      const targetH = this.options.targetHeight;
+      const fitMode = this.options.fitMode ?? "contain";
+      let outPixels = pixels;
+      if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+        const resized = applyTargetResize(pixels.data, pixels.width, pixels.height, targetW, targetH, fitMode, bpc);
+        outPixels = { data: resized.data, width: resized.width, height: resized.height, region: pixels.region };
+      }
+
       const info: ImageInfo = {
-        width: pixels.width,
-        height: pixels.height,
+        width: outPixels.width,
+        height: outPixels.height,
         bitsPerSample: decoded.bitsPerSample,
         hasAlpha: decoded.hasAlpha,
         hasAnimation: false,
         jpegReconstructionAvailable: false,
       };
+
+      // P5: emit decode metrics via onMetric callback.
+      const actualScale = this.options.downsample;
+      const onMetric = this.options.onMetric;
+      if (onMetric) {
+        onMetric("decode_scale_used", actualScale);
+        onMetric("source_pixels_decoded", decoded.width * decoded.height);
+        if (this.options.region != null) {
+          onMetric("decode_region_area", this.options.region.w * this.options.region.h);
+        }
+      }
 
       yield { type: "header", info };
       if (this.options.progressionTarget === "header") return;
@@ -636,16 +657,26 @@ class LibjxlDecoder implements JxlDecoder {
           type: "progress",
           stage: this.options.progressionTarget === "dc" ? "dc" : "pass",
           info,
-          pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(),
+          pixels: this.options.progressionTarget !== "final" ? outPixels.data : outPixels.data.slice(),
           format: fmt,
           pixelStride,
+          sourceScale: actualScale,
+          progressiveRegion: false,
         };
-        if (pixels.region !== undefined) ev.region = pixels.region;
+        if (outPixels.region !== undefined) ev.region = outPixels.region;
         yield ev;
         if (this.options.progressionTarget !== "final") return;
       }
-      const ev: Extract<DecodeEvent, { type: "final" }> = { type: "final", info, pixels: pixels.data, format: fmt, pixelStride };
-      if (pixels.region !== undefined) ev.region = pixels.region;
+      const ev: Extract<DecodeEvent, { type: "final" }> = {
+        type: "final",
+        info,
+        pixels: outPixels.data,
+        format: fmt,
+        pixelStride,
+        sourceScale: actualScale,
+        progressiveRegion: false,
+      };
+      if (outPixels.region !== undefined) ev.region = outPixels.region;
       yield ev;
     } finally {
       module._free(inputPtr);
