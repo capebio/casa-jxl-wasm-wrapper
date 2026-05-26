@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JXL Crop Benchmark</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-crop-benchmark.css" />
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar" data-mode="crop-benchmark">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link is-active" href="./jxl-crop-benchmark.html" aria-current="page">Crop benchmark</a>
+        </div>
+    </nav>
+
+    <main class="shell">
+        <section class="hero compact hero-with-picker">
+            <div class="hero-copy">
+                <p class="eyebrow">JXL Crop Benchmark &middot; <span id="wasm-status">Initialising…</span></p>
+                <h1>Region decode latency by crop size</h1>
+                <p class="hero-sub">Encodes a raw file to JXL, then benchmarks <code>createDecoder({ region })</code> for each crop size centred on the image.</p>
+            </div>
+        </section>
+
+        <section class="control-band compact">
+            <div class="source-panel">
+                <div class="control-row">
+                    <button id="btn-pick-folder" class="secondary-btn" type="button">Pick folder…</button>
+                    <span id="folder-label" class="folder-label">No folder selected</span>
+                    <button id="btn-run" class="primary-btn" type="button" disabled>Run</button>
+                    <button id="btn-clear" class="secondary-btn" type="button" disabled>Clear</button>
+                </div>
+
+                <div class="settings-inline">
+                    <div class="spinbox-row-inline">
+                        <div class="spinbox-inline-group">
+                            <label class="spinbox-label" for="file-count">Files</label>
+                            <input id="file-count" class="spinbox" type="number" min="1" max="20" value="3" />
+                        </div>
+                        <div class="spinbox-inline-group">
+                            <label class="spinbox-label" for="encode-effort">Encode effort</label>
+                            <input id="encode-effort" class="spinbox" type="number" min="1" max="9" value="3" />
+                        </div>
+                        <div class="spinbox-inline-group">
+                            <label class="spinbox-label" for="encode-distance">Distance</label>
+                            <input id="encode-distance" class="spinbox" type="number" min="0" max="25" step="0.1" value="1.0" />
+                        </div>
+                    </div>
+
+                    <div class="sizes-inline">
+                        <span class="sizes-label">Crop sizes (px, centred):</span>
+                        <div class="sizes-buttons">
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="128" checked /><span>128</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="256" checked /><span>256</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="512" checked /><span>512</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="1024" checked /><span>1024</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="2048" checked /><span>2048</span></label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="status-grid compact" aria-label="Status">
+            <div class="status-card">
+                <span class="label">Folder</span>
+                <strong id="status-folder">—</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Progress</span>
+                <strong id="status-progress">Idle</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">File</span>
+                <strong id="status-file">—</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Stage</span>
+                <strong id="status-stage">—</strong>
+            </div>
+        </section>
+
+        <section class="crop-results-shell">
+            <header class="crop-results-header">
+                <p class="eyebrow">Results</p>
+                <h2>Decoded crops</h2>
+            </header>
+            <div id="crop-results" class="crop-results">
+                <div class="crop-empty-state">Pick a folder of ORF files and press Run.</div>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-crop-benchmark.js"></script>
+</body>
+</html>

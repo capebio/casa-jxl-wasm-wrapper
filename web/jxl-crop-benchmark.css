@@ -1,0 +1,157 @@
+/* Crop benchmark — layout and result cards */
+
+.hero-sub {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.folder-label {
+    font-size: 13px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 360px;
+    align-self: center;
+}
+
+/* Results shell */
+
+.crop-results-shell {
+    margin-top: 28px;
+}
+
+.crop-results-header {
+    margin-bottom: 16px;
+}
+
+.crop-results-header .eyebrow {
+    margin: 0 0 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.crop-results-header h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.crop-empty-state {
+    padding: 40px 0;
+    color: var(--faint);
+    font-size: 14px;
+}
+
+.crop-results {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+}
+
+/* One row per source file */
+
+.crop-file-row {
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 16px 20px 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.crop-file-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.crop-file-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 14px;
+}
+
+/* Horizontal strip of crop cards */
+
+.crop-strip {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+    overflow-x: auto;
+}
+
+/* Individual crop card — width set inline via JS (log-scaled) */
+
+.crop-card {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+.crop-card-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+}
+
+.crop-canvas-wrap {
+    width: 100%;
+    background: var(--bg2);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 60px;
+    position: relative;
+}
+
+.crop-canvas-wrap canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    image-rendering: pixelated;
+}
+
+.crop-canvas-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: var(--faint);
+}
+
+.crop-timing {
+    font-size: 12px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.crop-timing-encode {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+}
+
+.crop-timing.is-fast  { color: var(--success); }
+.crop-timing.is-slow  { color: var(--danger); }
+
+.crop-timing-skip {
+    font-size: 11px;
+    color: var(--faint);
+    font-style: italic;
+}

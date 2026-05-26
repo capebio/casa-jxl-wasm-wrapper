@@ -35,6 +35,7 @@
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
         </div>
     </nav>
 
@@ -44,7 +45,7 @@
                 <p class="eyebrow">JPEG XL wrapper lab &middot; <span id="mode-status">Drag Race</span></p>
                 <h1>JPEG XL wrapper test lab</h1>
                 <p class="lede">
-                    Compare JXL, WEBP, and JPEG performance in a drag-race track. Overlapping cards show relative paint positions.
+                    Compare JXL, WEBP, and JPEG performance in a drag-race track. Race formats are exclusive per run so the result stays readable.
                 </p>
                 <p class="lede">
                     Session worker routes JPEG XL through the browser session stack: context, scheduler, and worker messaging before the codec runs. Direct wrapper calls the wrapper facade straight against libjxl wasm with no session layer in between.
@@ -110,35 +111,35 @@
 
         <section class="ops-frame">
             <label class="file-drop" for="source-input" id="source-drop">
-                <input id="source-input" type="file" multiple accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
+                <input id="source-input" type="file" multiple webkitdirectory accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
                 <strong>Pick files</strong>
                 <span>ORF, JPEG, PNG, TIFF, JXL</span>
             </label>
             <div class="ops-actions">
                 <div class="control-row">
-                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
+                    <button id="load-random" class="secondary-btn" type="button">Load 5 random files</button>
                     <button id="run-batch" class="secondary-btn" type="button" disabled>Run batch</button>
                     <button id="clear-batch" class="secondary-btn" type="button">Clear</button>
+                    <button id="auto-race" class="secondary-btn" type="button">Auto-race</button>
+                </div>
+                <div class="mode-frame inline-mode-frame">
+                    <div class="mode-switch" role="group" aria-label="Test mode">
+                        <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
+                        <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
+                        <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
+                        <button id="dbg-console-btn" class="secondary-btn console-btn" type="button">Console</button>
+                    </div>
                 </div>
             </div>
-        </section>
-
-        <section class="mode-frame">
-            <div class="mode-switch" role="group" aria-label="Test mode">
-                <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
-                <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
-                <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
-            </div>
-            <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
         </section>
 
         <section id="race-container" class="race-container">
             <header class="race-header">
                 <div class="race-controls">
-                    <div class="format-chips">
-                        <label class="chip-label"><input type="checkbox" name="race-format" value="jxl" checked /> <span>JXL</span></label>
-                        <label class="chip-label"><input type="checkbox" name="race-format" value="webp" checked /> <span>WEBP</span></label>
-                        <label class="chip-label"><input type="checkbox" name="race-format" value="jpeg" checked /> <span>JPEG</span></label>
+                    <div class="format-chips" role="radiogroup" aria-label="Race format">
+                        <label class="chip-label"><input type="radio" name="race-format" value="jxl" checked /> <span>JXL</span></label>
+                        <label class="chip-label"><input type="radio" name="race-format" value="webp" /> <span>WEBP</span></label>
+                        <label class="chip-label"><input type="radio" name="race-format" value="jpeg" /> <span>JPEG</span></label>
                     </div>
                     <div class="size-chips">
                         <label class="chip-label"><input type="radio" name="race-size" value="125" /> <span>125px</span></label>

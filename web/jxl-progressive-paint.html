@@ -36,6 +36,7 @@
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
             <a class="home-bar-link is-active" href="./jxl-progressive-paint.html" aria-current="page">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
         </div>
     </nav>
 
@@ -89,6 +90,16 @@
                     </div>
                 </div>
 
+                <div class="prog-option-group">
+                    <span class="prog-setting-label">Passes:</span>
+                    <div class="prog-radio-group">
+                        <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="2" checked /> 2</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="4" /> 4</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="6" /> 6</label>
+                        <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="8" /> 8</label>
+                    </div>
+                </div>
+
                 <label class="toggle-opt">
                     <input type="checkbox" id="prog-preview-first" />
                     <span class="opt-label">Preview 1st</span>
@@ -97,27 +108,29 @@
                 <span class="prog-status" id="prog-status">Load a file to begin.</span>
             </div>
 
+            <p class="panel-note">Click pass tiles to pin them into the large compare slots above.</p>
+
             <div class="viewport-trio" id="viewport-trio">
                 <div class="viewport-item">
-                    <div class="viewport-label">Overview (fit)</div>
+                    <div class="viewport-label" id="vp-overview-label">Compare A</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-overview" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
-                    <div class="viewport-info" id="vp-overview-info">—</div>
+                    <div class="viewport-info" id="vp-overview-info">Waiting for pass.</div>
                 </div>
                 <div class="viewport-item">
-                    <div class="viewport-label">1∶1 pixels (center)</div>
+                    <div class="viewport-label" id="vp-pixel-label">Compare B</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-pixel" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
-                    <div class="viewport-info" id="vp-pixel-info">—</div>
+                    <div class="viewport-info" id="vp-pixel-info">Waiting for pass.</div>
                 </div>
                 <div class="viewport-item">
-                    <div class="viewport-label">4× zoom (center)</div>
+                    <div class="viewport-label" id="vp-zoom-label">Compare C</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-zoom" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
-                    <div class="viewport-info" id="vp-zoom-info">—</div>
+                    <div class="viewport-info" id="vp-zoom-info">Waiting for pass.</div>
                 </div>
             </div>
 
