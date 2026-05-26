@@ -20,6 +20,9 @@ export interface DecodeFrameEvent {
     format: PixelFormat;
     region?: Region;
     pixelStride: number;
+    sourceScale?: number;
+    progressiveRegion?: boolean;
+    regionFallback?: "full-frame-then-crop";
 }
 export interface Region {
     x: number;
@@ -33,6 +36,9 @@ export interface DecodeOptions {
     preserveMetadata?: boolean;
     region?: Region;
     downsample?: 1 | 2 | 4 | 8;
+    targetWidth?: number;
+    targetHeight?: number;
+    fitMode?: "contain" | "cover" | "stretch";
     progressionTarget?: "header" | "dc" | "pass" | "final";
     emitEveryPass?: boolean;
     priority?: "visible" | "near" | "background";
@@ -55,6 +61,18 @@ export interface EncodeStats {
     compressedBytes: number;
     /** compressedBytes / originalBytes. Values below 1.0 indicate net compression. */
     ratio: number;
+    /**
+     * Cumulative byte offsets at sidecar boundaries. Length === sidecarSizes.length.
+     * Entry i = number of bytes emitted after the i-th sidecar chunk; equivalently
+     * the byte offset where the (i+1)-th chunk begins. The final main-image
+     * codestream starts at sidecarOffsets[sidecarOffsets.length - 1] and ends at
+     * compressedBytes. Omitted when no sidecars were requested or produced.
+     *
+     * Use with jxl-stream `fromRangePrefix` to fetch only the smallest sidecar:
+     *   const firstSidecar = sidecarOffsets[0];
+     *   stream.fromRangePrefix(url, { byteCount: firstSidecar });
+     */
+    sidecarOffsets?: readonly number[];
 }
 export interface EncodeOptions {
     format: PixelFormat;
@@ -68,6 +86,7 @@ export interface EncodeOptions {
     quality?: number;
     effort?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
     progressive?: boolean;
+    progressiveFlavor?: "dc" | "ac";
     previewFirst?: boolean;
     chunked?: boolean;
     /**
@@ -118,6 +137,15 @@ export type CodecMetric = {
 } | {
     name: "region_fallback_full_frame";
     value: 1;
+} | {
+    name: "decode_scale_used";
+    value: number;
+} | {
+    name: "decode_region_area";
+    value: number;
+} | {
+    name: "source_pixels_decoded";
+    value: number;
 };
 export interface Capabilities {
     wasm: boolean;
@@ -144,5 +172,26 @@ export interface CacheOptions {
     hotMaxBytes?: number;
     persistentMaxBytes?: number;
     persistentPath?: string;
+}
+export interface ViewportResult {
+    pixels: ArrayBuffer;
+    width: number;
+    height: number;
+    sourceRegion: Region;
+    sourceScale: number;
+}
+export interface DecodeGridInfo {
+    tileWidth?: number;
+    tileHeight?: number;
+    preferredRegionAlign?: number;
+    lodLevels?: readonly number[];
+}
+export interface WrapperCapabilities {
+    regionDecode: boolean;
+    exactSizeDecode: boolean;
+    progressiveRegionDecode: boolean;
+    tileAlignedRegionDecode: boolean;
+    arbitraryRegionDecode: boolean;
+    availableDownsampleFactors: readonly number[];
 }
 //# sourceMappingURL=types.d.ts.map

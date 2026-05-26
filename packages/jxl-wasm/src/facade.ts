@@ -563,7 +563,7 @@ class LibjxlDecoder implements JxlDecoder {
       const takeAndWrap = (handle: number): { pixels: { data: Uint8Array; width: number; height: number; region?: Region }; evInfo: ImageInfo } | null => {
         if (handle === 0) return null;
         const buf = takeBuffer(module, handle, "decode");
-        const pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region, this.options.downsample, bpc);
+        const pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region ?? null, this.options.downsample ?? 1, bpc);
         // When ROI/downsample crops the frame, pixels.width/height differ from full image dims.
         // buildInfo memoizes on first call (full dims from header), so we must not pass it
         // cropped dims — it would return the already-memoized full-dim object regardless.
@@ -641,7 +641,7 @@ class LibjxlDecoder implements JxlDecoder {
               let outPixels = rawPixels;
               if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
                 const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4);
-                outPixels = { data: resized.data, width: resized.width, height: resized.height, region: rawPixels.region };
+                outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
               }
 
               const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
@@ -655,7 +655,7 @@ class LibjxlDecoder implements JxlDecoder {
                 pixels: outPixels.data,
                 format: fmt,
                 pixelStride,
-                sourceScale: this.options.downsample,
+                sourceScale: this.options.downsample ?? 1,
                 progressiveRegion: false,
               };
               if (hasRegion) ev.regionFallback = "full-frame-then-crop";
@@ -688,7 +688,7 @@ class LibjxlDecoder implements JxlDecoder {
 
           // P5: emit decode metrics on final frame.
           if (onMetric) {
-            onMetric("decode_scale_used", this.options.downsample);
+            onMetric("decode_scale_used", this.options.downsample ?? 1);
             // info is memoized full-frame dims from buildInfo; fall back to rawPixels if header not yet seen.
             const fullW = info?.width ?? rawPixels.width;
             const fullH = info?.height ?? rawPixels.height;
@@ -705,7 +705,7 @@ class LibjxlDecoder implements JxlDecoder {
           let outPixels = rawPixels;
           if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
             const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4);
-            outPixels = { data: resized.data, width: resized.width, height: resized.height, region: rawPixels.region };
+            outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
           }
 
           const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
@@ -721,7 +721,7 @@ class LibjxlDecoder implements JxlDecoder {
               pixels: this.options.progressionTarget !== "final" ? outPixels.data : outPixels.data.slice(),
               format: fmt,
               pixelStride,
-              sourceScale: this.options.downsample,
+              sourceScale: this.options.downsample ?? 1,
               progressiveRegion: false,
             };
             if (hasRegion) ev.regionFallback = "full-frame-then-crop";
@@ -736,7 +736,7 @@ class LibjxlDecoder implements JxlDecoder {
             pixels: outPixels.data,
             format: fmt,
             pixelStride,
-            sourceScale: this.options.downsample,
+            sourceScale: this.options.downsample ?? 1,
             progressiveRegion: false,
           };
           if (hasRegion) ev.regionFallback = "full-frame-then-crop";
@@ -786,12 +786,12 @@ class LibjxlDecoder implements JxlDecoder {
         (fmt === "rgba16" && !!module._jxl_wasm_decode_rgba16_region) ||
         (fmt === "rgbaf32" && !!module._jxl_wasm_decode_rgbaf32_region)
       );
-      const decoded = callDecodeFromPtr(module, inputPtr, totalSize, this.options.downsample, fmt, cppDidCrop ? regionForDecode : null);
+      const decoded = callDecodeFromPtr(module, inputPtr, totalSize, this.options.downsample ?? 1, fmt, cppDidCrop ? regionForDecode : null);
       decodedHandle = decoded.handle;
       // If C++ did the crop, decoded.width/height already reflect the region; no further JS crop.
       // Otherwise, scale region into downsampled coords and apply in JS.
-      const ds = this.options.downsample;
-      const scaledRegion = (!cppDidCrop && regionForDecode !== null) ? {
+      const ds = this.options.downsample ?? 1;
+      const scaledRegion = (!cppDidCrop && regionForDecode != null) ? {
         x: Math.trunc(regionForDecode.x / ds),
         y: Math.trunc(regionForDecode.y / ds),
         w: Math.ceil(regionForDecode.w / ds),
@@ -814,7 +814,7 @@ class LibjxlDecoder implements JxlDecoder {
       let outPixels = pixels;
       if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
         const resized = applyTargetResize(pixels.data, pixels.width, pixels.height, targetW, targetH, fitMode, bpc);
-        outPixels = { data: resized.data, width: resized.width, height: resized.height, region: pixels.region };
+        outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(pixels.region !== undefined ? { region: pixels.region } : {}) };
       }
 
       const info: ImageInfo = {
@@ -827,7 +827,7 @@ class LibjxlDecoder implements JxlDecoder {
       };
 
       // P5: emit decode metrics via onMetric callback.
-      const actualScale = this.options.downsample;
+      const actualScale = this.options.downsample ?? 1;
       const onMetric = this.options.onMetric;
       if (onMetric) {
         onMetric("decode_scale_used", actualScale);
