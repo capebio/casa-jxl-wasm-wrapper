@@ -470,6 +470,10 @@ class LibjxlDecoder implements JxlDecoder {
         return { pixels, evInfo };
       };
 
+      const hasRegion = this.options.region != null;
+      const onMetric = this.options.onMetric;
+      let fallbackMetricEmitted = false;
+
       // IMPROVEMENT-7: Batch all queued data chunks into one WASM write per tick.
       // IMPROVEMENT-9: Guard dec_width/dec_height calls behind !headerEmitted — skip 2 WASM
       // FFI calls per chunk once the header has been emitted.
@@ -517,9 +521,40 @@ class LibjxlDecoder implements JxlDecoder {
             const stage: DecodeStage = flushCount === 1 ? "dc" : "pass";
             const wrapped = takeAndWrap(decTakeFlushed(dec));
             if (wrapped !== null) {
-              const { pixels, evInfo } = wrapped;
-              const ev: Extract<DecodeEvent, { type: "progress" }> = { type: "progress", stage, info: evInfo, pixels: pixels.data, format: fmt, pixelStride };
-              if (pixels.region !== undefined) ev.region = pixels.region;
+              const { pixels: rawPixels, evInfo } = wrapped;
+
+              // P4: emit region_fallback_full_frame metric once when progressive + region active.
+              if (hasRegion && !fallbackMetricEmitted && onMetric) {
+                onMetric("region_fallback_full_frame", 1);
+                fallbackMetricEmitted = true;
+              }
+
+              // P1: apply bilinear resize if target dims set.
+              const targetW = this.options.targetWidth;
+              const targetH = this.options.targetHeight;
+              const fitMode = this.options.fitMode ?? "contain";
+              let outPixels = rawPixels;
+              if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+                const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4);
+                outPixels = { data: resized.data, width: resized.width, height: resized.height, region: rawPixels.region };
+              }
+
+              const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
+                ? { ...evInfo, width: outPixels.width, height: outPixels.height }
+                : evInfo;
+
+              const ev: Extract<DecodeEvent, { type: "progress" }> = {
+                type: "progress",
+                stage,
+                info: outInfo,
+                pixels: outPixels.data,
+                format: fmt,
+                pixelStride,
+                sourceScale: this.options.downsample,
+                progressiveRegion: false,
+              };
+              if (hasRegion) ev.regionFallback = "full-frame-then-crop";
+              if (outPixels.region !== undefined) ev.region = outPixels.region;
               yield ev;
               if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
             }
@@ -544,16 +579,63 @@ class LibjxlDecoder implements JxlDecoder {
       if (done) {
         const wrapped = takeAndWrap(decTakeFinal(dec));
         if (wrapped !== null) {
-          const { pixels, evInfo } = wrapped;
+          const { pixels: rawPixels, evInfo } = wrapped;
+
+          // P5: emit decode metrics on final frame.
+          if (onMetric) {
+            onMetric("decode_scale_used", this.options.downsample);
+            // info is memoized full-frame dims from buildInfo; fall back to rawPixels if header not yet seen.
+            const fullW = info?.width ?? rawPixels.width;
+            const fullH = info?.height ?? rawPixels.height;
+            onMetric("source_pixels_decoded", fullW * fullH);
+            if (hasRegion && this.options.region != null) {
+              onMetric("decode_region_area", this.options.region.w * this.options.region.h);
+            }
+          }
+
+          // P1: apply bilinear resize if target dims set.
+          const targetW = this.options.targetWidth;
+          const targetH = this.options.targetHeight;
+          const fitMode = this.options.fitMode ?? "contain";
+          let outPixels = rawPixels;
+          if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+            const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4);
+            outPixels = { data: resized.data, width: resized.width, height: resized.height, region: rawPixels.region };
+          }
+
+          const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
+            ? { ...evInfo, width: outPixels.width, height: outPixels.height }
+            : evInfo;
+
           if (!gotRealFlush && (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass")) {
             const stage: DecodeStage = this.options.progressionTarget === "dc" ? "dc" : "pass";
-            const ev: Extract<DecodeEvent, { type: "progress" }> = { type: "progress", stage, info: evInfo, pixels: this.options.progressionTarget !== "final" ? pixels.data : pixels.data.slice(), format: fmt, pixelStride };
-            if (pixels.region !== undefined) ev.region = pixels.region;
+            const ev: Extract<DecodeEvent, { type: "progress" }> = {
+              type: "progress",
+              stage,
+              info: outInfo,
+              pixels: this.options.progressionTarget !== "final" ? outPixels.data : outPixels.data.slice(),
+              format: fmt,
+              pixelStride,
+              sourceScale: this.options.downsample,
+              progressiveRegion: false,
+            };
+            if (hasRegion) ev.regionFallback = "full-frame-then-crop";
+            if (outPixels.region !== undefined) ev.region = outPixels.region;
             yield ev;
             if (this.options.progressionTarget !== "final") return;
           }
-          const ev: Extract<DecodeEvent, { type: "final" }> = { type: "final", info: evInfo, pixels: pixels.data, format: fmt, pixelStride };
-          if (pixels.region !== undefined) ev.region = pixels.region;
+
+          const ev: Extract<DecodeEvent, { type: "final" }> = {
+            type: "final",
+            info: outInfo,
+            pixels: outPixels.data,
+            format: fmt,
+            pixelStride,
+            sourceScale: this.options.downsample,
+            progressiveRegion: false,
+          };
+          if (hasRegion) ev.regionFallback = "full-frame-then-crop";
+          if (outPixels.region !== undefined) ev.region = outPixels.region;
           yield ev;
         }
       }
