@@ -15,7 +15,7 @@ test('wrapper lab page is a separate page with three-way mode and 100-picture ba
     expect(html).toContain('data-mode="wrapper"');
     expect(html).toContain('data-mode="existing"');
     expect(html).toContain('data-mode="compare"');
-    expect(html).toContain('wrapper-controls-btn');
+    expect(html).toContain('id="source-drop"');
     expect(html).toContain('batch-thumb-size');
     expect(html).toContain('id="batch-limit"');
     expect(html).toContain('id="run-batch"');
@@ -29,5 +29,5 @@ test('wrapper lab page is a separate page with three-way mode and 100-picture ba
     expect(js).toContain('createDecoder');
     expect(js).toContain('MAX_BATCH_LIMIT = 100');
     expect(js).toContain('initDebugConsole(dbgConsoleBtn)');
-    expect(js).toContain('wireSlideoutPanel');
+    expect(js).toContain('updateRunButtons');
 });
