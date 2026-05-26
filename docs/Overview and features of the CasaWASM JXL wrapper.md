@@ -76,7 +76,7 @@ It uniquely employs an advanced **preemptive scheduler** that manages a worker p
 ### 3. Scientific Correctness & Fidelity
 *   **Metadata Round-trip:** Byte-exact preservation of **ICC profiles**, **EXIF**, and **XMP** metadata.
 *   **High Dynamic Range (HDR):** End-to-end support for 16-bit and 32-bit float pixel formats, essential for scientific raw data.
-*   **Color Management:** First-class support for sRGB, Display-P3, Adobe RGB, and Rec.2020.
+*   **Color Management:** First-class support for sRGB, Display-P3, Adobe RGB, and Rec.2020. DNG decodes use `ForwardMatrix1/2` (preferred) or inverted `ColorMatrix1/2` from the embedded TIFF tags via `choose_camera_to_srgb_matrix`; the generic Olympus `CAM_TO_SRGB` fallback is used only when both are absent. (`raw-pipeline/src/dng.rs`)
 *   **Alpha Channel Integrity:** Support for transparency without forced premultiplication, maintaining raw pixel values.
 
 ### 4. Progressive UX Features
