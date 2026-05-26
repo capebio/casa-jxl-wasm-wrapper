@@ -51,10 +51,10 @@ export interface DecodeOptions {
   preserveIcc?: boolean;            // default true
   preserveMetadata?: boolean;       // default true (EXIF + XMP)
   region?: Region;                  // crop decode
-  downsample?: 1 | 2 | 4 | 8;       // request power-of-two downsample if codestream supports
-  targetWidth?: number;
-  targetHeight?: number;
-  fitMode?: "contain" | "cover" | "stretch";
+  downsample?: 1 | 2 | 4 | 8;       // request power-of-two downsample; combined with targetWidth/targetHeight — downsample first, then JS bilinear resize
+  targetWidth?: number;               // desired output width; facade applies bilinear resize post-decode
+  targetHeight?: number;              // desired output height; facade applies bilinear resize post-decode
+  fitMode?: "contain" | "cover" | "stretch"; // default "contain"; only applied when targetWidth/targetHeight set
   // Progression
   progressionTarget?: "header" | "dc" | "pass" | "final"; // earliest stage to stop
   emitEveryPass?: boolean;          // default true for viewer, false for thumbnail
@@ -206,7 +206,7 @@ export interface DecodeGridInfo {
   tileWidth?: number;
   tileHeight?: number;
   preferredRegionAlign?: number;
-  lodLevels?: number[];
+  lodLevels?: readonly number[];
 }
 
 export interface WrapperCapabilities {
@@ -215,5 +215,5 @@ export interface WrapperCapabilities {
   progressiveRegionDecode: boolean;
   tileAlignedRegionDecode: boolean;
   arbitraryRegionDecode: boolean;
-  availableDownsampleFactors: number[];
+  availableDownsampleFactors: readonly number[];
 }
