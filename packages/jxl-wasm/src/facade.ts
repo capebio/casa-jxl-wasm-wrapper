@@ -21,6 +21,9 @@ export type DecodeEvent =
       format: PixelFormat;
       region?: Region;
       pixelStride: number;
+      sourceScale?: number;
+      progressiveRegion?: boolean;
+      regionFallback?: "full-frame-then-crop";
     }
   | {
       type: "final";
@@ -29,6 +32,9 @@ export type DecodeEvent =
       format: PixelFormat;
       region?: Region;
       pixelStride: number;
+      sourceScale?: number;
+      progressiveRegion?: boolean;
+      regionFallback?: "full-frame-then-crop";
     }
   | {
       type: "budget_exceeded";
@@ -48,14 +54,18 @@ export type DecodeEvent =
 
 export interface DecoderOptions {
   format: PixelFormat;
-  region: Region | null;
-  downsample: 1 | 2 | 4 | 8;
+  region?: Region | null;
+  downsample?: 1 | 2 | 4 | 8;
   progressionTarget: "header" | "dc" | "pass" | "final";
   emitEveryPass: boolean;
   preserveIcc: boolean;
   preserveMetadata: boolean;
   /** When false, skip the defensive .slice() copy on push() — caller must not mutate the buffer after push returns. Default true. */
   copyInput?: boolean;
+  targetWidth?: number | null;
+  targetHeight?: number | null;
+  fitMode?: "contain" | "cover" | "stretch" | null;
+  onMetric?: (name: string, value: number) => void;
 }
 
 export interface EncoderOptions {
@@ -69,18 +79,8 @@ export interface EncoderOptions {
   distance: number | null;
   quality: number | null;
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
-  /**
-   * NOTE: `progressive`, `previewFirst`, and `chunked` are accepted in the API
-   * but are NOT forwarded to any WASM bridge call. The current bridge functions
-   * (_jxl_wasm_enc_create_image, _jxl_wasm_enc_push_pixels, _jxl_wasm_encode_rgba8,
-   * _jxl_wasm_enc_push_pixels) have no progressive parameter. The encoder always
-   * produces a non-progressive JXL file. To enable true progressive encode
-   * (DC+AC refinement passes in the output), the C++ bridge must be rebuilt with
-   * a progressive flag and a new wantProgressive parameter exposed.
-   *
-   * For early-preview use, use `sidecarSizes` instead — that path IS implemented.
-   */
   progressive: boolean;
+  progressiveFlavor?: "dc" | "ac";
   previewFirst: boolean;
   chunked: boolean;
   /** Max dimensions (px) of sidecar thumbnails to yield before the full image. Sorted ascending. */
@@ -133,10 +133,10 @@ interface LibjxlWasmModule {
   _jxl_wasm_decode_rgba8(inputPtr: number, inputSize: number, downsample: number): number;
   _jxl_wasm_decode_rgba16?(inputPtr: number, inputSize: number, downsample: number): number;
   _jxl_wasm_decode_rgbaf32?(inputPtr: number, inputSize: number, downsample: number): number;
-  _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
-  _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
-  _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number): number;
-  _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
+  _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+  _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+  _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+  _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
   _jxl_wasm_buffer_data(handle: number): number;
   _jxl_wasm_buffer_size(handle: number): number;
   _jxl_wasm_buffer_width(handle: number): number;
@@ -164,19 +164,43 @@ interface LibjxlWasmModule {
   _jxl_wasm_decode_rgbaf32_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
   // #11: Streaming encoder — yields 64 KB chunks
   _jxl_wasm_enc_create?(): number;
-  _jxl_wasm_enc_push_pixels?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number): number;
+  _jxl_wasm_enc_push_pixels?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
   _jxl_wasm_enc_take_chunk?(state: number): number;
   _jxl_wasm_enc_error?(state: number): number;
   _jxl_wasm_enc_free?(state: number): void;
   // #15: Lossless JPEG → JXL transcode
   _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
   // #16: Streaming input encoder — pre-allocate pixel buffer in WASM, push chunks, finish
-  _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number): number;
+  _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
   _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_enc_finish?(state: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
+
+function normalizeDecoderOptions(options: DecoderOptions): DecoderOptions {
+  return {
+    ...options,
+    region: options.region ?? null,
+    downsample: options.downsample ?? 1,
+    targetWidth: options.targetWidth ?? null,
+    targetHeight: options.targetHeight ?? null,
+    fitMode: options.fitMode ?? null,
+  };
+}
+
+function resolveEncoderBridgeSettings(options: EncoderOptions) {
+  if (!options.progressive) {
+    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0 };
+  }
+  const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
+  return {
+    progressiveDc: 1,
+    progressiveAc: acEnabled ? 1 : 0,
+    qProgressiveAc: acEnabled ? 1 : 0,
+    buffering: options.chunked ? 2 : 0,
+  };
+}
 
 export class CapabilityMissing extends Error {
   readonly code = "CapabilityMissing";
@@ -279,7 +303,7 @@ export function getForcedTier(): Tier | null {
 }
 
 export function createDecoder(options: DecoderOptions): JxlDecoder {
-  return new LibjxlDecoder(options);
+  return new LibjxlDecoder(normalizeDecoderOptions(options));
 }
 
 export function createEncoder(options: EncoderOptions): JxlEncoder {
@@ -660,6 +684,8 @@ class LibjxlEncoder implements JxlEncoder {
   private wasmEncState = 0;
   private streamingInputActive = false;
   private moduleInitPromise: Promise<LibjxlWasmModule> | null = null;
+  private pendingPushPromise: Promise<void> = Promise.resolve();
+  private pendingPushError: unknown = null;
 
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
@@ -675,25 +701,29 @@ class LibjxlEncoder implements JxlEncoder {
     if (this.queuedPixelBytes + view.byteLength > this.pixelByteTotal) {
       throw new Error(`JXL encode received too many pixel bytes: expected ${this.pixelByteTotal}, got at least ${this.queuedPixelBytes + view.byteLength}`);
     }
-
-    const module = await this.ensureModule();
-    if (this.cancelled) return;
-
-    if (this.streamingInputActive) {
-      // #16: copy chunk into WASM pixel buffer; JS ref can be discarded immediately after.
-      const ptr = module._malloc(view.byteLength);
-      try {
-        module.HEAPU8.set(view, ptr);
-        const rc = module._jxl_wasm_enc_push_chunk!(this.wasmEncState, ptr, view.byteLength);
-        if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
-      } finally {
-        module._free(ptr);
-      }
-    } else {
-      this.pixelChunks.push(view);
-    }
-
     this.queuedPixelBytes += view.byteLength;
+    const pushTask = this.pendingPushPromise.then(async () => {
+      const module = await this.ensureModule();
+      if (this.cancelled) return;
+
+      if (this.streamingInputActive) {
+        // #16: copy chunk into WASM pixel buffer; JS ref can be discarded immediately after.
+        const ptr = module._malloc(view.byteLength);
+        try {
+          module.HEAPU8.set(view, ptr);
+          const rc = module._jxl_wasm_enc_push_chunk!(this.wasmEncState, ptr, view.byteLength);
+          if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
+        } finally {
+          module._free(ptr);
+        }
+      } else {
+        this.pixelChunks.push(view);
+      }
+    });
+    this.pendingPushPromise = pushTask.catch((error) => {
+      this.pendingPushError = error;
+    });
+    await pushTask;
   }
 
   private ensureModule(): Promise<LibjxlWasmModule> {
@@ -718,10 +748,12 @@ class LibjxlEncoder implements JxlEncoder {
     if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
       const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
+      const { progressiveDc, progressiveAc, qProgressiveAc, buffering } = resolveEncoderBridgeSettings(this.options);
       this.wasmEncState = module._jxl_wasm_enc_create_image!(
         this.options.width, this.options.height,
         distance, this.options.effort,
         fmtIndex, this.options.hasAlpha ? 1 : 0,
+        progressiveDc, progressiveAc, qProgressiveAc, buffering,
       );
       if (this.wasmEncState === 0) throw new Error("JXL streaming encoder: pixel buffer allocation failed");
       this.streamingInputActive = true;
@@ -743,16 +775,8 @@ class LibjxlEncoder implements JxlEncoder {
 
     await this.waitUntilFinished();
     if (this.cancelled) return;
-
-    // Progressive encode is accepted in the API but the current WASM bridge does
-    // not implement a progressive parameter. Throw here rather than silently
-    // producing a non-progressive file.
-    if (this.options.progressive) {
-      throw new CapabilityMissing(
-        "Progressive JXL encode requires a rebuilt WASM with a progressive bridge flag. " +
-        "Use sidecarSizes for fast first-paint previews instead."
-      );
-    }
+    await this.pendingPushPromise;
+    if (this.pendingPushError !== null) throw this.pendingPushError;
 
     // Module may not be loaded yet if no pixels were pushed (zero-byte edge case).
     const module = this.wasmModule ?? await loadLibjxlModule();
@@ -804,6 +828,7 @@ class LibjxlEncoder implements JxlEncoder {
         const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
         const hasAlpha = this.options.hasAlpha ? 1 : 0;
         const caps = getCapabilities(module);
+        const { progressiveDc, progressiveAc, qProgressiveAc, buffering } = resolveEncoderBridgeSettings(this.options);
 
         // Sidecar thumbnails — yield smallest first for faster first-paint.
         if (this.sortedSidecarSizes.length > 0 && caps.sidecars) {
@@ -853,9 +878,9 @@ class LibjxlEncoder implements JxlEncoder {
         } else if (caps.streamingEncode) {
           // #11: streaming encoder — yields 256 KB chunks, reducing peak JS heap usage.
           const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-          const encState = module._jxl_wasm_enc_create!();
-          try {
-            const rc = module._jxl_wasm_enc_push_pixels!(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha);
+            const encState = module._jxl_wasm_enc_create!();
+            try {
+            const rc = module._jxl_wasm_enc_push_pixels!(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
             if (rc !== 0) throw new Error(`JXL streaming encode failed (${rc})`);
             let chunkHandle: number;
             while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(encState)) !== 0) {
@@ -891,6 +916,7 @@ class LibjxlEncoder implements JxlEncoder {
               handle = module._jxl_wasm_encode_rgba8_with_metadata(
                 ptr, this.options.width, this.options.height,
                 distance, this.options.effort, fmt, hasAlpha,
+                progressiveDc, progressiveAc, qProgressiveAc, buffering,
                 iccPtr, iccView.byteLength,
                 exifPtr, exifView.byteLength,
                 xmpPtr, xmpView.byteLength
@@ -904,11 +930,11 @@ class LibjxlEncoder implements JxlEncoder {
             // Fallback: plain encode (no metadata) used when bridge fn absent
             // or when no metadata was provided.
             if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
-              handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+              handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
             } else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
-              handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+              handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
             } else {
-              handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha);
+              handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
             }
           }
           const encoded = takeBuffer(module, handle, "encode");
@@ -1214,6 +1240,125 @@ function applyRegionAndDownsample(
     result.region = { x: 0, y: 0, w: outWidth, h: outHeight };
   }
   return result;
+}
+
+function bilinearResize(
+  src: Uint8Array,
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number,
+  stride: number, // 4=rgba8, 8=rgba16, 16=rgbaf32
+): Uint8Array {
+  const dst = new Uint8Array(dstW * dstH * stride);
+  if (stride === 4) {
+    for (let dy = 0; dy < dstH; dy++) {
+      const fy = (dy + 0.5) * (srcH / dstH) - 0.5;
+      const y0 = Math.max(0, Math.floor(fy));
+      const y1 = Math.min(srcH - 1, y0 + 1);
+      const yt = fy - y0;
+      for (let dx = 0; dx < dstW; dx++) {
+        const fx = (dx + 0.5) * (srcW / dstW) - 0.5;
+        const x0 = Math.max(0, Math.floor(fx));
+        const x1 = Math.min(srcW - 1, x0 + 1);
+        const xt = fx - x0;
+        const dstOff = (dy * dstW + dx) * 4;
+        for (let c = 0; c < 4; c++) {
+          const tl = src[(y0 * srcW + x0) * 4 + c]!;
+          const tr = src[(y0 * srcW + x1) * 4 + c]!;
+          const bl = src[(y1 * srcW + x0) * 4 + c]!;
+          const br = src[(y1 * srcW + x1) * 4 + c]!;
+          dst[dstOff + c] = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
+        }
+      }
+    }
+  } else if (stride === 8) {
+    const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
+    const dstView = new DataView(dst.buffer);
+    for (let dy = 0; dy < dstH; dy++) {
+      const fy = (dy + 0.5) * (srcH / dstH) - 0.5;
+      const y0 = Math.max(0, Math.floor(fy));
+      const y1 = Math.min(srcH - 1, y0 + 1);
+      const yt = fy - y0;
+      for (let dx = 0; dx < dstW; dx++) {
+        const fx = (dx + 0.5) * (srcW / dstW) - 0.5;
+        const x0 = Math.max(0, Math.floor(fx));
+        const x1 = Math.min(srcW - 1, x0 + 1);
+        const xt = fx - x0;
+        const dstOff = (dy * dstW + dx) * 8;
+        for (let c = 0; c < 4; c++) {
+          const bo = c * 2;
+          const tl = srcView.getUint16((y0 * srcW + x0) * 8 + bo, true);
+          const tr = srcView.getUint16((y0 * srcW + x1) * 8 + bo, true);
+          const bl = srcView.getUint16((y1 * srcW + x0) * 8 + bo, true);
+          const br = srcView.getUint16((y1 * srcW + x1) * 8 + bo, true);
+          const val = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
+          dstView.setUint16(dstOff + bo, Math.max(0, Math.min(65535, val)), true);
+        }
+      }
+    }
+  } else {
+    // rgbaf32
+    const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
+    const dstView = new DataView(dst.buffer);
+    for (let dy = 0; dy < dstH; dy++) {
+      const fy = (dy + 0.5) * (srcH / dstH) - 0.5;
+      const y0 = Math.max(0, Math.floor(fy));
+      const y1 = Math.min(srcH - 1, y0 + 1);
+      const yt = fy - y0;
+      for (let dx = 0; dx < dstW; dx++) {
+        const fx = (dx + 0.5) * (srcW / dstW) - 0.5;
+        const x0 = Math.max(0, Math.floor(fx));
+        const x1 = Math.min(srcW - 1, x0 + 1);
+        const xt = fx - x0;
+        const dstOff = (dy * dstW + dx) * 16;
+        for (let c = 0; c < 4; c++) {
+          const bo = c * 4;
+          const tl = srcView.getFloat32((y0 * srcW + x0) * 16 + bo, true);
+          const tr = srcView.getFloat32((y0 * srcW + x1) * 16 + bo, true);
+          const bl = srcView.getFloat32((y1 * srcW + x0) * 16 + bo, true);
+          const br = srcView.getFloat32((y1 * srcW + x1) * 16 + bo, true);
+          dstView.setFloat32(dstOff + bo, tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt, true);
+        }
+      }
+    }
+  }
+  return dst;
+}
+
+function applyTargetResize(
+  src: Uint8Array,
+  srcW: number,
+  srcH: number,
+  targetW: number,
+  targetH: number,
+  fitMode: "contain" | "cover" | "stretch",
+  bpc: 1 | 2 | 4,
+): { data: Uint8Array; width: number; height: number } {
+  const stride = 4 * bpc;
+  if (fitMode === "stretch") {
+    return { data: bilinearResize(src, srcW, srcH, targetW, targetH, stride), width: targetW, height: targetH };
+  }
+  if (fitMode === "contain") {
+    const scale = Math.min(targetW / srcW, targetH / srcH);
+    const dstW = Math.max(1, Math.round(srcW * scale));
+    const dstH = Math.max(1, Math.round(srcH * scale));
+    return { data: bilinearResize(src, srcW, srcH, dstW, dstH, stride), width: dstW, height: dstH };
+  }
+  // cover: scale up so both dims >= target, then center-crop
+  const scale = Math.max(targetW / srcW, targetH / srcH);
+  const scaledW = Math.max(targetW, Math.round(srcW * scale));
+  const scaledH = Math.max(targetH, Math.round(srcH * scale));
+  const scaled = bilinearResize(src, srcW, srcH, scaledW, scaledH, stride);
+  const cropX = Math.floor((scaledW - targetW) / 2);
+  const cropY = Math.floor((scaledH - targetH) / 2);
+  const cropped = applyRegionAndDownsample(scaled, scaledW, scaledH, { x: cropX, y: cropY, w: targetW, h: targetH }, 1, bpc);
+  return { data: cropped.data, width: targetW, height: targetH };
+}
+
+function pickDownsample(_options: { targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {
+  // Source dims unknown at call time — resize post-decode handles scale-to-target.
+  return 1;
 }
 
 function normalizeRegion(region: Region | null, width: number, height: number): Region {
