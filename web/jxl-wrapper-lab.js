@@ -1,8 +1,8 @@
 ﻿import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
+import { getCapabilities } from '@casabio/jxl-capabilities';
 import {
-    bindRangeLabel,
     clamp,
     setCssVar,
 } from './jxl-dashboard-ui.js';
@@ -12,10 +12,12 @@ const { process_orf, rgb_to_rgba } = rawWasm;
 
 const MAX_BATCH_LIMIT = 100;
 const RANDOM_LOAD_CONCURRENCY = 4;
+const RACE_CARD_SIZE = 100;
 const WRAPPER_FILE_LOAD_CONCURRENCY = 4;
 const STATUS_UPDATE_INTERVAL_MS = 120;
 const TILE_CANVAS_MAX_EDGE = 256;
 const SESSION_STAGE_TIMEOUT_MS = 1000;
+const SESSION_COMPLETION_TIMEOUT_MS = 5000;
 
 const modeButtons = [...document.querySelectorAll('button[data-mode]')];
 const sourceInput = document.getElementById('source-input');
@@ -28,12 +30,11 @@ const batchConcurrencyInput = document.getElementById('batch-concurrency');
 const batchQualityInput = document.getElementById('batch-quality');
 const batchEffortInput = document.getElementById('batch-effort');
 const batchLosslessInput = document.getElementById('batch-lossless');
+const batchThumbSizeInputs = [...document.querySelectorAll('input[name="batch-thumb-size"]')];
 const batchLimitValue = document.getElementById('batch-limit-value');
 const batchConcurrencyValue = document.getElementById('batch-concurrency-value');
 const batchQualityValue = document.getElementById('batch-quality-value');
 const batchEffortValue = document.getElementById('batch-effort-value');
-const batchThumbSizeInput = document.getElementById('batch-thumb-size');
-const batchThumbSizeValue = document.getElementById('batch-thumb-size-value');
 const selectionStatus = document.getElementById('selection-status');
 const modeStatus = document.getElementById('mode-status');
 const batchStatus = document.getElementById('batch-status');
@@ -42,6 +43,10 @@ const loadedCount = document.getElementById('loaded-count');
 const queuedCount = document.getElementById('queued-count');
 const doneCount = document.getElementById('done-count');
 const errorCount = document.getElementById('error-count');
+const statsExistingTotal = document.getElementById('stats-existing-total');
+const statsWrapperTotal = document.getElementById('stats-wrapper-total');
+const statsTotalDelta = document.getElementById('stats-total-delta');
+const statsWrapperFaster = document.getElementById('stats-wrapper-faster');
 const batchGrid = document.getElementById('batch-grid');
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
 
@@ -50,11 +55,13 @@ const paintScratchCanvas = document.createElement('canvas');
 const sourceCache = new Map();
 const chartInstances = {};
 
+let nativeJxlDecoder = false;
+
 let currentMode = 'existing';
 let selectedSources = [];
 let activeRunId = 0;
 let activeLoadId = 0;
-let batchThumbSize = Number(batchThumbSizeInput?.value) || 220;
+let batchThumbSize = batchThumbSizeInputs.find((input) => input.checked)?.value || '256';
 let lastProgressStatusAt = 0;
 let sessionBackendBroken = false;
 
@@ -104,6 +111,14 @@ async function decodeFromBlob(blob) {
     return { bitmap, decodeMs };
 }
 
+async function decodeJxlNative(bytes) {
+    const started = performance.now();
+    const blob = new Blob([bytes], { type: 'image/jxl' });
+    const bitmap = await createImageBitmap(blob);
+    const decodeMs = performance.now() - started;
+    return { bitmap, decodeMs };
+}
+
 async function encodeToWebp(rgba, width, height, quality) {
     const started = performance.now();
     const canvas = document.createElement('canvas');
@@ -117,6 +132,7 @@ async function encodeToWebp(rgba, width, height, quality) {
 }
 
 function resizeRgba(rgba, width, height, targetWidth) {
+    if (targetWidth === 'fullsize') return { rgba, width, height };
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
     const resizeRgbaImpl = rawWasm.downscale_rgba ?? downscaleRgbaCanvas;
@@ -142,6 +158,18 @@ function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
     return new Uint8Array(dstCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer);
 }
 
+function nextFrame() {
+    return new Promise(resolve => requestAnimationFrame(() => resolve()));
+}
+
+function updateRaceCardTimingBars(raceCards) {
+    const runTotalBudget = Math.max(...raceCards.map(raceCard => raceCard.elapsed), 1);
+    for (const raceCard of raceCards) {
+        raceCard.meta.textContent = `${raceCard.format.toUpperCase()} ${fmtMs(raceCard.totalMs)} · ${fmtMs(raceCard.elapsed)}`;
+        raceCard.bar.style.width = `${(raceCard.elapsed / runTotalBudget) * 100}%`;
+    }
+}
+
 async function runRace() {
     const runId = ++activeRunId;
     const sources = buildBatchSources();
@@ -151,20 +179,25 @@ async function runRace() {
     }
 
     const formats = raceFormats();
-    const targetWidth = Number(raceSize());
+    const targetSize = raceSize();
     const quality = getQuality();
     const effort = getEffort();
     const started = performance.now();
+    const totalCards = formats.length * sources.length;
 
     raceTrack.innerHTML = '<div class="track-line"></div>';
-    setStatus(`Racing ${sources.length} images in ${formats.join(', ')}...`);
+    setStatus(`Racing ${sources.length} images in ${formats.join(', ')} @ ${targetSize}...`);
 
     const currentRunResults = [];
+    const raceCards = [];
+    const availableTrack = Math.max(0, raceTrack.clientWidth - RACE_CARD_SIZE);
+    const slotSpacing = totalCards > 1 ? availableTrack / (totalCards - 1) : 0;
 
     for (const format of formats) {
         for (let i = 0; i < sources.length; i++) {
             if (runId !== activeRunId) return;
             const source = sources[i];
+            const targetWidth = targetSize === 'fullsize' ? 'fullsize' : Number(targetSize);
 
             // 1. Resize
             const resized = await resizeRgba(source.rgba, source.width, source.height, targetWidth);
@@ -175,14 +208,20 @@ async function runRace() {
                 const enc = await encodeWithWrapper({ ...resized, rgba: resized.rgba });
                 bytes = enc.bytes;
                 encodeMs = enc.encodeMs;
-                const decodeStart = performance.now();
-                const dec = await decodeWithWrapper(bytes);
-                decodeMs = performance.now() - decodeStart;
-                const canvas = document.createElement('canvas');
-                canvas.width = resized.width;
-                canvas.height = resized.height;
-                rgbaToCanvas(canvas, toU8(dec.final.pixels), resized.width, resized.height);
-                bitmap = canvas;
+                if (nativeJxlDecoder) {
+                    const dec = await decodeJxlNative(bytes);
+                    decodeMs = dec.decodeMs;
+                    bitmap = dec.bitmap;
+                } else {
+                    const decodeStart = performance.now();
+                    const dec = await decodeWithWrapper(bytes);
+                    decodeMs = performance.now() - decodeStart;
+                    const canvas = document.createElement('canvas');
+                    canvas.width = resized.width;
+                    canvas.height = resized.height;
+                    rgbaToCanvas(canvas, toU8(dec.final.pixels), resized.width, resized.height);
+                    bitmap = canvas;
+                }
             } else if (format === 'jpeg') {
                 const enc = await encodeToJpeg(resized.rgba, resized.width, resized.height, quality);
                 bytes = enc.bytes;
@@ -217,24 +256,45 @@ async function runRace() {
             const card = document.createElement('div');
             card.className = 'race-card';
             card.style.zIndex = i;
-            if (elapsed > maxRaceTimeSoFar) maxRaceTimeSoFar = elapsed * 1.2;
-            const pos = (elapsed / maxRaceTimeSoFar) * 100;
-            card.style.left = `${pos}%`;
+            const slotIndex = currentRunResults.length - 1;
+            card.style.left = `${slotIndex * slotSpacing}px`;
 
             const canvas = document.createElement('canvas');
-            canvas.width = 100;
-            canvas.height = 100;
+            canvas.width = RACE_CARD_SIZE;
+            canvas.height = RACE_CARD_SIZE;
             const ctx = canvas.getContext('2d');
-            ctx.drawImage(bitmap, 0, 0, 100, 100);
+            ctx.drawImage(bitmap, 0, 0, RACE_CARD_SIZE, RACE_CARD_SIZE);
             card.appendChild(canvas);
+
+            const meta = document.createElement('div');
+            meta.className = 'race-card-meta';
+            card.appendChild(meta);
+
+            const barWrap = document.createElement('div');
+            barWrap.className = 'race-card-bar-wrap';
+            const bar = document.createElement('div');
+            bar.className = 'race-card-bar';
+            barWrap.appendChild(bar);
+            card.appendChild(barWrap);
+
             raceTrack.appendChild(card);
+            raceCards.push({ card, meta, bar, format, totalMs, elapsed });
+            updateRaceCardTimingBars(raceCards);
+
+            dbgLog(
+                `  race ${format} [${i + 1}/${sources.length}]`,
+                `orig ${source.width}×${source.height} → work ${resized.width}×${resized.height} · ${fmtBytes(bytes.byteLength)} · enc ${fmtMs(encodeMs)} · dec ${fmtMs(decodeMs)} · total ${fmtMs(totalMs)} · elapsed ${fmtMs(elapsed)}`,
+                'info'
+            );
+
+            await nextFrame();
 
             updateProgressStatus({ started, jobs: sources, done: currentRunResults.length, errors: 0 });
         }
     }
 
     const runTotalMs = performance.now() - started;
-    const runLabel = `${formats.join('+')} @ ${targetWidth}px · ${fmtMs(runTotalMs)}`;
+    const runLabel = `${formats.join('+')} @ ${targetSize === 'fullsize' ? 'fullsize' : `${targetSize}px`} · ${fmtMs(runTotalMs)}`;
     raceHistory.push({ label: runLabel, totalMs: runTotalMs });
     updateRaceHistory();
     setStatus('Race finished.', `${runLabel} elapsed`);
@@ -260,9 +320,9 @@ function updateRaceHistory() {
 
 
 function syncSettingLabels() {
-    batchLimitValue.textContent = String(getBatchLimit());
-    batchConcurrencyValue.textContent = String(getConcurrency());
-    batchQualityValue.textContent = String(getQuality());
+    if (batchLimitValue) batchLimitValue.textContent = String(getBatchLimit());
+    if (batchConcurrencyValue) batchConcurrencyValue.textContent = String(getConcurrency());
+    if (batchQualityValue) batchQualityValue.textContent = String(getQuality());
     if (batchEffortValue) batchEffortValue.textContent = String(getEffort());
     loadRandomBtn.textContent = `Load ${getBatchLimit()} random Gobabeb file${getBatchLimit() === 1 ? '' : 's'}`;
 }
@@ -337,6 +397,39 @@ function formatRunSummary(entries) {
     ].join(' · ');
 }
 
+function resetCompareStats() {
+    if (statsExistingTotal) statsExistingTotal.textContent = '--';
+    if (statsWrapperTotal) statsWrapperTotal.textContent = '--';
+    if (statsTotalDelta) statsTotalDelta.textContent = '--';
+    if (statsWrapperFaster) statsWrapperFaster.textContent = '--';
+}
+
+function updateCompareStats(entries) {
+    if (!statsExistingTotal && !statsWrapperTotal && !statsTotalDelta && !statsWrapperFaster) return;
+    const pairs = entries.filter((entry) => entry?.existing && entry?.wrapper);
+    if (!pairs.length) {
+        resetCompareStats();
+        return;
+    }
+    const existingTotals = pairs.map((entry) => entry.existing.totalMs).filter(Number.isFinite);
+    const wrapperTotals = pairs.map((entry) => entry.wrapper.totalMs).filter(Number.isFinite);
+    const deltas = pairs
+        .map((entry) => Number.isFinite(entry.existing.totalMs) && Number.isFinite(entry.wrapper.totalMs)
+            ? entry.wrapper.totalMs - entry.existing.totalMs
+            : null)
+        .filter((value) => Number.isFinite(value));
+    const wrapperFaster = deltas.filter((value) => value < 0).length;
+    const avg = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+
+    if (statsExistingTotal) statsExistingTotal.textContent = fmtTiming(avg(existingTotals));
+    if (statsWrapperTotal) statsWrapperTotal.textContent = fmtTiming(avg(wrapperTotals));
+    if (statsTotalDelta) {
+        const avgDelta = avg(deltas);
+        statsTotalDelta.textContent = avgDelta == null ? '--' : `${avgDelta >= 0 ? '+' : ''}${avgDelta.toFixed(0)} ms`;
+    }
+    if (statsWrapperFaster) statsWrapperFaster.textContent = `${wrapperFaster}/${pairs.length}`;
+}
+
 function toU8(value) {
     if (value instanceof Uint8Array) return value;
     return new Uint8Array(value);
@@ -399,6 +492,17 @@ function rgbaToCanvas(canvas, rgba, width, height) {
 }
 
 function paintDecodedToTileCanvas(canvas, decoded) {
+    if (decoded instanceof ImageBitmap) {
+        const target = sizeForMaxEdge(decoded.width, decoded.height);
+        if (canvas.width !== target.width) canvas.width = target.width;
+        if (canvas.height !== target.height) canvas.height = target.height;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'medium';
+        ctx.clearRect(0, 0, target.width, target.height);
+        ctx.drawImage(decoded, 0, 0, target.width, target.height);
+        return;
+    }
     const width = decoded.info.width;
     const height = decoded.info.height;
     const target = sizeForMaxEdge(width, height);
@@ -489,6 +593,7 @@ function resetTile(tile, label = 'Waiting for source') {
 
 function resetGrid() {
     for (const tile of tiles) resetTile(tile);
+    resetCompareStats();
 }
 
 function setCounters({ loaded = selectedSources.length, queued = 0, done = 0, errors = 0 } = {}) {
@@ -512,12 +617,10 @@ function updateProgressStatus({ started, jobs, done, errors, force = false }) {
 }
 
 function syncBatchThumbSize() {
-    if (batchThumbSizeInput) {
-        batchThumbSize = clamp(Number(batchThumbSizeInput.value) || 220, 120, 320);
-        batchThumbSizeInput.value = String(batchThumbSize);
-        if (batchThumbSizeValue) batchThumbSizeValue.textContent = String(batchThumbSize);
-        setCssVar('--batch-thumb-size', `${batchThumbSize}px`);
-    }
+    const selected = batchThumbSizeInputs.find((input) => input.checked)?.value || '256';
+    batchThumbSize = selected;
+    const gridSize = selected === 'fullsize' ? 320 : clamp(Number(selected) || 256, 128, 2048);
+    setCssVar('--batch-thumb-size', `${Math.min(gridSize, 320)}px`);
 }
 
 async function loadRandomFileSource() {
@@ -708,6 +811,7 @@ async function loadSourcesFromFiles(fileList) {
     if (!files.length) return;
     const started = performance.now();
     batchStatus.textContent = `Loading ${files.length} file(s)...`;
+    resetCompareStats();
     const loaded = await loadFilesConcurrently(files);
     selectedSources = loaded;
     const elapsed = performance.now() - started;
@@ -723,6 +827,7 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
     const started = performance.now();
     loadRandomBtn.disabled = true;
     batchStatus.textContent = `Loading Gobabeb files 0/${total}...`;
+    resetCompareStats();
     const loaded = Array(total);
     let nextIndex = 0;
     let completed = 0;
@@ -829,7 +934,7 @@ async function encodeWithSession(source) {
         await withTimeout(session.finish(), SESSION_STAGE_TIMEOUT_MS, 'session encode finish');
         const [totalBytes] = await withTimeout(
             Promise.all([session.done(), chunkTask]).then(([doneBytes]) => [doneBytes]),
-            SESSION_STAGE_TIMEOUT_MS,
+            SESSION_COMPLETION_TIMEOUT_MS,
             'session encode completion',
         );
         if (chunks.length === 0) {
@@ -848,7 +953,7 @@ async function decodeWithSession(bytes) {
         await withTimeout(session.push(transferableBuffer(bytes)), SESSION_STAGE_TIMEOUT_MS, 'session decode push');
         await withTimeout(session.close(), SESSION_STAGE_TIMEOUT_MS, 'session decode close');
         let final = null;
-        const doneTask = withTimeout(session.done(), SESSION_STAGE_TIMEOUT_MS, 'session decode completion');
+        const doneTask = withTimeout(session.done(), SESSION_COMPLETION_TIMEOUT_MS, 'session decode completion');
         for await (const ev of session.frames()) {
             if (ev.stage === 'final') final = ev;
         }
@@ -899,10 +1004,19 @@ async function runWrapperPipeline(source, label = 'wrapper') {
     dbgLog(`  ${label} enc ← ${fmtBytes(encodedByteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
 
     dbgLog(`  ${label} dec → ${fmtBytes(encodedByteLength)} jxl`);
-    const decodeStart = performance.now();
-    const decoded = await decodeWithWrapper(encoded.bytes);
-    const decodeMs = performance.now() - decodeStart;
-    dbgLog(`  ${label} dec ← ${decoded.final?.info?.width}×${decoded.final?.info?.height} · ${fmtMs(decodeMs)}`);
+    let decodedFinal, decodeMs;
+    if (nativeJxlDecoder) {
+        const { bitmap, decodeMs: dm } = await decodeJxlNative(encoded.bytes);
+        decodedFinal = bitmap;
+        decodeMs = dm;
+        dbgLog(`  ${label} dec ← ${bitmap.width}×${bitmap.height} [native] · ${fmtMs(decodeMs)}`);
+    } else {
+        const decodeStart = performance.now();
+        const decoded = await decodeWithWrapper(encoded.bytes);
+        decodeMs = performance.now() - decodeStart;
+        decodedFinal = decoded.final;
+        dbgLog(`  ${label} dec ← ${decodedFinal?.info?.width}×${decodedFinal?.info?.height} · ${fmtMs(decodeMs)}`);
+    }
 
     return {
         bytes: encoded.bytes,
@@ -910,7 +1024,7 @@ async function runWrapperPipeline(source, label = 'wrapper') {
         encodeMs,
         firstPieceMs: encoded.firstChunkMs ?? null,
         decodeMs,
-        final: decoded.final,
+        final: decodedFinal,
     };
 }
 
@@ -938,17 +1052,16 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
     tile.title.textContent = source.label;
     
     tile.existing.textContent = existingResult
-        ? `${fmtBytes(resultByteLength(existingResult))} · load ${fmtMs(existingResult.loadMs)} · enc ${fmtMs(existingResult.encodeMs)} · first ${fmtMs(existingResult.firstPieceMs)} · dec ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
+        ? `${fmtBytes(resultByteLength(existingResult))} · total ${fmtMs(existingResult.totalMs)} · load ${fmtMs(existingResult.loadMs)} · enc ${fmtMs(existingResult.encodeMs)} · first ${fmtMs(existingResult.firstPieceMs)} · dec ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
         : '--';
     tile.wrapper.textContent = wrapperResult
-        ? `${fmtBytes(resultByteLength(wrapperResult))} · load ${fmtMs(wrapperResult.loadMs)} · enc ${fmtMs(wrapperResult.encodeMs)} · first ${fmtMs(wrapperResult.firstPieceMs)} · dec ${fmtMs(wrapperResult.decodeMs)}`
+        ? `${fmtBytes(resultByteLength(wrapperResult))} · total ${fmtMs(wrapperResult.totalMs)} · load ${fmtMs(wrapperResult.loadMs)} · enc ${fmtMs(wrapperResult.encodeMs)} · first ${fmtMs(wrapperResult.firstPieceMs)} · dec ${fmtMs(wrapperResult.decodeMs)}`
         : '--';
     tile.timing.textContent = `first paint ${fmtMs(firstPaintMs)} · draw ${fmtMs(paintMs)}`;
     if (existingResult && wrapperResult) {
         const byteDelta = resultByteLength(wrapperResult) - resultByteLength(existingResult);
         const msDelta = wrapperResult.totalMs - existingResult.totalMs;
-        const paintDelta = (wrapperResult.firstPaintMs ?? wrapperResult.totalMs) - (existingResult.firstPaintMs ?? existingResult.totalMs);
-        tile.compare.textContent = `${byteDelta === 0 ? 'bytes match' : `${byteDelta > 0 ? '+' : ''}${byteDelta} B`} · total ${msDelta >= 0 ? '+' : ''}${msDelta.toFixed(0)} ms · paint ${paintDelta >= 0 ? '+' : ''}${paintDelta.toFixed(0)} ms`;
+        tile.compare.textContent = `${byteDelta === 0 ? 'bytes match' : `${byteDelta > 0 ? '+' : ''}${byteDelta} B`} · total ${msDelta >= 0 ? '+' : ''}${msDelta.toFixed(0)} ms · tile ${fmtMs(firstPaintMs)}`;
     } else {
         tile.compare.textContent = '--';
     }
@@ -970,8 +1083,8 @@ async function processOneSource(source, index, runId) {
 
     dbgLog(`▶ [${index + 1}] ${source.label}`, `orig ${source.width}×${source.height} · ${fmtBytes(source.rgba.byteLength)} rgba`);
 
-    const maxEdge = batchThumbSize || TILE_CANVAS_MAX_EDGE;
-    const needsResize = source.width > maxEdge || source.height > maxEdge;
+    const maxEdge = batchThumbSize === 'fullsize' ? 'fullsize' : (Number(batchThumbSize) || TILE_CANVAS_MAX_EDGE);
+    const needsResize = maxEdge !== 'fullsize' && (source.width > maxEdge || source.height > maxEdge);
     const thumbW = needsResize
         ? (source.width >= source.height ? maxEdge : Math.round(source.width * maxEdge / source.height))
         : source.width;
@@ -990,6 +1103,7 @@ async function processOneSource(source, index, runId) {
     try {
         if (currentMode === 'existing' || currentMode === 'compare' || currentMode === 'race') {
             const sessionSource = encodeSource;
+            const existingStartedAt = performance.now();
 
             if (sessionBackendBroken && (currentMode === 'existing' || currentMode === 'race')) {
                 dbgLog('  session bypass → wrapper', 'session backend marked broken for this page', 'error');
@@ -1003,36 +1117,26 @@ async function processOneSource(source, index, runId) {
                     const msg = error?.message || String(error);
                     dbgLog(`  session stall`, msg, 'error');
                     sessionBackendBroken = true;
-                    if (currentMode !== 'existing' && currentMode !== 'race') throw error;
                     dbgLog('  session fallback → wrapper', msg, 'error');
                     existingResult = await runWrapperPipeline(encodeSource, 'fallback');
                     existingResult.fallback = 'wrapper';
                 }
             }
-            existingResult.totalMs = performance.now() - startedAt;
+            existingResult.totalMs = performance.now() - existingStartedAt;
             existingResult.loadMs = source.loadMs ?? null;
             existingResult.firstPaintMs = null;
         }
 
         if (currentMode === 'wrapper' || currentMode === 'compare' || currentMode === 'race') {
+            const wrapperStartedAt = performance.now();
             wrapperResult = await runWrapperPipeline(encodeSource, 'wrapper');
-            wrapperResult.totalMs = performance.now() - startedAt;
+            wrapperResult.totalMs = performance.now() - wrapperStartedAt;
             wrapperResult.loadMs = source.loadMs ?? null;
             wrapperResult.firstPaintMs = null;
         }
 
         if (runId !== activeRunId) return;
         const renderTiming = paintTileResult(tile, source, existingResult, wrapperResult, startedAt);
-        if (existingResult && renderTiming) {
-            existingResult.firstPaintMs = renderTiming.firstPaintMs;
-            existingResult.paintMs = renderTiming.paintMs;
-            existingResult.totalMs = renderTiming.totalMs;
-        }
-        if (wrapperResult && renderTiming) {
-            wrapperResult.firstPaintMs = renderTiming.firstPaintMs;
-            wrapperResult.paintMs = renderTiming.paintMs;
-            wrapperResult.totalMs = renderTiming.totalMs;
-        }
         tile._timings = {
             existing: existingResult,
             wrapper: wrapperResult,
@@ -1094,6 +1198,7 @@ async function runBatch() {
     updateProgressStatus({ started, jobs, done, errors, force: true });
     const finishedTiles = tiles.slice(0, jobs.length).map((tile) => tile._timings).filter(Boolean);
     const summary = formatRunSummary(finishedTiles);
+    updateCompareStats(finishedTiles);
     setStatus(errors ? `Done with ${errors} error(s).` : 'Done.', `${fmtMs(performance.now() - started)} elapsed · ${summary}`);
     drawBatchGraphs(finishedTiles);
 }
@@ -1182,20 +1287,22 @@ function clearBatch() {
 function updateRunButtons() {
     const hasFiles = selectedSources.length > 0;
     runBatchBtn.disabled = !hasFiles;
-    startRaceBtn.disabled = !hasFiles;
+    if (clearBatchBtn) clearBatchBtn.disabled = !hasFiles;
+    if (startRaceBtn) startRaceBtn.disabled = !hasFiles;
 }
 
 function wireControls() {
     syncSettingLabels();
-    bindRangeLabel(batchThumbSizeInput, batchThumbSizeValue, (value) => String(value));
-    batchThumbSizeInput?.addEventListener('input', syncBatchThumbSize);
+    for (const input of batchThumbSizeInputs) {
+        input.addEventListener('change', syncBatchThumbSize);
+    }
     syncBatchThumbSize();
-    setMode('race');
+    setMode(document.body.dataset.mode || 'race');
     setStatus('Idle.', 'Ready.');
     resetGrid();
     updateRunButtons();
 
-    startRaceBtn.addEventListener('click', () => {
+    startRaceBtn?.addEventListener('click', () => {
         runRace().catch((error) => {
             setStatus(`Race failed: ${error?.message || error}`);
         });
@@ -1251,6 +1358,7 @@ function wireControls() {
 
 
 await initRaw();
+nativeJxlDecoder = (await getCapabilities()).nativeJxlDecoder;
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
 void resetContext().then((ctx) => {
     existingContext = ctx;

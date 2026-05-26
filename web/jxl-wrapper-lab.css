@@ -71,18 +71,12 @@ code {
 }
 
 .hero.compact {
-    padding: 12px 16px;
-    align-items: center;
+    display: block;
+    padding: 20px 24px 24px;
 }
 
 .hero.compact h1 {
     font-size: 24px;
-}
-
-.hero-actions {
-    display: flex;
-    gap: 12px;
-    align-items: center;
 }
 
 .race-container {
@@ -161,7 +155,7 @@ code {
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     background: #eee;
     transition: left 0.3s ease-out, transform 0.3s ease-out;
-    transform: translateX(-50%);
+    transform: none;
     overflow: hidden;
 }
 
@@ -169,6 +163,44 @@ code {
     width: 100%;
     height: 100%;
     object-fit: cover;
+}
+
+.race-card-meta {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    bottom: 10px;
+    z-index: 1;
+    padding: 2px 4px;
+    border-radius: 6px;
+    background: rgba(15, 17, 22, 0.74);
+    color: #f8fafc;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    text-align: center;
+    backdrop-filter: blur(4px);
+}
+
+.race-card-bar-wrap {
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: 4px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.38);
+    overflow: hidden;
+    z-index: 1;
+}
+
+.race-card-bar {
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width 0.2s ease-out;
 }
 
 .previous-runs {
@@ -205,10 +237,6 @@ code {
     color: var(--muted);
 }
 
-.control-band.compact {
-    padding: 12px;
-    margin-top: 12px;
-}
 
 .status-grid.compact {
     padding: 10px;
@@ -254,21 +282,249 @@ body:not([data-mode="race"]) .race-container {
 }
 
 .hero h1 {
-    max-width: 16ch;
-    font-size: clamp(36px, 4.6vw, 64px);
+    font-size: clamp(28px, 4vw, 52px);
 }
 
 .lede {
     margin: 12px 0 0;
-    max-width: 70ch;
+    max-width: 100%;
     color: var(--muted);
     font-size: 15px;
+}
+
+/* Inline spinpickers */
+.inline-spinners {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+}
+
+.spin-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.stats-divider {
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    color: var(--faint);
+    font-weight: 600;
+}
+
+.compare-stats-group {
+    min-width: 320px;
+}
+
+.compare-stats-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    min-height: 34px;
+    align-items: center;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.72);
+    font: 600 12px "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+    color: var(--text);
+}
+
+.compare-stats-inline span {
+    white-space: nowrap;
+}
+
+.compare-stats-inline strong {
+    font-weight: 800;
+}
+
+.spin-label {
+    font-size: 10px;
+    font-weight: 800;
+    color: var(--faint);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+}
+
+.spinpicker {
+    display: inline-flex;
+    align-items: stretch;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.72);
+    overflow: hidden;
+}
+
+.spin-btn {
+    width: 30px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 140ms;
+    flex-shrink: 0;
+    padding: 0;
+}
+
+.spin-btn:hover {
+    background: rgba(15, 118, 110, 0.09);
+}
+
+.spin-btn:active {
+    background: rgba(15, 118, 110, 0.18);
+}
+
+.spinpicker input[type="number"] {
+    width: 48px;
+    border: none;
+    border-left: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    text-align: center;
+    font: 600 14px "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+    color: var(--text);
+    background: transparent;
+    padding: 6px 0;
+    -moz-appearance: textfield;
+}
+
+.spinpicker input[type="number"]::-webkit-outer-spin-button,
+.spinpicker input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.spinpicker input[type="number"]:focus {
+    outline: none;
+    background: rgba(15, 118, 110, 0.05);
+}
+
+.preset-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-width: 100%;
+}
+
+.preset-group .chip-label {
+    min-height: 34px;
+    background: rgba(255,255,255,0.72);
+}
+
+/* Lossless toggle */
+.spin-toggle {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    height: 34px;
+}
+
+.spin-toggle input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.spin-toggle-track {
+    width: 40px;
+    height: 22px;
+    border-radius: 999px;
+    background: rgba(30, 31, 35, 0.14);
+    border: 1px solid var(--line);
+    position: relative;
+    transition: background 180ms, border-color 180ms;
+    flex-shrink: 0;
+}
+
+.spin-toggle-track::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+    transition: left 180ms;
+}
+
+.spin-toggle input:checked ~ .spin-toggle-track {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.spin-toggle input:checked ~ .spin-toggle-track::after {
+    left: 20px;
+}
+
+/* Ops frame (file ops + remaining settings) */
+.ops-frame {
+    margin-top: 12px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(12px);
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+.ops-actions {
+    flex: 1 1 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ops-status-grid {
+    margin-top: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    gap: 8px;
+}
+
+.status-grid.compact.ops-status-grid {
+    margin-top: 0;
+    padding-top: 0;
+}
+
+
+/* Mode frame */
+.mode-frame {
+    margin-top: 12px;
+    padding: 12px 16px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(12px);
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
 }
 
 .mode-switch {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 6px;
+    flex: 1 1 auto;
 }
 
 /* dashboard-toggle uses dark bg; --text is light-theme dark — force white text */
@@ -322,12 +578,6 @@ body:not([data-mode="race"]) .race-container {
     gap: 16px;
 }
 
-.source-panel,
-.settings-panel {
-    display: grid;
-    gap: 12px;
-}
-
 .file-drop {
     display: grid;
     gap: 6px;
@@ -353,6 +603,7 @@ body:not([data-mode="race"]) .race-container {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+    align-items: center;
 }
 
 .primary-btn {
@@ -374,9 +625,6 @@ body:not([data-mode="race"]) .race-container {
 }
 
 
-.settings-panel {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-}
 
 .setting {
     display: grid;
@@ -423,7 +671,7 @@ body:not([data-mode="race"]) .race-container {
 
 .status-card,
 .metric-card {
-    padding: 10px 12px;
+    padding: 7px 10px;
     border-radius: 14px;
     border: 1px solid var(--line);
     background: var(--panel-strong);
@@ -656,11 +904,6 @@ body[data-mode="compare"] .metric-line[data-kind="compare"] {
 }
 
 @media (max-width: 1200px) {
-    .hero,
-    .control-band {
-        grid-template-columns: 1fr;
-    }
-
     .batch-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
     }
@@ -672,8 +915,8 @@ body[data-mode="compare"] .metric-line[data-kind="compare"] {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .settings-panel {
-        grid-template-columns: 1fr;
+    .mode-switch {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     .batch-grid {
@@ -688,14 +931,19 @@ body[data-mode="compare"] .metric-line[data-kind="compare"] {
     }
 
     .hero,
-    .control-band,
+    .ops-frame,
+    .mode-frame,
     .batch-grid-shell {
         padding: 14px;
-        border-radius: 20px;
+        border-radius: 16px;
     }
 
     .mode-switch {
-        grid-template-columns: 1fr;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .inline-spinners {
+        gap: 12px;
     }
 
     .status-grid,
@@ -706,6 +954,7 @@ body[data-mode="compare"] .metric-line[data-kind="compare"] {
 }
 
 #run-batch:disabled,
+#clear-batch:disabled,
 #start-race:disabled {
     opacity: 0.4;
     cursor: not-allowed;

@@ -25,13 +25,14 @@
     }
     </script>
 </head>
-<body class="has-home-bar" data-mode="existing">
+<body class="has-home-bar" data-mode="race">
     <nav class="home-bar" aria-label="Test pages">
         <div class="home-bar-label">Test pages</div>
         <div class="home-bar-links">
             <a class="home-bar-link" href="./index.html">Home</a>
             <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
             <a class="home-bar-link is-active" href="./jxl-wrapper-lab.html" aria-current="page">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
         </div>
     </nav>
@@ -40,27 +41,94 @@
         <section class="hero compact">
             <div class="hero-copy">
                 <p class="eyebrow">JPEG XL wrapper lab &middot; <span id="mode-status">Drag Race</span></p>
-                <h1>JPEG XL wrapper and compare test lab</h1>
+                <h1>JPEG XL wrapper test lab</h1>
                 <p class="lede">
                     Compare JXL, WEBP, and JPEG performance in a drag-race track. Overlapping cards show relative paint positions.
                 </p>
                 <p class="lede">
-                    Session worker routes JPEG XL through the browser session stack: context, scheduler, and worker messaging before the codec runs. Direct wrapper calls the wrapper facade straight against libjxl wasm with no session layer in between. Compare mode runs both paths on the same prepared thumbnail so you can see whether overhead comes from the session plumbing or the codec itself.
+                    Session worker routes JPEG XL through the browser session stack: context, scheduler, and worker messaging before the codec runs. Direct wrapper calls the wrapper facade straight against libjxl wasm with no session layer in between.
                 </p>
                 <p class="lede">
                     Batch tiles encode and decode resized thumbnails, not full-size source frames. The console shows both the original source dimensions and the smaller working size used for each tile, so thumbnail timings are not mistaken for full-resolution timings.
                 </p>
-            </div>
 
-            <div class="hero-actions">
-                <div class="mode-switch" role="group" aria-label="Test mode">
-                    <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
-                    <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
-                    <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
-                    <button class="mode-btn" type="button" data-mode="compare" aria-pressed="false">Compare</button>
+                <div class="inline-spinners">
+                    <div class="spin-group">
+                        <span class="spin-label">Concurrency</span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-concurrency">&#8722;</button>
+                            <input id="batch-concurrency" type="number" min="1" max="16" step="1" value="6" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-concurrency">+</button>
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label">Quality</span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-quality">&#8722;</button>
+                            <input id="batch-quality" type="number" min="50" max="100" step="5" value="90" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-quality">+</button>
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label">Effort</span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-effort">&#8722;</button>
+                            <input id="batch-effort" type="number" min="1" max="9" step="1" value="3" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-effort">+</button>
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label">Batch limit</span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-limit">&#8722;</button>
+                            <input id="batch-limit" type="number" min="1" max="100" step="1" value="5" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-limit">+</button>
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label">Thumb size</span>
+                        <div class="preset-group" role="group" aria-label="Thumbnail size presets">
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="128" /> <span>128</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="256" checked /> <span>256</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="512" /> <span>512</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="1024" /> <span>1024</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="2048" /> <span>2048</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="fullsize" /> <span>Full size</span></label>
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label">Lossless</span>
+                        <label class="spin-toggle">
+                            <input id="batch-lossless" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                    </div>
                 </div>
-                <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
             </div>
+        </section>
+
+        <section class="ops-frame">
+            <label class="file-drop" for="source-input" id="source-drop">
+                <input id="source-input" type="file" multiple accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
+                <strong>Pick files</strong>
+                <span>ORF, JPEG, PNG, TIFF, JXL</span>
+            </label>
+            <div class="ops-actions">
+                <div class="control-row">
+                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
+                    <button id="run-batch" class="secondary-btn" type="button" disabled>Run batch</button>
+                    <button id="clear-batch" class="secondary-btn" type="button">Clear</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="mode-frame">
+            <div class="mode-switch" role="group" aria-label="Test mode">
+                <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
+                <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
+                <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
+            </div>
+            <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
         </section>
 
         <section id="race-container" class="race-container">
@@ -75,6 +143,9 @@
                         <label class="chip-label"><input type="radio" name="race-size" value="125" /> <span>125px</span></label>
                         <label class="chip-label"><input type="radio" name="race-size" value="256" checked /> <span>256px</span></label>
                         <label class="chip-label"><input type="radio" name="race-size" value="600" /> <span>600px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="1280" /> <span>1280px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="1920" /> <span>1920px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="fullsize" /> <span>Full size</span></label>
                     </div>
                     <button id="start-race" class="primary-btn" disabled>Start Race</button>
                 </div>
@@ -90,53 +161,6 @@
             </div>
         </section>
 
-
-        <section class="control-band compact">
-            <div class="source-panel">
-                <label class="file-drop" for="source-input" id="source-drop">
-                    <input id="source-input" type="file" multiple accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
-                    <strong>Pick files</strong>
-                    <span>ORF, JPEG, PNG, TIFF, JXL</span>
-                </label>
-                <div class="control-row">
-                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
-                    <button id="run-batch" class="secondary-btn" type="button" disabled>Run batch</button>
-                    <button id="clear-batch" class="secondary-btn" type="button">Clear</button>
-                </div>
-            </div>
-
-            <div class="settings-panel">
-                <label class="setting">
-                    <span>Batch limit</span>
-                    <input id="batch-limit" type="range" min="1" max="100" step="1" value="5" />
-                    <strong id="batch-limit-value">5</strong>
-                </label>
-                <label class="setting">
-                    <span>Concurrency</span>
-                    <input id="batch-concurrency" type="range" min="1" max="16" step="1" value="6" />
-                    <strong id="batch-concurrency-value">6</strong>
-                </label>
-                <label class="setting">
-                    <span>Quality</span>
-                    <input id="batch-quality" type="range" min="50" max="100" step="1" value="90" />
-                    <strong id="batch-quality-value">90</strong>
-                </label>
-                <label class="setting">
-                    <span>Effort</span>
-                    <input id="batch-effort" type="range" min="1" max="9" step="1" value="3" />
-                    <strong id="batch-effort-value">3</strong>
-                </label>
-                <label class="setting toggle-setting">
-                    <span>Lossless</span>
-                    <input id="batch-lossless" type="checkbox" />
-                </label>
-                <label class="setting">
-                    <span>Thumb size</span>
-                    <input id="batch-thumb-size" type="range" min="120" max="320" step="8" value="180" />
-                    <strong id="batch-thumb-size-value">180</strong>
-                </label>
-            </div>
-        </section>
 
         <section class="status-grid compact" aria-label="Batch status">
             <div class="status-card">
@@ -175,6 +199,17 @@
         </section>
     </main>
 
+    <script>
+    document.querySelectorAll('.spin-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var input = document.getElementById(btn.dataset.target);
+            if (!input) return;
+            if (btn.classList.contains('spin-inc')) input.stepUp();
+            else input.stepDown();
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    });
+    </script>
     <script type="module" src="./jxl-wrapper-lab.js"></script>
 </body>
 </html>
