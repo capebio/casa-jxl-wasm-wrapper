@@ -26,6 +26,9 @@ export interface MsgDecodeStart {
   preserveMetadata: boolean;
   priority: "visible" | "near" | "background";
   budgetMs: number | null;
+  targetWidth: number | null;
+  targetHeight: number | null;
+  fitMode: "contain" | "cover" | "stretch" | null;
 }
 
 export interface MsgDecodeChunk {
@@ -136,6 +139,7 @@ export interface MsgEncodeStart {
   quality: number | null;
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   progressive: boolean;
+  progressiveFlavor?: "dc" | "ac";
   previewFirst: boolean;
   chunked: boolean;
   sidecarSizes?: readonly number[];
@@ -179,6 +183,11 @@ export interface MsgEncodeDone {
   type: "encode_done";
   sessionId: string;
   totalBytes: number;
+  /**
+   * Cumulative byte offsets at sidecar boundaries. Length === sidecarSizes.length
+   * when sidecars were emitted; omitted otherwise. See EncodeStats.sidecarOffsets.
+   */
+  sidecarOffsets?: readonly number[];
 }
 
 export interface MsgEncodeError {
