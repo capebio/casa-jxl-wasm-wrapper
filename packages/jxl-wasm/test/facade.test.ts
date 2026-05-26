@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { createDecoder, createEncoder, detectTier, setJxlModuleFactoryForTesting } from "../src/index";
+import {
+  createDecoder,
+  createEncoder,
+  detectTier,
+  setJxlModuleFactoryForTesting,
+  normalizedToPixelExtent,
+  pixelToNormalizedExtent,
+  getWrapperCapabilities,
+  getDecodeGridInfo,
+  decodeViewport,
+} from "../src/index";
 
 const decodeOptions = {
   format: "rgba8" as const,
@@ -48,6 +58,30 @@ describe("@casabio/jxl-wasm facade", () => {
 
     expect(source).toContain("this.pixelChunks = []");
     expect(source).toContain("allChunks.length = 0");
+  });
+
+  test("forwards progressive encode settings into the WASM bridge instead of rejecting them", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("function resolveEncoderBridgeSettings");
+    expect(source).toContain("progressiveFlavor?: \"dc\" | \"ac\";");
+    expect(source).not.toContain("Progressive JXL encode requires a rebuilt WASM with a progressive bridge flag");
+  });
+
+  test("chunks waits for in-flight streaming pixel pushes", async () => {
+    setJxlModuleFactoryForTesting(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return createFakeStreamingInputLibjxlModule();
+    });
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
+    void encoder.pushPixels(new Uint8Array([255, 0, 0, 255]));
+    encoder.finish();
+
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+    expect(encoded.done).toBe(false);
+    expect(Array.from(new Uint8Array(encoded.value))).toEqual([255, 0, 0, 255]);
+    await encoder.dispose();
   });
 
   test("encodes and decodes rgba8 pixels through the WASM codec facade", async () => {
@@ -218,6 +252,29 @@ describe("@casabio/jxl-wasm facade", () => {
     await decoder.dispose();
   });
 
+  test("decoder defaults region to null and downsample to 1 when omitted", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeLibjxlModule());
+    const decoder = createDecoder({
+      format: "rgba8",
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: true,
+      preserveMetadata: true,
+    });
+
+    decoder.push(new Uint8Array([1, 2, 3, 4]));
+    decoder.close();
+
+    const events = [];
+    for await (const event of decoder.events()) {
+      events.push(event);
+    }
+
+    expect(events.map((event) => event.type)).toContain("final");
+    expect(events.map((event) => event.type)).not.toContain("error");
+    await decoder.dispose();
+  });
+
   test("encodes with ICC profile, EXIF, and XMP metadata", async () => {
     setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
     const rgba = new Uint8Array([255, 128, 64, 255]);
@@ -251,6 +308,146 @@ describe("detectTier", () => {
   test("returns scalar in Node/Bun (no cross-origin isolation)", () => {
     const tier = detectTier();
     expect(tier).toBe("scalar");
+  });
+});
+
+describe("bilinear resize via targetWidth/targetHeight", () => {
+  afterEach(() => {
+    setJxlModuleFactoryForTesting(null);
+  });
+
+  test("stretch 2x1 image to 1x1 produces 1x1 output", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+    const rgba = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]); // 2x1
+    const encoder = createEncoder({ ...encodeOptions, width: 2, height: 1 });
+    encoder.pushPixels(rgba);
+    encoder.finish();
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const decoder = createDecoder({
+      ...decodeOptions,
+      targetWidth: 1,
+      targetHeight: 1,
+      fitMode: "stretch",
+    });
+    decoder.push(encoded.value);
+    decoder.close();
+
+    const events = [];
+    for await (const event of decoder.events()) events.push(event);
+
+    const final = events.find((e) => e.type === "final");
+    expect(final).toBeDefined();
+    if (final?.type === "final") {
+      expect(final.info.width).toBe(1);
+      expect(final.info.height).toBe(1);
+      expect(final.pixels.byteLength).toBe(4); // 1x1 rgba8
+    }
+    await decoder.dispose();
+    await encoder.dispose();
+  });
+
+  test("no resize when targetWidth/targetHeight absent", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+    const rgba = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]); // 2x2
+    const encoder = createEncoder({ ...encodeOptions, width: 2, height: 2 });
+    encoder.pushPixels(rgba);
+    encoder.finish();
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const decoder = createDecoder(decodeOptions);
+    decoder.push(encoded.value);
+    decoder.close();
+    const events = [];
+    for await (const event of decoder.events()) events.push(event);
+    const final = events.find((e) => e.type === "final");
+    if (final?.type === "final") {
+      expect(final.info.width).toBe(2);
+      expect(final.info.height).toBe(2);
+    }
+    await decoder.dispose();
+    await encoder.dispose();
+  });
+
+  test("contain fit: wide image targetWidth:1 targetHeight:1 returns 1x1 or smaller height", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+    // 4x1 image, contain fit to 2x2 — result should be 2x1 (width fills, height contained)
+    const rgba = new Uint8Array(4 * 1 * 4).fill(128);
+    const encoder = createEncoder({ ...encodeOptions, width: 4, height: 1 });
+    encoder.pushPixels(rgba);
+    encoder.finish();
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const decoder = createDecoder({
+      ...decodeOptions,
+      targetWidth: 2,
+      targetHeight: 2,
+      fitMode: "contain",
+    });
+    decoder.push(encoded.value);
+    decoder.close();
+    const events = [];
+    for await (const event of decoder.events()) events.push(event);
+    const final = events.find((e) => e.type === "final");
+    if (final?.type === "final") {
+      // contain: scale = min(2/4, 2/1) = 0.5 → 2x0.5 = 2x1 (rounded)
+      expect(final.info.width).toBe(2);
+      expect(final.info.height).toBe(1);
+    }
+    await decoder.dispose();
+    await encoder.dispose();
+  });
+
+  test("decodeViewport returns a JxlDecoder", () => {
+    const decoder = decodeViewport({ format: "rgba8", targetWidth: 640, targetHeight: 480 });
+    expect(decoder).toBeDefined();
+    expect(typeof decoder.push).toBe("function");
+    expect(typeof decoder.events).toBe("function");
+    decoder.cancel();
+  });
+});
+
+describe("normalizedToPixelExtent / pixelToNormalizedExtent", () => {
+  test("full image normalized → full pixel rect", () => {
+    const r = normalizedToPixelExtent({ x: 0, y: 0, w: 1, h: 1 }, 1920, 1080);
+    expect(r).toEqual({ x: 0, y: 0, w: 1920, h: 1080 });
+  });
+
+  test("half image", () => {
+    const r = normalizedToPixelExtent({ x: 0.25, y: 0, w: 0.5, h: 1 }, 1000, 500);
+    expect(r).toEqual({ x: 250, y: 0, w: 500, h: 500 });
+  });
+
+  test("round-trip", () => {
+    const region = { x: 100, y: 50, w: 200, h: 150 };
+    const norm = pixelToNormalizedExtent(region, 1000, 500);
+    const back = normalizedToPixelExtent(norm, 1000, 500);
+    expect(back).toEqual(region);
+  });
+
+  test("w/h minimum is 1", () => {
+    const r = normalizedToPixelExtent({ x: 0, y: 0, w: 0.0001, h: 0.0001 }, 10, 10);
+    expect(r.w).toBeGreaterThanOrEqual(1);
+    expect(r.h).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("getWrapperCapabilities", () => {
+  test("returns synchronously with expected shape", () => {
+    const caps = getWrapperCapabilities();
+    expect(caps.regionDecode).toBe(true);
+    expect(caps.exactSizeDecode).toBe(true);
+    expect(caps.progressiveRegionDecode).toBe(false);
+    expect(caps.tileAlignedRegionDecode).toBe(false);
+    expect(caps.arbitraryRegionDecode).toBe(true);
+    expect(caps.availableDownsampleFactors).toEqual([1, 2, 4, 8]);
+  });
+});
+
+describe("getDecodeGridInfo", () => {
+  test("returns empty object", () => {
+    const info = getDecodeGridInfo();
+    expect(info).toEqual({});
   });
 });
 
@@ -334,6 +531,59 @@ function createFakeProgressiveLibjxlModule() {
   };
   module._jxl_wasm_dec_take_final = () => module._jxl_wasm_decode_rgba8(0, 4, 1);
   module._jxl_wasm_dec_free = () => {};
+
+  return module;
+}
+
+function createFakeStreamingInputLibjxlModule() {
+  const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
+    _jxl_wasm_enc_create_image: (width: number, height: number) => number;
+    _jxl_wasm_enc_push_chunk: (state: number, dataPtr: number, size: number) => number;
+    _jxl_wasm_enc_finish: (state: number) => number;
+    _jxl_wasm_enc_take_chunk: (state: number) => number;
+    _jxl_wasm_enc_free: (state: number) => void;
+  };
+
+  let nextState = 1;
+  const states = new Map<number, { width: number; height: number; chunks: Uint8Array[]; nextHandle: number }>();
+
+  module._jxl_wasm_enc_create_image = (width: number, height: number) => {
+    const state = nextState++;
+    states.set(state, { width, height, chunks: [], nextHandle: 0 });
+    return state;
+  };
+  module._jxl_wasm_enc_push_chunk = (state: number, dataPtr: number, size: number) => {
+    const entry = states.get(state);
+    if (!entry) return 1;
+    entry.chunks.push(module.HEAPU8.slice(dataPtr, dataPtr + size));
+    return 0;
+  };
+  module._jxl_wasm_enc_finish = (state: number) => {
+    const entry = states.get(state);
+    if (!entry) return 1;
+    const total = entry.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of entry.chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    entry.nextHandle = module._jxl_wasm_encode_rgba8(0, entry.width, entry.height, 0, 0);
+    const handle = entry.nextHandle;
+    const dataPtr = module._jxl_wasm_buffer_data(handle);
+    module.HEAPU8.set(joined, dataPtr);
+    return 0;
+  };
+  module._jxl_wasm_enc_take_chunk = (state: number) => {
+    const entry = states.get(state);
+    if (!entry) return 0;
+    const handle = entry.nextHandle;
+    entry.nextHandle = 0;
+    return handle;
+  };
+  module._jxl_wasm_enc_free = (state: number) => {
+    states.delete(state);
+  };
 
   return module;
 }
