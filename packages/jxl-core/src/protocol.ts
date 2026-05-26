@@ -91,8 +91,10 @@ export interface MsgDecodeError {
   sessionId: string;
   code: string;
   message: string;
-  partialPixels?: ArrayBuffer;  // transferred; present for TruncatedStream
+  partialPixels?: ArrayBuffer;       // transferred; present for TruncatedStream
   partialInfo?: ImageInfo;
+  partialPixelStride?: number;       // bytes per row of partialPixels; required when partialPixels is present
+  partialStage?: DecodeStage;        // stage at which the error occurred; present when partialPixels is present
 }
 
 export interface MsgDecodeCancelled {
@@ -112,6 +114,7 @@ export interface MsgDecodeBudgetExceeded {
   pixels: ArrayBuffer;          // transferred; best frame so far
   info: ImageInfo;
   format: PixelFormat;
+  region?: Region;              // present for region/tile decodes, matching progress/final
   pixelStride: number;
 }
 

@@ -25,7 +25,9 @@ export async function fromNodeReadable(
       if (signal?.aborted) break;
       await session.push(chunk);
     }
-    if (!signal?.aborted) {
+    if (signal?.aborted) {
+      await session.cancel('AbortSignal triggered');
+    } else {
       await session.close();
     }
   } catch (e) {

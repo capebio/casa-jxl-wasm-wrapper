@@ -17,7 +17,7 @@ import type {
   MsgDecodePaused,
   MsgDecodeBudgetExceeded,
 } from "@casabio/jxl-core/protocol";
-import type { ImageInfo, DecodeStage } from "@casabio/jxl-core/types";
+import type { ImageInfo, DecodeStage, Region } from "@casabio/jxl-core/types";
 
 type DecodeState =
   | "created"
@@ -346,7 +346,7 @@ export class DecodeHandler {
           // Budget check BEFORE transferring pixels. postMessage([pixels]) detaches the
           // buffer — reusing it in postBudgetExceeded would send a zero-length payload.
           if (this.checkBudget()) {
-            this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride);
+            this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride, event.region);
             return;
           }
           const msg: MsgDecodeProgress = {
@@ -369,7 +369,7 @@ export class DecodeHandler {
           // postMessage([pixels]) detaches the buffer; reusing it in postBudgetExceeded
           // would send a zero-length payload.
           if (this.checkBudget()) {
-            this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride);
+            this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride, event.region);
             return;
           }
           const msg: MsgDecodeFinal = {
@@ -388,11 +388,18 @@ export class DecodeHandler {
           return;
         }
         case "budget_exceeded": {
-          this.postBudgetExceeded(event.stage, event.info, toArrayBuffer(event.pixels), event.format, event.pixelStride);
+          this.postBudgetExceeded(event.stage, event.info, toArrayBuffer(event.pixels), event.format, event.pixelStride, event.region);
           return;
         }
         case "error": {
-          this.failSession(event.code, event.message);
+          this.failSession(
+            event.code,
+            event.message,
+            event.partialPixels !== undefined ? toArrayBuffer(event.partialPixels) : undefined,
+            event.partialInfo,
+            event.partialPixelStride,
+            event.partialStage,
+          );
           return;
         }
       }
@@ -409,7 +416,14 @@ export class DecodeHandler {
     return performance.now() - this.stageStartMs > this.opts.budgetMs;
   }
 
-  private failSession(code: string, message: string): void {
+  private failSession(
+    code: string,
+    message: string,
+    partialPixels?: ArrayBuffer,
+    partialInfo?: ImageInfo,
+    partialPixelStride?: number,
+    partialStage?: DecodeStage,
+  ): void {
     if (this.ended) return;
     const msg: MsgDecodeError = {
       type: "decode_error",
@@ -417,7 +431,15 @@ export class DecodeHandler {
       code,
       message,
     };
-    self.postMessage(msg);
+    const transfers: ArrayBuffer[] = [];
+    if (partialPixels !== undefined && partialInfo !== undefined) {
+      msg.partialPixels = partialPixels;
+      msg.partialInfo = partialInfo;
+      msg.partialPixelStride = partialPixelStride;
+      msg.partialStage = partialStage;
+      transfers.push(partialPixels);
+    }
+    self.postMessage(msg, transfers);
     this.finishSession("error");
     // Best-effort unblock of decoder.events().
     void this.disposeActiveDecoder();
@@ -429,6 +451,7 @@ export class DecodeHandler {
     pixels: ArrayBuffer,
     format: MsgDecodeBudgetExceeded["format"],
     pixelStride: number,
+    region?: Region,
   ): void {
     if (this.ended) return;
     const msg: MsgDecodeBudgetExceeded = {
@@ -440,6 +463,7 @@ export class DecodeHandler {
       format,
       pixelStride,
     };
+    if (region !== undefined) msg.region = region;
     self.postMessage(msg, [pixels]);
     this.finishSession("budget_exceeded");
     // Best-effort unblock of decoder.events().

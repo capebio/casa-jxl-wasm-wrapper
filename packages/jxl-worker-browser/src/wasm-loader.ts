@@ -4,6 +4,12 @@
 
 import type { DecodeStage, ImageInfo, PixelFormat, Region } from "@casabio/jxl-core/types";
 
+// Re-export detectTier from jxl-wasm so worker.ts can include the selected
+// build tier in the worker_ready announcement without a direct dependency on
+// the jxl-wasm package from worker.ts itself.
+export type { Tier } from "@casabio/jxl-wasm";
+export { detectTier } from "@casabio/jxl-wasm";
+
 export type BrowserDecodeEvent =
   | { type: "header"; info: ImageInfo }
   | {
@@ -29,6 +35,7 @@ export type BrowserDecodeEvent =
       info: ImageInfo;
       pixels: ArrayBuffer | Uint8Array;
       format: PixelFormat;
+      region?: Region;
       pixelStride: number;
     }
   | {
@@ -37,6 +44,8 @@ export type BrowserDecodeEvent =
       message: string;
       partialPixels?: ArrayBuffer | Uint8Array;
       partialInfo?: ImageInfo;
+      partialPixelStride?: number;
+      partialStage?: DecodeStage;
     };
 
 export interface BrowserDecoder {
@@ -95,14 +104,31 @@ export async function loadWasmModule(wasmUrl: string, options: WasmLoaderOptions
   const facade = resolveJxlModule(imported);
   if (facade !== null) return facade;
 
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const resp = await fetchImpl(wasmUrl);
-  if (!resp.ok) {
+  // The dynamic import returned null or a module without the expected exports.
+  // Probe the WASM URL to give a more actionable diagnostic (missing build
+  // artifact vs. module that loaded but lacks createDecoder/createEncoder).
+  // Only attempt the probe when a custom fetchImpl is provided or fetch is
+  // available in this context; the result is used for the error message only.
+  let probeStatus: number | null = null;
+  try {
+    const fetchImpl = options.fetchImpl ?? (typeof fetch !== "undefined" ? fetch : null);
+    if (fetchImpl !== null) {
+      const resp = await fetchImpl(wasmUrl);
+      probeStatus = resp.status;
+      // Drain the body to avoid keeping a connection open.
+      await resp.body?.cancel();
+    }
+  } catch {
+    // Probe failure is non-fatal; we still throw the primary error below.
+  }
+
+  if (probeStatus !== null && probeStatus !== 200) {
     throw new Error(
-      `[jxl-worker-browser] WASM not available at ${wasmUrl} (${resp.status}). ` +
+      `[jxl-worker-browser] WASM not available at ${wasmUrl} (${probeStatus}). ` +
         "T-WASM-BUILD artifact required.",
     );
   }
+
   throw new Error(
     "[jxl-worker-browser] @casabio/jxl-wasm does not expose a codec facade. " +
       "T-WASM-BUILD must export createDecoder/createEncoder.",

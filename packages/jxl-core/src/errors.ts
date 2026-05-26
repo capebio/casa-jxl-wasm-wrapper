@@ -13,6 +13,7 @@ export type JxlErrorCode =
   | "WorkerCrashed"
   | "CapabilityMissing"
   | "ConfigError"
+  | "QueueOverflow"   // caller is pushing chunks faster than the worker can drain
   | "Internal";
 
 export class JxlError extends Error {
@@ -26,7 +27,7 @@ export class JxlError extends Error {
     message: string,
     opts?: { sessionId?: string; partial?: DecodeFrameEvent; cause?: unknown },
   ) {
-    super(message);
+    super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = "JxlError";
     this.code = code;
     if (opts?.sessionId !== undefined) this.sessionId = opts.sessionId;

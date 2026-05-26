@@ -77,6 +77,7 @@ export function spawnWorker(): Promise<WorkerHandle> {
 
     worker.on("error", (err) => {
       _terminated = true;
+      messageHandlers = [];
       reject(new Error(`[jxl-worker-node] Worker error: ${err.message}`));
     });
 

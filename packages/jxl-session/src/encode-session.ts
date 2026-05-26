@@ -180,15 +180,12 @@ export class EncodeSessionImpl implements EncodeSession {
 
       case "encode_first_byte_ready":
         // Informational only; time_to_first_byte_ms arrives via a metric message.
+        if (msg.sessionId !== this.id) return;
         break;
 
       case "encode_done":
         if (msg.sessionId !== this.id) return;
-        this.totalBytesWritten = msg.totalBytes;
-        this.chunkStream.end();
-        this.doneDeferred.resolve(msg.totalBytes);
-        this.terminated = true;
-        this.cleanup();
+        this.complete(msg.totalBytes);
         break;
 
       case "encode_error": {
@@ -220,6 +217,18 @@ export class EncodeSessionImpl implements EncodeSession {
   private cleanup(): void {
     if (this.abortSignal !== null && this.abortHandler !== null) {
       this.abortSignal.removeEventListener("abort", this.abortHandler);
+    }
+  }
+
+  // Normal completion: chunk stream ends gracefully, done() resolves.
+  private complete(totalBytes: number): void {
+    if (this.terminated) return;
+    this.terminated = true;
+    this.totalBytesWritten = totalBytes;
+    this.cleanup();
+    this.chunkStream.end();
+    if (!this.doneDeferred.settled) {
+      this.doneDeferred.resolve(totalBytes);
     }
   }
 

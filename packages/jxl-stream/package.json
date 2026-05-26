@@ -9,13 +9,17 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test": "npm run build:test && node --test dist-test/test"
   },
   "peerDependencies": {
     "@casabio/jxl-core": "0.1.0"
   },
   "devDependencies": {
-    "typescript": "5.4.5",
-    "@casabio/jxl-core": "file:../jxl-core"
+    "@casabio/jxl-core": "file:../jxl-core",
+    "@types/node": "^22.5.0",
+    "typescript": "^5.4.5"
   }
 }

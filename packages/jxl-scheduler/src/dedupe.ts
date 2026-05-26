@@ -48,8 +48,14 @@ export class DedupeRegistry {
 
   // Cancel a subscriber. Returns true if all subscribers are gone and
   // the underlying primary session should be cancelled.
+  //
+  // When the PRIMARY session itself is cancelled (subscriberId === primaryId),
+  // the source-key mapping must be torn down immediately so that future
+  // register() calls for the same key do not fan-out to the dead primary,
+  // regardless of whether fan-out subscribers are still alive.
   cancelSubscriber(subscriberId: string): boolean {
     const primaryId = this.subscriberToPrimary.get(subscriberId) ?? subscriberId;
+    const isPrimary = primaryId === subscriberId;
     const subs = this.sessionToSubscribers.get(primaryId);
 
     if (subs === undefined) return true; // already cleaned up
@@ -57,16 +63,25 @@ export class DedupeRegistry {
     subs.delete(subscriberId);
     this.subscriberToPrimary.delete(subscriberId);
 
-    if (subs.size === 0) {
-      // All subscribers gone: clean up and signal caller to cancel primary.
+    // If the primary itself is being cancelled, tear down the source-key index
+    // now so no future findPrimary() hit returns this dead session.
+    if (isPrimary) {
       const key = this.sessionToKey.get(primaryId);
       if (key !== undefined) this.keyToSession.delete(key);
       this.sessionToKey.delete(primaryId);
+    }
+
+    if (subs.size === 0) {
+      // All subscribers gone: finish cleanup and signal caller to cancel primary.
       this.sessionToSubscribers.delete(primaryId);
       return true;
     }
 
-    return false;
+    // Fan-out subscribers still alive. If the primary itself was cancelled,
+    // return true so the scheduler kills the underlying worker session.
+    // Surviving subscribers will receive the resulting terminal message via
+    // the existing fan-out path and must handle it (e.g. resubmit).
+    return isPrimary;
   }
 
   // Clean up a completed or errored primary session.

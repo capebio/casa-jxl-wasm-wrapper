@@ -4,6 +4,7 @@ This document provides a high-level summary of the features available in the Cas
 
 ## 1. High-Performance Build Architecture
 *   **Multi-Tiered WASM Matrix:** Automatically selects the fastest available WASM build (Relaxed SIMD, SIMD+MT, or Scalar) based on the browser's capabilities.
+*   **Worker WASM Build Tier Reporting:** The `worker_ready` message now includes a `wasmBuild` field (`"relaxed-simd-mt" | "simd-mt" | "simd" | "scalar"`), allowing the scheduler and telemetry to observe which WASM build tier was selected at runtime.
 *   **PGO (Profile-Guided Optimization):** WASM artifacts are optimized using real-world image data to maximize performance for common scientific and consumer use cases.
 *   **Zero-Copy WASM Writes:** Eliminates intermediate memory copies by writing chunk data directly into the WASM heap.
 *   **Grow-only WASM Allocator:** Minimizes reallocations and memory fragmentation by reusing and growing pre-allocated pixel buffers.
@@ -33,12 +34,14 @@ This document provides a high-level summary of the features available in the Cas
 *   **Integrated Backpressure:** Uses stream adapters to prevent memory bloat during high-volume data transfers.
 *   **Adaptive Drain HWM:** Dynamically tunes worker buffer sizes based on real-time latency to balance throughput and memory usage.
 *   **Input Queue Safety Cap:** Enforces strict memory limits on unprocessed input data to prevent unbounded growth.
+*   **`QueueOverflow` as First-Class Error Code:** `JxlErrorCode` union now includes `"QueueOverflow"`, distinguishing the 128 MiB input queue cap from generic `"Internal"` errors so callers can detect and handle this case explicitly.
 *   **`onPause` Idempotency:** Prevents redundant pause/resume acknowledgments to maintain scheduler synchronization.
 *   **Event Iterator Unblocking:** Ensures the decoder event loop correctly terminates upon cancellation to prevent memory leaks.
 *   **Coalesced Drain Messages:** Reduces message overhead by batching drain signals while remaining responsive to slow connections.
 *   **Post-Push Budget Check:** Ensures decoding time limits are respected even during long-running data ingestion steps.
 *   **Terminal-State Wakeup:** Explicitly resolves pending promises when a session ends to prevent stuck workers.
 *   **Pre-Transfer Budget Check:** Prevents wasting resources on transferring pixel data if the execution budget has already been exceeded.
+*   **`MsgDecodeBudgetExceeded` Region Field:** Budget-exceeded messages for tiled/region decodes now include the `region?: Region` field, making the partial pixel buffer positionable by the consumer. Previously the field was silently dropped.
 *   **Telemetry for Final-Only Decodes:** Extends performance tracking to cover decodes that skip progressive passes.
 *   **Disposal Promise Sharing:** Ensures all callers wait for full decoder teardown before proceeding, preventing race conditions.
 *   **Terminal-Aware Pause Guard:** Improves robustness by correctly ignoring pause requests for sessions that are already finishing.
@@ -68,6 +71,7 @@ This document provides a high-level summary of the features available in the Cas
 
 ## 4. Progressive UX Features
 *   **Progressive Decoding:** Enhances user experience by emitting low-resolution previews and refinement passes before the final image is complete.
+*   **`MsgDecodeError` Partial Frame Fields:** `MsgDecodeError` now carries `partialPixelStride?: number` and `partialStage?: DecodeStage` for `TruncatedStream` errors, enabling decode-session to construct accurate partial `DecodeFrameEvent`s with correct row stride and stage label.
 *   **Region-of-Interest (ROI) Decoding:** Dramatically speeds up viewing large images by decoding only the requested viewport.
 *   **Preview-First Encoding:** Biases the encoder to quickly produce a usable first pass for "instant" upload previews.
 *   **Sidecar Thumbnails:** Allows for the extraction or generation of small preview images during the main decoding process.

@@ -1239,9 +1239,8 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
         ]
     };
 
-    // TODO(G3): raw_pipeline::dng::DngImage does not expose ISO; use a fixed
-    // fallback until upstream surfaces it.
-    let iso = 100u32;
+    // Use ISO from DNG metadata for NR strength; fall back to 100 if absent.
+    let iso = dng_img.iso.unwrap_or(100);
     let nr_strength = match iso {
         iso if iso >= 6400 => 0.50f32,
         iso if iso >= 3200 => 0.35,

@@ -6,7 +6,7 @@ export class JxlError extends Error {
     partial; // best frame so far, when applicable
     cause;
     constructor(code, message, opts) {
-        super(message);
+        super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
         this.name = "JxlError";
         this.code = code;
         if (opts?.sessionId !== undefined)

@@ -14,7 +14,20 @@ export class LRUCache<V> {
     return undefined;
   }
 
+  /**
+   * Read a value without updating its LRU position.
+   * Use this when inspecting an entry that is about to be evicted so that
+   * the Map insertion-order (= LRU order) is not disturbed.
+   */
+  peek(key: string): V | undefined {
+    return this.cache.get(key)?.value;
+  }
+
   set(key: string, value: V, size: number): void {
+    // Items that can never fit are dropped immediately without evicting
+    // anything — callers that evict-before-set have already ensured room.
+    if (size > this.maxSize) return;
+
     if (this.cache.has(key)) {
       this.currentSize -= this.cache.get(key)!.size;
       this.cache.delete(key);
@@ -27,10 +40,8 @@ export class LRUCache<V> {
       this.cache.delete(oldestKey);
     }
 
-    if (size <= this.maxSize) {
-      this.cache.set(key, { value, size });
-      this.currentSize += size;
-    }
+    this.cache.set(key, { value, size });
+    this.currentSize += size;
   }
 
   delete(key: string): void {

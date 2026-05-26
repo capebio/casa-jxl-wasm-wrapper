@@ -48,6 +48,14 @@ export interface DecodeSession {
     done(): Promise<ImageInfo>;
     cancel(reason?: string): Promise<void>;
 }
+export interface EncodeStats {
+    /** Raw pixel bytes: width × height × channels × bytesPerChannel. */
+    originalBytes: number;
+    /** Total JXL bytes written across all chunks (including sidecars). */
+    compressedBytes: number;
+    /** compressedBytes / originalBytes. Values below 1.0 indicate net compression. */
+    ratio: number;
+}
 export interface EncodeOptions {
     format: PixelFormat;
     width: number;
@@ -62,6 +70,14 @@ export interface EncodeOptions {
     progressive?: boolean;
     previewFirst?: boolean;
     chunked?: boolean;
+    /**
+     * Max dimension (px, long edge) of sidecar thumbnail(s) to yield BEFORE the
+     * main image chunks. Sorted ascending so the smallest preview arrives first.
+     * Requires a WASM build with the sidecar bridge (_jxl_wasm_encode_rgba8_with_sidecars).
+     * Falls back to plain encode when the bridge is absent.
+     * The leading `sidecarSizes.length` chunks from `chunks()` are the thumbnails.
+     */
+    sidecarSizes?: readonly number[];
     priority?: "visible" | "near" | "background";
     signal?: AbortSignal;
     onMetric?: (m: CodecMetric) => void;
@@ -72,6 +88,7 @@ export interface EncodeSession {
     finish(): Promise<void>;
     chunks(): AsyncIterable<ArrayBuffer>;
     done(): Promise<number>;
+    getStats(): EncodeStats | null;
     cancel(reason?: string): Promise<void>;
 }
 export type CodecMetric = {

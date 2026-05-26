@@ -4,6 +4,7 @@ export interface Subscription {
 }
 export declare class DedupeRegistry {
     private readonly keyToSession;
+    private readonly sessionToKey;
     private readonly sessionToSubscribers;
     private readonly subscriberToPrimary;
     register(sessionId: string, sourceKey: string): void;
@@ -12,6 +13,6 @@ export declare class DedupeRegistry {
     cancelSubscriber(subscriberId: string): boolean;
     complete(sessionId: string): void;
     subscribers(primaryId: string): string[];
-    private keyForSession;
+    forEachSubscriber(primaryId: string, fn: (subId: string) => void): void;
 }
 //# sourceMappingURL=dedupe.d.ts.map

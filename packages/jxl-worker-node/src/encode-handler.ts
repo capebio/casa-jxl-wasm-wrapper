@@ -48,6 +48,7 @@ interface NodeCodecModule {
 }
 
 const CHUNK_HWM = 4;
+const DRAIN_MIN_INTERVAL_MS = 8;
 
 export class EncodeHandler {
   private readonly sessionId: string;
@@ -63,6 +64,9 @@ export class EncodeHandler {
   private cancelled = false;
   private finished = false;
   private firstByteEmitted = false;
+  private wakeResolve: (() => void) | null = null;
+  private lastDrainPostedMs = 0;
+  private lastDrainAllowed = false;
 
   constructor(opts: MsgEncodeStart, backend: Backend, callbacks: EncodeHandlerCallbacks) {
     this.sessionId = opts.sessionId;
@@ -81,16 +85,22 @@ export class EncodeHandler {
     if (region !== undefined) entry.region = region;
     this.pixelQueue.push(entry);
     this.queueDepth++;
+    this.wakeResolve?.();
+    this.wakeResolve = null;
   }
 
   onFinish(): void {
     this.finished = true;
+    this.wakeResolve?.();
+    this.wakeResolve = null;
   }
 
   async onCancel(reason?: string): Promise<void> {
-    if (this.cancelled) return;
+    if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.cancelled = true;
     this.state = "cancelled";
+    this.wakeResolve?.();
+    this.wakeResolve = null;
 
     const msg: MsgEncodeCancelled = { type: "encode_cancelled", sessionId: this.sessionId };
     this.port.postMessage(msg);
@@ -124,14 +134,11 @@ export class EncodeHandler {
   }
 
   private waitForPixels(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const check = () => {
-        if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled) resolve();
-        else if (this.state === "done" || this.state === "error") resolve();
-        else setTimeout(check, 2);
-      };
-      check();
-    });
+    if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled
+        || this.state === "done" || this.state === "error") {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
   }
 
   private async feedEncoder(encoder: NodeEncoder): Promise<void> {
@@ -146,9 +153,7 @@ export class EncodeHandler {
         }
         this.queueDepth--;
         await encoder.pushPixels(entry.chunk, entry.region);
-        if (this.queueDepth < CHUNK_HWM) {
-          this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });
-        }
+        this.maybePostDrain();
       }
       if (this.finished) {
         this.state = "finalising";
@@ -156,6 +161,22 @@ export class EncodeHandler {
         return;
       }
     }
+  }
+
+  private maybePostDrain(): void {
+    const now = performance.now();
+    const drainAllowed = this.queueDepth < CHUNK_HWM;
+
+    const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
+    const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
+
+    this.lastDrainAllowed = drainAllowed;
+
+    if (!drainAllowed) return;
+    if (!crossedIntoDrain && !intervalElapsed) return;
+
+    this.lastDrainPostedMs = now;
+    this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });
   }
 
   private async readEncoderChunks(encoder: NodeEncoder): Promise<void> {
@@ -193,8 +214,11 @@ export class EncodeHandler {
   }
 
   private failSession(code: string, message: string): void {
-    if (this.cancelled || this.state === "done") return;
+    if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.state = "error";
+    // Unblock feedEncoder if it's sleeping in waitForPixels — mirrors browser handler.
+    this.wakeResolve?.();
+    this.wakeResolve = null;
     const msg: MsgEncodeError = { type: "encode_error", sessionId: this.sessionId, code, message };
     this.port.postMessage(msg);
     this.callbacks.onSessionEnd(this.sessionId);

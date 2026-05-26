@@ -1,5 +1,5 @@
 import type { DecodeFrameEvent } from "./types.js";
-export type JxlErrorCode = "MalformedCodestream" | "TruncatedStream" | "UnsupportedFeature" | "OutOfMemory" | "BudgetExceeded" | "Cancelled" | "WorkerCrashed" | "CapabilityMissing" | "ConfigError" | "Internal";
+export type JxlErrorCode = "MalformedCodestream" | "TruncatedStream" | "UnsupportedFeature" | "OutOfMemory" | "BudgetExceeded" | "Cancelled" | "WorkerCrashed" | "CapabilityMissing" | "ConfigError" | "QueueOverflow" | "Internal";
 export declare class JxlError extends Error {
     readonly code: JxlErrorCode;
     readonly sessionId?: string;

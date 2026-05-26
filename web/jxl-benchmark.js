@@ -1,7 +1,9 @@
-import initRaw, { process_orf, rgb_to_rgba, downscale_rgba } from '../pkg/raw_converter_wasm.js';
+import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder, detectTier, setForcedTier } from '@casabio/jxl-wasm';
 import { bindRangeLabel } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+
+const { process_orf, rgb_to_rgba } = rawWasm;
 
 const ALL_SIZES = [128, 256, 512, 1080, 1920, 'fullsize'];
 const DEFAULT_SIZES = [128, 512, 1080];
@@ -595,11 +597,27 @@ function resizeRgba(rgba, width, height, targetWidth) {
     }
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
+    const resizeRgbaImpl = rawWasm.downscale_rgba ?? downscaleRgbaCanvas;
     return {
-        rgba: downscale_rgba(rgba, width, height, targetWidth, targetHeight),
+        rgba: resizeRgbaImpl(rgba, width, height, targetWidth, targetHeight),
         width: targetWidth,
         height: targetHeight
     };
+}
+
+function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = width;
+    srcCanvas.height = height;
+    const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+
+    const dstCanvas = document.createElement('canvas');
+    dstCanvas.width = targetWidth;
+    dstCanvas.height = targetHeight;
+    const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
+    dstCtx.drawImage(srcCanvas, 0, 0, targetWidth, targetHeight);
+    return new Uint8Array(dstCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer);
 }
 
 function exactBuffer(view) {
@@ -1123,11 +1141,14 @@ function clearResults() {
     permutations = [];
     addPermutationMode = false;
     selectedSources = [];
+    resetCharts();
+    setGraphExportsEnabled(false);
     updateSelectionStatus();
     setProgress('Idle.');
     setFileStatus('—');
     setTiming('Ready.');
     renderPermutationSelector();
+    document.getElementById('graph-caption').textContent = '';
     const addBtn = document.getElementById('add-permutation');
     if (addBtn) addBtn.disabled = true;
 
@@ -1146,6 +1167,34 @@ const chartInstances = {
     'filesize': null,
 };
 
+function resetCharts() {
+    for (const [chartId, chart] of Object.entries(chartInstances)) {
+        chart?.destroy();
+        chartInstances[chartId] = null;
+        const canvas = document.getElementById(`graph-${chartId}`);
+        if (!canvas) continue;
+        const ctx = canvas.getContext('2d');
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
+function hasGraphData(results) {
+    return results.decodeMs.size > 0 || results.encodeMs.size > 0 || results.fileSize.size > 0;
+}
+
+function setGraphExportsEnabled(enabled) {
+    document.querySelectorAll('.export-webp, .export-csv').forEach(btn => {
+        btn.disabled = !enabled;
+        if (!enabled) {
+            btn.title = 'Run benchmark first';
+        } else if (btn.classList.contains('export-webp')) {
+            btn.title = 'Export as WebP';
+        } else {
+            btn.title = 'Export as CSV';
+        }
+    });
+}
+
 function getPermSources() {
     const visible = permutations.filter(p => p.visible);
     if (visible.length > 0) return visible;
@@ -1159,6 +1208,15 @@ function drawGraphs() {
     if (!selectedSizes.length) return;
 
     const captionEl = document.getElementById('graph-caption');
+    const sources = getPermSources();
+    const hasData = sources.some(src => hasGraphData(src.results));
+    setGraphExportsEnabled(hasData);
+    if (!hasData) {
+        resetCharts();
+        captionEl.textContent = '';
+        return;
+    }
+
     if (permutations.length > 0) {
         captionEl.textContent = permutations.map(p => `${p.label}: ${p.visible ? 'visible' : 'hidden'}`).join(' | ');
     } else {
@@ -1448,6 +1506,8 @@ document.querySelectorAll('.export-csv').forEach(btn => {
         exportGraphAsCSV(chartId);
     });
 });
+
+setGraphExportsEnabled(false);
 
 // ─── Progressive Paint Test ──────────────────────────────────────────────────
 

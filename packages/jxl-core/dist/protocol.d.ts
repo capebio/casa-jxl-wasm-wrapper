@@ -26,6 +26,14 @@ export interface MsgDecodeCancel {
     sessionId: string;
     reason?: string;
 }
+export interface MsgDecodePause {
+    type: "decode_pause";
+    sessionId: string;
+}
+export interface MsgDecodeResume {
+    type: "decode_resume";
+    sessionId: string;
+}
 export interface MsgDecodeHeader {
     type: "decode_header";
     sessionId: string;
@@ -57,9 +65,15 @@ export interface MsgDecodeError {
     message: string;
     partialPixels?: ArrayBuffer;
     partialInfo?: ImageInfo;
+    partialPixelStride?: number;
+    partialStage?: DecodeStage;
 }
 export interface MsgDecodeCancelled {
     type: "decode_cancelled";
+    sessionId: string;
+}
+export interface MsgDecodePaused {
+    type: "decode_paused";
     sessionId: string;
 }
 export interface MsgDecodeBudgetExceeded {
@@ -69,6 +83,7 @@ export interface MsgDecodeBudgetExceeded {
     pixels: ArrayBuffer;
     info: ImageInfo;
     format: PixelFormat;
+    region?: Region;
     pixelStride: number;
 }
 export interface MsgEncodeStart {
@@ -87,6 +102,7 @@ export interface MsgEncodeStart {
     progressive: boolean;
     previewFirst: boolean;
     chunked: boolean;
+    sidecarSizes?: readonly number[];
     priority: "visible" | "near" | "background";
 }
 export interface MsgEncodePixels {
@@ -139,9 +155,18 @@ export interface MsgWorkerShutdown {
 export interface MsgWorkerShutdownAck {
     type: "worker_shutdown_ack";
 }
+export interface MsgWorkerError {
+    type: "worker_error";
+    code: string;
+    message: string;
+}
 export interface MsgWorkerDrain {
     type: "worker_drain";
     sessionId: string;
+    latencyMs?: number;
+    queueDepth?: number;
+    queuedBytes?: number;
+    adaptiveHwm?: number;
 }
 export interface MsgMetric {
     type: "metric";
@@ -152,6 +177,6 @@ export interface MsgReleaseState {
     type: "release_state";
     sessionId: string;
 }
-export type MainToWorkerMessage = MsgDecodeStart | MsgDecodeChunk | MsgDecodeClose | MsgDecodeCancel | MsgEncodeStart | MsgEncodePixels | MsgEncodeFinish | MsgEncodeCancel | MsgWorkerShutdown | MsgReleaseState;
-export type WorkerToMainMessage = MsgDecodeHeader | MsgDecodeProgress | MsgDecodeFinal | MsgDecodeError | MsgDecodeCancelled | MsgDecodeBudgetExceeded | MsgEncodeChunk | MsgEncodeFirstByteReady | MsgEncodeDone | MsgEncodeError | MsgEncodeCancelled | MsgWorkerReady | MsgWorkerShutdownAck | MsgWorkerDrain | MsgMetric;
+export type MainToWorkerMessage = MsgDecodeStart | MsgDecodeChunk | MsgDecodeClose | MsgDecodeCancel | MsgDecodePause | MsgDecodeResume | MsgEncodeStart | MsgEncodePixels | MsgEncodeFinish | MsgEncodeCancel | MsgWorkerShutdown | MsgReleaseState;
+export type WorkerToMainMessage = MsgDecodeHeader | MsgDecodeProgress | MsgDecodeFinal | MsgDecodeError | MsgDecodeCancelled | MsgDecodePaused | MsgDecodeBudgetExceeded | MsgEncodeChunk | MsgEncodeFirstByteReady | MsgEncodeDone | MsgEncodeError | MsgEncodeCancelled | MsgWorkerReady | MsgWorkerShutdownAck | MsgWorkerError | MsgWorkerDrain | MsgMetric;
 //# sourceMappingURL=protocol.d.ts.map
