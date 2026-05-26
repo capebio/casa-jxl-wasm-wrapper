@@ -27,8 +27,11 @@ export async function pickFolder()         // opens showDirectoryPicker() or <in
 export async function saveHandle(handle)   // persists handle to IndexedDB
 export async function loadHandle()         // returns saved handle or null
 export async function verifyHandle(handle) // queryPermission(); returns true if still granted
-export async function randomOrfs(handle, n) // returns n random File objects with .name ending in .orf/.ORF
+export async function randomRaws(handle, n) // returns n random File objects matching supported RAW extensions
 ```
+
+**Supported RAW extensions** (case-insensitive):
+`.orf`, `.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.raf`, `.rw2`, `.pef`, `.srw`
 
 **IndexedDB schema:**
 - DB name: `jxl-source-folder`
@@ -58,7 +61,7 @@ On click:
 1. `loadHandle()` — try to get saved handle
 2. `verifyHandle(handle)` — check permission
 3. If no handle or permission denied: `pickFolder()` → `saveHandle(handle)`
-4. `randomOrfs(handle, n)` → convert to `File` objects → pass to existing `loadSourcesFromFiles(files)`
+4. `randomRaws(handle, n)` → convert to `File` objects → pass to existing `loadSourcesFromFiles(files)`
 
 `n` = existing batch limit setting (same as current random load count).
 
@@ -74,13 +77,13 @@ No replacement server-side route needed — folder access is now fully client-si
 ### Test changes
 
 **`web/orf-render.test.js`:**
-- Replace `const ORF_FOLDER = String.raw\`...\`` with `const ORF_FOLDER = process.env.TEST_ORF_FOLDER ?? null`
-- Wrap test body: `if (!ORF_FOLDER) { test.skip(...) }` or use `skipIf`
+- Replace `const ORF_FOLDER = String.raw\`...\`` with `const RAW_FOLDER = process.env.TEST_RAW_FOLDER ?? null`
+- Wrap test body: skip if `RAW_FOLDER` is null
 
 **`web/icodec-jxl-worker.test.js`:**
 - Remove `DEFAULT_ORF_PATH` constant
-- Replace with `const ORF_PATH = process.env.TEST_ORF ?? null`
-- Skip test if `ORF_PATH` is null
+- Replace with `const RAW_PATH = process.env.TEST_RAW_FILE ?? null`
+- Skip test if `RAW_PATH` is null
 
 ---
 
@@ -99,7 +102,6 @@ No replacement server-side route needed — folder access is now fully client-si
 
 ## Out of Scope
 
-- Other RAW formats (only `.ORF` / `.orf` targeted — existing behaviour)
 - Recursive directory scanning (flat scan, same as existing `/api/random-gobabeb`)
 - Multiple saved folders
 - Folder picker UI on `jxl-progressive.html` (separate session)
@@ -114,5 +116,5 @@ No replacement server-side route needed — folder access is now fully client-si
 3. Chosen folder name persists in IndexedDB; next page load shows `Load from [name]` without re-picking.
 4. If folder permission was revoked, button shows `Re-grant [name]` and re-opens picker on click.
 5. `/api/random-gobabeb` route no longer exists in `serve.ts`.
-6. `web/orf-render.test.js` and `web/icodec-jxl-worker.test.js` skip cleanly when env vars are absent; no hardcoded paths remain.
+6. `web/orf-render.test.js` and `web/icodec-jxl-worker.test.js` skip cleanly when `TEST_RAW_FOLDER` / `TEST_RAW_FILE` env vars are absent; no hardcoded paths remain.
 7. No regressions on wrapper lab or benchmark page functionality.
