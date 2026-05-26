@@ -1,15 +1,14 @@
-﻿import initRaw, { process_orf, rgb_to_rgba, downscale_rgba } from '../pkg/raw_converter_wasm.js';
+﻿import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
 import {
     bindRangeLabel,
     clamp,
     setCssVar,
-    setGroupDisabled,
-    wireHelpPopovers,
-    wireSlideoutPanel,
 } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+
+const { process_orf, rgb_to_rgba } = rawWasm;
 
 const MAX_BATCH_LIMIT = 100;
 const RANDOM_LOAD_CONCURRENCY = 4;
@@ -35,9 +34,6 @@ const batchQualityValue = document.getElementById('batch-quality-value');
 const batchEffortValue = document.getElementById('batch-effort-value');
 const batchThumbSizeInput = document.getElementById('batch-thumb-size');
 const batchThumbSizeValue = document.getElementById('batch-thumb-size-value');
-const wrapperDashboard = document.getElementById('wrapper-dashboard');
-const wrapperControlsBtn = document.getElementById('wrapper-controls-btn');
-const wrapperControlsClose = document.getElementById('wrapper-controls-close');
 const selectionStatus = document.getElementById('selection-status');
 const modeStatus = document.getElementById('mode-status');
 const batchStatus = document.getElementById('batch-status');
@@ -47,13 +43,12 @@ const queuedCount = document.getElementById('queued-count');
 const doneCount = document.getElementById('done-count');
 const errorCount = document.getElementById('error-count');
 const batchGrid = document.getElementById('batch-grid');
-const controlBand = document.querySelector('.control-band');
-const statusGrid = document.querySelector('.status-grid');
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
 
 let existingContext = getContext();
 const paintScratchCanvas = document.createElement('canvas');
 const sourceCache = new Map();
+const chartInstances = {};
 
 let currentMode = 'existing';
 let selectedSources = [];
@@ -124,11 +119,27 @@ async function encodeToWebp(rgba, width, height, quality) {
 function resizeRgba(rgba, width, height, targetWidth) {
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
+    const resizeRgbaImpl = rawWasm.downscale_rgba ?? downscaleRgbaCanvas;
     return {
-        rgba: downscale_rgba(rgba, width, height, targetWidth, targetHeight),
+        rgba: resizeRgbaImpl(rgba, width, height, targetWidth, targetHeight),
         width: targetWidth,
         height: targetHeight
     };
+}
+
+function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = width;
+    srcCanvas.height = height;
+    const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+
+    const dstCanvas = document.createElement('canvas');
+    dstCanvas.width = targetWidth;
+    dstCanvas.height = targetHeight;
+    const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
+    dstCtx.drawImage(srcCanvas, 0, 0, targetWidth, targetHeight);
+    return new Uint8Array(dstCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer);
 }
 
 async function runRace() {
@@ -703,6 +714,7 @@ async function loadSourcesFromFiles(fileList) {
     selectionStatus.textContent = `${loaded.length} file(s) ready in ${fmtTiming(elapsed)}.`;
     batchStatus.textContent = `Loaded ${loaded.length} file(s) in ${fmtTiming(elapsed)}.`;
     setCounters({ loaded: loaded.length });
+    updateRunButtons();
 }
 
 async function loadRandomSources(count = MAX_BATCH_LIMIT) {
@@ -733,6 +745,7 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
     selectionStatus.textContent = `${loaded.length} random Gobabeb files ready in ${fmtTiming(elapsed)}.`;
     batchStatus.textContent = `Loaded ${loaded.length}/${total} random Gobabeb files in ${fmtTiming(elapsed)}.`;
     setCounters({ loaded: loaded.length });
+    updateRunButtons();
 }
 
 function makeEncoderOptions(source) {
@@ -856,9 +869,11 @@ async function runExistingSessionPipeline(source, attempt = 1) {
     const encodeStart = performance.now();
     const encoded = await encodeWithSession(attemptSource);
     const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
-    dbgLog(`  session enc ← ${fmtBytes(encoded.bytes.byteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
+    // Capture byteLength before decodeWithSession transfers encoded.bytes.buffer.
+    const encodedByteLength = encoded.bytes.byteLength;
+    dbgLog(`  session enc ← ${fmtBytes(encodedByteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
 
-    dbgLog(`  session dec → ${fmtBytes(encoded.bytes.byteLength)} jxl`);
+    dbgLog(`  session dec → ${fmtBytes(encodedByteLength)} jxl`);
     const decodeStart = performance.now();
     const decoded = await decodeWithSession(encoded.bytes);
     const decodeMs = performance.now() - decodeStart;
@@ -866,7 +881,7 @@ async function runExistingSessionPipeline(source, attempt = 1) {
 
     return {
         bytes: encoded.bytes,
-        byteLength: encoded.bytes.byteLength,
+        byteLength: encodedByteLength,
         encodeMs,
         firstPieceMs: encoded.firstChunkMs ?? null,
         decodeMs,
@@ -1159,13 +1174,24 @@ function clearBatch() {
     resetGrid();
     setCounters({ loaded: 0, queued: 0, done: 0, errors: 0 });
     setStatus('Idle.', 'Ready.');
+    updateRunButtons();
+}
+
+function updateRunButtons() {
+    const hasFiles = selectedSources.length > 0;
+    runBatchBtn.disabled = !hasFiles;
+    startRaceBtn.disabled = !hasFiles;
 }
 
 function wireControls() {
     syncSettingLabels();
+    bindRangeLabel(batchThumbSizeInput, batchThumbSizeValue, (value) => String(value));
+    batchThumbSizeInput?.addEventListener('input', syncBatchThumbSize);
+    syncBatchThumbSize();
     setMode('race');
     setStatus('Idle.', 'Ready.');
     resetGrid();
+    updateRunButtons();
 
     startRaceBtn.addEventListener('click', () => {
         runRace().catch((error) => {
@@ -1221,24 +1247,6 @@ function wireControls() {
     batchEffortInput?.addEventListener('input', syncSettingLabels);
 }
 
-function wireDashboardControls() {
-    wireSlideoutPanel({
-        panel: wrapperDashboard,
-        openButton: wrapperControlsBtn,
-        closeButton: wrapperControlsClose,
-    });
-    wireHelpPopovers(wrapperDashboard);
-
-    wrapperDashboard?.appendChild(controlBand);
-    wrapperDashboard?.appendChild(statusGrid);
-
-    bindRangeLabel(batchThumbSizeInput, batchThumbSizeValue, (value) => String(value));
-    batchThumbSizeInput?.addEventListener('input', syncBatchThumbSize);
-    syncBatchThumbSize();
-
-    setGroupDisabled(wrapperDashboard?.querySelector('[data-group="progressive"]'), true, 'Progressive encode controls live on the progressive page.');
-    setGroupDisabled(wrapperDashboard?.querySelector('[data-group="display"]'), false);
-}
 
 await initRaw();
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
@@ -1246,6 +1254,5 @@ void resetContext().then((ctx) => {
     existingContext = ctx;
     sessionBackendBroken = false;
 }).catch(() => {});
-wireDashboardControls();
 wireControls();
 setCounters({ loaded: 0, queued: 0, done: 0, errors: 0 });
