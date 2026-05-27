@@ -6,7 +6,9 @@ export interface JxlWasmManifest {
 export interface LoaderOptions {
     fetchImpl?: typeof fetch;
     idbFactory?: IDBFactory;
-    nodeFs?: typeof import("node:fs/promises");
+    nodeFs?: {
+        readFile(path: string | URL): Promise<Uint8Array>;
+    };
     cacheDbName?: string;
     wasmUrl?: string;
 }
