@@ -40,3 +40,5 @@ _jxl_wasm_enc_free
 _jxl_wasm_enc_create_image
 _jxl_wasm_enc_push_chunk
 _jxl_wasm_enc_finish
+_jxl_wasm_encode_tiled_rgba8
+_jxl_wasm_decode_region_tiled_rgba8

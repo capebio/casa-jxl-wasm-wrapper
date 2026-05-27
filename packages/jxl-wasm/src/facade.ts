@@ -178,6 +178,12 @@ interface LibjxlWasmModule {
   _jxl_wasm_enc_advance_written?(state: number, size: number): number;
   _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_enc_finish?(state: number): number;
+  // Tiled multi-frame ROI: encode an image as N JXL frames each carrying
+  // layer_info.have_crop = JXL_TRUE. Pair with decode_region_tiled_rgba8 to
+  // decode only the tiles overlapping a target region (true partial decode
+  // via SkipFrames + SetCoalescing(false)).
+  _jxl_wasm_encode_tiled_rgba8?(pixelsPtr: number, width: number, height: number, tileSize: number, distance: number, effort: number, hasAlpha: number): number;
+  _jxl_wasm_decode_region_tiled_rgba8?(inputPtr: number, inputSize: number, tileSize: number, regionX: number, regionY: number, regionW: number, regionH: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -366,6 +372,90 @@ export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promis
     module.HEAPU8.set(view, ptr);
     const handle = module._jxl_wasm_transcode_jpeg_to_jxl!(ptr, view.byteLength);
     return takeBuffer(module, handle, "transcode").data;
+  } finally {
+    module._free(ptr);
+  }
+}
+
+/**
+ * Encode an RGBA8 image as a tiled multi-frame JXL.
+ * Each tile becomes one JXL frame with layer_info.have_crop = JXL_TRUE.
+ * Decode with decodeTiledRegionRgba8 to retrieve any rectangular region
+ * without decoding the whole image — true partial decode in libjxl 0.11.x.
+ *
+ * Requires a WASM build that includes the tile bridge
+ * (jxl_wasm_encode_tiled_rgba8).
+ *
+ * @param tileSize must match the value passed to decodeTiledRegionRgba8.
+ */
+export async function encodeTiledRgba8(
+  pixels: ArrayBuffer | Uint8Array,
+  width: number,
+  height: number,
+  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean },
+): Promise<Uint8Array> {
+  const module = await loadLibjxlModule();
+  if (!module._jxl_wasm_encode_tiled_rgba8) {
+    throw new CapabilityMissing("Tiled encode requires a rebuilt WASM with tile bridge");
+  }
+  const tileSize = options.tileSize;
+  if (!Number.isInteger(tileSize) || tileSize < 16) {
+    throw new Error(`tileSize must be an integer ≥ 16, got ${tileSize}`);
+  }
+  const distance = options.distance ?? 1.0;
+  const effort   = options.effort ?? 3;
+  const hasAlpha = options.hasAlpha !== false;
+
+  const view = copyOrBorrowInput(pixels, false);
+  const expectedBytes = width * height * 4;
+  if (view.byteLength < expectedBytes) {
+    throw new Error(`Pixel buffer too small: ${view.byteLength} < ${expectedBytes}`);
+  }
+
+  const ptr = module._malloc(view.byteLength);
+  if (ptr === 0) throw new Error("WASM malloc failed for tiled encode input");
+  try {
+    module.HEAPU8.set(view, ptr);
+    const handle = module._jxl_wasm_encode_tiled_rgba8(
+      ptr, width, height, tileSize, distance, effort, hasAlpha ? 1 : 0,
+    );
+    return takeBuffer(module, handle, "tiled encode").data;
+  } finally {
+    module._free(ptr);
+  }
+}
+
+/**
+ * Decode a rectangular region from a tiled JXL produced by encodeTiledRgba8.
+ * Only the JXL frames whose layer bounds overlap the region are decompressed;
+ * other frames are skipped via JxlDecoderSkipFrames (header-only walk).
+ *
+ * Returns clamped region dimensions — caller should pre-clamp if exact size
+ * is required.
+ */
+export async function decodeTiledRegionRgba8(
+  jxlBytes: ArrayBuffer | Uint8Array,
+  options: { tileSize: number; x: number; y: number; w: number; h: number },
+): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+  const module = await loadLibjxlModule();
+  if (!module._jxl_wasm_decode_region_tiled_rgba8) {
+    throw new CapabilityMissing("Tiled region decode requires a rebuilt WASM with tile bridge");
+  }
+  const { tileSize, x, y, w, h } = options;
+  if (!Number.isInteger(tileSize) || tileSize < 16) {
+    throw new Error(`tileSize must be an integer ≥ 16, got ${tileSize}`);
+  }
+
+  const view = copyOrBorrowInput(jxlBytes, false);
+  const ptr = module._malloc(view.byteLength);
+  if (ptr === 0) throw new Error("WASM malloc failed for tiled decode input");
+  try {
+    module.HEAPU8.set(view, ptr);
+    const handle = module._jxl_wasm_decode_region_tiled_rgba8(
+      ptr, view.byteLength, tileSize, x, y, w, h,
+    );
+    const buf = takeBuffer(module, handle, "tiled region decode");
+    return { pixels: buf.data, width: buf.width, height: buf.height };
   } finally {
     module._free(ptr);
   }

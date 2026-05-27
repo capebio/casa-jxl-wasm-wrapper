@@ -447,6 +447,274 @@ static bool LooksLikeJpeg(const uint8_t* p, size_t n) {
   return n >= 4 && p[0] == 0xFF && p[1] == 0xD8 && p[n - 2] == 0xFF && p[n - 1] == 0xD9;
 }
 
+// --- Tiled multi-frame encode (ROI support) ---
+//
+// Encodes a full RGBA8 image as a JXL container with one frame per tile,
+// each frame carrying layer_info.have_crop = JXL_TRUE plus crop offsets.
+// The resulting file can be decoded with JxlDecoderSetCoalescing(JXL_FALSE)
+// + JxlDecoderSkipFrames to retrieve individual tiles without decoding the
+// whole image — the core mechanism for true region-of-interest decode in
+// libjxl 0.11.x (which has no JxlDecoderSetCropWindow).
+static JxlWasmBuffer* EncodeRgba8Tiled(const uint8_t* pixels,
+    uint32_t width, uint32_t height, uint32_t tile_size,
+    float distance, uint32_t effort, uint32_t has_alpha) {
+  if (pixels == nullptr || width == 0 || height == 0 || tile_size == 0) return MakeError(60);
+
+  JxlEncoder* enc = JxlEncoderCreate(nullptr);
+  if (enc == nullptr) return MakeError(61);
+
+  JxlBasicInfo info;
+  JxlEncoderInitBasicInfo(&info);
+  info.xsize                    = width;
+  info.ysize                    = height;
+  info.bits_per_sample          = 8;
+  info.exponent_bits_per_sample = 0;
+  info.num_color_channels       = 3;
+  info.num_extra_channels       = has_alpha ? 1u : 0u;
+  info.alpha_bits               = has_alpha ? 8u : 0u;
+  info.alpha_exponent_bits      = 0;
+  info.have_animation           = JXL_FALSE;
+
+  if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(62); }
+
+  JxlColorEncoding color;
+  JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+  if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(63); }
+
+  const uint32_t tiles_x         = (width  + tile_size - 1u) / tile_size;
+  const uint32_t tiles_y         = (height + tile_size - 1u) / tile_size;
+  const uint32_t bytes_per_pixel = has_alpha ? 4u : 3u;
+
+  // Per-tile staging buffer (RGBA8 or RGB8 after stripping alpha).
+  uint8_t* tile_buf = static_cast<uint8_t*>(malloc(static_cast<size_t>(tile_size) * tile_size * 4u));
+  if (tile_buf == nullptr) { JxlEncoderDestroy(enc); return MakeError(64); }
+
+  JxlPixelFormat pf = {has_alpha ? 4u : 3u, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
+
+  for (uint32_t ty = 0; ty < tiles_y; ++ty) {
+    for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+      const uint32_t x0 = tx * tile_size;
+      const uint32_t y0 = ty * tile_size;
+      const uint32_t tw = std::min(tile_size, width  - x0);
+      const uint32_t th = std::min(tile_size, height - y0);
+
+      // Pull tile pixels out of full image, stripping alpha if needed.
+      if (has_alpha) {
+        for (uint32_t row = 0; row < th; ++row) {
+          memcpy(tile_buf + row * tw * 4u,
+                 pixels + (static_cast<size_t>(y0 + row) * width + x0) * 4u,
+                 tw * 4u);
+        }
+      } else {
+        for (uint32_t row = 0; row < th; ++row) {
+          const uint8_t* src = pixels   + (static_cast<size_t>(y0 + row) * width + x0) * 4u;
+          uint8_t*       dst = tile_buf + row * tw * 3u;
+          for (uint32_t col = 0; col < tw; ++col) {
+            dst[col * 3u + 0] = src[col * 4u + 0];
+            dst[col * 3u + 1] = src[col * 4u + 1];
+            dst[col * 3u + 2] = src[col * 4u + 2];
+          }
+        }
+      }
+
+      JxlFrameHeader fh;
+      JxlEncoderInitFrameHeader(&fh);
+      fh.duration                      = 0;
+      fh.layer_info.have_crop          = JXL_TRUE;
+      fh.layer_info.crop_x0            = static_cast<int32_t>(x0);
+      fh.layer_info.crop_y0            = static_cast<int32_t>(y0);
+      fh.layer_info.xsize              = tw;
+      fh.layer_info.ysize              = th;
+      fh.layer_info.blend_info.blendmode = JXL_BLEND_REPLACE;
+      fh.layer_info.blend_info.source    = 0;
+      fh.layer_info.blend_info.alpha     = 0;
+      fh.layer_info.blend_info.clamp     = JXL_FALSE;
+      fh.layer_info.save_as_reference    = 0;
+
+      JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
+      if (frame == nullptr) { free(tile_buf); JxlEncoderDestroy(enc); return MakeError(65); }
+      JxlEncoderSetFrameDistance(frame, distance);
+      JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
+
+      if (JxlEncoderSetFrameHeader(frame, &fh) != JXL_ENC_SUCCESS) {
+        free(tile_buf); JxlEncoderDestroy(enc); return MakeError(66);
+      }
+
+      const size_t tile_pixel_size = static_cast<size_t>(tw) * th * bytes_per_pixel;
+      if (JxlEncoderAddImageFrame(frame, &pf, tile_buf, tile_pixel_size) != JXL_ENC_SUCCESS) {
+        free(tile_buf); JxlEncoderDestroy(enc); return MakeError(67);
+      }
+    }
+  }
+  free(tile_buf);
+
+  JxlEncoderCloseInput(enc);
+
+  // Output capacity heuristic: a quarter of raw RGBA size (lossy compresses well).
+  size_t outbuf_cap = std::max(static_cast<size_t>(65536),
+      static_cast<size_t>(width) * height);
+  uint8_t* outbuf = static_cast<uint8_t*>(malloc(outbuf_cap));
+  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(68); }
+  uint8_t* next_out = outbuf;
+  size_t   avail_out = outbuf_cap;
+  for (;;) {
+    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
+    if (status == JXL_ENC_SUCCESS) {
+      const size_t final_size = static_cast<size_t>(next_out - outbuf);
+      JxlEncoderDestroy(enc);
+      return MakeBufferFromOwned(outbuf, final_size, width, height, 8, has_alpha);
+    }
+    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
+      const size_t offset = static_cast<size_t>(next_out - outbuf);
+      outbuf_cap *= 2u;
+      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
+      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(69); }
+      outbuf    = grown;
+      next_out  = outbuf + offset;
+      avail_out = outbuf_cap - offset;
+      continue;
+    }
+    free(outbuf);
+    JxlEncoderDestroy(enc);
+    return MakeError(static_cast<int>(status));
+  }
+}
+
+// --- Tiled region decode (ROI support) ---
+//
+// Decodes only the tiles overlapping `[region_x, region_x+region_w) ×
+// [region_y, region_y+region_h)` from a JXL produced by EncodeRgba8Tiled.
+// Uses JxlDecoderSetCoalescing(JXL_FALSE) + JxlDecoderSkipFrames to skip
+// past frames whose pixel data we don't need — libjxl walks frame headers
+// (cheap) but does not decompress the skipped frames' pixels.
+static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_size,
+    uint32_t tile_size, uint32_t region_x, uint32_t region_y,
+    uint32_t region_w, uint32_t region_h) {
+  if (input == nullptr || input_size == 0 || tile_size == 0) return MakeError(70);
+
+  JxlDecoder* dec = JxlDecoderCreate(nullptr);
+  if (dec == nullptr) return MakeError(71);
+
+  if (JxlDecoderSubscribeEvents(dec,
+        JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
+    JxlDecoderDestroy(dec); return MakeError(72);
+  }
+  if (JxlDecoderSetCoalescing(dec, JXL_FALSE) != JXL_DEC_SUCCESS) {
+    JxlDecoderDestroy(dec); return MakeError(73);
+  }
+  JxlDecoderSetInput(dec, input, input_size);
+  JxlDecoderCloseInput(dec);
+
+  // Run decoder until basic info known.
+  JxlBasicInfo info{};
+  bool info_known = false;
+  while (!info_known) {
+    JxlDecoderStatus st = JxlDecoderProcessInput(dec);
+    if (st == JXL_DEC_BASIC_INFO) {
+      if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) {
+        JxlDecoderDestroy(dec); return MakeError(74);
+      }
+      info_known = true;
+      break;
+    }
+    if (st == JXL_DEC_ERROR || st == JXL_DEC_NEED_MORE_INPUT || st == JXL_DEC_SUCCESS) {
+      JxlDecoderDestroy(dec); return MakeError(75);
+    }
+  }
+
+  // Clamp region to image bounds.
+  const uint32_t rx = std::min(region_x, info.xsize);
+  const uint32_t ry = std::min(region_y, info.ysize);
+  const uint32_t rw = std::min(region_w, info.xsize - rx);
+  const uint32_t rh = std::min(region_h, info.ysize - ry);
+  if (rw == 0 || rh == 0) { JxlDecoderDestroy(dec); return MakeError(76); }
+
+  const uint32_t tiles_x = (info.xsize + tile_size - 1u) / tile_size;
+  const uint32_t tx_min  = rx / tile_size;
+  const uint32_t tx_max  = (rx + rw - 1u) / tile_size;
+  const uint32_t ty_min  = ry / tile_size;
+  const uint32_t ty_max  = (ry + rh - 1u) / tile_size;
+
+  const size_t out_size  = static_cast<size_t>(rw) * rh * 4u;
+  uint8_t* out_pixels = static_cast<uint8_t*>(malloc(out_size));
+  if (out_pixels == nullptr) { JxlDecoderDestroy(dec); return MakeError(77); }
+
+  size_t tile_buf_cap = static_cast<size_t>(tile_size) * tile_size * 4u;
+  uint8_t* tile_buf   = static_cast<uint8_t*>(malloc(tile_buf_cap));
+  if (tile_buf == nullptr) { free(out_pixels); JxlDecoderDestroy(dec); return MakeError(78); }
+
+  JxlPixelFormat pf = {4, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
+
+  // Walk overlapping tiles in row-major order; SkipFrames between non-adjacent ones.
+  uint32_t cursor_idx = 0;
+  for (uint32_t ty = ty_min; ty <= ty_max; ++ty) {
+    for (uint32_t tx = tx_min; tx <= tx_max; ++tx) {
+      const uint32_t target_idx = ty * tiles_x + tx;
+      if (target_idx > cursor_idx) {
+        JxlDecoderSkipFrames(dec, target_idx - cursor_idx);
+      }
+
+      uint32_t tile_x0 = 0, tile_y0 = 0, tile_w = 0, tile_h = 0;
+      bool got_image = false;
+      while (!got_image) {
+        JxlDecoderStatus st = JxlDecoderProcessInput(dec);
+        if (st == JXL_DEC_FRAME) {
+          JxlFrameHeader fh{};
+          if (JxlDecoderGetFrameHeader(dec, &fh) == JXL_DEC_SUCCESS) {
+            tile_x0 = static_cast<uint32_t>(fh.layer_info.crop_x0);
+            tile_y0 = static_cast<uint32_t>(fh.layer_info.crop_y0);
+            tile_w  = fh.layer_info.xsize;
+            tile_h  = fh.layer_info.ysize;
+          }
+          continue;
+        }
+        if (st == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
+          size_t buf_size = 0;
+          if (JxlDecoderImageOutBufferSize(dec, &pf, &buf_size) != JXL_DEC_SUCCESS) {
+            free(tile_buf); free(out_pixels); JxlDecoderDestroy(dec); return MakeError(79);
+          }
+          if (buf_size > tile_buf_cap) {
+            uint8_t* grown = static_cast<uint8_t*>(realloc(tile_buf, buf_size));
+            if (grown == nullptr) {
+              free(tile_buf); free(out_pixels); JxlDecoderDestroy(dec); return MakeError(80);
+            }
+            tile_buf     = grown;
+            tile_buf_cap = buf_size;
+          }
+          if (JxlDecoderSetImageOutBuffer(dec, &pf, tile_buf, tile_buf_cap) != JXL_DEC_SUCCESS) {
+            free(tile_buf); free(out_pixels); JxlDecoderDestroy(dec); return MakeError(81);
+          }
+          continue;
+        }
+        if (st == JXL_DEC_FULL_IMAGE) { got_image = true; break; }
+        if (st == JXL_DEC_ERROR || st == JXL_DEC_NEED_MORE_INPUT || st == JXL_DEC_SUCCESS) {
+          free(tile_buf); free(out_pixels); JxlDecoderDestroy(dec); return MakeError(82);
+        }
+      }
+      cursor_idx = target_idx + 1;
+
+      // Composite tile pixels into the output region. Overlap is in image coords.
+      const uint32_t ox0 = std::max(tile_x0, rx);
+      const uint32_t oy0 = std::max(tile_y0, ry);
+      const uint32_t ox1 = std::min(tile_x0 + tile_w, rx + rw);
+      const uint32_t oy1 = std::min(tile_y0 + tile_h, ry + rh);
+      if (ox1 <= ox0 || oy1 <= oy0) continue;
+      const uint32_t ow = ox1 - ox0;
+      const uint32_t oh = oy1 - oy0;
+
+      for (uint32_t row = 0; row < oh; ++row) {
+        const uint8_t* src = tile_buf   + ((oy0 - tile_y0 + row) * tile_w + (ox0 - tile_x0)) * 4u;
+        uint8_t*       dst = out_pixels + ((oy0 - ry      + row) * rw     + (ox0 - rx))      * 4u;
+        memcpy(dst, src, ow * 4u);
+      }
+    }
+  }
+
+  free(tile_buf);
+  JxlDecoderDestroy(dec);
+  return MakeBufferFromOwned(out_pixels, out_size, rw, rh, 8, 1);
+}
+
 extern "C" {
 
 void jxl_wasm_bridge_anchor(void) {}
@@ -998,6 +1266,27 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_s
     JxlEncoderDestroy(enc);
     return MakeError(static_cast<int>(status));
   }
+}
+
+// --- Tiled ROI exports ---
+
+// Encode RGBA8 as a tiled multi-frame JXL. Each frame is one tile of
+// tile_size × tile_size pixels (edges clipped) carrying layer_info.have_crop.
+// Decode using jxl_wasm_decode_region_tiled_rgba8 below — the same tile_size
+// must be passed back on decode.
+JxlWasmBuffer* jxl_wasm_encode_tiled_rgba8(const uint8_t* pixels,
+    uint32_t width, uint32_t height, uint32_t tile_size,
+    float distance, uint32_t effort, uint32_t has_alpha) {
+  return EncodeRgba8Tiled(pixels, width, height, tile_size, distance, effort, has_alpha);
+}
+
+// Decode only the tiles overlapping `[region_x, region_x+region_w) ×
+// [region_y, region_y+region_h)`. Composites them into a tightly-packed
+// RGBA8 buffer with width=clamped_w, height=clamped_h.
+JxlWasmBuffer* jxl_wasm_decode_region_tiled_rgba8(const uint8_t* input, size_t input_size,
+    uint32_t tile_size, uint32_t region_x, uint32_t region_y,
+    uint32_t region_w, uint32_t region_h) {
+  return DecodeRgba8RegionTiled(input, input_size, tile_size, region_x, region_y, region_w, region_h);
 }
 
 }

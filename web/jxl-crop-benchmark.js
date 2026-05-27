@@ -1,5 +1,10 @@
 import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
-import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import {
+    createDecoder,
+    createEncoder,
+    encodeTiledRgba8,
+    decodeTiledRegionRgba8,
+} from '@casabio/jxl-wasm';
 
 // Log-scaled display width for each crop size (120px–400px range).
 function logDisplayWidth(px) {
@@ -19,45 +24,92 @@ function shuffled(arr) {
 
 // --- State ---
 
-let orfFiles   = [];   // File[] from file input
+let orfFiles   = [];
 let wasmReady  = false;
 let running    = false;
 let abortController = null;
 
 // --- DOM refs ---
 
-const orfFileInput       = document.getElementById('orf-file-input');
-const btnRun             = document.getElementById('btn-run');
-const btnClear           = document.getElementById('btn-clear');
-const folderLabel        = document.getElementById('folder-label');
-const fileCountInput     = document.getElementById('file-count');
-const encodeEffortInput  = document.getElementById('encode-effort');
+const orfFileInput        = document.getElementById('orf-file-input');
+const btnRun              = document.getElementById('btn-run');
+const btnClear            = document.getElementById('btn-clear');
+const btnConsole          = document.getElementById('btn-console');
+const btnConsoleClear     = document.getElementById('btn-console-clear');
+const fileCountInput      = document.getElementById('file-count');
+const encodeEffortInput   = document.getElementById('encode-effort');
 const encodeDistanceInput = document.getElementById('encode-distance');
-const wasmStatusEl       = document.getElementById('wasm-status');
-const statusFolder       = document.getElementById('status-folder');
-const statusProgress     = document.getElementById('status-progress');
-const statusFile         = document.getElementById('status-file');
-const statusStage        = document.getElementById('status-stage');
-const resultsEl          = document.getElementById('crop-results');
+const tileSizeInput       = document.getElementById('tile-size');
+const compareFullInput    = document.getElementById('compare-full');
+const wasmStatusEl        = document.getElementById('wasm-status');
+const statusFolder        = document.getElementById('status-folder');
+const statusProgress      = document.getElementById('status-progress');
+const statusFile          = document.getElementById('status-file');
+const statusStage         = document.getElementById('status-stage');
+const resultsEl           = document.getElementById('crop-results');
+const consolePanelEl      = document.getElementById('console-panel');
+const consoleOutputEl     = document.getElementById('console-output');
 
-function setWasmStatus(text)     { wasmStatusEl.textContent    = text; }
-function setStatusProgress(text) { statusProgress.textContent  = text; }
-function setStatusFile(text)     { statusFile.textContent      = text; }
-function setStatusStage(text)    { statusStage.textContent     = text; }
-function setStatusFolder(text)   { statusFolder.textContent    = text; }
+function setWasmStatus(text)     { wasmStatusEl.textContent   = text; }
+function setStatusProgress(text) { statusProgress.textContent = text; }
+function setStatusFile(text)     { statusFile.textContent     = text; }
+function setStatusStage(text)    { statusStage.textContent    = text; }
+function setStatusFolder(text)   { statusFolder.textContent   = text; }
+
+// --- Console panel ---
+
+let consolePanelOpen = false;
+
+function logToPanel(level, args) {
+    const line = document.createElement('div');
+    line.className = 'console-line console-line--' + level;
+    line.textContent = args.map(a => {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch { return String(a); }
+    }).join(' ');
+    consoleOutputEl.appendChild(line);
+    consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
+}
+
+const _log   = console.log.bind(console);
+const _warn  = console.warn.bind(console);
+const _error = console.error.bind(console);
+const _group = console.group.bind(console);
+const _groupEnd = console.groupEnd.bind(console);
+
+console.log   = (...a) => { _log(...a);   logToPanel('log',   a); };
+console.warn  = (...a) => { _warn(...a);  logToPanel('warn',  a); };
+console.error = (...a) => { _error(...a); logToPanel('error', a); };
+console.group = (...a) => {
+    _group(...a);
+    const line = document.createElement('div');
+    line.className = 'console-line console-line--group';
+    line.textContent = '▶ ' + a.join(' ');
+    consoleOutputEl.appendChild(line);
+    consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
+};
+console.groupEnd = (...a) => { _groupEnd(...a); };
+
+btnConsole.addEventListener('click', () => {
+    consolePanelOpen = !consolePanelOpen;
+    consolePanelEl.hidden = !consolePanelOpen;
+    btnConsole.classList.toggle('is-active', consolePanelOpen);
+});
+
+btnConsoleClear.addEventListener('click', () => {
+    consoleOutputEl.textContent = '';
+});
 
 // --- File picker ---
 
 orfFileInput.addEventListener('change', () => {
     orfFiles = Array.from(orfFileInput.files).filter(f => /\.orf$/i.test(f.name));
     if (!orfFiles.length) {
-        folderLabel.textContent = 'No ORF files in selection';
-        setStatusFolder('—');
+        setStatusFolder('No ORF files in selection');
         btnRun.disabled = true;
         return;
     }
-    folderLabel.textContent = `${orfFiles.length} ORF file${orfFiles.length !== 1 ? 's' : ''} selected`;
-    setStatusFolder(`${orfFiles.length} files`);
+    setStatusFolder(`${orfFiles.length} ORF file${orfFiles.length !== 1 ? 's' : ''} selected`);
     btnRun.disabled = !wasmReady;
 });
 
@@ -73,7 +125,10 @@ function concatChunks(chunks) {
     return out;
 }
 
-async function encodeToJxl(rgba, width, height, effort, distance) {
+/**
+ * Non-tiled (standard) JXL encode — for comparison decode timings.
+ */
+async function encodeStandard(rgba, width, height, effort, distance) {
     const encoder = createEncoder({
         format: 'rgba8', width, height, hasAlpha: true,
         iccProfile: null, exif: null, xmp: null,
@@ -94,21 +149,23 @@ async function encodeToJxl(rgba, width, height, effort, distance) {
     return concatChunks(chunks);
 }
 
-function pickDecodeDownsample(sourceWidth, sourceHeight, targetLongEdge) {
-    const longer = Math.max(sourceWidth, sourceHeight);
-    for (const factor of [8, 4, 2]) {
-        if (Math.ceil(longer / factor) >= targetLongEdge) return factor;
-    }
-    return 1;
-}
+/**
+ * Full-image decode + JS crop — the slow baseline for comparison.
+ * Decodes the entire JXL, then memcpys the requested region.
+ */
+async function decodeFullThenCrop(jxlBytes, sourceWidth, sourceHeight, targetSize) {
+    const half = Math.floor(targetSize / 2);
+    const cx   = Math.floor(sourceWidth  / 2);
+    const cy   = Math.floor(sourceHeight / 2);
+    const x    = Math.max(0, cx - half);
+    const y    = Math.max(0, cy - half);
+    const w    = Math.min(targetSize, sourceWidth  - x);
+    const h    = Math.min(targetSize, sourceHeight - y);
 
-async function decodeAtSize(jxlBytes, sourceWidth, sourceHeight, targetSize) {
     const decoder = createDecoder({
         format: 'rgba8',
-        downsample: pickDecodeDownsample(sourceWidth, sourceHeight, targetSize),
-        targetWidth: targetSize,
-        targetHeight: targetSize,
-        fitMode: 'contain',
+        region: { x, y, w, h },
+        downsample: 1,
         progressionTarget: 'final',
         emitEveryPass: false,
         preserveIcc: false,
@@ -130,6 +187,24 @@ async function decodeAtSize(jxlBytes, sourceWidth, sourceHeight, targetSize) {
     await decoder.dispose();
     if (!result) throw new Error('no final frame emitted');
     return result;
+}
+
+/**
+ * True ROI decode using the tile bridge:
+ * - jxlBytes must be a tiled JXL produced by encodeTiledRgba8
+ * - decoder uses SetCoalescing(false) + SkipFrames internally
+ * - only overlapping tiles are decompressed
+ */
+async function decodeTileRegion(jxlBytes, tileSize, sourceWidth, sourceHeight, targetSize) {
+    const half = Math.floor(targetSize / 2);
+    const cx   = Math.floor(sourceWidth  / 2);
+    const cy   = Math.floor(sourceHeight / 2);
+    const x    = Math.max(0, cx - half);
+    const y    = Math.max(0, cy - half);
+    const w    = Math.min(targetSize, sourceWidth  - x);
+    const h    = Math.min(targetSize, sourceHeight - y);
+
+    return decodeTiledRegionRgba8(jxlBytes, { tileSize, x, y, w, h });
 }
 
 // --- UI result rows ---
@@ -183,8 +258,13 @@ function createFileRow(fileName, imgWidth, imgHeight, sizes) {
         timing.textContent = '—';
         card.appendChild(timing);
 
+        const compareTiming = document.createElement('div');
+        compareTiming.className = 'crop-timing-encode';
+        compareTiming.textContent = '';
+        card.appendChild(compareTiming);
+
         strip.appendChild(card);
-        cards[size] = { wrap, placeholder, timing };
+        cards[size] = { wrap, placeholder, timing, compareTiming };
     }
 
     resultsEl.insertBefore(row, resultsEl.firstChild);
@@ -204,15 +284,13 @@ function paintCrop(slot, pixels, width, height, decodeMs, reqW, reqH) {
     slot.placeholder.remove();
     slot.wrap.appendChild(canvas);
 
-    slot.timing.textContent  = `${decodeMs.toFixed(1)} ms`;
+    slot.timing.textContent  = `tile ${decodeMs.toFixed(1)} ms`;
     slot.timing.className    = decodeMs < 80 ? 'crop-timing is-fast' : decodeMs > 400 ? 'crop-timing is-slow' : 'crop-timing';
+}
 
-    if (reqW !== width || reqH !== height) {
-        const note = document.createElement('div');
-        note.className   = 'crop-timing-encode';
-        note.textContent = `(output ${width}×${height})`;
-        slot.timing.after(note);
-    }
+function showCompareTiming(slot, tileMs, fullMs) {
+    const speedup = fullMs / tileMs;
+    slot.compareTiming.textContent = `full ${fullMs.toFixed(1)} ms  (${speedup.toFixed(1)}× faster)`;
 }
 
 function markSkipped(slot, reason) {
@@ -233,10 +311,12 @@ async function runBenchmark() {
     btnRun.textContent  = 'Stop';
     btnClear.disabled   = true;
 
-    const fileCount = Math.max(1, Math.min(20, Number(fileCountInput.value)      || 3));
-    const effort    = Math.max(1, Math.min(9,  Number(encodeEffortInput.value)   || 3));
-    const distance  = Math.max(0, Math.min(25, Number(encodeDistanceInput.value) || 1.0));
-    const sizes     = getSelectedSizes();
+    const fileCount   = Math.max(1, Math.min(20,   Number(fileCountInput.value)       || 3));
+    const effort      = Math.max(1, Math.min(9,    Number(encodeEffortInput.value)    || 3));
+    const distance    = Math.max(0, Math.min(25,   Number(encodeDistanceInput.value)  || 1.0));
+    const tileSize    = Math.max(64, Math.min(2048, Number(tileSizeInput.value)        || 512));
+    const compareFull = compareFullInput.checked;
+    const sizes       = getSelectedSizes();
 
     if (!sizes.length) { setStatusProgress('No crop sizes selected.'); endRun(); return; }
 
@@ -274,42 +354,86 @@ async function runBenchmark() {
             continue;
         }
 
-        setStatusStage('Encoding JXL…');
-        const t0enc = performance.now();
-        let jxlBytes;
+        // Encode tiled JXL (ROI-decodable) + optional standard JXL for comparison.
+        setStatusStage(`Encoding tiled JXL (${tileSize}px tiles)…`);
+        const t0tiled = performance.now();
+        let tiledBytes;
         try {
-            jxlBytes = await encodeToJxl(rgba, imgWidth, imgHeight, effort, distance);
+            tiledBytes = await encodeTiledRgba8(rgba, imgWidth, imgHeight, {
+                tileSize, distance, effort, hasAlpha: true,
+            });
         } catch (err) {
-            console.error('Encode error:', file.name, err);
-            setStatusStage(`Encode error: ${err.message}`);
+            console.error('Tiled encode error:', file.name, err);
+            setStatusStage(`Tiled encode error: ${err.message}`);
             continue;
         }
-        const encodeMs = performance.now() - t0enc;
+        const tiledEncodeMs = performance.now() - t0tiled;
+
+        let standardBytes = null;
+        let standardEncodeMs = 0;
+        if (compareFull) {
+            setStatusStage('Encoding standard JXL (comparison)…');
+            const t0std = performance.now();
+            try {
+                standardBytes = await encodeStandard(rgba, imgWidth, imgHeight, effort, distance);
+            } catch (err) {
+                console.warn('Standard encode error (comparison skipped):', err);
+            }
+            standardEncodeMs = performance.now() - t0std;
+        }
+
+        const tilesX = Math.ceil(imgWidth  / tileSize);
+        const tilesY = Math.ceil(imgHeight / tileSize);
+        const totalTiles = tilesX * tilesY;
 
         const { cards, meta } = createFileRow(file.name, imgWidth, imgHeight, sizes);
-        meta.textContent = `${imgWidth} × ${imgHeight} px  ·  encode ${encodeMs.toFixed(0)} ms  ·  ${(jxlBytes.byteLength / 1024).toFixed(0)} KB`;
+        const tiledKb = (tiledBytes.byteLength / 1024).toFixed(0);
+        const stdSuffix = standardBytes ? `  ·  standard ${(standardBytes.byteLength / 1024).toFixed(0)} KB / ${standardEncodeMs.toFixed(0)} ms` : '';
+        meta.textContent = `${imgWidth} × ${imgHeight} px  ·  ${tilesX}×${tilesY}=${totalTiles} tiles  ·  tiled ${tiledKb} KB / ${tiledEncodeMs.toFixed(0)} ms${stdSuffix}`;
 
         console.group(`Crop benchmark: ${file.name}`);
-        console.log(`${imgWidth}×${imgHeight}  encode ${encodeMs.toFixed(1)} ms  JXL ${(jxlBytes.byteLength / 1024).toFixed(0)} KB`);
+        console.log(`${imgWidth}×${imgHeight}  tiles=${tilesX}×${tilesY}  tiledKB=${tiledKb}  encodeTiledMs=${tiledEncodeMs.toFixed(1)}`);
 
         for (const size of sizes) {
             if (signal.aborted) break;
 
-            setStatusStage(`Decode ${size} px…`);
+            if (size >= imgWidth && size >= imgHeight) {
+                console.log(`  ${size}px: skipped (≥ full image)`);
+                markSkipped(cards[size], '≥ full image');
+                continue;
+            }
+
+            setStatusStage(`Tile region ${size}px…`);
 
             const t0 = performance.now();
             let decoded;
             try {
-                decoded = await decodeAtSize(jxlBytes, imgWidth, imgHeight, size);
+                decoded = await decodeTileRegion(tiledBytes, tileSize, imgWidth, imgHeight, size);
             } catch (err) {
-                console.error(`${size}px:`, err);
+                console.error(`  ${size}px tile region:`, err);
                 markSkipped(cards[size], 'error');
                 continue;
             }
-            const decodeMs = performance.now() - t0;
+            const tileMs = performance.now() - t0;
 
-            paintCrop(cards[size], decoded.pixels, decoded.width, decoded.height, decodeMs, size, size);
-            console.log(`  ${size}px → ${decoded.width}×${decoded.height}: ${decodeMs.toFixed(1)} ms`);
+            paintCrop(cards[size], decoded.pixels, decoded.width, decoded.height, tileMs, size, size);
+
+            // Comparison: full decode of standard JXL + JS crop
+            if (compareFull && standardBytes) {
+                setStatusStage(`Full decode ${size}px (compare)…`);
+                const t1 = performance.now();
+                try {
+                    await decodeFullThenCrop(standardBytes, imgWidth, imgHeight, size);
+                    const fullMs = performance.now() - t1;
+                    showCompareTiming(cards[size], tileMs, fullMs);
+                    console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms  vs full ${fullMs.toFixed(1)} ms  (${(fullMs / tileMs).toFixed(1)}×)`);
+                } catch (err) {
+                    console.warn(`  ${size}px full-decode comparison failed:`, err);
+                    console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms`);
+                }
+            } else {
+                console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms`);
+            }
 
             await new Promise(r => setTimeout(r, 0));
         }

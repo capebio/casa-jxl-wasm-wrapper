@@ -53,9 +53,14 @@
                 <div class="control-row">
                     <label class="secondary-btn" for="orf-file-input" style="cursor:pointer;">Pick ORF files…</label>
                     <input id="orf-file-input" type="file" multiple accept=".orf,.ORF" hidden />
-                    <span id="folder-label" class="folder-label">No files selected</span>
                     <button id="btn-run" class="primary-btn" type="button" disabled>Run</button>
                     <button id="btn-clear" class="secondary-btn" type="button" disabled>Clear</button>
+                    <button id="btn-console" class="secondary-btn" type="button">Console</button>
+                    <span class="status-inline-sep"></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Folder</span><strong id="status-folder">No files selected</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Progress</span><strong id="status-progress">Idle</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">File</span><strong id="status-file">—</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Stage</span><strong id="status-stage">—</strong></span>
                 </div>
 
                 <div class="settings-inline">
@@ -72,9 +77,14 @@
                             <label class="spinbox-label" for="encode-distance">Distance</label>
                             <input id="encode-distance" class="spinbox" type="number" min="0" max="25" step="0.1" value="1.0" />
                         </div>
-                    </div>
-
-                    <div class="sizes-inline">
+                        <div class="spinbox-inline-group">
+                            <label class="spinbox-label" for="tile-size">Tile px</label>
+                            <input id="tile-size" class="spinbox" type="number" min="64" max="2048" step="64" value="512" />
+                        </div>
+                        <div class="spinbox-inline-group">
+                            <label class="spinbox-label" for="compare-full"><input id="compare-full" type="checkbox" checked /> vs full-decode</label>
+                        </div>
+                        <span class="status-inline-sep"></span>
                         <span class="sizes-label">Crop sizes (px, centred):</span>
                         <div class="sizes-buttons">
                             <label class="size-btn"><input type="checkbox" name="crop-size" value="128" checked /><span>128</span></label>
@@ -88,24 +98,13 @@
             </div>
         </section>
 
-        <section class="status-grid compact" aria-label="Status">
-            <div class="status-card">
-                <span class="label">Folder</span>
-                <strong id="status-folder">—</strong>
+        <div id="console-panel" class="console-panel" hidden>
+            <div class="console-toolbar">
+                <span class="console-title">Console</span>
+                <button id="btn-console-clear" class="console-clear-btn" type="button">Clear</button>
             </div>
-            <div class="status-card">
-                <span class="label">Progress</span>
-                <strong id="status-progress">Idle</strong>
-            </div>
-            <div class="status-card">
-                <span class="label">File</span>
-                <strong id="status-file">—</strong>
-            </div>
-            <div class="status-card">
-                <span class="label">Stage</span>
-                <strong id="status-stage">—</strong>
-            </div>
-        </section>
+            <pre id="console-output" class="console-output"></pre>
+        </div>
 
         <section class="crop-results-shell">
             <header class="crop-results-header">
