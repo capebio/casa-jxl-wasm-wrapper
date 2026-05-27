@@ -413,9 +413,14 @@ async function runProgressivePaintTest() {
         const size = getProgSize();
         const quality = getProgQuality();
         const requestedPassCount = getRequestedPassCount();
-        const progressiveDetail = getRequestedProgressiveDetail(requestedPassCount);
+        const detailChoice = document.querySelector('input[name="prog-detail"]:checked')?.value ?? 'auto';
+        const progressiveDetail = detailChoice === 'auto'
+            ? getRequestedProgressiveDetail(requestedPassCount)
+            : detailChoice;
         const previewFirst = !!(document.getElementById('prog-preview-first')?.checked);
-        const progressiveFlavor = getRequestedProgressiveFlavor(requestedPassCount, previewFirst);
+        const progressiveFlavor = (detailChoice !== 'auto' && detailChoice !== 'dc')
+            ? 'ac'
+            : getRequestedProgressiveFlavor(requestedPassCount, previewFirst);
 
         setProgStatus(`Resizing to ${size === 'fullsize' ? 'full' : size + 'px'}…`);
         const resized = resizeRgba(selectedSource.rgba, selectedSource.width, selectedSource.height, size);
@@ -433,9 +438,6 @@ async function runProgressivePaintTest() {
             progressiveFlavor,
             previewFirst,
             chunked: false,
-            modular: false,
-            brotliEffort: 9,
-            copyInput: true,
         });
         const encChunks = [];
         const chunkTask = (async () => {
