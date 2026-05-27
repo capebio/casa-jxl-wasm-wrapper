@@ -1,0 +1,82 @@
+import { describe, expect, test } from "bun:test";
+import { createDecoder, createEncoder, type DecodeEvent } from "../src/index";
+
+const nativeIncludeDir =
+  "C:\\Foo\\raw-converter\\target\\release\\build\\jpegxl-sys-26f294f2024eaecb\\out\\include";
+const nativeLibDir =
+  "C:\\Foo\\raw-converter\\target\\release\\build\\jpegxl-sys-26f294f2024eaecb\\out\\lib";
+
+function asUint8Array(value: ArrayBuffer | Uint8Array): Uint8Array {
+  return value instanceof Uint8Array ? value : new Uint8Array(value);
+}
+
+function concat(chunks: Array<ArrayBuffer | Uint8Array>): Uint8Array {
+  const views = chunks.map(asUint8Array);
+  const size = views.reduce((total, chunk) => total + chunk.byteLength, 0);
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of views) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+describe("@casabio/jxl-native real codec", () => {
+  test("round-trips a 2x2 rgba8 image through libjxl", async () => {
+    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
+    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
+    const pixels = new Uint8Array([
+      255, 0, 0, 255,
+      0, 255, 0, 255,
+      0, 0, 255, 255,
+      255, 255, 255, 255,
+    ]);
+
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: 2,
+      height: 2,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 0,
+      quality: null,
+      effort: 3,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+    });
+
+    await encoder.pushPixels(pixels);
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+    expect(encoded.byteLength).toBeGreaterThan(0);
+
+    const decoder = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: true,
+      preserveMetadata: true,
+    });
+
+    await decoder.push(encoded);
+    await decoder.close();
+    const events = await Array.fromAsync(decoder.events());
+    const final = events.find((event): event is Extract<DecodeEvent, { type: "final" }> => event.type === "final");
+
+    expect(final).toBeDefined();
+    expect(final?.info.width).toBe(2);
+    expect(final?.info.height).toBe(2);
+    expect(final?.pixels.byteLength).toBe(2 * 2 * 4);
+    const decoded = asUint8Array(final!.pixels);
+    for (let i = 0; i < pixels.byteLength; i += 1) {
+      expect(Math.abs(decoded[i]! - pixels[i]!)).toBeLessThanOrEqual(2);
+    }
+  });
+});

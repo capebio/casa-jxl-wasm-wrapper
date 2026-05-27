@@ -195,7 +195,7 @@ async function decodeFullThenCrop(jxlBytes, sourceWidth, sourceHeight, targetSiz
  * - decoder uses SetCoalescing(false) + SkipFrames internally
  * - only overlapping tiles are decompressed
  */
-async function decodeTileRegion(jxlBytes, tileSize, sourceWidth, sourceHeight, targetSize) {
+async function decodeTileRegion(jxlBytes, tileSize, sourceWidth, sourceHeight, targetSize, onMetric) {
     const half = Math.floor(targetSize / 2);
     const cx   = Math.floor(sourceWidth  / 2);
     const cy   = Math.floor(sourceHeight / 2);
@@ -204,7 +204,7 @@ async function decodeTileRegion(jxlBytes, tileSize, sourceWidth, sourceHeight, t
     const w    = Math.min(targetSize, sourceWidth  - x);
     const h    = Math.min(targetSize, sourceHeight - y);
 
-    return decodeTiledRegionRgba8(jxlBytes, { tileSize, x, y, w, h });
+    return decodeTiledRegionRgba8(jxlBytes, { tileSize, x, y, w, h, onMetric });
 }
 
 // --- UI result rows ---
@@ -407,8 +407,11 @@ async function runBenchmark() {
 
             const t0 = performance.now();
             let decoded;
+            const metrics = {};
             try {
-                decoded = await decodeTileRegion(tiledBytes, tileSize, imgWidth, imgHeight, size);
+                decoded = await decodeTileRegion(tiledBytes, tileSize, imgWidth, imgHeight, size, (name, value) => {
+                    metrics[name] = value;
+                });
             } catch (err) {
                 console.error(`  ${size}px tile region:`, err);
                 markSkipped(cards[size], 'error');

@@ -1,0 +1,14 @@
+C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\release\deps\thiserror-053937e61aaa35cc.d: C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\release\build\thiserror-92ae9b635199a01b\out/private.rs
+
+C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\release\deps\libthiserror-053937e61aaa35cc.rlib: C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\release\build\thiserror-92ae9b635199a01b\out/private.rs
+
+C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\release\deps\libthiserror-053937e61aaa35cc.rmeta: C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\release\build\thiserror-92ae9b635199a01b\out/private.rs
+
+C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\lib.rs:
+C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\aserror.rs:
+C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\display.rs:
+C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\var.rs:
+C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-2.0.18\src\private.rs:
+C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\release\build\thiserror-92ae9b635199a01b\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Foo\\raw-converter-wasm\\target\\wasm32-unknown-unknown\\release\\build\\thiserror-92ae9b635199a01b\\out

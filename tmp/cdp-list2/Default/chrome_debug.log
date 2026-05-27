@@ -1,0 +1,19 @@
+[0520/222529.498:FATAL:mojo\public\cpp\platform\platform_channel.cc:108] Check failed: . : Access is denied. (0x5)
+[0520/222529.506:ERROR:content\browser\network_sandbox.cc:385] Failed to grant sandbox access to cache directory C:\foo\raw-converter-wasm\tmp\cdp-list2\Default\Cache\Cache_Data: Access is denied. (0x5)
+[0520/222529.507:ERROR:content\browser\network_sandbox.cc:318] Failed to grant sandbox access to NoVarySearch directory C:\foo\raw-converter-wasm\tmp\cdp-list2\Default\Cache\No_Vary_Search: Access is denied. (0x5)
+[0520/222529.507:ERROR:content\browser\network_sandbox.cc:318] Failed to grant sandbox access to SharedDictionary directory C:\foo\raw-converter-wasm\tmp\cdp-list2\Default\Shared Dictionary: Access is denied. (0x5)
+[0520/222529.509:ERROR:content\browser\network_sandbox.cc:490] Failed to grant sandbox access to network context data directory C:\foo\raw-converter-wasm\tmp\cdp-list2\Default\Network: Access is denied. (0x5)
+[0520/222529.514:ERROR:net\disk_cache\blockfile\backend_impl.cc:1446] Unable to map Index file
+[0520/222529.516:ERROR:net\disk_cache\blockfile\backend_impl.cc:1446] Unable to map Index file
+[0520/222529.518:ERROR:net\disk_cache\blockfile\backend_impl.cc:1446] Unable to map Index file
+[0520/222529.519:ERROR:content\browser\network_service_instance_impl.cc:333] Encountered error while migrating network context data or granting sandbox access for C:\foo\raw-converter-wasm\tmp\cdp-list2\Default\Network. Result: 6: The operation completed successfully. (0x0)
+[0520/222529.520:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: Access is denied. (0x5)
+[0520/222529.520:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: Access is denied. (0x5)
+[0520/222529.521:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: Access is denied. (0x5)
+[0520/222529.521:ERROR:net\disk_cache\disk_cache.cc:284] Unable to create cache
+[0520/222529.521:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+[0520/222529.521:ERROR:net\disk_cache\disk_cache.cc:284] Unable to create cache
+[0520/222529.521:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+[0520/222529.522:ERROR:net\disk_cache\disk_cache.cc:284] Unable to create cache
+[0520/222529.522:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+[0520/222530.536:WARNING:components\leveldb_proto\internal\leveldb_database.cc:124] Unable to open C:\foo\raw-converter-wasm\tmp\cdp-list2\Default\shared_proto_db\metadata: IO error: C:\foo\raw-converter-wasm\tmp\cdp-list2\Default\shared_proto_db\metadata/000001.dbtmp: Could not rename file: Access denied. (ChromeMethodBFE: 14::RenameFile::5)

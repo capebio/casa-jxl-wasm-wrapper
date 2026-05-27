@@ -1,0 +1,8 @@
+[0520/225236.810:FATAL:mojo\public\cpp\platform\platform_channel.cc:108] Check failed: . : Access is denied. (0x5)
+[0520/225236.819:ERROR:content\browser\network_sandbox.cc:385] Failed to grant sandbox access to cache directory C:\Users\User\AppData\Local\Temp\rtk-headless-9349\Default\Cache\Cache_Data: Access is denied. (0x5)
+[0520/225236.821:ERROR:content\browser\network_sandbox.cc:318] Failed to grant sandbox access to NoVarySearch directory C:\Users\User\AppData\Local\Temp\rtk-headless-9349\Default\Cache\No_Vary_Search: Access is denied. (0x5)
+[0520/225236.824:ERROR:content\browser\network_sandbox.cc:318] Failed to grant sandbox access to SharedDictionary directory C:\Users\User\AppData\Local\Temp\rtk-headless-9349\Default\Shared Dictionary: Access is denied. (0x5)
+[0520/225236.826:ERROR:content\browser\network_sandbox.cc:490] Failed to grant sandbox access to network context data directory C:\Users\User\AppData\Local\Temp\rtk-headless-9349\Default\Network: Access is denied. (0x5)
+
+DevTools listening on ws://127.0.0.1:9349/devtools/browser/0ea153cb-54f8-40a3-ab17-ce60c2b38cae
+[0520/225236.835:ERROR:content\browser\network_service_instance_impl.cc:333] Encountered error while migrating network context data or granting sandbox access for C:\Users\User\AppData\Local\Temp\rtk-headless-9349\Default\Network. Result: 6: The operation completed successfully. (0x0)

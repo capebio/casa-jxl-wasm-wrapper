@@ -1,0 +1,16 @@
+26 |     ".jpg":  "image/jpeg",
+27 |     ".svg":  "image/svg+xml",
+28 |     ".ts":   "application/typescript",
+29 | };
+30 | 
+31 | serve({
+     ^
+error: Failed to start server. Is port 9000 in use?
+ syscall: "listen",
+   errno: 0,
+    code: "EADDRINUSE"
+
+      at C:\Foo\raw-converter-wasm\serve.ts:31:1
+      at loadAndEvaluateModule (2:1)
+
+Bun v1.3.13 (Windows x64)

@@ -1,0 +1,1 @@
+C:\Foo\raw-converter-wasm\target\wasm32-unknown-unknown\debug\raw_converter_wasm.wasm: C:\Foo\raw-converter-wasm\src\decompress.rs C:\Foo\raw-converter-wasm\src\demosaic.rs C:\Foo\raw-converter-wasm\src\lib.rs C:\Foo\raw-converter-wasm\src\pipeline.rs C:\Foo\raw-converter-wasm\src\tiff.rs

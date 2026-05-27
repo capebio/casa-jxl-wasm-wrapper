@@ -1,0 +1,188 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 570B 0.0s done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/emscripten/emsdk:4.0.13
+#2 ...
+
+#3 [auth] emscripten/emsdk:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/emscripten/emsdk:4.0.13
+#2 DONE 2.4s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/3] FROM docker.io/emscripten/emsdk:4.0.13@sha256:520088b81877b610389dfd4cf7fb8c69f3ae41a611b0f80e222f57dafd930973
+#5 resolve docker.io/emscripten/emsdk:4.0.13@sha256:520088b81877b610389dfd4cf7fb8c69f3ae41a611b0f80e222f57dafd930973 0.0s done
+#5 DONE 0.0s
+
+#6 [2/3] RUN apt-get update   && apt-get install -y --no-install-recommends     ca-certificates     cmake     git     ninja-build     perl     pkg-config     python3   && rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [3/3] WORKDIR /work/jxl-wasm
+#7 CACHED
+
+#8 exporting to image
+#8 exporting layers done
+#8 exporting manifest sha256:3bb514c968745f47892c801214e2082582ededdc7d3b6a816d1434ca27a6e608 done
+#8 exporting config sha256:df67b9158f9380e4c10fe60694042f78c196d96f7f7944e6609393d502d81265 done
+#8 exporting attestation manifest sha256:a30972b9ddc50cb6ac0e972acb8492b975fd6b1a03969d5f5fa0653fa6bd3728 0.1s done
+#8 exporting manifest list sha256:19a8ef7badbde1e309107300ee03dd4740898659848f492781f5c857b91b45a9
+#8 exporting manifest list sha256:19a8ef7badbde1e309107300ee03dd4740898659848f492781f5c857b91b45a9 0.0s done
+#8 naming to docker.io/library/jxl-wasm-builder:local done
+#8 unpacking to docker.io/library/jxl-wasm-builder:local 0.0s done
+#8 DONE 0.2s
+Cloning into '/tmp/jxl-wasm-work/libjxl'...
+Note: switching to '332feb17d17311c748445f7ee75c4fb55cc38530'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+Submodule 'third_party/testdata' (https://github.com/libjxl/testdata) registered for path 'testdata'
+Submodule 'third_party/brotli' (https://github.com/google/brotli) registered for path 'third_party/brotli'
+Submodule 'third_party/googletest' (https://github.com/google/googletest) registered for path 'third_party/googletest'
+Submodule 'third_party/highway' (https://github.com/google/highway) registered for path 'third_party/highway'
+Submodule 'third_party/lcms' (https://github.com/mm2/Little-CMS) registered for path 'third_party/lcms'
+Submodule 'third_party/libjpeg-turbo' (https://github.com/libjpeg-turbo/libjpeg-turbo.git) registered for path 'third_party/libjpeg-turbo'
+Submodule 'third_party/libpng' (https://github.com/glennrp/libpng.git) registered for path 'third_party/libpng'
+Submodule 'third_party/sjpeg' (https://github.com/webmproject/sjpeg.git) registered for path 'third_party/sjpeg'
+Submodule 'third_party/skcms' (https://skia.googlesource.com/skcms) registered for path 'third_party/skcms'
+Submodule 'third_party/zlib' (https://github.com/madler/zlib.git) registered for path 'third_party/zlib'
+Cloning into '/tmp/jxl-wasm-work/libjxl/testdata'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/brotli'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/googletest'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/highway'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/lcms'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/libjpeg-turbo'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/libpng'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/sjpeg'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/skcms'...
+Cloning into '/tmp/jxl-wasm-work/libjxl/third_party/zlib'...
+From https://github.com/google/googletest
+ * branch              6910c9d9165801d8827d628cb72eb7ea9dd538c5 -> FETCH_HEAD
+From https://github.com/libjpeg-turbo/libjpeg-turbo
+ * branch              8ecba3647edb6dd940463fedf38ca33a8e2a73d1 -> FETCH_HEAD
+configure: cmake -S /tmp/jxl-wasm-work/libjxl -B /tmp/jxl-wasm-work/relaxed-simd-mt -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTHREADS_PREFER_PTHREAD_FLAG=ON -DCMAKE_HAVE_LIBC_PTHREAD=1 -DCMAKE_USE_PTHREADS_INIT=1 -DCMAKE_THREAD_LIBS_INIT=-pthread -DCMAKE_REQUIRED_FLAGS=-pthread -DCMAKE_REQUIRED_LIBRARIES=-latomic -DCMAKE_REQUIRED_LINK_OPTIONS=-pthread -DCMAKE_MODULE_PATH=/work/jxl-wasm/cmake-shims -DCMAKE_TOOLCHAIN_FILE=/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/emsdk/node/22.16.0_64bit/bin/node
+CMake Warning (dev) at /usr/share/cmake-3.22/Modules/CheckIncludeFile.cmake:82 (message):
+  Policy CMP0075 is not set: Include file check macros honor
+  CMAKE_REQUIRED_LIBRARIES.  Run "cmake --help-policy CMP0075" for policy
+  details.  Use the cmake_policy command to set the policy and suppress this
+  warning.
+
+  CMAKE_REQUIRED_LIBRARIES is set to:
+
+    -latomic
+
+  For compatibility with CMake 3.11 and below this check is ignoring it.
+Call Stack (most recent call first):
+  third_party/highway/CMakeLists.txt:405 (check_include_file)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Compiler is not EMSCRIPTEN
+CMake Warning at CMakeLists.txt:510 (message):
+  asciidoc was not found, the man pages will not be installed.
+
+
+em++: warning: -pthread + ALLOW_MEMORY_GROWTH may run non-wasm code slowly, see https://github.com/WebAssembly/design/issues/1271 [-Wpthreads-mem-growth]
+configure: cmake -S /tmp/jxl-wasm-work/libjxl -B /tmp/jxl-wasm-work/simd-mt -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTHREADS_PREFER_PTHREAD_FLAG=ON -DCMAKE_HAVE_LIBC_PTHREAD=1 -DCMAKE_USE_PTHREADS_INIT=1 -DCMAKE_THREAD_LIBS_INIT=-pthread -DCMAKE_REQUIRED_FLAGS=-pthread -DCMAKE_REQUIRED_LIBRARIES=-latomic -DCMAKE_REQUIRED_LINK_OPTIONS=-pthread -DCMAKE_MODULE_PATH=/work/jxl-wasm/cmake-shims -DCMAKE_TOOLCHAIN_FILE=/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/emsdk/node/22.16.0_64bit/bin/node
+CMake Warning (dev) at /usr/share/cmake-3.22/Modules/CheckIncludeFile.cmake:82 (message):
+  Policy CMP0075 is not set: Include file check macros honor
+  CMAKE_REQUIRED_LIBRARIES.  Run "cmake --help-policy CMP0075" for policy
+  details.  Use the cmake_policy command to set the policy and suppress this
+  warning.
+
+  CMAKE_REQUIRED_LIBRARIES is set to:
+
+    -latomic
+
+  For compatibility with CMake 3.11 and below this check is ignoring it.
+Call Stack (most recent call first):
+  third_party/highway/CMakeLists.txt:405 (check_include_file)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Compiler is not EMSCRIPTEN
+CMake Warning at CMakeLists.txt:510 (message):
+  asciidoc was not found, the man pages will not be installed.
+
+
+em++: warning: -pthread + ALLOW_MEMORY_GROWTH may run non-wasm code slowly, see https://github.com/WebAssembly/design/issues/1271 [-Wpthreads-mem-growth]
+configure: cmake -S /tmp/jxl-wasm-work/libjxl -B /tmp/jxl-wasm-work/simd -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTHREADS_PREFER_PTHREAD_FLAG=ON -DCMAKE_HAVE_LIBC_PTHREAD=1 -DCMAKE_USE_PTHREADS_INIT=1 -DCMAKE_THREAD_LIBS_INIT=-pthread -DCMAKE_REQUIRED_FLAGS=-pthread -DCMAKE_REQUIRED_LIBRARIES=-latomic -DCMAKE_REQUIRED_LINK_OPTIONS=-pthread -DCMAKE_MODULE_PATH=/work/jxl-wasm/cmake-shims -DCMAKE_TOOLCHAIN_FILE=/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/emsdk/node/22.16.0_64bit/bin/node
+CMake Warning (dev) at /usr/share/cmake-3.22/Modules/CheckIncludeFile.cmake:82 (message):
+  Policy CMP0075 is not set: Include file check macros honor
+  CMAKE_REQUIRED_LIBRARIES.  Run "cmake --help-policy CMP0075" for policy
+  details.  Use the cmake_policy command to set the policy and suppress this
+  warning.
+
+  CMAKE_REQUIRED_LIBRARIES is set to:
+
+    -latomic
+
+  For compatibility with CMake 3.11 and below this check is ignoring it.
+Call Stack (most recent call first):
+  third_party/highway/CMakeLists.txt:405 (check_include_file)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Compiler is not EMSCRIPTEN
+CMake Warning at CMakeLists.txt:510 (message):
+  asciidoc was not found, the man pages will not be installed.
+
+
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libGL-getprocaddr.a... (this will be cached in "/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libGL-getprocaddr.a" for subsequent builds)
+system_libs:INFO: compiled 4 inputs in 0.20s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libc.a... (this will be cached in "/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc.a" for subsequent builds)
+system_libs:INFO: compiled 1045 inputs in 5.79s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libdlmalloc.a... (this will be cached in "/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libdlmalloc.a" for subsequent builds)
+system_libs:INFO: compiled 2 inputs in 3.84s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libcompiler_rt.a... (this will be cached in "/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libcompiler_rt.a" for subsequent builds)
+system_libs:INFO: compiled 182 inputs in 1.66s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libc++-noexcept.a... (this will be cached in "/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++-noexcept.a" for subsequent builds)
+system_libs:INFO: compiled 56 inputs in 11.48s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libc++abi-noexcept.a... (this will be cached in "/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++abi-noexcept.a" for subsequent builds)
+system_libs:INFO: compiled 16 inputs in 1.98s
+cache:INFO:  - ok
+cache:INFO: generating system library: sysroot/lib/wasm32-emscripten/lto/libsockets.a... (this will be cached in "/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libsockets.a" for subsequent builds)
+system_libs:INFO: compiled 27 inputs in 0.61s
+cache:INFO:  - ok
+configure: cmake -S /tmp/jxl-wasm-work/libjxl -B /tmp/jxl-wasm-work/scalar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTHREADS_PREFER_PTHREAD_FLAG=ON -DCMAKE_HAVE_LIBC_PTHREAD=1 -DCMAKE_USE_PTHREADS_INIT=1 -DCMAKE_THREAD_LIBS_INIT=-pthread -DCMAKE_REQUIRED_FLAGS=-pthread -DCMAKE_REQUIRED_LIBRARIES=-latomic -DCMAKE_REQUIRED_LINK_OPTIONS=-pthread -DCMAKE_MODULE_PATH=/work/jxl-wasm/cmake-shims -DCMAKE_TOOLCHAIN_FILE=/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake -DCMAKE_CROSSCOMPILING_EMULATOR=/emsdk/node/22.16.0_64bit/bin/node
+CMake Warning (dev) at /usr/share/cmake-3.22/Modules/CheckIncludeFile.cmake:82 (message):
+  Policy CMP0075 is not set: Include file check macros honor
+  CMAKE_REQUIRED_LIBRARIES.  Run "cmake --help-policy CMP0075" for policy
+  details.  Use the cmake_policy command to set the policy and suppress this
+  warning.
+
+  CMAKE_REQUIRED_LIBRARIES is set to:
+
+    -latomic
+
+  For compatibility with CMake 3.11 and below this check is ignoring it.
+Call Stack (most recent call first):
+  third_party/highway/CMakeLists.txt:405 (check_include_file)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Compiler is not EMSCRIPTEN
+CMake Warning at CMakeLists.txt:510 (message):
+  asciidoc was not found, the man pages will not be installed.
+
+

@@ -1,0 +1,4 @@
+LIBRARY
+EXPORTS
+  __rustc_proc_macro_decls_e5cea6f14775c1c6__ DATA
+  rust_metadata_equator_macro_e5cea6f14775c1c6 DATA

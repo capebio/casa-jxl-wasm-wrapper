@@ -426,6 +426,7 @@ async function runProgressivePaintTest() {
         const resized = resizeRgba(selectedSource.rgba, selectedSource.width, selectedSource.height, size);
 
         setProgStatus(`Encoding ${resized.width}×${resized.height} Q${quality} progressive with ${requestedPassCount} stream steps…`);
+        dbgLog('Encoder config', `progressive=true, progressiveFlavor=${progressiveFlavor}, previewFirst=${previewFirst}, quality=${quality}, effort=3`, 'info');
 
         const encoder = createEncoder({
             format: 'rgba8',
@@ -456,6 +457,7 @@ async function runProgressivePaintTest() {
         setProgStatus(`Encoded ${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · streaming into decoder…`);
         dbgLog('Encoded', `${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms`, 'info');
 
+        dbgLog('Creating decoder…', `format=rgba8, progressionTarget=final, emitEveryPass=true, progressiveDetail=${progressiveDetail}`, 'info');
         const decoder = createDecoder({
             format: 'rgba8',
             region: null,
@@ -466,15 +468,19 @@ async function runProgressivePaintTest() {
             preserveIcc: false,
             preserveMetadata: false,
         });
+        dbgLog('Decoder created', 'Starting event iteration…', 'info');
 
         const decStart = performance.now();
         const passes = [];
         let passIdx = 0;
         const eventTask = (async () => {
-            for await (const ev of decoder.events()) {
-                if (ev.type === 'header') {
-                    setProgStatus(`Decoder ready for ${ev.info.width}×${ev.info.height} progressive paints…`);
-                } else if (ev.type === 'progress' || ev.type === 'final') {
+            dbgLog('Event loop started', 'Awaiting decoder.events()…', 'info');
+            try {
+                for await (const ev of decoder.events()) {
+                    dbgLog(`Event: ${ev.type}`, ev.type, 'info');
+                    if (ev.type === 'header') {
+                        setProgStatus(`Decoder ready for ${ev.info.width}×${ev.info.height} progressive paints…`);
+                    } else if (ev.type === 'progress' || ev.type === 'final') {
                     const t = performance.now() - decStart;
                     const isFinal = ev.type === 'final';
                     const passRecord = {
@@ -490,12 +496,21 @@ async function runProgressivePaintTest() {
                     passIdx++;
                     await nextPaint();
                 } else if (ev.type === 'error') {
-                    throw new Error(ev.message);
+                    dbgLog('Decoder error event', `code=${ev.code}, msg=${ev.message}`, 'error');
+                    throw new Error(`Decoder error (${ev.code}): ${ev.message}`);
                 }
             }
+            } catch (evErr) {
+                dbgLog('Event loop error', evErr instanceof Error ? evErr.message : String(evErr), 'error');
+                throw evErr;
+            }
         })();
-        const streamedSteps = await streamIntoDecoder(decoder, jxlBytes, requestedPassCount);
+        dbgLog('Pushing all bytes…', `${jxlBytes.length} bytes total`, 'info');
+        await decoder.push(exactBuffer(jxlBytes));
+        await decoder.close();
+        dbgLog('All bytes pushed and closed', 'Waiting for event task…', 'info');
         await eventTask;
+        dbgLog('Event task complete', `${passes.length} passes received`, 'info');
         decoder.dispose();
 
         const progressiveFirstMs = passes.length ? passes[0].t : null;
@@ -522,7 +537,7 @@ async function runProgressivePaintTest() {
         decoder2.dispose();
 
         renderProgressiveComparison({
-            requestedPassCount: streamedSteps,
+            requestedPassCount,
             passCount: passes.length,
             progressiveFirstMs,
             progressiveFinalMs,
@@ -533,13 +548,17 @@ async function runProgressivePaintTest() {
             progressiveDetail,
         });
 
-        const summary = `${passes.length} paints · stream ${streamedSteps} steps · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
+        const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
         setProgStatus(`Done. ${summary}`);
         dbgLog('Progressive paint done', summary, 'success');
 
     } catch (err) {
-        setProgStatus(`Error: ${err.message}`);
-        dbgLog('Progressive paint error', err.message, 'error');
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const errStack = err instanceof Error ? err.stack : '';
+        setProgStatus(`Error: ${errMsg}`);
+        dbgLog('Progressive paint error', errMsg, 'error');
+        dbgLog('Error stack', errStack, 'error');
+        console.error('Full error:', err);
     } finally {
         runProgressiveBtn.textContent = 'Run progressive paint';
         runProgressiveBtn.disabled = !selectedSource;

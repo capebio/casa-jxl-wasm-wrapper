@@ -8,21 +8,33 @@ if outstanding work, provide a concise handoff with sufficient context for an ag
 
 ---
 
-## Session handoff — 2026-05-26 (crop benchmark)
+## Session handoff — 2026-05-27 (tile ROI + crop benchmark)
 
 ### What was done
 
-**Crop benchmark page** (uncommitted, current branch):
-- New page `web/jxl-crop-benchmark.html` + `web/jxl-crop-benchmark.js` + `web/jxl-crop-benchmark.css`
-- Nav link added to all 6 existing HTML pages
-- Workflow: `showDirectoryPicker()` → IDB-persisted folder handle → random ORF files → ORF→RGBA (raw WASM) → RGBA→JXL (`createEncoder`) → 5 centred crop sizes decoded via `createDecoder({ region })` → painted in log₂-scaled columns
-- Overview doc updated with crop benchmark entry
+**Tile-based ROI encode/decode** (committed):
+- C++ bridge functions: `EncodeRgba8Tiled` (450-577), `DecodeRgba8RegionTiled` (585-715)
+- Facade wrappers: `encodeTiledRgba8()` (383-428), `decodeTiledRegionRgba8()` (429-464)
+- WASM exports: `_jxl_wasm_encode_tiled_rgba8`, `_jxl_wasm_decode_region_tiled_rgba8`
+- Multi-frame JXL encoding where each frame is a tile with crop metadata
+- Decoding uses `JxlDecoderSetCoalescing(false) + SkipFrames()` to skip non-overlapping tiles
+- Expected speedup: 8×–48× for small regions (128–512 px) on 20+ MP images
+
+**Crop benchmark page** (committed):
+- New pages: `web/jxl-crop-benchmark.html` (console button, inline status, tile size spinbox)
+- `web/jxl-crop-benchmark.js` (tied to tile encode/decode via `encodeTiledRgba8()`, `decodeTiledRegionRgba8()`)
+- `web/jxl-crop-benchmark.css` (console panel, status inline, canvas cards)
+- Workflow: `showDirectoryPicker()` → IDB-persisted folder → random ORF files → ORF→RGBA (raw WASM) → RGBA→tiled JXL → 5 centred crop sizes → tile ROI decode (new path) vs full-decode baseline → speedup factor
+- Log₂-scaled display columns (120–400 px) for side-by-side crop comparison
+
+**Documentation** (committed):
+- Updated `docs/Overview and features of the CasaWASM JXL wrapper.md` with new section on tile-aware ROI
+- No rejected optimizations this session
 
 ### Outstanding / unresolved
 
-- **Not yet tested** in browser — start `bun serve.ts` and open `http://localhost:9000/web/jxl-crop-benchmark.html`, pick an ORF folder, press Run
-- **IDB permission restore**: if `queryPermission` returns `'prompt'` on reload, the Run button stays disabled until the user re-picks the folder (by design — browser security requires user gesture). Could improve UX by showing a "Re-connect folder" button that calls `requestPermission()` on the stored handle.
-- **No rejected optimizations** this session.
+- **Browser test**: Start `bun serve.ts`, open `http://localhost:9000/web/jxl-crop-benchmark.html`, pick an ORF folder, press Run — verify tile path shows 8×–48× speedup vs full-decode baseline
+- **IDB permission restore**: if `queryPermission` returns `'prompt'` on reload, Run button stays disabled until user re-picks folder. Could add "Re-connect folder" button calling `requestPermission()` on stored handle.
 
 ---
 
