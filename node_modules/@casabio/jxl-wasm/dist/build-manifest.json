@@ -5,7 +5,7 @@
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
   "emsdkImage": "docker.io/emscripten/emsdk:4.0.13",
   "buildMode": "docker",
-  "generatedAt": "2026-05-27T09:30:20.517Z",
+  "generatedAt": "2026-05-27T10:55:36.996Z",
   "tiers": {
     "relaxed-simd-mt": {
       "jsBytes": 26543,

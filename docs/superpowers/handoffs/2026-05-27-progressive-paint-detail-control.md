@@ -36,7 +36,7 @@ The paint page already calls `createDecoder({ ..., progressiveDetail })` directl
 
 ### 1. Add detail selector to HTML
 
-Insert a fourth `prog-option-group` after the existing `Passes` group (`web/jxl-progressive-paint.html` around line 101). Default to `auto` so existing behaviour is preserved when nothing is touched:
+Insert a fourth `prog-option-group` after the existing `Passes` group (`web/jxl-progressive-paint.html` around line 101). Default to `auto` so existing behaviour is preserved when nothing is touched. **Note:** DC + AC (`kDCProgressive`) is not available in libjxl v0.11.2 (the pinned version); only Auto, DC, Last passes, and All passes are exposed:
 
 ```html
 <div class="prog-option-group">
@@ -46,8 +46,8 @@ Insert a fourth `prog-option-group` after the existing `Passes` group (`web/jxl-
         <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="dc" /> DC</label>
         <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="lastPasses" /> Last passes</label>
         <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="passes" /> All passes</label>
-        <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="dcProgressive" /> DC + AC</label>
     </div>
+    <!-- Note: DC + AC (kDCProgressive) not available in libjxl v0.11.2; may be added in future version -->
 </div>
 ```
 
@@ -105,13 +105,15 @@ Currently the comparison table shows `passCount` (number of progress + final eve
 
 ### 6. Tests to add
 
-`web/jxl-progressive-paint-page.test.js` (string-grep style — same pattern as existing tests):
+`web/jxl-progressive-paint-page.test.js` (string-grep style — same pattern as existing tests). Note: omit `dcProgressive` since `kDCProgressive` is not available in libjxl v0.11.2:
 
 ```js
 const html = readFileSync(new URL('./jxl-progressive-paint.html', import.meta.url), 'utf8');
 expect(html).toContain('name="prog-detail"');
+expect(html).toContain('value="auto"');
+expect(html).toContain('value="dc"');
 expect(html).toContain('value="lastPasses"');
-expect(html).toContain('value="dcProgressive"');
+expect(html).toContain('value="passes"');
 
 const js = readFileSync(new URL('./jxl-progressive-paint.js', import.meta.url), 'utf8');
 expect(js).toContain('input[name="prog-detail"]:checked');

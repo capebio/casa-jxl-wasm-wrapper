@@ -33,13 +33,12 @@ test('progressive paint timeline thumbs are clickable compare targets', () => {
     expect(source).toContain('advanceCompareSlotCursor(');
 });
 
-test('progressive paint page exposes progressiveDetail selector with auto/dc/lastPasses/passes/dcProgressive options', () => {
+test('progressive paint page exposes progressiveDetail selector with auto/dc/lastPasses/passes options', () => {
     expect(html).toContain('name="prog-detail"');
     expect(html).toContain('value="auto"');
     expect(html).toContain('value="dc"');
     expect(html).toContain('value="lastPasses"');
     expect(html).toContain('value="passes"');
-    expect(html).toContain('value="dcProgressive"');
 });
 
 test('progressive paint JS reads detail selector and applies auto-detection or manual selection', () => {
