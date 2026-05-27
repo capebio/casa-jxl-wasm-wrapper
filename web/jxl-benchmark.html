@@ -75,19 +75,34 @@
                 <div class="settings-inline">
                     <div class="spinbox-row-inline">
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label">Iterations per size</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label">Iterations per size</label>
+                                <button class="info-btn" type="button" data-help-target="bm-iter" aria-label="Iterations info">i</button>
+                            </div>
                             <input id="iterations" class="spinbox" type="number" min="1" max="10" value="3" />
+                            <div class="help-popover" data-help-popover="bm-iter" hidden>
+                                Number of encode+decode cycles per configuration. Higher = more stable averages, less noise from JIT or thermal variation. 3 is enough for a quick comparison; 10+ reveals thermal throttling patterns. Each iteration is fully independent — no result caching.
+                            </div>
                         </div>
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label"># of test files</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label"># of test files</label>
+                                <button class="info-btn" type="button" data-help-target="bm-maxfiles" aria-label="Max files info">i</button>
+                            </div>
                             <input id="max-files" class="spinbox" type="number" min="1" max="100" value="20" />
+                            <div class="help-popover" data-help-popover="bm-maxfiles" hidden>
+                                Source files to include in each benchmark run. More files broaden coverage across image content (fine detail, flat areas, high noise) and reduce the impact of any single outlier on averages.
+                            </div>
                         </div>
                         <button id="optimize-btn" class="secondary-btn" type="button" disabled title="Load files first, then optimize codec toggles for this device">Optimize</button>
                         <button id="save-full-btn" class="secondary-btn" type="button" disabled title="Save all fullsize encoded JXL files to a folder">Save full files</button>
                     </div>
 
                     <div class="quality-section quality-inline">
-                        <label class="section-label">Quality</label>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <span class="section-label">Quality</span>
+                            <button class="info-btn" type="button" data-help-target="bm-quality" aria-label="Quality info">i</button>
+                        </div>
                         <div class="quality-buttons">
                             <label class="quality-btn"><input type="checkbox" name="quality" value="50" /> 50</label>
                             <label class="quality-btn"><input type="checkbox" name="quality" value="55" /> 55</label>
@@ -100,10 +115,17 @@
                             <label class="quality-btn"><input type="checkbox" name="quality" value="90" /> 90</label>
                             <label class="quality-btn"><input type="checkbox" name="quality" value="95" /> 95</label>
                         </div>
+                        <div class="help-popover" data-help-popover="bm-quality" hidden>
+                            <strong>Quality (0–100 scale)</strong><br>
+                            Controls perceptual fidelity. Maps internally to a Butteraugli distance target. <strong>85</strong> is visually indistinguishable from source for most photographic content. Above 90 gives diminishing returns at rapidly growing file sizes. JXL quality is not on the same scale as JPEG — JXL q=85 typically outperforms JPEG q=85 in both file size and visual fidelity.
+                        </div>
                     </div>
 
                     <div class="sizes-inline">
-                        <span class="sizes-label">Benchmark sizes:</span>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <span class="sizes-label">Benchmark sizes:</span>
+                            <button class="info-btn" type="button" data-help-target="bm-sizes" aria-label="Benchmark sizes info">i</button>
+                        </div>
                         <div class="sizes-buttons">
                             <label class="size-btn">
                                 <input type="checkbox" name="benchmark-size" value="128" />
@@ -130,10 +152,17 @@
                                 <span>Full</span>
                             </label>
                         </div>
+                        <div class="help-popover" data-help-popover="bm-sizes" hidden>
+                            <strong>Output pixel size (long edge)</strong><br>
+                            Source images are proportionally resized before encoding. <em>Full</em> skips resizing and encodes at original resolution. Smaller sizes encode and decode much faster: 128–512 px is thumbnail range (~1–8 ms decode), 1920 px is display range (~30 ms), Full is archival range. Select multiple sizes to map the full size/latency curve.
+                        </div>
                     </div>
 
                     <div class="effort-section effort-inline">
-                        <label class="section-label">Effort</label>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <span class="section-label">Effort</span>
+                            <button class="info-btn" type="button" data-help-target="bm-effort" aria-label="Effort info">i</button>
+                        </div>
                         <div class="effort-buttons">
                             <label class="effort-btn"><input type="checkbox" name="effort" value="1" /> 1</label>
                             <label class="effort-btn"><input type="checkbox" name="effort" value="2" /> 2</label>
@@ -145,6 +174,10 @@
                             <label class="effort-btn"><input type="checkbox" name="effort" value="8" /> 8</label>
                             <label class="effort-btn"><input type="checkbox" name="effort" value="9" /> 9</label>
                         </div>
+                        <div class="help-popover" data-help-popover="bm-effort" hidden>
+                            <strong>Encode effort (1–9)</strong><br>
+                            Controls how hard the encoder searches for a more compact representation. Higher effort = smaller files, much slower encode, <em>identical decode speed and visual quality</em>. Effort 3 suits real-time; effort 7+ is archival. Encode time increase 3→7 is roughly 5–10×, with 5–15% file-size reduction.
+                        </div>
                     </div>
                 </div>
             </div>
@@ -153,7 +186,10 @@
                 <div class="settings-panel">
                     <div class="encoder-decoder-wrap">
                         <div class="encoder-options">
-                            <div class="section-header">Encoder advanced</div>
+                            <div class="section-header" style="display:flex;align-items:center;gap:6px;">
+                                Encoder advanced
+                                <button class="info-btn" type="button" data-help-target="bm-enc-advanced" aria-label="Encoder advanced info">i</button>
+                            </div>
                             <div class="encoder-grid">
                                 <div class="option-group">
                                     <label class="toggle-opt">
@@ -172,10 +208,18 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="help-popover" data-help-popover="bm-enc-advanced" hidden>
+                                <strong>Modular</strong> — Switches from VarDCT (default, frequency-domain, photographic) to Modular mode (spatial, lossless-friendly). VarDCT gives better compression for photos; Modular excels at lossless and synthetic/non-photographic content.<br><br>
+                                <strong>Butteraugli target</strong> — Direct perceptual quality override. Lower = higher quality (0.5 = near-lossless, 1.0 = high, 3.0 = moderate). The Quality buttons map to this automatically — only override here for fine control.<br><br>
+                                <strong>Brotli effort</strong> — Compression level for JXL header and metadata (0–11). Affects header bytes only, not pixel data. Impact on total file size is small (&lt;1%) for photographic content.
+                            </div>
                         </div>
 
                         <div class="advanced-options">
-                            <div class="advanced-header">Codec toggles</div>
+                            <div class="advanced-header" style="display:flex;align-items:center;gap:6px;">
+                                Codec toggles
+                                <button class="info-btn" type="button" data-help-target="bm-toggles" aria-label="Codec toggles info">i</button>
+                            </div>
                             <div class="options-grid">
                                 <label class="toggle-opt">
                                     <input type="checkbox" id="opt-simd" />
@@ -218,11 +262,26 @@
                                     <span class="opt-label">Zero-copy buf</span>
                                 </label>
                             </div>
+                            <div class="help-popover" data-help-popover="bm-toggles" hidden>
+                                <strong>SIMD</strong> — Uses hardware vector instructions (SSE4.1, AVX2, NEON) for parallel pixel ops. ~2–4× decode speedup. Keep on for real-world measurements; disable only for scalar baseline.<br><br>
+                                <strong>Threading</strong> — Multi-core decode. Reduces latency for large images. Disable to get single-thread baseline.<br><br>
+                                <strong>Tier</strong> — Detected WASM capability (scalar / simd / simd-mt). Reflects the active build variant chosen by capability detection.<br><br>
+                                <strong>Progressive</strong> — Encodes with progressive scans so the decoder can emit coarse previews from partial data. ~1–2% file size overhead. Required for gallery and paint pages.<br><br>
+                                <strong>Preserve ICC</strong> — Passes the ICC color profile through decode. Disable for raw throughput measurement without color management overhead.<br><br>
+                                <strong>Metadata</strong> — Preserves Exif/XMP metadata. Not needed for speed testing.<br><br>
+                                <strong>Chunked</strong> — Splits encoded output into multiple Brotli-compressed chunks for HTTP streaming. Enables progressive delivery. Slight overhead vs. single buffer.<br><br>
+                                <strong>Lossless</strong> — Mathematically perfect reconstruction. Uses Modular mode internally. Files are larger; suited for text, diagrams, and archival.<br><br>
+                                <strong>Preview 1st</strong> — Inserts a low-resolution preview frame at the start of the stream so viewers can show something before the main decode completes.<br><br>
+                                <strong>Zero-copy buf</strong> — Skips buffer copy when pushing data into WASM. Faster on large inputs. Only safe when the source buffer is not reused after the push.
+                            </div>
                         </div>
                     </div>
 
                     <div class="decoder-options">
-                        <div class="section-header">Decoder advanced</div>
+                        <div class="section-header" style="display:flex;align-items:center;gap:6px;">
+                            Decoder advanced
+                            <button class="info-btn" type="button" data-help-target="bm-dec-advanced" aria-label="Decoder advanced info">i</button>
+                        </div>
                         <div class="decoder-grid">
                             <div class="downsampling-row">
                                 <label class="section-label">Downsampling</label>
@@ -233,6 +292,9 @@
                                     <label class="downsample-btn"><input type="radio" name="downsample" value="8" /> 8×</label>
                                 </div>
                             </div>
+                        </div>
+                        <div class="help-popover" data-help-popover="bm-dec-advanced" hidden>
+                            <strong>Downsampling</strong> — Decodes at a fraction of full resolution (÷2, ÷4, ÷8). Fast path for generating thumbnails from large JXLs without decoding every pixel. 1× = full resolution.
                         </div>
                     </div>
                 </div>
@@ -426,5 +488,6 @@
     </main>
 
     <script type="module" src="./jxl-benchmark.js"></script>
+    <script src="./info-popover-init.js"></script>
 </body>
 </html>

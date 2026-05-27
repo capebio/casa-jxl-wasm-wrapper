@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Progressive JXL Gallery</title>
   <link rel="stylesheet" href="./test-nav.css" />
+  <link rel="stylesheet" href="./jxl-dashboard.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; }
 
@@ -164,15 +165,22 @@
     <input id="source-input" type="file" multiple accept=".jxl,.JXL" />
     <span class="picker-status" id="picker-status">No files selected</span>
     <label id="concurrent-label">
-      Concurrent
+      <span style="display:inline-flex;align-items:center;gap:4px;">
+        Concurrent
+        <button class="info-btn" type="button" data-help-target="pg-concurrent" aria-label="Concurrent decoders info" style="font-size:10px;width:18px;height:18px;">i</button>
+      </span>
       <input type="range" id="concurrent" min="1" max="8" value="4" />
       <span id="concurrent-val">4</span>
     </label>
+    <div class="help-popover" data-help-popover="pg-concurrent" hidden style="margin-top:4px;max-width:280px;">
+      Maximum JXL files decoded simultaneously. Higher = faster overall gallery load when many files are queued. Lower = less CPU contention and memory pressure per slot. Each active decoder runs its own session.
+    </div>
   </div>
 
   <div id="gallery"></div>
   <div id="log"></div>
 
   <script type="module" src="./jxl-progressive-gallery.js"></script>
+  <script src="./info-popover-init.js"></script>
 </body>
 </html>

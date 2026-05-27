@@ -7,6 +7,7 @@
     <title>Format Race — JXL vs JPEG vs WebP</title>
     <link rel="stylesheet" href="./test-nav.css" />
     <link rel="stylesheet" href="./jxl-compare.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
     <script type="importmap">
     {
       "imports": {
@@ -54,30 +55,48 @@
             </div>
 
             <div class="compare-option-group">
-                <span class="compare-option-label">Quality tier</span>
+                <span class="compare-option-label" style="display:inline-flex;align-items:center;gap:5px;">
+                    Quality tier
+                    <button class="info-btn" type="button" data-help-target="cmp-quality" aria-label="Quality tier info">i</button>
+                </span>
                 <div class="compare-radio-row">
                     <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="high" checked /> High &nbsp;&nbsp;<span class="tier-hint">JXL q=90 · JPEG q=90 · WebP q=90</span></label>
                     <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="medium" /> Medium <span class="tier-hint">JXL q=80 · JPEG q=80 · WebP q=80</span></label>
                     <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="low" /> Low &nbsp;&nbsp;&nbsp;<span class="tier-hint">JXL q=70 · JPEG q=70 · WebP q=70</span></label>
                 </div>
+                <div class="help-popover" data-help-popover="cmp-quality" hidden>
+                    Matched quality applied to all three formats. Because JXL, JPEG, and WebP use different perceptual models, equal quality numbers do not produce equal visual results — JXL typically achieves better fidelity at the same or smaller file size. Use High (q=90) as the reference; compare file sizes in the results grid to see the efficiency gap.
+                </div>
             </div>
 
             <div class="compare-option-group">
-                <span class="compare-option-label">JXL effort</span>
+                <span class="compare-option-label" style="display:inline-flex;align-items:center;gap:5px;">
+                    JXL effort
+                    <button class="info-btn" type="button" data-help-target="cmp-effort" aria-label="JXL effort info">i</button>
+                </span>
                 <div class="compare-radio-row">
                     <label class="compare-radio-btn"><input type="radio" name="effort" value="1" /> 1 — fastest encode</label>
                     <label class="compare-radio-btn"><input type="radio" name="effort" value="3" checked /> 3 — balanced</label>
                     <label class="compare-radio-btn"><input type="radio" name="effort" value="7" /> 7 — thorough</label>
                 </div>
+                <div class="help-popover" data-help-popover="cmp-effort" hidden>
+                    JXL-specific encode effort (1–9). JPEG and WebP use their own fixed effort. Higher effort = smaller JXL files, much slower JXL encode. Use effort 7 to show JXL's maximum compression advantage; use effort 1 to benchmark encode speed. Does not affect decode time or visual quality.
+                </div>
             </div>
 
             <div class="compare-option-group">
-                <span class="compare-option-label">Sizes to test</span>
+                <span class="compare-option-label" style="display:inline-flex;align-items:center;gap:5px;">
+                    Sizes to test
+                    <button class="info-btn" type="button" data-help-target="cmp-sizes" aria-label="Sizes info">i</button>
+                </span>
                 <div class="compare-radio-row">
                     <label class="compare-check-btn"><input type="checkbox" class="size-check" value="300" checked /> 300 long — thumbnail</label>
                     <label class="compare-check-btn"><input type="checkbox" class="size-check" value="800" checked /> 800 long — gallery card</label>
                     <label class="compare-check-btn"><input type="checkbox" class="size-check" value="1920" /> 1920 long — display</label>
                     <label class="compare-check-btn"><input type="checkbox" class="size-check" value="full" /> Full size — archive</label>
+                </div>
+                <div class="help-popover" data-help-popover="cmp-sizes" hidden>
+                    Output dimensions to benchmark. Each selected size triggers a separate encode+decode cycle for all three formats, with results side by side. 300 px is thumbnail range, 800 px is gallery card size, 1920 px is full display, Full uses the source at original resolution. Click any size row header in the results to open the quality lightbox.
                 </div>
             </div>
 
@@ -111,5 +130,6 @@
     </main>
 
     <script type="module" src="./jxl-compare.js"></script>
+    <script src="./info-popover-init.js"></script>
 </body>
 </html>

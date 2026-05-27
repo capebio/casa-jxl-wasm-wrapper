@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="./test-nav.css" />
     <link rel="stylesheet" href="./jxl-benchmark.css" />
     <link rel="stylesheet" href="./jxl-crop-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
     <script type="importmap">
     {
       "imports": {
@@ -67,27 +68,62 @@
                 <div class="settings-inline">
                     <div class="spinbox-row-inline">
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label" for="file-count">Files</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="file-count">Files</label>
+                                <button class="info-btn" type="button" data-help-target="cb-files" aria-label="Files info">i</button>
+                            </div>
                             <input id="file-count" class="spinbox" type="number" min="1" max="20" value="3" />
+                            <div class="help-popover" data-help-popover="cb-files" hidden>
+                                Number of ORF source files from the picked folder to benchmark. More files give broader coverage across image content and more stable averages.
+                            </div>
                         </div>
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label" for="encode-effort">Encode effort</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="encode-effort">Encode effort</label>
+                                <button class="info-btn" type="button" data-help-target="cb-effort" aria-label="Encode effort info">i</button>
+                            </div>
                             <input id="encode-effort" class="spinbox" type="number" min="1" max="9" value="3" />
+                            <div class="help-popover" data-help-popover="cb-effort" hidden>
+                                JXL encode effort (1–9). This benchmark measures <em>decode</em> speed; effort mainly affects file size and thus tile read I/O. Effort 3 gives a realistic photographic JXL. Does not affect visual quality.
+                            </div>
                         </div>
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label" for="encode-distance">Distance</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="encode-distance">Distance</label>
+                                <button class="info-btn" type="button" data-help-target="cb-distance" aria-label="Distance info">i</button>
+                            </div>
                             <input id="encode-distance" class="spinbox" type="number" min="0" max="25" step="0.1" value="1.0" />
+                            <div class="help-popover" data-help-popover="cb-distance" hidden>
+                                Butteraugli perceptual quality distance. Lower = higher quality, larger file. 0 = lossless, 1.0 = high quality photographic, 3.0 = moderate quality. This is the internal quality scale (inverse of the Quality slider).
+                            </div>
                         </div>
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label" for="tile-size">Tile px</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="tile-size">Tile px</label>
+                                <button class="info-btn" type="button" data-help-target="cb-tile" aria-label="Tile size info">i</button>
+                            </div>
                             <input id="tile-size" class="spinbox" type="number" min="64" max="2048" step="64" value="512" />
-                            <!-- TIP: try 256, 512, 1024 — smaller tiles = more frames = more walk overhead -->
+                            <div class="help-popover" data-help-popover="cb-tile" hidden>
+                                Tile size in pixels for the tiled JXL encode. Each tile is an independent frame — only tiles intersecting the crop are decoded. Smaller tiles = faster crop decode, more frame-header overhead. Try 256, 512, and 1024 to find the sweet spot.
+                            </div>
                         </div>
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label" for="compare-full"><input id="compare-full" type="checkbox" checked /> vs full-decode</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="compare-full"><input id="compare-full" type="checkbox" checked /> vs full-decode</label>
+                                <button class="info-btn" type="button" data-help-target="cb-compare-full" aria-label="Compare full decode info">i</button>
+                            </div>
+                            <div class="help-popover" data-help-popover="cb-compare-full" hidden>
+                                When enabled, each crop size also runs a full-image decode for comparison. Shows how much the tiled crop saves vs. decoding the entire image, across crop sizes.
+                            </div>
                         </div>
                         <span class="status-inline-sep"></span>
-                        <span class="sizes-label">Crop sizes (px, centred):</span>
+                        <span class="sizes-label" style="display:inline-flex;align-items:center;gap:5px;">
+                            Crop sizes (px, centred):
+                            <button class="info-btn" type="button" data-help-target="cb-cropsizes" aria-label="Crop sizes info">i</button>
+                        </span>
+                        <div class="help-popover" data-help-popover="cb-cropsizes" hidden>
+                            Square crop regions centred on the image. For each size, only the tiles intersecting that crop are decoded. Smaller crops should be faster than a full decode — this benchmark measures by how much, and how it scales relative to tile size.
+                        </div>
                         <div class="sizes-buttons">
                             <label class="size-btn"><input type="checkbox" name="crop-size" value="128" checked /><span>128</span></label>
                             <label class="size-btn"><input type="checkbox" name="crop-size" value="256" checked /><span>256</span></label>
@@ -121,5 +157,6 @@
     </main>
 
     <script type="module" src="./jxl-crop-benchmark.js"></script>
+    <script src="./info-popover-init.js"></script>
 </body>
 </html>

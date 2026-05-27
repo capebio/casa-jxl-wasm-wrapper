@@ -73,49 +73,82 @@
                 <button id="run-progressive" class="primary-btn" type="button" disabled title="Load a file first">Run progressive paint</button>
 
                 <div class="prog-option-group">
-                    <span class="prog-setting-label">Size:</span>
+                    <span class="prog-setting-label" style="display:inline-flex;align-items:center;gap:4px;">
+                        Size:
+                        <button class="info-btn" type="button" data-help-target="pp-size" aria-label="Size info">i</button>
+                    </span>
                     <div class="prog-radio-group">
                         <label class="prog-radio-btn"><input type="radio" name="prog-size" value="512" /> 512</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1080" checked /> 1080</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1920" /> 1920</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-size" value="fullsize" /> Full</label>
                     </div>
+                    <div class="help-popover" data-help-popover="pp-size" hidden>
+                        Long edge in pixels to resize the source before encoding. Smaller = faster encode+decode cycles. 1080 suits display-resolution testing; Full encodes at the original source resolution for archival comparison.
+                    </div>
                 </div>
 
                 <div class="prog-option-group">
-                    <span class="prog-setting-label">Quality:</span>
+                    <span class="prog-setting-label" style="display:inline-flex;align-items:center;gap:4px;">
+                        Quality:
+                        <button class="info-btn" type="button" data-help-target="pp-quality" aria-label="Quality info">i</button>
+                    </span>
                     <div class="prog-radio-group">
                         <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="75" /> 75</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="85" checked /> 85</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="95" /> 95</label>
                     </div>
+                    <div class="help-popover" data-help-popover="pp-quality" hidden>
+                        JXL encode quality (0–100). Higher = better fidelity, larger file. 85 is visually indistinguishable from the original for most photographic content. Higher quality means more data per pass, which affects how much each progressive step improves the image.
+                    </div>
                 </div>
 
                 <div class="prog-option-group">
-                    <span class="prog-setting-label">Passes:</span>
+                    <span class="prog-setting-label" style="display:inline-flex;align-items:center;gap:4px;">
+                        Passes:
+                        <button class="info-btn" type="button" data-help-target="pp-passes" aria-label="Passes info">i</button>
+                    </span>
                     <div class="prog-radio-group">
                         <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="2" checked /> 2</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="4" /> 4</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="6" /> 6</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="8" /> 8</label>
                     </div>
+                    <div class="help-popover" data-help-popover="pp-passes" hidden>
+                        Number of progressive AC passes encoded in the JXL stream. More passes = smoother quality ladder (coarse → fine). 2 passes gives a minimal two-step reveal (preview → final); 8 gives fine-grained progression. More passes slightly increases file size.
+                    </div>
                 </div>
 
                 <div class="prog-option-group">
-                    <span class="prog-setting-label">Detail:</span>
+                    <span class="prog-setting-label" style="display:inline-flex;align-items:center;gap:4px;">
+                        Detail:
+                        <button class="info-btn" type="button" data-help-target="pp-detail" aria-label="Detail info">i</button>
+                    </span>
                     <div class="prog-radio-group">
                         <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="auto" checked /> Auto</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="dc" /> DC</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="lastPasses" /> Last passes</label>
                         <label class="prog-radio-btn"><input type="radio" name="prog-detail" value="passes" /> All passes</label>
                     </div>
+                    <div class="help-popover" data-help-popover="pp-detail" hidden>
+                        <strong>Auto</strong> — Decoder chooses which passes to surface.<br>
+                        <strong>DC</strong> — Emits only the low-frequency DC pass first (fast, coarse). DC + AC is not available in libjxl v0.11.2.<br>
+                        <strong>Last passes</strong> — Surfaces only the final high-quality pass.<br>
+                        <strong>All passes</strong> — Emits every intermediate pass; maximum granularity, more canvas updates.
+                    </div>
                     <!-- Note: DC + AC (kDCProgressive) not available in libjxl v0.11.2; may be added in future version -->
                 </div>
 
-                <label class="toggle-opt">
-                    <input type="checkbox" id="prog-preview-first" />
-                    <span class="opt-label">Preview 1st</span>
-                </label>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <label class="toggle-opt">
+                        <input type="checkbox" id="prog-preview-first" />
+                        <span class="opt-label">Preview 1st</span>
+                    </label>
+                    <button class="info-btn" type="button" data-help-target="pp-preview" aria-label="Preview first info">i</button>
+                    <div class="help-popover" data-help-popover="pp-preview" hidden>
+                        Inserts a small low-resolution preview frame at the very start of the encoded stream. The viewer can display this placeholder immediately, before the main progressive decode begins. Useful for measuring time-to-first-pixel.
+                    </div>
+                </div>
 
                 <span class="prog-status" id="prog-status">Load a file to begin.</span>
             </div>
@@ -168,5 +201,6 @@
     </main>
 
     <script type="module" src="./jxl-progressive-paint.js"></script>
+    <script src="./info-popover-init.js"></script>
 </body>
 </html>

@@ -7,6 +7,7 @@
     <title>JXL Wrapper Lab</title>
     <link rel="stylesheet" href="./test-nav.css" />
     <link rel="stylesheet" href="./jxl-wrapper-lab.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
     <link rel="stylesheet" href="./jxl-debug-console.css" />
     <script type="importmap">
     {
@@ -57,39 +58,51 @@
 
                 <div class="inline-spinners">
                     <div class="spin-group">
-                        <span class="spin-label">Concurrency</span>
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Concurrency <button class="info-btn" type="button" data-help-target="wl-concurrency" aria-label="Concurrency info">i</button></span>
                         <div class="spinpicker">
                             <button class="spin-btn spin-dec" type="button" data-target="batch-concurrency">&#8722;</button>
                             <input id="batch-concurrency" type="number" min="1" max="16" step="1" value="6" />
                             <button class="spin-btn spin-inc" type="button" data-target="batch-concurrency">+</button>
                         </div>
+                        <div class="help-popover" data-help-popover="wl-concurrency" hidden>
+                            Parallel worker threads processing images simultaneously. Match to your core count for maximum throughput. Lower values isolate sequential baseline latency.
+                        </div>
                     </div>
                     <div class="spin-group">
-                        <span class="spin-label">Quality</span>
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Quality <button class="info-btn" type="button" data-help-target="wl-quality" aria-label="Quality info">i</button></span>
                         <div class="spinpicker">
                             <button class="spin-btn spin-dec" type="button" data-target="batch-quality">&#8722;</button>
                             <input id="batch-quality" type="number" min="50" max="100" step="5" value="90" />
                             <button class="spin-btn spin-inc" type="button" data-target="batch-quality">+</button>
                         </div>
+                        <div class="help-popover" data-help-popover="wl-quality" hidden>
+                            JXL encode quality (50–100). Higher = better fidelity, larger file, slightly slower decode. 85–90 is visually lossless for photographic content.
+                        </div>
                     </div>
                     <div class="spin-group">
-                        <span class="spin-label">Effort</span>
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Effort <button class="info-btn" type="button" data-help-target="wl-effort" aria-label="Effort info">i</button></span>
                         <div class="spinpicker">
                             <button class="spin-btn spin-dec" type="button" data-target="batch-effort">&#8722;</button>
                             <input id="batch-effort" type="number" min="1" max="9" step="1" value="3" />
                             <button class="spin-btn spin-inc" type="button" data-target="batch-effort">+</button>
                         </div>
+                        <div class="help-popover" data-help-popover="wl-effort" hidden>
+                            Encode effort (1–9). Controls encoder search depth for compression efficiency. Higher = smaller files, much slower encode. Does not affect decode speed or visual quality.
+                        </div>
                     </div>
                     <div class="spin-group">
-                        <span class="spin-label">Batch limit</span>
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Batch limit <button class="info-btn" type="button" data-help-target="wl-batch-limit" aria-label="Batch limit info">i</button></span>
                         <div class="spinpicker">
                             <button class="spin-btn spin-dec" type="button" data-target="batch-limit">&#8722;</button>
                             <input id="batch-limit" type="number" min="1" max="100" step="1" value="5" />
                             <button class="spin-btn spin-inc" type="button" data-target="batch-limit">+</button>
                         </div>
+                        <div class="help-popover" data-help-popover="wl-batch-limit" hidden>
+                            Maximum images in one batch run. Increase to stress-test concurrency and memory pressure. Each image is fully independent through the pipeline.
+                        </div>
                     </div>
                     <div class="spin-group">
-                        <span class="spin-label">Thumb size</span>
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Thumb size <button class="info-btn" type="button" data-help-target="wl-thumb-size" aria-label="Thumb size info">i</button></span>
                         <div class="preset-group" role="group" aria-label="Thumbnail size presets">
                             <label class="chip-label"><input type="radio" name="batch-thumb-size" value="128" /> <span>128</span></label>
                             <label class="chip-label"><input type="radio" name="batch-thumb-size" value="256" checked /> <span>256</span></label>
@@ -98,13 +111,19 @@
                             <label class="chip-label"><input type="radio" name="batch-thumb-size" value="2048" /> <span>2048</span></label>
                             <label class="chip-label"><input type="radio" name="batch-thumb-size" value="fullsize" /> <span>Full size</span></label>
                         </div>
+                        <div class="help-popover" data-help-popover="wl-thumb-size" hidden>
+                            Output pixel size (long edge) for each tile. Source images are resized before encode. 256–512 for gallery thumbnail testing; 1024+ for print/display benchmarking. <em>Full size</em> skips resizing.
+                        </div>
                     </div>
                     <div class="spin-group">
-                        <span class="spin-label">Lossless</span>
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Lossless <button class="info-btn" type="button" data-help-target="wl-lossless" aria-label="Lossless info">i</button></span>
                         <label class="spin-toggle">
                             <input id="batch-lossless" type="checkbox" />
                             <span class="spin-toggle-track"></span>
                         </label>
+                        <div class="help-popover" data-help-popover="wl-lossless" hidden>
+                            Mathematically perfect lossless encoding (no pixel loss). Uses JXL Modular mode internally. Files are larger than lossy at the same resolution. Best for text, line art, diagrams, and archival sources.
+                        </div>
                     </div>
                 </div>
             </div>
@@ -128,7 +147,13 @@
                         <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
                         <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
                         <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
+                        <button class="info-btn" type="button" data-help-target="wl-modes" aria-label="Mode info" style="margin-left:4px;">i</button>
                         <button id="dbg-console-btn" class="secondary-btn console-btn" type="button">Console</button>
+                    </div>
+                    <div class="help-popover" data-help-popover="wl-modes" hidden>
+                        <strong>Drag Race</strong> — Encodes the same image with JXL, WebP, and JPEG at matched quality, then races decodes side by side. Good for format comparison.<br><br>
+                        <strong>Session worker</strong> — Routes requests through the full browser pipeline (context → scheduler → worker messaging → codec). Measures realistic production latency including orchestration overhead.<br><br>
+                        <strong>Direct wrapper</strong> — Calls the WASM facade directly, bypassing all scheduling. Isolates pure codec speed with no orchestration cost. The delta between this and Session worker reveals pipeline overhead.
                     </div>
                 </div>
             </div>
@@ -214,5 +239,6 @@
     });
     </script>
     <script type="module" src="./jxl-wrapper-lab.js"></script>
+    <script src="./info-popover-init.js"></script>
 </body>
 </html>
