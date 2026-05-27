@@ -88,18 +88,25 @@ async function probeRelaxedSimd(): Promise<boolean> {
   }
 }
 
+async function probeWasmSimd(): Promise<boolean> {
+  try {
+    await WebAssembly.instantiate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 11]));
+    return true;
+  } catch { return false; }
+}
+
+async function probeWasmThreads(): Promise<boolean> {
+  try {
+    await WebAssembly.instantiate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 3, 1, 3, 1, 10, 11, 1, 9, 0, 65, 0, 254, 16, 2, 0, 26, 11]));
+    return true;
+  } catch { return false; }
+}
+
 /**
  * Probe for native JXL decoder support in the browser.
  */
 async function probeNativeJxl(): Promise<boolean> {
-  // 1x1 JXL image (lossless, minimal)
-  const jxl1x1 = new Uint8Array([
-    0xff, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-  ]); // This is a placeholder; real 1x1 JXL is small but specific.
-  
   // Real minimal 1x1 JXL (standard container/codestream)
-  // Source: https://github.com/jxl-community/jxl-1x1
   const minimalJxl = new Uint8Array([
     0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a,
     0x00, 0x00, 0x00, 0x14, 0x4a, 0x58, 0x4c, 0x49, 0x10, 0x47, 0x47, 0x22,
@@ -134,25 +141,9 @@ export async function getCapabilities(): Promise<Capabilities> {
     wasm = typeof WebAssembly !== 'undefined' && !!WebAssembly.compile;
   } catch {}
 
-  // Using inlined checks to avoid mandatory dependency during probe if possible, 
-  // but spec allows wasm-feature-detect.
-  // For simplicity in this implementation, I'll use common probes.
-  
-  const wasmSimd = wasm && await (async () => {
-    try {
-      const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 11]);
-      await WebAssembly.instantiate(bytes);
-      return true;
-    } catch { return false; }
-  })();
-
-  const wasmThreads = wasm && await (async () => {
-    try {
-      const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 3, 1, 3, 1, 10, 11, 1, 9, 0, 65, 0, 254, 16, 2, 0, 26, 11]);
-      await WebAssembly.instantiate(bytes);
-      return true;
-    } catch { return false; }
-  })();
+  const [wasmSimd, wasmThreads] = wasm
+    ? await Promise.all([probeWasmSimd(), probeWasmThreads()])
+    : [false, false] as const;
 
   const wasmRelaxedSimd = wasmSimd && await probeRelaxedSimd();
 

@@ -53,7 +53,7 @@ async function loadBrowserModule(manifest: JxlWasmManifest, options: LoaderOptio
 async function compileFromResponse(response: Response): Promise<WebAssembly.Module> {
   if ("compileStreaming" in WebAssembly && response.body) {
     try {
-      return await WebAssembly.compileStreaming(Promise.resolve(response.clone()));
+      return await WebAssembly.compileStreaming(response.clone());
     } catch {
       // Fall back to bytes for platforms that advertise streaming but reject the response shape.
     }

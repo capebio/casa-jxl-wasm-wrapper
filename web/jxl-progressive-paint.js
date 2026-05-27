@@ -510,7 +510,7 @@ async function runProgressivePaintTest() {
             preserveMetadata: false,
         });
         const oneShotStart = performance.now();
-        await decoder2.push(jxlBytes.slice());
+        await decoder2.push(jxlBytes);
         await decoder2.close();
         let oneShotFinalMs = null;
         for await (const ev of decoder2.events()) {

@@ -7,6 +7,7 @@
 const entries = [];
 let listEl = null;
 let countEl = null;
+let panelEl = null;
 const t0 = performance.now();
 let seq = 0;
 
@@ -29,7 +30,7 @@ function renderRow(entry) {
     }
     row.innerHTML = html;
     listEl.appendChild(row);
-    listEl.scrollTop = listEl.scrollHeight;
+    if (panelEl && !panelEl.hidden) listEl.scrollTop = listEl.scrollHeight;
 }
 
 function updateCount() {
@@ -59,6 +60,7 @@ export function initDebugConsole(toggleBtn) {
         <div class="dbg-list" id="dbg-list"></div>
     `;
     document.body.appendChild(panel);
+    panelEl = panel;
     listEl = panel.querySelector('#dbg-list');
     countEl = panel.querySelector('#dbg-entry-count');
 
