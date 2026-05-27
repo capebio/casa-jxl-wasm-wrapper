@@ -1159,6 +1159,7 @@ async function runBenchmark() {
         if (btn) btn.disabled = false;
     }
 
+    updateSaveFullBtn(); // call here too — displayResults/drawGraphs may throw
     displayResults();
 }
 
@@ -1332,8 +1333,8 @@ function displayResults() {
         }
     }
 
+    updateSaveFullBtn(); // must be before drawGraphs() — if charts throw, button still updates
     drawGraphs();
-    updateSaveFullBtn();
 }
 
 function renderPermutationSelector() {
