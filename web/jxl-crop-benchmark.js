@@ -94,11 +94,21 @@ async function encodeToJxl(rgba, width, height, effort, distance) {
     return concatChunks(chunks);
 }
 
-async function decodeCrop(jxlBytes, x, y, w, h) {
+function pickDecodeDownsample(sourceWidth, sourceHeight, targetLongEdge) {
+    const longer = Math.max(sourceWidth, sourceHeight);
+    for (const factor of [8, 4, 2]) {
+        if (Math.ceil(longer / factor) >= targetLongEdge) return factor;
+    }
+    return 1;
+}
+
+async function decodeAtSize(jxlBytes, sourceWidth, sourceHeight, targetSize) {
     const decoder = createDecoder({
         format: 'rgba8',
-        region: { x, y, w, h },
-        downsample: 1,
+        downsample: pickDecodeDownsample(sourceWidth, sourceHeight, targetSize),
+        targetWidth: targetSize,
+        targetHeight: targetSize,
+        fitMode: 'contain',
         progressionTarget: 'final',
         emitEveryPass: false,
         preserveIcc: false,
@@ -200,7 +210,7 @@ function paintCrop(slot, pixels, width, height, decodeMs, reqW, reqH) {
     if (reqW !== width || reqH !== height) {
         const note = document.createElement('div');
         note.className   = 'crop-timing-encode';
-        note.textContent = `(clamped to ${width}×${height})`;
+        note.textContent = `(output ${width}×${height})`;
         slot.timing.after(note);
     }
 }
@@ -285,19 +295,12 @@ async function runBenchmark() {
         for (const size of sizes) {
             if (signal.aborted) break;
 
-            const x = Math.max(0, Math.floor((imgWidth  - size) / 2));
-            const y = Math.max(0, Math.floor((imgHeight - size) / 2));
-            const w = Math.min(size, imgWidth  - x);
-            const h = Math.min(size, imgHeight - y);
-
-            setStatusStage(`Crop ${size} px…`);
-
-            if (w <= 0 || h <= 0) { markSkipped(cards[size], 'too large'); continue; }
+            setStatusStage(`Decode ${size} px…`);
 
             const t0 = performance.now();
             let decoded;
             try {
-                decoded = await decodeCrop(jxlBytes, x, y, w, h);
+                decoded = await decodeAtSize(jxlBytes, imgWidth, imgHeight, size);
             } catch (err) {
                 console.error(`${size}px:`, err);
                 markSkipped(cards[size], 'error');
@@ -305,8 +308,8 @@ async function runBenchmark() {
             }
             const decodeMs = performance.now() - t0;
 
-            paintCrop(cards[size], decoded.pixels, decoded.width, decoded.height, decodeMs, w, h);
-            console.log(`  ${size}px (${w}×${h}): ${decodeMs.toFixed(1)} ms`);
+            paintCrop(cards[size], decoded.pixels, decoded.width, decoded.height, decodeMs, size, size);
+            console.log(`  ${size}px → ${decoded.width}×${decoded.height}: ${decodeMs.toFixed(1)} ms`);
 
             await new Promise(r => setTimeout(r, 0));
         }

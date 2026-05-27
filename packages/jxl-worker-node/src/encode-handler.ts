@@ -48,6 +48,7 @@ interface NodeCodecModule {
 }
 
 const CHUNK_HWM = 4;
+const CHUNK_MAX_BUFFERED = 32;
 const DRAIN_MIN_INTERVAL_MS = 8;
 
 export class EncodeHandler {
@@ -63,6 +64,7 @@ export class EncodeHandler {
   private queueDepth = 0;
   private cancelled = false;
   private finished = false;
+  private ended = false;
   private firstByteEmitted = false;
   private wakeResolve: (() => void) | null = null;
   private lastDrainPostedMs = 0;
@@ -79,32 +81,49 @@ export class EncodeHandler {
   }
 
   onPixels(chunk: ArrayBuffer | Uint8Array | Buffer, region?: Region): void {
-    if (this.cancelled || this.state === "done") return;
+    if (
+      this.finished ||
+      this.cancelled ||
+      this.state === "done" ||
+      this.state === "error" ||
+      this.state === "cancelled"
+    ) return;
+    if (this.queueDepth >= CHUNK_MAX_BUFFERED) {
+      this.failSession(
+        "BackpressureOverflow",
+        `Encode input queue exceeded ${CHUNK_MAX_BUFFERED} buffered chunks`,
+      );
+      return;
+    }
     const buf = Buffer.from(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, chunk instanceof ArrayBuffer ? 0 : (chunk as Uint8Array).byteOffset, chunk instanceof ArrayBuffer ? chunk.byteLength : (chunk as Uint8Array).byteLength);
     const entry: { chunk: Buffer; region?: Region } = { chunk: buf };
     if (region !== undefined) entry.region = region;
     this.pixelQueue.push(entry);
     this.queueDepth++;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 
   onFinish(): void {
+    if (
+      this.finished ||
+      this.cancelled ||
+      this.state === "done" ||
+      this.state === "error" ||
+      this.state === "cancelled"
+    ) return;
     this.finished = true;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 
   async onCancel(reason?: string): Promise<void> {
     if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.cancelled = true;
     this.state = "cancelled";
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
 
     const msg: MsgEncodeCancelled = { type: "encode_cancelled", sessionId: this.sessionId };
     this.port.postMessage(msg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.endSessionOnce();
   }
 
   private async run(): Promise<void> {
@@ -121,6 +140,7 @@ export class EncodeHandler {
       quality: this.opts.quality,
       effort: this.opts.effort,
       progressive: this.opts.progressive,
+      progressiveFlavor: this.opts.progressiveFlavor,
       previewFirst: this.opts.previewFirst,
       chunked: this.opts.chunked,
     });
@@ -131,6 +151,19 @@ export class EncodeHandler {
     } finally {
       await encoder.dispose();
     }
+  }
+
+  private wake(): void {
+    const resolve = this.wakeResolve;
+    if (resolve === null) return;
+    this.wakeResolve = null;
+    resolve();
+  }
+
+  private endSessionOnce(): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.callbacks.onSessionEnd(this.sessionId);
   }
 
   private waitForPixels(): Promise<void> {
@@ -148,14 +181,18 @@ export class EncodeHandler {
         const entry = this.pixelQueue[this.pixelReadIndex++];
         if (entry === undefined) break;
         if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
-          this.pixelQueue = this.pixelQueue.slice(this.pixelReadIndex);
+          this.pixelQueue.copyWithin(0, this.pixelReadIndex);
+          this.pixelQueue.length -= this.pixelReadIndex;
           this.pixelReadIndex = 0;
         }
         this.queueDepth--;
+        if (this.cancelled || this.state === "error") return;
         await encoder.pushPixels(entry.chunk, entry.region);
+        if (this.cancelled || this.state === "error") return;
         this.maybePostDrain();
       }
       if (this.finished) {
+        if (this.cancelled || this.state === "error") return;
         this.state = "finalising";
         await encoder.finish();
         return;
@@ -164,15 +201,15 @@ export class EncodeHandler {
   }
 
   private maybePostDrain(): void {
-    const now = performance.now();
     const drainAllowed = this.queueDepth < CHUNK_HWM;
-
     const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
-    const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
-
     this.lastDrainAllowed = drainAllowed;
 
     if (!drainAllowed) return;
+
+    const now = performance.now();
+    const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
+
     if (!crossedIntoDrain && !intervalElapsed) return;
 
     this.lastDrainPostedMs = now;
@@ -181,6 +218,9 @@ export class EncodeHandler {
 
   private async readEncoderChunks(encoder: NodeEncoder): Promise<void> {
     let totalBytes = 0;
+    let chunkIndex = 0;
+    const sidecarCount = this.opts.sidecarSizes?.length ?? 0;
+    const sidecarOffsets: number[] = [];
     for await (const chunk of encoder.chunks()) {
       if (this.cancelled || this.state === "done" || this.state === "error") return;
       const buffer = toBuffer(chunk);
@@ -193,6 +233,10 @@ export class EncodeHandler {
         this.port.postMessage(msg);
       }
       totalBytes += buffer.byteLength;
+      if (chunkIndex < sidecarCount) {
+        sidecarOffsets.push(totalBytes);
+      }
+      chunkIndex++;
       const msg: MsgEncodeChunk = {
         type: "encode_chunk",
         sessionId: this.sessionId,
@@ -208,20 +252,20 @@ export class EncodeHandler {
       type: "encode_done",
       sessionId: this.sessionId,
       totalBytes,
+      ...(sidecarOffsets.length > 0 ? { sidecarOffsets } : {}),
     };
     this.port.postMessage(doneMsg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.endSessionOnce();
   }
 
   private failSession(code: string, message: string): void {
     if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.state = "error";
     // Unblock feedEncoder if it's sleeping in waitForPixels — mirrors browser handler.
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
     const msg: MsgEncodeError = { type: "encode_error", sessionId: this.sessionId, code, message };
     this.port.postMessage(msg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.endSessionOnce();
   }
 }
 

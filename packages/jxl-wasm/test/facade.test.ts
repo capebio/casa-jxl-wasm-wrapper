@@ -60,6 +60,13 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(source).toContain("allChunks.length = 0");
   });
 
+  test("viewport helper chooses power-of-two downsample from region and target size", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8");
+    expect(source).toContain("Math.ceil(sourceLongEdge / factor) >= targetLongEdge");
+  });
+
   test("forwards progressive encode settings into the WASM bridge instead of rejecting them", () => {
     const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
 
@@ -78,6 +85,22 @@ describe("@casabio/jxl-wasm facade", () => {
     void encoder.pushPixels(new Uint8Array([255, 0, 0, 255]));
     encoder.finish();
 
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+    expect(encoded.done).toBe(false);
+    expect(Array.from(new Uint8Array(encoded.value))).toEqual([255, 0, 0, 255]);
+    await encoder.dispose();
+  });
+
+  test("streaming input path writes directly into WASM pixels when bridge exposes direct-write hooks", async () => {
+    const module = createFakeStreamingInputLibjxlModule();
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
+    const beforePushMallocs = module.__mallocCalls;
+    await encoder.pushPixels(new Uint8Array([255, 0, 0, 255]));
+    expect(module.__mallocCalls).toBe(beforePushMallocs);
+
+    encoder.finish();
     const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
     expect(encoded.done).toBe(false);
     expect(Array.from(new Uint8Array(encoded.value))).toEqual([255, 0, 0, 255]);
@@ -201,6 +224,50 @@ describe("@casabio/jxl-wasm facade", () => {
 
     decoder.close();
     const final = await nextWithin(iterator, 100);
+    expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
+    await decoder.dispose();
+  });
+
+  test("progressive decoder drains multiple passes from one pushed chunk", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeDrainingProgressiveLibjxlModule());
+
+    const decoder = createDecoder({ ...decodeOptions, emitEveryPass: true });
+    const iterator = decoder.events()[Symbol.asyncIterator]();
+
+    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
+
+    const header = await nextWithin(iterator, 100);
+    const progressA = await nextWithin(iterator, 100);
+    const progressB = await nextWithin(iterator, 100);
+
+    expect(header.value).toMatchObject({ type: "header", info: { width: 1, height: 1 } });
+    expect(progressA.value).toMatchObject({ type: "progress", stage: "dc" });
+    expect(progressB.value).toMatchObject({ type: "progress", stage: "pass" });
+
+    decoder.close();
+    const final = await nextWithin(iterator, 100);
+    expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
+    await decoder.dispose();
+  });
+
+  test("progressive decoder keeps draining after close when final bytes first yield progress", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeCloseDrainProgressiveLibjxlModule());
+
+    const decoder = createDecoder({ ...decodeOptions, emitEveryPass: true });
+    const iterator = decoder.events()[Symbol.asyncIterator]();
+
+    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
+
+    const header = await nextWithin(iterator, 100);
+    const progress = await nextWithin(iterator, 100);
+    expect(header.value).toMatchObject({ type: "header", info: { width: 1, height: 1 } });
+    expect(progress.value).toMatchObject({ type: "progress", stage: "dc" });
+
+    decoder.close();
+    const closeProgress = await nextWithin(iterator, 100);
+    const final = await nextWithin(iterator, 100);
+
+    expect(closeProgress.value).toMatchObject({ type: "progress", stage: "pass" });
     expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
     await decoder.dispose();
   });
@@ -535,43 +602,145 @@ function createFakeProgressiveLibjxlModule() {
   return module;
 }
 
+function createFakeDrainingProgressiveLibjxlModule() {
+  const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
+    _jxl_wasm_dec_create: () => number;
+    _jxl_wasm_dec_push: (state: number, dataPtr: number, size: number) => number;
+    _jxl_wasm_dec_close_input: (state: number) => void;
+    _jxl_wasm_dec_width: (state: number) => number;
+    _jxl_wasm_dec_height: (state: number) => number;
+    _jxl_wasm_dec_error: (state: number) => number;
+    _jxl_wasm_dec_take_flushed: (state: number) => number;
+    _jxl_wasm_dec_take_final: (state: number) => number;
+    _jxl_wasm_dec_free: (state: number) => void;
+  };
+
+  let closed = false;
+  let pendingFlushes = 0;
+
+  module._jxl_wasm_dec_create = () => 1;
+  module._jxl_wasm_dec_push = (_state: number, _dataPtr: number, size: number) => {
+    if (!closed && size > 0) {
+      pendingFlushes = 2;
+    }
+    if (pendingFlushes > 0) {
+      pendingFlushes--;
+      return 1;
+    }
+    return closed ? 2 : 0;
+  };
+  module._jxl_wasm_dec_close_input = () => {
+    closed = true;
+  };
+  module._jxl_wasm_dec_width = () => 1;
+  module._jxl_wasm_dec_height = () => 1;
+  module._jxl_wasm_dec_error = () => 0;
+  module._jxl_wasm_dec_take_flushed = () => module._jxl_wasm_decode_rgba8(0, 4, 1);
+  module._jxl_wasm_dec_take_final = () => module._jxl_wasm_decode_rgba8(0, 4, 1);
+  module._jxl_wasm_dec_free = () => {};
+
+  return module;
+}
+
+function createFakeCloseDrainProgressiveLibjxlModule() {
+  const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
+    _jxl_wasm_dec_create: () => number;
+    _jxl_wasm_dec_push: (state: number, dataPtr: number, size: number) => number;
+    _jxl_wasm_dec_close_input: (state: number) => void;
+    _jxl_wasm_dec_width: (state: number) => number;
+    _jxl_wasm_dec_height: (state: number) => number;
+    _jxl_wasm_dec_error: (state: number) => number;
+    _jxl_wasm_dec_take_flushed: (state: number) => number;
+    _jxl_wasm_dec_take_final: (state: number) => number;
+    _jxl_wasm_dec_free: (state: number) => void;
+  };
+
+  let closed = false;
+  let pendingFlushes = 0;
+  let closeFlushQueued = false;
+
+  module._jxl_wasm_dec_create = () => 1;
+  module._jxl_wasm_dec_push = (_state: number, _dataPtr: number, size: number) => {
+    if (!closed && size > 0) {
+      pendingFlushes = 1;
+    } else if (closed && pendingFlushes === 0 && !closeFlushQueued) {
+      pendingFlushes = 1;
+      closeFlushQueued = true;
+    }
+    if (pendingFlushes > 0) {
+      pendingFlushes--;
+      return 1;
+    }
+    return closed ? 2 : 0;
+  };
+  module._jxl_wasm_dec_close_input = () => {
+    closed = true;
+  };
+  module._jxl_wasm_dec_width = () => 1;
+  module._jxl_wasm_dec_height = () => 1;
+  module._jxl_wasm_dec_error = () => 0;
+  module._jxl_wasm_dec_take_flushed = () => module._jxl_wasm_decode_rgba8(0, 4, 1);
+  module._jxl_wasm_dec_take_final = () => module._jxl_wasm_decode_rgba8(0, 4, 1);
+  module._jxl_wasm_dec_free = () => {};
+
+  return module;
+}
+
 function createFakeStreamingInputLibjxlModule() {
   const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
+    __mallocCalls: number;
     _jxl_wasm_enc_create_image: (width: number, height: number) => number;
+    _jxl_wasm_enc_pixels_ptr: (state: number, size: number) => number;
+    _jxl_wasm_enc_advance_written: (state: number, size: number) => number;
     _jxl_wasm_enc_push_chunk: (state: number, dataPtr: number, size: number) => number;
     _jxl_wasm_enc_finish: (state: number) => number;
     _jxl_wasm_enc_take_chunk: (state: number) => number;
     _jxl_wasm_enc_free: (state: number) => void;
   };
 
+  const baseMalloc = module._malloc.bind(module);
+  module.__mallocCalls = 0;
+  module._malloc = (size: number) => {
+    module.__mallocCalls++;
+    return baseMalloc(size);
+  };
+
   let nextState = 1;
-  const states = new Map<number, { width: number; height: number; chunks: Uint8Array[]; nextHandle: number }>();
+  const states = new Map<number, { width: number; height: number; pixelsPtr: number; pixelsSize: number; pixelsWritten: number; nextHandle: number }>();
 
   module._jxl_wasm_enc_create_image = (width: number, height: number) => {
     const state = nextState++;
-    states.set(state, { width, height, chunks: [], nextHandle: 0 });
+    const pixelsSize = width * height * 4;
+    const pixelsPtr = baseMalloc(pixelsSize);
+    states.set(state, { width, height, pixelsPtr, pixelsSize, pixelsWritten: 0, nextHandle: 0 });
     return state;
+  };
+  module._jxl_wasm_enc_pixels_ptr = (state: number, size: number) => {
+    const entry = states.get(state);
+    if (!entry || entry.pixelsWritten + size > entry.pixelsSize) return 0;
+    return entry.pixelsPtr + entry.pixelsWritten;
+  };
+  module._jxl_wasm_enc_advance_written = (state: number, size: number) => {
+    const entry = states.get(state);
+    if (!entry || entry.pixelsWritten + size > entry.pixelsSize) return 1;
+    entry.pixelsWritten += size;
+    return 0;
   };
   module._jxl_wasm_enc_push_chunk = (state: number, dataPtr: number, size: number) => {
     const entry = states.get(state);
     if (!entry) return 1;
-    entry.chunks.push(module.HEAPU8.slice(dataPtr, dataPtr + size));
+    if (entry.pixelsWritten + size > entry.pixelsSize) return 1;
+    module.HEAPU8.copyWithin(entry.pixelsPtr + entry.pixelsWritten, dataPtr, dataPtr + size);
+    entry.pixelsWritten += size;
     return 0;
   };
   module._jxl_wasm_enc_finish = (state: number) => {
     const entry = states.get(state);
     if (!entry) return 1;
-    const total = entry.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-    const joined = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of entry.chunks) {
-      joined.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
     entry.nextHandle = module._jxl_wasm_encode_rgba8(0, entry.width, entry.height, 0, 0);
     const handle = entry.nextHandle;
     const dataPtr = module._jxl_wasm_buffer_data(handle);
-    module.HEAPU8.set(joined, dataPtr);
+    module.HEAPU8.set(module.HEAPU8.subarray(entry.pixelsPtr, entry.pixelsPtr + entry.pixelsWritten), dataPtr);
     return 0;
   };
   module._jxl_wasm_enc_take_chunk = (state: number) => {

@@ -1,6 +1,7 @@
 export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32";
 export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = { x: number; y: number; w: number; h: number };
+export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";
 
 export interface ImageInfo {
   width: number;
@@ -58,6 +59,7 @@ export interface DecoderOptions {
   downsample?: 1 | 2 | 4 | 8;
   progressionTarget: "header" | "dc" | "pass" | "final";
   emitEveryPass: boolean;
+  progressiveDetail?: ProgressiveDetail;
   preserveIcc: boolean;
   preserveMetadata: boolean;
   /** When false, skip the defensive .slice() copy on push() — caller must not mutate the buffer after push returns. Default true. */
@@ -146,7 +148,7 @@ interface LibjxlWasmModule {
   _jxl_wasm_buffer_error?(handle: number): number;
   _jxl_wasm_buffer_free(handle: number): void;
   // Stateful progressive decoder (present after WASM rebuild with new bridge)
-  _jxl_wasm_dec_create?(format: number, wantProgressive: number): number;
+  _jxl_wasm_dec_create?(format: number, progressiveDetail: number): number;
   _jxl_wasm_dec_push?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_dec_close_input?(state: number): void;
   _jxl_wasm_dec_width?(state: number): number;
@@ -172,6 +174,8 @@ interface LibjxlWasmModule {
   _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
   // #16: Streaming input encoder — pre-allocate pixel buffer in WASM, push chunks, finish
   _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+  _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
+  _jxl_wasm_enc_advance_written?(state: number, size: number): number;
   _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_enc_finish?(state: number): number;
 }
@@ -182,11 +186,31 @@ function normalizeDecoderOptions(options: DecoderOptions): DecoderOptions {
   return {
     ...options,
     region: options.region ?? null,
-    downsample: options.downsample ?? 1,
+    downsample: options.downsample ?? pickDownsample(options),
+    ...(options.progressiveDetail !== undefined ? { progressiveDetail: options.progressiveDetail } : {}),
     targetWidth: options.targetWidth ?? null,
     targetHeight: options.targetHeight ?? null,
     fitMode: options.fitMode ?? null,
   };
+}
+
+function resolveDecoderProgressiveDetail(options: DecoderOptions): 0 | 1 | 2 | 3 | 4 {
+  if (options.progressionTarget === "header") return 0;
+  if (!(options.progressionTarget !== "final" || options.emitEveryPass)) return 0;
+  const detail = options.progressiveDetail
+    ?? (options.emitEveryPass || options.progressionTarget === "pass" ? "passes" : "dc");
+  switch (detail) {
+    case "dc":
+      return 1;
+    case "lastPasses":
+      return 2;
+    case "passes":
+      return 3;
+    case "dcProgressive":
+      return 4;
+    default:
+      return 1;
+  }
 }
 
 function resolveEncoderBridgeSettings(options: EncoderOptions) {
@@ -377,6 +401,7 @@ export interface DecodeViewportOptions {
   preserveMetadata?: boolean;
   progressionTarget?: "header" | "dc" | "pass" | "final";
   emitEveryPass?: boolean;
+  progressiveDetail?: ProgressiveDetail;
 }
 
 export function decodeViewport(options: DecodeViewportOptions): JxlDecoder {
@@ -391,6 +416,7 @@ export function decodeViewport(options: DecodeViewportOptions): JxlDecoder {
     targetWidth: options.targetWidth ?? null,
     targetHeight: options.targetHeight ?? null,
     fitMode: options.fitMode ?? null,
+    ...(options.progressiveDetail !== undefined ? { progressiveDetail: options.progressiveDetail } : {}),
   });
 }
 
@@ -488,8 +514,12 @@ class LibjxlDecoder implements JxlDecoder {
   }
 
   private compactQueue(): void {
-    if (this.readIndex > 64 && this.readIndex * 2 > this.chunkQueue.length) {
-      this.chunkQueue = this.chunkQueue.slice(this.readIndex);
+    if (this.readIndex >= this.chunkQueue.length) {
+      this.chunkQueue.length = 0;
+      this.readIndex = 0;
+    } else if (this.readIndex > 64 && this.readIndex * 2 > this.chunkQueue.length) {
+      this.chunkQueue.copyWithin(0, this.readIndex);
+      this.chunkQueue.length -= this.readIndex;
       this.readIndex = 0;
     }
   }
@@ -529,8 +559,8 @@ class LibjxlDecoder implements JxlDecoder {
 
   private async *eventsProgressive(module: LibjxlWasmModule): AsyncIterable<DecodeEvent> {
     const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-    const wantProgressive = (this.options.progressionTarget !== "final" || this.options.emitEveryPass) ? 1 : 0;
-    const dec = module._jxl_wasm_dec_create!(fmtIndex, wantProgressive);
+    const progressiveDetail = resolveDecoderProgressiveDetail(this.options);
+    const dec = module._jxl_wasm_dec_create!(fmtIndex, progressiveDetail);
     if (dec === 0) throw new Error("JXL progressive decoder creation failed");
     // Cache bridge fn refs once — avoids repeated property lookup on module per iteration.
     const decPush         = module._jxl_wasm_dec_push!;
@@ -578,20 +608,35 @@ class LibjxlDecoder implements JxlDecoder {
       const hasRegion = this.options.region != null;
       const onMetric = this.options.onMetric;
       let fallbackMetricEmitted = false;
+      let drainPending = false;
+      let inputClosed = false;
 
       // IMPROVEMENT-7: Batch all queued data chunks into one WASM write per tick.
       // IMPROVEMENT-9: Guard dec_width/dec_height calls behind !headerEmitted — skip 2 WASM
       // FFI calls per chunk once the header has been emitted.
       while (!done && !this.cancelled) {
-        if (this.chunkQueue.length <= this.readIndex) {
+        if (!drainPending && this.chunkQueue.length <= this.readIndex) {
           await this.waitForQueueItem();
           if (this.cancelled) return;
         }
 
-        // Pending byte count maintained incrementally — no scan needed.
-        const batchBytes = this.queuedBytes;
+        let result = 0;
 
-        if (batchBytes > 0) {
+        if (drainPending) {
+          result = decPush(dec, 0, 0);
+          if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
+        } else if (this.chunkQueue.length > this.readIndex && this.chunkQueue[this.readIndex] === null) {
+          // Close sentinel — flush remaining decoder state, then keep draining until done.
+          this.readIndex++;
+          this.compactQueue();
+          decCloseInput(dec);
+          inputClosed = true;
+          result = decPush(dec, 0, 0);
+          if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
+        } else {
+          // Pending byte count maintained incrementally — no scan needed.
+          const batchBytes = this.queuedBytes;
+          if (batchBytes <= 0) continue;
           if (batchBytes > chunkBufCap) {
             if (chunkBufPtr !== 0) module._free(chunkBufPtr);
             chunkBufPtr = module._malloc(batchBytes);
@@ -607,77 +652,72 @@ class LibjxlDecoder implements JxlDecoder {
             woff += chunk.byteLength;
           }
           this.compactQueue();
-          const result = decPush(dec, chunkBufPtr, batchBytes);
+          result = decPush(dec, chunkBufPtr, batchBytes);
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
+        }
 
-          if (!headerEmitted) {
-            const w = decWidth(dec);
-            const h = decHeight(dec);
-            if (w > 0 && h > 0) {
-              headerEmitted = true;
-              yield { type: "header", info: buildInfo(w, h) };
-              if (this.options.progressionTarget === "header") return;
-            }
+        if (!headerEmitted) {
+          const w = decWidth(dec);
+          const h = decHeight(dec);
+          if (w > 0 && h > 0) {
+            headerEmitted = true;
+            yield { type: "header", info: buildInfo(w, h) };
+            if (this.options.progressionTarget === "header") return;
           }
+        }
 
-          if (result === 1) {
-            gotRealFlush = true;
-            flushCount++;
-            const stage: DecodeStage = flushCount === 1 ? "dc" : "pass";
-            const wrapped = takeAndWrap(decTakeFlushed(dec));
-            if (wrapped !== null) {
-              const { pixels: rawPixels, evInfo } = wrapped;
+        if (result === 1) {
+          drainPending = true;
+          gotRealFlush = true;
+          flushCount++;
+          const stage: DecodeStage = flushCount === 1 ? "dc" : "pass";
+          const wrapped = takeAndWrap(decTakeFlushed(dec));
+          if (wrapped !== null) {
+            const { pixels: rawPixels, evInfo } = wrapped;
 
-              // P4: emit region_fallback_full_frame metric once when progressive + region active.
-              if (hasRegion && !fallbackMetricEmitted && onMetric) {
-                onMetric("region_fallback_full_frame", 1);
-                fallbackMetricEmitted = true;
-              }
-
-              // P1: apply bilinear resize if target dims set.
-              const targetW = this.options.targetWidth;
-              const targetH = this.options.targetHeight;
-              const fitMode = this.options.fitMode ?? "contain";
-              let outPixels = rawPixels;
-              if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
-                const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4);
-                outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
-              }
-
-              const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
-                ? { ...evInfo, width: outPixels.width, height: outPixels.height }
-                : evInfo;
-
-              const ev: Extract<DecodeEvent, { type: "progress" }> = {
-                type: "progress",
-                stage,
-                info: outInfo,
-                pixels: outPixels.data,
-                format: fmt,
-                pixelStride,
-                sourceScale: this.options.downsample ?? 1,
-                progressiveRegion: false,
-              };
-              if (hasRegion) ev.regionFallback = "full-frame-then-crop";
-              if (outPixels.region !== undefined) ev.region = outPixels.region;
-              yield ev;
-              if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
+            // P4: emit region_fallback_full_frame metric once when progressive + region active.
+            if (hasRegion && !fallbackMetricEmitted && onMetric) {
+              onMetric("region_fallback_full_frame", 1);
+              fallbackMetricEmitted = true;
             }
-          } else if (result === 2) {
-            done = true;
+
+            // P1: apply bilinear resize if target dims set.
+            const targetW = this.options.targetWidth;
+            const targetH = this.options.targetHeight;
+            const fitMode = this.options.fitMode ?? "contain";
+            let outPixels = rawPixels;
+            if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+              const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4);
+              outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
+            }
+
+            const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
+              ? { ...evInfo, width: outPixels.width, height: outPixels.height }
+              : evInfo;
+
+            const ev: Extract<DecodeEvent, { type: "progress" }> = {
+              type: "progress",
+              stage,
+              info: outInfo,
+              pixels: outPixels.data,
+              format: fmt,
+              pixelStride,
+              sourceScale: this.options.downsample ?? 1,
+              progressiveRegion: false,
+            };
+            if (hasRegion) ev.regionFallback = "full-frame-then-crop";
+            if (outPixels.region !== undefined) ev.region = outPixels.region;
+            yield ev;
+            if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
           }
-        } else if (this.chunkQueue.length > this.readIndex && this.chunkQueue[this.readIndex] === null) {
-          // Close sentinel — flush remaining decoder state
-          this.readIndex++;
-          this.compactQueue();
-          decCloseInput(dec);
-          const result = decPush(dec, 0, 0);
-          // result < 0 means libjxl signalled an error (e.g. truncated stream).
-          // Without this throw, the generator returns silently with no terminal
-          // event, leaving the decode session permanently unresolved on the main thread.
-          if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
-          done = result === 2;
-          break;
+          continue;
+        }
+
+        drainPending = false;
+        if (result === 2) {
+          done = true;
+        } else if (inputClosed) {
+          throw new Error(`JXL decode error: ${decError(dec)}`);
         }
       }
 
@@ -925,14 +965,22 @@ class LibjxlEncoder implements JxlEncoder {
       if (this.cancelled) return;
 
       if (this.streamingInputActive) {
-        // #16: copy chunk into WASM pixel buffer; JS ref can be discarded immediately after.
-        const ptr = module._malloc(view.byteLength);
-        try {
+        if (module._jxl_wasm_enc_pixels_ptr && module._jxl_wasm_enc_advance_written) {
+          const ptr = module._jxl_wasm_enc_pixels_ptr(this.wasmEncState, view.byteLength);
+          if (ptr === 0) throw new Error("JXL streaming pixel push failed (0)");
           module.HEAPU8.set(view, ptr);
-          const rc = module._jxl_wasm_enc_push_chunk!(this.wasmEncState, ptr, view.byteLength);
+          const rc = module._jxl_wasm_enc_advance_written(this.wasmEncState, view.byteLength);
           if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
-        } finally {
-          module._free(ptr);
+        } else {
+          // Back-compat with older WASM bridge: temp copy into WASM, then bridge memcpy.
+          const ptr = module._malloc(view.byteLength);
+          try {
+            module.HEAPU8.set(view, ptr);
+            const rc = module._jxl_wasm_enc_push_chunk!(this.wasmEncState, ptr, view.byteLength);
+            if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
+          } finally {
+            module._free(ptr);
+          }
         }
       } else {
         this.pixelChunks.push(view);
@@ -1460,6 +1508,23 @@ function applyRegionAndDownsample(
   return result;
 }
 
+const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+function buildResizeAxis(srcSize: number, dstSize: number): { i0: Int32Array; i1: Int32Array; t: Float32Array } {
+  const i0 = new Int32Array(dstSize);
+  const i1 = new Int32Array(dstSize);
+  const t = new Float32Array(dstSize);
+  const scale = srcSize / dstSize;
+  for (let d = 0; d < dstSize; d++) {
+    const f = (d + 0.5) * scale - 0.5;
+    const base = Math.max(0, Math.floor(f));
+    i0[d] = base;
+    i1[d] = Math.min(srcSize - 1, base + 1);
+    t[d] = f - base;
+  }
+  return { i0, i1, t };
+}
+
 function bilinearResize(
   src: Uint8Array,
   srcW: number,
@@ -1468,75 +1533,135 @@ function bilinearResize(
   dstH: number,
   stride: number, // 4=rgba8, 8=rgba16, 16=rgbaf32
 ): Uint8Array {
+  if (srcW === dstW && srcH === dstH) return src;
   const dst = new Uint8Array(dstW * dstH * stride);
+  const xAxis = buildResizeAxis(srcW, dstW);
+  const yAxis = buildResizeAxis(srcH, dstH);
   if (stride === 4) {
     for (let dy = 0; dy < dstH; dy++) {
-      const fy = (dy + 0.5) * (srcH / dstH) - 0.5;
-      const y0 = Math.max(0, Math.floor(fy));
-      const y1 = Math.min(srcH - 1, y0 + 1);
-      const yt = fy - y0;
+      const y0 = yAxis.i0[dy]!;
+      const y1 = yAxis.i1[dy]!;
+      const yt = yAxis.t[dy]!;
+      const row00 = y0 * srcW * 4;
+      const row10 = y1 * srcW * 4;
       for (let dx = 0; dx < dstW; dx++) {
-        const fx = (dx + 0.5) * (srcW / dstW) - 0.5;
-        const x0 = Math.max(0, Math.floor(fx));
-        const x1 = Math.min(srcW - 1, x0 + 1);
-        const xt = fx - x0;
+        const x0 = xAxis.i0[dx]!;
+        const x1 = xAxis.i1[dx]!;
+        const xt = xAxis.t[dx]!;
+        const topLeft = row00 + x0 * 4;
+        const topRight = row00 + x1 * 4;
+        const bottomLeft = row10 + x0 * 4;
+        const bottomRight = row10 + x1 * 4;
         const dstOff = (dy * dstW + dx) * 4;
         for (let c = 0; c < 4; c++) {
-          const tl = src[(y0 * srcW + x0) * 4 + c]!;
-          const tr = src[(y0 * srcW + x1) * 4 + c]!;
-          const bl = src[(y1 * srcW + x0) * 4 + c]!;
-          const br = src[(y1 * srcW + x1) * 4 + c]!;
+          const tl = src[topLeft + c]!;
+          const tr = src[topRight + c]!;
+          const bl = src[bottomLeft + c]!;
+          const br = src[bottomRight + c]!;
           dst[dstOff + c] = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
         }
       }
     }
   } else if (stride === 8) {
-    const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
-    const dstView = new DataView(dst.buffer);
-    for (let dy = 0; dy < dstH; dy++) {
-      const fy = (dy + 0.5) * (srcH / dstH) - 0.5;
-      const y0 = Math.max(0, Math.floor(fy));
-      const y1 = Math.min(srcH - 1, y0 + 1);
-      const yt = fy - y0;
-      for (let dx = 0; dx < dstW; dx++) {
-        const fx = (dx + 0.5) * (srcW / dstW) - 0.5;
-        const x0 = Math.max(0, Math.floor(fx));
-        const x1 = Math.min(srcW - 1, x0 + 1);
-        const xt = fx - x0;
-        const dstOff = (dy * dstW + dx) * 8;
-        for (let c = 0; c < 4; c++) {
-          const bo = c * 2;
-          const tl = srcView.getUint16((y0 * srcW + x0) * 8 + bo, true);
-          const tr = srcView.getUint16((y0 * srcW + x1) * 8 + bo, true);
-          const bl = srcView.getUint16((y1 * srcW + x0) * 8 + bo, true);
-          const br = srcView.getUint16((y1 * srcW + x1) * 8 + bo, true);
-          const val = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
-          dstView.setUint16(dstOff + bo, Math.max(0, Math.min(65535, val)), true);
+    if (IS_LITTLE_ENDIAN) {
+      const srcView = new Uint16Array(src.buffer, src.byteOffset, src.byteLength >> 1);
+      const dstView = new Uint16Array(dst.buffer);
+      for (let dy = 0; dy < dstH; dy++) {
+        const y0 = yAxis.i0[dy]!;
+        const y1 = yAxis.i1[dy]!;
+        const yt = yAxis.t[dy]!;
+        const row00 = y0 * srcW * 4;
+        const row10 = y1 * srcW * 4;
+        for (let dx = 0; dx < dstW; dx++) {
+          const x0 = xAxis.i0[dx]!;
+          const x1 = xAxis.i1[dx]!;
+          const xt = xAxis.t[dx]!;
+          const topLeft = row00 + x0 * 4;
+          const topRight = row00 + x1 * 4;
+          const bottomLeft = row10 + x0 * 4;
+          const bottomRight = row10 + x1 * 4;
+          const dstOff = (dy * dstW + dx) * 4;
+          for (let c = 0; c < 4; c++) {
+            const tl = srcView[topLeft + c]!;
+            const tr = srcView[topRight + c]!;
+            const bl = srcView[bottomLeft + c]!;
+            const br = srcView[bottomRight + c]!;
+            dstView[dstOff + c] = Math.max(0, Math.min(65535, Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt)));
+          }
+        }
+      }
+    } else {
+      const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
+      const dstView = new DataView(dst.buffer);
+      for (let dy = 0; dy < dstH; dy++) {
+        const y0 = yAxis.i0[dy]!;
+        const y1 = yAxis.i1[dy]!;
+        const yt = yAxis.t[dy]!;
+        for (let dx = 0; dx < dstW; dx++) {
+          const x0 = xAxis.i0[dx]!;
+          const x1 = xAxis.i1[dx]!;
+          const xt = xAxis.t[dx]!;
+          const dstOff = (dy * dstW + dx) * 8;
+          for (let c = 0; c < 4; c++) {
+            const bo = c * 2;
+            const tl = srcView.getUint16((y0 * srcW + x0) * 8 + bo, true);
+            const tr = srcView.getUint16((y0 * srcW + x1) * 8 + bo, true);
+            const bl = srcView.getUint16((y1 * srcW + x0) * 8 + bo, true);
+            const br = srcView.getUint16((y1 * srcW + x1) * 8 + bo, true);
+            const val = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
+            dstView.setUint16(dstOff + bo, Math.max(0, Math.min(65535, val)), true);
+          }
         }
       }
     }
   } else {
-    // rgbaf32
-    const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
-    const dstView = new DataView(dst.buffer);
-    for (let dy = 0; dy < dstH; dy++) {
-      const fy = (dy + 0.5) * (srcH / dstH) - 0.5;
-      const y0 = Math.max(0, Math.floor(fy));
-      const y1 = Math.min(srcH - 1, y0 + 1);
-      const yt = fy - y0;
-      for (let dx = 0; dx < dstW; dx++) {
-        const fx = (dx + 0.5) * (srcW / dstW) - 0.5;
-        const x0 = Math.max(0, Math.floor(fx));
-        const x1 = Math.min(srcW - 1, x0 + 1);
-        const xt = fx - x0;
-        const dstOff = (dy * dstW + dx) * 16;
-        for (let c = 0; c < 4; c++) {
-          const bo = c * 4;
-          const tl = srcView.getFloat32((y0 * srcW + x0) * 16 + bo, true);
-          const tr = srcView.getFloat32((y0 * srcW + x1) * 16 + bo, true);
-          const bl = srcView.getFloat32((y1 * srcW + x0) * 16 + bo, true);
-          const br = srcView.getFloat32((y1 * srcW + x1) * 16 + bo, true);
-          dstView.setFloat32(dstOff + bo, tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt, true);
+    if (IS_LITTLE_ENDIAN) {
+      const srcView = new Float32Array(src.buffer, src.byteOffset, src.byteLength >> 2);
+      const dstView = new Float32Array(dst.buffer);
+      for (let dy = 0; dy < dstH; dy++) {
+        const y0 = yAxis.i0[dy]!;
+        const y1 = yAxis.i1[dy]!;
+        const yt = yAxis.t[dy]!;
+        const row00 = y0 * srcW * 4;
+        const row10 = y1 * srcW * 4;
+        for (let dx = 0; dx < dstW; dx++) {
+          const x0 = xAxis.i0[dx]!;
+          const x1 = xAxis.i1[dx]!;
+          const xt = xAxis.t[dx]!;
+          const topLeft = row00 + x0 * 4;
+          const topRight = row00 + x1 * 4;
+          const bottomLeft = row10 + x0 * 4;
+          const bottomRight = row10 + x1 * 4;
+          const dstOff = (dy * dstW + dx) * 4;
+          for (let c = 0; c < 4; c++) {
+            const tl = srcView[topLeft + c]!;
+            const tr = srcView[topRight + c]!;
+            const bl = srcView[bottomLeft + c]!;
+            const br = srcView[bottomRight + c]!;
+            dstView[dstOff + c] = tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt;
+          }
+        }
+      }
+    } else {
+      const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
+      const dstView = new DataView(dst.buffer);
+      for (let dy = 0; dy < dstH; dy++) {
+        const y0 = yAxis.i0[dy]!;
+        const y1 = yAxis.i1[dy]!;
+        const yt = yAxis.t[dy]!;
+        for (let dx = 0; dx < dstW; dx++) {
+          const x0 = xAxis.i0[dx]!;
+          const x1 = xAxis.i1[dx]!;
+          const xt = xAxis.t[dx]!;
+          const dstOff = (dy * dstW + dx) * 16;
+          for (let c = 0; c < 4; c++) {
+            const bo = c * 4;
+            const tl = srcView.getFloat32((y0 * srcW + x0) * 16 + bo, true);
+            const tr = srcView.getFloat32((y0 * srcW + x1) * 16 + bo, true);
+            const bl = srcView.getFloat32((y1 * srcW + x0) * 16 + bo, true);
+            const br = srcView.getFloat32((y1 * srcW + x1) * 16 + bo, true);
+            dstView.setFloat32(dstOff + bo, tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt, true);
+          }
         }
       }
     }
@@ -1553,6 +1678,9 @@ function applyTargetResize(
   fitMode: "contain" | "cover" | "stretch",
   bpc: 1 | 2 | 4,
 ): { data: Uint8Array; width: number; height: number } {
+  if (srcW === targetW && srcH === targetH) {
+    return { data: src, width: srcW, height: srcH };
+  }
   const stride = 4 * bpc;
   if (fitMode === "stretch") {
     return { data: bilinearResize(src, srcW, srcH, targetW, targetH, stride), width: targetW, height: targetH };
@@ -1561,21 +1689,32 @@ function applyTargetResize(
     const scale = Math.min(targetW / srcW, targetH / srcH);
     const dstW = Math.max(1, Math.round(srcW * scale));
     const dstH = Math.max(1, Math.round(srcH * scale));
+    if (dstW === srcW && dstH === srcH) return { data: src, width: srcW, height: srcH };
     return { data: bilinearResize(src, srcW, srcH, dstW, dstH, stride), width: dstW, height: dstH };
   }
   // cover: scale up so both dims >= target, then center-crop
   const scale = Math.max(targetW / srcW, targetH / srcH);
   const scaledW = Math.max(targetW, Math.round(srcW * scale));
   const scaledH = Math.max(targetH, Math.round(srcH * scale));
-  const scaled = bilinearResize(src, srcW, srcH, scaledW, scaledH, stride);
+  const scaled = (scaledW === srcW && scaledH === srcH) ? src : bilinearResize(src, srcW, srcH, scaledW, scaledH, stride);
   const cropX = Math.floor((scaledW - targetW) / 2);
   const cropY = Math.floor((scaledH - targetH) / 2);
   const cropped = applyRegionAndDownsample(scaled, scaledW, scaledH, { x: cropX, y: cropY, w: targetW, h: targetH }, 1, bpc);
   return { data: cropped.data, width: targetW, height: targetH };
 }
 
-function pickDownsample(_options: { targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {
-  // Source dims unknown at call time — resize post-decode handles scale-to-target.
+function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {
+  const region = options.region ?? null;
+  const targetWidth = options.targetWidth ?? null;
+  const targetHeight = options.targetHeight ?? null;
+  if (region === null || targetWidth == null || targetHeight == null || targetWidth <= 0 || targetHeight <= 0) {
+    return 1;
+  }
+  const sourceLongEdge = Math.max(region.w, region.h);
+  const targetLongEdge = Math.max(targetWidth, targetHeight);
+  for (const factor of [8, 4, 2] as const) {
+    if (Math.ceil(sourceLongEdge / factor) >= targetLongEdge) return factor;
+  }
   return 1;
 }
 

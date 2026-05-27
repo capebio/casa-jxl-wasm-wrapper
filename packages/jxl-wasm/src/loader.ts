@@ -29,9 +29,7 @@ async function loadNodeModule(manifest: JxlWasmManifest, options: LoaderOptions)
   const fs = options.nodeFs ?? (await import("node:fs/promises"));
   const wasmUrl = options.wasmUrl ?? manifest.wasmUrl;
   const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""));
-  // fs.readFile returns Buffer (Uint8Array<ArrayBufferLike>) but WebAssembly.compile
-  // requires BufferSource. Copy into a plain ArrayBuffer to satisfy strict TS lib types.
-  return WebAssembly.compile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+  return WebAssembly.compile(bytes as BufferSource);
 }
 
 async function loadBrowserModule(manifest: JxlWasmManifest, options: LoaderOptions): Promise<WebAssembly.Module> {
