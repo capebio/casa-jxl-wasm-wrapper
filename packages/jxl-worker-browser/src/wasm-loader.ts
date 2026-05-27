@@ -75,6 +75,10 @@ export interface JxlModule {
     emitEveryPass: boolean;
     preserveIcc: boolean;
     preserveMetadata: boolean;
+    targetWidth?: number | null;
+    targetHeight?: number | null;
+    fitMode?: "contain" | "cover" | "stretch" | null;
+    onMetric?: (name: string, value: number) => void;
   }): BrowserDecoder;
   createEncoder(options: {
     format: PixelFormat;

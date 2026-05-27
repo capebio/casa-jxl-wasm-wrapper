@@ -230,7 +230,9 @@ export class DecodeHandler {
     const decoder = this.decoder;
     if (decoder === null) return Promise.resolve();
     this.decoder = null;
-    this.disposePromise = Promise.resolve(decoder.dispose()).catch(() => {});
+    this.disposePromise = Promise.resolve(decoder.dispose()).catch((e: unknown) => {
+      console.error('[jxl-worker] disposeActiveDecoder failed:', e);
+    });
     return this.disposePromise;
   }
 
@@ -376,6 +378,7 @@ export class DecodeHandler {
             this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride, event.region);
             return;
           }
+          const now = performance.now();
           const msg: MsgDecodeFinal = {
             type: "decode_final",
             sessionId: this.sessionId,
@@ -383,12 +386,16 @@ export class DecodeHandler {
             pixels,
             format: event.format,
             pixelStride: event.pixelStride,
+            outputBytes: pixels.byteLength,
+            timeToFinalMs: now - this.stageStartMs,
           };
           if (event.region !== undefined) msg.region = event.region;
-          this.postMetric("output_bytes", pixels.byteLength);
+          // Embed first-pixel timing if it hasn't been reported via a progress event.
+          if (!this.firstPixelMetricPosted) {
+            this.firstPixelMetricPosted = true;
+            msg.timeToFirstPixelMs = now - this.stageStartMs;
+          }
           self.postMessage(msg, [pixels]);
-          this.postFirstPixelMetric();
-          this.postMetric("time_to_final_ms", performance.now() - this.stageStartMs);
           this.finishSession("final");
           return;
         }

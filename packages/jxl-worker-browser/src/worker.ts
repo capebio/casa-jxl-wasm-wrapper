@@ -206,14 +206,16 @@ function routeEncodeMessage(msg: QueuedEncodeMessage): void {
 function handleReleaseState(sessionId: string): void {
   const decode = decodeSessions.get(sessionId);
   if (decode !== undefined) {
-    decodeSessions.delete(sessionId);
     void decode.onCancel("release_state").catch(() => undefined);
+    decodeSessions.delete(sessionId);
   }
   const encode = encodeSessions.get(sessionId);
   if (encode !== undefined) {
-    encodeSessions.delete(sessionId);
     void encode.onCancel("release_state").catch(() => undefined);
+    encodeSessions.delete(sessionId);
   }
+  pendingDecodeStarts.delete(sessionId);
+  pendingEncodeStarts.delete(sessionId);
   queuedDecodeMessages.delete(sessionId);
   queuedEncodeMessages.delete(sessionId);
 }

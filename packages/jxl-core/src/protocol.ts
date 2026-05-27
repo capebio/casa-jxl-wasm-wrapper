@@ -87,6 +87,12 @@ export interface MsgDecodeFinal {
   format: PixelFormat;
   region?: Region;
   pixelStride: number;
+  /** Byte length of the transferred pixel buffer (avoids a separate metric IPC). */
+  outputBytes?: number;
+  /** Elapsed ms from session start to first pixel (may be set here if no progress event fired). */
+  timeToFirstPixelMs?: number;
+  /** Elapsed ms from session start to final frame. */
+  timeToFinalMs?: number;
 }
 
 export interface MsgDecodeError {
