@@ -179,6 +179,9 @@ let selectedSources = [];
 let benchmarkResults = {
     decodeMs: new Map(),
     encodeMs: new Map(),
+    resizeMs: new Map(),
+    firstChunkMs: new Map(),
+    totalMs: new Map(),
     fileSize: new Map(),
 };
 let permutations = [];      // { id, label, color, visible, results }
@@ -202,6 +205,9 @@ function snapshotResults() {
     return {
         decodeMs: new Map(benchmarkResults.decodeMs),
         encodeMs: new Map(benchmarkResults.encodeMs),
+        resizeMs: new Map(benchmarkResults.resizeMs),
+        firstChunkMs: new Map(benchmarkResults.firstChunkMs),
+        totalMs: new Map(benchmarkResults.totalMs),
         fileSize: new Map(benchmarkResults.fileSize),
     };
 }
@@ -661,6 +667,7 @@ function concatChunks(chunks) {
 
 async function encodeJxl(rgba, width, height, quality, effort = null) {
     const started = performance.now();
+    let encoder = null;
     try {
         const opts = getAdvancedOptions();
         const encoderConfig = {
@@ -678,10 +685,12 @@ async function encodeJxl(rgba, width, height, quality, effort = null) {
             brotliEffort: opts.brotliEffort,
             copyInput: !opts.skipCopy,
         };
-        const encoder = createEncoder(encoderConfig);
+        encoder = createEncoder(encoderConfig);
         const chunks = [];
+        let firstChunkMs = null;
         const chunkTask = (async () => {
             for await (const chunk of encoder.chunks()) {
+                if (firstChunkMs === null) firstChunkMs = performance.now() - started;
                 chunks.push(chunk);
             }
         })();
@@ -692,11 +701,12 @@ async function encodeJxl(rgba, width, height, quality, effort = null) {
         await chunkTask;
         const bytes = concatChunks(chunks);
         const encodeMs = performance.now() - started;
-        await encoder.dispose();
-        return { bytes, encodeMs };
+        return { bytes, encodeMs, firstChunkMs: firstChunkMs ?? encodeMs };
     } catch (err) {
         console.error('Encode error:', err);
         throw new Error(`Encode failed: ${err.message}`);
+    } finally {
+        if (encoder) await encoder.dispose();
     }
 }
 
@@ -855,6 +865,9 @@ async function runBenchmark() {
     benchmarkResults = {
         decodeMs: new Map(),
         encodeMs: new Map(),
+        resizeMs: new Map(),
+        firstChunkMs: new Map(),
+        totalMs: new Map(),
         fileSize: new Map(),
     };
 
@@ -929,25 +942,22 @@ async function runBenchmark() {
                         const encResult = await encodeJxl(resized.rgba, resized.width, resized.height, quality, effort);
                         const encMs = encResult.encodeMs;
 
-                        if (!benchmarkResults.encodeMs.has(key)) {
-                            benchmarkResults.encodeMs.set(key, []);
-                        }
-                        benchmarkResults.encodeMs.get(key).push(encMs);
+                        recordTiming(benchmarkResults.resizeMs, key, resizeMs);
+                        recordTiming(benchmarkResults.encodeMs, key, encMs);
+                        recordTiming(benchmarkResults.firstChunkMs, key, encResult.firstChunkMs);
                         benchmarkResults.fileSize.set(key, encResult.bytes.length);
 
                         // Decode
-                        const decStart = performance.now();
                         const decResult = await decodeJxl(encResult.bytes);
                         const decMs = decResult.decodeMs;
 
                         if (decResult.success) {
-                            if (!benchmarkResults.decodeMs.has(key)) {
-                                benchmarkResults.decodeMs.set(key, []);
-                            }
-                            benchmarkResults.decodeMs.get(key).push(decMs);
+                            recordTiming(benchmarkResults.decodeMs, key, decMs);
                         } else {
                             throw new Error('Decode failed');
                         }
+                        const totalMs = resizeMs + encMs + decMs;
+                        recordTiming(benchmarkResults.totalMs, key, totalMs);
 
                         completedSteps++;
                         const percent = Math.round((completedSteps / totalSteps) * 100);
@@ -955,7 +965,7 @@ async function runBenchmark() {
 
                         dbgLog(
                             `  ${size}px Q${quality} E${effort} i${iter + 1}`,
-                            `resize ${resizeMs.toFixed(1)}ms | enc ${encMs.toFixed(1)}ms | dec ${decMs.toFixed(1)}ms | file ${fileSizeKB}KB | ${percent}%`,
+                            `resize ${resizeMs.toFixed(1)}ms | enc ${encMs.toFixed(1)}ms | first ${encResult.firstChunkMs.toFixed(1)}ms | dec ${decMs.toFixed(1)}ms | total ${totalMs.toFixed(1)}ms | file ${fileSizeKB}KB | ${percent}%`,
                             'success'
                         );
 
@@ -968,6 +978,7 @@ async function runBenchmark() {
                                 completedFiles,
                                 totalFiles: selectedSources.length,
                             }));
+                            setTiming(`resize ${resizeMs.toFixed(1)} ms · enc ${encMs.toFixed(1)} ms · first ${encResult.firstChunkMs.toFixed(1)} ms · dec ${decMs.toFixed(1)} ms · total ${totalMs.toFixed(1)} ms`);
                             lastProgressStatusAt = performance.now();
                         }
                     } catch (err) {
@@ -1033,6 +1044,16 @@ function getAverageTiming(timings) {
     return (sum / timings.length).toFixed(2);
 }
 
+function recordTiming(map, key, value) {
+    if (!Number.isFinite(value)) return;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(value);
+}
+
+function detailTimingLine(label, values) {
+    return `<span class="detail-inline-label">${label}:</span> <span class="detail-inline-value">${values.join(' · ')}</span>`;
+}
+
 function displayResults() {
     const selectedSizes = getSelectedSizes();
     const selectedQualities = getSelectedQualities();
@@ -1046,8 +1067,10 @@ function displayResults() {
                 const row = document.createElement('tr');
                 const key = `${size}x${quality}xe${effort}`;
                 const decodeMs = getAverageTiming(benchmarkResults.decodeMs.get(key));
+                const resizeMs = getAverageTiming(benchmarkResults.resizeMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
                 const note = size === 128 || size === 256 ? 'Thumb' : size === 512 ? 'Med' : size === 1080 ? 'Preview' : '';
-                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${decodeMs} ms</td><td>${note}</td>`;
+                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${decodeMs} ms</td><td>${resizeMs} ms</td><td>${totalMs} ms</td><td>${note}</td>`;
                 decodeSummary.appendChild(row);
             }
         }
@@ -1062,7 +1085,9 @@ function displayResults() {
                 const row = document.createElement('tr');
                 const key = `${size}x${quality}xe${effort}`;
                 const encodeMs = getAverageTiming(benchmarkResults.encodeMs.get(key));
-                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${encodeMs} ms</td><td></td>`;
+                const firstChunkMs = getAverageTiming(benchmarkResults.firstChunkMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
+                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${encodeMs} ms</td><td>${firstChunkMs} ms</td><td>${totalMs} ms</td><td></td>`;
                 encodeSummary.appendChild(row);
             }
         }
@@ -1094,7 +1119,9 @@ function displayResults() {
                 row.className = 'detail-inline-row';
                 const key = `${size}x${quality}xe${effort}`;
                 const encodeMs = getAverageTiming(benchmarkResults.encodeMs.get(key));
-                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> <span class="detail-inline-label">Encode:</span> <span class="detail-inline-value">${encodeMs} ms</span>`;
+                const firstChunkMs = getAverageTiming(benchmarkResults.firstChunkMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
+                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> ${detailTimingLine('Encode', [`avg ${encodeMs} ms`, `first chunk ${firstChunkMs} ms`, `total ${totalMs} ms`])}`;
                 encodeDetailBody.appendChild(row);
             }
         }
@@ -1110,7 +1137,9 @@ function displayResults() {
                 row.className = 'detail-inline-row';
                 const key = `${size}x${quality}xe${effort}`;
                 const decodeMs = getAverageTiming(benchmarkResults.decodeMs.get(key));
-                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> <span class="detail-inline-label">Decode:</span> <span class="detail-inline-value">${decodeMs} ms</span>`;
+                const resizeMs = getAverageTiming(benchmarkResults.resizeMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
+                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> ${detailTimingLine('Decode', [`avg ${decodeMs} ms`, `resize ${resizeMs} ms`, `total ${totalMs} ms`])}`;
                 decodeDetailBody.appendChild(row);
             }
         }
@@ -1169,6 +1198,9 @@ function clearResults() {
     benchmarkResults = {
         decodeMs: new Map(),
         encodeMs: new Map(),
+        resizeMs: new Map(),
+        firstChunkMs: new Map(),
+        totalMs: new Map(),
         fileSize: new Map(),
     };
     permutations = [];
@@ -1185,8 +1217,8 @@ function clearResults() {
     const addBtn = document.getElementById('add-permutation');
     if (addBtn) addBtn.disabled = true;
 
-    document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
-    document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
     document.getElementById('file-size-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
     document.getElementById('encode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
     document.getElementById('decode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
@@ -1489,25 +1521,27 @@ function exportGraphAsCSV(chartId) {
 
     const sysInfo = getSystemInfo();
     const advOpts = getAdvancedOptions();
-    let csv = '# JXL Benchmark Export\n';
-    csv += `# Date: ${new Date().toISOString()}\n`;
-    csv += `# Browser: ${sysInfo.browser} ${sysInfo.browserVersion}\n`;
-    csv += `# CPU Cores: ${sysInfo.cpuCores}\n`;
-    csv += `# Device Memory: ${sysInfo.deviceMemory} GB\n`;
-    csv += `# SIMD: ${advOpts.simd}, Threading: ${advOpts.threading}, Progressive: ${advOpts.progressive}\n`;
-    csv += `# ICC: ${advOpts.preserveIcc}, Metadata: ${advOpts.preserveMetadata}, Chunked: ${advOpts.chunked}\n`;
-    csv += '\n';
-    csv += 'Size,' + chart.data.datasets.map(ds => ds.label).join(',') + '\n';
+    const csvRows = [];
+    csvRows.push('# JXL Benchmark Export');
+    csvRows.push(`# Date: ${new Date().toISOString()}`);
+    csvRows.push(`# Browser: ${sysInfo.browser} ${sysInfo.browserVersion}`);
+    csvRows.push(`# CPU Cores: ${sysInfo.cpuCores}`);
+    csvRows.push(`# Device Memory: ${sysInfo.deviceMemory} GB`);
+    csvRows.push(`# SIMD: ${advOpts.simd}, Threading: ${advOpts.threading}, Progressive: ${advOpts.progressive}`);
+    csvRows.push(`# ICC: ${advOpts.preserveIcc}, Metadata: ${advOpts.preserveMetadata}, Chunked: ${advOpts.chunked}`);
+    csvRows.push('');
+    csvRows.push('Size,' + chart.data.datasets.map(ds => ds.label).join(','));
 
     chart.data.labels.forEach((label, idx) => {
         const row = [label];
         chart.data.datasets.forEach(ds => {
             row.push(ds.data[idx] || '');
         });
-        csv += row.join(',') + '\n';
+        csvRows.push(row.join(','));
     });
+    appendTimingBreakdownCsv(csvRows);
 
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob([csvRows.join('\n') + '\n'], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1516,6 +1550,33 @@ function exportGraphAsCSV(chartId) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+}
+
+function appendTimingBreakdownCsv(csvRows) {
+    const selectedSizes = getSelectedSizes();
+    const selectedQualities = getSelectedQualities();
+    const selectedEfforts = getSelectedEfforts();
+    csvRows.push('');
+    csvRows.push('Detailed Timing Breakdown');
+    csvRows.push('Config,Resize avg,Encode avg,First chunk avg,Decode avg,Total avg,File size KB');
+    for (const size of selectedSizes) {
+        for (const quality of selectedQualities) {
+            for (const effort of selectedEfforts) {
+                const key = `${size}x${quality}xe${effort}`;
+                const label = `${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}`;
+                const fileSizeKb = ((benchmarkResults.fileSize.get(key) || 0) / 1024).toFixed(1);
+                csvRows.push([
+                    label,
+                    getAverageTiming(benchmarkResults.resizeMs.get(key)),
+                    getAverageTiming(benchmarkResults.encodeMs.get(key)),
+                    getAverageTiming(benchmarkResults.firstChunkMs.get(key)),
+                    getAverageTiming(benchmarkResults.decodeMs.get(key)),
+                    getAverageTiming(benchmarkResults.totalMs.get(key)),
+                    fileSizeKb,
+                ].join(','));
+            }
+        }
+    }
 }
 
 document.querySelectorAll('.results-tab').forEach(tab => {

@@ -26,6 +26,7 @@ export declare class Scheduler {
     private readonly queue;
     private readonly dedupe;
     private readonly sessions;
+    private readonly pendingHandlers;
     private readonly backgroundWorkers;
     private readonly workerPausedSession;
     private readonly wiredWorkers;
@@ -69,6 +70,7 @@ export declare class Scheduler {
     private handleWorkerMessage;
     private isTerminalMessage;
     private setupSignalAbort;
+    private takePendingHandlers;
     private cleanupSession;
     private releaseSession;
     private drainQueue;
