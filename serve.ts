@@ -88,6 +88,7 @@ async function handleJxlCrop(url: URL): Promise<Response> {
             emitEveryPass: false,
             preserveIcc: false,
             preserveMetadata: false,
+            copyInput: false,
         });
         decoder.push(sourceBytes);
         await decoder.close();
