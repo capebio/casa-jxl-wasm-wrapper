@@ -7,6 +7,7 @@ export interface MsgDecodeStart {
     downsample: 1 | 2 | 4 | 8;
     progressionTarget: "header" | "dc" | "pass" | "final";
     emitEveryPass: boolean;
+    progressiveDetail: "dc" | "lastPasses" | "passes" | "dcProgressive" | null;
     preserveIcc: boolean;
     preserveMetadata: boolean;
     priority: "visible" | "near" | "background";
@@ -60,6 +61,12 @@ export interface MsgDecodeFinal {
     format: PixelFormat;
     region?: Region;
     pixelStride: number;
+    /** Byte length of the transferred pixel buffer (avoids a separate metric IPC). */
+    outputBytes?: number;
+    /** Elapsed ms from session start to first pixel (may be set here if no progress event fired). */
+    timeToFirstPixelMs?: number;
+    /** Elapsed ms from session start to final frame. */
+    timeToFinalMs?: number;
 }
 export interface MsgDecodeError {
     type: "decode_error";

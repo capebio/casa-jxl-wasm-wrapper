@@ -51,6 +51,7 @@ export class DecodeSessionImpl implements DecodeSession {
       downsample: opts.downsample ?? 1,
       progressionTarget: opts.progressionTarget ?? "final",
       emitEveryPass: opts.emitEveryPass ?? true,
+      progressiveDetail: opts.progressiveDetail ?? null,
       preserveIcc: opts.preserveIcc ?? true,
       preserveMetadata: opts.preserveMetadata ?? true,
       priority: opts.priority ?? "visible",

@@ -54,6 +54,7 @@ interface NodeCodecModule {
     downsample: 1 | 2 | 4 | 8;
     progressionTarget: "header" | "dc" | "pass" | "final";
     emitEveryPass: boolean;
+    progressiveDetail?: "dc" | "lastPasses" | "passes" | "dcProgressive";
     preserveIcc: boolean;
     preserveMetadata: boolean;
   }): NodeDecoder;
@@ -210,6 +211,7 @@ export class DecodeHandler {
       downsample: this.opts.downsample,
       progressionTarget: this.opts.progressionTarget,
       emitEveryPass: this.opts.emitEveryPass,
+      ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
       preserveIcc: this.opts.preserveIcc,
       preserveMetadata: this.opts.preserveMetadata,
     });

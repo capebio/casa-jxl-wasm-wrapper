@@ -22,6 +22,7 @@ export interface MsgDecodeStart {
   downsample: 1 | 2 | 4 | 8;
   progressionTarget: "header" | "dc" | "pass" | "final";
   emitEveryPass: boolean;
+  progressiveDetail: "dc" | "lastPasses" | "passes" | "dcProgressive" | null;
   preserveIcc: boolean;
   preserveMetadata: boolean;
   priority: "visible" | "near" | "background";

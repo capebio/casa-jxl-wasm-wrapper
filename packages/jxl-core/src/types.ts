@@ -58,6 +58,16 @@ export interface DecodeOptions {
   // Progression
   progressionTarget?: "header" | "dc" | "pass" | "final"; // earliest stage to stop
   emitEveryPass?: boolean;          // default true for viewer, false for thumbnail
+  /**
+   * libjxl progressive detail level. Mapped to JxlProgressiveDetail in the WASM bridge:
+   *   "dc"            → kDC: single DC-only preview
+   *   "lastPasses"    → kLastPasses: emit only the final refinement passes (skip early noise)
+   *   "passes"        → kPasses: emit every refinement pass (default when emitEveryPass)
+   *   "dcProgressive" → kDCProgressive: DC followed by progressive AC passes
+   * When unset, the facade picks "passes" if emitEveryPass is true or progressionTarget is "pass",
+   * otherwise "dc". Ignored when progressionTarget="final" and emitEveryPass=false (no subscription).
+   */
+  progressiveDetail?: "dc" | "lastPasses" | "passes" | "dcProgressive";
   // Scheduling
   priority?: "visible" | "near" | "background";
   budgetMs?: number;

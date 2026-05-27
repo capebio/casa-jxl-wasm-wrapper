@@ -152,6 +152,7 @@ export class DecodeHandler {
       downsample: this.opts.downsample,
       progressionTarget: this.opts.progressionTarget,
       emitEveryPass: this.opts.emitEveryPass,
+      ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
       preserveIcc: this.opts.preserveIcc,
       preserveMetadata: this.opts.preserveMetadata,
       targetWidth: this.opts.targetWidth,
@@ -392,8 +393,8 @@ export class DecodeHandler {
           if (event.region !== undefined) msg.region = event.region;
           // Embed first-pixel timing if it hasn't been reported via a progress event.
           if (!this.firstPixelMetricPosted) {
-            this.firstPixelMetricPosted = true;
             msg.timeToFirstPixelMs = now - this.stageStartMs;
+            this.postFirstPixelMetric();
           }
           self.postMessage(msg, [pixels]);
           this.finishSession("final");
@@ -447,8 +448,8 @@ export class DecodeHandler {
     if (partialPixels !== undefined && partialInfo !== undefined) {
       msg.partialPixels = partialPixels;
       msg.partialInfo = partialInfo;
-      msg.partialPixelStride = partialPixelStride;
-      msg.partialStage = partialStage;
+      if (partialPixelStride !== undefined) msg.partialPixelStride = partialPixelStride;
+      if (partialStage !== undefined) msg.partialStage = partialStage;
       transfers.push(partialPixels);
     }
     self.postMessage(msg, transfers);

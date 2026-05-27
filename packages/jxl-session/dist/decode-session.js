@@ -6,7 +6,8 @@ import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer } from "./util.js";
 const KNOWN_JXL_ERROR_CODES = new Set([
     "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
-    "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError", "Internal",
+    "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError",
+    "QueueOverflow", "Internal",
 ]);
 export class DecodeSessionImpl {
     id;
@@ -32,10 +33,14 @@ export class DecodeSessionImpl {
             downsample: opts.downsample ?? 1,
             progressionTarget: opts.progressionTarget ?? "final",
             emitEveryPass: opts.emitEveryPass ?? true,
+            progressiveDetail: opts.progressiveDetail ?? null,
             preserveIcc: opts.preserveIcc ?? true,
             preserveMetadata: opts.preserveMetadata ?? true,
             priority: opts.priority ?? "visible",
             budgetMs: opts.budgetMs ?? null,
+            targetWidth: opts.targetWidth ?? null,
+            targetHeight: opts.targetHeight ?? null,
+            fitMode: opts.fitMode ?? null,
         };
         // A caller may use only frames() and never call done(). Attach a no-op
         // catch so a rejected done() promise with no caller handler does not
@@ -170,8 +175,10 @@ export class DecodeSessionImpl {
                     format: msg.format,
                     pixelStride: msg.pixelStride,
                 };
+                if (msg.region !== undefined)
+                    ev.region = msg.region;
                 this.frameStream.push(ev);
-                this.finishWithError(new JxlError("BudgetExceeded", "Per-stage budget exceeded", {
+                this.finishWithError(new JxlError("BudgetExceeded", "Session budget exceeded", {
                     sessionId: this.id,
                     partial: ev,
                 }));
@@ -184,11 +191,11 @@ export class DecodeSessionImpl {
                 let partial;
                 if (code === "TruncatedStream" && msg.partialPixels !== undefined && msg.partialInfo !== undefined) {
                     partial = {
-                        stage: "pass",
+                        stage: msg.partialStage ?? "pass",
                         info: msg.partialInfo,
                         pixels: msg.partialPixels,
                         format: this.opts.format,
-                        pixelStride: 0,
+                        pixelStride: msg.partialPixelStride ?? 0,
                     };
                 }
                 const err = new JxlError(code, msg.message, {
