@@ -869,6 +869,7 @@ async function runBenchmark() {
         firstChunkMs: new Map(),
         totalMs: new Map(),
         fileSize: new Map(),
+        encodedBytes: new Map(), // key: `${filename}:${size}x${quality}xe${effort}` → Uint8Array
     };
 
     const totalSteps = selectedSources.length * selectedSizes.length * selectedQualities.length * selectedEfforts.length * iterations;
@@ -946,6 +947,8 @@ async function runBenchmark() {
                         recordTiming(benchmarkResults.encodeMs, key, encMs);
                         recordTiming(benchmarkResults.firstChunkMs, key, encResult.firstChunkMs);
                         benchmarkResults.fileSize.set(key, encResult.bytes.length);
+                        // Store encoded bytes for download (last iteration per file/config wins)
+                        benchmarkResults.encodedBytes.set(`${source.file}:${key}`, encResult.bytes);
 
                         // Decode
                         const decResult = await decodeJxl(encResult.bytes);
@@ -1103,11 +1106,42 @@ function displayResults() {
                 const key = `${size}x${quality}xe${effort}`;
                 const fileSizeBytes = benchmarkResults.fileSize.get(key) || 0;
                 const sizeKB = (fileSizeBytes / 1024).toFixed(1);
-                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${sizeKB}</td><td></td>`;
+                const configLabel = `${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}`;
+
+                // Build per-source download links for this config
+                const dlCell = document.createElement('td');
+                for (const src of selectedSources) {
+                    const bytes = benchmarkResults.encodedBytes?.get(`${src.file}:${key}`);
+                    if (bytes) {
+                        const blob = new Blob([bytes], { type: 'image/jxl' });
+                        const url = URL.createObjectURL(blob);
+                        const baseName = String(src.file).replace(/\.[^.]+$/, '');
+                        const sizeSuffix = size === 'fullsize' ? 'full' : `${size}px`;
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `${baseName}_${sizeSuffix}_q${quality}_e${effort}.jxl`;
+                        a.textContent = String(src.file);
+                        a.style.cssText = 'display:block;font-size:11px;';
+                        dlCell.appendChild(a);
+                    }
+                }
+                if (!dlCell.hasChildNodes()) dlCell.textContent = '—';
+
+                const td0 = document.createElement('td');
+                td0.textContent = configLabel;
+                const td1 = document.createElement('td');
+                td1.textContent = sizeKB;
+                row.appendChild(td0);
+                row.appendChild(td1);
+                row.appendChild(dlCell);
                 fileSize.appendChild(row);
             }
         }
     }
+
+    // Clear stale download list (no separate panel needed — links are inline above)
+    const dlList = document.getElementById('jxl-download-list');
+    if (dlList) dlList.innerHTML = '';
 
     const encodeDetailBody = document.getElementById('encode-detail-body');
     encodeDetailBody.innerHTML = '';
@@ -1202,6 +1236,7 @@ function clearResults() {
         firstChunkMs: new Map(),
         totalMs: new Map(),
         fileSize: new Map(),
+        encodedBytes: new Map(),
     };
     permutations = [];
     addPermutationMode = false;
@@ -1222,6 +1257,8 @@ function clearResults() {
     document.getElementById('file-size-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
     document.getElementById('encode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
     document.getElementById('decode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
+    const dlList = document.getElementById('jxl-download-list');
+    if (dlList) dlList.innerHTML = '';
 
     dbgLog('Cleared');
 }
