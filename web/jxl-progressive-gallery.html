@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <link rel="icon" href="data:," />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Progressive JXL Gallery Demo</title>
+  <link rel="stylesheet" href="./test-nav.css" />
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
     h1 { padding: 1rem; font-size: 1.2rem; }
@@ -21,7 +24,20 @@
     #log { margin: 1rem; background: #1a1a1a; border: 1px solid #333; padding: 0.5rem; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 11px; }
   </style>
 </head>
-<body>
+<body class="has-home-bar" data-mode="progressive-gallery">
+  <nav class="home-bar" aria-label="Test pages">
+    <div class="home-bar-label">Test pages</div>
+    <div class="home-bar-links">
+      <a class="home-bar-link" href="./index.html">Home</a>
+      <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+      <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+      <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
+      <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+      <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+      <a class="home-bar-link is-active" href="./jxl-progressive-gallery.html" aria-current="page">Progressive gallery</a>
+      <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+    </div>
+  </nav>
   <h1>Progressive JXL Gallery Demo</h1>
   <div id="controls">
     <input type="text" id="jxl-url" placeholder="Enter JXL base URL, e.g. https://example.com/images/img" />

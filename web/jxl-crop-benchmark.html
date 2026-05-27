@@ -35,6 +35,7 @@
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link is-active" href="./jxl-crop-benchmark.html" aria-current="page">Crop benchmark</a>
         </div>
     </nav>
@@ -80,6 +81,7 @@
                         <div class="spinbox-inline-group">
                             <label class="spinbox-label" for="tile-size">Tile px</label>
                             <input id="tile-size" class="spinbox" type="number" min="64" max="2048" step="64" value="512" />
+                            <!-- TIP: try 256, 512, 1024 — smaller tiles = more frames = more walk overhead -->
                         </div>
                         <div class="spinbox-inline-group">
                             <label class="spinbox-label" for="compare-full"><input id="compare-full" type="checkbox" checked /> vs full-decode</label>
@@ -101,6 +103,7 @@
         <div id="console-panel" class="console-panel" hidden>
             <div class="console-toolbar">
                 <span class="console-title">Console</span>
+                <button id="btn-console-copy" class="console-clear-btn" type="button">Copy all</button>
                 <button id="btn-console-clear" class="console-clear-btn" type="button">Clear</button>
             </div>
             <pre id="console-output" class="console-output"></pre>
@@ -108,7 +111,7 @@
 
         <section class="crop-results-shell">
             <header class="crop-results-header">
-                <p class="eyebrow">Results</p>
+                <p class="eyebrow">Results · <span id="tile-px-label">—</span></p>
                 <h2>Decoded crops</h2>
             </header>
             <div id="crop-results" class="crop-results">
