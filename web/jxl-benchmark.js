@@ -93,6 +93,87 @@ function getSettings() {
     };
 }
 
+// Download a single JXL Uint8Array as a file.
+function triggerJxlDownload(bytes, filename) {
+    const blob = new Blob([bytes], { type: 'image/jxl' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// Collect all encoded bytes matching a key prefix (e.g. ':fullsize' or any config key).
+function collectEncodedSet(keyFilter) {
+    const results = []; // { filename, bytes }
+    if (!benchmarkResults.encodedBytes) return results;
+    for (const [mapKey, bytes] of benchmarkResults.encodedBytes.entries()) {
+        if (!keyFilter || mapKey.includes(keyFilter)) {
+            // mapKey = "${source.file}:${size}x${quality}xe${effort}"
+            const colonIdx = mapKey.indexOf(':');
+            const sourceName = mapKey.slice(0, colonIdx);
+            const configPart = mapKey.slice(colonIdx + 1); // e.g. "fullsizex85xe5"
+            // Parse config for suffix: size, quality, effort
+            const m = configPart.match(/^([^x]+)x(\d+)xe(\d+)$/);
+            const sizeSuffix = m ? (m[1] === 'fullsize' ? 'full' : `${m[1]}px`) : configPart;
+            const qSuffix   = m ? `_q${m[2]}` : '';
+            const eSuffix   = m ? `_e${m[3]}` : '';
+            const baseName  = sourceName.replace(/\.[^.]+$/, '');
+            const filename  = `${baseName}_${sizeSuffix}${qSuffix}${eSuffix}.jxl`;
+            results.push({ filename, bytes });
+        }
+    }
+    return results;
+}
+
+// Save a set of JXL files to a chosen folder (File System Access API) or fall back to downloads.
+async function saveSetToFolder(entries, labelForLog) {
+    if (!entries.length) {
+        dbgLog(`No encoded JXL bytes for ${labelForLog}`, '', 'warn');
+        return;
+    }
+
+    if (typeof showDirectoryPicker === 'function') {
+        let dirHandle;
+        try {
+            dirHandle = await showDirectoryPicker({ mode: 'readwrite' });
+        } catch (e) {
+            if (e.name === 'AbortError') return; // user cancelled
+            dbgLog(`Folder picker failed: ${e.message}`, '', 'error');
+            return;
+        }
+        let saved = 0;
+        for (const { filename, bytes } of entries) {
+            try {
+                const fh = await dirHandle.getFileHandle(filename, { create: true });
+                const writable = await fh.createWritable();
+                await writable.write(bytes);
+                await writable.close();
+                saved++;
+            } catch (e) {
+                dbgLog(`Failed to write ${filename}: ${e.message}`, '', 'error');
+            }
+        }
+        dbgLog(`Saved ${saved}/${entries.length} JXL files to folder`, '', 'success');
+    } else {
+        // Fallback: sequential <a download> — browser may block multiple rapid downloads
+        dbgLog(`showDirectoryPicker not available — triggering ${entries.length} individual downloads`, '', 'warn');
+        for (const { filename, bytes } of entries) {
+            triggerJxlDownload(bytes, filename);
+            await new Promise(r => setTimeout(r, 120)); // slight delay to avoid browser throttle
+        }
+    }
+}
+
+// Button: save all fullsize encoded JXL files to a chosen folder.
+async function saveFullFiles() {
+    const entries = collectEncodedSet(':fullsize');
+    await saveSetToFolder(entries, 'fullsize');
+}
+
 function saveSettings() {
     const settings = getSettings();
     const json = JSON.stringify(settings, null, 2);
@@ -373,6 +454,11 @@ if (optimizeBtn) {
     optimizeBtn.addEventListener('click', () => runOptimizer());
 }
 
+const saveFullBtn = document.getElementById('save-full-btn');
+if (saveFullBtn) {
+    saveFullBtn.addEventListener('click', () => saveFullFiles());
+}
+
 const saveSettingsBtn = document.getElementById('save-settings');
 const loadSettingsInput = document.getElementById('load-settings-input');
 
@@ -404,6 +490,22 @@ if (loadSettingsInput) {
 
 let optimizerRunning = false;
 
+function hasFullsizeBytes() {
+    if (!benchmarkResults.encodedBytes) return false;
+    for (const key of benchmarkResults.encodedBytes.keys()) {
+        if (key.includes(':fullsize')) return true;
+    }
+    return false;
+}
+
+function updateSaveFullBtn() {
+    const btn = document.getElementById('save-full-btn');
+    if (!btn) return;
+    const has = hasFullsizeBytes();
+    btn.disabled = !has;
+    btn.title = has ? 'Save all fullsize encoded JXL files to a folder' : 'Run benchmark with fullsize selected first';
+}
+
 function updateSelectionStatus() {
     const ready = selectedSources.length > 0;
     selectionStatus.textContent = ready
@@ -418,6 +520,7 @@ function updateSelectionStatus() {
         optBtn.disabled = !ready;
         optBtn.title = ready ? 'Auto-optimize codec toggles for this device' : 'Load files first, then optimize codec toggles for this device';
     }
+    updateSaveFullBtn();
 }
 
 function setProgress(text) {
@@ -1110,22 +1213,43 @@ function displayResults() {
 
                 // Build per-source download links for this config
                 const dlCell = document.createElement('td');
+                const configKey = key; // capture for closure
+
+                // "Download set" button — saves all files for this config to a folder
+                const dlSetBtn = document.createElement('button');
+                dlSetBtn.type = 'button';
+                dlSetBtn.className = 'ghost-btn';
+                dlSetBtn.style.cssText = 'display:block;font-size:11px;margin-bottom:4px;';
+                dlSetBtn.textContent = '⬇ Download set';
+                dlSetBtn.addEventListener('click', () => {
+                    const entries = collectEncodedSet(`:${configKey}`);
+                    saveSetToFolder(entries, configKey);
+                });
+                dlCell.appendChild(dlSetBtn);
+
+                let hasAny = false;
                 for (const src of selectedSources) {
                     const bytes = benchmarkResults.encodedBytes?.get(`${src.file}:${key}`);
                     if (bytes) {
-                        const blob = new Blob([bytes], { type: 'image/jxl' });
-                        const url = URL.createObjectURL(blob);
+                        hasAny = true;
                         const baseName = String(src.file).replace(/\.[^.]+$/, '');
                         const sizeSuffix = size === 'fullsize' ? 'full' : `${size}px`;
+                        const filename = `${baseName}_${sizeSuffix}_q${quality}_e${effort}.jxl`;
                         const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `${baseName}_${sizeSuffix}_q${quality}_e${effort}.jxl`;
+                        a.href = '#';
                         a.textContent = String(src.file);
                         a.style.cssText = 'display:block;font-size:11px;';
+                        a.addEventListener('click', e => {
+                            e.preventDefault();
+                            triggerJxlDownload(bytes, filename);
+                        });
                         dlCell.appendChild(a);
                     }
                 }
-                if (!dlCell.hasChildNodes()) dlCell.textContent = '—';
+                if (!hasAny) {
+                    dlSetBtn.remove();
+                    dlCell.textContent = '—';
+                }
 
                 const td0 = document.createElement('td');
                 td0.textContent = configLabel;
@@ -1191,6 +1315,7 @@ function displayResults() {
     }
 
     drawGraphs();
+    updateSaveFullBtn();
 }
 
 function renderPermutationSelector() {
