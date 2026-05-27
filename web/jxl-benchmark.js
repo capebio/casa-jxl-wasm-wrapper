@@ -168,10 +168,17 @@ async function saveSetToFolder(entries, labelForLog) {
     }
 }
 
-// Button: save all fullsize encoded JXL files to a chosen folder.
+// Button: save encoded JXL files to a chosen folder.
+// Prefers fullsize; falls back to all available sizes if fullsize was not benchmarked.
 async function saveFullFiles() {
-    const entries = collectEncodedSet(':fullsize');
-    await saveSetToFolder(entries, 'fullsize');
+    const fullEntries = collectEncodedSet(':fullsize');
+    if (fullEntries.length > 0) {
+        await saveSetToFolder(fullEntries, 'fullsize');
+    } else {
+        // No fullsize benchmarked — offer all available encoded bytes
+        const allEntries = collectEncodedSet(null);
+        await saveSetToFolder(allEntries, 'all sizes');
+    }
 }
 
 function saveSettings() {
@@ -490,6 +497,10 @@ if (loadSettingsInput) {
 
 let optimizerRunning = false;
 
+function hasAnyEncodedBytes() {
+    return !!(benchmarkResults.encodedBytes && benchmarkResults.encodedBytes.size > 0);
+}
+
 function hasFullsizeBytes() {
     if (!benchmarkResults.encodedBytes) return false;
     for (const key of benchmarkResults.encodedBytes.keys()) {
@@ -501,9 +512,16 @@ function hasFullsizeBytes() {
 function updateSaveFullBtn() {
     const btn = document.getElementById('save-full-btn');
     if (!btn) return;
-    const has = hasFullsizeBytes();
-    btn.disabled = !has;
-    btn.title = has ? 'Save all fullsize encoded JXL files to a folder' : 'Run benchmark with fullsize selected first';
+    const hasAny = hasAnyEncodedBytes();
+    const hasFull = hasFullsizeBytes();
+    btn.disabled = !hasAny;
+    if (!hasAny) {
+        btn.title = 'Run benchmark first to encode JXL files';
+    } else if (hasFull) {
+        btn.title = 'Save all fullsize encoded JXL files to a folder';
+    } else {
+        btn.title = 'Save encoded JXL files to a folder (no fullsize benchmarked — saves all available sizes)';
+    }
 }
 
 function updateSelectionStatus() {
