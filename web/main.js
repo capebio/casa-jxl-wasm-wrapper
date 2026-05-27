@@ -957,7 +957,8 @@ function makeCard(name) {
             try {
                 const [settings, token] = await Promise.all([invoke('get_settings'), invoke('get_token')]);
                 const { jxl, exif } = card._tauriResult;
-                const jxl_b64 = btoa(String.fromCharCode(...new Uint8Array(jxl)));
+                const _jb = new Uint8Array(jxl); let _js = ''; for (let _i = 0; _i < _jb.length; _i++) _js += String.fromCharCode(_jb[_i]);
+                const jxl_b64 = btoa(_js);
                 const result = await invoke('push_to_planner', {
                     payload: { filename: name, jxl_b64, exif, planner_url: settings.planner_url, token: token ?? '' },
                 });

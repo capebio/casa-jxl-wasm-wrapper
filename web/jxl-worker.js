@@ -127,7 +127,7 @@ self.onmessage = async ({ data }) => {
         w: width,
         h: height,
         effortUsed: effortLevel,
-        effortRequested: effort ?? recommendedEffort(),
+        effortRequested: effortLevel,
         ratio: stats?.ratio ?? (jxl.byteLength / (width * height * 4)),
       },
       [jxl.buffer],
