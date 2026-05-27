@@ -29,7 +29,7 @@ documented contract, not our logic.  Added a comment to `take_rgb` /
 
 ---
 
-## Q3 — Vertical-pass cache thrash in blur (PERF · MEDIUM)
+## ~~Q3 — Vertical-pass cache thrash in blur~~ CLOSED ✓
 
 **Benchmark results (2026-05-15)** — 13-tap kernel, 5240×3912 (20 MP / 117 MB rgb16),
 native release build, 5 runs each:
@@ -64,6 +64,10 @@ with `tiled-128`.  No extra allocations.  Pure loop restructure.
 
 **Implemented (2026-05-15):** tiled-128 vertical pass + horizontal interior split in
 `pipeline.rs`; demosaic interior split in `demosaic.rs`.
+
+**Follow-up (2026-05-27):** `blur_bench` now reports `tiled-128` in the full
+round-trip section too, so the Q3 verification path directly compares `naive`
+against `tiled-128` for both vertical-only and h-pass + v-pass timings.
 
 ---
 

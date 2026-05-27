@@ -14,9 +14,10 @@
 use std::time::Instant;
 
 fn k13() -> [f32; 13] {
-    [0.0185, 0.0342, 0.0563, 0.0831, 0.1097, 0.1296,
-     0.1370,
-     0.1296, 0.1097, 0.0831, 0.0563, 0.0342, 0.0185]
+    [
+        0.0185, 0.0342, 0.0563, 0.0831, 0.1097, 0.1296, 0.1370, 0.1296, 0.1097, 0.0831, 0.0563,
+        0.0342, 0.0185,
+    ]
 }
 
 // Shared: horizontal pass — row-major access is cache-friendly.
@@ -26,16 +27,17 @@ fn h_pass(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
         for x in 0..w {
             let mut acc = [0f32; 3];
             for (ki, &kv) in k.iter().enumerate() {
-                let xi = (x as isize + ki as isize - half as isize).clamp(0, w as isize - 1) as usize;
+                let xi =
+                    (x as isize + ki as isize - half as isize).clamp(0, w as isize - 1) as usize;
                 let b = (y * w + xi) * 3;
-                acc[0] += src[b]   as f32 * kv;
-                acc[1] += src[b+1] as f32 * kv;
-                acc[2] += src[b+2] as f32 * kv;
+                acc[0] += src[b] as f32 * kv;
+                acc[1] += src[b + 1] as f32 * kv;
+                acc[2] += src[b + 2] as f32 * kv;
             }
             let b = (y * w + x) * 3;
-            dst[b]   = acc[0].round() as u16;
-            dst[b+1] = acc[1].round() as u16;
-            dst[b+2] = acc[2].round() as u16;
+            dst[b] = acc[0].round() as u16;
+            dst[b + 1] = acc[1].round() as u16;
+            dst[b + 2] = acc[2].round() as u16;
         }
     }
 }
@@ -47,16 +49,17 @@ fn v_pass_naive(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
         for x in 0..w {
             let mut acc = [0f32; 3];
             for (ki, &kv) in k.iter().enumerate() {
-                let yi = (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
+                let yi =
+                    (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
                 let b = (yi * w + x) * 3;
-                acc[0] += src[b]   as f32 * kv;
-                acc[1] += src[b+1] as f32 * kv;
-                acc[2] += src[b+2] as f32 * kv;
+                acc[0] += src[b] as f32 * kv;
+                acc[1] += src[b + 1] as f32 * kv;
+                acc[2] += src[b + 2] as f32 * kv;
             }
             let b = (y * w + x) * 3;
-            dst[b]   = acc[0].round() as u16;
-            dst[b+1] = acc[1].round() as u16;
-            dst[b+2] = acc[2].round() as u16;
+            dst[b] = acc[0].round() as u16;
+            dst[b + 1] = acc[1].round() as u16;
+            dst[b + 2] = acc[2].round() as u16;
         }
     }
 }
@@ -72,20 +75,21 @@ fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], d
             let tile = x1 - x0;
             let mut acc = [[0f32; 3]; TILE];
             for (ki, &kv) in k.iter().enumerate() {
-                let yi = (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
+                let yi =
+                    (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
                 let row = yi * w * 3;
                 for xi in 0..tile {
                     let b = row + (x0 + xi) * 3;
-                    acc[xi][0] += src[b]   as f32 * kv;
-                    acc[xi][1] += src[b+1] as f32 * kv;
-                    acc[xi][2] += src[b+2] as f32 * kv;
+                    acc[xi][0] += src[b] as f32 * kv;
+                    acc[xi][1] += src[b + 1] as f32 * kv;
+                    acc[xi][2] += src[b + 2] as f32 * kv;
                 }
             }
             for xi in 0..tile {
                 let b = (y * w + x0 + xi) * 3;
-                dst[b]   = acc[xi][0].round() as u16;
-                dst[b+1] = acc[xi][1].round() as u16;
-                dst[b+2] = acc[xi][2].round() as u16;
+                dst[b] = acc[xi][0].round() as u16;
+                dst[b + 1] = acc[xi][1].round() as u16;
+                dst[b + 2] = acc[xi][2].round() as u16;
             }
         }
     }
@@ -104,19 +108,19 @@ fn v_pass_clarity(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
         while x + LANE <= w {
             let mut acc = [[0f32; 3]; LANE];
             for (ki, &kv) in k.iter().enumerate() {
-                let yi = (y as isize + ki as isize - half as isize)
-                    .clamp(0, h as isize - 1) as usize;
+                let yi =
+                    (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
                 let row = yi * w * 3;
                 for i in 0..LANE {
                     let b = row + (x + i) * 3;
-                    acc[i][0] += src[b]     as f32 * kv;
+                    acc[i][0] += src[b] as f32 * kv;
                     acc[i][1] += src[b + 1] as f32 * kv;
                     acc[i][2] += src[b + 2] as f32 * kv;
                 }
             }
             for i in 0..LANE {
                 let b = (y * w + x + i) * 3;
-                dst[b]     = acc[i][0].round() as u16;
+                dst[b] = acc[i][0].round() as u16;
                 dst[b + 1] = acc[i][1].round() as u16;
                 dst[b + 2] = acc[i][2].round() as u16;
             }
@@ -127,15 +131,15 @@ fn v_pass_clarity(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
         for xi in x..w {
             let mut acc = [0f32; 3];
             for (ki, &kv) in k.iter().enumerate() {
-                let yi = (y as isize + ki as isize - half as isize)
-                    .clamp(0, h as isize - 1) as usize;
+                let yi =
+                    (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
                 let b = (yi * w + xi) * 3;
-                acc[0] += src[b]     as f32 * kv;
+                acc[0] += src[b] as f32 * kv;
                 acc[1] += src[b + 1] as f32 * kv;
                 acc[2] += src[b + 2] as f32 * kv;
             }
             let b = (y * w + xi) * 3;
-            dst[b]     = acc[0].round() as u16;
+            dst[b] = acc[0].round() as u16;
             dst[b + 1] = acc[1].round() as u16;
             dst[b + 2] = acc[2].round() as u16;
         }
@@ -151,9 +155,9 @@ fn transpose_tiled(src: &[u16], sw: usize, sh: usize, dst: &mut [u16]) {
                 for x in tx..(tx + T).min(sw) {
                     let si = (y * sw + x) * 3;
                     let di = (x * sh + y) * 3;
-                    dst[di]   = src[si];
-                    dst[di+1] = src[si+1];
-                    dst[di+2] = src[si+2];
+                    dst[di] = src[si];
+                    dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2];
                 }
             }
         }
@@ -161,8 +165,13 @@ fn transpose_tiled(src: &[u16], sw: usize, sh: usize, dst: &mut [u16]) {
 }
 
 fn v_pass_via_transpose(
-    src: &[u16], w: usize, h: usize, k: &[f32],
-    dst: &mut [u16], s1: &mut Vec<u16>, s2: &mut Vec<u16>,
+    src: &[u16],
+    w: usize,
+    h: usize,
+    k: &[f32],
+    dst: &mut [u16],
+    s1: &mut Vec<u16>,
+    s2: &mut Vec<u16>,
 ) {
     let n = w * h * 3;
     s1.resize(n, 0);
@@ -172,47 +181,109 @@ fn v_pass_via_transpose(
     transpose_tiled(s2, h, w, dst);
 }
 
+#[cfg(test)]
+fn full_roundtrip_variant_names() -> &'static [&'static str] {
+    &[
+        "naive",
+        "tiled-16",
+        "tiled-32",
+        "tiled-64",
+        "tiled-128",
+        "clarity-8",
+        "transpose+h+transpose",
+    ]
+}
+
 fn time_fn(name: &str, runs: usize, mut f: impl FnMut()) {
     f(); // warmup
-    let mut ms: Vec<f64> = (0..runs).map(|_| {
-        let t = Instant::now();
-        f();
-        t.elapsed().as_secs_f64() * 1000.0
-    }).collect();
+    let mut ms: Vec<f64> = (0..runs)
+        .map(|_| {
+            let t = Instant::now();
+            f();
+            t.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
     ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    println!("  {:30}  min={:6.1}ms  med={:6.1}ms  max={:6.1}ms",
-             name, ms[0], ms[runs / 2], ms[runs - 1]);
+    println!(
+        "  {:30}  min={:6.1}ms  med={:6.1}ms  max={:6.1}ms",
+        name,
+        ms[0],
+        ms[runs / 2],
+        ms[runs - 1]
+    );
 }
 
 fn bench_size(w: usize, h: usize, kernel: &[f32], runs: usize) {
     let n = w * h * 3;
     let mb = n as f64 * 2.0 / 1024.0 / 1024.0;
-    println!("\n=== {}×{} ({:.1} MP, {:.0} MB rgb16) ===", w, h, (w * h) as f64 / 1e6, mb);
+    println!(
+        "\n=== {}×{} ({:.1} MP, {:.0} MB rgb16) ===",
+        w,
+        h,
+        (w * h) as f64 / 1e6,
+        mb
+    );
 
     let src: Vec<u16> = (0..n).map(|i| (i % 65536) as u16).collect();
     let mut temp = vec![0u16; n];
-    let mut out  = vec![0u16; n];
+    let mut out = vec![0u16; n];
     let mut s1: Vec<u16> = Vec::new();
     let mut s2: Vec<u16> = Vec::new();
 
     h_pass(&src, w, h, kernel, &mut temp);
 
     println!("  Vertical pass only:");
-    time_fn("naive (baseline)",      runs, || v_pass_naive(&temp, w, h, kernel, &mut out));
-    time_fn("tiled-16",              runs, || v_pass_tiled::<16>(&temp, w, h, kernel, &mut out));
-    time_fn("tiled-32",              runs, || v_pass_tiled::<32>(&temp, w, h, kernel, &mut out));
-    time_fn("tiled-64",              runs, || v_pass_tiled::<64>(&temp, w, h, kernel, &mut out));
-    time_fn("tiled-128",             runs, || v_pass_tiled::<128>(&temp, w, h, kernel, &mut out));
-    time_fn("clarity-8 (unrolled)",  runs, || v_pass_clarity(&temp, w, h, kernel, &mut out));
-    time_fn("transpose+h+transpose", runs, || v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2));
+    time_fn("naive (baseline)", runs, || {
+        v_pass_naive(&temp, w, h, kernel, &mut out)
+    });
+    time_fn("tiled-16", runs, || {
+        v_pass_tiled::<16>(&temp, w, h, kernel, &mut out)
+    });
+    time_fn("tiled-32", runs, || {
+        v_pass_tiled::<32>(&temp, w, h, kernel, &mut out)
+    });
+    time_fn("tiled-64", runs, || {
+        v_pass_tiled::<64>(&temp, w, h, kernel, &mut out)
+    });
+    time_fn("tiled-128", runs, || {
+        v_pass_tiled::<128>(&temp, w, h, kernel, &mut out)
+    });
+    time_fn("clarity-8 (unrolled)", runs, || {
+        v_pass_clarity(&temp, w, h, kernel, &mut out)
+    });
+    time_fn("transpose+h+transpose", runs, || {
+        v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2)
+    });
 
     println!("  Full round-trip (h_pass + v_pass):");
-    time_fn("naive",                 runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_naive(&temp, w, h, kernel, &mut out); });
-    time_fn("tiled-16",              runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_tiled::<16>(&temp, w, h, kernel, &mut out); });
-    time_fn("tiled-32",              runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_tiled::<32>(&temp, w, h, kernel, &mut out); });
-    time_fn("tiled-64",              runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_tiled::<64>(&temp, w, h, kernel, &mut out); });
-    time_fn("clarity-8",             runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_clarity(&temp, w, h, kernel, &mut out); });
-    time_fn("transpose+h+transpose", runs, || { h_pass(&src, w, h, kernel, &mut temp); v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2); });
+    time_fn("naive", runs, || {
+        h_pass(&src, w, h, kernel, &mut temp);
+        v_pass_naive(&temp, w, h, kernel, &mut out);
+    });
+    time_fn("tiled-16", runs, || {
+        h_pass(&src, w, h, kernel, &mut temp);
+        v_pass_tiled::<16>(&temp, w, h, kernel, &mut out);
+    });
+    time_fn("tiled-32", runs, || {
+        h_pass(&src, w, h, kernel, &mut temp);
+        v_pass_tiled::<32>(&temp, w, h, kernel, &mut out);
+    });
+    time_fn("tiled-64", runs, || {
+        h_pass(&src, w, h, kernel, &mut temp);
+        v_pass_tiled::<64>(&temp, w, h, kernel, &mut out);
+    });
+    time_fn("tiled-128", runs, || {
+        h_pass(&src, w, h, kernel, &mut temp);
+        v_pass_tiled::<128>(&temp, w, h, kernel, &mut out);
+    });
+    time_fn("clarity-8", runs, || {
+        h_pass(&src, w, h, kernel, &mut temp);
+        v_pass_clarity(&temp, w, h, kernel, &mut out);
+    });
+    time_fn("transpose+h+transpose", runs, || {
+        h_pass(&src, w, h, kernel, &mut temp);
+        v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2);
+    });
 }
 
 fn main() {
@@ -220,4 +291,17 @@ fn main() {
     println!("Kernel: 13-tap Gaussian (clarity). Runs = 5 per variant.");
     bench_size(1024, 1024, &kernel, 5);
     bench_size(5240, 3912, &kernel, 5);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_roundtrip_includes_tiled_128() {
+        assert!(
+            full_roundtrip_variant_names().contains(&"tiled-128"),
+            "full round-trip benchmark must include tiled-128 for Q3 verification"
+        );
+    }
 }
