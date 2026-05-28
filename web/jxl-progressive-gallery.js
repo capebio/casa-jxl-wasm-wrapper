@@ -12,7 +12,7 @@ const sourceInput   = document.getElementById('source-input');
 const pickerStatus  = document.getElementById('picker-status');
 const concurrentEl  = document.getElementById('concurrent');
 const concurrentVal = document.getElementById('concurrent-val');
-const galleryEl     = document.getElementById('gallery');
+const galleryEl     = document.getElementById('gallery'); // TODO(Task4): remove — replaced by galleryRowsEl
 const galleryRowsEl  = document.querySelector('[data-gallery-rows]');
 const lightboxRoot   = document.querySelector('[data-lightbox-root]');
 const logEl         = document.getElementById('log');
@@ -67,7 +67,7 @@ sourceInput.addEventListener('change', () => {
   pickerStatus.textContent = `${files.length} JXL file${files.length > 1 ? 's' : ''} selected`;
 
   // Clear gallery and queue
-  galleryEl.innerHTML = '';
+  if (galleryEl) galleryEl.innerHTML = '';
   queue.length = 0;
 
   for (const file of files) {
@@ -142,7 +142,7 @@ function createSlot(file) {
   filename.textContent = file.name;
 
   slotEl.append(canvas, badge, spinner, filename);
-  galleryEl.appendChild(slotEl);
+  if (galleryEl) galleryEl.appendChild(slotEl);
 
   return slotEl;
 }
