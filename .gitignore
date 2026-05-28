@@ -1,2 +1,4 @@
 .worktrees/
 .epiccodereview/
+tmp/
+**/__pycache__/
