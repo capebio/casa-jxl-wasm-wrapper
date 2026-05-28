@@ -91,6 +91,40 @@
                         </div>
                     </div>
                     <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Photon noise ISO <button class="info-btn" type="button" data-help-target="wl-photon-noise" aria-label="Photon noise ISO info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-photon-noise-iso">&#8722;</button>
+                            <input id="batch-photon-noise-iso" type="number" min="0" max="51200" step="400" value="0" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-photon-noise-iso">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-photon-noise" hidden>
+                            Synthetic photon noise target ISO. 0 = off. Try 800, 1600, 3200, or 6400 to add natural signal-dependent grain during encode.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Resampling <button class="info-btn" type="button" data-help-target="wl-resampling" aria-label="Resampling info">i</button></span>
+                        <div class="preset-group" role="radiogroup" aria-label="JXL encoder resampling factor">
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="1" checked /> <span>1x</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="2" /> <span>2x</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="4" /> <span>4x</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="8" /> <span>8x</span></label>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-resampling" hidden>
+                            Encoder-native downsampling before JXL transform/coding. 1x = off; 2x, 4x, or 8x trade detail for smaller output and faster encode.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Decode speed tier <button class="info-btn" type="button" data-help-target="wl-decode-speed" aria-label="Decode speed tier info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-decode-speed">&#8722;</button>
+                            <input id="batch-decode-speed" type="number" min="0" max="4" step="1" value="0" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-decode-speed">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-decode-speed" hidden>
+                            Decoder speed tier hint (0&#8211;4). Tells the encoder to structure the codestream for faster decoding. 0&#8211;1 = fully optimised, 2&#8211;3 = faster decode with small quality trade-off, 4 = fastest decode. Default 0 means no hint is applied.
+                        </div>
+                    </div>
+                    <div class="spin-group">
                         <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Batch limit <button class="info-btn" type="button" data-help-target="wl-batch-limit" aria-label="Batch limit info">i</button></span>
                         <div class="spinpicker">
                             <button class="spin-btn spin-dec" type="button" data-target="batch-limit">&#8722;</button>
