@@ -4,6 +4,7 @@
 // Feed each file in chunks with emitEveryPass=true to show dc → pass → full.
 
 import { createBrowserContext } from '../packages/jxl-session/dist/index.js';
+import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
@@ -12,15 +13,23 @@ const pickerStatus  = document.getElementById('picker-status');
 const concurrentEl  = document.getElementById('concurrent');
 const concurrentVal = document.getElementById('concurrent-val');
 const galleryEl     = document.getElementById('gallery');
+const galleryRowsEl  = document.querySelector('[data-gallery-rows]');
+const lightboxRoot   = document.querySelector('[data-lightbox-root]');
 const logEl         = document.getElementById('log');
+const dbgConsoleBtn = document.getElementById('dbg-console-btn');
+const pushModeButtons = [...document.querySelectorAll('[data-push-mode]')];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let ctx = null;
 let activeDecoders = 0;
 const queue = []; // Array<File>
+let pushMode = 'all-chunks';
 
-const CHUNK_SIZE = 65536; // 64 KiB per push — small enough for visible progression
+const CHUNK_SIZE = 65536; // 64 KiB per chunk
+// Keep this comfortably above the scheduler drain HWM so the worker can
+// actually consume enough bytes to emit drain on large codestreams.
+const WINDOW_SIZE = 32;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -28,10 +37,15 @@ const CHUNK_SIZE = 65536; // 64 KiB per push — small enough for visible progre
   try {
     ctx = createBrowserContext();
     log('JXL context ready');
+    dbgLog('JXL context ready');
   } catch (e) {
     log(`Init error: ${e.message}`, 'error');
+    dbgLog('Init error', e.message, 'error');
   }
 })();
+
+if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
+wirePushModeControls();
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
@@ -62,6 +76,7 @@ sourceInput.addEventListener('change', () => {
   }
 
   log(`Queued ${files.length} files`);
+  dbgLog('Queued files', `${files.length} JXL file${files.length > 1 ? 's' : ''} selected`);
   drain();
 });
 
@@ -72,10 +87,32 @@ function drain() {
   while (queue.length > 0 && activeDecoders < max) {
     const file = queue.shift();
     activeDecoders++;
+    dbgLog('Decode start', file.name, 'info');
     decodeFile(file).finally(() => {
       activeDecoders--;
       drain();
     });
+  }
+}
+
+function wirePushModeControls() {
+  for (const button of pushModeButtons) {
+    button.addEventListener('click', () => {
+      const next = button.dataset.pushMode;
+      if (!next || next === pushMode) return;
+      pushMode = next;
+      syncPushModeButtons();
+      dbgLog('Push mode', next, 'info');
+    });
+  }
+  syncPushModeButtons();
+}
+
+function syncPushModeButtons() {
+  for (const button of pushModeButtons) {
+    const active = button.dataset.pushMode === pushMode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
 }
 
@@ -135,16 +172,27 @@ function renderFrameToSlot(slotEl, frame) {
   canvas.height = height;
 
   const ctx2d = canvas.getContext('2d');
-  const pixels = frame.pixels instanceof ArrayBuffer
-    ? frame.pixels
-    : frame.pixels.buffer;
-
-  const imageData = new ImageData(
-    new Uint8ClampedArray(pixels),
-    width,
-    height,
-  );
+  const imageData = typeof frame.getImageData === 'function'
+    ? frame.getImageData()
+    : new ImageData(
+      new Uint8ClampedArray(frame.pixels instanceof ArrayBuffer ? frame.pixels : frame.pixels.buffer),
+      width,
+      height,
+    );
   ctx2d.putImageData(imageData, 0, 0);
+}
+
+function renderCell(fileId, frame) {
+  return {
+    fileId,
+    frameIndex: frame.frameIndex ?? 0,
+    stage: frame.stage,
+    elapsedMs: frame.elapsedMs ?? 0,
+    bytesFed: frame.bytesFed ?? 0,
+    percentFed: frame.percentFed ?? 0,
+    info: frame.info,
+    pixels: frame.pixels,
+  };
 }
 
 // ── Decode pipeline ───────────────────────────────────────────────────────────
@@ -159,6 +207,7 @@ async function decodeFile(file) {
   if (!slotEl) return;
 
   setBadge(slotEl, 'wait', 'reading…');
+  dbgLog('Reading file', file.name, 'info');
 
   let buffer;
   try {
@@ -166,31 +215,58 @@ async function decodeFile(file) {
   } catch (e) {
     setBadge(slotEl, 'error', 'read err');
     log(`${file.name}: read error — ${e.message}`, 'error');
+    dbgLog('Read error', `${file.name}\n${e.stack ?? e.message}`, 'error');
     return;
   }
 
   setBadge(slotEl, 'wait', 'decoding…');
+  dbgLog('Decoding', `${file.name} · ${buffer.byteLength} bytes · mode=${pushMode}`, 'info');
 
   const session = ctx.decode({
     format: 'rgba8',
+    progressionTarget: 'final',
     emitEveryPass: true,
-    progressiveDetail: 'dcProgressive', // DC then progressive AC passes
   });
 
   let frameCount = 0;
 
   // Push bytes and collect frames concurrently (mirrors profileJxl pattern).
   const pushTask = (async () => {
-    const total = buffer.byteLength;
-    for (let offset = 0; offset < total; offset += CHUNK_SIZE) {
-      await session.push(buffer.slice(offset, Math.min(offset + CHUNK_SIZE, total)));
+    if (pushMode === 'full-file') {
+      dbgLog('Push whole file', `${file.name} · ${buffer.byteLength} bytes`, 'info');
+      await session.push(buffer);
+    } else if (pushMode === 'window') {
+      dbgLog('Push windowed', `${file.name} · ${buffer.byteLength} bytes · ${CHUNK_SIZE}B chunks · window=${WINDOW_SIZE}`, 'info');
+      const inFlight = new Set();
+      for (let offset = 0; offset < buffer.byteLength; offset += CHUNK_SIZE) {
+        const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
+        dbgLog('Push chunk', `${file.name} · ${offset}..${end} / ${buffer.byteLength}`, 'info');
+        const pushPromise = session.push(buffer.slice(offset, end));
+        inFlight.add(pushPromise);
+        pushPromise.finally(() => inFlight.delete(pushPromise));
+        if (inFlight.size >= WINDOW_SIZE) {
+          await Promise.race(inFlight);
+        }
+      }
+      await Promise.all(inFlight);
+    } else {
+      dbgLog('Push chunks', `${file.name} · ${buffer.byteLength} bytes · ${CHUNK_SIZE}B chunks`, 'info');
+      const pushes = [];
+      for (let offset = 0; offset < buffer.byteLength; offset += CHUNK_SIZE) {
+        const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
+        dbgLog('Push chunk', `${file.name} · ${offset}..${end} / ${buffer.byteLength}`, 'info');
+        pushes.push(session.push(buffer.slice(offset, end)));
+      }
+      await Promise.all(pushes);
     }
     await session.close();
+    dbgLog('Push complete', file.name, 'info');
   })();
 
   const framesTask = (async () => {
     for await (const frame of session.frames()) {
       frameCount++;
+      dbgLog('Frame', `${file.name} · ${frame.stage} · ${frame.info.width}x${frame.info.height}`, 'info');
       renderFrameToSlot(slotEl, frame);
 
       // Badge reflects progression stage
@@ -210,13 +286,16 @@ async function decodeFile(file) {
     if (frameCount === 0) {
       setBadge(slotEl, 'error', 'no frames');
       log(`${file.name}: decoded but emitted 0 frames`, 'warn');
+      dbgLog('No frames', file.name, 'warn');
     } else {
       setBadge(slotEl, 'full', 'full');
       log(`${file.name}: done (${frameCount} frame${frameCount > 1 ? 's' : ''})`);
+      dbgLog('Decode done', `${file.name} · ${frameCount} frame${frameCount > 1 ? 's' : ''}`, 'success');
     }
   } catch (e) {
     setBadge(slotEl, 'error', 'error');
     log(`${file.name}: ${e.message}`, 'error');
+    dbgLog('Decode error', `${file.name}\n${e.stack ?? e.message}`, 'error');
   }
 }
 
