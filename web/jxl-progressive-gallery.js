@@ -27,6 +27,7 @@ let ctx = null;
 let activeDecoders = 0;
 const queue = []; // Array<File>
 let pushMode = 'all-chunks';
+let activeKeyHandler = null;  // cleaned up on each startGallery() call
 
 const CHUNK_SIZE = 65536; // 64 KiB per chunk
 // Keep this comfortably above the scheduler drain HWM so the worker can
@@ -175,19 +176,6 @@ function renderFrameToSlot(slotEl, frame) {
   ctx2d.putImageData(imageData, 0, 0);
 }
 
-function renderCell(fileId, frame) {
-  return {
-    fileId,
-    frameIndex: frame.frameIndex ?? 0,
-    stage: frame.stage,
-    elapsedMs: frame.elapsedMs ?? 0,
-    bytesFed: frame.bytesFed ?? 0,
-    percentFed: frame.percentFed ?? 0,
-    info: frame.info,
-    pixels: frame.pixels,
-  };
-}
-
 // ── Decode pipeline ───────────────────────────────────────────────────────────
 
 async function decodeFile(file) {
@@ -300,6 +288,12 @@ async function startGallery(selectedFiles) {
     return;
   }
 
+  // Remove any previous keyboard handler from prior gallery load
+  if (activeKeyHandler) {
+    document.removeEventListener('keydown', activeKeyHandler);
+    activeKeyHandler = null;
+  }
+
   // Build per-file row elements
   const stripEls = new Map(); // fileId → <div class="thumb-strip">
   for (const file of selectedFiles) {
@@ -346,6 +340,7 @@ async function startGallery(selectedFiles) {
     const next = lightbox.current();
     if (next) renderLightboxState(next);
   }
+  activeKeyHandler = onKey;
   document.addEventListener('keydown', onKey);
 
   // Re-render all file strips based on current coordinator visibility
@@ -441,7 +436,10 @@ async function startGallery(selectedFiles) {
     lightboxRoot.hidden = true;
     lightboxRoot.classList.remove('is-open');
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    document.removeEventListener('keydown', onKey);
+    if (activeKeyHandler) {
+      document.removeEventListener('keydown', activeKeyHandler);
+      activeKeyHandler = null;
+    }
   }
 
   // Decode all files concurrently, register frames with coordinator

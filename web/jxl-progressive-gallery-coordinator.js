@@ -23,7 +23,6 @@ export function createGalleryCoordinator({ files }) {
       // But only if multiple files exist and they differ, otherwise show first frame
       const frameCounts = nonClosedFiles.map((e) => e.frames.length);
       const minFrames = Math.min(...frameCounts);
-      const maxFrames = Math.max(...frameCounts);
       
       // Cap at the slowest open file. When minFrames=0 we still return 1 so that
       // faster files expose their first frame — slice(0,1) on an empty frames array
