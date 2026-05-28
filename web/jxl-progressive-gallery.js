@@ -14,7 +14,6 @@ const sourceInput   = document.getElementById('source-input');
 const pickerStatus  = document.getElementById('picker-status');
 const concurrentEl  = document.getElementById('concurrent');
 const concurrentVal = document.getElementById('concurrent-val');
-const galleryEl     = document.getElementById('gallery'); // TODO(Task4): remove — replaced by galleryRowsEl
 const galleryRowsEl  = document.querySelector('[data-gallery-rows]');
 const lightboxRoot   = document.querySelector('[data-lightbox-root]');
 const logEl         = document.getElementById('log');
@@ -24,8 +23,6 @@ const pushModeButtons = [...document.querySelectorAll('[data-push-mode]')];
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let ctx = null;
-let activeDecoders = 0;
-const queue = []; // Array<File>
 let pushMode = 'all-chunks';
 let activeKeyHandler = null;  // cleaned up on each startGallery() call
 
@@ -54,7 +51,6 @@ wirePushModeControls();
 
 concurrentEl.addEventListener('input', () => {
   concurrentVal.textContent = concurrentEl.value;
-  drain();
 });
 
 sourceInput.addEventListener('change', () => {
@@ -67,27 +63,11 @@ sourceInput.addEventListener('change', () => {
 
   pickerStatus.textContent = `${files.length} JXL file${files.length > 1 ? 's' : ''} selected`;
   galleryRowsEl.innerHTML = '';
-  queue.length = 0;
 
   log(`Starting round-robin gallery for ${files.length} file${files.length > 1 ? 's' : ''}`);
   dbgLog('Gallery start', `${files.length} files`, 'info');
   startGallery(files).catch(e => log(`Gallery error: ${e.message}`, 'error'));
 });
-
-// ── Queue drain ───────────────────────────────────────────────────────────────
-
-function drain() {
-  const max = parseInt(concurrentEl.value, 10);
-  while (queue.length > 0 && activeDecoders < max) {
-    const file = queue.shift();
-    activeDecoders++;
-    dbgLog('Decode start', file.name, 'info');
-    decodeFile(file).finally(() => {
-      activeDecoders--;
-      drain();
-    });
-  }
-}
 
 function wirePushModeControls() {
   for (const button of pushModeButtons) {
@@ -114,170 +94,6 @@ function syncPushModeButtons() {
 
 function slotId(file) {
   return `slot-${file.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-}
-
-function createSlot(file) {
-  const slotEl = document.createElement('div');
-  slotEl.className = 'slot';
-  slotEl.id = slotId(file);
-
-  const canvas = document.createElement('canvas');
-
-  const badge  = document.createElement('div');
-  badge.className = 'badge';
-  badge.textContent = 'queued';
-
-  const spinner = document.createElement('div');
-  spinner.className = 'spinner';
-  spinner.textContent = '⏳';
-
-  const filename = document.createElement('div');
-  filename.className = 'filename';
-  filename.textContent = file.name;
-
-  slotEl.append(canvas, badge, spinner, filename);
-  if (galleryEl) galleryEl.appendChild(slotEl);
-
-  return slotEl;
-}
-
-function getSlot(file) {
-  return document.getElementById(slotId(file));
-}
-
-function setBadge(slotEl, tier, label) {
-  const badge = slotEl.querySelector('.badge');
-  badge.className = `badge tier-${tier}`;
-  badge.textContent = label ?? tier;
-}
-
-function hideSpinner(slotEl) {
-  const spinner = slotEl.querySelector('.spinner');
-  if (spinner) spinner.style.display = 'none';
-}
-
-function renderFrameToSlot(slotEl, frame) {
-  hideSpinner(slotEl);
-
-  const canvas = slotEl.querySelector('canvas');
-  const { width, height } = frame.info;
-
-  canvas.width  = width;
-  canvas.height = height;
-
-  const ctx2d = canvas.getContext('2d');
-  const imageData = typeof frame.getImageData === 'function'
-    ? frame.getImageData()
-    : new ImageData(
-      new Uint8ClampedArray(frame.pixels instanceof ArrayBuffer ? frame.pixels : frame.pixels.buffer),
-      width,
-      height,
-    );
-  ctx2d.putImageData(imageData, 0, 0);
-}
-
-// ── Decode pipeline ───────────────────────────────────────────────────────────
-
-async function decodeFile(file) {
-  if (!ctx) {
-    log(`Skip ${file.name}: context not ready`, 'warn');
-    return;
-  }
-
-  const slotEl = getSlot(file);
-  if (!slotEl) return;
-
-  setBadge(slotEl, 'wait', 'reading…');
-  dbgLog('Reading file', file.name, 'info');
-
-  let buffer;
-  try {
-    buffer = await file.arrayBuffer();
-  } catch (e) {
-    setBadge(slotEl, 'error', 'read err');
-    log(`${file.name}: read error — ${e.message}`, 'error');
-    dbgLog('Read error', `${file.name}\n${e.stack ?? e.message}`, 'error');
-    return;
-  }
-
-  setBadge(slotEl, 'wait', 'decoding…');
-  dbgLog('Decoding', `${file.name} · ${buffer.byteLength} bytes · mode=${pushMode}`, 'info');
-
-  const session = ctx.decode({
-    format: 'rgba8',
-    progressionTarget: 'final',
-    emitEveryPass: true,
-  });
-
-  let frameCount = 0;
-
-  // Push bytes and collect frames concurrently (mirrors profileJxl pattern).
-  const pushTask = (async () => {
-    if (pushMode === 'full-file') {
-      dbgLog('Push whole file', `${file.name} · ${buffer.byteLength} bytes`, 'info');
-      await session.push(buffer);
-    } else if (pushMode === 'window') {
-      dbgLog('Push windowed', `${file.name} · ${buffer.byteLength} bytes · ${CHUNK_SIZE}B chunks · window=${WINDOW_SIZE}`, 'info');
-      const inFlight = new Set();
-      for (let offset = 0; offset < buffer.byteLength; offset += CHUNK_SIZE) {
-        const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
-        dbgLog('Push chunk', `${file.name} · ${offset}..${end} / ${buffer.byteLength}`, 'info');
-        const pushPromise = session.push(buffer.slice(offset, end));
-        inFlight.add(pushPromise);
-        pushPromise.finally(() => inFlight.delete(pushPromise));
-        if (inFlight.size >= WINDOW_SIZE) {
-          await Promise.race(inFlight);
-        }
-      }
-      await Promise.all(inFlight);
-    } else {
-      dbgLog('Push chunks', `${file.name} · ${buffer.byteLength} bytes · ${CHUNK_SIZE}B chunks`, 'info');
-      const pushes = [];
-      for (let offset = 0; offset < buffer.byteLength; offset += CHUNK_SIZE) {
-        const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
-        dbgLog('Push chunk', `${file.name} · ${offset}..${end} / ${buffer.byteLength}`, 'info');
-        pushes.push(session.push(buffer.slice(offset, end)));
-      }
-      await Promise.all(pushes);
-    }
-    await session.close();
-    dbgLog('Push complete', file.name, 'info');
-  })();
-
-  const framesTask = (async () => {
-    for await (const frame of session.frames()) {
-      frameCount++;
-      dbgLog('Frame', `${file.name} · ${frame.stage} · ${frame.info.width}x${frame.info.height}`, 'info');
-      renderFrameToSlot(slotEl, frame);
-
-      // Badge reflects progression stage
-      const stage = frame.stage ?? '';
-      if (stage === 'dc') {
-        setBadge(slotEl, 'dc', 'DC');
-      } else if (stage === 'final') {
-        setBadge(slotEl, 'full', 'full');
-      } else {
-        setBadge(slotEl, 'pass', `pass ${frameCount}`);
-      }
-    }
-  })();
-
-  try {
-    await Promise.all([pushTask, framesTask]);
-    if (frameCount === 0) {
-      setBadge(slotEl, 'error', 'no frames');
-      log(`${file.name}: decoded but emitted 0 frames`, 'warn');
-      dbgLog('No frames', file.name, 'warn');
-    } else {
-      setBadge(slotEl, 'full', 'full');
-      log(`${file.name}: done (${frameCount} frame${frameCount > 1 ? 's' : ''})`);
-      dbgLog('Decode done', `${file.name} · ${frameCount} frame${frameCount > 1 ? 's' : ''}`, 'success');
-    }
-  } catch (e) {
-    setBadge(slotEl, 'error', 'error');
-    log(`${file.name}: ${e.message}`, 'error');
-    dbgLog('Decode error', `${file.name}\n${e.stack ?? e.message}`, 'error');
-  }
 }
 
 // ── Gallery pipeline (round-robin reveal + lightbox) ──────────────────────────
@@ -330,6 +146,7 @@ async function startGallery(selectedFiles) {
 
   // Keyboard handler for lightbox navigation
   function onKey(ev) {
+    if (!lightboxRoot || lightboxRoot.hidden) return;  // lightbox not visible
     const cur = lightbox.current();
     if (!cur) return;
     if (ev.key === 'Escape') {
@@ -388,7 +205,12 @@ async function startGallery(selectedFiles) {
       renderLightboxState({ fileId, frameIndex: frame.frameIndex });
     };
     cell.addEventListener('click', open);
-    cell.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') open(); });
+    cell.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        open();
+      }
+    });
 
     return cell;
   }
@@ -436,10 +258,6 @@ async function startGallery(selectedFiles) {
     lightboxRoot.hidden = true;
     lightboxRoot.classList.remove('is-open');
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    if (activeKeyHandler) {
-      document.removeEventListener('keydown', activeKeyHandler);
-      activeKeyHandler = null;
-    }
   }
 
   // Decode all files concurrently, register frames with coordinator
