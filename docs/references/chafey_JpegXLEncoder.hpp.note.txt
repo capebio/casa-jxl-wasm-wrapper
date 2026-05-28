@@ -1,0 +1,1 @@
+chafey JpegXLEncoder.hpp saved as reference

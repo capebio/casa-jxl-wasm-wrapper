@@ -1,0 +1,1 @@
+official libjxl encode_oneshot.cc saved as reference (raw C++ API usage)

@@ -1,0 +1,1 @@
+jpegxl-rs encode.rs reference saved (high-level Rust wrapper design)
