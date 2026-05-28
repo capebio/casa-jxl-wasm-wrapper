@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile, access, stat, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -12,9 +13,10 @@ const packageRoot = resolve(__dirname, "..");
 const distDir = join(packageRoot, "dist");
 const workDir = join(os.tmpdir(), "jxl-wasm-work");
 const dockerBinary = resolveDockerBinary();
-const emcmakeBinary = resolveEmscriptenBinary("emcmake");
-const emppBinary = resolveEmscriptenBinary("em++");
-const bashBinary = resolveBashBinary();
+const emsdkRoot = resolveEmsdkRoot();
+const emcmakeBinary = resolveEmscriptenBinary("emcmake", emsdkRoot);
+const emppBinary = resolveEmscriptenBinary("em++", emsdkRoot);
+const bashBinary = resolveBashBinary(emsdkRoot);
 const config = {
   buildId: "jxl-wasm-0.1.0",
   libjxlRepo: process.env.LIBJXL_REPO ?? "https://github.com/libjxl/libjxl.git",
@@ -67,17 +69,34 @@ async function main() {
   await mkdir(workDir, { recursive: true });
 
   if (!insideDocker && !hostToolchain) {
+    const dockerReady = await canUseDocker();
+    if (dockerReady) {
+      await runDockerBuild();
+      return;
+    }
+    if (emsdkRoot) {
+      console.warn(`Docker unavailable; falling back to local Emscripten toolchain at ${emsdkRoot}.`);
+      await buildWithHostToolchain();
+      return;
+    }
     await runDockerBuild();
     return;
   }
 
+  await buildAll({
+    hostToolchain,
+    manifestBuildMode: hostToolchain ? "host-toolchain" : insideDocker ? "docker" : "local-toolchain"
+  });
+}
+
+async function buildAll({ hostToolchain, manifestBuildMode }) {
   const manifest = {
     buildId: config.buildId,
     libjxlCommit: config.libjxlCommit,
     emscriptenTag: config.emscriptenTag,
     emscriptenCommit: config.emscriptenCommit,
     emsdkImage: process.env.JXL_WASM_EMSDK_IMAGE ?? null,
-    buildMode: hostToolchain ? "host-toolchain" : insideDocker ? "docker" : "local",
+    buildMode: manifestBuildMode,
     generatedAt: new Date().toISOString(),
     tiers: {},
     skippedTiers: hostToolchain ? config.tiers.filter((tier) => tier.threads).map((tier) => tier.name) : []
@@ -119,6 +138,7 @@ async function main() {
     ];
     const tierEnv = {
       ...process.env,
+      ...(emsdkRoot ? { EMSDK: emsdkRoot } : {}),
       CFLAGS: tierFlags.join(" "),
       CXXFLAGS: tierFlags.join(" "),
       LDFLAGS: tierFlags.join(" ")
@@ -155,6 +175,10 @@ async function main() {
   await writeManifest(manifest);
 }
 
+async function buildWithHostToolchain() {
+  await buildAll({ hostToolchain: true, manifestBuildMode: "host-toolchain" });
+}
+
 async function runDockerBuild() {
   const image = "jxl-wasm-builder:local";
   const dockerEnv = { ...process.env };
@@ -175,6 +199,15 @@ async function runDockerBuild() {
     "scripts/build.mjs",
     "--inside-docker"
   ], { cwd: packageRoot, env: dockerEnv });
+}
+
+async function canUseDocker() {
+  try {
+    await run(dockerBinary, ["info"], { cwd: packageRoot, env: process.env });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function buildDockerImage(image, dockerEnv) {
@@ -394,13 +427,31 @@ function resolveDockerBinary() {
   return "docker";
 }
 
-function resolveEmscriptenBinary(name) {
-  const root = process.env.EMSDK;
+function resolveEmscriptenBinary(name, root = process.env.EMSDK) {
   if (!root) return name;
   if (process.platform === "win32") {
     return join(root, "upstream", "emscripten", `${name}.bat`);
   }
   return join(root, "upstream", "emscripten", name);
+}
+
+function resolveEmsdkRoot() {
+  if (process.env.EMSDK && hasEmscriptenToolchain(process.env.EMSDK)) {
+    return process.env.EMSDK;
+  }
+  if (process.platform === "win32") {
+    const candidates = ["C:\\tools\\emsdk", "C:\\emsdk", "C:\\Program Files\\Emscripten"];
+    for (const candidate of candidates) {
+      if (hasEmscriptenToolchain(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+function hasEmscriptenToolchain(root) {
+  return existsSync(join(root, "upstream", "emscripten", process.platform === "win32" ? "emcmake.bat" : "emcmake"));
 }
 
 function resolveEmsdkImages() {
