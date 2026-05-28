@@ -8,6 +8,61 @@ if outstanding work, provide a concise handoff with sufficient context for an ag
 
 ---
 
+## Session handoff — 2026-05-28 (JXTC tile container)
+
+### What was done
+
+**Root cause diagnosis** of the previous session's "tile ROI" path:
+- `encodeTiledRgba8` + `decodeTiledRegionRgba8` capped at **1.4–2× speedup** vs full-frame decode on 20+ MP images, far short of the 8×–48× claim
+- libjxl 0.11.2 `JxlDecoderSetCoalescing(false) + SkipFrames` still walks every frame header
+- Frame-walk overhead is per-file fixed cost — scales with total tile count, not tiles needed
+- Verified empirically in `web/jxl-crop-benchmark.html`: decoding 4 tiles of 128×128 took the same time as 81 tiles of 1024×1024
+
+**JXTC tile container** (committed `de832b7`):
+- Custom container: N independent standalone JXL bitstreams + byte-offset index
+- Magic `'JXTC'`, 32-byte header, 8 bytes per index entry, then N JXL files
+- Decode opens fresh `JxlDecoder` per needed tile — zero frame-walk overhead
+- C++ bridge: `EncodeRgba8TileContainer` / `DecodeRgba8TileContainerRegion` + standalone helpers `EncodeStandaloneJxlTileRgba8` / `DecodeStandaloneJxlTileRgba8`
+- TS facade: `encodeTileContainerRgba8` / `decodeTileContainerRegionRgba8` with per-phase `onMetric` telemetry (`jxtc_input_prep`, `jxtc_malloc`, `jxtc_heap_set`, `jxtc_wasm_decode`, `jxtc_buffer_read`, `jxtc_total`)
+- WASM exports added to `exports.txt`, all 4 tiers rebuilt (relaxed-simd-mt, simd-mt, simd, scalar)
+- Validated speedup on 5240×3912 image: **23.1× at 128px**, 9.7× at 256px, 10.7× at 512px, 5.7× at 1024px, 2.5× at 2048px (vs the old multi-frame tile path)
+
+**Benchmark page** (`web/jxl-crop-benchmark.js`) now decodes both paths side-by-side and logs `tile XXXms · jxtc YYYms (Zx vs tile) · full WWWms (Vx vs tile)` per crop. File-row header shows encode times and sizes for both formats.
+
+### Outstanding / unresolved
+
+1. **Wire JXTC into production viewer/UI.** The lightbox / progressive paint code still calls `decodeTiledRegionRgba8` (or `createDecoder({ region })`) — search for those call sites and route ROI decode through `decodeTileContainerRegionRgba8` instead. Encoder side must emit JXTC for assets that need fast ROI (lightbox tiles, lookup-table viewer). Grep starting points: `decodeTiledRegionRgba8`, `encodeTiledRgba8` outside `web/jxl-crop-benchmark.js` and the facade itself.
+
+2. **Tile-size tuning.** Benchmark used 512px. For interactive pan/zoom in the lightbox a 256px tile would let a 128px viewport decode in ~70ms (single tile) instead of ~260ms (one 512px tile). Tradeoff: doubled tile count + slightly larger file. Recommend benchmarking 256 vs 512 against the actual lightbox viewport sizes used in production.
+
+3. **JXTC encode speed.** Encoding a 20MP image to JXTC at distance=1.0 effort=3 took ~12s in the browser. Each tile is encoded sequentially via a fresh `JxlEncoder`. Could parallelise by either (a) emitting WASM workers that each encode a subset of tiles, or (b) reusing the encoder instance across tiles (requires libjxl multi-image-frame mode investigation). Not urgent — encode is one-shot at ingest; decode is the hot path. Currently faster than `encodeTiledRgba8` (which was 15.7s on the same image).
+
+4. **Deprecation decision.** `encodeTiledRgba8` / `decodeTiledRegionRgba8` are now strictly worse than JXTC for ROI decode. Suggest leaving the multi-frame API in place as a fallback (still valid JXL, viewable in external viewers) but updating docs to recommend JXTC as the primary ROI path. Already done in `docs/Overview and features of the CasaWASM JXL wrapper.md` section 4.
+
+5. **Tests.** No unit tests added for `EncodeRgba8TileContainer` / `DecodeRgba8TileContainerRegion`. Add coverage for: round-trip identity at tile boundary, region crossing 2/4/9 tiles, region exactly equal to one tile, region clamped to image edge, error 101/102 on bad magic/version, error 105 on zero-area region. Place under `packages/jxl-wasm/test/jxtc.test.ts` or similar.
+
+6. **Multi-format support.** JXTC currently only handles RGBA8 input. For 16-bit pipelines (scientific raw at higher precision), need `encodeTileContainerRgba16` and `decodeTileContainerRegionRgba16`. Mostly mechanical — duplicate the standalone-tile helpers with `JXL_TYPE_UINT16` and parameterise the bit-depth in the header `flags` field (already has room).
+
+7. **Worker integration.** `JxlModule.createDecoder` in `wasm-loader.ts` doesn't yet know about JXTC. If a JXTC blob arrives at a `DecodeSession`, the session-layer code currently has no way to route it through `decodeTileContainerRegionRgba8`. Options: (a) auto-detect via magic bytes in the session layer and dispatch to the right facade function, (b) add a new session type. Out of scope for this PR — JXTC is currently called as a direct facade function from app code, not via session.
+
+### Error codes added in this session
+
+bridge.cpp errors 90–109 are JXTC-specific:
+- 90: invalid encode params (null pixels, zero dims, zero tile_size)
+- 91–95: encode allocation failures (stage buf, output buf, tile encode failures)
+- 100: input too small (< 32B header)
+- 101: bad magic (expected 'JXTC' = 0x4354584A)
+- 102: unsupported version (expected 1)
+- 103: invalid header dims/tile counts
+- 104: input too small for declared index
+- 105: zero-area region after clamp
+- 106: output buffer alloc failure
+- 107: out-of-bounds tile index
+- 108: tile offset/length out of input bounds
+- 109: per-tile decode failure (bad bitstream)
+
+---
+
 ## Session handoff — 2026-05-27 (tile ROI + crop benchmark)
 
 ### What was done
