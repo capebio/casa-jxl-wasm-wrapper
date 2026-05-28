@@ -4,11 +4,7 @@
 
 import type { DecodeStage, ImageInfo, PixelFormat, Region } from "@casabio/jxl-core/types";
 
-// Re-export detectTier from jxl-wasm so worker.ts can include the selected
-// build tier in the worker_ready announcement without a direct dependency on
-// the jxl-wasm package from worker.ts itself.
-export type { Tier } from "@casabio/jxl-wasm";
-export { detectTier } from "@casabio/jxl-wasm";
+export { detectTier, type Tier } from "@casabio/jxl-capabilities";
 
 export type BrowserDecodeEvent =
   | { type: "header"; info: ImageInfo }
@@ -141,14 +137,9 @@ export async function loadWasmModule(wasmUrl: string, options: WasmLoaderOptions
 }
 
 async function defaultImportWasm(): Promise<unknown> {
-  // Workers do not reliably inherit the page import map, so resolve the sibling
-  // package by URL before falling back to the package specifier for bundled use.
-  const packageUrl = new URL("../../jxl-wasm/dist/index.js", import.meta.url).href;
-  return await import(packageUrl).catch(async () => {
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore - module may be absent until local packages are installed
-    return await import("@casabio/jxl-wasm").catch(() => null) as unknown;
-  }) as unknown;
+  // Resolve the published package shape so packed installs behave the same as
+  // the workspace checkout.
+  return await import("@casabio/jxl-wasm");
 }
 
 function resolveJxlModule(value: unknown): JxlModule | null {

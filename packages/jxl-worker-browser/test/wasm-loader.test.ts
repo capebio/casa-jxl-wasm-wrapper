@@ -1,8 +1,17 @@
 import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { loadWasmModule } from "../src/wasm-loader.js";
 import { expect } from "./expect.js";
 
 describe("loadWasmModule", () => {
+  test("browser worker bundle avoids bare @casabio/jxl-wasm specifiers", () => {
+    const dist = readFileSync(new URL("../src/wasm-loader.js", import.meta.url), "utf8");
+    assert.ok(dist.includes('@casabio/jxl-wasm'));
+    assert.ok(!dist.includes("../../jxl-wasm/dist/index.js"));
+    assert.ok(dist.includes('@casabio/jxl-capabilities'));
+  });
+
   test("returns an imported codec facade without fetching wasm bytes", async () => {
     let fetched = false;
     const facade = fakeFacade();

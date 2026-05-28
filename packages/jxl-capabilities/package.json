@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test --test-isolation=none --test-force-exit dist-test/test/*.test.js"
   },
   "dependencies": {
     "wasm-feature-detect": "1.8.0"

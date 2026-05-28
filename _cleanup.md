@@ -8,6 +8,50 @@ if outstanding work, provide a concise handoff with sufficient context for an ag
 
 ---
 
+## Session handoff — 2026-05-28 (task 2/3 production-hygiene pass)
+
+### What was done
+
+**Task 2: packed-package proof as release gate**
+- `tools/pack-test.mjs` now smoke-tests publishable subpaths:
+  - `@casabio/jxl-worker-browser/worker`
+  - `@casabio/jxl-worker-node/worker`
+- Smoke app now runs worker entry points in worker-appropriate contexts:
+  - browser worker imports under a stubbed `self`
+  - node worker imports inside `worker_threads`
+- `tools/run-workspaces.mjs` now uses one shared publishable workspace order for build/typecheck/test
+- `packages/jxl-capabilities`, `packages/jxl-worker-browser`, and `packages/jxl-worker-node` now use `node --test --test-isolation=none` for the local sandbox
+
+**Task 3: capability/tier alignment**
+- Added shared threaded-WASM eligibility helper in `packages/jxl-capabilities/src/index.ts`
+- Browser worker tier reporting now re-exports `detectTier` from `@casabio/jxl-capabilities`
+- Node backend selection now records `wasmBuild` for WASM backends and forwards it in `worker_ready`
+- Added tier tests in `packages/jxl-capabilities/test/tier.test.ts`
+- Added/updated worker tests in:
+  - `packages/jxl-worker-browser/test/wasm-loader.test.ts`
+  - `packages/jxl-worker-node/test/backend-selector.test.ts`
+
+### Verification
+
+- `npm test --workspace @casabio/jxl-capabilities --if-present` PASS
+- `npm test --workspace @casabio/jxl-worker-browser --if-present` PASS
+- `npm test --workspace @casabio/jxl-worker-node --if-present` PASS
+- `npm run typecheck` PASS
+- `npm run pack-test` PASS when run through `rtk proxy pwsh`
+
+### Remaining blocker
+
+- `npm run build` still stalls on the Docker-backed `@casabio/jxl-wasm` build in this environment.
+- Direct local Docker daemon access from the sandbox is still denied.
+- `rtk proxy pwsh` can reach Docker, but the full WASM build exceeds the available timeout window here.
+
+### Handoff
+
+Next agent should:
+- retry the root build through `rtk proxy pwsh` with a longer timeout or background wrapper
+- confirm whether the Docker-backed `@casabio/jxl-wasm` build can finish in this environment
+- avoid touching the generated `dist` / `dist-test` artifacts unless the source files change again
+
 ## Session handoff — 2026-05-28 (JXTC tile container)
 
 ### What was done

@@ -6,45 +6,21 @@ if (!task) {
   throw new Error("usage: node tools/run-workspaces.mjs <build|typecheck|test>");
 }
 
-const workspaceOrder = {
-  build: [
-    "@casabio/jxl-core",
-    "@casabio/jxl-capabilities",
-    "@casabio/jxl-policy",
-    "@casabio/jxl-cache",
-    "@casabio/jxl-scheduler",
-    "@casabio/jxl-wasm",
-    "@casabio/jxl-worker-browser",
-    "@casabio/jxl-worker-node",
-    "@casabio/jxl-stream",
-    "@casabio/jxl-session",
-    "@casabio/jxl-test-corpus",
-  ],
-  typecheck: [
-    "@casabio/jxl-core",
-    "@casabio/jxl-capabilities",
-    "@casabio/jxl-policy",
-    "@casabio/jxl-cache",
-    "@casabio/jxl-native",
-    "@casabio/jxl-scheduler",
-    "@casabio/jxl-wasm",
-    "@casabio/jxl-worker-browser",
-    "@casabio/jxl-worker-node",
-    "@casabio/jxl-stream",
-    "@casabio/jxl-session",
-    "@casabio/jxl-test-corpus",
-  ],
-  test: [
-    "@casabio/jxl-scheduler",
-    "@casabio/jxl-worker-browser",
-    "@casabio/jxl-worker-node",
-    "@casabio/jxl-stream",
-    "@casabio/jxl-session",
-  ],
-};
+const workspaceOrder = [
+  "@casabio/jxl-core",
+  "@casabio/jxl-capabilities",
+  "@casabio/jxl-policy",
+  "@casabio/jxl-cache",
+  "@casabio/jxl-scheduler",
+  "@casabio/jxl-wasm",
+  "@casabio/jxl-worker-browser",
+  "@casabio/jxl-worker-node",
+  "@casabio/jxl-stream",
+  "@casabio/jxl-session",
+  "@casabio/jxl-test-corpus",
+];
 
-const packages = workspaceOrder[task];
-if (!packages) {
+if (!["build", "typecheck", "test"].includes(task)) {
   throw new Error(`unknown workspace task: ${task}`);
 }
 
@@ -57,7 +33,7 @@ function runNpm(args) {
   execFileSync("cmd.exe", ["/d", "/s", "/c", "npm", ...args], { stdio: "inherit" });
 }
 
-for (const name of packages) {
+for (const name of workspaceOrder) {
   console.log(`>> ${task} ${name}`);
   runNpm(["run", task, "--workspace", name, "--if-present"]);
 }

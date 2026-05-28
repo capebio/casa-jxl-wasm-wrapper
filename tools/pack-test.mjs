@@ -9,6 +9,12 @@ const packDir = await mkdtemp(join(tmpdir(), "jxl-pack-"));
 const smokeDir = await mkdtemp(join(tmpdir(), "jxl-smoke-"));
 
 function runNpm(args, options = {}) {
+  if (process.platform === "win32") {
+    return execFileSync("cmd.exe", ["/d", "/s", "/c", "npm", ...args], {
+      encoding: "utf8",
+      ...options,
+    });
+  }
   const npmCli = process.env.npm_execpath;
   if (npmCli) {
     return execFileSync(process.execPath, [npmCli, ...args], {
@@ -16,7 +22,7 @@ function runNpm(args, options = {}) {
       ...options,
     });
   }
-  return execFileSync("cmd.exe", ["/d", "/s", "/c", "npm", ...args], {
+  return execFileSync("npm", args, {
     encoding: "utf8",
     ...options,
   });
@@ -73,6 +79,28 @@ try {
   await writeFile(
     join(smokeDir, "smoke.mjs"),
     `
+import { Worker } from "node:worker_threads";
+
+globalThis.self = {
+  crossOriginIsolated: false,
+  location: { href: "file:///jxl-pack-smoke/" },
+  addEventListener() {},
+  postMessage() {},
+  close() {},
+  onmessage: null,
+};
+
+async function loadNodeWorkerEntry() {
+  const worker = new Worker(new URL("./node-worker-smoke.mjs", import.meta.url), { type: "module" });
+  await new Promise((resolve, reject) => {
+    worker.once("error", reject);
+    worker.once("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(\`node worker exited with code \${code}\`));
+    });
+  });
+}
+
 const modules = [
   ["@casabio/jxl-core", () => import("@casabio/jxl-core")],
   ["@casabio/jxl-core/errors", () => import("@casabio/jxl-core/errors")],
@@ -82,7 +110,15 @@ const modules = [
   ["@casabio/jxl-scheduler", () => import("@casabio/jxl-scheduler")],
   ["@casabio/jxl-wasm", () => import("@casabio/jxl-wasm")],
   ["@casabio/jxl-worker-browser", () => import("@casabio/jxl-worker-browser")],
+  ["@casabio/jxl-worker-browser/worker", async () => {
+    await import("@casabio/jxl-worker-browser/worker");
+    return {};
+  }],
   ["@casabio/jxl-worker-node", () => import("@casabio/jxl-worker-node")],
+  ["@casabio/jxl-worker-node/worker", async () => {
+    await loadNodeWorkerEntry();
+    return {};
+  }],
   ["@casabio/jxl-stream", () => import("@casabio/jxl-stream")],
   ["@casabio/jxl-session", () => import("@casabio/jxl-session")],
 ];
@@ -93,6 +129,15 @@ for (const [name, load] of modules) {
     throw new Error(\`Import failed for \${name}\`);
   }
 }
+`,
+    "utf8",
+  );
+
+  await writeFile(
+    join(smokeDir, "node-worker-smoke.mjs"),
+    `
+await import("@casabio/jxl-worker-node/worker");
+process.exit(0);
 `,
     "utf8",
   );

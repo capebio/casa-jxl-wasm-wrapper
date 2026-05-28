@@ -3,6 +3,20 @@ import { expect } from "./expect.js";
 import { selectBackend } from "../src/backend-selector.js";
 
 describe("selectBackend", () => {
+  test("attaches a wasm build tier when WASM wins selection", async () => {
+    const backend = await selectBackend({
+      env: {},
+      importNative: async () => {
+        throw new Error("native unavailable");
+      },
+      importWasm: async () => fakeCodecModule(),
+    });
+
+    expect(backend.type).toBe("wasm");
+    expect(backend.wasmBuild).toBeDefined();
+    expect(["relaxed-simd-mt", "simd-mt", "simd", "scalar"]).toContain(backend.wasmBuild);
+  });
+
   test("skips imported native module without codec facade and falls back to WASM", async () => {
     const backend = await selectBackend({
       env: {},
