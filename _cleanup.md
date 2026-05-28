@@ -170,3 +170,37 @@ The returned `crop.jxl` should decode cleanly in any JXL viewer or via the exist
 - **Remote URL support**: Option A (local path) only. When deployed to production, add a URL fetch path (Option C). Gate behind an env var or separate endpoint.
 - **Memory**: server still allocates full-frame pixel buffer during decode (unavoidable without libjxl ROI API). For 100 MP images this is ~400 MB. Fine for dev; revisit for production with Tier B (TOC partial delivery).
 - **No rejected optimizations**: `docs/rejected optimizations.md` not modified.
+
+---
+
+## Session handoff - 2026-05-28 (JXL encoder resampling)
+
+### What was done
+
+- Added `EncoderOptions.resampling?: 1 | 2 | 4 | 8` to the WASM and native facades.
+- Forwarded resampling through WASM one-shot, metadata, sidecar, streaming, and streaming-input encode paths.
+- Applied `JXL_ENC_FRAME_SETTING_RESAMPLING` in `packages/jxl-wasm/src/bridge.cpp` and `packages/jxl-native/src/native.cc`.
+- Added wrapper-lab 1x/2x/4x/8x controls and wired them into `makeEncoderOptions`.
+- Added facade tests for valid and invalid resampling forwarding.
+- Updated the wrapper overview doc and `docs/references/PROGRESS_LOG.md`.
+
+### Verification
+
+- `npm --workspace packages/jxl-wasm run typecheck` PASS
+- `npm --workspace packages/jxl-native run typecheck` PASS
+- `npx tsc -p packages/jxl-wasm/tsconfig.json` PASS
+- `npx tsc -p packages/jxl-native/tsconfig.json` PASS
+- `bun test packages/jxl-wasm/test/facade.test.ts --test-name-pattern resampling` PASS
+
+### Blocked verification
+
+- `npm --workspace packages/jxl-wasm run build` failed because Docker daemon is not reachable: `permission denied while trying to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`.
+- `npm --workspace packages/jxl-native run build` failed because `packages/jxl-native/node_modules/node-gyp/bin/node-gyp.js` is missing.
+- Full `packages/jxl-wasm/test/facade.test.ts` still has an unrelated existing tier expectation failure: expected Node/Bun tier `scalar`, received `simd-mt`.
+- `web/jxl-wrapper-lab.test.js` still fails an unrelated existing expectation for `data-mode="compare"`, which is absent from the current page.
+
+### Next steps
+
+- Start Docker Desktop/Linux engine and rerun the WASM build.
+- Install/restore `packages/jxl-native` build dependencies and rerun the native addon build.
+- Run browser wrapper-lab smoke after rebuilt WASM artifacts are available.
