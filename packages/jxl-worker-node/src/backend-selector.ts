@@ -2,12 +2,9 @@
 // Selects native libjxl vs WASM at worker startup.
 // Spec: Section 15.2, T-WORKER-NODE brief.
 
-import { detectTier, type Tier } from "@casabio/jxl-capabilities";
-
 export interface Backend {
   type: "native" | "wasm";
   module: CodecModule;
-  wasmBuild?: Tier;
 }
 
 export interface CodecModule {
@@ -55,7 +52,7 @@ async function tryWasm(options: BackendSelectorOptions): Promise<Backend | null>
     const imported = await (options.importWasm ?? defaultImportWasm)();
     const module = resolveCodecModule(imported);
     if (module === null) return null;
-    return { type: "wasm", module, wasmBuild: detectTier() };
+    return { type: "wasm", module };
   } catch {
     return null;
   }

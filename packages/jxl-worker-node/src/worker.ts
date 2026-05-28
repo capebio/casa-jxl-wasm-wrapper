@@ -502,17 +502,13 @@ process.on("unhandledRejection", (reason: unknown) => {
 
 void (async () => {
   let backendType: MsgWorkerReady["backend"] = "wasm";
-  let wasmBuild: MsgWorkerReady["wasmBuild"] | undefined;
   try {
     const b = await initBackend();
     backendType = b.type;
-    wasmBuild = b.type === "wasm" ? b.wasmBuild : undefined;
   } catch {
     // Keep reporting wasm as the intended fallback if backend init failed.
     // The first actual session will report CapabilityMissing if it still cannot initialise.
   }
-  const ready: MsgWorkerReady = wasmBuild === undefined
-    ? { type: "worker_ready", backend: backendType }
-    : { type: "worker_ready", backend: backendType, wasmBuild };
+  const ready: MsgWorkerReady = { type: "worker_ready", backend: backendType };
   port.postMessage(ready);
 })();
