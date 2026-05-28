@@ -25,14 +25,10 @@ export function createGalleryCoordinator({ files }) {
       const minFrames = Math.min(...frameCounts);
       const maxFrames = Math.max(...frameCounts);
       
-      // If all files have the same frame count, show up to that count
-      // If they differ, show only frames that all files have, but at least 1 if any file has frames
-      if (minFrames === maxFrames) {
-        return minFrames;
-      } else {
-        // Files differ in frame count - show up to the minimum, but at least 1
-        return Math.max(minFrames, minFrames > 0 ? minFrames : 1);
-      }
+      // Cap at the slowest open file. When minFrames=0 we still return 1 so that
+      // faster files expose their first frame — slice(0,1) on an empty frames array
+      // produces [] via filter(Boolean), keeping the UI consistent.
+      return minFrames > 0 ? minFrames : 1;
     } else if (closedFiles.length > 0) {
       // If all files are closed, show all available frames
       const maxFrames = Math.max(...closedFiles.map((e) => e.frames.length));
