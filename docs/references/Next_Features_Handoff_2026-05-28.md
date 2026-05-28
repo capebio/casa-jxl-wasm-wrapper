@@ -22,7 +22,7 @@ As of 2026-05-28:
 - Features 1–4 are reported as nearly complete.
 - All implementation is following (or should follow) `FEATURE_IMPLEMENTATION_TEMPLATE.md` and referencing the corresponding design note.
 
-See the top of `PROGRESS_LOG.md` for the latest per-feature status.
+See the top of `PROGRESS_LOG.md` for the latest per-feature status. Current follow-up blockers and the full list of items still needing design notes or production work are tracked in `docs/references/designs/ISSUES.md` (use the Issue Entry Specification at the top of that file).
 
 ---
 
