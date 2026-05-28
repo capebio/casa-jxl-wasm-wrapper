@@ -19,9 +19,7 @@ export function createGalleryLightbox({ framesByFile }) {
         const ids = [...framesByFile.keys()];
         const nextFile = ids[(ids.indexOf(state.fileId) + 1) % ids.length];
         const nextFrames = framesByFile.get(nextFile) ?? [];
-        const clampedIndex = Math.min(maxFrameIndexVisited, Math.max(0, nextFrames.length - 1));
-        state = { fileId: nextFile, frameIndex: clampedIndex };
-        maxFrameIndexVisited = Math.max(maxFrameIndexVisited, clampedIndex);
+        state = { fileId: nextFile, frameIndex: Math.min(maxFrameIndexVisited, Math.max(0, nextFrames.length - 1)) };
         return;
       }
 
@@ -29,9 +27,7 @@ export function createGalleryLightbox({ framesByFile }) {
         const ids = [...framesByFile.keys()];
         const nextFile = ids[(ids.indexOf(state.fileId) - 1 + ids.length) % ids.length];
         const nextFrames = framesByFile.get(nextFile) ?? [];
-        const clampedIndex = Math.min(maxFrameIndexVisited, Math.max(0, nextFrames.length - 1));
-        state = { fileId: nextFile, frameIndex: clampedIndex };
-        maxFrameIndexVisited = Math.max(maxFrameIndexVisited, clampedIndex);
+        state = { fileId: nextFile, frameIndex: Math.min(maxFrameIndexVisited, Math.max(0, nextFrames.length - 1)) };
         return;
       }
 
