@@ -2,14 +2,6 @@ export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
 
 let _cachedTier: Tier | undefined;
 
-export function canUseThreadedWasm(
-  wasmThreads: boolean,
-  sharedArrayBuffer: boolean,
-  crossOriginIsolated: boolean,
-): boolean {
-  return wasmThreads && sharedArrayBuffer && crossOriginIsolated;
-}
-
 function _probeSimd(): boolean {
   try {
     return WebAssembly.validate(new Uint8Array([
@@ -18,19 +10,6 @@ function _probeSimd(): boolean {
       0x03, 0x02, 0x01, 0x00,
       0x0a, 0x08, 0x01, 0x06, 0x00,
       0x41, 0x00, 0xfd, 0x0f, 0x0b,
-    ]));
-  } catch { return false; }
-}
-
-function _probeWasmThreads(): boolean {
-  try {
-    return WebAssembly.validate(new Uint8Array([
-      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-      0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
-      0x03, 0x02, 0x01, 0x00,
-      0x05, 0x03, 0x01, 0x03, 0x01,
-      0x0a, 0x0b, 0x01, 0x09, 0x00,
-      0x41, 0x00, 0xfe, 0x10, 0x02, 0x00, 0x1a, 0x0b,
     ]));
   } catch { return false; }
 }
@@ -58,11 +37,9 @@ export function detectTier(): Tier {
       tier = "scalar";
     } else {
       const hasSab = typeof SharedArrayBuffer !== "undefined";
-      const crossOriginIsolated = typeof self !== "undefined" && !!(self as { crossOriginIsolated?: boolean }).crossOriginIsolated;
-      const canDoMT = canUseThreadedWasm(_probeWasmThreads(), hasSab, crossOriginIsolated);
       const hasRelaxedSimd = _probeRelaxedSimd();
-      if (canDoMT && hasRelaxedSimd) tier = "relaxed-simd-mt";
-      else if (canDoMT) tier = "simd-mt";
+      if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
+      else if (hasSab) tier = "simd-mt";
       else tier = "simd";
     }
   }
@@ -119,23 +96,10 @@ async function probeWasmSimd(): Promise<boolean> {
 }
 
 async function probeWasmThreads(): Promise<boolean> {
-  return _probeWasmThreads();
-}
-
-function selectWasmBuild(
-  wasm: boolean,
-  wasmSimd: boolean,
-  wasmThreads: boolean,
-  sharedArrayBuffer: boolean,
-  crossOriginIsolated: boolean,
-  wasmRelaxedSimd: boolean,
-): Capabilities["selectedWasmBuild"] {
-  if (!wasm) return "none";
-  const canDoMT = canUseThreadedWasm(wasmThreads, sharedArrayBuffer, crossOriginIsolated);
-  if (canDoMT && wasmRelaxedSimd) return "relaxed-simd-mt";
-  if (canDoMT && wasmSimd) return "simd-mt";
-  if (wasmSimd) return "simd";
-  return "scalar";
+  try {
+    await WebAssembly.instantiate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 3, 1, 3, 1, 10, 11, 1, 9, 0, 65, 0, 254, 16, 2, 0, 26, 11]));
+    return true;
+  } catch { return false; }
 }
 
 /**
@@ -202,14 +166,19 @@ export async function getCapabilities(): Promise<Capabilities> {
   }
 
   // Build selection logic (Section 6.1)
-  const selectedWasmBuild = selectWasmBuild(
-    wasm,
-    wasmSimd,
-    wasmThreads,
-    sharedArrayBuffer,
-    crossOriginIsolated,
-    wasmRelaxedSimd,
-  );
+  let selectedWasmBuild: Capabilities['selectedWasmBuild'] = "none";
+  if (wasm) {
+    const canDoMT = wasmThreads && sharedArrayBuffer && crossOriginIsolated;
+    if (canDoMT && wasmRelaxedSimd) {
+      selectedWasmBuild = "relaxed-simd-mt";
+    } else if (canDoMT && wasmSimd) {
+      selectedWasmBuild = "simd-mt";
+    } else if (wasmSimd) {
+      selectedWasmBuild = "simd";
+    } else {
+      selectedWasmBuild = "scalar";
+    }
+  }
 
   return {
     wasm,
