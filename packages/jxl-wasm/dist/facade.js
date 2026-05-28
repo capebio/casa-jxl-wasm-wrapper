@@ -30,8 +30,13 @@ function resolveDecoderProgressiveDetail(options) {
     }
 }
 function resolveEncoderBridgeSettings(options) {
+    const modular = options.modular ?? -1;
+    const brotliEffort = options.brotliEffort != null ? Math.max(-1, Math.min(11, Math.round(options.brotliEffort))) : -1;
+    const decodingSpeed = options.decodingSpeed != null ? Math.max(0, Math.min(4, Math.round(options.decodingSpeed))) : -1;
+    const photonNoiseIso = options.photonNoiseIso != null ? Math.max(0, Math.round(options.photonNoiseIso)) : 0;
+    const resampling = resolveResampling(options.resampling);
     if (!options.progressive) {
-        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0 };
+        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling };
     }
     const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
     return {
@@ -39,7 +44,15 @@ function resolveEncoderBridgeSettings(options) {
         progressiveAc: acEnabled ? 1 : 0,
         qProgressiveAc: acEnabled ? 1 : 0,
         buffering: options.chunked ? 2 : 0,
+        modular,
+        brotliEffort,
+        decodingSpeed,
+        photonNoiseIso,
+        resampling,
     };
+}
+function resolveResampling(value) {
+    return value === 2 || value === 4 || value === 8 ? value : 1;
 }
 export class CapabilityMissing extends Error {
     code = "CapabilityMissing";
@@ -961,8 +974,13 @@ class LibjxlEncoder {
         if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
             const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
             const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-            const { progressiveDc, progressiveAc, qProgressiveAc, buffering } = resolveEncoderBridgeSettings(this.options);
-            this.wasmEncState = module._jxl_wasm_enc_create_image(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering);
+            const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
+            if (caps.extOptions && module._jxl_wasm_enc_create_image_x) {
+                this.wasmEncState = module._jxl_wasm_enc_create_image_x(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling);
+            }
+            else {
+                this.wasmEncState = module._jxl_wasm_enc_create_image(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
+            }
             if (this.wasmEncState === 0)
                 throw new Error("JXL streaming encoder: pixel buffer allocation failed");
             this.streamingInputActive = true;
@@ -989,7 +1007,8 @@ class LibjxlEncoder {
         const module = this.wasmModule ?? await loadLibjxlModule();
         if (this.options.format === "rgba16" || this.options.format === "rgbaf32") {
             const encFn = this.options.format === "rgba16" ? "_jxl_wasm_encode_rgba16" : "_jxl_wasm_encode_rgbaf32";
-            if (typeof module[encFn] !== "function") {
+            const extFn = this.options.format === "rgba16" ? "_jxl_wasm_encode_rgba16_x" : "_jxl_wasm_encode_rgbaf32_x";
+            if (typeof module[encFn] !== "function" && typeof module[extFn] !== "function") {
                 throw new CapabilityMissing(`${this.options.format} encode requires a rebuilt WASM with multi-format bridge`);
             }
         }
@@ -1034,7 +1053,7 @@ class LibjxlEncoder {
                 const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
                 const hasAlpha = this.options.hasAlpha ? 1 : 0;
                 const caps = getCapabilities(module);
-                const { progressiveDc, progressiveAc, qProgressiveAc, buffering } = resolveEncoderBridgeSettings(this.options);
+                const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
                 // Sidecar thumbnails — yield smallest first for faster first-paint.
                 if (this.sortedSidecarSizes.length > 0 && caps.sidecars) {
                     const sortedSizes = this.sortedSidecarSizes;
@@ -1055,7 +1074,9 @@ class LibjxlEncoder {
                                 module.HEAPU8[dimsPtr + i * 4 + 3] = (v >>> 24) & 0xff;
                             }
                         }
-                        let handle = module._jxl_wasm_encode_rgba8_with_sidecars(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, dimsPtr, sortedSizes.length);
+                        let handle = caps.extOptions && module._jxl_wasm_encode_rgba8_with_sidecars_x
+                            ? module._jxl_wasm_encode_rgba8_with_sidecars_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, dimsPtr, sortedSizes.length, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                            : module._jxl_wasm_encode_rgba8_with_sidecars(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, dimsPtr, sortedSizes.length, resampling);
                         while (handle !== 0) {
                             // Capture next pointer before takeBuffer frees handle.
                             const next = module._jxl_wasm_buffer_next(handle);
@@ -1086,7 +1107,9 @@ class LibjxlEncoder {
                     const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
                     const encState = module._jxl_wasm_enc_create();
                     try {
-                        const rc = module._jxl_wasm_enc_push_pixels(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
+                        const rc = caps.extOptions && module._jxl_wasm_enc_push_pixels_x
+                            ? module._jxl_wasm_enc_push_pixels_x(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                            : module._jxl_wasm_enc_push_pixels(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
                         if (rc !== 0)
                             throw new Error(`JXL streaming encode failed (${rc})`);
                         let chunkHandle;
@@ -1121,7 +1144,9 @@ class LibjxlEncoder {
                                 module.HEAPU8.set(exifView, exifPtr);
                             if (xmpPtr !== 0)
                                 module.HEAPU8.set(xmpView, xmpPtr);
-                            handle = module._jxl_wasm_encode_rgba8_with_metadata(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength);
+                            handle = caps.extOptions && module._jxl_wasm_encode_rgba8_with_metadata_x
+                                ? module._jxl_wasm_encode_rgba8_with_metadata_x(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength)
+                                : module._jxl_wasm_encode_rgba8_with_metadata(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength);
                         }
                         finally {
                             if (iccPtr !== 0)
@@ -1135,14 +1160,24 @@ class LibjxlEncoder {
                     else {
                         // Fallback: plain encode (no metadata) used when bridge fn absent
                         // or when no metadata was provided.
-                        if (this.options.format === "rgba16" && module._jxl_wasm_encode_rgba16) {
-                            handle = module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
+                        if (this.options.format === "rgba16") {
+                            handle = caps.extOptions && module._jxl_wasm_encode_rgba16_x
+                                ? module._jxl_wasm_encode_rgba16_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                                : module._jxl_wasm_encode_rgba16
+                                    ? module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling)
+                                    : module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
                         }
-                        else if (this.options.format === "rgbaf32" && module._jxl_wasm_encode_rgbaf32) {
-                            handle = module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
+                        else if (this.options.format === "rgbaf32") {
+                            handle = caps.extOptions && module._jxl_wasm_encode_rgbaf32_x
+                                ? module._jxl_wasm_encode_rgbaf32_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                                : module._jxl_wasm_encode_rgbaf32
+                                    ? module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling)
+                                    : module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
                         }
                         else {
-                            handle = module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering);
+                            handle = caps.extOptions && module._jxl_wasm_encode_rgba8_x
+                                ? module._jxl_wasm_encode_rgba8_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                                : module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
                         }
                     }
                     const encoded = takeBuffer(module, handle, "encode");
@@ -1234,6 +1269,7 @@ function getCapabilities(module) {
         sidecars: typeof module._jxl_wasm_encode_rgba8_with_sidecars === "function" &&
             typeof module._jxl_wasm_buffer_next === "function",
         jpegTranscode: typeof module._jxl_wasm_transcode_jpeg_to_jxl === "function",
+        extOptions: typeof module._jxl_wasm_encode_rgba8_x === "function",
     };
     capabilityCache.set(module, caps);
     return caps;

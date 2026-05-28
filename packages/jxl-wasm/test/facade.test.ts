@@ -75,6 +75,35 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(source).not.toContain("Progressive JXL encode requires a rebuilt WASM with a progressive bridge flag");
   });
 
+  test("forwards photonNoiseIso into the extended WASM encode bridge", async () => {
+    const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
+      __encodeArgs?: number[];
+      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
+    };
+    module._jxl_wasm_encode_rgba8_x = (...args: number[]) => {
+      module.__encodeArgs = args;
+      return module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!, args[9]!, args[14]!);
+    };
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, photonNoiseIso: 1600 });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    await encoder.finish();
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    expect(encoded.done).toBe(false);
+    expect(module.__encodeArgs?.[13]).toBe(1600);
+    await encoder.dispose();
+  });
+
+  test("bridge and native encoders set the libjxl photon noise frame option", () => {
+    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
+    const native = readFileSync(new URL("../../jxl-native/src/native.cc", import.meta.url), "utf8");
+
+    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_PHOTON_NOISE");
+    expect(native).toContain("JXL_ENC_FRAME_SETTING_PHOTON_NOISE");
+  });
+
   test("chunks waits for in-flight streaming pixel pushes", async () => {
     setJxlModuleFactoryForTesting(async () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -515,6 +544,126 @@ describe("getDecodeGridInfo", () => {
   test("returns empty object", () => {
     const info = getDecodeGridInfo();
     expect(info).toEqual({});
+  });
+});
+
+describe("resampling encoder option", () => {
+  afterEach(() => {
+    setJxlModuleFactoryForTesting(null);
+  });
+
+  function makeModuleCapturingEncodeArgs() {
+    const base = createFakeLibjxlModule();
+    const calls: number[][] = [];
+    const module = {
+      ...base,
+      _jxl_wasm_encode_rgba8: (...args: number[]) => {
+        calls.push(args);
+        return base._jxl_wasm_encode_rgba8(args[0], args[1], args[2], args[3], args[4]);
+      },
+    };
+    return { module, calls };
+  }
+
+  test("resampling:4 forwards as 11th arg to encode bridge (index 10)", async () => {
+    const { module, calls } = makeModuleCapturingEncodeArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, resampling: 4 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][10]).toBe(4);
+  });
+
+  test("invalid resampling resolves to 1", async () => {
+    const { module, calls } = makeModuleCapturingEncodeArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, resampling: 3 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][10]).toBe(1);
+  });
+});
+
+describe("decodingSpeed encoder option", () => {
+  afterEach(() => {
+    setJxlModuleFactoryForTesting(null);
+  });
+
+  function makeModuleCapturingXArgs() {
+    const base = createFakeLibjxlModule();
+    const calls: number[][] = [];
+    const module = {
+      ...base,
+      _jxl_wasm_encode_rgba8_x: (...args: number[]) => {
+        calls.push(args);
+        return base._jxl_wasm_encode_rgba8(args[0], args[1], args[2], args[3], args[4]);
+      },
+    };
+    return { module, calls };
+  }
+
+  test("decodingSpeed:2 forwards as 13th arg to _x bridge (index 12)", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: 2 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][12]).toBe(2);
+    await encoder.dispose();
+  });
+
+  test("decodingSpeed omitted resolves to -1", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][12]).toBe(-1);
+    await encoder.dispose();
+  });
+
+  test("decodingSpeed:0 resolves to 0 (explicit minimum tier)", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: 0 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][12]).toBe(0);
+    await encoder.dispose();
+  });
+
+  test("decodingSpeed:5 clamps to 4", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: 5 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][12]).toBe(4);
+    await encoder.dispose();
+  });
+
+  test("decodingSpeed:-1 clamps to 0", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: -1 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][12]).toBe(0);
+    await encoder.dispose();
   });
 });
 

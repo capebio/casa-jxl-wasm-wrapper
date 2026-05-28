@@ -1,4 +1,4 @@
-﻿import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
+import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
 import { getCapabilities } from '@casabio/jxl-capabilities';
@@ -29,6 +29,9 @@ const batchLimitInput = document.getElementById('batch-limit');
 const batchConcurrencyInput = document.getElementById('batch-concurrency');
 const batchQualityInput = document.getElementById('batch-quality');
 const batchEffortInput = document.getElementById('batch-effort');
+const batchDecodeSpeedInput = document.getElementById('batch-decode-speed');
+const batchPhotonNoiseIsoInput = document.getElementById('batch-photon-noise-iso');
+const batchResamplingInputs = [...document.querySelectorAll('input[name="batch-resampling"]')];
 const batchLosslessInput = document.getElementById('batch-lossless');
 const batchThumbSizeInputs = [...document.querySelectorAll('input[name="batch-thumb-size"]')];
 const batchLimitValue = document.getElementById('batch-limit-value');
@@ -341,6 +344,22 @@ function getQuality() {
 
 function getEffort() {
     return clamp(Number(batchEffortInput.value) || 3, 1, 9);
+}
+
+function getDecodeSpeed() {
+    if (!batchDecodeSpeedInput) return undefined;
+    const v = clamp(Math.round(Number(batchDecodeSpeedInput.value) || 0), 0, 4);
+    return v > 0 ? v : undefined;
+}
+
+function getPhotonNoiseIso() {
+    if (!batchPhotonNoiseIsoInput) return 0;
+    return clamp(Math.round(Number(batchPhotonNoiseIsoInput.value) || 0), 0, 51200);
+}
+
+function getResampling() {
+    const value = Number(batchResamplingInputs.find((input) => input.checked)?.value || 1);
+    return value === 2 || value === 4 || value === 8 ? value : 1;
 }
 
 function getLossless() {
@@ -866,6 +885,9 @@ function makeEncoderOptions(source) {
         progressive: false,
         previewFirst: false,
         chunked: false,
+        decodingSpeed: getDecodeSpeed(),
+        photonNoiseIso: getPhotonNoiseIso() > 0 ? getPhotonNoiseIso() : undefined,
+        resampling: getResampling(),
     };
 }
 
@@ -1354,6 +1376,9 @@ function wireControls() {
     batchConcurrencyInput.addEventListener('input', syncSettingLabels);
     batchQualityInput.addEventListener('input', syncSettingLabels);
     batchEffortInput?.addEventListener('input', syncSettingLabels);
+    batchDecodeSpeedInput?.addEventListener('input', syncSettingLabels);
+    batchPhotonNoiseIsoInput?.addEventListener('input', syncSettingLabels);
+    for (const input of batchResamplingInputs) input.addEventListener('change', syncSettingLabels);
 }
 
 
