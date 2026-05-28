@@ -124,6 +124,10 @@ export interface EncodeOptions {
   distance?: number;                // libjxl distance; 0 = lossless
   quality?: number;                 // 0-100, mapped via JxlEncoderDistanceFromQuality
   effort?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  modular?: -1 | 0 | 1;             // -1 = auto, 0 = VarDCT, 1 = Modular
+  brotliEffort?: number;            // -1 = libjxl default, 0-11 explicit
+  decodingSpeed?: number;           // 0-4 encode-time decode speed tier hint
+  photonNoiseIso?: number;          // 0/off or target ISO for synthetic photon noise
   // Progressive / streaming
   progressive?: boolean;            // enable progressive frames
   progressiveFlavor?: "dc" | "ac";  // DC-only or DC+AC refinement progression

@@ -46,6 +46,9 @@ struct EncoderData {
   bool has_alpha = true;
   double distance = 1.0;
   uint32_t effort = 7;
+  int32_t brotli_effort = -1;
+  int32_t photon_noise_iso = 0;
+  uint32_t resampling = 1;
   bool finished = false;
   bool cancelled = false;
 };
@@ -98,6 +101,10 @@ static uint32_t GetUint32Prop(napi_env env, napi_value object, const char* name,
   uint32_t out = fallback;
   napi_get_value_uint32(env, value, &out);
   return out;
+}
+
+static uint32_t NormalizeResampling(uint32_t value) {
+  return (value == 2u || value == 4u || value == 8u) ? value : 1u;
 }
 
 static bool GetBoolProp(napi_env env, napi_value object, const char* name, bool fallback) {
@@ -457,6 +464,9 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   }
   JxlEncoderSetFrameDistance(frame, static_cast<float>(data->distance));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(data->effort));
+  if (data->brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(data->brotli_effort));
+  if (data->photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(data->photon_noise_iso));
+  if (data->resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(data->resampling));
 
   JxlPixelFormat pf = {4, DataTypeForFormat(data->format), JXL_NATIVE_ENDIAN, 0};
   const size_t expected = static_cast<size_t>(data->width) * data->height * 4 * BytesPerChannel(data->format);
@@ -676,6 +686,15 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
   data->has_alpha = GetBoolProp(env, args[0], "hasAlpha", true);
   data->distance = GetNullableNumberProp(env, args[0], "distance", GetNullableNumberProp(env, args[0], "quality", 90.0) >= 100.0 ? 0.0 : 1.0);
   data->effort = GetUint32Prop(env, args[0], "effort", 7);
+  {
+    const double be = GetNullableNumberProp(env, args[0], "brotliEffort", -1.0);
+    data->brotli_effort = (be < 0.0) ? -1 : (be > 11.0) ? 11 : static_cast<int32_t>(be);
+  }
+  {
+    const double iso = GetNullableNumberProp(env, args[0], "photonNoiseIso", 0.0);
+    data->photon_noise_iso = (iso <= 0.0) ? 0 : static_cast<int32_t>(iso);
+  }
+  data->resampling = NormalizeResampling(GetUint32Prop(env, args[0], "resampling", 1));
 
   napi_value object;
   napi_create_object(env, &object);

@@ -71,6 +71,12 @@ export interface EncoderOptions {
   distance: number | null;
   quality: number | null;
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  /** Brotli effort for aux data (metadata, ICC, EXIF, extra channels). -1 = libjxl default, 0-11 explicit. */
+  brotliEffort?: number;
+  /** Target ISO for libjxl synthetic photon noise. 0 or omitted disables it. */
+  photonNoiseIso?: number;
+  /** Encoder-native downsampling factor before JXL transform/coding. */
+  resampling?: 1 | 2 | 4 | 8;
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
