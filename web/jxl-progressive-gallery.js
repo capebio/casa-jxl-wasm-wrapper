@@ -5,6 +5,8 @@
 
 import { createBrowserContext } from '../packages/jxl-session/dist/index.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+import { createGalleryCoordinator } from './jxl-progressive-gallery-coordinator.js';
+import { createGalleryLightbox } from './jxl-progressive-gallery-lightbox.js';
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
@@ -55,9 +57,7 @@ concurrentEl.addEventListener('input', () => {
 });
 
 sourceInput.addEventListener('change', () => {
-  const files = [...sourceInput.files].filter(f =>
-    /\.jxl$/i.test(f.name)
-  );
+  const files = [...sourceInput.files].filter(f => /\.jxl$/i.test(f.name));
 
   if (files.length === 0) {
     pickerStatus.textContent = 'No JXL files in selection';
@@ -65,19 +65,12 @@ sourceInput.addEventListener('change', () => {
   }
 
   pickerStatus.textContent = `${files.length} JXL file${files.length > 1 ? 's' : ''} selected`;
-
-  // Clear gallery and queue
-  if (galleryEl) galleryEl.innerHTML = '';
+  galleryRowsEl.innerHTML = '';
   queue.length = 0;
 
-  for (const file of files) {
-    createSlot(file);
-    queue.push(file);
-  }
-
-  log(`Queued ${files.length} files`);
-  dbgLog('Queued files', `${files.length} JXL file${files.length > 1 ? 's' : ''} selected`);
-  drain();
+  log(`Starting round-robin gallery for ${files.length} file${files.length > 1 ? 's' : ''}`);
+  dbgLog('Gallery start', `${files.length} files`, 'info');
+  startGallery(files).catch(e => log(`Gallery error: ${e.message}`, 'error'));
 });
 
 // ── Queue drain ───────────────────────────────────────────────────────────────
@@ -297,6 +290,239 @@ async function decodeFile(file) {
     log(`${file.name}: ${e.message}`, 'error');
     dbgLog('Decode error', `${file.name}\n${e.stack ?? e.message}`, 'error');
   }
+}
+
+// ── Gallery pipeline (round-robin reveal + lightbox) ──────────────────────────
+
+async function startGallery(selectedFiles) {
+  if (!ctx) {
+    log('Context not ready', 'warn');
+    return;
+  }
+
+  // Build per-file row elements
+  const stripEls = new Map(); // fileId → <div class="thumb-strip">
+  for (const file of selectedFiles) {
+    const fileId = slotId(file);
+    const rowEl = document.createElement('div');
+    rowEl.className = 'gallery-row';
+    rowEl.dataset.fileId = fileId;
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'gallery-row-label';
+    labelEl.textContent = file.name;
+
+    const stripEl = document.createElement('div');
+    stripEl.className = 'thumb-strip';
+
+    rowEl.append(labelEl, stripEl);
+    galleryRowsEl.appendChild(rowEl);
+    stripEls.set(fileId, stripEl);
+  }
+
+  // round-robin coordinator controls when each frame becomes visible
+  const coordinator = createGalleryCoordinator({
+    files: selectedFiles.map(file => ({
+      fileId: slotId(file),
+      name: file.name,
+      byteLength: file.size,
+    })),
+  });
+
+  // framesByFile is a live Map used by the lightbox
+  const framesByFile = new Map(selectedFiles.map(f => [slotId(f), []]));
+
+  const lightbox = createGalleryLightbox({ framesByFile });
+
+  // Keyboard handler for lightbox navigation
+  function onKey(ev) {
+    const cur = lightbox.current();
+    if (!cur) return;
+    if (ev.key === 'Escape') {
+      closeLightbox();
+      return;
+    }
+    lightbox.handleKey(ev);
+    const next = lightbox.current();
+    if (next) renderLightboxState(next);
+  }
+  document.addEventListener('keydown', onKey);
+
+  // Re-render all file strips based on current coordinator visibility
+  function reRenderAll() {
+    for (const [fileId, stripEl] of stripEls) {
+      const visible = coordinator.visibleFrames(fileId);
+      syncStrip(stripEl, fileId, visible);
+    }
+  }
+
+  function syncStrip(stripEl, fileId, frames) {
+    const existing = new Map(
+      [...stripEl.querySelectorAll('.thumb-cell')].map(el => [+el.dataset.frameIndex, el])
+    );
+    for (const frame of frames) {
+      if (existing.has(frame.frameIndex)) {
+        updateThumbCell(existing.get(frame.frameIndex), frame);
+      } else {
+        const cell = createThumbCell(fileId, frame);
+        stripEl.appendChild(cell);
+      }
+    }
+  }
+
+  function createThumbCell(fileId, frame) {
+    const cell = document.createElement('div');
+    cell.className = 'thumb-cell';
+    cell.dataset.fileId = fileId;
+    cell.dataset.frameIndex = frame.frameIndex;
+    cell.setAttribute('tabindex', '0');
+    cell.setAttribute('role', 'button');
+    cell.setAttribute('aria-label', `Open ${frame.stage} frame in lightbox`);
+
+    const canvas = document.createElement('canvas');
+    drawFrameToCanvas(canvas, frame);
+
+    const metaEl = document.createElement('div');
+    metaEl.className = 'thumb-meta';
+    metaEl.textContent = formatFrameMeta(frame);
+
+    cell.append(canvas, metaEl);
+
+    const open = () => {
+      lightbox.open(fileId, frame.frameIndex);
+      renderLightboxState({ fileId, frameIndex: frame.frameIndex });
+    };
+    cell.addEventListener('click', open);
+    cell.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') open(); });
+
+    return cell;
+  }
+
+  function updateThumbCell(cell, frame) {
+    const canvas = cell.querySelector('canvas');
+    if (canvas) drawFrameToCanvas(canvas, frame);
+    const metaEl = cell.querySelector('.thumb-meta');
+    if (metaEl) metaEl.textContent = formatFrameMeta(frame);
+  }
+
+  function formatFrameMeta(frame) {
+    const pct = typeof frame.percentFed === 'number' ? frame.percentFed.toFixed(1) : '?';
+    const bytes = typeof frame.bytesFed === 'number' ? frame.bytesFed.toLocaleString() : '?';
+    const total = typeof frame.totalBytes === 'number' ? frame.totalBytes.toLocaleString() : '?';
+    const ms = typeof frame.elapsedMs === 'number' ? frame.elapsedMs.toFixed(1) : '?';
+    return `${frame.stage} · ${ms} ms · ${bytes} / ${total} bytes · ${pct}%`;
+  }
+
+  function renderLightboxState({ fileId, frameIndex }) {
+    const frames = framesByFile.get(fileId) ?? [];
+    const frame = frames[frameIndex];
+    if (!frame) return;
+
+    const canvas = document.getElementById('lightbox-canvas');
+    if (canvas) drawFrameToCanvas(canvas, frame);
+
+    const metaEl = document.getElementById('lightbox-meta');
+    if (metaEl) metaEl.textContent = `${fileId.replace(/^slot-/, '')} — frame ${frameIndex} — ${formatFrameMeta(frame)}`;
+
+    openLightboxOverlay();
+  }
+
+  function openLightboxOverlay() {
+    if (!lightboxRoot) return;
+    lightboxRoot.hidden = false;
+    lightboxRoot.classList.add('is-open');
+    if (lightboxRoot.requestFullscreen) {
+      lightboxRoot.requestFullscreen().catch(() => {/* overlay fallback already works */});
+    }
+  }
+
+  function closeLightbox() {
+    if (!lightboxRoot) return;
+    lightboxRoot.hidden = true;
+    lightboxRoot.classList.remove('is-open');
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    document.removeEventListener('keydown', onKey);
+  }
+
+  // Decode all files concurrently, register frames with coordinator
+  const filePromises = selectedFiles.map(async file => {
+    const fileId = slotId(file);
+    const startMs = Date.now();
+
+    let buffer;
+    try {
+      buffer = await file.arrayBuffer();
+    } catch (e) {
+      log(`${file.name}: read error — ${e.message}`, 'error');
+      return;
+    }
+
+    dbgLog('Decoding', `${file.name} · ${buffer.byteLength} bytes · mode=${pushMode}`, 'info');
+
+    const session = ctx.decode({
+      format: 'rgba8',
+      progressionTarget: 'final',
+      emitEveryPass: true,
+    });
+
+    // Push chunks — all at once (round-robin reveal works because coordinator
+    // gates visibility, not because push is serialised per file)
+    const pushes = [];
+    for (let offset = 0; offset < buffer.byteLength; offset += CHUNK_SIZE) {
+      const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
+      pushes.push(session.push(buffer.slice(offset, end)));
+    }
+    const pushPromise = Promise.all(pushes).then(() => session.close());
+
+    let frameIndex = 0;
+    const framesPromise = (async () => {
+      for await (const frame of session.frames()) {
+        const elapsedMs = Date.now() - startMs;
+        const bytesFed = buffer.byteLength; // all bytes fed upfront in all-chunks mode
+        const percentFed = 100;
+        const enriched = {
+          ...frame,
+          frameIndex: frameIndex++,
+          elapsedMs,
+          bytesFed,
+          percentFed,
+          totalBytes: buffer.byteLength,
+        };
+        framesByFile.get(fileId).push(enriched);
+        coordinator.registerFrame(fileId, enriched);
+        reRenderAll();
+        dbgLog('Frame', `${file.name} · ${frame.stage}`, 'info');
+      }
+      coordinator.markFileClosed(fileId);
+      reRenderAll();
+      log(`${file.name}: done (${frameIndex} frame${frameIndex !== 1 ? 's' : ''})`);
+      dbgLog('Decode done', `${file.name} · ${frameIndex} frames`, 'success');
+    })();
+
+    try {
+      await Promise.all([pushPromise, framesPromise]);
+    } catch (e) {
+      log(`${file.name}: ${e.message}`, 'error');
+      dbgLog('Decode error', `${file.name}\n${e.stack ?? e.message}`, 'error');
+    }
+  });
+
+  await Promise.all(filePromises);
+}
+
+function drawFrameToCanvas(canvas, frame) {
+  const { width, height } = frame.info;
+  canvas.width = width;
+  canvas.height = height;
+  const ctx2d = canvas.getContext('2d');
+  const imageData = typeof frame.getImageData === 'function'
+    ? frame.getImageData()
+    : new ImageData(
+        new Uint8ClampedArray(frame.pixels instanceof ArrayBuffer ? frame.pixels : frame.pixels.buffer),
+        width,
+        height,
+      );
+  ctx2d.putImageData(imageData, 0, 0);
 }
 
 // ── Log ───────────────────────────────────────────────────────────────────────

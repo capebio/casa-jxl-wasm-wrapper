@@ -37,3 +37,11 @@ test('gallery script wires progressive metadata under each thumbnail', () => {
   expect(js).toContain('percentFed');
   expect(js).toContain('frameIndex');
 });
+
+test('gallery keeps one decode per file and round-robin reveals progressive frames', () => {
+  expect(js).toContain('createGalleryCoordinator');
+  expect(js).toContain('createGalleryLightbox');
+  expect(js).toContain('round-robin');
+  expect(js).toContain('session.frames()');
+  expect(js).toContain('Promise.all(pushes)');
+});
