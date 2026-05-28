@@ -521,8 +521,8 @@ export async function encodeTileContainerRgba8(
     throw new CapabilityMissing("Tile container encode requires a rebuilt WASM with JXTC bridge");
   }
   const tileSize = options.tileSize;
-  if (!Number.isInteger(tileSize) || tileSize < 16) {
-    throw new Error(`tileSize must be an integer ≥ 16, got ${tileSize}`);
+  if (!Number.isInteger(tileSize) || tileSize < 1) {
+    throw new Error(`tileSize must be a positive integer, got ${tileSize}`);
   }
   const distance = options.distance ?? 1.0;
   const effort   = options.effort ?? 3;
