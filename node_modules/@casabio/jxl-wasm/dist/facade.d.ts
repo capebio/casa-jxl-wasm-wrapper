@@ -7,6 +7,7 @@ export type Region = {
     h: number;
 };
 export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";
+export type ResamplingFactor = 1 | 2 | 4 | 8;
 export interface ImageInfo {
     width: number;
     height: number;
@@ -88,6 +89,16 @@ export interface EncoderOptions {
     sidecarSizes?: readonly number[];
     /** When false, skip the defensive .slice() copy on pushPixels() — caller must not mutate the buffer after push returns. Default true. */
     copyInput?: boolean;
+    /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
+    modular?: -1 | 0 | 1;
+    /** Brotli effort for metadata/entropy coding. -1 = libjxl default, 0-11. */
+    brotliEffort?: number;
+    /** Decoder speed tier hint (0-4). */
+    decodingSpeed?: number;
+    /** Target ISO for libjxl synthetic photon noise. 0 or omitted disables it. */
+    photonNoiseIso?: number;
+    /** Encoder-native downsampling factor before JXL transform/coding. */
+    resampling?: ResamplingFactor;
 }
 export interface JxlDecoder {
     push(chunk: ArrayBuffer | Uint8Array): void | Promise<void>;
@@ -121,10 +132,10 @@ interface LibjxlWasmModule {
     _jxl_wasm_decode_rgba8(inputPtr: number, inputSize: number, downsample: number): number;
     _jxl_wasm_decode_rgba16?(inputPtr: number, inputSize: number, downsample: number): number;
     _jxl_wasm_decode_rgbaf32?(inputPtr: number, inputSize: number, downsample: number): number;
-    _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
-    _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
-    _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
-    _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
+    _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, resampling: number): number;
+    _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, resampling: number): number;
+    _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, resampling: number): number;
+    _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
     _jxl_wasm_buffer_data(handle: number): number;
     _jxl_wasm_buffer_size(handle: number): number;
     _jxl_wasm_buffer_width(handle: number): number;
@@ -142,18 +153,25 @@ interface LibjxlWasmModule {
     _jxl_wasm_dec_take_flushed?(state: number): number;
     _jxl_wasm_dec_take_final?(state: number): number;
     _jxl_wasm_dec_free?(state: number): void;
-    _jxl_wasm_encode_rgba8_with_sidecars?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number): number;
+    _jxl_wasm_encode_rgba8_with_sidecars?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, resampling: number): number;
     _jxl_wasm_buffer_next?(handle: number): number;
     _jxl_wasm_decode_rgba8_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
     _jxl_wasm_decode_rgba16_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
     _jxl_wasm_decode_rgbaf32_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
     _jxl_wasm_enc_create?(): number;
-    _jxl_wasm_enc_push_pixels?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+    _jxl_wasm_enc_push_pixels?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, resampling: number): number;
     _jxl_wasm_enc_take_chunk?(state: number): number;
     _jxl_wasm_enc_error?(state: number): number;
     _jxl_wasm_enc_free?(state: number): void;
     _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
-    _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+    _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, resampling: number): number;
+    _jxl_wasm_encode_rgba8_with_sidecars_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
+    _jxl_wasm_encode_rgba8_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
+    _jxl_wasm_encode_rgba16_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
+    _jxl_wasm_encode_rgbaf32_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
+    _jxl_wasm_encode_rgba8_with_metadata_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
+    _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
+    _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
     _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
     _jxl_wasm_enc_advance_written?(state: number, size: number): number;
     _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
