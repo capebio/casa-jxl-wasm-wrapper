@@ -585,8 +585,9 @@ static JxlWasmBuffer* EncodeRgba8Tiled(const uint8_t* pixels,
 // Decodes only the tiles overlapping `[region_x, region_x+region_w) ×
 // [region_y, region_y+region_h)` from a JXL produced by EncodeRgba8Tiled.
 // Uses JxlDecoderSetCoalescing(JXL_FALSE) + JxlDecoderSkipFrames to skip
-// past frames whose pixel data we don't need — libjxl walks frame headers
-// (cheap) but does not decompress the skipped frames' pixels.
+// past frames whose pixel data we don't need. Known limitation in libjxl ≤0.11.x:
+// SkipFrames still walks frame headers and may decompress internally — see JXTC
+// tile container below for a true ROI alternative.
 static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_size,
     uint32_t tile_size, uint32_t region_x, uint32_t region_y,
     uint32_t region_w, uint32_t region_h) {
@@ -599,6 +600,7 @@ static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_
         JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
     JxlDecoderDestroy(dec); return MakeError(72);
   }
+  // SetCoalescing check — result will be visible only if it fails (error 73)
   if (JxlDecoderSetCoalescing(dec, JXL_FALSE) != JXL_DEC_SUCCESS) {
     JxlDecoderDestroy(dec); return MakeError(73);
   }
@@ -656,7 +658,9 @@ static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_
 
       uint32_t tile_x0 = 0, tile_y0 = 0, tile_w = 0, tile_h = 0;
       bool got_image = false;
+      int process_input_calls = 0;
       while (!got_image) {
+        process_input_calls++;
         JxlDecoderStatus st = JxlDecoderProcessInput(dec);
         if (st == JXL_DEC_FRAME) {
           JxlFrameHeader fh{};
@@ -712,6 +716,318 @@ static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_
 
   free(tile_buf);
   JxlDecoderDestroy(dec);
+  return MakeBufferFromOwned(out_pixels, out_size, rw, rh, 8, 1);
+}
+
+// --- Tile container (JXTC) format ---
+//
+// Stores N independent standalone JXL bitstreams + a byte-offset index.
+// Decode seeks directly to needed tiles — zero frame-walk overhead.
+// Works on any libjxl version.
+//
+// Layout:
+//   [Header 32B] magic 'JXTC' | version=1 | image_w | image_h |
+//                tile_size | tiles_x | tiles_y | flags (bit0=has_alpha)
+//   [Index 8B × N] per tile: offset (4B), length (4B)
+//   [N standalone JXL bitstreams]
+#define JXTC_MAGIC          0x4354584Au  // 'JXTC' little-endian
+#define JXTC_VERSION        1u
+#define JXTC_HEADER_BYTES   32u
+#define JXTC_INDEX_BYTES    8u
+
+// Encode a single RGBA8 tile as a standalone JXL bitstream.
+// Strips alpha channel inline if !has_alpha. Returns malloc'd buffer; caller frees.
+// On failure returns nullptr and leaves *out_size unchanged.
+static uint8_t* EncodeStandaloneJxlTileRgba8(const uint8_t* rgba_pixels,
+    uint32_t width, uint32_t height, float distance, uint32_t effort,
+    uint32_t has_alpha, size_t* out_size) {
+  JxlEncoder* enc = JxlEncoderCreate(nullptr);
+  if (enc == nullptr) return nullptr;
+
+  JxlBasicInfo info;
+  JxlEncoderInitBasicInfo(&info);
+  info.xsize                    = width;
+  info.ysize                    = height;
+  info.bits_per_sample          = 8;
+  info.exponent_bits_per_sample = 0;
+  info.num_color_channels       = 3;
+  info.num_extra_channels       = has_alpha ? 1u : 0u;
+  info.alpha_bits               = has_alpha ? 8u : 0u;
+  info.alpha_exponent_bits      = 0;
+  if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return nullptr; }
+
+  JxlColorEncoding color;
+  JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+  if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return nullptr; }
+
+  JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
+  JxlEncoderSetFrameDistance(frame, distance);
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
+
+  JxlPixelFormat pf = {has_alpha ? 4u : 3u, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
+  uint8_t* stripped = nullptr;
+  const uint8_t* src = rgba_pixels;
+  size_t pixel_size;
+  if (has_alpha) {
+    pixel_size = static_cast<size_t>(width) * height * 4u;
+  } else {
+    const size_t n = static_cast<size_t>(width) * height;
+    pixel_size = n * 3u;
+    stripped = static_cast<uint8_t*>(malloc(pixel_size));
+    if (stripped == nullptr) { JxlEncoderDestroy(enc); return nullptr; }
+    for (size_t i = 0; i < n; ++i) {
+      stripped[i * 3 + 0] = rgba_pixels[i * 4 + 0];
+      stripped[i * 3 + 1] = rgba_pixels[i * 4 + 1];
+      stripped[i * 3 + 2] = rgba_pixels[i * 4 + 2];
+    }
+    src = stripped;
+  }
+
+  const JxlEncoderStatus add_status = JxlEncoderAddImageFrame(frame, &pf, src, pixel_size);
+  free(stripped);
+  if (add_status != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return nullptr; }
+
+  JxlEncoderCloseInput(enc);
+
+  size_t cap = std::max(static_cast<size_t>(4096), pixel_size / 4u);
+  uint8_t* outbuf = static_cast<uint8_t*>(malloc(cap));
+  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return nullptr; }
+  uint8_t* next_out  = outbuf;
+  size_t   avail_out = cap;
+  for (;;) {
+    JxlEncoderStatus s = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
+    if (s == JXL_ENC_SUCCESS) {
+      *out_size = static_cast<size_t>(next_out - outbuf);
+      JxlEncoderDestroy(enc);
+      return outbuf;
+    }
+    if (s == JXL_ENC_NEED_MORE_OUTPUT) {
+      const size_t off = static_cast<size_t>(next_out - outbuf);
+      cap *= 2u;
+      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, cap));
+      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return nullptr; }
+      outbuf    = grown;
+      next_out  = outbuf + off;
+      avail_out = cap - off;
+      continue;
+    }
+    free(outbuf);
+    JxlEncoderDestroy(enc);
+    return nullptr;
+  }
+}
+
+// Decode a standalone JXL bitstream to RGBA8. Returns malloc'd pixel buffer; caller frees.
+// Writes decoded dimensions to *out_w, *out_h. On failure returns nullptr.
+static uint8_t* DecodeStandaloneJxlTileRgba8(const uint8_t* input, size_t input_size,
+    uint32_t* out_w, uint32_t* out_h) {
+  *out_w = 0; *out_h = 0;
+  JxlDecoder* dec = JxlDecoderCreate(nullptr);
+  if (dec == nullptr) return nullptr;
+
+  if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
+    JxlDecoderDestroy(dec); return nullptr;
+  }
+  JxlDecoderSetInput(dec, input, input_size);
+  JxlDecoderCloseInput(dec);
+
+  JxlBasicInfo info{};
+  uint8_t* pixels = nullptr;
+  size_t   pixels_size = 0;
+  JxlPixelFormat pf = {4, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
+
+  for (;;) {
+    JxlDecoderStatus st = JxlDecoderProcessInput(dec);
+    if (st == JXL_DEC_SUCCESS) break;
+    if (st == JXL_DEC_ERROR || st == JXL_DEC_NEED_MORE_INPUT) {
+      free(pixels); JxlDecoderDestroy(dec); return nullptr;
+    }
+    if (st == JXL_DEC_BASIC_INFO) {
+      if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) { JxlDecoderDestroy(dec); return nullptr; }
+      continue;
+    }
+    if (st == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
+      size_t buf_size = 0;
+      if (JxlDecoderImageOutBufferSize(dec, &pf, &buf_size) != JXL_DEC_SUCCESS) {
+        free(pixels); JxlDecoderDestroy(dec); return nullptr;
+      }
+      if (buf_size > pixels_size) {
+        free(pixels);
+        pixels = static_cast<uint8_t*>(malloc(buf_size));
+        if (pixels == nullptr) { JxlDecoderDestroy(dec); return nullptr; }
+        pixels_size = buf_size;
+      }
+      if (JxlDecoderSetImageOutBuffer(dec, &pf, pixels, pixels_size) != JXL_DEC_SUCCESS) {
+        free(pixels); JxlDecoderDestroy(dec); return nullptr;
+      }
+      continue;
+    }
+  }
+
+  JxlDecoderDestroy(dec);
+  *out_w = info.xsize;
+  *out_h = info.ysize;
+  return pixels;
+}
+
+// Encode RGBA8 image into JXTC tile container.
+static JxlWasmBuffer* EncodeRgba8TileContainer(const uint8_t* pixels,
+    uint32_t width, uint32_t height, uint32_t tile_size,
+    float distance, uint32_t effort, uint32_t has_alpha) {
+  if (pixels == nullptr || width == 0 || height == 0 || tile_size == 0) return MakeError(90);
+
+  const uint32_t tiles_x    = (width  + tile_size - 1u) / tile_size;
+  const uint32_t tiles_y    = (height + tile_size - 1u) / tile_size;
+  const uint32_t tile_count = tiles_x * tiles_y;
+  if (tile_count == 0) return MakeError(91);
+
+  uint8_t** tile_bytes   = static_cast<uint8_t**>(calloc(tile_count, sizeof(uint8_t*)));
+  size_t*   tile_lengths = static_cast<size_t*>(  calloc(tile_count, sizeof(size_t)));
+  if (tile_bytes == nullptr || tile_lengths == nullptr) {
+    free(tile_bytes); free(tile_lengths); return MakeError(92);
+  }
+
+  const size_t tile_stage_bytes = static_cast<size_t>(tile_size) * tile_size * 4u;
+  uint8_t* tile_stage = static_cast<uint8_t*>(malloc(tile_stage_bytes));
+  if (tile_stage == nullptr) {
+    free(tile_bytes); free(tile_lengths); return MakeError(93);
+  }
+
+  size_t total_tile_bytes = 0;
+  for (uint32_t ty = 0; ty < tiles_y; ++ty) {
+    for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+      const uint32_t x0 = tx * tile_size;
+      const uint32_t y0 = ty * tile_size;
+      const uint32_t tw = std::min(tile_size, width  - x0);
+      const uint32_t th = std::min(tile_size, height - y0);
+
+      for (uint32_t row = 0; row < th; ++row) {
+        memcpy(tile_stage + row * tw * 4u,
+               pixels + (static_cast<size_t>(y0 + row) * width + x0) * 4u,
+               tw * 4u);
+      }
+
+      size_t out_size = 0;
+      uint8_t* enc_bytes = EncodeStandaloneJxlTileRgba8(tile_stage, tw, th, distance, effort, has_alpha, &out_size);
+      if (enc_bytes == nullptr) {
+        for (uint32_t i = 0; i < tile_count; ++i) free(tile_bytes[i]);
+        free(tile_bytes); free(tile_lengths); free(tile_stage);
+        return MakeError(94);
+      }
+      const uint32_t idx = ty * tiles_x + tx;
+      tile_bytes[idx]   = enc_bytes;
+      tile_lengths[idx] = out_size;
+      total_tile_bytes += out_size;
+    }
+  }
+  free(tile_stage);
+
+  const size_t header_bytes = JXTC_HEADER_BYTES;
+  const size_t index_bytes  = static_cast<size_t>(tile_count) * JXTC_INDEX_BYTES;
+  const size_t total_size   = header_bytes + index_bytes + total_tile_bytes;
+  uint8_t* output = static_cast<uint8_t*>(malloc(total_size));
+  if (output == nullptr) {
+    for (uint32_t i = 0; i < tile_count; ++i) free(tile_bytes[i]);
+    free(tile_bytes); free(tile_lengths);
+    return MakeError(95);
+  }
+
+  uint32_t* h32 = reinterpret_cast<uint32_t*>(output);
+  h32[0] = JXTC_MAGIC;
+  h32[1] = JXTC_VERSION;
+  h32[2] = width;
+  h32[3] = height;
+  h32[4] = tile_size;
+  h32[5] = tiles_x;
+  h32[6] = tiles_y;
+  h32[7] = has_alpha ? 1u : 0u;
+
+  uint32_t cursor = static_cast<uint32_t>(header_bytes + index_bytes);
+  uint32_t* index = reinterpret_cast<uint32_t*>(output + header_bytes);
+  for (uint32_t i = 0; i < tile_count; ++i) {
+    index[i * 2 + 0] = cursor;
+    index[i * 2 + 1] = static_cast<uint32_t>(tile_lengths[i]);
+    memcpy(output + cursor, tile_bytes[i], tile_lengths[i]);
+    cursor += static_cast<uint32_t>(tile_lengths[i]);
+    free(tile_bytes[i]);
+  }
+  free(tile_bytes);
+  free(tile_lengths);
+
+  return MakeBufferFromOwned(output, total_size, width, height, 8, has_alpha);
+}
+
+// Decode region from a JXTC tile container. Only tiles overlapping the region
+// are decoded. Each tile is a standalone JXL — zero frame-walk overhead.
+static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_t input_size,
+    uint32_t region_x, uint32_t region_y, uint32_t region_w, uint32_t region_h) {
+  if (input == nullptr || input_size < JXTC_HEADER_BYTES) return MakeError(100);
+
+  const uint32_t* h32 = reinterpret_cast<const uint32_t*>(input);
+  if (h32[0] != JXTC_MAGIC)   return MakeError(101);
+  if (h32[1] != JXTC_VERSION) return MakeError(102);
+  const uint32_t image_w   = h32[2];
+  const uint32_t image_h   = h32[3];
+  const uint32_t tile_size = h32[4];
+  const uint32_t tiles_x   = h32[5];
+  const uint32_t tiles_y   = h32[6];
+  if (image_w == 0 || image_h == 0 || tile_size == 0 || tiles_x == 0 || tiles_y == 0) return MakeError(103);
+
+  const uint32_t tile_count = tiles_x * tiles_y;
+  const size_t header_bytes = JXTC_HEADER_BYTES;
+  const size_t index_bytes  = static_cast<size_t>(tile_count) * JXTC_INDEX_BYTES;
+  if (input_size < header_bytes + index_bytes) return MakeError(104);
+  const uint32_t* index = reinterpret_cast<const uint32_t*>(input + header_bytes);
+
+  const uint32_t rx = std::min(region_x, image_w);
+  const uint32_t ry = std::min(region_y, image_h);
+  const uint32_t rw = std::min(region_w, image_w - rx);
+  const uint32_t rh = std::min(region_h, image_h - ry);
+  if (rw == 0 || rh == 0) return MakeError(105);
+
+  const uint32_t tx_min = rx / tile_size;
+  const uint32_t tx_max = (rx + rw - 1u) / tile_size;
+  const uint32_t ty_min = ry / tile_size;
+  const uint32_t ty_max = (ry + rh - 1u) / tile_size;
+
+  const size_t out_size = static_cast<size_t>(rw) * rh * 4u;
+  uint8_t* out_pixels = static_cast<uint8_t*>(malloc(out_size));
+  if (out_pixels == nullptr) return MakeError(106);
+
+  for (uint32_t ty = ty_min; ty <= ty_max; ++ty) {
+    for (uint32_t tx = tx_min; tx <= tx_max; ++tx) {
+      const uint32_t idx = ty * tiles_x + tx;
+      if (idx >= tile_count) { free(out_pixels); return MakeError(107); }
+      const uint32_t offset = index[idx * 2 + 0];
+      const uint32_t length = index[idx * 2 + 1];
+      if (offset < header_bytes + index_bytes || static_cast<size_t>(offset) + length > input_size) {
+        free(out_pixels); return MakeError(108);
+      }
+
+      uint32_t tile_w = 0, tile_h = 0;
+      uint8_t* tile_pixels = DecodeStandaloneJxlTileRgba8(input + offset, length, &tile_w, &tile_h);
+      if (tile_pixels == nullptr) { free(out_pixels); return MakeError(109); }
+
+      const uint32_t tile_x0 = tx * tile_size;
+      const uint32_t tile_y0 = ty * tile_size;
+      const uint32_t ox0 = std::max(tile_x0, rx);
+      const uint32_t oy0 = std::max(tile_y0, ry);
+      const uint32_t ox1 = std::min(tile_x0 + tile_w, rx + rw);
+      const uint32_t oy1 = std::min(tile_y0 + tile_h, ry + rh);
+
+      if (ox1 > ox0 && oy1 > oy0) {
+        const uint32_t ow = ox1 - ox0;
+        const uint32_t oh = oy1 - oy0;
+        for (uint32_t row = 0; row < oh; ++row) {
+          const uint8_t* src = tile_pixels + ((oy0 - tile_y0 + row) * tile_w + (ox0 - tile_x0)) * 4u;
+          uint8_t*       dst = out_pixels  + ((oy0 - ry      + row) * rw     + (ox0 - rx))      * 4u;
+          memcpy(dst, src, ow * 4u);
+        }
+      }
+      free(tile_pixels);
+    }
+  }
+
   return MakeBufferFromOwned(out_pixels, out_size, rw, rh, 8, 1);
 }
 
@@ -1287,6 +1603,23 @@ JxlWasmBuffer* jxl_wasm_decode_region_tiled_rgba8(const uint8_t* input, size_t i
     uint32_t tile_size, uint32_t region_x, uint32_t region_y,
     uint32_t region_w, uint32_t region_h) {
   return DecodeRgba8RegionTiled(input, input_size, tile_size, region_x, region_y, region_w, region_h);
+}
+
+// --- JXTC tile container exports ---
+//
+// True ROI decode via per-tile independent JXL bitstreams + byte-offset index.
+// Bypasses libjxl frame-walk overhead — each tile is a fresh decoder.
+// Encode: jxl_wasm_encode_tile_container_rgba8(pixels, w, h, tile_size, distance, effort, has_alpha)
+// Decode: jxl_wasm_decode_tile_container_region_rgba8(bytes, size, rx, ry, rw, rh)
+JxlWasmBuffer* jxl_wasm_encode_tile_container_rgba8(const uint8_t* pixels,
+    uint32_t width, uint32_t height, uint32_t tile_size,
+    float distance, uint32_t effort, uint32_t has_alpha) {
+  return EncodeRgba8TileContainer(pixels, width, height, tile_size, distance, effort, has_alpha);
+}
+
+JxlWasmBuffer* jxl_wasm_decode_tile_container_region_rgba8(const uint8_t* input, size_t input_size,
+    uint32_t region_x, uint32_t region_y, uint32_t region_w, uint32_t region_h) {
+  return DecodeRgba8TileContainerRegion(input, input_size, region_x, region_y, region_w, region_h);
 }
 
 }

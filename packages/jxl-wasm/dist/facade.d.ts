@@ -160,6 +160,8 @@ interface LibjxlWasmModule {
     _jxl_wasm_enc_finish?(state: number): number;
     _jxl_wasm_encode_tiled_rgba8?(pixelsPtr: number, width: number, height: number, tileSize: number, distance: number, effort: number, hasAlpha: number): number;
     _jxl_wasm_decode_region_tiled_rgba8?(inputPtr: number, inputSize: number, tileSize: number, regionX: number, regionY: number, regionW: number, regionH: number): number;
+    _jxl_wasm_encode_tile_container_rgba8?(pixelsPtr: number, width: number, height: number, tileSize: number, distance: number, effort: number, hasAlpha: number): number;
+    _jxl_wasm_decode_tile_container_region_rgba8?(inputPtr: number, inputSize: number, regionX: number, regionY: number, regionW: number, regionH: number): number;
 }
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
 export declare class CapabilityMissing extends Error {
@@ -232,6 +234,41 @@ export declare function encodeTiledRgba8(pixels: ArrayBuffer | Uint8Array, width
  */
 export declare function decodeTiledRegionRgba8(jxlBytes: ArrayBuffer | Uint8Array, options: {
     tileSize: number;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    onMetric?: (name: string, value: number) => void;
+}): Promise<{
+    pixels: Uint8Array;
+    width: number;
+    height: number;
+}>;
+/**
+ * Encode RGBA8 as a JXTC tile container — N independent standalone JXL bitstreams
+ * plus a byte-offset index. Decode with decodeTileContainerRegionRgba8 to retrieve
+ * any rectangular region with zero frame-walk overhead.
+ *
+ * Compared to encodeTiledRgba8 (multi-frame JXL):
+ *   - Same tile granularity
+ *   - Slightly larger output (~5-10% overhead from per-tile JXL headers)
+ *   - Vastly faster ROI decode in libjxl ≤0.11.x where SkipFrames doesn't skip work
+ *
+ * Output is NOT a standard JXL — it's a custom container format. Magic 'JXTC'.
+ */
+export declare function encodeTileContainerRgba8(pixels: ArrayBuffer | Uint8Array, width: number, height: number, options: {
+    tileSize: number;
+    distance?: number;
+    effort?: number;
+    hasAlpha?: boolean;
+}): Promise<Uint8Array>;
+/**
+ * Decode a rectangular region from a JXTC tile container produced by
+ * encodeTileContainerRgba8. Each overlapping tile is decoded as a standalone
+ * JXL bitstream — zero frame-walk overhead. Performance is linear in number
+ * of overlapping tiles, regardless of total image size.
+ */
+export declare function decodeTileContainerRegionRgba8(containerBytes: ArrayBuffer | Uint8Array, options: {
     x: number;
     y: number;
     w: number;

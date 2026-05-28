@@ -4,6 +4,8 @@ import {
     createEncoder,
     encodeTiledRgba8,
     decodeTiledRegionRgba8,
+    encodeTileContainerRgba8,
+    decodeTileContainerRegionRgba8,
 } from '@casabio/jxl-wasm';
 
 // Log-scaled display width for each crop size (120px–400px range).
@@ -49,6 +51,8 @@ const statusStage         = document.getElementById('status-stage');
 const resultsEl           = document.getElementById('crop-results');
 const consolePanelEl      = document.getElementById('console-panel');
 const consoleOutputEl     = document.getElementById('console-output');
+const btnConsoleCopy      = document.getElementById('btn-console-copy');
+const tilePxLabel         = document.getElementById('tile-px-label');
 
 function setWasmStatus(text)     { wasmStatusEl.textContent   = text; }
 function setStatusProgress(text) { statusProgress.textContent = text; }
@@ -94,6 +98,12 @@ btnConsole.addEventListener('click', () => {
     consolePanelOpen = !consolePanelOpen;
     consolePanelEl.hidden = !consolePanelOpen;
     btnConsole.classList.toggle('is-active', consolePanelOpen);
+});
+
+btnConsoleCopy.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(consoleOutputEl.textContent);
+    btnConsoleCopy.textContent = 'Copied!';
+    setTimeout(() => { btnConsoleCopy.textContent = 'Copy all'; }, 2000);
 });
 
 btnConsoleClear.addEventListener('click', () => {
@@ -205,6 +215,24 @@ async function decodeTileRegion(jxlBytes, tileSize, sourceWidth, sourceHeight, t
     const h    = Math.min(targetSize, sourceHeight - y);
 
     return decodeTiledRegionRgba8(jxlBytes, { tileSize, x, y, w, h, onMetric });
+}
+
+/**
+ * JXTC container ROI decode:
+ * - containerBytes must be a JXTC produced by encodeTileContainerRgba8
+ * - decoder seeks directly to needed tile byte offsets — zero frame-walk overhead
+ * - each tile decoded as standalone JXL
+ */
+async function decodeContainerRegion(containerBytes, sourceWidth, sourceHeight, targetSize, onMetric) {
+    const half = Math.floor(targetSize / 2);
+    const cx   = Math.floor(sourceWidth  / 2);
+    const cy   = Math.floor(sourceHeight / 2);
+    const x    = Math.max(0, cx - half);
+    const y    = Math.max(0, cy - half);
+    const w    = Math.min(targetSize, sourceWidth  - x);
+    const h    = Math.min(targetSize, sourceHeight - y);
+
+    return decodeTileContainerRegionRgba8(containerBytes, { x, y, w, h, onMetric });
 }
 
 // --- UI result rows ---
@@ -354,7 +382,7 @@ async function runBenchmark() {
             continue;
         }
 
-        // Encode tiled JXL (ROI-decodable) + optional standard JXL for comparison.
+        // Encode tiled JXL (ROI-decodable) + JXTC container + optional standard JXL.
         setStatusStage(`Encoding tiled JXL (${tileSize}px tiles)…`);
         const t0tiled = performance.now();
         let tiledBytes;
@@ -368,6 +396,18 @@ async function runBenchmark() {
             continue;
         }
         const tiledEncodeMs = performance.now() - t0tiled;
+
+        setStatusStage(`Encoding JXTC container (${tileSize}px tiles)…`);
+        const t0jxtc = performance.now();
+        let jxtcBytes = null;
+        try {
+            jxtcBytes = await encodeTileContainerRgba8(rgba, imgWidth, imgHeight, {
+                tileSize, distance, effort, hasAlpha: true,
+            });
+        } catch (err) {
+            console.warn('JXTC encode error (container test skipped):', err);
+        }
+        const jxtcEncodeMs = performance.now() - t0jxtc;
 
         let standardBytes = null;
         let standardEncodeMs = 0;
@@ -388,11 +428,14 @@ async function runBenchmark() {
 
         const { cards, meta } = createFileRow(file.name, imgWidth, imgHeight, sizes);
         const tiledKb = (tiledBytes.byteLength / 1024).toFixed(0);
+        const jxtcKb  = jxtcBytes  ? (jxtcBytes.byteLength  / 1024).toFixed(0) : '—';
         const stdSuffix = standardBytes ? `  ·  standard ${(standardBytes.byteLength / 1024).toFixed(0)} KB / ${standardEncodeMs.toFixed(0)} ms` : '';
-        meta.textContent = `${imgWidth} × ${imgHeight} px  ·  ${tilesX}×${tilesY}=${totalTiles} tiles  ·  tiled ${tiledKb} KB / ${tiledEncodeMs.toFixed(0)} ms${stdSuffix}`;
+        const jxtcSuffix = jxtcBytes ? `  ·  jxtc ${jxtcKb} KB / ${jxtcEncodeMs.toFixed(0)} ms` : '';
+        meta.textContent = `${imgWidth} × ${imgHeight} px  ·  ${tilesX}×${tilesY}=${totalTiles} tiles  ·  tiled ${tiledKb} KB / ${tiledEncodeMs.toFixed(0)} ms${jxtcSuffix}${stdSuffix}`;
+        tilePxLabel.textContent = `Tile px: ${tileSize}`;
 
         console.group(`Crop benchmark: ${file.name}`);
-        console.log(`${imgWidth}×${imgHeight}  tiles=${tilesX}×${tilesY}  tiledKB=${tiledKb}  encodeTiledMs=${tiledEncodeMs.toFixed(1)}`);
+        console.log(`${imgWidth}×${imgHeight}  tiles=${tilesX}×${tilesY}  tiledKB=${tiledKb}  jxtcKB=${jxtcKb}  encodeTiledMs=${tiledEncodeMs.toFixed(1)}  encodeJxtcMs=${jxtcEncodeMs.toFixed(1)}  tilePx=${tileSize}`);
 
         for (const size of sizes) {
             if (signal.aborted) break;
@@ -413,13 +456,32 @@ async function runBenchmark() {
                     metrics[name] = value;
                 });
             } catch (err) {
-                console.error(`  ${size}px tile region:`, err);
-                markSkipped(cards[size], 'error');
+                console.error(`  ${size}px tile region ERROR:`, err.message || err);
+                markSkipped(cards[size], `error: ${err.message?.split('\n')[0] || String(err).slice(0,20)}`);
                 continue;
             }
             const tileMs = performance.now() - t0;
 
             paintCrop(cards[size], decoded.pixels, decoded.width, decoded.height, tileMs, size, size);
+
+            // JXTC container ROI decode comparison
+            let jxtcMs = null;
+            if (jxtcBytes) {
+                setStatusStage(`JXTC region ${size}px…`);
+                const tJ = performance.now();
+                try {
+                    await decodeContainerRegion(jxtcBytes, imgWidth, imgHeight, size, () => {});
+                    jxtcMs = performance.now() - tJ;
+                } catch (err) {
+                    console.warn(`  ${size}px JXTC region failed:`, err.message || err);
+                }
+            }
+
+            // Update timing display to show both tile and jxtc
+            if (jxtcMs !== null) {
+                cards[size].timing.textContent = `tile ${tileMs.toFixed(0)}ms · jxtc ${jxtcMs.toFixed(0)}ms (${(tileMs/jxtcMs).toFixed(1)}×)`;
+                if (jxtcMs < 200) cards[size].timing.className = 'crop-timing is-fast';
+            }
 
             // Comparison: full decode of standard JXL + JS crop
             if (compareFull && standardBytes) {
@@ -429,13 +491,15 @@ async function runBenchmark() {
                     await decodeFullThenCrop(standardBytes, imgWidth, imgHeight, size);
                     const fullMs = performance.now() - t1;
                     showCompareTiming(cards[size], tileMs, fullMs);
-                    console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms  vs full ${fullMs.toFixed(1)} ms  (${(fullMs / tileMs).toFixed(1)}×)`);
+                    const jxtcStr = jxtcMs !== null ? `  ·  jxtc ${jxtcMs.toFixed(1)} ms (${(tileMs/jxtcMs).toFixed(1)}× vs tile)` : '';
+                    console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms${jxtcStr}  ·  full ${fullMs.toFixed(1)} ms  (${(fullMs / tileMs).toFixed(1)}× vs tile)`);
                 } catch (err) {
                     console.warn(`  ${size}px full-decode comparison failed:`, err);
                     console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms`);
                 }
             } else {
-                console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms`);
+                const jxtcStr = jxtcMs !== null ? `  ·  jxtc ${jxtcMs.toFixed(1)} ms (${(tileMs/jxtcMs).toFixed(1)}× vs tile)` : '';
+                console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms${jxtcStr}`);
             }
 
             await new Promise(r => setTimeout(r, 0));

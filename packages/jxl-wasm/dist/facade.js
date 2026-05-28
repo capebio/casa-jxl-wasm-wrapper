@@ -261,6 +261,94 @@ export async function decodeTiledRegionRgba8(jxlBytes, options) {
         module._free(ptr);
     }
 }
+/**
+ * Encode RGBA8 as a JXTC tile container — N independent standalone JXL bitstreams
+ * plus a byte-offset index. Decode with decodeTileContainerRegionRgba8 to retrieve
+ * any rectangular region with zero frame-walk overhead.
+ *
+ * Compared to encodeTiledRgba8 (multi-frame JXL):
+ *   - Same tile granularity
+ *   - Slightly larger output (~5-10% overhead from per-tile JXL headers)
+ *   - Vastly faster ROI decode in libjxl ≤0.11.x where SkipFrames doesn't skip work
+ *
+ * Output is NOT a standard JXL — it's a custom container format. Magic 'JXTC'.
+ */
+export async function encodeTileContainerRgba8(pixels, width, height, options) {
+    const module = await loadLibjxlModule();
+    if (!module._jxl_wasm_encode_tile_container_rgba8) {
+        throw new CapabilityMissing("Tile container encode requires a rebuilt WASM with JXTC bridge");
+    }
+    const tileSize = options.tileSize;
+    if (!Number.isInteger(tileSize) || tileSize < 16) {
+        throw new Error(`tileSize must be an integer ≥ 16, got ${tileSize}`);
+    }
+    const distance = options.distance ?? 1.0;
+    const effort = options.effort ?? 3;
+    const hasAlpha = options.hasAlpha !== false;
+    const view = copyOrBorrowInput(pixels, false);
+    const expectedBytes = width * height * 4;
+    if (view.byteLength < expectedBytes) {
+        throw new Error(`Pixel buffer too small: ${view.byteLength} < ${expectedBytes}`);
+    }
+    const ptr = module._malloc(view.byteLength);
+    if (ptr === 0)
+        throw new Error("WASM malloc failed for tile container encode");
+    try {
+        module.HEAPU8.set(view, ptr);
+        const handle = module._jxl_wasm_encode_tile_container_rgba8(ptr, width, height, tileSize, distance, effort, hasAlpha ? 1 : 0);
+        return takeBuffer(module, handle, "tile container encode").data;
+    }
+    finally {
+        module._free(ptr);
+    }
+}
+/**
+ * Decode a rectangular region from a JXTC tile container produced by
+ * encodeTileContainerRgba8. Each overlapping tile is decoded as a standalone
+ * JXL bitstream — zero frame-walk overhead. Performance is linear in number
+ * of overlapping tiles, regardless of total image size.
+ */
+export async function decodeTileContainerRegionRgba8(containerBytes, options) {
+    const module = await loadLibjxlModule();
+    if (!module._jxl_wasm_decode_tile_container_region_rgba8) {
+        throw new CapabilityMissing("Tile container decode requires a rebuilt WASM with JXTC bridge");
+    }
+    const { x, y, w, h, onMetric } = options;
+    const tStart = performance.now();
+    const view = copyOrBorrowInput(containerBytes, false);
+    const t1 = performance.now();
+    onMetric?.("jxtc_input_prep", t1 - tStart);
+    const t2 = performance.now();
+    const ptr = module._malloc(view.byteLength);
+    if (ptr === 0)
+        throw new Error("WASM malloc failed for tile container decode");
+    const tMalloc = performance.now() - t2;
+    onMetric?.("jxtc_malloc", tMalloc);
+    try {
+        const t3 = performance.now();
+        module.HEAPU8.set(view, ptr);
+        const tHeapSet = performance.now() - t3;
+        onMetric?.("jxtc_heap_set", tHeapSet);
+        const t4 = performance.now();
+        const handle = module._jxl_wasm_decode_tile_container_region_rgba8(ptr, view.byteLength, x, y, w, h);
+        const tWasmDecode = performance.now() - t4;
+        onMetric?.("jxtc_wasm_decode", tWasmDecode);
+        const t5 = performance.now();
+        const buf = takeBuffer(module, handle, "tile container region decode");
+        const tBufferRead = performance.now() - t5;
+        onMetric?.("jxtc_buffer_read", tBufferRead);
+        const tTotal = performance.now() - tStart;
+        console.log(`[decodeTileContainerRegionRgba8] region=${x},${y} size=${w}×${h} | ` +
+            `prep=${(t1 - tStart).toFixed(1)}ms malloc=${tMalloc.toFixed(1)}ms heapSet=${tHeapSet.toFixed(1)}ms ` +
+            `wasmDecode=${tWasmDecode.toFixed(1)}ms bufferRead=${tBufferRead.toFixed(1)}ms total=${tTotal.toFixed(1)}ms | ` +
+            `output=${buf.width}×${buf.height} (${(buf.data.byteLength / 1024).toFixed(1)}KB)`);
+        onMetric?.("jxtc_total", tTotal);
+        return { pixels: buf.data, width: buf.width, height: buf.height };
+    }
+    finally {
+        module._free(ptr);
+    }
+}
 /** Start loading the WASM module immediately. Call during app startup to hide cold-start latency. */
 export function preloadJxlModule() {
     void loadLibjxlModule();
