@@ -1,5 +1,7 @@
 # Overview and features of the CasaWASM JXL wrapper
 
+> **Parity Note (2026-06):** For the complete WASM vs Tauri/Native implementation status of every feature listed here (plus raw-pipeline, scheduling, JXL advanced controls, and explicit Benchmark tab exposure), see the master matrix **`docs/FEATURE_PARITY_MATRIX.md`**. It is the single source of truth and supersedes earlier partial comparison documents.
+
 ## Overview
 The CasaWASM JXL wrapper is a production-grade, high-performance JPEG XL (JXL) codec suite designed for scientific and consumer imaging. It provides a unified TypeScript API that bridges the gap between high-performance native execution and WebAssembly. Developed for the Casabio biodiversity platform, it prioritizes **scientific fidelity** (preserving 16-bit depth, ICC profiles, and EXIF/XMP metadata) and **progressive performance** (showing pixels immediately while a large raw image continues to decode).
 

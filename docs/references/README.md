@@ -35,3 +35,5 @@ This directory contains notes and extracts from mature open-source wrappers and 
 - Keep this README as the single source of truth for what each reference file contains.
 
 See `REFERENCE_INDEX.md` for feature-by-feature mapping to these sources.
+
+**Parity & Completeness:** The authoritative cross-build (WASM vs Tauri/Native) + Benchmark exposure view lives in `../FEATURE_PARITY_MATRIX.md` (docs/ root). It was extended to full coverage and is the single source of truth after the 2026-06 unification pass. All new work must update it.

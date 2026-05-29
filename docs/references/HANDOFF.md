@@ -19,9 +19,10 @@ Focus is on advanced encoder/decoder controls that are currently missing or weak
 
 All files live under the canonical docs folder:
 
-**Main Documents**
-- CasaWASM_JXL_Feature_Completeness_and_Gaps.md — The living inventory of gaps + current recommended division of labor.
-- WASM_Tauri_feature_comparison.md — The original feature parity table between WASM and Tauri (moved here earlier).
+**Main Documents (Post-2026-06 Unification)**
+- `docs/FEATURE_PARITY_MATRIX.md` (root of docs/) — **Single source of truth** for complete WASM ↔ Tauri parity + benchmark exposure across *all* features (raw pipeline, JXL advanced, scheduling, perf, desktop-specific, etc.). Uses ✅ ❌ 🟡 N/A symbols. Supersedes and consolidates the two older partial comparison docs.
+- CasaWASM_JXL_Feature_Completeness_and_Gaps.md + WASM_Tauri_feature_comparison.md — Legacy (thin redirects to the matrix; unique historical content merged during unification). Do not edit.
+- references/REFERENCE_INDEX.md — JXL feature → reference code mapping (still primary for implementation research).
 
 **References System** (eferences/ folder)
 - REFERENCE_INDEX.md — Feature-by-feature mapping with file + line guidance across multiple libraries. Includes a strong "How to Use" section.
