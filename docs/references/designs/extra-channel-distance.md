@@ -3,7 +3,7 @@
 **Feature:** Per-extra-channel distance (`alpha_distance` and the general extra channel distance mechanism) + foundational extra channel declaration support  
 **Date:** 2026-05-28  
 **Author:** Grok  
-**Status:** Implemented (branch epiccodereview/20260527T054853; benchmark and Tauri deferred to Phase 2)  
+**Status:** Phase 1 implemented (branch epiccodereview/20260527T054853); Phase 2 complete — see extra-channel-infrastructure.md for full type enum, 72B descriptors, decoder symmetry, native parity, matrix tests, and benchmark wiring. (Tauri + full benchmark completed in Phase 2.)  
 **Related Index Section:** 4. Extra Channels  
 **Priority:** Explicitly paired with Brotli Effort in the HANDOFF sprint list ("Brotli Effort + basic extra-channel distance"). Foundation for the larger "Full extra channel infrastructure" goal.
 
@@ -157,10 +157,10 @@ This is highly visual and will be one of the most compelling demos once working.
 - [x] Decide on final data-passing shape for extra planes (parallel arrays — extraChannels[] + extraChannelPlanes[])
 - [x] Implement declaration + distance setting in bridge
 - [x] Wire alpha convenience path
-- [ ] Build compelling benchmark with visual alpha inspection
-- [x] Tests (dispatch routing, descriptor layout, lossless-alpha integration)
-- [ ] Tauri side
-- [x] PROGRESS_LOG updated
+- [x] Build compelling benchmark with visual alpha inspection (completed in Phase 2 Extra Channels Lab)
+- [x] Tests (dispatch routing, descriptor layout, lossless-alpha integration; matrix in Phase 2)
+- [x] Tauri side (parity implemented in Phase 2)
+- [x] PROGRESS_LOG updated (Phase 1 + Phase 2 entries)
 
 ---
 
@@ -168,10 +168,9 @@ This is highly visual and will be one of the most compelling demos once working.
 
 This completes the explicit "Brotli Effort + basic extra-channel distance" priority pair from the HANDOFF.
 
+Phase 2 (Full Extra Channel Infrastructure) is now complete — see `extra-channel-infrastructure.md` (cross-ref added at top).
+
 Next logical items (still high priority):
-- Full extra channel infrastructure (Phase 2 of the above)
 - Resampling controls
 - Animation / multi-frame
 - Gain maps, patches, etc.
-
-I will continue the iteration with the next one unless you give different direction.

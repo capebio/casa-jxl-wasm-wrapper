@@ -150,15 +150,15 @@ This is one of the lower-effort notes in the overall batch if scoped primarily t
 
 ## 10. Implementation Checklist
 
-- [ ] Branch: `feature/patches-splines`
-- [ ] Extract exact constants and usage from cjxl_main.cc + libjxl format_overview + headers
-- [ ] Implement the `advancedFrameSettings` escape hatch (or dedicated booleans)
-- [ ] (Optional) Add higher-level `advancedCoding` sugar
-- [ ] Add experimental section to the benchmark with appropriate warnings
-- [ ] Basic validity + size-impact tests on friendly content
-- [ ] Tauri parity via the same escape hatch
-- [ ] Clear documentation of experimental status
-- [ ] Full handoff + PROGRESS_LOG entry
+- [x] Branch: worktree + main (feature/patches-splines work)
+- [x] Extract exact constants (PATCHES = 8 from libjxl encode.h)
+- [x] Implement the `advancedFrameSettings` escape hatch (Array<{id,value}> + JxlFrameSetting helper) — both WASM and native
+- [ ] (Optional) Add higher-level `advancedCoding` sugar (deferred per design note)
+- [x] Add experimental section to the benchmark with appropriate warnings (minimal checkbox + warning in wrapper-lab)
+- [x] Basic validity + size-impact smoke on friendly synthetic repeating content (test + console logging)
+- [x] Tauri parity via the same escape hatch (native package wired + parsing + SetOption)
+- [x] Clear documentation of experimental status (JSDoc + lab warning)
+- [x] Full handoff + PROGRESS_LOG entry (entry exists in PROGRESS_LOG.md with Visibility Note re: branch isolation — see 2026-06 sync pass)
 
 ---
 

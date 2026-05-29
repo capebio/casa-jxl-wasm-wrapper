@@ -1,5 +1,5 @@
 ﻿import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
-import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { createDecoder, createEncoder, getWrapperCapabilities } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
 import { getCapabilities } from '@casabio/jxl-capabilities';
 import {
@@ -32,6 +32,8 @@ const batchEffortInput = document.getElementById('batch-effort');
 const batchDecodeSpeedInput = document.getElementById('batch-decode-speed');
 const batchPhotonNoiseIsoInput = document.getElementById('batch-photon-noise-iso');
 const batchResamplingInputs = [...document.querySelectorAll('input[name="batch-resampling"]')];
+const batchAlphaDistanceInput = document.getElementById('batch-alpha-distance');
+const alphaDistanceUnavail = document.getElementById('alpha-distance-unavail');
 const batchLosslessInput = document.getElementById('batch-lossless');
 const batchCompressBoxesInput = document.getElementById('batch-compress-boxes');
 const batchForceContainerInput = document.getElementById('batch-force-container');
@@ -363,6 +365,14 @@ function getPhotonNoiseIso() {
 function getResampling() {
     const value = Number(batchResamplingInputs.find((input) => input.checked)?.value || 1);
     return value === 2 || value === 4 || value === 8 ? value : 1;
+}
+
+function getAlphaDistance() {
+    if (!batchAlphaDistanceInput) return undefined;
+    const raw = batchAlphaDistanceInput.value.trim();
+    if (raw === '') return undefined;
+    const v = parseFloat(raw);
+    return isNaN(v) ? undefined : Math.max(0, Math.min(2, v));
 }
 
 function getLossless() {
@@ -908,6 +918,7 @@ function makeEncoderOptions(source) {
         photonNoiseIso: getPhotonNoiseIso() > 0 ? getPhotonNoiseIso() : undefined,
         resampling: getResampling(),
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
+        alphaDistance: getAlphaDistance(),
     };
 }
 
@@ -1404,6 +1415,13 @@ function wireControls() {
 
 await initRaw();
 nativeJxlDecoder = (await getCapabilities()).nativeJxlDecoder;
+{
+    const wCaps = getWrapperCapabilities();
+    if (!wCaps.extraChannelEncode && alphaDistanceUnavail) {
+        alphaDistanceUnavail.hidden = false;
+        if (batchAlphaDistanceInput) batchAlphaDistanceInput.disabled = true;
+    }
+}
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
 void resetContext().then((ctx) => {
     existingContext = ctx;

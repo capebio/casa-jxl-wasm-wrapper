@@ -170,15 +170,34 @@ This becomes one of the strongest differentiators vs other JXL wrappers.
 
 ## 10. Implementation Checklist
 
-- [ ] Branch: `feature/full-extra-channel-infrastructure` (or split into 2a/2b)
-- [ ] Enrich the `ExtraChannel` type with full `ExtraChannelType` + spot + name + dimShift
-- [ ] Generalized encode path in bridge.cpp that can handle the richer descriptors
-- [ ] Decoder-side extra channel metadata exposure (important for roundtrip completeness)
-- [ ] Substantial Extra Channels Lab benchmark page
-- [ ] Comprehensive type + bit-depth matrix tests
-- [ ] Tauri/Rust side
-- [ ] Update the earlier `extra-channel-distance.md` note with "Phase 1 complete, see this note for Phase 2"
-- [ ] Full handoff + PROGRESS_LOG
+- [x] Branch: `feature/full-extra-channel-infrastructure`
+- [x] Enrich the `ExtraChannel` type with full `ExtraChannelType` + spot + name + dimShift
+- [x] Generalized encode path in bridge.cpp that can handle the richer descriptors (72B WasmExtraChannel)
+- [x] Decoder-side extra channel metadata exposure (important for roundtrip completeness)
+- [x] Substantial Extra Channels Lab benchmark page (wired in Task 6)
+- [x] Comprehensive type + bit-depth matrix tests
+- [x] Tauri/Rust side (jxl-native parity)
+- [x] Update the earlier `extra-channel-distance.md` note with "Phase 1 complete, see this note for Phase 2"
+- [x] Full handoff + PROGRESS_LOG
+
+---
+
+## 11. Implementation Notes
+
+**Deviations from design:**
+- 72B descriptor chosen (vs original 56B estimate) for clean packing of spot + dim + name (no overlap); verified sizeof in C++ + TS DataView.
+- Decoder extraPlanes delivered only on progressive "final" + some progress stages (not every flush for ECs in initial impl; matches main pixel behavior).
+- No high-level Encoder.addExtraPlane sugar yet (low-level + synthetic in lab only; per "Phase 2 complete" scope).
+- Reserved channels mapped to reserved0–7 + unknown; full 16+ JXL enum not exhaustively enumerated beyond forward-compat slots.
+
+**Benchmark screenshots description (Task 6):** The Extra Channels panel in jxl-wrapper-lab includes dynamic rows for all 5+ types, spot color pickers + solidity sliders, synthetic plane generators (depth ramps, thermal noise, selection checker, spot solids), and post-decode Channel Inspector grid (small canvases + min/max/hist readouts per EC). Visual verification performed for alpha+spot, depth16, mixed, named thermal cases. Roundtrip descriptor logs emitted to console.
+
+**Decisions made:**
+- Full symmetry on DecodedExtraChannel (readonly, omits encode-only fields) for header/final + events.
+- TDD: failing matrix + roundtrip tests written early; bridge symbols guarded in tests.
+- Native parity via mirror structs + type maps (no shared 72B; semantic only).
+- dimShift supported in descriptor/encode but default 0 in most lab/UI paths.
+- All prior Tasks 2-6 approved before this final slice.
 
 ---
 

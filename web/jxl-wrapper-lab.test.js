@@ -14,7 +14,7 @@ test('wrapper lab page is a separate page with three-way mode and 100-picture ba
     expect(html).toContain('JPEG XL wrapper lab');
     expect(html).toContain('data-mode="wrapper"');
     expect(html).toContain('data-mode="existing"');
-    expect(html).toContain('data-mode="compare"');
+    expect(html).toContain('data-mode="race"');
     expect(html).toContain('id="source-drop"');
     expect(html).toContain('batch-thumb-size');
     expect(html).toContain('id="batch-limit"');

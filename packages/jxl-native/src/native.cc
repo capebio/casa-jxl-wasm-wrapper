@@ -1,5 +1,6 @@
 #include <node_api.h>
 
+#include <climits>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +18,17 @@
 #ifndef JxlBool
 typedef int JxlBool;
 #endif
+// Gain map support requires libjxl built with gain map symbols (JxlGainMap*).
+// Enable by passing -DCASABIO_GAIN_MAP_ENABLED during the node-gyp build.
+#if __has_include(<jxl/gain_map.h>) && defined(CASABIO_GAIN_MAP_ENABLED)
+#include <jxl/gain_map.h>
+#define CASABIO_HAVE_GAIN_MAP 1
+#else
+#define CASABIO_HAVE_GAIN_MAP 0
+#endif
 #else
 #define CASABIO_HAVE_LIBJXL 0
+#define CASABIO_HAVE_GAIN_MAP 0
 #endif
 
 namespace {
@@ -75,12 +85,34 @@ struct EncoderData {
     std::string name;
   };
   std::vector<AnimFrame> anim_frames;
+  // Modular mode: -1 = auto, 0 = VarDCT, 1 = Modular
+  int32_t modular = -1;
+  // Modular sub-settings
+  int32_t modular_group_size = -1;          // -1 = libjxl default
+  int32_t modular_predictor = -1;
+  int32_t modular_nb_prev_channels = -1;
+  int32_t modular_palette_colors = INT32_MIN; // INT32_MIN = not set
+  int32_t modular_lossy_palette = -1;       // -1 = not set
+  int32_t modular_ma_tree_learning_percent = -1;
+  // Raw JXL_ENC_FRAME_SETTING_* escape hatch
+  struct AdvancedSetting { int32_t id; int32_t value; };
+  std::vector<AdvancedSetting> advanced_frame_settings;
+  // Gain map (jhgm box)
+  std::vector<uint8_t> gain_map_jxl;
+  // Custom metadata boxes
+  struct CustomBox {
+    std::string type;
+    std::vector<uint8_t> data;
+    bool compress = false;
+  };
+  std::vector<CustomBox> custom_boxes;
   // Extra channel fields
   double alpha_distance = -1.0;
   struct NativeExtraChannel {
     uint32_t type = 0; // JxlExtraChannelType value; 0=alpha, 1=depth, 2=spot, 3=selection, 15=unknown
     uint32_t bits_per_sample = 8;
     double distance = -1.0;
+    std::string name;
     std::vector<uint8_t> pixels;
   };
   std::vector<NativeExtraChannel> extra_channels;
@@ -244,6 +276,19 @@ static JxlDataType DataTypeForFormat(PixelFormatKind format) {
 
 static uint32_t ExponentBitsForFormat(PixelFormatKind format) {
   return format == PixelFormatKind::Rgbaf32 ? 8u : 0u;
+}
+
+static const char* ExtraChannelTypeName(uint32_t t) {
+  switch (t) {
+    case 0: return "alpha";
+    case 1: return "depth";
+    case 2: return "spot";
+    case 3: return "selection";
+    case 4: return "black";
+    case 5: return "cfa";
+    case 6: return "thermal";
+    default: return "other";
+  }
 }
 #endif
 
@@ -409,7 +454,7 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return false;
 
-  int events = JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE;
+  int events = JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE | JXL_DEC_BOX;
   if (emit_every_pass || strcmp(progression_target, "dc") == 0 || strcmp(progression_target, "pass") == 0) {
     events |= JXL_DEC_FRAME_PROGRESSION;
   }
@@ -437,6 +482,15 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
   std::string frame_name;
   uint32_t anim_tps = 1000;
   uint32_t anim_loops = 0;
+  struct DecodedEC {
+    JxlExtraChannelInfo info;
+    char name[256];
+    std::vector<uint8_t> pixels;
+  };
+  std::vector<DecodedEC> extra_channels_dec;
+  bool jhgm_reading = false;
+  std::vector<uint8_t> jhgm_buf;
+  std::vector<uint8_t> gain_map_jxl;
 
   for (;;) {
     JxlDecoderStatus status = JxlDecoderProcessInput(dec);
@@ -444,7 +498,49 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
       JxlDecoderDestroy(dec);
       return false;
     }
-    if (status == JXL_DEC_SUCCESS) break;
+    if (status == JXL_DEC_SUCCESS) {
+      // Finalize jhgm box accumulation.
+      if (jhgm_reading && !jhgm_buf.empty()) {
+        size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
+        const size_t jhgm_size = jhgm_buf.size() - remaining;
+#if CASABIO_HAVE_GAIN_MAP
+        if (jhgm_size > 0) {
+          JxlGainMapBundle bundle = {};
+          size_t bytes_read = 0;
+          if (JxlGainMapReadBundle(&bundle, jhgm_buf.data(), jhgm_size, &bytes_read) == JXL_TRUE
+              && bundle.gain_map != nullptr && bundle.gain_map_size > 0) {
+            gain_map_jxl.assign(bundle.gain_map, bundle.gain_map + bundle.gain_map_size);
+          }
+        }
+#endif
+        jhgm_reading = false;
+      }
+      break;
+    }
+    if (status == JXL_DEC_BOX) {
+      if (jhgm_reading && !jhgm_buf.empty()) {
+        JxlDecoderReleaseBoxBuffer(dec);
+        jhgm_reading = false;
+      }
+      JxlBoxType box_type;
+      if (JxlDecoderGetBoxType(dec, box_type, JXL_FALSE) == JXL_DEC_SUCCESS) {
+        if (box_type[0]=='j' && box_type[1]=='h' && box_type[2]=='g' && box_type[3]=='m') {
+          jhgm_buf.resize(65536);
+          JxlDecoderSetBoxBuffer(dec, jhgm_buf.data(), jhgm_buf.size());
+          jhgm_reading = true;
+        }
+      }
+      continue;
+    }
+    if (status == JXL_DEC_BOX_NEED_MORE_OUTPUT) {
+      if (jhgm_reading && !jhgm_buf.empty()) {
+        size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
+        const size_t used = jhgm_buf.size() - remaining;
+        jhgm_buf.resize(jhgm_buf.size() * 2);
+        JxlDecoderSetBoxBuffer(dec, jhgm_buf.data() + used, jhgm_buf.size() - used);
+      }
+      continue;
+    }
     if (status == JXL_DEC_FRAME) {
       JxlFrameHeader frame_header;
       memset(&frame_header, 0, sizeof(frame_header));
@@ -475,8 +571,33 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
         anim_tps   = basic.animation.tps_numerator;
         anim_loops = basic.animation.num_loops;
       }
+      // Collect extra-channel descriptors.
+      const uint32_t num_ec = basic.num_extra_channels;
+      extra_channels_dec.resize(num_ec);
+      for (uint32_t i = 0; i < num_ec; ++i) {
+        memset(&extra_channels_dec[i].info, 0, sizeof(extra_channels_dec[i].info));
+        JxlDecoderGetExtraChannelInfo(dec, static_cast<size_t>(i), &extra_channels_dec[i].info);
+        memset(extra_channels_dec[i].name, 0, sizeof(extra_channels_dec[i].name));
+        JxlDecoderGetExtraChannelName(dec, static_cast<size_t>(i), extra_channels_dec[i].name, 256);
+      }
       info_known = true;
       napi_value header = MakeHeaderEvent(env, info);
+      if (!extra_channels_dec.empty()) {
+        napi_value info_obj;
+        napi_get_named_property(env, header, "info", &info_obj);
+        napi_value ec_descs;
+        napi_create_array_with_length(env, extra_channels_dec.size(), &ec_descs);
+        for (uint32_t i = 0; i < static_cast<uint32_t>(extra_channels_dec.size()); ++i) {
+          napi_value desc;
+          napi_create_object(env, &desc);
+          const uint32_t ec_bits = extra_channels_dec[i].info.bits_per_sample > 0 ? extra_channels_dec[i].info.bits_per_sample : 8u;
+          napi_set_named_property(env, desc, "type", MakeString(env, ExtraChannelTypeName(static_cast<uint32_t>(extra_channels_dec[i].info.type))));
+          napi_set_named_property(env, desc, "bitsPerSample", MakeUint32(env, ec_bits));
+          napi_set_named_property(env, desc, "name", MakeString(env, extra_channels_dec[i].name));
+          napi_set_element(env, ec_descs, i, desc);
+        }
+        napi_set_named_property(env, info_obj, "extraChannels", ec_descs);
+      }
       data->events.push_back(RefValue(env, header));
       if (strcmp(progression_target, "header") == 0) {
         JxlDecoderDestroy(dec);
@@ -494,6 +615,17 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
       if (JxlDecoderSetImageOutBuffer(dec, &pf, pixels.data(), pixels.size()) != JXL_DEC_SUCCESS) {
         JxlDecoderDestroy(dec);
         return false;
+      }
+      // Set extra-channel output buffers.
+      for (uint32_t i = 0; i < static_cast<uint32_t>(extra_channels_dec.size()); ++i) {
+        const uint32_t ec_bits = extra_channels_dec[i].info.bits_per_sample > 0 ? extra_channels_dec[i].info.bits_per_sample : 8u;
+        JxlDataType ec_dtype = (ec_bits == 32u) ? JXL_TYPE_FLOAT : (ec_bits == 16u) ? JXL_TYPE_UINT16 : JXL_TYPE_UINT8;
+        JxlPixelFormat ec_pf = {1, ec_dtype, JXL_NATIVE_ENDIAN, 0};
+        size_t ec_buf_size = 0;
+        if (JxlDecoderExtraChannelBufferSize(dec, &ec_pf, &ec_buf_size, i) != JXL_DEC_SUCCESS) continue;
+        if (ec_buf_size == 0) continue;
+        extra_channels_dec[i].pixels.resize(ec_buf_size);
+        JxlDecoderSetExtraChannelBuffer(dec, &ec_pf, extra_channels_dec[i].pixels.data(), ec_buf_size, i);
       }
       continue;
     }
@@ -522,6 +654,34 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
     napi_value name_val;
     napi_create_string_utf8(env, frame_name.c_str(), NAPI_AUTO_LENGTH, &name_val);
     napi_set_named_property(env, final_ev, "frameName", name_val);
+  }
+  if (!extra_channels_dec.empty()) {
+    napi_value ec_arr;
+    napi_create_array_with_length(env, extra_channels_dec.size(), &ec_arr);
+    napi_value planes_arr;
+    napi_create_array_with_length(env, extra_channels_dec.size(), &planes_arr);
+    for (uint32_t i = 0; i < static_cast<uint32_t>(extra_channels_dec.size()); ++i) {
+      const uint32_t ec_bits = extra_channels_dec[i].info.bits_per_sample > 0 ? extra_channels_dec[i].info.bits_per_sample : 8u;
+      const char* ec_pf_name = (ec_bits == 32u) ? "rgbaf32" : (ec_bits == 16u) ? "rgba16" : "rgba8";
+      napi_value obj;
+      napi_create_object(env, &obj);
+      napi_set_named_property(env, obj, "type", MakeString(env, ExtraChannelTypeName(static_cast<uint32_t>(extra_channels_dec[i].info.type))));
+      napi_set_named_property(env, obj, "bitsPerSample", MakeUint32(env, ec_bits));
+      napi_set_named_property(env, obj, "name", MakeString(env, extra_channels_dec[i].name));
+      napi_set_named_property(env, obj, "pixelFormat", MakeString(env, ec_pf_name));
+      napi_set_named_property(env, obj, "pixels", MakeArrayBuffer(env, extra_channels_dec[i].pixels.data(), extra_channels_dec[i].pixels.size()));
+      napi_set_element(env, ec_arr, i, obj);
+      napi_value ab = MakeArrayBuffer(env, extra_channels_dec[i].pixels.data(), extra_channels_dec[i].pixels.size());
+      napi_set_element(env, planes_arr, i, ab);
+    }
+    napi_set_named_property(env, final_ev, "extraChannelDescriptors", ec_arr);
+    napi_set_named_property(env, final_ev, "extraPlanes", planes_arr);
+  }
+  if (!gain_map_jxl.empty()) {
+    napi_value gm_obj;
+    napi_create_object(env, &gm_obj);
+    napi_set_named_property(env, gm_obj, "data", MakeArrayBuffer(env, gain_map_jxl.data(), gain_map_jxl.size()));
+    napi_set_named_property(env, final_ev, "gainMap", gm_obj);
   }
   data->events.push_back(RefValue(env, final_ev));
   return true;
@@ -579,6 +739,9 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
       JxlEncoderDestroy(enc);
       return false;
     }
+    if (!ec.name.empty()) {
+      JxlEncoderSetExtraChannelName(enc, ec_index, ec.name.c_str(), ec.name.size());
+    }
   }
 
   if (!data->icc_profile.empty()) {
@@ -601,10 +764,21 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   }
   JxlEncoderSetFrameDistance(frame, static_cast<float>(data->distance));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(data->effort));
+  if (data->modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(data->modular));
   if (data->brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(data->brotli_effort));
   if (data->decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(data->decoding_speed > 4 ? 4 : data->decoding_speed));
   if (data->photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(data->photon_noise_iso));
   if (data->resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(data->resampling));
+  for (const auto& adv : data->advanced_frame_settings) {
+    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(adv.id), static_cast<int64_t>(adv.value));
+  }
+  // Modular sub-settings.
+  if (data->modular_group_size >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(32), static_cast<int64_t>(data->modular_group_size));
+  if (data->modular_predictor >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(33), static_cast<int64_t>(data->modular_predictor));
+  if (data->modular_nb_prev_channels >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(34), static_cast<int64_t>(data->modular_nb_prev_channels));
+  if (data->modular_palette_colors != INT32_MIN) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(35), static_cast<int64_t>(data->modular_palette_colors));
+  if (data->modular_lossy_palette >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(36), static_cast<int64_t>(data->modular_lossy_palette));
+  if (data->modular_ma_tree_learning_percent >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(37), static_cast<int64_t>(data->modular_ma_tree_learning_percent));
 
   // Per-extra-channel distances.
   if (data->has_alpha && data->alpha_distance >= 0.0) {
@@ -675,6 +849,40 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
       return false;
     }
   }
+
+  for (const auto& box : data->custom_boxes) {
+    if (box.data.empty()) continue;
+    char box_type[4] = {' ', ' ', ' ', ' '};
+    for (size_t ci = 0; ci < box.type.size() && ci < 4; ++ci) box_type[ci] = box.type[ci];
+    const JxlBool compress_box = box.compress ? JXL_TRUE : JXL_FALSE;
+    if (JxlEncoderAddBox(enc, box_type, box.data.data(), box.data.size(), compress_box) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+  }
+
+#if CASABIO_HAVE_GAIN_MAP
+  if (!data->gain_map_jxl.empty()) {
+    JxlGainMapBundle bundle = {};
+    bundle.gain_map      = data->gain_map_jxl.data();
+    bundle.gain_map_size = static_cast<uint32_t>(data->gain_map_jxl.size());
+    size_t bundle_size = 0;
+    if (JxlGainMapGetBundleSize(&bundle, &bundle_size) != JXL_TRUE) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+    std::vector<uint8_t> bundle_bytes(bundle_size);
+    size_t bytes_written = 0;
+    if (JxlGainMapWriteBundle(&bundle, bundle_bytes.data(), bundle_size, &bytes_written) != JXL_TRUE) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+    if (JxlEncoderAddBox(enc, "jhgm", bundle_bytes.data(), bytes_written, JXL_FALSE) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+  }
+#endif
 
   JxlEncoderCloseInput(enc);
 
@@ -900,6 +1108,68 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
     data->photon_noise_iso = (iso <= 0.0) ? 0 : static_cast<int32_t>(iso);
   }
   data->resampling = NormalizeResampling(GetUint32Prop(env, args[0], "resampling", 1));
+  {
+    const double mod = GetNullableNumberProp(env, args[0], "modular", -1.0);
+    data->modular = (mod < 0.0) ? -1 : (mod > 1.0) ? 1 : static_cast<int32_t>(mod);
+  }
+
+  // advancedFrameSettings escape hatch.
+  {
+    napi_value adv_val;
+    if (GetProp(env, args[0], "advancedFrameSettings", &adv_val)) {
+      bool is_array = false;
+      napi_is_array(env, adv_val, &is_array);
+      if (is_array) {
+        uint32_t adv_len = 0;
+        napi_get_array_length(env, adv_val, &adv_len);
+        for (uint32_t ai = 0; ai < adv_len; ++ai) {
+          napi_value item;
+          napi_get_element(env, adv_val, ai, &item);
+          EncoderData::AdvancedSetting setting;
+          setting.id    = static_cast<int32_t>(GetNullableNumberProp(env, item, "id",    0.0));
+          setting.value = static_cast<int32_t>(GetNullableNumberProp(env, item, "value", 0.0));
+          data->advanced_frame_settings.push_back(setting);
+        }
+      }
+    }
+  }
+
+  // Modular sub-settings (modularOptions object).
+  {
+    napi_value mo_val;
+    if (GetProp(env, args[0], "modularOptions", &mo_val)) {
+      napi_valuetype mo_type;
+      napi_typeof(env, mo_val, &mo_type);
+      if (mo_type == napi_object) {
+        const double gs = GetNullableNumberProp(env, mo_val, "groupSize", -1.0);
+        data->modular_group_size = (gs < 0.0) ? -1 : static_cast<int32_t>(gs);
+        const double pred = GetNullableNumberProp(env, mo_val, "predictor", -1.0);
+        data->modular_predictor = (pred < 0.0) ? -1 : static_cast<int32_t>(pred);
+        const double npc = GetNullableNumberProp(env, mo_val, "nbPrevChannels", -1.0);
+        data->modular_nb_prev_channels = (npc < 0.0) ? -1 : static_cast<int32_t>(npc);
+        const double pc = GetNullableNumberProp(env, mo_val, "paletteColors", static_cast<double>(INT32_MIN));
+        data->modular_palette_colors = (pc <= static_cast<double>(INT32_MIN)) ? INT32_MIN : static_cast<int32_t>(pc);
+        data->modular_lossy_palette = GetBoolProp(env, mo_val, "lossyPalette", false) ? 1 : -1;
+        const double mlp = GetNullableNumberProp(env, mo_val, "maTreeLearningPercent", -1.0);
+        data->modular_ma_tree_learning_percent = (mlp < 0.0) ? -1 : static_cast<int32_t>(mlp);
+      }
+    }
+  }
+
+  // Gain map (gainMap.data = JXL naked codestream).
+  {
+    napi_value gm_val;
+    if (GetProp(env, args[0], "gainMap", &gm_val)) {
+      napi_valuetype gm_type;
+      napi_typeof(env, gm_val, &gm_type);
+      if (gm_type == napi_object) {
+        napi_value gm_data_val;
+        if (GetProp(env, gm_val, "data", &gm_data_val)) {
+          ReadBytes(env, gm_data_val, &data->gain_map_jxl);
+        }
+      }
+    }
+  }
 
   // Metadata blobs.
   data->icc_profile = GetNullableBufferProp(env, args[0], "iccProfile");
@@ -920,6 +1190,31 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
         if (!GetBoolProp(env, meta_val, "includeICC",  true)) data->icc_profile.clear();
         if (!GetBoolProp(env, meta_val, "includeExif", true)) data->exif.clear();
         if (!GetBoolProp(env, meta_val, "includeXMP",  true)) data->xmp.clear();
+      }
+    }
+  }
+
+  // Custom metadata boxes.
+  {
+    napi_value boxes_val;
+    if (GetProp(env, args[0], "customBoxes", &boxes_val)) {
+      bool is_array = false;
+      napi_is_array(env, boxes_val, &is_array);
+      if (is_array) {
+        uint32_t boxes_len = 0;
+        napi_get_array_length(env, boxes_val, &boxes_len);
+        for (uint32_t bi = 0; bi < boxes_len; ++bi) {
+          napi_value item;
+          napi_get_element(env, boxes_val, bi, &item);
+          EncoderData::CustomBox box;
+          box.type     = GetStringProp(env, item, "type", "    ");
+          box.compress = GetBoolProp(env, item, "compress", false);
+          napi_value box_data_val;
+          if (GetProp(env, item, "data", &box_data_val)) {
+            ReadBytes(env, box_data_val, &box.data);
+          }
+          data->custom_boxes.push_back(std::move(box));
+        }
       }
     }
   }
@@ -988,6 +1283,7 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
           ec.type = ParseExtraChannelType(GetStringProp(env, ec_item, "type", "other"));
           ec.bits_per_sample = GetUint32Prop(env, ec_item, "bitsPerSample", 8);
           ec.distance = GetNullableNumberProp(env, ec_item, "distance", -1.0);
+          ec.name = GetStringProp(env, ec_item, "name", "");
           if (planes_is_array && i < planes_len) {
             napi_value plane_val;
             napi_get_element(env, planes_arr, i, &plane_val);

@@ -8,6 +8,99 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
+## Native EC Decoder Reporting (extra-channel decode parity) — 2026-05-29
+
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Complete
+
+**Scope:** Closed the last major encode/decode asymmetry in `jxl-native`. `DecodeAll` previously had no extra-channel output; WASM Phase 2 has full decoder symmetry. Now native matches.
+
+**Changes — `packages/jxl-native/src/index.ts`:**
+- Added `ExtraChannelDescriptor` interface (`type`, `bitsPerSample`, `name`) — EC metadata without pixel data.
+- Added `DecodedExtraChannel extends ExtraChannelDescriptor` (`pixels: ArrayBuffer`, `pixelFormat: PixelFormat`).
+- `ImageInfo.extraChannels?: readonly ExtraChannelDescriptor[]` — populated from `JXL_DEC_BASIC_INFO` event; available at header time.
+- `DecodeEvent` `progress` + `final` variants: added `extraPlanes?: readonly ArrayBuffer[]` and `extraChannelDescriptors?: readonly DecodedExtraChannel[]`.
+
+**Changes — `packages/jxl-native/src/native.cc`:**
+- Added `ExtraChannelTypeName()` helper — maps `JxlExtraChannelType` int to `"alpha"/"depth"/"spot"/"selection"/"black"/"cfa"/"thermal"/"other"`.
+- `DecodeAll`: added `struct DecodedEC { JxlExtraChannelInfo info; char name[256]; vector<uint8_t> pixels; }` + `vector<DecodedEC> extra_channels_dec`.
+- In `JXL_DEC_BASIC_INFO`: calls `JxlDecoderGetExtraChannelInfo` + `JxlDecoderGetExtraChannelName` for all ECs; attaches `extraChannels` descriptor array to the header event's `info` object.
+- In `JXL_DEC_NEED_IMAGE_OUT_BUFFER`: calls `JxlDecoderExtraChannelBufferSize` + `JxlDecoderSetExtraChannelBuffer` per EC; dtype derived from `bits_per_sample` (uint8/uint16/float).
+- Final event: attaches `extraChannelDescriptors` (full objects with pixels + pixelFormat) and `extraPlanes` (parallel raw ArrayBuffer array).
+
+**Build + Verification:**
+- `npx tsc --noEmit` (packages/jxl-native) — clean.
+- Native addon rebuilt (vcvars64 + `JXL_NATIVE_INCLUDE_DIR` + `JXL_NATIVE_LIB_DIR`); 602 functions compiled.
+- `bun test packages/jxl-native/test/codec.test.ts` — 6 pass, 0 fail.
+
+**Docs Updated:**
+- `docs/FEATURE_PARITY_MATRIX.md` — row 2.4 notes updated to reflect decode parity.
+- `docs/references/PROGRESS_LOG.md` — this entry.
+
+---
+
+## Full Feature Parity Audit + Docs Unification (WASM ↔ Tauri + Benchmark Matrix) — 2026-06
+
+**Branch:** (unification pass; no dedicated feature branch)
+**Status:** Complete
+**Scope:** Extended the prior partial "new features" transpose table (old WASM_Tauri_feature_comparison.md) to a complete audit of *all* features across raw-pipeline, JXL controls (per REFERENCE_INDEX 1-12 + audit), scheduling, WASM perf architecture, progressive/ROI/JXTC, benchmark exposure, and Tauri desktop specifics. Produced the single source of truth `docs/FEATURE_PARITY_MATRIX.md` (with ✅ ❌ 🟡 N/A + explicit benchmark tab(s) or "all"/"N/A"). Consolidated docs, reduced duplication by deleting redundant summaries/backups (feature-summary*.md, rejected optimizations_backup.md), and updated all references (HANDOFF, DESIGNS_INDEX, etc.) to point to the matrix.
+
+**Key Outcomes:**
+- Matrix covers 8 categories / ~60+ distinct features with WASM/Tauri/benchmark columns.
+- Confirmed remaining high-impact gaps are the raw LookRenderer + selective flags + orient fastpath on Tauri side, plus progressive/JXTC encode and native progressive decode on Tauri.
+- Many JXL advanced (extra channels full, animation, brotli, patches escape, metadata) already have good WASM + jxl-native parity.
+- Scheduler/preemption largely shared (excellent parity via web/ frontend on Tauri).
+- Deleted 3 redundant files; matrix + Overview now carry the completeness story.
+- All cross-refs (DESIGNS_INDEX, HANDOFF, PROGRESS intro, Casa/WASM_Tauri legacy notes) updated.
+
+**Docs Updated:**
+- Created `docs/FEATURE_PARITY_MATRIX.md`
+- Updated `docs/references/HANDOFF.md`, `docs/references/designs/DESIGNS_INDEX.md`, this PROGRESS_LOG
+- Minor clean in references/ + legacy comparison files (now thin or removed)
+- 3 redundant files removed (see shell log in session)
+
+**Verification:** Targeted source inspection (lib.rs WASM exports, raw-pipeline pipeline.rs + apply_orientation, tauri pipeline.rs Rgb16State/process_file, jxl-wasm facade/bridge, jxl-native parity from prior PROGRESS entries, web/*.html tab inventory).
+
+**Next:** Use matrix as the only parity reference. Every new feature must update it + benchmark exposure + this log.
+
+---
+
+## Native Parity Pass — modular, advancedFrameSettings, customBoxes, ExtraChannel.name — 2026-05-29
+
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Complete
+
+**Scope:** Full-audit pass of WASM vs Tauri/native gaps per `docs/FEATURE_PARITY_MATRIX.md`. Four missing items identified and implemented.
+
+**Changes — `packages/jxl-native/src/index.ts`:**
+- `EncoderOptions.modular?: -1 | 0 | 1` — matches WASM facade; -1 = auto, 0 = VarDCT, 1 = Modular.
+- `EncoderOptions.advancedFrameSettings?: readonly { id: number; value: number }[]` — escape hatch for arbitrary `JXL_ENC_FRAME_SETTING_*` values (patches, splines, modular predictor, etc.). Applied after named settings; later entries override earlier ones.
+- `ExtraChannel.name?: string` — matches WASM facade; optional per-channel label embedded in the JXL bitstream.
+
+**Changes — `packages/jxl-native/src/native.cc`:**
+- `EncoderData.modular` (int32_t, -1 default) — parsed from JS; applied via `JXL_ENC_FRAME_SETTING_MODULAR` in `EncodeAll`.
+- `EncoderData.advanced_frame_settings` (`vector<AdvancedSetting>`) — parsed from `advancedFrameSettings` array; applied in `EncodeAll` loop after all named settings.
+- `EncoderData.custom_boxes` (`vector<CustomBox>`) — parsed from `customBoxes` array (type, data, compress); applied in `EncodeAll` via `JxlEncoderAddBox` per entry. Box type padded/truncated to 4 chars with space-padding. This completes the "not yet implemented in native binding" note from the metadata-boxes-container design.
+- `NativeExtraChannel.name` (string) — parsed from `name` property; applied via `JxlEncoderSetExtraChannelName` in the extra-channel declare loop (after `JxlEncoderSetExtraChannelInfo`).
+
+**Build + Verification:**
+- `npx tsc --noEmit` (packages/jxl-native) — clean.
+- Native addon rebuilt via vcvars64 + `JXL_NATIVE_INCLUDE_DIR=C:\Foo\raw-converter\target\release\build\jpegxl-sys-26f294f2024eaecb\out\include` + `JXL_NATIVE_LIB_DIR=C:\TEMP\jxl-mt-libs`.
+- `bun test packages/jxl-native/test/codec.test.ts` — 6 pass, 0 fail.
+
+**Docs Updated:**
+- `docs/FEATURE_PARITY_MATRIX.md` — rows updated for Modular advanced, Metadata Boxes v2, Extra Channels, and EncoderOptions surface parity.
+- `docs/references/PROGRESS_LOG.md` — this entry.
+
+**Remaining native gaps (not in this pass):**
+- Extra-channel decoder reporting (planes + descriptors in decode events) — still pending.
+- Gain Maps — native ❌, WASM 🟠 stub.
+- Full nested Modular controls (groupSize, predictor, nbPrevChannels, etc.) — design note complete; not yet dedicated fields (covered by `advancedFrameSettings` escape hatch in the interim).
+- JXTC Tile-Container — major native gap; complex.
+- RAW Pipeline items (LookRenderer, process_orf_with_flags, etc.) — Rust-side work.
+
+---
+
 ## Native Addon Rebuild — 2026-05-29
 
 **Branch:** `epiccodereview/20260527T054853`

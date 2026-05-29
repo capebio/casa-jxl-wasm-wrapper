@@ -34,6 +34,17 @@ export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32";
 export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = { x: number; y: number; w: number; h: number };
 
+export interface ExtraChannelDescriptor {
+  readonly type: string;
+  readonly bitsPerSample: number;
+  readonly name: string;
+}
+
+export interface DecodedExtraChannel extends ExtraChannelDescriptor {
+  readonly pixels: ArrayBuffer;
+  readonly pixelFormat: PixelFormat;
+}
+
 export interface ImageInfo {
   width: number;
   height: number;
@@ -41,12 +52,13 @@ export interface ImageInfo {
   hasAlpha: boolean;
   hasAnimation: boolean;
   jpegReconstructionAvailable: boolean;
+  extraChannels?: readonly ExtraChannelDescriptor[];
 }
 
 export type DecodeEvent =
   | { type: "header"; info: ImageInfo }
-  | { type: "progress"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; frameIndex?: number; frameDuration?: number; frameName?: string; isLastFrame?: boolean; animTicksPerSecond?: number; animLoopCount?: number }
-  | { type: "final"; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; frameIndex?: number; frameDuration?: number; frameName?: string; isLastFrame?: boolean; animTicksPerSecond?: number; animLoopCount?: number }
+  | { type: "progress"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; frameIndex?: number; frameDuration?: number; frameName?: string; isLastFrame?: boolean; animTicksPerSecond?: number; animLoopCount?: number; extraPlanes?: readonly ArrayBuffer[]; extraChannelDescriptors?: readonly DecodedExtraChannel[]; gainMap?: { data: ArrayBuffer } }
+  | { type: "final"; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; frameIndex?: number; frameDuration?: number; frameName?: string; isLastFrame?: boolean; animTicksPerSecond?: number; animLoopCount?: number; extraPlanes?: readonly ArrayBuffer[]; extraChannelDescriptors?: readonly DecodedExtraChannel[]; gainMap?: { data: ArrayBuffer } }
   | { type: "budget_exceeded"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; pixelStride: number }
   | { type: "error"; code: string; message: string };
 
@@ -83,6 +95,28 @@ export interface MetadataOptions {
   rawCodestream?: boolean;
 }
 
+/** Options for attaching an HDR gain map (ISO 21496-1 / JXL jhgm box). */
+export interface GainMapOptions {
+  /** Pre-encoded JXL naked codestream for the gain map image. */
+  data: Uint8Array | ArrayBuffer;
+}
+
+/** Sub-settings for Modular encoding mode. Applied alongside or instead of the flat `modular` flag. */
+export interface ModularOptions {
+  /** 0 = auto group size (libjxl default), positive = explicit group size (power-of-two). */
+  groupSize?: number;
+  /** Predictor selection (0–15). Major quality/speed tradeoff knob. */
+  predictor?: number;
+  /** Number of previous channels to use for prediction. */
+  nbPrevChannels?: number;
+  /** Number of palette colors. 0 = disable palette, -1 = libjxl default. */
+  paletteColors?: number;
+  /** Allow lossy palette. */
+  lossyPalette?: boolean;
+  /** Tree learning percent (0–100). -1 = libjxl default. */
+  maTreeLearningPercent?: number;
+}
+
 /** Descriptor for one extra channel beyond the main color channels. */
 export interface ExtraChannel {
   /** Channel type. 'other' maps to JXL_CHANNEL_UNKNOWN (15). */
@@ -91,6 +125,8 @@ export interface ExtraChannel {
   bitsPerSample: number;
   /** Per-channel encode distance. 0 = lossless; omit to inherit main distance. */
   distance?: number;
+  /** Optional human-readable label embedded in the JXL bitstream. */
+  name?: string;
 }
 
 /** Descriptor for one frame in an animation sequence. */
@@ -128,6 +164,18 @@ export interface EncoderOptions {
   photonNoiseIso?: number;
   /** Encoder-native downsampling factor before JXL transform/coding. */
   resampling?: 1 | 2 | 4 | 8;
+  /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
+  modular?: -1 | 0 | 1;
+  /**
+   * Raw JXL_ENC_FRAME_SETTING_* escape hatch for advanced/experimental features
+   * (e.g. patches=8, splines=9, modular predictor, etc.).
+   * Applied after all named settings; later entries override earlier ones.
+   */
+  advancedFrameSettings?: readonly { id: number; value: number }[];
+  /** Fine-grained Modular mode sub-settings. Applied after `modular` force flag. */
+  modularOptions?: ModularOptions;
+  /** Attach an HDR gain map (ISO 21496-1) as a jhgm box. data is a JXL naked codestream. */
+  gainMap?: GainMapOptions | null;
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;

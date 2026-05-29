@@ -21,13 +21,13 @@ This index is your primary tool for efficient, high-quality feature implementati
    - How does a production high-level wrapper choose to abstract it? (libvips + cjxl_main.cc)
    - What does the raw reference implementation expect? (official examples + headers)
 
-5. **Design** the feature for both WASM and Tauri, using the best ideas from the references while respecting platform constraints.
+5. **Design** the feature for both WASM and Tauri, using the best ideas from the references while respecting platform constraints. Check current parity status first in `docs/FEATURE_PARITY_MATRIX.md` (the single authoritative WASM / Tauri / Benchmark exposure table).
 
 6. **Implement** following the FEATURE_IMPLEMENTATION_TEMPLATE.md (branching, benchmark wiring, cleanup, etc.).
 
 7. **Record progress** by appending an entry to PROGRESS_LOG.md at the end of the work.
 
-8. **Update this index** with your new implementation locations and any new insights.
+8. **Update this index** with your new implementation locations and any new insights. Also update `DESIGNS_INDEX.md` status and the master `FEATURE_PARITY_MATRIX.md`.
 
 ### Tips
 - cjxl_main.cc is usually the best place to see real production usage of many options together.
@@ -143,6 +143,13 @@ This index maps high-value JXL features across several open-source implementatio
 
 **libjxl Reference**
 - Full ExtraChannel API
+
+**CasaWASM Implementation (Phase 2 complete):**
+- Rich types + 72B descriptor: `packages/jxl-wasm/src/facade.ts:147-184` (ExtraChannelType + SpotColorInfo + ExtraChannel + DecodedExtraChannel), `147-154` (full enum incl. reserved0-7 + unknown), `packages/jxl-wasm/src/bridge.cpp:92-102` (WasmExtraChannel struct, exact 72B layout), `packages/jxl-native/src/index.ts:41-75` (mirrored types for parity), `packages/jxl-native/src/native.cc:51-63` (ExtraChannelDesc)
+- Encode paths: `packages/jxl-wasm/src/facade.ts:490-513` (serializeExtraChannelsForWasm + EC_BYTES=476), `bridge.cpp:546-639` (EncodeRgbaWithExtraChannels + per-EC SetExtraChannelInfo/Name/Distance/Buffer), `native.cc:620-672` (extra channel setup loop + Set* + buffer)
+- Decode / descriptor paths: `facade.ts:529-` (deserializeExtraChannelsFromWasm), `1165-1182` (header info attachment), `1219-1300` (extraPlanes on events), `bridge.cpp:269-304` (decode desc collection to 72B sidecar), `2127-2191` (jxl_wasm_get_extra_channels helper), `native.cc:495-527` (decoder extra_channels collection + MakeExtraChannelObject)
+- Tests: `packages/jxl-wasm/test/facade.test.ts:886-` (Phase 2 describe + Task 7 matrix: all types, bits, unicode/long names, spot, mixed, dimShift, many-EC, decoder header/final reports)
+- Also: `packages/jxl-wasm/src/facade.ts:1166-1444` (progressive decoder extra handling)
 
 ---
 

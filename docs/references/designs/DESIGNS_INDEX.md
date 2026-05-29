@@ -73,6 +73,7 @@ All items in the 2026-05-28 audit section now have design coverage.
 
 ## Cross-References & Dependencies
 
+- **Parity tracking**: See the authoritative `docs/FEATURE_PARITY_MATRIX.md` (docs/ root) for the *complete* WASM vs Tauri/Native + Benchmark exposure status of every feature (raw pipeline, JXL controls, scheduling, perf arch, desktop specifics). This is the single source of truth for parity and lab exposure. It was created/extended in the 2026-06 unification pass and supersedes the earlier partial comparison documents.
 - Many notes recommend grouping related controls in the same benchmark page (`jxl-wrapper-lab.js` or dedicated tabs).
 - **Escape hatch pattern** is recommended consistently for advanced/experimental settings (see `patches-splines.md`, `core-modular-controls.md`, `gain-maps.md`).
 - **Benchmark wiring** is mandatory in every note per the TEMPLATE.
