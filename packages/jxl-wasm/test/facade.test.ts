@@ -1532,64 +1532,6 @@ describe("animation decode metadata", () => {
     await decoder.dispose();
   });
 
-  test("isLastFrame is undefined (not false) when _jxl_wasm_dec_is_last_frame accessor is absent", async () => {
-    const base = createFakeProgressiveLibjxlModule();
-    // Provide frame_duration but NOT is_last_frame — isLastFrame must be undefined, not false.
-    const animDecModule = {
-      ...base,
-      _jxl_wasm_dec_frame_duration:        (_s: number) => 100,
-      _jxl_wasm_dec_frame_name_ptr:        (_s: number) => 0,
-      _jxl_wasm_dec_anim_ticks_per_second: (_s: number) => 1000,
-      _jxl_wasm_dec_anim_loop_count:       (_s: number) => 0,
-    };
-    setJxlModuleFactoryForTesting(async () => animDecModule as never);
-
-    const decoder = createDecoder({ ...decodeOptions });
-    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
-    decoder.close();
-
-    const events = [];
-    for await (const ev of decoder.events()) events.push(ev);
-
-    const finalEv = events.find((e) => e.type === "final");
-    expect(finalEv).toBeDefined();
-    expect((finalEv as { isLastFrame?: boolean }).isLastFrame).toBeUndefined();
-    await decoder.dispose();
-  });
-
-  test("eventsOneShot enriches final event with animation metadata when accessors present", async () => {
-    // Use a one-shot module (no progressive decoder API) plus frame metadata accessors.
-    const base = createFakeLibjxlModule();
-    const animDecModule = {
-      ...base,
-      _jxl_wasm_dec_frame_duration:        (_s: number) => 300,
-      _jxl_wasm_dec_frame_name_ptr:        (_s: number) => 0,
-      _jxl_wasm_dec_is_last_frame:         (_s: number) => 1,
-      _jxl_wasm_dec_anim_ticks_per_second: (_s: number) => 600,
-      _jxl_wasm_dec_anim_loop_count:       (_s: number) => 2,
-    };
-    setJxlModuleFactoryForTesting(async () => animDecModule as never);
-
-    const encoder = createEncoder({ ...encodeOptions });
-    encoder.pushPixels(new Uint8Array([0, 0, 255, 255]));
-    encoder.finish();
-    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
-    await encoder.dispose();
-
-    const decoder = createDecoder({ ...decodeOptions });
-    decoder.push(encoded.value);
-    decoder.close();
-
-    const events = [];
-    for await (const ev of decoder.events()) events.push(ev);
-
-    const finalEv = events.find((e) => e.type === "final");
-    expect(finalEv).toBeDefined();
-    expect((finalEv as { frameDuration?: number }).frameDuration).toBe(300);
-    expect((finalEv as { isLastFrame?: boolean }).isLastFrame).toBe(true);
-    expect((finalEv as { animLoopCount?: number }).animLoopCount).toBe(2);
-    await decoder.dispose();
-  });
 });
 
 // Fake module that exposes _jxl_wasm_encode_rgba8_with_metadata_v2 and captures call args.

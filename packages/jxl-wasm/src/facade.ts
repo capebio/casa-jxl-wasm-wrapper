@@ -1553,30 +1553,6 @@ class LibjxlDecoder implements JxlDecoder {
           progressiveRegion: false,
         };
         if (outPixels.region !== undefined) ev.region = outPixels.region;
-        if (module._jxl_wasm_dec_frame_duration) {
-          const frameIndex         = module._jxl_wasm_dec_frame_index?.(decodedHandle) ?? undefined;
-          const frameDuration      = module._jxl_wasm_dec_frame_duration(decodedHandle);
-          const isLastFrame        = module._jxl_wasm_dec_is_last_frame
-            ? (module._jxl_wasm_dec_is_last_frame(decodedHandle) !== 0)
-            : undefined;
-          const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(decodedHandle) ?? undefined;
-          const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(decodedHandle)       ?? undefined;
-          const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(decodedHandle) ?? 0;
-          let frameName: string | undefined;
-          if (namePtr !== 0) {
-            let end = namePtr;
-            while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
-            frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
-          }
-          Object.assign(ev, {
-            ...(frameIndex         !== undefined && { frameIndex }),
-            ...(frameDuration      !== undefined && { frameDuration }),
-            ...(frameName          !== undefined && { frameName }),
-            ...(isLastFrame        !== undefined && { isLastFrame }),
-            ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
-            ...(animLoopCount      !== undefined && { animLoopCount }),
-          });
-        }
         yield ev;
         if (this.options.progressionTarget !== "final") return;
       }
@@ -1590,30 +1566,6 @@ class LibjxlDecoder implements JxlDecoder {
         progressiveRegion: false,
       };
       if (outPixels.region !== undefined) ev.region = outPixels.region;
-      if (module._jxl_wasm_dec_frame_duration) {
-        const frameIndex         = module._jxl_wasm_dec_frame_index?.(decodedHandle) ?? undefined;
-        const frameDuration      = module._jxl_wasm_dec_frame_duration(decodedHandle);
-        const isLastFrame        = module._jxl_wasm_dec_is_last_frame
-          ? (module._jxl_wasm_dec_is_last_frame(decodedHandle) !== 0)
-          : undefined;
-        const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(decodedHandle) ?? undefined;
-        const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(decodedHandle)       ?? undefined;
-        const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(decodedHandle) ?? 0;
-        let frameName: string | undefined;
-        if (namePtr !== 0) {
-          let end = namePtr;
-          while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
-          frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
-        }
-        Object.assign(ev, {
-          ...(frameIndex         !== undefined && { frameIndex }),
-          ...(frameDuration      !== undefined && { frameDuration }),
-          ...(frameName          !== undefined && { frameName }),
-          ...(isLastFrame        !== undefined && { isLastFrame }),
-          ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
-          ...(animLoopCount      !== undefined && { animLoopCount }),
-        });
-      }
       yield ev;
     } finally {
       module._free(inputPtr);
