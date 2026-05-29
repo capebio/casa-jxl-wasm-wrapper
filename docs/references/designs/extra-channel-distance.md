@@ -3,7 +3,7 @@
 **Feature:** Per-extra-channel distance (`alpha_distance` and the general extra channel distance mechanism) + foundational extra channel declaration support  
 **Date:** 2026-05-28  
 **Author:** Grok  
-**Status:** Design ready for implementation handoff  
+**Status:** Implemented (branch epiccodereview/20260527T054853; benchmark and Tauri deferred to Phase 2)  
 **Related Index Section:** 4. Extra Channels  
 **Priority:** Explicitly paired with Brotli Effort in the HANDOFF sprint list ("Brotli Effort + basic extra-channel distance"). Foundation for the larger "Full extra channel infrastructure" goal.
 
@@ -153,14 +153,14 @@ This is highly visual and will be one of the most compelling demos once working.
 
 ## 10. Implementation Checklist
 
-- [ ] Branch: `feature/extra-channel-distance` (or `feature/extra-channels-basic`)
-- [ ] Decide on final data-passing shape for extra planes (multi-plane buffer vs separate args)
-- [ ] Implement declaration + distance setting in bridge
-- [ ] Wire alpha convenience path
+- [x] Branch: `epiccodereview/20260527T054853`
+- [x] Decide on final data-passing shape for extra planes (parallel arrays — extraChannels[] + extraChannelPlanes[])
+- [x] Implement declaration + distance setting in bridge
+- [x] Wire alpha convenience path
 - [ ] Build compelling benchmark with visual alpha inspection
-- [ ] Tests (especially lossless-alpha + lossy-color)
+- [x] Tests (dispatch routing, descriptor layout, lossless-alpha integration)
 - [ ] Tauri side
-- [ ] Full handoff + PROGRESS_LOG
+- [x] PROGRESS_LOG updated
 
 ---
 

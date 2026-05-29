@@ -292,3 +292,37 @@ Use the template below for every entry.
 - Handoff document (if any):
 
 ---
+
+## 2026-05-29 — Extra Channel Distance (Phase 1)
+
+**Feature:** Per-extra-channel distance + basic extra channel infrastructure
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Implemented
+
+### What was done
+
+- Fixed parameter-drop bug: `decodingSpeed`, `photonNoiseIso`, `resampling` were computed but not forwarded through the EC bridge path. Updated `EncodeRgbaWithExtraChannels`, both `_ec` and `_ec_v2` public bridge functions, facade TS declarations, and dispatch calls.
+- Fixed inline resampling normalization to call `NormalizeResampling()` helper (consistent with all other encode paths).
+- Added `_jxl_wasm_encode_rgba8_with_metadata_ec_v2` to `exports.txt` (was implemented but not exported).
+- Added 5 unit tests (arg dispatch, alphaDistance arg index, extraChannels numEc, WasmExtraChannel descriptor layout, fallback path) + 1 integration test (lossless-alpha smoke test).
+
+### Design note checklist status
+
+- [x] Branch created
+- [x] Declaration + distance setting in bridge
+- [x] Alpha convenience path wired
+- [x] Tests (dispatch, descriptor layout, lossless-alpha integration)
+- [ ] Benchmark/lab page — deferred to Phase 2
+- [ ] Tauri side — deferred
+- [ ] Full handoff — see Phase 2 note (`extra-channel-infrastructure.md`)
+
+### Commits
+
+- fix(jxl-wasm): export _jxl_wasm_encode_rgba8_with_metadata_ec_v2
+- fix(jxl-wasm): thread decodingSpeed/photonNoiseIso/resampling through EC bridge
+- fix(jxl-wasm): use NormalizeResampling helper in EC encode path
+- fix(jxl-wasm): pass decodingSpeed/photonNoiseIso/resampling in EC encode dispatch
+- test(jxl-wasm): add extra-channel distance dispatch and descriptor tests
+- test(jxl-wasm): assert alphaDistance sentinel -1 when no alphaDistance option
+
+---
