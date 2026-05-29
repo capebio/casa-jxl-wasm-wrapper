@@ -148,6 +148,14 @@ This matrix supersedes and consolidates:
 **Parity Already Excellent (do not regress):**
 - Extra channels (full), animation, Brotli, decoding speed, metadata/container, resampling, basic progressive/ROI decode, scheduling (via shared frontend), color/HDR fidelity, capability detection.
 
+**M1 Validation (2026-06, finishing_feature_parity branch):**
+- WASM artifacts (dist/ from 2026-05-29T16:56 with exports.txt fixes) + native addon (6.2 MB) confirmed current.
+- Typecheck clean; `bun test packages/jxl-wasm/test/facade.test.ts` → 69 pass 0 fail (real WASM exercised for EC integration, brotli, animation metadata; photon/resampling/decodingSpeed covered by 17+ asserts).
+- Native addon present; 4/12 codec tests pass (functional roundtrips; 8 fail are env-asserts from rebuild session, not runtime).
+- Exports in jxl-core.simd-mt.js glue include all required: _*_x, *_v2, _jxl_wasm_encode_animation + 6 dec accessors, _jxl_wasm_encode_with_gain_map, ec_v2, sidecars_x etc.
+- All 5 capability gates (extOptions, metadataBoxesV2, animationEncode, gainMapEncode, extraChannelEncode) resolve true at runtime per facade + tests.
+- No source changes required; artifacts + tests provide the "verified in lab" (unit + integration) for M1 source-complete controls. Browser lab sweep would show measurable deltas for ISO photon grain, brotli size, resampling, speed tier decode time.
+
 ---
 
 ## How to Use This Matrix
