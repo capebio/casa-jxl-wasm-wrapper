@@ -203,6 +203,7 @@ export interface EncoderOptions {
   /** Attach an HDR gain map (ISO 21496-1) as a jhgm box. data is a JXL naked codestream. */
   gainMap?: GainMapOptions | null;
   progressive: boolean;
+  progressiveFlavor?: "dc" | "ac";
   previewFirst: boolean;
   chunked: boolean;
   /** Container format and per-box options. */

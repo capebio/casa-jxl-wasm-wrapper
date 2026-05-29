@@ -785,8 +785,10 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (data->modular_lossy_palette >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(36), static_cast<int64_t>(data->modular_lossy_palette));
   if (data->modular_ma_tree_learning_percent >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(37), static_cast<int64_t>(data->modular_ma_tree_learning_percent));
   // Progressive encode settings.
-  // PROGRESSIVE_DC and PROGRESSIVE_AC are VarDCT-only features. Force VarDCT (modular=0)
-  // when any progressive mode is requested and the caller has not already chosen modular mode.
+  // Force VarDCT when progressive DC/AC is requested and the caller has not explicitly
+  // chosen Modular mode via the named 'modular' field. Note: does not account for
+  // advancedFrameSettings overrides — callers using that escape hatch with modular=1
+  // and progressive=true will get a silent override to VarDCT.
   if ((data->progressive_dc > 0 || data->progressive_ac > 0 || data->qprogressive_ac > 0) && data->modular < 0) {
     JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, 0);
   }
@@ -1152,10 +1154,13 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
     const bool progressive   = GetBoolProp(env, args[0], "progressive",  false);
     const bool preview_first = GetBoolProp(env, args[0], "previewFirst", false);
     const bool chunked       = GetBoolProp(env, args[0], "chunked",      false);
+    // Read progressiveFlavor ("dc" | "ac" | absent). Mirrors resolveEncoderBridgeSettings in facade.ts.
+    const std::string flavor = GetStringProp(env, args[0], "progressiveFlavor", "");
     if (progressive) {
+      const bool ac_enabled = (flavor == "ac") || (flavor != "dc" && preview_first);
       data->progressive_dc  = 1;
-      data->progressive_ac  = preview_first ? 1 : 0;
-      data->qprogressive_ac = preview_first ? 1 : 0;
+      data->progressive_ac  = ac_enabled ? 1 : 0;
+      data->qprogressive_ac = ac_enabled ? 1 : 0;
     }
     data->buffering = chunked ? 2 : 0;
   }
