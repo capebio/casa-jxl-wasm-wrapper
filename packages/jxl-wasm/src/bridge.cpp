@@ -677,6 +677,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed,
+    int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
@@ -745,6 +746,9 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
   if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
+  if (photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(photon_noise_iso));
+  const uint32_t normalized_resampling_ec = (resampling == 2u || resampling == 4u || resampling == 8u) ? resampling : 1u;
+  if (normalized_resampling_ec > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling_ec));
 
   // Per-extra-channel distances.
   if (has_alpha && alpha_distance >= 0.0f) {
@@ -1793,7 +1797,8 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
-    int32_t modular, int32_t brotli_effort,
+    int32_t modular, int32_t brotli_effort, int32_t decoding_speed,
+    int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
@@ -1803,7 +1808,7 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec(
   const uint32_t n_ec = (ec != nullptr) ? num_ec : 0u;
   return EncodeRgbaWithExtraChannels(pixels, width, height, distance, effort, fmt, has_alpha,
       progressive_dc, progressive_ac, qprogressive_ac, buffering,
-      modular, brotli_effort, -1,
+      modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size,
       alpha_distance, ec, n_ec);
 }
@@ -1831,7 +1836,8 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec_v2(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
-    int32_t modular, int32_t brotli_effort,
+    int32_t modular, int32_t brotli_effort, int32_t decoding_speed,
+    int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
@@ -1842,7 +1848,7 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec_v2(
   const uint32_t n_ec = (ec != nullptr) ? num_ec : 0u;
   return EncodeRgbaWithExtraChannels(pixels, width, height, distance, effort, fmt, has_alpha,
       progressive_dc, progressive_ac, qprogressive_ac, buffering,
-      modular, brotli_effort, -1,
+      modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size,
       alpha_distance, ec, n_ec, box_opts);
 }
