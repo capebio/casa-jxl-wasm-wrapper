@@ -48,10 +48,10 @@ This matrix supersedes and consolidates:
 | 2 | Progressive / interlace encode options | ✅ (preview-first bias) | 🟡 (one-shot only in casabio_encode.rs) | N/A (encode side) | Gap: 12 from old table |
 | 3 | Modular mode advanced controls (force, groupSize, predictor, palette, MA tree, etc.) | 🟡 (escape hatch via advancedFrameSettings) | 🟡 (similar escape in native) | wrapper-lab (experimental) | designs/core-modular-controls.md; REFERENCE #3 |
 | 4 | Full Extra Channel infrastructure (alpha/depth/spot/thermal + 72B descriptors + symmetry) | ✅ (Phase 2 complete: facade + bridge + tests matrix) | ✅ (jxl-native parity: encode + decode; descriptors + pixel planes on final event; ExtraChannelDescriptor on header) | wrapper-lab (full Extra Channels panel + inspector) | PROGRESS 2026-05-29; designs/extra-channel* |
-| 5 | Photon noise (ISO-based) | 🟡 (design + escape) | 🟡 (design) | N/A | designs/photon-noise.md; REFERENCE #5 |
+| 5 | Photon noise (ISO-based) | ✅ (`photonNoiseIso?: number` + JXL_ENC_FRAME_SETTING_PHOTON_NOISE; WASM rebuilt) | ✅ (jxl-native parity) | wrapper-lab | designs/photon-noise.md; PROGRESS 2026-05-28; REFERENCE #5 |
 | 6 | Decoding speed tier (0-4) | ✅ | ✅ | wrapper-lab | REFERENCE #6; PROGRESS |
 | 7 | Brotli effort (0-11) | ✅ | ✅ | wrapper-lab | designs/brotli-effort.md; REFERENCE #7 |
-| 8 | Animation / multi-frame (per-frame duration/name, loop, progressive decode) | ✅ (source + 7 symbols; rebuild pending in some branches) | ✅ (jxl-native parity) | animation-lab.html (full interactive lab + capability banner) | PROGRESS 2026-05-29 full entry; designs/animation-multi-frame.md |
+| 8 | Animation / multi-frame (per-frame duration/name, loop, progressive decode) | ✅ (7 symbols live in rebuilt artifacts; `animationEncode` cap true) | ✅ (jxl-native parity; native addon rebuilt 2026-05-29) | animation-lab.html (full interactive lab + capability banner) | PROGRESS 2026-05-29 full entry; designs/animation-multi-frame.md |
 | 9 | Metadata boxes + container decisions (ICC/EXIF/XMP, JPEG recon, compressBoxes, custom) | ✅ | ✅ | wrapper-lab + jxl-compare | designs/metadata-boxes-container.md; REFERENCE #9,12 |
 | 10 | Gain maps (HDR tone-mapping assistance) | 🟡 (design complete) | ❌ | N/A | designs/gain-maps.md; ties to LookRenderer |
 | 11 | Patches & splines (advanced coding tools) | ✅ (escape hatch + experimental toggle) | ✅ (escape parity) | wrapper-lab (checkbox + warning) | designs/patches-splines.md; PROGRESS |
