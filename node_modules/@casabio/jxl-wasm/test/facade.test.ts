@@ -928,7 +928,8 @@ describe("extra channel encode", () => {
     await encoder.chunks()[Symbol.asyncIterator]().next();
 
     const args = module.__ecCalls[0]!;
-    expect(args[24]).toBe(1); // numEc = 1
+    expect(args[24]).toBe(1);   // numEc = 1
+    expect(args[22]).toBe(-1);  // alphaDistance = -1 (no override)
     await encoder.dispose();
   });
 
