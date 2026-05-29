@@ -519,7 +519,7 @@ describe("progressive encode", () => {
       format: "rgba8",
       width: W,
       height: H,
-      hasAlpha: false,
+      hasAlpha: true,
       iccProfile: null,
       exif: null,
       xmp: null,

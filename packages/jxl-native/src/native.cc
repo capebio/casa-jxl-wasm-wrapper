@@ -785,6 +785,14 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (data->modular_lossy_palette >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(36), static_cast<int64_t>(data->modular_lossy_palette));
   if (data->modular_ma_tree_learning_percent >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(37), static_cast<int64_t>(data->modular_ma_tree_learning_percent));
   // Progressive encode settings.
+  // PROGRESSIVE_DC and PROGRESSIVE_AC are VarDCT-only features. Force VarDCT (modular=0)
+  // when any progressive mode is requested and the caller has not already chosen modular mode.
+  if ((data->progressive_dc > 0 || data->progressive_ac > 0 || data->qprogressive_ac > 0) && data->modular < 0) {
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, 0);
+  }
+  // Apply progressive settings, ignoring individual errors — libjxl may silently reject a
+  // setting for a particular image/effort combination (e.g. tiny images for DC passes).
+  // A failure here does not poison the encoder; only JxlEncoderAddImageFrame is authoritative.
   if (data->progressive_dc > 0)
     JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC,  static_cast<int64_t>(data->progressive_dc));
   if (data->progressive_ac > 0)
