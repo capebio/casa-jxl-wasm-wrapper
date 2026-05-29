@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { createDecoder, createEncoder, type DecodeEvent } from "../src/index";
+import {
+  createDecoder,
+  createEncoder,
+  encodeJxtcRgba8,
+  decodeJxtcRegionRgba8,
+  type DecodeEvent,
+} from "../src/index";
 
 const nativeIncludeDir =
   "C:\\Foo\\raw-converter\\target\\release\\build\\jpegxl-sys-26f294f2024eaecb\\out\\include";
@@ -579,5 +585,135 @@ describe("JXTC tile container in native index.ts", () => {
     const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
     expect(source).toContain("encodeJxtcRgba8?:");
     expect(source).toContain("decodeJxtcRegionRgba8?:");
+  });
+});
+
+describe("@casabio/jxl-native JXTC round-trip", () => {
+  test("encode + decode full image (single tile)", async () => {
+    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
+    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
+    // 4×4 RGBA8 gradient — fits in one tile (tileSize=16)
+    const pixels = new Uint8Array(4 * 4 * 4);
+    for (let i = 0; i < 16; i++) {
+      pixels[i * 4 + 0] = i * 16;        // R
+      pixels[i * 4 + 1] = 255 - i * 16;  // G
+      pixels[i * 4 + 2] = 128;           // B
+      pixels[i * 4 + 3] = 255;           // A
+    }
+
+    const container = encodeJxtcRgba8(pixels.buffer, 4, 4, 16, {
+      distance: 0, effort: 1, hasAlpha: true,
+    });
+    expect(container.byteLength).toBeGreaterThan(32);
+
+    // Verify JXTC magic bytes (little-endian 0x4354584A = 'JXTC')
+    const header = new Uint8Array(container, 0, 4);
+    expect(header[0]).toBe(0x4a); // 'J'
+    expect(header[1]).toBe(0x58); // 'X'
+    expect(header[2]).toBe(0x54); // 'T'
+    expect(header[3]).toBe(0x43); // 'C'
+
+    const result = decodeJxtcRegionRgba8(container, 0, 0, 4, 4);
+    expect(result.width).toBe(4);
+    expect(result.height).toBe(4);
+    expect(result.pixels.byteLength).toBe(4 * 4 * 4);
+
+    const decoded = new Uint8Array(result.pixels);
+    for (let i = 0; i < 16; i++) {
+      expect(Math.abs(decoded[i * 4 + 0] - pixels[i * 4 + 0])).toBeLessThanOrEqual(1);
+      expect(Math.abs(decoded[i * 4 + 1] - pixels[i * 4 + 1])).toBeLessThanOrEqual(1);
+      expect(Math.abs(decoded[i * 4 + 2] - pixels[i * 4 + 2])).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test("encode + decode multi-tile image with ROI per quadrant", async () => {
+    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
+    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
+    // 8×8 RGBA8 quadrant image: TL=red, TR=green, BL=blue, BR=white
+    const pixels = new Uint8Array(8 * 8 * 4);
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        const i = (y * 8 + x) * 4;
+        const right  = x >= 4;
+        const bottom = y >= 4;
+        pixels[i + 0] = (!right && !bottom) ? 255 : (right && !bottom) ? 0   : (right && bottom) ? 255 : 0;
+        pixels[i + 1] = (!right && !bottom) ? 0   : (right && !bottom) ? 255 : (right && bottom) ? 255 : 0;
+        pixels[i + 2] = (!right && !bottom) ? 0   : (right && !bottom) ? 0   : (right && bottom) ? 255 : 255;
+        pixels[i + 3] = 255;
+      }
+    }
+
+    // Encode with tileSize=4 → 2×2 = 4 tiles
+    const container = encodeJxtcRgba8(pixels.buffer, 8, 8, 4, {
+      distance: 0, effort: 1, hasAlpha: false,
+    });
+
+    // Verify header fields via DataView
+    const dv = new DataView(container);
+    expect(dv.getUint32(0, true)).toBe(0x4354584a); // magic
+    expect(dv.getUint32(4, true)).toBe(1);           // version
+    expect(dv.getUint32(8, true)).toBe(8);           // image_w
+    expect(dv.getUint32(12, true)).toBe(8);          // image_h
+    expect(dv.getUint32(16, true)).toBe(4);          // tile_size
+    expect(dv.getUint32(20, true)).toBe(2);          // tiles_x
+    expect(dv.getUint32(24, true)).toBe(2);          // tiles_y
+
+    // Top-left tile (0,0,4,4) → should be predominantly red
+    const tl = decodeJxtcRegionRgba8(container, 0, 0, 4, 4);
+    expect(tl.width).toBe(4);
+    expect(tl.height).toBe(4);
+    const tlPx = new Uint8Array(tl.pixels);
+    const tlCenter = (1 * 4 + 1) * 4; // pixel (1,1) in the tile
+    expect(tlPx[tlCenter + 0]).toBeGreaterThan(200); // R high
+    expect(tlPx[tlCenter + 1]).toBeLessThan(50);     // G low
+    expect(tlPx[tlCenter + 2]).toBeLessThan(50);     // B low
+
+    // Bottom-right tile (4,4,4,4) → should be predominantly white
+    const br = decodeJxtcRegionRgba8(container, 4, 4, 4, 4);
+    expect(br.width).toBe(4);
+    expect(br.height).toBe(4);
+    const brPx = new Uint8Array(br.pixels);
+    const brCenter = (1 * 4 + 1) * 4;
+    expect(brPx[brCenter + 0]).toBeGreaterThan(200); // R high
+    expect(brPx[brCenter + 1]).toBeGreaterThan(200); // G high
+    expect(brPx[brCenter + 2]).toBeGreaterThan(200); // B high
+  });
+
+  test("encode + decode cross-tile ROI strip spanning tile boundary", async () => {
+    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
+    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
+    // 8×4 RGBA8: left half (x<4) red, right half (x≥4) green
+    const pixels = new Uint8Array(8 * 4 * 4);
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 8; x++) {
+        const i = (y * 8 + x) * 4;
+        pixels[i + 0] = x < 4 ? 255 : 0;
+        pixels[i + 1] = x < 4 ? 0 : 255;
+        pixels[i + 2] = 0;
+        pixels[i + 3] = 255;
+      }
+    }
+
+    const container = encodeJxtcRgba8(pixels.buffer, 8, 4, 4, {
+      distance: 0, effort: 1, hasAlpha: false,
+    });
+
+    // Cross-tile strip: x=3..4, y=0..3 (spans the left→right tile boundary)
+    const strip = decodeJxtcRegionRgba8(container, 3, 0, 2, 4);
+    expect(strip.width).toBe(2);
+    expect(strip.height).toBe(4);
+    const stripPx = new Uint8Array(strip.pixels);
+
+    for (let row = 0; row < 4; row++) {
+      const leftIdx  = (row * 2 + 0) * 4; // x=3 in output → red
+      const rightIdx = (row * 2 + 1) * 4; // x=4 in output → green
+      expect(stripPx[leftIdx  + 0]).toBeGreaterThan(200); // R at x=3
+      expect(stripPx[leftIdx  + 1]).toBeLessThan(50);     // G at x=3
+      expect(stripPx[rightIdx + 0]).toBeLessThan(50);     // R at x=4
+      expect(stripPx[rightIdx + 1]).toBeGreaterThan(200); // G at x=4
+    }
   });
 });
