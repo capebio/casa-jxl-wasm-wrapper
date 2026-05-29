@@ -25,7 +25,7 @@ This matrix supersedes and consolidates:
 
 | # | Feature | WASM | Tauri | Benchmark Exposure | Notes |
 |---|---------|------|-------|--------------------|-------|
-| 1 | LookRenderer – WASM-resident pre-tonemapped RGB16 + zero-copy render() for live sliders | ✅ | ❌ (only Rgb16State + one-shot apply_look_inner at ingest) | N/A (internal to lightbox worker) | Highest UX gap. See WASM src/lib.rs:946 |
+| 1 | LookRenderer – WASM-resident pre-tonemapped RGB16 + zero-copy render() for live sliders | ✅ | ✅ (B3: Rgb16State now has resident .render() + .new() mirroring WASM LookRenderer exactly — unsharp conditional, orientation fastpath, unified params from B1; apply_look delegates; full backward compat. Highest UX gap closed) | N/A (internal to Tauri lightbox) | WASM src/lib.rs:946 + B3 on finishing_feature_parity |
 | 2 | process_orf_with_flags + selective bitmask (full / lightbox / thumb) | ✅ (OUT_* consts, conditional paths) | ❌ (process_file always full materialization) | N/A | Batch JXL win; WASM src/lib.rs:613 |
 | 3 | parse_orf_metadata (TIFF/EXIF-only, zero pixel work) | ✅ | 🟡 (tiff::parse + exif used internally; no public metadata-only cmd) | N/A | Gallery preflight; WASM:1122 |
 | 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | 🟡 (bin/ and examples/ benches exist; no stable lib fn for runtime) | N/A (dev only) | WASM:1156 |
@@ -133,10 +133,10 @@ This matrix supersedes and consolidates:
 ## Summary of Remaining High-Impact Gaps (2026-06)
 
 **Raw / Interactive (highest user-visible on desktop):**
-- LookRenderer + render command + Rgb16State integration in Tauri (item 1) — in progress on finishing_feature_parity (B)
-- process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1 (unified helper + orient fixes) landed
-- True pause/resume of native Rust decode tasks (item 11)
-- JXTC + progressive/streaming encode on native (C) — C1 audit complete (native uses one-shot jpegxl-rs + escape hatch; JXTC is custom in WASM bridge only; progressive encode needs new paths in native.cc or casabio)
+- LookRenderer + render command + Rgb16State integration in Tauri (item 1) — B3 landed (resident .render() + .new() parity; apply_look now uses it)
+- process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1/B2 landed
+- True pause/resume of native Rust decode tasks (item 11) — still pending
+- JXTC + progressive/streaming encode on native (C) — C1 audit complete; pause before C2 per directive
 
 **JXL Encode/Progressive on Native:**
 - Progressive/streaming encode during RAW ingest (preview-first)

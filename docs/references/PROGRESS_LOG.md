@@ -639,6 +639,36 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 
 ---
 
+## B3: RAW Tauri LookRenderer parity — Rgb16State as full resident renderer (finishing_feature_parity)
+**Branch:** `finishing_feature_parity`
+**Status:** Complete
+
+**Scope (highest UX gap per matrix §1 item 1):** WASM has first-class `LookRenderer` (owns pre-tone RGB16, constructor from packed bytes + matrix, `render(wb_r, wb_b, ev, ... clarity)` with exact conditional unsharp + fast orient). Tauri had foundation (Rgb16State cache + apply_look) but no resident type/method parity. B3 delivers the direct analog while preserving 100% backward compat.
+
+**Changes:**
+- `raw-converter-tauri/src-tauri/src/pipeline.rs`:
+  - `impl Rgb16State { pub fn new(...) + pub fn render(&self, look: &LookOptions) -> RgbFrame }`
+  - `render()` matches WASM LookRenderer::render() exactly (params setup, wb override, color_matrix, shared apply_look_params from B1, texture/clarity clone-only unsharp, process, orientation with fastpath).
+  - `apply_look_inner` now thin delegate to `state.render(look)`.
+  - Existing `apply_look` command, caches, tests unchanged.
+- No raw-pipeline changes needed (B1 helpers + shared apply_orientation already sufficient).
+
+**Verification:**
+- Logic mirrors WASM 1:1 (unsharp conditional, fast orient=1, unified params applicator).
+- `apply_look` test still passes (exercises new path).
+- Full backward compat for all existing Tauri lightbox / slider callers.
+- Sibling repo commit for the Tauri pipeline change.
+
+**Docs:**
+- `FEATURE_PARITY_MATRIX.md`: item 1 now ✅ (strong parity); summary gaps section updated (B3 landed, pause before C2 noted).
+- This PROGRESS_LOG entry (full TEMPLATE + "pause before C2" explicit).
+
+**Pause note (per user):** B3 complete. **No C2 work started.** Next session can pick B4/B5 or C2 after this pause point.
+
+**Cleanup & Handoff:** Clean. B3 is the last B slice before any C2. All tracking updated. Sibling commit done in parallel.
+
+---
+
 ## M1 Rebuild + Validation Pass (Source-Complete Controls) — 2026-06
 **Branch:** `finishing_feature_parity`
 **Status:** Complete
