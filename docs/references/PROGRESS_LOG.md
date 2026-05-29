@@ -669,6 +669,16 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 
 ---
 
+**PAUSE POINT (B3 complete — before C2):**  
+All B1–B3 RAW Tauri parity work landed and pushed (unified params, downscales + thumb-from-lb, full resident LookRenderer parity).  
+Matrix item 1 (highest UX gap) now ✅.  
+C1 audit only — **zero C2/C3 code changes**.  
+Branch: finishing_feature_parity (up to date after B3 push).  
+Sibling raw-converter-tauri also has B3 committed on its master.  
+Ready for B4 (metadata-only + bench fns) or B5 (preemption) or C2 after explicit resume.
+
+---
+
 ## M1 Rebuild + Validation Pass (Source-Complete Controls) — 2026-06
 **Branch:** `finishing_feature_parity`
 **Status:** Complete
