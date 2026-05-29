@@ -181,7 +181,7 @@ export interface EncoderOptions {
   chunked: boolean;
   /** Container format and per-box options. */
   metadata?: MetadataOptions;
-  /** Additional custom metadata boxes to embed. Note: not yet implemented in native binding. */
+  /** Additional custom metadata boxes to embed. */
   customBoxes?: readonly MetadataBoxSpec[];
   /** Animation header options. */
   animation?: AnimationOptions;
