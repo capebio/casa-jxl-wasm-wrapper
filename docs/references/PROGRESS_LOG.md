@@ -815,6 +815,8 @@ Matrix RAW section now in very strong shape.
 **Zero C2/C3 code changes** — explicit pause maintained per user directive.  
 Branch: finishing_feature_parity ready for whatever comes next.
 
+**Handoff created:** See `docs/references/HANDOFF_NextSet_RAW_Tauri_Selective.md` for the detailed continuation guide on the remaining items in this bucket (2, 5, 9, 10). Includes file pointers, current code state, recommended order, and references to REFERENCE_INDEX.md + WASM patterns.
+
 ---
 
 ## Next-set after B4 (excl. B5/C2/C3): Selective processing + decode/process split progress (finishing_feature_parity)
