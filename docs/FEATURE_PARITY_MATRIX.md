@@ -29,7 +29,7 @@ This matrix supersedes and consolidates:
 | 2 | process_orf_with_flags + selective bitmask (full / lightbox / thumb) | ✅ (OUT_* consts, conditional paths) | ❌ (process_file always full materialization) | N/A | Batch JXL win; WASM src/lib.rs:613 |
 | 3 | parse_orf_metadata (TIFF/EXIF-only, zero pixel work) | ✅ | 🟡 (tiff::parse + exif used internally; no public metadata-only cmd) | N/A | Gallery preflight; WASM:1122 |
 | 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | 🟡 (bin/ and examples/ benches exist; no stable lib fn for runtime) | N/A (dev only) | WASM:1156 |
-| 5 | Thumb derived from pre-computed lightbox buffer (not 2nd full scan) | ✅ | ❌ (downscales always from full RGB8) | N/A | Memory win on 20 MP+; WASM impl |
+| 5 | Thumb derived from pre-computed lightbox buffer (not 2nd full scan) | ✅ | 🟡 (B2: now derives gallery thumb from lb16 buffer via shared downscale; avoids 2nd full downscale; full flags path next) | N/A | Memory win on 20 MP+; WASM + B2 on finishing_feature_parity |
 | 6 | Orientation==1 fast-path (move / zero-copy, no 60 MB traffic) | ✅ (explicit in process + apply_look) | 🟡 (shared apply_orientation does zero-copy move for 1; WASM call sites fixed for consistency in B1) | N/A | raw-pipeline/src/pipeline.rs:624 |
 | 7 | Unified apply_look_params helper (single 12× is_finite, no drift) | ✅ (private helper called from 3 paths) | ✅ (now delegates to shared raw_pipeline::pipeline::apply_look_params; B1 on finishing_feature_parity) | N/A | WASM:156 + raw-pipeline/src/pipeline.rs |
 | 8 | apply_look accepts native &[u16] (no LE byte unpack) | ✅ | N/A (no public apply_look; edits baked at process_file) | N/A | WASM:836 |

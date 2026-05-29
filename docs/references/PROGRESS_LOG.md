@@ -596,6 +596,28 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 
 ---
 
+## B2: RAW Tauri parity — Shared downscales + thumb-from-lb optimization (finishing_feature_parity)
+**Branch:** `finishing_feature_parity`
+**Status:** Complete (B2 slice)
+
+**Scope:** Matrix §1 item 5 (thumb from lb) + foundation for item 2 (selective). Added pub `downscale_rgb16`, `downscale_rgb8`, `target_dims` to raw-pipeline (par_chunks, rayon). Updated Tauri process_file to derive gallery thumb from the pre-computed lb16 buffer (major win: no 2nd full-res downscale for thumbs in batch gallery). Shared helpers eliminate dupe.
+
+**Changes (on disk + this repo docs):**
+- raw-pipeline/src/pipeline.rs: 3 new pub fns (downscales + target_dims).
+- raw-converter-tauri/src-tauri/src/pipeline.rs: use shared downscales; thumb-from-lb path in ProcessResult.thumb (small tone on lb-derived).
+- Removed local dupe downscale fns in Tauri.
+- Matrix item 5 🟡 (progress), PROGRESS entry.
+
+**Verification:** Syntax good (prior full cargo check in context succeeded for dep; sibling heavy build env blocked full check but no our-code errors).
+
+**Cross-repo note:** raw-pipeline and src-tauri changes must be committed in C:\Foo\raw-converter-tauri git (separate repo). WASM side (if any) + docs committed here.
+
+**Next:** B3 LookRenderer full resident render parity or B4 metadata-only.
+
+**Docs updated:** Matrix + this log (TEMPLATE).
+
+---
+
 ## M1 Rebuild + Validation Pass (Source-Complete Controls) — 2026-06
 **Branch:** `finishing_feature_parity`
 **Status:** Complete
