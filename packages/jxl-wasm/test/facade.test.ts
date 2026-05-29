@@ -1493,6 +1493,46 @@ describe("animation capability", () => {
   });
 });
 
+describe("animation decode metadata", () => {
+  afterEach(() => { setJxlModuleFactoryForTesting(null); });
+
+  test("facade.ts DecodeEvent final type has optional frameIndex/duration/frameName/isLastFrame", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+    expect(source).toContain("frameIndex?: number");
+    expect(source).toContain("frameDuration?: number");
+    expect(source).toContain("frameName?: string");
+    expect(source).toContain("isLastFrame?: boolean");
+  });
+
+  test("decoder reads frame metadata accessors after take_final", async () => {
+    const base = createFakeProgressiveLibjxlModule();
+    let callCount = 0;
+    const animDecModule = {
+      ...base,
+      _jxl_wasm_dec_frame_index:          (_s: number) => callCount++,
+      _jxl_wasm_dec_frame_duration:        (_s: number) => 250,
+      _jxl_wasm_dec_frame_name_ptr:        (_s: number) => 0,
+      _jxl_wasm_dec_is_last_frame:         (_s: number) => 1,
+      _jxl_wasm_dec_anim_ticks_per_second: (_s: number) => 1000,
+      _jxl_wasm_dec_anim_loop_count:       (_s: number) => 0,
+    };
+    setJxlModuleFactoryForTesting(async () => animDecModule as never);
+
+    const decoder = createDecoder({ ...decodeOptions });
+    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
+    decoder.close();
+
+    const events = [];
+    for await (const ev of decoder.events()) events.push(ev);
+
+    const finalEv = events.find((e) => e.type === "final");
+    expect(finalEv).toBeDefined();
+    expect((finalEv as { frameDuration?: number }).frameDuration).toBe(250);
+    expect((finalEv as { isLastFrame?: boolean }).isLastFrame).toBe(true);
+    await decoder.dispose();
+  });
+});
+
 // Fake module that exposes _jxl_wasm_encode_rgba8_with_metadata_v2 and captures call args.
 // readBoxOpts(ptr) reads WasmBoxOpts fields from the fake HEAPU8.
 function createFakeMetadataV2Module() {

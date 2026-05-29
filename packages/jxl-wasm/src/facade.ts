@@ -26,6 +26,18 @@ export type DecodeEvent =
       sourceScale?: number;
       progressiveRegion?: boolean;
       regionFallback?: "full-frame-then-crop";
+      /** Zero-based index of this frame in the animation sequence. */
+      frameIndex?: number;
+      /** Duration of this frame in ticks (see animTicksPerSecond). Undefined for non-animation files. */
+      frameDuration?: number;
+      /** Human-readable frame name embedded in the JXL bitstream, if any. */
+      frameName?: string;
+      /** True if this is the last frame of the animation. */
+      isLastFrame?: boolean;
+      /** Ticks per second for the animation (from JxlAnimationHeader). */
+      animTicksPerSecond?: number;
+      /** Total animation loop count (0 = infinite). */
+      animLoopCount?: number;
     }
   | {
       type: "final";
@@ -38,6 +50,18 @@ export type DecodeEvent =
       progressiveRegion?: boolean;
       regionFallback?: "full-frame-then-crop";
       gainMap?: { data: Uint8Array };
+      /** Zero-based index of this frame in the animation sequence. */
+      frameIndex?: number;
+      /** Duration of this frame in ticks (see animTicksPerSecond). Undefined for non-animation files. */
+      frameDuration?: number;
+      /** Human-readable frame name embedded in the JXL bitstream, if any. */
+      frameName?: string;
+      /** True if this is the last frame of the animation. */
+      isLastFrame?: boolean;
+      /** Ticks per second for the animation (from JxlAnimationHeader). */
+      animTicksPerSecond?: number;
+      /** Total animation loop count (0 = infinite). */
+      animLoopCount?: number;
     }
   | {
       type: "budget_exceeded";
@@ -1258,6 +1282,28 @@ class LibjxlDecoder implements JxlDecoder {
             };
             if (hasRegion) ev.regionFallback = "full-frame-then-crop";
             if (outPixels.region !== undefined) ev.region = outPixels.region;
+            if (module._jxl_wasm_dec_frame_duration) {
+              const frameIndex         = module._jxl_wasm_dec_frame_index?.(dec) ?? undefined;
+              const frameDuration      = module._jxl_wasm_dec_frame_duration(dec);
+              const isLastFrame        = (module._jxl_wasm_dec_is_last_frame?.(dec) ?? 0) !== 0;
+              const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(dec) ?? undefined;
+              const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(dec)       ?? undefined;
+              const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(dec) ?? 0;
+              let frameName: string | undefined;
+              if (namePtr !== 0) {
+                let end = namePtr;
+                while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
+                frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
+              }
+              Object.assign(ev, {
+                ...(frameIndex         !== undefined && { frameIndex }),
+                ...(frameDuration      !== undefined && { frameDuration }),
+                ...(frameName          !== undefined && { frameName }),
+                ...(isLastFrame        !== undefined && { isLastFrame }),
+                ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
+                ...(animLoopCount      !== undefined && { animLoopCount }),
+              });
+            }
             yield ev;
             if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
           }
@@ -1317,6 +1363,28 @@ class LibjxlDecoder implements JxlDecoder {
             };
             if (hasRegion) ev.regionFallback = "full-frame-then-crop";
             if (outPixels.region !== undefined) ev.region = outPixels.region;
+            if (module._jxl_wasm_dec_frame_duration) {
+              const frameIndex         = module._jxl_wasm_dec_frame_index?.(dec) ?? undefined;
+              const frameDuration      = module._jxl_wasm_dec_frame_duration(dec);
+              const isLastFrame        = (module._jxl_wasm_dec_is_last_frame?.(dec) ?? 0) !== 0;
+              const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(dec) ?? undefined;
+              const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(dec)       ?? undefined;
+              const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(dec) ?? 0;
+              let frameName: string | undefined;
+              if (namePtr !== 0) {
+                let end = namePtr;
+                while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
+                frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
+              }
+              Object.assign(ev, {
+                ...(frameIndex         !== undefined && { frameIndex }),
+                ...(frameDuration      !== undefined && { frameDuration }),
+                ...(frameName          !== undefined && { frameName }),
+                ...(isLastFrame        !== undefined && { isLastFrame }),
+                ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
+                ...(animLoopCount      !== undefined && { animLoopCount }),
+              });
+            }
             yield ev;
             if (this.options.progressionTarget !== "final") return;
           }
@@ -1345,6 +1413,29 @@ class LibjxlDecoder implements JxlDecoder {
                 module._jxl_wasm_buffer_free(gmHandle);
               }
             }
+          }
+          // Populate animation per-frame metadata when bridge accessors are present.
+          if (module._jxl_wasm_dec_frame_duration) {
+            const frameIndex         = module._jxl_wasm_dec_frame_index?.(dec) ?? undefined;
+            const frameDuration      = module._jxl_wasm_dec_frame_duration(dec);
+            const isLastFrame        = (module._jxl_wasm_dec_is_last_frame?.(dec) ?? 0) !== 0;
+            const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(dec) ?? undefined;
+            const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(dec)       ?? undefined;
+            const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(dec) ?? 0;
+            let frameName: string | undefined;
+            if (namePtr !== 0) {
+              let end = namePtr;
+              while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
+              frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
+            }
+            Object.assign(ev, {
+              ...(frameIndex         !== undefined && { frameIndex }),
+              ...(frameDuration      !== undefined && { frameDuration }),
+              ...(frameName          !== undefined && { frameName }),
+              ...(isLastFrame        !== undefined && { isLastFrame }),
+              ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
+              ...(animLoopCount      !== undefined && { animLoopCount }),
+            });
           }
           yield ev;
         }
