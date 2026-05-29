@@ -36,13 +36,13 @@ Each note follows the process described in `FEATURE_IMPLEMENTATION_TEMPLATE.md` 
 | Note | File | Related INDEX Section | Key Focus | Status |
 |------|------|-----------------------|-----------|--------|
 | Extra Channel Distance (Basic) | `extra-channel-distance.md` | 4. Extra Channels | `alphaDistance` + minimal `extraChannels[]` declaration + per-channel distance | Design complete (Phase 1) |
-| Full Extra Channel Infrastructure | `extra-channel-infrastructure.md` | 4. Extra Channels | Complete `ExtraChannelType` enum, names, spot colors, dimShift, bit depths, decoder symmetry | Design complete (Phase 2) |
+| Full Extra Channel Infrastructure | `extra-channel-infrastructure.md` | 4. Extra Channels | Complete `ExtraChannelType` enum, names, spot colors, dimShift, bit depths, decoder symmetry | Implemented in commit <see PROGRESS_LOG + final handoff for SHA> (Phase 2 complete; all checklist items done) |
 
 ### Animation & Multi-Frame
 
 | Note | File | Related INDEX Section | Key Focus | Status |
 |------|------|-----------------------|-----------|--------|
-| Animation / Multi-Frame | `animation-multi-frame.md` | 8. Animation / Multi-Frame | Timing, loopCount, per-frame duration/names, progressive-per-frame decode | Design complete |
+| Animation / Multi-Frame | `animation-multi-frame.md` | 8. Animation / Multi-Frame | Timing, loopCount, per-frame duration/names, progressive-per-frame decode | Implemented on branch `epiccodereview/20260527T054853` (source-only; WASM + native rebuild pending — see ISSUES.md §9) |
 
 ### Metadata, Container & Boxes
 

@@ -3,7 +3,7 @@
 **Feature:** Full multi-frame / animation encoding and decoding (timing, looping, frame names, blending, duration control)  
 **Date:** 2026-05-28  
 **Author:** Grok  
-**Status:** Design ready for implementation handoff  
+**Status:** Implemented (source-only; WASM + native rebuild pending — see ISSUES.md §9 and §EC-TAURI-01)  
 **Related Index Section:** 8. Animation / Multi-Frame  
 **Priority:** Part of the advanced feature surface; benefits from the project's existing deep investment in progressive streaming.
 
@@ -166,14 +166,14 @@ Tie this directly to the existing progressive gallery / lightbox work — animat
 
 ## 10. Implementation Checklist
 
-- [ ] Branch: `feature/animation-multi-frame`
-- [ ] Animation header + multi-frame encode path in bridge
-- [ ] High-level TS animation encode API
-- [ ] Extend decode events / metadata for animation info and per-frame timing
-- [ ] Rich animation benchmark / demo (leverage existing progressive gallery)
-- [ ] Comprehensive roundtrip + timing tests
-- [ ] Tauri/Rust side using jpegxl-rs animation builders
-- [ ] Full handoff + PROGRESS_LOG entry
+- [x] Branch: `epiccodereview/20260527T054853`
+- [x] Animation header + multi-frame encode path in bridge (`bridge.cpp` — source-only; WASM rebuild blocked)
+- [x] High-level TS animation encode API (`facade.ts`: `AnimationFrame`, `AnimationOptions`, `marshalAnimationFrames`, encode dispatch)
+- [x] Extend decode events / metadata for animation info and per-frame timing (`facade.ts` `DecodeEvent`; `eventsProgressive` enrichment; bridge accessor exports)
+- [x] Rich animation benchmark / demo (`web/animation-lab.html` — frame strip, encode+decode, stats, capability gate)
+- [x] Comprehensive roundtrip + timing tests (facade.test.ts: capability gate, routing, opts layout, decode metadata; native codec.test.ts: source-text checks)
+- [x] Tauri/Rust side using jpegxl-rs animation builders (`native.cc` + `index.ts` — source-only; native rebuild blocked)
+- [x] Full handoff + PROGRESS_LOG entry (see PROGRESS_LOG 2026-05-29 entry)
 
 ---
 

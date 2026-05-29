@@ -407,3 +407,58 @@ Observed: passing `alphaDistance: 0` through the Tauri encode path has no effect
 - Prerequisite: node-gyp must be resolvable (see Issue 4 above).
 
 **Sufficient Context Summary:** The WASM extra-channel path is complete; the Tauri native path (`packages/jxl-native/src/native.cc`) still ignores `alphaDistance` and `extraChannels`. Port the three-step libjxl pattern from `EncodeRgbaWithExtraChannels` in `bridge.cpp` to `CreateEncoder` in `native.cc`, parse the JS fields via Napi instead of the binary WASM struct, add type-string-to-enum mapping, and add a smoke test.
+
+---
+
+## 9. Rebuild WASM + Native Artifacts for Animation Feature (2026-05-29)
+
+**Status:** blocked (Docker/Emscripten unavailable; node-gyp unresolvable — same environment as Issues 1/3 and 4)
+
+**Why this matters:**
+- `packages/jxl-wasm/src/bridge.cpp` and `packages/jxl-native/src/native.cc` were extended with full animation encode/decode support on branch `epiccodereview/20260527T054853` (see PROGRESS_LOG 2026-05-29 animation entry).
+- The generated `dist/*.wasm`, `dist/facade.js`, and native `.node` binary still reflect the pre-animation state.
+- Until rebuilt, `getWrapperCapabilities().animationEncode` will return `false` in the browser, and the `web/animation-lab.html` encode path will fall through gracefully but will not actually encode.
+- TypeScript typechecks (`npx tsc --noEmit`) pass. Functional validation of the C++ encode path requires a live WASM binary.
+
+**Reproduction:**
+```powershell
+# WASM rebuild blocked — Docker daemon not reachable:
+pnpm --filter @casabio/jxl-wasm build
+# Expected: permission denied while trying to connect to docker API
+# (same as Issues 1/3)
+
+# Native rebuild blocked — node-gyp missing:
+npm --workspace packages/jxl-native run build
+# Expected: Cannot find module '.../node-gyp/bin/node-gyp.js'
+# (same as Issue 4)
+```
+
+**New symbols added (must appear in rebuilt artifacts):**
+- WASM exports (7): `_jxl_wasm_encode_animation`, `_jxl_wasm_dec_frame_index`, `_jxl_wasm_dec_frame_duration`, `_jxl_wasm_dec_frame_name_ptr`, `_jxl_wasm_dec_is_last_frame`, `_jxl_wasm_dec_anim_ticks_per_second`, `_jxl_wasm_dec_anim_loop_count`
+- Native N-API: animation header parsing in `CreateEncoder`; `JXL_DEC_FRAME` handler + frame metadata in `DecodeAll`
+
+**Affected files / packages:**
+- `packages/jxl-wasm/src/bridge.cpp` — `WasmAnimationFrame`, `WasmAnimationOpts`, `EncodeAnimation()`, `jxl_wasm_encode_animation`, 6 decoder accessor exports, `JxlWasmDecState` animation fields, `JXL_DEC_FRAME` handler
+- `packages/jxl-wasm/exports.txt` — 7 new animation symbols appended
+- `packages/jxl-wasm/src/facade.ts` — capability gate `animationEncode`, `marshalAnimationFrames`, encode dispatch, `eventsProgressive` enrichment
+- `packages/jxl-native/src/native.cc` — `EncoderData` animation fields, `CreateEncoder` animation parsing, `DecodeAll` frame metadata
+- `packages/jxl-native/src/index.ts` — `AnimationFrame`, `AnimationOptions`, extended `EncoderOptions` and `DecodeEvent`
+- `web/animation-lab.html` — benchmark page (capability banner shown until rebuild)
+
+**Follow-up:**
+1. Start Docker Desktop/Linux engine (same prerequisite as Issues 1/3).
+2. Run `pnpm --filter @casabio/jxl-wasm build` from repo root.
+3. Verify the 7 animation symbols appear in the regenerated `dist/` artifacts.
+4. Open `web/animation-lab.html` in a browser; confirm capability banner disappears and "Encode Animation" produces a file > 0 bytes.
+5. Check `getWrapperCapabilities().animationEncode === true` in browser console.
+6. Restore node-gyp for native package (see Issue 4), rebuild, run `bun test packages/jxl-native/test/codec.test.ts`.
+
+**Agent Jump-In Checklist:**
+- Read (in order): `docs/references/PROGRESS_LOG.md` (2026-05-29 animation entry), `packages/jxl-wasm/src/bridge.cpp` (`EncodeAnimation` function + `JXL_DEC_FRAME` handler block + 6 accessor exports at bottom), `packages/jxl-wasm/exports.txt` (last 7 lines), `web/animation-lab.html` (capability banner logic).
+- Run first: `npx tsc --noEmit` from `packages/jxl-wasm` — must pass (TypeScript clean baseline confirmed on 2026-05-29).
+- Success criteria = all 7 new symbols in WASM binary + `animation-lab.html` encodes a multi-frame file + `animationEncode` capability true + decode events include `frameIndex`/`frameDuration` fields.
+- Gotcha: `_jxl_wasm_encode_animation` takes 19 uint32 args — verify the Emscripten call stub matches exactly (count args in `bridge.cpp` export signature).
+- Gotcha: `eventsOneShot` does NOT get animation enrichment (uses buffer handle not decoder state handle) — do not add it there.
+- Prerequisite: Docker/Emscripten (WASM rebuild) and node-gyp (native rebuild) must be available. See Issues 1/3 and Issue 4 for environment setup.
+
+**Sufficient Context Summary:** Animation encode/decode was fully implemented in source on 2026-05-29 (7 new WASM exports, N-API native path, TypeScript types, benchmark page). The WASM binary and native addon must be rebuilt to activate the feature at runtime. The rebuild is blocked by the same Docker/node-gyp environment constraints documented in Issues 1/3 and Issue 4. Once unblocked, follow the 6-step verification sequence above.

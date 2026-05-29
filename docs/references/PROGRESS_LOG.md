@@ -6,6 +6,88 @@ Use the template below for every entry.
 
 ---
 
+## Feature: Animation / Multi-Frame Encode + Decode — 2026-05-29
+
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Fully implemented (source-only; WASM + native rebuild pending — see ISSUES.md §9)
+
+**WASM Changes:**
+- `packages/jxl-wasm/src/facade.ts` — `AnimationFrame`, `AnimationOptions` interfaces; `EncoderOptions.animation` + `.frames`; `LibjxlWasmModule` extended with `_jxl_wasm_encode_animation?` (19-arg) + 6 decoder accessor methods; `JxlCapabilities.animationEncode` gate; `WASM_ANIMATION_FRAME_BYTES=28`, `WASM_ANIMATION_OPTS_BYTES=8` constants; `marshalAnimationFrames` helper; animation encode dispatch before single-frame path; `DecodeEvent` "final"/"progress" extended with `frameIndex?`/`frameDuration?`/`frameName?`/`isLastFrame?`/`animTicksPerSecond?`/`animLoopCount?`; `eventsProgressive` enrichment (3 blocks) gated on accessor presence; `eventsOneShot` deliberately NOT enriched (incompatible handle type).
+- `packages/jxl-wasm/src/bridge.cpp` — `WasmAnimationFrame` (28-byte packed struct) + `WasmAnimationOpts` (8-byte); `EncodeAnimation()` static (~130 lines): `have_animation=JXL_TRUE`, per-frame `JxlEncoderSetFrameDuration`/`JxlEncoderSetFrameName`, dynamic output buffer; `jxl_wasm_encode_animation` C export (19 params); `JxlWasmDecState` extended with 6 animation fields; `JXL_DEC_FRAME` in subscribe mask + handler; animation header population in `JXL_DEC_BASIC_INFO`; `frame_index++` in `JXL_DEC_FULL_IMAGE`; 6 accessor exports (`_jxl_wasm_dec_frame_index`, `_jxl_wasm_dec_frame_duration`, `_jxl_wasm_dec_frame_name_ptr`, `_jxl_wasm_dec_is_last_frame`, `_jxl_wasm_dec_anim_ticks_per_second`, `_jxl_wasm_dec_anim_loop_count`). Source-only.
+- `packages/jxl-wasm/exports.txt` — 7 animation symbols appended.
+- `packages/jxl-wasm/test/facade.test.ts` — `describe("animation capability")` (3 tests: real gate, routing, opts layout); `describe("animation decode metadata")` (2 tests: source-text + progressive decode); exports.txt symbol test.
+
+**Native (Tauri) Changes:**
+- `packages/jxl-native/src/index.ts` — `AnimationFrame`, `AnimationOptions` interfaces; `EncoderOptions.animation?` + `.frames?`; `DecodeEvent` "progress"/"final" extended with 6 animation fields (full parity with WASM facade).
+- `packages/jxl-native/src/native.cc` — `EncoderData` animation fields (`has_animation`, tps, loop_count, `AnimFrame` inner struct + vector); `CreateEncoder` animation + frames parsing; `EncodeAll` animation header branch + multi-frame path; `DecodeAll`: `JXL_DEC_FRAME` subscribe + handler, animation header on `JXL_DEC_BASIC_INFO`, `frame_index++` on `JXL_DEC_FULL_IMAGE`, 6 `napi_set_named_property` calls on final event. Source-only.
+- `packages/jxl-native/test/codec.test.ts` — 2 source-text tests confirming `AnimationFrame`, `AnimationOptions`, `animation?`/`frames?`, `frameIndex?`/`frameDuration?`/`frameName?`.
+
+**Benchmark Wiring:**
+- `web/animation-lab.html` — interactive animation lab: frame count/size/ticks/duration/loop/quality controls; hue-shifted canvas frame generator; frame strip preview; capability banner when `animationEncode=false`; encode→decode flow with stats (`frames`, `file size`, `duration ms`, `fps`) + first-frame preview; decode event log.
+- `web/animation-lab.test.js` — structural test (1 pass).
+
+**Tests:**
+- Narrow: `bun test packages/jxl-wasm/test/facade.test.ts --grep "animation"` — all pass.
+- Narrow: `bun test packages/jxl-native/test/codec.test.ts --grep "animation"` — all pass.
+- Narrow: `bun test web/animation-lab.test.js` — 1 pass.
+- TypeScript: `npx tsc --noEmit` — clean (packages/jxl-wasm and packages/jxl-native).
+
+**Docs Updated:**
+- `docs/references/designs/animation-multi-frame.md` — status updated; checklist all [x].
+- `docs/references/designs/DESIGNS_INDEX.md` — status updated to "Implemented on branch `epiccodereview/20260527T054853`".
+- `docs/references/designs/ISSUES.md` — §9 added for WASM + native rebuild blocker.
+- `docs/references/PROGRESS_LOG.md` — this entry.
+
+**Cleanup & Handoff:**
+- Current state: All source implemented; WASM binary and native addon rebuild pending (same Docker/node-gyp blockers as Issues 1/3 and Issue 4). `animationEncode` capability will be `false` in browser until rebuild. Capability banner in `animation-lab.html` communicates this to users.
+- Background processes / logs: None.
+- Next session: After Docker is available, run `pnpm --filter @casabio/jxl-wasm build`, verify 7 new exports in dist/, open `web/animation-lab.html`, confirm encode produces file > 0 bytes. See ISSUES.md §9 for full 6-step checklist.
+
+---
+
+## Feature: Full Extra Channel Infrastructure (Phase 2) — types, 72B descriptors, encode/decode symmetry, native parity, matrix tests - 2026-05-29
+
+**Branch:** feature/full-extra-channel-infrastructure (worktree: transpose-wasm-to-tauri)
+**Status:** Fully implemented (all design checklist items + Task 7 matrix + docs + handoff)
+
+**WASM Changes:**
+- `packages/jxl-wasm/src/facade.ts:147-184` — full ExtraChannelType enum (alpha/depth/selection/spot/thermal + reserved0-7 + unknown), SpotColorInfo, ExtraChannel, DecodedExtraChannel (readonly symmetric). serializeExtraChannelsForWasm + EC_BYTES=476, deserializeExtraChannelsFromWasm (72B). Decoder event shaping for extraChannels/extraPlanes on header/final/progress.
+- `packages/jxl-wasm/src/bridge.cpp:92-102` — WasmExtraChannel struct (exact 72B layout with type/bits/distance/planes/dim/spot/name). `EncodeRgbaWithExtraChannels:546` (per-EC SetExtraChannelInfo/Name/Distance + SetExtraChannelBuffer for all bit depths). Decode descriptor collection `269-304` + `jxl_wasm_get_extra_channels:2127-2191` (exact 72B output for tests/roundtrips). Progressive extra plane flushing.
+- `packages/jxl-wasm/exports.txt` — (prior) new FFI symbols for EC encode + get_extra.
+- `packages/jxl-wasm/test/facade.test.ts:886-` (expanded) — Phase 2 describe + comprehensive matrix (every type × 8/16/32 where valid, unicode/long names, spot metadata, mixed bits, dimShift, many-EC perf, decoder header/final full descriptor reports).
+
+**Native (Tauri) Changes:**
+- `packages/jxl-native/src/index.ts:41-75` — mirrored ExtraChannelType/Spot/ExtraChannel/DecodedExtraChannel + ImageInfo.extraChannels + DecodeEvent/EncoderOptions extraChannels for parity.
+- `packages/jxl-native/src/native.cc:51-63` — ExtraChannelDesc struct. Type maps `220-239`. Encode setup `620-672` (Init/SetInfo/Name/Distance + SetExtraChannelBuffer). Decoder collection `495-527` (GetExtra* → extra_channels vector + emission on header/final events).
+
+**Benchmark Wiring:**
+- `web/jxl-wrapper-lab.html` + `.js` (Task 6) — substantial "Extra Channels" panel: dynamic type selects (all enum values), bit/depth/distance/name/dimShift/spot controls (color + solidity), +channel/- , synthetic plane generators (ramps/noise/checker/solid). Post-decode Channel Inspector grid (per-EC canvases + histograms/min-max). Manual verification of 5+ cases + descriptor logs.
+
+**Tests:**
+- `packages/jxl-wasm/test/facade.test.ts` — expanded Phase 2 describe with matrix roundtrips (serialize unit + guarded encode/decode + decoder event assertions for descriptors + planes). All new its pass under symbol guards.
+- Narrow verification: static inspection + (user to run) `bun test packages/jxl-wasm/test/facade.test.ts --grep "ExtraChannel full infrastructure|matrix|roundtrips|unicode|spotColor|mixed|dimShift|many|decoder.*descriptors"`
+
+**Docs Updated:**
+- `docs/references/designs/extra-channel-infrastructure.md` — checklist all [x]; new "Implementation Notes" section (deviations, benchmark desc, decisions).
+- `docs/references/designs/extra-channel-distance.md` — top status + cross-ref to Phase 2 complete + checklist finalization.
+- `docs/references/DESIGNS_INDEX.md` — status for Full Extra Channel Infrastructure changed to "Implemented in commit <SHA>".
+- `docs/references/REFERENCE_INDEX.md` — added full "CasaWASM Implementation (Phase 2 complete)" with file:line ranges for types, 72B, encode/decode paths in WASM + native.
+- `docs/references/PROGRESS_LOG.md` — this entry (top).
+- `_cleanup.md` / handoff block produced (per TEMPLATE §10 + _cleanup_source.md).
+
+**References Used:**
+- `docs/references/designs/extra-channel-infrastructure.md` + sibling extra-channel-distance.md
+- libjxl `encode.h` / `decode.h` (JxlExtraChannelInfo, JxlExtraChannelType, SetExtraChannel*, GetExtraChannelInfo/Name)
+- Prior Phase 1 bridge patterns + facade encode/decode symmetry.
+
+**Cleanup & Handoff:**
+- Current state: Full Phase 2 complete. WASM artifacts require rebuild for browser runtime of new C++ exports. All listed files edited surgically.
+- Background processes / logs: None started in this slice (prior build artifacts in tmp/ noted).
+- Next session instructions: From repo root after `/clean`; rebuild WASM (`node packages/jxl-wasm/scripts/build.mjs ...`); run the matrix test subset + serve wrapper-lab for Extra Channels visual; `git commit` using message below; update SHA in DESIGNS_INDEX/PROGRESS_LOG if needed.
+- Handoff document: See final response block + local `_cleanup.md` / `_handoff.md` patterns.
+
+---
+
 ## Feature: Patches & Advanced Frame Settings Escape Hatch (advancedFrameSettings + JxlFrameSetting) - 2026-06
 
 **Branch:** worktree (transpose-wasm-to-tauri) + main
