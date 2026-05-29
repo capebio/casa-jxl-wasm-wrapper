@@ -128,7 +128,7 @@ export interface EncoderOptions {
   /** Animation header options. */
   animation?: AnimationOptions;
   /** Frame data for animation encode. When present, replaces single-image pushPixels. */
-  frames?: AnimationFrame[];
+  frames?: readonly AnimationFrame[];
 }
 
 export interface NativeDecoder {

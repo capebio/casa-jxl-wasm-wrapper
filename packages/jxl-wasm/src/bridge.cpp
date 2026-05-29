@@ -2124,7 +2124,8 @@ JxlWasmBuffer* jxl_wasm_dec_take_gain_map(JxlWasmDecState* s) {
 
 uint32_t jxl_wasm_dec_frame_index(uint32_t state_ptr) {
   const JxlWasmDecState* s = reinterpret_cast<const JxlWasmDecState*>(static_cast<uintptr_t>(state_ptr));
-  return s ? s->frame_index : 0u;
+  // frame_index is incremented on JXL_DEC_FULL_IMAGE (post-completion); subtract 1 for zero-based result.
+  return s && s->frame_index > 0u ? s->frame_index - 1u : 0u;
 }
 
 uint32_t jxl_wasm_dec_frame_duration(uint32_t state_ptr) {
