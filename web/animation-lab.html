@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>JXL Animation Lab</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-wasm": "./pkg/jxl-wasm.js"
+      }
+    }
+  </script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 1rem; }
+    h1 { font-size: 1.4rem; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.875rem; }
+    input, select { padding: 0.3rem; border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: 0.5rem 1rem; background: #0070f3; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+    button:hover { background: #005cc5; }
+    .frames-section { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    .output-section { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stat-card { background: #f5f5f5; border-radius: 6px; padding: 0.75rem; min-width: 140px; }
+    .stat-card .label { font-size: 0.75rem; color: #666; }
+    .stat-card .value { font-size: 1.25rem; font-weight: bold; }
+    canvas#preview { border: 1px solid #ccc; image-rendering: pixelated; display: block; margin-top: 1rem; }
+    .info-banner { background: #fff8e1; border-left: 4px solid #f0b429; padding: 0.75rem; border-radius: 4px; font-size: 0.85rem; margin-bottom: 1rem; }
+    .error { color: #c00; font-size: 0.875rem; }
+    #frame-anim-strip { display: flex; gap: 2px; flex-wrap: wrap; margin-top: 0.5rem; }
+    #frame-anim-strip canvas { border: 1px solid #aaa; image-rendering: pixelated; }
+  </style>
+</head>
+<body>
+  <h1 id="animation-lab">JXL Animation Lab</h1>
+
+  <div class="info-banner" id="capability-banner" style="display:none">
+    ⚠️ Animation encode requires a rebuilt WASM binary (see ISSUES.md §9). Controls shown for preview.
+  </div>
+
+  <div class="controls">
+    <label>
+      Frame count
+      <input type="number" id="frameCount" min="1" max="30" value="8" />
+    </label>
+    <label>
+      Frame size (px)
+      <input type="number" id="frameSize" min="16" max="256" value="64" />
+    </label>
+    <label>
+      Ticks per second
+      <input type="number" id="ticksPerSecond" min="1" max="10000" value="1000" />
+    </label>
+    <label>
+      Frame duration (ticks)
+      <input type="number" id="frameDuration" min="1" max="10000" value="100" />
+    </label>
+    <label>
+      Loop count (0 = infinite)
+      <input type="number" id="loopCount" min="0" max="100" value="0" />
+    </label>
+    <label>
+      Quality
+      <input type="number" id="quality" min="1" max="100" value="90" />
+    </label>
+  </div>
+
+  <div class="frames-section">
+    <strong>Preview frames</strong>
+    <div id="frame-anim-strip"></div>
+  </div>
+
+  <button id="encodeAnimation">Encode Animation</button>
+  <span id="encode-status" style="margin-left:0.75rem;font-size:0.875rem;"></span>
+  <div id="error-msg" class="error"></div>
+
+  <div class="output-section" id="output-section" style="display:none">
+    <div class="stat-card">
+      <div class="label">Frames</div>
+      <div class="value" id="stat-frames">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">File size</div>
+      <div class="value" id="stat-size">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Duration (ms)</div>
+      <div class="value" id="stat-duration">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">FPS</div>
+      <div class="value" id="stat-fps">—</div>
+    </div>
+  </div>
+
+  <canvas id="preview" style="display:none"></canvas>
+  <div id="decode-events" style="font-size:0.75rem; margin-top:0.5rem;"></div>
+
+  <script type="module">
+    import { createEncoder, createDecoder, getWrapperCapabilities } from "@casabio/jxl-wasm";
+
+    function el(id) { return document.getElementById(id); }
+
+    function generateFrame(index, total, size) {
+      const canvas = document.createElement("canvas");
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const hue = Math.round((index / total) * 360);
+      ctx.fillStyle = `hsl(${hue}, 80%, 55%)`;
+      ctx.fillRect(0, 0, size, size);
+      ctx.fillStyle = "#fff";
+      ctx.font = `bold ${Math.max(10, size / 4)}px monospace`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(index + 1), size / 2, size / 2);
+      const imageData = ctx.getImageData(0, 0, size, size);
+      return new Uint8Array(imageData.data.buffer);
+    }
+
+    function renderFrameStrip(count, size) {
+      const strip = el("frame-anim-strip");
+      strip.innerHTML = "";
+      for (let i = 0; i < count; i++) {
+        const c = document.createElement("canvas");
+        c.width = size; c.height = size;
+        c.style.width = "48px"; c.style.height = "48px";
+        const ctx = c.getContext("2d");
+        const rgba = generateFrame(i, count, size);
+        const id = new ImageData(new Uint8ClampedArray(rgba.buffer), size, size);
+        ctx.putImageData(id, 0, 0);
+        strip.appendChild(c);
+      }
+    }
+
+    renderFrameStrip(Number(el("frameCount").value), Number(el("frameSize").value));
+    el("frameCount").addEventListener("input", () =>
+      renderFrameStrip(Number(el("frameCount").value), Number(el("frameSize").value)));
+    el("frameSize").addEventListener("input", () =>
+      renderFrameStrip(Number(el("frameCount").value), Number(el("frameSize").value)));
+
+    const caps = getWrapperCapabilities();
+    if (!caps.animationEncode) {
+      el("capability-banner").style.display = "block";
+    }
+
+    el("encodeAnimation").addEventListener("click", async () => {
+      el("error-msg").textContent = "";
+      el("encode-status").textContent = "Encoding…";
+      el("output-section").style.display = "none";
+
+      const frameCount     = Number(el("frameCount").value);
+      const frameSize      = Number(el("frameSize").value);
+      const ticksPerSecond = Number(el("ticksPerSecond").value);
+      const frameDuration  = Number(el("frameDuration").value);
+      const loopCount      = Number(el("loopCount").value);
+      const quality        = Number(el("quality").value);
+
+      try {
+        const frames = Array.from({ length: frameCount }, (_, i) => ({
+          data:     generateFrame(i, frameCount, frameSize),
+          width:    frameSize,
+          height:   frameSize,
+          duration: frameDuration,
+          name:     `frame-${i + 1}`,
+        }));
+
+        const t0 = performance.now();
+        const encoder = createEncoder({
+          format:   "rgba8",
+          width:    frameSize,
+          height:   frameSize,
+          hasAlpha: false,
+          iccProfile: null, exif: null, xmp: null,
+          distance: null, quality,
+          effort: 5, progressive: false, previewFirst: false, chunked: false,
+          animation: { ticksPerSecond, loopCount },
+          frames,
+        });
+        encoder.finish();
+
+        const chunks = [];
+        for await (const chunk of encoder.chunks()) chunks.push(chunk);
+        const elapsed = performance.now() - t0;
+        await encoder.dispose();
+
+        const totalBytes = chunks.reduce((s, c) => s + c.byteLength, 0);
+        const totalMs    = (frameCount * frameDuration / ticksPerSecond) * 1000;
+        const fps        = ticksPerSecond / frameDuration;
+
+        el("stat-frames").textContent   = String(frameCount);
+        el("stat-size").textContent     = (totalBytes / 1024).toFixed(1) + " KB";
+        el("stat-duration").textContent = totalMs.toFixed(0);
+        el("stat-fps").textContent      = fps.toFixed(1);
+        el("output-section").style.display = "flex";
+        el("encode-status").textContent = `Done in ${elapsed.toFixed(0)} ms`;
+
+        const combined = new Uint8Array(totalBytes);
+        let off = 0;
+        for (const c of chunks) {
+          const v = c instanceof ArrayBuffer ? new Uint8Array(c) : c;
+          combined.set(v, off); off += v.byteLength;
+        }
+
+        const decoder = createDecoder({
+          format: "rgba8", region: null, downsample: 1,
+          progressionTarget: "final", emitEveryPass: false,
+          preserveIcc: false, preserveMetadata: false,
+        });
+        decoder.push(combined);
+        decoder.close();
+
+        const eventsLog = [];
+        let firstFrame = null;
+        for await (const ev of decoder.events()) {
+          eventsLog.push(
+            `${ev.type}` +
+            (ev.frameIndex != null ? ` [frame ${ev.frameIndex}]` : "") +
+            (ev.frameDuration != null ? ` dur=${ev.frameDuration}` : "") +
+            (ev.frameName ? ` name="${ev.frameName}"` : "")
+          );
+          if (ev.type === "final" && firstFrame === null) firstFrame = ev;
+        }
+        await decoder.dispose();
+
+        el("decode-events").innerHTML =
+          "<strong>Decode events:</strong><br>" +
+          eventsLog.map(e => `<code>${e}</code>`).join("<br>");
+
+        if (firstFrame && firstFrame.type === "final") {
+          const pv = el("preview");
+          pv.width = firstFrame.info.width;
+          pv.height = firstFrame.info.height;
+          pv.style.display = "block";
+          const ctx = pv.getContext("2d");
+          const px = firstFrame.pixels instanceof ArrayBuffer
+            ? new Uint8ClampedArray(firstFrame.pixels)
+            : new Uint8ClampedArray(firstFrame.pixels.buffer, firstFrame.pixels.byteOffset, firstFrame.pixels.byteLength);
+          ctx.putImageData(new ImageData(px, firstFrame.info.width, firstFrame.info.height), 0, 0);
+        }
+      } catch (err) {
+        el("error-msg").textContent = String(err);
+        el("encode-status").textContent = "";
+      }
+    });
+  </script>
+</body>
+</html>
