@@ -104,6 +104,14 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(native).toContain("JXL_ENC_FRAME_SETTING_PHOTON_NOISE");
   });
 
+  test("bridge and native encoders set the libjxl brotli effort frame option", () => {
+    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
+    const native = readFileSync(new URL("../../jxl-native/src/native.cc", import.meta.url), "utf8");
+
+    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_BROTLI_EFFORT");
+    expect(native).toContain("JXL_ENC_FRAME_SETTING_BROTLI_EFFORT");
+  });
+
   test("chunks waits for in-flight streaming pixel pushes", async () => {
     setJxlModuleFactoryForTesting(async () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -1010,6 +1018,85 @@ describe("extra channel encode", () => {
   });
 });
 
+describe("brotliEffort encoder option", () => {
+  afterEach(() => {
+    setJxlModuleFactoryForTesting(null);
+  });
+
+  function makeModuleCapturingXArgs() {
+    const base = createFakeLibjxlModule();
+    const calls: number[][] = [];
+    const module = {
+      ...base,
+      _jxl_wasm_encode_rgba8_x: (...args: number[]) => {
+        calls.push(args);
+        return base._jxl_wasm_encode_rgba8(args[0], args[1], args[2], args[3], args[4]);
+      },
+    };
+    return { module, calls };
+  }
+
+  test("brotliEffort:5 forwards as index 11 to _x bridge", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: 5 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![11]).toBe(5);
+    await encoder.dispose();
+  });
+
+  test("brotliEffort omitted resolves to -1 (libjxl default)", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![11]).toBe(-1);
+    await encoder.dispose();
+  });
+
+  test("brotliEffort:0 resolves to 0 (minimum effort)", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: 0 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![11]).toBe(0);
+    await encoder.dispose();
+  });
+
+  test("brotliEffort:12 clamps to 11", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: 12 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![11]).toBe(11);
+    await encoder.dispose();
+  });
+
+  test("brotliEffort:-2 clamps to -1 (uses libjxl default)", async () => {
+    const { module, calls } = makeModuleCapturingXArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: -2 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![11]).toBe(-1);
+    await encoder.dispose();
+  });
+});
+
 function createFakeGainMapModule() {
   const base = createFakeLibjxlModule();
   const gainMapCalls: number[][] = [];
@@ -1333,6 +1420,17 @@ async function loadPreferredLibjxlModule() {
   return createFakeLibjxlModule();
 }
 
+
+describe("animation capability", () => {
+  afterEach(() => { setJxlModuleFactoryForTesting(null); });
+
+  test("animationEncode capability is false when bridge absent", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+    expect(source).toContain("animationEncode:");
+    expect(source).toContain("_jxl_wasm_encode_animation");
+  });
+});
+
 // Fake module that exposes _jxl_wasm_encode_rgba8_with_metadata_v2 and captures call args.
 // readBoxOpts(ptr) reads WasmBoxOpts fields from the fake HEAPU8.
 function createFakeMetadataV2Module() {
@@ -1369,3 +1467,5 @@ function createFakeMetadataV2Module() {
 
   return { module, v2Calls, readBoxOpts };
 }
+
+

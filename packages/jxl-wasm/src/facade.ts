@@ -313,6 +313,15 @@ interface LibjxlWasmModule {
   _jxl_wasm_encode_with_gain_map?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, gainMapPtr: number, gainMapSize: number): number;
   _jxl_wasm_dec_has_gain_map?(state: number): number;
   _jxl_wasm_dec_take_gain_map?(state: number): number;
+  // Animation encode — present after WASM rebuild with animation bridge
+  _jxl_wasm_encode_animation?(framesPtr: number, numFrames: number, distance: number, effort: number, fmt: number, hasAlpha: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, animOptsPtr: number): number;
+  // Animation decode frame metadata accessors — present after WASM rebuild with animation bridge
+  _jxl_wasm_dec_frame_index?(state: number): number;
+  _jxl_wasm_dec_frame_duration?(state: number): number;
+  _jxl_wasm_dec_frame_name_ptr?(state: number): number;
+  _jxl_wasm_dec_is_last_frame?(state: number): number;
+  _jxl_wasm_dec_anim_ticks_per_second?(state: number): number;
+  _jxl_wasm_dec_anim_loop_count?(state: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -1983,6 +1992,7 @@ interface JxlCapabilities {
   extraChannelEncode: boolean;
   metadataBoxesV2: boolean;
   gainMapEncode: boolean;
+  animationEncode: boolean;
 }
 
 const capabilityCache = new WeakMap<LibjxlWasmModule, JxlCapabilities>();
@@ -2011,6 +2021,7 @@ function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
     extraChannelEncode: typeof module._jxl_wasm_encode_rgba8_with_metadata_ec === "function",
     metadataBoxesV2: typeof module._jxl_wasm_encode_rgba8_with_metadata_v2 === "function",
     gainMapEncode: typeof module._jxl_wasm_encode_with_gain_map === "function",
+    animationEncode: typeof module._jxl_wasm_encode_animation === "function",
   };
   capabilityCache.set(module, caps);
   return caps;
@@ -2433,3 +2444,9 @@ function normalizeRegion(region: Region | null, width: number, height: number): 
     h: Math.max(1, Math.min(maxH, Math.trunc(region.h))),
   };
 }
+
+
+
+
+
+
