@@ -747,8 +747,8 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
   if (photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(photon_noise_iso));
-  const uint32_t normalized_resampling_ec = (resampling == 2u || resampling == 4u || resampling == 8u) ? resampling : 1u;
-  if (normalized_resampling_ec > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling_ec));
+  const uint32_t normalized_resampling = NormalizeResampling(resampling);
+  if (normalized_resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling));
 
   // Per-extra-channel distances.
   if (has_alpha && alpha_distance >= 0.0f) {
