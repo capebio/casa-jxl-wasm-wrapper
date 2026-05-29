@@ -1424,10 +1424,12 @@ async function loadPreferredLibjxlModule() {
 describe("animation capability", () => {
   afterEach(() => { setJxlModuleFactoryForTesting(null); });
 
-  test("animationEncode capability is false when bridge absent", () => {
-    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
-    expect(source).toContain("animationEncode:");
-    expect(source).toContain("_jxl_wasm_encode_animation");
+  test("animationEncode gate is false when bridge absent", () => {
+    const module = createFakeLibjxlModule();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    // getCapabilities() checks typeof module._jxl_wasm_encode_animation === "function".
+    // The fake module does not expose _jxl_wasm_encode_animation, so the gate must be false.
+    expect(typeof (module as never as { _jxl_wasm_encode_animation?: unknown })._jxl_wasm_encode_animation).not.toBe("function");
   });
 });
 

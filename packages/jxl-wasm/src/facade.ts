@@ -2444,9 +2444,3 @@ function normalizeRegion(region: Region | null, width: number, height: number): 
     h: Math.max(1, Math.min(maxH, Math.trunc(region.h))),
   };
 }
-
-
-
-
-
-
