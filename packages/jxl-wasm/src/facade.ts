@@ -456,6 +456,68 @@ function marshalBoxOpts(
   return { ptr, freePtrs };
 }
 
+// WasmAnimationFrame layout (28 bytes, 4-byte aligned uint32):
+//   offset  0: pixels_ptr  — WASM heap ptr to RGBA pixel data
+//   offset  4: pixels_size — byte length of pixel buffer
+//   offset  8: width       — frame width in px
+//   offset 12: height      — frame height in px
+//   offset 16: duration    — frame duration in ticks
+//   offset 20: name_ptr    — WASM heap ptr to UTF-8 name string (0 if absent)
+//   offset 24: name_size   — byte length of name string
+const WASM_ANIMATION_FRAME_BYTES = 28;
+
+// WasmAnimationOpts layout (8 bytes):
+//   offset 0: ticks_per_second (uint32)
+//   offset 4: loop_count       (uint32)
+const WASM_ANIMATION_OPTS_BYTES = 8;
+
+function marshalAnimationFrames(
+  module: LibjxlWasmModule,
+  frames: readonly AnimationFrame[],
+  animOpts: AnimationOptions | undefined,
+): { framesPtr: number; animOptsPtr: number; freePtrs: number[] } {
+  const freePtrs: number[] = [];
+
+  const framesBuf = new Uint8Array(frames.length * WASM_ANIMATION_FRAME_BYTES);
+  const framesDv = new DataView(framesBuf.buffer);
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i]!;
+    const base = i * WASM_ANIMATION_FRAME_BYTES;
+    const pixelData = f.data instanceof ArrayBuffer ? new Uint8Array(f.data) : f.data;
+    let pixelsPtr = 0;
+    if (pixelData.byteLength > 0) {
+      pixelsPtr = module._malloc(pixelData.byteLength);
+      if (pixelsPtr !== 0) { module.HEAPU8.set(pixelData, pixelsPtr); freePtrs.push(pixelsPtr); }
+    }
+    framesDv.setUint32(base,      pixelsPtr,            true);
+    framesDv.setUint32(base +  4, pixelData.byteLength, true);
+    framesDv.setUint32(base +  8, f.width,              true);
+    framesDv.setUint32(base + 12, f.height,             true);
+    framesDv.setUint32(base + 16, f.duration,           true);
+    let namePtr = 0;
+    let nameSize = 0;
+    if (f.name != null && f.name.length > 0) {
+      const nameBytes = new TextEncoder().encode(f.name);
+      namePtr = module._malloc(nameBytes.byteLength);
+      if (namePtr !== 0) { module.HEAPU8.set(nameBytes, namePtr); freePtrs.push(namePtr); nameSize = nameBytes.byteLength; }
+    }
+    framesDv.setUint32(base + 20, namePtr,  true);
+    framesDv.setUint32(base + 24, nameSize, true);
+  }
+
+  const framesPtr = module._malloc(framesBuf.byteLength);
+  if (framesPtr !== 0) { module.HEAPU8.set(framesBuf, framesPtr); freePtrs.push(framesPtr); }
+
+  const animBuf = new Uint8Array(WASM_ANIMATION_OPTS_BYTES);
+  const animDv = new DataView(animBuf.buffer);
+  animDv.setUint32(0, animOpts?.ticksPerSecond ?? 1000, true);
+  animDv.setUint32(4, animOpts?.loopCount      ?? 0,    true);
+  const animOptsPtr = module._malloc(WASM_ANIMATION_OPTS_BYTES);
+  if (animOptsPtr !== 0) { module.HEAPU8.set(animBuf, animOptsPtr); freePtrs.push(animOptsPtr); }
+
+  return { framesPtr, animOptsPtr, freePtrs };
+}
+
 function resolveEncoderBridgeSettings(options: EncoderOptions) {
   const modular = options.modular ?? -1;
   const brotliEffort = options.brotliEffort != null ? Math.max(-1, Math.min(11, Math.round(options.brotliEffort))) : -1;
@@ -1560,6 +1622,55 @@ class LibjxlEncoder implements JxlEncoder {
       if (typeof module[encFn] !== "function" && typeof module[extFn] !== "function") {
         throw new CapabilityMissing(`${this.options.format} encode requires a rebuilt WASM with multi-format bridge`);
       }
+    }
+
+    // Animation encode path: multi-frame encode bypasses the single-image pixel buffer entirely.
+    // Must be checked before the queuedPixelBytes guard (no pushPixels needed for animation).
+    const frames = this.options.frames;
+    if (frames != null && frames.length > 0) {
+      const caps = getCapabilities(module);
+      if (caps.animationEncode && typeof module._jxl_wasm_encode_animation === "function") {
+        const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
+        const hasAlpha = this.options.hasAlpha ? 1 : 0;
+        const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
+        const { modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
+        const { iccProfile: effIcc, exif: effExif, xmp: effXmp } = resolveEffectiveMetadata(this.options);
+        const iccView = effIcc ? copyOrBorrowInput(effIcc, false) : new Uint8Array(0);
+        const exifView = effExif ? copyOrBorrowInput(effExif, false) : new Uint8Array(0);
+        const xmpView = effXmp ? copyOrBorrowInput(effXmp, false) : new Uint8Array(0);
+        const iccPtr = iccView.byteLength > 0 ? module._malloc(iccView.byteLength) : 0;
+        const exifPtr = exifView.byteLength > 0 ? module._malloc(exifView.byteLength) : 0;
+        const xmpPtr = xmpView.byteLength > 0 ? module._malloc(xmpView.byteLength) : 0;
+        if (iccPtr !== 0) module.HEAPU8.set(iccView, iccPtr);
+        if (exifPtr !== 0) module.HEAPU8.set(exifView, exifPtr);
+        if (xmpPtr !== 0) module.HEAPU8.set(xmpView, xmpPtr);
+        const { ptr: boxOptsPtr, freePtrs: boxOptsPtrs } = marshalBoxOpts(module, this.options);
+        const { framesPtr, animOptsPtr, freePtrs: animFreePtrs } = marshalAnimationFrames(module, frames, this.options.animation);
+        try {
+          const handle = module._jxl_wasm_encode_animation(
+            framesPtr, frames.length,
+            distance, this.options.effort, fmt, hasAlpha,
+            modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling,
+            iccPtr, iccView.byteLength,
+            exifPtr, exifView.byteLength,
+            xmpPtr, xmpView.byteLength,
+            boxOptsPtr, animOptsPtr,
+          );
+          const encoded = takeBuffer(module, handle, "animation encode");
+          const compressedBytes = encoded.data.byteLength;
+          yield encoded.data;
+          this.encodeStats = { originalBytes: this.pixelByteTotal, compressedBytes, ratio: this.pixelByteTotal > 0 ? compressedBytes / this.pixelByteTotal : 0 };
+        } finally {
+          for (const p of animFreePtrs) module._free(p);
+          boxOptsPtrs.forEach(p => module._free(p));
+          if (boxOptsPtr !== 0) module._free(boxOptsPtr);
+          if (iccPtr !== 0) module._free(iccPtr);
+          if (exifPtr !== 0) module._free(exifPtr);
+          if (xmpPtr !== 0) module._free(xmpPtr);
+        }
+        return;
+      }
+      // Capability absent — fall through to single-frame encode (graceful degradation).
     }
 
     if (this.queuedPixelBytes !== this.pixelByteTotal) {
