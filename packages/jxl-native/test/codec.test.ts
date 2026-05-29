@@ -137,7 +137,7 @@ describe("animation types in native index.ts", () => {
     expect(source).toContain("AnimationFrame");
     expect(source).toContain("AnimationOptions");
     expect(source).toContain("animation?: AnimationOptions");
-    expect(source).toContain("frames?: AnimationFrame[]");
+    expect(source).toContain("frames?: readonly AnimationFrame[]");
   });
 
   test("native DecodeEvent has frameIndex/frameDuration/frameName fields", async () => {
