@@ -27,6 +27,32 @@ Use the template below for every entry.
 
 ---
 
+## M2 Native Parity: JxlEncoderUseBoxes fix + EC/modular/animation roundtrip tests — 2026-05-29
+
+**Branch:** `finishing_feature_parity` (commit `6512573`)
+**Status:** Complete
+
+**Scope:** Closed Milestone 2 native-side parity gaps — custom boxes, extra channels, modular sub-settings, advanced frame settings, animation. Core bug: `JxlEncoderAddBox` in libjxl 0.11.x requires `JxlEncoderUseBoxes()` (not just `JxlEncoderUseContainer()`); all prior custom-box encode calls were silently failing.
+
+**Changes — `node_modules/@casabio/jxl-native/src/native.cc`:**
+- Added `needs_boxes` block calling `JxlEncoderUseBoxes(enc)` before first `JxlEncoderAddBox` call; gates on `!exif.empty() || !xmp.empty() || !custom_boxes.empty()` (+ gain map when `CASABIO_HAVE_GAIN_MAP`).
+- Added `|| !data->custom_boxes.empty()` to `JxlEncoderUseContainer` condition so container format is also set for custom-box-only encodes.
+
+**Changes — `node_modules/@casabio/jxl-native/src/index.ts`:**
+- Removed stale comment "Note: not yet implemented in native binding" from `customBoxes` field.
+
+**Changes — `node_modules/@casabio/jxl-native/test/codec.test.ts`:**
+- Fixed `nativeLibDir` constant from stale `out\lib` path to `C:\TEMP\jxl-mt-libs`.
+- Added 6 roundtrip tests: `alphaDistance:0` lossless alpha, depth extra channel plane, `modularOptions` force+predictor, `advancedFrameSettings` patches=8, `customBoxes`, 2-frame animation with header + frame metadata.
+
+**Verification:** `bun test ./node_modules/@casabio/jxl-native/test/codec.test.ts` — 12 pass, 0 fail.
+
+**Docs Updated:**
+- `docs/FEATURE_PARITY_MATRIX.md` row 3 (Modular) → ✅/✅.
+- `docs/references/designs/ISSUES.md` §8 → done.
+
+---
+
 ## Native EC Decoder Reporting (extra-channel decode parity) — 2026-05-29
 
 **Branch:** `epiccodereview/20260527T054853`
