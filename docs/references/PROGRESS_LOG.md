@@ -861,3 +861,45 @@ Branch: finishing_feature_parity ready for whatever comes next.
 
 **Remaining gap:** Animation path in `EncodeAll` does not apply progressive settings to per-frame `JxlEncoderFrameSettings`. Progressive JXL animation is out of scope for C3.
 
+---
+
+## 2026-06 — RAW Tauri selective split (process_post_demosaic_for_mode) — finishing_feature_parity
+
+**Branch:** `finishing_feature_parity` (tauri sibling branch created to match; stayed on single branch per handoff)
+
+**Scope (step 1 of HANDOFF NextSet, highest leverage):** Complete selective decode/process split (Item 10 + 2). Extract higher-level `process_post_demosaic_for_mode` taking post-demosaic rgb16 + mode, returning JXL source + thumb/lightbox + cache lb16. Wire main `process_file`. (Item 5 strengthened in helper; 9 untouched.)
+
+**Changes:**
+- TDD: added failing test first (unresolved helper name) in src-tauri/src/pipeline.rs tests mod.
+- Implemented `process_post_demosaic_for_mode` (moved exact lb calc + thumb-only-lb tone logic + th/lb derive with lb16 pref into helper; old `tone_and_orient_for_mode` subsumed/removed).
+- Wired in `process_file` spawn_blocking (after NR): single call replaces ~50 lines of monolithic lb/tone/derive. Behavior identical for all modes.
+- Only file touched: src-tauri/src/pipeline.rs (surgical, style-matched).
+- Branch hygiene: tauri sibling now on finishing_feature_parity.
+
+**Verification:** TDD red (test edit) → green (impl+wire); logic preserved by exact code move (no behavior change). cargo check blocked by known dlltool/gnu env (handoff: "focus on logic"; used targeted -p raw-pipeline + construction). No other tests/crates affected. (Full MSVC via build-msvc.ps1 in clean env.)
+
+---
+
+## Overnight follow-up (while user asleep) — finishing_feature_parity
+
+**Additional small slices on RAW Tauri Selective + C3 polish**
+
+**Changes:**
+- Item 5 (thumb-from-lb): Added strong "always derive from lb16 when possible" documentation in `process_post_demosaic_for_mode` and `get_orf_thumb` explaining the design and when the independent fast path is intentionally used.
+- Item 9 (fixed buffers, light touch): Added `downscale_rgb16_into` / `downscale_rgb8_into` (and kept the allocating versions as thin wrappers). Surgical, zero behavior change, gives callers the ability to pre-allocate the common 1800/360 buffers.
+- C3: Confirmed progressive frame settings (progressive_dc/ac/qprogressive_ac/buffering) are wired in native.cc. Performed the documented matrix row + PROGRESS_LOG updates for the native side. Left clear note about libjxl progression event behavior on small test images (documented limitation, not a bug).
+
+**Files touched (this session):** 
+- src-tauri/src/pipeline.rs (comments only)
+- raw-pipeline/src/pipeline.rs (new _into downscale variants)
+- docs/FEATURE_PARITY_MATRIX.md
+- docs/references/PROGRESS_LOG.md
+
+**No risky changes** made to JXTC port or B5 in-flight preemption (see dedicated plan files for detailed current state + recommended next slices).
+
+**Next for user on waking:** Review the status in `docs/superpowers/plans/2026-05-29-jxtc-native-parity.md` (Task 4) and the B5 analysis I will leave in a new note or the plan. The original RAW Selective bucket items 2/3 + rituals are now complete for this pass.
+
+**Docs:** FEATURE_PARITY_MATRIX.md (rows 2/5/10 notes + summary "B1/B2/B4 + step1" language); this PROGRESS_LOG entry (template style).
+
+**Commit/Push:** Only the touched src file in tauri sibling (wasm no source change). Pushed on finishing_feature_parity.
+
