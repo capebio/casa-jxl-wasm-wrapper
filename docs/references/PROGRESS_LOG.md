@@ -8,6 +8,34 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
+## Native Addon Rebuild — 2026-05-29
+
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Complete
+
+**What changed in native.cc (3 fixes to compile against libjxl 0.11.x):**
+1. `JxlEncoderAddExtraChannelBuffer` → `JxlEncoderSetExtraChannelBuffer` (API rename)
+2. `JxlEncoderSetFrameDuration` → `JxlEncoderInitFrameHeader` + `JxlEncoderSetFrameHeader` block (same fix as bridge.cpp)
+3. Added `#ifndef JxlBool typedef int JxlBool; #endif` shim after JXL includes
+
+**binding.gyp:** No net changes (temporarily added `ucrt.lib` during CRT mismatch diagnosis, then reverted when root cause identified as `/MD` vs `/MT` mismatch).
+
+**Build environment:**
+- libjxl source: `jpegxl-src-0.11.4` Cargo registry crate (libjxl 0.11.x)
+- CMake flags: `-DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` (must match node-gyp's `/MT`)
+- Libs collected to `C:\TEMP\jxl-mt-libs\` (7 static `.lib` files)
+- Build command: `vcvars64 + JXL_NATIVE_INCLUDE_DIR + JXL_NATIVE_LIB_DIR + npx node-gyp rebuild --release`
+
+**Verification:**
+- `packages/jxl-native/build/Release/jxl_native.node` — 6.2 MB
+- `bun test packages/jxl-native/test/codec.test.ts` — 6 pass, 0 fail
+
+**Docs Updated:**
+- `docs/references/designs/ISSUES.md` — §4 done, §9 done
+- `docs/references/PROGRESS_LOG.md` — this entry
+
+---
+
 ## WASM Bridge Rebuild — 2026-05-29
 
 **Branch:** `epiccodereview/20260527T054853`
@@ -31,8 +59,15 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 - All 7 animation symbols present in `dist/jxl-core.simd-mt.js` and correctly mapped to WASM exports
 - `bun test packages/jxl-wasm/test/facade.test.ts` — 69 pass, 0 fail
 
+**Second rebuild — exports.txt gap fix (2026-05-29, `16:56:25Z`):**
+- Discovered: 10 `_x` / `_v2` functions defined in `bridge.cpp` were not listed in `exports.txt` and were dead-code-eliminated by Emscripten LTO. Affected: `_jxl_wasm_encode_rgba8_x`, `rgba16_x`, `rgbaf32_x`, `encode_rgba8_with_metadata_x`, `encode_rgba8_with_metadata_v2`, `encode_auto_x`, `encode_rgba8_with_sidecars_x`, `enc_push_pixels_x`, `enc_create_image_x`, `transcode_jpeg_to_jxl_v2`.
+- Fixed: all 10 added to `exports.txt`; rebuild run; all confirmed present in `dist/jxl-core.simd-mt.js`.
+- Impact: without this fix all 5 capability gates would have resolved `false` in browser (`extOptions`, `metadataBoxesV2`, and effectively all encoder extension paths). Now all 5 gates resolve correctly.
+- `bun test packages/jxl-wasm/test/facade.test.ts` — 69 pass, 0 fail.
+
 **Docs Updated:**
 - `docs/references/designs/ISSUES.md` — §1 done, §3 done, §9 partial (WASM done; native pending)
+- `docs/references/ACTION PLAN.md` — Milestone 0 Docker/build items ticked; exports.txt gap noted
 - `docs/references/PROGRESS_LOG.md` — this entry
 
 ---
@@ -40,7 +75,7 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 ## Feature: Animation / Multi-Frame Encode + Decode — 2026-05-29
 
 **Branch:** `epiccodereview/20260527T054853`
-**Status:** Fully implemented (source-only; WASM + native rebuild pending — see ISSUES.md §9)
+**Status:** Fully implemented (WASM rebuilt 2026-05-29 — `animationEncode` cap live; native rebuild still pending — see ISSUES.md §9)
 
 **WASM Changes:**
 - `packages/jxl-wasm/src/facade.ts` — `AnimationFrame`, `AnimationOptions` interfaces; `EncoderOptions.animation` + `.frames`; `LibjxlWasmModule` extended with `_jxl_wasm_encode_animation?` (19-arg) + 6 decoder accessor methods; `JxlCapabilities.animationEncode` gate; `WASM_ANIMATION_FRAME_BYTES=28`, `WASM_ANIMATION_OPTS_BYTES=8` constants; `marshalAnimationFrames` helper; animation encode dispatch before single-frame path; `DecodeEvent` "final"/"progress" extended with `frameIndex?`/`frameDuration?`/`frameName?`/`isLastFrame?`/`animTicksPerSecond?`/`animLoopCount?`; `eventsProgressive` enrichment (3 blocks) gated on accessor presence; `eventsOneShot` deliberately NOT enriched (incompatible handle type).

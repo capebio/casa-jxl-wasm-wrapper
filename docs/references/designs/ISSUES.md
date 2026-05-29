@@ -131,30 +131,17 @@ All 4 tiers rebuilt. `bun test packages/jxl-wasm/test/facade.test.ts` — 69 pas
 
 ## 4. Rebuild Native Addon
 
-Status: blocked in current environment.
+**Status: done (2026-05-29)**
 
-Command run:
+Built `packages/jxl-native/build/Release/jxl_native.node` (6.2 MB) against libjxl 0.11.x static `/MT` libs. Three native.cc fixes applied (matching bridge.cpp fixes): `JxlEncoderSetExtraChannelBuffer` rename, `JxlEncoderInitFrameHeader`/`SetFrameHeader` replacement, `JxlBool` shim. `bun test packages/jxl-native/test/codec.test.ts` — 6 pass, 0 fail.
 
-```powershell
-rtk npm --workspace packages/jxl-native run build
-```
-
-Observed failure:
-
-```text
-Cannot find module 'C:\Foo\raw-converter-wasm\packages\jxl-native\node_modules\node-gyp\bin\node-gyp.js'
-```
-
-Why this matters:
-
-- `packages/jxl-native/src/native.cc` now parses `resampling` and applies `JXL_ENC_FRAME_SETTING_RESAMPLING`.
-- Native binary rebuild is required before Node/N-API runtime validation.
-
-Follow-up:
-
-1. Restore/install `packages/jxl-native` dependencies so `node-gyp` exists locally, or update the build script to use the workspace/root `node-gyp`.
-2. Rerun `rtk npm --workspace packages/jxl-native run build`.
-3. Add or run a native encode/decode smoke test with `resampling: 2`.
+**Build environment notes (for future rebuilds):**
+- libjxl source: `jpegxl-src-0.11.4` in Cargo registry (`C:\Users\User\.cargo\registry\src\...`)
+- Configured: `cmake -S <src> -B C:\TEMP\jxl-mt-build -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DJPEGXL_ENABLE_TOOLS=OFF ...`
+- Include dir: `C:\TEMP\jxl-mt-build\lib\include`
+- Lib dir: all 7 `.lib` files collected to `C:\TEMP\jxl-mt-libs\` (jxl, jxl_threads, jxl_cms, hwy, brotlienc, brotlidec, brotlicommon)
+- Build: `cmd /c "call vcvars64.bat && set JXL_NATIVE_INCLUDE_DIR=... && set JXL_NATIVE_LIB_DIR=... && npx node-gyp rebuild --release"`
+- CRT must match: `/MT` (node-gyp default) — `/MD` causes LNK2038 mismatch
 
 ## 5. Existing Full Facade Test Failure
 
@@ -360,7 +347,7 @@ Observed: passing `alphaDistance: 0` through the Tauri encode path has no effect
 
 ## 9. Rebuild WASM + Native Artifacts for Animation Feature (2026-05-29)
 
-**Status:** partial — WASM done (2026-05-29); native still blocked by node-gyp (see Issue 4)
+**Status:** done (2026-05-29) — WASM and native both complete
 
 **WASM rebuild complete:** All 7 animation symbols confirmed in `dist/jxl-core.simd-mt.js`: `_jxl_wasm_encode_animation` (→ wasmExports["Q"]), `_jxl_wasm_dec_frame_index` ("T"), `_jxl_wasm_dec_frame_duration` ("U"), `_jxl_wasm_dec_frame_name_ptr` ("V"), `_jxl_wasm_dec_is_last_frame` ("W"), `_jxl_wasm_dec_anim_ticks_per_second` ("X"), `_jxl_wasm_dec_anim_loop_count` ("Y"). `animationEncode` capability will be `true` in browser. 69 facade tests pass.
 
