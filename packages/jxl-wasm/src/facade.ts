@@ -471,6 +471,12 @@ const WASM_ANIMATION_FRAME_BYTES = 28;
 //   offset 4: loop_count       (uint32)
 const WASM_ANIMATION_OPTS_BYTES = 8;
 
+/**
+ * Allocates WasmAnimationFrame[] + WasmAnimationOpts on the WASM heap.
+ * Returns ptr to the frame array, ptr to the animation options struct,
+ * and an array of all heap allocations to free.
+ * `framesPtr` and `animOptsPtr` can be 0 if `_malloc` fails (same semantics as marshalBoxOpts).
+ */
 function marshalAnimationFrames(
   module: LibjxlWasmModule,
   frames: readonly AnimationFrame[],
@@ -1662,7 +1668,7 @@ class LibjxlEncoder implements JxlEncoder {
           this.encodeStats = { originalBytes: this.pixelByteTotal, compressedBytes, ratio: this.pixelByteTotal > 0 ? compressedBytes / this.pixelByteTotal : 0 };
         } finally {
           for (const p of animFreePtrs) module._free(p);
-          boxOptsPtrs.forEach(p => module._free(p));
+          for (const p of boxOptsPtrs) module._free(p);
           if (boxOptsPtr !== 0) module._free(boxOptsPtr);
           if (iccPtr !== 0) module._free(iccPtr);
           if (exifPtr !== 0) module._free(exifPtr);
