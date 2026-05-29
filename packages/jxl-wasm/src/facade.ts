@@ -125,6 +125,13 @@ export interface EncoderOptions {
   customBoxes?: readonly MetadataBoxSpec[];
   /** HDR gain map to embed as a jhgm box. Requires WASM with gain map bridge. */
   gainMap?: GainMapOptions | null;
+  /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
+  animation?: AnimationOptions;
+  /**
+   * Frame data for animation encode. When set, replaces the single-image pushPixels path.
+   * Requires rebuilt WASM with animation bridge (_jxl_wasm_encode_animation).
+   */
+  frames?: AnimationFrame[];
 }
 
 /** Options for attaching an HDR gain map (ISO 21496-1 / JXL jhgm box). */
@@ -145,6 +152,26 @@ export interface ExtraChannel {
   distance?: number;
   /** Optional human-readable label (informational only). */
   name?: string;
+}
+
+/** Descriptor for one frame in an animation sequence. */
+export interface AnimationFrame {
+  /** RGBA pixel data for this frame (must match EncoderOptions format). */
+  data: Uint8Array | ArrayBuffer;
+  width: number;
+  height: number;
+  /** Duration in ticks (see AnimationOptions.ticksPerSecond). */
+  duration: number;
+  /** Optional human-readable frame name (informational; embedded in the JXL bitstream). */
+  name?: string;
+}
+
+/** Animation header options written to JxlAnimationHeader. */
+export interface AnimationOptions {
+  /** Ticks per second for frame duration values. Default 1000 (millisecond units). */
+  ticksPerSecond?: number;
+  /** Number of animation loops. 0 = infinite (default). */
+  loopCount?: number;
 }
 
 /** Descriptor for a custom metadata box to embed in the JXL container. */
