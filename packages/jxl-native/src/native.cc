@@ -784,6 +784,15 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (data->modular_palette_colors != INT32_MIN) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(35), static_cast<int64_t>(data->modular_palette_colors));
   if (data->modular_lossy_palette >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(36), static_cast<int64_t>(data->modular_lossy_palette));
   if (data->modular_ma_tree_learning_percent >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(37), static_cast<int64_t>(data->modular_ma_tree_learning_percent));
+  // Progressive encode settings.
+  if (data->progressive_dc > 0)
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC,  static_cast<int64_t>(data->progressive_dc));
+  if (data->progressive_ac > 0)
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC,  1);
+  if (data->qprogressive_ac > 0)
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, 1);
+  if (data->buffering > 0)
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING,       static_cast<int64_t>(data->buffering));
 
   // Per-extra-channel distances.
   if (data->has_alpha && data->alpha_distance >= 0.0) {
