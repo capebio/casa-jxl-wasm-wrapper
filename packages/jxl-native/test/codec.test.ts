@@ -129,3 +129,22 @@ describe("@casabio/jxl-native real codec", () => {
     expect(final?.pixels.byteLength).toBe(2 * 1 * 4);
   });
 });
+
+describe("animation types in native index.ts", () => {
+  test("NativeEncoderOptions has animation and frames fields", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("AnimationFrame");
+    expect(source).toContain("AnimationOptions");
+    expect(source).toContain("animation?: AnimationOptions");
+    expect(source).toContain("frames?: AnimationFrame[]");
+  });
+
+  test("native DecodeEvent has frameIndex/frameDuration/frameName fields", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("frameIndex?: number");
+    expect(source).toContain("frameDuration?: number");
+    expect(source).toContain("frameName?: string");
+  });
+});

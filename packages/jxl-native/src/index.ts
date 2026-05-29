@@ -45,8 +45,8 @@ export interface ImageInfo {
 
 export type DecodeEvent =
   | { type: "header"; info: ImageInfo }
-  | { type: "progress"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number }
-  | { type: "final"; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number }
+  | { type: "progress"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; frameIndex?: number; frameDuration?: number; frameName?: string; isLastFrame?: boolean; animTicksPerSecond?: number; animLoopCount?: number }
+  | { type: "final"; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; frameIndex?: number; frameDuration?: number; frameName?: string; isLastFrame?: boolean; animTicksPerSecond?: number; animLoopCount?: number }
   | { type: "budget_exceeded"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; pixelStride: number }
   | { type: "error"; code: string; message: string };
 
@@ -83,6 +83,22 @@ export interface MetadataOptions {
   rawCodestream?: boolean;
 }
 
+/** Descriptor for one frame in an animation sequence. */
+export interface AnimationFrame {
+  data: Uint8Array | ArrayBuffer;
+  width: number;
+  height: number;
+  /** Duration in ticks (see AnimationOptions.ticksPerSecond). */
+  duration: number;
+  name?: string;
+}
+
+/** Animation header options. */
+export interface AnimationOptions {
+  ticksPerSecond?: number;
+  loopCount?: number;
+}
+
 export interface EncoderOptions {
   format: PixelFormat;
   width: number;
@@ -109,6 +125,10 @@ export interface EncoderOptions {
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. Note: not yet implemented in native binding. */
   customBoxes?: readonly MetadataBoxSpec[];
+  /** Animation header options. */
+  animation?: AnimationOptions;
+  /** Frame data for animation encode. When present, replaces single-image pushPixels. */
+  frames?: AnimationFrame[];
 }
 
 export interface NativeDecoder {

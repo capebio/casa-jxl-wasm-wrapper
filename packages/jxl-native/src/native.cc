@@ -59,6 +59,18 @@ struct EncoderData {
   bool raw_codestream = false;
   bool finished = false;
   bool cancelled = false;
+  // Animation fields
+  bool has_animation = false;
+  uint32_t anim_ticks_per_second = 1000;
+  uint32_t anim_loop_count = 0;
+  struct AnimFrame {
+    std::vector<uint8_t> pixels;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t duration = 0;
+    std::string name;
+  };
+  std::vector<AnimFrame> anim_frames;
 };
 
 struct IteratorData {
@@ -376,7 +388,7 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return false;
 
-  int events = JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE;
+  int events = JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE;
   if (emit_every_pass || strcmp(progression_target, "dc") == 0 || strcmp(progression_target, "pass") == 0) {
     events |= JXL_DEC_FRAME_PROGRESSION;
   }
@@ -398,6 +410,12 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
   bool info_known = false;
   std::vector<uint8_t> pixels;
   JxlPixelFormat pf = {4, DataTypeForFormat(format), JXL_NATIVE_ENDIAN, 0};
+  uint32_t frame_index = 0;
+  uint32_t frame_duration = 0;
+  bool is_last_frame = false;
+  std::string frame_name;
+  uint32_t anim_tps = 1000;
+  uint32_t anim_loops = 0;
 
   for (;;) {
     JxlDecoderStatus status = JxlDecoderProcessInput(dec);
@@ -406,6 +424,21 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
       return false;
     }
     if (status == JXL_DEC_SUCCESS) break;
+    if (status == JXL_DEC_FRAME) {
+      JxlFrameHeader frame_header;
+      memset(&frame_header, 0, sizeof(frame_header));
+      if (JxlDecoderGetFrameHeader(dec, &frame_header) == JXL_DEC_SUCCESS) {
+        frame_duration = frame_header.duration;
+        is_last_frame  = frame_header.is_last == JXL_TRUE;
+        char name_buf[256] = {0};
+        if (JxlDecoderGetFrameName(dec, name_buf, sizeof(name_buf)) == JXL_DEC_SUCCESS) {
+          frame_name = std::string(name_buf);
+        } else {
+          frame_name.clear();
+        }
+      }
+      continue;
+    }
     if (status == JXL_DEC_BASIC_INFO) {
       if (JxlDecoderGetBasicInfo(dec, &basic) != JXL_DEC_SUCCESS) {
         JxlDecoderDestroy(dec);
@@ -417,6 +450,10 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
       info.has_alpha = basic.alpha_bits > 0;
       info.has_animation = basic.have_animation;
       info.jpeg_reconstruction_available = basic.uses_original_profile == JXL_FALSE ? false : false;
+      if (basic.have_animation) {
+        anim_tps   = basic.animation.tps_numerator;
+        anim_loops = basic.animation.num_loops;
+      }
       info_known = true;
       napi_value header = MakeHeaderEvent(env, info);
       data->events.push_back(RefValue(env, header));
@@ -449,13 +486,23 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
       }
       continue;
     }
-    if (status == JXL_DEC_FULL_IMAGE) continue;
+    if (status == JXL_DEC_FULL_IMAGE) { frame_index++; continue; }
   }
 
   JxlDecoderDestroy(dec);
   if (!info_known || pixels.empty()) return false;
-  napi_value final = MakeImageEvent(env, "final", info, format, pixels);
-  data->events.push_back(RefValue(env, final));
+  napi_value final_ev = MakeImageEvent(env, "final", info, format, pixels);
+  napi_set_named_property(env, final_ev, "frameIndex",         MakeUint32(env, frame_index > 0 ? frame_index - 1 : 0));
+  napi_set_named_property(env, final_ev, "frameDuration",      MakeUint32(env, frame_duration));
+  napi_set_named_property(env, final_ev, "isLastFrame",        MakeBool(env, is_last_frame));
+  napi_set_named_property(env, final_ev, "animTicksPerSecond", MakeUint32(env, anim_tps));
+  napi_set_named_property(env, final_ev, "animLoopCount",      MakeUint32(env, anim_loops));
+  if (!frame_name.empty()) {
+    napi_value name_val;
+    napi_create_string_utf8(env, frame_name.c_str(), NAPI_AUTO_LENGTH, &name_val);
+    napi_set_named_property(env, final_ev, "frameName", name_val);
+  }
+  data->events.push_back(RefValue(env, final_ev));
   return true;
 }
 
@@ -482,6 +529,16 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   info.num_extra_channels = data->has_alpha ? 1 : 0;
   info.alpha_bits = data->has_alpha ? bits : 0;
   info.alpha_exponent_bits = data->has_alpha ? exp_bits : 0;
+
+  if (data->has_animation && !data->anim_frames.empty()) {
+    info.have_animation             = JXL_TRUE;
+    info.animation.tps_numerator    = data->anim_ticks_per_second;
+    info.animation.tps_denominator  = 1;
+    info.animation.num_loops        = data->anim_loop_count;
+    info.animation.have_timecodes   = JXL_FALSE;
+    info.xsize = data->anim_frames[0].width;
+    info.ysize = data->anim_frames[0].height;
+  }
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc);
@@ -514,11 +571,30 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (data->resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(data->resampling));
 
   JxlPixelFormat pf = {4, DataTypeForFormat(data->format), JXL_NATIVE_ENDIAN, 0};
-  const size_t expected = static_cast<size_t>(data->width) * data->height * 4 * BytesPerChannel(data->format);
-  if (data->pixels.size() < expected ||
-      JxlEncoderAddImageFrame(frame, &pf, data->pixels.data(), expected) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc);
-    return false;
+  if (data->has_animation) {
+    for (const auto& af : data->anim_frames) {
+      JxlEncoderFrameSettings* fs = JxlEncoderFrameSettingsCreate(enc, frame);
+      if (JxlEncoderSetFrameDuration(fs, af.duration) != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc); return false;
+      }
+      if (!af.name.empty()) {
+        if (JxlEncoderSetFrameName(fs, af.name.c_str()) != JXL_ENC_SUCCESS) {
+          JxlEncoderDestroy(enc); return false;
+        }
+      }
+      const size_t expected = static_cast<size_t>(af.width) * af.height * 4 * BytesPerChannel(data->format);
+      if (af.pixels.size() < expected ||
+          JxlEncoderAddImageFrame(fs, &pf, af.pixels.data(), expected) != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc); return false;
+      }
+    }
+  } else {
+    const size_t expected = static_cast<size_t>(data->width) * data->height * 4 * BytesPerChannel(data->format);
+    if (data->pixels.size() < expected ||
+        JxlEncoderAddImageFrame(frame, &pf, data->pixels.data(), expected) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
   }
 
   const JxlBool compress_flag = data->compress_boxes ? JXL_TRUE : JXL_FALSE;
@@ -779,6 +855,43 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
         if (!GetBoolProp(env, meta_val, "includeICC",  true)) data->icc_profile.clear();
         if (!GetBoolProp(env, meta_val, "includeExif", true)) data->exif.clear();
         if (!GetBoolProp(env, meta_val, "includeXMP",  true)) data->xmp.clear();
+      }
+    }
+  }
+
+  // Animation options + frames.
+  {
+    napi_value anim_val;
+    if (GetProp(env, args[0], "animation", &anim_val)) {
+      napi_valuetype anim_type;
+      napi_typeof(env, anim_val, &anim_type);
+      if (anim_type == napi_object) {
+        data->anim_ticks_per_second = GetUint32Prop(env, anim_val, "ticksPerSecond", 1000);
+        data->anim_loop_count       = GetUint32Prop(env, anim_val, "loopCount",      0);
+      }
+    }
+    napi_value frames_val;
+    if (GetProp(env, args[0], "frames", &frames_val)) {
+      bool is_array = false;
+      napi_is_array(env, frames_val, &is_array);
+      if (is_array) {
+        data->has_animation = true;
+        uint32_t length = 0;
+        napi_get_array_length(env, frames_val, &length);
+        for (uint32_t fi = 0; fi < length; ++fi) {
+          napi_value frame_val;
+          napi_get_element(env, frames_val, fi, &frame_val);
+          EncoderData::AnimFrame af;
+          af.width    = GetUint32Prop(env, frame_val, "width",    0);
+          af.height   = GetUint32Prop(env, frame_val, "height",   0);
+          af.duration = GetUint32Prop(env, frame_val, "duration", 1);
+          af.name     = GetStringProp(env, frame_val, "name",     "");
+          napi_value data_val;
+          if (GetProp(env, frame_val, "data", &data_val)) {
+            ReadBytes(env, data_val, &af.pixels);
+          }
+          data->anim_frames.push_back(std::move(af));
+        }
       }
     }
   }
