@@ -23,6 +23,20 @@ export interface NativeBinding {
   };
   createDecoder?: (options: DecoderOptions) => NativeDecoder;
   createEncoder?: (options: EncoderOptions) => NativeEncoder;
+  encodeJxtcRgba8?: (
+    pixels: ArrayBuffer,
+    width: number,
+    height: number,
+    tileSize: number,
+    options?: JxtcEncodeOptions,
+  ) => ArrayBuffer;
+  decodeJxtcRegionRgba8?: (
+    container: ArrayBuffer,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ) => JxtcDecodeResult;
 }
 
 export interface NativeLoaderOptions {
@@ -143,6 +157,18 @@ export interface AnimationFrame {
 export interface AnimationOptions {
   ticksPerSecond?: number;
   loopCount?: number;
+}
+
+export interface JxtcEncodeOptions {
+  distance?: number;
+  effort?: number;
+  hasAlpha?: boolean;
+}
+
+export interface JxtcDecodeResult {
+  pixels: ArrayBuffer;
+  width: number;
+  height: number;
 }
 
 export interface EncoderOptions {
@@ -267,6 +293,46 @@ export function createDecoder(options: DecoderOptions): NativeDecoder {
 
 export function createEncoder(options: EncoderOptions): NativeEncoder {
   return createNativeCodecFacade(loadNativeBinding()).createEncoder(options);
+}
+
+export function encodeJxtcRgba8(
+  pixels: ArrayBuffer | Uint8Array,
+  width: number,
+  height: number,
+  tileSize: number,
+  options?: JxtcEncodeOptions,
+): ArrayBuffer {
+  const binding = loadNativeBinding();
+  if (typeof binding.encodeJxtcRgba8 !== "function") {
+    throw new CapabilityMissing(
+      "encodeJxtcRgba8 requires a rebuilt jxl-native addon with JXTC support",
+    );
+  }
+  const buf =
+    pixels instanceof Uint8Array
+      ? pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength)
+      : pixels;
+  return binding.encodeJxtcRgba8(buf as ArrayBuffer, width, height, tileSize, options);
+}
+
+export function decodeJxtcRegionRgba8(
+  container: ArrayBuffer | Uint8Array,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): JxtcDecodeResult {
+  const binding = loadNativeBinding();
+  if (typeof binding.decodeJxtcRegionRgba8 !== "function") {
+    throw new CapabilityMissing(
+      "decodeJxtcRegionRgba8 requires a rebuilt jxl-native addon with JXTC support",
+    );
+  }
+  const buf =
+    container instanceof Uint8Array
+      ? container.buffer.slice(container.byteOffset, container.byteOffset + container.byteLength)
+      : container;
+  return binding.decodeJxtcRegionRgba8(buf as ArrayBuffer, x, y, w, h);
 }
 
 function resolvePrebuiltBinary(): string {
