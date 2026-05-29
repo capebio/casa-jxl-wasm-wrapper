@@ -512,7 +512,7 @@ describe("progressive encode", () => {
   });
 
   test("progressive:true, previewFirst:false (DC only) produces valid JXL", async () => {
-    const W = 8, H = 8;
+    const W = 256, H = 256;
     const pixels = new Uint8Array(W * H * 4).fill(128);
 
     const encoder = createEncoder({
@@ -552,5 +552,32 @@ describe("progressive encode", () => {
     expect(finalEvent).toBeDefined();
     expect(finalEvent?.info.width).toBe(W);
     expect(finalEvent?.info.height).toBe(H);
+  });
+});
+
+describe("JXTC tile container in native index.ts", () => {
+  test("JxtcEncodeOptions interface is defined", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("export interface JxtcEncodeOptions");
+    expect(source).toContain("distance?: number");
+    expect(source).toContain("effort?: number");
+    expect(source).toContain("hasAlpha?: boolean");
+  });
+
+  test("JxtcDecodeResult interface is defined", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("export interface JxtcDecodeResult");
+    expect(source).toContain("pixels: ArrayBuffer");
+    expect(source).toContain("width: number");
+    expect(source).toContain("height: number");
+  });
+
+  test("NativeBinding has encodeJxtcRgba8 and decodeJxtcRegionRgba8", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("encodeJxtcRgba8?:");
+    expect(source).toContain("decodeJxtcRegionRgba8?:");
   });
 });
