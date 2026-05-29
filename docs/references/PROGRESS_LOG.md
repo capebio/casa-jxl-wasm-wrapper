@@ -816,3 +816,28 @@ Matrix RAW section now in very strong shape.
 Branch: finishing_feature_parity ready for whatever comes next.
 
 ---
+
+## Next-set after B4 (excl. B5/C2/C3): Selective processing + decode/process split progress (finishing_feature_parity)
+**Branch:** `finishing_feature_parity`
+**Status:** Started (initial concrete progress)
+
+**Scope:** Remaining RAW Tauri gaps from matrix items 2 and 10 (selective bitmask paths and clean decode/process split), plus polish on 5/9. Excludes B5 (in-flight preemption), C2, and C3 per user directive.
+
+**Work done in this session:**
+- Added `ProcessingMode` (full/thumb/lightbox) to `ProcessOptions`.
+- Added `get_orf_thumb` Tauri command: fast gallery path using B4 `parse_orf_metadata` + minimal decode + early downscale. Returns thumb + full metadata without full tone/JXL.
+- Registered the new command.
+- Updated matrix items 2 and 10 to 🟡 with notes on the selective path.
+
+**Next concrete steps for this set:**
+- Wire `mode` into main `process_file` to skip unnecessary full materialization where safe.
+- Extract `decode_orf_raw` + selective `process` helpers in raw-pipeline or Tauri for better separation (item 10).
+- Polish fixed buffers and complete thumb-from-lb for all callers (items 5/9).
+
+**Docs:**
+- Matrix updated (items 2 + 10).
+- This entry.
+
+**Commit/Push:** Will be done after more progress in the set.
+
+---
