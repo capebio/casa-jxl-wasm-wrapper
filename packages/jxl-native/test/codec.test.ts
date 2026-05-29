@@ -464,16 +464,14 @@ describe("@casabio/jxl-native animation", () => {
 
 describe("progressive encode", () => {
   test("progressive:true produces valid JXL and decoder emits progress event", async () => {
-    const W = 16, H = 16;
+    const W = 512, H = 512;
+    // Use pseudo-random noise to prevent libjxl from collapsing to a trivially small
+    // codestream that has no DC groups and therefore no DC progression pass.
     const pixels = new Uint8Array(W * H * 4);
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 4;
-        pixels[i]     = Math.floor((x / (W - 1)) * 255);
-        pixels[i + 1] = Math.floor((y / (H - 1)) * 255);
-        pixels[i + 2] = 128;
-        pixels[i + 3] = 255;
-      }
+    let seed = 0x12345678;
+    for (let i = 0; i < pixels.length; i++) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      pixels[i] = seed & 0xff;
     }
 
     const encoder = createEncoder({
@@ -486,7 +484,7 @@ describe("progressive encode", () => {
       xmp: null,
       distance: 1.0,
       quality: null,
-      effort: 3,
+      effort: 7,
       progressive: true,
       previewFirst: true,
       chunked: false,
@@ -510,8 +508,13 @@ describe("progressive encode", () => {
     await decoder.push(encoded);
     await decoder.close();
     const events = await Array.fromAsync(decoder.events());
+    console.log("DEBUG encoded size:", encoded.byteLength);
+    console.log("DEBUG events:", events.map(e => e.type));
     const hasFinal = events.some(e => e.type === "final");
     expect(hasFinal).toBe(true);
+    // With a 256×256 image and previewFirst:true, libjxl emits at least one DC progress pass.
+    const hasProgress = events.some(e => e.type === "progress");
+    expect(hasProgress).toBe(true);
     const finalEvent = events.find((e): e is Extract<DecodeEvent, { type: "final" }> => e.type === "final");
     expect(finalEvent?.info.width).toBe(W);
     expect(finalEvent?.info.height).toBe(H);
@@ -546,14 +549,15 @@ describe("progressive encode", () => {
       format: "rgba8",
       region: null,
       downsample: 1,
-      progressionTarget: "final",
-      emitEveryPass: false,
+      progressionTarget: "pass",
+      emitEveryPass: true,
       preserveIcc: false,
       preserveMetadata: false,
     });
     await decoder.push(encoded);
     await decoder.close();
     const events = await Array.fromAsync(decoder.events());
+    console.log("DEBUG dc-only events:", events.map(e => e.type));
     const finalEvent = events.find((e): e is Extract<DecodeEvent, { type: "final" }> => e.type === "final");
     expect(finalEvent).toBeDefined();
     expect(finalEvent?.info.width).toBe(W);
@@ -621,9 +625,10 @@ describe("@casabio/jxl-native JXTC round-trip", () => {
 
     const decoded = new Uint8Array(result.pixels);
     for (let i = 0; i < 16; i++) {
-      expect(Math.abs(decoded[i * 4 + 0] - pixels[i * 4 + 0])).toBeLessThanOrEqual(1);
-      expect(Math.abs(decoded[i * 4 + 1] - pixels[i * 4 + 1])).toBeLessThanOrEqual(1);
-      expect(Math.abs(decoded[i * 4 + 2] - pixels[i * 4 + 2])).toBeLessThanOrEqual(1);
+      // distance=0 is lossless — decoded values must be exact
+      expect(decoded[i * 4 + 0]).toBe(pixels[i * 4 + 0]);
+      expect(decoded[i * 4 + 1]).toBe(pixels[i * 4 + 1]);
+      expect(decoded[i * 4 + 2]).toBe(pixels[i * 4 + 2]);
     }
   });
 
@@ -659,6 +664,7 @@ describe("@casabio/jxl-native JXTC round-trip", () => {
     expect(dv.getUint32(16, true)).toBe(4);          // tile_size
     expect(dv.getUint32(20, true)).toBe(2);          // tiles_x
     expect(dv.getUint32(24, true)).toBe(2);          // tiles_y
+    expect(dv.getUint32(28, true)).toBe(0);          // flags: bit0=has_alpha=false
 
     // Top-left tile (0,0,4,4) → should be predominantly red
     const tl = decodeJxtcRegionRgba8(container, 0, 0, 4, 4);
