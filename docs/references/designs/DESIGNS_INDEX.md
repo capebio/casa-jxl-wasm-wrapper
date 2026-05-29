@@ -26,7 +26,7 @@ Each note follows the process described in `FEATURE_IMPLEMENTATION_TEMPLATE.md` 
 | Note | File | Related INDEX Section | Key Focus | Status |
 |------|------|-----------------------|-----------|--------|
 | Brotli Effort | `brotli-effort.md` | 7. Brotli Effort | Single integer (0-11), default 9, aux data compression | Design complete |
-| Decoding Speed Tier | `decoding-speed-tier.md` | 6. Decoding Speed Tier | 0-4 tiers for faster decode | Design complete |
+| Decoding Speed Tier | `decoding-speed-tier.md` | 6. Decoding Speed Tier | 0-4 tiers for faster decode | Implemented on branch `epiccodereview/20260527T054853` |
 | Photon Noise | `photon-noise.md` | 5. Photon Noise | `--photon_noise_iso` style control | Design complete |
 | Core Modular Controls | `core-modular-controls.md` | 3. Modular Mode & Advanced Modular Controls | Nested `modular: {force, groupSize, predictor, nbPrevChannels, palette...}`. Phased recommendation | Design complete |
 | Resampling | `resampling.md` | (Paired with Photon Noise) | Main + extra-channel resampling factors (1/2/4/8) | Design complete |
@@ -48,7 +48,7 @@ Each note follows the process described in `FEATURE_IMPLEMENTATION_TEMPLATE.md` 
 
 | Note | File | Related INDEX Section | Key Focus | Status |
 |------|------|-----------------------|-----------|--------|
-| Metadata Boxes & Container Decisions | `metadata-boxes-container.md` | 9. Metadata Boxes + Brotli Compression<br>12. Container vs Raw Codestream Decisions + Box Handling | `MetadataOptions` (ICC/Exif/XMP), JPEG reconstruction boxes, container vs raw, custom boxes, compressBoxes | Design complete (covers audit item #12) |
+| Metadata Boxes & Container Decisions | `metadata-boxes-container.md` | 9. Metadata Boxes + Brotli Compression<br>12. Container vs Raw Codestream Decisions + Box Handling | `MetadataOptions` (ICC/Exif/XMP), JPEG reconstruction boxes, container vs raw, custom boxes, compressBoxes | Implemented on branch `epiccodereview/20260527T054853` |
 
 ### HDR & Advanced / Experimental
 

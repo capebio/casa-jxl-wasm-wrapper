@@ -33,6 +33,9 @@ const batchDecodeSpeedInput = document.getElementById('batch-decode-speed');
 const batchPhotonNoiseIsoInput = document.getElementById('batch-photon-noise-iso');
 const batchResamplingInputs = [...document.querySelectorAll('input[name="batch-resampling"]')];
 const batchLosslessInput = document.getElementById('batch-lossless');
+const batchCompressBoxesInput = document.getElementById('batch-compress-boxes');
+const batchForceContainerInput = document.getElementById('batch-force-container');
+const batchRawCodestreamInput = document.getElementById('batch-raw-codestream');
 const batchThumbSizeInputs = [...document.querySelectorAll('input[name="batch-thumb-size"]')];
 const batchLimitValue = document.getElementById('batch-limit-value');
 const batchConcurrencyValue = document.getElementById('batch-concurrency-value');
@@ -364,6 +367,18 @@ function getResampling() {
 
 function getLossless() {
     return Boolean(batchLosslessInput.checked);
+}
+
+function getCompressBoxes() {
+    return Boolean(batchCompressBoxesInput?.checked);
+}
+
+function getForceContainer() {
+    return Boolean(batchForceContainerInput?.checked);
+}
+
+function getRawCodestream() {
+    return Boolean(batchRawCodestreamInput?.checked);
 }
 
 function fmtBytes(n) {
@@ -874,6 +889,10 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
 
 function makeEncoderOptions(source) {
     const lossless = getLossless();
+    const compressBoxes = getCompressBoxes();
+    const forceContainer = getForceContainer();
+    const rawCodestream = getRawCodestream();
+    const hasMetadataOpts = compressBoxes || forceContainer || rawCodestream;
     return {
         format: 'rgba8',
         width: source.width,
@@ -888,6 +907,7 @@ function makeEncoderOptions(source) {
         decodingSpeed: getDecodeSpeed(),
         photonNoiseIso: getPhotonNoiseIso() > 0 ? getPhotonNoiseIso() : undefined,
         resampling: getResampling(),
+        metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
     };
 }
 

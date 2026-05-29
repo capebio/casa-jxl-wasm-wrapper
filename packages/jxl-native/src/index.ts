@@ -60,6 +60,29 @@ export interface DecoderOptions {
   preserveMetadata: boolean;
 }
 
+export interface MetadataBoxSpec {
+  /** 4-character JXL box type (e.g. "uuid", "xml "). Padded with spaces if shorter. */
+  type: string;
+  data: Uint8Array;
+  /** Compress this box with Brotli. Default false. */
+  compress?: boolean;
+}
+
+export interface MetadataOptions {
+  /** Include ICC profile (default true when iccProfile is non-null). */
+  includeICC?: boolean;
+  /** Include EXIF box (default true when exif is non-null). */
+  includeExif?: boolean;
+  /** Include XMP box (default true when xmp is non-null). */
+  includeXMP?: boolean;
+  /** Compress all metadata boxes with Brotli. Default false. */
+  compressBoxes?: boolean;
+  /** Force JXL container format even when no metadata boxes are present. */
+  forceContainer?: boolean;
+  /** Emit raw codestream only — no container, no boxes. Overrides forceContainer. */
+  rawCodestream?: boolean;
+}
+
 export interface EncoderOptions {
   format: PixelFormat;
   width: number;
@@ -73,6 +96,8 @@ export interface EncoderOptions {
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   /** Brotli effort for aux data (metadata, ICC, EXIF, extra channels). -1 = libjxl default, 0-11 explicit. */
   brotliEffort?: number;
+  /** Decoder speed tier hint (0-4). Tells the encoder to structure the codestream for faster decoding. 0 = default, 4 = fastest decode. */
+  decodingSpeed?: number;
   /** Target ISO for libjxl synthetic photon noise. 0 or omitted disables it. */
   photonNoiseIso?: number;
   /** Encoder-native downsampling factor before JXL transform/coding. */
@@ -80,6 +105,10 @@ export interface EncoderOptions {
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
+  /** Container format and per-box options. */
+  metadata?: MetadataOptions;
+  /** Additional custom metadata boxes to embed. Note: not yet implemented in native binding. */
+  customBoxes?: readonly MetadataBoxSpec[];
 }
 
 export interface NativeDecoder {

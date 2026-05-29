@@ -159,6 +159,36 @@
                             Mathematically perfect lossless encoding (no pixel loss). Uses JXL Modular mode internally. Files are larger than lossy at the same resolution. Best for text, line art, diagrams, and archival sources.
                         </div>
                     </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Compress boxes <button class="info-btn" type="button" data-help-target="wl-compress-boxes" aria-label="Compress boxes info">i</button></span>
+                        <label class="spin-toggle">
+                            <input id="batch-compress-boxes" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                        <div class="help-popover" data-help-popover="wl-compress-boxes" hidden>
+                            Compress metadata boxes (ICC, EXIF, XMP) with Brotli inside the JXL container. Reduces file size when metadata is large. Has no effect on raw codestream output.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Force container <button class="info-btn" type="button" data-help-target="wl-force-container" aria-label="Force container info">i</button></span>
+                        <label class="spin-toggle">
+                            <input id="batch-force-container" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                        <div class="help-popover" data-help-popover="wl-force-container" hidden>
+                            Always emit a JXL container (ISOBMFF wrapper) even when no metadata is present. Useful for compatibility with tools that require the container format. Ignored when Raw codestream is on.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Raw codestream <button class="info-btn" type="button" data-help-target="wl-raw-codestream" aria-label="Raw codestream info">i</button></span>
+                        <label class="spin-toggle">
+                            <input id="batch-raw-codestream" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                        <div class="help-popover" data-help-popover="wl-raw-codestream" hidden>
+                            Emit a bare JXL codestream with no container wrapper and no metadata boxes. Smallest possible output. Overrides Force container. Not recommended for interchange — use only when you control both encoder and decoder.
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>

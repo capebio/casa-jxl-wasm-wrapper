@@ -6,6 +6,35 @@ Use the template below for every entry.
 
 ---
 
+## Feature: Patches & Advanced Frame Settings Escape Hatch (advancedFrameSettings + JxlFrameSetting) - 2026-06
+
+**Branch:** worktree (transpose-wasm-to-tauri) + main
+**Status:** Core escape hatch implemented (WASM + native parity)
+
+**WASM Changes:**
+- `packages/jxl-wasm/src/facade.ts` — added `advancedFrameSettings?: Array<{id,value}>` + `JxlFrameSetting` named constants helper (PATCHES=8). Wired in streaming input (`enc_create_image_adv`) and buffered metadata path using `_adv` FFI variants.
+- `packages/jxl-wasm/src/bridge.cpp` — added `ApplyAdvancedFrameSettings` helper + storage in `JxlWasmEncState`. Extended `EncodeRgbaWithMetadata`, `enc_create_image`/`enc_finish`, and exported `_adv` functions. Temporary WASM allocations for ids/values with proper free.
+
+**Native (Tauri) Changes:**
+- `packages/jxl-native/src/index.ts` — matching `advancedFrameSettings` field + `JxlFrameSetting` constants.
+- `packages/jxl-native/src/native.cc` — extended `EncoderData`, parsing in `CreateEncoder`, application of `SetOption` calls.
+
+**Benchmark Wiring:**
+- `web/jxl-wrapper-lab.html` + `.js` — minimal experimental checkbox "Enable Patches (experimental)" with strong content-dependent warning. Wired into `makeEncoderOptions()` using the escape hatch.
+
+**Tests:**
+- `packages/jxl-wasm/test/facade.test.ts` — smoke test for API acceptance + synthetic repeating content size-impact smoke test (with console logging).
+
+**Docs Updated:**
+- `docs/references/designs/patches-splines.md` — checklist updated.
+- `docs/references/PROGRESS_LOG.md` — this entry.
+
+**References Used:**
+- `docs/references/designs/patches-splines.md`
+- libjxl `encode.h` (JXL_ENC_FRAME_SETTING_PATCHES = 8)
+
+---
+
 ## Feature: Decoding Speed Tier (JXL_ENC_FRAME_SETTING_DECODING_SPEED) - 2026-05-28
 
 **Branch:** epiccodereview/20260527T054853
@@ -19,6 +48,10 @@ Use the template below for every entry.
 - `web/jxl-wrapper-lab.html` — added Decode speed tier spinpicker (0–4, default 0).
 - `web/jxl-wrapper-lab.js` — `getDecodeSpeed()` helper; wired into `makeEncoderOptions()` and `syncSettingLabels`.
 
+**Tauri/Native Changes (2026-05-29):**
+- `packages/jxl-native/src/index.ts` — added `decodingSpeed?: number` to `EncoderOptions`.
+- `packages/jxl-native/src/native.cc` — added `decoding_speed` field to `EncoderData`; parses `decodingSpeed` from JS options (clamped -1/0–4); applies `JXL_ENC_FRAME_SETTING_DECODING_SPEED` in encoder setup.
+
 **Tests:**
 - `packages/jxl-wasm/test/facade.test.ts` — added `describe("decodingSpeed encoder option", ...)` with 5 tests covering tier forwarding, -1 default, clamp-to-0, clamp-to-4.
 - `bun test packages/jxl-wasm/test/facade.test.ts` — 38 pass, 1 pre-existing unrelated failure.
@@ -30,7 +63,7 @@ Use the template below for every entry.
 - `docs/references/designs/decoding-speed-tier.md`
 
 **Cleanup & Handoff:**
-- Current state: Source implementation complete. WASM/browser runtime needs regenerated artifacts before browser can exercise the new C++ exports.
+- Current state: Full implementation complete (WASM + native). WASM/browser runtime needs regenerated artifacts before browser can exercise the new C++ exports.
 - Background processes / logs: None started intentionally.
 
 ---
@@ -188,6 +221,51 @@ Use the template below for every entry.
 - Background processes / logs: None active.
 - Next session instructions: Start Docker Desktop/Linux engine, ensure `packages/jxl-native` dependencies are installed, then rerun `npm --workspace packages/jxl-wasm run build` and `npm --workspace packages/jxl-native run build`.
 - Handoff document: `_cleanup.md`
+
+---
+
+## Feature: Metadata Boxes & Container Decisions - 2026-05-28
+
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Completed (WASM source + types + tests + benchmark wiring done; binary artifacts need rebuild)
+
+**WASM Changes:**
+- Added `WasmBoxOpts` (20-byte) and `WasmCustomBox` (16-byte) packed structs to `bridge.cpp`.
+- Added `ApplyContainerMode()` and `AddCustomBoxes()` static helpers.
+- Extended `EncodeRgbaWithMetadata` and `EncodeRgbaWithExtraChannels` with optional `box_opts` parameter; Brotli compress flag now sourced from `box_opts->compress_boxes`; added error codes 54/55 (standard) and 134/135 (extra-channel).
+- New exported functions: `jxl_wasm_encode_rgba8_with_metadata_v2`, `jxl_wasm_encode_rgba8_with_metadata_ec_v2`, `jxl_wasm_transcode_jpeg_to_jxl_v2` (JPEG lossless transcode + EXIF/XMP + container control).
+- Added `MetadataOptions` and `MetadataBoxSpec` interfaces to `facade.ts`; added `metadata?` and `customBoxes?` to `EncoderOptions`.
+- Added `metadataBoxesV2` capability flag; capability-gated routing to v2 bridge functions.
+- Added `resolveEffectiveMetadata`, `needsBoxOptsV2`, `marshalBoxOpts` helpers in `facade.ts`.
+
+**Native Changes:**
+- Added `icc_profile`, `exif`, `xmp` buffer fields and `compress_boxes`, `force_container`, `raw_codestream` booleans to `EncoderData` struct in `native.cc`.
+- Added `GetNullableBufferProp()` NAPI helper to read nullable `ArrayBuffer` or Node `Buffer` properties.
+- Wired `JxlEncoderUseContainer`, `JxlEncoderSetICCProfile`, and EXIF/XMP `JxlEncoderAddBox` calls in `EncodeAll`.
+- Parsed `metadata` sub-object (compressBoxes/forceContainer/rawCodestream/includeICC/includeExif/includeXMP) in `CreateEncoder`.
+- Added `MetadataOptions` and `MetadataBoxSpec` interfaces and extended `EncoderOptions` in `packages/jxl-native/src/index.ts` (customBoxes noted as not yet wired in native binding).
+
+**Benchmark Wiring:**
+- Added Compress boxes, Force container, and Raw codestream toggle controls to `web/jxl-wrapper-lab.html`.
+- Added `getCompressBoxes()`, `getForceContainer()`, `getRawCodestream()` getters and wired them into `makeEncoderOptions()` as `metadata: { compressBoxes, forceContainer, rawCodestream }` in `web/jxl-wrapper-lab.js`.
+
+**Tests:**
+- Added 6 unit tests in `packages/jxl-wasm/test/facade.test.ts` covering: `includeExif:false` stripping, `compressBoxes`/`rawCodestream`/`forceContainer` WasmBoxOpts fields, custom box marshaling, and `rawCodestream` overriding `forceContainer`.
+- Result: 44 pass, 1 pre-existing unrelated failure (`detectTier > returns scalar in Node/Bun`).
+
+**Docs Updated:**
+- `docs/references/designs/DESIGNS_INDEX.md` — status updated to "Implemented on branch `epiccodereview/20260527T054853`".
+
+**References Used:**
+- `docs/references/designs/metadata-boxes-container.md`
+- `docs/references/designs/DESIGNS_INDEX.md`
+- `docs/references/designs/README.md`
+
+**Cleanup & Handoff:**
+- Current state: All source changes complete. Binary WASM and native addon artifacts need rebuild (Docker/Emscripten for WASM, node-gyp for native).
+- Background processes / logs: None active.
+- Next session instructions: Rebuild `packages/jxl-wasm` with Emscripten (see CLAUDE.md build notes) and `packages/jxl-native` with node-gyp. Then run full test suite. Remaining design notes ready for implementation: `brotli-effort.md`, `decoding-speed-tier.md`, `core-modular-controls.md`, `extra-channel-distance.md`, etc.
+- Handoff document (if any): `docs/references/designs/DESIGNS_INDEX.md` and `ISSUES.md`.
 
 ---
 

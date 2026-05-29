@@ -47,8 +47,16 @@ struct EncoderData {
   double distance = 1.0;
   uint32_t effort = 7;
   int32_t brotli_effort = -1;
+  int32_t decoding_speed = -1;
   int32_t photon_noise_iso = 0;
   uint32_t resampling = 1;
+  // Metadata boxes
+  std::vector<uint8_t> icc_profile;
+  std::vector<uint8_t> exif;
+  std::vector<uint8_t> xmp;
+  bool compress_boxes = false;
+  bool force_container = false;
+  bool raw_codestream = false;
   bool finished = false;
   bool cancelled = false;
 };
@@ -134,6 +142,28 @@ static std::string GetStringProp(napi_env env, napi_value object, const char* na
   std::vector<char> buffer(len + 1, '\0');
   napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &len);
   return std::string(buffer.data(), len);
+}
+
+// Reads a nullable ArrayBuffer/Buffer property into a vector. Returns empty vector when null/absent.
+static std::vector<uint8_t> GetNullableBufferProp(napi_env env, napi_value object, const char* name) {
+  napi_value value;
+  if (!GetProp(env, object, name, &value)) return {};
+  napi_valuetype type;
+  napi_typeof(env, value, &type);
+  if (type == napi_null || type == napi_undefined) return {};
+  void* data = nullptr;
+  size_t len = 0;
+  bool is_ab = false;
+  napi_is_arraybuffer(env, value, &is_ab);
+  if (is_ab) {
+    napi_get_arraybuffer_info(env, value, &data, &len);
+  } else {
+    // Accept Buffer (node:buffer) which wraps as ArrayBuffer with offset.
+    napi_get_buffer_info(env, value, &data, &len);
+  }
+  if (data == nullptr || len == 0) return {};
+  return std::vector<uint8_t>(static_cast<const uint8_t*>(data),
+                               static_cast<const uint8_t*>(data) + len);
 }
 
 static PixelFormatKind ParsePixelFormat(const std::string& value) {
@@ -433,6 +463,13 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return false;
 
+  // Container / raw-codestream control.
+  if (data->raw_codestream) {
+    JxlEncoderUseContainer(enc, JXL_FALSE);
+  } else if (data->force_container || !data->exif.empty() || !data->xmp.empty() || !data->icc_profile.empty()) {
+    JxlEncoderUseContainer(enc, JXL_TRUE);
+  }
+
   const uint32_t bits = BitsForFormat(data->format);
   const uint32_t exp_bits = ExponentBitsForFormat(data->format);
   JxlBasicInfo info;
@@ -451,11 +488,18 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
     return false;
   }
 
-  JxlColorEncoding color;
-  JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
-  if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc);
-    return false;
+  if (!data->icc_profile.empty()) {
+    if (JxlEncoderSetICCProfile(enc, data->icc_profile.data(), data->icc_profile.size()) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+  } else {
+    JxlColorEncoding color;
+    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
   }
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
@@ -465,6 +509,7 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   JxlEncoderSetFrameDistance(frame, static_cast<float>(data->distance));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(data->effort));
   if (data->brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(data->brotli_effort));
+  if (data->decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(data->decoding_speed > 4 ? 4 : data->decoding_speed));
   if (data->photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(data->photon_noise_iso));
   if (data->resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(data->resampling));
 
@@ -475,6 +520,21 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
     JxlEncoderDestroy(enc);
     return false;
   }
+
+  const JxlBool compress_flag = data->compress_boxes ? JXL_TRUE : JXL_FALSE;
+  if (!data->exif.empty()) {
+    if (JxlEncoderAddBox(enc, "Exif", data->exif.data(), data->exif.size(), compress_flag) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+  }
+  if (!data->xmp.empty()) {
+    if (JxlEncoderAddBox(enc, "xml ", data->xmp.data(), data->xmp.size(), compress_flag) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+  }
+
   JxlEncoderCloseInput(enc);
 
   out->assign(65536, 0);
@@ -691,10 +751,37 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
     data->brotli_effort = (be < 0.0) ? -1 : (be > 11.0) ? 11 : static_cast<int32_t>(be);
   }
   {
+    const double ds = GetNullableNumberProp(env, args[0], "decodingSpeed", -1.0);
+    data->decoding_speed = (ds < 0.0) ? -1 : (ds > 4.0) ? 4 : static_cast<int32_t>(ds);
+  }
+  {
     const double iso = GetNullableNumberProp(env, args[0], "photonNoiseIso", 0.0);
     data->photon_noise_iso = (iso <= 0.0) ? 0 : static_cast<int32_t>(iso);
   }
   data->resampling = NormalizeResampling(GetUint32Prop(env, args[0], "resampling", 1));
+
+  // Metadata blobs.
+  data->icc_profile = GetNullableBufferProp(env, args[0], "iccProfile");
+  data->exif        = GetNullableBufferProp(env, args[0], "exif");
+  data->xmp         = GetNullableBufferProp(env, args[0], "xmp");
+
+  // MetadataOptions sub-object (optional).
+  {
+    napi_value meta_val;
+    if (GetProp(env, args[0], "metadata", &meta_val)) {
+      napi_valuetype meta_type;
+      napi_typeof(env, meta_val, &meta_type);
+      if (meta_type == napi_object) {
+        data->compress_boxes  = GetBoolProp(env, meta_val, "compressBoxes",  false);
+        data->force_container = GetBoolProp(env, meta_val, "forceContainer", false);
+        data->raw_codestream  = GetBoolProp(env, meta_val, "rawCodestream",  false);
+        // includeICC/Exif/XMP: strip the blob when flag is explicitly false.
+        if (!GetBoolProp(env, meta_val, "includeICC",  true)) data->icc_profile.clear();
+        if (!GetBoolProp(env, meta_val, "includeExif", true)) data->exif.clear();
+        if (!GetBoolProp(env, meta_val, "includeXMP",  true)) data->xmp.clear();
+      }
+    }
+  }
 
   napi_value object;
   napi_create_object(env, &object);

@@ -154,15 +154,15 @@ JPEG reconstruction is one of the most impressive JXL demos possible.
 
 ## 10. Implementation Checklist
 
-- [ ] Branch: `feature/metadata-boxes-container`
-- [ ] Wire the long-ignored `iccProfile` / `exif` / `xmp` paths in bridge.cpp
-- [ ] Full `MetadataOptions` surface + custom boxes
-- [ ] JPEG reconstruction box support
-- [ ] Container vs raw control
-- [ ] Rich metadata benchmark (especially JPEG recon demo)
-- [ ] Tauri parity
+- [x] Branch: `epiccodereview/20260527T054853`
+- [x] Wire the long-ignored `iccProfile` / `exif` / `xmp` paths in bridge.cpp
+- [x] Full `MetadataOptions` surface + custom boxes
+- [x] JPEG reconstruction box support (`jxl_wasm_transcode_jpeg_to_jxl_v2`)
+- [x] Container vs raw control (`forceContainer` / `rawCodestream` in WasmBoxOpts)
+- [x] Rich metadata benchmark — compress boxes, force container, raw codestream toggles wired in wrapper-lab
+- [x] Tauri parity (native.cc + jxl-native/src/index.ts)
 - [ ] Update any earlier notes that referenced "metadata ignored for now"
-- [ ] Full handoff + PROGRESS_LOG
+- [x] Full handoff + PROGRESS_LOG
 
 ---
 
