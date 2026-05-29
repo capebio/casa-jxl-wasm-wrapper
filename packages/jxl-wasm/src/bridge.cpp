@@ -68,13 +68,14 @@ struct JxlWasmDecState {
   int error_code;
 };
 
-// Phase 2 extended descriptor (56 bytes, 4-byte aligned). Matches TS DataView writes.
-// Layout (byte offsets):
-//   0: type(u32), 4: bits(u32), 8: distance(f32), 12: plane_ptr(u32), 16: plane_size(u32)
-//  20: dim_shift(u32)
-//  24: spot_r(f32), 28: spot_g, 32: spot_b, 36: spot_solidity(f32)
-//  40: name_len(u8), 41: name[31] (UTF-8, null-padded/truncated to 31 bytes, total struct 56B)
-// Used for both encode input (planes via embedded plane_ptr in WASM memory) and decode info extraction.
+// Phase 2 extended descriptor: 72 bytes (4-byte aligned), exact match to TS DataView + serialize.
+// Field math (no internal padding):
+//   0-39: 10 × 4B (type u32, bits u32, distance f32, plane_ptr u32, plane_size u32,
+//                  dim_shift u32, spot_r/g/b/solidity f32) = 40 bytes
+//   40: name_len (u8) → offset 41
+//   41-71: name[31] (UTF-8, truncated/padded) → total 72 bytes.
+// sizeof(WasmExtraChannel) == 72 (C++). Used for encode input (plane_ptrs written by TS caller post-malloc)
+// and (zeroed fields) for decode-side roundtrip verification via helper.
 struct WasmExtraChannel {
   uint32_t type;               // JxlExtraChannelType numeric value (0=ALPHA,1=DEPTH,2=SPOT_COLOR,3=SELECTION_MASK,4=BLACK,5=CFA,6=THERMAL,7..14=RESERVED*,15=UNKNOWN,16=OPTIONAL)
   uint32_t bits;
@@ -86,7 +87,7 @@ struct WasmExtraChannel {
   uint8_t  name_len;
   char     name[31];
 };
-// sizeof(WasmExtraChannel) == 56 on 4-byte alignment (name[31] + pad after name_len reaches 56).
+// sizeof(WasmExtraChannel) == 72 (verified layout: 40 + 1 + 31). Matches EC_BYTES in facade.ts.
 
 #define JXL_DEC_RESULT_NEED_MORE  0
 #define JXL_DEC_RESULT_PROGRESS   1
@@ -463,7 +464,7 @@ static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t
 
 // Core Task 3 encode with full extra channels (Phase 2 descriptor).
 // main_pixels: RGBA (or RGB if !has_alpha) in the given fmt.
-// ec_desc: pointer to array of num_ec WasmExtraChannel (56B each); each .plane_ptr is valid WASM offset for that channel's 1-channel pixel buffer.
+// ec_desc: pointer to array of num_ec WasmExtraChannel (72B each per struct); each .plane_ptr is valid WASM offset for that channel's 1-channel pixel buffer.
 // All extra channel planes are provided separately (even alpha type if used as EC).
 static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
     const uint8_t* main_pixels, uint32_t width, uint32_t height,
@@ -1870,7 +1871,7 @@ JxlWasmBuffer* jxl_wasm_decode_tile_container_region_rgba16(const uint8_t* input
   return DecodeTileContainerRegion(input, input_size, region_x, region_y, region_w, region_h, 1u);
 }
 
-// --- Task 3: Extra channel encode FFI (rgba8 main + arbitrary ECs via packed 56B descriptors) ---
+// --- Task 3: Extra channel encode FFI (rgba8 main + arbitrary ECs via packed 72B descriptors) ---
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_extra_channels(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t has_alpha,
@@ -1882,7 +1883,9 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_extra_channels(
 
 // Decode-side helper for roundtrip test verification only (no public ImageInfo change).
 // Decodes only header, extracts all extra channel descriptors (names via GetExtraChannelName),
-// packs into a JxlWasmBuffer whose .data is a sequence of (type u32 + bits u32 + dim_shift u32 + spot[4] f32 + name_len u8 + name[31]).
+// packs into a JxlWasmBuffer using the *exact same 72B WasmExtraChannel layout* as encode input
+// (distance/plane_ptr/plane_size zeroed; dim/spot/name populated). This ensures consistent
+// DataView offsets in TS test (type@0, bits@4, dim@20, spot@24, name_len@40, name@41).
 // Caller (test) walks via buffer_data/size. Returns error buffer on failure.
 JxlWasmBuffer* jxl_wasm_get_extra_channels(const uint8_t* input, size_t input_size) {
   if (input == nullptr || input_size == 0) return MakeError(90);
@@ -1909,7 +1912,7 @@ JxlWasmBuffer* jxl_wasm_get_extra_channels(const uint8_t* input, size_t input_si
   if (!have_info) { JxlDecoderDestroy(dec); return MakeError(95); }
 
   const uint32_t n = binfo.num_extra_channels;
-  const size_t out_stride = 4u + 4u + 4u + 16u + 1u + 31u; // type+bits+dim+spot4+name_len+name31 = 56B same layout for simplicity (distance/plane=0)
+  const size_t out_stride = 72; // exact match to sizeof(WasmExtraChannel) / EC_BYTES for consistent offsets in tests
   const size_t out_size = n * out_stride;
   uint8_t* out = static_cast<uint8_t*>(malloc(out_size ? out_size : 1));
   if (out == nullptr && n > 0) { JxlDecoderDestroy(dec); return MakeError(96); }
@@ -1921,20 +1924,22 @@ JxlWasmBuffer* jxl_wasm_get_extra_channels(const uint8_t* input, size_t input_si
       free(out); JxlDecoderDestroy(dec); return MakeError(97);
     }
     uint8_t* slot = out + i * out_stride;
-    // pack (compatible with 56B read even if some fields 0)
+    // Pack using *exact* 72B struct offsets (zero distance/planes; dim/spot/name filled).
+    // Matches C++ WasmExtraChannel + TS serializeExtraChannelsForWasm + DataView in facade.test.ts
     *reinterpret_cast<uint32_t*>(slot + 0) = static_cast<uint32_t>(ei.type);
     *reinterpret_cast<uint32_t*>(slot + 4) = ei.bits_per_sample;
-    *reinterpret_cast<uint32_t*>(slot + 8) = ei.dim_shift;  // reuse 'distance' slot as dim in this helper
+    // distance@8, plane_ptr@12, plane_size@16 left 0 (memset)
+    *reinterpret_cast<uint32_t*>(slot + 20) = ei.dim_shift;
     if (ei.type == JXL_CHANNEL_SPOT_COLOR) {
-      memcpy(slot + 12, ei.spot_color, 16);
+      memcpy(slot + 24, ei.spot_color, 16);  // spot_r/g/b/solidity at 24-39
     }
     uint32_t name_len = ei.name_length;
     if (name_len > 31) name_len = 31;
-    *reinterpret_cast<uint8_t*>(slot + 28) = static_cast<uint8_t>(name_len); // name_len at offset adjusted
+    *reinterpret_cast<uint8_t*>(slot + 40) = static_cast<uint8_t>(name_len);
     if (name_len > 0) {
       char nm[32] = {0};
       if (JxlDecoderGetExtraChannelName(dec, i, nm, 32) == JXL_DEC_SUCCESS) {
-        memcpy(slot + 29, nm, name_len);  // name at +29 to keep simple 56-ish
+        memcpy(slot + 41, nm, name_len);
       }
     }
   }

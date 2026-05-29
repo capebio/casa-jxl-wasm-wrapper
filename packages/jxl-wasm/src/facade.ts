@@ -108,8 +108,9 @@ export interface EncoderOptions {
   /**
    * Extra channels to encode alongside the main image (Phase 2 full support).
    * Each descriptor's pixel data is supplied out-of-band for the low-level path
-   * (or future high-level Encoder extension). The 56-byte packed form is used
-   * for the WASM FFI.
+   * (or future high-level Encoder extension). The 72-byte packed descriptor form
+   * (matching WasmExtraChannel in bridge.cpp) is used for the WASM FFI.
+   * (serializeExtraChannelsForWasm + post-malloc plane_ptr writes by caller.)
    */
   extraChannels?: ExtraChannel[];
 }
@@ -280,9 +281,9 @@ interface LibjxlWasmModule {
   _jxl_wasm_encode_tile_container_rgba16?(pixelsPtr: number, width: number, height: number, tileSize: number, distance: number, effort: number, hasAlpha: number): number;
   _jxl_wasm_decode_tile_container_region_rgba8?(inputPtr: number, inputSize: number, regionX: number, regionY: number, regionW: number, regionH: number): number;
   _jxl_wasm_decode_tile_container_region_rgba16?(inputPtr: number, inputSize: number, regionX: number, regionY: number, regionW: number, regionH: number): number;
-  // Task 3: WASM bridge encode with packed 56B extra channel descriptors + per-EC planes
+  // Task 3: WASM bridge encode with packed 72B extra channel descriptors (WasmExtraChannel layout) + per-EC planes
   _jxl_wasm_encode_rgba8_with_extra_channels?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, ecDescPtr: number, numEc: number): number;
-  // Decode helper (test verification only): returns packed extra channel descriptors from codestream header
+  // Decode helper (test verification only): returns packed extra channel descriptors from codestream header (same 72B layout)
   _jxl_wasm_get_extra_channels?(inputPtr: number, inputSize: number): number;
 }
 
@@ -452,10 +453,12 @@ export function createDecoder(options: DecoderOptions): JxlDecoder {
   return new LibjxlDecoder(normalizeDecoderOptions(options));
 }
 
-// Task 3: 56-byte packed descriptor for WASM FFI (exact layout matches C++ struct WasmExtraChannel).
-// type(u32) bits(u32) distance(f32) plane_ptr(u32) plane_size(u32) dim_shift(u32)
-// spot[4](f32) name_len(u8) name[31 padded]
-export const EC_BYTES = 56;
+// Task 3: 72-byte packed descriptor for WASM FFI (exact layout matches C++ struct WasmExtraChannel sizeof==72).
+// Byte layout (no padding; 4B aligned):
+//   0:type(u32), 4:bits(u32), 8:distance(f32), 12:plane_ptr(u32), 16:plane_size(u32), 20:dim_shift(u32)
+//   24-39: spot[4](f32), 40:name_len(u8), 41-71:name[31] (UTF-8 truncated, zero-padded remainder)
+// plane_ptr/plane_size left 0 by serialize; filled by TS caller after separate per-plane _malloc.
+export const EC_BYTES = 72;
 
 const EXTRA_TYPE_TO_JXL: Record<ExtraChannelType, number> = {
   alpha: 0, depth: 1, selection: 3, spot: 2, thermal: 6,
@@ -464,9 +467,10 @@ const EXTRA_TYPE_TO_JXL: Record<ExtraChannelType, number> = {
 };
 
 /**
- * Serializes ExtraChannel[] to a 56*N byte ArrayBuffer for the EC encode FFI.
+ * Serializes ExtraChannel[] to a 72*N byte ArrayBuffer for the EC encode FFI.
  * Names UTF-8 truncated to 31 bytes, zero-padded. plane_ptr/plane_size left as 0 (filled by caller after malloc).
  * Returns { buffer, view } for direct DataView writes of pointers/sizes by caller.
+ * Offsets match bridge.cpp WasmExtraChannel exactly (critical for num_ec > 0; prior 56B caused overlap).
  */
 export function serializeExtraChannelsForWasm(channels: ExtraChannel[]): { buffer: ArrayBuffer; view: DataView } {
   const n = channels.length;

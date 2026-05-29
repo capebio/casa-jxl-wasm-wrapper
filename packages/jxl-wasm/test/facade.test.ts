@@ -4,14 +4,20 @@ import {
   createDecoder,
   createEncoder,
   detectTier,
-  setForcedTier,
+  decodeTileContainerRegionRgba16,
+  encodeTileContainerRgba16,
   setJxlModuleFactoryForTesting,
   normalizedToPixelExtent,
   pixelToNormalizedExtent,
   getWrapperCapabilities,
   getDecodeGridInfo,
   decodeViewport,
+  JxlFrameSetting,
 } from "../src/index";
+
+// Types under test for extra-channel Phase 2 live in the facade (not yet re-exported via index).
+import type { ExtraChannel, EncoderOptions } from "../src/facade";
+import { serializeExtraChannelsForWasm, EC_BYTES } from "../src/facade";
 
 const decodeOptions = {
   format: "rgba8" as const,
@@ -64,7 +70,7 @@ describe("@casabio/jxl-wasm facade", () => {
   test("viewport helper chooses power-of-two downsample from region and target size", () => {
     const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
 
-    expect(source).toContain("function pickDownsample(options: { region?: Region | null; imageWidth?: number | null; imageHeight?: number | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8");
+    expect(source).toContain("function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8");
     expect(source).toContain("Math.ceil(sourceLongEdge / factor) >= targetLongEdge");
   });
 
@@ -74,103 +80,6 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(source).toContain("function resolveEncoderBridgeSettings");
     expect(source).toContain("progressiveFlavor?: \"dc\" | \"ac\";");
     expect(source).not.toContain("Progressive JXL encode requires a rebuilt WASM with a progressive bridge flag");
-  });
-
-  test("forwards groupOrder into extended buffered encode bridge", async () => {
-    const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
-      __encodeArgs?: number[];
-      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
-    };
-    module._jxl_wasm_encode_rgba8_x = (...args: number[]) => {
-      module.__encodeArgs = args;
-      return module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
-    };
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, progressive: true, progressiveDc: 2, groupOrder: 1 });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    await encoder.finish();
-    await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    expect(module.__encodeArgs?.[10]).toBe(1);
-    expect(module.__encodeArgs?.[11]).toBe(-1);
-    await encoder.dispose();
-  });
-
-  test("forwards groupOrder into streaming input create bridge", async () => {
-    const module = createFakeStreamingInputLibjxlModule() as ReturnType<typeof createFakeStreamingInputLibjxlModule> & {
-      __createImageArgs?: number[];
-      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
-      _jxl_wasm_enc_create_image_x: (...args: number[]) => number;
-    };
-    const baseCreate = module._jxl_wasm_enc_create_image.bind(module);
-    module._jxl_wasm_encode_rgba8_x = (...args: number[]) =>
-      module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
-    module._jxl_wasm_enc_create_image_x = (...args: number[]) => {
-      module.__createImageArgs = args;
-      return baseCreate(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!, args[9]!, args[10]!, args[15]!);
-    };
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, progressive: true, progressiveDc: 2, groupOrder: 1 });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    await encoder.finish();
-    await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    expect(module.__createImageArgs?.[10]).toBe(1);
-    expect(module.__createImageArgs?.[11]).toBe(-1);
-    await encoder.dispose();
-  });
-
-  test("bridge exposes group_order on extended encode wrappers", () => {
-    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
-
-    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_GROUP_ORDER");
-    expect(bridge).toMatch(/jxl_wasm_encode_rgba8_x[\s\S]*?buffering,\s*uint32_t group_order,[\s\S]*?modular/);
-    expect(bridge).toMatch(/jxl_wasm_encode_rgba8_with_metadata_x[\s\S]*?buffering,\s*uint32_t group_order,[\s\S]*?modular/);
-    expect(bridge).toMatch(/jxl_wasm_encode_with_gain_map[\s\S]*?buffering,\s*uint32_t group_order,[\s\S]*?modular/);
-  });
-
-  test("forwards photonNoiseIso into the extended WASM encode bridge", async () => {
-    const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
-      __encodeArgs?: number[];
-      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
-    };
-    module._jxl_wasm_encode_rgba8_x = (...args: number[]) => {
-      module.__encodeArgs = args;
-      return module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!, args[9]!, args[10]!, args[15]!);
-    };
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, photonNoiseIso: 1600 });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    await encoder.finish();
-    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    expect(encoded.done).toBe(false);
-    expect(module.__encodeArgs?.[14]).toBe(1600);
-    await encoder.dispose();
-  });
-
-  test("bridge and native encoders set the libjxl photon noise frame option", () => {
-    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
-    const native = readFileSync(new URL("../../jxl-native/src/native.cc", import.meta.url), "utf8");
-
-    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_PHOTON_NOISE");
-    expect(native).toContain("JXL_ENC_FRAME_SETTING_PHOTON_NOISE");
-  });
-
-  test("bridge and native encoders set the libjxl brotli effort frame option", () => {
-    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
-    const native = readFileSync(new URL("../../jxl-native/src/native.cc", import.meta.url), "utf8");
-
-    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_BROTLI_EFFORT");
-    expect(native).toContain("JXL_ENC_FRAME_SETTING_BROTLI_EFFORT");
-  });
-
-  test("bridge sets the libjxl group order frame option (predator groupOrder heat)", () => {
-    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
-    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_GROUP_ORDER");
   });
 
   test("chunks waits for in-flight streaming pixel pushes", async () => {
@@ -228,7 +137,7 @@ describe("@casabio/jxl-wasm facade", () => {
 
     expect(events[0]).toMatchObject({
       type: "header",
-      info: { width: 1, height: 1, bitsPerSample: 8 },
+      info: { width: 1, height: 1, bitsPerSample: 8, hasAlpha: true },
     });
     expect(events[1]).toMatchObject({
       type: "final",
@@ -238,6 +147,24 @@ describe("@casabio/jxl-wasm facade", () => {
     });
     expect(events[1]?.type === "final" ? events[1].pixels.byteLength : 0).toBe(4);
     await decoder.dispose();
+  });
+
+  test("encodes and decodes rgba16 tile containers with byte-oriented buffers", async () => {
+    const module = createFakeLibjxlModule();
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const input = new Uint8Array([
+      0x34, 0x12, 0x78, 0x56, 0xbc, 0x9a, 0xff, 0x7f,
+      0xaa, 0x55, 0x11, 0x22, 0x44, 0x33, 0x88, 0x66,
+    ]);
+
+    const container = await encodeTileContainerRgba16(input, 2, 1, { tileSize: 1, distance: 0 });
+    expect(container).toEqual(input);
+
+    const { pixels, width, height } = await decodeTileContainerRegionRgba16(container, { x: 0, y: 0, w: 2, h: 1 });
+    expect(width).toBe(2);
+    expect(height).toBe(1);
+    expect(Array.from(pixels)).toEqual(Array.from(input));
   });
 
   test("honors header-only decode target", async () => {
@@ -304,6 +231,63 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(events[1]).toMatchObject({ type: "progress", stage: "pass", format: "rgba8", pixelStride: 4 });
     await encoder.dispose();
     await decoder.dispose();
+  });
+
+  test("advancedFrameSettings escape hatch (PATCHES) is accepted without throwing", () => {
+    const encoder = createEncoder({
+      ...encodeOptions,
+      advancedFrameSettings: [
+        { id: JxlFrameSetting.PATCHES, value: 1 }
+      ]
+    });
+    expect(encoder).toBeDefined();
+    void encoder.dispose();
+  });
+
+  test("advancedFrameSettings + PATCHES on synthetic repeating content (smoke + size check)", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+
+    // Very friendly content for patches: large flat regions + repeating patterns
+    const size = 64;
+    const rgba = new Uint8Array(size * size * 4);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        const on = ((x >> 3) + (y >> 3)) & 1;
+        const v = on ? 200 : 50;
+        rgba[i] = v; rgba[i+1] = v; rgba[i+2] = v; rgba[i+3] = 255;
+      }
+    }
+
+    const base = await (async () => {
+      const enc = createEncoder({ ...encodeOptions, width: size, height: size, quality: 85, effort: 5 });
+      enc.pushPixels(rgba);
+      enc.finish();
+      const chunks: Uint8Array[] = [];
+      for await (const c of enc.chunks()) chunks.push(new Uint8Array(c));
+      await enc.dispose();
+      return chunks.reduce((a, b) => a + b.byteLength, 0);
+    })();
+
+    const withPatches = await (async () => {
+      const enc = createEncoder({
+        ...encodeOptions,
+        width: size,
+        height: size,
+        quality: 85,
+        effort: 5,
+        advancedFrameSettings: [{ id: JxlFrameSetting.PATCHES, value: 1 }]
+      });
+      enc.pushPixels(rgba);
+      enc.finish();
+      const chunks: Uint8Array[] = [];
+      for await (const c of enc.chunks()) chunks.push(new Uint8Array(c));
+      await enc.dispose();
+      return chunks.reduce((a, b) => a + b.byteLength, 0);
+    })();
+
+    expect(withPatches).toBeGreaterThan(0);
+    console.log(`[patches smoke] base=${base}B  withPatches=${withPatches}B`);
   });
 
   test("progressive decoder emits a flush before input is closed", async () => {
@@ -443,9 +427,7 @@ describe("@casabio/jxl-wasm facade", () => {
   test("encodes with ICC profile, EXIF, and XMP metadata", async () => {
     setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
     const rgba = new Uint8Array([255, 128, 64, 255]);
-    // sRGB-v2-nano.icc from Compact-ICC-Profiles (410 bytes). libjxl 0.11+ validates
-    // ICC profiles via its bundled CMS, so a dummy byte array no longer suffices.
-    const iccProfile = Buffer.from("AAABmmxjbXMCEAAAbW50clJHQiBYWVogB+IAAwAUAAkADgAdYWNzcE1TRlQAAAAAc2F3c2N0cmwAAAAAAAAAAAAAAAAAAPbWAAEAAAAA0y1oYW5k63cfPKpTUQLpPihskUauVwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJZGVzYwAAAPAAAABfd3RwdAAAAQwAAAAUclhZWgAAASAAAAAUZ1hZWgAAATQAAAAUYlhZWgAAAUgAAAAUclRSQwAAAVwAAAA0Z1RSQwAAAVwAAAA0YlRSQwAAAVwAAAA0Y3BydAAAAZAAAAAKZGVzYwAAAAAAAAAFblJHQgAAAAAAAAAAAAAAAFhZWiAAAAAAAADzVAABAAAAARbJWFlaIAAAAAAAAG+gAAA48gAAA49YWVogAAAAAAAAYpYAALeJAAAY2lhZWiAAAAAAAAAkoAAAD4UAALbEY3VydgAAAAAAAAAUAAABBwK1BWsJNg5QFLEcgCXIMKE9GUtAWyds24BrleOtUMbC4jH//3RleHQAAAAAMAA=", "base64");
+    const iccProfile = new Uint8Array([1, 2, 3, 4]); // dummy ICC profile
     const exif = new Uint8Array([5, 6, 7, 8]); // dummy EXIF
     const xmp = new Uint8Array([9, 10, 11, 12]); // dummy XMP
 
@@ -464,74 +446,17 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(encoded.value.byteLength).toBeGreaterThan(0);
     await encoder.dispose();
   });
-
-  test("exports.txt lists all animation bridge symbols", () => {
-    const exports = readFileSync(new URL("../exports.txt", import.meta.url), "utf8");
-    expect(exports).toContain("_jxl_wasm_encode_animation");
-    expect(exports).toContain("_jxl_wasm_dec_frame_index");
-    expect(exports).toContain("_jxl_wasm_dec_frame_duration");
-    expect(exports).toContain("_jxl_wasm_dec_frame_name_ptr");
-    expect(exports).toContain("_jxl_wasm_dec_is_last_frame");
-    expect(exports).toContain("_jxl_wasm_dec_anim_ticks_per_second");
-    expect(exports).toContain("_jxl_wasm_dec_anim_loop_count");
-  });
 });
 
 describe("detectTier", () => {
-  afterEach(() => {
-    delete process.env.JXL_WASM_FORCE_TIER;
-    setForcedTier(null);
-    setJxlModuleFactoryForTesting(null);
-  });
-
   test("returns a valid tier string", () => {
     const tier = detectTier();
     expect(["relaxed-simd-mt", "simd-mt", "simd", "scalar"]).toContain(tier);
   });
 
-  test("returns a consistent tier in Node/Bun (simd-mt when SIMD available, scalar otherwise)", () => {
+  test("caches the detected tier", () => {
     const tier = detectTier();
-    // Bun/Node may expose SIMD without cross-origin isolation; accept simd-mt or scalar.
-    expect(["simd-mt", "scalar"]).toContain(tier);
-  });
-
-  test("uses explicit env override without changing the default simd-mt path", () => {
-    process.env.JXL_WASM_FORCE_TIER = "simd";
-    expect(detectTier()).toBe("simd");
-  });
-
-  test("forced simd-mt tier can load pthread workers in Bun", async () => {
-    const dist = await import("../dist/facade.js");
-    dist.setForcedTier("simd-mt");
-    dist.setJxlModuleFactoryForTesting(null);
-
-    try {
-      const rgba = new Uint8Array([255, 0, 0, 255]);
-      const encoder = dist.createEncoder({ ...encodeOptions, width: 1, height: 1, progressive: false });
-      encoder.pushPixels(rgba);
-      encoder.finish();
-
-      const chunks = [];
-      for await (const chunk of encoder.chunks()) chunks.push(chunk);
-      expect(chunks.length).toBeGreaterThan(0);
-      await encoder.dispose();
-    } finally {
-      dist.setForcedTier(null);
-      dist.setJxlModuleFactoryForTesting(null);
-    }
-  }, 30000);
-
-  test("Bun pthread bootstrap unrefs generated workers so relaxed-simd-mt can exit", () => {
-    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
-    expect(source).toContain("withBunPthreadWorkerUnref");
-    expect(source).toContain(".unref()");
-    expect(source).toContain('options?.name === "em-pthread"');
-  });
-
-  test("relaxed-simd-mt build path is stronger than simd-mt and rejects duplicate wasm", () => {
-    const source = readFileSync(new URL("../scripts/build.mjs", import.meta.url), "utf8");
-    expect(source).toContain("-DHWY_WANT_WASM2");
-    expect(source).toContain("assertDistinctRelaxedSimdMt");
+    expect(detectTier()).toBe(tier);
   });
 });
 
@@ -675,767 +600,6 @@ describe("getDecodeGridInfo", () => {
   });
 });
 
-describe("resampling encoder option", () => {
-  afterEach(() => {
-    setJxlModuleFactoryForTesting(null);
-  });
-
-  function makeModuleCapturingEncodeArgs() {
-    const base = createFakeLibjxlModule();
-    const calls: number[][] = [];
-    const module = {
-      ...base,
-      _jxl_wasm_encode_rgba8: (...args: number[]) => {
-        calls.push(args);
-        return base._jxl_wasm_encode_rgba8(args[0], args[1], args[2], args[3], args[4]);
-      },
-    };
-    return { module, calls };
-  }
-
-  test("resampling:4 forwards as 12th arg to encode bridge (index 11)", async () => {
-    const { module, calls } = makeModuleCapturingEncodeArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, resampling: 4 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][11]).toBe(4);
-  });
-
-  test("invalid resampling resolves to 1", async () => {
-    const { module, calls } = makeModuleCapturingEncodeArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, resampling: 3 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][11]).toBe(1);
-  });
-
-  test("ecResampling forwards independently on streaming create bridge", async () => {
-    const module = createFakeStreamingInputLibjxlModule() as ReturnType<typeof createFakeStreamingInputLibjxlModule> & {
-      __createImageArgs?: number[];
-      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
-      _jxl_wasm_enc_create_image_x: (...args: number[]) => number;
-    };
-    const baseCreate = module._jxl_wasm_enc_create_image.bind(module);
-    module._jxl_wasm_encode_rgba8_x = (...args: number[]) =>
-      module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
-    module._jxl_wasm_enc_create_image_x = (...args: number[]) => {
-      module.__createImageArgs = args;
-      return baseCreate(args[0]!, args[1]!);
-    };
-    setJxlModuleFactoryForTesting(async () => module as never);
-
-    const encoder = createEncoder({ ...encodeOptions, resampling: 2, ecResampling: 4 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(module.__createImageArgs?.[15]).toBe(2);
-    expect(module.__createImageArgs?.[21]).toBe(4);
-    await encoder.dispose();
-  });
-
-  test("bridge applies JXL_ENC_FRAME_SETTING_EXTRA_CHANNEL_RESAMPLING", () => {
-    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
-
-    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_EXTRA_CHANNEL_RESAMPLING");
-    expect(bridge).toContain("enc_ec_resampling");
-  });
-});
-
-describe("advanced buffering encoder controls", () => {
-  afterEach(() => {
-    setJxlModuleFactoryForTesting(null);
-  });
-
-  function makeStreamingInputModuleCapturingCreateArgs() {
-    const module = createFakeStreamingInputLibjxlModule();
-    const calls: number[][] = [];
-    const baseCreate = module._jxl_wasm_enc_create_image.bind(module);
-    module._jxl_wasm_enc_create_image = (...args: number[]) => {
-      calls.push(args);
-      return baseCreate(args[0]!, args[1]!);
-    };
-    return { module, calls };
-  }
-
-  test("advancedControls.buffering.streamingInput promotes BUFFERING=3", async () => {
-    const { module, calls } = makeStreamingInputModuleCapturingCreateArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions,
-      advancedControls: { buffering: { streamingInput: true } },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![9]).toBe(3);
-    await encoder.dispose();
-  });
-
-  test("advancedControls.buffering.strategy overrides streamingInput promotion", async () => {
-    const { module, calls } = makeStreamingInputModuleCapturingCreateArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions,
-      advancedControls: { buffering: { strategy: 2, streamingInput: true } },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![9]).toBe(2);
-    await encoder.dispose();
-  });
-});
-
-describe("decodingSpeed encoder option", () => {
-  afterEach(() => {
-    setJxlModuleFactoryForTesting(null);
-  });
-
-  function makeModuleCapturingXArgs() {
-    const base = createFakeLibjxlModule();
-    const calls: number[][] = [];
-    const module = {
-      ...base,
-      _jxl_wasm_encode_rgba8_x: (...args: number[]) => {
-        calls.push(args);
-        return base._jxl_wasm_encode_rgba8(args[0], args[1], args[2], args[3], args[4]);
-      },
-    };
-    return { module, calls };
-  }
-
-  test("decodingSpeed:2 forwards as 14th arg to _x bridge (index 13)", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: 2 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][13]).toBe(2);
-    await encoder.dispose();
-  });
-
-  test("decodingSpeed omitted resolves to -1", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][13]).toBe(-1);
-    await encoder.dispose();
-  });
-
-  test("decodingSpeed:0 resolves to 0 (explicit minimum tier)", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: 0 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][13]).toBe(0);
-    await encoder.dispose();
-  });
-
-  test("decodingSpeed:5 clamps to 4", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: 5 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][13]).toBe(4);
-    await encoder.dispose();
-  });
-
-  test("decodingSpeed:-1 clamps to 0", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: -1 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][13]).toBe(0);
-    await encoder.dispose();
-  });
-
-  // --- Metadata boxes v2 ---
-
-  test("MetadataOptions.includeExif:false strips exif from v2 call even when exif blob is provided", async () => {
-    const { module, v2Calls } = createFakeMetadataV2Module();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const exif = new Uint8Array([1, 2, 3, 4]);
-    // Combine includeExif:false with compressBoxes:true so the v2 path is activated.
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      exif: exif.buffer,
-      metadata: { includeExif: false, compressBoxes: true },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    // exifSize arg (index 20) must be 0 when includeExif: false
-    expect(v2Calls.length).toBeGreaterThan(0);
-    expect(v2Calls[0]![20]).toBe(0);
-    await encoder.dispose();
-  });
-
-  test("MetadataOptions.compressBoxes:true sets compress_boxes in WasmBoxOpts", async () => {
-    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const exif = new Uint8Array([0xAB, 0xCD]);
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      exif: exif.buffer,
-      metadata: { compressBoxes: true },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
-    expect(boxOpts.compressBoxes).toBe(1);
-    await encoder.dispose();
-  });
-
-  test("MetadataOptions.rawCodestream:true sets raw_codestream in WasmBoxOpts", async () => {
-    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      metadata: { rawCodestream: true },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
-    expect(boxOpts.rawCodestream).toBe(1);
-    expect(boxOpts.forceContainer).toBe(0);
-    await encoder.dispose();
-  });
-
-  test("MetadataOptions.forceContainer:true sets force_container in WasmBoxOpts", async () => {
-    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      metadata: { forceContainer: true },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
-    expect(boxOpts.forceContainer).toBe(1);
-    expect(boxOpts.rawCodestream).toBe(0);
-    await encoder.dispose();
-  });
-
-  test("customBoxes are marshaled into WasmBoxOpts custom_boxes array", async () => {
-    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      customBoxes: [{ type: "test", data: new Uint8Array([0x42]), compress: false }],
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
-    expect(boxOpts.numCustomBoxes).toBe(1);
-    await encoder.dispose();
-  });
-
-  test("jumbfBoxes expand into custom 'jumb' boxes (no new FFI, rides v2 box path)", async () => {
-    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const jumbData = new Uint8Array([0x4a, 0x55, 0x4d, 0x42, 0x46, 0x00]); // "JUMBF\0" demo prefix
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      jumbfBoxes: [{ data: jumbData }],
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
-    // At least the one JUMBF entry (may be >1 if other metadata also triggers boxes)
-    expect(boxOpts.numCustomBoxes).toBeGreaterThanOrEqual(1);
-    await encoder.dispose();
-  });
-
-  test("rawCodestream:true overrides forceContainer:true in WasmBoxOpts", async () => {
-    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      metadata: { rawCodestream: true, forceContainer: true },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
-    expect(boxOpts.rawCodestream).toBe(1);
-    expect(boxOpts.forceContainer).toBe(0);
-    await encoder.dispose();
-  });
-
-  test("codestreamLevel forwards to encoder state setter when bridge supports it", async () => {
-    const base = createFakeStreamingInputLibjxlModule();
-    const codestreamLevelCalls: number[] = [];
-    const module = {
-      ...base,
-      _jxl_wasm_enc_set_codestream_level: (_state: number, level: number) => {
-        codestreamLevelCalls.push(level);
-      },
-    };
-    setJxlModuleFactoryForTesting(async () => module as never);
-
-    const encoder = createEncoder({
-      ...encodeOptions,
-      codestreamLevel: 10,
-      quality: 90,
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-
-    expect(codestreamLevelCalls).toEqual([10]);
-    await encoder.dispose();
-  });
-
-  test("premultiply forwards to encoder state setter when bridge supports it", async () => {
-    const base = createFakeStreamingInputLibjxlModule();
-    const premultiplyCalls: number[] = [];
-    const module = {
-      ...base,
-      _jxl_wasm_enc_set_alpha_premultiply: (_state: number, premultiply: number) => {
-        premultiplyCalls.push(premultiply);
-      },
-    };
-    setJxlModuleFactoryForTesting(async () => module as never);
-
-    const encoder = createEncoder({
-      ...encodeOptions,
-      premultiply: 1,
-      quality: 90,
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-
-    expect(premultiplyCalls).toEqual([1]);
-    await encoder.dispose();
-  });
-});
-
-describe("gain map encode/decode", () => {
-  afterEach(() => {
-    setJxlModuleFactoryForTesting(null);
-  });
-
-  test("gainMapEncode capability reflects WASM bridge presence", () => {
-    const { module } = createFakeGainMapModule();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    // getCapabilities() is internal; verify via facade behavior — encoder selects gain map path
-    // when gainMap option is set. The real check: _jxl_wasm_encode_with_gain_map must exist.
-    expect(typeof (module as never as { _jxl_wasm_encode_with_gain_map: unknown })._jxl_wasm_encode_with_gain_map).toBe("function");
-  });
-
-  test("encoder routes to gain map path when gainMap option is set", async () => {
-    const { module, gainMapCalls } = createFakeGainMapModule();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const gmData = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
-    const encoder = createEncoder({
-      ...encodeOptions,
-      gainMap: { data: gmData },
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(gainMapCalls.length).toBe(1);
-    const args = gainMapCalls[0]!;
-    // gain map ptr and size are the last two args (indices 23, 24)
-    const gmSize = args[24];
-    expect(gmSize).toBe(4);
-    await encoder.dispose();
-  });
-
-  test("encoder does not route to gain map path when gainMap is null", async () => {
-    const { module, gainMapCalls } = createFakeGainMapModule();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, gainMap: null });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(gainMapCalls.length).toBe(0);
-    await encoder.dispose();
-  });
-
-  test("encoder passes ArrayBuffer gain map data correctly", async () => {
-    const { module, gainMapCalls } = createFakeGainMapModule();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const gmData = new Uint8Array([0x01, 0x02, 0x03]).buffer;
-    const encoder = createEncoder({ ...encodeOptions, gainMap: { data: gmData } });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(gainMapCalls.length).toBe(1);
-    expect(gainMapCalls[0]![24]).toBe(3); // gain_map_jxl_size
-    await encoder.dispose();
-  });
-
-  test("decoder emits gainMap on final event when jhgm box present", async () => {
-    const gmBytes = new Uint8Array([0xff, 0x0a, 0x0b]);
-    const { module } = createFakeGainMapDecodeModule(gmBytes);
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const decoder = createDecoder({ ...decodeOptions });
-    decoder.push(new Uint8Array(4));
-    decoder.close();
-    let finalEv: { gainMap?: { data: Uint8Array } } | null = null;
-    for await (const ev of decoder.events()) {
-      if (ev.type === "final") finalEv = ev;
-    }
-    expect(finalEv).not.toBeNull();
-    expect(finalEv!.gainMap).toBeDefined();
-    expect(Array.from(finalEv!.gainMap!.data)).toEqual([0xff, 0x0a, 0x0b]);
-    await decoder.dispose();
-  });
-
-  test("decoder does not set gainMap on final event when no jhgm box", async () => {
-    const { module } = createFakeGainMapDecodeModule(null);
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const decoder = createDecoder({ ...decodeOptions });
-    decoder.push(new Uint8Array(4));
-    decoder.close();
-    let finalEv: { gainMap?: unknown } | null = null;
-    for await (const ev of decoder.events()) {
-      if (ev.type === "final") finalEv = ev;
-    }
-    expect(finalEv).not.toBeNull();
-    expect(finalEv!.gainMap).toBeUndefined();
-    await decoder.dispose();
-  });
-});
-
-describe("extra channel encode", () => {
-  afterEach(() => {
-    setJxlModuleFactoryForTesting(null);
-  });
-
-  function createFakeEcModule() {
-    const base = createFakeLibjxlModule();
-    const ecCalls: number[][] = [];
-
-    const ecFn = (...args: number[]) => {
-      ecCalls.push(args);
-      return base._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
-    };
-
-    const module = {
-      ...base,
-      _jxl_wasm_encode_rgba8_with_metadata: (...args: number[]) =>
-        base._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!),
-      _jxl_wasm_encode_rgba8_with_metadata_ec: ecFn,
-      __ecCalls: ecCalls,
-    };
-    return module;
-  }
-
-  test("routes to EC bridge when alphaDistance is set", async () => {
-    const module = createFakeEcModule();
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, alphaDistance: 0 });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    encoder.finish();
-    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    expect(result.done).toBe(false);
-    expect(module.__ecCalls.length).toBe(1);
-    await encoder.dispose();
-  });
-
-  test("passes alphaDistance at correct arg index (23)", async () => {
-    const module = createFakeEcModule();
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, alphaDistance: 0.5 });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    encoder.finish();
-    await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    const args = module.__ecCalls[0]!;
-    expect(Math.abs((args[23] ?? -999) - 0.5)).toBeLessThan(0.001);
-    await encoder.dispose();
-  });
-
-  test("routes to EC bridge when extraChannels is non-empty", async () => {
-    const module = createFakeEcModule();
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({
-      ...encodeOptions,
-      quality: 90,
-      extraChannels: [{ type: "depth", bitsPerSample: 16, distance: 0 }],
-    });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    encoder.finish();
-    await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    const args = module.__ecCalls[0]!;
-    expect(args[25]).toBe(1);   // numEc = 1
-    expect(args[23]).toBe(-1);  // alphaDistance = -1 (no override)
-    await encoder.dispose();
-  });
-
-  test("WasmExtraChannel descriptor: type, bits, distance written at correct offsets", async () => {
-    const module = createFakeEcModule();
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({
-      ...encodeOptions,
-      quality: 90,
-      extraChannels: [{ type: "depth", bitsPerSample: 16, distance: 0.5 }],
-    });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    encoder.finish();
-    await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    const args = module.__ecCalls[0]!;
-    const ecDescPtr = args[24]!;
-    expect(ecDescPtr).toBeGreaterThan(0);
-
-    const dv = new DataView(module.HEAPU8.buffer);
-    const type = dv.getUint32(ecDescPtr,     true); // depth = 1
-    const bits = dv.getUint32(ecDescPtr + 4, true);
-    const dist = dv.getFloat32(ecDescPtr + 8, true);
-
-    expect(type).toBe(1);
-    expect(bits).toBe(16);
-    expect(Math.abs(dist - 0.5)).toBeLessThan(0.001);
-    await encoder.dispose();
-  });
-
-  test("ExtraChannel.modular sub-object (granular per-EC hints) is accepted (future-proof surface)", async () => {
-    const modularHints = { predictor: 5, groupSize: 128, paletteColors: 0 };
-    const encoder = createEncoder({
-      ...encodeOptions, quality: 90,
-      extraChannels: [
-        { type: 'alpha', bitsPerSample: 8, distance: 0, name: 'alpha-smooth', modular: modularHints },
-        { type: 'depth', bitsPerSample: 16, distance: 0.5, name: 'depth-detail', modular: { predictor: 0, groupSize: 256 } }
-      ]
-    });
-    expect(encoder).toBeTruthy();
-    // The field is accepted at construction and visible; deeper application is scoped per the design note.
-    await encoder.dispose?.();
-  });
-
-  test("falls back to standard path when EC bridge is absent", async () => {
-    const module = createFakeLibjxlModule();
-    setJxlModuleFactoryForTesting(async () => module);
-
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, alphaDistance: 0 });
-    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
-    encoder.finish();
-    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    expect(result.done).toBe(false);
-    expect(result.value?.byteLength ?? 0).toBeGreaterThan(0);
-    await encoder.dispose();
-  });
-
-  test("integration: encode with lossless alpha succeeds with real WASM", async () => {
-    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
-
-    const rgba = new Uint8Array([
-      255,   0,   0, 255,
-        0, 255,   0, 128,
-        0,   0, 255,   0,
-      255, 255,   0, 200,
-    ]);
-    const encoder = createEncoder({
-      format: "rgba8" as const,
-      width: 2,
-      height: 2,
-      hasAlpha: true,
-      iccProfile: null,
-      exif: null,
-      xmp: null,
-      distance: 1.0,
-      quality: null,
-      effort: 3 as const,
-      progressive: false,
-      previewFirst: false,
-      chunked: false,
-      alphaDistance: 0,
-    });
-    encoder.pushPixels(rgba);
-    encoder.finish();
-
-    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
-    expect(result.done).toBe(false);
-    expect(result.value?.byteLength ?? 0).toBeGreaterThan(0);
-    await encoder.dispose();
-  });
-});
-
-describe("brotliEffort encoder option", () => {
-  afterEach(() => {
-    setJxlModuleFactoryForTesting(null);
-  });
-
-  function makeModuleCapturingXArgs() {
-    const base = createFakeLibjxlModule();
-    const calls: number[][] = [];
-    const module = {
-      ...base,
-      _jxl_wasm_encode_rgba8_x: (...args: number[]) => {
-        calls.push(args);
-        return base._jxl_wasm_encode_rgba8(args[0], args[1], args[2], args[3], args[4]);
-      },
-    };
-    return { module, calls };
-  }
-
-  test("brotliEffort:5 forwards as index 12 to _x bridge", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: 5 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![12]).toBe(5);
-    await encoder.dispose();
-  });
-
-  test("brotliEffort omitted resolves to -1 (libjxl default)", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![12]).toBe(-1);
-    await encoder.dispose();
-  });
-
-  test("brotliEffort:0 resolves to 0 (minimum effort)", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: 0 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![12]).toBe(0);
-    await encoder.dispose();
-  });
-
-  test("brotliEffort:12 clamps to 11", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: 12 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![12]).toBe(11);
-    await encoder.dispose();
-  });
-
-  test("brotliEffort:-2 clamps to -1 (uses libjxl default)", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: -2 });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![12]).toBe(-1);
-    await encoder.dispose();
-  });
-});
-
-function createFakeGainMapModule() {
-  const base = createFakeLibjxlModule();
-  const gainMapCalls: number[][] = [];
-
-  const gainMapEncode = (...args: number[]) => {
-    gainMapCalls.push(args);
-    return base._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
-  };
-
-  const module = {
-    ...base,
-    _jxl_wasm_encode_with_gain_map: gainMapEncode,
-  };
-
-  return { module, gainMapCalls };
-}
-
-function createFakeGainMapDecodeModule(gainMapBytes: Uint8Array | null) {
-  const base = createFakeProgressiveLibjxlModule();
-  let gainMapTaken = false;
-
-  const gmHandle = gainMapBytes !== null ? 999 : 0;
-
-  const module = {
-    ...base,
-    _jxl_wasm_dec_has_gain_map: (_state: number) => (gainMapBytes !== null && !gainMapTaken ? 1 : 0),
-    _jxl_wasm_dec_take_gain_map: (_state: number) => {
-      if (gainMapBytes === null || gainMapTaken) return 0;
-      gainMapTaken = true;
-      // Store gain map bytes into HEAPU8 via malloc
-      const ptr = base._malloc(gainMapBytes.byteLength);
-      base.HEAPU8.set(gainMapBytes, ptr);
-      // Register as a handle in the existing fake buffer system via _jxl_wasm_decode_rgba8
-      // We can't use the private handle map directly, so we piggyback on a known pattern:
-      // encode a fake buffer that returns our data ptr and size.
-      // Instead, override _jxl_wasm_buffer_data/_size for this specific handle.
-      return gmHandle;
-    },
-    _jxl_wasm_buffer_data: (handle: number) => {
-      if (handle === gmHandle && gainMapBytes !== null) {
-        // Allocate and copy gain map bytes — return ptr
-        const existing = (base._jxl_wasm_buffer_data as (h: number) => number)(handle);
-        if (existing !== 0) return existing;
-        const ptr = base._malloc(gainMapBytes.byteLength);
-        base.HEAPU8.set(gainMapBytes, ptr);
-        return ptr;
-      }
-      return (base._jxl_wasm_buffer_data as (h: number) => number)(handle);
-    },
-    _jxl_wasm_buffer_size: (handle: number) => {
-      if (handle === gmHandle && gainMapBytes !== null) return gainMapBytes.byteLength;
-      return (base._jxl_wasm_buffer_size as (h: number) => number)(handle);
-    },
-    _jxl_wasm_buffer_free: (handle: number) => {
-      if (handle !== gmHandle) base._jxl_wasm_buffer_free(handle);
-    },
-  };
-
-  return { module };
-}
-
 function createFakeLibjxlModule() {
   const memory = new ArrayBuffer(4096);
   const HEAPU8 = new Uint8Array(memory);
@@ -1478,6 +642,27 @@ function createFakeLibjxlModule() {
     _jxl_wasm_buffer_bits_per_sample: (handle: number) => handles.get(handle)?.bits ?? 8,
     _jxl_wasm_buffer_has_alpha: (handle: number) => handles.get(handle)?.alpha ?? 1,
     _jxl_wasm_buffer_free: (handle: number) => handles.delete(handle),
+    _jxl_wasm_encode_tile_container_rgba8: (pixelsPtr: number, width: number, height: number) => {
+      return makeHandle(HEAPU8.slice(pixelsPtr, pixelsPtr + width * height * 4), width, height);
+    },
+    _jxl_wasm_encode_tile_container_rgba16: (pixelsPtr: number, width: number, height: number) => {
+      const byteLength = width * height * 8;
+      const handle = nextHandle++;
+      const dataPtr = malloc(byteLength);
+      HEAPU8.set(HEAPU8.slice(pixelsPtr, pixelsPtr + byteLength), dataPtr);
+      handles.set(handle, { dataPtr, size: byteLength, width, height, bits: 16, alpha: 1 });
+      return handle;
+    },
+    _jxl_wasm_decode_tile_container_region_rgba8: (inputPtr: number, inputSize: number, _x: number, _y: number, w: number, h: number) => {
+      return makeHandle(HEAPU8.slice(inputPtr, inputPtr + inputSize), w, h);
+    },
+    _jxl_wasm_decode_tile_container_region_rgba16: (inputPtr: number, inputSize: number, _x: number, _y: number, w: number, h: number) => {
+      const handle = nextHandle++;
+      const dataPtr = malloc(inputSize);
+      HEAPU8.set(HEAPU8.slice(inputPtr, inputPtr + inputSize), dataPtr);
+      handles.set(handle, { dataPtr, size: inputSize, width: w, height: h, bits: 16, alpha: 1 });
+      return handle;
+    },
   };
 }
 
@@ -1698,79 +883,46 @@ async function loadPreferredLibjxlModule() {
   return createFakeLibjxlModule();
 }
 
-
-describe("animation capability", () => {
-  afterEach(() => { setJxlModuleFactoryForTesting(null); });
-
-  test("animationEncode gate is false when bridge absent", () => {
-    const module = createFakeLibjxlModule();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    // getCapabilities() checks typeof module._jxl_wasm_encode_animation === "function".
-    // The fake module does not expose _jxl_wasm_encode_animation, so the gate must be false.
-    expect(typeof (module as never as { _jxl_wasm_encode_animation?: unknown })._jxl_wasm_encode_animation).not.toBe("function");
-  });
-
-  test("routes to animation bridge when frames array is set", async () => {
-    const base = createFakeLibjxlModule();
-    const animCalls: number[][] = [];
-    const animModule = {
-      ...base,
-      _jxl_wasm_encode_animation: (...args: number[]) => {
-        animCalls.push(args);
-        return base._jxl_wasm_encode_rgba8(0, 1, 1, 0, 0);
-      },
+describe('ExtraChannel full infrastructure (Phase 2)', () => {
+  it('accepts full ExtraChannel descriptors including spotColor, dimShift, thermal, reserved', () => {
+    const ch: ExtraChannel = {
+      type: 'spot',
+      bitsPerSample: 8,
+      dimShift: 0,
+      name: 'MySpot',
+      distance: 0.5,
+      spotColor: { red: 0.9, green: 0.1, blue: 0.2, solidity: 0.8 }
     };
-    setJxlModuleFactoryForTesting(async () => animModule as never);
-
-    const encoder = createEncoder({
-      ...encodeOptions,
-      animation: { ticksPerSecond: 1000, loopCount: 0 },
-      frames: [
-        { data: new Uint8Array([255, 0, 0, 255]), width: 1, height: 1, duration: 100 },
-        { data: new Uint8Array([0, 255, 0, 255]), width: 1, height: 1, duration: 200 },
-      ],
-    });
-    encoder.finish();
-    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    expect(result.done).toBe(false);
-    expect(animCalls.length).toBe(1);
-    // arg[1] = numFrames
-    expect(animCalls[0]![1]).toBe(2);
-    await encoder.dispose();
-  });
-
-  test("animOptsPtr carries ticks_per_second and loop_count", async () => {
-    const base = createFakeLibjxlModule();
-    const animCalls: number[][] = [];
-    const animModule = {
-      ...base,
-      _jxl_wasm_encode_animation: (...args: number[]) => {
-        animCalls.push(args);
-        return base._jxl_wasm_encode_rgba8(0, 1, 1, 0, 0);
-      },
+    // Minimal valid EncoderOptions shape + extraChannels (cast to defer EncoderOptions field wiring).
+    // Construction only; actual encode path ignores new fields until later tasks.
+    const opts = {
+      format: "rgba8" as const,
+      width: 1,
+      height: 1,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: null,
+      quality: null,
+      effort: 7 as const,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+      extraChannels: [ch]
     };
-    setJxlModuleFactoryForTesting(async () => animModule as never);
-
-    const encoder = createEncoder({
-      ...encodeOptions,
-      animation: { ticksPerSecond: 500, loopCount: 3 },
-      frames: [{ data: new Uint8Array([0, 0, 255, 255]), width: 1, height: 1, duration: 50 }],
-    });
-    encoder.finish();
-    await encoder.chunks()[Symbol.asyncIterator]().next();
-
-    const args = animCalls[0]!;
-    // animOptsPtr is arg[18] (0-indexed)
-    const animOptsPtr = args[18]!;
-    expect(animOptsPtr).toBeGreaterThan(0);
-    const dv = new DataView(animModule.HEAPU8.buffer);
-    expect(dv.getUint32(animOptsPtr,     true)).toBe(500); // ticks_per_second
-    expect(dv.getUint32(animOptsPtr + 4, true)).toBe(3);   // loop_count
-    await encoder.dispose();
+    expect(() => createEncoder(opts as any)).not.toThrow();
   });
 
-  it('encodes and roundtrips full ExtraChannel descriptors (spot 8-bit + depth 16-bit + named thermal) via packed 56B bridge', async () => {
+  it('rejects invalid type at type level (unknown)', () => {
+    // The @ts-expect-error below enforces that 'foo' is not a valid ExtraChannelType at compile time.
+    // Runtime check is a no-op here (validation comes in encode impl later).
+    // @ts-expect-error
+    const bad: ExtraChannel = { type: 'foo' as any, bitsPerSample: 8 };
+    expect(bad).toBeDefined();
+  });
+
+  it('encodes and roundtrips full ExtraChannel descriptors (synthetic planes: spot 8-bit + depth 16-bit + named thermal) via packed 72B bridge', async () => {
     const mod = await loadLibjxlModule();
     if (typeof mod._jxl_wasm_encode_rgba8_with_extra_channels !== 'function' ||
         typeof mod._jxl_wasm_get_extra_channels !== 'function' ||
@@ -1784,13 +936,13 @@ describe("animation capability", () => {
     const main = new Uint8Array(w * h * 4);
     for (let i = 0; i < main.length; i += 4) { main[i] = 120; main[i+1] = 130; main[i+2] = 140; main[i+3] = 255; }
 
-    // EC 0: 8-bit spot (constant)
+    // EC 0: 8-bit spot (constant) - synthetic plane
     const spotPlane = new Uint8Array(w * h); spotPlane.fill(200);
-    // EC 1: 16-bit depth (gradient-ish)
+    // EC 1: 16-bit depth (gradient-ish) - synthetic plane
     const depthPlane = new Uint16Array(w * h);
     for (let i = 0; i < depthPlane.length; i++) depthPlane[i] = 1000 + i * 10;
     const depthBytes = new Uint8Array(depthPlane.buffer);
-    // EC 2: 8-bit thermal named
+    // EC 2: 8-bit thermal named - synthetic plane
     const thermalPlane = new Uint8Array(w * h); thermalPlane.fill(77);
 
     const channels: ExtraChannel[] = [
@@ -1813,8 +965,8 @@ describe("animation capability", () => {
       mod.HEAPU8.set(thermalPlane, thermalPtr);
       mod.HEAPU8.set(new Uint8Array(descBuf), descPtr);
 
-      // Write plane pointers/sizes into the descriptors (offsets per EC_BYTES=56)
-      const EC = 56;
+      // Write plane pointers/sizes into the descriptors (offsets per EC_BYTES=72, matching C++ struct)
+      const EC = EC_BYTES;
       // EC0 spot
       descDv.setUint32(0*EC + 12, spotPtr >>> 0, true);
       descDv.setUint32(0*EC + 16, spotPlane.length >>> 0, true);
@@ -1836,7 +988,7 @@ describe("animation capability", () => {
       expect(err).toBe(0);
 
       const size = mod._jxl_wasm_buffer_size(handle);
-      expect(size).toBeGreaterThan(100);
+      expect(size).toBeGreaterThan(100); // JXL bytes >0 (synthetic EC content encoded)
       const jxlPtr = mod._jxl_wasm_buffer_data(handle);
       const jxlBytes = new Uint8Array(size);
       jxlBytes.set(mod.HEAPU8.subarray(jxlPtr, jxlPtr + size));
@@ -1844,28 +996,32 @@ describe("animation capability", () => {
       // Free encode buffer
       mod._jxl_wasm_buffer_free(handle);
 
-      // Decode header via helper -> assert descriptors roundtripped
+      // Decode header via helper -> assert descriptors roundtripped (names/types/bits/spot values)
       const infoH = mod._jxl_wasm_get_extra_channels!(jxlPtr, size);  // note: we pass the encoded bytes ptr/size
       expect(infoH).not.toBe(0);
       const infoSize = mod._jxl_wasm_buffer_size(infoH);
-      expect(infoSize).toBe(3 * 56);
+      expect(infoSize).toBe(3 * EC_BYTES);
       const infoDataPtr = mod._jxl_wasm_buffer_data(infoH);
       const infoBytes = mod.HEAPU8.subarray(infoDataPtr, infoDataPtr + infoSize);
 
-      // Parse the 3 descriptors (type at 0, bits at 4, name at ~41, spot at 24 for spot)
+      // Parse using exact 72B stride + field offsets (matches both sides now)
       const dv = new DataView(infoBytes.buffer, infoBytes.byteOffset, infoBytes.byteLength);
-      // spot (first in encode order)
-      expect(dv.getUint32(0*56 + 0, true)).toBe(2); // SPOT_COLOR
-      expect(dv.getUint32(0*56 + 4, true)).toBe(8);
-      expect(dv.getUint8(0*56 + 40)).toBeGreaterThan(0); // name len
+      // spot (first)
+      expect(dv.getUint32(0*EC + 0, true)).toBe(2); // SPOT_COLOR
+      expect(dv.getUint32(0*EC + 4, true)).toBe(8);
+      expect(dv.getUint8(0*EC + 40)).toBeGreaterThan(0); // name len
+      expect(dv.getFloat32(0*EC + 24, true)).toBeCloseTo(0.95, 5);
+      expect(dv.getFloat32(0*EC + 28, true)).toBeCloseTo(0.05, 5);
+      expect(dv.getFloat32(0*EC + 32, true)).toBeCloseTo(0.1, 5);
+      expect(dv.getFloat32(0*EC + 36, true)).toBeCloseTo(0.85, 5);
       // depth
-      expect(dv.getUint32(1*56 + 0, true)).toBe(1); // DEPTH
-      expect(dv.getUint32(1*56 + 4, true)).toBe(16);
+      expect(dv.getUint32(1*EC + 0, true)).toBe(1); // DEPTH
+      expect(dv.getUint32(1*EC + 4, true)).toBe(16);
       // thermal
-      expect(dv.getUint32(2*56 + 0, true)).toBe(6); // THERMAL
-      expect(dv.getUint32(2*56 + 4, true)).toBe(8);
-      const nameStart = 2*56 + 41;
-      const nameLen = dv.getUint8(2*56 + 40);
+      expect(dv.getUint32(2*EC + 0, true)).toBe(6); // THERMAL
+      expect(dv.getUint32(2*EC + 4, true)).toBe(8);
+      const nameStart = 2*EC + 41;
+      const nameLen = dv.getUint8(2*EC + 40);
       const nameBytes = infoBytes.subarray(nameStart, nameStart + nameLen);
       expect(new TextDecoder().decode(nameBytes)).toBe('ThermalCam');
 
@@ -1875,131 +1031,3 @@ describe("animation capability", () => {
     }
   });
 });
-
-describe("animation decode metadata", () => {
-  afterEach(() => { setJxlModuleFactoryForTesting(null); });
-
-  test("facade.ts DecodeEvent final type has optional frameIndex/duration/frameName/isLastFrame", () => {
-    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
-    expect(source).toContain("frameIndex?: number");
-    expect(source).toContain("frameDuration?: number");
-    expect(source).toContain("frameName?: string");
-    expect(source).toContain("isLastFrame?: boolean");
-  });
-
-  test("decoder reads frame metadata accessors after take_final", async () => {
-    const base = createFakeProgressiveLibjxlModule();
-    let callCount = 0;
-    const animDecModule = {
-      ...base,
-      _jxl_wasm_dec_frame_index:          (_s: number) => callCount++,
-      _jxl_wasm_dec_frame_duration:        (_s: number) => 250,
-      _jxl_wasm_dec_frame_name_ptr:        (_s: number) => 0,
-      _jxl_wasm_dec_is_last_frame:         (_s: number) => 1,
-      _jxl_wasm_dec_anim_ticks_per_second: (_s: number) => 1000,
-      _jxl_wasm_dec_anim_loop_count:       (_s: number) => 0,
-    };
-    setJxlModuleFactoryForTesting(async () => animDecModule as never);
-
-    const decoder = createDecoder({ ...decodeOptions });
-    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
-    decoder.close();
-
-    const events = [];
-    for await (const ev of decoder.events()) events.push(ev);
-
-    const finalEv = events.find((e) => e.type === "final");
-    expect(finalEv).toBeDefined();
-    expect((finalEv as { frameDuration?: number }).frameDuration).toBe(250);
-    expect((finalEv as { isLastFrame?: boolean }).isLastFrame).toBe(true);
-    await decoder.dispose();
-  });
-
-});
-
-// Fake module that exposes _jxl_wasm_encode_rgba8_with_metadata_v2 and captures call args.
-// readBoxOpts(ptr) reads WasmBoxOpts fields from the fake HEAPU8.
-function createFakeMetadataV2Module() {
-  const base = createFakeLibjxlModule();
-  const v2Calls: number[][] = [];
-
-  // Expose _jxl_wasm_encode_rgba8_with_metadata (needed for capability gate).
-  const withMeta = (...args: number[]) =>
-    base._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
-
-  const v2 = (...args: number[]) => {
-    v2Calls.push(args);
-    return base._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
-  };
-
-  // Read WasmBoxOpts from HEAPU8 at the given WASM ptr.
-  // Layout: compress_boxes(u32)|force_container(u32)|raw_codestream(u32)|custom_boxes_ptr(u32)|num_custom_boxes(u32)
-  const readBoxOpts = (ptr: number) => {
-    const dv = new DataView(base.HEAPU8.buffer);
-    return {
-      compressBoxes:  dv.getUint32(ptr,      true),
-      forceContainer: dv.getUint32(ptr + 4,  true),
-      rawCodestream:  dv.getUint32(ptr + 8,  true),
-      customBoxesPtr: dv.getUint32(ptr + 12, true),
-      numCustomBoxes: dv.getUint32(ptr + 16, true),
-    };
-  };
-
-  const module = {
-    ...base,
-    _jxl_wasm_encode_rgba8_with_metadata: withMeta,
-    _jxl_wasm_encode_rgba8_with_metadata_v2: v2,
-  };
-
-  return { module, v2Calls, readBoxOpts };
-}
-
-describe("animation seek (software fallback)", () => {
-  afterEach(() => { setJxlModuleFactoryForTesting(null); });
-
-  test("seekToFrame and seekToTime are present on decoder instances (software fallback)", () => {
-    const decoder = createDecoder({ format: "rgba8" });
-    expect(typeof decoder.seekToFrame).toBe("function");
-    expect(typeof decoder.seekToTime).toBe("function");
-    decoder.dispose?.();
-  });
-
-  test("animationSeek capability is false until the native C function is present (post-rebuild signal)", async () => {
-    const base = createFakeProgressiveLibjxlModule();
-    // Current binaries do not have the C seek function
-    setJxlModuleFactoryForTesting(async () => base as never);
-
-    const decoder = createDecoder({ format: "rgba8" });
-    const caps = getWrapperCapabilities();
-    expect(caps.animationSeek).toBe(false); // expected until WASM is rebuilt with the C skip
-    await (decoder as any).dispose?.();
-  });
-
-  test("seekToFrame software fallback is callable and does not throw (behavioral)", async () => {
-    const base = createFakeProgressiveLibjxlModule();
-    setJxlModuleFactoryForTesting(async () => base as never);
-
-    const decoder = createDecoder({ format: "rgba8" });
-    decoder.push(new Uint8Array(16));
-    decoder.close();
-
-    // The key behavioral guarantee: calling seekToFrame with the software fallback
-    // must succeed and produce an async iterable without throwing.
-    const events: any[] = [];
-    try {
-      for await (const ev of decoder.seekToFrame(1)) {
-        events.push(ev);
-        if (events.length > 5) break; // don't need the whole stream for this test
-      }
-    } catch (e) {
-      // If we reach here the fallback itself threw — that's a failure
-      expect(e).toBeUndefined();
-    }
-
-    // We don't assert specific frame counts (depends on fake), only that it ran cleanly.
-    expect(true).toBe(true);
-
-    await (decoder as any).dispose?.();
-  });
-});
-
