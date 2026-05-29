@@ -826,9 +826,10 @@ Branch: finishing_feature_parity ready for whatever comes next.
 **Work done in this session:**
 - Added `ProcessingMode` (full/thumb/lightbox) to `ProcessOptions`.
 - Added `get_orf_thumb` Tauri command: fast gallery path using B4 `parse_orf_metadata` + minimal decode + early downscale.
-- Wired first real optimization: in "thumb" mode, skip full-resolution unsharp masks inside the main process_file (saves significant work for gallery workloads).
+- Wired first real optimization: in "thumb" mode, skip full-resolution unsharp masks inside the main process_file.
+- Major next-set win: In thumb mode we now tone *only* the lb16 buffer and use the result for the JXL (huge CPU/memory saving vs full rgb16 tone curve).
 - Registered the new command.
-- Updated matrix items 2 and 10 to 🟡.
+- Updated matrix items 2, 5, and 10.
 
 **Next concrete steps for this set:**
 - Wire `mode` into main `process_file` to skip unnecessary full materialization where safe.
