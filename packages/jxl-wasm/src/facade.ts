@@ -131,7 +131,7 @@ export interface EncoderOptions {
    * Frame data for animation encode. When set, replaces the single-image pushPixels path.
    * Requires rebuilt WASM with animation bridge (_jxl_wasm_encode_animation).
    */
-  frames?: AnimationFrame[];
+  frames?: readonly AnimationFrame[];
 }
 
 /** Options for attaching an HDR gain map (ISO 21496-1 / JXL jhgm box). */
