@@ -35,7 +35,7 @@ This matrix supersedes and consolidates:
 | 8 | apply_look accepts native &[u16] (no LE byte unpack) | ✅ | N/A (no public apply_look; edits baked at process_file) | N/A | WASM:836 |
 | 9 | Pre-allocated fixed buffers for rgb_to_rgba / box downscales | ✅ | 🟡 (par_chunks alloc inside; no documented fixed strategy) | N/A | Minor perf |
 | 10 | decode_orf_raw / process_orf_impl split (clean separation) | ✅ | ❌ (monolithic in process_file + build_params) | N/A | Enables 2,3,5 |
-| 11 | Preemptive priority + pause/resume of in-flight decodes (visible suspends background) | 🟡 (full in scheduler + worker handlers for JXL) | 🟡 (priority_sem + promote_to_front; no suspend/resume of Rust decode tasks) | wrapper-lab (indirect via scheduler) | packages/jxl-scheduler + decode-handler; Tauri src-tauri/src/priority_sem.rs |
+| 11 | Preemptive priority + pause/resume of in-flight decodes (visible suspends background) | 🟡 (full in scheduler + worker handlers for JXL) | 🟡 (B5: priority_sem + promote + new cancel_file; queued tasks now cancellable; true in-flight Rust pause still hard without cooperative decode) | wrapper-lab (indirect via scheduler) | packages/jxl-scheduler + decode-handler; Tauri src-tauri/src/priority_sem.rs + B5 on finishing_feature_parity |
 | 12 | DNG support + ForwardMatrix / ColorMatrix camera-to-sRGB | ✅ (raw-pipeline) | ✅ (shared raw-pipeline) | N/A (via main ingest) | Scientific fidelity |
 | 13 | 16-bit / 32-bit float HDR round-trip + alpha integrity | ✅ | ✅ (shared) | wrapper-lab (format controls) | End-to-end |
 | 14 | EXIF/XMP/ICC metadata round-trip fidelity | ✅ | ✅ (shared tiff/exif + JXL side) | all | Core invariant |
@@ -135,7 +135,7 @@ This matrix supersedes and consolidates:
 **Raw / Interactive (highest user-visible on desktop):**
 - LookRenderer + render command + Rgb16State integration in Tauri (item 1) — B3 landed (resident .render() + .new() parity; apply_look now uses it)
 - process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1/B2/B4 landed (metadata-only + bench now public)
-- True pause/resume of native Rust decode tasks (item 11) — still pending
+- True pause/resume of native Rust decode tasks (item 11) — B5 partial (cancel for queued tasks landed; full in-flight cooperative yield is the remaining hard part)
 - JXTC + progressive/streaming encode on native (C) — C1 audit complete; pause before C2 per directive
 
 **JXL Encode/Progressive on Native:**

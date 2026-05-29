@@ -760,3 +760,24 @@ Ready for B4 (metadata-only + bench fns) or B5 (preemption) or C2 after explicit
 **Commit/Push:** Done on finishing_feature_parity + sibling. B4 feature complete before B5.
 
 ---
+
+## B5 (partial): RAW Tauri preemption - cancel for queued decode tasks (finishing_feature_parity)
+**Branch:** `finishing_feature_parity`
+**Status:** Partial but useful progress (B5 foundation)
+
+**Scope:** Matrix item 11. The existing `priority_sem` only allowed promotion of queued tasks. In-flight `spawn_blocking` decode work could not be cancelled. B5 adds the ability to cancel queued work when the user scrolls away or navigates.
+
+**Changes:**
+- `priority_sem.rs`: Added `cancel(&id) -> bool` that removes a waiter from the queue.
+- `pipeline.rs`: Added `cancel_file` Tauri command.
+- `lib.rs`: Registered the command.
+
+**Limitation (documented):** True pause/resume of *in-flight* Rust decode tasks remains difficult without making the core decompress/demosaic cooperative (checkpoints + early exit). This is noted as the remaining hard part.
+
+**Docs:**
+- Matrix item 11 updated with B5 note.
+- This entry.
+
+**Next:** Full in-flight cooperative cancellation would be a larger refactor. Current state is already a clear improvement over pure promotion-only.
+
+---
