@@ -130,8 +130,6 @@ Use the template below for every entry.
 
 ## Feature: Brotli Effort (JXL_ENC_FRAME_SETTING_BROTLI_EFFORT) - 2026-05-28
 
-## Feature: Brotli Effort (JXL_ENC_FRAME_SETTING_BROTLI_EFFORT) - 2026-05-28
-
 **Branch:** epiccodereview/20260527T054853  
 **Status:** Completed
 
@@ -149,7 +147,8 @@ Use the template below for every entry.
 - `benchmark/encode-option-sweep.mjs` — sweep across `[-1, 0, 4, 9, 11]` already present
 
 **Tests:**
-- `packages/jxl-native/test/codec.test.ts` — New test exercises `brotliEffort` at 0/9/11; all 2 tests pass
+- `packages/jxl-wasm/test/facade.test.ts` — Added `describe("brotliEffort encoder option", ...)` with 5 tests: forwarding, -1 default, 0 minimum, clamp-to-11, clamp-to-(-1). Added source-check test for `JXL_ENC_FRAME_SETTING_BROTLI_EFFORT` in bridge.cpp + native.cc. 62 pass, 1 pre-existing unrelated failure.
+- `packages/jxl-native/test/codec.test.ts` — Added round-trip test with `brotliEffort: 5`.
 
 **Docs Updated:**
 - `docs/references/designs/brotli-effort.md` — Status updated to Implemented; checklist items ticked

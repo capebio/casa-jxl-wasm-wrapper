@@ -1431,6 +1431,66 @@ describe("animation capability", () => {
     // The fake module does not expose _jxl_wasm_encode_animation, so the gate must be false.
     expect(typeof (module as never as { _jxl_wasm_encode_animation?: unknown })._jxl_wasm_encode_animation).not.toBe("function");
   });
+
+  test("routes to animation bridge when frames array is set", async () => {
+    const base = createFakeLibjxlModule();
+    const animCalls: number[][] = [];
+    const animModule = {
+      ...base,
+      _jxl_wasm_encode_animation: (...args: number[]) => {
+        animCalls.push(args);
+        return base._jxl_wasm_encode_rgba8(0, 1, 1, 0, 0);
+      },
+    };
+    setJxlModuleFactoryForTesting(async () => animModule as never);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      animation: { ticksPerSecond: 1000, loopCount: 0 },
+      frames: [
+        { data: new Uint8Array([255, 0, 0, 255]), width: 1, height: 1, duration: 100 },
+        { data: new Uint8Array([0, 255, 0, 255]), width: 1, height: 1, duration: 200 },
+      ],
+    });
+    encoder.finish();
+    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    expect(result.done).toBe(false);
+    expect(animCalls.length).toBe(1);
+    // arg[1] = numFrames
+    expect(animCalls[0]![1]).toBe(2);
+    await encoder.dispose();
+  });
+
+  test("animOptsPtr carries ticks_per_second and loop_count", async () => {
+    const base = createFakeLibjxlModule();
+    const animCalls: number[][] = [];
+    const animModule = {
+      ...base,
+      _jxl_wasm_encode_animation: (...args: number[]) => {
+        animCalls.push(args);
+        return base._jxl_wasm_encode_rgba8(0, 1, 1, 0, 0);
+      },
+    };
+    setJxlModuleFactoryForTesting(async () => animModule as never);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      animation: { ticksPerSecond: 500, loopCount: 3 },
+      frames: [{ data: new Uint8Array([0, 0, 255, 255]), width: 1, height: 1, duration: 50 }],
+    });
+    encoder.finish();
+    await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const args = animCalls[0]!;
+    // animOptsPtr is arg[18] (0-indexed)
+    const animOptsPtr = args[18]!;
+    expect(animOptsPtr).toBeGreaterThan(0);
+    const dv = new DataView(animModule.HEAPU8.buffer);
+    expect(dv.getUint32(animOptsPtr,     true)).toBe(500); // ticks_per_second
+    expect(dv.getUint32(animOptsPtr + 4, true)).toBe(3);   // loop_count
+    await encoder.dispose();
+  });
 });
 
 // Fake module that exposes _jxl_wasm_encode_rgba8_with_metadata_v2 and captures call args.

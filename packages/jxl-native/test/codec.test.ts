@@ -79,4 +79,53 @@ describe("@casabio/jxl-native real codec", () => {
       expect(Math.abs(decoded[i]! - pixels[i]!)).toBeLessThanOrEqual(2);
     }
   });
+
+  test("encodes with brotliEffort:5 and round-trips correctly", async () => {
+    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
+    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
+    const pixels = new Uint8Array([128, 64, 32, 255, 0, 128, 255, 255]);
+
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: 2,
+      height: 1,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 0,
+      quality: null,
+      effort: 3,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+      brotliEffort: 5,
+    });
+
+    await encoder.pushPixels(pixels);
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+    expect(encoded.byteLength).toBeGreaterThan(0);
+
+    const decoder = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: true,
+      preserveMetadata: true,
+    });
+
+    await decoder.push(encoded);
+    await decoder.close();
+    const events = await Array.fromAsync(decoder.events());
+    const final = events.find((event): event is Extract<DecodeEvent, { type: "final" }> => event.type === "final");
+
+    expect(final).toBeDefined();
+    expect(final?.info.width).toBe(2);
+    expect(final?.info.height).toBe(1);
+    expect(final?.pixels.byteLength).toBe(2 * 1 * 4);
+  });
 });
