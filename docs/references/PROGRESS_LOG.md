@@ -897,6 +897,13 @@ Branch: finishing_feature_parity ready for whatever comes next.
 
 **No risky changes** made to JXTC port or B5 in-flight preemption (see dedicated plan files for detailed current state + recommended next slices).
 
+**Item 4 implemented as small follow-up slice:**
+- Added `skip_jxl: bool` (default false) to `ProcessOptions`.
+- When true, `process_file` skips the final `encode_jxl` call after the selective helper (JXL payload is empty, `encode_ms=0`).
+- This delivers the "true thumb-only / metadata-only early return without touching JXL at all" for gallery prefetch/batch use cases, while still populating the lightbox/Rgb16State caches.
+- Backward compatible (existing callers unaffected).
+- Test updated.
+
 **Next for user on waking:** Review the status in `docs/superpowers/plans/2026-05-29-jxtc-native-parity.md` (Task 4) and the B5 analysis I will leave in a new note or the plan. The original RAW Selective bucket items 2/3 + rituals are now complete for this pass.
 
 **Docs:** FEATURE_PARITY_MATRIX.md (rows 2/5/10 notes + summary "B1/B2/B4 + step1" language); this PROGRESS_LOG entry (template style).
