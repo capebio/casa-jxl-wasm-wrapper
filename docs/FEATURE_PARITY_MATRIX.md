@@ -56,7 +56,7 @@ This matrix supersedes and consolidates:
 | 10 | Gain maps (HDR tone-mapping assistance) | 🟡 (design complete) | ❌ | N/A | designs/gain-maps.md; ties to LookRenderer |
 | 11 | Patches & splines (advanced coding tools) | ✅ (escape hatch + experimental toggle) | ✅ (escape parity) | wrapper-lab (checkbox + warning) | designs/patches-splines.md; PROGRESS |
 | 12 | Resampling factors (encoder-native 1/2/4/8 + per-EC) | ✅ | ✅ (jxl-native) | wrapper-lab | designs/resampling.md |
-| 13 | Streaming / progressive encode during RAW ingest (early usable pass) | ✅ (facade + bridge.cpp) | ❌ (one-shot jpegxl-rs in casabio_encode) | N/A | Old table #12; high importance for large scientific RAWs |
+| 13 | Streaming / progressive encode during RAW ingest (early usable pass) | ✅ (facade + bridge.cpp) | ✅ (jxl-native: progressive_dc/ac/buffering wired; 2026-05-29) | N/A | Old table #12; high importance for large scientific RAWs |
 | 14 | Native libjxl progressive decode (real JXL_DEC_FRAME_PROGRESSION, flush, detail) on Tauri | N/A (browser JS re-decode workaround or native browser JXL) | ❌ (relies on shared JS workaround or full one-shot) | jxl-progressive-paint.html (JS path) | Old table #13; Tauri-progressive-implementation.md recommends native event machine |
 
 ## 3. Progressive UX / ROI / JXTC / Streaming
@@ -68,7 +68,7 @@ This matrix supersedes and consolidates:
 | 3 | JXTC tile-container encode + zero-overhead round-trip ROI decode | ✅ (primary path, 5–23× on large crops; unit tests) | ❌ (only standard JXL via jpegxl-rs; no JXTC) | jxl-crop-benchmark.html (full validation) | Old table #14; bridge.cpp + facade |
 | 4 | Tile-based multi-frame fallback ROI | ✅ | 🟡 (via shared decode) | crop-benchmark | Limitation noted in libjxl 0.11.2 |
 | 5 | progressiveDetail (dc / lastPasses / passes / dcProgressive) end-to-end | ✅ | ✅ (shared) | jxl-progressive-paint.html (selector) | packages/jxl-core + session + worker |
-| 6 | Preview-first + early-pass emission on encode | ✅ | ❌ | N/A | See #13 core |
+| 6 | Preview-first + early-pass emission on encode | ✅ | ✅ (jxl-native; progressive frame settings wired) | N/A | See #13 core |
 | 7 | Sidecar thumbnails + compression ratio feedback | ✅ | 🟡 | wrapper-lab | Stats on encode |
 | 8 | Capability probing (SIMD tiers, native JXL browser fast-path, streamingEncode, regionDecode, etc.) | ✅ (jxl-capabilities + WrapperCapabilities) | ✅ (jxl-native + shared) | all (banners + auto paths) | Native browser JXL drops latency 120 ms → 5 ms |
 

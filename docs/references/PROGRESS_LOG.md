@@ -846,3 +846,18 @@ Branch: finishing_feature_parity ready for whatever comes next.
 **Commit/Push:** Will be done after more progress in the set.
 
 ---
+
+## 2026-05-29 — C3: Progressive Encode Native (jxl-native)
+
+**Branch:** finishing_feature_parity
+
+**What changed:**
+- `EncoderData` in `native.cc` gains `progressive_dc`, `progressive_ac`, `qprogressive_ac`, `buffering` (int32_t, default 0).
+- `CreateEncoder` parses `progressive`, `previewFirst`, `chunked` from JS options: `progressive=true` → `progressive_dc=1`; `previewFirst=true` additionally sets `progressive_ac=qprogressive_ac=1`; `chunked=true` → `buffering=2`. Mirrors `resolveEncoderBridgeSettings` in facade.ts.
+- `EncodeAll` applies the four settings via `JxlEncoderFrameSettingsSetOption`. VarDCT guard added: forces `MODULAR=0` when progressive flags are set and caller has not explicitly chosen modular mode.
+- 2 new round-trip tests in `codec.test.ts`.
+
+**Parity matrix rows updated:** Section 2 row 13, Section 3 row 6.
+
+**Remaining gap:** Animation path in `EncodeAll` does not apply progressive settings to per-frame `JxlEncoderFrameSettings`. Progressive JXL animation is out of scope for C3.
+
