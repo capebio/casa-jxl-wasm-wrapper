@@ -6,6 +6,37 @@ Use the template below for every entry.
 
 ---
 
+**Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
+
+## WASM Bridge Rebuild — 2026-05-29
+
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Complete
+
+**What changed:**
+
+Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the source to compile against libjxl build commit `332feb17d17311c748445f7ee75c4fb55cc38530` (WASM target) via Emscripten:
+
+1. `JxlEncoderAddExtraChannelBuffer` → `JxlEncoderSetExtraChannelBuffer` (API rename between commits)
+2. `JxlEncoderSetFrameDuration` (never existed at this commit) → replaced with `JxlEncoderInitFrameHeader` / `JxlEncoderSetFrameHeader` block; `fh.duration = wf.duration`
+3. Added `#include <vector>` (needed for `std::vector<char> name_buf(...)` in animation frame name code)
+4. Added `#ifndef JxlBool typedef int JxlBool; #endif` compatibility shim after JXL includes (`JxlBool` was added to `jxl/types.h` in a later libjxl commit; all 4 uses in bridge.cpp — lines 480, 828, 1614, 2612 — would fail without it)
+
+**Build:**
+- Docker image: `docker.io/emscripten/emsdk:4.0.13` / local `jxl-wasm-builder:local`
+- Command: `docker run --rm -v "C:\Foo\raw-converter-wasm\packages\jxl-wasm:/work/jxl-wasm" -w /work/jxl-wasm jxl-wasm-builder:local node scripts/build.mjs --inside-docker`
+- Result: all 4 tiers built (relaxed-simd-mt 18:07, simd-mt 18:24, simd 18:40, scalar 18:52 UTC)
+
+**Verification:**
+- All 7 animation symbols present in `dist/jxl-core.simd-mt.js` and correctly mapped to WASM exports
+- `bun test packages/jxl-wasm/test/facade.test.ts` — 69 pass, 0 fail
+
+**Docs Updated:**
+- `docs/references/designs/ISSUES.md` — §1 done, §3 done, §9 partial (WASM done; native pending)
+- `docs/references/PROGRESS_LOG.md` — this entry
+
+---
+
 ## Feature: Animation / Multi-Frame Encode + Decode — 2026-05-29
 
 **Branch:** `epiccodereview/20260527T054853`
@@ -77,6 +108,7 @@ Use the template below for every entry.
 
 **References Used:**
 - `docs/references/designs/extra-channel-infrastructure.md` + sibling extra-channel-distance.md
+- REFERENCE_INDEX.md §4 (Extra Channels) — the "CasaWASM Implementation (Phase 2 complete)" block with exact 72B / facade:147-184 / bridge:546-639 / native parity lines was added by this work.
 - libjxl `encode.h` / `decode.h` (JxlExtraChannelInfo, JxlExtraChannelType, SetExtraChannel*, GetExtraChannelInfo/Name)
 - Prior Phase 1 bridge patterns + facade encode/decode symmetry.
 
@@ -92,6 +124,7 @@ Use the template below for every entry.
 
 **Branch:** worktree (transpose-wasm-to-tauri) + main
 **Status:** Core escape hatch implemented (WASM + native parity)
+**Visibility Note (2026-06 sync with REFERENCE_INDEX.md + ACTION PLAN):** Code changes described (advancedFrameSettings + JxlFrameSetting + _adv FFI) are not present on the `epiccodereview/20260527T054853` branch (verified via source scan). Work remains isolated to the worktree/main; see ACTION PLAN.md Milestone 3 for merge/re-execution plan. Patches & Splines corresponds to REFERENCE_INDEX.md audit item #11 (escape-hatch first per designs/patches-splines.md; cjxl_main.cc --patches reference).
 
 **WASM Changes:**
 - `packages/jxl-wasm/src/facade.ts` — added `advancedFrameSettings?: Array<{id,value}>` + `JxlFrameSetting` named constants helper (PATCHES=8). Wired in streaming input (`enc_create_image_adv`) and buffered metadata path using `_adv` FFI variants.

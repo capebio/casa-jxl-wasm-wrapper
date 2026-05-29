@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <vector>
 
 #include <jxl/color_encoding.h>
 #include <jxl/decode.h>
@@ -13,6 +14,10 @@
 #define JXL_GAIN_MAP_SUPPORTED 1
 #else
 #define JXL_GAIN_MAP_SUPPORTED 0
+#endif
+// JxlBool was added to jxl/types.h after the WASM build commit — provide fallback.
+#ifndef JxlBool
+typedef int JxlBool;
 #endif
 
 // IMPROVEMENT-1: `next` pointer enables sidecar linked-list without extra allocation.
@@ -820,7 +825,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
     const uint32_t ec_index = (has_alpha ? 1u : 0u) + i;
     JxlPixelFormat ec_pf = {1u, BitsToDataType(ec.bits > 0u ? ec.bits : 8u), JXL_NATIVE_ENDIAN, 0};
     const void* plane_data = reinterpret_cast<const void*>(static_cast<uintptr_t>(ec.plane_ptr));
-    if (JxlEncoderAddExtraChannelBuffer(frame, &ec_pf, plane_data, ec.plane_size, ec_index) != JXL_ENC_SUCCESS) {
+    if (JxlEncoderSetExtraChannelBuffer(frame, &ec_pf, plane_data, ec.plane_size, ec_index) != JXL_ENC_SUCCESS) {
       JxlEncoderDestroy(enc); return MakeError(131);
     }
   }
@@ -1572,8 +1577,13 @@ static JxlWasmBuffer* EncodeAnimation(
     const uint8_t* pixels = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(wf.pixels_ptr));
 
     JxlEncoderFrameSettings* fs = JxlEncoderFrameSettingsCreate(enc, frame_settings);
-    if (JxlEncoderSetFrameDuration(fs, wf.duration) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc); return MakeError(67);
+    {
+      JxlFrameHeader fh;
+      JxlEncoderInitFrameHeader(&fh);
+      fh.duration = wf.duration;
+      if (JxlEncoderSetFrameHeader(fs, &fh) != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc); return MakeError(67);
+      }
     }
     if (wf.name_ptr != 0 && wf.name_size > 0) {
       const char* name = reinterpret_cast<const char*>(static_cast<uintptr_t>(wf.name_ptr));
