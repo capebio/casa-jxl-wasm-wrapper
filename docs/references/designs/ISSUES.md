@@ -320,3 +320,90 @@ Observed: color_matrix_from_mn is false for most DNGs; the real matrix from the 
 **Sufficient Context Summary:** Encoder progressive controls lag far behind the mature decoder progressive stack. The highest-ROI next design note is a clean mapping of cjxl/libjxl progressive encoder knobs to the TS + native surface, followed by the standard TEMPLATE process (branch, design note, benchmark wiring, handoff). All references and the exact next actions are listed above.
 
 (Additional high-priority items — PGO operationalization, true bitstream ROI, packaging/verification closure, WASM-to-Tauri transposition — can be added in the same format by any agent following this spec.)
+
+## 7. Extra Channels Lab — benchmark/demo page for alphaDistance and multi-channel encode (2026-05-29)
+
+**Status:** deferred (Phase 1 WASM implementation complete; benchmark page explicitly excluded from that phase)
+
+**Why this matters:**
+- The extra-channel-distance Phase 1 feature (`alphaDistance`, `extraChannels[]`) is now fully wired in `bridge.cpp` + `facade.ts` with 6 passing tests.
+- The user-visible value — seeing lossless-alpha vs. lossy-alpha file size and quality — cannot be demonstrated without a lab page.
+- Design note `extra-channel-distance.md` section 6 calls this "highly visual and will be one of the most compelling demos once working."
+- Without it, no one can validate the encode path end-to-end in a browser (the WASM binary has not been rebuilt yet either; the lab page will need the capability gate to degrade gracefully until the binary rebuild is done).
+- Links: `docs/references/designs/extra-channel-distance.md` §6, `docs/references/PROGRESS_LOG.md` (2026-05-29 entry, deferred items).
+
+**Reproduction / Current State:**
+```powershell
+# Open web/jxl-wrapper-lab.html in a browser
+# No Extra Channels section exists; alphaDistance has no UI exposure
+```
+Observed: wrapper lab shows concurrency / quality / effort / decode speed controls only. No alpha-distance slider, no extra-channel selector, no depth channel demo.
+
+**Affected files / packages:**
+- `web/jxl-wrapper-lab.html` (add Extra Channels section) **or** create `web/jxl-extra-channels-lab.html`
+- `web/jxl-wrapper-lab.js` (wire `alphaDistance` into `makeEncoderOptions()`)
+- Potentially `web/test-nav.css` or nav bar links if a new page is added
+- `packages/jxl-wasm/src/facade.ts` (already complete — `alphaDistance`, `extraChannels[]`, `caps.extraChannelEncode`)
+
+**Follow-up / Resolution steps:**
+1. Add an "Extra Channels" section to `web/jxl-wrapper-lab.html` (or new page). Controls needed: `alphaDistance` slider (0.0–2.0, step 0.1), channel type dropdown for extra channels, bit-depth selector.
+2. Wire controls into `makeEncoderOptions()` in `web/jxl-wrapper-lab.js` under a `caps.extraChannelEncode` guard.
+3. Add side-by-side or overlay comparison: encode the same RGBA image with `alphaDistance: 0` (lossless) vs. `alphaDistance: 1.0` (lossy); display both decoded outputs + file sizes.
+4. Add a depth-channel demo: synthesize a 16-bit greyscale gradient plane in a `Uint16Array`; pass it as `extraChannels: [{ type: 'depth', bitsPerSample: 16, distance: 0 }]` with matching `extraChannelPlanes`; decode and display as a greyscale overlay.
+5. Verify `caps.extraChannelEncode` gate hides/disables EC controls when the binary lacks the export (expected until WASM binary is rebuilt — see Issue 1/3 above).
+6. Run existing wrapper lab tests after changes (`bun test web/jxl-wrapper-lab.test.js`); fix any regressions.
+
+**Agent Jump-In Checklist:**
+- Read (in order): `docs/references/designs/extra-channel-distance.md` §6 (Benchmark Wiring), `packages/jxl-wasm/src/facade.ts` (`EncoderOptions.alphaDistance`, `EncoderOptions.extraChannels`, `caps.extraChannelEncode` capability check), `packages/jxl-wasm/test/facade.test.ts` (`describe("extra channel encode")` — shows the minimal working encode call).
+- Read for UI patterns: `web/jxl-wrapper-lab.html` lines 1–120 (page structure, spinpickers, importmap), `web/jxl-wrapper-lab.js` `makeEncoderOptions()`.
+- Run first: open `web/jxl-wrapper-lab.html` locally to confirm existing race section still works.
+- Success criteria = alpha distance slider works + side-by-side comparison renders + depth demo displays greyscale overlay + existing race section unaffected + `caps.extraChannelEncode` guard tested.
+- Gotcha: `caps.extraChannelEncode` will be false until the WASM binary is rebuilt (Issue 1/3). Design the UI to degrade gracefully (show message "Extra channel encode requires a rebuilt WASM binary — see Issue 1/3").
+- Gotcha: RGBA source images needed — transparent PNGs work; alternatively generate a checkerboard with canvas `clearRect` + `fillRect`.
+
+**Sufficient Context Summary:** Phase 1 extra-channel WASM code is complete but has no browser UI. This issue adds alpha-distance and depth-channel controls to `web/jxl-wrapper-lab.html`, guarded by `caps.extraChannelEncode` (false until WASM binary rebuild). The complete API shape is already in `facade.ts`; the test file shows the minimal encode call.
+
+---
+
+## 8. Tauri/Rust extra channel implementation — wire alphaDistance and extraChannels[] into native encode path (2026-05-29)
+
+**Status:** deferred (WASM Phase 1 complete; Tauri side excluded from Phase 1 scope per design note)
+
+**Why this matters:**
+- The WASM encode path now supports `alphaDistance`, `extraChannels[]`, and full per-channel distance. The Tauri/native path does not.
+- Users who encode through the Tauri desktop app get no benefit from Phase 1 until the native side is wired.
+- The native path calls libjxl C API directly (`packages/jxl-native/src/native.cc`). The three-step libjxl pattern (`JxlEncoderSetExtraChannelInfo` → `JxlEncoderSetExtraChannelDistance` → `JxlEncoderAddExtraChannelBuffer`) is already demonstrated in the WASM bridge and can be ported directly.
+- Links: `docs/references/designs/extra-channel-distance.md` §4 (Rust sub-section), `docs/references/PROGRESS_LOG.md` (2026-05-29 entry, deferred items).
+
+**Reproduction / Current State:**
+```powershell
+# packages/jxl-native/src/index.ts — NativeEncoderOptions has no alphaDistance or extraChannels fields
+# packages/jxl-native/src/native.cc — CreateEncoder does not call JxlEncoderSetExtraChannelInfo
+```
+Observed: passing `alphaDistance: 0` through the Tauri encode path has no effect; option is silently ignored.
+
+**Affected files / packages:**
+- `packages/jxl-native/src/index.ts` — add `alphaDistance?: number` and `extraChannels?: ExtraChannel[]` to `NativeEncoderOptions`
+- `packages/jxl-native/src/native.cc` — parse new fields in `CreateEncoder`; add channel declaration, distance setting, and buffer-add calls
+- `packages/jxl-native/test/` — add or extend test for lossless alpha + lossy color round-trip
+- Shared type: `ExtraChannel` interface is defined in `packages/jxl-wasm/src/facade.ts` — check whether `packages/jxl-core/src/types.ts` is the right place to share it with the native package
+
+**Follow-up / Resolution steps:**
+1. Check `packages/jxl-core/src/types.ts` — if `ExtraChannel` is already exported there, use it. If not, move or re-export the interface from `facade.ts` so both packages share one definition.
+2. Add `alphaDistance?: number` and `extraChannels?: ExtraChannel[]` to `NativeEncoderOptions` in `packages/jxl-native/src/index.ts`.
+3. In `native.cc`, extend `EncoderData` (or equivalent options struct) to hold these fields.
+4. In `CreateEncoder`, after the main image frame settings and before `JxlEncoderAddImageFrame`, add: iterate `extraChannels`, call `JxlEncoderSetExtraChannelInfo` for each, then `JxlEncoderSetExtraChannelDistance`; then after `AddImageFrame`, call `JxlEncoderAddExtraChannelBuffer` for each channel's pixel data.
+5. Wire `alphaDistance` as a shorthand: if `alphaDistance` is set and the image has alpha, apply it to the alpha channel; if `extraChannels` explicitly declares an alpha channel, use its `distance` field and ignore `alphaDistance`.
+6. Add a native test that encodes a 2×2 RGBA8 image with `alphaDistance: 0` and verifies the output is a valid JXL bitstream with non-zero size.
+7. Rebuild native addon (resolve node-gyp dependency — see Issue 4 in this file) and run the test suite.
+
+**Agent Jump-In Checklist:**
+- Read (in order): `docs/references/designs/extra-channel-distance.md` §4 + §5, `packages/jxl-wasm/src/bridge.cpp` (`EncodeRgbaWithExtraChannels` static function — the complete libjxl sequence to replicate), `packages/jxl-native/src/native.cc` (`CreateEncoder` function — insertion point for new code).
+- Run first: `pnpm typecheck` to confirm current native package baseline; run existing native tests.
+- Success criteria = `NativeEncoderOptions` has both fields + native encode with `alphaDistance: 0` produces valid output + existing native paths unaffected + new test passes.
+- Gotcha: `JxlEncoderSetExtraChannelInfo` and `JxlEncoderSetExtraChannelDistance` **must** be called before `JxlEncoderAddImageFrame` — verify the call ordering in `CreateEncoder`.
+- Gotcha: The `WasmExtraChannel` 20-byte binary struct is WASM-only. Parse the JS `extraChannels[]` array via Napi/V8 directly in `native.cc` — do not replicate the binary layout.
+- Gotcha: `ExtraChannelType` string literals (`'alpha'`, `'depth'`, etc.) must be mapped to `JxlExtraChannelType` C enum values (`JXL_CHANNEL_ALPHA = 0`, `JXL_CHANNEL_DEPTH = 1`, `JXL_CHANNEL_SPOT_COLOR = 2`, `JXL_CHANNEL_SELECTION_MASK = 3`, etc.).
+- Prerequisite: node-gyp must be resolvable (see Issue 4 above).
+
+**Sufficient Context Summary:** The WASM extra-channel path is complete; the Tauri native path (`packages/jxl-native/src/native.cc`) still ignores `alphaDistance` and `extraChannels`. Port the three-step libjxl pattern from `EncodeRgbaWithExtraChannels` in `bridge.cpp` to `CreateEncoder` in `native.cc`, parse the JS fields via Napi instead of the binary WASM struct, add type-string-to-enum mapping, and add a smoke test.
