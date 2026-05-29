@@ -401,6 +401,17 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(encoded.value.byteLength).toBeGreaterThan(0);
     await encoder.dispose();
   });
+
+  test("exports.txt lists all animation bridge symbols", () => {
+    const exports = readFileSync(new URL("../exports.txt", import.meta.url), "utf8");
+    expect(exports).toContain("_jxl_wasm_encode_animation");
+    expect(exports).toContain("_jxl_wasm_dec_frame_index");
+    expect(exports).toContain("_jxl_wasm_dec_frame_duration");
+    expect(exports).toContain("_jxl_wasm_dec_frame_name_ptr");
+    expect(exports).toContain("_jxl_wasm_dec_is_last_frame");
+    expect(exports).toContain("_jxl_wasm_dec_anim_ticks_per_second");
+    expect(exports).toContain("_jxl_wasm_dec_anim_loop_count");
+  });
 });
 
 describe("detectTier", () => {
