@@ -8,6 +8,52 @@ if outstanding work, provide a concise handoff with sufficient context for an ag
 
 ---
 
+## Session handoff — 2026-05-29 (Milestone 0 + 1 complete: WASM + native rebuilt)
+
+### What was done
+
+**WASM artifacts rebuilt** (`packages/jxl-wasm/dist/`, all 4 tiers):
+- 4 `bridge.cpp` fixes required to compile against libjxl build commit `332feb17`:
+  1. `JxlEncoderAddExtraChannelBuffer` → `JxlEncoderSetExtraChannelBuffer` (API rename)
+  2. `JxlEncoderSetFrameDuration` (absent) → `JxlEncoderInitFrameHeader` / `JxlEncoderSetFrameHeader`
+  3. `#include <vector>` added (for animation frame name buffer)
+  4. `#ifndef JxlBool typedef int JxlBool; #endif` shim added
+- All 7 animation symbols confirmed in dist (`_jxl_wasm_encode_animation` + 6 decoder accessors)
+- All 5 capability gates resolve `true` in browser (`animationEncode`, `extraChannelEncode`, `metadataBoxesV2`, `extOptions`, `gainMapEncode`)
+- `bun test packages/jxl-wasm/test/facade.test.ts` — 69 pass, 0 fail
+
+**Native addon rebuilt** (`packages/jxl-native/build/Release/jxl_native.node`, 6.2 MB):
+- Same 3 source fixes applied to `native.cc` (ExtraChannelBuffer rename, FrameHeader replacement, JxlBool shim)
+- libjxl 0.11.x (jpegxl-src-0.11.4) built as static `/MT` libs at `C:\TEMP\jxl-mt-libs\`
+- Build command: `vcvars64 + JXL_NATIVE_INCLUDE_DIR=C:\TEMP\jxl-mt-build\lib\include + JXL_NATIVE_LIB_DIR=C:\TEMP\jxl-static-libs + npx node-gyp rebuild --release`
+- `bun test packages/jxl-native/test/codec.test.ts` — 6 pass, 0 fail
+- ISSUES.md §1, §3, §4, §9 all closed
+
+### Verification
+
+- `bun test packages/jxl-wasm/test/facade.test.ts` → 69 pass
+- `bun test packages/jxl-native/test/codec.test.ts` → 6 pass
+- All 4 WASM tiers in `packages/jxl-wasm/dist/` dated 2026-05-29
+- All 7 animation symbols + 5 capability gates confirmed live
+
+### What remains (ACTION PLAN §3)
+
+**Milestone 2 (native parity):**
+- EC Phase 1 native side: `alphaDistance` + `extraChannels[]` + `extraChannelPlanes` in `native.cc` / `index.ts` (ISSUES.md §8)
+- Custom boxes native: `JxlEncoderAddBox` for `customBoxes` array
+- Advanced frame settings native parity (once WASM patches work lands)
+
+**Milestone 3 (remaining design notes, priority order):**
+1. Core Modular Controls (`designs/core-modular-controls.md`) — nested `modular: { force, groupSize, predictor, ... }` shape
+2. Patches & Advanced Frame Settings — port from worktree or re-implement per design note
+3. Full EC Infrastructure Phase 2 (`designs/extra-channel-infrastructure.md`) — already complete on a different branch, needs merge/re-execute on epic branch
+4. Gain Maps (`designs/gain-maps.md`) — finish existing stub
+5. EC Phase 1 lab page (`designs/extra-channel-distance.md` §6) — ISSUES.md §7
+
+**Next agent:** Start with ISSUES.md §8 (native EC parity) — all env prerequisites are now satisfied. libjxl libs are at `C:\TEMP\jxl-mt-libs\`, headers at `C:\TEMP\jxl-mt-build\lib\include`. Run codec tests after each change.
+
+---
+
 ## Session handoff — 2026-05-28 (task 2/3 production-hygiene pass)
 
 ### What was done
