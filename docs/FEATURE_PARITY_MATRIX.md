@@ -136,7 +136,7 @@ This matrix supersedes and consolidates:
 - LookRenderer + render command + Rgb16State integration in Tauri (item 1) — in progress on finishing_feature_parity (B)
 - process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1 (unified helper + orient fixes) landed
 - True pause/resume of native Rust decode tasks (item 11)
-- JXTC + progressive/streaming encode on native (C) — audit started
+- JXTC + progressive/streaming encode on native (C) — C1 audit complete (native uses one-shot jpegxl-rs + escape hatch; JXTC is custom in WASM bridge only; progressive encode needs new paths in native.cc or casabio)
 
 **JXL Encode/Progressive on Native:**
 - Progressive/streaming encode during RAW ingest (preview-first)
