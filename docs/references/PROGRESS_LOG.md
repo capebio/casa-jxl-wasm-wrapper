@@ -618,6 +618,27 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 
 ---
 
+## C1: Native JXL progressive/streaming encode + JXTC parity audit (finishing_feature_parity)
+**Branch:** `finishing_feature_parity`
+**Status:** Complete (audit only; impl deferred per complexity + leave-out rules)
+
+**Audit findings (C1):**
+- casabio_encode.rs (raw-pipeline): pure one-shot jpegxl-rs (encode_variants, no progressive, no JXTC, Lanczos resize). Used for Casabio thumb/preview/full.
+- packages/jxl-native/src/native.cc + index.ts: full libjxl direct (JxlEncoderFrameSettingsSetOption for all advanced including escape hatch advancedFrameSettings). No streaming encode, no JXTC (JXTC is custom 'JXTC' container + tiled decode only in WASM bridge.cpp:1195+).
+- JXTC (tile container for fast ROI) + true progressive encode (preview-first during RAW ingest) are WASM-only today (matrix 2.13, 3.3 ❌ on Tauri).
+- Entry points for future C2/C3: extend jxl-native EncodeAll with JxlEncoderFrameSettings for progressive (RESPONSIVE etc), or add dedicated JXTC encode path mirroring bridge.cpp (complex; may stay WASM-preferred for scientific ROI use).
+- REFERENCE_INDEX + cjxl_main.cc have progressive flags; WASM bridge has the tiled impl as reference.
+
+**Docs:**
+- Matrix C note updated.
+- This entry.
+
+**Decision:** C2/C3 require substantial new native code (beyond escape). Recommend starting with benchmark exposure of existing escape for progressive hints, or explicit deferral. B (RAW) higher user-visible priority.
+
+**Cleanup:** Audit complete; no source for C yet. Continue B3 or C2 on branch as directed.
+
+---
+
 ## M1 Rebuild + Validation Pass (Source-Complete Controls) — 2026-06
 **Branch:** `finishing_feature_parity`
 **Status:** Complete
