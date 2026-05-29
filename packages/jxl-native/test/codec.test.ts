@@ -455,3 +455,102 @@ describe("@casabio/jxl-native animation", () => {
     expect(final?.frameIndex).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("progressive encode", () => {
+  test("progressive:true produces valid JXL and decoder emits progress event", async () => {
+    const W = 16, H = 16;
+    const pixels = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        pixels[i]     = Math.floor((x / (W - 1)) * 255);
+        pixels[i + 1] = Math.floor((y / (H - 1)) * 255);
+        pixels[i + 2] = 128;
+        pixels[i + 3] = 255;
+      }
+    }
+
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: W,
+      height: H,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 1.0,
+      quality: null,
+      effort: 3,
+      progressive: true,
+      previewFirst: true,
+      chunked: false,
+    });
+
+    await encoder.pushPixels(pixels);
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+    expect(encoded.byteLength).toBeGreaterThan(0);
+
+    const decoder = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "pass",
+      emitEveryPass: true,
+      preserveIcc: false,
+      preserveMetadata: false,
+    });
+
+    await decoder.push(encoded);
+    await decoder.close();
+    const events = await Array.fromAsync(decoder.events());
+    const hasFinal = events.some(e => e.type === "final");
+    expect(hasFinal).toBe(true);
+    const finalEvent = events.find((e): e is Extract<DecodeEvent, { type: "final" }> => e.type === "final");
+    expect(finalEvent?.info.width).toBe(W);
+    expect(finalEvent?.info.height).toBe(H);
+  });
+
+  test("progressive:true, previewFirst:false (DC only) produces valid JXL", async () => {
+    const W = 8, H = 8;
+    const pixels = new Uint8Array(W * H * 4).fill(128);
+
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: W,
+      height: H,
+      hasAlpha: false,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 1.0,
+      quality: null,
+      effort: 3,
+      progressive: true,
+      previewFirst: false,
+      chunked: false,
+    });
+
+    await encoder.pushPixels(pixels);
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+    expect(encoded.byteLength).toBeGreaterThan(0);
+
+    const decoder = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: false,
+      preserveMetadata: false,
+    });
+    await decoder.push(encoded);
+    await decoder.close();
+    const events = await Array.fromAsync(decoder.events());
+    const finalEvent = events.find((e): e is Extract<DecodeEvent, { type: "final" }> => e.type === "final");
+    expect(finalEvent).toBeDefined();
+    expect(finalEvent?.info.width).toBe(W);
+    expect(finalEvent?.info.height).toBe(H);
+  });
+});

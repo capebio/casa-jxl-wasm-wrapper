@@ -97,6 +97,11 @@ struct EncoderData {
   // Raw JXL_ENC_FRAME_SETTING_* escape hatch
   struct AdvancedSetting { int32_t id; int32_t value; };
   std::vector<AdvancedSetting> advanced_frame_settings;
+  // Progressive encode settings (derived from EncoderOptions.progressive / previewFirst / chunked)
+  int32_t progressive_dc = 0;   // 0=none, 1=one DC pass
+  int32_t progressive_ac = 0;   // 0=disabled, 1=AC progressive
+  int32_t qprogressive_ac = 0;  // 0=disabled, 1=quality-progressive AC
+  int32_t buffering = 0;        // 0=emit immediately, 2=buffer for chunked streaming
   // Gain map (jhgm box)
   std::vector<uint8_t> gain_map_jxl;
   // Custom metadata boxes
@@ -1123,6 +1128,19 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
   {
     const double mod = GetNullableNumberProp(env, args[0], "modular", -1.0);
     data->modular = (mod < 0.0) ? -1 : (mod > 1.0) ? 1 : static_cast<int32_t>(mod);
+  }
+
+  // Progressive encode: mirror resolveEncoderBridgeSettings() in facade.ts.
+  {
+    const bool progressive   = GetBoolProp(env, args[0], "progressive",  false);
+    const bool preview_first = GetBoolProp(env, args[0], "previewFirst", false);
+    const bool chunked       = GetBoolProp(env, args[0], "chunked",      false);
+    if (progressive) {
+      data->progressive_dc  = 1;
+      data->progressive_ac  = preview_first ? 1 : 0;
+      data->qprogressive_ac = preview_first ? 1 : 0;
+    }
+    data->buffering = chunked ? 2 : 0;
   }
 
   // advancedFrameSettings escape hatch.
