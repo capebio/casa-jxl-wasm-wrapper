@@ -862,6 +862,153 @@ describe("gain map encode/decode", () => {
   });
 });
 
+describe("extra channel encode", () => {
+  afterEach(() => {
+    setJxlModuleFactoryForTesting(null);
+  });
+
+  function createFakeEcModule() {
+    const base = createFakeLibjxlModule();
+    const ecCalls: number[][] = [];
+
+    const ecFn = (...args: number[]) => {
+      ecCalls.push(args);
+      return base._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
+    };
+
+    const module = {
+      ...base,
+      _jxl_wasm_encode_rgba8_with_metadata: (...args: number[]) =>
+        base._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!),
+      _jxl_wasm_encode_rgba8_with_metadata_ec: ecFn,
+      __ecCalls: ecCalls,
+    };
+    return module;
+  }
+
+  test("routes to EC bridge when alphaDistance is set", async () => {
+    const module = createFakeEcModule();
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, alphaDistance: 0 });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    encoder.finish();
+    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    expect(result.done).toBe(false);
+    expect(module.__ecCalls.length).toBe(1);
+    await encoder.dispose();
+  });
+
+  test("passes alphaDistance at correct arg index (22)", async () => {
+    const module = createFakeEcModule();
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, alphaDistance: 0.5 });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    encoder.finish();
+    await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const args = module.__ecCalls[0]!;
+    expect(Math.abs((args[22] ?? -999) - 0.5)).toBeLessThan(0.001);
+    await encoder.dispose();
+  });
+
+  test("routes to EC bridge when extraChannels is non-empty", async () => {
+    const module = createFakeEcModule();
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      quality: 90,
+      extraChannels: [{ type: "depth", bitsPerSample: 16, distance: 0 }],
+    });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    encoder.finish();
+    await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const args = module.__ecCalls[0]!;
+    expect(args[24]).toBe(1); // numEc = 1
+    await encoder.dispose();
+  });
+
+  test("WasmExtraChannel descriptor: type, bits, distance written at correct offsets", async () => {
+    const module = createFakeEcModule();
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      quality: 90,
+      extraChannels: [{ type: "depth", bitsPerSample: 16, distance: 0.5 }],
+    });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    encoder.finish();
+    await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    const args = module.__ecCalls[0]!;
+    const ecDescPtr = args[23]!;
+    expect(ecDescPtr).toBeGreaterThan(0);
+
+    const dv = new DataView(module.HEAPU8.buffer);
+    const type = dv.getUint32(ecDescPtr,     true); // depth = 1
+    const bits = dv.getUint32(ecDescPtr + 4, true);
+    const dist = dv.getFloat32(ecDescPtr + 8, true);
+
+    expect(type).toBe(1);
+    expect(bits).toBe(16);
+    expect(Math.abs(dist - 0.5)).toBeLessThan(0.001);
+    await encoder.dispose();
+  });
+
+  test("falls back to standard path when EC bridge is absent", async () => {
+    const module = createFakeLibjxlModule();
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, alphaDistance: 0 });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    encoder.finish();
+    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    expect(result.done).toBe(false);
+    expect(result.value?.byteLength ?? 0).toBeGreaterThan(0);
+    await encoder.dispose();
+  });
+
+  test("integration: encode with lossless alpha succeeds with real WASM", async () => {
+    setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
+
+    const rgba = new Uint8Array([
+      255,   0,   0, 255,
+        0, 255,   0, 128,
+        0,   0, 255,   0,
+      255, 255,   0, 200,
+    ]);
+    const encoder = createEncoder({
+      format: "rgba8" as const,
+      width: 2,
+      height: 2,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 1.0,
+      quality: null,
+      effort: 3 as const,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+      alphaDistance: 0,
+    });
+    encoder.pushPixels(rgba);
+    encoder.finish();
+
+    const result = await encoder.chunks()[Symbol.asyncIterator]().next();
+    expect(result.done).toBe(false);
+    expect(result.value?.byteLength ?? 0).toBeGreaterThan(0);
+    await encoder.dispose();
+  });
+});
+
 function createFakeGainMapModule() {
   const base = createFakeLibjxlModule();
   const gainMapCalls: number[][] = [];
