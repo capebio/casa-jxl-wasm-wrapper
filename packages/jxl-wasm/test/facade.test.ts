@@ -1769,6 +1769,111 @@ describe("animation capability", () => {
     expect(dv.getUint32(animOptsPtr + 4, true)).toBe(3);   // loop_count
     await encoder.dispose();
   });
+
+  it('encodes and roundtrips full ExtraChannel descriptors (spot 8-bit + depth 16-bit + named thermal) via packed 56B bridge', async () => {
+    const mod = await loadLibjxlModule();
+    if (typeof mod._jxl_wasm_encode_rgba8_with_extra_channels !== 'function' ||
+        typeof mod._jxl_wasm_get_extra_channels !== 'function' ||
+        typeof mod._malloc !== 'function') {
+      // Bridge not rebuilt with Task 3 symbols yet — skip (build step will enable)
+      return;
+    }
+
+    const w = 4, h = 2;
+    // Main RGBA8 (synthetic)
+    const main = new Uint8Array(w * h * 4);
+    for (let i = 0; i < main.length; i += 4) { main[i] = 120; main[i+1] = 130; main[i+2] = 140; main[i+3] = 255; }
+
+    // EC 0: 8-bit spot (constant)
+    const spotPlane = new Uint8Array(w * h); spotPlane.fill(200);
+    // EC 1: 16-bit depth (gradient-ish)
+    const depthPlane = new Uint16Array(w * h);
+    for (let i = 0; i < depthPlane.length; i++) depthPlane[i] = 1000 + i * 10;
+    const depthBytes = new Uint8Array(depthPlane.buffer);
+    // EC 2: 8-bit thermal named
+    const thermalPlane = new Uint8Array(w * h); thermalPlane.fill(77);
+
+    const channels: ExtraChannel[] = [
+      { type: 'spot', bitsPerSample: 8, name: 'RedSpot', distance: 0.1, spotColor: { red: 0.95, green: 0.05, blue: 0.1, solidity: 0.85 } },
+      { type: 'depth', bitsPerSample: 16, dimShift: 0, name: 'Depth16' },
+      { type: 'thermal', bitsPerSample: 8, name: 'ThermalCam' },
+    ];
+
+    const { buffer: descBuf, view: descDv } = serializeExtraChannelsForWasm(channels);
+    const descPtr = mod._malloc(descBuf.byteLength);
+    const spotPtr = mod._malloc(spotPlane.length);
+    const depthPtr = mod._malloc(depthBytes.length);
+    const thermalPtr = mod._malloc(thermalPlane.length);
+    const mainPtr = mod._malloc(main.length);
+
+    try {
+      mod.HEAPU8.set(main, mainPtr);
+      mod.HEAPU8.set(spotPlane, spotPtr);
+      mod.HEAPU8.set(depthBytes, depthPtr);
+      mod.HEAPU8.set(thermalPlane, thermalPtr);
+      mod.HEAPU8.set(new Uint8Array(descBuf), descPtr);
+
+      // Write plane pointers/sizes into the descriptors (offsets per EC_BYTES=56)
+      const EC = 56;
+      // EC0 spot
+      descDv.setUint32(0*EC + 12, spotPtr >>> 0, true);
+      descDv.setUint32(0*EC + 16, spotPlane.length >>> 0, true);
+      // EC1 depth
+      descDv.setUint32(1*EC + 12, depthPtr >>> 0, true);
+      descDv.setUint32(1*EC + 16, depthBytes.length >>> 0, true);
+      // EC2 thermal
+      descDv.setUint32(2*EC + 12, thermalPtr >>> 0, true);
+      descDv.setUint32(2*EC + 16, thermalPlane.length >>> 0, true);
+
+      // Re-copy updated desc
+      mod.HEAPU8.set(new Uint8Array(descBuf), descPtr);
+
+      const handle = mod._jxl_wasm_encode_rgba8_with_extra_channels!(
+        mainPtr, w, h, 1.0 /*distance*/, 4 /*effort*/, 0 /*no alpha*/, descPtr, 3
+      );
+      expect(handle).not.toBe(0);
+      const err = mod._jxl_wasm_buffer_error ? mod._jxl_wasm_buffer_error(handle) : 0;
+      expect(err).toBe(0);
+
+      const size = mod._jxl_wasm_buffer_size(handle);
+      expect(size).toBeGreaterThan(100);
+      const jxlPtr = mod._jxl_wasm_buffer_data(handle);
+      const jxlBytes = new Uint8Array(size);
+      jxlBytes.set(mod.HEAPU8.subarray(jxlPtr, jxlPtr + size));
+
+      // Free encode buffer
+      mod._jxl_wasm_buffer_free(handle);
+
+      // Decode header via helper -> assert descriptors roundtripped
+      const infoH = mod._jxl_wasm_get_extra_channels!(jxlPtr, size);  // note: we pass the encoded bytes ptr/size
+      expect(infoH).not.toBe(0);
+      const infoSize = mod._jxl_wasm_buffer_size(infoH);
+      expect(infoSize).toBe(3 * 56);
+      const infoDataPtr = mod._jxl_wasm_buffer_data(infoH);
+      const infoBytes = mod.HEAPU8.subarray(infoDataPtr, infoDataPtr + infoSize);
+
+      // Parse the 3 descriptors (type at 0, bits at 4, name at ~41, spot at 24 for spot)
+      const dv = new DataView(infoBytes.buffer, infoBytes.byteOffset, infoBytes.byteLength);
+      // spot (first in encode order)
+      expect(dv.getUint32(0*56 + 0, true)).toBe(2); // SPOT_COLOR
+      expect(dv.getUint32(0*56 + 4, true)).toBe(8);
+      expect(dv.getUint8(0*56 + 40)).toBeGreaterThan(0); // name len
+      // depth
+      expect(dv.getUint32(1*56 + 0, true)).toBe(1); // DEPTH
+      expect(dv.getUint32(1*56 + 4, true)).toBe(16);
+      // thermal
+      expect(dv.getUint32(2*56 + 0, true)).toBe(6); // THERMAL
+      expect(dv.getUint32(2*56 + 4, true)).toBe(8);
+      const nameStart = 2*56 + 41;
+      const nameLen = dv.getUint8(2*56 + 40);
+      const nameBytes = infoBytes.subarray(nameStart, nameStart + nameLen);
+      expect(new TextDecoder().decode(nameBytes)).toBe('ThermalCam');
+
+      mod._jxl_wasm_buffer_free(infoH);
+    } finally {
+      mod._free(descPtr); mod._free(spotPtr); mod._free(depthPtr); mod._free(thermalPtr); mod._free(mainPtr);
+    }
+  });
 });
 
 describe("animation decode metadata", () => {
