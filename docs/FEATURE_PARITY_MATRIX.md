@@ -27,10 +27,10 @@ This matrix supersedes and consolidates:
 |---|---------|------|-------|--------------------|-------|
 | 1 | LookRenderer – WASM-resident pre-tonemapped RGB16 + zero-copy render() for live sliders | ✅ | ✅ (B3: Rgb16State now has resident .render() + .new() mirroring WASM LookRenderer exactly — unsharp conditional, orientation fastpath, unified params from B1; apply_look delegates; full backward compat. Highest UX gap closed) | N/A (internal to Tauri lightbox) | WASM src/lib.rs:946 + B3 on finishing_feature_parity |
 | 2 | process_orf_with_flags + selective bitmask (full / lightbox / thumb) | ✅ (OUT_* consts, conditional paths) | ❌ (process_file always full materialization) | N/A | Batch JXL win; WASM src/lib.rs:613 |
-| 3 | parse_orf_metadata (TIFF/EXIF-only, zero pixel work) | ✅ | 🟡 (tiff::parse + exif used internally; no public metadata-only cmd) | N/A | Gallery preflight; WASM:1122 |
-| 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | 🟡 (bin/ and examples/ benches exist; no stable lib fn for runtime) | N/A (dev only) | WASM:1156 |
+| 3 | parse_orf_metadata (TIFF/EXIF-only, zero pixel work) | ✅ | ✅ (B4: public `raw_pipeline::parse_orf_metadata` + `get_orf_metadata` Tauri command; zero pixel work) | N/A | Gallery preflight; WASM:1122 + B4 on finishing_feature_parity |
+| 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | ✅ (B4: public `raw_pipeline::bench_decode_orf` + `bench_decode_orf` Tauri command) | N/A (dev only) | WASM:1156 + B4 on finishing_feature_parity |
 | 5 | Thumb derived from pre-computed lightbox buffer (not 2nd full scan) | ✅ | 🟡 (B2: now derives gallery thumb from lb16 buffer via shared downscale; avoids 2nd full downscale; full flags path next) | N/A | Memory win on 20 MP+; WASM + B2 on finishing_feature_parity |
-| 6 | Orientation==1 fast-path (move / zero-copy, no 60 MB traffic) | ✅ (explicit in process + apply_look) | 🟡 (shared apply_orientation does zero-copy move for 1; WASM call sites fixed for consistency in B1) | N/A | raw-pipeline/src/pipeline.rs:624 |
+| 6 | Orientation==1 fast-path (move / zero-copy, no 60 MB traffic) | ✅ (explicit in process + apply_look) | ✅ (apply_orientation now takes Vec<u8>; orientation==1 is zero-copy move; all 5 Tauri callers updated — 3e on epiccodereview/20260527T054853) | N/A | raw-pipeline/src/pipeline.rs:614 |
 | 7 | Unified apply_look_params helper (single 12× is_finite, no drift) | ✅ (private helper called from 3 paths) | ✅ (now delegates to shared raw_pipeline::pipeline::apply_look_params; B1 on finishing_feature_parity) | N/A | WASM:156 + raw-pipeline/src/pipeline.rs |
 | 8 | apply_look accepts native &[u16] (no LE byte unpack) | ✅ | N/A (no public apply_look; edits baked at process_file) | N/A | WASM:836 |
 | 9 | Pre-allocated fixed buffers for rgb_to_rgba / box downscales | ✅ | 🟡 (par_chunks alloc inside; no documented fixed strategy) | N/A | Minor perf |
@@ -134,7 +134,7 @@ This matrix supersedes and consolidates:
 
 **Raw / Interactive (highest user-visible on desktop):**
 - LookRenderer + render command + Rgb16State integration in Tauri (item 1) — B3 landed (resident .render() + .new() parity; apply_look now uses it)
-- process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1/B2 landed
+- process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1/B2/B4 landed (metadata-only + bench now public)
 - True pause/resume of native Rust decode tasks (item 11) — still pending
 - JXTC + progressive/streaming encode on native (C) — C1 audit complete; pause before C2 per directive
 

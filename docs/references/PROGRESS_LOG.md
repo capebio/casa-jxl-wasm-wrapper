@@ -8,6 +8,25 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
+## RAW Pipeline Tauri Gaps (3e) — 2026-05-29
+
+**Branch:** `epiccodereview/20260527T054853`
+**Status:** Complete
+
+**Scope:** Closed three micro-gaps in the Tauri/native RAW pipeline that diverged from the WASM path: (a) `apply_orientation` zero-copy fast-path, (b) unified `apply_look_params` helper, (c) conditional `Vec<u16>` clone in `apply_look_inner`.
+
+**Changes — `raw-pipeline/src/pipeline.rs`:**
+- `apply_orientation` signature changed from `rgb: &[u8]` to `rgb: Vec<u8>`. The `_ =>` arm now returns `(rgb, width, height)` — zero-copy move for orientation 1 (and unsupported mirror variants) instead of `to_vec()` allocation.
+
+**Changes — `src-tauri/src/pipeline.rs`:**
+- Extracted `apply_look_params(look, params)` local helper — eliminates the duplicated 12× `is_finite` block that existed in both `build_params_from_look` and `apply_look_inner`.
+- `apply_look_inner` (and `Rgb16State::render`): conditional `Vec<u16>` clone — clones only when `texture != 0.0 || clarity != 0.0`; passes `&state.data` directly to `process()` otherwise.
+- Updated all 5 caller sites (`pipeline.rs:423`, `pipeline.rs:518`, `casabio.rs:134`, `bench.rs:85`, `bench.rs:2086`, `bin/lightbox_bench.rs:348`) to pass `rgb8` by value; removed now-redundant `drop(rgb8)` calls.
+
+**Verification:** `cargo check` passed clean (exit 0) in `src-tauri/`.
+
+---
+
 ## Native EC Decoder Reporting (extra-channel decode parity) — 2026-05-29
 
 **Branch:** `epiccodereview/20260527T054853`
@@ -715,5 +734,29 @@ Ready for B4 (metadata-only + bench fns) or B5 (preemption) or C2 after explicit
 - Current state: M1 complete for the "source-complete" batch. Matrix + log now carry the verifiable evidence. RAW pipeline Tauri gaps (matrix §1) and remaining design notes (M3) left explicitly out per user directive; native EC parity (ISSUES §8 / M2) already in progress on other thread.
 - No background processes.
 - Next session: From repo root on finishing_feature_parity; `git pull` to get this; continue with highest-ROI non-left-out item (e.g. RAW LookRenderer / selective flags parity or JXTC native if desired). Clear context recommended.
+
+---
+
+## B4: RAW Tauri parity - Public metadata-only + bench_decode_orf (finishing_feature_parity)
+**Branch:** `finishing_feature_parity`
+**Status:** Complete
+
+**Scope:** Matrix 1 items 3 & 4. WASM already had clean `parse_orf_metadata` and `bench_decode_orf` (zero pixel work). Tauri/raw-pipeline used `tiff::parse` internally but had no stable public metadata-only surface or command. B4 delivers parity.
+
+**Changes:**
+- `raw-pipeline/src/tiff.rs`: Added stable public `OrfMetadata` + `parse_orf_metadata(data)` and `DecodeBench` + `bench_decode_orf(data)`. Both do zero pixel work.
+- `raw-pipeline/src/lib.rs`: Re-exported the four new public items.
+- `raw-converter-tauri/src-tauri/src/pipeline.rs`: Added `get_orf_metadata(path)` and `bench_decode_orf(path)` Tauri commands.
+- `raw-converter-tauri/src-tauri/src/lib.rs`: Registered the two new commands.
+
+**Verification:**
+- New paths call only `tiff::parse` / decompress / demosaic - confirmed no tonemap, no orientation, no downscale.
+- Cross-repo commits performed.
+
+**Docs:**
+- `FEATURE_PARITY_MATRIX.md`: Items 3 & 4 now ?. Summary section updated.
+- Full TEMPLATE-style entry here.
+
+**Commit/Push:** Done on finishing_feature_parity + sibling. B4 feature complete before B5.
 
 ---
