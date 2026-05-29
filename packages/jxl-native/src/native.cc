@@ -13,6 +13,10 @@
 #include <jxl/decode.h>
 #include <jxl/encode.h>
 #include <jxl/types.h>
+// JxlBool was added to jxl/types.h after v0.10.x — provide fallback.
+#ifndef JxlBool
+typedef int JxlBool;
+#endif
 #else
 #define CASABIO_HAVE_LIBJXL 0
 #endif
@@ -71,6 +75,15 @@ struct EncoderData {
     std::string name;
   };
   std::vector<AnimFrame> anim_frames;
+  // Extra channel fields
+  double alpha_distance = -1.0;
+  struct NativeExtraChannel {
+    uint32_t type = 0; // JxlExtraChannelType value; 0=alpha, 1=depth, 2=spot, 3=selection, 15=unknown
+    uint32_t bits_per_sample = 8;
+    double distance = -1.0;
+    std::vector<uint8_t> pixels;
+  };
+  std::vector<NativeExtraChannel> extra_channels;
 };
 
 struct IteratorData {
@@ -182,6 +195,14 @@ static PixelFormatKind ParsePixelFormat(const std::string& value) {
   if (value == "rgba16") return PixelFormatKind::Rgba16;
   if (value == "rgbaf32") return PixelFormatKind::Rgbaf32;
   return PixelFormatKind::Rgba8;
+}
+
+static uint32_t ParseExtraChannelType(const std::string& type) {
+  if (type == "alpha")     return 0;  // JXL_CHANNEL_ALPHA
+  if (type == "depth")     return 1;  // JXL_CHANNEL_DEPTH
+  if (type == "spot")      return 2;  // JXL_CHANNEL_SPOT_COLOR
+  if (type == "selection") return 3;  // JXL_CHANNEL_SELECTION_MASK
+  return 15;                          // JXL_CHANNEL_UNKNOWN
 }
 
 static const char* PixelFormatName(PixelFormatKind format) {
@@ -526,7 +547,7 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   info.bits_per_sample = bits;
   info.exponent_bits_per_sample = exp_bits;
   info.num_color_channels = 3;
-  info.num_extra_channels = data->has_alpha ? 1 : 0;
+  info.num_extra_channels = (data->has_alpha ? 1u : 0u) + static_cast<uint32_t>(data->extra_channels.size());
   info.alpha_bits = data->has_alpha ? bits : 0;
   info.alpha_exponent_bits = data->has_alpha ? exp_bits : 0;
 
@@ -543,6 +564,21 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc);
     return false;
+  }
+
+  // Declare extra channels beyond alpha (must follow SetBasicInfo).
+  for (uint32_t i = 0; i < static_cast<uint32_t>(data->extra_channels.size()); ++i) {
+    const auto& ec = data->extra_channels[i];
+    const uint32_t ec_index = (data->has_alpha ? 1u : 0u) + i;
+    JxlExtraChannelInfo ec_info;
+    memset(&ec_info, 0, sizeof(ec_info));
+    ec_info.type = static_cast<JxlExtraChannelType>(ec.type);
+    ec_info.bits_per_sample = ec.bits_per_sample > 0u ? ec.bits_per_sample : 8u;
+    ec_info.exponent_bits_per_sample = (ec.bits_per_sample == 32u) ? 8u : 0u;
+    if (JxlEncoderSetExtraChannelInfo(enc, ec_index, &ec_info) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
   }
 
   if (!data->icc_profile.empty()) {
@@ -570,12 +606,28 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (data->photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(data->photon_noise_iso));
   if (data->resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(data->resampling));
 
+  // Per-extra-channel distances.
+  if (data->has_alpha && data->alpha_distance >= 0.0) {
+    JxlEncoderSetExtraChannelDistance(frame, 0, static_cast<float>(data->alpha_distance));
+  }
+  for (uint32_t i = 0; i < static_cast<uint32_t>(data->extra_channels.size()); ++i) {
+    const auto& ec = data->extra_channels[i];
+    if (ec.distance >= 0.0) {
+      JxlEncoderSetExtraChannelDistance(frame, (data->has_alpha ? 1u : 0u) + i, static_cast<float>(ec.distance));
+    }
+  }
+
   JxlPixelFormat pf = {4, DataTypeForFormat(data->format), JXL_NATIVE_ENDIAN, 0};
   if (data->has_animation) {
     for (const auto& af : data->anim_frames) {
       JxlEncoderFrameSettings* fs = JxlEncoderFrameSettingsCreate(enc, frame);
-      if (JxlEncoderSetFrameDuration(fs, af.duration) != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc); return false;
+      {
+        JxlFrameHeader fh;
+        JxlEncoderInitFrameHeader(&fh);
+        fh.duration = af.duration;
+        if (JxlEncoderSetFrameHeader(fs, &fh) != JXL_ENC_SUCCESS) {
+          JxlEncoderDestroy(enc); return false;
+        }
       }
       if (!af.name.empty()) {
         if (JxlEncoderSetFrameName(fs, af.name.c_str()) != JXL_ENC_SUCCESS) {
@@ -594,6 +646,19 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
         JxlEncoderAddImageFrame(frame, &pf, data->pixels.data(), expected) != JXL_ENC_SUCCESS) {
       JxlEncoderDestroy(enc);
       return false;
+    }
+    // Extra channel plane buffers (must follow JxlEncoderAddImageFrame).
+    for (uint32_t i = 0; i < static_cast<uint32_t>(data->extra_channels.size()); ++i) {
+      const auto& ec = data->extra_channels[i];
+      if (ec.pixels.empty()) continue;
+      const uint32_t ec_index = (data->has_alpha ? 1u : 0u) + i;
+      const uint32_t ec_bits = ec.bits_per_sample > 0u ? ec.bits_per_sample : 8u;
+      JxlDataType ec_dtype = (ec_bits == 32u) ? JXL_TYPE_FLOAT : (ec_bits == 16u) ? JXL_TYPE_UINT16 : JXL_TYPE_UINT8;
+      JxlPixelFormat ec_pf = {1u, ec_dtype, JXL_NATIVE_ENDIAN, 0};
+      if (JxlEncoderSetExtraChannelBuffer(frame, &ec_pf, ec.pixels.data(), ec.pixels.size(), ec_index) != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return false;
+      }
     }
   }
 
@@ -891,6 +956,44 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
             ReadBytes(env, data_val, &af.pixels);
           }
           data->anim_frames.push_back(std::move(af));
+        }
+      }
+    }
+  }
+
+  // Extra channel options.
+  data->alpha_distance = GetNullableNumberProp(env, args[0], "alphaDistance", -1.0);
+  {
+    napi_value ec_arr;
+    if (GetProp(env, args[0], "extraChannels", &ec_arr)) {
+      bool is_array = false;
+      napi_is_array(env, ec_arr, &is_array);
+      if (is_array) {
+        uint32_t ec_len = 0;
+        napi_get_array_length(env, ec_arr, &ec_len);
+
+        napi_value planes_arr;
+        bool has_planes = GetProp(env, args[0], "extraChannelPlanes", &planes_arr);
+        bool planes_is_array = false;
+        uint32_t planes_len = 0;
+        if (has_planes) {
+          napi_is_array(env, planes_arr, &planes_is_array);
+          if (planes_is_array) napi_get_array_length(env, planes_arr, &planes_len);
+        }
+
+        for (uint32_t i = 0; i < ec_len; ++i) {
+          napi_value ec_item;
+          napi_get_element(env, ec_arr, i, &ec_item);
+          EncoderData::NativeExtraChannel ec;
+          ec.type = ParseExtraChannelType(GetStringProp(env, ec_item, "type", "other"));
+          ec.bits_per_sample = GetUint32Prop(env, ec_item, "bitsPerSample", 8);
+          ec.distance = GetNullableNumberProp(env, ec_item, "distance", -1.0);
+          if (planes_is_array && i < planes_len) {
+            napi_value plane_val;
+            napi_get_element(env, planes_arr, i, &plane_val);
+            ReadBytes(env, plane_val, &ec.pixels);
+          }
+          data->extra_channels.push_back(std::move(ec));
         }
       }
     }

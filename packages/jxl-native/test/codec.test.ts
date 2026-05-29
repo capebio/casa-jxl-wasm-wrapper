@@ -130,6 +130,24 @@ describe("@casabio/jxl-native real codec", () => {
   });
 });
 
+describe("extra channel types in native index.ts", () => {
+  test("ExtraChannel interface is defined in index.ts", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("export interface ExtraChannel");
+    expect(source).toContain("bitsPerSample: number");
+    expect(source).toContain("distance?: number");
+  });
+
+  test("EncoderOptions has alphaDistance, extraChannels, extraChannelPlanes fields", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("alphaDistance?: number");
+    expect(source).toContain("extraChannels?: readonly ExtraChannel[]");
+    expect(source).toContain("extraChannelPlanes?: readonly (ArrayBuffer | Uint8Array)[]");
+  });
+});
+
 describe("animation types in native index.ts", () => {
   test("NativeEncoderOptions has animation and frames fields", async () => {
     const { readFileSync } = await import("node:fs");

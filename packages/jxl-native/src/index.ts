@@ -83,6 +83,16 @@ export interface MetadataOptions {
   rawCodestream?: boolean;
 }
 
+/** Descriptor for one extra channel beyond the main color channels. */
+export interface ExtraChannel {
+  /** Channel type. 'other' maps to JXL_CHANNEL_UNKNOWN (15). */
+  type: "alpha" | "depth" | "spot" | "selection" | "other";
+  /** Bits per sample for this channel (typically 8, 16, or 32). */
+  bitsPerSample: number;
+  /** Per-channel encode distance. 0 = lossless; omit to inherit main distance. */
+  distance?: number;
+}
+
 /** Descriptor for one frame in an animation sequence. */
 export interface AnimationFrame {
   data: Uint8Array | ArrayBuffer;
@@ -129,6 +139,19 @@ export interface EncoderOptions {
   animation?: AnimationOptions;
   /** Frame data for animation encode. When present, replaces single-image pushPixels. */
   frames?: readonly AnimationFrame[];
+  /**
+   * Per-channel distance for the alpha channel. 0 = lossless; omit to inherit main distance.
+   * Only applied when hasAlpha is true.
+   */
+  alphaDistance?: number;
+  /** Extra channels beyond alpha (e.g. depth, selection mask). */
+  extraChannels?: readonly ExtraChannel[];
+  /**
+   * Pixel data for each extra channel declared in extraChannels.
+   * Each entry is a single-channel buffer (width × height × bytesPerSample).
+   * May be shorter than extraChannels — missing entries leave the channel data unset.
+   */
+  extraChannelPlanes?: readonly (ArrayBuffer | Uint8Array)[];
 }
 
 export interface NativeDecoder {
