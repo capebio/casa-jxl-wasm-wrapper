@@ -310,7 +310,13 @@ Observed: wrapper lab shows concurrency / quality / effort / decode speed contro
 
 ## 8. Tauri/Rust extra channel implementation — wire alphaDistance and extraChannels[] into native encode path (2026-05-29)
 
-**Status:** partial (2026-05-29 — source implemented: `ExtraChannel` interface + `alphaDistance`/`extraChannels`/`extraChannelPlanes` in `index.ts`; `ParseExtraChannelType`, `NativeExtraChannel` struct, `CreateEncoder` parsing, `EncodeAll` libjxl calls in `native.cc`; 2 source-text tests pass. Awaiting native addon rebuild — blocked by node-gyp; see Issue 4)
+**Status:** done (2026-05-29)
+
+Source complete + native addon rebuilt + 12 tests pass (6 roundtrip codec tests including lossless alpha, depth extra channel, modular options, advancedFrameSettings, custom boxes, animation).
+
+Bug fixed: `JxlEncoderAddBox` in libjxl 0.11.x requires `JxlEncoderUseBoxes()` (not just `JxlEncoderUseContainer`) — added before any box additions in `EncodeAll`. Also: `customBoxes` comment "not yet implemented in native binding" removed from `index.ts`.
+
+Verification: `bun test ./node_modules/@casabio/jxl-native/test/codec.test.ts` — 12 pass, 0 fail.
 
 **Why this matters:**
 - The WASM encode path now supports `alphaDistance`, `extraChannels[]`, and full per-channel distance. The Tauri/native path does not.

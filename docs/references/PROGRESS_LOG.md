@@ -781,3 +781,12 @@ Ready for B4 (metadata-only + bench fns) or B5 (preemption) or C2 after explicit
 **Next:** Full in-flight cooperative cancellation would be a larger refactor. Current state is already a clear improvement over pure promotion-only.
 
 ---
+
+**PAUSE AFTER B4 + B5 (before any C2):**  
+B4 (public metadata-only + bench) and B5 (cancel for queued tasks) complete.  
+All B1–B5 RAW Tauri parity work landed and pushed.  
+Matrix RAW section now in very strong shape.  
+**Zero C2/C3 code changes** — explicit pause maintained per user directive.  
+Branch: finishing_feature_parity ready for whatever comes next.
+
+---

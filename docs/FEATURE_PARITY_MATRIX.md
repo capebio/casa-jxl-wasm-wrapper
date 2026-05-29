@@ -46,7 +46,7 @@ This matrix supersedes and consolidates:
 |---|---------|-----------------|---------------------------------------------|--------------------|-------|
 | 1 | Basic encode (effort, distance/quality, lossless) | ✅ | ✅ (jpegxl-rs + casabio_encode) | wrapper-lab | Parity |
 | 2 | Progressive / interlace encode options | ✅ (preview-first bias) | 🟡 (one-shot only in casabio_encode.rs) | N/A (encode side) | Gap: 12 from old table |
-| 3 | Modular mode advanced controls (force, groupSize, predictor, palette, MA tree, etc.) | 🟡 (escape hatch via advancedFrameSettings) | 🟡 (similar escape in native) | wrapper-lab (experimental) | designs/core-modular-controls.md; REFERENCE #3 |
+| 3 | Modular mode advanced controls (force, groupSize, predictor, palette, MA tree, etc.) | ✅ (modular force + full modularOptions: groupSize, predictor, nbPrevChannels, palette, MA%; plus advancedFrameSettings escape) | ✅ (jxl-native parity: modular + modularOptions + advancedFrameSettings; verified 2026-05-29) | wrapper-lab (experimental) | designs/core-modular-controls.md; REFERENCE #3 |
 | 4 | Full Extra Channel infrastructure (alpha/depth/spot/thermal + 72B descriptors + symmetry) | ✅ (Phase 2 complete: facade + bridge + tests matrix) | ✅ (jxl-native parity: encode + decode; descriptors + pixel planes on final event; ExtraChannelDescriptor on header) | wrapper-lab (full Extra Channels panel + inspector) | PROGRESS 2026-05-29; designs/extra-channel* |
 | 5 | Photon noise (ISO-based) | ✅ (`photonNoiseIso?: number` + JXL_ENC_FRAME_SETTING_PHOTON_NOISE; WASM rebuilt) | ✅ (jxl-native parity) | wrapper-lab | designs/photon-noise.md; PROGRESS 2026-05-28; REFERENCE #5 |
 | 6 | Decoding speed tier (0-4) | ✅ | ✅ | wrapper-lab | REFERENCE #6; PROGRESS |

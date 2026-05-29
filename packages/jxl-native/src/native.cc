@@ -694,7 +694,7 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   // Container / raw-codestream control.
   if (data->raw_codestream) {
     JxlEncoderUseContainer(enc, JXL_FALSE);
-  } else if (data->force_container || !data->exif.empty() || !data->xmp.empty() || !data->icc_profile.empty()) {
+  } else if (data->force_container || !data->exif.empty() || !data->xmp.empty() || !data->icc_profile.empty() || !data->custom_boxes.empty()) {
     JxlEncoderUseContainer(enc, JXL_TRUE);
   }
 
@@ -833,6 +833,18 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
         JxlEncoderDestroy(enc);
         return false;
       }
+    }
+  }
+
+  const bool needs_boxes = !data->exif.empty() || !data->xmp.empty() || !data->custom_boxes.empty()
+#if CASABIO_HAVE_GAIN_MAP
+      || !data->gain_map_jxl.empty()
+#endif
+      ;
+  if (needs_boxes) {
+    if (JxlEncoderUseBoxes(enc) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
     }
   }
 
