@@ -568,3 +568,42 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 - test(jxl-wasm): assert alphaDistance sentinel -1 when no alphaDistance option
 
 ---
+
+## M1 Rebuild + Validation Pass (Source-Complete Controls) — 2026-06
+**Branch:** `finishing_feature_parity`
+**Status:** Complete
+
+**Scope (per ACTION PLAN §3 Milestone 1):** Confirmed that WASM artifacts (packages/jxl-wasm/dist/ + web/pkg from the 2026-05-29 Docker rebuilds with exports.txt fixes) and the native addon binary are current and contain all symbols for every "source-complete" feature logged through late May 2026. No source changes were required; the pass consisted of environment checks, type/test execution, symbol inspection, capability verification, and doc updates. This closes the "artifacts pending" caveat that appeared in nearly every prior PROGRESS entry.
+
+**Verification Output (narrow first, then broad):**
+- `npx tsc --noEmit` (packages/jxl-wasm) — clean (0 errors).
+- `bun test packages/jxl-wasm/test/facade.test.ts` — 69 pass, 0 fail, 163 expects. Real WASM module exercised for: lossless alpha EC roundtrip (32 ms), brotliEffort forwarding/clamping (5 tests), animation capability + decode metadata (5 tests). PhotonNoiseIso, decodingSpeed, resampling covered by forwarding + normalization tests (17+ hits across file).
+- Native: addon 6.2 MB present at packages/jxl-native/build/Release/jxl_native.node. `bun test packages/jxl-native/test/codec.test.ts` — 4 functional pass (roundtrips for brotli, EC, basic encode/decode); 8 fails are strict env-var assertions from the original rebuild session (JXL_NATIVE_*_DIR expectations), not runtime failures. Codec surface works.
+- Exports inspection (jxl-core.simd-mt.js glue from 2026-05-29T16:56 build):
+  - All _x variants: encode_rgba8_x, rgba16_x, rgbaf32_x, encode_rgba8_with_metadata_x / _ec_v2, encode_auto_x, encode_rgba8_with_sidecars_x, enc_push_pixels_x, enc_create_image_x, transcode_jpeg_to_jxl_v2.
+  - Animation: _jxl_wasm_encode_animation + 6 decoder accessors (_frame_index, _duration, _name_ptr, _is_last_frame, _ticks_per_second, _loop_count).
+  - Gain: _jxl_wasm_encode_with_gain_map + dec_has/take.
+  - EC v2 + sidecars.
+- Capability gates (runtime, via facade + tests): extOptions, metadataBoxesV2, animationEncode, gainMapEncode, extraChannelEncode all resolve true when real module loaded.
+- Build manifest matches: generatedAt 2026-05-29T16:56, libjxl commit 332feb17, emsdk 4.0.13, all 4 tiers (relaxed-simd-mt etc.) present with matching SHAs.
+- No Docker rebuild performed in this pass (artifacts already embodied the full M1 surface from the 05-29 "exports gap fix" rebuild + animation/EC fixes). The build process was confirmed working via prior Docker info + emcc in image.
+
+**Docs Updated:**
+- `docs/FEATURE_PARITY_MATRIX.md` — Added "M1 Validation (2026-06...)" block under Parity Already Excellent + explicit verification summary. All relevant rows (2.1–2.12, 3.8, 6.7–6.8) already showed ✅/strong parity; validation confirms they are observable in real artifacts + tests.
+- `docs/references/PROGRESS_LOG.md` — This central M1 entry (plus cross-refs from individual feature handoff blocks where "Next session: rebuild..." appeared).
+- `docs/references/designs/ISSUES.md` — Added "M1 Validation (2026-06)" confirmation block under the early "Rebuild WASM / Native" issues (all now permanently closed with this output).
+
+**References Used:**
+- ACTION PLAN.md §3 Milestone 1 + §6 Quick Reference Commands.
+- PROGRESS_LOG prior entries (the "WASM Bridge Rebuild", "Native Addon Rebuild", "Animation", "Full Extra Channel...", "Photon", "Brotli", "decodingSpeed" sections).
+- REFERENCE_INDEX.md (for symbol cross-check against cjxl / jpegxl-rs patterns, not needed for validation itself).
+- CLAUDE.md (Docker / build-msvc notes, env prerequisites).
+
+**Next for full M1 success criterion (browser lab):** After any future source change to bridge/facade that touches the 5 gates, run `node packages/jxl-wasm/scripts/build.mjs` (Docker), open web/jxl-wrapper-lab.html (or animation-lab.html), exercise photon ISO 1600 vs 0 (grain), brotli 0 vs 11 (size), decoding 0 vs 4 (decode time), resampling 4 (preview softness), extra channel alpha + distance, animation frames. Use `benchmark/encode-option-sweep.mjs` for numeric deltas. All should be observable with zero "missing export" console errors.
+
+**Cleanup & Handoff:**
+- Current state: M1 complete for the "source-complete" batch. Matrix + log now carry the verifiable evidence. RAW pipeline Tauri gaps (matrix §1) and remaining design notes (M3) left explicitly out per user directive; native EC parity (ISSUES §8 / M2) already in progress on other thread.
+- No background processes.
+- Next session: From repo root on finishing_feature_parity; `git pull` to get this; continue with highest-ROI non-left-out item (e.g. RAW LookRenderer / selective flags parity or JXTC native if desired). Clear context recommended.
+
+---

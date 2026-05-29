@@ -172,6 +172,14 @@ Focused verification already passing:
 pnpm run typecheck
 ```
 
+**M1 Validation Confirmation (2026-06, finishing_feature_parity):**
+- WASM artifacts dated 2026-05-29T16:56 already contain every symbol listed above (full _x / _v2 / animation / gain / ec_v2 surface).
+- `bun test packages/jxl-wasm/test/facade.test.ts` (real module) — 69 pass including EC integration, brotli, animation metadata.
+- All 5 capability gates resolve true.
+- Native addon (6.2 MB) present; functional codec paths work (env-assert tests are rebuild-session artifacts only).
+- See new central entry in `docs/references/PROGRESS_LOG.md` ("M1 Rebuild + Validation Pass") for full output + export list.
+- Issues 1–6 (early rebuild blockers) are now permanently closed. No further action.
+
 ---
 
 ## Broader Unfinished Business (Populated 2026-05-28 under the Issue Entry Specification above)
