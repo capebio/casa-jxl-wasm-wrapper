@@ -153,59 +153,6 @@ fn now_ms() -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_look_params(
-    params: &mut pipeline::PipelineParams,
-    exposure_ev: f32,
-    contrast: f32,
-    highlights: f32,
-    shadows: f32,
-    whites: f32,
-    blacks: f32,
-    saturation: f32,
-    vibrance: f32,
-    temp: f32,
-    tint: f32,
-    texture: f32,
-    clarity: f32,
-) {
-    if exposure_ev.is_finite() {
-        params.exposure_ev = exposure_ev;
-    }
-    if contrast.is_finite() {
-        params.contrast = contrast;
-    }
-    if highlights.is_finite() {
-        params.highlights = highlights;
-    }
-    if shadows.is_finite() {
-        params.shadows = shadows;
-    }
-    if whites.is_finite() {
-        params.whites = whites;
-    }
-    if blacks.is_finite() {
-        params.blacks = blacks;
-    }
-    if saturation.is_finite() {
-        params.saturation = saturation;
-    }
-    if vibrance.is_finite() {
-        params.vibrance = vibrance;
-    }
-    if temp.is_finite() {
-        params.temp = temp;
-    }
-    if tint.is_finite() {
-        params.tint = tint;
-    }
-    if texture.is_finite() {
-        params.texture = texture;
-    }
-    if clarity.is_finite() {
-        params.clarity = clarity;
-    }
-}
-
 /// Box-filter downscale an RGB16 (u16) buffer, outputting packed u16 LE bytes
 /// (6 bytes per pixel).  Used to cache a lightbox-sized buffer for live re-render.
 fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
@@ -436,7 +383,7 @@ fn process_orf_impl(
     if look.wb_b.is_finite() && look.wb_b > 0.0 {
         params.wb_b = look.wb_b.min(8.0);
     }
-    apply_look_params(
+    raw_pipeline::pipeline::apply_look_params(
         &mut params,
         look.exposure_ev,
         look.contrast,
@@ -465,7 +412,7 @@ fn process_orf_impl(
         let (fr, fw, fh) = if info.orientation == 1 {
             (rgb8, w, h)
         } else {
-            pipeline::apply_orientation(&rgb8, w, h, info.orientation)
+            pipeline::apply_orientation(rgb8, w, h, info.orientation)
         };
         (fr, fw, fh, tonemap_ms, now_ms() - t2)
     } else {
@@ -884,7 +831,7 @@ pub fn apply_look(
         }
         params.color_matrix = Some(m);
     }
-    apply_look_params(
+    raw_pipeline::pipeline::apply_look_params(
         &mut params,
         exposure_ev,
         contrast,
@@ -913,7 +860,7 @@ pub fn apply_look(
     if orientation == 1 {
         Ok(rgb8)
     } else {
-        let (final_rgb, _, _) = pipeline::apply_orientation(&rgb8, w, h, orientation);
+        let (final_rgb, _, _) = pipeline::apply_orientation(rgb8, w, h, orientation);
         Ok(final_rgb)
     }
 }
@@ -1038,7 +985,7 @@ impl LookRenderer {
             params.wb_b = wb_b;
         }
         params.color_matrix = Some(self.color_matrix);
-        apply_look_params(
+        raw_pipeline::pipeline::apply_look_params(
             &mut params,
             exposure_ev,
             contrast,
@@ -1066,7 +1013,7 @@ impl LookRenderer {
             Ok(rgb8)
         } else {
             let (final_rgb, _, _) =
-                pipeline::apply_orientation(&rgb8, self.width, self.height, self.orientation);
+                pipeline::apply_orientation(rgb8, self.width, self.height, self.orientation);
             Ok(final_rgb)
         }
     }
@@ -1316,7 +1263,7 @@ fn process_dng_impl(
     if look.wb_b.is_finite() && look.wb_b > 0.0 {
         params.wb_b = look.wb_b.min(8.0);
     }
-    apply_look_params(
+    raw_pipeline::pipeline::apply_look_params(
         &mut params,
         look.exposure_ev,
         look.contrast,
@@ -1345,7 +1292,7 @@ fn process_dng_impl(
         let (fr, fw, fh) = if orientation == 1 {
             (rgb8, aw, ah)
         } else {
-            pipeline::apply_orientation(&rgb8, aw, ah, orientation)
+            pipeline::apply_orientation(rgb8, aw, ah, orientation)
         };
         (fr, fw, fh, tonemap_ms, now_ms() - t2)
     } else {

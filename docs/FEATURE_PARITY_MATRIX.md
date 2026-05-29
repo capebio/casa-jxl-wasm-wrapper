@@ -30,8 +30,8 @@ This matrix supersedes and consolidates:
 | 3 | parse_orf_metadata (TIFF/EXIF-only, zero pixel work) | ✅ | 🟡 (tiff::parse + exif used internally; no public metadata-only cmd) | N/A | Gallery preflight; WASM:1122 |
 | 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | 🟡 (bin/ and examples/ benches exist; no stable lib fn for runtime) | N/A (dev only) | WASM:1156 |
 | 5 | Thumb derived from pre-computed lightbox buffer (not 2nd full scan) | ✅ | ❌ (downscales always from full RGB8) | N/A | Memory win on 20 MP+; WASM impl |
-| 6 | Orientation==1 fast-path (move / zero-copy, no 60 MB traffic) | ✅ (explicit in process + apply_look) | ❌ (raw-pipeline apply_orientation always to_vec() even for 1) | N/A | raw-pipeline/src/pipeline.rs:624 |
-| 7 | Unified apply_look_params helper (single 12× is_finite, no drift) | ✅ (private helper called from 3 paths) | 🟡 (inline dupes in build_params_from_look + apply_look_inner) | N/A | WASM:156 |
+| 6 | Orientation==1 fast-path (move / zero-copy, no 60 MB traffic) | ✅ (explicit in process + apply_look) | 🟡 (shared apply_orientation does zero-copy move for 1; WASM call sites fixed for consistency in B1) | N/A | raw-pipeline/src/pipeline.rs:624 |
+| 7 | Unified apply_look_params helper (single 12× is_finite, no drift) | ✅ (private helper called from 3 paths) | ✅ (now delegates to shared raw_pipeline::pipeline::apply_look_params; B1 on finishing_feature_parity) | N/A | WASM:156 + raw-pipeline/src/pipeline.rs |
 | 8 | apply_look accepts native &[u16] (no LE byte unpack) | ✅ | N/A (no public apply_look; edits baked at process_file) | N/A | WASM:836 |
 | 9 | Pre-allocated fixed buffers for rgb_to_rgba / box downscales | ✅ | 🟡 (par_chunks alloc inside; no documented fixed strategy) | N/A | Minor perf |
 | 10 | decode_orf_raw / process_orf_impl split (clean separation) | ✅ | ❌ (monolithic in process_file + build_params) | N/A | Enables 2,3,5 |
@@ -133,9 +133,10 @@ This matrix supersedes and consolidates:
 ## Summary of Remaining High-Impact Gaps (2026-06)
 
 **Raw / Interactive (highest user-visible on desktop):**
-- LookRenderer + render command + Rgb16State integration in Tauri (item 1)
-- process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10)
+- LookRenderer + render command + Rgb16State integration in Tauri (item 1) — in progress on finishing_feature_parity (B)
+- process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1 (unified helper + orient fixes) landed
 - True pause/resume of native Rust decode tasks (item 11)
+- JXTC + progressive/streaming encode on native (C) — audit started
 
 **JXL Encode/Progressive on Native:**
 - Progressive/streaming encode during RAW ingest (preview-first)

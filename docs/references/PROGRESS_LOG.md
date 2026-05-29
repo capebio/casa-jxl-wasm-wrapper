@@ -569,6 +569,33 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 
 ---
 
+## B1: RAW Tauri parity — Unified apply_look_params + orient fast-path fixes (finishing_feature_parity)
+**Branch:** `finishing_feature_parity`
+**Status:** Complete (first B slice)
+
+**Scope:** Per FEATURE_PARITY_MATRIX §1 items 6-7 and ACTION PLAN gaps. Eliminated duplication of the 12-slider look applicator (was inline in Tauri + private copy in WASM wrapper). Made `raw_pipeline::pipeline::apply_look_params` the single source (pub). Updated Tauri to delegate; WASM now calls the shared version from all 4 sites. As drive-by, fixed 4 stale `&Vec` call sites on `apply_orientation` so WASM consistently gets the zero-copy move for orientation==1 (helps item 6 fast-path).
+
+**Changes:**
+- `raw-pipeline/src/pipeline.rs`: new pub fn `apply_look_params` (exact semantics of prior copies).
+- `raw-converter-tauri/src-tauri/src/pipeline.rs`: delegate wrapper (removes 12-line dupe).
+- `raw-converter-wasm/src/lib.rs`: 4 call sites now use `raw_pipeline::pipeline::...`; removed dead local fn; 4 borrow fixes on apply_orientation for true zero-copy on orient=1.
+- No behavior change for existing callers.
+
+**Verification:**
+- `cargo check` (WASM crate, path-dep on updated raw-pipeline) — clean (only unrelated dead_code warn).
+- Matrix rows 6/7 updated (🟡→✅ for unified; orient fastpath note).
+- This is the first commit in the B (RAW Tauri) series on the single allowed branch.
+
+**Docs:**
+- `FEATURE_PARITY_MATRIX.md` updated (items 6/7 + summary "B1 landed").
+- This PROGRESS_LOG entry (TEMPLATE style).
+
+**Next (B2 on same branch):** Selective process_with_flags + thumb-from-lb optimization in raw-pipeline + Tauri process_file (big win for gallery thumbs).
+
+**Cleanup & Handoff:** Clean point. Only source files touched for this feature. Commit will be docs + the 3 Rust files.
+
+---
+
 ## M1 Rebuild + Validation Pass (Source-Complete Controls) — 2026-06
 **Branch:** `finishing_feature_parity`
 **Status:** Complete
