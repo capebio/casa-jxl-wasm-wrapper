@@ -453,7 +453,7 @@ export interface JxlDecoder {
    * Seek to a specific frame index (0-based) and re-emit decode events from that frame.
    * Requires the full JXL bytes to have been buffered (call after close() completes).
    * Requires WASM rebuild with animation seek bridge (_jxl_wasm_dec_seek_to_frame).
-   * Throws if animationSeek capability is absent.
+   * Requires animationSeek capability: check getWrapperCapabilities().animationSeek before calling.
    * Returns an AsyncIterable yielding DecodeEvent for the requested frame.
    */
   seekToFrame?(frameIndex: number): AsyncIterable<DecodeEvent>;
@@ -984,6 +984,7 @@ export interface WrapperCapabilities {
   tileAlignedRegionDecode: boolean;
   arbitraryRegionDecode: boolean;
   availableDownsampleFactors: readonly number[];
+  animationSeek: boolean;
 }
 
 export interface DecodeGridInfo {
@@ -1361,6 +1362,7 @@ export function getWrapperCapabilities(): WrapperCapabilities {
     tileAlignedRegionDecode: false,
     arbitraryRegionDecode: true,
     availableDownsampleFactors: [1, 2, 4, 8],
+    animationSeek: false,
   };
 }
 
