@@ -449,6 +449,20 @@ export interface JxlDecoder {
   events(): AsyncIterable<DecodeEvent>;
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
+  /**
+   * Seek to a specific frame index (0-based) and re-emit decode events from that frame.
+   * Requires the full JXL bytes to have been buffered (call after close() completes).
+   * Requires WASM rebuild with animation seek bridge (_jxl_wasm_dec_seek_to_frame).
+   * Throws if animationSeek capability is absent.
+   * Returns an AsyncIterable yielding DecodeEvent for the requested frame.
+   */
+  seekToFrame?(frameIndex: number): AsyncIterable<DecodeEvent>;
+  /**
+   * Seek to a frame by timestamp in milliseconds (relative to animation start).
+   * Convenience wrapper over seekToFrame that computes frame index from animTicksPerSecond.
+   * Requires same preconditions as seekToFrame.
+   */
+  seekToTime?(timeMs: number): AsyncIterable<DecodeEvent>;
 }
 
 export interface EncodeStats {
@@ -570,6 +584,8 @@ interface LibjxlWasmModule {
   _jxl_wasm_dec_is_last_frame?(state: number): number;
   _jxl_wasm_dec_anim_ticks_per_second?(state: number): number;
   _jxl_wasm_dec_anim_loop_count?(state: number): number;
+  // Animation seek — present after WASM rebuild with seek bridge
+  _jxl_wasm_dec_seek_to_frame?(state: number, targetFrame: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -2637,6 +2653,7 @@ interface JxlCapabilities {
   metadataBoxesV2: boolean;
   gainMapEncode: boolean;
   animationEncode: boolean;
+  animationSeek: boolean;
 }
 
 const capabilityCache = new WeakMap<LibjxlWasmModule, JxlCapabilities>();
@@ -2666,6 +2683,7 @@ function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
     metadataBoxesV2: typeof module._jxl_wasm_encode_rgba8_with_metadata_v2 === "function",
     gainMapEncode: typeof module._jxl_wasm_encode_with_gain_map === "function",
     animationEncode: typeof module._jxl_wasm_encode_animation === "function",
+    animationSeek: typeof module._jxl_wasm_dec_seek_to_frame === "function",
   };
   capabilityCache.set(module, caps);
   return caps;
