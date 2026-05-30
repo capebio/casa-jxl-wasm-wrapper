@@ -113,6 +113,28 @@
                             Encoder-native downsampling before JXL transform/coding. 1x = off; 2x, 4x, or 8x trade detail for smaller output and faster encode.
                         </div>
                     </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Modular mode <button class="info-btn" type="button" data-help-target="wl-modular" aria-label="Modular mode info">i</button></span>
+                        <div class="preset-group" role="radiogroup" aria-label="JXL modular mode">
+                            <label class="chip-label"><input type="radio" name="batch-modular" value="-1" checked /> <span>Auto</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-modular" value="0" /> <span>VarDCT</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-modular" value="1" /> <span>Modular</span></label>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-modular" hidden>
+                            Codec selection. Auto lets libjxl choose (VarDCT for photos, Modular for lossless). VarDCT (0) is optimal for photographs at lossy quality. Modular (1) suits lossless and line art.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Brotli effort <button class="info-btn" type="button" data-help-target="wl-brotli-effort" aria-label="Brotli effort info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-brotli-effort">&#8722;</button>
+                            <input id="batch-brotli-effort" type="number" min="-1" max="11" step="1" value="-1" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-brotli-effort">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-brotli-effort" hidden>
+                            Brotli entropy effort for metadata boxes (&#8722;1&#8211;11). &#8722;1 = libjxl default. Higher compresses metadata more at encode-time cost. Rarely changes file size significantly for photographic content.
+                        </div>
+                    </div>
                     <!-- Phase 1: First-class advanced filters (DOTS/PATCHES/EPF/GABORISH) via advancedControls -->
                     <div class="spin-group">
                         <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Advanced filters <span style="font-size:10px;opacity:0.6">(new)</span></span>
@@ -145,6 +167,20 @@
                             <input id="batch-group-center-y" type="number" placeholder="cy" style="width:50px; font-size:11px;" />
                         </div>
                         <div style="font-size:10px; opacity:0.6;">Center mode + coords for better progressive/ROI behavior.</div>
+                    </div>
+                    <!-- Gain map (HDR) transport wiring - mandatory benchmark exposure per gain-maps.md -->
+                    <div class="spin-group" id="sg-gain-map">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Gain map (HDR / jhgm) <span style="font-size:10px;opacity:0.6">(transport)</span> <button class="info-btn" type="button" data-help-target="wl-gain-map" aria-label="Gain map info">i</button></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:4px; font-size:11px;">
+                                <input type="checkbox" id="batch-gainmap-use-demo" /> <span>Use demo placeholder</span>
+                            </label>
+                            <input type="file" id="batch-gainmap-file" accept=".jxl" style="font-size:11px; max-width:160px;" />
+                            <span id="batch-gainmap-status" style="font-size:10px; opacity:0.7; margin-left:4px;"></span>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-gain-map" hidden>
+                            HDR gain map transport (ISO 21496-1 jhgm box). Supply a pre-encoded naked JXL codestream for the gain map image (the library wraps it using official JxlGainMapBundle APIs when the build supports &lt;jxl/gain_map.h&gt;). "Use demo" exercises the full encode/decode path with minimal placeholder bytes (content is not meaningful; file size delta and download badge prove the transport). Synergizes with LookRenderer tone-mapping workflows for real scientific HDR use. Graceful no-op on builds without symbols (see caps.gainMapEncode).
+                        </div>
                     </div>
                     <div class="spin-group">
                         <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Decode speed tier <button class="info-btn" type="button" data-help-target="wl-decode-speed" aria-label="Decode speed tier info">i</button></span>

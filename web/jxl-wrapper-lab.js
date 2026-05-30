@@ -32,6 +32,8 @@ const batchEffortInput = document.getElementById('batch-effort');
 const batchDecodeSpeedInput = document.getElementById('batch-decode-speed');
 const batchPhotonNoiseIsoInput = document.getElementById('batch-photon-noise-iso');
 const batchResamplingInputs = [...document.querySelectorAll('input[name="batch-resampling"]')];
+const batchModularInputs = [...document.querySelectorAll('input[name="batch-modular"]')];
+const batchBrotliEffortInput = document.getElementById('batch-brotli-effort');
 
 /** Phase 1 first-class advanced filters controls (populated after DOM ready). */
 let batchAdvancedFilters = null;
@@ -370,6 +372,17 @@ function getResampling() {
     return value === 2 || value === 4 || value === 8 ? value : 1;
 }
 
+function getModular() {
+    const v = Number(batchModularInputs.find(i => i.checked)?.value ?? -1);
+    return (v === -1 || v === 0 || v === 1) ? v : -1;
+}
+
+function getBrotliEffort() {
+    if (!batchBrotliEffortInput) return -1;
+    const v = Math.round(Number(batchBrotliEffortInput.value) || -1);
+    return Math.max(-1, Math.min(11, v));
+}
+
 /** Phase 1: first-class advanced filters (DOTS/PATCHES/EPF/GABORISH) via the new advancedControls surface. */
 function getAdvancedFilters() {
     if (!batchAdvancedFilters) return undefined;
@@ -396,6 +409,25 @@ function getGroupOrderControls() {
     if (!Number.isNaN(cx)) go.centerX = Math.floor(cx);
     if (!Number.isNaN(cy)) go.centerY = Math.floor(cy);
     return (mode === 'center' || go.centerX !== undefined || go.centerY !== undefined) ? { groupOrder: go } : undefined;
+}
+
+/** Gain map (HDR) transport — mandatory benchmark wiring per gain-maps.md.
+ * Returns { data: Uint8Array | ArrayBuffer } when demo checked or a file is selected.
+ * Demo uses a tiny placeholder to exercise the full jhgm box encode/decode path (content is irrelevant for transport test).
+ */
+let currentGainMapBytes = null; // Uint8Array | null
+const DEMO_GAIN_MAP_BYTES = new Uint8Array([0xff, 0x0a, 0x00, 0x10, 0x4a, 0x58, 0x4c, 0x20, 0x67, 0x61, 0x69, 0x6e, 0x20, 0x64, 0x65, 0x6d, 0x6f]); // placeholder (validates transport; replace with real for perceptual use)
+
+function getGainMap() {
+    const useDemo = document.getElementById('batch-gainmap-use-demo');
+    const fileInput = document.getElementById('batch-gainmap-file');
+    if (useDemo && useDemo.checked) {
+        return { data: DEMO_GAIN_MAP_BYTES };
+    }
+    if (currentGainMapBytes && currentGainMapBytes.byteLength > 0) {
+        return { data: currentGainMapBytes };
+    }
+    return undefined;
 }
 
 function getAlphaDistance() {
@@ -934,6 +966,8 @@ function makeEncoderOptions(source) {
     const forceContainer = getForceContainer();
     const rawCodestream = getRawCodestream();
     const hasMetadataOpts = compressBoxes || forceContainer || rawCodestream;
+    const modular = getModular();
+    const brotliEffort = getBrotliEffort();
     return {
         format: 'rgba8',
         width: source.width,
@@ -948,8 +982,12 @@ function makeEncoderOptions(source) {
         decodingSpeed: getDecodeSpeed(),
         photonNoiseIso: getPhotonNoiseIso() > 0 ? getPhotonNoiseIso() : undefined,
         resampling: getResampling(),
+        modular: modular !== -1 ? modular : undefined,
+        brotliEffort: brotliEffort >= 0 ? brotliEffort : undefined,
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
         alphaDistance: getAlphaDistance(),
+        // Gain map (HDR) transport — exercises jhgm box path when provided (mandatory per gain-maps.md)
+        gainMap: getGainMap(),
         // First-class advanced controls (Phase 1 slice)
         advancedControls: (() => {
             const f = getAdvancedFilters();
@@ -1163,6 +1201,35 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
         tile.chip.textContent = 'Compare';
     }
     tile.el.title = `${source.label} · first paint ${fmtTiming(firstPaintMs)} · total ${fmtTiming(ms)}`;
+
+    // Gain map (HDR) result badge + download action (mandatory benchmark wiring per gain-maps.md)
+    const gm = decoded?.gainMap?.data;
+    if (gm && (gm.byteLength || gm.length)) {
+        const gmSize = gm.byteLength || gm.length;
+        const gmNote = document.createElement('span');
+        gmNote.style.cssText = 'margin-left:6px; font-size:10px; padding:1px 5px; border:1px solid #4a9; border-radius:3px; cursor:pointer; background:#f0f9f4; user-select:none;';
+        gmNote.textContent = `GM ${fmtBytes(gmSize)} ⬇`;
+        gmNote.title = 'Download extracted gain map JXL codestream (from jhgm box via official APIs)';
+        gmNote.onclick = (e) => {
+            e.stopPropagation();
+            const blob = new Blob([gm], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${(source.label || 'image').replace(/[^\w.-]+/g, '_')}.gainmap.jxl`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
+        // Append to the wrapper meta line for visibility in batch results
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(gmNote);
+        } else if (tile.el) {
+            tile.el.appendChild(gmNote);
+        }
+    }
+
     return { paintMs, firstPaintMs, totalMs: ms };
 }
 
@@ -1450,6 +1517,8 @@ function wireControls() {
     batchDecodeSpeedInput?.addEventListener('input', syncSettingLabels);
     batchPhotonNoiseIsoInput?.addEventListener('input', syncSettingLabels);
     for (const input of batchResamplingInputs) input.addEventListener('change', syncSettingLabels);
+    for (const input of batchModularInputs) input.addEventListener('change', syncSettingLabels);
+    batchBrotliEffortInput?.addEventListener('input', syncSettingLabels);
 
     // Phase 1: advanced filters (first-class controls)
     batchAdvancedFilters = {
@@ -1467,6 +1536,35 @@ function wireControls() {
     document.querySelectorAll('input[name="batch-group-order-mode"]').forEach(r => r.addEventListener('change', syncSettingLabels));
     document.getElementById('batch-group-center-x')?.addEventListener('input', syncSettingLabels);
     document.getElementById('batch-group-center-y')?.addEventListener('input', syncSettingLabels);
+
+    // Gain map (HDR) transport benchmark wiring
+    const gainFile = document.getElementById('batch-gainmap-file');
+    const gainDemo = document.getElementById('batch-gainmap-use-demo');
+    const gainStatus = document.getElementById('batch-gainmap-status');
+    function updateGainStatus() {
+        if (!gainStatus) return;
+        const useDemo = gainDemo && gainDemo.checked;
+        if (useDemo) {
+            gainStatus.textContent = 'demo (' + DEMO_GAIN_MAP_BYTES.length + 'B placeholder)';
+            currentGainMapBytes = null;
+        } else if (currentGainMapBytes) {
+            gainStatus.textContent = currentGainMapBytes.length + 'B loaded';
+        } else {
+            gainStatus.textContent = '';
+        }
+        syncSettingLabels();
+    }
+    gainDemo?.addEventListener('change', updateGainStatus);
+    if (gainFile) {
+        gainFile.addEventListener('change', async () => {
+            const f = gainFile.files?.[0];
+            if (!f) { currentGainMapBytes = null; updateGainStatus(); return; }
+            const buf = await f.arrayBuffer();
+            currentGainMapBytes = new Uint8Array(buf);
+            if (gainDemo) gainDemo.checked = false;
+            updateGainStatus();
+        });
+    }
 }
 
 
