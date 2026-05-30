@@ -85,6 +85,17 @@ All items in the 2026-05-28 audit section now have design coverage.
 
 ---
 
+## 2026-06 Phase 3 Micro-Features (Fine-Toothed Comb Continuation)
+
+All four notes now have dedicated branches and exemplar-level implementation (HDR signaling completed earlier; JPEG recompression, Pixel Art, and this Production Chunked note completed in sequence):
+
+- `hdr-signaling-color-priority.md` — full (public API, smart CICP policy threading, ApplyColorEncoding helper, rich "HDR Info" badges, native parity, tests, living docs).
+- `jpeg-recompression-polish.md` — (see its own living progress).
+- `pixel-art-downsampling.md` — (see its own living progress).
+- `production-chunked-paths.md` — **completed on `feature/production-chunked-paths`** (first-class `lowMemoryMode` + `preferChunkedAPI` inside `buffering`, smart ID 34 promotion, full "Low Memory / Large Image" lab section with 8K Simulate + memory delta, native parity, acceptance test, full Cleanup & Handoff + PROGRESS_LOG entry).
+
+See `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` and `PROGRESS_LOG.md` for the full continuation log.
+
 ## Next Steps (After Design Phase)
 
 When ready to implement any note:

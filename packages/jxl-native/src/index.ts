@@ -158,6 +158,19 @@ export interface BufferingControls {
   strategy?: -1 | 0 | 1 | 2 | 3;
   streamingInput?: boolean;
   streamingOutput?: boolean;
+
+  /**
+   * Low-memory mode hint (production-chunked-paths design note).
+   * Signals desire for minimal peak RAM on very large images (maps to high buffering + streaming paths where available).
+   */
+  lowMemoryMode?: boolean;
+
+  /**
+   * On Tauri/native builds, prefer the full modern chunked path (JxlEncoderAddChunkedFrame + custom JxlChunkedFrameInputSource)
+   * over the buffered AddImageFrame path. Matches libvips production recommendation for large images.
+   * Browser path remains strong via existing streaming entrypoints (no behavioral change).
+   */
+  preferChunkedAPI?: boolean;
 }
 
 /** Descriptor for one extra channel beyond the main color channels. */
@@ -219,6 +232,19 @@ export interface EncoderOptions {
   photonNoiseIso?: number;
   /** Encoder-native downsampling factor before JXL transform/coding. */
   resampling?: 1 | 2 | 4 | 8;
+
+  /**
+   * Upsampling mode for the encoder (pixel-art-downsampling design note).
+   * 0 = nearest neighbor (non-negotiable for crisp pixel art and retro/UI content).
+   * Matches WASM facade exactly for cross-platform parity.
+   */
+  upsamplingMode?: number;
+
+  /**
+   * The input image has already been downsampled by the resampling factor.
+   * Tells the encoder to skip its own downsampling step. Matches WASM.
+   */
+  alreadyDownsampled?: boolean;
   /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
   modular?: -1 | 0 | 1;
   /**

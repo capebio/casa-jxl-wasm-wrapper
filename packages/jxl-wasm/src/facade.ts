@@ -125,6 +125,21 @@ export interface EncoderOptions {
   photonNoiseIso?: number;
   /** Encoder-native downsampling factor before JXL transform/coding. */
   resampling?: ResamplingFactor;
+
+  /**
+   * Upsampling mode for the encoder (pixel-art-downsampling design note).
+   * 0 = nearest neighbor (non-negotiable for crisp pixel art and retro/UI content).
+   * Other values follow libjxl kernel semantics (see cjxl --upsampling_mode).
+   * Recommended with resampling > 1 for intentional pixel art workflows.
+   * Using 0 with photographic content is usually a mistake — the lab emits a warning badge.
+   */
+  upsamplingMode?: number;
+
+  /**
+   * The input image has already been downsampled by the resampling factor.
+   * Tells the encoder to skip its own downsampling step.
+   */
+  alreadyDownsampled?: boolean;
   /**
    * Convenience: per-channel distance for the alpha channel (if hasAlpha is true).
    * 0 = lossless alpha; omit to inherit main distance.
@@ -290,6 +305,19 @@ export interface BufferingControls {
   streamingInput?: boolean;
   /** Hint for streaming output path. */
   streamingOutput?: boolean;
+
+  /**
+   * Low-memory mode hint (production-chunked-paths design note).
+   * Signals desire for minimal peak RAM on very large images (maps to high buffering + streaming paths where available).
+   */
+  lowMemoryMode?: boolean;
+
+  /**
+   * On Tauri/native builds, prefer the full modern chunked path (JxlEncoderAddChunkedFrame + custom JxlChunkedFrameInputSource)
+   * over the buffered AddImageFrame path. Matches libvips production recommendation for large images.
+   * Browser path remains strong via existing streaming entrypoints (no behavioral change).
+   */
+  preferChunkedAPI?: boolean;
 }
 
 /** Group order controls (promoted in current slice). */
@@ -358,6 +386,7 @@ export function validateAdvancedControls(controls?: AdvancedEncoderControls): st
       warnings.push(`buffering.strategy ${b.strategy} is out of range (-1..3).`);
     }
   }
+  // lowMemoryMode + preferChunkedAPI are boolean hints (production-chunked-paths note); no range validation needed.
 
   // Future groups (expert, etc.) can be added here as they are promoted.
 
@@ -732,6 +761,8 @@ function marshalAdvancedAndModular(
   modularOptions: ModularOptions | undefined,
   advanced: readonly AdvancedFrameSetting[] | undefined,
   advancedControls?: AdvancedEncoderControls,
+  upsamplingMode: number = 0,
+  alreadyDownsampled: boolean = false,
 ): { modSubs: number[]; advPtr: number; advCount: number; freePtrs: number[] } {
   const freePtrs: number[] = [];
   // Order matches native.cc EncoderData + Apply: group, predictor, nbPrev, paletteColors, lossyPalette, maTree
@@ -786,10 +817,26 @@ function marshalAdvancedAndModular(
     if (b.streamingOutput) {
       effectiveAdvanced.push({ id: 34, value: 3 }); // common pattern
     }
+    // Production low-memory (production-chunked-paths note): lowMemoryMode promotes to high buffering strategy
+    // without requiring caller to know the magic number. preferChunkedAPI is a native-only policy flag (no-op here).
+    if (b.lowMemoryMode && b.strategy === undefined) {
+      effectiveAdvanced.push({ id: 34, value: 3 });
+    }
   }
 
   if (advanced && advanced.length > 0) {
     effectiveAdvanced.push(...advanced);
+  }
+
+  // Pixel art & advanced downsampling (from pixel-art-downsampling design note).
+  // Routed via the advanced pairs mechanism for automatic reach on all paths that call ApplyAdvancedFrameSettings.
+  // ID 55 = UPSAMPLING_MODE (0 = nearest for pixel art); ID 56 = ALREADY_DOWNSAMPLED.
+  // This is the sustainable smart-wiring pattern (see HDR scalars and buffering).
+  if (upsamplingMode >= 0) {
+    effectiveAdvanced.push({ id: 55, value: upsamplingMode });
+  }
+  if (alreadyDownsampled) {
+    effectiveAdvanced.push({ id: 56, value: 1 });
   }
 
   let advPtr = 0;
@@ -819,6 +866,8 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
   const decodingSpeed = options.decodingSpeed != null ? Math.max(0, Math.min(4, Math.round(options.decodingSpeed))) : -1;
   const photonNoiseIso = options.photonNoiseIso != null ? Math.max(0, Math.round(options.photonNoiseIso)) : 0;
   const resampling = resolveResampling(options.resampling);
+  const upsamplingMode = options.upsamplingMode ?? 0;
+  const alreadyDownsampled = !!options.alreadyDownsampled;
   // Advanced modular + escape + the new first-class advancedControls surface.
   // Named advancedControls are converted to raw pairs inside marshalAdvancedAndModular
   // and win over user raw advancedFrameSettings for the promoted IDs.
@@ -826,7 +875,7 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
   const advancedFrameSettings = options.advancedFrameSettings;
   const advancedControls = options.advancedControls;
   if (!options.progressive) {
-    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modularOptions, advancedFrameSettings, advancedControls };
+    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, upsamplingMode, alreadyDownsampled, modularOptions, advancedFrameSettings, advancedControls };
   }
   const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
   return {
@@ -839,6 +888,8 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
     decodingSpeed,
     photonNoiseIso,
     resampling,
+    upsamplingMode,
+    alreadyDownsampled,
     modularOptions,
     advancedFrameSettings,
     advancedControls,
@@ -1964,7 +2015,7 @@ class LibjxlEncoder implements JxlEncoder {
     if (!wantSidecars && !hasMetadataOpts && !hasAdvanced && caps.streamingInput) {
       const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-      const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
+      const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, upsamplingMode: upCreate, alreadyDownsampled: adCreate } = resolveEncoderBridgeSettings(this.options);
       if (caps.extOptions && module._jxl_wasm_enc_create_image_x) {
         this.wasmEncState = module._jxl_wasm_enc_create_image_x(
           this.options.width, this.options.height,
@@ -2024,8 +2075,8 @@ class LibjxlEncoder implements JxlEncoder {
         const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
         const hasAlpha = this.options.hasAlpha ? 1 : 0;
         const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
-        const { modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modularOptions: modOptsAnim, advancedFrameSettings: advAnim, advancedControls: advControlsAnim } = resolveEncoderBridgeSettings(this.options);
-        const { modSubs: modSubsAnim, advPtr: advPtrAnim, advCount: numAdvAnim, freePtrs: advFreeAnim } = marshalAdvancedAndModular(module, modOptsAnim, advAnim, advControlsAnim);
+        const { modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, upsamplingMode: upAnim, alreadyDownsampled: adAnim, modularOptions: modOptsAnim, advancedFrameSettings: advAnim, advancedControls: advControlsAnim } = resolveEncoderBridgeSettings(this.options);
+        const { modSubs: modSubsAnim, advPtr: advPtrAnim, advCount: numAdvAnim, freePtrs: advFreeAnim } = marshalAdvancedAndModular(module, modOptsAnim, advAnim, advControlsAnim, upAnim ?? 0, !!adAnim);
         const { iccProfile: effIcc, exif: effExif, xmp: effXmp } = resolveEffectiveMetadata(this.options);
         const iccView = effIcc ? copyOrBorrowInput(effIcc, false) : new Uint8Array(0);
         const exifView = effExif ? copyOrBorrowInput(effExif, false) : new Uint8Array(0);
@@ -2110,8 +2161,8 @@ class LibjxlEncoder implements JxlEncoder {
         const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
         const hasAlpha = this.options.hasAlpha ? 1 : 0;
         const caps = getCapabilities(module);
-        const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modularOptions: modOpts, advancedFrameSettings: advSettings, advancedControls: advControls } = resolveEncoderBridgeSettings(this.options);
-        const { modSubs, advPtr: advSettingsPtr, advCount: numAdvSettings, freePtrs: advFreePtrs } = marshalAdvancedAndModular(module, modOpts, advSettings, advControls);
+        const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, upsamplingMode: upMode, alreadyDownsampled: alreadyDown, modularOptions: modOpts, advancedFrameSettings: advSettings, advancedControls: advControls } = resolveEncoderBridgeSettings(this.options);
+        const { modSubs, advPtr: advSettingsPtr, advCount: numAdvSettings, freePtrs: advFreePtrs } = marshalAdvancedAndModular(module, modOpts, advSettings, advControls, upMode ?? 0, !!alreadyDown);
 
         // Gain map encode path: embeds pre-encoded JXL codestream as jhgm box.
         const wantGainMap = this.options.gainMap != null && caps.gainMapEncode &&

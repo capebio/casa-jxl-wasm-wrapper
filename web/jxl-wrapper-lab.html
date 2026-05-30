@@ -114,6 +114,17 @@
                             Encoder-native downsampling before JXL transform/coding. 1x = off; 2x, 4x, or 8x trade detail for smaller output and faster encode.
                         </div>
                     </div>
+                    <!-- Pixel art upsampling mode (pixel-art-downsampling design note) - mandatory benchmark -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Upsampling mode <span style="font-size:10px;opacity:0.6">(Phase 3)</span></span>
+                        <select id="batch-upsampling-mode" style="font-size:11px; max-width:140px;">
+                            <option value="0">0 — nearest (pixel art)</option>
+                            <option value="1" selected>1 — default</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                        </select>
+                        <div style="font-size:10px; opacity:0.65;">0 (nearest) is non-negotiable for crisp pixel art. Combine with resampling>1. Warning badge in results for photographic misuse.</div>
+                    </div>
                     <div class="spin-group">
                         <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Modular mode <button class="info-btn" type="button" data-help-target="wl-modular" aria-label="Modular mode info">i</button></span>
                         <div class="preset-group" role="radiogroup" aria-label="JXL modular mode">
@@ -192,6 +203,21 @@
                             <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-expert-allow" /> <span>Allow expert options</span></label>
                         </div>
                         <div style="font-size:10px; color:#c33; opacity:0.85;">Strong warning: for benchmarking/archival only. May increase size + artifacts. Mirrors cjxl --allow_expert_options.</div>
+                    </div>
+                    <!-- Low Memory / Production Chunked Paths (production-chunked-paths design note, Phase 3) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Low Memory / Large Image <span style="font-size:10px;opacity:0.6">(Phase 3)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:11px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-lowmem-mode" /> <span>lowMemoryMode</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-prefer-chunked" /> <span>preferChunkedAPI (Tauri)</span></label>
+                            <button type="button" id="batch-simulate-large" style="font-size:10px; padding:1px 6px;">Simulate Large Image (8K test)</button>
+                        </div>
+                        <div style="font-size:10px; opacity:0.65; max-width: 420px;">
+                            Builds on Buffering (Phase 2). <strong>lowMemoryMode</strong> promotes to strategy=3 + streaming hints for minimal peak RAM.
+                            <strong>preferChunkedAPI</strong> signals the modern libvips/cjxl path on Tauri (JxlEncoderAddChunkedFrame + custom source; future slice).
+                            Browser already strong via streaming entrypoints. See <code>production-chunked-paths.md</code> design note for full rationale and future Tauri chunked source work.
+                        </div>
+                        <div id="batch-lowmem-status" style="font-size:9px; opacity:0.7; margin-top:2px; font-family:monospace;"></div>
                     </div>
                     <!-- Gain map (HDR) transport wiring - mandatory benchmark exposure per gain-maps.md -->
                     <div class="spin-group" id="sg-gain-map">

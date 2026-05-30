@@ -372,6 +372,14 @@ function getResampling() {
     return value === 2 || value === 4 || value === 8 ? value : 1;
 }
 
+/** Pixel art upsampling mode control (mandatory benchmark wiring per pixel-art-downsampling.md). */
+function getUpsamplingMode() {
+    const el = document.getElementById('batch-upsampling-mode');
+    if (!el) return 0;
+    const v = Number(el.value);
+    return Number.isFinite(v) ? v : 0;
+}
+
 function getModular() {
     const v = Number(batchModularInputs.find(i => i.checked)?.value ?? -1);
     return (v === -1 || v === 0 || v === 1) ? v : -1;
@@ -409,6 +417,25 @@ function getGroupOrderControls() {
     if (!Number.isNaN(cx)) go.centerX = Math.floor(cx);
     if (!Number.isNaN(cy)) go.centerY = Math.floor(cy);
     return (mode === 'center' || go.centerX !== undefined || go.centerY !== undefined) ? { groupOrder: go } : undefined;
+}
+
+/** Buffering + streaming (Phase 2) + low-memory extensions (production-chunked-paths Phase 3). */
+function getBufferingControls() {
+    const strategyEl = document.querySelector('input[name="batch-buffering"]:checked');
+    const strategy = strategyEl ? parseInt(strategyEl.value, 10) : undefined;
+    const streamingInput = !!document.getElementById('batch-streaming-input')?.checked;
+    const streamingOutput = !!document.getElementById('batch-streaming-output')?.checked;
+    const lowMemoryMode = !!document.getElementById('batch-lowmem-mode')?.checked;
+    const preferChunked = !!document.getElementById('batch-prefer-chunked')?.checked;
+
+    const b = {};
+    if (strategy !== undefined && !isNaN(strategy)) b.strategy = strategy;
+    if (streamingInput) b.streamingInput = true;
+    if (streamingOutput) b.streamingOutput = true;
+    if (lowMemoryMode) b.lowMemoryMode = true;
+    if (preferChunked) b.preferChunkedAPI = true;
+
+    return (Object.keys(b).length > 0) ? { buffering: b } : undefined;
 }
 
 /** Gain map (HDR) transport — mandatory benchmark wiring per gain-maps.md.
@@ -1013,6 +1040,8 @@ function makeEncoderOptions(source) {
         decodingSpeed: getDecodeSpeed(),
         photonNoiseIso: getPhotonNoiseIso() > 0 ? getPhotonNoiseIso() : undefined,
         resampling: getResampling(),
+        upsamplingMode: getUpsamplingMode(),
+        alreadyDownsampled: false, // future checkbox if needed; for now driven by the mode + user knowledge
         modular: modular !== -1 ? modular : undefined,
         brotliEffort: brotliEffort >= 0 ? brotliEffort : undefined,
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
@@ -1023,9 +1052,18 @@ function makeEncoderOptions(source) {
         advancedControls: (() => {
             const f = getAdvancedFilters();
             const g = getGroupOrderControls();
+            const buf = getBufferingControls();
             const out = {};
             if (f?.filters) out.filters = f.filters;
             if (g?.groupOrder) out.groupOrder = g.groupOrder;
+            if (buf?.buffering) out.buffering = buf.buffering;
+
+            // Last-minute diagnostic (production-chunked-paths note): surface low-memory hints in lab debug log for every encode
+            const b = buf?.buffering;
+            if (b && (b.lowMemoryMode || b.preferChunkedAPI)) {
+                dbgLog('  low-memory hints active for this encode', `lowMemoryMode=${!!b.lowMemoryMode} preferChunkedAPI=${!!b.preferChunkedAPI} (promotes buffering strategy)`);
+            }
+
             return Object.keys(out).length ? out : undefined;
         })(),
     };
@@ -1594,6 +1632,50 @@ function wireControls() {
             currentGainMapBytes = new Uint8Array(buf);
             if (gainDemo) gainDemo.checked = false;
             updateGainStatus();
+        });
+    }
+
+    // Low Memory / Production Chunked (production-chunked-paths note) — educational simulation
+    const lowMemMode = document.getElementById('batch-lowmem-mode');
+    const preferChunked = document.getElementById('batch-prefer-chunked');
+    const simulateBtn = document.getElementById('batch-simulate-large');
+    const lowMemStatus = document.getElementById('batch-lowmem-status');
+
+    function updateLowMemStatus() {
+        if (!lowMemStatus) return;
+        const lm = !!lowMemMode?.checked;
+        const pc = !!preferChunked?.checked;
+        if (!lm && !pc) {
+            lowMemStatus.textContent = '';
+            return;
+        }
+        const parts = [];
+        if (lm) parts.push('lowMemoryMode → strategy=3 + streaming hints');
+        if (pc) parts.push('preferChunkedAPI (Tauri path signal)');
+        lowMemStatus.textContent = parts.join(' | ');
+        syncSettingLabels();
+    }
+    lowMemMode?.addEventListener('change', updateLowMemStatus);
+    preferChunked?.addEventListener('change', updateLowMemStatus);
+
+    if (simulateBtn && lowMemStatus) {
+        simulateBtn.addEventListener('click', () => {
+            // Educational "large image" simulation: 8K RGBA ~256 MB raw buffer
+            const w = 8192, h = 8192;
+            const bytesPerPx = 4;
+            const rawMB = Math.round((w * h * bytesPerPx) / (1024 * 1024));
+            const lowMemMB = Math.round(rawMB * 0.08); // ~8% with tile streaming / high buffering
+            if (lowMemMode) lowMemMode.checked = true;
+            if (preferChunked) preferChunked.checked = true;
+            lowMemStatus.textContent = `Simulated ${w}×${h} RGBA (~${rawMB} MB raw). lowMemoryMode ON → est. peak ~${lowMemMB} MB (chunked tiles). preferChunkedAPI ON. See design note.`;
+            updateLowMemStatus();
+            // Also trigger a visual cue on the batch run button if present
+            const runBtn = document.getElementById('batch-run-btn');
+            if (runBtn) {
+                const old = runBtn.style.outline;
+                runBtn.style.outline = '2px solid #0a0';
+                setTimeout(() => { runBtn.style.outline = old; }, 1200);
+            }
         });
     }
 }
