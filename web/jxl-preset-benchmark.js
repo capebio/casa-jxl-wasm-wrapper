@@ -1017,3 +1017,295 @@ export function renderPhase3Chart(rows) {
 
 // Build the graph section DOM immediately on module init so canvases exist.
 buildGraphsSection();
+
+// =============================================================================
+// Results table — Task 8
+// =============================================================================
+
+let sortCol = 'score';
+let sortDir = 'desc';
+
+const MODULAR_LABELS = { '-1': 'Auto', '0': 'VarDCT', '1': 'Modular' };
+
+const TABLE_COLS = [
+    { key: 'file',      label: 'File'    },
+    { key: 'sizePx',    label: 'Size'    },
+    { key: 'tier',      label: 'Tier'    },
+    { key: 'phase',     label: 'Phase'   },
+    { key: 'effort',    label: 'Effort'  },
+    { key: 'decSpeed',  label: 'DecSpd'  },
+    { key: 'modular',   label: 'Modular' },
+    { key: 'brotli',    label: 'Brotli'  },
+    { key: 'resamp',    label: 'Resamp'  },
+    { key: 'encMs',     label: 'Enc ms'  },
+    { key: 'decMs',     label: 'Dec ms'  },
+    { key: 'sizeBytes', label: 'KB'      },
+    { key: 'score',     label: 'Score'   },
+];
+
+/** Compute best-row set: for each (file, tier, sizePx) group, the row with the highest score. */
+function computeBestRows(rows) {
+    const best = new Map();
+    for (const r of rows) {
+        const k = `${r.file}|${r.tier}|${r.sizePx}`;
+        const prev = best.get(k);
+        if (!prev || r.score > prev.score) best.set(k, r);
+    }
+    return new Set(best.values());
+}
+
+/** Format a cell value for display. */
+function fmtCell(col, row) {
+    switch (col.key) {
+        case 'sizePx':    return row.sizePx === 'full' ? 'Full' : row.sizePx + 'px';
+        case 'sizeBytes': return (row.sizeBytes / 1024).toFixed(1);
+        case 'encMs':     return row.encMs.toFixed(1);
+        case 'decMs':     return row.decMs.toFixed(1);
+        case 'modular':   return MODULAR_LABELS[String(row.modular)] ?? row.modular;
+        default:          return row[col.key];
+    }
+}
+
+/** Inject or update the results table inside #results-table. */
+export function buildResultsTable(rows) {
+    const section = document.getElementById('results-table');
+    if (!section) return;
+
+    // Persist to localStorage whenever called
+    try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+            timestamp: Date.now(),
+            rows,
+            presets: null, // presets written separately by saveResults
+        }));
+    } catch (e) {
+        console.warn('[preset-bench] localStorage write failed in buildResultsTable:', e);
+    }
+
+    const bestSet = computeBestRows(rows);
+
+    // Sort rows
+    const sorted = [...rows].sort((a, b) => {
+        const av = a[sortCol];
+        const bv = b[sortCol];
+        if (av < bv) return sortDir === 'asc' ? -1 : 1;
+        if (av > bv) return sortDir === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    // Build or reuse table element
+    let table = section.querySelector('table.results-table');
+    if (!table) {
+        table = document.createElement('table');
+        table.className = 'results-table';
+
+        const thead = document.createElement('thead');
+        const headerRow = document.createElement('tr');
+        for (const col of TABLE_COLS) {
+            const th = document.createElement('th');
+            th.dataset.col = col.key;
+            th.textContent = col.label + (col.key === sortCol ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '');
+            th.style.cursor = 'pointer';
+            th.addEventListener('click', () => {
+                if (sortCol === col.key) {
+                    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+                } else {
+                    sortCol = col.key;
+                    sortDir = 'asc';
+                }
+                buildResultsTable(rows);
+            });
+            headerRow.appendChild(th);
+        }
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+        table.appendChild(document.createElement('tbody'));
+        section.innerHTML = '';
+        section.appendChild(table);
+    } else {
+        // Update header sort indicators
+        for (const th of table.querySelectorAll('thead th')) {
+            const col = TABLE_COLS.find(c => c.key === th.dataset.col);
+            if (!col) continue;
+            th.textContent = col.label + (col.key === sortCol ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '');
+        }
+    }
+
+    // Rebuild tbody
+    const tbody = table.querySelector('tbody');
+    tbody.innerHTML = '';
+    for (const row of sorted) {
+        const tr = document.createElement('tr');
+        const isBest = bestSet.has(row);
+        if (isBest) tr.classList.add('best-row');
+
+        for (const col of TABLE_COLS) {
+            const td = document.createElement('td');
+            let text = fmtCell(col, row);
+            if (col.key === 'score' && isBest) text = '★ ' + text;
+            td.textContent = text;
+            tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+    }
+}
+
+// =============================================================================
+// Preset derivation — Task 8
+// =============================================================================
+
+function mode(arr) {
+    if (!arr.length) return undefined;
+    const counts = {};
+    for (const v of arr) counts[v] = (counts[v] || 0) + 1;
+    return Number(Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]);
+}
+
+function avg(arr) {
+    if (!arr.length) return 0;
+    return arr.reduce((s, v) => s + v, 0) / arr.length;
+}
+
+export function derivePresets(rows) {
+    return TIERS.map(tier => {
+        const tierRows = rows.filter(r => r.tier === tier.id);
+        if (!tierRows.length) return null;
+
+        const effort = mode(tierRows.filter(r => r.phase === 1).map(r => r.effort));
+        const decodingSpeed = mode(tierRows.filter(r => r.phase === 2).map(r => r.decSpeed));
+        const p3Best = tierRows
+            .filter(r => r.phase === 3)
+            .sort((a, b) => b.score - a.score)[0];
+        const modular = p3Best?.modular ?? -1;
+        const brotliEffort = p3Best?.brotli ?? -1;
+        const resampling = mode(tierRows.filter(r => r.phase === 4).map(r => r.resamp));
+
+        const benchStats = {};
+        for (const sz of SIZES) {
+            const szRows = tierRows.filter(r => r.sizePx === sz);
+            if (!szRows.length) continue;
+            const key = sz === 'full' ? 'full' : `${sz}px`;
+            benchStats[key] = {
+                avgEncMs: Math.round(avg(szRows.map(r => r.encMs))),
+                avgDecMs: Math.round(avg(szRows.map(r => r.decMs))),
+                avgSizeKb: Math.round(avg(szRows.map(r => r.sizeBytes)) / 1024),
+            };
+        }
+
+        return {
+            tier: tier.id,
+            quality: tier.quality,
+            lossless: tier.lossless,
+            effort,
+            decodingSpeed,
+            modular,
+            brotliEffort,
+            resampling,
+            benchStats,
+        };
+    }).filter(Boolean);
+}
+
+// =============================================================================
+// Preset cards UI — Task 8
+// =============================================================================
+
+const TIER_COLORS = { low: '#f87171', medium: '#fbbf24', high: '#4ade80', lossless: '#818cf8' };
+
+function buildPresetCard(preset) {
+    const color = TIER_COLORS[preset.tier] || '#94a3b8';
+    const card = document.createElement('div');
+    card.className = 'preset-card';
+    card.style.setProperty('--preset-color', color);
+
+    const params = [
+        `quality: ${preset.quality}`,
+        `lossless: ${preset.lossless}`,
+        `effort: ${preset.effort}`,
+        `decodingSpeed: ${preset.decodingSpeed}`,
+        `modular: ${preset.modular}`,
+        `brotliEffort: ${preset.brotliEffort}`,
+        `resampling: ${preset.resampling}`,
+    ].join('<br>');
+
+    const s128  = preset.benchStats['128px'];
+    const s1920 = preset.benchStats['1920px'];
+    const timingHtml = [
+        s128  ? `128px  enc ${s128.avgEncMs}ms / dec ${s128.avgDecMs}ms`  : '',
+        s1920 ? `1920px enc ${s1920.avgEncMs}ms / dec ${s1920.avgDecMs}ms` : '',
+    ].filter(Boolean).join('<br>');
+
+    card.innerHTML = `
+        <div class="preset-card-title">${preset.tier.toUpperCase()}</div>
+        <div class="preset-card-params">${params}</div>
+        <div class="preset-card-timing">${timingHtml}</div>
+        <button class="copy-json-btn" type="button">Copy JSON</button>
+    `;
+
+    card.querySelector('.copy-json-btn').addEventListener('click', () => {
+        navigator.clipboard.writeText(JSON.stringify(preset, null, 2));
+    });
+
+    return card;
+}
+
+export function buildPresetCards(presets) {
+    const section = document.getElementById('preset-cards');
+    if (!section) return;
+    const grid = document.createElement('div');
+    grid.className = 'preset-cards-grid';
+    for (const preset of presets) {
+        grid.appendChild(buildPresetCard(preset));
+    }
+    section.innerHTML = '';
+    section.appendChild(grid);
+}
+
+// =============================================================================
+// localStorage persistence — Task 8
+// =============================================================================
+
+const LS_KEY = 'jxl-preset-bench-results';
+
+export function saveResults(rows, presets) {
+    try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+            timestamp: Date.now(),
+            rows,
+            presets,
+        }));
+    } catch (e) {
+        console.warn('Could not save results to localStorage:', e);
+    }
+}
+
+export function loadSavedResults() {
+    try {
+        const raw = localStorage.getItem(LS_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+}
+
+// =============================================================================
+// CSV export — Task 8
+// =============================================================================
+
+export function exportCsv(rows) {
+    const header = ['file','sizePx','tier','phase','effort','decSpeed','modular','brotli','resamp','encMs','decMs','sizeKB','score'];
+    const csvRows = [header.join(',')];
+    for (const r of rows) {
+        csvRows.push([
+            r.file, r.sizePx, r.tier, r.phase, r.effort, r.decSpeed,
+            r.modular, r.brotli, r.resamp,
+            r.encMs.toFixed(1), r.decMs.toFixed(1),
+            (r.sizeBytes / 1024).toFixed(1), r.score,
+        ].join(','));
+    }
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'preset-benchmark.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+}
