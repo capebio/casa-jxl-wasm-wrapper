@@ -121,8 +121,17 @@ Each note should eventually reach the same bar as HDR:
 
 When all four Phase 3 notes have reached this bar, the "2026-06 Fine-Toothed Comb Micro-Features" work is complete. Update the master HANDOFF and DESIGNS_INDEX accordingly and celebrate.
 
----
+**2026-06-?? Update:** Note 4 (Production Low-Memory Chunked Paths) completed to full exemplar standard on `feature/production-chunked-paths` (see its design note Cleanup & Handoff + the matching PROGRESS_LOG entry). All four notes now done. Master handoff can be marked complete.
 
-**Handoff complete.** The foundation is strong, the partial wins from the shared passes are real, and the path forward is clear and repeatable. Resume at the same standard of rigor the user has come to expect.
+**2026-06 Completion (Final):** All tracking performed exactly per spec:
+- `FEATURE_PARITY_MATRIX.md`: New §9 table added with all 4 features (HDR/JPEG/Pixel/Chunked) ticked ✅ + benchmark exposure + cross-refs. Summary block retained.
+- `PROGRESS_LOG.md`: Master "Phase 3 Micro-Features — Full Completion" entry appended (detailed per-note achievements, files, handoff followed, result).
+- `DESIGNS_INDEX.md`: Date bumped; Phase 3 section refined with matrix §9 pointer + note refs.
+- This handoff: marked complete with final note.
+- All design notes already contained full living progress + Cleanup & Handoff blocks (exemplar quality).
+
+The 2026-06 Fine-Toothed Comb Micro-Features effort is **complete**. Every note reached the HDR bar. No escape regressions. All changes surgical + smart-wired.
+
+**Handoff complete.** The foundation is strong, the partial wins from the shared passes are real, and the 2026-06 micro-feature set is now fully realized and tracked. Resume future work at the same standard.
 
 **End of handoff document.**

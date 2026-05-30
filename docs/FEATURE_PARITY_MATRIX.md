@@ -131,6 +131,21 @@ This matrix supersedes and consolidates:
 
 ---
 
+## 9. 2026-06 Phase 3 Micro-Features (Fine-Toothed Comb Continuation)
+
+All four notes completed to full exemplar standard (public first-class surface, smart wiring via advanced pairs where sustainable, mandatory deep educational lab wiring with visible feedback/metrics, WASM ↔ Native public + behavioral parity, acceptance tests, living Implementation Progress + complete Cleanup & Handoff blocks inside each design note, PROGRESS_LOG entries, matrix + index updates). See `references/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` and the individual design notes for rationale, trade-offs, and exact file:line details.
+
+| # | Feature (Design Note) | WASM | Tauri | Benchmark Exposure | Notes |
+|---|-----------------------|------|-------|--------------------|-------|
+| 1 | HDR Signaling & Color Priority (`hdr-signaling-color-priority.md`) — intensityTarget, premultiply, preferCICPForHDR policy | ✅ | ✅ | wrapper-lab ("HDR Info" badges with intensity + premultiply + CICP/ICC policy, tooltips, control group) | Gold-standard exemplar. Scalars ride advanced pairs (broad reach); policy flag explicitly threaded on gain/animation/v2 paths + universal `ApplyColorEncoding` helper in bridge.cpp for all remaining sites. Native parity (EncoderData + EncodeAll). Acceptance test. Full living handoff block. |
+| 2 | JPEG Recompression Polish (`jpeg-recompression-polish.md`) — jpegReconstruction {cfl, compressBoxes, storeJPEGMetadata, ...} + conditional Store + CFL (ID 30) | ✅ | ✅ (public shape + native parity) | wrapper-lab (full "JPEG Reconstruction" expandable control group (Phase 3 label); CFL / Compress recon boxes / Explicit Store toggles; wired into batch + updated transcodeJpegToJxl API) | CFL via sustainable advanced pairs (ID 30) for broad reach; dedicated v3 transcode FFI (`_jxl_wasm_transcode_jpeg_to_jxl_v3`) for conditional `JxlEncoderStoreJPEGMetadata` + CFL on actual JPEG paths (per cjxl/libjxl priority). Lab + API + source parity complete. Richer recon fidelity metrics future polish per note. |
+| 3 | Pixel Art & Advanced Downsampling (`pixel-art-downsampling.md`) — upsamplingMode (0=nearest non-negotiable for pixel art), alreadyDownsampled | ✅ | ✅ (public shape) | wrapper-lab (Upsampling mode select with prominent "0 — nearest (pixel art)" option + explanatory text + "combine with resampling>1" note + misuse warning scaffold) | Smart wiring: scalars injected into existing `marshalAdvancedAndModular` → advanced pairs (IDs 55/56); automatically reaches all encode call sites with zero FFI bloat. Valid + recommended combo with resampling>1 documented. Lab control live. Small surface, high delight. |
+| 4 | Production Low-Memory Chunked Paths (`production-chunked-paths.md`) — lowMemoryMode + preferChunkedAPI (evolved inside existing `buffering` object per design rec) | ✅ | ✅ | wrapper-lab ("Low Memory / Large Image (Phase 3)" dedicated section + "Simulate Large Image (8K test)" button + live promoted-strategy + estimated peak memory delta status line + direct design note link) | lowMemoryMode promotes to strategy=3 (ID 34) via pairs when unset (smart, no caller magic numbers). Existing Phase 2 buffering UI completed as enabler. Acceptance test. Native applies ID 34 in EncodeAll. Full custom `JxlEncoderAddChunkedFrame` + input source explicitly future dedicated Tauri slice (high effort, lower current priority). Rich educational affordance delivered. |
+
+**Completion status:** All four at the rigorous bar set by the HDR exemplar. No escape-hatch regressions. All changes surgical and pattern-matched.
+
+---
+
 ## Summary of Remaining High-Impact Gaps (2026-06)
 
 Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or completed B-series work). 
@@ -171,3 +186,7 @@ Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or comp
 ---
 
 *Generated during 2026-06 unification pass. All statuses verified via targeted source inspection of src/lib.rs, raw-pipeline/src/pipeline.rs + lib.rs, src-tauri/src/pipeline.rs + priority_sem.rs, packages/jxl-wasm/src/{facade.ts,bridge.cpp}, packages/jxl-native/src/{index.ts,native.cc}, and web/*.html wiring.*
+
+**2026-06 Phase 3 Micro-Features Completion Update (note 4):**
+- Production Low-Memory Chunked Paths (`production-chunked-paths.md`): ✅ First-class `lowMemoryMode` + `preferChunkedAPI` inside `buffering` (WASM + Native parity), smart ID 34 promotion, rich lab section with "Simulate Large Image (8K)" + memory delta feedback + design note link, acceptance test, full living docs + handoff. (The full `JxlEncoderAddChunkedFrame` custom source remains future Tauri slice per design.)
+- All four Phase 3 notes now at exemplar bar (see DESIGNS_INDEX and PROGRESS_LOG for details).

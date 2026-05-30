@@ -858,12 +858,10 @@ function marshalAdvancedAndModular(
     effectiveAdvanced.push({ id: 56, value: 1 });
   }
 
-  // JPEG recon CFL (ID 30) from jpeg-recompression-polish note — rides advanced pairs for reach
-  // (the dedicated transcode paths below will also read the explicit option for conditional Store).
-  const jr = (typeof options !== 'undefined' && options.jpegReconstruction) || undefined; // best-effort; callers that have options pass it
-  if (jr && jr.cfl !== undefined) {
-    effectiveAdvanced.push({ id: 30, value: jr.cfl ? 1 : 0 });
-  }
+  // JPEG recon CFL (ID 30) intentionally omitted here (broken scope in prior pass).
+  // Dedicated handling lives in the v3 transcode path (jpeg-recompression-polish note).
+  // General encodes can use advancedFrameSettings escape or advancedControls for ID 30 if needed.
+  // (The sustainable pairs injection for CFL remains available for a future minimal follow-up.)
 
   let advPtr = 0;
   let advCount = 0;
@@ -2420,7 +2418,7 @@ class LibjxlEncoder implements JxlEncoder {
             const encState = module._jxl_wasm_enc_create!();
             try {
             const rc = caps.extOptions && module._jxl_wasm_enc_push_pixels_x
-              ? module._jxl_wasm_enc_push_pixels_x(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+              ? module._jxl_wasm_enc_push_pixels_x(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, -1, -1, -1, -1, -1, -1, 0, 0)
               : module._jxl_wasm_enc_push_pixels!(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
             if (rc !== 0) throw new Error(`JXL streaming encode failed (${rc})`);
             let chunkHandle: number;
