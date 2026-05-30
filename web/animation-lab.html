@@ -24,11 +24,11 @@
     .stat-card { background: #f5f5f5; border-radius: 6px; padding: 0.75rem; min-width: 140px; }
     .stat-card .label { font-size: 0.75rem; color: #666; }
     .stat-card .value { font-size: 1.25rem; font-weight: bold; }
-    canvas#preview { border: 1px solid #ccc; image-rendering: pixelated; display: block; margin-top: 1rem; }
     .info-banner { background: #fff8e1; border-left: 4px solid #f0b429; padding: 0.75rem; border-radius: 4px; font-size: 0.85rem; margin-bottom: 1rem; }
     .error { color: #c00; font-size: 0.875rem; }
     #frame-anim-strip { display: flex; gap: 2px; flex-wrap: wrap; margin-top: 0.5rem; }
     #frame-anim-strip canvas { border: 1px solid #aaa; image-rendering: pixelated; }
+    #btn-play-pause { min-width: 90px; }
   </style>
 </head>
 <body>
@@ -93,7 +93,23 @@
     </div>
   </div>
 
-  <canvas id="preview" style="display:none"></canvas>
+  <!-- Playback section (shown after decode completes) -->
+  <div id="playback-section" style="display:none; margin-top:1rem;">
+    <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.5rem;">
+      <button id="btn-play-pause">⏸ Pause</button>
+      <input type="range" id="scrubber" min="0" max="0" value="0" style="flex:1;" />
+      <span id="scrubber-label" style="font-size:0.8rem; min-width:60px; text-align:right;">0 / 0</span>
+    </div>
+    <canvas id="preview-anim" style="border:1px solid #ccc; image-rendering:pixelated; display:block;"></canvas>
+  </div>
+
+  <!-- Per-frame metadata panel -->
+  <div id="frame-meta" style="font-size:0.8rem; margin-top:0.5rem; display:none;">
+    Frame: <strong id="meta-index">—</strong>
+    &nbsp;|&nbsp; Duration: <strong id="meta-duration">—</strong> ms
+    &nbsp;|&nbsp; Name: <strong id="meta-name">—</strong>
+  </div>
+
   <div id="decode-events" style="font-size:0.75rem; margin-top:0.5rem;"></div>
 
   <script type="module">
@@ -101,6 +117,86 @@
 
     function el(id) { return document.getElementById(id); }
 
+    // ── Frame buffer ──────────────────────────────────────────────────────────
+    let frameBuffer = []; // { pixels, width, height, durationMs, frameIndex, frameName }
+    let playbackTicksPerSecond = 1000;
+
+    // ── Playback state ────────────────────────────────────────────────────────
+    let currentFrameIdx = 0;
+    let lastFrameTime   = 0;
+    let rafId           = null;
+    let isPlaying       = false;
+    let loopsDone       = 0;
+    let playbackLoopCount = 0; // 0 = infinite
+
+    function showFrame(idx) {
+      const f = frameBuffer[idx];
+      if (!f) return;
+      const pv = el("preview-anim");
+      pv.width = f.width; pv.height = f.height;
+      pv.getContext("2d").putImageData(new ImageData(f.pixels, f.width, f.height), 0, 0);
+      el("scrubber").value = String(idx);
+      el("scrubber-label").textContent = `${idx + 1} / ${frameBuffer.length}`;
+      el("meta-index").textContent = String(f.frameIndex);
+      el("meta-duration").textContent = String(f.durationMs);
+      el("meta-name").textContent = f.frameName ?? "(none)";
+      el("frame-meta").style.display = "block";
+    }
+
+    function stopPlayback() {
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+      isPlaying = false;
+      el("btn-play-pause").textContent = "▶ Play";
+    }
+
+    function startPlayback() {
+      if (frameBuffer.length === 0) return;
+      isPlaying = true;
+      el("btn-play-pause").textContent = "⏸ Pause";
+      lastFrameTime = performance.now();
+
+      function tick(now) {
+        if (!isPlaying) return;
+        const f = frameBuffer[currentFrameIdx];
+        if (f && (now - lastFrameTime) >= f.durationMs) {
+          const nextIdx = currentFrameIdx + 1;
+          if (nextIdx >= frameBuffer.length) {
+            // End of animation
+            loopsDone++;
+            if (playbackLoopCount > 0 && loopsDone >= playbackLoopCount) {
+              // Finite loops exhausted
+              currentFrameIdx = frameBuffer.length - 1;
+              showFrame(currentFrameIdx);
+              stopPlayback();
+              return;
+            }
+            currentFrameIdx = 0;
+          } else {
+            currentFrameIdx = nextIdx;
+          }
+          lastFrameTime = now;
+          showFrame(currentFrameIdx);
+        }
+        rafId = requestAnimationFrame(tick);
+      }
+
+      rafId = requestAnimationFrame(tick);
+    }
+
+    // ── Play/pause button ─────────────────────────────────────────────────────
+    el("btn-play-pause").addEventListener("click", () => {
+      if (isPlaying) { stopPlayback(); } else { startPlayback(); }
+    });
+
+    // ── Scrubber ──────────────────────────────────────────────────────────────
+    el("scrubber").addEventListener("input", () => {
+      const idx = Number(el("scrubber").value);
+      stopPlayback();
+      currentFrameIdx = idx;
+      showFrame(idx);
+    });
+
+    // ── Frame generation ──────────────────────────────────────────────────────
     function generateFrame(index, total, size) {
       const canvas = document.createElement("canvas");
       canvas.width = size; canvas.height = size;
@@ -148,12 +244,24 @@
       el("encode-status").textContent = "Encoding…";
       el("output-section").style.display = "none";
 
+      // Stop any existing playback before starting a new run
+      stopPlayback();
+      frameBuffer = [];
+      loopsDone = 0;
+      currentFrameIdx = 0;
+      el("playback-section").style.display = "none";
+      el("frame-meta").style.display = "none";
+
       const frameCount     = Number(el("frameCount").value);
       const frameSize      = Number(el("frameSize").value);
       const ticksPerSecond = Number(el("ticksPerSecond").value);
       const frameDuration  = Number(el("frameDuration").value);
       const loopCount      = Number(el("loopCount").value);
       const quality        = Number(el("quality").value);
+
+      // Store for playback timing
+      playbackTicksPerSecond = ticksPerSecond;
+      playbackLoopCount = loopCount;
 
       try {
         const frames = Array.from({ length: frameCount }, (_, i) => ({
@@ -210,7 +318,6 @@
         decoder.close();
 
         const eventsLog = [];
-        let firstFrame = null;
         for await (const ev of decoder.events()) {
           eventsLog.push(
             `${ev.type}` +
@@ -218,7 +325,29 @@
             (ev.frameDuration != null ? ` dur=${ev.frameDuration}` : "") +
             (ev.frameName ? ` name="${ev.frameName}"` : "")
           );
-          if (ev.type === "final" && firstFrame === null) firstFrame = ev;
+          if (ev.type === "final") {
+            // Compute durationMs: use frameDuration from event if available, otherwise derive from encode params
+            let durationMs;
+            if (ev.frameDuration != null) {
+              durationMs = Math.round(ev.frameDuration / playbackTicksPerSecond * 1000);
+            } else {
+              // Fallback: use encode-time frameDuration and ticksPerSecond
+              durationMs = frameDuration != null && ticksPerSecond != null
+                ? Math.round(frameDuration / ticksPerSecond * 1000)
+                : 100;
+            }
+
+            frameBuffer.push({
+              pixels: ev.pixels instanceof ArrayBuffer
+                ? new Uint8ClampedArray(ev.pixels)
+                : new Uint8ClampedArray(ev.pixels.buffer, ev.pixels.byteOffset ?? 0, ev.pixels.byteLength),
+              width:       ev.info.width,
+              height:      ev.info.height,
+              durationMs,
+              frameIndex:  ev.frameIndex ?? frameBuffer.length,
+              frameName:   ev.frameName ?? null,
+            });
+          }
         }
         await decoder.dispose();
 
@@ -226,16 +355,17 @@
           "<strong>Decode events:</strong><br>" +
           eventsLog.map(e => `<code>${e}</code>`).join("<br>");
 
-        if (firstFrame && firstFrame.type === "final") {
-          const pv = el("preview");
-          pv.width = firstFrame.info.width;
-          pv.height = firstFrame.info.height;
-          pv.style.display = "block";
-          const ctx = pv.getContext("2d");
-          const px = firstFrame.pixels instanceof ArrayBuffer
-            ? new Uint8ClampedArray(firstFrame.pixels)
-            : new Uint8ClampedArray(firstFrame.pixels.buffer, firstFrame.pixels.byteOffset, firstFrame.pixels.byteLength);
-          ctx.putImageData(new ImageData(px, firstFrame.info.width, firstFrame.info.height), 0, 0);
+        // Wire up scrubber and start playback
+        if (frameBuffer.length > 0) {
+          const scrubber = el("scrubber");
+          scrubber.min = "0";
+          scrubber.max = String(frameBuffer.length - 1);
+          scrubber.value = "0";
+
+          el("playback-section").style.display = "block";
+          currentFrameIdx = 0;
+          showFrame(0);
+          startPlayback();
         }
       } catch (err) {
         el("error-msg").textContent = String(err);
