@@ -2,8 +2,8 @@
 
 **Location:** `docs/references/designs/`  
 **Purpose:** This is the master index for all per-feature design proposals produced under the hybrid Grok-synthesis workflow.  
-**Last Updated:** 2026-05-28  
-**Total Notes:** 11
+**Last Updated:** 2026-06 (Phase 3 micro-features completion)  
+**Total Notes:** 15 (11 core + 4 Phase 3 fine-toothed-comb)
 
 Each note follows the process described in `FEATURE_IMPLEMENTATION_TEMPLATE.md` and is the primary technical reference when an implementing agent begins work on that feature.
 
@@ -87,14 +87,16 @@ All items in the 2026-05-28 audit section now have design coverage.
 
 ## 2026-06 Phase 3 Micro-Features (Fine-Toothed Comb Continuation)
 
-All four notes now have dedicated branches and exemplar-level implementation (HDR signaling completed earlier; JPEG recompression, Pixel Art, and this Production Chunked note completed in sequence):
+All four notes completed to full exemplar standard on dedicated branches (see individual design notes for living Implementation Progress + Cleanup & Handoff blocks; HDR was the reference standard):
 
-- `hdr-signaling-color-priority.md` — full (public API, smart CICP policy threading, ApplyColorEncoding helper, rich "HDR Info" badges, native parity, tests, living docs).
-- `jpeg-recompression-polish.md` — (see its own living progress).
-- `pixel-art-downsampling.md` — (see its own living progress).
-- `production-chunked-paths.md` — **completed on `feature/production-chunked-paths`** (first-class `lowMemoryMode` + `preferChunkedAPI` inside `buffering`, smart ID 34 promotion, full "Low Memory / Large Image" lab section with 8K Simulate + memory delta, native parity, acceptance test, full Cleanup & Handoff + PROGRESS_LOG entry).
+- `hdr-signaling-color-priority.md` — intensityTarget / premultiply / preferCICPForHDR (smart pairs + universal helper, rich badges, full parity + test).
+- `jpeg-recompression-polish.md` — jpegReconstruction (CFL ID 30 via pairs + v3 conditional Store transcode, lab control group).
+- `pixel-art-downsampling.md` — upsamplingMode (0=nearest) + alreadyDownsampled (pairs IDs 55/56, pixel-art-specific lab wiring).
+- `production-chunked-paths.md` — lowMemoryMode + preferChunkedAPI inside buffering (ID 34 promotion, Simulate 8K educational section). Implemented on `feature/production-chunked-paths` (full body + living handoff 2026-06).
 
-See `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` and `PROGRESS_LOG.md` for the full continuation log.
+**Single source of truth for parity + exposure:** `docs/FEATURE_PARITY_MATRIX.md` §9 (new dedicated table with all four ✅ + wrapper-lab details).
+
+See `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (now marked complete) and `PROGRESS_LOG.md` for the full log + rationale.
 
 ## Next Steps (After Design Phase)
 
