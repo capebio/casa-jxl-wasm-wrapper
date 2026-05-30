@@ -8,7 +8,7 @@ import {
 } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
-const { process_orf, rgb_to_rgba } = rawWasm;
+const { process_orf, process_cr2, rgb_to_rgba } = rawWasm;
 
 const MAX_BATCH_LIMIT = 100;
 const RANDOM_LOAD_CONCURRENCY = 4;
@@ -752,6 +752,13 @@ async function loadFileSource(file) {
         return source;
     }
 
+    if (ext === 'cr2') {
+        const raw = new Uint8Array(await file.arrayBuffer());
+        const source = loadBytesAsCr2Source(raw, file.name, '', `${fmtBytes(file.size)}`);
+        source.loadMs = performance.now() - started;
+        return source;
+    }
+
     if (ext === 'jxl') {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const source = await decodeBytesToSource(bytes, `${file.name} · JXL · ${fmtBytes(file.size)}`);
@@ -815,6 +822,11 @@ async function loadBytesSourceByName(bytes, name, folder = '', sizeLabel = '') {
         source.loadMs = performance.now() - started;
         return source;
     }
+    if (ext === 'cr2') {
+        const source = loadBytesAsCr2Source(bytes, name, folder, sizeLabel);
+        source.loadMs = performance.now() - started;
+        return source;
+    }
     if (ext === 'jxl') {
         const source = await decodeBytesToSource(bytes, `${name} · JXL · ${sizeLabel || fmtBytes(bytes.byteLength)}`);
         source.loadMs = performance.now() - started;
@@ -859,6 +871,25 @@ function loadBytesAsSource(bytes, name, folder = '', sizeLabel = '') {
         return {
             name,
             label: `${name} · ORF · ${result.width}×${result.height}`,
+            meta: [folder, sizeLabel].filter(Boolean).join(' · '),
+            width: result.width,
+            height: result.height,
+            rgba: rgb_to_rgba(rgb),
+            loadMs: performance.now() - started,
+        };
+    } finally {
+        result.free();
+    }
+}
+
+function loadBytesAsCr2Source(bytes, name, folder = '', sizeLabel = '') {
+    const started = performance.now();
+    const result = process_cr2(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
+    try {
+        const rgb = result.take_rgb();
+        return {
+            name,
+            label: `${name} · CR2 · ${result.width}×${result.height}`,
             meta: [folder, sizeLabel].filter(Boolean).join(' · '),
             width: result.width,
             height: result.height,
