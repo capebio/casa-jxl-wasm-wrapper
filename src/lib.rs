@@ -1452,6 +1452,14 @@ struct Cr2Decoded {
     iso: u32,
 }
 
+/// Generic Canon EOS cam-to-sRGB matrix (dcraw/LibRaw coefficients).
+/// Used as the fallback when a CR2 file does not embed its own color matrix.
+const CANON_CAM_TO_SRGB: [[f32; 3]; 3] = [
+    [ 0.4592, 0.3810, 0.1595],
+    [ 0.1638, 0.7718, 0.0644],
+    [ 0.0388, 0.0791, 0.8824],
+];
+
 fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
     const MAX_DIM: u32 = 8192;
     const MAX_PIXELS: usize = 50_000_000;
@@ -1492,7 +1500,7 @@ fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
     params.wb_b = cr2.wb_b;
     params.color_matrix = cr2.color_matrix;
     let color_matrix_flat: [f32; 9] = {
-        let m = params.color_matrix.unwrap_or(pipeline::CAM_TO_SRGB);
+        let m = params.color_matrix.unwrap_or(CANON_CAM_TO_SRGB);
         [m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2]]
     };
 
