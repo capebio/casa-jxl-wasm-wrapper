@@ -1,9 +1,0 @@
-
-packages\jxl-session\test\encode-session.test.ts:
-(pass) EncodeSessionImpl lifecycle > pushPixels() forwards encode_pixels messages [31.00ms]
-(pass) EncodeSessionImpl cancel and errors > pushPixels() after finish throws ConfigError [16.00ms]
-
- 2 pass
- 11 filtered out
- 0 fail
-Ran 2 tests across 1 file. [237.00ms]
