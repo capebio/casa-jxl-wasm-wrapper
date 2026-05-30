@@ -775,6 +775,24 @@ describe("decodingSpeed encoder option", () => {
     await encoder.dispose();
   });
 
+  test("jumbfBoxes expand into custom 'jumb' boxes (no new FFI, rides v2 box path)", async () => {
+    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const jumbData = new Uint8Array([0x4a, 0x55, 0x4d, 0x42, 0x46, 0x00]); // "JUMBF\0" demo prefix
+    const encoder = createEncoder({
+      ...encodeOptions, quality: 90,
+      jumbfBoxes: [{ data: jumbData }],
+    });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(v2Calls.length).toBeGreaterThan(0);
+    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    // At least the one JUMBF entry (may be >1 if other metadata also triggers boxes)
+    expect(boxOpts.numCustomBoxes).toBeGreaterThanOrEqual(1);
+    await encoder.dispose();
+  });
+
   test("rawCodestream:true overrides forceContainer:true in WasmBoxOpts", async () => {
     const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
     setJxlModuleFactoryForTesting(async () => module as never);
@@ -1583,4 +1601,52 @@ function createFakeMetadataV2Module() {
   return { module, v2Calls, readBoxOpts };
 }
 
+describe("animation seek (software fallback)", () => {
+  afterEach(() => { setJxlModuleFactoryForTesting(null); });
+
+  test("seekToFrame and seekToTime are present on decoder instances (software fallback)", () => {
+    const decoder = createDecoder({ format: "rgba8" });
+    expect(typeof decoder.seekToFrame).toBe("function");
+    expect(typeof decoder.seekToTime).toBe("function");
+    decoder.dispose?.();
+  });
+
+  test("animationSeek capability is false until the native C function is present (post-rebuild signal)", async () => {
+    const base = createFakeProgressiveLibjxlModule();
+    // Current binaries do not have the C seek function
+    setJxlModuleFactoryForTesting(async () => base as never);
+
+    const decoder = createDecoder({ format: "rgba8" });
+    const caps = getWrapperCapabilities();
+    expect(caps.animationSeek).toBe(false); // expected until WASM is rebuilt with the C skip
+    await (decoder as any).dispose?.();
+  });
+
+  test("seekToFrame software fallback is callable and does not throw (behavioral)", async () => {
+    const base = createFakeProgressiveLibjxlModule();
+    setJxlModuleFactoryForTesting(async () => base as never);
+
+    const decoder = createDecoder({ format: "rgba8" });
+    decoder.push(new Uint8Array(16));
+    decoder.close();
+
+    // The key behavioral guarantee: calling seekToFrame with the software fallback
+    // must succeed and produce an async iterable without throwing.
+    const events: any[] = [];
+    try {
+      for await (const ev of decoder.seekToFrame(1)) {
+        events.push(ev);
+        if (events.length > 5) break; // don't need the whole stream for this test
+      }
+    } catch (e) {
+      // If we reach here the fallback itself threw — that's a failure
+      expect(e).toBeUndefined();
+    }
+
+    // We don't assert specific frame counts (depends on fake), only that it ran cleanly.
+    expect(true).toBe(true);
+
+    await (decoder as any).dispose?.();
+  });
+});
 

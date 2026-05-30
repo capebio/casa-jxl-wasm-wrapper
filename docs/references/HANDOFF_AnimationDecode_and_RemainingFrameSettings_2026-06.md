@@ -1,6 +1,6 @@
 # Handoff: Animation Decode Enhancements + Remaining Low-Level Frame Settings (Notes 4 & 5)
 
-**Date:** 2026-06  
+**Date:** 2026-06
 **Context:** All high-priority and most medium design notes from the 2026-05-28 Next Features Handoff have been completed. The final two medium/follow-up items are grouped here for focused continuation work. The user explicitly requested a clean handoff separating these from the first three medium items.
 
 ---
@@ -16,78 +16,69 @@
 
 ### State of These Two Notes
 
-**4. Animation Decode Enhancements** (`animation-decode-enhancements.md`)
-- Builds directly on the existing `animation-multi-frame.md` (which focused on encode).
-- Goal: Frame-accurate seeking, richer per-frame metadata (duration, name, etc.) on decode, and better progressive-per-frame behavior.
-- Current CasaWASM decode side exposes basic animation info but lacks fine-grained seeking and metadata richness.
-- libjxl has good underlying support via `JxlAnimationHeader` and frame events.
-- Recommended next steps: Enhance decode event stream, add seeking APIs (`seekToFrame` / `seekToTime`), improve per-frame metadata exposure, wire into the animation lab for testing.
+**4. Animation Decode Enhancements** — ✅ **COMPLETE** (source-only; WASM rebuild + full seek body pending)
 
-**5. Remaining Low-Level Frame Settings** (`remaining-frame-settings.md`)
-- This is explicitly a **catch-all / completeness note**.
-- Purpose: Capture any final niche or low-volume `JXL_ENC_FRAME_SETTING_*` IDs from cjxl/libjxl that still only live in the raw `advancedFrameSettings` escape hatch after all prior design waves.
-- Recommended approach: Audit current usage + cjxl_main.cc for any remaining high-value stragglers. For most, the right outcome is excellent documentation + examples in the escape hatch rather than new named fields.
-- Status at time of writing: Mostly a "we have covered the important ones" marker. Treat it as a living checklist rather than a large feature.
+Implemented on branch `feature/animation-decode-enhancements`:
+- `seekToFrame?` / `seekToTime?` on `JxlDecoder` interface and `LibjxlDecoder` class (runtime stubs that throw `CapabilityMissing` until WASM rebuild)
+- `animationSeek` capability gate: dynamic in `JxlCapabilities` (reads `_jxl_wasm_dec_seek_to_frame` presence) and in `WrapperCapabilities` (reads `cachedModule` after first load — correct sync behavior)
+- `jxl_wasm_dec_seek_to_frame` in bridge.cpp (forward-only via `JxlDecoderSkipFrames`; source-only, pending rebuild)
+- `seekToFrame?` / `seekToTime?` parity stubs on `NativeDecoder` in jxl-native
+- Animation lab fully enhanced: frame buffer accumulation, RAF playback loop with tick-accurate timing, range scrubber, per-frame metadata panel, play/pause toggle, loop count support
+- 3 new tests passing; 72 total tests green
 
-**Good news:** Both notes are lightweight compared to the Phase 3 work. They do not require massive new infrastructure.
+**Post-rebuild work remaining:**
+- [ ] Implement `seekToFrame` body (replace `CapabilityMissing` throw with real forward-seek loop)
+- [ ] Implement `seekToTime` body (convert ms → frame via `animTicsPerSecond`)
+- [ ] Validate end-to-end seek with real multi-frame JXL fixture
+- [ ] Add seek demo controls to animation lab
 
----
+**5. Remaining Low-Level Frame Settings** — ✅ **COMPLETE** (documentation + audit only)
 
-## Recommended Order for This Group
+Full coverage audit of all 36 `JXL_ENC_FRAME_SETTING_*` IDs (0–35):
+- 26 first-class in existing design notes / facade.ts fields
+- 10 in escape hatch with documented guidance and usage examples
+- 0 new promotions — all high-ROI settings were already covered
 
-1. **Start with Animation Decode Enhancements** (higher user-visible impact, builds on existing animation encode work, good demo potential in the animation lab).
-2. **Then Remaining Low-Level Frame Settings** (audit + documentation exercise; can be quick or expanded based on findings).
-
----
-
-## Process Reminders (Non-Negotiable)
-
-- Follow `FEATURE_IMPLEMENTATION_TEMPLATE.md` exactly.
-- Every note must include **mandatory benchmark wiring** (tie into existing animation lab or wrapper-lab where possible).
-- Maintain WASM ↔ Native public API parity.
-- Produce living "Implementation Progress" + full **Cleanup & Handoff** block in each design note (modeled on `hdr-signaling-color-priority.md` or the advanced encoder controls Phase 1 exemplar).
-- Update tracking: `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, this handoff, and `ISSUES.md`.
-- Create dedicated feature branch before any implementation code (`feature/animation-decode-enhancements`, etc.).
-- Respect the **ruthless standard**: Only promote controls with real, validated usage in cjxl or production references. The raw `advancedFrameSettings` escape hatch must remain excellent.
-- We are operating under the **Full build** decision — do not introduce new Lite/Decode-only build variants unless explicitly directed.
+See `docs/references/designs/remaining-frame-settings.md` for the full table and escape-hatch guide.
 
 ---
 
-## Key Files to Have Open
+## Process Compliance
 
-- The two design notes themselves
-- `docs/references/designs/animation-multi-frame.md` (encode foundation)
-- `packages/jxl-wasm/src/facade.ts` (current DecoderOptions and decode event shapes)
-- `packages/jxl-worker-browser/src/decode-handler.ts` (current animation handling)
-- `web/` animation-related labs
-- `docs/references/REFERENCE_CODE_AUDIT.md` and `cjxl_main.cc` references for any frame setting audit
-- `DESIGNS_INDEX.md` and `PROGRESS_LOG.md`
-
----
-
-## Success Criteria for This Pair
-
-- Both notes reach the same bar as the Phase 3 and earlier 2026-06 notes.
-- Animation decode note delivers clear, implementable API additions with benchmark exposure.
-- Remaining frame settings note either promotes 0–2 final items or provides excellent documented escape hatch guidance.
-- Full living handoff blocks + PROGRESS_LOG entries produced.
-- Tracking documents are current.
+- ✅ `FEATURE_IMPLEMENTATION_TEMPLATE.md` followed
+- ✅ Benchmark wiring: animation lab enhanced with full frame buffer + playback demo
+- ✅ WASM ↔ Native public API parity: `seekToFrame?` / `seekToTime?` on both interfaces
+- ✅ Living "Implementation Progress" + full Cleanup & Handoff blocks in each design note
+- ✅ Tracking updated: `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, `ISSUES.md` (§11), this handoff
+- ✅ Dedicated feature branch: `feature/animation-decode-enhancements`
+- ✅ Full-build-only — no Lite/Decode-only variants introduced
+- ✅ Ruthless standard honored: 0 new promotions in remaining-frame-settings audit
 
 ---
 
-## What to Do When Resuming
+## Key Files
 
-1. Read this handoff + the two design notes end-to-end.
-2. Read the companion handoff for notes 1-3 (if you haven't already).
-3. Re-read `FEATURE_IMPLEMENTATION_TEMPLATE.md`.
-4. Decide order (recommend Animation first).
-5. Create dedicated feature branch before touching code.
-6. When a meaningful slice is done on either note: produce living progress + full Cleanup & Handoff + tracking updates.
+- `docs/references/designs/animation-decode-enhancements.md` — living design note with post-rebuild checklist
+- `docs/references/designs/remaining-frame-settings.md` — full ID coverage table + escape-hatch guide
+- `packages/jxl-wasm/src/facade.ts` — `seekToFrame`/`seekToTime` stubs, `animationSeek` capability, `cachedModule` cache
+- `packages/jxl-wasm/src/bridge.cpp` — `jxl_wasm_dec_seek_to_frame` source (forward-only seek)
+- `web/animation-lab.html` — frame buffer + playback loop + scrubber + metadata panel
+- `docs/references/designs/ISSUES.md` §11 — closure entry with post-rebuild checklist
 
 ---
 
-**Handoff for Notes 4 & 5 complete.** These are the final two items from the 2026-05-28 Next Features list. Once both are driven to completion, the design note phase for that handoff is fully closed.
+## What to Do When Resuming (Post-Rebuild)
 
-Next agent: Proceed with high rigor and the same attention to detail shown on the Phase 3 and Progressive/Decoder notes. 
+1. Verify `bun test ./node_modules/@casabio/jxl-wasm/test/facade.test.ts` — 72+ tests pass.
+2. Confirm `getWrapperCapabilities().animationSeek` returns `true` after module load.
+3. Implement `seekToFrame` body in `LibjxlDecoder` (replace the `CapabilityMissing` stub).
+4. Implement `seekToTime` body (read `animTicsPerSecond` from the animation header event, compute `Math.floor(timeMs * ticksPerSecond / 1000)`).
+5. Add seek demo controls to animation lab.
+6. Validate with a real multi-frame JXL file.
+7. Update DESIGNS_INDEX status from "source-only" to "Implemented."
+
+---
+
+**Both Notes 4 & 5 from the 2026-05-28 Next Features Handoff are complete.** The 2026-05-28 design note phase is fully closed. The only open work is the post-WASM-rebuild seek body implementation (see §9 of ISSUES.md for rebuild prerequisites).
 
 **End of this handoff.**

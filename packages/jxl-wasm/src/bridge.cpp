@@ -2164,6 +2164,17 @@ uint32_t jxl_wasm_dec_anim_loop_count(uint32_t state_ptr) {
   return s ? s->anim_loop_count : 0u;
 }
 
+// Forward-only seek: skip (target_frame - frame_index) frames from current position.
+// Returns 0 on success, -1 if target_frame <= current frame_index (cannot seek backward).
+int32_t jxl_wasm_dec_seek_to_frame(uint32_t state_ptr, uint32_t target_frame) {
+  JxlWasmDecState* s = reinterpret_cast<JxlWasmDecState*>(static_cast<uintptr_t>(state_ptr));
+  if (s == nullptr) return -1;
+  if (target_frame <= s->frame_index) return -1;
+  uint32_t skip = target_frame - s->frame_index;
+  JxlDecoderSkipFrames(s->dec, static_cast<size_t>(skip));
+  return 0;
+}
+
 // Routes JPEG bytes to lossless transcode; otherwise encodes as RGBA pixels.
 // For JPEG input, width/height/fmt/has_alpha are ignored.
 JxlWasmBuffer* jxl_wasm_encode_auto(

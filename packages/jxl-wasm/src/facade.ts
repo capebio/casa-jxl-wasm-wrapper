@@ -229,6 +229,27 @@ export interface JxlDecoder {
   events(): AsyncIterable<DecodeEvent>;
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
+  /**
+   * Seek to a specific animation frame index (0-based) and yield events from that point onward.
+   *
+   * **Current behavior (always works):** Software fallback — the decoder replays the stream
+   * internally and filters out frames before the target. No WASM rebuild required.
+   *
+   * **Future (after rebuild):** Will use the native _jxl_wasm_dec_seek_to_frame fast path when
+   * available. The method itself will remain available regardless of rebuild status.
+   *
+   * Must be called *instead of* events(), never after. Call only after push + close().
+   */
+  seekToFrame?(frameIndex: number): AsyncIterable<DecodeEvent>;
+
+  /**
+   * Convenience wrapper over seekToFrame that accepts time in milliseconds.
+   * Computes the target frame using the first event that carries animTicksPerSecond.
+   * Falls back to frame 0 for non-animated content.
+   *
+   * Same guarantees as seekToFrame: works today via software fallback.
+   */
+  seekToTime?(timeMs: number): AsyncIterable<DecodeEvent>;
 }
 
 export interface EncodeStats {
@@ -346,6 +367,8 @@ interface LibjxlWasmModule {
   _jxl_wasm_dec_is_last_frame?(state: number): number;
   _jxl_wasm_dec_anim_ticks_per_second?(state: number): number;
   _jxl_wasm_dec_anim_loop_count?(state: number): number;
+  // Animation seek — present after WASM rebuild with seek bridge
+  _jxl_wasm_dec_seek_to_frame?(state: number, targetFrame: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -597,6 +620,16 @@ export interface WrapperCapabilities {
   tileAlignedRegionDecode: boolean;
   arbitraryRegionDecode: boolean;
   availableDownsampleFactors: readonly number[];
+
+  /**
+   * Whether the *optimized native* seek path is available.
+   * - `true` only after a WASM rebuild that includes `_jxl_wasm_dec_seek_to_frame`.
+   * - `false` on current binaries (seek still works via the software fallback in seekToFrame/seekToTime).
+   *
+   * Use this flag if you want to know whether you are getting the fast C++ skip path.
+   * The seek methods themselves are always present and functional.
+   */
+  animationSeek: boolean;
 }
 
 export interface DecodeGridInfo {
@@ -668,6 +701,7 @@ function probeRelaxedSimd(): boolean {
 }
 
 let modulePromise: Promise<LibjxlWasmModule> | undefined;
+let cachedModule: LibjxlWasmModule | undefined;
 let testModuleFactory: JxlModuleFactory | null = null;
 let _forcedTier: Tier | null = null;
 let _cachedDetectedTier: Tier | undefined;
@@ -675,6 +709,7 @@ let _cachedDetectedTier: Tier | undefined;
 export function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null): void {
   testModuleFactory = factory;
   modulePromise = undefined;
+  cachedModule = undefined;
 }
 
 /**
@@ -685,6 +720,7 @@ export function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null):
 export function setForcedTier(tier: Tier | null): void {
   _forcedTier = tier;
   modulePromise = undefined;
+  cachedModule = undefined;
 }
 
 export function getForcedTier(): Tier | null {
@@ -959,6 +995,7 @@ export function getWrapperCapabilities(): WrapperCapabilities {
     tileAlignedRegionDecode: false,
     arbitraryRegionDecode: true,
     availableDownsampleFactors: [1, 2, 4, 8],
+    animationSeek: cachedModule != null && typeof cachedModule._jxl_wasm_dec_seek_to_frame === "function",
   };
 }
 
@@ -1578,6 +1615,93 @@ class LibjxlDecoder implements JxlDecoder {
     this.wake();
   }
 
+  async *seekToFrame(frameIndex: number): AsyncIterable<DecodeEvent> {
+    if (this.eventsStarted) {
+      yield { type: "error", code: "InvalidState", message: "seekToFrame cannot be called after events() has been consumed." };
+      return;
+    }
+    this.eventsStarted = true;
+    try {
+      if (this.cancelled) return;
+      const module = await loadLibjxlModule();
+      if (this.options.format !== "rgba8") {
+        const decFn = this.options.format === "rgba16" ? "_jxl_wasm_decode_rgba16" : "_jxl_wasm_decode_rgbaf32";
+        if (typeof module[decFn] !== "function") {
+          throw new CapabilityMissing(`${this.options.format} decode requires a rebuilt WASM with multi-format bridge`);
+        }
+      }
+      // Software fallback: decode all frames, emit only those at frameIndex and beyond.
+      // Post-rebuild: replace inner loop with _jxl_wasm_dec_seek_to_frame(dec, frameIndex)
+      // before entering the event loop to skip at the C++ level.
+      const source = getCapabilities(module).progressiveDecode
+        ? this.eventsProgressive(module)
+        : this.eventsOneShot(module);
+      for await (const ev of source) {
+        if (ev.type === "header" || ev.type === "error" || ev.type === "budget_exceeded") {
+          yield ev;
+        } else if (ev.type === "progress" || ev.type === "final") {
+          if ((ev.frameIndex ?? 0) >= frameIndex) yield ev;
+        }
+      }
+    } catch (error) {
+      yield {
+        type: "error",
+        code: error instanceof CapabilityMissing ? error.code : "DecodeFailed",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      this.chunkQueue = [];
+      this.readIndex = 0;
+      this.queuedBytes = 0;
+    }
+  }
+
+  async *seekToTime(timeMs: number): AsyncIterable<DecodeEvent> {
+    if (this.eventsStarted) {
+      yield { type: "error", code: "InvalidState", message: "seekToTime cannot be called after events() has been consumed." };
+      return;
+    }
+    this.eventsStarted = true;
+    try {
+      if (this.cancelled) return;
+      const module = await loadLibjxlModule();
+      if (this.options.format !== "rgba8") {
+        const decFn = this.options.format === "rgba16" ? "_jxl_wasm_decode_rgba16" : "_jxl_wasm_decode_rgbaf32";
+        if (typeof module[decFn] !== "function") {
+          throw new CapabilityMissing(`${this.options.format} decode requires a rebuilt WASM with multi-format bridge`);
+        }
+      }
+      const source = getCapabilities(module).progressiveDecode
+        ? this.eventsProgressive(module)
+        : this.eventsOneShot(module);
+      // targetFrame computed lazily from first event carrying animTicksPerSecond.
+      // Falls back to 0 for non-animation files (yield all events).
+      let targetFrame = -1;
+      for await (const ev of source) {
+        if (ev.type === "header" || ev.type === "error" || ev.type === "budget_exceeded") {
+          yield ev;
+        } else if (ev.type === "progress" || ev.type === "final") {
+          if (targetFrame === -1) {
+            targetFrame = ev.animTicksPerSecond != null
+              ? Math.floor(timeMs * ev.animTicksPerSecond / 1000)
+              : 0;
+          }
+          if ((ev.frameIndex ?? 0) >= targetFrame) yield ev;
+        }
+      }
+    } catch (error) {
+      yield {
+        type: "error",
+        code: error instanceof CapabilityMissing ? error.code : "DecodeFailed",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      this.chunkQueue = [];
+      this.readIndex = 0;
+      this.queuedBytes = 0;
+    }
+  }
+
   dispose(): void {
     this.chunkQueue = [];
     this.readIndex = 0;
@@ -2167,7 +2291,8 @@ class LibjxlEncoder implements JxlEncoder {
 
 async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
   modulePromise ??= (testModuleFactory ?? loadGeneratedLibjxlModule)();
-  return modulePromise;
+  cachedModule = await modulePromise;
+  return cachedModule;
 }
 
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
@@ -2207,6 +2332,12 @@ interface JxlCapabilities {
   metadataBoxesV2: boolean;
   gainMapEncode: boolean;
   animationEncode: boolean;
+
+  /**
+   * Internal: presence of the native C seek function.
+   * Exposed publicly as WrapperCapabilities.animationSeek.
+   */
+  animationSeek: boolean;
 }
 
 const capabilityCache = new WeakMap<LibjxlWasmModule, JxlCapabilities>();
@@ -2236,6 +2367,7 @@ function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
     metadataBoxesV2: typeof module._jxl_wasm_encode_rgba8_with_metadata_v2 === "function",
     gainMapEncode: typeof module._jxl_wasm_encode_with_gain_map === "function",
     animationEncode: typeof module._jxl_wasm_encode_animation === "function",
+    animationSeek: typeof module._jxl_wasm_dec_seek_to_frame === "function",
   };
   capabilityCache.set(module, caps);
   return caps;

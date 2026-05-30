@@ -208,6 +208,18 @@ export interface NativeDecoder {
   events(): AsyncIterable<DecodeEvent>;
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
+
+  /**
+   * Seek to a specific animation frame index (0-based). Software fallback: decodes all
+   * frames and discards those before frameIndex. Must be called instead of events().
+   */
+  seekToFrame?(frameIndex: number): AsyncIterable<DecodeEvent>;
+
+  /**
+   * Seek by timestamp in milliseconds. Computes frame index from animTicksPerSecond;
+   * falls back to frame 0 for non-animation files. Same constraints as seekToFrame.
+   */
+  seekToTime?(timeMs: number): AsyncIterable<DecodeEvent>;
 }
 
 export interface NativeEncoder {
@@ -253,7 +265,37 @@ export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFaca
   ensureBindingLoaded(binding, "native binding");
   return {
     createDecoder(options) {
-      return binding.createDecoder!(options);
+      const raw = binding.createDecoder!(options);
+      // Software fallback seek: same logic as WASM LibjxlDecoder.
+      return {
+        ...raw,
+        async *seekToFrame(frameIndex: number) {
+          if (raw.seekToFrame) { yield* raw.seekToFrame(frameIndex); return; }
+          for await (const ev of raw.events()) {
+            if (ev.type === "header" || ev.type === "error" || ev.type === "budget_exceeded") {
+              yield ev;
+            } else if (ev.type === "progress" || ev.type === "final") {
+              if ((ev.frameIndex ?? 0) >= frameIndex) yield ev;
+            }
+          }
+        },
+        async *seekToTime(timeMs: number) {
+          if (raw.seekToTime) { yield* raw.seekToTime(timeMs); return; }
+          let targetFrame = -1;
+          for await (const ev of raw.events()) {
+            if (ev.type === "header" || ev.type === "error" || ev.type === "budget_exceeded") {
+              yield ev;
+            } else if (ev.type === "progress" || ev.type === "final") {
+              if (targetFrame === -1) {
+                targetFrame = ev.animTicksPerSecond != null
+                  ? Math.floor(timeMs * ev.animTicksPerSecond / 1000)
+                  : 0;
+              }
+              if ((ev.frameIndex ?? 0) >= targetFrame) yield ev;
+            }
+          }
+        },
+      } as NativeDecoder;
     },
     createEncoder(options) {
       return binding.createEncoder!(options);

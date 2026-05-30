@@ -92,10 +92,10 @@ All items in the 2026-05-28 audit section now have design coverage.
 | Additional HDR Signaling | `additional-hdr-signaling.md` | Medium follow-up | Mastering Display Color Volume + CLLI | Design complete (2026-06) |
 | JUMBF Box Support | `jumbf-box-support.md` | Medium follow-up | First-class JUMBF embedding (C2PA etc.) via pure-TS sugar over custom boxes | Implemented on branch `feature/jumbf-box-support` (exemplar: zero-FFI, rich lab demo with sample stub, full living handoff) |
 | Granular per-Extra-Channel Modular Settings | `granular-extra-channel-modular.md` | Medium follow-up | Per-channel Modular controls for extra channels | Design complete (2026-06) |
-| Animation Decode Enhancements | `animation-decode-enhancements.md` | Medium follow-up | Frame-accurate seeking + richer per-frame metadata on decode | Design complete (2026-06) |
-| Remaining Low-Level Frame Settings | `remaining-frame-settings.md` | Catch-all | Final stragglers from cjxl | Design complete (2026-06) — completeness record |
+| Animation Decode Enhancements | `animation-decode-enhancements.md` | Medium follow-up | Frame-accurate seeking + richer per-frame metadata on decode | Implemented on branch `feature/animation-decode-enhancements` (source-only; WASM rebuild + seek wiring pending — see ISSUES.md §9) |
+| Remaining Low-Level Frame Settings | `remaining-frame-settings.md` | Catch-all | Final stragglers from cjxl | Complete (2026-06) — 26 first-class, 10 escape-hatch, 0 new promotions |
 
-All Medium / Follow-up items from the 2026-05-28 Next Features Handoff now have design notes.
+All Medium / Follow-up items from the 2026-05-28 Next Features Handoff now have design notes and implementation.
 
 ---
 

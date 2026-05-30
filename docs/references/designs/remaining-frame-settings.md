@@ -1,61 +1,139 @@
 # Feature Design Note: Remaining Low-Level Frame Settings
 
-**Feature:** Catch-all design note for any remaining low-level `JXL_ENC_FRAME_SETTING_*` values from cjxl / libjxl that are still only accessible via the raw `advancedFrameSettings` escape hatch after all previous design notes.  
-**Date:** 2026-06  
-**Author:** Grok  
-**Status:** Design ready for implementation handoff  
-**Related Index Section:** Medium / Follow-up (catch-all)  
-**Priority:** Low-to-Medium — ensures completeness.
+**Feature:** Catch-all completeness record for all `JXL_ENC_FRAME_SETTING_*` IDs from libjxl / cjxl.
+**Date:** 2026-06
+**Author:** Grok + David (audit pass)
+**Status:** Complete — 0 new promotions; 10 IDs in escape hatch with documented guidance
+**Related Index Section:** Medium / Follow-up (catch-all)
+**Priority:** Low — reference and completeness only
 
 ---
 
 ## 1. Goal & Value
 
-After the major waves of design notes (advanced encoder controls, Phase 3 micro-features, progressive, decoder controls, HDR, etc.), there may still be a small number of niche or low-level frame settings that have real usage in cjxl but have not been promoted to named first-class surfaces.
+After all major design notes (first-class-advanced-encoder-controls, core-modular-controls, Phase 3 micro-features, etc.), confirm that no high-value `JXL_ENC_FRAME_SETTING_*` IDs have been missed. This note is the official audit record for the 2026 design wave.
 
-This note serves as a home for those final stragglers so they receive at least a documented path rather than being left completely undocumented.
-
----
-
-## 2. Recommended Approach
-
-1. Audit the current `advancedFrameSettings` usage in the codebase and in cjxl_main.cc for any remaining frequently-used or high-value IDs that lack dedicated support.
-2. For each such setting, decide:
-   - Promote to a small dedicated option (if high value).
-   - Document it clearly as a recommended escape hatch value with examples (if low/niche value).
-3. Add any newly promoted items to the appropriate existing design note or this one.
+Verdict: **All high-ROI settings are first-class. 0 new promotions required.** The escape hatch is the right home for the remaining niche/low-value IDs.
 
 ---
 
-## 3. Current Status (as of this note)
+## 2. Coverage Audit — All Frame Setting IDs
 
-At the time of writing, the major high-ROI controls have been covered. Any remaining items are expected to be low-volume or highly specialized.
+| ID | cjxl Name | Coverage | Notes |
+|----|-----------|----------|-------|
+| 0 | EFFORT | ✅ First-class: `effort` | Core encode option |
+| 1 | RESAMPLING | ✅ First-class: `resampling.factor` | `resampling.md` |
+| 2 | EXTRA_CHANNEL_RESAMPLING | ✅ First-class: `resampling.extraChannelFactor` | `resampling.md` |
+| 3 | ALREADY_DOWNSAMPLED | ✅ First-class: `alreadyDownsampled` | `pixel-art-downsampling.md` |
+| 4 | PHOTON_NOISE_ISO | ✅ First-class: `photonNoiseIso` | `photon-noise.md` |
+| 5 | NOISE | 🔧 Escape hatch | Low-value synthetic noise toggle |
+| 6 | DOTS | 🔧 Escape hatch | Content-adaptive; only affects specific content types |
+| 7 | PATCHES | 🔧 Escape hatch | `patches-splines.md` — explicitly escape-hatch-first |
+| 8 | EPF | ✅ First-class: `advancedControls.epf` | `first-class-advanced-encoder-controls.md` |
+| 9 | GABORISH | ✅ First-class: `advancedControls.gaborish` | `first-class-advanced-encoder-controls.md` |
+| 10 | MODULAR | ✅ First-class: `modular.force` | `core-modular-controls.md` |
+| 11 | KEEP_INVISIBLE | 🔧 Escape hatch | Niche; only relevant for images with invisible pixels |
+| 12 | GROUP_ORDER | ✅ First-class: `advancedControls.groupOrder` | `first-class-advanced-encoder-controls.md` |
+| 13 | GROUP_ORDER_CENTER_X | ✅ First-class: `advancedControls.groupOrderCenterX` | Paired with GROUP_ORDER |
+| 14 | GROUP_ORDER_CENTER_Y | ✅ First-class: `advancedControls.groupOrderCenterY` | Paired with GROUP_ORDER |
+| 15 | RESPONSIVE | 🔧 Escape hatch | Progressive signaling; niche |
+| 16 | PROGRESSIVE_AC | 🔧 Escape hatch | Low-level progressive mode flag |
+| 17 | QPROGRESSIVE_AC | 🔧 Escape hatch | Low-level progressive mode flag |
+| 18 | PROGRESSIVE_DC | 🔧 Escape hatch | Low-level progressive mode flag |
+| 19 | CHANNEL_COLORS_GLOBAL_PERCENT | ✅ First-class: `advancedControls.channelColorsGlobalPercent` | CfL tuning |
+| 20 | CHANNEL_COLORS_GROUP_PERCENT | ✅ First-class: `advancedControls.channelColorsGroupPercent` | CfL tuning |
+| 21 | PALETTE_COLORS | ✅ First-class: `modular.paletteColors` | `core-modular-controls.md` |
+| 22 | LOSSY_PALETTE | ✅ First-class: `modular.lossyPalette` | `core-modular-controls.md` |
+| 23 | COLOR_TRANSFORM | 🔧 Escape hatch | Internal color transform; rarely needed |
+| 24 | MODULAR_COLOR_SPACE | ✅ First-class: `modular.colorSpace` | `core-modular-controls.md` |
+| 25 | MODULAR_GROUP_SIZE | ✅ First-class: `modular.groupSize` | `core-modular-controls.md` |
+| 26 | MODULAR_PREDICTOR | ✅ First-class: `modular.predictor` | `core-modular-controls.md` |
+| 27 | MODULAR_MA_TREE_LEARNING_PERCENT | ✅ First-class: `modular.maTreeLearningPercent` | `core-modular-controls.md` |
+| 28 | MODULAR_NB_PREV_CHANNELS | ✅ First-class: `modular.nbPrevChannels` | `core-modular-controls.md` |
+| 29 | JPEG_RECON_CFL | ✅ First-class: `jpegReconstruction` (CFL toggle) | `jpeg-recompression-polish.md` |
+| 30 | SKIP_BASIC_SIM | ✅ First-class: `advancedControls.disablePerceptualHeuristics` | `first-class-advanced-encoder-controls.md` |
+| 31 | DECODING_SPEED | ✅ First-class: `decodingSpeedTier` | `decoding-speed-tier.md` |
+| 32 | RESAMPLING_FUNCTION | 🔧 Escape hatch | Niche; affects resampling kernel |
+| 33 | BUFFERING | ✅ First-class: `buffering` (lowMemoryMode/preferChunked) | `production-chunked-paths.md` |
+| 34 | JPEG_COMPRESS_BOXES | ✅ First-class: `metadata.compressBoxes` | `metadata-boxes-container.md` |
+| 35 | UPSAMPLING_MODE | ✅ First-class: `upsamplingMode` | `pixel-art-downsampling.md` |
 
-This note acts as the "completion" record for the 2026 design wave.
+**Summary:** 26 first-class, 10 escape-hatch. 0 new promotions.
 
 ---
 
-## 4. Implementation Guidance
+## 3. Escape Hatch — Documented Guidance
 
-- Keep the bar high: only promote settings that have clear, repeated real-world usage in cjxl or production wrappers.
-- Everything else should receive excellent documentation in the escape hatch path rather than half-hearted named fields.
+The following IDs have confirmed real libjxl support but are not promoted. They should be used via `advancedFrameSettings`:
+
+```typescript
+// Example: enable noise synthesis
+encoder.setAdvancedFrameSetting(5, 1);
+
+// Example: disable patches
+encoder.setAdvancedFrameSetting(7, 0);
+
+// Example: keep invisible pixels
+encoder.setAdvancedFrameSetting(11, 1);
+
+// Example: override color transform (0=auto, 1=XYB, 2=None)
+encoder.setAdvancedFrameSetting(23, 2);
+
+// Example: set responsive (progressive signaling)
+encoder.setAdvancedFrameSetting(15, 1);
+```
+
+**Escape hatch IDs and when to use them:**
+
+| ID | When to use |
+|----|-------------|
+| 5 NOISE | Only if you want to add synthetic noise for stylistic effect. Default (auto) is usually correct. |
+| 6 DOTS | Only if testing halftone/dot-pattern rendering behavior. Very niche. |
+| 7 PATCHES | See `patches-splines.md` — try escape hatch first. |
+| 11 KEEP_INVISIBLE | When images have meaningful data in alpha=0 pixels that must survive round-trip. |
+| 15 RESPONSIVE | Low-level progressive signaling; use `progressive: true` high-level option instead. |
+| 16 PROGRESSIVE_AC | Only if you need fine-grained progressive AC pass control. Rarely needed. |
+| 17 QPROGRESSIVE_AC | Same as above. |
+| 18 PROGRESSIVE_DC | Same as above. |
+| 23 COLOR_TRANSFORM | Override internal color space transform. Only useful for special debugging or format studies. |
+| 32 RESAMPLING_FUNCTION | Override the resampling kernel (e.g., Lanczos variant). Very niche. |
 
 ---
 
-## Rationale
+## 4. Rationale for Not Promoting
 
-Completeness matters for a "feature-maximal" project. This note ensures nothing important falls through the cracks while avoiding over-engineering niche controls.
+Each escape-hatch ID was evaluated against the ruthless standard:
+- **Real, validated usage in cjxl or production references?**
+- **User-visible benefit with a clear, non-expert explanation?**
 
-**End of design note.**
+IDs 5, 6, 11, 15–18, 23, 32 failed at least one criterion. The correct outcome is the escape hatch with good documentation — which is what this note provides.
 
 ---
 
 ## Implementation Progress
 
-Design note created as the catch-all / completeness record for the 2026 design notes effort.
+No implementation code needed. This note is a documentation and audit artifact only.
+
+| Task | Status |
+|------|--------|
+| Audit all JXL_ENC_FRAME_SETTING_* IDs (0–35) | ✅ Done |
+| Confirm 0 new promotions | ✅ Confirmed |
+| Write escape-hatch guidance table | ✅ Done |
+| Reference all related design notes | ✅ Done |
 
 ---
 
 ## Cleanup & Handoff
 
-This note should be revisited after major implementation waves to see if any newly popular low-level settings have emerged that deserve promotion. For now it serves as the official "we have covered the important ones" marker.
+This is the official "we have covered the important ones" marker for the 2026 design wave. No follow-up implementation required.
+
+**If new frame settings are added in a future libjxl version:** Re-audit this table. Check `jxl/encode.h` in the updated libjxl for any new `JXL_ENC_FRAME_SETTING_*` entries.
+
+**Companion notes:**
+- `first-class-advanced-encoder-controls.md` — master advanced controls note
+- `core-modular-controls.md` — all modular settings
+- `patches-splines.md` — detailed escape-hatch guidance for patches/splines
+- `pixel-art-downsampling.md` — upsamplingMode + alreadyDownsampled
+- `jpeg-recompression-polish.md` — JPEG recon CFL
+
+**End of design note.**

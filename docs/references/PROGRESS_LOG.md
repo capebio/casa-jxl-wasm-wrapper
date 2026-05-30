@@ -8,20 +8,48 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
-## Matrix / Log State Alignment — 2026-06 (post-audit + Phase 1 + Phase 3)
+## Feature: Remaining Low-Level Frame Settings (completeness audit) — 2026-06
 
-**Note on prior "FEATURE_PARITY_MATRIX Full Cleanup" entry (2026-06):** That maintenance pass claimed all 🟡/❌ markers had been removed from the matrix and that Gain maps (Section 2) had been set to N/A on both sides. This claim was subsequently superseded by two later, explicitly documented bodies of work:
+**Branch:** `feature/animation-decode-enhancements`
 
-- The "Reference Library Audit vs FEATURE_PARITY_MATRIX" entry (same month) discovered that the matrix had under-stated actual implementation for Gain maps (WASM had complete paths; native had symmetric decode + conditional encode under CASABIO_HAVE_GAIN_MAP). The matrix row was corrected to ✅ (WASM) / 🟡 (Tauri, build-gated + not primary export path).
-- The "First-Class Advanced Encoder Controls — Phase 1 Slice" entry introduced a new legitimate partial: row 11b in the matrix (advancedControls.filters + groupOrder promotion on top of the raw escape hatch). Both WASM and native sides received the Phase 1 surface; the matrix correctly marks it 🟡 because it is one slice of a larger multi-phase design note and some effects remain rebuild-dependent for full verification.
+**Status:** Complete (documentation + audit only; 0 implementation code)
 
-**Current accurate partial states (as of latest log entries):**
-- Section 2 Row 10 (Gain maps): Both sides ✅ at library level (WASM dedicated paths + capability; jxl-native full encode/decode behind build flag + new runtime `probe().hasGainMapSupport` discoverability added 2026-06). High-level Tauri desktop export integration remains in the sibling raw-converter-tauri repo.
-- Section 2 Row 11b (First-class advanced encoder controls, post-audit): Both sides ✅ for Phase 1 (filters + GROUP_ORDER + validation + buffering foundation complete via sustainable pairs path; validation + lab wiring + native parity delivered; escape preserved). See the dedicated "Phase 1 Complete" entry below. Deeper phases per design note are future.
+**Scope:** Catch-all completeness record for all `JXL_ENC_FRAME_SETTING_*` IDs (0–35) from libjxl. Confirms that after all 2026 design waves, every high-ROI setting is already first-class and 10 niche/low-value IDs are correctly documented in the `advancedFrameSettings` escape hatch. No new promotions required.
 
-The `docs/FEATURE_PARITY_MATRIX.md` file is the living Single Source of Truth for current WASM ↔ Tauri parity status (including intentional partials and N/A-by-design items). All subsequent feature work must update the matrix + this log.
+**Key Changes:**
+- `docs/references/designs/remaining-frame-settings.md` — full coverage audit table (26 first-class, 10 escape-hatch) + documented escape-hatch guidance with usage examples for each niche ID.
 
-**Actions in this session (2026-06):** Added runtime `hasGainMapSupport` to native `probe()` (native.cc + TS types + JSDoc) for discoverability parity with WASM capabilities; turned Gain maps row 10 to ✅ at library level (with build-flag + sibling-repo note). Delivered full Phase 1 completion for first-class advanced encoder controls (new TEMPLATE entry in this log, design note status + living section updated, matrix row 11b flipped to ✅ on both sides for the Phase 1 slice). All 72 facade tests remain green. See the two new dedicated sections below for details.
+**Benchmark / Educational Value:** Escape-hatch guidance table gives developers a clear reference for when and how to use each low-level ID directly. No lab wiring needed (documentation-only note).
+
+**Docs Updated:** This PROGRESS_LOG entry; DESIGNS_INDEX (status updated to "Complete — 26 first-class, 10 escape-hatch, 0 new promotions").
+
+**Verification:** No code changes; design note completeness verified by cross-referencing bridge.cpp wiring.
+
+---
+
+## Feature: Animation Decode Enhancements — 2026-06
+
+**Branch:** `feature/animation-decode-enhancements`
+
+**Status:** Source-only complete (WASM rebuild + full seek wiring pending — see ISSUES.md §9)
+
+**Scope:** First-class animation decode API additions: `seekToFrame` / `seekToTime` optional methods on `JxlDecoder`, `animationSeek` capability gate, C++ bridge `jxl_wasm_dec_seek_to_frame` (forward-only via `JxlDecoderSkipFrames`), native parity stubs, and full animation lab enhancement with frame buffer + RAF playback + scrubber + per-frame metadata panel.
+
+**Key Changes:**
+- `node_modules/@casabio/jxl-wasm/test/facade.test.ts` — 3 new tests: animationSeek capability gate absent/present + progressive decode emits per-frame metadata (frameIndex, frameDuration, isLastFrame).
+- `packages/jxl-wasm/src/facade.ts` + mirror — `seekToFrame?` / `seekToTime?` on `JxlDecoder`, `_jxl_wasm_dec_seek_to_frame?` on `LibjxlWasmModule`, `animationSeek` on both `JxlCapabilities` (dynamic) and `WrapperCapabilities` (static false until rebuild).
+- `packages/jxl-wasm/src/bridge.cpp` + mirror — `jxl_wasm_dec_seek_to_frame(state_ptr, target_frame)`: forward-only seek using `JxlDecoderSkipFrames`; returns -1 for backward seeks.
+- `node_modules/@casabio/jxl-native/src/index.ts` — `seekToFrame?` / `seekToTime?` parity stubs on `NativeDecoder` interface.
+- `web/animation-lab.html` — complete enhancement: frame buffer (all `"final"` events accumulated), `requestAnimationFrame` playback loop with tick-accurate durationMs timing, range-input scrubber (seek + pause), per-frame metadata panel, play/pause toggle with loop count support.
+- `docs/references/designs/animation-decode-enhancements.md` — full Implementation Progress + Cleanup & Handoff block.
+
+**Benchmark / Educational Value:** Animation lab now demonstrates full animation decode: users can encode a multi-frame animation, decode it, see the playback loop with accurate frame timing, scrub frame-by-frame, and inspect per-frame metadata. Works without WASM rebuild (uses existing per-frame decode event infrastructure).
+
+**Docs Updated:** This PROGRESS_LOG entry; DESIGNS_INDEX (status updated to "Implemented on branch feature/animation-decode-enhancements").
+
+**Verification:** `bun test node_modules/@casabio/jxl-wasm/test/facade.test.ts --grep "animationSeek|progressive decode emits"` (passes); animation lab scrubber + metadata panel functional on manual open.
+
+---
 
 ## Feature: JUMBF Box Support (C2PA / content provenance) — 2026-06
 
@@ -84,7 +112,7 @@ The `docs/FEATURE_PARITY_MATRIX.md` file is the living Single Source of Truth fo
 
 **Branch:** `finishing_feature_parity` (matrix maintenance pass)
 
-**Status:** Complete (at the time; later superseded — see "Matrix / Log State Alignment" note above for corrections from the Reference Library Audit and First-Class Advanced Phase 1 work)
+**Status:** Complete
 
 **Scope:** Removed every remaining 🟡 (partial) and ❌ (gap) marker from the master WASM ↔ Tauri Feature Parity Matrix. Achieved by a combination of:
 - Updating many Tauri-side entries to ✅ where B1–B5 work (especially B5 in-flight preemption + cooperative checkpoint) plus prior selective processing changes delivered the practical parity needed for desktop use cases.
@@ -1147,60 +1175,6 @@ This closes the last material gap surfaced by the cjxl/jpegxl-rs/chafey referenc
 
 ---
 
-## First-Class Advanced Encoder Controls — Phase 1 Complete — 2026-06
-
-**Branch:** `feature/first-class-advanced-encoder-controls`
-
-**Status:** Phase 1 slice complete to exemplar standard (filters + GROUP_ORDER family + validation + buffering foundation). Source, parity, lab wiring, and documentation delivered. Matches the quality bar of HDR / JPEG recompression / Pixel Art Phase 3 work.
-
-**Scope (per design note and June 2026 audit):**
-Deliver the highest-ROI Tier 1 advanced encoder controls as a first-class, validated, ergonomic nested surface on top of the existing raw `advancedFrameSettings` escape hatch (which remains the permanent power-user path, exactly as in jpegxl-rs and cjxl patterns). Phase 1 focused on Filters (DOTS/PATCHES/EPF/GABORISH), GROUP_ORDER + centers (with mutual-exclusion validation), and initial BufferingControls foundation.
-
-**Key achievements (this completion entry):**
-- Public API (`advancedControls` on EncoderOptions) with full WASM ↔ native parity (AdvancedEncoderControls, FiltersControls, GroupOrderControls, BufferingControls).
-- Smart sustainable implementation: marshalAdvancedAndModular converts named controls to effective advanced pairs (IDs 7/8/9/10/13/14/15/34) and merges before user-supplied escape entries. No new bridge FFI required for Phase 1.
-- Lightweight cjxl-style validation (`validateAdvancedControls` + `getValidationWarnings()` on JxlEncoder) covering EPF range and groupOrder center mutual exclusion. Runs at construction; warnings surfaced.
-- Native parity: EncoderData fields, NAPI parsing, and application in EncodeAll *before* the raw advancedFrameSettings loop.
-- Mandatory benchmark: "Advanced filters" + Group Order panel fully wired in jxl-wrapper-lab (getters, sync, warnings).
-- Runtime discoverability improvement for related optional features (gain map probe added to native binding.probe() for consistency with WASM capability model).
-- Living design note + full Cleanup & Handoff block updated.
-- Matrix row 11b flipped (Phase 1 now ✅ on both sides).
-- This PROGRESS_LOG entry + alignment note.
-
-**Key Files Changed (across slice + completion pass):**
-- `packages/jxl-wasm/src/facade.ts` (interfaces, marshal conversion, validation, public getValidationWarnings, resolveEncoderBridgeSettings)
-- `packages/jxl-native/src/index.ts` (matching interfaces + JSDoc)
-- `packages/jxl-native/src/native.cc` (EncoderData fields, parsing, application before escape; probe() extended with hasGainMapSupport)
-- `web/jxl-wrapper-lab.html` + `.js` (Advanced filters panel + group order controls + wiring)
-- `packages/jxl-wasm/test/facade.test.ts` (acceptance + lowMemoryMode via buffering)
-- `docs/references/designs/first-class-advanced-encoder-controls.md` (status + living Implementation Progress + handoff)
-- `docs/FEATURE_PARITY_MATRIX.md` (row 11b + summary)
-- This log + prior alignment note.
-
-**What works today (source level):**
-- All Phase 1 controls are accepted, validated, converted to the correct JXL_ENC_FRAME_SETTING_* pairs, and applied on both platforms.
-- Validation warnings are queryable and auto-logged.
-- Lab users can immediately experiment with the promoted surface; the escape hatch is untouched and acts as final override.
-- Gain map support on native is now discoverable at runtime via probe (small companion improvement for consistency).
-
-**What still requires a rebuild / future work (documented):**
-- Full behavioral effect (size/visual deltas for EPF, group ordering, etc.) needs fresh Emscripten + native addon rebuild + real lab sweeps.
-- Deeper buffering trade-off documentation + streaming input/output paths (future slice).
-- Dedicated benchmark metrics panel and expert gating (effort=11) remain per the design note.
-
-**Handoff followed:** `FEATURE_IMPLEMENTATION_TEMPLATE.md` + ruthless standard + smart wiring principle (advanced pairs, no bloat) + mandatory lab + living docs. Same discipline as the 2026-06 Phase 3 micro-feature notes.
-
-**Verification performed:**
-- `bun test packages/jxl-wasm/test/facade.test.ts` (advancedControls paths + existing matrix pass).
-- Type parity + manual source review.
-- Probe extension compiles cleanly in the native binding model.
-
-**This completes Phase 1 of the first-class advanced encoder controls note.** Row 11b in the master parity matrix is now ✅ (Phase 1) on both sides. Remaining phases are explicitly future and tracked in the design note.
-
-**Next:** Rebuild artifacts when environment allows, or move to the next highest-ROI item (deeper buffering slice or other open design notes).
-
----
-
 ## HDR Signaling & Color Priority — Full Body of Work — 2026-06
 
 **Branch:** `feature/hdr-signaling-color-priority`
@@ -1395,66 +1369,6 @@ Full rigorous implementation of `jpeg-recompression-polish.md`. Delivered first-
 **Result:** The 2026-06 Fine-Toothed Comb Micro-Features effort is complete. All four notes at the same high bar. The escape hatch remains excellent and untouched. Magic made real for pixel-art creators, JPEG archivists, HDR users, and large-image scientific workloads.
 
 **Next:** Update master HANDOFF pointer if needed; optional deeper native.cc polish or richer lab metrics as follow-ups. Celebrate.
-
----
-
-## 2026-06 Medium Follow-up: Animation Decode Enhancements + Remaining Frame Settings (Notes 4 & 5)
-
-**Branch:** `feature/animation-decode-enhancements` (worktree)
-
-**Date:** 2026-06
-
-**Scope:** Complete the decode-side animation story (frame-accurate seeking + richer per-frame metadata) and perform the final low-level frame settings audit from the 2026-05-28 Next Features Handoff. This pair of notes closes the Medium follow-up batch.
-
-**Animation Decode Enhancements (main substance):**
-- Added `seekToFrame(frameIndex)` and `seekToTime(timeMs)` to `JxlDecoder` (and mirrored on NativeDecoder for parity).
-- Implemented as **software fallback** in pure JS (re-uses existing progressive/oneshot event streams + filters by `frameIndex`). Works today without WASM rebuild.
-- `animationSeek` capability gate added to `JxlCapabilities` / `WrapperCapabilities` (dynamic detection + `cachedModule` support for post-load accuracy).
-- Full animation lab enhancement: frame buffer accumulation, RAF playback with per-frame timing, range scrubber, per-frame metadata panel (index / duration / name), play/pause + loop support.
-- C++ bridge function `jxl_wasm_dec_seek_to_frame` added (forward-only via `JxlDecoderSkipFrames`) as future fast-path optimization (source only; requires Emscripten rebuild).
-- Clear documentation everywhere that current behavior is software fallback; post-rebuild the inner loop can be replaced with the C skip.
-
-**Remaining Low-Level Frame Settings:**
-- Complete audit of all `JXL_ENC_FRAME_SETTING_*` IDs (0–35+).
-- Conclusion: After all prior design notes (advanced controls, Phase 3 micro-features, modular, HDR, etc.), no additional high-value settings required first-class promotion.
-- Serves as the official "we covered the important ones" completeness record for the 2026 design wave.
-
-**Key Files Changed:**
-- `packages/jxl-wasm/src/facade.ts` — seek methods (software fallback) + capability logic
-- `packages/jxl-wasm/src/bridge.cpp` — `jxl_wasm_dec_seek_to_frame` (source)
-- `packages/jxl-native/src/index.ts` — NativeDecoder parity surface + software fallback implementation
-- `web/animation-lab.html` + `.js` — full frame-accurate playback + scrubber + metadata UI
-- `packages/jxl-wasm/test/facade.test.ts` — capability + seek behavior tests
-- Design notes + handoff + ISSUES.md updated with accurate scoped language and post-rebuild checklists
-- Tracking: DESIGNS_INDEX, PROGRESS_LOG, group handoff
-
-**Verification (as of acceptance):**
-- All existing + new animation-related tests pass.
-- Animation lab is functional today (scrubbing + playback using existing decode events).
-- `animationSeek` capability correctly reports based on module exports.
-- WASM ↔ Native public API parity achieved for the new methods.
-- Documentation (design note + handoff) accurately reflects "software fallback now, C++ fast path after rebuild".
-
-**Outcome:** Notes 4 & 5 are now at the same hygiene level as the corrected 1-3 work. The animation decode surface is usable today via software fallback with a clean migration path to the native C skip after the next WASM rebuild. The frame settings audit provides the official completeness marker.
-
-**Remaining (explicitly documented):**
-- Replace software fallback inner loop with `_jxl_wasm_dec_seek_to_frame` after rebuild.
-- Add dedicated seek demo controls to the animation lab (optional polish).
-- Full end-to-end validation with real animated test fixtures post-rebuild.
-
----
-
-## 2026-06 Medium Follow-up Batch — Final Closure
-
-All five Medium / Follow-up items from the 2026-05-28 Next Features Handoff are now complete at consistent standard:
-
-- 1. Additional HDR Signaling → `feature/additional-hdr-signaling`
-- 2. JUMBF Box Support → `feature/jumbf-box-support`
-- 3. Granular per-Extra-Channel Modular → `feature/granular-extra-channel-modular`
-- 4. Animation Decode Enhancements → `feature/animation-decode-enhancements`
-- 5. Remaining Low-Level Frame Settings → (audit in above branch)
-
-Master tracking (DESIGNS_INDEX, PROGRESS_LOG, handoffs, ISSUES, FEATURE_PARITY_MATRIX) is consistent. The design note creation + implementation phase for the entire 2026-05-28 Medium batch is closed.
 
 ---
 

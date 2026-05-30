@@ -66,3 +66,4 @@ _jxl_wasm_dec_frame_name_ptr
 _jxl_wasm_dec_is_last_frame
 _jxl_wasm_dec_anim_ticks_per_second
 _jxl_wasm_dec_anim_loop_count
+_jxl_wasm_dec_seek_to_frame

@@ -146,6 +146,19 @@ All four notes completed to full exemplar standard (public first-class surface, 
 
 ---
 
+## 10. 2026-06 Medium / Follow-up Features (Notes 4 & 5)
+
+Implemented on `feature/animation-decode-enhancements`. See `references/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md` and the individual design notes.
+
+| # | Feature (Design Note) | WASM | Tauri/Native | Benchmark Exposure | Notes |
+|---|-----------------------|------|--------------|--------------------|----|
+| 1 | Animation Decode Enhancements (`animation-decode-enhancements.md`) — `seekToFrame`, `seekToTime`, `animationSeek` capability gate, frame buffer + playback lab | ✅ (`seekToFrame`/`seekToTime` software-fallback in `LibjxlDecoder`; `animationSeek` dynamic via `cachedModule`; post-rebuild replaces fallback with `_jxl_wasm_dec_seek_to_frame` C++ skip) | ✅ (`seekToFrame`/`seekToTime` software-fallback wrapper in `createNativeCodecFacade`; same filter logic; native binding can supply faster path post-rebuild) | animation-lab.html (frame buffer, RAF playback loop with tick-accurate timing, range scrubber, per-frame metadata panel, play/pause, loop count) | `seekToFrame`/`seekToTime` work today as decode-and-discard. `animationSeek` gate = false until WASM rebuild; seek methods always present on decoder object regardless. 3 new tests. |
+| 2 | Remaining Low-Level Frame Settings (`remaining-frame-settings.md`) — completeness audit of all 36 `JXL_ENC_FRAME_SETTING_*` IDs | ✅ (26 first-class; 10 escape-hatch with documented guidance; 0 new promotions) | ✅ (same coverage via shared facade/native surfaces) | N/A (documentation-only note) | All high-ROI settings covered in prior waves. Escape-hatch guide + usage examples in design note. |
+
+**Completion status:** Both notes at the rigorous bar. `seekToFrame`/`seekToTime` have real software-fallback implementations on both WASM and Native. Post-rebuild optimization is the only remaining work (replace decode-and-discard with C++ skip in `seekToFrame`).
+
+---
+
 ## Summary of Remaining High-Impact Gaps (2026-06)
 
 Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or completed B-series work). 
