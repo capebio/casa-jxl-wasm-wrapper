@@ -1,1 +1,0 @@
-cjxl_main.cc (official libjxl command-line encoder) saved as reference - the most complete real-world usage of all encoder options

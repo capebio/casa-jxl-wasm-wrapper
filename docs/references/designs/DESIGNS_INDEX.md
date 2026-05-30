@@ -110,7 +110,7 @@ All four notes completed to full exemplar standard on dedicated branches (see in
 
 **Single source of truth for parity + exposure:** `docs/FEATURE_PARITY_MATRIX.md` §9 (new dedicated table with all four ✅ + wrapper-lab details).
 
-See `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (now marked complete) and `PROGRESS_LOG.md` for the full log + rationale.
+See git history for the 2026-06 HANDOFF_Continuing_Phase3_MicroFeatures (now marked complete in the log) and `PROGRESS_LOG.md` for the full log + rationale.
 
 ## Next Steps (After Design Phase)
 

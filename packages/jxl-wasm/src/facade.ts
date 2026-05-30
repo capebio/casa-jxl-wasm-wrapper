@@ -447,8 +447,19 @@ function resolveEffectiveMetadata(options: EncoderOptions): {
 /** True when box-options v2 features are needed (compress, container control, custom boxes). */
 function needsBoxOptsV2(options: EncoderOptions): boolean {
   const m = options.metadata;
+  const hasJumbf = options.jumbfBoxes != null && options.jumbfBoxes.length > 0;
   return !!(m?.compressBoxes || m?.forceContainer || m?.rawCodestream) ||
-    (options.customBoxes != null && options.customBoxes.length > 0);
+    (options.customBoxes != null && options.customBoxes.length > 0) ||
+    hasJumbf;
+}
+
+/** Expands jumbfBoxes into MetadataBoxSpec entries (type "jumb", compress true by default). */
+function expandJumbfBoxes(options: EncoderOptions): MetadataBoxSpec[] {
+  if (!options.jumbfBoxes?.length) return [];
+  return options.jumbfBoxes.map(j => {
+    const data = j.data instanceof ArrayBuffer ? new Uint8Array(j.data) : j.data;
+    return { type: "jumb", data, compress: true };
+  });
 }
 
 // WasmBoxOpts layout (20 bytes, little-endian uint32):

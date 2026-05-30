@@ -1,4 +1,4 @@
-﻿import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
+﻿import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder, getWrapperCapabilities } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
 import { getCapabilities } from '@casabio/jxl-capabilities';
@@ -7,6 +7,7 @@ import {
     setCssVar,
 } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+import { createFilePicker } from './jxl-file-picker.js';
 
 const { process_orf, process_cr2, rgb_to_rgba } = rawWasm;
 
@@ -1113,6 +1114,7 @@ async function loadSourcesFromFiles(fileList) {
     batchStatus.textContent = `Loaded ${loaded.length} file(s) in ${fmtTiming(elapsed)}.`;
     setCounters({ loaded: loaded.length });
     updateRunButtons();
+    updateWorkflowState();
 }
 
 async function loadRandomSources(count = MAX_BATCH_LIMIT) {
@@ -1125,19 +1127,22 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
     const loaded = Array(total);
     let nextIndex = 0;
     let completed = 0;
-    const workers = Array.from({ length: Math.min(RANDOM_LOAD_CONCURRENCY, total) }, async () => {
-        while (nextIndex < total && loadId === activeLoadId) {
-            const index = nextIndex++;
-            loaded[index] = await loadRandomFileSource();
-            if (loadId !== activeLoadId) return;
-            completed++;
-            batchStatus.textContent = `Loading Gobabeb files ${completed}/${total}...`;
-            selectionStatus.textContent = `Loaded ${completed}/${total} random Gobabeb files.`;
-            setCounters({ loaded: completed });
-        }
-    });
-    await Promise.all(workers);
-    loadRandomBtn.disabled = false;
+    try {
+        const workers = Array.from({ length: Math.min(RANDOM_LOAD_CONCURRENCY, total) }, async () => {
+            while (nextIndex < total && loadId === activeLoadId) {
+                const index = nextIndex++;
+                loaded[index] = await loadRandomFileSource();
+                if (loadId !== activeLoadId) return;
+                completed++;
+                batchStatus.textContent = `Loading Gobabeb files ${completed}/${total}...`;
+                selectionStatus.textContent = `Loaded ${completed}/${total} random Gobabeb files.`;
+                setCounters({ loaded: completed });
+            }
+        });
+        await Promise.all(workers);
+    } finally {
+        loadRandomBtn.disabled = false;
+    }
     if (loadId !== activeLoadId) return;
     selectedSources = loaded;
     const elapsed = performance.now() - started;
@@ -1725,6 +1730,7 @@ function clearBatch() {
     setCounters({ loaded: 0, queued: 0, done: 0, errors: 0 });
     setStatus('Idle.', 'Ready.');
     updateRunButtons();
+    updateWorkflowState();
 }
 
 function updateRunButtons() {
@@ -1732,6 +1738,38 @@ function updateRunButtons() {
     runBatchBtn.disabled = !hasFiles;
     if (clearBatchBtn) clearBatchBtn.disabled = !hasFiles;
     if (startRaceBtn) startRaceBtn.disabled = !hasFiles;
+}
+
+/**
+ * Unified workflow + disabled state guidance for this page.
+ * Makes the intended flow obvious and explains why things are disabled.
+ */
+function updateWorkflowState() {
+    const hasFiles = selectedSources.length > 0;
+
+    // Main action buttons
+    const runBtn = document.getElementById('run-batch');
+    const clearBtn = document.getElementById('clear-batch');
+    const startRaceBtnEl = document.getElementById('start-race');
+
+    if (runBtn) {
+        runBtn.disabled = !hasFiles;
+        runBtn.title = hasFiles
+            ? 'Run batch processing with current advanced settings'
+            : 'Pick files first (step 1) before running batch operations.';
+    }
+    if (clearBtn) {
+        clearBtn.disabled = !hasFiles;
+        clearBtn.title = hasFiles ? 'Clear loaded files' : 'No files to clear.';
+    }
+    if (startRaceBtnEl) {
+        startRaceBtnEl.disabled = !hasFiles;
+        startRaceBtnEl.title = hasFiles
+            ? 'Start the selected format race'
+            : 'Load files before starting a race.';
+    }
+
+    // Update any other dependent controls here as needed
 }
 
 function wireControls() {
@@ -1757,20 +1795,29 @@ function wireControls() {
         });
     }
 
-    sourceInput.addEventListener('change', async () => {
-        if (!sourceInput.files?.length) return;
-        await loadSourcesFromFiles(sourceInput.files);
-        setCounters({ loaded: selectedSources.length });
+    // Use unified file picker with memory
+    const filePicker = createFilePicker({
+        input: sourceInput,
+        dropZone: sourceDrop,
+        multiple: true,
+        accept: '.orf,.ORF,.cr2,.CR2,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*',
+        persistKey: 'jxl-wrapper-lab-last-files',
+        onFiles: async (files) => {
+            await loadSourcesFromFiles(files);
+            setCounters({ loaded: selectedSources.length });
+            updateWorkflowState();
+        }
     });
 
-    sourceDrop.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        sourceDrop.classList.add('is-drop-target');
-    });
-
-    sourceDrop.addEventListener('dragleave', () => {
-        sourceDrop.classList.remove('is-drop-target');
-    });
+    // Try to restore last used files on startup (best effort)
+    filePicker?.loadLastPersisted?.().then(files => {
+        if (files?.length) {
+            loadSourcesFromFiles(files).then(() => {
+                setCounters({ loaded: selectedSources.length });
+                updateWorkflowState();
+            });
+        }
+    }).catch(() => {});
 
     sourceDrop.addEventListener('drop', async (event) => {
         event.preventDefault();
@@ -1781,8 +1828,15 @@ function wireControls() {
     });
 
     loadRandomBtn.addEventListener('click', async () => {
-        await loadRandomSources(getBatchLimit());
-        setCounters({ loaded: selectedSources.length });
+        try {
+            await loadRandomSources(getBatchLimit());
+            setCounters({ loaded: selectedSources.length });
+        } catch (err) {
+            const msg = `Random load failed: ${err?.message || err}`;
+            batchStatus.textContent = msg;
+            setStatus(msg);
+            console.error('[wrapper-lab] random load error', err);
+        }
     });
 
     runBatchBtn.addEventListener('click', () => {

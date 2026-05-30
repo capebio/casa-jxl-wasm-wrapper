@@ -5,11 +5,51 @@
 //   1024×1024  — web thumbnail / small image
 //   5240×3912  — full P1100157.ORF dimensions (~20 MP)
 //
-// Known results (1024×1024, native release build):
-//   tiled-16 wins vertical pass (33ms vs 37ms naive; tiled-32 close at 35ms)
-//   transpose is slower (44ms); tiled-2d variants add complexity with no gain.
+// Benchmark results (2026-05-30, Windows 11, native release build):
 //
-// clarity-8 results at both sizes still needed.
+//   1024×1024 — vertical pass only:
+//     tiled-64   171ms  ← winner
+//     tiled-128  179ms
+//     tiled-32   204ms
+//     tiled-16   248ms
+//     clarity-8  268ms  (56% slower than tiled-64)
+//     naive      297ms  (baseline)
+//     transpose  292ms
+//
+//   1024×1024 — full round-trip (h_pass + v_pass):
+//     tiled-128  420ms  ← winner
+//     tiled-64   423ms
+//     clarity-8  424ms  (within noise of tiled-128, but worse v-pass)
+//     tiled-32   448ms
+//     tiled-16   486ms
+//     naive      518ms
+//     transpose  487ms
+//
+//   5240×3912 — vertical pass only:
+//     tiled-64   4074ms  ← winner (-17% vs naive)
+//     tiled-128  4224ms
+//     tiled-32   4927ms
+//     naive      4921ms  (baseline)
+//     tiled-16   5019ms  (slower than naive)
+//     clarity-8  5518ms  (12% slower than naive, 35% slower than tiled-64)
+//     transpose  5531ms
+//
+//   5240×3912 — full round-trip (h_pass + v_pass):
+//     tiled-128  8362ms  ← winner (-16% vs naive)
+//     tiled-64   8761ms
+//     tiled-32   8870ms
+//     transpose  9211ms
+//     tiled-16   9589ms
+//     naive      9988ms  (baseline)
+//     clarity-8 10037ms  (on par with naive, worse than all tiled at this scale)
+//
+// VERDICT: v_pass_clarity REJECTED. Fixed LANE=8 does not help — LLVM vectorises
+// the larger [[f32;3]; TILE] accumulator more effectively than the 8-wide variant.
+// At 20.5 MP, clarity-8 is slower than even the naive baseline.
+//
+// Production recommendation (../raw-converter-tauri/raw-pipeline):
+//   Use v_pass_tiled::<128> for separable_blur (full round-trip winner at both scales).
+//   v_pass_tiled::<64> is best if only the vertical pass is profiled in isolation.
 
 use std::time::Instant;
 

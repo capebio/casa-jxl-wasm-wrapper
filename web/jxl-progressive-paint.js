@@ -1,6 +1,7 @@
-import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
+import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+import { createFilePicker } from './jxl-file-picker.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 
@@ -12,6 +13,7 @@ let wasmReady = false;
 initRaw().then(() => {
     wasmReady = true;
     dbgLog('WASM module initialized');
+    updateWorkflowState?.();
 }).catch(err => {
     dbgLog('Failed to init WASM: ' + err.message, '', 'error');
 });
@@ -179,26 +181,26 @@ async function loadRandomImage() {
 function updateUI() {
     const ready = !!selectedSource;
     runProgressiveBtn.disabled = !ready;
+    updateWorkflowState?.();
     runProgressiveBtn.title = ready ? '' : 'Load a file first';
 }
 
 // ─── Event wiring ─────────────────────────────────────────────────────────────
 
-if (sourceInput) {
-    sourceInput.addEventListener('change', e => {
-        const file = e.target.files?.[0];
-        if (file) loadFile(file);
-    });
-}
+// Unified picker with memory
+const filePicker = createFilePicker({
+    input: sourceInput,
+    dropZone: sourceDrop,
+    multiple: false,
+    accept: '.orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*',
+    persistKey: 'jxl-progressive-paint-last-file',
+    onFiles: (files) => {
+        if (files[0]) loadFile(files[0]);
+        updateWorkflowState();
+    }
+});
 
-if (sourceDrop) {
-    sourceDrop.addEventListener('drop', e => {
-        e.preventDefault();
-        const file = e.dataTransfer?.files?.[0];
-        if (file) loadFile(file);
-    });
-    sourceDrop.addEventListener('dragover', e => e.preventDefault());
-}
+filePicker?.loadLastPersisted?.().then(f => f?.[0] && loadFile(f[0]));
 
 if (loadRandomBtn) {
     loadRandomBtn.addEventListener('click', () => loadRandomImage());

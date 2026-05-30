@@ -1,5 +1,6 @@
-import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from '../pkg/raw_converter_wasm.js';
+import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from './pkg/raw_converter_wasm.js';
 import { getContext } from './jxl-browser-context.js';
+import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
 // ── DOM refs ──────────────────────────────────────────────────────
 const runBtn      = document.getElementById('run-btn');
@@ -40,6 +41,13 @@ function fmtBytes(n)  {
 }
 function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
 
+function withTimeout(promise, ms, label = 'operation') {
+    return Promise.race([
+        promise,
+        new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms (likely worker/session hang)`)), ms))
+    ]);
+}
+
 function rgbaToCanvas(rgba, width, height) {
     const c = document.createElement('canvas');
     c.width = width; c.height = height;
@@ -75,23 +83,35 @@ function scaledPreviewCanvas(srcCanvas, maxLong = 1200) {
 // ── source loading ────────────────────────────────────────────────
 async function loadRandomSource() {
     setStatus('Fetching random ORF…');
-    const resp = await fetch('/api/random-gobabeb', { cache: 'no-store' });
-    if (!resp.ok) throw new Error(`random ORF request failed: ${resp.status}`);
-    const raw = new Uint8Array(await resp.arrayBuffer());
-    const name = resp.headers.get('x-file-name') || 'random.orf';
-    await initRaw();
-    const result = process_orf(raw, 0,0,0,0,0,0,0,0,0,0, NaN,NaN, 0,0);
     try {
-        const rgb  = result.take_rgb();
-        const rgba = rgb_to_rgba(rgb);
-        return {
-            kind: 'orf', raw, rgb, rgba,
-            width:  result.width,
-            height: result.height,
-            label:  `${name} | ${result.width}×${result.height}`,
-            meta:   `${resp.headers.get('x-source-folder') || ''} · ${fmtBytes(raw.byteLength)}`,
-        };
-    } finally { result.free(); }
+        const resp = await fetch('/api/random-gobabeb', { cache: 'no-store' });
+        if (!resp.ok) {
+            const msg = `Random data unavailable (API ${resp.status}). Use Pick Files instead.`;
+            setStatus(msg);
+            dbgLog('Random source failed', msg);
+            throw new Error(msg);
+        }
+        const raw = new Uint8Array(await resp.arrayBuffer());
+        const name = resp.headers.get('x-file-name') || 'random.orf';
+        await initRaw();
+        const result = process_orf(raw, 0,0,0,0,0,0,0,0,0,0, NaN,NaN, 0,0);
+        try {
+            const rgb  = result.take_rgb();
+            const rgba = rgb_to_rgba(rgb);
+            return {
+                kind: 'orf', raw, rgb, rgba,
+                width:  result.width,
+                height: result.height,
+                label:  `${name} | ${result.width}×${result.height}`,
+                meta:   `${resp.headers.get('x-source-folder') || ''} · ${fmtBytes(raw.byteLength)}`,
+            };
+        } finally { result.free(); }
+    } catch (err) {
+        const msg = err?.message || 'Random source failed';
+        setStatus(msg);
+        dbgLog('Random source error', msg, 'error');
+        throw err;
+    }
 }
 
 // ── encode helpers ────────────────────────────────────────────────
@@ -188,10 +208,30 @@ async function runFormatRaceAtSize(source, longEdge, tier, effort, thisRunId) {
     const results = {};
 
     // JXL
+    dbgLog('JXL encode start (session path)', `${longEdge}px q=${jxlQ} effort=${effort}`);
     setStatus(`Encoding JXL at ${longEdge === 'full' ? 'full' : longEdge + 'px'}…`);
-    const jxlEnc = await encodeAsJxl(new Uint8Array(rgba.buffer.slice(0)), dims.width, dims.height, jxlQ, effort);
+    let jxlEnc;
+    try {
+        jxlEnc = await withTimeout(
+            encodeAsJxl(new Uint8Array(rgba.buffer.slice(0)), dims.width, dims.height, jxlQ, effort),
+            18000,
+            `JXL encode ${longEdge}px`
+        );
+    } catch (e) {
+        dbgLog('JXL encode timeout/hang', e.message, 'error');
+        setStatus(`Failed: ${e.message}`);
+        throw e; // let the outer catch in runRace surface it properly
+    }
     if (thisRunId !== runId) return null;
-    const jxlDec = await decodeJxl(jxlEnc.bytes);
+
+    let jxlDec;
+    try {
+        jxlDec = await withTimeout(decodeJxl(jxlEnc.bytes), 12000, `JXL decode ${longEdge}px`);
+    } catch (e) {
+        dbgLog('JXL decode timeout/hang', e.message, 'error');
+        setStatus(`Failed: ${e.message}`);
+        throw e;
+    }
     if (thisRunId !== runId) return null;
     results.jxl = { ...jxlEnc, ...jxlDec, totalMs: jxlEnc.encodeMs + jxlDec.decodeMs };
 
@@ -226,11 +266,14 @@ async function runRace() {
     runBtn.disabled = true;
     runId++;
     const thisRunId = runId;
+    dbgLog('Race started', `runId=${thisRunId}`);
     resultsEl.innerHTML = '<div class="compare-empty">Running…</div>';
 
     try {
         if (!cachedSource) {
+            dbgLog('Loading random source via /api/random-gobabeb');
             cachedSource = await loadRandomSource();
+            dbgLog('Source loaded', cachedSource?.label || '');
         }
         if (thisRunId !== runId) return;
         if (sourceMetaEl) sourceMetaEl.textContent = cachedSource.label;
@@ -243,16 +286,19 @@ async function runRace() {
         const allRows = [];
         for (const size of sizes) {
             if (thisRunId !== runId) return;
+            dbgLog(`Race size ${size}`, `tier=${tier} effort=${effort}`);
             const row = await runFormatRaceAtSize(cachedSource, size, tier, effort, thisRunId);
             if (!row) return;
             allRows.push(row);
         }
 
         if (thisRunId !== runId) return;
+        dbgLog('Rendering results', `${allRows.length} sizes`);
         renderResults(allRows, tier, effort);
         setStatus(`Done — ${allRows.length} size${allRows.length > 1 ? 's' : ''} compared at ${tier} quality.`);
     } catch (err) {
         if (thisRunId !== runId) return;
+        dbgLog('Race failed', String(err?.stack || err), 'error');
         setStatus(`Failed: ${err?.message || err}`);
         resultsEl.innerHTML = `<div class="compare-empty" style="color:#f87171">Error: ${err?.message || err}</div>`;
     } finally {
@@ -452,3 +498,8 @@ resetBtn.addEventListener('click', () => {
 lightboxClose.addEventListener('click', closeLightbox);
 lightbox.addEventListener('click', (e) => { if (e.target === lightbox) closeLightbox(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
+
+// On-page debug console (same as wrapper lab) so internal scheduler/worker/session
+// messages and race steps are visible without opening DevTools.
+const dbgBtn = document.getElementById('dbg-console-btn');
+if (dbgBtn) initDebugConsole(dbgBtn);

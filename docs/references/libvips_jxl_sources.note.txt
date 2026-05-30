@@ -1,1 +1,0 @@
-libvips jxlsave.c and jxlload.c saved as references (production C implementation)

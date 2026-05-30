@@ -222,7 +222,7 @@ These two, together with the previous references, should give very strong covera
 **Next step recommendation**: When starting the first feature from the sprint list, follow the `FEATURE_IMPLEMENTATION_TEMPLATE.md` using this updated index.
 
 **Important 2026-06 update**: Prior work was largely based on the thin notes in this folder. A deeper audit against the *actual* full reference sources is now underway. See:
-- `DEEP_REFERENCE_CODE_AUDIT_HANDOFF.md` (method + handoff)
+- `historical/DEEP_REFERENCE_CODE_AUDIT_HANDOFF.md` (method + handoff)
 - `REFERENCE_CODE_AUDIT.md` (the living document where Red/Orange gaps vs real cjxl_main.cc, encode.h, jpegxl-rs, etc. are recorded)
 
 Use the new audit files when deciding what still needs first-class exposure vs what can stay behind the escape hatch.

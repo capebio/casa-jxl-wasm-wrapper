@@ -4,7 +4,7 @@
 **Date:** 2026-06  
 **Author:** Grok (autonomous continuation)  
 **Status:** Design expanded + scoped surface implementation accepted on dedicated branch `feature/granular-extra-channel-modular` (interface + exemplar design note only; lab + wiring closure documented as next slice)  
-**Related Index Section:** Medium follow-up from Next Features Handoff 2026-05-28 (HANDOFF_HDR_JUMBF_GranularModular_2026-06.md)  
+**Related Index Section:** Medium follow-up from the 2026-05-28 Next Features Handoff (see git history for HANDOFF_HDR_JUMBF_GranularModular_2026-06)  
 **Priority:** Medium — logical completion of extra-channel first-class status after distance + infrastructure work.
 
 ---
@@ -251,7 +251,7 @@ bun test packages/jxl-wasm/test/facade.test.ts --grep "extra channel|ExtraChanne
   - `ExtraChannel.modular?` sub-object present with accurate JSDoc (current limits + future-proof) in both facade.ts and native index.ts.
   - Existing extra-channel tests (including real-WASM EC roundtrips) remain green; the new field is accepted at construction time.
   - TypeScript clean on the changed packages.
-  - Updated `DESIGNS_INDEX.md`, added detailed entry to `PROGRESS_LOG.md`, marked complete in `Next_Features_Handoff_2026-05-28.md` + group handoff, added/updated row in `FEATURE_PARITY_MATRIX.md`, proper ISSUES.md handling.
+  - Updated `DESIGNS_INDEX.md`, added detailed entry to `PROGRESS_LOG.md`, marked complete in `historical/Next_Features_Handoff_2026-05-28.md` + group handoff, added/updated row in `FEATURE_PARITY_MATRIX.md`, proper ISSUES.md handling.
   - This design note contains the complete living record + verification closure that matches what was actually shipped in code on this pass.
 - Narrow verification command (surface only): `bun test packages/jxl-wasm/test/facade.test.ts --grep "extra channel|ExtraChannel"` (all pass). The dedicated granular grep test and lab demo are documented next-slice work.
 

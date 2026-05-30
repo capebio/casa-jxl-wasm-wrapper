@@ -1,4 +1,4 @@
-import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
+import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import {
     createDecoder,
     createEncoder,
@@ -7,6 +7,7 @@ import {
     encodeTileContainerRgba8,
     decodeTileContainerRegionRgba8,
 } from '@casabio/jxl-wasm';
+import { createFilePicker } from './jxl-file-picker.js';
 
 // Log-scaled display width for each crop size (120px–400px range).
 function logDisplayWidth(px) {
@@ -60,6 +61,20 @@ function setStatusFile(text)     { statusFile.textContent     = text; }
 function setStatusStage(text)    { statusStage.textContent    = text; }
 function setStatusFolder(text)   { statusFolder.textContent   = text; }
 
+function updateWorkflowState() {
+    const hasFiles = orfFiles && orfFiles.length > 0;
+    if (btnRun) {
+        btnRun.disabled = !hasFiles || !wasmReady;
+        btnRun.title = !hasFiles 
+            ? 'Pick ORF files first (step 1)' 
+            : (wasmReady ? 'Run region decode benchmark' : 'Waiting for WASM...');
+    }
+    if (btnClear) {
+        btnClear.disabled = !hasFiles;
+        btnClear.title = hasFiles ? 'Clear selected files' : 'No files loaded';
+    }
+}
+
 // --- Console panel ---
 
 let consolePanelOpen = false;
@@ -112,15 +127,39 @@ btnConsoleClear.addEventListener('click', () => {
 
 // --- File picker ---
 
-orfFileInput.addEventListener('change', () => {
-    orfFiles = Array.from(orfFileInput.files).filter(f => /\.orf$/i.test(f.name));
-    if (!orfFiles.length) {
-        setStatusFolder('No ORF files in selection');
-        btnRun.disabled = true;
-        return;
+// Unified picker with memory + workflow guidance
+const filePicker = createFilePicker({
+    input: orfFileInput,
+    dropZone: document.querySelector('label[for="orf-file-input"]'),
+    multiple: true,
+    accept: '.orf,.ORF',
+    persistKey: 'jxl-crop-benchmark-last-files',
+    onFiles: (files) => {
+        orfFiles = files.filter(f => /\.orf$/i.test(f.name));
+        if (!orfFiles.length) {
+            setStatusFolder('No ORF files in selection');
+            btnRun.disabled = true;
+    updateWorkflowState();
+            return;
+        }
+        setStatusFolder(`${orfFiles.length} ORF file${orfFiles.length !== 1 ? 's' : ''} selected`);
+        btnRun.disabled = !wasmReady;
+    updateWorkflowState();
+        updateWorkflowState();
     }
-    setStatusFolder(`${orfFiles.length} ORF file${orfFiles.length !== 1 ? 's' : ''} selected`);
-    btnRun.disabled = !wasmReady;
+});
+
+filePicker?.loadLastPersisted?.().then(f => {
+    if (f?.length) {
+        orfFiles = f.filter(x => /\.orf$/i.test(x.name));
+        if (orfFiles.length) {
+            setStatusFolder(`${orfFiles.length} ORF file(s) restored from last session`);
+            btnRun.disabled = !wasmReady;
+    updateWorkflowState();
+            updateWorkflowState();
+        }
+    }
+});
 });
 
 // --- WASM encode/decode ---

@@ -10,7 +10,7 @@ Context: the `packages/jxl-wasm` bridge was extended on 2026-05-28 to expose `_x
 1. Title + Date + Originating Feature / Area
 2. Status (one of: blocked, partial, deferred, needs-decision, ready-for-impl, done)
 3. Exact reproduction command(s) + full observed output (quoted blocks, including any error text)
-4. Why this matters (business + technical impact; explicit links to `Strategic_overview.md`, `feature-summary-handoff.md`, relevant design note in `designs/`, PROGRESS_LOG entry, file-summary/*, or REFERENCE_INDEX)
+4. Why this matters (business + technical impact; explicit links to historical Strategic assessment (now in `BENCHMARK_AND_TESTING_HANDOFF.md` "Historical Snapshot" section), relevant design note in `designs/`, PROGRESS_LOG entry, file-summary/*, or REFERENCE_INDEX)
 5. Affected files / packages (clear paths, relative to repo root)
 6. Follow-up / Resolution steps (numbered list; every step includes its own verification command or explicit success criterion)
 7. Agent Jump-In Checklist (5–8 bullets):
@@ -48,7 +48,7 @@ full output
 2. ...
 
 **Agent Jump-In Checklist**
-- Read (in order): `docs/references/Next_Features_Handoff_2026-05-28.md`, `docs/Strategic_overview.md` §X, this file entry.
+- Read (in order): historical Next Features Handoff 2026-05-28 notes (in git), BENCHMARK_AND_TESTING_HANDOFF.md (Historical Snapshot), this file entry.
 - Run: `...` then `...`
 - Success = all verification commands green + no TODO(Gx) left for this item.
 - Gotcha: DNG work requires changes in sibling `raw-converter-tauri/raw-pipeline` first.
@@ -58,7 +58,7 @@ full output
 ```
 
 **Distinction (2026-05-28):** The 11 design notes under `designs/` (see `DESIGNS_INDEX.md`) cover the *first audited batch* of new JXL controls. Design work for that batch is complete. This file (ISSUES.md) is the home for:
-- The "Recommended Next Batch" items that still lack design notes (Progressive Encode Options, WASM Build Strategy, Advanced Decoder Controls, etc. — see `Next_Features_Handoff_2026-05-28.md`).
+- The "Recommended Next Batch" items that still lack design notes (Progressive Encode Options, WASM Build Strategy, Advanced Decoder Controls, etc. — see `historical/Next_Features_Handoff_2026-05-28.md`).
 - Broader production, fidelity, packaging, and cross-repo unfinished business (DNG G3/C3 color/ISO, PGO, true bitstream ROI, verification harness, WASM-to-Tauri transposition, etc.).
 
 New entries must clearly label which category they belong to.
@@ -195,7 +195,7 @@ The entries below capture high-priority items that still require work after the 
 - This breaks color-accurate round-trips for DNG → JXL → display/export when the camera profile is not sRGB-like.
 - Explicitly called out as the top remaining "Still Failed" item in `docs/feature-summary-handoff.md` and `docs/feature-summary.md`.
 - File-summary audits (`docs/file-summary/lib-rs.md`, `_index.md`) mark both G3 (ISO) and C3 (color matrix) as "REVERTED with TODO" pending upstream `raw_pipeline` changes.
-- Links: `docs/Strategic_overview.md` (Production Blockers §3), `src/lib.rs` (DNG decode path around lines 1234–1240 uses `dng_img.color_matrix` when present, else fallback).
+- Links: `BENCHMARK_AND_TESTING_HANDOFF.md` (Historical Snapshot — 2026-05-27 production blockers), `src/lib.rs` (DNG decode path around lines 1234–1240 uses `dng_img.color_matrix` when present, else fallback).
 
 **Reproduction (current state):**
 ```powershell
@@ -232,8 +232,8 @@ Observed: color_matrix_from_mn is false for most DNGs; the real matrix from the 
 **Why this matters:**
 - The project has excellent progressive *decode* (multiple detail levels, emitEveryPass, progressiveDetail plumbing, gallery strip + lightbox, JXTC, etc.).
 - Encoder-side progressive controls (number of passes, DC-only vs AC passes, responsive, group order, last-passes bias, etc.) remain weakly surfaced compared to cjxl's rich `--progressive*` flags.
-- Explicitly called out as the #1 "High Priority for Next Wave" in `docs/references/Next_Features_Handoff_2026-05-28.md` ("highest-ROI remaining item").
-- Links: `docs/references/Next_Features_Handoff_2026-05-28.md:55`, original HANDOFF goal, `cjxl_main.cc` progressive handling, `docs/Progressive JXL Encoding Final.md`.
+- Explicitly called out as the #1 "High Priority for Next Wave" in `historical/Next_Features_Handoff_2026-05-28.md` ("highest-ROI remaining item").
+- Links: `historical/Next_Features_Handoff_2026-05-28.md:55`, original HANDOFF goal, `cjxl_main.cc` progressive handling, `docs/Progressive JXL Encoding Final.md`.
 
 **Reproduction / Current State:**
 - Encoder APIs (`EncoderOptions`, facade encode paths, bridge) expose only coarse `progressive` / `preview` flags and a few passes counts.
@@ -250,11 +250,11 @@ Observed: color_matrix_from_mn is false for most DNGs; the real matrix from the 
 1. Create a short design note in `designs/progressive-encode-options.md` following `FEATURE_IMPLEMENTATION_TEMPLATE.md` and the pattern of `resampling.md` / `brotli-effort.md`. Map cjxl `--progressive*` flags + libjxl `JxlEncoderFrameSettings` progressive knobs to a clean TS API (both WASM and Tauri).
 2. Implement the bridge + facade changes for the agreed surface.
 3. Wire basic UI exposure in the benchmark / progressive paint pages (mandatory per TEMPLATE).
-4. Add the item to `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, and update the "Next Batch" status in `Next_Features_Handoff_2026-05-28.md`.
+4. Add the item to `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, and update the "Next Batch" status in `historical/Next_Features_Handoff_2026-05-28.md`.
 5. Produce a Cleanup & Handoff + entry in this ISSUES.md (or mark the item done here).
 
 **Agent Jump-In Checklist**
-- Read (in order): `docs/references/Next_Features_Handoff_2026-05-28.md:47-66` (the table entry), `FEATURE_IMPLEMENTATION_TEMPLATE.md` (full), `designs/resampling.md` (example of a completed control note), cjxl_main.cc progressive flag handling (search for "progressive").
+- Read (in order): `historical/Next_Features_Handoff_2026-05-28.md:47-66` (the table entry), `FEATURE_IMPLEMENTATION_TEMPLATE.md` (full), `designs/resampling.md` (example of a completed control note), cjxl_main.cc progressive flag handling (search for "progressive").
 - Run first: the existing progressive gallery and paint pages with high pass counts to establish baseline behavior.
 - Success criteria = a design note exists + the encoder surface matches the doc + at least one benchmark page exposes the new knobs + the item is removed from the "Next Batch" table or marked "design complete".
 - Gotcha: Keep decoder progressive work (already strong) completely separate; this is encoder-only.
@@ -420,7 +420,7 @@ npm --workspace packages/jxl-native run build
 
 **Status:** done (2026-06)
 
-**Originating:** Medium / Follow-up Items in `docs/references/Next_Features_Handoff_2026-05-28.md` + the "design gap" distinction paragraph in the Issue Entry Specification at the top of this file. Highest-value remaining item after Progressive Encode Options, WASM Build Strategy (Full builds decision), and Advanced Decoder Controls were completed.
+**Originating:** Medium / Follow-up Items in `historical/Next_Features_Handoff_2026-05-28.md` + the "design gap" distinction paragraph in the Issue Entry Specification at the top of this file. Highest-value remaining item after Progressive Encode Options, WASM Build Strategy (Full builds decision), and Advanced Decoder Controls were completed.
 
 **Why this matters:**
 - JUMBF (with C2PA) is the production standard for image provenance, content authenticity, and archival workflows in 2026. Stock libraries, news organizations, and AI-content pipelines require or strongly prefer it.
@@ -450,7 +450,7 @@ Observed: JUMBF payloads could be attached only via the generic escape; no ergon
 7. Verified: typecheck clean, facade JUMBF test passes, lab controls functional.
 
 **Agent Jump-In Checklist**
-- Read (in order): `docs/references/Next_Features_Handoff_2026-05-28.md` (Medium table + "how to restart"), `docs/references/designs/jumbf-box-support.md` (the full living exemplar), `docs/references/designs/ISSUES.md` (this entry + the Issue Entry Specification at top), `docs/references/designs/metadata-boxes-container.md` (dependency), `packages/jxl-wasm/src/facade.ts` (expandJumbf + marshalBoxOpts + needsBoxOptsV2).
+- Read (in order): `historical/Next_Features_Handoff_2026-05-28.md` (Medium table + "how to restart"), `docs/references/designs/jumbf-box-support.md` (the full living exemplar), `docs/references/designs/ISSUES.md` (this entry + the Issue Entry Specification at top), `docs/references/designs/metadata-boxes-container.md` (dependency), `packages/jxl-wasm/src/facade.ts` (expandJumbf + marshalBoxOpts + needsBoxOptsV2).
 - Run first: `bun test packages/jxl-wasm/test/facade.test.ts --grep "JUMBF|jumbfBoxes"` (must pass).
 - Success criteria = JUMBF test green + lab JUMBF section renders + sample button populates payload + encode with jumbfBoxes succeeds and appears in advanced payload dump + all tracking docs show the item as Implemented on the feature branch.
 - Gotcha: Decode-side JUMBF discovery (JXL_DEC_BOX subscription) is explicitly out of scope in this note (future slice); only encode + container roundtrip is delivered.
@@ -464,7 +464,7 @@ Observed: JUMBF payloads could be attached only via the generic escape; no ergon
 
 **Status:** done (2026-06) — source-only; WASM rebuild + full seek wiring deferred to WASM rebuild cycle (see §9)
 
-**Originating:** `docs/references/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md` — the final two items from the 2026-05-28 Next Features Handoff.
+**Originating:** `historical/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md` — the final two items from the 2026-05-28 Next Features Handoff.
 
 **Why this matters:**
 - Animation is one of JXL's strongest features. Decode parity with encode (seeking, rich per-frame metadata) is required for a complete story.
@@ -505,7 +505,7 @@ Observed: JUMBF payloads could be attached only via the generic escape; no ergon
 - [ ] Add seek demo controls to animation lab
 
 **Agent Jump-In Checklist:**
-- Read (in order): `docs/references/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md`, `docs/references/designs/animation-decode-enhancements.md` (Cleanup & Handoff + post-rebuild checklist), `packages/jxl-wasm/src/bridge.cpp` (~line 2175 for seek function).
+- Read (in order): `historical/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md`, `docs/references/designs/animation-decode-enhancements.md` (Cleanup & Handoff + post-rebuild checklist), `packages/jxl-wasm/src/bridge.cpp` (~line 2175 for seek function).
 - Run first: `bun test ./node_modules/@casabio/jxl-wasm/test/facade.test.ts` (72 tests must pass).
 - Success criteria = `getWrapperCapabilities().animationSeek` returns `true` after WASM rebuild; `decoder.seekToFrame(n)` returns frame events; 72+ tests pass.
 - Gotcha: `seekToFrame`/`seekToTime` currently throw `CapabilityMissing` — intentional pre-rebuild behavior. Do not remove the stubs; replace their bodies.

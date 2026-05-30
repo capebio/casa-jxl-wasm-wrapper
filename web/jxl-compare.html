@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="./test-nav.css" />
     <link rel="stylesheet" href="./jxl-compare.css" />
     <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <link rel="stylesheet" href="./jxl-debug-console.css" />
     <script type="importmap">
     {
       "imports": {
@@ -53,6 +54,8 @@
             <div class="compare-controls-row">
                 <button id="run-btn" class="run-btn" type="button">Load &amp; run race</button>
                 <button id="reset-btn" class="ghost-btn" type="button">New source</button>
+                <button id="dbg-console-btn" class="ghost-btn" type="button" title="Show pipeline debug console" style="margin-left:auto;">Console</button>
+                <span id="random-hint" style="font-size:10px;opacity:0.6;margin-left:8px;">(Random uses private data; falls back to file picker if unavailable)</span>
             </div>
 
             <div class="compare-option-group">

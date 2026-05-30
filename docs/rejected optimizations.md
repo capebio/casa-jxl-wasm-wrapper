@@ -188,7 +188,12 @@ All 4 proposals are re-submissions of previously rejected items. No code changes
 
 ### `src/bin/blur_bench.rs`
 
-`v_pass_clarity` added to bench as a new candidate variant. Production integration deferred.
+`v_pass_clarity` added to bench, benchmarked, and permanently rejected (2026-05-30).
 
-*   **v_pass_clarity added to blur_bench.rs (ACCEPTED):** 8-wide unrolled vertical pass with separate scalar tail. Inner `for i in 0..LANE` iterates exactly LANE=8 times per main-loop iteration, allowing LLVM to fully unroll it — unlike `v_pass_tiled` where `for xi in 0..tile` uses a runtime `tile` variable that may block full unroll even though TILE is a const generic. Timing entry added alongside tiled variants for direct comparison. (`src/bin/blur_bench.rs`)
-*   **Production integration of v_pass_clarity (DEFERRED):** Production `separable_blur` is in `../raw-converter-tauri/raw-pipeline` — a separate repository (`Cargo.toml: raw-pipeline = { path = "../raw-converter-tauri/raw-pipeline" }`). Cannot integrate from this repo. Additionally, benchmark results are needed before declaring a winner — the "8-12% gain" claim is unverified and both v_pass_clarity and v_pass_tiled::<8> are structurally similar for the benchmark's W=5240 (exactly divisible by 8, so the tail never runs). Run `cargo run --bin blur_bench --release` to establish data before integration.
+*   **v_pass_clarity added to blur_bench.rs (ACCEPTED):** 8-wide unrolled vertical pass with separate scalar tail added as candidate variant. (`src/bin/blur_bench.rs`)
+*   **Production integration of v_pass_clarity (REJECTED — benchmark data 2026-05-30):** `cargo run --bin blur_bench --release` shows `v_pass_clarity` loses at both sizes:
+    - 1024×1024 v-pass only: clarity-8 **268ms** vs tiled-64 **171ms** (56% slower)
+    - 5240×3912 v-pass only: clarity-8 **5518ms** vs tiled-64 **4074ms** (35% slower; also 12% slower than naive 4921ms)
+    - 5240×3912 full round-trip: clarity-8 **10037ms** vs tiled-128 **8362ms** (20% slower)
+    The fixed LANE=8 hypothesis was wrong — LLVM vectorises the larger `[[f32;3]; TILE]` accumulator in `v_pass_tiled::<64/128>` more efficiently. The "8-12% gain" claim was opposite to reality.
+    **Production recommendation for `../raw-converter-tauri/raw-pipeline`:** use `v_pass_tiled::<128>` for `separable_blur` (full round-trip winner at both scales: 420ms at 1 MP, 8362ms at 20.5 MP).

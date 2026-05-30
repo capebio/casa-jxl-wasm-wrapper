@@ -25,10 +25,10 @@ This matrix supersedes and consolidates:
 
 | # | Feature | WASM | Tauri | Benchmark Exposure | Notes |
 |---|---------|------|-------|--------------------|-------|
-| 1 | LookRenderer – WASM-resident pre-tonemapped RGB16 + zero-copy render() for live sliders | ✅ | ✅ (B3: Rgb16State now has resident .render() + .new() mirroring WASM LookRenderer exactly — unsharp conditional, orientation fastpath, unified params from B1; apply_look delegates; full backward compat. Highest UX gap closed) | N/A (internal to Tauri lightbox) | WASM src/lib.rs:946 + B3 on finishing_feature_parity |
-| 2 | process_orf_with_flags + selective bitmask (full / lightbox / thumb) | ✅ (OUT_* consts, conditional paths) | ✅ (ProcessingMode + `process_post_demosaic_for_mode` + `skip_jxl` + get_orf_thumb deliver the practical selective paths needed on desktop: full/lightbox/thumb/metadata-only. Full internal bitmask not required.) | N/A | Practical parity achieved for desktop use cases via B-series work |
+| 1 | LookRenderer – WASM-resident pre-tonemapped RGB16 + zero-copy render() for live sliders | ✅ | ✅ (B3: Rgb16State now has resident .render() + .new() mirroring WASM LookRenderer exactly — unsharp conditional, orientation fastpath, unified params from B1; apply_look delegates; full backward compat. Highest UX gap closed) | jxl-preset-benchmark.html (RAW Isolation, construction + render timing) + main worker | WASM src/lib.rs:946 + B3; now measurable in browser optimization context for different output sizes |
+| 2 | process_orf_with_flags + selective bitmask (full / lightbox / thumb) | ✅ (OUT_* consts, conditional paths) | ✅ (ProcessingMode + `process_post_demosaic_for_mode` + `skip_jxl` + get_orf_thumb deliver the practical selective paths needed on desktop: full/lightbox/thumb/metadata-only. Full internal bitmask not required.) | jxl-preset-benchmark.html (RAW Isolation panel + future selective sweeps) | Now exposed for timing different output modes in browser optimization suite |
 | 3 | parse_orf_metadata (TIFF/EXIF-only, zero pixel work) | ✅ | ✅ (B4: public `raw_pipeline::parse_orf_metadata` + `get_orf_metadata` Tauri command; zero pixel work) | N/A | Gallery preflight; WASM:1122 + B4 on finishing_feature_parity |
-| 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | ✅ (B4: public `raw_pipeline::bench_decode_orf` + `bench_decode_orf` Tauri command) | N/A (dev only) | WASM:1156 + B4 on finishing_feature_parity |
+| 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | ✅ (B4: public `raw_pipeline::bench_decode_orf` + `bench_decode_orf` Tauri command) | jxl-preset-benchmark.html (RAW Isolation panel) | WASM:1156 + B4; now surfaced in browser optimization suite for use-case costing (thumbnails vs 80MP vs gallery) |
 | 5 | Thumb derived from pre-computed lightbox buffer (not 2nd full scan) | ✅ | ✅ (B2 + next-set + step1: strong lb16 preference implemented in `process_post_demosaic_for_mode`; thumb and JXL sources prefer pre-toned lb16 where possible. Audit complete.) | N/A | Memory win achieved on Tauri via B-series work |
 | 6 | Orientation==1 fast-path (move / zero-copy, no 60 MB traffic) | ✅ (explicit in process + apply_look) | ✅ (apply_orientation now takes Vec<u8>; orientation==1 is zero-copy move; all 5 Tauri callers updated — 3e on epiccodereview/20260527T054853) | N/A | raw-pipeline/src/pipeline.rs:614 |
 | 7 | Unified apply_look_params helper (single 12× is_finite, no drift) | ✅ (private helper called from 3 paths) | ✅ (now delegates to shared raw_pipeline::pipeline::apply_look_params; B1 on finishing_feature_parity) | N/A | WASM:156 + raw-pipeline/src/pipeline.rs |
@@ -133,7 +133,7 @@ This matrix supersedes and consolidates:
 
 ## 9. 2026-06 Phase 3 Micro-Features (Fine-Toothed Comb Continuation)
 
-All four notes completed to full exemplar standard (public first-class surface, smart wiring via advanced pairs where sustainable, mandatory deep educational lab wiring with visible feedback/metrics, WASM ↔ Native public + behavioral parity, acceptance tests, living Implementation Progress + complete Cleanup & Handoff blocks inside each design note, PROGRESS_LOG entries, matrix + index updates). See `references/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` and the individual design notes for rationale, trade-offs, and exact file:line details.
+All four notes completed to full exemplar standard (public first-class surface, smart wiring via advanced pairs where sustainable, mandatory deep educational lab wiring with visible feedback/metrics, WASM ↔ Native public + behavioral parity, acceptance tests, living Implementation Progress + complete Cleanup & Handoff blocks inside each design note, PROGRESS_LOG entries, matrix + index updates). See git history for the 2026-06 HANDOFF_Continuing_Phase3_MicroFeatures and the individual design notes for rationale, trade-offs, and exact file:line details.
 
 | # | Feature (Design Note) | WASM | Tauri | Benchmark Exposure | Notes |
 |---|-----------------------|------|-------|--------------------|-------|
@@ -148,7 +148,7 @@ All four notes completed to full exemplar standard (public first-class surface, 
 
 ## 10. 2026-06 Medium / Follow-up Features (Notes 4 & 5)
 
-Implemented on `feature/animation-decode-enhancements`. See `references/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md` and the individual design notes.
+Implemented on `feature/animation-decode-enhancements`. See git history for the 2026-06 HANDOFF_AnimationDecode_and_RemainingFrameSettings and the individual design notes.
 
 | # | Feature (Design Note) | WASM | Tauri/Native | Benchmark Exposure | Notes |
 |---|-----------------------|------|--------------|--------------------|----|
@@ -190,7 +190,7 @@ Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or comp
 
 **Cross-References**
 - Full JXL feature mapping + reference code: `references/REFERENCE_INDEX.md`
-- **Deep audit against actual (not just notes) reference sources:** `references/DEEP_REFERENCE_CODE_AUDIT_HANDOFF.md` + `references/REFERENCE_CODE_AUDIT.md` (new 2026-06 effort using Red/Orange for gaps vs real cjxl/jpegxl-rs/etc. code)
+- **Deep audit against actual (not just notes) reference sources:** `references/historical/DEEP_REFERENCE_CODE_AUDIT_HANDOFF.md` + `references/REFERENCE_CODE_AUDIT.md` (new 2026-06 effort using Red/Orange for gaps vs real cjxl/jpegxl-rs/etc. code)
 - Design notes: `references/designs/DESIGNS_INDEX.md`
 - Process + benchmark requirement: `references/FEATURE_IMPLEMENTATION_TEMPLATE.md`
 - Historical per-feature log: `references/PROGRESS_LOG.md`

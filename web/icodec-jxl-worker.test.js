@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import initRaw, { process_orf, rgb_to_rgba } from '../pkg/raw_converter_wasm.js';
+import initRaw, { process_orf, rgb_to_rgba } from './pkg/raw_converter_wasm.js';
 import { existsSync, readFileSync } from 'node:fs';
 import {
     createEncoder,

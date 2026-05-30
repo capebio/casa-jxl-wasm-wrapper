@@ -6,6 +6,7 @@ import initRaw, {
   process_cr2_with_flags,
   process_dng_with_flags,
   process_orf_with_flags,
+  bench_decode_orf,
   rgb_to_rgba,
 } from "../pkg/raw_converter_wasm.js";
 import { createDecoder, createEncoder, detectTier, setForcedTier } from "../packages/jxl-wasm/dist/index.js";
@@ -209,6 +210,13 @@ async function measureOne(path) {
   const rawWallMs = performance.now() - rawStarted;
   traceStage(`[stage] ${basename(path)} raw:done ${fmtMs(rawWallMs)}`);
 
+  let rawBenchDecompress = null, rawBenchDemosaic = null;
+  try {
+    const b = bench_decode_orf(bytes);
+    rawBenchDecompress = b.decompress_ms;
+    rawBenchDemosaic = b.demosaic_ms;
+  } catch (e) {}
+
   try {
     const rgbStarted = performance.now();
     traceStage(`[stage] ${basename(path)} rgba:start`);
@@ -236,6 +244,8 @@ async function measureOne(path) {
       tonemapMs: result.tonemap_ms ?? 0,
       orientMs: result.orient_ms ?? 0,
       rawWallMs,
+      rawBenchDecompress,
+      rawBenchDemosaic,
       rgbaPrepMs,
       encodeMs: encode.encodeMs,
       firstChunkMs: encode.firstChunkMs,

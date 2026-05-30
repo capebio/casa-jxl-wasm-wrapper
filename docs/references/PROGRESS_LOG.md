@@ -237,19 +237,19 @@ Use the template below for every entry.
 **Scope:** After full rigorous completion of the HDR Signaling note (smart wiring, lab badges, native parity, test, living progress + exemplar Cleanup & Handoff block), a dedicated continuation handoff was produced so the remaining three Phase 3 notes from the fine-toothed-comb audit can be driven to the same standard.
 
 **Key Artifact:**
-- New file: `docs/references/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md`
+- New file: `historical/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md`
   - Exact current state per note (HDR = done; JPEG recompression = initial slice + partial handoff already present; Pixel Art + Production Chunked = partial shared infrastructure + benchmark scaffolding from coordinated passes).
   - Notes that `jpegReconstruction`, `upsamplingMode`/`alreadyDownsampled`, and strengthened `buffering`/`lowMemoryStrategy` fields already exist in facade.ts + lab from the "Both 1 & 2" infrastructure work.
   - Clear recommended process, ruthless standard reminder, smart wiring principle, and immediate next actions.
-- Light pointer added to the top of the older master `HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md` directing readers to the active Phase 3 continuation document.
+- Light pointer added to the top of the older master `historical/HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md` directing readers to the active Phase 3 continuation document.
 
 **Why this handoff:** The long autonomous + heavily steered session (gain maps through Phase 3 micro-features + HDR deep slices) reached a natural pause after the credits question. This artifact preserves context, decisions, partial wins, and the exact bar for resumption without requiring the next agent to reconstruct everything from chat history.
 
 **Next:** When resuming, start from the new focused handoff file. Create a fresh feature branch before any further edits on the remaining notes.
 
 **Docs Updated:**
-- `docs/references/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (new)
-- `docs/references/HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md` (pointer at top)
+- `historical/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (new)
+- `historical/HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md` (pointer at top)
 - This PROGRESS_LOG entry
 
 ---
@@ -359,7 +359,7 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 
 **Docs Updated:**
 - `docs/references/designs/ISSUES.md` — §1 done, §3 done, §9 partial (WASM done; native pending)
-- `docs/references/ACTION PLAN.md` — Milestone 0 Docker/build items ticked; exports.txt gap noted
+- `historical/ACTION PLAN.md` — Milestone 0 Docker/build items ticked; exports.txt gap noted
 - `docs/references/PROGRESS_LOG.md` — this entry
 
 ---
@@ -451,7 +451,7 @@ Four `packages/jxl-wasm/src/bridge.cpp` compilation errors fixed to allow the so
 
 **Branch:** worktree (transpose-wasm-to-tauri) + main
 **Status:** Core escape hatch implemented (WASM + native parity)
-**Visibility Note (2026-06 sync with REFERENCE_INDEX.md + ACTION PLAN):** Code changes described (advancedFrameSettings + JxlFrameSetting + _adv FFI) are not present on the `epiccodereview/20260527T054853` branch (verified via source scan). Work remains isolated to the worktree/main; see ACTION PLAN.md Milestone 3 for merge/re-execution plan. Patches & Splines corresponds to REFERENCE_INDEX.md audit item #11 (escape-hatch first per designs/patches-splines.md; cjxl_main.cc --patches reference).
+**Visibility Note (2026-06 sync with REFERENCE_INDEX.md + historical/ACTION PLAN):** Code changes described (advancedFrameSettings + JxlFrameSetting + _adv FFI) are not present on the `epiccodereview/20260527T054853` branch (verified via source scan). Work remains isolated to the worktree/main; see historical/ACTION PLAN.md Milestone 3 for merge/re-execution plan. Patches & Splines corresponds to REFERENCE_INDEX.md audit item #11 (escape-hatch first per designs/patches-splines.md; cjxl_main.cc --patches reference).
 
 **WASM Changes:**
 - `packages/jxl-wasm/src/facade.ts` — added `advancedFrameSettings?: Array<{id,value}>` + `JxlFrameSetting` named constants helper (PATCHES=8). Wired in streaming input (`enc_create_image_adv`) and buffered metadata path using `_adv` FFI variants.
@@ -969,7 +969,7 @@ Matrix RAW section now in very strong shape.
 **Zero C2/C3 code changes** — explicit pause maintained per user directive.  
 Branch: finishing_feature_parity ready for whatever comes next.
 
-**Handoff created:** See `docs/references/HANDOFF_NextSet_RAW_Tauri_Selective.md` for the detailed continuation guide on the remaining items in this bucket (2, 5, 9, 10). Includes file pointers, current code state, recommended order, and references to REFERENCE_INDEX.md + WASM patterns.
+**Handoff created:** See `historical/HANDOFF_NextSet_RAW_Tauri_Selective.md` for the detailed continuation guide on the remaining items in this bucket (2, 5, 9, 10). Includes file pointers, current code state, recommended order, and references to REFERENCE_INDEX.md + WASM patterns.
 
 ---
 
@@ -1264,13 +1264,13 @@ Completion of `production-chunked-paths.md` to the HDR exemplar standard. Promot
 - Full `JxlEncoderAddChunkedFrame` + `JxlChunkedFrameInputSource` custom object on Tauri (future dedicated slice when needed).
 - No decode/roundtrip exposure of "chunked path used".
 
-**Handoff followed:** Exact process in `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (read design note + HDR exemplar + audit section, branch first, full template rigor, mandatory lab, living docs, PROGRESS_LOG + tracking updates).
+**Handoff followed:** Exact process in `historical/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (read design note + HDR exemplar + audit section, branch first, full template rigor, mandatory lab, living docs, PROGRESS_LOG + tracking updates).
 
 ---
 
 ## Completion of Remaining Medium / Follow-up Design Notes (2026-06)
 
-**Status:** All Medium / Follow-up items from `Next_Features_Handoff_2026-05-28.md` now have design notes.
+**Status:** All Medium / Follow-up items from `historical/Next_Features_Handoff_2026-05-28.md` now have design notes.
 
 **Notes created in this session:**
 - `additional-hdr-signaling.md` — Additional HDR static metadata (Mastering Display + CLLI)
@@ -1327,7 +1327,7 @@ Full rigorous implementation of `jpeg-recompression-polish.md`. Delivered first-
 - Native.cc implementation detail.
 - `emitWarnings` forwarding (limited libjxl surface today).
 
-**Handoff followed:** Full process from `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` + `FEATURE_IMPLEMENTATION_TEMPLATE.md` + ruthless standard + smart wiring principle. Same quality as the immediately preceding Pixel Art slice.
+**Handoff followed:** Full process from `historical/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` + `FEATURE_IMPLEMENTATION_TEMPLATE.md` + ruthless standard + smart wiring principle. Same quality as the immediately preceding Pixel Art slice.
 
 **Next:** Production Chunked Paths polish (final Phase 3 note) or deeper metrics on this one if requested.
 
@@ -1343,7 +1343,7 @@ Full rigorous implementation of `jpeg-recompression-polish.md`. Delivered first-
 
 **Status:** All four notes complete to exemplar standard.
 
-**Scope:** The four micro-features identified in the "Fine-Toothed Comb Micro-Features Continuation (2026-06)" section of `REFERENCE_CODE_AUDIT.md`, driven through the full rigorous process defined in `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (read design note + audit section + HDR exemplar end-to-end; dedicated branch before edits; smart wiring per principle; mandatory deep lab wiring with badges/metrics/educational affordances; WASM+Native public+behavior parity; min acceptance tests; living Implementation Progress + complete Cleanup & Handoff block inside each design note; append to this log; update DESIGNS_INDEX + FEATURE_PARITY_MATRIX + master HANDOFF).
+**Scope:** The four micro-features identified in the "Fine-Toothed Comb Micro-Features Continuation (2026-06)" section of `REFERENCE_CODE_AUDIT.md`, driven through the full rigorous process defined in `historical/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (read design note + audit section + HDR exemplar end-to-end; dedicated branch before edits; smart wiring per principle; mandatory deep lab wiring with badges/metrics/educational affordances; WASM+Native public+behavior parity; min acceptance tests; living Implementation Progress + complete Cleanup & Handoff block inside each design note; append to this log; update DESIGNS_INDEX + FEATURE_PARITY_MATRIX + master HANDOFF).
 
 **Key Achievements (per note):**
 - **HDR Signaling & Color Priority:** First-class `intensityTarget`, `premultiply`, `preferCICPForHDR`. Scalars via advanced pairs; policy flag smart-threaded only on high-impact paths + universal `ApplyColorEncoding` helper extracted and applied to *all* color sites in bridge.cpp. Rich "HDR Info" badges + tooltips in wrapper-lab. Native parity. Acceptance test. Living docs + handoff block (the reference standard).
@@ -1360,11 +1360,11 @@ Full rigorous implementation of `jpeg-recompression-polish.md`. Delivered first-
 - `docs/FEATURE_PARITY_MATRIX.md`: New Section 9 with one row per note (all ✅, wrapper-lab exposure, cross-refs). Existing Phase 3 summary block retained/updated.
 - This PROGRESS_LOG entry (master completion).
 - `docs/references/designs/DESIGNS_INDEX.md` (Phase 3 section + date).
-- `docs/references/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (final completion marker).
+- `historical/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (final completion marker).
 
 **Files Changed (across the four dedicated branches + final tracking pass):** `packages/jxl-wasm/src/{facade.ts,bridge.cpp}`, `packages/jxl-native/src/{index.ts,native.cc}`, `web/jxl-wrapper-lab.{html,js}`, `packages/jxl-wasm/test/facade.test.ts`, the four design notes (living sections), `DESIGNS_INDEX.md`, `FEATURE_PARITY_MATRIX.md`, `PROGRESS_LOG.md`, `HANDOFF_...md`.
 
-**Handoff followed exactly:** `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (recommended order Pixel→JPEG→Chunked after HDR; clean tree / branch-first; ruthless standard; smart wiring; benchmark mandatory; full artifacts).
+**Handoff followed exactly:** `historical/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (recommended order Pixel→JPEG→Chunked after HDR; clean tree / branch-first; ruthless standard; smart wiring; benchmark mandatory; full artifacts).
 
 **Result:** The 2026-06 Fine-Toothed Comb Micro-Features effort is complete. All four notes at the same high bar. The escape hatch remains excellent and untouched. Magic made real for pixel-art creators, JPEG archivists, HDR users, and large-image scientific workloads.
 

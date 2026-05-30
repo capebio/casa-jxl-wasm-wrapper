@@ -142,7 +142,7 @@ This is the natural and low-risk completion of the HDR signaling surface. It giv
 - Acceptance test added in `packages/jxl-wasm/test/facade.test.ts` exercising the public `hdrMetadata` shape (presence, no crash, appears in advanced dump).
 - All changes follow the established "smart wiring / minimal diff / escape hatch preserved" discipline of the Phase 3 notes and JUMBF exemplar.
 - Design note kept living with rationale for the no-FFI-first approach, full verification closure, and tracking updates across the five required documents.
-- `DESIGNS_INDEX.md` + `FEATURE_PARITY_MATRIX.md` + `ISSUES.md` (new closure entry) + `PROGRESS_LOG.md` + `Next_Features_Handoff_2026-05-28.md` + this handoff all updated.
+- `DESIGNS_INDEX.md` + `FEATURE_PARITY_MATRIX.md` + `ISSUES.md` (new closure entry) + `PROGRESS_LOG.md` + `historical/Next_Features_Handoff_2026-05-28.md` + this handoff all updated.
 
 **Strategic note on wiring approach (preserved for future agents):**
 We deliberately delivered the public TS surface + rich lab demo + test without touching bridge.cpp or exports.txt in this slice. This gives instant parity (WASM = Native at the call site), requires no WASM rebuild for the feature itself, and leaves the actual `JxlEncoderSetHDRMetadata` / struct marshaling + conditional emission as a clean, low-risk follow-up that any agent can do after a normal Emscripten rebuild (matching how `modularOptions` and advanced frame settings were phased). The escape hatches (`advancedFrameSettings`, raw custom boxes for mhdr if ever needed) remain fully powerful. When the bridge is extended, the existing `hdrMetadata` field will be the natural place to feed the C++ setter — zero public API churn.
@@ -178,7 +178,7 @@ Completion of the Additional HDR Signaling design note (the natural continuation
 - `web/jxl-wrapper-lab.html` — new HDR Metadata control subsection with inputs + sample button + status + help text + design note link.
 - `web/jxl-wrapper-lab.js` — getters + sample HDR10 stub generator + wiring into `makeEncoderOptions()` + result annotation.
 - `packages/jxl-wasm/test/facade.test.ts` — new describe/it block exercising `hdrMetadata` public shape + advanced dump presence.
-- Tracking updates in `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, `Next_Features_Handoff_2026-05-28.md`, `ISSUES.md` (new §11 closure), `FEATURE_PARITY_MATRIX.md`.
+- Tracking updates in `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, `historical/Next_Features_Handoff_2026-05-28.md`, `ISSUES.md` (new §11 closure), `FEATURE_PARITY_MATRIX.md`.
 
 **What works today (source level):**
 - `encoderOptions: { hdrMetadata: { masteringDisplay: { primaries: [...], whitePoint: [...], luminance: [...] }, contentLight: { maxCLL: 1000, maxFALL: 400 } } }` (or via lab controls) is accepted on every encode path and appears in advanced payload / lab dumps.
@@ -231,7 +231,7 @@ bun test packages/jxl-wasm/test/facade.test.ts --grep "hdrMetadata|HDR Metadata"
 - Narrow test: `bun test packages/jxl-wasm/test/facade.test.ts --grep "hdrMetadata|HDR Metadata"` — passes.
 - Updated `DESIGNS_INDEX.md` to reflect "Implemented (API + benchmark + test; C++ emission follow-up) on branch `feature/additional-hdr-signaling`".
 - Added detailed entry to `PROGRESS_LOG.md`.
-- Marked the item complete in `Next_Features_Handoff_2026-05-28.md` Medium section.
+- Marked the item complete in `historical/Next_Features_Handoff_2026-05-28.md` Medium section.
 - Added proper Issue Entry Specification closure entry in `ISSUES.md` §11 (per the 2026-05-28 spec).
 - Added HDR Metadata row under the HDR section in `FEATURE_PARITY_MATRIX.md`.
 - This design note contains the complete living record + verification closure.

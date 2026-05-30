@@ -188,7 +188,7 @@ bun test packages/jxl-wasm/test/facade.test.ts
 
 **Outcome:** All four Phase 3 2026-06 Fine-Toothed Comb micro-feature notes (hdr-signaling-color-priority, pixel-art-downsampling, jpeg-recompression-polish, production-chunked-paths) have now received complete, exemplar-level autonomous treatment with living artifacts.
 
-**Master handoff** (`HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md`) will be annotated with final Phase 3 closure.
+**Master handoff** (`historical/HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md`) will be annotated with final Phase 3 closure.
 
 The 2026-06 micro-features autonomous run is now 100% closed at the ruthless standard.
 

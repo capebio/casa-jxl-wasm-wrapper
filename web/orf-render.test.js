@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import initRaw, { process_orf, rgb_to_rgba } from '../pkg/raw_converter_wasm.js';
+import initRaw, { process_orf, rgb_to_rgba } from './pkg/raw_converter_wasm.js';
 import { encodeBackendForTarget } from './jxl-progressive-policy.js';
 
 const ORF_FOLDER = String.raw`C:\995\2026-02-17 Dave at Kyffhauser`;

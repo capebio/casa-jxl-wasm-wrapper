@@ -139,7 +139,7 @@ This wiring gives the scientific / archival audience an immediately runnable, se
 - `packages/jxl-native/src/index.ts` (types + merge in native encode prep)
 - `web/jxl-wrapper-lab.html` + `web/jxl-wrapper-lab.js` (benchmark section + getters + sample generator)
 - `packages/jxl-wasm/test/facade.test.ts` (acceptance test for the public shape)
-- Tracking: `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, `Next_Features_Handoff_2026-05-28.md`, `ISSUES.md`, `FEATURE_PARITY_MATRIX.md`
+- Tracking: `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, `historical/Next_Features_Handoff_2026-05-28.md`, `ISSUES.md`, `FEATURE_PARITY_MATRIX.md`
 
 **Rationale for the chosen shape:**
 - Maximum leverage of the v2 box infrastructure already proven in production.
@@ -210,7 +210,7 @@ Completion of the JUMBF design note (the highest-value remaining Medium / Follow
 - `web/jxl-wrapper-lab.html` — new JUMBF control subsection with file/paste + demo button + status + help text + design note link.
 - `web/jxl-wrapper-lab.js` — `getJumbfBoxes()`, sample stub generator (minimal valid-ish JUMBF bytes), wiring into `makeEncoderOptions()`, listeners, result annotation.
 - `packages/jxl-wasm/test/facade.test.ts` — new describe block / it exercising `jumbfBoxes` round-trip shape.
-- Tracking updates in `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, `Next_Features_Handoff_2026-05-28.md`, `ISSUES.md`, `FEATURE_PARITY_MATRIX.md`.
+- Tracking updates in `DESIGNS_INDEX.md`, `PROGRESS_LOG.md`, `historical/Next_Features_Handoff_2026-05-28.md`, `ISSUES.md`, `FEATURE_PARITY_MATRIX.md`.
 
 **What works today (source level):**
 - `encoderOptions: { jumbfBoxes: [{ data: someUint8Array }] }` (or via lab controls) works on every encode path (one-shot, streaming, animation, gain, EC, JPEG transcode v3, etc.) because it rides the existing v2 box machinery.
@@ -264,7 +264,7 @@ bun test ./node_modules/@casabio/jxl-native/test/codec.test.ts --grep "jumbf|JUM
 - Narrow test: `bun test packages/jxl-wasm/test/facade.test.ts --grep "JUMBF|jumbfBoxes"` — passes.
 - Updated `DESIGNS_INDEX.md` to reflect "Implemented on branch `feature/jumbf-box-support`".
 - Added detailed entry to `PROGRESS_LOG.md`.
-- Marked the item complete in `Next_Features_Handoff_2026-05-28.md` Medium section.
+- Marked the item complete in `historical/Next_Features_Handoff_2026-05-28.md` Medium section.
 - Added proper Issue Entry Specification closure entry in `ISSUES.md` (per the 2026-05-28 spec at top of that file).
 - Added JUMBF row / note under the Metadata boxes section in `FEATURE_PARITY_MATRIX.md`.
 - This design note contains the complete living record + verification closure.

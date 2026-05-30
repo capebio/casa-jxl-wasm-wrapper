@@ -372,6 +372,12 @@ async function measureFileRun(
   const result = processRaw(type, bytes, process_orf_with_flags, process_dng_with_flags, process_cr2_with_flags);
   try {
     const rawMs = performance.now() - rawStarted;
+
+    // NEW: isolated RAW decode cost (decompress + demosaic only)
+    let rawBench = null;
+    try {
+      rawBench = bench_decode_orf(bytes);
+    } catch (e) {}
     const rgbaStarted = performance.now();
     const rgb = result.take_rgb();
     const rgba = rgb_to_rgba(rgb);
@@ -399,6 +405,8 @@ async function measureFileRun(
         mode: variant.name,
         run: runIndex,
         rawMs,
+        rawBenchDecompress: rawBench?.decompress_ms ?? null,
+        rawBenchDemosaic: rawBench?.demosaic_ms ?? null,
         rgbaMs,
         encodeMs: standard.ms,
         decodeMs: standardDec.ms,
@@ -550,7 +558,7 @@ async function main() {
   const activeTileSizes = selectedTileSizes();
 
   const initRaw = (await import('../pkg/raw_converter_wasm.js')).default;
-  const { process_orf_with_flags, process_dng_with_flags, process_cr2_with_flags, rgb_to_rgba } = await import('../pkg/raw_converter_wasm.js');
+  const { process_orf_with_flags, process_dng_with_flags, process_cr2_with_flags, bench_decode_orf, rgb_to_rgba } = await import('../pkg/raw_converter_wasm.js');
   await initRaw({ module_or_path: readFileSync(new URL('../pkg/raw_converter_wasm_bg.wasm', import.meta.url)) });
 
   const rows = [];

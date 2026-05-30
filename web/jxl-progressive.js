@@ -1,4 +1,4 @@
-﻿import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from '../pkg/raw_converter_wasm.js';
+﻿import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from './pkg/raw_converter_wasm.js';
 import { createProgressiveSession } from './jxl-progressive-session.js';
 import { encodeBackendForTarget } from './jxl-progressive-policy.js';
 import { createProgressiveDecodeRequest } from './jxl-progressive-decode.js';
@@ -845,30 +845,40 @@ async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, streamOp
 async function loadRandomSource() {
     const started = performance.now();
     dbgLog('▶ source load → /api/random-gobabeb');
-    const resp = await fetch('/api/random-gobabeb', { cache: 'no-store' });
-    if (!resp.ok) throw new Error(`random ORF request failed: ${resp.status}`);
-    const raw = new Uint8Array(await resp.arrayBuffer());
-    const name = resp.headers.get('x-file-name') || 'random.orf';
-    const folder = resp.headers.get('x-source-folder') || 'source folder';
-    const result = process_orf(raw, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
     try {
-        const rgb = result.take_rgb();
-        const rgba = rgb_to_rgba(rgb);
-        const source = {
-            kind: 'orf',
-            raw,
-            width: result.width,
-            height: result.height,
-            rgb,
-            rgba,
-            label: `${name} | ORF | ${result.width}x${result.height}`,
-            meta: `${folder} | ${fmtBytes(raw.byteLength)}`,
-            loadMs: performance.now() - started,
-        };
-        dbgLog(`  source load ← ${name}`, `${source.width}x${source.height} · ${fmtBytes(raw.byteLength)} raw · ${fmtTiming(source.loadMs)}`);
-        return source;
-    } finally {
-        result.free();
+        const resp = await fetch('/api/random-gobabeb', { cache: 'no-store' });
+        if (!resp.ok) {
+            const msg = `Random data unavailable (API ${resp.status}). Use file picker or local files instead.`;
+            dbgLog('✗ random source failed', msg, 'error');
+            throw new Error(msg);
+        }
+        const raw = new Uint8Array(await resp.arrayBuffer());
+        const name = resp.headers.get('x-file-name') || 'random.orf';
+        const folder = resp.headers.get('x-source-folder') || 'source folder';
+        const result = process_orf(raw, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
+        try {
+            const rgb = result.take_rgb();
+            const rgba = rgb_to_rgba(rgb);
+            const source = {
+                kind: 'orf',
+                raw,
+                width: result.width,
+                height: result.height,
+                rgb,
+                rgba,
+                label: `${name} | ORF | ${result.width}x${result.height}`,
+                meta: `${folder} | ${fmtBytes(raw.byteLength)}`,
+                loadMs: performance.now() - started,
+            };
+            dbgLog(`  source load ← ${name}`, `${source.width}x${source.height} · ${fmtBytes(raw.byteLength)} raw · ${fmtTiming(source.loadMs)}`);
+            return source;
+        } finally {
+            result.free();
+        }
+    } catch (err) {
+        const msg = err?.message || 'Random source load failed';
+        dbgLog('✗ loadRandomSource error', msg, 'error');
+        throw err;
     }
 }
 

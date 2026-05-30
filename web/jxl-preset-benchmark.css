@@ -247,21 +247,35 @@ main > section h2 {
     padding: 16px 0;
 }
 
+/* === Ultra-Compact Dev Tool Overrides === */
+body { font-size: 10px; line-height: 1.15; }
+.shell { padding: 4px 0 8px; gap: 4px; width: min(1600px, calc(100vw - 4px)); }
+main > section { padding: 4px 6px; border-radius: 2px; margin-bottom: 2px; }
+main > section h2 { margin: 0 0 2px; font-size: 8px; font-weight: 600; }
+.hero.compact { padding: 2px 6px; border-radius: 2px; }
+.hero-copy h1 { font-size: 11px; margin:1px 0; }
+button { font-size: 8px; padding: 0 3px; }
+.chip-label { padding: 0 2px; font-size: 8px; }
+#raw-isolation, #raw-isolation-results { font-size: 8px; line-height: 1.1; }
+.scenario-card, .preset-card { padding: 1px 3px !important; font-size: 7px !important; border-radius: 1px; }
+.preset-cards-grid { gap: 3px !important; }
+.preset-card { padding: 3px !important; }
+
 /* ⑥ Preset cards */
 .preset-cards-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 8px;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 2px;
 }
 
 .preset-card {
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px;
+    border-radius: 2px !important;
+    padding: 3px !important;
     background: rgba(0, 0, 0, 0.2);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 2px !important;
 }
 
 .preset-card .preset-name {

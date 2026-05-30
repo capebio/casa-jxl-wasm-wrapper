@@ -1,4 +1,4 @@
-import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
+import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createEncoder, createDecoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
@@ -152,6 +152,7 @@ function clearSlotError(slotId) {
 
 async function handleFile(slot, file) {
     const bytes = new Uint8Array(await file.arrayBuffer());
+    sessionBytes.set(slot.id, bytes); // keep for RAW isolation this session
     const ext = file.name.split('.').pop() ?? '';
     clearSlotError(slot.id);
     try {
@@ -165,6 +166,7 @@ async function handleFile(slot, file) {
             }
         }
         setSlotFilename(slot.id, file.name);
+        updateButtonStates(); // Enable RAW / Run buttons now that we have files
     } catch (err) {
         console.error(`[preset-bench] Decode failed for slot ${slot.id}:`, err);
         loadedSources[slot.id] = null;
@@ -266,6 +268,54 @@ const DEC_SPEEDS  = [0, 1, 2, 3, 4];
 const MODULAR_VALS = [-1, 0, 1];
 const BROTLI_VALS  = [-1, 0, 4, 9];
 const RESAMP_VALS  = [1, 2, 4];
+
+// Use-case scenario profiles (user-specified situations).
+// Each defines: preferred sizes, metric weights for scoring (higher = more important),
+// extra diagnostic behaviors, and human label.
+const SCENARIO_PROFILES = {
+    thumb: {
+        label: 'Thumbnails (rapid gallery)',
+        sizes: [128, 512],
+        weights: { decSpeed: 0.40, size: 0.25, encSpeed: 0.15, rawCost: 0.20 }, // added rawCost weight
+        diagnostics: ['p95', 'sustained', 'raw'],
+        description: 'Grid / many visible at once. Low latency per thumb, small file size critical. RAW ingest cost now factored.'
+    },
+    medium: {
+        label: 'Medium preview (1080)',
+        sizes: [512, 1920],
+        weights: { decSpeed: 0.45, size: 0.25, encSpeed: 0.30 },
+        diagnostics: ['firstPixel'],
+        description: 'Lightbox warm preview or medium detail view.'
+    },
+    fullpage: {
+        label: 'Full page / lightbox warm',
+        sizes: [1920, 'full'],
+        weights: { decSpeed: 0.40, size: 0.20, encSpeed: 0.40 },
+        diagnostics: ['progressive'],
+        description: 'Typical screen-filling image. Balance quality, decode, encode cost.'
+    },
+    fullres: {
+        label: 'Full resolution archival',
+        sizes: ['full'],
+        weights: { size: 0.60, decSpeed: 0.25, encSpeed: 0.15 },
+        diagnostics: ['size', 'fidelity'],
+        description: 'Master copy. Size efficiency at high fidelity dominates.'
+    },
+    massive: {
+        label: '80MP+ lightbox exploration (ROI + lowMem)',
+        sizes: ['full'],
+        weights: { regionTile: 0.35, lowMem: 0.20, decSpeed: 0.15, size: 0.10, rawCost: 0.20 }, // RAW cost very relevant for huge files
+        diagnostics: ['region', 'memory', 'lowMemoryMode', 'raw'],
+        description: 'Huge scientific/landscape files. Region decode tiles + lowMemoryMode + JXTC critical. RAW ingest now heavily weighted.'
+    },
+    gallery: {
+        label: 'Rapid gallery scroll (sustained throughput)',
+        sizes: [128, 512, 1920],
+        weights: { decSpeed: 0.40, sustained: 0.25, size: 0.15, rawCost: 0.20 },
+        diagnostics: ['p95', 'sustained', 'backpressure', 'raw'],
+        description: 'Scrolling large folders. p95 decode latency + worker pool behavior under load. RAW cost now included.'
+    }
+};
 
 // --- Result storage ----------------------------------------------------------
 
@@ -395,6 +445,276 @@ async function decodeOnce(jxlBytes) {
     }
 }
 
+// === RAW Isolation Surface ===================================================
+
+const RAW_FLAGS = {
+    full: 1,      // OUT_FULL_RGB8
+    lightbox: 2,  // OUT_LIGHTBOX (1800px RGB16)
+    thumb: 4,     // OUT_THUMB (360px RGB16)
+    lb_thumb: 6,  // lightbox + thumb
+    all: 7,       // full + lb + thumb (matches old process_orf)
+};
+
+let rawIsolationData = null;
+const sessionBytes = new Map(); // slotId -> Uint8Array (in-memory for current tab session)
+let lastRawMeasurementKey = null; // simple cache key to avoid re-work on repeated clicks
+
+async function runRawIsolation() {
+    const status = document.getElementById('raw-isolation-status');
+    const resultsEl = document.getElementById('raw-isolation-results');
+    if (!status || !resultsEl) return;
+
+    const loaded = Object.entries(loadedSources).filter(([_, v]) => v);
+    if (!loaded.length) {
+        status.textContent = 'Load files first. Original bytes are cached in-memory for this session + IDB.';
+        return;
+    }
+
+    // Cheap session cache: if the set of loaded files hasn't changed, reuse last measurement
+    const currentKey = Object.keys(loadedSources).filter(k => loadedSources[k]).sort().join('|');
+    if (lastRawMeasurementKey === currentKey && rawIsolationData && Object.keys(rawIsolationData).length > 0) {
+        status.textContent = 'Using cached RAW isolation results (files unchanged)';
+        renderRawIsolationResults();
+        return;
+    }
+
+    status.textContent = 'Measuring RAW isolation (bench_decode_orf + selective modes)...';
+    resultsEl.innerHTML = '';
+
+    rawIsolationData = {};
+
+    for (const [slotId, src] of loaded) {
+        const bytes = await getBytesForSlot(slotId);
+        if (!bytes) {
+            rawIsolationData[slotId] = { error: 'no original bytes (re-load the file)', name: src.name };
+            continue;
+        }
+
+        const ext = (src.name || '').split('.').pop()?.toLowerCase() || '';
+        const fn = ext === 'orf' ? rawWasm.process_orf_with_flags
+                 : ext === 'dng' ? rawWasm.process_dng_with_flags
+                 : ext === 'cr2' ? rawWasm.process_cr2_with_flags : null;
+
+        let bench = null;
+        try {
+            // Light warm-up + median for consistency with JXL sweeps
+            for (let i = 0; i < 1; i++) rawWasm.bench_decode_orf(bytes); // warm
+            const runs = [];
+            for (let i = 0; i < 3; i++) {
+                const b = rawWasm.bench_decode_orf(bytes);
+                runs.push(b);
+            }
+            runs.sort((a, b) => (a.decompress_ms + a.demosaic_ms) - (b.decompress_ms + b.demosaic_ms));
+            bench = runs[1]; // median of 3
+        } catch (e) { console.warn('[raw-isolation] bench_decode_orf failed', slotId, e); }
+
+        const modes = {};
+
+        // Full multi-flag selective sweep + LookRenderer timing
+        const flagEntries = [
+            ['full', 1],
+            ['lightbox', 2],
+            ['thumb', 4],
+            ['lb+thumb', 6],
+            ['all', 7],
+        ];
+
+        for (const [name, flag] of flagEntries) {
+            if (!fn) continue;
+            try {
+                const t0 = performance.now();
+                const res = fn(bytes, flag, 0,0,0,0,0,0,0,0,0,0, NaN,NaN,0,0);
+                const total = performance.now() - t0;
+
+                const modeData = {
+                    decompress: res.decompress_ms || 0,
+                    demosaic: res.demosaic_ms || 0,
+                    tonemap: res.tonemap_ms || 0,
+                    orient: res.orient_ms || 0,
+                    total,
+                };
+
+                // LookRenderer construction + timed render() for modes that produce lb or thumb buffers
+                if ((flag & 2) || (flag & 4)) {
+                    try {
+                        const lbBytes = (flag & 2) ? res.take_rgb16_lb() : null;
+                        const thBytes = (flag & 4) ? res.take_rgb16_thumb() : null;
+                        const useLb = lbBytes && lbBytes.length > 0;
+                        const useTh = thBytes && thBytes.length > 0;
+
+                        if (useLb || useTh) {
+                            const renderStart = performance.now();
+                            if (useLb) {
+                                const renderer = new rawWasm.LookRenderer(lbBytes, res.lb_w || 0, res.lb_h || 0, src.orientation || 1, res.color_matrix_used ? res.color_matrix_used() : []);
+                                // representative render (neutral look)
+                                renderer.render(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                                renderer.free();
+                            }
+                            if (useTh) {
+                                const renderer = new rawWasm.LookRenderer(thBytes, res.thumb_w || 0, res.thumb_h || 0, src.orientation || 1, res.color_matrix_used ? res.color_matrix_used() : []);
+                                renderer.render(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                                renderer.free();
+                            }
+                            modeData.lookRenderMs = performance.now() - renderStart;
+                        }
+                    } catch (e) { /* non-fatal for benchmark */ }
+                }
+
+                modes[name] = modeData;
+                res.free?.();
+            } catch (e) {
+                console.warn('[raw-isolation] selective flag failed', name, e);
+            }
+        }
+
+        // Compute simple per-use-case RAW cost summary for scoring
+        const rawCostForScoring = {
+            thumb: modes['thumb']?.total || modes['lb+thumb']?.total || modes['all']?.total || 0,
+            lightbox: modes['lightbox']?.total || modes['lb+thumb']?.total || modes['all']?.total || 0,
+            full: modes['full']?.total || modes['all']?.total || 0,
+        };
+
+        rawIsolationData[slotId] = {
+            bench,
+            modes,
+            rawCostForScoring,
+            width: src.width,
+            height: src.height,
+            name: src.name,
+            ext,
+        };
+    }
+
+    status.textContent = `RAW isolation (full selective + Look) measured for ${Object.keys(rawIsolationData).length} files`;
+    lastRawMeasurementKey = currentKey;
+    renderRawIsolationResults();
+}
+
+function renderRawIsolationResults() {
+    const el = document.getElementById('raw-isolation-results');
+    if (!el || !rawIsolationData) return;
+
+    let html = '<table style="width:100%; font-size:11px; border-collapse:collapse;"><thead><tr>' +
+        '<th>File</th><th>bench dec+dem</th><th>full</th><th>lightbox</th><th>thumb</th><th>lb+thumb</th><th>all</th><th>Look render</th></tr></thead><tbody>';
+
+    for (const [slot, data] of Object.entries(rawIsolationData)) {
+        if (data.error) {
+            html += `<tr><td colspan="8" style="color:#f66;">${data.name}: ${data.error}</td></tr>`;
+            continue;
+        }
+        const b = data.bench;
+        const benchStr = b ? `${(b.decompress_ms + b.demosaic_ms).toFixed(1)} ms` : '—';
+
+        const m = data.modes || {};
+        const cell = (name) => {
+            const d = m[name];
+            if (!d) return '—';
+            let s = `${d.total.toFixed(1)}`;
+            if (d.lookRenderMs) s += `+L${d.lookRenderMs.toFixed(1)}`;
+            return s;
+        };
+
+        const lookMs = Object.values(m).reduce((max, d) => Math.max(max, d.lookRenderMs || 0), 0);
+
+        html += `<tr>
+            <td>${data.name}</td>
+            <td>${benchStr}</td>
+            <td>${cell('full')}</td>
+            <td>${cell('lightbox')}</td>
+            <td>${cell('thumb')}</td>
+            <td>${cell('lb+thumb')}</td>
+            <td>${cell('all')}</td>
+            <td>${lookMs ? lookMs.toFixed(1) + ' ms' : '—'}</td>
+        </tr>`;
+    }
+
+    html += '</tbody></table>';
+    html += '<div style="font-size:10px;opacity:0.65;margin-top:4px;">' +
+        'bench = pure decompress+demosaic. Columns = wall time for process_*_with_flags(flag). +L = LookRenderer construction + one render() for lb/thumb buffers. ' +
+        'Re-load originals if bytes missing from IDB.</div>';
+
+    el.innerHTML = html;
+}
+
+async function getBytesForSlot(slotId) {
+    // Fast path: in-memory session cache (populated on every file load this tab)
+    if (sessionBytes.has(slotId)) return sessionBytes.get(slotId);
+
+    try {
+        const db = await getDb();
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const record = await new Promise((resolve) => {
+            const req = store.get(slotId);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => resolve(null);
+        });
+        if (record?.bytes) {
+            const u8 = new Uint8Array(record.bytes);
+            sessionBytes.set(slotId, u8); // promote to fast cache
+            return u8;
+        }
+    } catch (e) {
+        console.warn('[raw-isolation] IDB byte lookup failed', e);
+    }
+    return null;
+}
+
+document.getElementById('btn-raw-isolation')?.addEventListener('click', () => {
+    runRawIsolation().catch(console.error);
+});
+document.getElementById('btn-raw-isolation-clear')?.addEventListener('click', () => {
+    rawIsolationData = null;
+    lastRawMeasurementKey = null;
+    const el = document.getElementById('raw-isolation-results');
+    if (el) el.innerHTML = '';
+    const st = document.getElementById('raw-isolation-status');
+    if (st) st.textContent = '';
+});
+
+// Reactive button state management (called after relevant changes)
+function updateButtonStates() {
+    const hasFiles = Object.values(loadedSources || {}).some(Boolean);
+
+    // RAW Isolation button
+    const rawBtn = document.getElementById('btn-raw-isolation');
+    if (rawBtn) {
+        rawBtn.disabled = !hasFiles;
+        rawBtn.title = hasFiles 
+            ? "Measure RAW pipeline costs (bench_decode_orf + selective modes). Results will feed into scenario scoring."
+            : "Load at least one file first to enable RAW isolation measurement.";
+    }
+
+    // Run Sweep button
+    const runBtn = document.getElementById('btn-run-sweep');
+    if (runBtn) {
+        const sizesSelected = document.querySelectorAll('input[name="sweep-size"]:checked').length > 0;
+        const tiersSelected = document.querySelectorAll('input[name="sweep-tier"]:checked').length > 0;
+        const canRun = hasFiles && sizesSelected && tiersSelected;
+
+        runBtn.disabled = !canRun;
+
+        if (!hasFiles) {
+            runBtn.title = "Load files first before running a sweep.";
+        } else if (!sizesSelected || !tiersSelected) {
+            runBtn.title = "Select at least one Size and one Tier to enable Run Sweep.";
+        } else {
+            runBtn.title = "Run the multi-phase sweep with current settings. RAW costs (if measured) will influence scenario recommendations.";
+        }
+    }
+
+    // Export CSV
+    const exportBtn = document.getElementById('btn-export-csv');
+    if (exportBtn) {
+        const hasResults = (typeof sweepRows !== 'undefined') && sweepRows.length > 0;
+        exportBtn.disabled = !hasResults;
+        exportBtn.title = hasResults ? "Export current sweep results as CSV" : "Run a sweep first to enable CSV export.";
+    }
+}
+
+// Call this function at key moments
+// (we'll hook it into existing places below)
+
 async function median(fn, n) {
     // Run fn() n times; return median of results
     const results = [];
@@ -457,6 +777,7 @@ export async function runSweep(options = {}) {
     const {
         tiers: tierFilter   = TIERS.map(t => t.id),
         sizes: sizeFilter   = SIZES,
+        scenarios: scenarioFilter = Object.keys(SCENARIO_PROFILES),
         runsPerConfig       = 3,
     } = options;
 
@@ -465,8 +786,20 @@ export async function runSweep(options = {}) {
     sweepRows.length = 0;
 
     const activeTiers = TIERS.filter(t => tierFilter.includes(t.id));
-    const activeSizes = SIZES.filter(s => sizeFilter.includes(s));
+    const activeScenarios = scenarioFilter.filter(s => SCENARIO_PROFILES[s]);
+
+    // Union of sizes required by the chosen scenarios (plus any explicit size filter)
+    let scenarioSizes = [];
+    for (const s of activeScenarios) {
+        scenarioSizes.push(...(SCENARIO_PROFILES[s]?.sizes || []));
+    }
+    const effectiveSizeFilter = sizeFilter.length ? sizeFilter : [...new Set(scenarioSizes)];
+    const activeSizes = SIZES.filter(s => effectiveSizeFilter.includes(s));
+
     const activeFiles = SLOTS.filter(s => loadedSources[s.id]);
+
+    // Store for post-processing (diagnostics use the chosen scenarios + their weights)
+    window.__lastSweepScenarios = activeScenarios;
 
     const bestEffort   = {}; // [tier.id][file][sizePx]
     const bestDecSpeed = {}; // [tier.id][file][sizePx]
@@ -1050,41 +1383,46 @@ function buildSweepSettings() {
     const body = document.getElementById('sweep-settings-body');
     if (!body) return;
     body.innerHTML = `
-        <div class="sweep-controls">
+        <div class="sweep-controls" style="font-size:9px;">
             <div class="control-group">
-                <label class="control-label">Image sizes</label>
+                <span>Sizes:</span>
                 <div class="chip-group">
                     ${[128, 512, 1920, 'full'].map(sz => `
-                        <label class="chip-label">
-                            <input type="checkbox" name="sweep-size" value="${sz}" checked />
-                            <span>${sz === 'full' ? 'Full' : sz + 'px'}</span>
-                        </label>`).join('')}
+                        <label class="chip-label" style="padding:0 3px;"><input type="checkbox" name="sweep-size" value="${sz}" checked /> <span>${sz === 'full' ? 'Full' : sz}</span></label>`).join('')}
                 </div>
             </div>
             <div class="control-group">
-                <label class="control-label">Quality tiers</label>
+                <span>Tiers:</span>
                 <div class="chip-group">
                     ${['low','medium','high','lossless'].map(t => `
-                        <label class="chip-label">
-                            <input type="checkbox" name="sweep-tier" value="${t}" checked />
-                            <span>${t.charAt(0).toUpperCase()+t.slice(1)}</span>
-                        </label>`).join('')}
+                        <label class="chip-label" style="padding:0 3px;"><input type="checkbox" name="sweep-tier" value="${t}" checked /> <span>${t}</span></label>`).join('')}
                 </div>
             </div>
             <div class="control-group">
-                <label class="control-label">Runs / config</label>
-                <div class="spinpicker">
-                    <button class="spin-btn" type="button" id="runs-dec">&#8722;</button>
-                    <input id="input-runs" type="number" min="1" max="5" step="1" value="3" style="width:40px;text-align:center" />
-                    <button class="spin-btn" type="button" id="runs-inc">+</button>
+                <span>Scenarios:</span>
+                <div class="chip-group" id="scenario-chips">
+                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="thumb" checked /> <span>Thumb</span></label>
+                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="medium" checked /> <span>Med</span></label>
+                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="fullpage" checked /> <span>FullPg</span></label>
+                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="fullres" /> <span>FullRes</span></label>
+                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="massive" /> <span>80M</span></label>
+                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="gallery" checked /> <span>Gallery</span></label>
                 </div>
             </div>
-            <div class="control-group" style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-                <button id="btn-run-sweep" class="btn-primary" type="button">&#9654; Run sweep</button>
-                <button id="btn-stop" class="btn-danger" type="button" disabled>&#9632; Stop</button>
-                <button id="btn-load-saved" class="btn-secondary" type="button">Load saved</button>
-                <button id="btn-export-csv" class="btn-secondary" type="button">Export CSV</button>
-                <button id="btn-console" class="btn-secondary" type="button">Console</button>
+            <div class="control-group">
+                <span>Runs:</span>
+                <div class="spinpicker">
+                    <button class="spin-btn" type="button" id="runs-dec" style="padding:0 2px;">−</button>
+                    <input id="input-runs" type="number" min="1" max="5" step="1" value="3" style="width:28px;text-align:center;font-size:9px;" />
+                    <button class="spin-btn" type="button" id="runs-inc" style="padding:0 2px;">+</button>
+                </div>
+            </div>
+            <div class="control-group" style="margin-left:auto;display:flex;gap:3px;align-items:center;flex-wrap:wrap">
+                <button id="btn-run-sweep" class="btn-primary" type="button" style="font-size:8px;padding:0 4px;">Run</button>
+                <button id="btn-stop" class="btn-danger" type="button" disabled style="font-size:8px;padding:0 3px;">Stop</button>
+                <button id="btn-load-saved" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Load</button>
+                <button id="btn-export-csv" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">CSV</button>
+                <button id="btn-console" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Log</button>
             </div>
         </div>
     `;
@@ -1096,6 +1434,16 @@ function buildSweepSettings() {
         const inp = document.getElementById('input-runs');
         inp.value = Math.min(5, Number(inp.value) + 1);
     });
+
+    // Make Run button state reactive to checkbox changes
+    const settingsBody = document.getElementById('sweep-settings-body');
+    if (settingsBody) {
+        settingsBody.addEventListener('change', (e) => {
+            if (e.target.name === 'sweep-size' || e.target.name === 'sweep-tier' || e.target.name === 'scenario') {
+                updateButtonStates();
+            }
+        });
+    }
 }
 
 // =============================================================================
@@ -1150,10 +1498,15 @@ function wireButtons() {
             const v = el.value; return v === 'full' ? 'full' : Number(v);
         });
         const tiers = [...document.querySelectorAll('input[name="sweep-tier"]:checked')].map(el => el.value);
+        const scenarios = [...document.querySelectorAll('input[name="scenario"]:checked')].map(el => el.value);
         const runsPerConfig = Math.max(1, Number(document.getElementById('input-runs')?.value ?? 3));
         if (!sizes.length || !tiers.length) {
             alert('Select at least one size and one tier.');
             return;
+        }
+        if (!scenarios.length) {
+            // default to all if none explicitly checked (back-compat)
+            scenarios.push(...Object.keys(SCENARIO_PROFILES));
         }
 
         const btnRun  = document.getElementById('btn-run-sweep');
@@ -1162,7 +1515,7 @@ function wireButtons() {
         btnStop.disabled = false;
 
         try {
-            await runSweep({ tiers, sizes, runsPerConfig });
+            await runSweep({ tiers, sizes, scenarios, runsPerConfig });
         } finally {
             btnRun.disabled  = false;
             btnStop.disabled = true;
@@ -1173,14 +1526,29 @@ function wireButtons() {
         buildPresetCards(presets);
         saveResults(sweepRows, presets);
         renderPhase1Charts(sweepRows.filter(r => r.phase === 1));
+
+        // New: scenario-driven recommendations + diagnostics (core deliverable)
+        buildScenarioRecommendations(sweepRows, scenarios);
+        updateButtonStates(); // Enable Export CSV etc.
+
+        // Double-check note (from full matrix re-audit 2026-06): The most meaningful remaining items for this exact
+        // optimization goal (sweeps for thumbs/gallery/80MP+/lightbox) that are ✅ implemented but have weak/no
+        // interactive browser optimization exposure are:
+        // - Isolated RAW stage timing via bench_decode_orf (decompress+demosaic cost, the dominant WASM bottleneck)
+        // - Selective processing / LookRenderer impact for different output modes (thumb vs lightbox vs full)
+        // Everything else performance-relevant from §2/3/9 is either covered in the current suite (after the
+        // use-case evolution of this page) or intentionally N/A per the matrix (Tauri-internal, unit tests only,
+        // or the 10 low-ROI escape-hatch JXL_ENC_FRAME_SETTING_* values). Scripted tools already exercise the RAW side.
         renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
         renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
     });
 
     document.getElementById('btn-stop')?.addEventListener('click', () => {
         abortSweep();
-        document.getElementById('btn-stop').disabled  = true;
-        document.getElementById('btn-run-sweep').disabled = false;
+        const stopBtn = document.getElementById('btn-stop');
+        const runBtn = document.getElementById('btn-run-sweep');
+        if (stopBtn) stopBtn.disabled = true;
+        if (runBtn) runBtn.disabled = false;
     });
 
     document.getElementById('btn-load-saved')?.addEventListener('click', () => {
@@ -1193,6 +1561,7 @@ function wireButtons() {
         renderPhase1Charts(sweepRows.filter(r => r.phase === 1));
         renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
         renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
+        updateButtonStates();
     });
 
     document.getElementById('btn-export-csv')?.addEventListener('click', () => {
@@ -1203,6 +1572,9 @@ function wireButtons() {
 
 // Build the graph section DOM immediately on module init so canvases exist.
 buildGraphsSection();
+
+// Initial button state check (in case of restored state or fast loads)
+setTimeout(updateButtonStates, 300);
 
 // =============================================================================
 // Results table — Task 8
@@ -1448,6 +1820,116 @@ export function buildPresetCards(presets) {
 }
 
 // =============================================================================
+// Scenario Recommendations + Diagnostic Suite (NEW core feature)
+// =============================================================================
+
+function scoreRowForScenario(row, scenario) {
+    const prof = SCENARIO_PROFILES[scenario];
+    if (!prof) return row.score || 0;
+    const w = prof.weights;
+
+    const relevant = sweepRows.filter(r => prof.sizes.some(sz => (sz === 'full' ? r.sizePx === 'full' : r.sizePx === sz)));
+    if (!relevant.length) return row.score || 0;
+
+    const minSize = Math.min(...relevant.map(r => r.sizeBytes));
+    const minEnc  = Math.min(...relevant.map(r => r.encMs));
+    const minDec  = Math.min(...relevant.map(r => r.decMs));
+
+    const sizeEff  = minSize / Math.max(1, row.sizeBytes);
+    const encSpeed = minEnc  / Math.max(1, row.encMs);
+    const decSpeed = minDec  / Math.max(1, row.decMs);
+
+    let composite = (sizeEff * (w.size || 0)) + (encSpeed * (w.encSpeed || 0)) + (decSpeed * (w.decSpeed || 0));
+
+    // RAW cost integration (from the new isolation surface)
+    if (w.rawCost && rawIsolationData) {
+        // Improved matching: try exact name match first, then contains
+        let match = Object.values(rawIsolationData).find(d => d.name && row.file && d.name === row.file);
+        if (!match) {
+            match = Object.values(rawIsolationData).find(d => d.name && row.file && d.name.includes(row.file));
+        }
+        const rawCost = match ? (match.rawCostForScoring?.thumb || match.rawCostForScoring?.full || 0) : 0;
+        if (rawCost > 0) {
+            const maxRaw = Math.max(...Object.values(rawIsolationData).map(d => d.rawCostForScoring?.full || d.rawCostForScoring?.thumb || 1));
+            const rawEff = maxRaw / Math.max(1, rawCost);
+            composite += rawEff * (w.rawCost || 0);
+        }
+    }
+
+    // Special bonuses
+    if (scenario === 'massive' && (row.lowMemoryMode || row.resamp > 1)) composite += 15;
+    if (scenario === 'gallery' && row.decSpeed >= 2) composite += 10;
+
+    return Math.round(composite * 100);
+}
+
+export function buildScenarioRecommendations(rows, selectedScenarios) {
+    const container = document.getElementById('preset-cards'); // reuse area or we could add a new section
+    if (!container) return;
+
+    // Create or replace a dedicated scenario recommendations block
+    let diag = document.getElementById('scenario-diagnostics');
+    if (!diag) {
+        diag = document.createElement('section');
+        diag.id = 'scenario-diagnostics';
+        diag.style.marginTop = '24px';
+        container.parentNode.insertBefore(diag, container.nextSibling);
+    }
+
+    const scenariosToShow = selectedScenarios.length ? selectedScenarios : Object.keys(SCENARIO_PROFILES);
+
+    let html = `<div style="font-size:8px;opacity:0.55;margin:1px 0 4px;">Scores include RAW cost where relevant. JSON = copy preset.</div>
+        <div class="scenario-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:3px;">`;
+
+    for (const scenId of scenariosToShow) {
+        const prof = SCENARIO_PROFILES[scenId];
+        if (!prof) continue;
+
+        const candidates = rows.filter(r => prof.sizes.some(s => (s === 'full' ? r.sizePx === 'full' : r.sizePx === s)));
+        if (!candidates.length) continue;
+
+        const scored = candidates.map(r => ({ r, s: scoreRowForScenario(r, scenId) }));
+        scored.sort((a, b) => b.s - a.s);
+        const best = scored[0].r;
+
+        let rawInfo = '';
+        if (rawIsolationData) {
+            const rawVals = Object.values(rawIsolationData).map(d => d.rawCostForScoring).filter(Boolean);
+            if (rawVals.length) {
+                const avgFull = rawVals.reduce((s, r) => s + (r.full || 0), 0) / rawVals.length;
+                rawInfo = ` RAW:${avgFull.toFixed(0)}`;
+            }
+        }
+
+        html += `
+            <div style="border:1px solid #333; border-radius:1px; padding:1px 3px; background:#111; font-size:7.5px; line-height:1.05;">
+                <strong style="color:#fde047;">${prof.label}</strong> e=${best.effort} ds=${best.decSpeed} m=${best.modular} b=${best.brotli} r=${best.resamp} | ${best.tier}@${best.sizePx} sc=${scored[0].s}${rawInfo}
+                <button class="copy-scenario-btn" data-scenario='${scenId}' style="font-size:6.5px;padding:0 1px;margin-left:2px;">JSON</button>
+            </div>`;
+    }
+
+    html += `</div>
+        <div style="margin-top:8px;font-size:10px;opacity:0.6;">
+            Tip: Combine with jxl-crop-benchmark.html for real 80MP ROI numbers and jxl-wrapper-lab.html for the full advanced filter / HDR / granular-EC controls not yet in the sweep matrix.
+        </div>`;
+
+    diag.innerHTML = html;
+
+    // Wire copy buttons
+    diag.querySelectorAll('.copy-scenario-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const scen = btn.dataset.scenario;
+            const prof = SCENARIO_PROFILES[scen];
+            const bestForScen = /* simplistic: take first good row */ rows.find(r => prof.sizes.some(s => r.sizePx === s)) || {};
+            const payload = { scenario: scen, profile: prof, bestRow: bestForScen, generatedAt: new Date().toISOString() };
+            navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+            btn.textContent = 'Copied!';
+            setTimeout(() => { if (btn) btn.textContent = 'Copy profile JSON'; }, 1200);
+        });
+    });
+}
+
+// =============================================================================
 // localStorage persistence — Task 8
 // =============================================================================
 
@@ -1477,14 +1959,28 @@ export function loadSavedResults() {
 // =============================================================================
 
 export function exportCsv(rows) {
-    const header = ['file','sizePx','tier','phase','effort','decSpeed','modular','brotli','resamp','encMs','decMs','sizeKB','score'];
+    const header = ['file','sizePx','tier','phase','effort','decSpeed','modular','brotli','resamp','encMs','decMs','sizeKB','score','rawBenchMs','rawFullMs','rawLightboxMs','rawThumbMs'];
     const csvRows = [header.join(',')];
     for (const r of rows) {
+        // Try to attach latest RAW data if present for this file
+        let rawBench = '', rawFull = '', rawLb = '', rawTh = '';
+        if (rawIsolationData) {
+            const match = Object.values(rawIsolationData).find(d => d.name && r.file && d.name.includes(r.file));
+            if (match) {
+                if (match.bench) rawBench = (match.bench.decompress_ms + match.bench.demosaic_ms).toFixed(1);
+                if (match.rawCostForScoring) {
+                    rawFull = (match.rawCostForScoring.full || 0).toFixed(1);
+                    rawLb   = (match.rawCostForScoring.lightbox || 0).toFixed(1);
+                    rawTh   = (match.rawCostForScoring.thumb || 0).toFixed(1);
+                }
+            }
+        }
         csvRows.push([
             r.file, r.sizePx, r.tier, r.phase, r.effort, r.decSpeed,
             r.modular, r.brotli, r.resamp,
             r.encMs.toFixed(1), r.decMs.toFixed(1),
             (r.sizeBytes / 1024).toFixed(1), r.score,
+            rawBench, rawFull, rawLb, rawTh
         ].join(','));
     }
     const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });

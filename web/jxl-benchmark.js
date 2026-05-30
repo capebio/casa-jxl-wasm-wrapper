@@ -1,4 +1,4 @@
-import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
+import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder, detectTier, setForcedTier } from '@casabio/jxl-wasm';
 import { bindRangeLabel } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
@@ -8,6 +8,7 @@ import {
     formatLoadFileStatus,
     formatLoadProgress,
 } from './jxl-benchmark-progress.js';
+import { createFilePicker } from './jxl-file-picker.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 
@@ -315,6 +316,7 @@ function addPermutation() {
     drawGraphs();
     const btn = document.getElementById('add-permutation');
     if (btn) btn.disabled = true;
+    updateButtonStates();
 }
 
 // Verify DOM elements exist
@@ -417,12 +419,26 @@ initRaw().then(() => {
 });
 
 // UI Setup
-if (sourceInput) {
-    sourceInput.addEventListener('change', e => {
-        console.log('File input changed, files:', e.target.files.length);
-        handleFileSelect(e);
-    });
-} else console.error('sourceInput missing');
+// Use unified file picker with memory
+const filePicker = createFilePicker({
+    input: sourceInput,
+    dropZone: sourceDrop,
+    multiple: true,
+    accept: '.orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*',
+    persistKey: 'jxl-benchmark-last-files',
+    onFiles: (files) => {
+        loadFiles(files);
+        updateButtonStates();
+    }
+});
+
+// Try to restore last session files
+filePicker?.loadLastPersisted?.().then(files => {
+    if (files?.length) {
+        loadFiles(files);
+        updateButtonStates();
+    }
+}).catch(() => {});
 
 if (sourceDrop) {
     sourceDrop.addEventListener('drop', handleFileDrop);
@@ -1392,15 +1408,15 @@ function clearResults() {
     setFileStatus('—');
     setTiming('Ready.');
     renderPermutationSelector();
-    document.getElementById('graph-caption').textContent = '';
+    const gc = document.getElementById('graph-caption'); if (gc) gc.textContent = '';
     const addBtn = document.getElementById('add-permutation');
     if (addBtn) addBtn.disabled = true;
 
-    document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
-    document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
-    document.getElementById('file-size-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
-    document.getElementById('encode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
-    document.getElementById('decode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
+    const esb = document.getElementById('encode-summary-body'); if (esb) esb.innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
+    const dsb = document.getElementById('decode-summary-body'); if (dsb) dsb.innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
+    const fsb = document.getElementById('file-size-body'); if (fsb) fsb.innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
+    const edb = document.getElementById('encode-detail-body'); if (edb) edb.innerHTML = '<div class="empty-state">Run benchmark.</div>';
+    const ddb = document.getElementById('decode-detail-body'); if (ddb) ddb.innerHTML = '<div class="empty-state">Run benchmark.</div>';
     const dlList = document.getElementById('jxl-download-list');
     if (dlList) dlList.innerHTML = '';
 

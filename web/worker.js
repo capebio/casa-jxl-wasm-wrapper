@@ -23,7 +23,7 @@ import init, {
     rgb_to_rgba,
     LookRenderer,
     rotate_rgb8,
-} from '../pkg/raw_converter_wasm.js';
+} from './pkg/raw_converter_wasm.js';
 
 // JXL encoding is handled by jxl-worker.js (spawned from the main thread).
 
