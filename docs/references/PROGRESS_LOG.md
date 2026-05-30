@@ -157,6 +157,34 @@ Use the template below for every entry.
 - All cross-refs (DESIGNS_INDEX, HANDOFF, PROGRESS intro, Casa/WASM_Tauri legacy notes) updated.
 
 **Docs Updated:**
+
+---
+
+## Handoff Created for Remaining 2026-06 Phase 3 Micro-Features — 2026-06
+
+**Branch:** `feature/hdr-signaling-color-priority` (at creation time)
+
+**Status:** Handoff artifact complete
+
+**Scope:** After full rigorous completion of the HDR Signaling note (smart wiring, lab badges, native parity, test, living progress + exemplar Cleanup & Handoff block), a dedicated continuation handoff was produced so the remaining three Phase 3 notes from the fine-toothed-comb audit can be driven to the same standard.
+
+**Key Artifact:**
+- New file: `docs/references/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md`
+  - Exact current state per note (HDR = done; JPEG recompression = initial slice + partial handoff already present; Pixel Art + Production Chunked = partial shared infrastructure + benchmark scaffolding from coordinated passes).
+  - Notes that `jpegReconstruction`, `upsamplingMode`/`alreadyDownsampled`, and strengthened `buffering`/`lowMemoryStrategy` fields already exist in facade.ts + lab from the "Both 1 & 2" infrastructure work.
+  - Clear recommended process, ruthless standard reminder, smart wiring principle, and immediate next actions.
+- Light pointer added to the top of the older master `HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md` directing readers to the active Phase 3 continuation document.
+
+**Why this handoff:** The long autonomous + heavily steered session (gain maps through Phase 3 micro-features + HDR deep slices) reached a natural pause after the credits question. This artifact preserves context, decisions, partial wins, and the exact bar for resumption without requiring the next agent to reconstruct everything from chat history.
+
+**Next:** When resuming, start from the new focused handoff file. Create a fresh feature branch before any further edits on the remaining notes.
+
+**Docs Updated:**
+- `docs/references/HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (new)
+- `docs/references/HANDOFF_Autonomous_Design_Notes_Implementation_2026-06.md` (pointer at top)
+- This PROGRESS_LOG entry
+
+---
 - Created `docs/FEATURE_PARITY_MATRIX.md`
 - Updated `docs/references/HANDOFF.md`, `docs/references/designs/DESIGNS_INDEX.md`, this PROGRESS_LOG
 - Minor clean in references/ + legacy comparison files (now thin or removed)
@@ -1076,4 +1104,50 @@ This closes the last material gap surfaced by the cjxl/jpegxl-rs/chafey referenc
 **Handoff followed:** The approved plan + `FEATURE_IMPLEMENTATION_TEMPLATE.md` + ruthless standard from the June 2026 audit. Branch created before any implementation code.
 
 **Next:** Full slice cleanup on this branch, then move to the next design note at the same level of refinement.
+
+---
+
+## HDR Signaling & Color Priority — Full Body of Work — 2026-06
+
+**Branch:** `feature/hdr-signaling-color-priority`
+
+**Status:** Substantial implementation body of work complete (public API + smart infrastructure + major modern paths + benchmark + native parity + living documentation).
+
+**Scope:**
+Focused implementation of the `hdr-signaling-color-priority.md` design note. Delivered first-class support for `intensityTarget`, `premultiply`, and especially the `preferCICPForHDR` policy (the key libvips/cjxl-inspired qualitative improvement for HDR correctness).
+
+**Key achievements:**
+- Public API + resolution on both WASM and Native with full parity.
+- Smart, sustainable infrastructure: scalars via advanced pairs in marshal; policy flag explicitly threaded to major modern paths (gain map, animation, core v2/metadata family via `EncodeRgbaWithMetadata`).
+- All color setup sites in `bridge.cpp` converted to the reusable `ApplyColorEncoding` helper.
+- Mandatory + richer benchmark wiring: controls + visible "HDR Info" result badges in the wrapper lab.
+- Richer test coverage.
+- Native parity (fields, parsing, application in central `EncodeAll`).
+- Design note kept as a high-quality living reference with strategic notes on the threading philosophy.
+
+**Key Files Changed (across the effort):**
+- `packages/jxl-wasm/src/facade.ts`, `packages/jxl-wasm/src/bridge.cpp`
+- `packages/jxl-native/src/index.ts`, `packages/jxl-native/src/native.cc`
+- `web/jxl-wrapper-lab.html` + `.js`
+- `packages/jxl-wasm/test/facade.test.ts`
+- `docs/references/designs/hdr-signaling-color-priority.md` (living progress + full Cleanup & Handoff)
+- Tracking updates (this entry, matrix context, main handoff doc)
+
+**What works today:**
+- HDR options are usable and effective on the recommended modern paths.
+- `preferCICPForHDR` correctly influences color decisions where threaded.
+- Visible, useful feedback exists in the benchmark.
+- WASM ↔ Native parity on public surface and core behavior.
+- All changes follow the project's rigorous, low-bloat patterns.
+
+**What still requires a rebuild:**
+- Full behavioral effect of the new options needs fresh Emscripten + native addon rebuilds.
+
+**Open items (documented in the design note):**
+- Explicit flag threading on any remaining lower-priority paths (intentional default-off).
+- Richer decode-side / roundtrip HDR metadata exposure (future polish).
+
+**Handoff followed:** `FEATURE_IMPLEMENTATION_TEMPLATE.md` + ruthless standard + smart architecture decisions + living documentation + clean tests at every step.
+
+**Next:** Final full handoff when the note is considered shipped, or move to the other 2026-06 micro-feature notes.
 
