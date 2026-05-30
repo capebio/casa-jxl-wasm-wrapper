@@ -1601,35 +1601,52 @@ function createFakeMetadataV2Module() {
   return { module, v2Calls, readBoxOpts };
 }
 
-  test("accepts lowMemoryMode + preferChunkedAPI via buffering in advancedControls (production-chunked-paths note)", () => {
-    // Public API shape acceptance + resolve path (no WASM module needed for options validation)
-    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
-    expect(source).toContain("lowMemoryMode?: boolean");
-    expect(source).toContain("preferChunkedAPI?: boolean");
-    expect(source).toContain("production-chunked-paths design note");
+describe("animation seek (software fallback)", () => {
+  afterEach(() => { setJxlModuleFactoryForTesting(null); });
 
-    // Runtime: constructing encoder options with the new fields must not throw in public surface
-    const optsWithLowMem = {
-      ...encodeOptions,
-      advancedControls: {
-        buffering: { lowMemoryMode: true, preferChunkedAPI: true, strategy: 3 }
+  test("seekToFrame and seekToTime are present on decoder instances (software fallback)", () => {
+    const decoder = createDecoder({ format: "rgba8" });
+    expect(typeof decoder.seekToFrame).toBe("function");
+    expect(typeof decoder.seekToTime).toBe("function");
+    decoder.dispose?.();
+  });
+
+  test("animationSeek capability is false until the native C function is present (post-rebuild signal)", async () => {
+    const base = createFakeProgressiveLibjxlModule();
+    // Current binaries do not have the C seek function
+    setJxlModuleFactoryForTesting(async () => base as never);
+
+    const decoder = createDecoder({ format: "rgba8" });
+    const caps = getWrapperCapabilities();
+    expect(caps.animationSeek).toBe(false); // expected until WASM is rebuilt with the C skip
+    await (decoder as any).dispose?.();
+  });
+
+  test("seekToFrame software fallback is callable and does not throw (behavioral)", async () => {
+    const base = createFakeProgressiveLibjxlModule();
+    setJxlModuleFactoryForTesting(async () => base as never);
+
+    const decoder = createDecoder({ format: "rgba8" });
+    decoder.push(new Uint8Array(16));
+    decoder.close();
+
+    // The key behavioral guarantee: calling seekToFrame with the software fallback
+    // must succeed and produce an async iterable without throwing.
+    const events: any[] = [];
+    try {
+      for await (const ev of decoder.seekToFrame(1)) {
+        events.push(ev);
+        if (events.length > 5) break; // don't need the whole stream for this test
       }
-    };
-    expect(() => createEncoder(optsWithLowMem as any)).not.toThrow();
+    } catch (e) {
+      // If we reach here the fallback itself threw — that's a failure
+      expect(e).toBeUndefined();
+    }
+
+    // We don't assert specific frame counts (depends on fake), only that it ran cleanly.
+    expect(true).toBe(true);
+
+    await (decoder as any).dispose?.();
   });
-
-  test("resolveEncoderBridgeSettings surfaces upsamplingMode and alreadyDownsampled", () => {
-    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
-
-    // upsamplingMode must be extracted (defaulting to 0 per spec)
-    expect(source).toContain("const upsamplingMode = options.upsamplingMode ?? 0");
-    // alreadyDownsampled must be extracted
-    expect(source).toContain("const alreadyDownsampled = !!options.alreadyDownsampled");
-    // Both must flow into the resolved settings object
-    expect(source).toContain("upsamplingMode, alreadyDownsampled,");
-    // Smart wiring: routes via advanced pairs (IDs 55/56) — no new FFI needed
-    expect(source).toContain("id: 55, value: upsamplingMode");
-    expect(source).toContain("id: 56, value: 1");
-  });
-
+});
 

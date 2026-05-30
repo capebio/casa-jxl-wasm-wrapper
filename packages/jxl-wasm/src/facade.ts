@@ -450,16 +450,24 @@ export interface JxlDecoder {
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
   /**
-   * Seek to a specific frame index (0-based) and re-emit decode events from that frame.
-   * Works today as a software fallback (decodes all frames, discards those before frameIndex).
-   * After WASM rebuild: uses _jxl_wasm_dec_seek_to_frame to skip at the C++ level (faster).
-   * Must be called instead of events(), not after it. Call after all data is pushed + close().
+   * Seek to a specific animation frame index (0-based) and yield events from that point onward.
+   *
+   * **Current behavior (always works):** Software fallback — the decoder replays the stream
+   * internally and filters out frames before the target. No WASM rebuild required.
+   *
+   * **Future (after rebuild):** Will use the native _jxl_wasm_dec_seek_to_frame fast path when
+   * available. The method itself will remain available regardless of rebuild status.
+   *
+   * Must be called *instead of* events(), never after. Call only after push + close().
    */
   seekToFrame?(frameIndex: number): AsyncIterable<DecodeEvent>;
+
   /**
-   * Seek to a frame by timestamp in milliseconds (relative to animation start).
-   * Computes frame index from animTicksPerSecond on the first decoded event.
-   * Falls back to frame 0 for non-animation files. Same constraints as seekToFrame.
+   * Convenience wrapper over seekToFrame that accepts time in milliseconds.
+   * Computes the target frame using the first event that carries animTicksPerSecond.
+   * Falls back to frame 0 for non-animated content.
+   *
+   * Same guarantees as seekToFrame: works today via software fallback.
    */
   seekToTime?(timeMs: number): AsyncIterable<DecodeEvent>;
 }
@@ -983,6 +991,15 @@ export interface WrapperCapabilities {
   tileAlignedRegionDecode: boolean;
   arbitraryRegionDecode: boolean;
   availableDownsampleFactors: readonly number[];
+
+  /**
+   * Whether the *optimized native* seek path is available.
+   * - `true` only after a WASM rebuild that includes `_jxl_wasm_dec_seek_to_frame`.
+   * - `false` on current binaries (seek still works via the software fallback in seekToFrame/seekToTime).
+   *
+   * Use this flag if you want to know whether you are getting the fast C++ skip path.
+   * The seek methods themselves are always present and functional.
+   */
   animationSeek: boolean;
 }
 
@@ -2745,6 +2762,11 @@ interface JxlCapabilities {
   metadataBoxesV2: boolean;
   gainMapEncode: boolean;
   animationEncode: boolean;
+
+  /**
+   * Internal: presence of the native C seek function.
+   * Exposed publicly as WrapperCapabilities.animationSeek.
+   */
   animationSeek: boolean;
 }
 

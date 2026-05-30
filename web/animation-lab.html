@@ -100,6 +100,10 @@
       <input type="range" id="scrubber" min="0" max="0" value="0" style="flex:1;" />
       <span id="scrubber-label" style="font-size:0.8rem; min-width:60px; text-align:right;">0 / 0</span>
     </div>
+    <div style="font-size:0.7rem; opacity:0.75; margin-bottom:0.25rem;">
+      Seek/scrub uses software fallback today (always works). After next WASM rebuild it will use the native fast path when available.
+      <span id="seek-status" style="margin-left:0.5rem;"></span>
+    </div>
     <canvas id="preview-anim" style="border:1px solid #ccc; image-rendering:pixelated; display:block;"></canvas>
   </div>
 
@@ -366,6 +370,16 @@
           currentFrameIdx = 0;
           showFrame(0);
           startPlayback();
+
+          // Honest status for the seek capability
+          const caps = getWrapperCapabilities();
+          const statusEl = el("seek-status");
+          if (statusEl) {
+            statusEl.textContent = caps.animationSeek
+              ? "• Native fast path active"
+              : "• Software fallback (native fast path after rebuild)";
+            statusEl.style.color = caps.animationSeek ? "#0a0" : "#c80";
+          }
         }
       } catch (err) {
         el("error-msg").textContent = String(err);
