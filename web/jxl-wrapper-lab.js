@@ -380,6 +380,15 @@ function getUpsamplingMode() {
     return Number.isFinite(v) ? v : 0;
 }
 
+/** JPEG reconstruction options (jpeg-recompression-polish design note) — mandatory benchmark. */
+function getJpegReconstruction() {
+    const cfl = !!document.getElementById('batch-jpeg-cfl')?.checked;
+    const compress = !!document.getElementById('batch-jpeg-compress-recon')?.checked;
+    const store = !!document.getElementById('batch-jpeg-store-meta')?.checked;
+    if (!cfl && !compress && !store) return undefined;
+    return { cfl, compressBoxes: compress, storeJPEGMetadata: store };
+}
+
 function getModular() {
     const v = Number(batchModularInputs.find(i => i.checked)?.value ?? -1);
     return (v === -1 || v === 0 || v === 1) ? v : -1;
@@ -1041,7 +1050,8 @@ function makeEncoderOptions(source) {
         photonNoiseIso: getPhotonNoiseIso() > 0 ? getPhotonNoiseIso() : undefined,
         resampling: getResampling(),
         upsamplingMode: getUpsamplingMode(),
-        alreadyDownsampled: false, // future checkbox if needed; for now driven by the mode + user knowledge
+        alreadyDownsampled: false,
+        jpegReconstruction: getJpegReconstruction(),
         modular: modular !== -1 ? modular : undefined,
         brotliEffort: brotliEffort >= 0 ? brotliEffort : undefined,
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,

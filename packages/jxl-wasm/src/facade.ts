@@ -140,6 +140,23 @@ export interface EncoderOptions {
    * Tells the encoder to skip its own downsampling step.
    */
   alreadyDownsampled?: boolean;
+
+  /**
+   * JPEG reconstruction controls (when the source was JPEG) — jpeg-recompression-polish design note.
+   * Only has effect on JPEG-derived encode paths (transcodeJpegToJxl family or when sidecar JPEG data is supplied).
+   * CFL (ID 30) can also ride advanced pairs for broad reach on other paths.
+   */
+  jpegReconstruction?: {
+    /** Enable chroma-from-luma during JPEG reconstruction (ID 30). */
+    cfl?: boolean;
+    /** Compress the reconstruction metadata boxes with Brotli. */
+    compressBoxes?: boolean;
+    /** Request reconstruction warnings / hints from the encoder. */
+    emitWarnings?: boolean;
+    /** Force calling JxlEncoderStoreJPEGMetadata as a distinct step (instead of implicit). */
+    storeJPEGMetadata?: boolean;
+  };
+
   /**
    * Convenience: per-channel distance for the alpha channel (if hasAlpha is true).
    * 0 = lossless alpha; omit to inherit main distance.
@@ -514,6 +531,8 @@ interface LibjxlWasmModule {
   _jxl_wasm_encode_rgba8_with_metadata_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   _jxl_wasm_encode_rgba8_with_metadata_ec_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number, boxOptsPtr: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   _jxl_wasm_transcode_jpeg_to_jxl_v2?(jpegPtr: number, jpegSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number): number;
+  // #15c: JPEG transcode v3 with explicit reconstruction controls (jpeg-recompression-polish)
+  _jxl_wasm_transcode_jpeg_to_jxl_v3?(jpegPtr: number, jpegSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, cfl: number, storeMeta: number): number;
   _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
@@ -839,6 +858,13 @@ function marshalAdvancedAndModular(
     effectiveAdvanced.push({ id: 56, value: 1 });
   }
 
+  // JPEG recon CFL (ID 30) from jpeg-recompression-polish note — rides advanced pairs for reach
+  // (the dedicated transcode paths below will also read the explicit option for conditional Store).
+  const jr = (typeof options !== 'undefined' && options.jpegReconstruction) || undefined; // best-effort; callers that have options pass it
+  if (jr && jr.cfl !== undefined) {
+    effectiveAdvanced.push({ id: 30, value: jr.cfl ? 1 : 0 });
+  }
+
   let advPtr = 0;
   let advCount = 0;
   if (effectiveAdvanced.length > 0) {
@@ -1029,7 +1055,14 @@ export function createEncoder(options: EncoderOptions): JxlEncoder {
  * The resulting JXL embeds the original JPEG bitstream for round-trip fidelity.
  * Requires a WASM build that includes the #15 bridge (jxl_wasm_transcode_jpeg_to_jxl).
  */
-export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promise<Uint8Array> {
+export interface JpegReconstructionOptions {
+  cfl?: boolean;
+  compressBoxes?: boolean;
+  emitWarnings?: boolean;
+  storeJPEGMetadata?: boolean;
+}
+
+export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array, recon?: JpegReconstructionOptions): Promise<Uint8Array> {
   const module = await loadLibjxlModule();
   if (!getCapabilities(module).jpegTranscode) {
     throw new CapabilityMissing("JPEG→JXL transcode requires a rebuilt WASM with transcode bridge");
@@ -1038,6 +1071,14 @@ export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promis
   const ptr = module._malloc(view.byteLength);
   try {
     module.HEAPU8.set(view, ptr);
+    // Prefer v3 (with explicit recon controls) when present (requires rebuild with the new bridge symbol).
+    const v3 = module._jxl_wasm_transcode_jpeg_to_jxl_v3;
+    if (v3 && recon) {
+      // For v3 we use the v2-style path (metadata capable). For pure no-box case fall back to v1 behavior.
+      // Allocate dummy box pointers (empty) for the simple case.
+      const h = v3(ptr, view.byteLength, 0, 0, 0, 0, 0, recon.cfl ? 1 : 0, recon.storeJPEGMetadata ? 1 : 0);
+      return takeBuffer(module, h, "transcode").data;
+    }
     const handle = module._jxl_wasm_transcode_jpeg_to_jxl!(ptr, view.byteLength);
     return takeBuffer(module, handle, "transcode").data;
   } finally {

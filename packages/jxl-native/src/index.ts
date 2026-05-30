@@ -245,6 +245,18 @@ export interface EncoderOptions {
    * Tells the encoder to skip its own downsampling step. Matches WASM.
    */
   alreadyDownsampled?: boolean;
+
+  /**
+   * JPEG reconstruction controls (when the source was JPEG) — jpeg-recompression-polish design note.
+   * Mirrors WASM facade exactly.
+   */
+  jpegReconstruction?: {
+    cfl?: boolean;
+    compressBoxes?: boolean;
+    emitWarnings?: boolean;
+    storeJPEGMetadata?: boolean;
+  };
+
   /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
   modular?: -1 | 0 | 1;
   /**

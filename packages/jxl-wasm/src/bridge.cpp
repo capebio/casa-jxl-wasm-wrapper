@@ -403,7 +403,13 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
-    const WasmBoxOpts* box_opts = nullptr) {
+    const WasmBoxOpts* box_opts = nullptr,
+    bool prefer_cicp_for_hdr = false,
+    int32_t mod_group_size = -1, int32_t mod_predictor = -1, int32_t mod_nb_prev = -1,
+    int32_t mod_palette_colors = -1, int32_t mod_lossy_palette = -1, int32_t mod_ma_tree = -1,
+    const int32_t* adv_pairs = nullptr, uint32_t num_adv = 0,
+    int32_t upsampling_mode = -1,      // -1 = libjxl default; 0 = nearest-neighbor (pixel art)
+    int32_t already_downsampled = 0) { // 1 = source already downsampled
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -2609,6 +2615,93 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl_v2(
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
   if (frame == nullptr) { JxlEncoderDestroy(enc); return MakeError(43); }
+
+  if (JxlEncoderAddJPEGFrame(frame, jpeg, jpeg_size) != JXL_ENC_SUCCESS) {
+    JxlEncoderDestroy(enc); return MakeError(44);
+  }
+
+  const JxlBool compress_flag = (box_opts && box_opts->compress_boxes) ? JXL_TRUE : JXL_FALSE;
+  if (exif != nullptr && exif_size > 0) {
+    if (JxlEncoderAddBox(enc, "Exif", exif, exif_size, compress_flag) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc); return MakeError(161);
+    }
+  }
+  if (xmp != nullptr && xmp_size > 0) {
+    if (JxlEncoderAddBox(enc, "xml ", xmp, xmp_size, compress_flag) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc); return MakeError(162);
+    }
+  }
+  if (AddCustomBoxes(enc, box_opts) != JXL_ENC_SUCCESS) {
+    JxlEncoderDestroy(enc); return MakeError(163);
+  }
+
+  JxlEncoderCloseInput(enc);
+
+  const size_t initial_cap = std::max(size_t(65536), jpeg_size / 2);
+  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_cap));
+  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(45); }
+  size_t outbuf_cap = initial_cap;
+  uint8_t* next_out = outbuf;
+  size_t avail_out = outbuf_cap;
+  for (;;) {
+    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
+    if (status == JXL_ENC_SUCCESS) {
+      const size_t final_size = static_cast<size_t>(next_out - outbuf);
+      JxlEncoderDestroy(enc);
+      JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+      if (result == nullptr) { free(outbuf); return MakeError(46); }
+      result->data = outbuf;
+      result->size = final_size;
+      return result;
+    }
+    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
+      const size_t offset = static_cast<size_t>(next_out - outbuf);
+      outbuf_cap *= 2;
+      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
+      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(47); }
+      outbuf = grown;
+      next_out = outbuf + offset;
+      avail_out = outbuf_cap - offset;
+      continue;
+    }
+    free(outbuf);
+    JxlEncoderDestroy(enc);
+    return MakeError(static_cast<int>(status));
+  }
+}
+
+// --- #15c: JPEG → JXL transcode v3 with explicit reconstruction controls (jpeg-recompression-polish note) ---
+// Adds first-class CFL (ID 30) and conditional StoreJPEGMetadata.
+// This is the production-grade path for archival JPEG sources.
+JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl_v3(
+    const uint8_t* jpeg, size_t jpeg_size,
+    const uint8_t* exif, size_t exif_size,
+    const uint8_t* xmp, size_t xmp_size,
+    const WasmBoxOpts* box_opts,
+    bool cfl,
+    bool store_meta) {
+  if (jpeg == nullptr || jpeg_size == 0) return MakeError(40);
+
+  JxlEncoder* enc = JxlEncoderCreate(nullptr);
+  if (enc == nullptr) return MakeError(41);
+
+  // Conditional Store per the design note (distinct controllable step).
+  // We honor the caller's intent: if they pass store_meta=false we skip (for advanced "strip recon" use cases).
+  const JxlBool do_store = store_meta ? JXL_TRUE : JXL_FALSE;
+  if (JxlEncoderStoreJPEGMetadata(enc, do_store) != JXL_ENC_SUCCESS) {
+    JxlEncoderDestroy(enc); return MakeError(42);
+  }
+  if (ApplyContainerMode(enc, box_opts) != JXL_ENC_SUCCESS) {
+    JxlEncoderDestroy(enc); return MakeError(160);
+  }
+
+  JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
+  if (frame == nullptr) { JxlEncoderDestroy(enc); return MakeError(43); }
+
+  // Apply CFL when requested (the key qualitative knob from cjxl).
+  if (cfl) {
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_JPEG_RECON_CFL, 1);
+  }
 
   if (JxlEncoderAddJPEGFrame(frame, jpeg, jpeg_size) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(44);

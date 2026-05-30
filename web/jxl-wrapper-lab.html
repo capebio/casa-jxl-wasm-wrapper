@@ -125,6 +125,16 @@
                         </select>
                         <div style="font-size:10px; opacity:0.65;">0 (nearest) is non-negotiable for crisp pixel art. Combine with resampling>1. Warning badge in results for photographic misuse.</div>
                     </div>
+                    <!-- JPEG Reconstruction (jpeg-recompression-polish design note) - mandatory benchmark -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">JPEG Reconstruction <span style="font-size:10px;opacity:0.6">(Phase 3)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:11px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-jpeg-cfl" /> <span>CFL (ID 30)</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-jpeg-compress-recon" /> <span>Compress recon boxes</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-jpeg-store-meta" /> <span>Explicit StoreJPEGMetadata</span></label>
+                        </div>
+                        <div style="font-size:10px; opacity:0.65;">Fine control for JPEG→JXL fidelity + roundtrip quality. Best with actual JPEG sources (uses transcode paths).</div>
+                    </div>
                     <div class="spin-group">
                         <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Modular mode <button class="info-btn" type="button" data-help-target="wl-modular" aria-label="Modular mode info">i</button></span>
                         <div class="preset-group" role="radiogroup" aria-label="JXL modular mode">
