@@ -999,6 +999,20 @@ describe("extra channel encode", () => {
     await encoder.dispose();
   });
 
+  test("ExtraChannel.modular sub-object (granular per-EC hints) is accepted (future-proof surface)", async () => {
+    const modularHints = { predictor: 5, groupSize: 128, paletteColors: 0 };
+    const encoder = createEncoder({
+      ...encodeOptions, quality: 90,
+      extraChannels: [
+        { type: 'alpha', bitsPerSample: 8, distance: 0, name: 'alpha-smooth', modular: modularHints },
+        { type: 'depth', bitsPerSample: 16, distance: 0.5, name: 'depth-detail', modular: { predictor: 0, groupSize: 256 } }
+      ]
+    });
+    expect(encoder).toBeTruthy();
+    // The field is accepted at construction and visible; deeper application is scoped per the design note.
+    await encoder.dispose?.();
+  });
+
   test("falls back to standard path when EC bridge is absent", async () => {
     const module = createFakeLibjxlModule();
     setJxlModuleFactoryForTesting(async () => module);

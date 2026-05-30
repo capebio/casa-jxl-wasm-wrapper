@@ -4,6 +4,7 @@
 // Feed each file in chunks with emitEveryPass=true to show dc → pass → full.
 
 import { createBrowserContext } from '../packages/jxl-session/dist/index.js';
+import { createEncoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createGalleryCoordinator } from './jxl-progressive-gallery-coordinator.js';
 import { createGalleryLightbox } from './jxl-progressive-gallery-lightbox.js';
@@ -53,20 +54,37 @@ concurrentEl.addEventListener('input', () => {
   concurrentVal.textContent = concurrentEl.value;
 });
 
-sourceInput.addEventListener('change', () => {
-  const files = [...sourceInput.files].filter(f => /\.jxl$/i.test(f.name));
+function getGalleryProgressiveDetail() {
+  const sel = document.getElementById('gallery-prog-detail');
+  return sel ? sel.value : 'dc';
+}
 
-  if (files.length === 0) {
-    pickerStatus.textContent = 'No JXL files in selection';
+function getGalleryEncodeOptions() {
+  return {
+    previewFirst: !!(document.getElementById('gallery-preview-first')?.checked),
+    progressiveDc: Number(document.getElementById('gallery-prog-dc')?.value ?? 2),
+    groupOrder: document.getElementById('gallery-group-order')?.checked ? 1 : 0,
+  };
+}
+
+sourceInput.addEventListener('change', () => {
+  const allFiles = [...sourceInput.files];
+  const jxlFiles = allFiles.filter(f => /\.jxl$/i.test(f.name));
+  const rawFiles = allFiles.filter(f => /\.(png|jpe?g|webp)$/i.test(f.name));
+
+  const filesToUse = jxlFiles.length > 0 ? jxlFiles : rawFiles;
+
+  if (filesToUse.length === 0) {
+    pickerStatus.textContent = 'Pick .jxl files (or PNG/JPG for on-the-fly encode demo)';
     return;
   }
 
-  pickerStatus.textContent = `${files.length} JXL file${files.length > 1 ? 's' : ''} selected`;
+  pickerStatus.textContent = `${filesToUse.length} file${filesToUse.length > 1 ? 's' : ''} selected${rawFiles.length > 0 && jxlFiles.length === 0 ? ' (will encode with new options)' : ''}`;
   galleryRowsEl.innerHTML = '';
 
-  log(`Starting round-robin gallery for ${files.length} file${files.length > 1 ? 's' : ''}`);
-  dbgLog('Gallery start', `${files.length} files`, 'info');
-  startGallery(files).catch(e => log(`Gallery error: ${e.message}`, 'error'));
+  log(`Starting round-robin gallery for ${filesToUse.length} file${filesToUse.length > 1 ? 's' : ''}`);
+  dbgLog('Gallery start', `${filesToUse.length} files`, 'info');
+  startGallery(filesToUse, { encodeOnTheFly: rawFiles.length > 0 && jxlFiles.length === 0 }).catch(e => log(`Gallery error: ${e.message}`, 'error'));
 });
 
 function wirePushModeControls() {
@@ -98,11 +116,13 @@ function slotId(file) {
 
 // ── Gallery pipeline (round-robin reveal + lightbox) ──────────────────────────
 
-async function startGallery(selectedFiles) {
+async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
   if (!ctx) {
     log('Context not ready', 'warn');
     return;
   }
+
+  const encodeOpts = encodeOnTheFly ? getGalleryEncodeOptions() : null;
 
   // Remove any previous keyboard handler from prior gallery load
   if (activeKeyHandler) {
@@ -260,6 +280,61 @@ async function startGallery(selectedFiles) {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   }
 
+  async function loadImageToRgba(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = img.width;
+      c.height = img.height;
+      const ctx2d = c.getContext('2d');
+      ctx2d.drawImage(img, 0, 0);
+      const data = ctx2d.getImageData(0, 0, c.width, c.height);
+      return { rgba: new Uint8Array(data.data.buffer), width: c.width, height: c.height };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function encodeToProgressiveJxl(rgbaData, encodeOptions) {
+    const { width, height, rgba } = rgbaData;
+    const enc = createEncoder({
+      format: 'rgba8',
+      width,
+      height,
+      hasAlpha: true,
+      quality: 82,
+      effort: 4,
+      progressive: true,
+      previewFirst: encodeOptions.previewFirst,
+      progressiveDc: encodeOptions.progressiveDc,
+      groupOrder: encodeOptions.groupOrder,
+      chunked: false,
+    });
+
+    const chunks = [];
+    const pushTask = (async () => {
+      for await (const ch of enc.chunks()) {
+        chunks.push(ch instanceof Uint8Array ? ch : new Uint8Array(ch));
+      }
+    })();
+
+    await enc.pushPixels(rgba);
+    await enc.finish();
+    await pushTask;
+    await enc.dispose();
+
+    // Concatenate
+    let total = 0;
+    for (const c of chunks) total += c.byteLength;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.byteLength; }
+    return out;
+  }
+
   // Decode all files concurrently, register frames with coordinator
   const filePromises = selectedFiles.map(async file => {
     const fileId = slotId(file);
@@ -267,18 +342,27 @@ async function startGallery(selectedFiles) {
 
     let buffer;
     try {
-      buffer = await file.arrayBuffer();
+      if (encodeOnTheFly) {
+        log(`${file.name}: encoding on the fly with progressiveDc=${encodeOpts.progressiveDc}, groupOrder=${encodeOpts.groupOrder}, previewFirst=${encodeOpts.previewFirst}...`);
+        const raw = await loadImageToRgba(file);
+        buffer = await encodeToProgressiveJxl(raw, encodeOpts);
+        log(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL`);
+      } else {
+        buffer = await file.arrayBuffer();
+      }
     } catch (e) {
-      log(`${file.name}: read error — ${e.message}`, 'error');
+      log(`${file.name}: ${encodeOnTheFly ? 'encode' : 'read'} error — ${e.message}`, 'error');
       return;
     }
 
     dbgLog('Decoding', `${file.name} · ${buffer.byteLength} bytes · mode=${pushMode}`, 'info');
 
+    const chosenDetail = getGalleryProgressiveDetail();
     const session = ctx.decode({
       format: 'rgba8',
       progressionTarget: 'final',
       emitEveryPass: true,
+      progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail,
     });
 
     // Push chunks — all at once (round-robin reveal works because coordinator
@@ -296,6 +380,12 @@ async function startGallery(selectedFiles) {
         const elapsedMs = Date.now() - startMs;
         const bytesFed = buffer.byteLength; // all bytes fed upfront in all-chunks mode
         const percentFed = 100;
+
+        let stage = frame.stage;
+        if (frame.type === 'preview' || stage === 'preview') {
+          stage = 'preview';
+        }
+
         const enriched = {
           ...frame,
           frameIndex: frameIndex++,
@@ -303,11 +393,12 @@ async function startGallery(selectedFiles) {
           bytesFed,
           percentFed,
           totalBytes: buffer.byteLength,
+          stage,
         };
         framesByFile.get(fileId).push(enriched);
         coordinator.registerFrame(fileId, enriched);
         reRenderAll();
-        dbgLog('Frame', `${file.name} · ${frame.stage}`, 'info');
+        dbgLog('Frame', `${file.name} · ${stage || frame.stage}`, 'info');
       }
       coordinator.markFileClosed(fileId);
       reRenderAll();

@@ -98,6 +98,24 @@
     }
 
     .push-mode-btn.is-active {
+
+    /* New controls for progressive encode/decode options */
+    .prog-controls {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+      font-size: 0.8rem;
+    }
+    .prog-control {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      background: #222;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      border: 1px solid #444;
+    }
       background: #0d3b66;
       border-color: #3a78c2;
       color: #fff;
@@ -207,7 +225,7 @@
     <label class="file-pick-btn" for="source-input">
       📂 Pick JXL files
     </label>
-    <input id="source-input" type="file" multiple accept=".jxl,.JXL" />
+    <input id="source-input" type="file" multiple accept=".jxl,.JXL,.png,.jpg,.jpeg,.webp" />
     <span class="picker-status" id="picker-status">No files selected</span>
     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
     <div class="push-mode-group" aria-label="Chunk push mode">
@@ -226,6 +244,33 @@
     </label>
     <div class="help-popover" data-help-popover="pg-concurrent" hidden style="margin-top:4px;max-width:280px;">
       Maximum JXL files decoded simultaneously. Higher = faster overall gallery load when many files are queued. Lower = less CPU contention and memory pressure per slot. Each active decoder runs its own session.
+    </div>
+
+    <!-- New progressive options for earliest preview + round-robin testing -->
+    <div class="prog-controls">
+      <div class="prog-control">
+        <label style="display:flex; align-items:center; gap:4px; font-size:0.75rem;">
+          Decode mode
+          <select id="gallery-prog-detail" style="font-size:0.75rem;">
+            <option value="dc">Earliest DC + Preview (new)</option>
+            <option value="passes">All passes</option>
+            <option value="auto">Auto</option>
+          </select>
+        </label>
+      </div>
+      <div class="prog-control" title="Affects generated JXLs if you use raw images">
+        <label style="display:flex; align-items:center; gap:4px; font-size:0.75rem;">
+          <input type="checkbox" id="gallery-preview-first" checked />
+          Preview 1st
+        </label>
+        <label style="display:flex; align-items:center; gap:4px; font-size:0.75rem;">
+          DC layers <input type="number" id="gallery-prog-dc" value="2" min="0" max="3" style="width:3em;" />
+        </label>
+        <label style="display:flex; align-items:center; gap:4px; font-size:0.75rem;">
+          <input type="checkbox" id="gallery-group-order" checked />
+          Center-out
+        </label>
+      </div>
     </div>
   </div>
 

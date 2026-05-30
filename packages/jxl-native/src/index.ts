@@ -127,6 +127,22 @@ export interface ExtraChannel {
   distance?: number;
   /** Optional human-readable label embedded in the JXL bitstream. */
   name?: string;
+
+  /**
+   * Per-extra-channel Modular hints (future-proof surface per granular-extra-channel-modular.md).
+   * In the current vendored libjxl (no dedicated per-EC modular setters on JxlExtraChannelInfo or frame settings),
+   * these are accepted for discoverability and forward compatibility but most fields remain global-only (via modularOptions
+   * or advancedFrameSettings). Global `modularOptions` on EncoderOptions is the primary mechanism today.
+   * Mirrors the shape of ModularOptions for ergonomic consistency.
+   */
+  modular?: {
+    predictor?: number;
+    groupSize?: number;
+    paletteColors?: number;
+    nbPrevChannels?: number;
+    lossyPalette?: boolean;
+    maTreeLearningPercent?: number;
+  };
 }
 
 /** Descriptor for one frame in an animation sequence. */
