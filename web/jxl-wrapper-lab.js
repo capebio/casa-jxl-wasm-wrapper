@@ -494,6 +494,45 @@ function getAlphaDistance() {
     return isNaN(v) ? undefined : Math.max(0, Math.min(2, v));
 }
 
+/** HDR signaling controls (intensityTarget, premultiply, preferCICPForHDR) — Phase 3 exemplar wiring. */
+function getHDRSignaling() {
+    const intensityEl = document.getElementById('batch-hdr-intensity');
+    const premultEl = document.getElementById('batch-hdr-premultiply');
+    const cicpEl = document.getElementById('batch-hdr-cicp-policy');
+
+    const intensityTarget = intensityEl && intensityEl.value.trim() !== '' ? Number(intensityEl.value) : undefined;
+    const premultiply = premultEl ? !!premultEl.checked : undefined;
+    let preferCICPForHDR;
+    if (cicpEl && cicpEl.value !== '') {
+        preferCICPForHDR = cicpEl.value === 'true';
+    }
+
+    const hasAny = intensityTarget != null || premultiply != null || preferCICPForHDR != null;
+    if (!hasAny) return undefined;
+
+    return { intensityTarget, premultiply, preferCICPForHDR };
+}
+
+// Granular per-EC Modular demo (scoped future-proof surface per granular-extra-channel-modular.md).
+// Returns sample extraChannels with per-channel modular hints for the lab "Mixed alpha + depth" demo.
+// In current libjxl these hints are accepted at the TS surface but most remain global in effect.
+let _granularEcModularDemo = null;
+
+function getGranularExtraChannelModularDemo() {
+  return _granularEcModularDemo;
+}
+
+function updateGranularEcStatus() {
+  const status = document.getElementById('batch-granular-ec-status');
+  if (!status) return;
+  if (_granularEcModularDemo && _granularEcModularDemo.length > 0) {
+    status.textContent = `${_granularEcModularDemo.length} ECs w/ modular hints (demo)`;
+    status.style.color = '#0a0';
+  } else {
+    status.textContent = '';
+  }
+}
+
 function getLossless() {
     return Boolean(batchLosslessInput.checked);
 }
@@ -1139,8 +1178,15 @@ function makeEncoderOptions(source) {
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
         jumbfBoxes: jumbfBoxes || undefined,
         alphaDistance: getAlphaDistance(),
+        // Granular per-EC Modular demo (future-proof surface). When the lab sample is activated this injects
+        // mixed extraChannels with per-channel modular hints so they appear in the advanced payload + results.
+        // Full application is scoped per the design note (global modularOptions already flow to EC paths).
+        extraChannels: getGranularExtraChannelModularDemo() || undefined,
         // Gain map (HDR) transport — exercises jhgm box path when provided (mandatory per gain-maps.md)
         gainMap: getGainMap(),
+        // HDR Signaling (intensityTarget / premultiply / preferCICPForHDR) — Phase 3 exemplar (hdr-signaling-color-priority.md)
+        // Currently surfaced for lab visibility + future first-class wiring. Values also influence advanced pairs when the full HDR signaling implementation is active.
+        hdr: getHDRSignaling(),
         // First-class advanced controls (Phase 1 slice)
         advancedControls: (() => {
             const f = getAdvancedFilters();
@@ -1155,6 +1201,12 @@ function makeEncoderOptions(source) {
             const b = buf?.buffering;
             if (b && (b.lowMemoryMode || b.preferChunkedAPI)) {
                 dbgLog('  low-memory hints active for this encode', `lowMemoryMode=${!!b.lowMemoryMode} preferChunkedAPI=${!!b.preferChunkedAPI} (promotes buffering strategy)`);
+            }
+
+            // HDR signaling diagnostic (hdr-signaling-color-priority.md exemplar)
+            const h = getHDRSignaling();
+            if (h) {
+                dbgLog('  HDR signaling active', `intensity=${h.intensityTarget ?? 'auto'} premult=${!!h.premultiply} preferCICP=${h.preferCICPForHDR ?? 'default'}`);
             }
 
             return Object.keys(out).length ? out : undefined;
@@ -1389,6 +1441,75 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
             tile.wrapper.parentNode.appendChild(gmNote);
         } else if (tile.el) {
             tile.el.appendChild(gmNote);
+        }
+    }
+
+    // HDR Signaling policy badges (educational home for the Phase 3 exemplar)
+    // Shows the user's chosen policy from the HDR signaling controls at encode time.
+    const hdrIntensity = document.getElementById('batch-hdr-intensity')?.value;
+    const hdrPremult = document.getElementById('batch-hdr-premultiply')?.checked;
+    const hdrCICP = document.getElementById('batch-hdr-cicp-policy')?.value;
+    const hdrNotes = [];
+    if (hdrIntensity && hdrIntensity.trim() !== '') hdrNotes.push(`nits ${hdrIntensity}`);
+    if (hdrPremult) hdrNotes.push('premult');
+    if (hdrCICP) hdrNotes.push(hdrCICP === 'true' ? 'CICP' : 'ICC');
+    if (hdrNotes.length > 0) {
+        const hdrBadge = document.createElement('span');
+        hdrBadge.style.cssText = 'margin-left:6px; font-size:9px; padding:0 4px; border:1px solid #c084fc; border-radius:3px; background:#faf5ff; color:#6b21a8;';
+        hdrBadge.textContent = `HDR ${hdrNotes.join(' ')}`;
+        hdrBadge.title = 'HDR signaling policy from lab controls (intensityTarget / premultiply / preferCICPForHDR). See hdr-signaling-color-priority.md (Phase 3 exemplar)';
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(hdrBadge);
+        } else if (tile.el) {
+            tile.el.appendChild(hdrBadge);
+        }
+    }
+
+    // Extra Channels demo badge (educational visibility for the scoped granular modular demo)
+    if (_granularEcModularDemo && _granularEcModularDemo.length > 0) {
+        const ecBadge = document.createElement('span');
+        ecBadge.style.cssText = 'margin-left:6px; font-size:9px; padding:0 4px; border:1px solid #64748b; border-radius:3px; background:#f1f5f9; color:#334155;';
+        ecBadge.textContent = `EC demo ${_granularEcModularDemo.length}ch`;
+        ecBadge.title = 'Granular extraChannels with per-channel modular hints (scoped demo). See granular-extra-channel-modular.md';
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(ecBadge);
+        } else if (tile.el) {
+            tile.el.appendChild(ecBadge);
+        }
+    }
+
+    // Advanced controls feedback in results (filters / groupOrder / buffering) — makes Phase 1 visible per-tile
+    const advF = getAdvancedFilters?.();
+    const advG = getGroupOrderControls?.();
+    const advB = getBufferingControls?.();
+    const advParts = [];
+    if (advF?.filters) {
+        const f = advF.filters;
+        const active = [];
+        if (f.dots) active.push('dots');
+        if (f.patches) active.push('patches');
+        if (f.epf != null) active.push(`epf${f.epf}`);
+        if (f.gaborish) active.push('gaborish');
+        if (active.length) advParts.push(`F:${active.join('+')}`);
+    }
+    if (advG?.groupOrder) {
+        const g = advG.groupOrder;
+        advParts.push(g.mode === 'center' ? `G:center${g.centerX != null ? `(${g.centerX},${g.centerY})` : ''}` : 'G:scan');
+    }
+    if (advB?.buffering) {
+        const b = advB.buffering;
+        if (b.strategy != null) advParts.push(`B:${b.strategy}`);
+        if (b.lowMemoryMode) advParts.push('lowmem');
+    }
+    if (advParts.length > 0) {
+        const advBadge = document.createElement('span');
+        advBadge.style.cssText = 'margin-left:6px; font-size:9px; padding:0 4px; border:1px solid #7c3aed; border-radius:3px; background:#f5f3ff; color:#5b21b6;';
+        advBadge.textContent = advParts.join(' ');
+        advBadge.title = 'Active first-class advancedControls (Phase 1): filters / groupOrder / buffering. See first-class-advanced-encoder-controls.md';
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(advBadge);
+        } else if (tile.el) {
+            tile.el.appendChild(advBadge);
         }
     }
 
@@ -1769,6 +1890,23 @@ function wireControls() {
                 runBtn.style.outline = '2px solid #0a0';
                 setTimeout(() => { runBtn.style.outline = old; }, 1200);
             }
+        });
+    }
+
+    // Extra Channels granular demo button (makes the scoped demo from granular-extra-channel-modular.md visible in the benchmark)
+    const ecDemoBtn = document.getElementById('batch-load-ec-demo');
+    if (ecDemoBtn) {
+        ecDemoBtn.addEventListener('click', () => {
+            // Sample: alpha (lossless) + depth with per-channel modular hints
+            _granularEcModularDemo = [
+                { type: 'alpha', bitsPerSample: 8, distance: 0, modular: { predictor: 5 } },
+                { type: 'depth', bitsPerSample: 16, distance: 1.5, modular: { predictor: 0, groupSize: 128 } }
+            ];
+            updateGranularEcStatus();
+            // Visual feedback
+            ecDemoBtn.style.outline = '2px solid #0a0';
+            setTimeout(() => { ecDemoBtn.style.outline = ''; }, 800);
+            dbgLog('Extra Channels demo activated', '2 channels (alpha lossless + depth) with per-channel modular hints');
         });
     }
 }

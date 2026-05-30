@@ -3,7 +3,7 @@
 **Feature:** Promotion of high-ROI `JxlEncoderFrameSettingId` surface (GROUP_ORDER family, DOTS/PATCHES/EPF/GABORISH, BUFFERING modes, DISABLE_PERCEPTUAL_HEURISTICS, expert gating, convenience bundles, and related controls) from raw `advancedFrameSettings` escape hatch to named, validated, ergonomic first-class options  
 **Date:** 2026-06  
 **Author:** Grok (as the implementing agent post-audit)  
-**Status:** Design ready for implementation handoff  
+**Status:** Phase 1 complete (filters + GROUP_ORDER + validation + buffering foundation, 2026-06); remaining phases (deeper buffering, metrics, expert gating) future per note. Source + parity + lab delivered to exemplar slice standard.  
 **Related Index Section:** Post-June 2026 deep reference audit (REFERENCE_CODE_AUDIT.md Master Gap List + cjxl_main.cc + full enum audit)  
 **Priority:** Highest remaining encoder gap after core-modular, extra channels, photon noise, resampling, and metadata work. Directly called out as the primary recommended next artifact in AUDIT_TO_DESIGN_HANDOFF.md.
 
@@ -315,18 +315,18 @@ The raw `advancedFrameSettings` escape hatch is available from day one for anyth
 - Lab UI: Filters + Group Order controls live and wired.
 - Validation covers EPF range + groupOrder mutual exclusion (center requires centers).
 - Buffering controls started (strategy + streaming hints).
-- Tests extended (including validation warnings test).
+- Tests extended (including validation warnings test + lowMemoryMode usage).
 - All tracking and living docs updated.
 - Escape hatch 100% preserved.
+- Runtime probe for optional features (gain map) added to native for discoverability parity.
 
-**Status:** Final polish complete for this slice:
-- `getValidationWarnings()` exposed on the public `JxlEncoder` interface (stored at construction time).
-- Validation now covers filters (EPF), groupOrder (mutual exclusion), and buffering ranges.
-- `validateAdvancedControls` is public and usable before encoder creation.
-- Lab and core now have much better discoverability for misconfigurations (matching cjxl philosophy).
-- Buffering controls foundation landed with parity.
+**Status:** Phase 1 slice complete (2026-06). See PROGRESS_LOG "First-Class Advanced Encoder Controls — Phase 1 Complete" entry for the full TEMPLATE handoff.
+- `getValidationWarnings()` exposed on the public `JxlEncoder` interface.
+- All Phase 1 controls (filters, groupOrder, initial buffering) functional via the sustainable advanced pairs path.
+- Full WASM ↔ native source parity + lab exposure.
+- This slice delivered to the same bar as HDR / JPEG recompression Phase 3 exemplars (smart wiring, no unnecessary FFI, rich docs, tests, benchmark wiring).
 
-This slice of the note is now in excellent shape for a rebuild + real usage. High quality bar achieved.
+Rebuild still recommended for full end-to-end behavioral verification on real artifacts. Future slices (deeper buffering trade-off docs, dedicated metrics panel, expert gating) remain per the design note.
 
 ---
 

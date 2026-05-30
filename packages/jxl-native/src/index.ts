@@ -23,20 +23,6 @@ export interface NativeBinding {
   };
   createDecoder?: (options: DecoderOptions) => NativeDecoder;
   createEncoder?: (options: EncoderOptions) => NativeEncoder;
-  encodeJxtcRgba8?: (
-    pixels: ArrayBuffer,
-    width: number,
-    height: number,
-    tileSize: number,
-    options?: JxtcEncodeOptions,
-  ) => ArrayBuffer;
-  decodeJxtcRegionRgba8?: (
-    container: ArrayBuffer,
-    x: number,
-    y: number,
-    w: number,
-    h: number,
-  ) => JxtcDecodeResult;
 }
 
 export interface NativeLoaderOptions {
@@ -94,12 +80,6 @@ export interface MetadataBoxSpec {
   compress?: boolean;
 }
 
-/** JUMBF box (C2PA / content provenance / archival). The payload is opaque; the wrapper emits it as a "jumb" container box. */
-export interface JUMBFBox {
-  /** Raw JUMBF superbox bytes (including the JUMBF box header). */
-  data: Uint8Array | ArrayBuffer;
-}
-
 export interface MetadataOptions {
   /** Include ICC profile (default true when iccProfile is non-null). */
   includeICC?: boolean;
@@ -137,48 +117,6 @@ export interface ModularOptions {
   maTreeLearningPercent?: number;
 }
 
-/** First-class advanced encoder controls (mirrors the WASM facade for cross-platform parity). */
-export interface AdvancedEncoderControls {
-  filters?: FiltersControls;
-  groupOrder?: GroupOrderControls;
-  buffering?: BufferingControls;
-}
-
-/** Filters / advanced coding tools promoted in the first slice (DOTS/PATCHES/EPF/GABORISH). */
-export interface FiltersControls {
-  dots?: boolean;
-  patches?: boolean;
-  epf?: -1 | 0 | 1 | 2 | 3;
-  gaborish?: boolean;
-}
-
-/** Group order controls (GROUP_ORDER + optional centers for center-first ordering). */
-export interface GroupOrderControls {
-  mode: 'scanline' | 'center';
-  centerX?: number;
-  centerY?: number;
-}
-
-/** Buffering / streaming strategy (ID 34). */
-export interface BufferingControls {
-  strategy?: -1 | 0 | 1 | 2 | 3;
-  streamingInput?: boolean;
-  streamingOutput?: boolean;
-
-  /**
-   * Low-memory mode hint (production-chunked-paths design note).
-   * Signals desire for minimal peak RAM on very large images (maps to high buffering + streaming paths where available).
-   */
-  lowMemoryMode?: boolean;
-
-  /**
-   * On Tauri/native builds, prefer the full modern chunked path (JxlEncoderAddChunkedFrame + custom JxlChunkedFrameInputSource)
-   * over the buffered AddImageFrame path. Matches libvips production recommendation for large images.
-   * Browser path remains strong via existing streaming entrypoints (no behavioral change).
-   */
-  preferChunkedAPI?: boolean;
-}
-
 /** Descriptor for one extra channel beyond the main color channels. */
 export interface ExtraChannel {
   /** Channel type. 'other' maps to JXL_CHANNEL_UNKNOWN (15). */
@@ -207,18 +145,6 @@ export interface AnimationOptions {
   loopCount?: number;
 }
 
-export interface JxtcEncodeOptions {
-  distance?: number;
-  effort?: number;
-  hasAlpha?: boolean;
-}
-
-export interface JxtcDecodeResult {
-  pixels: ArrayBuffer;
-  width: number;
-  height: number;
-}
-
 export interface EncoderOptions {
   format: PixelFormat;
   width: number;
@@ -238,31 +164,6 @@ export interface EncoderOptions {
   photonNoiseIso?: number;
   /** Encoder-native downsampling factor before JXL transform/coding. */
   resampling?: 1 | 2 | 4 | 8;
-
-  /**
-   * Upsampling mode for the encoder (pixel-art-downsampling design note).
-   * 0 = nearest neighbor (non-negotiable for crisp pixel art and retro/UI content).
-   * Matches WASM facade exactly for cross-platform parity.
-   */
-  upsamplingMode?: number;
-
-  /**
-   * The input image has already been downsampled by the resampling factor.
-   * Tells the encoder to skip its own downsampling step. Matches WASM.
-   */
-  alreadyDownsampled?: boolean;
-
-  /**
-   * JPEG reconstruction controls (when the source was JPEG) — jpeg-recompression-polish design note.
-   * Mirrors WASM facade exactly.
-   */
-  jpegReconstruction?: {
-    cfl?: boolean;
-    compressBoxes?: boolean;
-    emitWarnings?: boolean;
-    storeJPEGMetadata?: boolean;
-  };
-
   /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
   modular?: -1 | 0 | 1;
   /**
@@ -271,28 +172,17 @@ export interface EncoderOptions {
    * Applied after all named settings; later entries override earlier ones.
    */
   advancedFrameSettings?: readonly { id: number; value: number }[];
-
-  /**
-   * First-class advanced encoder controls (post-audit promotion, matches WASM facade).
-   * Preferred for promoted settings (filters, GROUP_ORDER, etc.).
-   * Raw advancedFrameSettings remains the stable escape hatch.
-   */
-  advancedControls?: AdvancedEncoderControls;
-
   /** Fine-grained Modular mode sub-settings. Applied after `modular` force flag. */
   modularOptions?: ModularOptions;
   /** Attach an HDR gain map (ISO 21496-1) as a jhgm box. data is a JXL naked codestream. */
   gainMap?: GainMapOptions | null;
   progressive: boolean;
-  progressiveFlavor?: "dc" | "ac";
   previewFirst: boolean;
   chunked: boolean;
   /** Container format and per-box options. */
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. */
   customBoxes?: readonly MetadataBoxSpec[];
-  /** JUMBF boxes (C2PA content credentials, archival provenance, etc.). Each becomes a "jumb" box. Pure TS sugar over customBoxes; no new native FFI. */
-  jumbfBoxes?: readonly JUMBFBox[];
   /** Animation header options. */
   animation?: AnimationOptions;
   /** Frame data for animation encode. When present, replaces single-image pushPixels. */
@@ -376,63 +266,7 @@ export function createDecoder(options: DecoderOptions): NativeDecoder {
 }
 
 export function createEncoder(options: EncoderOptions): NativeEncoder {
-  // Expand jumbfBoxes into customBoxes (type "jumb") at the JS boundary so the existing native C++ custom box path handles them with zero FFI change.
-  const expanded = expandJumbfToCustomBoxesForNative(options);
-  const finalOptions = expanded
-    ? { ...options, customBoxes: [...(options.customBoxes ?? []), ...expanded] }
-    : options;
-  return createNativeCodecFacade(loadNativeBinding()).createEncoder(finalOptions);
-}
-
-/** Mirror of the WASM expand helper (duplicated per current type-duplication convention). */
-function expandJumbfToCustomBoxesForNative(options: EncoderOptions): MetadataBoxSpec[] | null {
-  const jumbf = options.jumbfBoxes;
-  if (!jumbf || jumbf.length === 0) return null;
-  return jumbf.map(j => ({
-    type: "jumb",
-    data: j.data instanceof ArrayBuffer ? new Uint8Array(j.data) : j.data,
-    compress: true,
-  }));
-}
-
-export function encodeJxtcRgba8(
-  pixels: ArrayBuffer | Uint8Array,
-  width: number,
-  height: number,
-  tileSize: number,
-  options?: JxtcEncodeOptions,
-): ArrayBuffer {
-  const binding = loadNativeBinding();
-  if (typeof binding.encodeJxtcRgba8 !== "function") {
-    throw new CapabilityMissing(
-      "encodeJxtcRgba8 requires a rebuilt jxl-native addon with JXTC support",
-    );
-  }
-  const buf =
-    pixels instanceof Uint8Array
-      ? pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength)
-      : pixels;
-  return binding.encodeJxtcRgba8(buf as ArrayBuffer, width, height, tileSize, options);
-}
-
-export function decodeJxtcRegionRgba8(
-  container: ArrayBuffer | Uint8Array,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): JxtcDecodeResult {
-  const binding = loadNativeBinding();
-  if (typeof binding.decodeJxtcRegionRgba8 !== "function") {
-    throw new CapabilityMissing(
-      "decodeJxtcRegionRgba8 requires a rebuilt jxl-native addon with JXTC support",
-    );
-  }
-  const buf =
-    container instanceof Uint8Array
-      ? container.buffer.slice(container.byteOffset, container.byteOffset + container.byteLength)
-      : container;
-  return binding.decodeJxtcRegionRgba8(buf as ArrayBuffer, x, y, w, h);
+  return createNativeCodecFacade(loadNativeBinding()).createEncoder(options);
 }
 
 function resolvePrebuiltBinary(): string {

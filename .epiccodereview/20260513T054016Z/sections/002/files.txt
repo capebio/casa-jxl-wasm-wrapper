@@ -1,5 +1,0 @@
-./src/decompress.rs
-./src/demosaic.rs
-./src/lib.rs
-./src/pipeline.rs
-./src/tiff.rs

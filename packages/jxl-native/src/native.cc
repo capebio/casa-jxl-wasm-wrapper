@@ -94,28 +94,9 @@ struct EncoderData {
   int32_t modular_palette_colors = INT32_MIN; // INT32_MIN = not set
   int32_t modular_lossy_palette = -1;       // -1 = not set
   int32_t modular_ma_tree_learning_percent = -1;
-  // First-class advanced controls (Phase 1: filters group from advancedControls)
-  // -1 = not set for bools; -2 = not set for EPF (which has legitimate -1 value)
-  int32_t adv_filters_dots = -1;
-  int32_t adv_filters_patches = -1;
-  int32_t adv_filters_epf = -2;
-  int32_t adv_filters_gaborish = -1;
-  // Group order (Phase 1 continuation)
-  int32_t adv_group_order = -1;      // 0 = scanline, 1 = center
-  int32_t adv_group_center_x = -1;
-  int32_t adv_group_center_y = -1;
-  // Buffering (ID 34)
-  int32_t adv_buffering = -1;
-  bool adv_streaming_input = false;
-  bool adv_streaming_output = false;
   // Raw JXL_ENC_FRAME_SETTING_* escape hatch
   struct AdvancedSetting { int32_t id; int32_t value; };
   std::vector<AdvancedSetting> advanced_frame_settings;
-  // Progressive encode settings (derived from EncoderOptions.progressive / previewFirst / chunked)
-  int32_t progressive_dc = 0;   // 0=none, 1=one DC pass
-  int32_t progressive_ac = 0;   // 0=disabled, 1=AC progressive
-  int32_t qprogressive_ac = 0;  // 0=disabled, 1=quality-progressive AC
-  int32_t buffering = 0;        // 0=emit immediately, 2=buffer for chunked streaming
   // Gain map (jhgm box)
   std::vector<uint8_t> gain_map_jxl;
   // Custom metadata boxes
@@ -788,36 +769,6 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (data->decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(data->decoding_speed > 4 ? 4 : data->decoding_speed));
   if (data->photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(data->photon_noise_iso));
   if (data->resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(data->resampling));
-
-  // First-class advancedControls (Phase 1 filters) — applied before raw escape hatch
-  // so that named controls are the "default" and raw advancedFrameSettings can still override.
-  if (data->adv_filters_dots >= 0)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(7), static_cast<int64_t>(data->adv_filters_dots));
-  if (data->adv_filters_patches >= 0)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(8), static_cast<int64_t>(data->adv_filters_patches));
-  if (data->adv_filters_epf >= -1)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(9), static_cast<int64_t>(data->adv_filters_epf));
-  if (data->adv_filters_gaborish >= 0)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(10), static_cast<int64_t>(data->adv_filters_gaborish));
-
-  // Group order (13 + optional 14/15)
-  if (data->adv_group_order >= 0)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(13), static_cast<int64_t>(data->adv_group_order));
-  if (data->adv_group_center_x >= 0)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(14), static_cast<int64_t>(data->adv_group_center_x));
-  if (data->adv_group_center_y >= 0)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(15), static_cast<int64_t>(data->adv_group_center_y));
-
-  // Buffering (34) + streaming hints
-  if (data->adv_buffering >= -1)
-    JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(34), static_cast<int64_t>(data->adv_buffering));
-  if (data->adv_streaming_input || data->adv_streaming_output) {
-    // Common pattern in references: force higher buffering when streaming hints are present
-    if (data->adv_buffering < 0) {
-      JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(34), 3);
-    }
-  }
-
   for (const auto& adv : data->advanced_frame_settings) {
     JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(adv.id), static_cast<int64_t>(adv.value));
   }
@@ -828,25 +779,6 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   if (data->modular_palette_colors != INT32_MIN) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(35), static_cast<int64_t>(data->modular_palette_colors));
   if (data->modular_lossy_palette >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(36), static_cast<int64_t>(data->modular_lossy_palette));
   if (data->modular_ma_tree_learning_percent >= 0) JxlEncoderFrameSettingsSetOption(frame, static_cast<JxlEncoderFrameSettingId>(37), static_cast<int64_t>(data->modular_ma_tree_learning_percent));
-  // Progressive encode settings.
-  // Force VarDCT when progressive DC/AC is requested and the caller has not explicitly
-  // chosen Modular mode via the named 'modular' field. Note: does not account for
-  // advancedFrameSettings overrides — callers using that escape hatch with modular=1
-  // and progressive=true will get a silent override to VarDCT.
-  if ((data->progressive_dc > 0 || data->progressive_ac > 0 || data->qprogressive_ac > 0) && data->modular < 0) {
-    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, 0);
-  }
-  // Apply progressive settings, ignoring individual errors — libjxl may silently reject a
-  // setting for a particular image/effort combination (e.g. tiny images for DC passes).
-  // A failure here does not poison the encoder; only JxlEncoderAddImageFrame is authoritative.
-  if (data->progressive_dc > 0)
-    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC,  static_cast<int64_t>(data->progressive_dc));
-  if (data->progressive_ac > 0)
-    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC,  1);
-  if (data->qprogressive_ac > 0)
-    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, 1);
-  if (data->buffering > 0)
-    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING,       static_cast<int64_t>(data->buffering));
 
   // Per-extra-channel distances.
   if (data->has_alpha && data->alpha_distance >= 0.0) {
@@ -1193,22 +1125,6 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
     data->modular = (mod < 0.0) ? -1 : (mod > 1.0) ? 1 : static_cast<int32_t>(mod);
   }
 
-  // Progressive encode: mirror resolveEncoderBridgeSettings() in facade.ts.
-  {
-    const bool progressive   = GetBoolProp(env, args[0], "progressive",  false);
-    const bool preview_first = GetBoolProp(env, args[0], "previewFirst", false);
-    const bool chunked       = GetBoolProp(env, args[0], "chunked",      false);
-    // Read progressiveFlavor ("dc" | "ac" | absent). Mirrors resolveEncoderBridgeSettings in facade.ts.
-    const std::string flavor = GetStringProp(env, args[0], "progressiveFlavor", "");
-    if (progressive) {
-      const bool ac_enabled = (flavor == "ac") || (flavor != "dc" && preview_first);
-      data->progressive_dc  = 1;
-      data->progressive_ac  = ac_enabled ? 1 : 0;
-      data->qprogressive_ac = ac_enabled ? 1 : 0;
-    }
-    data->buffering = chunked ? 2 : 0;
-  }
-
   // advancedFrameSettings escape hatch.
   {
     napi_value adv_val;
@@ -1225,122 +1141,6 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
           setting.id    = static_cast<int32_t>(GetNullableNumberProp(env, item, "id",    0.0));
           setting.value = static_cast<int32_t>(GetNullableNumberProp(env, item, "value", 0.0));
           data->advanced_frame_settings.push_back(setting);
-        }
-      }
-    }
-  }
-
-  // First-class advancedControls (Phase 1: filters group)
-  {
-    napi_value ac_val;
-    if (GetProp(env, args[0], "advancedControls", &ac_val)) {
-      napi_valuetype ac_type;
-      napi_typeof(env, ac_val, &ac_type);
-      if (ac_type == napi_object) {
-        napi_value filters_val;
-        if (GetProp(env, ac_val, "filters", &filters_val)) {
-          napi_valuetype f_type;
-          napi_typeof(env, filters_val, &f_type);
-          if (f_type == napi_object) {
-            // dots / patches / gaborish are simple bool presence → 0/1
-            napi_value v;
-            if (GetProp(env, filters_val, "dots", &v)) {
-              bool b = false; napi_get_value_bool(env, v, &b);
-              data->adv_filters_dots = b ? 1 : 0;
-            }
-            if (GetProp(env, filters_val, "patches", &v)) {
-              bool b = false; napi_get_value_bool(env, v, &b);
-              data->adv_filters_patches = b ? 1 : 0;
-            }
-            if (GetProp(env, filters_val, "gaborish", &v)) {
-              bool b = false; napi_get_value_bool(env, v, &b);
-              data->adv_filters_gaborish = b ? 1 : 0;
-            }
-            if (GetProp(env, filters_val, "epf", &v)) {
-              double d = -2.0;
-              napi_get_value_double(env, v, &d);
-              data->adv_filters_epf = static_cast<int32_t>(d);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // GroupOrder controls
-  {
-    napi_value ac_val;
-    if (GetProp(env, args[0], "advancedControls", &ac_val)) {
-      napi_valuetype ac_type;
-      napi_typeof(env, ac_val, &ac_type);
-      if (ac_type == napi_object) {
-        napi_value go_val;
-        if (GetProp(env, ac_val, "groupOrder", &go_val)) {
-          napi_valuetype go_type;
-          napi_typeof(env, go_val, &go_type);
-          if (go_type == napi_object) {
-            // mode
-            napi_value mode_val;
-            if (GetProp(env, go_val, "mode", &mode_val)) {
-              std::string modeStr;
-              // Simple string extraction
-              napi_valuetype mt;
-              napi_typeof(env, mode_val, &mt);
-              if (mt == napi_string) {
-                char buf[32] = {0};
-                size_t len = 0;
-                napi_get_value_string_utf8(env, mode_val, buf, sizeof(buf), &len);
-                if (std::string(buf) == "center") {
-                  data->adv_group_order = 1;
-                } else {
-                  data->adv_group_order = 0;
-                }
-              }
-            }
-            // centers
-            napi_value cx_val;
-            if (GetProp(env, go_val, "centerX", &cx_val)) {
-              double d = -1.0;
-              napi_get_value_double(env, cx_val, &d);
-              data->adv_group_center_x = static_cast<int32_t>(d);
-            }
-            napi_value cy_val;
-            if (GetProp(env, go_val, "centerY", &cy_val)) {
-              double d = -1.0;
-              napi_get_value_double(env, cy_val, &d);
-              data->adv_group_center_y = static_cast<int32_t>(d);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Buffering controls
-  {
-    napi_value ac_val;
-    if (GetProp(env, args[0], "advancedControls", &ac_val)) {
-      napi_valuetype ac_type;
-      napi_typeof(env, ac_val, &ac_type);
-      if (ac_type == napi_object) {
-        napi_value b_val;
-        if (GetProp(env, ac_val, "buffering", &b_val)) {
-          napi_valuetype b_type;
-          napi_typeof(env, b_val, &b_type);
-          if (b_type == napi_object) {
-            napi_value s_val;
-            if (GetProp(env, b_val, "strategy", &s_val)) {
-              double d = -1.0;
-              napi_get_value_double(env, s_val, &d);
-              data->adv_buffering = static_cast<int32_t>(d);
-            }
-            if (GetBoolProp(env, b_val, "streamingInput", false)) {
-              data->adv_streaming_input = true;
-            }
-            if (GetBoolProp(env, b_val, "streamingOutput", false)) {
-              data->adv_streaming_output = true;
-            }
-          }
         }
       }
     }
