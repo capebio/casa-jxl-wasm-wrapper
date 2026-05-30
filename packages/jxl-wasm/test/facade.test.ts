@@ -1609,8 +1609,9 @@ function createFakeMetadataV2Module() {
     expect(source).toContain("const alreadyDownsampled = !!options.alreadyDownsampled");
     // Both must flow into the resolved settings object
     expect(source).toContain("upsamplingMode, alreadyDownsampled,");
-    // Capability check for _v3 (pixel art WASM path) — this is what's not yet present
-    expect(source).toContain("_jxl_wasm_encode_rgba8_with_metadata_v3");
+    // Smart wiring: routes via advanced pairs (IDs 55/56) — no new FFI needed
+    expect(source).toContain("id: 55, value: upsamplingMode");
+    expect(source).toContain("id: 56, value: 1");
   });
 
 
