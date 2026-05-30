@@ -8,6 +8,9 @@ const { process_orf, rgb_to_rgba } = rawWasm;
 let selectedSource = null;
 let wasmReady = false;
 
+// Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
+console.log('%c[Progressive Paint] jxl-progressive-paint.js loaded — progressive paint / live decode UI', 'color:#ec4899;font-weight:600');
+
 // ─── WASM init ────────────────────────────────────────────────────────────────
 
 initRaw().then(() => {

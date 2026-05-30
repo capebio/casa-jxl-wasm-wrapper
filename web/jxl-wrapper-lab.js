@@ -9,6 +9,9 @@ import {
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createFilePicker } from './jxl-file-picker.js';
 
+// Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
+console.log('%c[Wrapper Lab] jxl-wrapper-lab.js loaded — main encode/decode + HDR/granular/JUMBF lab', 'color:#10b981;font-weight:600');
+
 const { process_orf, process_cr2, rgb_to_rgba } = rawWasm;
 
 const MAX_BATCH_LIMIT = 100;

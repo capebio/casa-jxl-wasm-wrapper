@@ -147,8 +147,23 @@ export interface EncoderOptions {
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. Requires WASM with v2 metadata bridge. */
   customBoxes?: readonly MetadataBoxSpec[];
+  /** JUMBF boxes (C2PA content credentials, archival provenance, etc.). Each becomes a "jumb" box. Pure TS sugar over customBoxes; no new FFI. */
+  jumbfBoxes?: readonly JUMBFBox[];
   /** HDR gain map to embed as a jhgm box. Requires WASM with gain map bridge. */
   gainMap?: GainMapOptions | null;
+  /**
+   * HDR static metadata (mastering display color volume + content light levels).
+   * First-class surface for professional/archival HDR masters (see additional-hdr-signaling.md).
+   * Complements intensityTarget/premultiply/preferCICPForHDR (Phase 3 color priority).
+   * Currently accepted for discoverability + lab dumps; full emission after small bridge extension.
+   */
+  hdrMetadata?: HDRMetadata | null;
+  /** Intensity target in nits (for tone mapping / viewing conditions). Part of HDR signaling surface. */
+  intensityTarget?: number;
+  /** Premultiply alpha before encoding (-1=libjxl default, 0=no, 1=yes). HDR color fidelity knob. */
+  premultiply?: -1 | 0 | 1;
+  /** Prefer CICP (transfer + matrix) over ICC for HDR content when both present. */
+  preferCICPForHDR?: boolean;
   /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
   animation?: AnimationOptions;
   /**
@@ -162,6 +177,38 @@ export interface EncoderOptions {
 export interface GainMapOptions {
   /** Pre-encoded JXL codestream for the gain map image. */
   data: Uint8Array | ArrayBuffer;
+}
+
+/**
+ * Mastering Display Color Volume (MDCV / mdcv box) per SMPTE ST 2086 / ITU-T H.273.
+ * Values are in CIE 1931 xy for chromaticities (0-1 range typical) and nits for luminance.
+ */
+export interface MasteringDisplay {
+  /** CIE 1931 xy chromaticity of red, green, blue primaries (x,y order for each). */
+  primaries: [number, number, number, number, number, number];
+  /** CIE 1931 xy chromaticity of the white point. */
+  whitePoint: [number, number];
+  /** [max, min] luminance of the mastering display in nits (cd/m²). */
+  luminance: [number, number];
+}
+
+/** Content Light Level Information (CLLI / clli box). */
+export interface ContentLightLevel {
+  /** Maximum Content Light Level (MaxCLL) in cd/m². Typical range 0–65535. */
+  maxCLL: number;
+  /** Maximum Frame-Average Light Level (MaxFALL) in cd/m². */
+  maxFALL: number;
+}
+
+/**
+ * Additional static HDR metadata (Mastering Display + Content Light Levels).
+ * Complements intensityTarget / CICP policy from prior HDR signaling work.
+ * Pure TS surface in current slice (per additional-hdr-signaling.md); full codestream
+ * emission via JxlEncoderSetHDRMetadata (or equivalent) is the explicit rebuild follow-up.
+ */
+export interface HDRMetadata {
+  masteringDisplay?: MasteringDisplay;
+  contentLight?: ContentLightLevel;
 }
 
 /** Descriptor for one extra channel beyond the main color channels. */
@@ -221,6 +268,12 @@ export interface MetadataBoxSpec {
   data: Uint8Array;
   /** Compress this box with Brotli. Default false. */
   compress?: boolean;
+}
+
+/** JUMBF box (C2PA / content provenance / archival). The payload is opaque; the wrapper emits it as a "jumb" container box. Pure-TS ergonomic sugar over customBoxes (type "jumb"). */
+export interface JUMBFBox {
+  /** Raw JUMBF superbox bytes (including the JUMBF box header). */
+  data: Uint8Array | ArrayBuffer;
 }
 
 /** Per-encode control over which metadata boxes are included and how the container is written. */
@@ -487,7 +540,8 @@ function marshalBoxOpts(
   options: EncoderOptions,
 ): { ptr: number; freePtrs: number[] } {
   const m = options.metadata;
-  const customBoxes = options.customBoxes ?? [];
+  const jumbfCustom = expandJumbfBoxes(options);
+  const customBoxes = [...(options.customBoxes ?? []), ...jumbfCustom];
   if (!m && customBoxes.length === 0) return { ptr: 0, freePtrs: [] };
 
   const freePtrs: number[] = [];

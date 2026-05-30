@@ -9,6 +9,9 @@ import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createGalleryCoordinator } from './jxl-progressive-gallery-coordinator.js';
 import { createGalleryLightbox } from './jxl-progressive-gallery-lightbox.js';
 
+// Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
+console.log('%c[Progressive Gallery] jxl-progressive-gallery.js loaded — multi-frame progressive gallery + lightbox', 'color:#06b6d4;font-weight:600');
+
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
 const sourceInput   = document.getElementById('source-input');

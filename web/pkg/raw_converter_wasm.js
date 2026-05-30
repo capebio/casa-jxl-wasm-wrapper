@@ -1,6 +1,268 @@
 /* @ts-self-types="./raw_converter_wasm.d.ts" */
 
 /**
+ * Timing results for the decompress + demosaic stages only.
+ * Skips tonemap, downscale, and orientation — isolates raw decode cost.
+ */
+export class DecodeBench {
+    static __wrap(ptr) {
+        const obj = Object.create(DecodeBench.prototype);
+        obj.__wbg_ptr = ptr;
+        DecodeBenchFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        DecodeBenchFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_decodebench_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get decompress_ms() {
+        const ret = wasm.__wbg_get_decodebench_decompress_ms(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get demosaic_ms() {
+        const ret = wasm.__wbg_get_decodebench_demosaic_ms(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get height() {
+        const ret = wasm.__wbg_get_decodebench_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get width() {
+        const ret = wasm.__wbg_get_decodebench_width(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) DecodeBench.prototype[Symbol.dispose] = DecodeBench.prototype.free;
+
+/**
+ * WASM-resident rendering state for a single image (lightbox or thumbnail).
+ *
+ * Owns the pre-tonemapped RGB16 buffer.  Slider changes call `render()` without
+ * transferring pixel data between JS and WASM — the JS→WASM transfer happens once
+ * at construction; every subsequent edit stays inside WASM.
+ *
+ * When `texture` and `clarity` are both zero (the common case), `render` reads the
+ * internal buffer without cloning.  When either is nonzero, a clone is made before
+ * in-place sharpening so the cached buffer is never mutated.
+ */
+export class LookRenderer {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        LookRendererFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_lookrenderer_free(ptr, 0);
+    }
+    /**
+     * Construct from a packed u16-LE buffer (6 bytes per pixel, as returned by
+     * `take_rgb16_lb` / `take_rgb16_thumb`), dims, EXIF orientation, and a
+     * 9-element row-major colour matrix.  Pass a slice of length != 9 to use
+     * the built-in `CAM_TO_SRGB` fallback.
+     * @param {Uint8Array} rgb16_bytes
+     * @param {number} width
+     * @param {number} height
+     * @param {number} orientation
+     * @param {Float32Array} color_matrix_flat
+     */
+    constructor(rgb16_bytes, width, height, orientation, color_matrix_flat) {
+        const ptr0 = passArray8ToWasm0(rgb16_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(color_matrix_flat, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.lookrenderer_new(ptr0, len0, width, height, orientation, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        LookRendererFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Apply look parameters and return an RGB8 buffer (post-orientation).
+     * Only the output RGB8 crosses the WASM boundary on each call.
+     * @param {number} wb_r
+     * @param {number} wb_b
+     * @param {number} exposure_ev
+     * @param {number} contrast
+     * @param {number} highlights
+     * @param {number} shadows
+     * @param {number} whites
+     * @param {number} blacks
+     * @param {number} saturation
+     * @param {number} vibrance
+     * @param {number} temp
+     * @param {number} tint
+     * @param {number} texture
+     * @param {number} clarity
+     * @returns {Uint8Array}
+     */
+    render(wb_r, wb_b, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, texture, clarity) {
+        const ret = wasm.lookrenderer_render(this.__wbg_ptr, wb_r, wb_b, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, texture, clarity);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) LookRenderer.prototype[Symbol.dispose] = LookRenderer.prototype.free;
+
+/**
+ * EXIF metadata extracted without demosaic/tonemap.  Use for gallery thumbnails,
+ * batch preflight, and sort-by-date/lens/GPS without a full decode.
+ */
+export class OrfMetadata {
+    static __wrap(ptr) {
+        const obj = Object.create(OrfMetadata.prototype);
+        obj.__wbg_ptr = ptr;
+        OrfMetadataFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        OrfMetadataFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_orfmetadata_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get gps_lat() {
+        const ret = wasm.__wbg_get_orfmetadata_gps_lat(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get gps_lon() {
+        const ret = wasm.__wbg_get_orfmetadata_gps_lon(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {boolean}
+     */
+    get has_gps() {
+        const ret = wasm.__wbg_get_orfmetadata_has_gps(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get height() {
+        const ret = wasm.__wbg_get_orfmetadata_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get iso() {
+        const ret = wasm.__wbg_get_orfmetadata_iso(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get orientation() {
+        const ret = wasm.__wbg_get_orfmetadata_orientation(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get width() {
+        const ret = wasm.__wbg_get_orfmetadata_width(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {string}
+     */
+    get datetime() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.orfmetadata_datetime(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get lens() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.orfmetadata_lens(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get make() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.orfmetadata_make(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get model() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.orfmetadata_model(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) OrfMetadata.prototype[Symbol.dispose] = OrfMetadata.prototype.free;
+
+/**
  * Result of processing an ORF: RGB8 buffer + dims (post-orientation).
  */
 export class ProcessResult {
@@ -385,10 +647,12 @@ if (Symbol.dispose) RotateResult.prototype[Symbol.dispose] = RotateResult.protot
 /**
  * Re-apply tonemap + orientation to a cached lightbox-sized rgb16 buffer.
  *
- * `rgb16_bytes` is packed u16 LE (6 bytes per pixel).
+ * `rgb16_src` is flat RGB16 (3 u16 per pixel, interleaved).  For repeated slider
+ * edits prefer `LookRenderer`, which owns the buffer inside WASM and avoids the
+ * JS→WASM transfer on each call.
  * `color_matrix_flat` is 9 f32s row-major; pass a slice of len != 9 to use the
  * built-in fallback.
- * @param {Uint8Array} rgb16_bytes
+ * @param {Uint16Array} rgb16_src
  * @param {number} width
  * @param {number} height
  * @param {number} orientation
@@ -409,8 +673,8 @@ if (Symbol.dispose) RotateResult.prototype[Symbol.dispose] = RotateResult.protot
  * @param {number} clarity
  * @returns {Uint8Array}
  */
-export function apply_look(rgb16_bytes, width, height, orientation, wb_r, wb_b, color_matrix_flat, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, texture, clarity) {
-    const ptr0 = passArray8ToWasm0(rgb16_bytes, wasm.__wbindgen_malloc);
+export function apply_look(rgb16_src, width, height, orientation, wb_r, wb_b, color_matrix_flat, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, texture, clarity) {
+    const ptr0 = passArray16ToWasm0(rgb16_src, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArrayF32ToWasm0(color_matrix_flat, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
@@ -421,6 +685,22 @@ export function apply_look(rgb16_bytes, width, height, orientation, wb_r, wb_b, 
     var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v3;
+}
+
+/**
+ * Benchmark ORF decompress + demosaic without tonemap/downscale/orientation.
+ * Use to measure decoder cost in isolation when tuning WASM flags or algorithms.
+ * @param {Uint8Array} data
+ * @returns {DecodeBench}
+ */
+export function bench_decode_orf(data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.bench_decode_orf(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return DecodeBench.__wrap(ret[0]);
 }
 
 /**
@@ -445,11 +725,190 @@ export function downscale_rgb(src, src_w, src_h, dst_w, dst_h) {
 }
 
 /**
+ * Box-filter downscale an RGBA8 buffer.  Useful for thumbnail generation.
+ * @param {Uint8Array} src
+ * @param {number} src_w
+ * @param {number} src_h
+ * @param {number} dst_w
+ * @param {number} dst_h
+ * @returns {Uint8Array}
+ */
+export function downscale_rgba(src, src_w, src_h, dst_w, dst_h) {
+    const ptr0 = passArray8ToWasm0(src, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.downscale_rgba(ptr0, len0, src_w, src_h, dst_w, dst_h);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * Parse ORF EXIF metadata only — no decompress, no demosaic, no tonemap.
+ * Returns camera, lens, exposure, GPS for batch ingest and gallery views.
+ * @param {Uint8Array} data
+ * @returns {OrfMetadata}
+ */
+export function parse_orf_metadata(data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.parse_orf_metadata(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return OrfMetadata.__wrap(ret[0]);
+}
+
+/**
+ * Parse + decode a Canon CR2 file blob.
+ *
+ * Always generates full RGB8, 1800 px lightbox RGB16, and 360 px thumbnail RGB16.
+ * Use `process_cr2_with_flags` to skip unused outputs.
+ * @param {Uint8Array} data
+ * @param {number} exposure_ev
+ * @param {number} contrast
+ * @param {number} highlights
+ * @param {number} shadows
+ * @param {number} whites
+ * @param {number} blacks
+ * @param {number} saturation
+ * @param {number} vibrance
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} wb_r_override
+ * @param {number} wb_b_override
+ * @param {number} texture
+ * @param {number} clarity
+ * @returns {ProcessResult}
+ */
+export function process_cr2(data, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.process_cr2(ptr0, len0, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ProcessResult.__wrap(ret[0]);
+}
+
+/**
+ * Variant of `process_cr2` with explicit output flags.
+ *
+ * `output_flags` bitmask: 1 = full RGB8, 2 = 1800 px lightbox RGB16, 4 = 360 px thumb RGB16.
+ * Pass `7` to match `process_cr2`.
+ * @param {Uint8Array} data
+ * @param {number} output_flags
+ * @param {number} exposure_ev
+ * @param {number} contrast
+ * @param {number} highlights
+ * @param {number} shadows
+ * @param {number} whites
+ * @param {number} blacks
+ * @param {number} saturation
+ * @param {number} vibrance
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} wb_r_override
+ * @param {number} wb_b_override
+ * @param {number} texture
+ * @param {number} clarity
+ * @returns {ProcessResult}
+ */
+export function process_cr2_with_flags(data, output_flags, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.process_cr2_with_flags(ptr0, len0, output_flags, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ProcessResult.__wrap(ret[0]);
+}
+
+/**
+ * Parse + decode a DNG file blob. Returns an error string on failure.
+ * Single-threaded (no rayon in WASM).  Look params: LR-style (-1..+1), except
+ * exposure_ev in stops.  Pass NaN/≤0 for wb_r_override/wb_b_override to use defaults.
+ *
+ * Always generates full RGB8, 1800 px lightbox RGB16, and 360 px thumbnail RGB16.
+ * Use `process_dng_with_flags` to skip unused outputs (e.g. batch JXL encoding
+ * only needs full RGB8, not lb/thumb).
+ * @param {Uint8Array} data
+ * @param {number} exposure_ev
+ * @param {number} contrast
+ * @param {number} highlights
+ * @param {number} shadows
+ * @param {number} whites
+ * @param {number} blacks
+ * @param {number} saturation
+ * @param {number} vibrance
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} wb_r_override
+ * @param {number} wb_b_override
+ * @param {number} texture
+ * @param {number} clarity
+ * @returns {ProcessResult}
+ */
+export function process_dng(data, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.process_dng(ptr0, len0, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ProcessResult.__wrap(ret[0]);
+}
+
+/**
+ * Variant of `process_dng` with explicit output flags to skip unused pipeline stages.
+ *
+ * `output_flags` is a bitmask of:
+ * - `1`: full-resolution RGB8 (needed for JXL encoding)
+ * - `2`: 1800 px lightbox RGB16 cache (needed to construct a `LookRenderer`)
+ * - `4`: 360 px thumbnail RGB16 cache (needed to construct a thumb `LookRenderer`)
+ *
+ * Absent outputs have empty buffers and zero dims in `ProcessResult`.
+ * Pass `7` to match the behaviour of `process_dng`.
+ * @param {Uint8Array} data
+ * @param {number} output_flags
+ * @param {number} exposure_ev
+ * @param {number} contrast
+ * @param {number} highlights
+ * @param {number} shadows
+ * @param {number} whites
+ * @param {number} blacks
+ * @param {number} saturation
+ * @param {number} vibrance
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} wb_r_override
+ * @param {number} wb_b_override
+ * @param {number} texture
+ * @param {number} clarity
+ * @returns {ProcessResult}
+ */
+export function process_dng_with_flags(data, output_flags, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.process_dng_with_flags(ptr0, len0, output_flags, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ProcessResult.__wrap(ret[0]);
+}
+
+/**
  * Parse + decode an ORF file blob.  Returns an error string on failure.
  *
  * All look params are LR-style, zero-centred (-1..+1 normalised), except
  * `exposure_ev` which is in stops.  `wb_r_override` / `wb_b_override`:
  * pass NaN (or ≤0) to use MakerNote / defaults.
+ *
+ * Always generates full RGB8, 1800 px lightbox RGB16, and 360 px thumbnail RGB16.
+ * Use `process_orf_with_flags` to skip unused outputs (e.g. batch JXL encoding
+ * only needs full RGB8, not lb/thumb).
  * @param {Uint8Array} data
  * @param {number} exposure_ev
  * @param {number} contrast
@@ -471,6 +930,44 @@ export function process_orf(data, exposure_ev, contrast, highlights, shadows, wh
     const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.process_orf(ptr0, len0, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ProcessResult.__wrap(ret[0]);
+}
+
+/**
+ * Variant of `process_orf` with explicit output flags to skip unused pipeline stages.
+ *
+ * `output_flags` is a bitmask of:
+ * - `1`: full-resolution RGB8 (needed for JXL encoding)
+ * - `2`: 1800 px lightbox RGB16 cache (needed to construct a `LookRenderer`)
+ * - `4`: 360 px thumbnail RGB16 cache (needed to construct a thumb `LookRenderer`)
+ *
+ * Absent outputs have empty buffers and zero dims in `ProcessResult`.
+ * Pass `7` to match the behaviour of `process_orf`.
+ * @param {Uint8Array} data
+ * @param {number} output_flags
+ * @param {number} exposure_ev
+ * @param {number} contrast
+ * @param {number} highlights
+ * @param {number} shadows
+ * @param {number} whites
+ * @param {number} blacks
+ * @param {number} saturation
+ * @param {number} vibrance
+ * @param {number} temp
+ * @param {number} tint
+ * @param {number} wb_r_override
+ * @param {number} wb_b_override
+ * @param {number} texture
+ * @param {number} clarity
+ * @returns {ProcessResult}
+ */
+export function process_orf_with_flags(data, output_flags, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.process_orf_with_flags(ptr0, len0, output_flags, exposure_ev, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temp, tint, wb_r_override, wb_b_override, texture, clarity);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -587,6 +1084,15 @@ function __wbg_get_imports() {
     };
 }
 
+const DecodeBenchFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_decodebench_free(ptr, 1));
+const LookRendererFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_lookrenderer_free(ptr, 1));
+const OrfMetadataFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_orfmetadata_free(ptr, 1));
 const ProcessResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_processresult_free(ptr, 1));
@@ -622,6 +1128,14 @@ function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
 }
 
+let cachedUint16ArrayMemory0 = null;
+function getUint16ArrayMemory0() {
+    if (cachedUint16ArrayMemory0 === null || cachedUint16ArrayMemory0.byteLength === 0) {
+        cachedUint16ArrayMemory0 = new Uint16Array(wasm.memory.buffer);
+    }
+    return cachedUint16ArrayMemory0;
+}
+
 let cachedUint8ArrayMemory0 = null;
 function getUint8ArrayMemory0() {
     if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
@@ -632,6 +1146,13 @@ function getUint8ArrayMemory0() {
 
 function isLikeNone(x) {
     return x === undefined || x === null;
+}
+
+function passArray16ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 2, 2) >>> 0;
+    getUint16ArrayMemory0().set(arg, ptr / 2);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passArray8ToWasm0(arg, malloc) {
@@ -676,6 +1197,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedFloat32ArrayMemory0 = null;
+    cachedUint16ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

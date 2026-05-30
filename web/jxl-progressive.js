@@ -13,6 +13,9 @@ import {
 } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
+// Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
+console.log('%c[Progressive] jxl-progressive.js loaded — progressive decode / paint / gallery experiments', 'color:#8b5cf6;font-weight:600');
+
 const runBtn = document.getElementById('run-btn');
 const replayBtn = document.getElementById('replay-btn');
 const resetBtn = document.getElementById('reset-btn');

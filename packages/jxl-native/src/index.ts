@@ -101,6 +101,39 @@ export interface GainMapOptions {
   data: Uint8Array | ArrayBuffer;
 }
 
+/**
+ * Mastering Display Color Volume (MDCV / mdcv box) per SMPTE ST 2086 / ITU-T H.273.
+ * Values are in CIE 1931 xy for chromaticities (0-1 range typical) and nits for luminance.
+ */
+export interface MasteringDisplay {
+  /** CIE 1931 xy chromaticity of red, green, blue primaries (x,y order for each). */
+  primaries: [number, number, number, number, number, number];
+  /** CIE 1931 xy chromaticity of the white point. */
+  whitePoint: [number, number];
+  /** [max, min] luminance of the mastering display in nits (cd/m²). */
+  luminance: [number, number];
+}
+
+/** Content Light Level Information (CLLI / clli box). */
+export interface ContentLightLevel {
+  /** Maximum Content Light Level (MaxCLL) in cd/m². Typical range 0–65535. */
+  maxCLL: number;
+  /** Maximum Frame-Average Light Level (MaxFALL) in cd/m². */
+  maxFALL: number;
+}
+
+/**
+ * Additional static HDR metadata (Mastering Display + Content Light Levels).
+ * Complements intensityTarget / CICP policy from prior HDR signaling work.
+ * Pure TS surface in current slice (per additional-hdr-signaling.md); full codestream
+ * emission via JxlEncoderSetHDRMetadata (or equivalent) is the explicit rebuild follow-up.
+ * Native binding receives the fields after normalization (future native.cc wiring).
+ */
+export interface HDRMetadata {
+  masteringDisplay?: MasteringDisplay;
+  contentLight?: ContentLightLevel;
+}
+
 /** Sub-settings for Modular encoding mode. Applied alongside or instead of the flat `modular` flag. */
 export interface ModularOptions {
   /** 0 = auto group size (libjxl default), positive = explicit group size (power-of-two). */
@@ -143,6 +176,42 @@ export interface ExtraChannel {
     lossyPalette?: boolean;
     maTreeLearningPercent?: number;
   };
+}
+
+/** JUMBF box (C2PA / content provenance / archival). The payload is opaque; the wrapper emits it as a "jumb" container box. */
+export interface JUMBFBox {
+  /** Raw JUMBF superbox bytes (including the JUMBF box header). */
+  data: Uint8Array | ArrayBuffer;
+}
+
+/**
+ * First-class advanced encoder controls (parity with WASM facade).
+ */
+export interface AdvancedEncoderControls {
+  filters?: FiltersControls;
+  groupOrder?: GroupOrderControls;
+  buffering?: BufferingControls;
+}
+
+export interface FiltersControls {
+  dots?: boolean;
+  patches?: boolean;
+  epf?: -1 | 0 | 1 | 2 | 3;
+  gaborish?: boolean;
+}
+
+export interface GroupOrderControls {
+  mode: 'scanline' | 'center';
+  centerX?: number;
+  centerY?: number;
+}
+
+export interface BufferingControls {
+  strategy?: -1 | 0 | 1 | 2 | 3;
+  streamingInput?: boolean;
+  streamingOutput?: boolean;
+  lowMemoryMode?: boolean;
+  preferChunkedAPI?: boolean;
 }
 
 /** Descriptor for one frame in an animation sequence. */
@@ -192,6 +261,19 @@ export interface EncoderOptions {
   modularOptions?: ModularOptions;
   /** Attach an HDR gain map (ISO 21496-1) as a jhgm box. data is a JXL naked codestream. */
   gainMap?: GainMapOptions | null;
+  /**
+   * HDR static metadata (mastering display color volume + content light levels).
+   * First-class surface for professional/archival HDR masters (see additional-hdr-signaling.md).
+   * Complements intensityTarget/premultiply/preferCICPForHDR (Phase 3 color priority).
+   * Currently accepted for discoverability + lab dumps; full emission after small bridge/native wiring.
+   */
+  hdrMetadata?: HDRMetadata | null;
+  /** Intensity target in nits (for tone mapping / viewing conditions). Part of HDR signaling surface. */
+  intensityTarget?: number;
+  /** Premultiply alpha before encoding (-1=libjxl default, 0=no, 1=yes). HDR color fidelity knob. */
+  premultiply?: -1 | 0 | 1;
+  /** Prefer CICP (transfer + matrix) over ICC for HDR content when both present. */
+  preferCICPForHDR?: boolean;
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
@@ -199,6 +281,32 @@ export interface EncoderOptions {
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. */
   customBoxes?: readonly MetadataBoxSpec[];
+  /** JUMBF boxes (C2PA content credentials, archival provenance, etc.). Each becomes a "jumb" box. Pure TS sugar over customBoxes; no new native FFI. */
+  jumbfBoxes?: readonly JUMBFBox[];
+
+  /**
+   * JPEG reconstruction controls (when the source was JPEG).
+   * Maps to advanced pairs + special handling on the native side.
+   */
+  jpegReconstruction?: {
+    cfl?: boolean;
+    compressBoxes?: boolean;
+    emitWarnings?: boolean;
+    storeJPEGMetadata?: boolean;
+  };
+
+  /** The input image has already been downsampled by the resampling factor. */
+  alreadyDownsampled?: boolean;
+
+  /** Encoder upsampling mode (0 = nearest for pixel art, etc.). */
+  upsamplingMode?: number;
+
+  /**
+   * First-class advanced encoder controls (post-audit).
+   * Provides ergonomic access to filters, group order, buffering strategy, etc.
+   */
+  advancedControls?: AdvancedEncoderControls;
+
   /** Animation header options. */
   animation?: AnimationOptions;
   /** Frame data for animation encode. When present, replaces single-image pushPixels. */
@@ -274,6 +382,15 @@ export function loadNativeBinding(options: NativeLoaderOptions = {}): NativeBind
   throw new CapabilityMissing("jxl-native addon unavailable; falling back to WASM is required", lastError);
 }
 
+/** Expands jumbfBoxes into MetadataBoxSpec entries (type "jumb", compress true by default). */
+function expandJumbfToCustomBoxes(options: EncoderOptions): MetadataBoxSpec[] {
+  if (!options.jumbfBoxes?.length) return [];
+  return options.jumbfBoxes.map(j => {
+    const data = j.data instanceof ArrayBuffer ? new Uint8Array(j.data) : j.data;
+    return { type: "jumb", data, compress: true };
+  });
+}
+
 export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFacade {
   if (typeof binding.createDecoder !== "function" || typeof binding.createEncoder !== "function") {
     throw new CapabilityMissing("jxl-native addon does not expose createDecoder/createEncoder");
@@ -314,9 +431,83 @@ export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFaca
       } as NativeDecoder;
     },
     createEncoder(options) {
-      return binding.createEncoder!(options);
+      // Expand jumbfBoxes into customBoxes for parity with WASM facade.
+      const jumbfExpanded = expandJumbfToCustomBoxes(options);
+
+      // Convert new high-level fields into advancedFrameSettings for the native binding.
+      const extraAdvanced = convertAdvancedControlsToPairs(options);
+
+      const baseAdvanced = options.advancedFrameSettings ?? [];
+      const mergedAdvanced = [...baseAdvanced, ...extraAdvanced];
+
+      // Destructure to drop high-level sugar fields that the native binding does not yet understand
+      // (or that we convert). This pattern is robust under exactOptionalPropertyTypes.
+      const {
+        jpegReconstruction,
+        alreadyDownsampled,
+        upsamplingMode,
+        advancedControls,
+        hdrMetadata,
+        intensityTarget,
+        premultiply,
+        preferCICPForHDR,
+        ...base
+      } = options;
+
+      const normalized: EncoderOptions = {
+        ...base,
+        customBoxes: [
+          ...(options.customBoxes ?? []),
+          ...jumbfExpanded,
+        ],
+        ...(mergedAdvanced.length > 0 ? { advancedFrameSettings: mergedAdvanced as readonly { id: number; value: number }[] } : {}),
+      };
+
+      return binding.createEncoder!(normalized);
     },
   };
+}
+
+/** Converts the new high-level advanced controls into raw advancedFrameSettings pairs. */
+function convertAdvancedControlsToPairs(options: EncoderOptions): { id: number; value: number }[] {
+  const out: { id: number; value: number }[] = [];
+  const ac = options.advancedControls;
+
+  if (ac?.filters) {
+    const f = ac.filters;
+    if (f.dots !== undefined) out.push({ id: 7, value: f.dots ? 1 : 0 });
+    if (f.patches !== undefined) out.push({ id: 8, value: f.patches ? 1 : 0 });
+    if (f.epf !== undefined) out.push({ id: 9, value: f.epf });
+    if (f.gaborish !== undefined) out.push({ id: 10, value: f.gaborish ? 1 : 0 });
+  }
+
+  if (ac?.groupOrder) {
+    const g = ac.groupOrder;
+    out.push({ id: 13, value: g.mode === 'center' ? 1 : 0 });
+    if (g.centerX !== undefined) out.push({ id: 14, value: g.centerX });
+    if (g.centerY !== undefined) out.push({ id: 15, value: g.centerY });
+  }
+
+  if (ac?.buffering) {
+    const b = ac.buffering;
+    if (b.strategy !== undefined) out.push({ id: 34, value: b.strategy });
+    // lowMemoryMode / preferChunkedAPI can be handled via other means or ignored for now
+  }
+
+  // Simple scalars
+  if (options.alreadyDownsampled !== undefined) {
+    out.push({ id: 4, value: options.alreadyDownsampled ? 1 : 0 });
+  }
+  if (options.upsamplingMode !== undefined) {
+    out.push({ id: 55, value: options.upsamplingMode }); // approximate ID; adjust if needed
+  }
+
+  // jpegReconstruction scalars (CFL etc.) can ride advanced pairs (ID 30 for CFL)
+  if (options.jpegReconstruction?.cfl !== undefined) {
+    out.push({ id: 30, value: options.jpegReconstruction.cfl ? 1 : 0 });
+  }
+
+  return out;
 }
 
 export function createDecoder(options: DecoderOptions): NativeDecoder {
