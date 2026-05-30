@@ -8,6 +8,49 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
+## Feature: Remaining Low-Level Frame Settings (completeness audit) — 2026-06
+
+**Branch:** `feature/animation-decode-enhancements`
+
+**Status:** Complete (documentation + audit only; 0 implementation code)
+
+**Scope:** Catch-all completeness record for all `JXL_ENC_FRAME_SETTING_*` IDs (0–35) from libjxl. Confirms that after all 2026 design waves, every high-ROI setting is already first-class and 10 niche/low-value IDs are correctly documented in the `advancedFrameSettings` escape hatch. No new promotions required.
+
+**Key Changes:**
+- `docs/references/designs/remaining-frame-settings.md` — full coverage audit table (26 first-class, 10 escape-hatch) + documented escape-hatch guidance with usage examples for each niche ID.
+
+**Benchmark / Educational Value:** Escape-hatch guidance table gives developers a clear reference for when and how to use each low-level ID directly. No lab wiring needed (documentation-only note).
+
+**Docs Updated:** This PROGRESS_LOG entry; DESIGNS_INDEX (status updated to "Complete — 26 first-class, 10 escape-hatch, 0 new promotions").
+
+**Verification:** No code changes; design note completeness verified by cross-referencing bridge.cpp wiring.
+
+---
+
+## Feature: Animation Decode Enhancements — 2026-06
+
+**Branch:** `feature/animation-decode-enhancements`
+
+**Status:** Source-only complete (WASM rebuild + full seek wiring pending — see ISSUES.md §9)
+
+**Scope:** First-class animation decode API additions: `seekToFrame` / `seekToTime` optional methods on `JxlDecoder`, `animationSeek` capability gate, C++ bridge `jxl_wasm_dec_seek_to_frame` (forward-only via `JxlDecoderSkipFrames`), native parity stubs, and full animation lab enhancement with frame buffer + RAF playback + scrubber + per-frame metadata panel.
+
+**Key Changes:**
+- `node_modules/@casabio/jxl-wasm/test/facade.test.ts` — 3 new tests: animationSeek capability gate absent/present + progressive decode emits per-frame metadata (frameIndex, frameDuration, isLastFrame).
+- `packages/jxl-wasm/src/facade.ts` + mirror — `seekToFrame?` / `seekToTime?` on `JxlDecoder`, `_jxl_wasm_dec_seek_to_frame?` on `LibjxlWasmModule`, `animationSeek` on both `JxlCapabilities` (dynamic) and `WrapperCapabilities` (static false until rebuild).
+- `packages/jxl-wasm/src/bridge.cpp` + mirror — `jxl_wasm_dec_seek_to_frame(state_ptr, target_frame)`: forward-only seek using `JxlDecoderSkipFrames`; returns -1 for backward seeks.
+- `node_modules/@casabio/jxl-native/src/index.ts` — `seekToFrame?` / `seekToTime?` parity stubs on `NativeDecoder` interface.
+- `web/animation-lab.html` — complete enhancement: frame buffer (all `"final"` events accumulated), `requestAnimationFrame` playback loop with tick-accurate durationMs timing, range-input scrubber (seek + pause), per-frame metadata panel, play/pause toggle with loop count support.
+- `docs/references/designs/animation-decode-enhancements.md` — full Implementation Progress + Cleanup & Handoff block.
+
+**Benchmark / Educational Value:** Animation lab now demonstrates full animation decode: users can encode a multi-frame animation, decode it, see the playback loop with accurate frame timing, scrub frame-by-frame, and inspect per-frame metadata. Works without WASM rebuild (uses existing per-frame decode event infrastructure).
+
+**Docs Updated:** This PROGRESS_LOG entry; DESIGNS_INDEX (status updated to "Implemented on branch feature/animation-decode-enhancements").
+
+**Verification:** `bun test node_modules/@casabio/jxl-wasm/test/facade.test.ts --grep "animationSeek|progressive decode emits"` (passes); animation lab scrubber + metadata panel functional on manual open.
+
+---
+
 ## Feature: JUMBF Box Support (C2PA / content provenance) — 2026-06
 
 **Branch:** `feature/jumbf-box-support`
