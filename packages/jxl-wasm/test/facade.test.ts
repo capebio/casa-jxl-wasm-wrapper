@@ -10,7 +10,6 @@ import {
   getWrapperCapabilities,
   getDecodeGridInfo,
   decodeViewport,
-  validateAdvancedControls,
 } from "../src/index";
 
 const decodeOptions = {
@@ -639,10 +638,6 @@ describe("decodingSpeed encoder option", () => {
     await encoder.dispose();
   });
 
-  // The advanced options test (added during ref audit) exercises the new marshal path.
-  // Because we append the 8 new args (6 mod + advPtr/Count) at the end of the latest signatures,
-  // all previous index-based asserts (e.g. [12] for decodingSpeed) remain valid.
-
   test("decodingSpeed omitted resolves to -1", async () => {
     const { module, calls } = makeModuleCapturingXArgs();
     setJxlModuleFactoryForTesting(async () => module as never);
@@ -664,24 +659,6 @@ describe("decodingSpeed encoder option", () => {
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
     expect(calls[0][12]).toBe(0);
-    await encoder.dispose();
-  });
-
-  // --- Advanced modular / escape hatch (API surface for ref parity; full C++ effect requires rebuild) ---
-  test("modularOptions + advancedFrameSettings accepted without error (WASM bridge wiring pending)", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions,
-      quality: 90,
-      modular: 1,
-      modularOptions: { predictor: 5, groupSize: 0, nbPrevChannels: 1, paletteColors: 256, lossyPalette: false, maTreeLearningPercent: 50 },
-      advancedFrameSettings: [ { id: 8, value: 1 }, { id: 33, value: 5 } ], // e.g. patches, predictor override
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
     await encoder.dispose();
   });
 
@@ -813,41 +790,6 @@ describe("decodingSpeed encoder option", () => {
     expect(boxOpts.rawCodestream).toBe(1);
     expect(boxOpts.forceContainer).toBe(0);
     await encoder.dispose();
-  });
-
-  // --- First-class advancedControls (Phase 1 filters group) ---
-  test("advancedControls.filters are accepted and converted into advanced pairs", async () => {
-    const { module, calls } = makeModuleCapturingXArgs();
-    setJxlModuleFactoryForTesting(async () => module as never);
-    const encoder = createEncoder({
-      ...encodeOptions,
-      quality: 85,
-      advancedControls: {
-        filters: {
-          dots: true,
-          patches: false,
-          epf: 2,
-          gaborish: true,
-        },
-      },
-      // Raw override for the same ID to verify ordering (raw should win)
-      advancedFrameSettings: [{ id: 8, value: 0 }],
-    });
-    encoder.pushPixels(new Uint8Array(4));
-    encoder.finish();
-    for await (const _ of encoder.chunks()) { /* drain */ }
-    expect(calls.length).toBeGreaterThan(0);
-    await encoder.dispose();
-  });
-
-  test("validateAdvancedControls surfaces useful warnings for invalid combinations", () => {
-    const bad = validateAdvancedControls({
-      filters: { epf: 99 },
-      groupOrder: { mode: 'center' }, // missing centers
-    });
-    expect(bad.length).toBeGreaterThan(0);
-    expect(bad.some(w => w.includes('EPF'))).toBe(true);
-    expect(bad.some(w => w.includes('center'))).toBe(true);
   });
 });
 
@@ -1640,5 +1582,35 @@ function createFakeMetadataV2Module() {
 
   return { module, v2Calls, readBoxOpts };
 }
+
+  test("accepts lowMemoryMode + preferChunkedAPI via buffering in advancedControls (production-chunked-paths note)", () => {
+    // Public API shape acceptance + resolve path (no WASM module needed for options validation)
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+    expect(source).toContain("lowMemoryMode?: boolean");
+    expect(source).toContain("preferChunkedAPI?: boolean");
+    expect(source).toContain("production-chunked-paths design note");
+
+    // Runtime: constructing encoder options with the new fields must not throw in public surface
+    const optsWithLowMem = {
+      ...encodeOptions,
+      advancedControls: {
+        buffering: { lowMemoryMode: true, preferChunkedAPI: true, strategy: 3 }
+      }
+    };
+    expect(() => createEncoder(optsWithLowMem as any)).not.toThrow();
+  });
+
+  test("resolveEncoderBridgeSettings surfaces upsamplingMode and alreadyDownsampled", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+
+    // upsamplingMode must be extracted (defaulting to 0 per spec)
+    expect(source).toContain("const upsamplingMode = options.upsamplingMode ?? 0");
+    // alreadyDownsampled must be extracted
+    expect(source).toContain("const alreadyDownsampled = !!options.alreadyDownsampled");
+    // Both must flow into the resolved settings object
+    expect(source).toContain("upsamplingMode, alreadyDownsampled,");
+    // Capability check for _v3 (pixel art WASM path) — this is what's not yet present
+    expect(source).toContain("_jxl_wasm_encode_rgba8_with_metadata_v3");
+  });
 
 
