@@ -85,6 +85,20 @@ All items in the 2026-05-28 audit section now have design coverage.
 
 ---
 
+## 2026-06 Medium / Follow-up Design Notes (Completion of Next Features Handoff)
+
+| Note | File | Related | Key Focus | Status |
+|------|------|---------|-----------|--------|
+| Additional HDR Signaling | `additional-hdr-signaling.md` | Medium follow-up | Mastering Display Color Volume + CLLI | Design complete (2026-06) |
+| JUMBF Box Support | `jumbf-box-support.md` | Medium follow-up | First-class JUMBF embedding (C2PA etc.) via pure-TS sugar over custom boxes | Implemented on branch `feature/jumbf-box-support` (exemplar: zero-FFI, rich lab demo with sample stub, full living handoff) |
+| Granular per-Extra-Channel Modular Settings | `granular-extra-channel-modular.md` | Medium follow-up | Per-channel Modular controls for extra channels | Design complete (2026-06) |
+| Animation Decode Enhancements | `animation-decode-enhancements.md` | Medium follow-up | Frame-accurate seeking + richer per-frame metadata on decode | Design complete (2026-06) |
+| Remaining Low-Level Frame Settings | `remaining-frame-settings.md` | Catch-all | Final stragglers from cjxl | Design complete (2026-06) — completeness record |
+
+All Medium / Follow-up items from the 2026-05-28 Next Features Handoff now have design notes.
+
+---
+
 ## 2026-06 Phase 3 Micro-Features (Fine-Toothed Comb Continuation)
 
 All four notes completed to full exemplar standard on dedicated branches (see individual design notes for living Implementation Progress + Cleanup & Handoff blocks; HDR was the reference standard):

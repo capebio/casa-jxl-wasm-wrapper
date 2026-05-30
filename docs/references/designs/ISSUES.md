@@ -413,3 +413,47 @@ npm --workspace packages/jxl-native run build
 - Prerequisite: Docker/Emscripten (WASM rebuild) and node-gyp (native rebuild) must be available. See Issues 1/3 and Issue 4 for environment setup.
 
 **Sufficient Context Summary:** Animation encode/decode was fully implemented in source on 2026-05-29 (7 new WASM exports, N-API native path, TypeScript types, benchmark page). The WASM binary and native addon must be rebuilt to activate the feature at runtime. The rebuild is blocked by the same Docker/node-gyp environment constraints documented in Issues 1/3 and Issue 4. Once unblocked, follow the 6-step verification sequence above.
+
+---
+
+## 10. JUMBF Box Support Design + Implementation Gap Closed (Medium Follow-up #2) (2026-06)
+
+**Status:** done (2026-06)
+
+**Originating:** Medium / Follow-up Items in `docs/references/Next_Features_Handoff_2026-05-28.md` + the "design gap" distinction paragraph in the Issue Entry Specification at the top of this file. Highest-value remaining item after Progressive Encode Options, WASM Build Strategy (Full builds decision), and Advanced Decoder Controls were completed.
+
+**Why this matters:**
+- JUMBF (with C2PA) is the production standard for image provenance, content authenticity, and archival workflows in 2026. Stock libraries, news organizations, and AI-content pipelines require or strongly prefer it.
+- The project already had excellent custom box + container infrastructure (metadata-boxes-container.md + v2 box opts). JUMBF was the single highest-ROI specialization left in the Medium list.
+- Without a first-class surface, users were forced to the raw `customBoxes` escape hatch with magic "jumb" 4CC.
+
+**Reproduction (pre-work state):**
+```powershell
+# No dedicated jumbfBoxes field existed on EncoderOptions in either package.
+# Users had to hand-craft { type: "jumb", data: ... } in customBoxes (undiscoverable, no benchmark exposure).
+```
+Observed: JUMBF payloads could be attached only via the generic escape; no ergonomic name, no lab demo, no explicit design note with living handoff.
+
+**Affected files / packages (pre-fix):**
+- `docs/references/designs/jumbf-box-support.md` (stub only)
+- `packages/jxl-wasm/src/facade.ts`, `packages/jxl-native/src/index.ts` (no JUMBFBox or jumbfBoxes)
+- `web/jxl-wrapper-lab.*` (no UI)
+- Tracking: DESIGNS_INDEX, PROGRESS_LOG, Next Features Handoff, ISSUES, FEATURE_PARITY_MATRIX
+
+**Follow-up / Resolution steps (all completed on `feature/jumbf-box-support`):**
+1. Created dedicated branch per TEMPLATE.
+2. Expanded the design note to full exemplar standard (reference analysis with cjxl emphasis, recommended API, implementation plan, mandatory benchmark section, risks, living progress + Cleanup & Handoff).
+3. Implemented pure-TS expansion (`jumbfBoxes` → `customBoxes` entries with type "jumb", compress default true) in both WASM facade and jxl-native (zero C++ / FFI changes).
+4. Wired mandatory benchmark UI + "Sample C2PA stub (demo only)" generator + status + help text linking the design note.
+5. Added acceptance test in facade.test.ts.
+6. Updated all five tracking documents with proper entries (DESIGNS_INDEX status+branch, detailed PROGRESS_LOG entry, handoff mark, this closure entry per spec, matrix coverage).
+7. Verified: typecheck clean, facade JUMBF test passes, lab controls functional.
+
+**Agent Jump-In Checklist**
+- Read (in order): `docs/references/Next_Features_Handoff_2026-05-28.md` (Medium table + "how to restart"), `docs/references/designs/jumbf-box-support.md` (the full living exemplar), `docs/references/designs/ISSUES.md` (this entry + the Issue Entry Specification at top), `docs/references/designs/metadata-boxes-container.md` (dependency), `packages/jxl-wasm/src/facade.ts` (expandJumbf + marshalBoxOpts + needsBoxOptsV2).
+- Run first: `bun test packages/jxl-wasm/test/facade.test.ts --grep "JUMBF|jumbfBoxes"` (must pass).
+- Success criteria = JUMBF test green + lab JUMBF section renders + sample button populates payload + encode with jumbfBoxes succeeds and appears in advanced payload dump + all tracking docs show the item as Implemented on the feature branch.
+- Gotcha: Decode-side JUMBF discovery (JXL_DEC_BOX subscription) is explicitly out of scope in this note (future slice); only encode + container roundtrip is delivered.
+- No cross-repo prerequisite.
+
+**Sufficient Context Summary:** JUMBF was the highest-value Medium follow-up after the high-priority Next Wave items. A short stub design note existed but lacked exemplar rigor, implementation, benchmark wiring, and tracking closure. The fix delivered a dedicated `jumbfBoxes` surface (WASM + Native parity) as pure-TS sugar over the proven custom box path (zero FFI cost), full lab demo with sample generator, acceptance test, and complete living artifacts + updates to the five tracking documents — all on dedicated branch `feature/jumbf-box-support` following the Phase 3 exemplar pattern exactly.

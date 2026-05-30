@@ -333,6 +333,18 @@
                             Emit a bare JXL codestream with no container wrapper and no metadata boxes. Smallest possible output. Overrides Force container. Not recommended for interchange — use only when you control both encoder and decoder.
                         </div>
                     </div>
+                    <!-- JUMBF / C2PA (Phase 3 follow-up per jumbf-box-support.md) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">JUMBF / C2PA <span style="font-size:10px;opacity:0.6">(demo)</span> <button class="info-btn" type="button" data-help-target="wl-jumbf" aria-label="JUMBF info">i</button></span>
+                        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                            <input id="batch-jumbf-input" type="text" placeholder="base64 or hex JUMBF bytes (or use sample)" style="font-family:monospace; font-size:11px; width:180px; padding:2px 4px;" />
+                            <button id="batch-jumbf-sample" class="secondary-btn" type="button" style="padding:1px 6px; font-size:11px;">Sample C2PA stub</button>
+                            <span id="batch-jumbf-status" style="font-size:10px; opacity:0.8; min-width:90px;"></span>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-jumbf" hidden>
+                            Attach JUMBF boxes (e.g. C2PA content credentials) as "jumb" container boxes. Uses the existing custom box infrastructure (no new FFI). The sample is a minimal illustrative stub — not a real signed credential. Decode reporting of JUMBF is future work; container roundtrip is reliable today. See docs/references/designs/jumbf-box-support.md.
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>

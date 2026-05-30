@@ -94,6 +94,12 @@ export interface MetadataBoxSpec {
   compress?: boolean;
 }
 
+/** JUMBF box (C2PA / content provenance / archival). The payload is opaque; the wrapper emits it as a "jumb" container box. */
+export interface JUMBFBox {
+  /** Raw JUMBF superbox bytes (including the JUMBF box header). */
+  data: Uint8Array | ArrayBuffer;
+}
+
 export interface MetadataOptions {
   /** Include ICC profile (default true when iccProfile is non-null). */
   includeICC?: boolean;
@@ -285,6 +291,8 @@ export interface EncoderOptions {
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. */
   customBoxes?: readonly MetadataBoxSpec[];
+  /** JUMBF boxes (C2PA content credentials, archival provenance, etc.). Each becomes a "jumb" box. Pure TS sugar over customBoxes; no new native FFI. */
+  jumbfBoxes?: readonly JUMBFBox[];
   /** Animation header options. */
   animation?: AnimationOptions;
   /** Frame data for animation encode. When present, replaces single-image pushPixels. */
@@ -368,7 +376,23 @@ export function createDecoder(options: DecoderOptions): NativeDecoder {
 }
 
 export function createEncoder(options: EncoderOptions): NativeEncoder {
-  return createNativeCodecFacade(loadNativeBinding()).createEncoder(options);
+  // Expand jumbfBoxes into customBoxes (type "jumb") at the JS boundary so the existing native C++ custom box path handles them with zero FFI change.
+  const expanded = expandJumbfToCustomBoxesForNative(options);
+  const finalOptions = expanded
+    ? { ...options, customBoxes: [...(options.customBoxes ?? []), ...expanded] }
+    : options;
+  return createNativeCodecFacade(loadNativeBinding()).createEncoder(finalOptions);
+}
+
+/** Mirror of the WASM expand helper (duplicated per current type-duplication convention). */
+function expandJumbfToCustomBoxesForNative(options: EncoderOptions): MetadataBoxSpec[] | null {
+  const jumbf = options.jumbfBoxes;
+  if (!jumbf || jumbf.length === 0) return null;
+  return jumbf.map(j => ({
+    type: "jumb",
+    data: j.data instanceof ArrayBuffer ? new Uint8Array(j.data) : j.data,
+    compress: true,
+  }));
 }
 
 export function encodeJxtcRgba8(

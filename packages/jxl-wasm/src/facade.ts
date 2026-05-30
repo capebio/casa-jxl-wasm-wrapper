@@ -179,6 +179,8 @@ export interface EncoderOptions {
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. Requires WASM with v2 metadata bridge. */
   customBoxes?: readonly MetadataBoxSpec[];
+  /** JUMBF boxes (C2PA content credentials, archival provenance, etc.). Each becomes a "jumb" box. Pure TS sugar over customBoxes; no new FFI. */
+  jumbfBoxes?: readonly JUMBFBox[];
   /** HDR gain map to embed as a jhgm box. Requires WASM with gain map bridge. */
   gainMap?: GainMapOptions | null;
   /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
@@ -419,6 +421,12 @@ export interface MetadataBoxSpec {
   compress?: boolean;
 }
 
+/** JUMBF box (C2PA / content provenance / archival). The payload is opaque; the wrapper emits it as a "jumb" container box. */
+export interface JUMBFBox {
+  /** Raw JUMBF superbox bytes (including the JUMBF box header). */
+  data: Uint8Array | ArrayBuffer;
+}
+
 /** Per-encode control over which metadata boxes are included and how the container is written. */
 export interface MetadataOptions {
   /** Include ICC profile (default true when iccProfile is non-null). */
@@ -621,11 +629,12 @@ function resolveEffectiveMetadata(options: EncoderOptions): {
   };
 }
 
-/** True when box-options v2 features are needed (compress, container control, custom boxes). */
+/** True when box-options v2 features are needed (compress, container control, custom boxes, or jumbfBoxes). */
 function needsBoxOptsV2(options: EncoderOptions): boolean {
   const m = options.metadata;
-  return !!(m?.compressBoxes || m?.forceContainer || m?.rawCodestream) ||
-    (options.customBoxes != null && options.customBoxes.length > 0);
+  const hasCustom = (options.customBoxes != null && options.customBoxes.length > 0);
+  const hasJumbf = (options.jumbfBoxes != null && options.jumbfBoxes.length > 0);
+  return !!(m?.compressBoxes || m?.forceContainer || m?.rawCodestream) || hasCustom || hasJumbf;
 }
 
 // WasmBoxOpts layout (20 bytes, little-endian uint32):
@@ -643,6 +652,16 @@ const WASM_BOX_OPTS_BYTES = 20;
 //   offset 12: compress    (uint32)
 const WASM_CUSTOM_BOX_BYTES = 16;
 
+/** Expand jumbfBoxes into internal MetadataBoxSpec entries (type "jumb", compress default true). Pure TS sugar. */
+function expandJumbfToCustomBoxes(jumbf?: readonly JUMBFBox[]): MetadataBoxSpec[] {
+  if (!jumbf || jumbf.length === 0) return [];
+  return jumbf.map(j => ({
+    type: "jumb",
+    data: j.data instanceof ArrayBuffer ? new Uint8Array(j.data) : j.data,
+    compress: true, // JUMBF claims are often large; default to compression (caller can still override via customBoxes if needed)
+  }));
+}
+
 /**
  * Allocates WasmBoxOpts + WasmCustomBox[] on the WASM heap.
  * Returns ptr to WasmBoxOpts and an array of all heap allocations to free.
@@ -653,7 +672,10 @@ function marshalBoxOpts(
   options: EncoderOptions,
 ): { ptr: number; freePtrs: number[] } {
   const m = options.metadata;
-  const customBoxes = options.customBoxes ?? [];
+  const customBoxes = [
+    ...(options.customBoxes ?? []),
+    ...expandJumbfToCustomBoxes(options.jumbfBoxes),
+  ];
   if (!m && customBoxes.length === 0) return { ptr: 0, freePtrs: [] };
 
   const freePtrs: number[] = [];

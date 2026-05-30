@@ -775,6 +775,24 @@ describe("decodingSpeed encoder option", () => {
     await encoder.dispose();
   });
 
+  test("jumbfBoxes expand into custom 'jumb' boxes (no new FFI, rides v2 box path)", async () => {
+    const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const jumbData = new Uint8Array([0x4a, 0x55, 0x4d, 0x42, 0x46, 0x00]); // "JUMBF\0" demo prefix
+    const encoder = createEncoder({
+      ...encodeOptions, quality: 90,
+      jumbfBoxes: [{ data: jumbData }],
+    });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(v2Calls.length).toBeGreaterThan(0);
+    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    // At least the one JUMBF entry (may be >1 if other metadata also triggers boxes)
+    expect(boxOpts.numCustomBoxes).toBeGreaterThanOrEqual(1);
+    await encoder.dispose();
+  });
+
   test("rawCodestream:true overrides forceContainer:true in WasmBoxOpts", async () => {
     const { module, v2Calls, readBoxOpts } = createFakeMetadataV2Module();
     setJxlModuleFactoryForTesting(async () => module as never);

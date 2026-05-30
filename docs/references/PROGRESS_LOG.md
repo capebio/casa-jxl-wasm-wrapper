@@ -8,6 +8,31 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
+## Feature: JUMBF Box Support (C2PA / content provenance) — 2026-06
+
+**Branch:** `feature/jumbf-box-support`
+
+**Status:** Full body complete (design + implementation to exemplar standard)
+
+**Scope:** Highest-value remaining Medium / Follow-up item from Next_Features_Handoff_2026-05-28. First-class ergonomic `jumbfBoxes` surface (WASM + Native parity) implemented as pure TypeScript sugar over the existing custom box / v2 metadata infrastructure. Zero new FFI or C++ changes. Mandatory rich benchmark wiring with "Sample C2PA stub (demo only)" generator. Acceptance test. Full living design note + handoff.
+
+**Key Changes:**
+- `docs/references/designs/jumbf-box-support.md` — complete rewrite to the same rigor as production-chunked-paths / HDR exemplar (deep cjxl/libjxl + CasaWASM reference analysis, explicit future-slice for decode JXL_DEC_BOX work, API, benchmark plan, risks, living Implementation Progress + full Cleanup & Handoff + verification closure).
+- `packages/jxl-wasm/src/facade.ts` — `JUMBFBox` interface, `jumbfBoxes` on EncoderOptions, `expandJumbfToCustomBoxes` helper, merge in `marshalBoxOpts`, `needsBoxOptsV2` update, acceptance test.
+- `packages/jxl-native/src/index.ts` — identical `JUMBFBox` + field + expansion in `createEncoder` wrapper (parity, zero native.cc touch).
+- `web/jxl-wrapper-lab.html` + `.js` — "JUMBF / Content Provenance (C2PA)" control group (input + Sample button + live status + help popover with design note link); `getJumbfBoxes` + sample stub generator + wiring into `makeEncoderOptions`; listeners.
+- `packages/jxl-wasm/test/facade.test.ts` — new test verifying jumbfBoxes presence triggers v2 box path and produces valid output.
+
+**Benchmark / Educational Value:** Lab users can paste or auto-load a minimal illustrative JUMBF stub, see byte count, run batch, observe the payload in options and the resulting file size delta. Decode note clearly communicates the container-level roundtrip guarantee + future decode work.
+
+**Docs Updated:** This PROGRESS_LOG entry; DESIGNS_INDEX (status + branch); Next_Features_Handoff (Medium item marked complete); ISSUES.md (closure entry per spec); FEATURE_PARITY_MATRIX (JUMBF coverage under Metadata boxes row 9).
+
+**Verification:** `bun test packages/jxl-wasm/test/facade.test.ts --grep "JUMBF|jumbfBoxes"` (passes); `npx tsc --noEmit` clean on changed packages; lab controls functional on manual open.
+
+**Rationale / Pattern Match:** Exactly follows the Phase 3 "smart wiring, no FFI bloat, rich lab, living artifacts" discipline. Highest external value (real C2PA driver) among remaining Medium items.
+
+---
+
 ## B5: True In-Flight RAW Decode Preemption (cooperative checkpoint) — 2026-06
 
 **Branch:** `finishing_feature_parity`
@@ -1197,6 +1222,25 @@ Completion of `production-chunked-paths.md` to the HDR exemplar standard. Promot
 - No decode/roundtrip exposure of "chunked path used".
 
 **Handoff followed:** Exact process in `HANDOFF_Continuing_Phase3_MicroFeatures_2026-06.md` (read design note + HDR exemplar + audit section, branch first, full template rigor, mandatory lab, living docs, PROGRESS_LOG + tracking updates).
+
+---
+
+## Completion of Remaining Medium / Follow-up Design Notes (2026-06)
+
+**Status:** All Medium / Follow-up items from `Next_Features_Handoff_2026-05-28.md` now have design notes.
+
+**Notes created in this session:**
+- `additional-hdr-signaling.md` — Additional HDR static metadata (Mastering Display + CLLI)
+- `jumbf-box-support.md` — JUMBF box support for C2PA / archival use cases
+- `granular-extra-channel-modular.md` — Per-extra-channel Modular encoding settings
+- `animation-decode-enhancements.md` — Animation decode improvements (seeking + per-frame metadata)
+- `remaining-frame-settings.md` — Catch-all for any final low-level cjxl frame settings
+
+All notes follow the established high-quality template with API shapes, reference analysis, benchmark requirements, and living progress/handoff sections.
+
+Tracking documents (`DESIGNS_INDEX.md`, this log, the Next Features Handoff, and `ISSUES.md`) have been updated.
+
+This marks the completion of the design note creation phase for the items identified in the 2026-05-28 Next Features Handoff.
 
 ---
 

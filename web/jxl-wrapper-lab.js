@@ -43,6 +43,8 @@ const batchLosslessInput = document.getElementById('batch-lossless');
 const batchCompressBoxesInput = document.getElementById('batch-compress-boxes');
 const batchForceContainerInput = document.getElementById('batch-force-container');
 const batchRawCodestreamInput = document.getElementById('batch-raw-codestream');
+const batchJumbfInput = document.getElementById('batch-jumbf-input');
+const batchJumbfSampleBtn = document.getElementById('batch-jumbf-sample');
 const batchThumbSizeInputs = [...document.querySelectorAll('input[name="batch-thumb-size"]')];
 const batchLimitValue = document.getElementById('batch-limit-value');
 const batchConcurrencyValue = document.getElementById('batch-concurrency-value');
@@ -62,6 +64,24 @@ const statsTotalDelta = document.getElementById('stats-total-delta');
 const statsWrapperFaster = document.getElementById('stats-wrapper-faster');
 const batchGrid = document.getElementById('batch-grid');
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
+
+// JUMBF demo wiring (jumbf-box-support.md)
+if (batchJumbfInput) {
+  batchJumbfInput.addEventListener('input', updateJumbfStatus);
+  batchJumbfInput.addEventListener('change', updateJumbfStatus);
+}
+if (batchJumbfSampleBtn) {
+  batchJumbfSampleBtn.addEventListener('click', () => {
+    if (!batchJumbfInput) return;
+    const stub = makeSampleJumbfStub();
+    // store for getter
+    _lastJumbfBytes = stub;
+    // show a short base64 preview (demo only)
+    const b64 = btoa(String.fromCharCode(...stub));
+    batchJumbfInput.value = b64.slice(0, 40) + (b64.length > 40 ? '...' : '');
+    updateJumbfStatus();
+  });
+}
 
 let existingContext = getContext();
 const paintScratchCanvas = document.createElement('canvas');
@@ -488,6 +508,67 @@ function getForceContainer() {
 
 function getRawCodestream() {
     return Boolean(batchRawCodestreamInput?.checked);
+}
+
+/** Parse a loose base64 or hex string into Uint8Array (best-effort for lab demo). */
+function parseJumbfInput(str) {
+  if (!str || !str.trim()) return null;
+  const s = str.trim();
+  try {
+    if (/^[0-9a-fA-F\s]+$/.test(s)) {
+      const hex = s.replace(/\s+/g, '');
+      if (hex.length % 2 !== 0) return null;
+      const out = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i*2, i*2+2), 16);
+      return out;
+    }
+    // base64
+    const b64 = s.replace(/[^A-Za-z0-9+/=]/g, '');
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch { return null; }
+}
+
+/** Minimal illustrative JUMBF stub (not a valid C2PA credential — clearly labeled in UI). */
+function makeSampleJumbfStub() {
+  // 8-byte JUMBF superbox header (type "jumb" + size) + tiny JSON claim stub for demo only.
+  const claim = new TextEncoder().encode(JSON.stringify({ "claim": "demo-only", "generator": "CasaWASM-lab", "ts": Date.now() }));
+  const header = new Uint8Array([0x00,0x00,0x00,0x00, 0x6a,0x75,0x6d,0x62]); // placeholder size + 'jumb'
+  const buf = new Uint8Array(8 + claim.length);
+  buf.set(header, 0);
+  buf.set(claim, 8);
+  // Patch big-endian size at [0:4]
+  const size = buf.length;
+  buf[0] = (size >>> 24) & 0xff; buf[1] = (size >>> 16) & 0xff; buf[2] = (size >>> 8) & 0xff; buf[3] = size & 0xff;
+  return buf;
+}
+
+let _lastJumbfBytes = null;
+
+function getJumbfBoxes() {
+  const inputEl = document.getElementById('batch-jumbf-input');
+  const raw = inputEl?.value || '';
+  const parsed = parseJumbfInput(raw);
+  if (parsed && parsed.byteLength > 0) {
+    _lastJumbfBytes = parsed;
+    return [{ data: parsed }];
+  }
+  return _lastJumbfBytes ? [{ data: _lastJumbfBytes }] : null;
+}
+
+function updateJumbfStatus() {
+  const status = document.getElementById('batch-jumbf-status');
+  const inputEl = document.getElementById('batch-jumbf-input');
+  if (!status) return;
+  const bytes = _lastJumbfBytes || parseJumbfInput(inputEl?.value || '');
+  if (bytes && bytes.byteLength > 0) {
+    status.textContent = `${bytes.byteLength} B JUMBF`;
+    status.style.color = '#0a0';
+  } else {
+    status.textContent = '';
+  }
 }
 
 function fmtBytes(n) {
@@ -1032,7 +1113,8 @@ function makeEncoderOptions(source) {
     const compressBoxes = getCompressBoxes();
     const forceContainer = getForceContainer();
     const rawCodestream = getRawCodestream();
-    const hasMetadataOpts = compressBoxes || forceContainer || rawCodestream;
+    const jumbfBoxes = getJumbfBoxes();
+    const hasMetadataOpts = compressBoxes || forceContainer || rawCodestream || !!(jumbfBoxes && jumbfBoxes.length);
     const modular = getModular();
     const brotliEffort = getBrotliEffort();
     return {
@@ -1055,6 +1137,7 @@ function makeEncoderOptions(source) {
         modular: modular !== -1 ? modular : undefined,
         brotliEffort: brotliEffort >= 0 ? brotliEffort : undefined,
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
+        jumbfBoxes: jumbfBoxes || undefined,
         alphaDistance: getAlphaDistance(),
         // Gain map (HDR) transport — exercises jhgm box path when provided (mandatory per gain-maps.md)
         gainMap: getGainMap(),

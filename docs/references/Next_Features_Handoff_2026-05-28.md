@@ -56,13 +56,22 @@ The following items are the strongest candidates for the **next wave** of design
 | 2 | **WASM Build Strategy (Full / Lite / Decode-only)** | Called out as the "Next suggested action" in `CasaWASM_JXL_Feature_Completeness_and_Gaps.md`. Affects Emscripten/CMake configuration, binary size, and which features are compiled in. | Not a single "feature" but an architectural decision that will influence all future work. |
 | 3 | **Advanced Decoder Controls & Tuning** | Most design work so far has been encoder-focused. Decoder-side knobs (threading, memory limits, progressive detail levels, etc.) may need better exposure. | Look at libjxl decoder API + existing worker/decode-handler code. |
 
-### Medium / Follow-up Items
+### Medium / Follow-up Items (All Completed 2026-06)
 
-- Additional HDR signaling (mastering display metadata, content light level, etc.)
-- JUMBF box support (important for certain archival / security use cases)
-- Granular per-extra-channel Modular settings (beyond what was covered in the core Modular note)
-- Animation decode enhancements (frame-accurate seeking, better timing metadata exposure)
-- Any remaining low-level frame settings that keep appearing in cjxl but aren't yet surfaced
+All items below now have dedicated design notes (see the focused handoffs below for implementation guidance):
+
+- `HANDOFF_HDR_JUMBF_GranularModular_2026-06.md` — covers Additional HDR Signaling, JUMBF, and Granular per-Extra-Channel Modular
+- `HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md` — covers Animation Decode Enhancements and Remaining Low-Level Frame Settings
+
+Detailed guidance for resuming work on these groups lives in those two handoff files.
+
+- Additional HDR signaling → `additional-hdr-signaling.md`
+- **JUMBF box support** → `jumbf-box-support.md` (Implemented 2026-06 on `feature/jumbf-box-support` — full exemplar body + living handoff per Phase 3 standard; see PROGRESS_LOG and the note's Cleanup & Handoff)
+- Granular per-extra-channel Modular settings → `granular-extra-channel-modular.md`
+- Animation decode enhancements → `animation-decode-enhancements.md`
+- Remaining low-level frame settings → `remaining-frame-settings.md` (catch-all completeness note)
+
+See `DESIGNS_INDEX.md` for current status of all notes.
 
 ---
 
