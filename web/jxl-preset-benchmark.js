@@ -516,7 +516,9 @@ export async function runSweep(options = {}) {
             }
         }
 
-        computeScores(phase1Rows);
+        for (const tier of activeTiers) {
+            computeScores(phase1Rows.filter(r => r.tier === tier.id));
+        }
         updatePhaseStatus(1, 'done');
         if (sweepAborted) return;
 
@@ -591,7 +593,9 @@ export async function runSweep(options = {}) {
             }
         }
 
-        computeScores(phase2Rows);
+        for (const tier of activeTiers) {
+            computeScores(phase2Rows.filter(r => r.tier === tier.id));
+        }
         updatePhaseStatus(2, 'done');
         if (sweepAborted) return;
 
@@ -672,7 +676,9 @@ export async function runSweep(options = {}) {
             }
         }
 
-        computeScores(phase3Rows);
+        for (const tier of activeTiers) {
+            computeScores(phase3Rows.filter(r => r.tier === tier.id));
+        }
         updatePhaseStatus(3, 'done');
         if (sweepAborted) return;
 
@@ -748,7 +754,9 @@ export async function runSweep(options = {}) {
             }
         }
 
-        computeScores(phase4Rows);
+        for (const tier of activeTiers) {
+            computeScores(phase4Rows.filter(r => r.tier === tier.id));
+        }
         updatePhaseStatus(4, 'done');
 
     } finally {
