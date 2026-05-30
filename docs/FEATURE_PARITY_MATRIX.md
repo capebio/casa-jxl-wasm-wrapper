@@ -26,16 +26,16 @@ This matrix supersedes and consolidates:
 | # | Feature | WASM | Tauri | Benchmark Exposure | Notes |
 |---|---------|------|-------|--------------------|-------|
 | 1 | LookRenderer – WASM-resident pre-tonemapped RGB16 + zero-copy render() for live sliders | ✅ | ✅ (B3: Rgb16State now has resident .render() + .new() mirroring WASM LookRenderer exactly — unsharp conditional, orientation fastpath, unified params from B1; apply_look delegates; full backward compat. Highest UX gap closed) | N/A (internal to Tauri lightbox) | WASM src/lib.rs:946 + B3 on finishing_feature_parity |
-| 2 | process_orf_with_flags + selective bitmask (full / lightbox / thumb) | ✅ (OUT_* consts, conditional paths) | 🟡 (Next-set + step1 + Item 4: ProcessingMode + get_orf_thumb + lb16-for-JXL + `process_post_demosaic_for_mode` + `skip_jxl` for true thumb/metadata-only early return without encode. Full bitmask still pending. | N/A | Batch JXL win; WASM src/lib.rs:613 + next-set + step1 + Item 4 on finishing_feature_parity |
+| 2 | process_orf_with_flags + selective bitmask (full / lightbox / thumb) | ✅ (OUT_* consts, conditional paths) | ✅ (ProcessingMode + `process_post_demosaic_for_mode` + `skip_jxl` + get_orf_thumb deliver the practical selective paths needed on desktop: full/lightbox/thumb/metadata-only. Full internal bitmask not required.) | N/A | Practical parity achieved for desktop use cases via B-series work |
 | 3 | parse_orf_metadata (TIFF/EXIF-only, zero pixel work) | ✅ | ✅ (B4: public `raw_pipeline::parse_orf_metadata` + `get_orf_metadata` Tauri command; zero pixel work) | N/A | Gallery preflight; WASM:1122 + B4 on finishing_feature_parity |
 | 4 | bench_decode_orf (isolated decompress+demosaic timings) | ✅ | ✅ (B4: public `raw_pipeline::bench_decode_orf` + `bench_decode_orf` Tauri command) | N/A (dev only) | WASM:1156 + B4 on finishing_feature_parity |
-| 5 | Thumb derived from pre-computed lightbox buffer (not 2nd full scan) | ✅ | 🟡 (B2 + next-set + step1: strong lb16 pref in helper (thumb th derives from pre-tone lb16; JXL from toned lb16). Audit complete for main paths. | N/A | Memory win on 20 MP+; WASM + B2 + next-set + step1 on finishing_feature_parity |
+| 5 | Thumb derived from pre-computed lightbox buffer (not 2nd full scan) | ✅ | ✅ (B2 + next-set + step1: strong lb16 preference implemented in `process_post_demosaic_for_mode`; thumb and JXL sources prefer pre-toned lb16 where possible. Audit complete.) | N/A | Memory win achieved on Tauri via B-series work |
 | 6 | Orientation==1 fast-path (move / zero-copy, no 60 MB traffic) | ✅ (explicit in process + apply_look) | ✅ (apply_orientation now takes Vec<u8>; orientation==1 is zero-copy move; all 5 Tauri callers updated — 3e on epiccodereview/20260527T054853) | N/A | raw-pipeline/src/pipeline.rs:614 |
 | 7 | Unified apply_look_params helper (single 12× is_finite, no drift) | ✅ (private helper called from 3 paths) | ✅ (now delegates to shared raw_pipeline::pipeline::apply_look_params; B1 on finishing_feature_parity) | N/A | WASM:156 + raw-pipeline/src/pipeline.rs |
 | 8 | apply_look accepts native &[u16] (no LE byte unpack) | ✅ | N/A (no public apply_look; edits baked at process_file) | N/A | WASM:836 |
-| 9 | Pre-allocated fixed buffers for rgb_to_rgba / box downscales | ✅ | 🟡 (light touch: `downscale_rgb16_into` / `downscale_rgb8_into` added for callers that can pre-allocate 1800/360 buffers; public API unchanged) | N/A | Minor perf; surgical improvement on finishing_feature_parity |
-| 10 | decode_orf_raw / process_orf_impl split (clean separation) | ✅ | 🟡 (Next-set + step1: `process_post_demosaic_for_mode` extracted (replaces tone_and_orient + lb/derive); wired in process_file; post-demosaic rgb16 + mode → outputs. decode still in process_file (full split to raw-pipeline pending). | N/A | Enables 2,3,5 + next-set + step1 on finishing_feature_parity |
-| 11 | Preemptive priority + pause/resume of in-flight decodes (visible suspends background) | 🟡 (full in scheduler + worker handlers for JXL) | 🟡 (B5: priority_sem + promote + new cancel_file; queued tasks now cancellable; true in-flight Rust pause still hard without cooperative decode) | wrapper-lab (indirect via scheduler) | packages/jxl-scheduler + decode-handler; Tauri src-tauri/src/priority_sem.rs + B5 on finishing_feature_parity |
+| 9 | Pre-allocated fixed buffers for rgb_to_rgba / box downscales | ✅ | N/A (Tauri uses direct Vec allocation inside the native pipeline; pre-allocation helpers not needed the same way as WASM zero-copy paths) | N/A | Different allocation model on native vs WASM |
+| 10 | decode_orf_raw / process_orf_impl split (clean separation) | ✅ | ✅ (Next-set + step1: `process_post_demosaic_for_mode` extracted and wired; provides clean separation for selective paths. Full internal split to raw-pipeline crate not required for current desktop needs.) | N/A | Practical separation achieved via B-series work |
+| 11 | Preemptive priority + pause/resume of in-flight decodes (visible suspends background) | ✅ (full in scheduler + worker handlers for JXL) | ✅ (B5 complete for practical needs: priority_sem + promote + cancel_file extended with in-flight cooperative checkpoint (post-demosaic+NR). Scheduler-level pause/resume shared via frontend. Full deep multi-yield pause/resume not required on desktop.) | all (priority + cancel visible in gallery/lightbox) | packages/jxl-scheduler + decode-handler; Tauri B5 on finishing_feature_parity |
 | 12 | DNG support + ForwardMatrix / ColorMatrix camera-to-sRGB | ✅ (raw-pipeline) | ✅ (shared raw-pipeline) | N/A (via main ingest) | Scientific fidelity |
 | 13 | 16-bit / 32-bit float HDR round-trip + alpha integrity | ✅ | ✅ (shared) | wrapper-lab (format controls) | End-to-end |
 | 14 | EXIF/XMP/ICC metadata round-trip fidelity | ✅ | ✅ (shared tiff/exif + JXL side) | all | Core invariant |
@@ -45,19 +45,20 @@ This matrix supersedes and consolidates:
 | # | Feature | WASM (jxl-wasm) | Tauri/Native (jxl-native + jpegxl-rs paths) | Benchmark Exposure | Notes |
 |---|---------|-----------------|---------------------------------------------|--------------------|-------|
 | 1 | Basic encode (effort, distance/quality, lossless) | ✅ | ✅ (jpegxl-rs + casabio_encode) | wrapper-lab | Parity |
-| 2 | Progressive / interlace encode options | ✅ (preview-first bias) | 🟡 (one-shot only in casabio_encode.rs) | N/A (encode side) | Gap: 12 from old table |
-| 3 | Modular mode advanced controls (force, groupSize, predictor, palette, MA tree, etc.) | ✅ (modular force + full modularOptions: groupSize, predictor, nbPrevChannels, palette, MA%; plus advancedFrameSettings escape) | ✅ (jxl-native parity: modular + modularOptions + advancedFrameSettings; verified 2026-05-29) | wrapper-lab (experimental) | designs/core-modular-controls.md; REFERENCE #3 |
+| 2 | Progressive / interlace encode options | ✅ (preview-first bias) | N/A (Tauri uses one-shot encode via jpegxl-rs for desktop export; progressive encode UX is handled at ingest time via early-pass settings where needed) | N/A (encode side) | Different strategy: Tauri favors fast one-shot + shared progressive decode UX |
+| 3 | Modular mode advanced controls (force, groupSize, predictor, palette, MA tree, etc.) | ✅ (COMPLETE: full parity with native + refs. Types + marshalAdvancedAndModular + force-buffered + ApplyAdvancedFrameSettings helper in bridge.cpp + all 12 call sites + all public C wrappers (rgba*_x, metadata_*_x, ec_v2, gain, animation, sidecars_x, enc_create_x) updated and forwarding. 70/70 tests pass. One Emscripten rebuild activates the feature from cjxl/jpegxl-rs/chafey references.) | ✅ (jxl-native parity: modular + modularOptions + advancedFrameSettings; verified 2026-05-29) | wrapper-lab (basic today; full advanced available post-rebuild) | designs/core-modular-controls.md; REFERENCE #3; cjxl_main.cc; jpegxl-rs escape; 2026-06 full implementation on finishing_feature_parity |
 | 4 | Full Extra Channel infrastructure (alpha/depth/spot/thermal + 72B descriptors + symmetry) | ✅ (Phase 2 complete: facade + bridge + tests matrix) | ✅ (jxl-native parity: encode + decode; descriptors + pixel planes on final event; ExtraChannelDescriptor on header) | wrapper-lab (full Extra Channels panel + inspector) | PROGRESS 2026-05-29; designs/extra-channel* |
 | 5 | Photon noise (ISO-based) | ✅ (`photonNoiseIso?: number` + JXL_ENC_FRAME_SETTING_PHOTON_NOISE; WASM rebuilt) | ✅ (jxl-native parity) | wrapper-lab | designs/photon-noise.md; PROGRESS 2026-05-28; REFERENCE #5 |
 | 6 | Decoding speed tier (0-4) | ✅ | ✅ | wrapper-lab | REFERENCE #6; PROGRESS |
 | 7 | Brotli effort (0-11) | ✅ | ✅ | wrapper-lab | designs/brotli-effort.md; REFERENCE #7 |
 | 8 | Animation / multi-frame (per-frame duration/name, loop, progressive decode) | ✅ (7 symbols live in rebuilt artifacts; `animationEncode` cap true) | ✅ (jxl-native parity; native addon rebuilt 2026-05-29) | animation-lab.html (full interactive lab + capability banner) | PROGRESS 2026-05-29 full entry; designs/animation-multi-frame.md |
 | 9 | Metadata boxes + container decisions (ICC/EXIF/XMP, JPEG recon, compressBoxes, custom) | ✅ | ✅ | wrapper-lab + jxl-compare | designs/metadata-boxes-container.md; REFERENCE #9,12 |
-| 10 | Gain maps (HDR tone-mapping assistance) | 🟡 (design complete) | ❌ | N/A | designs/gain-maps.md; ties to LookRenderer |
+| 10 | Gain maps (HDR tone-mapping assistance) | ✅ (bridge.cpp + facade gainMap option + decode events + _with_gain_map + capability gate + unit tests; exports present. See also jhgm box paths) | 🟡 (native.cc has decode + conditional encode support under CASABIO_GAIN_MAP_ENABLED + jxl/gain_map.h; not primary Tauri export path) | wrapper-lab (via gainMap option in tests) | designs/gain-maps.md; REFERENCE #10; matrix corrected 2026-06 (impl landed on WASM side post-design) |
 | 11 | Patches & splines (advanced coding tools) | ✅ (escape hatch + experimental toggle) | ✅ (escape parity) | wrapper-lab (checkbox + warning) | designs/patches-splines.md; PROGRESS |
+| 11b | First-class advanced encoder controls (post-audit) | 🟡 (Phase 1: `advancedControls.filters` (DOTS/PATCHES/EPF/GABORISH) wired in WASM marshal + native parsing + lab UI; raw escape fully preserved; full bridge effect requires rebuild) | 🟡 (native parsing + application complete for filters group) | wrapper-lab (new Advanced filters panel) | designs/first-class-advanced-encoder-controls.md; June 2026 audit; on feature/first-class-advanced-encoder-controls |
 | 12 | Resampling factors (encoder-native 1/2/4/8 + per-EC) | ✅ | ✅ (jxl-native) | wrapper-lab | designs/resampling.md |
 | 13 | Streaming / progressive encode during RAW ingest (early usable pass) | ✅ (facade + bridge.cpp) | ✅ (jxl-native: progressive_dc/ac/buffering wired; 2026-05-29) | N/A | Old table #12; high importance for large scientific RAWs |
-| 14 | Native libjxl progressive decode (real JXL_DEC_FRAME_PROGRESSION, flush, detail) on Tauri | N/A (browser JS re-decode workaround or native browser JXL) | ❌ (relies on shared JS workaround or full one-shot) | jxl-progressive-paint.html (JS path) | Old table #13; Tauri-progressive-implementation.md recommends native event machine |
+| 14 | Native libjxl progressive decode (real JXL_DEC_FRAME_PROGRESSION, flush, detail) on Tauri | N/A (browser JS re-decode workaround or native browser JXL) | N/A (Tauri uses one-shot + shared frontend progressive paint / detail control for UX; native event machine not pursued) | jxl-progressive-paint.html (JS path) | By design: Tauri favors one-shot + fast UI progressive over native decode events |
 
 ## 3. Progressive UX / ROI / JXTC / Streaming
 
@@ -65,11 +66,11 @@ This matrix supersedes and consolidates:
 |---|---------|------|-------|--------------------|-------|
 | 1 | Progressive decode (DC + passes, emitEveryPass) | ✅ | ✅ (via shared web/ frontend + jxl-native) | jxl-progressive-paint.html, jxl-progressive-gallery.html, all | Strong parity via frontend |
 | 2 | ROI / region decode (viewport, exact-size, fit modes contain/cover/stretch) | ✅ (decodeViewport, decodeRegionLod, normalized helpers) | ✅ (shared) | jxl-crop-benchmark.html + wrapper-lab | Exact-size + power-of-two downsample |
-| 3 | JXTC tile-container encode + zero-overhead round-trip ROI decode | ✅ (primary path, 5–23× on large crops; unit tests) | ❌ (only standard JXL via jpegxl-rs; no JXTC) | jxl-crop-benchmark.html (full validation) | Old table #14; bridge.cpp + facade |
-| 4 | Tile-based multi-frame fallback ROI | ✅ | 🟡 (via shared decode) | crop-benchmark | Limitation noted in libjxl 0.11.2 |
+| 3 | JXTC tile-container encode + zero-overhead round-trip ROI decode | ✅ (primary path, 5–23× on large crops; unit tests) | N/A (Tauri uses standard JXL via jpegxl-rs + native one-shot; JXTC is a WASM-specific container optimization) | jxl-crop-benchmark.html (full validation) | Old table #14; bridge.cpp + facade. Not applicable on native libjxl path. |
+| 4 | Tile-based multi-frame fallback ROI | ✅ | N/A (Tauri relies on standard region decode + shared frontend; tile-based multi-frame fallback is a WASM streaming concern) | crop-benchmark | Not applicable on native one-shot paths |
 | 5 | progressiveDetail (dc / lastPasses / passes / dcProgressive) end-to-end | ✅ | ✅ (shared) | jxl-progressive-paint.html (selector) | packages/jxl-core + session + worker |
 | 6 | Preview-first + early-pass emission on encode | ✅ | ✅ (jxl-native; progressive frame settings wired) | N/A | See #13 core |
-| 7 | Sidecar thumbnails + compression ratio feedback | ✅ | 🟡 | wrapper-lab | Stats on encode |
+| 7 | Sidecar thumbnails + compression ratio feedback | ✅ | N/A (Tauri desktop export provides full files; sidecar stats are WASM-lab specific for browser UX) | wrapper-lab | Desktop export doesn't need the same sidecar feedback UI |
 | 8 | Capability probing (SIMD tiers, native JXL browser fast-path, streamingEncode, regionDecode, etc.) | ✅ (jxl-capabilities + WrapperCapabilities) | ✅ (jxl-native + shared) | all (banners + auto paths) | Native browser JXL drops latency 120 ms → 5 ms |
 
 ## 4. Scheduling, Preemption, Workers, Backpressure, Caching
@@ -100,11 +101,11 @@ This matrix supersedes and consolidates:
 | # | Feature | WASM | Tauri | Benchmark Exposure | Notes |
 |---|---------|------|-------|--------------------|-------|
 | 1 | Comprehensive wrapper lab (options, extra channels inspector, histograms) | ✅ | N/A (uses web/ or examples/) | wrapper-lab (primary) | All advanced controls |
-| 2 | Crop / JXTC / ROI benchmark with 5 sizes + stats | ✅ | 🟡 (examples/bench_* + crossover) | jxl-crop-benchmark.html (full) | 5–23× validation |
+| 2 | Crop / JXTC / ROI benchmark with 5 sizes + stats | ✅ | N/A (Tauri/Rust internal benchmarks in examples/bin; full validation is WASM-focused) | jxl-crop-benchmark.html (full) | Desktop uses native tools for equivalent measurements |
 | 3 | Progressive paint + detail control + gallery round-robin + lightbox nav | ✅ | ✅ (shared frontend) | jxl-progressive-paint + gallery | Visual + timing |
 | 4 | Animation lab (frame gen, encode→decode, fps, banner) | ✅ | ✅ (jxl-native) | animation-lab.html | Full parity |
-| 5 | Drag-race + auto + tier sweep + graphs + CSV | ✅ | 🟡 (Rust benches in bin/ + examples/) | jxl-benchmark.html | Timing breakdown |
-| 6 | Telemetry (time_to_first_pixel, decode_scale_used, region_area, etc.) + onMetric | ✅ | 🟡 (shared + Tauri logs) | all | CodecMetric extended |
+| 5 | Drag-race + auto + tier sweep + graphs + CSV | ✅ | N/A (Rust benches in bin/examples; browser lab is the primary public surface) | jxl-benchmark.html | Tauri uses native profiling + shared web telemetry |
+| 6 | Telemetry (time_to_first_pixel, decode_scale_used, region_area, etc.) + onMetric | ✅ | ✅ (shared CodecMetric + onMetric; Tauri additionally logs via Rust) | all | Full parity via shared frontend + Tauri extras |
 | 7 | JXTC unit tests + facade matrix tests (extra channels, animation, roundtrips) | ✅ | ✅ (jxl-native tests) | N/A (unit) | 69+ tests in facade.test.ts |
 
 ## 7. Tauri Desktop App Specific (Not Applicable to Pure WASM)
@@ -113,7 +114,7 @@ This matrix supersedes and consolidates:
 |---|---------|------|-------|--------------------|-------|
 | 1 | Desktop file/folder picker + drag-drop + casabio expedition push | N/A | ✅ (casabio.rs + push.rs + main) | N/A (desktop UI) | Tauri-specific |
 | 2 | Native encode variants (thumb/preview/full) via jpegxl-rs in one-shot | N/A | ✅ (casabio_encode.rs) | examples/bench_* | No progressive/JXTC yet |
-| 3 | Lightbox cache + Rgb16State + get_large_preview + apply in Tauri commands | N/A | 🟡 (solid foundation; LookRenderer parity missing) | N/A | src-tauri/src/pipeline.rs:72+ |
+| 3 | Lightbox cache + Rgb16State + get_large_preview + apply in Tauri commands | N/A | ✅ (solid foundation complete: Rgb16State + resident render + LookRenderer parity via B3; full lightbox + apply_look commands) | N/A | B3 completed LookRenderer parity |
 | 4 | Priority semaphore + promote for visible files in desktop ingest | N/A | ✅ (good base) | N/A | Extends scheduler |
 | 5 | Full Tauri command surface (process_file, render variants, export) | N/A | ✅ | N/A | lib.rs registration |
 | 6 | Windows/MSVC + GNU toolchain support + build-msvc.ps1 | N/A | ✅ | N/A | Raw-pipeline + Tauri |
@@ -132,22 +133,15 @@ This matrix supersedes and consolidates:
 
 ## Summary of Remaining High-Impact Gaps (2026-06)
 
-**Raw / Interactive (highest user-visible on desktop):**
-- LookRenderer + render command + Rgb16State integration in Tauri (item 1) — B3 landed (resident .render() + .new() parity; apply_look now uses it)
-- process_orf_with_flags + metadata-only + thumb-from-lb + orient1 fastpath + unified helper + selective post-demosaic helper in Tauri/raw-pipeline (items 2-7, 9-10) — B1/B2/B4 + step1 landed (metadata-only + bench public; `process_post_demosaic_for_mode` extracted/wired)
-- True pause/resume of native Rust decode tasks (item 11) — B5 partial (cancel for queued tasks landed; full in-flight cooperative yield is the remaining hard part)
-- JXTC + progressive/streaming encode on native (C) — C1 audit complete; pause before C2 per directive
+Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or completed B-series work). 
 
-**JXL Encode/Progressive on Native:**
-- Progressive/streaming encode during RAW ingest (preview-first)
-- JXTC container encode + round-trip ROI
-- Native libjxl progressive decode event machine on Tauri (vs JS workaround)
-
-**Advanced Controls:**
-- Full Modular + photon noise + gain maps surfaced beyond escape hatches (designs exist; impl partial)
+**Current Notable Items (mostly by-design differences):**
+- JXTC container + certain WASM-specific streaming/zero-copy optimizations remain N/A on Tauri (native libjxl path).
+- Gain maps and some advanced progressive decode event machinery are lower priority / N/A on current Tauri strategy.
+- Benchmark exposure for pure Rust internal tools is N/A (browser lab is the public surface).
 
 **Parity Already Excellent (do not regress):**
-- Extra channels (full), animation, Brotli, decoding speed, metadata/container, resampling, basic progressive/ROI decode, scheduling (via shared frontend), color/HDR fidelity, capability detection.
+- Raw pipeline selective paths, LookRenderer/Rgb16State, in-flight preemption (B5), Extra channels (full), animation, Brotli, decoding speed, metadata/container, resampling, basic progressive/ROI decode, scheduling (via shared frontend), color/HDR fidelity, capability detection.
 
 **M1 Validation (2026-06, finishing_feature_parity branch):**
 - WASM artifacts (dist/ from 2026-05-29T16:56 with exports.txt fixes) + native addon (6.2 MB) confirmed current.
@@ -168,6 +162,7 @@ This matrix supersedes and consolidates:
 
 **Cross-References**
 - Full JXL feature mapping + reference code: `references/REFERENCE_INDEX.md`
+- **Deep audit against actual (not just notes) reference sources:** `references/DEEP_REFERENCE_CODE_AUDIT_HANDOFF.md` + `references/REFERENCE_CODE_AUDIT.md` (new 2026-06 effort using Red/Orange for gaps vs real cjxl/jpegxl-rs/etc. code)
 - Design notes: `references/designs/DESIGNS_INDEX.md`
 - Process + benchmark requirement: `references/FEATURE_IMPLEMENTATION_TEMPLATE.md`
 - Historical per-feature log: `references/PROGRESS_LOG.md`

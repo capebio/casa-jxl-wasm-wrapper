@@ -113,6 +113,39 @@
                             Encoder-native downsampling before JXL transform/coding. 1x = off; 2x, 4x, or 8x trade detail for smaller output and faster encode.
                         </div>
                     </div>
+                    <!-- Phase 1: First-class advanced filters (DOTS/PATCHES/EPF/GABORISH) via advancedControls -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Advanced filters <span style="font-size:10px;opacity:0.6">(new)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-adv-dots" /> <span>Dots</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-adv-patches" /> <span>Patches</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-adv-gaborish" /> <span>Gaborish</span></label>
+                            <select id="batch-adv-epf" style="font-size:11px; padding:1px 3px;">
+                                <option value="">EPF auto</option>
+                                <option value="-1">EPF -1 (auto)</option>
+                                <option value="0">EPF 0 (off)</option>
+                                <option value="1">EPF 1</option>
+                                <option value="2">EPF 2</option>
+                                <option value="3">EPF 3 (strong)</option>
+                            </select>
+                        </div>
+                        <div style="font-size:10px; opacity:0.65; margin-top:2px;">First-class promoted controls (Phase 1). See design note for details.</div>
+                    </div>
+                    <!-- GROUP_ORDER + centers (next Tier 1 item) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Group order <span style="font-size:10px;opacity:0.6">(new)</span></span>
+                        <div style="display:flex; gap:8px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:2px;">
+                                <input type="radio" name="batch-group-order-mode" value="scanline" checked /> <span>Scanline</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:2px;">
+                                <input type="radio" name="batch-group-order-mode" value="center" /> <span>Center</span>
+                            </label>
+                            <input id="batch-group-center-x" type="number" placeholder="cx" style="width:50px; font-size:11px;" />
+                            <input id="batch-group-center-y" type="number" placeholder="cy" style="width:50px; font-size:11px;" />
+                        </div>
+                        <div style="font-size:10px; opacity:0.6;">Center mode + coords for better progressive/ROI behavior.</div>
+                    </div>
                     <div class="spin-group">
                         <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Decode speed tier <button class="info-btn" type="button" data-help-target="wl-decode-speed" aria-label="Decode speed tier info">i</button></span>
                         <div class="spinpicker">

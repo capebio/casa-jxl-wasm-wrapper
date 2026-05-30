@@ -156,6 +156,29 @@ export interface EncoderOptions {
    * Requires rebuilt WASM with animation bridge (_jxl_wasm_encode_animation).
    */
   frames?: readonly AnimationFrame[];
+  /** Fine-grained Modular mode sub-settings (group size, predictor, palette, MA tree % etc.).
+   * Requires WASM bridge rebuild with advanced support (currently native-only parity; see handoff 2026-05-29).
+   * References: cjxl_main.cc ProcessFlags, jpegxl-rs set_frame_option, designs/core-modular-controls.md
+   */
+  modularOptions?: ModularOptions;
+  /**
+   * Raw escape hatch for advanced/experimental JXL_ENC_FRAME_SETTING_* values (patches=8, splines=9,
+   * modular predictor via id 33, etc.). Applied after named settings. Full support requires bridge.cpp
+   * extension + Emscripten rebuild. Matches @casabio/jxl-native for API parity with references.
+   *
+   * For the promoted first-class controls (GROUP_ORDER, filters, buffering, etc.), prefer
+   * `advancedControls` (see designs/first-class-advanced-encoder-controls.md). Raw entries here
+   * are still supported and applied last (they win on conflicts).
+   */
+  advancedFrameSettings?: readonly AdvancedFrameSetting[];
+
+  /**
+   * First-class advanced encoder controls (post-audit promotion).
+   * Use this for DOTS/PATCHES/EPF/GABORISH (filters), GROUP_ORDER + centers, BUFFERING modes,
+   * DISABLE_PERCEPTUAL_HEURISTICS, etc. as they are promoted slice by slice.
+   * Raw `advancedFrameSettings` remains the stable power-user escape hatch.
+   */
+  advancedControls?: AdvancedEncoderControls;
 }
 
 /** Options for attaching an HDR gain map (ISO 21496-1 / JXL jhgm box). */
@@ -196,6 +219,149 @@ export interface AnimationOptions {
   ticksPerSecond?: number;
   /** Number of animation loops. 0 = infinite (default). */
   loopCount?: number;
+}
+
+/** Sub-settings for Modular encoding mode (matches @casabio/jxl-native exactly for cross-path parity).
+ * These provide fine-grained control over libjxl Modular mode behavior, as exposed in production
+ * by cjxl_main.cc (--modular_*) and the jpegxl-rs escape hatch. See REFERENCE_INDEX.md #3 and
+ * designs/core-modular-controls.md. Full wiring to bridge.cpp pending (see native.cc:1188 for model).
+ */
+export interface ModularOptions {
+  /** 0 = auto group size (libjxl default), positive = explicit group size (power-of-two). */
+  groupSize?: number;
+  /** Predictor selection (0–15). Major quality/speed tradeoff knob. */
+  predictor?: number;
+  /** Number of previous channels to use for prediction. */
+  nbPrevChannels?: number;
+  /** Number of palette colors. 0 = disable palette, -1 = libjxl default. */
+  paletteColors?: number;
+  /** Allow lossy palette. */
+  lossyPalette?: boolean;
+  /** Tree learning percent (0–100). -1 = libjxl default. */
+  maTreeLearningPercent?: number;
+}
+
+/** Raw JXL_ENC_FRAME_SETTING_* escape hatch (id + value pairs).
+ * Enables patches (e.g. 8), splines (9), and any future/undocumented modular or coding tool settings.
+ * Applied after all named options; later entries override. Matches native API.
+ * See cjxl_main.cc and libjxl encode.h for the numeric ids.
+ */
+export type AdvancedFrameSetting = { id: number; value: number };
+
+/**
+ * First-class advanced encoder controls (Phase 1+ of the post-audit work).
+ * These are the high-ROI settings promoted from the raw escape hatch based on
+ * cjxl_main.cc usage + the June 2026 REFERENCE_CODE_AUDIT Master Gap List.
+ *
+ * Preferred over raw `advancedFrameSettings` for the documented controls.
+ * Raw advancedFrameSettings entries are still applied last (can override).
+ *
+ * See designs/first-class-advanced-encoder-controls.md for the full rationale,
+ * ID mappings, validation rules, and phasing.
+ */
+export interface AdvancedEncoderControls {
+  /**
+   * Advanced coding tools and filters (content-dependent compression wins).
+   * DOTS (id 7), PATCHES (id 8), EPF (id 9, -1..3), GABORISH (id 10).
+   * These were previously only reachable via the raw escape hatch.
+   */
+  filters?: FiltersControls;
+
+  /**
+   * Group storage order (high value for progressive, ROI, and tiling workflows).
+   * From cjxl --group_order and --center_x / --center_y with mutual-exclusion validation.
+   * IDs: 13 (GROUP_ORDER), 14 (CENTER_X), 15 (CENTER_Y).
+   */
+  groupOrder?: GroupOrderControls;
+
+  /**
+   * Buffering strategy (rich documented tradeoffs in cjxl for memory vs density vs streaming).
+   * ID 34. Currently the internal `chunked` flag only exercises a subset.
+   * This is the first-class surface for what was previously opaque.
+   */
+  buffering?: BufferingControls;
+}
+
+/** Buffering / streaming strategy controls. */
+export interface BufferingControls {
+  /** -1 = libjxl default, 0 = emit immediately, 1-3 = increasing buffering. */
+  strategy?: -1 | 0 | 1 | 2 | 3;
+  /** Hint for streaming input path (often used with buffering=3). */
+  streamingInput?: boolean;
+  /** Hint for streaming output path. */
+  streamingOutput?: boolean;
+}
+
+/** Group order controls (promoted in current slice). */
+export interface GroupOrderControls {
+  /** 'scanline' (default) or 'center' (better for progressive / viewport decodes). */
+  mode: 'scanline' | 'center';
+  /** Center coordinates when mode === 'center'. cjxl requires these when using center mode. */
+  centerX?: number;
+  centerY?: number;
+}
+
+/** Filters / advanced coding tools promoted in the first slice. */
+export interface FiltersControls {
+  /** Enable synthetic dot generation (halftone-like content). ID 7. */
+  dots?: boolean;
+  /** Enable dictionary-based patches (repeated content modeling). ID 8. */
+  patches?: boolean;
+  /**
+   * Edge-preserving filter strength.
+   * -1 = libjxl default/auto, 0 = disabled, 1–3 = increasing strength.
+   * One of the most valuable production controls per the audit. ID 9.
+   */
+  epf?: -1 | 0 | 1 | 2 | 3;
+  /** Enable Gaborish filter. ID 10. */
+  gaborish?: boolean;
+}
+
+/**
+ * Lightweight client-side validation for first-class advanced controls.
+ * Mirrors the spirit of cjxl pre-validation (range checks + mutual exclusion warnings)
+ * without trying to replicate the full libjxl validator.
+ *
+ * Returns an array of warning messages (empty array = no issues found).
+ * These are intended for console.warn / UI feedback, not hard errors.
+ */
+export function validateAdvancedControls(controls?: AdvancedEncoderControls): string[] {
+  const warnings: string[] = [];
+  if (!controls) return warnings;
+
+  // Filters validation
+  const f = controls.filters;
+  if (f?.epf !== undefined) {
+    if (f.epf < -1 || f.epf > 3) {
+      warnings.push(`EPF value ${f.epf} is out of range (-1..3). Clamped or ignored by libjxl.`);
+    }
+  }
+
+  // Group order validation (high value per audit + cjxl mutual exclusion)
+  const g = controls.groupOrder;
+  if (g) {
+    if (g.mode === 'center') {
+      if (g.centerX === undefined || g.centerY === undefined) {
+        warnings.push('groupOrder mode="center" without centerX/centerY. cjxl requires centers for center-first ordering.');
+      }
+    } else {
+      if (g.centerX !== undefined || g.centerY !== undefined) {
+        warnings.push('groupOrder centerX/centerY provided but mode is not "center". Values will be ignored.');
+      }
+    }
+  }
+
+  // Buffering validation
+  const b = controls.buffering;
+  if (b?.strategy !== undefined) {
+    if (b.strategy < -1 || b.strategy > 3) {
+      warnings.push(`buffering.strategy ${b.strategy} is out of range (-1..3).`);
+    }
+  }
+
+  // Future groups (expert, etc.) can be added here as they are promoted.
+
+  return warnings;
 }
 
 /** Descriptor for a custom metadata box to embed in the JXL container. */
@@ -248,6 +414,8 @@ export interface JxlEncoder {
   dispose(): void | Promise<void>;
   /** Populated after chunks() completes normally. Null before or on error. */
   getStats(): EncodeStats | null;
+  /** Returns any warnings from lightweight client-side validation of first-class advanced controls (e.g. EPF range, groupOrder mutual exclusion). */
+  getValidationWarnings(): readonly string[];
 }
 
 interface LibjxlBuffer {
@@ -306,19 +474,19 @@ interface LibjxlWasmModule {
   _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
   // #16: Streaming input encoder — pre-allocate pixel buffer in WASM, push chunks, finish
   _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, resampling: number): number;
-  _jxl_wasm_encode_rgba8_with_sidecars_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
-  _jxl_wasm_encode_rgba8_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
-  _jxl_wasm_encode_rgba16_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
-  _jxl_wasm_encode_rgbaf32_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
-  _jxl_wasm_encode_rgba8_with_metadata_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
+  _jxl_wasm_encode_rgba8_with_sidecars_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
+  _jxl_wasm_encode_rgba8_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
+  _jxl_wasm_encode_rgba16_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
+  _jxl_wasm_encode_rgbaf32_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
+  _jxl_wasm_encode_rgba8_with_metadata_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   // Extra-channel encode: per-channel distance + optional separate plane buffers.
-  _jxl_wasm_encode_rgba8_with_metadata_ec?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number): number;
+  _jxl_wasm_encode_rgba8_with_metadata_ec?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   // v2: extends _x / _ec with WasmBoxOpts (container control, box compression, custom boxes).
-  _jxl_wasm_encode_rgba8_with_metadata_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number): number;
-  _jxl_wasm_encode_rgba8_with_metadata_ec_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number, boxOptsPtr: number): number;
+  _jxl_wasm_encode_rgba8_with_metadata_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
+  _jxl_wasm_encode_rgba8_with_metadata_ec_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number, boxOptsPtr: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   _jxl_wasm_transcode_jpeg_to_jxl_v2?(jpegPtr: number, jpegSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number): number;
-  _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
-  _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
+  _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
+  _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
   _jxl_wasm_enc_advance_written?(state: number, size: number): number;
   _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
@@ -334,11 +502,11 @@ interface LibjxlWasmModule {
   _jxl_wasm_encode_tile_container_rgba8?(pixelsPtr: number, width: number, height: number, tileSize: number, distance: number, effort: number, hasAlpha: number): number;
   _jxl_wasm_decode_tile_container_region_rgba8?(inputPtr: number, inputSize: number, regionX: number, regionY: number, regionW: number, regionH: number): number;
   // Gain map encode/decode — present after WASM rebuild with gain map bridge
-  _jxl_wasm_encode_with_gain_map?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, gainMapPtr: number, gainMapSize: number): number;
+  _jxl_wasm_encode_with_gain_map?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, gainMapPtr: number, gainMapSize: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   _jxl_wasm_dec_has_gain_map?(state: number): number;
   _jxl_wasm_dec_take_gain_map?(state: number): number;
   // Animation encode — present after WASM rebuild with animation bridge
-  _jxl_wasm_encode_animation?(framesPtr: number, numFrames: number, distance: number, effort: number, fmt: number, hasAlpha: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, animOptsPtr: number): number;
+  _jxl_wasm_encode_animation?(framesPtr: number, numFrames: number, distance: number, effort: number, fmt: number, hasAlpha: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, animOptsPtr: number, modGroupSize: number, modPredictor: number, modNbPrev: number, modPaletteColors: number, modLossyPalette: number, modMaTreePercent: number, advPtr: number, advCount: number): number;
   // Animation decode frame metadata accessors — present after WASM rebuild with animation bridge
   _jxl_wasm_dec_frame_index?(state: number): number;
   _jxl_wasm_dec_frame_duration?(state: number): number;
@@ -548,14 +716,117 @@ function marshalAnimationFrames(
   return { framesPtr, animOptsPtr, freePtrs };
 }
 
+/**
+ * Marshals modularOptions (6 scalars with native sentinels) + advancedFrameSettings (flat i32 pairs)
+ * for the extended latest encode entrypoints.
+ * Only the newest _x / _v2 / ec_v2 / animation / gain / sidecars_x paths accept these.
+ * Returns the 6 subs (in native order), advPtr/Count, and a free list.
+ * When no advanced options are present, returns neutral sentinels (no malloc).
+ *
+ * `advancedControls` (the new first-class promoted surface) is converted into additional
+ * raw pairs here and merged before the user-supplied advancedFrameSettings (so named
+ * controls win unless the user explicitly overrides via the escape hatch).
+ */
+function marshalAdvancedAndModular(
+  module: LibjxlWasmModule,
+  modularOptions: ModularOptions | undefined,
+  advanced: readonly AdvancedFrameSetting[] | undefined,
+  advancedControls?: AdvancedEncoderControls,
+): { modSubs: number[]; advPtr: number; advCount: number; freePtrs: number[] } {
+  const freePtrs: number[] = [];
+  // Order matches native.cc EncoderData + Apply: group, predictor, nbPrev, paletteColors, lossyPalette, maTree
+  const paletteSentinel = (1 << 31); // INT32_MIN equivalent for "not set"
+  const modSubs: number[] = [
+    modularOptions?.groupSize ?? -1,
+    modularOptions?.predictor ?? -1,
+    modularOptions?.nbPrevChannels ?? -1,
+    modularOptions?.paletteColors ?? paletteSentinel,
+    modularOptions?.lossyPalette ? 1 : -1,
+    modularOptions?.maTreeLearningPercent ?? -1,
+  ];
+
+  // Build the effective list of advanced settings.
+  // 1. Convert first-class advancedControls into raw pairs (named controls win for promoted IDs).
+  // 2. Append user-supplied advancedFrameSettings last (they can still override).
+  const effectiveAdvanced: AdvancedFrameSetting[] = [];
+
+  // Phase 1 concrete win: Filters group (DOTS=7, PATCHES=8, EPF=9, GABORISH=10)
+  const f = advancedControls?.filters;
+  if (f) {
+    if (f.dots !== undefined)      effectiveAdvanced.push({ id: 7,  value: f.dots ? 1 : 0 });
+    if (f.patches !== undefined)   effectiveAdvanced.push({ id: 8,  value: f.patches ? 1 : 0 });
+    if (f.epf !== undefined)       effectiveAdvanced.push({ id: 9,  value: f.epf });
+    if (f.gaborish !== undefined)  effectiveAdvanced.push({ id: 10, value: f.gaborish ? 1 : 0 });
+  }
+
+  // Next high-ROI item: GROUP_ORDER family (13, 14, 15)
+  const g = advancedControls?.groupOrder;
+  if (g) {
+    const modeVal = g.mode === 'center' ? 1 : 0;
+    effectiveAdvanced.push({ id: 13, value: modeVal });
+    if (g.mode === 'center') {
+      if (g.centerX !== undefined) effectiveAdvanced.push({ id: 14, value: g.centerX });
+      if (g.centerY !== undefined) effectiveAdvanced.push({ id: 15, value: g.centerY });
+    }
+  }
+
+  // Buffering modes (ID 34) — strong candidate from the audit
+  const b = advancedControls?.buffering;
+  if (b) {
+    if (b.strategy !== undefined) {
+      effectiveAdvanced.push({ id: 34, value: b.strategy });
+    }
+    // Note: streamingInput / streamingOutput are hints that often interact with buffering=3
+    // and JxlOutputProcessor on the C side. For now we expose them; full low-memory streaming
+    // paths may require additional bridge work in future slices.
+    if (b.streamingInput) {
+      // Many references force buffering=3 when using streaming input.
+      // We surface the flag; caller can also set strategy: 3 explicitly.
+    }
+    if (b.streamingOutput) {
+      effectiveAdvanced.push({ id: 34, value: 3 }); // common pattern
+    }
+  }
+
+  if (advanced && advanced.length > 0) {
+    effectiveAdvanced.push(...advanced);
+  }
+
+  let advPtr = 0;
+  let advCount = 0;
+  if (effectiveAdvanced.length > 0) {
+    const bytes = effectiveAdvanced.length * 8; // int32 id + int32 value, little-endian
+    const buf = new Uint8Array(bytes);
+    const dv = new DataView(buf.buffer);
+    for (let i = 0; i < effectiveAdvanced.length; i++) {
+      const a = effectiveAdvanced[i]!;
+      dv.setInt32(i * 8 + 0, (a.id | 0), true);
+      dv.setInt32(i * 8 + 4, (a.value | 0), true);
+    }
+    advPtr = module._malloc(bytes);
+    if (advPtr !== 0) {
+      module.HEAPU8.set(buf, advPtr);
+      freePtrs.push(advPtr);
+    }
+    advCount = effectiveAdvanced.length;
+  }
+  return { modSubs, advPtr, advCount, freePtrs };
+}
+
 function resolveEncoderBridgeSettings(options: EncoderOptions) {
   const modular = options.modular ?? -1;
   const brotliEffort = options.brotliEffort != null ? Math.max(-1, Math.min(11, Math.round(options.brotliEffort))) : -1;
   const decodingSpeed = options.decodingSpeed != null ? Math.max(0, Math.min(4, Math.round(options.decodingSpeed))) : -1;
   const photonNoiseIso = options.photonNoiseIso != null ? Math.max(0, Math.round(options.photonNoiseIso)) : 0;
   const resampling = resolveResampling(options.resampling);
+  // Advanced modular + escape + the new first-class advancedControls surface.
+  // Named advancedControls are converted to raw pairs inside marshalAdvancedAndModular
+  // and win over user raw advancedFrameSettings for the promoted IDs.
+  const modularOptions = options.modularOptions;
+  const advancedFrameSettings = options.advancedFrameSettings;
+  const advancedControls = options.advancedControls;
   if (!options.progressive) {
-    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling };
+    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modularOptions, advancedFrameSettings, advancedControls };
   }
   const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
   return {
@@ -568,6 +839,9 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
     decodingSpeed,
     photonNoiseIso,
     resampling,
+    modularOptions,
+    advancedFrameSettings,
+    advancedControls,
   };
 }
 
@@ -1606,10 +1880,17 @@ class LibjxlEncoder implements JxlEncoder {
   private moduleInitPromise: Promise<LibjxlWasmModule> | null = null;
   private pendingPushPromise: Promise<void> = Promise.resolve();
   private pendingPushError: unknown = null;
+  private readonly validationWarnings: string[] = [];
 
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
     this.pixelByteTotal = expectedPixelBytes(options.width, options.height, options.format);
+
+    // Run lightweight validation on first-class advanced controls (cjxl-inspired)
+    this.validationWarnings = validateAdvancedControls(options.advancedControls);
+    if (this.validationWarnings.length > 0) {
+      console.warn('[JxlEncoder] Advanced controls warnings:', this.validationWarnings);
+    }
   }
 
   async pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): Promise<void> {
@@ -1674,7 +1955,13 @@ class LibjxlEncoder implements JxlEncoder {
     const wantSidecars = this.sortedSidecarSizes.length > 0 && caps.sidecars;
     const { iccProfile: effIcc, exif: effExif, xmp: effXmp } = resolveEffectiveMetadata(this.options);
     const hasMetadataOpts = effIcc !== null || effExif !== null || effXmp !== null || needsBoxOptsV2(this.options) || this.options.gainMap != null;
-    if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
+    const hasAdvanced = !!(this.options.modularOptions ||
+      (this.options.advancedFrameSettings && this.options.advancedFrameSettings.length > 0) ||
+      this.options.advancedControls);
+    // When advanced modular/escape options are supplied, force the buffered path (which will go through
+    // the extended _x / _v2 / ec_v2 entrypoints that carry the new params). This avoids touching the
+    // streaming enc state machine for the first implementation.
+    if (!wantSidecars && !hasMetadataOpts && !hasAdvanced && caps.streamingInput) {
       const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
       const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
@@ -1685,6 +1972,7 @@ class LibjxlEncoder implements JxlEncoder {
           fmtIndex, this.options.hasAlpha ? 1 : 0,
           progressiveDc, progressiveAc, qProgressiveAc, buffering,
           modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling,
+          -1, -1, -1, (1<<31), -1, -1, 0, 0,
         );
       } else {
         this.wasmEncState = module._jxl_wasm_enc_create_image!(
@@ -1736,7 +2024,8 @@ class LibjxlEncoder implements JxlEncoder {
         const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
         const hasAlpha = this.options.hasAlpha ? 1 : 0;
         const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
-        const { modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
+        const { modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modularOptions: modOptsAnim, advancedFrameSettings: advAnim, advancedControls: advControlsAnim } = resolveEncoderBridgeSettings(this.options);
+        const { modSubs: modSubsAnim, advPtr: advPtrAnim, advCount: numAdvAnim, freePtrs: advFreeAnim } = marshalAdvancedAndModular(module, modOptsAnim, advAnim, advControlsAnim);
         const { iccProfile: effIcc, exif: effExif, xmp: effXmp } = resolveEffectiveMetadata(this.options);
         const iccView = effIcc ? copyOrBorrowInput(effIcc, false) : new Uint8Array(0);
         const exifView = effExif ? copyOrBorrowInput(effExif, false) : new Uint8Array(0);
@@ -1758,6 +2047,8 @@ class LibjxlEncoder implements JxlEncoder {
             exifPtr, exifView.byteLength,
             xmpPtr, xmpView.byteLength,
             boxOptsPtr, animOptsPtr,
+            modSubsAnim[0], modSubsAnim[1], modSubsAnim[2], modSubsAnim[3], modSubsAnim[4], modSubsAnim[5],
+            (advPtrAnim ?? 0), (numAdvAnim ?? 0),
           );
           const encoded = takeBuffer(module, handle, "animation encode");
           const compressedBytes = encoded.data.byteLength;
@@ -1770,6 +2061,8 @@ class LibjxlEncoder implements JxlEncoder {
           if (iccPtr !== 0) module._free(iccPtr);
           if (exifPtr !== 0) module._free(exifPtr);
           if (xmpPtr !== 0) module._free(xmpPtr);
+          advFreeAnim.forEach(p => module._free(p));
+          if (advPtrAnim !== 0) module._free(advPtrAnim);
         }
         return;
       }
@@ -1817,7 +2110,8 @@ class LibjxlEncoder implements JxlEncoder {
         const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
         const hasAlpha = this.options.hasAlpha ? 1 : 0;
         const caps = getCapabilities(module);
-        const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
+        const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modularOptions: modOpts, advancedFrameSettings: advSettings, advancedControls: advControls } = resolveEncoderBridgeSettings(this.options);
+        const { modSubs, advPtr: advSettingsPtr, advCount: numAdvSettings, freePtrs: advFreePtrs } = marshalAdvancedAndModular(module, modOpts, advSettings, advControls);
 
         // Gain map encode path: embeds pre-encoded JXL codestream as jhgm box.
         const wantGainMap = this.options.gainMap != null && caps.gainMapEncode &&
@@ -1849,6 +2143,8 @@ class LibjxlEncoder implements JxlEncoder {
               exifPtr4, exifView4.byteLength,
               xmpPtr4, xmpView4.byteLength,
               gmPtr, gmView.byteLength,
+              modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5],
+              advSettingsPtr, numAdvSettings,
             );
             const encoded = takeBuffer(module, handle, "encode (gain map)");
             compressedBytes += encoded.data.byteLength;
@@ -1858,6 +2154,8 @@ class LibjxlEncoder implements JxlEncoder {
             if (exifPtr4 !== 0) module._free(exifPtr4);
             if (xmpPtr4 !== 0) module._free(xmpPtr4);
             if (gmPtr !== 0) module._free(gmPtr);
+            advFreePtrs.forEach(p => module._free(p));
+            if (advSettingsPtr !== 0) module._free(advSettingsPtr);
           }
         } else
 
@@ -1936,6 +2234,8 @@ class LibjxlEncoder implements JxlEncoder {
                   alphaDistance,
                   ecDescPtr, extraChannels.length,
                   boxOptsPtr,
+                  modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5],
+                  advSettingsPtr ?? 0, numAdvSettings ?? 0,
                 )
               : module._jxl_wasm_encode_rgba8_with_metadata_ec!(
                   ptr, this.options.width, this.options.height,
@@ -1947,6 +2247,8 @@ class LibjxlEncoder implements JxlEncoder {
                   xmpPtr, xmpView.byteLength,
                   alphaDistance,
                   ecDescPtr, extraChannels.length,
+                  modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5],
+                  advSettingsPtr ?? 0, numAdvSettings ?? 0,
                 );
             const encoded = takeBuffer(module, handle, "encode (extra channels)");
             compressedBytes += encoded.data.byteLength;
@@ -1959,6 +2261,8 @@ class LibjxlEncoder implements JxlEncoder {
             if (xmpPtr !== 0) module._free(xmpPtr);
             boxOptsPtrs.forEach(p => module._free(p));
             if (boxOptsPtr !== 0) module._free(boxOptsPtr);
+            advFreePtrs.forEach(p => module._free(p));
+            if (advSettingsPtr !== 0) module._free(advSettingsPtr);
           }
         } else
 
@@ -1986,6 +2290,8 @@ class LibjxlEncoder implements JxlEncoder {
                   distance, this.options.effort, hasAlpha,
                   dimsPtr, sortedSizes.length,
                   modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling,
+                  modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5],
+                  advSettingsPtr ?? 0, numAdvSettings ?? 0,
                 )
               : module._jxl_wasm_encode_rgba8_with_sidecars!(
                   ptr, this.options.width, this.options.height,
@@ -2013,6 +2319,8 @@ class LibjxlEncoder implements JxlEncoder {
             }
           } finally {
             module._free(dimsPtr);
+            advFreePtrs.forEach(p => module._free(p));
+            if (advSettingsPtr !== 0) module._free(advSettingsPtr);
           }
         } else if (caps.streamingEncode) {
           // #11: streaming encoder — yields 256 KB chunks, reducing peak JS heap usage.
@@ -2071,6 +2379,8 @@ class LibjxlEncoder implements JxlEncoder {
                   exifPtr, exifView.byteLength,
                   xmpPtr, xmpView.byteLength,
                   boxOptsPtr2,
+                  modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5],
+                  advSettingsPtr ?? 0, numAdvSettings ?? 0,
                 );
               } else {
                 handle = caps.extOptions && module._jxl_wasm_encode_rgba8_with_metadata_x
@@ -2082,6 +2392,8 @@ class LibjxlEncoder implements JxlEncoder {
                       iccPtr, iccView.byteLength,
                       exifPtr, exifView.byteLength,
                       xmpPtr, xmpView.byteLength,
+                      modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5],
+                      advSettingsPtr, numAdvSettings,
                     )
                   : module._jxl_wasm_encode_rgba8_with_metadata(
                       ptr, this.options.width, this.options.height,
@@ -2098,25 +2410,27 @@ class LibjxlEncoder implements JxlEncoder {
               if (xmpPtr !== 0) module._free(xmpPtr);
               boxOptsPtrs2.forEach(p => module._free(p));
               if (boxOptsPtr2 !== 0) module._free(boxOptsPtr2);
+              advFreePtrs.forEach(p => module._free(p));
+              if (advSettingsPtr !== 0) module._free(advSettingsPtr);
             }
           } else {
             // Fallback: plain encode (no metadata) used when bridge fn absent
             // or when no metadata was provided.
             if (this.options.format === "rgba16") {
               handle = caps.extOptions && module._jxl_wasm_encode_rgba16_x
-                ? module._jxl_wasm_encode_rgba16_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                ? module._jxl_wasm_encode_rgba16_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5], advSettingsPtr ?? 0, numAdvSettings ?? 0)
                 : module._jxl_wasm_encode_rgba16
                   ? module._jxl_wasm_encode_rgba16(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling)
                   : module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
             } else if (this.options.format === "rgbaf32") {
               handle = caps.extOptions && module._jxl_wasm_encode_rgbaf32_x
-                ? module._jxl_wasm_encode_rgbaf32_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                ? module._jxl_wasm_encode_rgbaf32_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5], advSettingsPtr ?? 0, numAdvSettings ?? 0)
                 : module._jxl_wasm_encode_rgbaf32
                   ? module._jxl_wasm_encode_rgbaf32(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling)
                   : module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
             } else {
               handle = caps.extOptions && module._jxl_wasm_encode_rgba8_x
-                ? module._jxl_wasm_encode_rgba8_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
+                ? module._jxl_wasm_encode_rgba8_x(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, modSubs[0], modSubs[1], modSubs[2], modSubs[3], modSubs[4], modSubs[5], advSettingsPtr ?? 0, numAdvSettings ?? 0)
                 : module._jxl_wasm_encode_rgba8(ptr, this.options.width, this.options.height, distance, this.options.effort, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, resampling);
             }
           }
@@ -2135,6 +2449,10 @@ class LibjxlEncoder implements JxlEncoder {
   }
 
   getStats(): EncodeStats | null { return this.encodeStats; }
+
+  getValidationWarnings(): readonly string[] {
+    return this.validationWarnings;
+  }
 
   cancel(_reason?: string): void {
     this.cancelled = true;

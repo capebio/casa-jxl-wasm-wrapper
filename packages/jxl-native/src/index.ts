@@ -131,6 +131,35 @@ export interface ModularOptions {
   maTreeLearningPercent?: number;
 }
 
+/** First-class advanced encoder controls (mirrors the WASM facade for cross-platform parity). */
+export interface AdvancedEncoderControls {
+  filters?: FiltersControls;
+  groupOrder?: GroupOrderControls;
+  buffering?: BufferingControls;
+}
+
+/** Filters / advanced coding tools promoted in the first slice (DOTS/PATCHES/EPF/GABORISH). */
+export interface FiltersControls {
+  dots?: boolean;
+  patches?: boolean;
+  epf?: -1 | 0 | 1 | 2 | 3;
+  gaborish?: boolean;
+}
+
+/** Group order controls (GROUP_ORDER + optional centers for center-first ordering). */
+export interface GroupOrderControls {
+  mode: 'scanline' | 'center';
+  centerX?: number;
+  centerY?: number;
+}
+
+/** Buffering / streaming strategy (ID 34). */
+export interface BufferingControls {
+  strategy?: -1 | 0 | 1 | 2 | 3;
+  streamingInput?: boolean;
+  streamingOutput?: boolean;
+}
+
 /** Descriptor for one extra channel beyond the main color channels. */
 export interface ExtraChannel {
   /** Channel type. 'other' maps to JXL_CHANNEL_UNKNOWN (15). */
@@ -198,6 +227,14 @@ export interface EncoderOptions {
    * Applied after all named settings; later entries override earlier ones.
    */
   advancedFrameSettings?: readonly { id: number; value: number }[];
+
+  /**
+   * First-class advanced encoder controls (post-audit promotion, matches WASM facade).
+   * Preferred for promoted settings (filters, GROUP_ORDER, etc.).
+   * Raw advancedFrameSettings remains the stable escape hatch.
+   */
+  advancedControls?: AdvancedEncoderControls;
+
   /** Fine-grained Modular mode sub-settings. Applied after `modular` force flag. */
   modularOptions?: ModularOptions;
   /** Attach an HDR gain map (ISO 21496-1) as a jhgm box. data is a JXL naked codestream. */

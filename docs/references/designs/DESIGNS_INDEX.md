@@ -25,6 +25,7 @@ Each note follows the process described in `FEATURE_IMPLEMENTATION_TEMPLATE.md` 
 
 | Note | File | Related INDEX Section | Key Focus | Status |
 |------|------|-----------------------|-----------|--------|
+| First-Class Advanced Encoder Controls | `first-class-advanced-encoder-controls.md` | June 2026 deep audit (REFERENCE_CODE_AUDIT.md Master Gap List) | GROUP_ORDER + centers (validation), DOTS/PATCHES/EPF/GABORISH, BUFFERING modes + streaming tradeoffs, DISABLE_PERCEPTUAL_HEURISTICS, expert gating, convenience bundles. Nested `advancedControls` + permanent documented `advancedFrameSettings` escape hatch. | Design complete (post-audit handoff) |
 | Brotli Effort | `brotli-effort.md` | 7. Brotli Effort | Single integer (0-11), default 9, aux data compression | Implemented on branch `epiccodereview/20260527T054853` |
 | Decoding Speed Tier | `decoding-speed-tier.md` | 6. Decoding Speed Tier | 0-4 tiers for faster decode | Implemented on branch `epiccodereview/20260527T054853` |
 | Photon Noise | `photon-noise.md` | 5. Photon Noise | `--photon_noise_iso` style control | Design complete |

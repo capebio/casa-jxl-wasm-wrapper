@@ -32,6 +32,9 @@ const batchEffortInput = document.getElementById('batch-effort');
 const batchDecodeSpeedInput = document.getElementById('batch-decode-speed');
 const batchPhotonNoiseIsoInput = document.getElementById('batch-photon-noise-iso');
 const batchResamplingInputs = [...document.querySelectorAll('input[name="batch-resampling"]')];
+
+/** Phase 1 first-class advanced filters controls (populated after DOM ready). */
+let batchAdvancedFilters = null;
 const batchAlphaDistanceInput = document.getElementById('batch-alpha-distance');
 const alphaDistanceUnavail = document.getElementById('alpha-distance-unavail');
 const batchLosslessInput = document.getElementById('batch-lossless');
@@ -365,6 +368,34 @@ function getPhotonNoiseIso() {
 function getResampling() {
     const value = Number(batchResamplingInputs.find((input) => input.checked)?.value || 1);
     return value === 2 || value === 4 || value === 8 ? value : 1;
+}
+
+/** Phase 1: first-class advanced filters (DOTS/PATCHES/EPF/GABORISH) via the new advancedControls surface. */
+function getAdvancedFilters() {
+    if (!batchAdvancedFilters) return undefined;
+    const f = {};
+    if (batchAdvancedFilters.dots && batchAdvancedFilters.dots.checked) f.dots = true;
+    if (batchAdvancedFilters.patches && batchAdvancedFilters.patches.checked) f.patches = true;
+    if (batchAdvancedFilters.epf) {
+        const v = Number(batchAdvancedFilters.epf.value);
+        if (!Number.isNaN(v)) f.epf = v;
+    }
+    if (batchAdvancedFilters.gaborish && batchAdvancedFilters.gaborish.checked) f.gaborish = true;
+    return Object.keys(f).length > 0 ? { filters: f } : undefined;
+}
+
+function getGroupOrderControls() {
+    const modeInputs = document.querySelectorAll('input[name="batch-group-order-mode"]');
+    const mode = [...modeInputs].find(i => i.checked)?.value || 'scanline';
+    const cxEl = document.getElementById('batch-group-center-x');
+    const cyEl = document.getElementById('batch-group-center-y');
+    const cx = cxEl ? Number(cxEl.value) : NaN;
+    const cy = cyEl ? Number(cyEl.value) : NaN;
+
+    const go = { mode };
+    if (!Number.isNaN(cx)) go.centerX = Math.floor(cx);
+    if (!Number.isNaN(cy)) go.centerY = Math.floor(cy);
+    return (mode === 'center' || go.centerX !== undefined || go.centerY !== undefined) ? { groupOrder: go } : undefined;
 }
 
 function getAlphaDistance() {
@@ -919,6 +950,15 @@ function makeEncoderOptions(source) {
         resampling: getResampling(),
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
         alphaDistance: getAlphaDistance(),
+        // First-class advanced controls (Phase 1 slice)
+        advancedControls: (() => {
+            const f = getAdvancedFilters();
+            const g = getGroupOrderControls();
+            const out = {};
+            if (f?.filters) out.filters = f.filters;
+            if (g?.groupOrder) out.groupOrder = g.groupOrder;
+            return Object.keys(out).length ? out : undefined;
+        })(),
     };
 }
 
@@ -1410,6 +1450,23 @@ function wireControls() {
     batchDecodeSpeedInput?.addEventListener('input', syncSettingLabels);
     batchPhotonNoiseIsoInput?.addEventListener('input', syncSettingLabels);
     for (const input of batchResamplingInputs) input.addEventListener('change', syncSettingLabels);
+
+    // Phase 1: advanced filters (first-class controls)
+    batchAdvancedFilters = {
+        dots: document.getElementById('batch-adv-dots'),
+        patches: document.getElementById('batch-adv-patches'),
+        epf: document.getElementById('batch-adv-epf'),
+        gaborish: document.getElementById('batch-adv-gaborish'),
+    };
+    for (const key of ['dots', 'patches', 'gaborish']) {
+        batchAdvancedFilters[key]?.addEventListener('change', syncSettingLabels);
+    }
+    batchAdvancedFilters.epf?.addEventListener('change', syncSettingLabels);
+
+    // Group order controls
+    document.querySelectorAll('input[name="batch-group-order-mode"]').forEach(r => r.addEventListener('change', syncSettingLabels));
+    document.getElementById('batch-group-center-x')?.addEventListener('input', syncSettingLabels);
+    document.getElementById('batch-group-center-y')?.addEventListener('input', syncSettingLabels);
 }
 
 

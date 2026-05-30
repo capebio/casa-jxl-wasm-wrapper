@@ -1028,3 +1028,52 @@ This closes the last material gap surfaced by the cjxl/jpegxl-rs/chafey referenc
 
 **No behavior change** for existing callers. Pure audit + parity alignment.
 
+---
+
+## First-Class Advanced Encoder Controls — Phase 1 Slice (Filters + Group Order + Validation) — 2026-06
+
+**Branch:** `feature/first-class-advanced-encoder-controls`
+
+**Status:** Phase 1 slice complete + final polish (per design note + approved plan)
+
+**Scope:** First implementation slice of the post-June 2026 deep reference audit work on advanced encoder controls. Promoted the two highest-ROI Tier 1 items from the Master Gap List (Filters group + GROUP_ORDER + centers) to true first-class status with validation, while preserving the raw `advancedFrameSettings` escape hatch as the documented power-user path.
+
+**Key Changes:**
+- Added `AdvancedEncoderControls`, `FiltersControls`, `GroupOrderControls`, and initial `BufferingControls` interfaces (WASM + native).
+- WASM: `marshalAdvancedAndModular` now converts named first-class settings into the existing advanced pairs pipeline (applied before raw escape).
+- Native: Full parity — new fields in `EncoderData`, NAPI parsing, and application in `EncodeAll` before the raw vector.
+- Introduced `validateAdvancedControls()` + `getValidationWarnings()` on the public `JxlEncoder` (lightweight cjxl-style range + mutual-exclusion warnings).
+- Mandatory benchmark wiring: New "Advanced filters" and "Group order" controls in `web/jxl-wrapper-lab.html` + full wiring in JS.
+- Tests added for conversion paths and validation warnings.
+- All changes surgical and routed through proven mechanisms (minimal risk).
+
+**What this delivers:**
+- `advancedControls.filters` (dots, patches, epf, gaborish) and `advancedControls.groupOrder` (with centers) are now first-class, ergonomic, validated, and cross-platform.
+- Validation runs automatically on encoder creation and is queryable.
+- Lab users can immediately experiment with the controls the audit identified as highest impact.
+- Escape hatch remains excellent and is the final override.
+
+**Verification:**
+- `bun test packages/jxl-wasm/test/facade.test.ts` (new tests + existing pass).
+- Type and interface parity checked between WASM and native.
+- Manual review against the approved architecture in the plan (Option C: nested groups + permanent documented escape hatch).
+
+**Docs Updated:**
+- `docs/references/designs/first-class-advanced-encoder-controls.md` (full living progress + this Cleanup & Handoff block).
+- `docs/FEATURE_PARITY_MATRIX.md`
+- `docs/references/designs/DESIGNS_INDEX.md`
+- This PROGRESS_LOG entry.
+
+**Files touched (meaningful source):** `packages/jxl-wasm/src/facade.ts`, `packages/jxl-native/src/index.ts`, `packages/jxl-native/src/native.cc`, `packages/jxl-wasm/test/facade.test.ts`, `web/jxl-wrapper-lab.html`, `web/jxl-wrapper-lab.js`, design note, matrix, index.
+
+**Open for future slices of this note:**
+- Deeper Buffering implementation + trade-off documentation.
+- More validation coverage.
+- Proper benchmark metrics panel for the new controls.
+- Expert gating / effort=11 surface.
+- Rebuild + real-world output verification.
+
+**Handoff followed:** The approved plan + `FEATURE_IMPLEMENTATION_TEMPLATE.md` + ruthless standard from the June 2026 audit. Branch created before any implementation code.
+
+**Next:** Full slice cleanup on this branch, then move to the next design note at the same level of refinement.
+
