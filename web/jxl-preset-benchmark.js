@@ -1,5 +1,6 @@
 import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
 import { createEncoder, createDecoder } from '@casabio/jxl-wasm';
+import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
 // === IDB ===
 
@@ -220,6 +221,11 @@ await initRaw();
 buildFileIntake();
 buildSweepSettings();
 buildPhaseProgress();
+
+// Initialize debug console with the hero button
+const debugConsoleBtn = document.getElementById('dbg-console-btn');
+if (debugConsoleBtn) initDebugConsole(debugConsoleBtn);
+
 wireButtons();
 
 // Restore previously stored files from IDB
@@ -1136,10 +1142,8 @@ function buildPhaseProgress() {
 // =============================================================================
 
 function wireButtons() {
-    // Hero console button (already in HTML)
-    document.getElementById('dbg-console-btn')?.addEventListener('click', () => {
-        if (window.jxlDebugConsole?.toggle) window.jxlDebugConsole.toggle();
-    });
+    // Debug console button is now initialized via initDebugConsole() above.
+    // The click handler is automatically wired by initDebugConsole.
 
     document.getElementById('btn-run-sweep')?.addEventListener('click', async () => {
         const sizes = [...document.querySelectorAll('input[name="sweep-size"]:checked')].map(el => {
@@ -1194,10 +1198,6 @@ function wireButtons() {
     document.getElementById('btn-export-csv')?.addEventListener('click', () => {
         if (!sweepRows.length) { alert('No results to export. Run a sweep first.'); return; }
         exportCsv(sweepRows);
-    });
-
-    document.getElementById('btn-console')?.addEventListener('click', () => {
-        if (window.jxlDebugConsole?.toggle) window.jxlDebugConsole.toggle();
     });
 }
 
