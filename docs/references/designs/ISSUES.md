@@ -457,3 +457,60 @@ Observed: JUMBF payloads could be attached only via the generic escape; no ergon
 - No cross-repo prerequisite.
 
 **Sufficient Context Summary:** JUMBF was the highest-value Medium follow-up after the high-priority Next Wave items. A short stub design note existed but lacked exemplar rigor, implementation, benchmark wiring, and tracking closure. The fix delivered a dedicated `jumbfBoxes` surface (WASM + Native parity) as pure-TS sugar over the proven custom box path (zero FFI cost), full lab demo with sample generator, acceptance test, and complete living artifacts + updates to the five tracking documents — all on dedicated branch `feature/jumbf-box-support` following the Phase 3 exemplar pattern exactly.
+
+---
+
+## 11. Animation Decode Enhancements + Remaining Frame Settings (Notes 4 & 5) (2026-06)
+
+**Status:** done (2026-06) — source-only; WASM rebuild + full seek wiring deferred to WASM rebuild cycle (see §9)
+
+**Originating:** `docs/references/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md` — the final two items from the 2026-05-28 Next Features Handoff.
+
+**Why this matters:**
+- Animation is one of JXL's strongest features. Decode parity with encode (seeking, rich per-frame metadata) is required for a complete story.
+- The `advancedFrameSettings` escape hatch needed a definitive completeness audit so no high-value settings were accidentally left undocumented.
+- Lab users previously had no way to play back a decoded animation with accurate per-frame timing — the new frame buffer + RAF loop + scrubber fills this gap without requiring a WASM rebuild.
+
+**Reproduction (pre-work state):**
+```powershell
+# No seekToFrame/seekToTime on JxlDecoder. No animationSeek capability gate.
+# Animation lab showed only first frame; no playback, no scrubber.
+# getWrapperCapabilities() had no animationSeek field.
+```
+
+**Affected files / packages:**
+- `packages/jxl-wasm/src/facade.ts` + mirror
+- `packages/jxl-wasm/src/bridge.cpp` + mirror
+- `node_modules/@casabio/jxl-native/src/index.ts`
+- `node_modules/@casabio/jxl-wasm/test/facade.test.ts`
+- `web/animation-lab.html`
+- `docs/references/designs/animation-decode-enhancements.md`
+- `docs/references/designs/remaining-frame-settings.md`
+- Tracking: DESIGNS_INDEX, PROGRESS_LOG, this ISSUES entry, handoff document
+
+**Follow-up / Resolution steps (all completed on `feature/animation-decode-enhancements`):**
+1. Added 3 tests: animationSeek capability gate (absent/present) + progressive decode per-frame metadata.
+2. Added `seekToFrame?`/`seekToTime?` to `JxlDecoder` interface + `LibjxlDecoder` runtime stubs (throw `CapabilityMissing` with helpful message).
+3. Added `animationSeek` to `JxlCapabilities` (dynamic: `typeof module._jxl_wasm_dec_seek_to_frame === "function"`) and `WrapperCapabilities` (dynamic: reads `cachedModule` after first load).
+4. Added `cachedModule` cache variable so `getWrapperCapabilities().animationSeek` reflects the live binary after first decode/encode.
+5. Added `jxl_wasm_dec_seek_to_frame` to bridge.cpp (source-only, forward-only via `JxlDecoderSkipFrames`).
+6. Added `seekToFrame?`/`seekToTime?` parity stubs to `NativeDecoder` in jxl-native.
+7. Enhanced animation lab: frame buffer, RAF playback loop, scrubber, per-frame metadata panel.
+8. Wrote full coverage audit for all 36 `JXL_ENC_FRAME_SETTING_*` IDs — 26 first-class, 10 escape-hatch, 0 promotions.
+9. Full living design notes + tracking documents updated.
+
+**Post-rebuild checklist (open):**
+- [ ] Implement `seekToFrame` body in facade.ts (replace `CapabilityMissing` stub with real forward-seek loop)
+- [ ] Implement `seekToTime` body (convert ms → frame index via `animTicsPerSecond`)
+- [ ] Validate end-to-end seek against real multi-frame JXL fixture
+- [ ] Add seek demo controls to animation lab
+
+**Agent Jump-In Checklist:**
+- Read (in order): `docs/references/HANDOFF_AnimationDecode_and_RemainingFrameSettings_2026-06.md`, `docs/references/designs/animation-decode-enhancements.md` (Cleanup & Handoff + post-rebuild checklist), `packages/jxl-wasm/src/bridge.cpp` (~line 2175 for seek function).
+- Run first: `bun test ./node_modules/@casabio/jxl-wasm/test/facade.test.ts` (72 tests must pass).
+- Success criteria = `getWrapperCapabilities().animationSeek` returns `true` after WASM rebuild; `decoder.seekToFrame(n)` returns frame events; 72+ tests pass.
+- Gotcha: `seekToFrame`/`seekToTime` currently throw `CapabilityMissing` — intentional pre-rebuild behavior. Do not remove the stubs; replace their bodies.
+- Gotcha: `cachedModule` is set on first call to `loadLibjxlModule()` — `getWrapperCapabilities()` returns `false` before any decode/encode has run in the current session. This is correct: callers that check before first use should call `preloadJxlModule()` first.
+- Prerequisite: WASM rebuild requires Emscripten (see §9).
+
+**Sufficient Context Summary:** Notes 4 & 5 from the 2026-05-28 Next Features Handoff. Animation decode enhancements added the `seekToFrame`/`seekToTime` API surface (interface + `CapabilityMissing` stubs + `animationSeek` capability gate with dynamic `cachedModule` check), the C++ bridge source for forward seeking, native parity stubs, and a full animation lab enhancement (frame buffer, RAF playback loop, scrubber, per-frame metadata). The remaining frame settings note audited all 36 `JXL_ENC_FRAME_SETTING_*` IDs and confirmed 0 new promotions. Full seek implementation is deferred to the next WASM rebuild cycle.

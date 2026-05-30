@@ -1056,6 +1056,7 @@ function probeRelaxedSimd(): boolean {
 }
 
 let modulePromise: Promise<LibjxlWasmModule> | undefined;
+let cachedModule: LibjxlWasmModule | undefined;
 let testModuleFactory: JxlModuleFactory | null = null;
 let _forcedTier: Tier | null = null;
 let _cachedDetectedTier: Tier | undefined;
@@ -1063,6 +1064,7 @@ let _cachedDetectedTier: Tier | undefined;
 export function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null): void {
   testModuleFactory = factory;
   modulePromise = undefined;
+  cachedModule = undefined;
 }
 
 /**
@@ -1073,6 +1075,7 @@ export function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null):
 export function setForcedTier(tier: Tier | null): void {
   _forcedTier = tier;
   modulePromise = undefined;
+  cachedModule = undefined;
 }
 
 export function getForcedTier(): Tier | null {
@@ -1362,7 +1365,7 @@ export function getWrapperCapabilities(): WrapperCapabilities {
     tileAlignedRegionDecode: false,
     arbitraryRegionDecode: true,
     availableDownsampleFactors: [1, 2, 4, 8],
-    animationSeek: false, // static: no module access here; runtime check is in getCapabilities()
+    animationSeek: cachedModule != null && typeof cachedModule._jxl_wasm_dec_seek_to_frame === "function",
   };
 }
 
@@ -1980,6 +1983,14 @@ class LibjxlDecoder implements JxlDecoder {
   cancel(_reason?: string): void {
     this.cancelled = true;
     this.wake();
+  }
+
+  async *seekToFrame(_frameIndex: number): AsyncIterable<DecodeEvent> {
+    throw new CapabilityMissing("seekToFrame requires WASM rebuild; check getWrapperCapabilities().animationSeek before calling");
+  }
+
+  async *seekToTime(_timeMs: number): AsyncIterable<DecodeEvent> {
+    throw new CapabilityMissing("seekToTime requires WASM rebuild; check getWrapperCapabilities().animationSeek before calling");
   }
 
   dispose(): void {
@@ -2615,7 +2626,8 @@ class LibjxlEncoder implements JxlEncoder {
 
 async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
   modulePromise ??= (testModuleFactory ?? loadGeneratedLibjxlModule)();
-  return modulePromise;
+  cachedModule = await modulePromise;
+  return cachedModule;
 }
 
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
