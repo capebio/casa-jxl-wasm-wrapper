@@ -38,6 +38,7 @@
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+            <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
         </div>
     </nav>
 
@@ -167,6 +168,30 @@
                             <input id="batch-group-center-y" type="number" placeholder="cy" style="width:50px; font-size:11px;" />
                         </div>
                         <div style="font-size:10px; opacity:0.6;">Center mode + coords for better progressive/ROI behavior.</div>
+                    </div>
+                    <!-- Phase 2: Buffering + Expert (deeper advanced encoder controls slice) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Buffering <span style="font-size:10px;opacity:0.6">(Phase 2)</span></span>
+                        <div class="preset-group" role="radiogroup" aria-label="Buffering strategy">
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="-1" checked /> <span>default</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="0" /> <span>0 (immediate)</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="1" /> <span>1</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="2" /> <span>2</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="3" /> <span>3 (max)</span></label>
+                        </div>
+                        <div style="display:flex; gap:8px; font-size:11px; margin-top:2px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-streaming-input" /> <span>streamingInput</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-streaming-output" /> <span>streamingOutput</span></label>
+                        </div>
+                        <div style="font-size:10px; opacity:0.6;">Rich tradeoffs (memory / density / latency). See design note for cjxl-derived guidance.</div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Expert <span style="font-size:10px;opacity:0.6">(Phase 2)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-expert-disable-perceptual" /> <span>Disable perceptual heuristics (ID 39)</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-expert-allow" /> <span>Allow expert options</span></label>
+                        </div>
+                        <div style="font-size:10px; color:#c33; opacity:0.85;">Strong warning: for benchmarking/archival only. May increase size + artifacts. Mirrors cjxl --allow_expert_options.</div>
                     </div>
                     <!-- Gain map (HDR) transport wiring - mandatory benchmark exposure per gain-maps.md -->
                     <div class="spin-group" id="sg-gain-map">
