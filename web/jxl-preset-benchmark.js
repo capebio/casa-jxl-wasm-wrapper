@@ -768,3 +768,252 @@ export async function runSweep(options = {}) {
 export function abortSweep() {
     if (sweepRunning) sweepAborted = true;
 }
+
+// =============================================================================
+// Chart.js graphs — Task 7
+// =============================================================================
+
+const SIZE_COLORS = ['#4ade80', '#60a5fa', '#f97316', '#a78bfa'];
+
+// { p1a, p1b, p2, p3 } — Chart instances
+let charts = {};
+
+/**
+ * Average rows matching sizePx and a single parameter value, returning the
+ * given metric. Returns null when no matching rows exist.
+ * @param {object[]} rows
+ * @param {number|string} sizePx
+ * @param {number|string} paramVal  value of paramKey to filter on
+ * @param {string} paramKey         row property name (e.g. 'effort', 'decSpeed')
+ * @param {string} metric           row property to average ('encMs'|'decMs'|'sizeBytes')
+ * @returns {number|null}
+ */
+function avgFor(rows, sizePx, paramVal, paramKey, metric) {
+    const matching = rows.filter(r => r.sizePx === sizePx && r[paramKey] === paramVal);
+    if (!matching.length) return null;
+    return matching.reduce((s, r) => s + r[metric], 0) / matching.length;
+}
+
+/**
+ * Find the knee-point effort for a given sizePx within phase-1 rows.
+ * Returns the effort value, or null if there are no rows.
+ */
+function kneeEffortFor(rows, sizePx) {
+    const effortRows = EFFORTS
+        .map(e => {
+            const matching = rows.filter(r => r.sizePx === sizePx && r.effort === e);
+            if (!matching.length) return null;
+            const avgSize = matching.reduce((s, r) => s + r.sizeBytes, 0) / matching.length;
+            const avgTime = matching.reduce((s, r) => s + r.encMs,    0) / matching.length;
+            return { effort: e, avgSize, avgTime };
+        })
+        .filter(Boolean);
+
+    if (!effortRows.length) return null;
+
+    for (let i = 1; i < effortRows.length; i++) {
+        const sizeReduction = (effortRows[i - 1].avgSize - effortRows[i].avgSize) / effortRows[i - 1].avgSize;
+        const timeCost      = (effortRows[i].avgTime - effortRows[i - 1].avgTime) / effortRows[i - 1].avgTime;
+        if (timeCost > 3 * sizeReduction) return effortRows[i - 1].effort;
+    }
+    // No knee — return effort with minimum size
+    return effortRows.reduce((best, r) => r.avgSize < best.avgSize ? r : best).effort;
+}
+
+/** Inject the four canvas cards into #phase-graphs-body (idempotent). */
+function buildGraphsSection() {
+    const body = document.getElementById('phase-graphs-body');
+    if (!body) return;
+    body.innerHTML = `
+        <div class="graph-grid">
+            <div class="graph-card">
+                <h3>Phase 1a — Encode time vs Effort</h3>
+                <canvas id="chart-p1a"></canvas>
+            </div>
+            <div class="graph-card">
+                <h3>Phase 1b — File size vs Effort</h3>
+                <canvas id="chart-p1b"></canvas>
+            </div>
+            <div class="graph-card">
+                <h3>Phase 2 — Decode time vs Decode speed tier</h3>
+                <canvas id="chart-p2"></canvas>
+            </div>
+            <div class="graph-card">
+                <h3>Phase 3 — Modular × Brotli</h3>
+                <canvas id="chart-p3"></canvas>
+            </div>
+        </div>
+    `;
+}
+
+/** Render (or re-render) Phase 1a and 1b charts from phase-1 sweep rows. */
+export function renderPhase1Charts(rows) {
+    const sizes = SIZES; // [128, 512, 1920, 'full']
+
+    // --- Phase 1a: Encode ms vs Effort ---
+    if (charts.p1a) { charts.p1a.destroy(); charts.p1a = null; }
+    const canvas1a = document.getElementById('chart-p1a');
+    if (canvas1a) {
+        charts.p1a = new Chart(canvas1a, {
+            type: 'line',
+            data: {
+                labels: EFFORTS,
+                datasets: sizes.map((sz, i) => ({
+                    label: sz === 'full' ? 'Full' : `${sz}px`,
+                    data: EFFORTS.map(e => avgFor(rows, sz, e, 'effort', 'encMs')),
+                    borderColor: SIZE_COLORS[i],
+                    backgroundColor: SIZE_COLORS[i] + '22',
+                    tension: 0.3,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                })),
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { position: 'bottom' } },
+                scales: {
+                    x: { title: { display: true, text: 'Effort' } },
+                    y: { title: { display: true, text: 'Encode ms' }, beginAtZero: true },
+                },
+            },
+        });
+    }
+
+    // --- Phase 1b: File size (KB) vs Effort, with knee-point scatter ---
+    if (charts.p1b) { charts.p1b.destroy(); charts.p1b = null; }
+    const canvas1b = document.getElementById('chart-p1b');
+    if (canvas1b) {
+        const lineDatasets = sizes.map((sz, i) => ({
+            label: sz === 'full' ? 'Full' : `${sz}px`,
+            data: EFFORTS.map(e => {
+                const bytes = avgFor(rows, sz, e, 'effort', 'sizeBytes');
+                return bytes !== null ? bytes / 1024 : null;
+            }),
+            borderColor: SIZE_COLORS[i],
+            backgroundColor: SIZE_COLORS[i] + '22',
+            tension: 0.3,
+            pointRadius: 4,
+            pointHoverRadius: 6,
+            type: 'line',
+        }));
+
+        // One scatter dataset per size to mark the knee effort
+        const kneeDatasets = sizes.map((sz, i) => {
+            const kneeEffort = kneeEffortFor(rows, sz);
+            if (kneeEffort === null) return null;
+            const bytes = avgFor(rows, sz, kneeEffort, 'effort', 'sizeBytes');
+            const sizeKB = bytes !== null ? bytes / 1024 : null;
+            return {
+                label: `Knee ${sz === 'full' ? 'Full' : sz + 'px'}`,
+                data: sizeKB !== null ? [{ x: kneeEffort, y: sizeKB }] : [],
+                type: 'scatter',
+                borderColor: SIZE_COLORS[i],
+                backgroundColor: SIZE_COLORS[i],
+                pointStyle: 'rectRot',
+                pointRadius: 8,
+                showLine: false,
+            };
+        }).filter(Boolean);
+
+        charts.p1b = new Chart(canvas1b, {
+            type: 'line',
+            data: {
+                labels: EFFORTS,
+                datasets: [...lineDatasets, ...kneeDatasets],
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { position: 'bottom' } },
+                scales: {
+                    x: { title: { display: true, text: 'Effort' } },
+                    y: { title: { display: true, text: 'Size KB' }, beginAtZero: true },
+                },
+            },
+        });
+    }
+}
+
+/** Render (or re-render) Phase 2 chart from phase-2 sweep rows. */
+export function renderPhase2Chart(rows) {
+    if (charts.p2) { charts.p2.destroy(); charts.p2 = null; }
+    const canvas = document.getElementById('chart-p2');
+    if (!canvas) return;
+
+    const sizes = SIZES;
+    charts.p2 = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: DEC_SPEEDS,
+            datasets: sizes.map((sz, i) => ({
+                label: sz === 'full' ? 'Full' : `${sz}px`,
+                data: DEC_SPEEDS.map(ds => avgFor(rows, sz, ds, 'decSpeed', 'decMs')),
+                borderColor: SIZE_COLORS[i],
+                backgroundColor: SIZE_COLORS[i] + '22',
+                tension: 0.3,
+                pointRadius: 4,
+                pointHoverRadius: 6,
+            })),
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+                x: { title: { display: true, text: 'Decode speed tier' } },
+                y: { title: { display: true, text: 'Decode ms' }, beginAtZero: true },
+            },
+        },
+    });
+}
+
+/** Render (or re-render) Phase 3 chart from phase-3 sweep rows. */
+export function renderPhase3Chart(rows) {
+    if (charts.p3) { charts.p3.destroy(); charts.p3 = null; }
+    const canvas = document.getElementById('chart-p3');
+    if (!canvas) return;
+
+    const modularLabels = { '-1': 'Auto', '0': 'VarDCT', '1': 'Modular' };
+
+    // Build combo labels and one dataset per modular mode
+    const combos = [];
+    for (const modular of MODULAR_VALS) {
+        for (const brotli of BROTLI_VALS) {
+            combos.push({ modular, brotli, label: `${modularLabels[modular]}/${brotli}` });
+        }
+    }
+    const comboLabels = combos.map(c => c.label);
+
+    const datasets = MODULAR_VALS.map((modular, i) => {
+        const data = BROTLI_VALS.map(brotli => {
+            const matching = rows.filter(r => r.modular === modular && r.brotli === brotli);
+            if (!matching.length) return null;
+            return matching.reduce((s, r) => s + r.encMs, 0) / matching.length;
+        });
+        return {
+            label: modularLabels[modular],
+            data,
+            backgroundColor: SIZE_COLORS[i] + 'aa',
+            borderColor: SIZE_COLORS[i],
+            borderWidth: 1,
+        };
+    });
+
+    // X axis labels are brotli values; group by modular using separate datasets
+    charts.p3 = new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: comboLabels,
+            datasets,
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+                x: { title: { display: true, text: 'Modular mode / Brotli effort' } },
+                y: { title: { display: true, text: 'Encode ms' }, beginAtZero: true },
+            },
+        },
+    });
+}
+
+// Build the graph section DOM immediately on module init so canvases exist.
+buildGraphsSection();
