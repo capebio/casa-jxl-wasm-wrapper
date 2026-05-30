@@ -500,8 +500,7 @@ Observed: JUMBF payloads could be attached only via the generic escape; no ergon
 9. Full living design notes + tracking documents updated.
 
 **Post-rebuild checklist (open):**
-- [ ] Implement `seekToFrame` body in facade.ts (replace `CapabilityMissing` stub with real forward-seek loop)
-- [ ] Implement `seekToTime` body (convert ms → frame index via `animTicsPerSecond`)
+- [ ] Replace `seekToFrame` software-fallback with `_jxl_wasm_dec_seek_to_frame` native skip (optimization — current implementation works, just decodes all skipped frames)
 - [ ] Validate end-to-end seek against real multi-frame JXL fixture
 - [ ] Add seek demo controls to animation lab
 

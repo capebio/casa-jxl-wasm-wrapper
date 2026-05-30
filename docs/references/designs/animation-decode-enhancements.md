@@ -87,26 +87,24 @@ Enhanced `web/animation-lab.html` with:
 | Animation lab: frame buffer + playback + scrubber + metadata | `web/animation-lab.html` | ✅ Done |
 
 **Pending (post-rebuild):**
-- Implement `seekToFrame` / `seekToTime` bodies in facade.ts (currently interface-only)
-- Wire `animationSeek` dynamically in `getWrapperCapabilities()` once module is loaded
+- Replace software-fallback seek with native `_jxl_wasm_dec_seek_to_frame` skip in `seekToFrame` body
 - Validate end-to-end seek behavior against a real multi-frame JXL file
 
 ---
 
 ## Cleanup & Handoff
 
-**Source-only status:** All C++ additions are in `packages/jxl-wasm/src/bridge.cpp` and its mirror. The shipped `web/pkg` WASM binary does NOT yet include `jxl_wasm_dec_seek_to_frame`. Rebuild requires Emscripten (see ISSUES.md §9 — pre-existing blocker). Until rebuilt:
-- `getWrapperCapabilities().animationSeek` returns `false`
-- `decoder.seekToFrame` / `decoder.seekToTime` are `undefined`
-- Callers must guard: `if (caps.animationSeek) { ... }`
+**`seekToFrame` / `seekToTime` work today** as software fallbacks: both methods are fully implemented in `LibjxlDecoder`. `seekToFrame(n)` runs the progressive decode loop internally and discards events for frames before `n`. `seekToTime(ms)` computes `targetFrame = Math.floor(ms * animTicksPerSecond / 1000)` from the first event carrying `animTicksPerSecond`, then delegates to the same filtering. Both are usable against any already-decoded animation without a WASM rebuild.
 
-**Lab works now:** The animation lab frame buffer, playback loop, scrubber, and metadata panel all work using the already-existing per-frame decode events — no WASM rebuild required for that functionality.
+**`animationSeek` capability:** `getWrapperCapabilities().animationSeek` is dynamic — it reads `cachedModule` after the first decode/encode completes. Returns `false` before any decode; returns `true` only after WASM rebuild includes `jxl_wasm_dec_seek_to_frame`. The seek methods themselves work regardless of this flag (they're always present on the decoder object).
 
-**Post-rebuild checklist:**
-- [ ] Wire `seekToFrame` body: buffer consumed data, call `_jxl_wasm_dec_seek_to_frame`, re-enter event loop
-- [ ] Wire `seekToTime` body: compute frame index from `timeMs * animTicsPerSecond / 1000`
-- [ ] Update `getWrapperCapabilities()` to read `animationSeek` from an initialized module
-- [ ] Add seek demo to animation lab (seek-to-frame input, seek-to-time input)
+**Source-only status:** The C++ `jxl_wasm_dec_seek_to_frame` is in `packages/jxl-wasm/src/bridge.cpp`. The shipped WASM binary does NOT yet include it. Rebuild requires Emscripten (see ISSUES.md §9 — pre-existing blocker).
+
+**Lab works now:** Animation lab frame buffer, playback loop, scrubber, and metadata panel all work using existing per-frame decode events — no WASM rebuild required.
+
+**Post-rebuild checklist (optimization only):**
+- [ ] Replace the decode-and-discard loop in `seekToFrame` with `_jxl_wasm_dec_seek_to_frame(dec, frameIndex)` before entering the event loop (skips C++ decoding of pixel data for skipped frames — faster for large seeks)
+- [ ] Add seek demo controls to animation lab (seek-to-frame input, seek-to-time input)
 - [ ] Test with real multi-frame JXL (animated test fixture)
 
 **Branch:** `feature/animation-decode-enhancements`  
