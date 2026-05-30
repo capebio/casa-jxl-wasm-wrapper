@@ -218,6 +218,9 @@ try {
 await initRaw();
 
 buildFileIntake();
+buildSweepSettings();
+buildPhaseProgress();
+wireButtons();
 
 // Restore previously stored files from IDB
 for (const slot of SLOTS) {
@@ -264,15 +267,33 @@ export const sweepRows   = [];
 export let sweepAborted  = false;
 export let sweepRunning  = false;
 
-// --- UI stubs (wired in Task 9) ----------------------------------------------
+// --- UI (wired in Task 9) ----------------------------------------------------
 
-export function updatePhaseStatus(phaseNum, status) {
+export function updatePhaseStatus(phaseNum, status, progress = 0) {
     // status: 'pending' | 'active' | 'done' | null
     console.log(`[sweep] phase ${phaseNum} → ${status}`);
+    if (phaseNum == null) return;
+    const card = document.getElementById(`phase-card-${phaseNum}`);
+    if (!card) return;
+    card.dataset.status = status ?? 'pending';
+    const icon = card.querySelector('.phase-icon');
+    const bar  = card.querySelector('.phase-bar-fill');
+    if (status === 'active') {
+        if (icon) icon.textContent = '↻';
+        if (bar)  bar.style.width = `${Math.round(progress * 100)}%`;
+    } else if (status === 'done') {
+        if (icon) icon.textContent = '✓';
+        if (bar)  bar.style.width = '100%';
+    } else {
+        if (icon) icon.textContent = '⋯';
+        if (bar)  bar.style.width = '0%';
+    }
 }
 
 export function updateLiveStatus(msg) {
     console.log(`[sweep] ${msg}`);
+    const el = document.getElementById('live-current');
+    if (el) el.textContent = msg;
 }
 
 // --- Helpers -----------------------------------------------------------------
@@ -1012,6 +1033,171 @@ export function renderPhase3Chart(rows) {
                 y: { title: { display: true, text: 'Encode ms' }, beginAtZero: true },
             },
         },
+    });
+}
+
+// =============================================================================
+// Sweep settings UI — Task 9
+// =============================================================================
+
+function buildSweepSettings() {
+    const body = document.getElementById('sweep-settings-body');
+    if (!body) return;
+    body.innerHTML = `
+        <div class="sweep-controls">
+            <div class="control-group">
+                <label class="control-label">Image sizes</label>
+                <div class="chip-group">
+                    ${[128, 512, 1920, 'full'].map(sz => `
+                        <label class="chip-label">
+                            <input type="checkbox" name="sweep-size" value="${sz}" checked />
+                            <span>${sz === 'full' ? 'Full' : sz + 'px'}</span>
+                        </label>`).join('')}
+                </div>
+            </div>
+            <div class="control-group">
+                <label class="control-label">Quality tiers</label>
+                <div class="chip-group">
+                    ${['low','medium','high','lossless'].map(t => `
+                        <label class="chip-label">
+                            <input type="checkbox" name="sweep-tier" value="${t}" checked />
+                            <span>${t.charAt(0).toUpperCase()+t.slice(1)}</span>
+                        </label>`).join('')}
+                </div>
+            </div>
+            <div class="control-group">
+                <label class="control-label">Runs / config</label>
+                <div class="spinpicker">
+                    <button class="spin-btn" type="button" id="runs-dec">&#8722;</button>
+                    <input id="input-runs" type="number" min="1" max="5" step="1" value="3" style="width:40px;text-align:center" />
+                    <button class="spin-btn" type="button" id="runs-inc">+</button>
+                </div>
+            </div>
+            <div class="control-group" style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <button id="btn-run-sweep" class="btn-primary" type="button">&#9654; Run sweep</button>
+                <button id="btn-stop" class="btn-danger" type="button" disabled>&#9632; Stop</button>
+                <button id="btn-load-saved" class="btn-secondary" type="button">Load saved</button>
+                <button id="btn-export-csv" class="btn-secondary" type="button">Export CSV</button>
+                <button id="btn-console" class="btn-secondary" type="button">Console</button>
+            </div>
+        </div>
+    `;
+    document.getElementById('runs-dec').addEventListener('click', () => {
+        const inp = document.getElementById('input-runs');
+        inp.value = Math.max(1, Number(inp.value) - 1);
+    });
+    document.getElementById('runs-inc').addEventListener('click', () => {
+        const inp = document.getElementById('input-runs');
+        inp.value = Math.min(5, Number(inp.value) + 1);
+    });
+}
+
+// =============================================================================
+// Phase progress UI — Task 9
+// =============================================================================
+
+function buildPhaseProgress() {
+    const cards = document.getElementById('phase-cards');
+    if (!cards) return;
+    const phases = [
+        'Effort 1–6 × 4 sizes',
+        'Decode speed 0–4 × 4 sizes',
+        'Modular + Brotli',
+        'Resampling × 4 sizes',
+    ];
+    cards.innerHTML = '';
+    for (let i = 0; i < phases.length; i++) {
+        const card = document.createElement('div');
+        card.className = 'phase-card';
+        card.id = `phase-card-${i + 1}`;
+        card.dataset.status = 'pending';
+        card.innerHTML = `
+            <div class="phase-label">PHASE ${i + 1} <span class="phase-icon">⋯</span></div>
+            <div class="phase-sub">${phases[i]}</div>
+            <div class="phase-bar"><div class="phase-bar-fill" style="width:0%"></div></div>
+        `;
+        cards.appendChild(card);
+    }
+
+    const ticker = document.getElementById('live-status');
+    if (ticker) {
+        ticker.innerHTML = `
+            <div class="live-status-header">
+                <span>Live status</span>
+                <span id="elapsed-label">—</span>
+            </div>
+            <div id="live-current" class="live-line live-active">Idle</div>
+        `;
+    }
+}
+
+// =============================================================================
+// Button wiring — Task 9
+// =============================================================================
+
+function wireButtons() {
+    // Hero console button (already in HTML)
+    document.getElementById('dbg-console-btn')?.addEventListener('click', () => {
+        if (window.jxlDebugConsole?.toggle) window.jxlDebugConsole.toggle();
+    });
+
+    document.getElementById('btn-run-sweep')?.addEventListener('click', async () => {
+        const sizes = [...document.querySelectorAll('input[name="sweep-size"]:checked')].map(el => {
+            const v = el.value; return v === 'full' ? 'full' : Number(v);
+        });
+        const tiers = [...document.querySelectorAll('input[name="sweep-tier"]:checked')].map(el => el.value);
+        const runsPerConfig = Math.max(1, Number(document.getElementById('input-runs')?.value ?? 3));
+        if (!sizes.length || !tiers.length) {
+            alert('Select at least one size and one tier.');
+            return;
+        }
+
+        const btnRun  = document.getElementById('btn-run-sweep');
+        const btnStop = document.getElementById('btn-stop');
+        btnRun.disabled  = true;
+        btnStop.disabled = false;
+
+        try {
+            await runSweep({ tiers, sizes, runsPerConfig });
+        } finally {
+            btnRun.disabled  = false;
+            btnStop.disabled = true;
+        }
+
+        buildResultsTable(sweepRows);
+        const presets = derivePresets(sweepRows);
+        buildPresetCards(presets);
+        saveResults(sweepRows, presets);
+        renderPhase1Charts(sweepRows.filter(r => r.phase === 1));
+        renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
+        renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
+    });
+
+    document.getElementById('btn-stop')?.addEventListener('click', () => {
+        abortSweep();
+        document.getElementById('btn-stop').disabled  = true;
+        document.getElementById('btn-run-sweep').disabled = false;
+    });
+
+    document.getElementById('btn-load-saved')?.addEventListener('click', () => {
+        const saved = loadSavedResults();
+        if (!saved) { alert('No saved results found.'); return; }
+        sweepRows.length = 0;
+        sweepRows.push(...saved.rows);
+        buildResultsTable(sweepRows);
+        buildPresetCards(saved.presets ?? derivePresets(sweepRows));
+        renderPhase1Charts(sweepRows.filter(r => r.phase === 1));
+        renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
+        renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
+    });
+
+    document.getElementById('btn-export-csv')?.addEventListener('click', () => {
+        if (!sweepRows.length) { alert('No results to export. Run a sweep first.'); return; }
+        exportCsv(sweepRows);
+    });
+
+    document.getElementById('btn-console')?.addEventListener('click', () => {
+        if (window.jxlDebugConsole?.toggle) window.jxlDebugConsole.toggle();
     });
 }
 
