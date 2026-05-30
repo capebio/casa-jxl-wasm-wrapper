@@ -1362,7 +1362,7 @@ export function getWrapperCapabilities(): WrapperCapabilities {
     tileAlignedRegionDecode: false,
     arbitraryRegionDecode: true,
     availableDownsampleFactors: [1, 2, 4, 8],
-    animationSeek: false,
+    animationSeek: false, // static: no module access here; runtime check is in getCapabilities()
   };
 }
 
