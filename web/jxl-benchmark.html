@@ -36,7 +36,12 @@
             <a class="home-bar-link" href="./index.html">Home</a>
             <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link is-active" href="./jxl-benchmark.html" aria-current="page">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+            <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
         </div>
     </nav>
 
@@ -59,7 +64,7 @@
                     <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
                     <button id="start-benchmark" class="primary-btn" type="button" disabled title="Press Random Gobabeb first">Run benchmark</button>
                     <button id="add-permutation" class="secondary-btn" type="button" disabled title="Run benchmark first, then add permutation">Add Permutation</button>
-                    <button id="clear-results" class="secondary-btn" type="button">Clear</button>
+                    <button id="clear-results" class="secondary-btn" type="button" disabled title="Load files first">Clear</button>
                     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
                     <button id="save-settings" class="ghost-btn" type="button">Save settings</button>
                     <label class="upload-settings">
@@ -71,18 +76,34 @@
                 <div class="settings-inline">
                     <div class="spinbox-row-inline">
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label">Iterations per size</label>
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label">Iterations per size</label>
+                                <button class="info-btn" type="button" data-help-target="bm-iter" aria-label="Iterations info">i</button>
+                            </div>
                             <input id="iterations" class="spinbox" type="number" min="1" max="10" value="3" />
+                            <div class="help-popover" data-help-popover="bm-iter" hidden>
+                                Number of encode+decode cycles per configuration. Higher = more stable averages, less noise from JIT or thermal variation. 3 is enough for a quick comparison; 10+ reveals thermal throttling patterns. Each iteration is fully independent — no result caching.
+                            </div>
                         </div>
                         <div class="spinbox-inline-group">
-                            <label class="spinbox-label"># of test files</label>
-                            <input id="max-files" class="spinbox" type="number" min="1" max="20" value="5" />
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label"># of test files</label>
+                                <button class="info-btn" type="button" data-help-target="bm-maxfiles" aria-label="Max files info">i</button>
+                            </div>
+                            <input id="max-files" class="spinbox" type="number" min="1" max="100" value="20" />
+                            <div class="help-popover" data-help-popover="bm-maxfiles" hidden>
+                                Source files to include in each benchmark run. More files broaden coverage across image content (fine detail, flat areas, high noise) and reduce the impact of any single outlier on averages.
+                            </div>
                         </div>
                         <button id="optimize-btn" class="secondary-btn" type="button" disabled title="Load files first, then optimize codec toggles for this device">Optimize</button>
+                        <button id="save-full-btn" class="secondary-btn" type="button" disabled title="Save all fullsize encoded JXL files to a folder">Save full files</button>
                     </div>
 
                     <div class="quality-section quality-inline">
-                        <label class="section-label">Quality</label>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <span class="section-label">Quality</span>
+                            <button class="info-btn" type="button" data-help-target="bm-quality" aria-label="Quality info">i</button>
+                        </div>
                         <div class="quality-buttons">
                             <label class="quality-btn"><input type="checkbox" name="quality" value="50" /> 50</label>
                             <label class="quality-btn"><input type="checkbox" name="quality" value="55" /> 55</label>
@@ -95,10 +116,17 @@
                             <label class="quality-btn"><input type="checkbox" name="quality" value="90" /> 90</label>
                             <label class="quality-btn"><input type="checkbox" name="quality" value="95" /> 95</label>
                         </div>
+                        <div class="help-popover" data-help-popover="bm-quality" hidden>
+                            <strong>Quality (0–100 scale)</strong><br>
+                            Controls perceptual fidelity. Maps internally to a Butteraugli distance target. <strong>85</strong> is visually indistinguishable from source for most photographic content. Above 90 gives diminishing returns at rapidly growing file sizes. JXL quality is not on the same scale as JPEG — JXL q=85 typically outperforms JPEG q=85 in both file size and visual fidelity.
+                        </div>
                     </div>
 
                     <div class="sizes-inline">
-                        <span class="sizes-label">Benchmark sizes:</span>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <span class="sizes-label">Benchmark sizes:</span>
+                            <button class="info-btn" type="button" data-help-target="bm-sizes" aria-label="Benchmark sizes info">i</button>
+                        </div>
                         <div class="sizes-buttons">
                             <label class="size-btn">
                                 <input type="checkbox" name="benchmark-size" value="128" />
@@ -125,10 +153,17 @@
                                 <span>Full</span>
                             </label>
                         </div>
+                        <div class="help-popover" data-help-popover="bm-sizes" hidden>
+                            <strong>Output pixel size (long edge)</strong><br>
+                            Source images are proportionally resized before encoding. <em>Full</em> skips resizing and encodes at original resolution. Smaller sizes encode and decode much faster: 128–512 px is thumbnail range (~1–8 ms decode), 1920 px is display range (~30 ms), Full is archival range. Select multiple sizes to map the full size/latency curve.
+                        </div>
                     </div>
 
                     <div class="effort-section effort-inline">
-                        <label class="section-label">Effort</label>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <span class="section-label">Effort</span>
+                            <button class="info-btn" type="button" data-help-target="bm-effort" aria-label="Effort info">i</button>
+                        </div>
                         <div class="effort-buttons">
                             <label class="effort-btn"><input type="checkbox" name="effort" value="1" /> 1</label>
                             <label class="effort-btn"><input type="checkbox" name="effort" value="2" /> 2</label>
@@ -140,6 +175,10 @@
                             <label class="effort-btn"><input type="checkbox" name="effort" value="8" /> 8</label>
                             <label class="effort-btn"><input type="checkbox" name="effort" value="9" /> 9</label>
                         </div>
+                        <div class="help-popover" data-help-popover="bm-effort" hidden>
+                            <strong>Encode effort (1–9)</strong><br>
+                            Controls how hard the encoder searches for a more compact representation. Higher effort = smaller files, much slower encode, <em>identical decode speed and visual quality</em>. Effort 3 suits real-time; effort 7+ is archival. Encode time increase 3→7 is roughly 5–10×, with 5–15% file-size reduction.
+                        </div>
                     </div>
                 </div>
             </div>
@@ -148,7 +187,10 @@
                 <div class="settings-panel">
                     <div class="encoder-decoder-wrap">
                         <div class="encoder-options">
-                            <div class="section-header">Encoder advanced</div>
+                            <div class="section-header" style="display:flex;align-items:center;gap:6px;">
+                                Encoder advanced
+                                <button class="info-btn" type="button" data-help-target="bm-enc-advanced" aria-label="Encoder advanced info">i</button>
+                            </div>
                             <div class="encoder-grid">
                                 <div class="option-group">
                                     <label class="toggle-opt">
@@ -167,10 +209,18 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="help-popover" data-help-popover="bm-enc-advanced" hidden>
+                                <strong>Modular</strong> — Switches from VarDCT (default, frequency-domain, photographic) to Modular mode (spatial, lossless-friendly). VarDCT gives better compression for photos; Modular excels at lossless and synthetic/non-photographic content.<br><br>
+                                <strong>Butteraugli target</strong> — Direct perceptual quality override. Lower = higher quality (0.5 = near-lossless, 1.0 = high, 3.0 = moderate). The Quality buttons map to this automatically — only override here for fine control.<br><br>
+                                <strong>Brotli effort</strong> — Compression level for JXL header and metadata (0–11). Affects header bytes only, not pixel data. Impact on total file size is small (&lt;1%) for photographic content.
+                            </div>
                         </div>
 
                         <div class="advanced-options">
-                            <div class="advanced-header">Codec toggles</div>
+                            <div class="advanced-header" style="display:flex;align-items:center;gap:6px;">
+                                Codec toggles
+                                <button class="info-btn" type="button" data-help-target="bm-toggles" aria-label="Codec toggles info">i</button>
+                            </div>
                             <div class="options-grid">
                                 <label class="toggle-opt">
                                     <input type="checkbox" id="opt-simd" />
@@ -213,11 +263,26 @@
                                     <span class="opt-label">Zero-copy buf</span>
                                 </label>
                             </div>
+                            <div class="help-popover" data-help-popover="bm-toggles" hidden>
+                                <strong>SIMD</strong> — Uses hardware vector instructions (SSE4.1, AVX2, NEON) for parallel pixel ops. ~2–4× decode speedup. Keep on for real-world measurements; disable only for scalar baseline.<br><br>
+                                <strong>Threading</strong> — Multi-core decode. Reduces latency for large images. Disable to get single-thread baseline.<br><br>
+                                <strong>Tier</strong> — Detected WASM capability (scalar / simd / simd-mt). Reflects the active build variant chosen by capability detection.<br><br>
+                                <strong>Progressive</strong> — Encodes with progressive scans so the decoder can emit coarse previews from partial data. ~1–2% file size overhead. Required for gallery and paint pages.<br><br>
+                                <strong>Preserve ICC</strong> — Passes the ICC color profile through decode. Disable for raw throughput measurement without color management overhead.<br><br>
+                                <strong>Metadata</strong> — Preserves Exif/XMP metadata. Not needed for speed testing.<br><br>
+                                <strong>Chunked</strong> — Splits encoded output into multiple Brotli-compressed chunks for HTTP streaming. Enables progressive delivery. Slight overhead vs. single buffer.<br><br>
+                                <strong>Lossless</strong> — Mathematically perfect reconstruction. Uses Modular mode internally. Files are larger; suited for text, diagrams, and archival.<br><br>
+                                <strong>Preview 1st</strong> — Inserts a low-resolution preview frame at the start of the stream so viewers can show something before the main decode completes.<br><br>
+                                <strong>Zero-copy buf</strong> — Skips buffer copy when pushing data into WASM. Faster on large inputs. Only safe when the source buffer is not reused after the push.
+                            </div>
                         </div>
                     </div>
 
                     <div class="decoder-options">
-                        <div class="section-header">Decoder advanced</div>
+                        <div class="section-header" style="display:flex;align-items:center;gap:6px;">
+                            Decoder advanced
+                            <button class="info-btn" type="button" data-help-target="bm-dec-advanced" aria-label="Decoder advanced info">i</button>
+                        </div>
                         <div class="decoder-grid">
                             <div class="downsampling-row">
                                 <label class="section-label">Downsampling</label>
@@ -228,6 +293,9 @@
                                     <label class="downsample-btn"><input type="radio" name="downsample" value="8" /> 8×</label>
                                 </div>
                             </div>
+                        </div>
+                        <div class="help-popover" data-help-popover="bm-dec-advanced" hidden>
+                            <strong>Downsampling</strong> — Decodes at a fraction of full resolution (÷2, ÷4, ÷8). Fast path for generating thumbnails from large JXLs without decoding every pixel. 1× = full resolution.
                         </div>
                     </div>
                 </div>
@@ -265,16 +333,6 @@
 
             <div class="graphs-grid">
                 <div class="graph-item">
-                    <div class="graph-container" id="decode-latency-container">
-                        <canvas id="graph-decode-latency"></canvas>
-                        <div class="graph-export-buttons">
-                            <button class="export-btn export-webp" data-chart="decode-latency" title="Export as WebP">WebP</button>
-                            <button class="export-btn export-csv" data-chart="decode-latency" title="Export as CSV">CSV</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="graph-item">
                     <div class="graph-container" id="encode-latency-container">
                         <canvas id="graph-encode-latency"></canvas>
                         <div class="graph-export-buttons">
@@ -282,6 +340,18 @@
                             <button class="export-btn export-csv" data-chart="encode-latency" title="Export as CSV">CSV</button>
                         </div>
                     </div>
+                    <div class="graph-caption">Average encode time by output size and selected encoder settings.</div>
+                </div>
+
+                <div class="graph-item">
+                    <div class="graph-container" id="decode-latency-container">
+                        <canvas id="graph-decode-latency"></canvas>
+                        <div class="graph-export-buttons">
+                            <button class="export-btn export-webp" data-chart="decode-latency" title="Export as WebP">WebP</button>
+                            <button class="export-btn export-csv" data-chart="decode-latency" title="Export as CSV">CSV</button>
+                        </div>
+                    </div>
+                    <div class="graph-caption">Average decode time by output size and selected decoder settings.</div>
                 </div>
 
                 <div class="graph-item">
@@ -292,6 +362,7 @@
                             <button class="export-btn export-csv" data-chart="decode-distribution" title="Export as CSV">CSV</button>
                         </div>
                     </div>
+                    <div class="graph-caption">Per-run decode timings, showing spread and outliers across selected sizes and configs.</div>
                 </div>
 
                 <div class="graph-item">
@@ -302,6 +373,7 @@
                             <button class="export-btn export-csv" data-chart="filesize" title="Export as CSV">CSV</button>
                         </div>
                     </div>
+                    <div class="graph-caption">Encoded JXL file size for each selected output size and quality/effort combination.</div>
                 </div>
             </div>
         </section>
@@ -315,42 +387,46 @@
             </header>
 
             <div class="results-tabs">
-                <button class="results-tab is-active" data-tab="decode-summary" type="button">Decode summary</button>
-                <button class="results-tab" data-tab="encode-summary" type="button">Encode summary</button>
+                <button class="results-tab is-active" data-tab="encode-summary" type="button">Encode summary</button>
+                <button class="results-tab" data-tab="decode-summary" type="button">Decode summary</button>
                 <button class="results-tab" data-tab="encode-detail" type="button">Encode detail</button>
                 <button class="results-tab" data-tab="decode-detail" type="button">Decode detail</button>
                 <button class="results-tab" data-tab="file-size" type="button">File size</button>
             </div>
 
-            <div id="decode-summary" class="results-panel is-active">
-                <table class="results-table">
-                    <thead>
-                        <tr>
-                            <th>Config</th>
-                            <th>Decode (ms)</th>
-                            <th>Note</th>
-                        </tr>
-                    </thead>
-                    <tbody id="decode-summary-body">
-                        <tr>
-                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <div id="encode-summary" class="results-panel">
+            <div id="encode-summary" class="results-panel is-active">
                 <table class="results-table">
                     <thead>
                         <tr>
                             <th>Config</th>
                             <th>Encode (ms)</th>
+                            <th>First chunk avg</th>
+                            <th>Total avg</th>
                             <th>Note</th>
                         </tr>
                     </thead>
                     <tbody id="encode-summary-body">
                         <tr>
-                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
+                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="decode-summary" class="results-panel">
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Config</th>
+                            <th>Decode (ms)</th>
+                            <th>Resize avg</th>
+                            <th>Total avg</th>
+                            <th>Note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="decode-summary-body">
+                        <tr>
+                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -374,7 +450,7 @@
                         <tr>
                             <th>Config</th>
                             <th>File size (KB)</th>
-                            <th>Note</th>
+                            <th>Download</th>
                         </tr>
                     </thead>
                     <tbody id="file-size-body">
@@ -383,86 +459,7 @@
                         </tr>
                     </tbody>
                 </table>
-            </div>
-        </section>
-
-        <section class="progressive-shell">
-            <header class="progressive-header">
-                <p class="eyebrow">Progressive paint test</p>
-                <h2>Per-pass timing and visual quality viewer</h2>
-            </header>
-
-            <div class="progressive-controls">
-                <button id="run-progressive" class="primary-btn" type="button" disabled title="Load files first">Run progressive paint</button>
-
-                <div class="prog-option-group">
-                    <span class="prog-setting-label">Size:</span>
-                    <div class="prog-radio-group">
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="512" /> 512</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1080" checked /> 1080</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="1920" /> 1920</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-size" value="fullsize" /> Full</label>
-                    </div>
-                </div>
-
-                <div class="prog-option-group">
-                    <span class="prog-setting-label">Quality:</span>
-                    <div class="prog-radio-group">
-                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="75" /> 75</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="85" checked /> 85</label>
-                        <label class="prog-radio-btn"><input type="radio" name="prog-quality" value="95" /> 95</label>
-                    </div>
-                </div>
-
-                <label class="toggle-opt">
-                    <input type="checkbox" id="prog-preview-first" />
-                    <span class="opt-label">Preview 1st</span>
-                </label>
-
-                <span class="prog-status" id="prog-status">Load files to begin.</span>
-            </div>
-
-            <div class="viewport-trio" id="viewport-trio">
-                <div class="viewport-item">
-                    <div class="viewport-label">Overview (fit)</div>
-                    <div class="viewport-canvas-wrap">
-                        <canvas id="vp-overview" width="480" height="300" class="viewport-canvas"></canvas>
-                    </div>
-                    <div class="viewport-info" id="vp-overview-info">—</div>
-                </div>
-                <div class="viewport-item">
-                    <div class="viewport-label">1∶1 pixels (center)</div>
-                    <div class="viewport-canvas-wrap">
-                        <canvas id="vp-pixel" width="480" height="300" class="viewport-canvas"></canvas>
-                    </div>
-                    <div class="viewport-info" id="vp-pixel-info">—</div>
-                </div>
-                <div class="viewport-item">
-                    <div class="viewport-label">4× zoom (center)</div>
-                    <div class="viewport-canvas-wrap">
-                        <canvas id="vp-zoom" width="480" height="300" class="viewport-canvas"></canvas>
-                    </div>
-                    <div class="viewport-info" id="vp-zoom-info">—</div>
-                </div>
-            </div>
-
-            <div class="pass-timeline" id="pass-timeline"></div>
-
-            <div class="prog-comparison-wrap">
-                <table class="results-table">
-                    <thead>
-                        <tr>
-                            <th>Mode</th>
-                            <th>Passes</th>
-                            <th>First frame (ms)</th>
-                            <th>Final (ms)</th>
-                            <th>1st-frame speedup</th>
-                        </tr>
-                    </thead>
-                    <tbody id="prog-comparison-body">
-                        <tr><td colspan="5" class="empty-state">Run progressive paint to populate.</td></tr>
-                    </tbody>
-                </table>
+                <div id="jxl-download-list"></div>
             </div>
         </section>
 
@@ -492,5 +489,6 @@
     </main>
 
     <script type="module" src="./jxl-benchmark.js"></script>
+    <script src="./info-popover-init.js"></script>
 </body>
 </html>

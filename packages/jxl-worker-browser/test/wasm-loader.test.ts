@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { loadWasmModule } from "../src/wasm-loader";
+import { describe, test } from "node:test";
+import { loadWasmModule } from "../src/wasm-loader.js";
+import { expect } from "./expect.js";
 
 describe("loadWasmModule", () => {
   test("returns an imported codec facade without fetching wasm bytes", async () => {

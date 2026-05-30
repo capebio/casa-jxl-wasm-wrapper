@@ -33,7 +33,12 @@
             <a class="home-bar-link" href="./index.html">Home</a>
             <a class="home-bar-link is-active" href="./jxl-progressive.html" aria-current="page">Progressive decode</a>
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
-            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Format race</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Settings explorer</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+            <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
         </div>
     </nav>
 
@@ -95,10 +100,18 @@
                             <button id="mode-progressive" class="toggle-btn is-active" type="button" data-decode-mode="progressive" aria-pressed="true">Progressive preview</button>
                         </div>
                         <label class="step-control" for="progressive-steps">
-                            <span>Progressive steps</span>
+                            <span>Source playback steps</span>
                             <input id="progressive-steps" type="range" min="2" max="8" step="1" value="4" />
                             <strong id="progressive-steps-value">4</strong>
                         </label>
+                    </div>
+                    <div class="backend-panel" data-progressive-detail-panel>
+                        <span class="panel-label">Progressive detail</span>
+                        <div class="decode-toggle is-tight" role="group" aria-label="Progressive detail">
+                            <button class="toggle-btn is-active" type="button" data-progressive-detail="dc" aria-pressed="true">DC only</button>
+                            <button class="toggle-btn" type="button" data-progressive-detail="ac" aria-pressed="false">DC + AC</button>
+                        </div>
+                        <p class="panel-note">DC only emits coarse preview passes first. DC + AC allows refinement passes through the full ladder when the encoder path supports it.</p>
                     </div>
                     <div class="backend-panel" data-preview-panel>
                         <span class="panel-label">Progressive preview</span>
@@ -245,7 +258,10 @@
                     <div class="progress-line"><span class="fill"></span></div>
                     <div class="bytes">0 / 0</div>
                     <div class="encode">encode: --</div>
-                    <div class="timings">1/3: -- · 2/3: -- · end: --</div>
+                    <div class="timing-pipeline">
+                        <div class="timing-seg-row" data-timing-seg-row aria-label="Timing pipeline"></div>
+                        <div class="timings" data-timing-meta>Waiting for source.</div>
+                    </div>
                     <div class="notes">Waiting for source.</div>
                 </div>
                 <div class="error-detail">
@@ -267,7 +283,10 @@
                     <div class="progress-line"><span class="fill"></span></div>
                     <div class="bytes">0 / 0</div>
                     <div class="encode">encode: --</div>
-                    <div class="timings">1/3: -- · 2/3: -- · end: --</div>
+                    <div class="timing-pipeline">
+                        <div class="timing-seg-row" data-timing-seg-row aria-label="Timing pipeline"></div>
+                        <div class="timings" data-timing-meta>Waiting for source.</div>
+                    </div>
                     <div class="notes">Waiting for source.</div>
                 </div>
                 <div class="error-detail">
@@ -289,7 +308,10 @@
                     <div class="progress-line"><span class="fill"></span></div>
                     <div class="bytes">0 / 0</div>
                     <div class="encode">encode: --</div>
-                    <div class="timings">1/3: -- · 2/3: -- · end: --</div>
+                    <div class="timing-pipeline">
+                        <div class="timing-seg-row" data-timing-seg-row aria-label="Timing pipeline"></div>
+                        <div class="timings" data-timing-meta>Waiting for source.</div>
+                    </div>
                     <div class="notes">Waiting for source.</div>
                 </div>
                 <div class="error-detail">
@@ -297,6 +319,20 @@
                     <button class="error-copy-btn" type="button">Copy</button>
                 </div>
             </article>
+        </section>
+
+        <section class="backend-race" id="backend-race" aria-label="Backend comparison">
+            <header class="backend-race-header">
+                <div>
+                    <p class="slot-label">Backend race</p>
+                    <h2>jsquash vs libjxl</h2>
+                </div>
+                <button id="race-btn" class="run-btn" type="button" disabled>Run race</button>
+            </header>
+            <p class="backend-race-lede">
+                Encodes and decodes the cached ORF with both backends at 300 px and 800 px — same source, same quality and effort — then surfaces each timing delta so you can see exactly what the optimised wrapper gains.
+            </p>
+            <div id="race-result" class="race-result" hidden></div>
         </section>
 
         <section class="thumb-bench" aria-label="Browser thumb benchmark">

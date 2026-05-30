@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JXL Preset Benchmark</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-preset-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-debug-console.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar" data-mode="preset-benchmark">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+            <a class="home-bar-link is-active" href="./jxl-preset-benchmark.html" aria-current="page">Preset benchmark</a>
+        </div>
+    </nav>
+
+    <main class="shell">
+        <section class="hero compact">
+            <div class="hero-copy">
+                <p class="eyebrow">JXL Preset Benchmark &middot; <span id="mode-status">Idle</span></p>
+                <h1>Preset sweep benchmark</h1>
+            </div>
+            <div class="hero-actions">
+                <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
+            </div>
+        </section>
+
+        <section id="file-intake">
+            <h2>&#9312; File intake</h2>
+            <div id="file-slots" class="file-slots"></div>
+        </section>
+
+        <section id="sweep-settings">
+            <h2>&#9313; Sweep settings</h2>
+            <div id="sweep-settings-body"></div>
+        </section>
+
+        <section id="phase-progress">
+            <h2>&#9314; Phase progress</h2>
+            <div class="phase-cards" id="phase-cards"></div>
+            <div class="live-status" id="live-status" aria-live="polite" aria-atomic="false"></div>
+        </section>
+
+        <section id="phase-graphs">
+            <h2>&#9315; Phase graphs</h2>
+            <div id="phase-graphs-body"></div>
+        </section>
+
+        <section id="results-table">
+            <h2>&#9316; Raw results</h2>
+            <div id="results-table-body"></div>
+        </section>
+
+        <section id="preset-cards">
+            <h2>&#9317; Presets</h2>
+            <div class="preset-cards-grid" id="preset-cards-grid"></div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-preset-benchmark.js"></script>
+</body>
+</html>

@@ -7,7 +7,7 @@ export interface JxlWasmManifest {
 export interface LoaderOptions {
   fetchImpl?: typeof fetch;
   idbFactory?: IDBFactory;
-  nodeFs?: typeof import("node:fs/promises");
+  nodeFs?: { readFile(path: string | URL): Promise<Uint8Array> };
   cacheDbName?: string;
   wasmUrl?: string;
 }
@@ -29,9 +29,7 @@ async function loadNodeModule(manifest: JxlWasmManifest, options: LoaderOptions)
   const fs = options.nodeFs ?? (await import("node:fs/promises"));
   const wasmUrl = options.wasmUrl ?? manifest.wasmUrl;
   const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""));
-  // fs.readFile returns Buffer (Uint8Array<ArrayBufferLike>) but WebAssembly.compile
-  // requires BufferSource. Copy into a plain ArrayBuffer to satisfy strict TS lib types.
-  return WebAssembly.compile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+  return WebAssembly.compile(bytes as BufferSource);
 }
 
 async function loadBrowserModule(manifest: JxlWasmManifest, options: LoaderOptions): Promise<WebAssembly.Module> {
@@ -55,7 +53,7 @@ async function loadBrowserModule(manifest: JxlWasmManifest, options: LoaderOptio
 async function compileFromResponse(response: Response): Promise<WebAssembly.Module> {
   if ("compileStreaming" in WebAssembly && response.body) {
     try {
-      return await WebAssembly.compileStreaming(Promise.resolve(response.clone()));
+      return await WebAssembly.compileStreaming(response.clone());
     } catch {
       // Fall back to bytes for platforms that advertise streaming but reject the response shape.
     }

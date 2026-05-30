@@ -1,2 +1,6 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
+
+[env]
+LLVMInstallDir = "C:/Program Files/LLVM"
+LLVMToolsVersion = "22"

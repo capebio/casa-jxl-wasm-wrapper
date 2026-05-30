@@ -2,6 +2,7 @@
 // EncodeSession implementation. Routes through jxl-scheduler to a worker.
 // Spec: Sections 5, 11, 16.2.
 import { JxlError } from "@casabio/jxl-core/errors";
+import { recommendedEffort } from "@casabio/jxl-capabilities";
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer } from "./util.js";
 const KNOWN_JXL_ERROR_CODES = new Set([
@@ -27,6 +28,7 @@ export class EncodeSessionImpl {
     abortHandler;
     finished = false;
     terminated = false;
+    totalBytesWritten = null;
     constructor(scheduler, opts) {
         this.scheduler = scheduler;
         this.opts = opts;
@@ -48,12 +50,14 @@ export class EncodeSessionImpl {
             xmp: opts.xmp != null ? toTransferableBuffer(opts.xmp) : null,
             distance,
             quality,
-            effort: opts.effort ?? 4,
+            effort: opts.effort ?? recommendedEffort(),
             progressive: opts.progressive ?? false,
             previewFirst: opts.previewFirst ?? false,
             chunked: opts.chunked ?? false,
             priority: opts.priority ?? "visible",
         };
+        if (opts.sidecarSizes !== undefined)
+            startMsg.sidecarSizes = opts.sidecarSizes;
         // No-op catch so a rejected done() promise with no caller handler (caller
         // used only chunks()) does not surface as an unhandledRejection.
         void this.doneDeferred.promise.catch(() => undefined);
@@ -120,6 +124,14 @@ export class EncodeSessionImpl {
     done() {
         return this.doneDeferred.promise;
     }
+    getStats() {
+        if (this.totalBytesWritten === null)
+            return null;
+        const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : 16;
+        const originalBytes = this.opts.width * this.opts.height * bpp;
+        const compressedBytes = this.totalBytesWritten;
+        return { originalBytes, compressedBytes, ratio: compressedBytes / originalBytes };
+    }
     async cancel(reason) {
         if (this.terminated)
             return;
@@ -141,14 +153,13 @@ export class EncodeSessionImpl {
                 break;
             case "encode_first_byte_ready":
                 // Informational only; time_to_first_byte_ms arrives via a metric message.
+                if (msg.sessionId !== this.id)
+                    return;
                 break;
             case "encode_done":
                 if (msg.sessionId !== this.id)
                     return;
-                this.chunkStream.end();
-                this.doneDeferred.resolve(msg.totalBytes);
-                this.terminated = true;
-                this.cleanup();
+                this.complete(msg.totalBytes);
                 break;
             case "encode_error": {
                 if (msg.sessionId !== this.id)
@@ -176,6 +187,18 @@ export class EncodeSessionImpl {
     cleanup() {
         if (this.abortSignal !== null && this.abortHandler !== null) {
             this.abortSignal.removeEventListener("abort", this.abortHandler);
+        }
+    }
+    // Normal completion: chunk stream ends gracefully, done() resolves.
+    complete(totalBytes) {
+        if (this.terminated)
+            return;
+        this.terminated = true;
+        this.totalBytesWritten = totalBytes;
+        this.cleanup();
+        this.chunkStream.end();
+        if (!this.doneDeferred.settled) {
+            this.doneDeferred.resolve(totalBytes);
         }
     }
     terminate(err) {

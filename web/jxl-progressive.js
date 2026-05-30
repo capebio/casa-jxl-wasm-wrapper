@@ -20,6 +20,7 @@ const modeButtons = [...document.querySelectorAll('[data-decode-mode]')];
 const encodeBackendButtons = [...document.querySelectorAll('[data-encode-backend]')];
 const decodeBackendButtons = [...document.querySelectorAll('[data-decode-backend]')];
 const previewModeButtons = [...document.querySelectorAll('[data-preview-mode]')];
+const progressiveDetailButtons = [...document.querySelectorAll('[data-progressive-detail]')];
 const thumbBenchRunBtn = document.getElementById('thumb-bench-run');
 const thumbBenchConcurrencyInput = document.getElementById('thumb-bench-concurrency');
 const thumbBenchConcurrencyValue = document.getElementById('thumb-bench-concurrency-value');
@@ -53,6 +54,9 @@ const progressiveControlsClose = document.getElementById('progressive-controls-c
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
 const statusText = document.getElementById('status-text');
 const sourceMeta = document.getElementById('source-meta');
+const raceBtn = document.getElementById('race-btn');
+const raceResult = document.getElementById('race-result');
+
 const cards = [...document.querySelectorAll('.card')].map((card) => ({
     el: card,
     slot: card.dataset.slot,
@@ -61,6 +65,7 @@ const cards = [...document.querySelectorAll('.card')].map((card) => ({
     bytes: card.querySelector('.bytes'),
     encode: card.querySelector('.encode'),
     timings: card.querySelector('.timings'),
+    timingSegRow: card.querySelector('[data-timing-seg-row]'),
     notes: card.querySelector('.notes'),
     badge: card.querySelector('.badge'),
     defaultBadge: card.querySelector('.badge').textContent,
@@ -92,10 +97,12 @@ const TARGETS = [
     { slot: 'full', label: 'Full size', longEdge: null, badge: 'reference' },
 ];
 const INITIAL_PREVIEW_LONG_EDGE = 1200;
+const THUMB_BENCH_DECODE_PRIORITY = 'near';
 
 let activeRunId = 0;
 let decodeMode = 'progressive';
 let previewMode = 'stream';
+let progressiveDetail = 'dc';
 let thumbBenchRunId = 0;
 let thumbBenchConcurrency = Number(thumbBenchConcurrencyInput?.value) || 4;
 let thumbBenchProgressive = true;
@@ -154,6 +161,52 @@ function setThumbBenchSettings(text) {
 
 function fmtTiming(ms) {
     return ms == null ? '--' : `${ms.toFixed(0)} ms`;
+}
+
+// ── timing pipeline bar ───────────────────────────────────────────
+const TIMING_PHASES = [
+    { key: 'loadMs',   label: 'Load', color: '#f59e0b' },
+    { key: 'encodeMs', label: 'Enc',  color: '#34d399' },
+    { key: 'decodeMs', label: 'Dec',  color: '#7dd3fc' },
+];
+
+function renderTimingBar(card) {
+    const row = card.timingSegRow;
+    if (!row) return;
+
+    const phases = TIMING_PHASES
+        .map((p) => ({ ...p, ms: card[p.key] }))
+        .filter((p) => p.ms != null && p.ms > 0);
+
+    const sum = phases.reduce((acc, p) => acc + p.ms, 0);
+    const norm = sum > 0 ? sum : 1;
+
+    row.innerHTML = '';
+
+    if (!phases.length) {
+        const empty = document.createElement('div');
+        empty.className = 'timing-seg-empty';
+        empty.textContent = 'no data';
+        row.appendChild(empty);
+        return;
+    }
+
+    for (const phase of phases) {
+        const pct = Math.max(4, (phase.ms / norm) * 100).toFixed(1);
+        const el = document.createElement('div');
+        el.className = 'timing-seg is-visible';
+        el.style.cssText = `--pct:${pct}%; --seg-color:${phase.color}`;
+        el.title = `${phase.label}: ${phase.ms.toFixed(0)} ms`;
+        const label = document.createElement('span');
+        label.className = 'timing-seg-label';
+        label.textContent = phase.label;
+        const ms = document.createElement('span');
+        ms.className = 'timing-seg-ms';
+        ms.textContent = `${phase.ms.toFixed(0)}`;
+        el.appendChild(label);
+        el.appendChild(ms);
+        row.appendChild(el);
+    }
 }
 
 function formatProgressiveTimings(timings = {}, live = {}) {
@@ -219,6 +272,7 @@ function resetCard(card, note = 'Waiting for source.') {
     card.canvas.width = 16;
     card.canvas.height = 16;
     ctx.clearRect(0, 0, card.canvas.width, card.canvas.height);
+    renderTimingBar(card);
 }
 
 function resetAllCards() {
@@ -239,6 +293,15 @@ function getProgressiveStepCount() {
 
 function syncProgressiveStepLabel() {
     progressiveStepsValue.textContent = String(getProgressiveStepCount());
+}
+
+function setProgressiveDetail(detail) {
+    progressiveDetail = detail === 'ac' ? 'ac' : 'dc';
+    for (const button of progressiveDetailButtons) {
+        const active = button.dataset.progressiveDetail === progressiveDetail;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
 }
 
 function setDecodeMode(mode) {
@@ -670,7 +733,7 @@ async function encodeJxlWithSession(
     height,
     quality = 90,
     effort = 3,
-    { lossless = false, progressive = true, previewFirst = transportPreviewFirst, chunked = transportChunked } = {},
+    { lossless = false, progressive = true, progressiveFlavor = progressiveDetail, previewFirst = transportPreviewFirst, chunked = transportChunked } = {},
 ) {
     const t0 = performance.now();
     const session = getContext().encode({
@@ -682,6 +745,7 @@ async function encodeJxlWithSession(
         quality: lossless ? null : quality,
         effort,
         progressive,
+        ...(progressive ? { progressiveFlavor } : {}),
         previewFirst,
         chunked,
         priority: 'visible',
@@ -749,7 +813,7 @@ async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, streamOp
             await session.cancel('decode superseded').catch(() => {});
             throw new Error('decode superseded');
         }
-        const buf = chunk instanceof ArrayBuffer ? chunk : chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+        const buf = chunk instanceof ArrayBuffer ? chunk : chunk.buffer;
         await session.push(buf);
     }, { pacingMs, chunkSize, iterations }).then(async (streamedResult) => {
         await session.close();
@@ -1098,7 +1162,7 @@ async function runThumbBenchSize(size, sources, runId, encodeBackend, decodeBack
 
                 const decodeStart = performance.now();
                 const decoded = await (decodeBackend === 'libjxl'
-                    ? decodeJxlFinalSession(encoded.jxl, 'background')
+                    ? decodeJxlFinalSession(encoded.jxl, THUMB_BENCH_DECODE_PRIORITY)
                     : decodeJxlFinal(lane.decode, encoded.jxl));
                 const decodeMs = performance.now() - decodeStart;
 
@@ -1353,6 +1417,7 @@ async function runVariant(source, target, runId) {
         firstPieceMs: card.firstPieceMs,
         firstPaintMs: card._firstPaintMs,
     });
+    renderTimingBar(card);
 
     card.el.dataset.state = 'streaming';
     card.notes.textContent = `Streaming JXL bytes for ${target.label}.`;
@@ -1395,15 +1460,17 @@ async function runVariant(source, target, runId) {
         card.fill.style.width = '100%';
         card.bytes.textContent = `${fmtBytes(jxlBytes.byteLength)} / ${fmtBytes(jxlBytes.byteLength)}`;
         card.firstPieceMs = streamedResult.firstChunkMs ?? card.firstPieceMs;
+        card.decodeMs = performance.now() - decodeStart;
         card.timings.textContent = `${formatProgressiveTimings({
             loadMs: card.loadMs,
             encodeMs: card.encodeMs,
             firstPieceMs: card.firstPieceMs,
             firstPaintMs: card._firstPaintMs,
-            decodeMs: performance.now() - decodeStart,
+            decodeMs: card.decodeMs,
             totalMs: performance.now() - card._timingStartedAt,
         })} | stream 1/3 ${fmtTiming(streamedResult.times[0])} | 2/3 ${fmtTiming(streamedResult.times[1])} | end ${fmtTiming(streamedResult.times[2])}`;
-        card.notes.textContent = `Decoded ${decoded.w}x${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+        card.notes.textContent = `Decoded ${decoded.w}x${decoded.h} in ${card.decodeMs.toFixed(0)} ms.`;
+        renderTimingBar(card);
         return;
     }
 
@@ -1439,7 +1506,8 @@ async function runVariant(source, target, runId) {
         decodeMs: card.decodeMs,
         totalMs: performance.now() - card._timingStartedAt,
     })} | stream 1/3 ${fmtTiming(streamedResult.times[0])} | 2/3 ${fmtTiming(streamedResult.times[1])} | end ${fmtTiming(streamedResult.times[2])}`;
-    card.notes.textContent = `Decoded ${decoded.w}x${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+    card.notes.textContent = `Decoded ${decoded.w}x${decoded.h} in ${card.decodeMs.toFixed(0)} ms.`;
+    renderTimingBar(card);
 }
 
 async function replayDecodeCard(card, runId) {
@@ -1450,13 +1518,9 @@ async function replayDecodeCard(card, runId) {
     const targetDims = card._targetDims || { width: card.canvas.width, height: card.canvas.height };
     const canShowSourcePlayback = mode === 'progressive' && card._source && (progressivePreview === 'source' || decodeBackend === 'jsquash');
     dbgLog(`▶ replay ${card.slot}`, `${fmtBytes(card._jxlBytes.byteLength)} jxl · mode ${mode} · preview ${progressivePreview} · dec ${decodeBackend}`);
-    if (canShowSourcePlayback) {
-        startPreviewPlayback(card, card._source, targetDims, getProgressiveStepCount(), runId);
-    } else {
-        stopPreviewPlayback(card);
-        card._previewFrames = null;
-        card._previewStep = -1;
-    }
+    stopPreviewPlayback(card);
+    card._previewFrames = null;
+    card._previewStep = -1;
     const decodeWorker = decodeBackend !== 'libjxl' ? getWorker('decode', decodeBackend, card.slot) : null;
     card.el.dataset.state = 'replaying';
     card.fill.style.width = '0%';
@@ -1485,6 +1549,7 @@ async function replayDecodeCard(card, runId) {
 
     const decodeStart = performance.now();
     if (mode === 'progressive' && canShowSourcePlayback) {
+        startPreviewPlayback(card, card._source, targetDims, getProgressiveStepCount(), runId);
         card.notes.textContent = `Progressive preview enabled (${card._previewFrames.length} steps).`;
     }
     else {
@@ -1532,7 +1597,8 @@ async function replayDecodeCard(card, runId) {
             totalMs: performance.now() - card._timingStartedAt,
         })} · stream 1/3 ${fmtTiming(streamedResult.times[0])} · 2/3 ${fmtTiming(streamedResult.times[1])} · end ${fmtTiming(streamedResult.times[2])}`;
         dbgLog(`  replay ← ${card.slot}`, `${decoded.w}x${decoded.h} · ${fmtTiming(card.decodeMs)} · stream 1/3 ${fmtTiming(streamedResult.times[0])} · 2/3 ${fmtTiming(streamedResult.times[1])} · end ${fmtTiming(streamedResult.times[2])}`, 'ok');
-        card.notes.textContent = `Replay decode: ${decoded.w}x${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+        card.notes.textContent = `Replay decode: ${decoded.w}x${decoded.h} in ${card.decodeMs.toFixed(0)} ms.`;
+        renderTimingBar(card);
         return;
     }
 
@@ -1560,15 +1626,170 @@ async function replayDecodeCard(card, runId) {
         totalMs: performance.now() - card._timingStartedAt,
     })} · stream 1/3 ${fmtTiming(streamedResult.times[0])} · 2/3 ${fmtTiming(streamedResult.times[1])} · end ${fmtTiming(streamedResult.times[2])}`;
     dbgLog(`  replay ← ${card.slot}`, `${decoded.w}x${decoded.h} · ${fmtTiming(card.decodeMs)} · stream 1/3 ${fmtTiming(streamedResult.times[0])} · 2/3 ${fmtTiming(streamedResult.times[1])} · end ${fmtTiming(streamedResult.times[2])}`, 'ok');
-    card.notes.textContent = `Replay decode: ${decoded.w}x${decoded.h} in ${(performance.now() - decodeStart).toFixed(0)} ms.`;
+    card.notes.textContent = `Replay decode: ${decoded.w}x${decoded.h} in ${card.decodeMs.toFixed(0)} ms.`;
+    renderTimingBar(card);
+}
+
+// ── backend race ─────────────────────────────────────────────────
+async function runBackendRace() {
+    if (!session.source) return;
+    if (raceBtn) raceBtn.disabled = true;
+    if (raceResult) {
+        raceResult.hidden = false;
+        raceResult.innerHTML = '<div class="race-loading">Running decode race… encoding once with libjxl, then decoding with each backend.</div>';
+    }
+
+    const source = session.source;
+    const sizes = [300, 800];
+    const blocks = [];
+
+    try {
+        for (const longEdge of sizes) {
+            const targetDims = sizeForLongEdge(source.width, source.height, longEdge);
+            let rgba;
+            if (targetDims.width === source.width && targetDims.height === source.height) {
+                rgba = source.rgba.slice();
+            } else {
+                const downRgb = downscale_rgb(source.rgb, source.width, source.height, targetDims.width, targetDims.height);
+                rgba = rgb_to_rgba(downRgb);
+            }
+
+            // Encode once (libjxl, no progressive so decode is apples-to-apples)
+            const encStart = performance.now();
+            const encoded = await encodeJxlWithSession(
+                new Uint8Array(rgba.buffer.slice(0)),
+                targetDims.width, targetDims.height,
+                90, 3,
+                { progressive: false, previewFirst: false, chunked: false },
+            );
+            const encodeMs = performance.now() - encStart;
+            const fileSize = encoded.jxl.byteLength;
+
+            // Decode with jsquash worker
+            const jsquashWorker = getWorker('decode', 'jsquash', `race-jsquash-${longEdge}`);
+            const decJsqStart = performance.now();
+            await decodeJxlFinal(jsquashWorker, encoded.jxl.slice());
+            const decodeJsqMs = performance.now() - decJsqStart;
+
+            // Decode with libjxl session (progressive decode)
+            const decLibStart = performance.now();
+            await decodeJxlFinalSession(encoded.jxl.slice(), 'visible');
+            const decodeLibMs = performance.now() - decLibStart;
+
+            blocks.push({
+                longEdge, dims: targetDims, encodeMs, fileSize,
+                jsquash: { decodeMs: decodeJsqMs, totalMs: encodeMs + decodeJsqMs },
+                libjxl:  { decodeMs: decodeLibMs, totalMs: encodeMs + decodeLibMs },
+            });
+        }
+
+        renderRaceResult(blocks);
+    } catch (err) {
+        if (raceResult) raceResult.innerHTML = `<div class="race-loading" style="color:#f87171">Race failed: ${err?.message || err}</div>`;
+    } finally {
+        if (raceBtn) raceBtn.disabled = false;
+    }
+}
+
+function renderRaceResult(blocks) {
+    if (!raceResult) return;
+    const grid = document.createElement('div');
+    grid.className = 'race-grid';
+
+    for (const block of blocks) {
+        const { longEdge, dims, encodeMs, fileSize, jsquash, libjxl } = block;
+        const libFaster = libjxl.decodeMs < jsquash.decodeMs;
+        const jsqFaster = jsquash.decodeMs < libjxl.decodeMs;
+        const maxDec = Math.max(jsquash.decodeMs, libjxl.decodeMs, 1);
+        const deltaMs = jsquash.decodeMs - libjxl.decodeMs;
+        const deltaPct = Math.abs(deltaMs / Math.max(jsquash.decodeMs, 1) * 100).toFixed(0);
+        const deltaStr = libFaster
+            ? `libjxl decodes ${deltaMs.toFixed(0)} ms faster (${deltaPct}%)`
+            : jsqFaster
+                ? `jsquash decodes ${(-deltaMs).toFixed(0)} ms faster (${deltaPct}%)`
+                : 'identical';
+
+        const blockEl = document.createElement('div');
+        blockEl.className = 'race-block';
+        blockEl.innerHTML = `
+            <div class="race-block-title">${longEdge} long · ${dims.width}×${dims.height} · ${fmtBytes(fileSize)}</div>
+            <div class="race-cols">
+                <div class="race-col-head">Metric</div>
+                <div class="race-col-head" style="text-align:right">jsquash</div>
+                <div class="race-col-head" style="text-align:right">libjxl</div>
+
+                <div class="race-metric-label">Encode (shared)</div>
+                <div class="race-metric-val" style="text-align:right;color:var(--muted)">${encodeMs.toFixed(0)} ms</div>
+                <div class="race-metric-val" style="text-align:right;color:var(--muted)">${encodeMs.toFixed(0)} ms</div>
+
+                <div class="race-metric-label">Decode</div>
+                <div class="race-metric-val${jsqFaster ? ' is-winner' : ''}" style="text-align:right">${jsquash.decodeMs.toFixed(0)} ms</div>
+                <div class="race-metric-val${libFaster ? ' is-winner' : ''}" style="text-align:right">${libjxl.decodeMs.toFixed(0)} ms</div>
+
+                <div class="race-metric-label">Total pipeline</div>
+                <div class="race-metric-val" style="text-align:right">${jsquash.totalMs.toFixed(0)} ms</div>
+                <div class="race-metric-val${libFaster ? ' is-winner' : ''}" style="text-align:right">${libjxl.totalMs.toFixed(0)} ms</div>
+            </div>
+            <div class="race-bars">
+                <div class="race-bar-row">
+                    <div class="race-bar-label">Enc</div>
+                    <div class="race-bar-wrap">
+                        <div class="race-bar-name">shared</div>
+                        <div class="race-bar-track"><div class="race-bar-fill" style="--w:100%;--bar-color:#34d399"><span class="race-bar-fill-label">${encodeMs.toFixed(0)} ms</span></div></div>
+                    </div>
+                    <div></div>
+                </div>
+                <div class="race-bar-row">
+                    <div class="race-bar-label">Dec</div>
+                    <div class="race-bar-wrap">
+                        <div class="race-bar-name">jsquash</div>
+                        <div class="race-bar-track"><div class="race-bar-fill" style="--w:${(jsquash.decodeMs / maxDec * 100).toFixed(1)}%;--bar-color:#f59e0b"><span class="race-bar-fill-label">${jsquash.decodeMs.toFixed(0)} ms</span></div></div>
+                    </div>
+                    <div class="race-bar-wrap">
+                        <div class="race-bar-name">libjxl</div>
+                        <div class="race-bar-track"><div class="race-bar-fill" style="--w:${(libjxl.decodeMs / maxDec * 100).toFixed(1)}%;--bar-color:#7dd3fc"><span class="race-bar-fill-label">${libjxl.decodeMs.toFixed(0)} ms</span></div></div>
+                    </div>
+                </div>
+            </div>
+            <div style="margin-top:4px;font-size:10px;color:${libFaster ? 'var(--emerald)' : jsqFaster ? '#f87171' : 'var(--muted)'};font-family:monospace">${deltaStr}</div>
+        `;
+        grid.appendChild(blockEl);
+    }
+
+    raceResult.innerHTML = '';
+    raceResult.appendChild(grid);
+}
+
+function wireRaceBtn() {
+    if (!raceBtn) return;
+    raceBtn.addEventListener('click', () => {
+        runBackendRace().catch((err) => {
+            if (raceResult) raceResult.innerHTML = `<div class="race-loading" style="color:#f87171">Race error: ${err?.message || err}</div>`;
+            if (raceBtn) raceBtn.disabled = false;
+        });
+    });
 }
 
 function wireModeControls() {
     syncProgressiveStepLabel();
     setDecodeMode(decodeMode);
+    setProgressiveDetail(progressiveDetail);
     for (const button of modeButtons) {
         button.addEventListener('click', () => {
             setDecodeMode(button.dataset.decodeMode);
+        });
+    }
+    for (const button of progressiveDetailButtons) {
+        button.addEventListener('click', () => {
+            const next = button.dataset.progressiveDetail;
+            if (next === progressiveDetail) return;
+            setProgressiveDetail(next);
+            setStatus(`Progressive detail set to ${progressiveDetail.toUpperCase()}. Re-running the same source file.`);
+            if (session.source) {
+                runLadder().catch((error) => {
+                    setStatus(`Failed: ${error?.message || error}`);
+                });
+            }
         });
     }
     progressiveStepsInput.addEventListener('input', () => {
@@ -1704,7 +1925,7 @@ async function runLadder() {
         const source = await session.ensureSource();
         if (runId !== activeRunId) return;
         setSourceMeta(source.meta);
-        setStatus(`Source ready. Building three JXL variants with enc ${session.encodeBackend} / dec ${session.decodeBackend}.`);
+        setStatus(`Source ready. Building three JXL variants with enc ${session.encodeBackend} / dec ${session.decodeBackend} / prog ${progressiveDetail.toUpperCase()}.`);
         for (const card of cards) {
             card.notes.textContent = `${source.label}`;
             const ctx = card.canvas.getContext('2d');
@@ -1725,6 +1946,7 @@ async function runLadder() {
         if (runId !== activeRunId) return;
         setStatus('Done. Smaller variants should establish the subject first.');
         replayBtn.disabled = false;
+        if (raceBtn) raceBtn.disabled = false;
     } catch (error) {
         if (runId !== activeRunId) return;
         setStatus(`Failed: ${error?.message || error}`);
@@ -1787,6 +2009,7 @@ wireModeControls();
 wireBackendControls();
 wirePreviewControls();
 wireThumbBenchControls();
+wireRaceBtn();
 setThumbBenchStatus('Idle.');
 refreshThumbBenchSummary();
 runLadder().catch((error) => {

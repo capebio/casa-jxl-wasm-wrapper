@@ -57,5 +57,9 @@ export function makeDecodeStart(sessionId: string, priority: "visible" | "near" 
     preserveMetadata: true,
     priority,
     budgetMs: null,
+    progressiveDetail: null,
+    targetWidth: null,
+    targetHeight: null,
+    fitMode: null,
   };
 }

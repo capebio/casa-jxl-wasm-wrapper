@@ -15,6 +15,7 @@ export declare class PriorityQueue<T> {
     get size(): number;
     get isEmpty(): boolean;
     backgroundIds(): string[];
+    findBySessionId(sessionId: string): QueueEntry<T> | null;
     private lane;
 }
 //# sourceMappingURL=queue.d.ts.map

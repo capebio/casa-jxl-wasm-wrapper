@@ -44,15 +44,15 @@ describe("Scheduler preemption", () => {
       signal: null,
     }).then((r) => { visibleResolved = true; return r; });
 
-    // Simulate: worker receives decode_cancel and responds with decode_cancelled.
-    // The scheduler sends decode_cancel first.
+    // Simulate: worker receives decode_pause and responds with decode_paused.
+    // The scheduler pauses decode victims first so state can resume later.
     await new Promise<void>((res) => setTimeout(res, 10));
 
-    const cancelMsg = bgWorker.messages.find((m) => m.type === "decode_cancel" && m.sessionId === "bg-1");
-    assert.ok(cancelMsg !== undefined, "scheduler sent decode_cancel to background session");
+    const pauseMsg = bgWorker.messages.find((m) => m.type === "decode_pause" && m.sessionId === "bg-1");
+    assert.ok(pauseMsg !== undefined, "scheduler sent decode_pause to background session");
 
-    // Emit decode_cancelled so scheduler knows preemption complete.
-    bgWorker.emit({ type: "decode_cancelled", sessionId: "bg-1" });
+    // Emit decode_paused so scheduler knows preemption complete.
+    bgWorker.emit({ type: "decode_paused", sessionId: "bg-1" });
 
     await new Promise<void>((res) => setTimeout(res, 10));
     assert.ok(visibleResolved, "visible session acquired slot after preemption");

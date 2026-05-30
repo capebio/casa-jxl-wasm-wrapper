@@ -1,1 +1,45 @@
 .worktrees/
+.epiccodereview/
+tmp/
+**/__pycache__/
+
+# ============================================================================
+# Build artifacts, dependencies, and runtime profiles
+# (These were accidentally committed in the past; this .gitignore + rm --cached
+#  cleans the index so future merges and clones stay lean.)
+# ============================================================================
+
+# JS / monorepo dependencies (workspaces populate these)
+node_modules/
+
+# Rust build artifacts (Cargo target dir)
+target/
+
+# Temporary / scratch (already partially ignored; ensure all)
+tmp/
+
+# Browser / test automation profiles (Playwright, CDP, persistent contexts)
+bun-chrome-*/
+node-cdp-*/
+bun-persistent-*/
+
+# Agent / review / automation worktrees and scratch
+.claude/worktrees/
+.epiccodereview/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs and error dumps
+*.log
+debug.log
+build errors*.log
+build errors.run.log
+
+# Python
+**/__pycache__/
+*.py[cod]
+*$py.class

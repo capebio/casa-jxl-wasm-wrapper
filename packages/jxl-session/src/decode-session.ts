@@ -18,7 +18,8 @@ import { deferred, newSessionId, toTransferableBuffer, type Deferred } from "./u
 
 const KNOWN_JXL_ERROR_CODES: ReadonlySet<string> = new Set([
   "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
-  "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError", "Internal",
+  "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError",
+  "QueueOverflow", "Internal",
 ]);
 
 export class DecodeSessionImpl implements DecodeSession {
@@ -50,10 +51,14 @@ export class DecodeSessionImpl implements DecodeSession {
       downsample: opts.downsample ?? 1,
       progressionTarget: opts.progressionTarget ?? "final",
       emitEveryPass: opts.emitEveryPass ?? true,
+      progressiveDetail: opts.progressiveDetail ?? null,
       preserveIcc: opts.preserveIcc ?? true,
       preserveMetadata: opts.preserveMetadata ?? true,
       priority: opts.priority ?? "visible",
       budgetMs: opts.budgetMs ?? null,
+      targetWidth: opts.targetWidth ?? null,
+      targetHeight: opts.targetHeight ?? null,
+      fitMode: opts.fitMode ?? null,
     };
 
     // A caller may use only frames() and never call done(). Attach a no-op
@@ -190,9 +195,10 @@ export class DecodeSessionImpl implements DecodeSession {
           format: msg.format,
           pixelStride: msg.pixelStride,
         };
+        if (msg.region !== undefined) ev.region = msg.region;
         this.frameStream.push(ev);
         this.finishWithError(
-          new JxlError("BudgetExceeded", "Per-stage budget exceeded", {
+          new JxlError("BudgetExceeded", "Session budget exceeded", {
             sessionId: this.id,
             partial: ev,
           }),
@@ -206,11 +212,11 @@ export class DecodeSessionImpl implements DecodeSession {
         let partial: DecodeFrameEvent | undefined;
         if (code === "TruncatedStream" && msg.partialPixels !== undefined && msg.partialInfo !== undefined) {
           partial = {
-            stage: "pass",
+            stage: msg.partialStage ?? "pass",
             info: msg.partialInfo,
             pixels: msg.partialPixels,
             format: this.opts.format,
-            pixelStride: 0,
+            pixelStride: msg.partialPixelStride ?? 0,
           };
         }
         const err = new JxlError(code, msg.message, {

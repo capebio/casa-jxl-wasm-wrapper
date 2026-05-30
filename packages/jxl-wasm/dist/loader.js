@@ -13,9 +13,7 @@ async function loadNodeModule(manifest, options) {
     const fs = options.nodeFs ?? (await import("node:fs/promises"));
     const wasmUrl = options.wasmUrl ?? manifest.wasmUrl;
     const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""));
-    // fs.readFile returns Buffer (Uint8Array<ArrayBufferLike>) but WebAssembly.compile
-    // requires BufferSource. Copy into a plain ArrayBuffer to satisfy strict TS lib types.
-    return WebAssembly.compile(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    return WebAssembly.compile(bytes);
 }
 async function loadBrowserModule(manifest, options) {
     const key = `${manifest.buildId}:${manifest.wasmSha}`;
@@ -36,7 +34,7 @@ async function loadBrowserModule(manifest, options) {
 async function compileFromResponse(response) {
     if ("compileStreaming" in WebAssembly && response.body) {
         try {
-            return await WebAssembly.compileStreaming(Promise.resolve(response.clone()));
+            return await WebAssembly.compileStreaming(response.clone());
         }
         catch {
             // Fall back to bytes for platforms that advertise streaming but reject the response shape.

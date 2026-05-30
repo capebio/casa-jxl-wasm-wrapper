@@ -26,14 +26,19 @@
     }
     </script>
 </head>
-<body class="has-home-bar" data-mode="existing">
+<body class="has-home-bar" data-mode="race">
     <nav class="home-bar" aria-label="Test pages">
         <div class="home-bar-label">Test pages</div>
         <div class="home-bar-links">
             <a class="home-bar-link" href="./index.html">Home</a>
             <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
             <a class="home-bar-link is-active" href="./jxl-wrapper-lab.html" aria-current="page">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+            <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
         </div>
     </nav>
 
@@ -41,44 +46,382 @@
         <section class="hero compact">
             <div class="hero-copy">
                 <p class="eyebrow">JPEG XL wrapper lab &middot; <span id="mode-status">Drag Race</span></p>
-                <h1>JPEG XL wrapper and compare test lab</h1>
+                <h1>JPEG XL wrapper test lab</h1>
                 <p class="lede">
-                    Compare JXL, WEBP, and JPEG performance in a drag-race track. Overlapping cards show relative paint positions.
+                    Compare JXL, WEBP, and JPEG performance in a drag-race track. Race formats are exclusive per run so the result stays readable.
                 </p>
                 <p class="lede">
-                    Session worker routes JPEG XL through the browser session stack: context, scheduler, and worker messaging before the codec runs. Direct wrapper calls the wrapper facade straight against libjxl wasm with no session layer in between. Compare mode runs both paths on the same prepared thumbnail so you can see whether overhead comes from the session plumbing or the codec itself.
+                    Session worker routes JPEG XL through the browser session stack: context, scheduler, and worker messaging before the codec runs. Direct wrapper calls the wrapper facade straight against libjxl wasm with no session layer in between.
                 </p>
                 <p class="lede">
                     Batch tiles encode and decode resized thumbnails, not full-size source frames. The console shows both the original source dimensions and the smaller working size used for each tile, so thumbnail timings are not mistaken for full-resolution timings.
                 </p>
-            </div>
 
-            <div class="hero-actions">
-                <div class="mode-switch" role="group" aria-label="Test mode">
-                    <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
-                    <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
-                    <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
-                    <button class="mode-btn" type="button" data-mode="compare" aria-pressed="false">Compare</button>
+                <div class="inline-spinners">
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Concurrency <button class="info-btn" type="button" data-help-target="wl-concurrency" aria-label="Concurrency info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-concurrency">&#8722;</button>
+                            <input id="batch-concurrency" type="number" min="1" max="16" step="1" value="6" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-concurrency">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-concurrency" hidden>
+                            Parallel worker threads processing images simultaneously. Match to your core count for maximum throughput. Lower values isolate sequential baseline latency.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Quality <button class="info-btn" type="button" data-help-target="wl-quality" aria-label="Quality info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-quality">&#8722;</button>
+                            <input id="batch-quality" type="number" min="50" max="100" step="5" value="90" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-quality">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-quality" hidden>
+                            JXL encode quality (50–100). Higher = better fidelity, larger file, slightly slower decode. 85–90 is visually lossless for photographic content.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Effort <button class="info-btn" type="button" data-help-target="wl-effort" aria-label="Effort info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-effort">&#8722;</button>
+                            <input id="batch-effort" type="number" min="1" max="9" step="1" value="3" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-effort">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-effort" hidden>
+                            Encode effort (1–9). Controls encoder search depth for compression efficiency. Higher = smaller files, much slower encode. Does not affect decode speed or visual quality.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Photon noise ISO <button class="info-btn" type="button" data-help-target="wl-photon-noise" aria-label="Photon noise ISO info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-photon-noise-iso">&#8722;</button>
+                            <input id="batch-photon-noise-iso" type="number" min="0" max="51200" step="400" value="0" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-photon-noise-iso">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-photon-noise" hidden>
+                            Synthetic photon noise target ISO. 0 = off. Try 800, 1600, 3200, or 6400 to add natural signal-dependent grain during encode.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Resampling <button class="info-btn" type="button" data-help-target="wl-resampling" aria-label="Resampling info">i</button></span>
+                        <div class="preset-group" role="radiogroup" aria-label="JXL encoder resampling factor">
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="1" checked /> <span>1x</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="2" /> <span>2x</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="4" /> <span>4x</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-resampling" value="8" /> <span>8x</span></label>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-resampling" hidden>
+                            Encoder-native downsampling before JXL transform/coding. 1x = off; 2x, 4x, or 8x trade detail for smaller output and faster encode.
+                        </div>
+                    </div>
+                    <!-- Pixel art upsampling mode (pixel-art-downsampling design note) - mandatory benchmark -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Upsampling mode <span style="font-size:10px;opacity:0.6">(Phase 3)</span></span>
+                        <select id="batch-upsampling-mode" style="font-size:11px; max-width:140px;">
+                            <option value="0">0 — nearest (pixel art)</option>
+                            <option value="1" selected>1 — default</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                        </select>
+                        <div style="font-size:10px; opacity:0.65;">0 (nearest) is non-negotiable for crisp pixel art. Combine with resampling>1. Warning badge in results for photographic misuse.</div>
+                    </div>
+                    <!-- JPEG Reconstruction (jpeg-recompression-polish design note) - mandatory benchmark -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">JPEG Reconstruction <span style="font-size:10px;opacity:0.6">(Phase 3)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:11px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-jpeg-cfl" /> <span>CFL (ID 30)</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-jpeg-compress-recon" /> <span>Compress recon boxes</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-jpeg-store-meta" /> <span>Explicit StoreJPEGMetadata</span></label>
+                        </div>
+                        <div style="font-size:10px; opacity:0.65;">Fine control for JPEG→JXL fidelity + roundtrip quality. Best with actual JPEG sources (uses transcode paths).</div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Modular mode <button class="info-btn" type="button" data-help-target="wl-modular" aria-label="Modular mode info">i</button></span>
+                        <div class="preset-group" role="radiogroup" aria-label="JXL modular mode">
+                            <label class="chip-label"><input type="radio" name="batch-modular" value="-1" checked /> <span>Auto</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-modular" value="0" /> <span>VarDCT</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-modular" value="1" /> <span>Modular</span></label>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-modular" hidden>
+                            Codec selection. Auto lets libjxl choose (VarDCT for photos, Modular for lossless). VarDCT (0) is optimal for photographs at lossy quality. Modular (1) suits lossless and line art.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Brotli effort <button class="info-btn" type="button" data-help-target="wl-brotli-effort" aria-label="Brotli effort info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-brotli-effort">&#8722;</button>
+                            <input id="batch-brotli-effort" type="number" min="-1" max="11" step="1" value="-1" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-brotli-effort">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-brotli-effort" hidden>
+                            Brotli entropy effort for metadata boxes (&#8722;1&#8211;11). &#8722;1 = libjxl default. Higher compresses metadata more at encode-time cost. Rarely changes file size significantly for photographic content.
+                        </div>
+                    </div>
+                    <!-- Phase 1: First-class advanced filters (DOTS/PATCHES/EPF/GABORISH) via advancedControls -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Advanced filters <span style="font-size:10px;opacity:0.6">(new)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-adv-dots" /> <span>Dots</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-adv-patches" /> <span>Patches</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-adv-gaborish" /> <span>Gaborish</span></label>
+                            <select id="batch-adv-epf" style="font-size:11px; padding:1px 3px;">
+                                <option value="">EPF auto</option>
+                                <option value="-1">EPF -1 (auto)</option>
+                                <option value="0">EPF 0 (off)</option>
+                                <option value="1">EPF 1</option>
+                                <option value="2">EPF 2</option>
+                                <option value="3">EPF 3 (strong)</option>
+                            </select>
+                        </div>
+                        <div style="font-size:10px; opacity:0.65; margin-top:2px;">First-class promoted controls (Phase 1). See design note for details.</div>
+                    </div>
+                    <!-- GROUP_ORDER + centers (next Tier 1 item) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Group order <span style="font-size:10px;opacity:0.6">(new)</span></span>
+                        <div style="display:flex; gap:8px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:2px;">
+                                <input type="radio" name="batch-group-order-mode" value="scanline" checked /> <span>Scanline</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:2px;">
+                                <input type="radio" name="batch-group-order-mode" value="center" /> <span>Center</span>
+                            </label>
+                            <input id="batch-group-center-x" type="number" placeholder="cx" style="width:50px; font-size:11px;" />
+                            <input id="batch-group-center-y" type="number" placeholder="cy" style="width:50px; font-size:11px;" />
+                        </div>
+                        <div style="font-size:10px; opacity:0.6;">Center mode + coords for better progressive/ROI behavior.</div>
+                    </div>
+                    <!-- Phase 2: Buffering + Expert (deeper advanced encoder controls slice) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Buffering <span style="font-size:10px;opacity:0.6">(Phase 2)</span></span>
+                        <div class="preset-group" role="radiogroup" aria-label="Buffering strategy">
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="-1" checked /> <span>default</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="0" /> <span>0 (immediate)</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="1" /> <span>1</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="2" /> <span>2</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-buffering" value="3" /> <span>3 (max)</span></label>
+                        </div>
+                        <div style="display:flex; gap:8px; font-size:11px; margin-top:2px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-streaming-input" /> <span>streamingInput</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-streaming-output" /> <span>streamingOutput</span></label>
+                        </div>
+                        <div style="font-size:10px; opacity:0.6;">Rich tradeoffs (memory / density / latency). See design note for cjxl-derived guidance.</div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Expert <span style="font-size:10px;opacity:0.6">(Phase 2)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-expert-disable-perceptual" /> <span>Disable perceptual heuristics (ID 39)</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-expert-allow" /> <span>Allow expert options</span></label>
+                        </div>
+                        <div style="font-size:10px; color:#c33; opacity:0.85;">Strong warning: for benchmarking/archival only. May increase size + artifacts. Mirrors cjxl --allow_expert_options.</div>
+                    </div>
+                    <!-- Low Memory / Production Chunked Paths (production-chunked-paths design note, Phase 3) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Low Memory / Large Image <span style="font-size:10px;opacity:0.6">(Phase 3)</span></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:11px;">
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-lowmem-mode" /> <span>lowMemoryMode</span></label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-prefer-chunked" /> <span>preferChunkedAPI (Tauri)</span></label>
+                            <button type="button" id="batch-simulate-large" style="font-size:10px; padding:1px 6px;">Simulate Large Image (8K test)</button>
+                        </div>
+                        <div style="font-size:10px; opacity:0.65; max-width: 420px;">
+                            Builds on Buffering (Phase 2). <strong>lowMemoryMode</strong> promotes to strategy=3 + streaming hints for minimal peak RAM.
+                            <strong>preferChunkedAPI</strong> signals the modern libvips/cjxl path on Tauri (JxlEncoderAddChunkedFrame + custom source; future slice).
+                            Browser already strong via streaming entrypoints. See <code>production-chunked-paths.md</code> design note for full rationale and future Tauri chunked source work.
+                        </div>
+                        <div id="batch-lowmem-status" style="font-size:9px; opacity:0.7; margin-top:2px; font-family:monospace;"></div>
+                    </div>
+                    <!-- Gain map (HDR) transport wiring - mandatory benchmark exposure per gain-maps.md -->
+                    <div class="spin-group" id="sg-gain-map">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Gain map (HDR / jhgm) <span style="font-size:10px;opacity:0.6">(transport)</span> <button class="info-btn" type="button" data-help-target="wl-gain-map" aria-label="Gain map info">i</button></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:4px; font-size:11px;">
+                                <input type="checkbox" id="batch-gainmap-use-demo" /> <span>Use demo placeholder</span>
+                            </label>
+                            <input type="file" id="batch-gainmap-file" accept=".jxl" style="font-size:11px; max-width:160px;" />
+                            <span id="batch-gainmap-status" style="font-size:10px; opacity:0.7; margin-left:4px;"></span>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-gain-map" hidden>
+                            HDR gain map transport (ISO 21496-1 jhgm box). Supply a pre-encoded naked JXL codestream for the gain map image (the library wraps it using official JxlGainMapBundle APIs when the build supports &lt;jxl/gain_map.h&gt;). "Use demo" exercises the full encode/decode path with minimal placeholder bytes (content is not meaningful; file size delta and download badge prove the transport). Synergizes with LookRenderer tone-mapping workflows for real scientific HDR use. Graceful no-op on builds without symbols (see caps.gainMapEncode).
+                        </div>
+                    </div>
+                    <!-- HDR Signaling (intensityTarget, premultiply, preferCICPForHDR) - gold-standard exemplar per hdr-signaling-color-priority.md / Phase 3 -->
+                    <div class="spin-group" id="sg-hdr-signaling">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">HDR signaling <span style="font-size:10px;opacity:0.6">(Phase 3)</span> <button class="info-btn" type="button" data-help-target="wl-hdr-signaling" aria-label="HDR signaling info">i</button></span>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:11px;">
+                            <label style="display:flex; align-items:center; gap:3px;">
+                                nits
+                                <input id="batch-hdr-intensity" type="number" min="0" max="100000" step="50" placeholder="auto" style="width:72px; font-size:10px;" />
+                            </label>
+                            <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-hdr-premultiply" /> <span>premultiply</span></label>
+                            <select id="batch-hdr-cicp-policy" style="font-size:10px; max-width:160px;">
+                                <option value="">preferCICP: default</option>
+                                <option value="true">prefer CICP for HDR</option>
+                                <option value="false">prefer ICC</option>
+                            </select>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-hdr-signaling" hidden>
+                            First-class HDR signaling (intensityTarget in nits, premultiply alpha for HDR, preferCICPForHDR policy). These ride advanced pairs for broad reach and are specially threaded on gain/animation/metadata paths. "HDR Info" badges appear in results when active. See <code>hdr-signaling-color-priority.md</code> (the gold-standard Phase 3 exemplar).
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Decode speed tier <button class="info-btn" type="button" data-help-target="wl-decode-speed" aria-label="Decode speed tier info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-decode-speed">&#8722;</button>
+                            <input id="batch-decode-speed" type="number" min="0" max="4" step="1" value="0" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-decode-speed">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-decode-speed" hidden>
+                            Decoder speed tier hint (0&#8211;4). Tells the encoder to structure the codestream for faster decoding. 0&#8211;1 = fully optimised, 2&#8211;3 = faster decode with small quality trade-off, 4 = fastest decode. Default 0 means no hint is applied.
+                        </div>
+                    </div>
+                    <div class="spin-group" id="sg-alpha-distance">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Alpha distance <button class="info-btn" type="button" data-help-target="wl-alpha-distance" aria-label="Alpha distance info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-alpha-distance">&#8722;</button>
+                            <input id="batch-alpha-distance" type="number" min="0" max="2" step="0.1" value="" placeholder="off" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-alpha-distance">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-alpha-distance" hidden>
+                            Per-channel encode distance for the alpha channel. Leave blank to inherit the main image distance. 0&nbsp;=&nbsp;lossless alpha, 1&nbsp;=&nbsp;same fidelity as main, 2&nbsp;=&nbsp;more lossy alpha. Requires a rebuilt WASM binary with extra-channel encode support (<code>caps.extraChannelEncode</code>).
+                        </div>
+                        <p class="ec-unavailable-note" id="alpha-distance-unavail" hidden style="font-size:0.75rem;color:var(--color-warning,#b45309);margin:2px 0 0;">
+                            Extra-channel encode unavailable — rebuild WASM binary (see ISSUES.md §1/3).
+                        </p>
+                    </div>
+                    <!-- Extra Channels granular modular demo (scoped surface per granular-extra-channel-modular.md + Phase 2 work) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Extra Channels demo <span style="font-size:10px;opacity:0.6">(scoped)</span></span>
+                        <button type="button" id="batch-load-ec-demo" style="font-size:10px; padding:1px 6px;">Load mixed alpha+depth modular demo</button>
+                        <span id="batch-granular-ec-status" style="font-size:9px; margin-left:6px; opacity:0.7;"></span>
+                        <div style="font-size:9px; opacity:0.6; margin-top:2px;">Injects sample extraChannels with per-channel modular hints. See <code>granular-extra-channel-modular.md</code>. Full rich inspector is future.</div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Batch limit <button class="info-btn" type="button" data-help-target="wl-batch-limit" aria-label="Batch limit info">i</button></span>
+                        <div class="spinpicker">
+                            <button class="spin-btn spin-dec" type="button" data-target="batch-limit">&#8722;</button>
+                            <input id="batch-limit" type="number" min="1" max="100" step="1" value="5" />
+                            <button class="spin-btn spin-inc" type="button" data-target="batch-limit">+</button>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-batch-limit" hidden>
+                            Maximum images in one batch run. Increase to stress-test concurrency and memory pressure. Each image is fully independent through the pipeline.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Thumb size <button class="info-btn" type="button" data-help-target="wl-thumb-size" aria-label="Thumb size info">i</button></span>
+                        <div class="preset-group" role="group" aria-label="Thumbnail size presets">
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="128" /> <span>128</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="256" checked /> <span>256</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="512" /> <span>512</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="1024" /> <span>1024</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="2048" /> <span>2048</span></label>
+                            <label class="chip-label"><input type="radio" name="batch-thumb-size" value="fullsize" /> <span>Full size</span></label>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-thumb-size" hidden>
+                            Output pixel size (long edge) for each tile. Source images are resized before encode. 256–512 for gallery thumbnail testing; 1024+ for print/display benchmarking. <em>Full size</em> skips resizing.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Lossless <button class="info-btn" type="button" data-help-target="wl-lossless" aria-label="Lossless info">i</button></span>
+                        <label class="spin-toggle">
+                            <input id="batch-lossless" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                        <div class="help-popover" data-help-popover="wl-lossless" hidden>
+                            Mathematically perfect lossless encoding (no pixel loss). Uses JXL Modular mode internally. Files are larger than lossy at the same resolution. Best for text, line art, diagrams, and archival sources.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Compress boxes <button class="info-btn" type="button" data-help-target="wl-compress-boxes" aria-label="Compress boxes info">i</button></span>
+                        <label class="spin-toggle">
+                            <input id="batch-compress-boxes" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                        <div class="help-popover" data-help-popover="wl-compress-boxes" hidden>
+                            Compress metadata boxes (ICC, EXIF, XMP) with Brotli inside the JXL container. Reduces file size when metadata is large. Has no effect on raw codestream output.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Force container <button class="info-btn" type="button" data-help-target="wl-force-container" aria-label="Force container info">i</button></span>
+                        <label class="spin-toggle">
+                            <input id="batch-force-container" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                        <div class="help-popover" data-help-popover="wl-force-container" hidden>
+                            Always emit a JXL container (ISOBMFF wrapper) even when no metadata is present. Useful for compatibility with tools that require the container format. Ignored when Raw codestream is on.
+                        </div>
+                    </div>
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Raw codestream <button class="info-btn" type="button" data-help-target="wl-raw-codestream" aria-label="Raw codestream info">i</button></span>
+                        <label class="spin-toggle">
+                            <input id="batch-raw-codestream" type="checkbox" />
+                            <span class="spin-toggle-track"></span>
+                        </label>
+                        <div class="help-popover" data-help-popover="wl-raw-codestream" hidden>
+                            Emit a bare JXL codestream with no container wrapper and no metadata boxes. Smallest possible output. Overrides Force container. Not recommended for interchange — use only when you control both encoder and decoder.
+                        </div>
+                    </div>
+                    <!-- JUMBF / C2PA (Phase 3 follow-up per jumbf-box-support.md) -->
+                    <div class="spin-group">
+                        <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">JUMBF / C2PA <span style="font-size:10px;opacity:0.6">(demo)</span> <button class="info-btn" type="button" data-help-target="wl-jumbf" aria-label="JUMBF info">i</button></span>
+                        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                            <input id="batch-jumbf-input" type="text" placeholder="base64 or hex JUMBF bytes (or use sample)" style="font-family:monospace; font-size:11px; width:180px; padding:2px 4px;" />
+                            <button id="batch-jumbf-sample" class="secondary-btn" type="button" style="padding:1px 6px; font-size:11px;">Sample C2PA stub</button>
+                            <span id="batch-jumbf-status" style="font-size:10px; opacity:0.8; min-width:90px;"></span>
+                        </div>
+                        <div class="help-popover" data-help-popover="wl-jumbf" hidden>
+                            Attach JUMBF boxes (e.g. C2PA content credentials) as "jumb" container boxes. Uses the existing custom box infrastructure (no new FFI). The sample is a minimal illustrative stub — not a real signed credential. Decode reporting of JUMBF is future work; container roundtrip is reliable today. See docs/references/designs/jumbf-box-support.md.
+                        </div>
+                    </div>
                 </div>
-                <button id="wrapper-controls-btn" class="dashboard-toggle" type="button" aria-expanded="false">Controls</button>
-                <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
+            </div>
+        </section>
+
+        <section class="ops-frame">
+            <label class="file-drop" for="source-input" id="source-drop">
+                <input id="source-input" type="file" multiple webkitdirectory accept=".orf,.ORF,.cr2,.CR2,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
+                <strong>Pick files</strong>
+                <span>ORF, JPEG, PNG, TIFF, JXL</span>
+            </label>
+            <div class="ops-actions">
+                <div class="control-row">
+                    <button id="load-random" class="secondary-btn" type="button">Load 5 random files</button>
+                    <button id="run-batch" class="secondary-btn" type="button" disabled>Run batch</button>
+                    <button id="clear-batch" class="secondary-btn" type="button">Clear</button>
+                    <button id="auto-race" class="secondary-btn" type="button">Auto-race</button>
+                </div>
+                <div class="mode-frame inline-mode-frame">
+                    <div class="mode-switch" role="group" aria-label="Test mode">
+                        <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
+                        <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
+                        <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
+                        <button class="info-btn" type="button" data-help-target="wl-modes" aria-label="Mode info" style="margin-left:4px;">i</button>
+                        <button id="dbg-console-btn" class="secondary-btn console-btn" type="button">Console</button>
+                    </div>
+                    <div class="help-popover" data-help-popover="wl-modes" hidden>
+                        <strong>Drag Race</strong> — Encodes the same image with JXL, WebP, and JPEG at matched quality, then races decodes side by side. Good for format comparison.<br><br>
+                        <strong>Session worker</strong> — Routes requests through the full browser pipeline (context → scheduler → worker messaging → codec). Measures realistic production latency including orchestration overhead.<br><br>
+                        <strong>Direct wrapper</strong> — Calls the WASM facade directly, bypassing all scheduling. Isolates pure codec speed with no orchestration cost. The delta between this and Session worker reveals pipeline overhead.
+                    </div>
+                </div>
             </div>
         </section>
 
         <section id="race-container" class="race-container">
             <header class="race-header">
                 <div class="race-controls">
-                    <div class="format-chips">
-                        <label class="chip-label"><input type="checkbox" name="race-format" value="jxl" checked /> <span>JXL</span></label>
-                        <label class="chip-label"><input type="checkbox" name="race-format" value="webp" checked /> <span>WEBP</span></label>
-                        <label class="chip-label"><input type="checkbox" name="race-format" value="jpeg" checked /> <span>JPEG</span></label>
+                    <div class="format-chips" role="radiogroup" aria-label="Race format">
+                        <label class="chip-label"><input type="radio" name="race-format" value="jxl" checked /> <span>JXL</span></label>
+                        <label class="chip-label"><input type="radio" name="race-format" value="webp" /> <span>WEBP</span></label>
+                        <label class="chip-label"><input type="radio" name="race-format" value="jpeg" /> <span>JPEG</span></label>
                     </div>
                     <div class="size-chips">
                         <label class="chip-label"><input type="radio" name="race-size" value="125" /> <span>125px</span></label>
                         <label class="chip-label"><input type="radio" name="race-size" value="256" checked /> <span>256px</span></label>
                         <label class="chip-label"><input type="radio" name="race-size" value="600" /> <span>600px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="1280" /> <span>1280px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="1920" /> <span>1920px</span></label>
+                        <label class="chip-label"><input type="radio" name="race-size" value="fullsize" /> <span>Full size</span></label>
                     </div>
-                    <button id="start-race" class="primary-btn">Start Race</button>
+                    <button id="start-race" class="primary-btn" disabled>Start Race</button>
                 </div>
             </header>
             <div class="race-track-shell">
@@ -92,96 +435,6 @@
             </div>
         </section>
 
-        <aside id="wrapper-dashboard" class="dashboard" aria-hidden="true" data-open="false">
-            <div class="dashboard-head">
-                <div>
-                    <p class="dashboard-eyebrow">Wrapper controls</p>
-                    <h2>Batch, compare, display</h2>
-                </div>
-                <button id="wrapper-controls-close" class="dashboard-close" type="button">Close</button>
-            </div>
-
-            <section class="dashboard-group" data-group="display">
-                <header class="dashboard-group-head">
-                    <div>
-                        <span class="dashboard-label">Display</span>
-                        <strong>Batch thumbnail size</strong>
-                    </div>
-                    <button class="info-btn" type="button" data-help-target="wrapper-display" aria-label="Display help">i</button>
-                </header>
-                <label class="setting">
-                    <span>Bottom thumbs</span>
-                    <input id="batch-thumb-size" type="range" min="120" max="320" step="8" value="180" />
-                    <strong id="batch-thumb-size-value">180</strong>
-                </label>
-                <p class="panel-note">Resizes the bottom batch grid without changing the source files or compare math.</p>
-                <div class="help-popover" data-help-popover="wrapper-display" hidden>
-                    Bigger cells make the tiles easier to read. Smaller cells let more compare cards fit on screen.
-                </div>
-            </section>
-
-            <section class="dashboard-group is-dimmed" data-group="progressive">
-                <header class="dashboard-group-head">
-                    <div>
-                        <span class="dashboard-label">Progressive</span>
-                        <strong>Progressive encode / download</strong>
-                    </div>
-                    <button class="info-btn" type="button" data-help-target="wrapper-progressive" aria-label="Progressive help">i</button>
-                </header>
-                <div class="dashboard-actions is-disabled">
-                    <button class="ghost-btn" type="button" disabled>Preview first</button>
-                    <button class="ghost-btn" type="button" disabled>Chunked encode</button>
-                    <button class="ghost-btn" type="button" disabled>Transport pacing</button>
-                    <button class="ghost-btn" type="button" disabled>DC / AC</button>
-                </div>
-                <p class="panel-note">Disabled here. Open the progressive page to test download pacing, DC-only runs, and stepped decode.</p>
-                <div class="help-popover" data-help-popover="wrapper-progressive" hidden>
-                    The wrapper lab focuses on existing-vs-wrapper compare. Progressive transport knobs live on the progressive page.
-                </div>
-            </section>
-        </aside>
-
-        <section class="control-band compact">
-            <div class="source-panel">
-                <label class="file-drop" for="source-input" id="source-drop">
-                    <input id="source-input" type="file" multiple accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
-                    <strong>Pick files</strong>
-                    <span>ORF, JPEG, PNG, TIFF, JXL</span>
-                </label>
-                <div class="control-row">
-                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
-                    <button id="run-batch" class="secondary-btn" type="button">Run batch</button>
-                    <button id="clear-batch" class="secondary-btn" type="button">Clear</button>
-                </div>
-            </div>
-
-            <div class="settings-panel">
-                <label class="setting">
-                    <span>Batch limit</span>
-                    <input id="batch-limit" type="range" min="1" max="100" step="1" value="5" />
-                    <strong id="batch-limit-value">5</strong>
-                </label>
-                <label class="setting">
-                    <span>Concurrency</span>
-                    <input id="batch-concurrency" type="range" min="1" max="16" step="1" value="6" />
-                    <strong id="batch-concurrency-value">6</strong>
-                </label>
-                <label class="setting">
-                    <span>Quality</span>
-                    <input id="batch-quality" type="range" min="50" max="100" step="1" value="90" />
-                    <strong id="batch-quality-value">90</strong>
-                </label>
-                <label class="setting">
-                    <span>Effort</span>
-                    <input id="batch-effort" type="range" min="1" max="9" step="1" value="3" />
-                    <strong id="batch-effort-value">3</strong>
-                </label>
-                <label class="setting toggle-setting">
-                    <span>Lossless</span>
-                    <input id="batch-lossless" type="checkbox" />
-                </label>
-            </div>
-        </section>
 
         <section class="status-grid compact" aria-label="Batch status">
             <div class="status-card">
@@ -220,6 +473,18 @@
         </section>
     </main>
 
+    <script>
+    document.querySelectorAll('.spin-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var input = document.getElementById(btn.dataset.target);
+            if (!input) return;
+            if (btn.classList.contains('spin-inc')) input.stepUp();
+            else input.stepDown();
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    });
+    </script>
     <script type="module" src="./jxl-wrapper-lab.js"></script>
+    <script src="./info-popover-init.js"></script>
 </body>
 </html>

@@ -6,6 +6,7 @@
 - [x] Implement Node stream adapters (Readable)
 - [x] Implement BufferedReader helper
 - [x] Add README.md
+- [x] HTTP Range-prefix fetch adapter (`fromRangePrefix`) for sidecar / progressive-truncation workflows
 
 ## Current Subtask
 - None

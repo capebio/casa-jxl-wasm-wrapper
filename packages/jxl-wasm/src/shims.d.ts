@@ -1,11 +1,3 @@
-declare const process:
-  | {
-      versions?: {
-        node?: string;
-      };
-    }
-  | undefined;
-
 declare module "node:fs/promises" {
   export function readFile(path: string | URL): Promise<Uint8Array>;
   export function writeFile(path: string | URL, data: string | Uint8Array): Promise<void>;

@@ -1,7 +1,15 @@
-import initRaw, { process_orf, rgb_to_rgba, downscale_rgba } from '../pkg/raw_converter_wasm.js';
+import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder, detectTier, setForcedTier } from '@casabio/jxl-wasm';
 import { bindRangeLabel } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+import {
+    formatBenchmarkFileStatus,
+    formatBenchmarkProgress,
+    formatLoadFileStatus,
+    formatLoadProgress,
+} from './jxl-benchmark-progress.js';
+
+const { process_orf, rgb_to_rgba } = rawWasm;
 
 const ALL_SIZES = [128, 256, 512, 1080, 1920, 'fullsize'];
 const DEFAULT_SIZES = [128, 512, 1080];
@@ -83,6 +91,94 @@ function getSettings() {
         maxFiles,
         options: advOpts,
     };
+}
+
+// Download a single JXL Uint8Array as a file.
+function triggerJxlDownload(bytes, filename) {
+    const blob = new Blob([bytes], { type: 'image/jxl' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// Collect all encoded bytes matching a key prefix (e.g. ':fullsize' or any config key).
+function collectEncodedSet(keyFilter) {
+    const results = []; // { filename, bytes }
+    if (!benchmarkResults.encodedBytes) return results;
+    for (const [mapKey, bytes] of benchmarkResults.encodedBytes.entries()) {
+        if (!keyFilter || mapKey.includes(keyFilter)) {
+            // mapKey = "${source.file}:${size}x${quality}xe${effort}"
+            const colonIdx = mapKey.indexOf(':');
+            const sourceName = mapKey.slice(0, colonIdx);
+            const configPart = mapKey.slice(colonIdx + 1); // e.g. "fullsizex85xe5"
+            // Parse config for suffix: size, quality, effort
+            const m = configPart.match(/^([^x]+)x(\d+)xe(\d+)$/);
+            const sizeSuffix = m ? (m[1] === 'fullsize' ? 'full' : `${m[1]}px`) : configPart;
+            const qSuffix   = m ? `_q${m[2]}` : '';
+            const eSuffix   = m ? `_e${m[3]}` : '';
+            const baseName  = sourceName.replace(/\.[^.]+$/, '');
+            const filename  = `${baseName}_${sizeSuffix}${qSuffix}${eSuffix}.jxl`;
+            results.push({ filename, bytes });
+        }
+    }
+    return results;
+}
+
+// Save a set of JXL files to a chosen folder (File System Access API) or fall back to downloads.
+async function saveSetToFolder(entries, labelForLog) {
+    if (!entries.length) {
+        dbgLog(`No encoded JXL bytes for ${labelForLog}`, '', 'warn');
+        return;
+    }
+
+    if (typeof showDirectoryPicker === 'function') {
+        let dirHandle;
+        try {
+            dirHandle = await showDirectoryPicker({ mode: 'readwrite' });
+        } catch (e) {
+            if (e.name === 'AbortError') return; // user cancelled
+            dbgLog(`Folder picker failed: ${e.message}`, '', 'error');
+            return;
+        }
+        let saved = 0;
+        for (const { filename, bytes } of entries) {
+            try {
+                const fh = await dirHandle.getFileHandle(filename, { create: true });
+                const writable = await fh.createWritable();
+                await writable.write(bytes);
+                await writable.close();
+                saved++;
+            } catch (e) {
+                dbgLog(`Failed to write ${filename}: ${e.message}`, '', 'error');
+            }
+        }
+        dbgLog(`Saved ${saved}/${entries.length} JXL files to folder`, '', 'success');
+    } else {
+        // Fallback: sequential <a download> — browser may block multiple rapid downloads
+        dbgLog(`showDirectoryPicker not available — triggering ${entries.length} individual downloads`, '', 'warn');
+        for (const { filename, bytes } of entries) {
+            triggerJxlDownload(bytes, filename);
+            await new Promise(r => setTimeout(r, 120)); // slight delay to avoid browser throttle
+        }
+    }
+}
+
+// Button: save encoded JXL files to a chosen folder.
+// Prefers fullsize; falls back to all available sizes if fullsize was not benchmarked.
+async function saveFullFiles() {
+    const fullEntries = collectEncodedSet(':fullsize');
+    if (fullEntries.length > 0) {
+        await saveSetToFolder(fullEntries, 'fullsize');
+    } else {
+        // No fullsize benchmarked — offer all available encoded bytes
+        const allEntries = collectEncodedSet(null);
+        await saveSetToFolder(allEntries, 'all sizes');
+    }
 }
 
 function saveSettings() {
@@ -171,6 +267,9 @@ let selectedSources = [];
 let benchmarkResults = {
     decodeMs: new Map(),
     encodeMs: new Map(),
+    resizeMs: new Map(),
+    firstChunkMs: new Map(),
+    totalMs: new Map(),
     fileSize: new Map(),
 };
 let permutations = [];      // { id, label, color, visible, results }
@@ -194,6 +293,9 @@ function snapshotResults() {
     return {
         decodeMs: new Map(benchmarkResults.decodeMs),
         encodeMs: new Map(benchmarkResults.encodeMs),
+        resizeMs: new Map(benchmarkResults.resizeMs),
+        firstChunkMs: new Map(benchmarkResults.firstChunkMs),
+        totalMs: new Map(benchmarkResults.totalMs),
         fileSize: new Map(benchmarkResults.fileSize),
     };
 }
@@ -359,6 +461,11 @@ if (optimizeBtn) {
     optimizeBtn.addEventListener('click', () => runOptimizer());
 }
 
+const saveFullBtn = document.getElementById('save-full-btn');
+if (saveFullBtn) {
+    saveFullBtn.addEventListener('click', () => saveFullFiles());
+}
+
 const saveSettingsBtn = document.getElementById('save-settings');
 const loadSettingsInput = document.getElementById('load-settings-input');
 
@@ -390,6 +497,33 @@ if (loadSettingsInput) {
 
 let optimizerRunning = false;
 
+function hasAnyEncodedBytes() {
+    return !!(benchmarkResults.encodedBytes && benchmarkResults.encodedBytes.size > 0);
+}
+
+function hasFullsizeBytes() {
+    if (!benchmarkResults.encodedBytes) return false;
+    for (const key of benchmarkResults.encodedBytes.keys()) {
+        if (key.includes(':fullsize')) return true;
+    }
+    return false;
+}
+
+function updateSaveFullBtn() {
+    const btn = document.getElementById('save-full-btn');
+    if (!btn) return;
+    const hasAny = hasAnyEncodedBytes();
+    const hasFull = hasFullsizeBytes();
+    btn.disabled = !hasAny;
+    if (!hasAny) {
+        btn.title = 'Run benchmark first to encode JXL files';
+    } else if (hasFull) {
+        btn.title = 'Save all fullsize encoded JXL files to a folder';
+    } else {
+        btn.title = 'Save encoded JXL files to a folder (no fullsize benchmarked — saves all available sizes)';
+    }
+}
+
 function updateSelectionStatus() {
     const ready = selectedSources.length > 0;
     selectionStatus.textContent = ready
@@ -397,21 +531,14 @@ function updateSelectionStatus() {
         : 'No files.';
     startBenchmarkBtn.disabled = !ready;
     startBenchmarkBtn.title = ready ? '' : 'Press Random Gobabeb first';
+    clearResultsBtn.disabled = !ready;
+    clearResultsBtn.title = ready ? '' : 'Load files first';
     const optBtn = document.getElementById('optimize-btn');
     if (optBtn && !optimizerRunning) {
         optBtn.disabled = !ready;
         optBtn.title = ready ? 'Auto-optimize codec toggles for this device' : 'Load files first, then optimize codec toggles for this device';
     }
-    const progBtn = document.getElementById('run-progressive');
-    if (progBtn && progBtn.textContent !== 'Running…') {
-        progBtn.disabled = !ready;
-        progBtn.title = ready ? '' : 'Load files first';
-    }
-    if (ready) {
-        setProgStatus(`${selectedSources.length} file${selectedSources.length !== 1 ? 's' : ''} ready — click Run progressive paint.`);
-    } else {
-        setProgStatus('Load files to begin.');
-    }
+    updateSaveFullBtn();
 }
 
 function setProgress(text) {
@@ -442,9 +569,18 @@ async function loadFiles(files) {
     const limited = files.slice(0, maxFiles);
     selectedSources = [];
     setProgress('Loading files...');
+    setFileStatus('—');
+    setTiming('Loading…');
+    updateSelectionStatus();
     dbgLog(`Loading ${limited.length} files...`);
 
-    for (const file of limited) {
+    for (let fileIdx = 0; fileIdx < limited.length; fileIdx++) {
+        const file = limited[fileIdx];
+        setFileStatus(formatLoadFileStatus({
+            currentIndex: fileIdx + 1,
+            totalCount: limited.length,
+            fileName: file.name,
+        }));
         try {
             const fileLoadStart = performance.now();
             const arrayBuffer = await file.arrayBuffer();
@@ -464,10 +600,18 @@ async function loadFiles(files) {
         } catch (err) {
             dbgLog(`✗ Error loading ${file.name}: ${err.message}`);
         }
+
+        updateSelectionStatus();
+        setProgress(formatLoadProgress({
+            loadedCount: selectedSources.length,
+            totalCount: limited.length,
+        }));
     }
 
     updateSelectionStatus();
     setProgress(selectedSources.length ? 'Files loaded.' : 'No files loaded.');
+    setFileStatus(selectedSources.length ? `Loaded ${selectedSources.length}/${limited.length} files.` : '—');
+    setTiming('Ready.');
     dbgLog(`Loaded ${selectedSources.length}/${limited.length} images`);
 }
 
@@ -595,11 +739,27 @@ function resizeRgba(rgba, width, height, targetWidth) {
     }
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
+    const resizeRgbaImpl = rawWasm.downscale_rgba ?? downscaleRgbaCanvas;
     return {
-        rgba: downscale_rgba(rgba, width, height, targetWidth, targetHeight),
+        rgba: resizeRgbaImpl(rgba, width, height, targetWidth, targetHeight),
         width: targetWidth,
         height: targetHeight
     };
+}
+
+function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = width;
+    srcCanvas.height = height;
+    const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+
+    const dstCanvas = document.createElement('canvas');
+    dstCanvas.width = targetWidth;
+    dstCanvas.height = targetHeight;
+    const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
+    dstCtx.drawImage(srcCanvas, 0, 0, targetWidth, targetHeight);
+    return new Uint8Array(dstCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer);
 }
 
 function exactBuffer(view) {
@@ -628,6 +788,7 @@ function concatChunks(chunks) {
 
 async function encodeJxl(rgba, width, height, quality, effort = null) {
     const started = performance.now();
+    let encoder = null;
     try {
         const opts = getAdvancedOptions();
         const encoderConfig = {
@@ -645,10 +806,12 @@ async function encodeJxl(rgba, width, height, quality, effort = null) {
             brotliEffort: opts.brotliEffort,
             copyInput: !opts.skipCopy,
         };
-        const encoder = createEncoder(encoderConfig);
+        encoder = createEncoder(encoderConfig);
         const chunks = [];
+        let firstChunkMs = null;
         const chunkTask = (async () => {
             for await (const chunk of encoder.chunks()) {
+                if (firstChunkMs === null) firstChunkMs = performance.now() - started;
                 chunks.push(chunk);
             }
         })();
@@ -659,11 +822,12 @@ async function encodeJxl(rgba, width, height, quality, effort = null) {
         await chunkTask;
         const bytes = concatChunks(chunks);
         const encodeMs = performance.now() - started;
-        await encoder.dispose();
-        return { bytes, encodeMs };
+        return { bytes, encodeMs, firstChunkMs: firstChunkMs ?? encodeMs };
     } catch (err) {
         console.error('Encode error:', err);
         throw new Error(`Encode failed: ${err.message}`);
+    } finally {
+        if (encoder) await encoder.dispose();
     }
 }
 
@@ -822,11 +986,16 @@ async function runBenchmark() {
     benchmarkResults = {
         decodeMs: new Map(),
         encodeMs: new Map(),
+        resizeMs: new Map(),
+        firstChunkMs: new Map(),
+        totalMs: new Map(),
         fileSize: new Map(),
+        encodedBytes: new Map(), // key: `${filename}:${size}x${quality}xe${effort}` → Uint8Array
     };
 
     const totalSteps = selectedSources.length * selectedSizes.length * selectedQualities.length * selectedEfforts.length * iterations;
     let completedSteps = 0;
+    let completedFiles = 0;
     const benchmarkStart = performance.now();
 
     // Capture system info
@@ -865,7 +1034,11 @@ async function runBenchmark() {
 
         const source = selectedSources[fileIdx];
         const fileStart = performance.now();
-        setFileStatus(`${fileIdx + 1}/${selectedSources.length}: ${source.file}`);
+        setFileStatus(formatBenchmarkFileStatus({
+            completedFiles,
+            totalFiles: selectedSources.length,
+            fileName: source.file,
+        }));
         dbgLog(`\n📄 FILE ${fileIdx + 1}/${selectedSources.length}`, source.file, 'info');
 
         for (const size of selectedSizes) {
@@ -891,25 +1064,24 @@ async function runBenchmark() {
                         const encResult = await encodeJxl(resized.rgba, resized.width, resized.height, quality, effort);
                         const encMs = encResult.encodeMs;
 
-                        if (!benchmarkResults.encodeMs.has(key)) {
-                            benchmarkResults.encodeMs.set(key, []);
-                        }
-                        benchmarkResults.encodeMs.get(key).push(encMs);
+                        recordTiming(benchmarkResults.resizeMs, key, resizeMs);
+                        recordTiming(benchmarkResults.encodeMs, key, encMs);
+                        recordTiming(benchmarkResults.firstChunkMs, key, encResult.firstChunkMs);
                         benchmarkResults.fileSize.set(key, encResult.bytes.length);
+                        // Store encoded bytes for download (last iteration per file/config wins)
+                        benchmarkResults.encodedBytes.set(`${source.file}:${key}`, encResult.bytes);
 
                         // Decode
-                        const decStart = performance.now();
                         const decResult = await decodeJxl(encResult.bytes);
                         const decMs = decResult.decodeMs;
 
                         if (decResult.success) {
-                            if (!benchmarkResults.decodeMs.has(key)) {
-                                benchmarkResults.decodeMs.set(key, []);
-                            }
-                            benchmarkResults.decodeMs.get(key).push(decMs);
+                            recordTiming(benchmarkResults.decodeMs, key, decMs);
                         } else {
                             throw new Error('Decode failed');
                         }
+                        const totalMs = resizeMs + encMs + decMs;
+                        recordTiming(benchmarkResults.totalMs, key, totalMs);
 
                         completedSteps++;
                         const percent = Math.round((completedSteps / totalSteps) * 100);
@@ -917,12 +1089,20 @@ async function runBenchmark() {
 
                         dbgLog(
                             `  ${size}px Q${quality} E${effort} i${iter + 1}`,
-                            `resize ${resizeMs.toFixed(1)}ms | enc ${encMs.toFixed(1)}ms | dec ${decMs.toFixed(1)}ms | file ${fileSizeKB}KB | ${percent}%`,
+                            `resize ${resizeMs.toFixed(1)}ms | enc ${encMs.toFixed(1)}ms | first ${encResult.firstChunkMs.toFixed(1)}ms | dec ${decMs.toFixed(1)}ms | total ${totalMs.toFixed(1)}ms | file ${fileSizeKB}KB | ${percent}%`,
                             'success'
                         );
 
                         if (performance.now() - lastProgressStatusAt > STATUS_UPDATE_INTERVAL_MS) {
-                            setProgress(`${percent}% - ${size}px q=${quality} e=${effort} (file ${fileIdx + 1}/${selectedSources.length})`);
+                            setProgress(formatBenchmarkProgress({
+                                percent,
+                                size,
+                                quality,
+                                effort,
+                                completedFiles,
+                                totalFiles: selectedSources.length,
+                            }));
+                            setTiming(`resize ${resizeMs.toFixed(1)} ms · enc ${encMs.toFixed(1)} ms · first ${encResult.firstChunkMs.toFixed(1)} ms · dec ${decMs.toFixed(1)} ms · total ${totalMs.toFixed(1)} ms`);
                             lastProgressStatusAt = performance.now();
                         }
                     } catch (err) {
@@ -934,9 +1114,15 @@ async function runBenchmark() {
                     }
                 }
             }
-        }
+            }
         }
 
+        completedFiles++;
+        setFileStatus(formatBenchmarkFileStatus({
+            completedFiles,
+            totalFiles: selectedSources.length,
+            fileName: source.file,
+        }));
         const fileElapsed = ((performance.now() - fileStart) / 1000).toFixed(1);
         dbgLog(`  ✓ File done in ${fileElapsed}s`, '', 'success');
     }
@@ -973,6 +1159,7 @@ async function runBenchmark() {
         if (btn) btn.disabled = false;
     }
 
+    updateSaveFullBtn(); // call here too — displayResults/drawGraphs may throw
     displayResults();
 }
 
@@ -980,6 +1167,16 @@ function getAverageTiming(timings) {
     if (!timings || !timings.length) return 0;
     const sum = timings.reduce((a, b) => a + b, 0);
     return (sum / timings.length).toFixed(2);
+}
+
+function recordTiming(map, key, value) {
+    if (!Number.isFinite(value)) return;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(value);
+}
+
+function detailTimingLine(label, values) {
+    return `<span class="detail-inline-label">${label}:</span> <span class="detail-inline-value">${values.join(' · ')}</span>`;
 }
 
 function displayResults() {
@@ -995,8 +1192,10 @@ function displayResults() {
                 const row = document.createElement('tr');
                 const key = `${size}x${quality}xe${effort}`;
                 const decodeMs = getAverageTiming(benchmarkResults.decodeMs.get(key));
+                const resizeMs = getAverageTiming(benchmarkResults.resizeMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
                 const note = size === 128 || size === 256 ? 'Thumb' : size === 512 ? 'Med' : size === 1080 ? 'Preview' : '';
-                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${decodeMs} ms</td><td>${note}</td>`;
+                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${decodeMs} ms</td><td>${resizeMs} ms</td><td>${totalMs} ms</td><td>${note}</td>`;
                 decodeSummary.appendChild(row);
             }
         }
@@ -1011,7 +1210,9 @@ function displayResults() {
                 const row = document.createElement('tr');
                 const key = `${size}x${quality}xe${effort}`;
                 const encodeMs = getAverageTiming(benchmarkResults.encodeMs.get(key));
-                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${encodeMs} ms</td><td></td>`;
+                const firstChunkMs = getAverageTiming(benchmarkResults.firstChunkMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
+                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${encodeMs} ms</td><td>${firstChunkMs} ms</td><td>${totalMs} ms</td><td></td>`;
                 encodeSummary.appendChild(row);
             }
         }
@@ -1027,11 +1228,63 @@ function displayResults() {
                 const key = `${size}x${quality}xe${effort}`;
                 const fileSizeBytes = benchmarkResults.fileSize.get(key) || 0;
                 const sizeKB = (fileSizeBytes / 1024).toFixed(1);
-                row.innerHTML = `<td>${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}</td><td>${sizeKB}</td><td></td>`;
+                const configLabel = `${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}`;
+
+                // Build per-source download links for this config
+                const dlCell = document.createElement('td');
+                const configKey = key; // capture for closure
+
+                // "Download set" button — saves all files for this config to a folder
+                const dlSetBtn = document.createElement('button');
+                dlSetBtn.type = 'button';
+                dlSetBtn.className = 'ghost-btn';
+                dlSetBtn.style.cssText = 'display:block;font-size:11px;margin-bottom:4px;';
+                dlSetBtn.textContent = '⬇ Download set';
+                dlSetBtn.addEventListener('click', () => {
+                    const entries = collectEncodedSet(`:${configKey}`);
+                    saveSetToFolder(entries, configKey);
+                });
+                dlCell.appendChild(dlSetBtn);
+
+                let hasAny = false;
+                for (const src of selectedSources) {
+                    const bytes = benchmarkResults.encodedBytes?.get(`${src.file}:${key}`);
+                    if (bytes) {
+                        hasAny = true;
+                        const baseName = String(src.file).replace(/\.[^.]+$/, '');
+                        const sizeSuffix = size === 'fullsize' ? 'full' : `${size}px`;
+                        const filename = `${baseName}_${sizeSuffix}_q${quality}_e${effort}.jxl`;
+                        const a = document.createElement('a');
+                        a.href = '#';
+                        a.textContent = String(src.file);
+                        a.style.cssText = 'display:block;font-size:11px;';
+                        a.addEventListener('click', e => {
+                            e.preventDefault();
+                            triggerJxlDownload(bytes, filename);
+                        });
+                        dlCell.appendChild(a);
+                    }
+                }
+                if (!hasAny) {
+                    dlSetBtn.remove();
+                    dlCell.textContent = '—';
+                }
+
+                const td0 = document.createElement('td');
+                td0.textContent = configLabel;
+                const td1 = document.createElement('td');
+                td1.textContent = sizeKB;
+                row.appendChild(td0);
+                row.appendChild(td1);
+                row.appendChild(dlCell);
                 fileSize.appendChild(row);
             }
         }
     }
+
+    // Clear stale download list (no separate panel needed — links are inline above)
+    const dlList = document.getElementById('jxl-download-list');
+    if (dlList) dlList.innerHTML = '';
 
     const encodeDetailBody = document.getElementById('encode-detail-body');
     encodeDetailBody.innerHTML = '';
@@ -1043,7 +1296,9 @@ function displayResults() {
                 row.className = 'detail-inline-row';
                 const key = `${size}x${quality}xe${effort}`;
                 const encodeMs = getAverageTiming(benchmarkResults.encodeMs.get(key));
-                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> <span class="detail-inline-label">Encode:</span> <span class="detail-inline-value">${encodeMs} ms</span>`;
+                const firstChunkMs = getAverageTiming(benchmarkResults.firstChunkMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
+                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> ${detailTimingLine('Encode', [`avg ${encodeMs} ms`, `first chunk ${firstChunkMs} ms`, `total ${totalMs} ms`])}`;
                 encodeDetailBody.appendChild(row);
             }
         }
@@ -1059,7 +1314,9 @@ function displayResults() {
                 row.className = 'detail-inline-row';
                 const key = `${size}x${quality}xe${effort}`;
                 const decodeMs = getAverageTiming(benchmarkResults.decodeMs.get(key));
-                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> <span class="detail-inline-label">Decode:</span> <span class="detail-inline-value">${decodeMs} ms</span>`;
+                const resizeMs = getAverageTiming(benchmarkResults.resizeMs.get(key));
+                const totalMs = getAverageTiming(benchmarkResults.totalMs.get(key));
+                row.innerHTML = `<span class="detail-inline-key">${size}px Q${quality} E${effort}</span> ${detailTimingLine('Decode', [`avg ${decodeMs} ms`, `resize ${resizeMs} ms`, `total ${totalMs} ms`])}`;
                 decodeDetailBody.appendChild(row);
             }
         }
@@ -1076,6 +1333,7 @@ function displayResults() {
         }
     }
 
+    updateSaveFullBtn(); // must be before drawGraphs() — if charts throw, button still updates
     drawGraphs();
 }
 
@@ -1118,23 +1376,33 @@ function clearResults() {
     benchmarkResults = {
         decodeMs: new Map(),
         encodeMs: new Map(),
+        resizeMs: new Map(),
+        firstChunkMs: new Map(),
+        totalMs: new Map(),
         fileSize: new Map(),
+        encodedBytes: new Map(),
     };
     permutations = [];
     addPermutationMode = false;
     selectedSources = [];
+    resetCharts();
+    setGraphExportsEnabled(false);
     updateSelectionStatus();
     setProgress('Idle.');
     setFileStatus('—');
     setTiming('Ready.');
     renderPermutationSelector();
+    document.getElementById('graph-caption').textContent = '';
     const addBtn = document.getElementById('add-permutation');
     if (addBtn) addBtn.disabled = true;
 
-    document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
-    document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('encode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('decode-summary-body').innerHTML = '<tr><td colspan="5" class="empty-state">Run benchmark.</td></tr>';
     document.getElementById('file-size-body').innerHTML = '<tr><td colspan="3" class="empty-state">Run benchmark.</td></tr>';
+    document.getElementById('encode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
     document.getElementById('decode-detail-body').innerHTML = '<div class="empty-state">Run benchmark.</div>';
+    const dlList = document.getElementById('jxl-download-list');
+    if (dlList) dlList.innerHTML = '';
 
     dbgLog('Cleared');
 }
@@ -1145,6 +1413,34 @@ const chartInstances = {
     'decode-distribution': null,
     'filesize': null,
 };
+
+function resetCharts() {
+    for (const [chartId, chart] of Object.entries(chartInstances)) {
+        chart?.destroy();
+        chartInstances[chartId] = null;
+        const canvas = document.getElementById(`graph-${chartId}`);
+        if (!canvas) continue;
+        const ctx = canvas.getContext('2d');
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
+function hasGraphData(results) {
+    return results.decodeMs.size > 0 || results.encodeMs.size > 0 || results.fileSize.size > 0;
+}
+
+function setGraphExportsEnabled(enabled) {
+    document.querySelectorAll('.export-webp, .export-csv').forEach(btn => {
+        btn.disabled = !enabled;
+        if (!enabled) {
+            btn.title = 'Run benchmark first';
+        } else if (btn.classList.contains('export-webp')) {
+            btn.title = 'Export as WebP';
+        } else {
+            btn.title = 'Export as CSV';
+        }
+    });
+}
 
 function getPermSources() {
     const visible = permutations.filter(p => p.visible);
@@ -1159,6 +1455,15 @@ function drawGraphs() {
     if (!selectedSizes.length) return;
 
     const captionEl = document.getElementById('graph-caption');
+    const sources = getPermSources();
+    const hasData = sources.some(src => hasGraphData(src.results));
+    setGraphExportsEnabled(hasData);
+    if (!hasData) {
+        resetCharts();
+        captionEl.textContent = '';
+        return;
+    }
+
     if (permutations.length > 0) {
         captionEl.textContent = permutations.map(p => `${p.label}: ${p.visible ? 'visible' : 'hidden'}`).join(' | ');
     } else {
@@ -1166,8 +1471,8 @@ function drawGraphs() {
         captionEl.textContent = `Enc: Lossless=${advOpts.lossless} Modular=${advOpts.modular} Progressive=${advOpts.progressive} Chunked=${advOpts.chunked} PreviewFirst=${advOpts.previewFirst} Butteraugli=${advOpts.butteraugliTarget} BrotliEffort=${advOpts.brotliEffort} | Dec: ICC=${advOpts.preserveIcc} Metadata=${advOpts.preserveMetadata} Downsample=${advOpts.downsample}× | Platform: SIMD=${advOpts.simd} Threading=${advOpts.threading}`;
     }
 
-    drawDecodeLatencyGraph(selectedSizes, selectedQualities, selectedEfforts);
     drawEncodeLatencyGraph(selectedSizes, selectedQualities, selectedEfforts);
+    drawDecodeLatencyGraph(selectedSizes, selectedQualities, selectedEfforts);
     drawDecodeDistributionGraph(selectedSizes, selectedQualities, selectedEfforts);
     drawFileSizeGraph(selectedSizes, selectedQualities, selectedEfforts);
 }
@@ -1217,7 +1522,7 @@ function drawDecodeLatencyGraph(selectedSizes, selectedQualities, selectedEffort
                 tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + 'ms' } }
             },
             scales: {
-                y: { title: { display: true, text: 'Time (ms)' }, beginAtZero: true }
+                y: { title: { display: true, text: 'Decode time (ms)' }, beginAtZero: true }
             }
         }
     });
@@ -1267,7 +1572,9 @@ function drawEncodeLatencyGraph(selectedSizes, selectedQualities, selectedEffort
                 legend: { position: 'bottom' },
                 tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + 'ms' } }
             },
-            scales: { y: { beginAtZero: true } }
+            scales: {
+                y: { title: { display: true, text: 'Encode time (ms)' }, beginAtZero: true }
+            }
         }
     });
 }
@@ -1317,7 +1624,7 @@ function drawDecodeDistributionGraph(selectedSizes, selectedQualities, selectedE
                     max: sizeLabels.length - 0.5,
                     ticks: { callback: value => sizeLabels[Math.round(value)] || '' }
                 },
-                y: { beginAtZero: true }
+                y: { title: { display: true, text: 'Decode time (ms)' }, beginAtZero: true }
             }
         }
     });
@@ -1360,7 +1667,9 @@ function drawFileSizeGraph(selectedSizes, selectedQualities, selectedEfforts) {
                 legend: { position: 'bottom' },
                 tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + ' KB' } }
             },
-            scales: { y: { stacked: false, beginAtZero: true } }
+            scales: {
+                y: { title: { display: true, text: 'File size (KB)' }, stacked: false, beginAtZero: true }
+            }
         }
     });
 }
@@ -1393,25 +1702,27 @@ function exportGraphAsCSV(chartId) {
 
     const sysInfo = getSystemInfo();
     const advOpts = getAdvancedOptions();
-    let csv = '# JXL Benchmark Export\n';
-    csv += `# Date: ${new Date().toISOString()}\n`;
-    csv += `# Browser: ${sysInfo.browser} ${sysInfo.browserVersion}\n`;
-    csv += `# CPU Cores: ${sysInfo.cpuCores}\n`;
-    csv += `# Device Memory: ${sysInfo.deviceMemory} GB\n`;
-    csv += `# SIMD: ${advOpts.simd}, Threading: ${advOpts.threading}, Progressive: ${advOpts.progressive}\n`;
-    csv += `# ICC: ${advOpts.preserveIcc}, Metadata: ${advOpts.preserveMetadata}, Chunked: ${advOpts.chunked}\n`;
-    csv += '\n';
-    csv += 'Size,' + chart.data.datasets.map(ds => ds.label).join(',') + '\n';
+    const csvRows = [];
+    csvRows.push('# JXL Benchmark Export');
+    csvRows.push(`# Date: ${new Date().toISOString()}`);
+    csvRows.push(`# Browser: ${sysInfo.browser} ${sysInfo.browserVersion}`);
+    csvRows.push(`# CPU Cores: ${sysInfo.cpuCores}`);
+    csvRows.push(`# Device Memory: ${sysInfo.deviceMemory} GB`);
+    csvRows.push(`# SIMD: ${advOpts.simd}, Threading: ${advOpts.threading}, Progressive: ${advOpts.progressive}`);
+    csvRows.push(`# ICC: ${advOpts.preserveIcc}, Metadata: ${advOpts.preserveMetadata}, Chunked: ${advOpts.chunked}`);
+    csvRows.push('');
+    csvRows.push('Size,' + chart.data.datasets.map(ds => ds.label).join(','));
 
     chart.data.labels.forEach((label, idx) => {
         const row = [label];
         chart.data.datasets.forEach(ds => {
             row.push(ds.data[idx] || '');
         });
-        csv += row.join(',') + '\n';
+        csvRows.push(row.join(','));
     });
+    appendTimingBreakdownCsv(csvRows);
 
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob([csvRows.join('\n') + '\n'], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1420,6 +1731,33 @@ function exportGraphAsCSV(chartId) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+}
+
+function appendTimingBreakdownCsv(csvRows) {
+    const selectedSizes = getSelectedSizes();
+    const selectedQualities = getSelectedQualities();
+    const selectedEfforts = getSelectedEfforts();
+    csvRows.push('');
+    csvRows.push('Detailed Timing Breakdown');
+    csvRows.push('Config,Resize avg,Encode avg,First chunk avg,Decode avg,Total avg,File size KB');
+    for (const size of selectedSizes) {
+        for (const quality of selectedQualities) {
+            for (const effort of selectedEfforts) {
+                const key = `${size}x${quality}xe${effort}`;
+                const label = `${size === 'fullsize' ? 'Full' : size + 'px'} Q${quality} E${effort}`;
+                const fileSizeKb = ((benchmarkResults.fileSize.get(key) || 0) / 1024).toFixed(1);
+                csvRows.push([
+                    label,
+                    getAverageTiming(benchmarkResults.resizeMs.get(key)),
+                    getAverageTiming(benchmarkResults.encodeMs.get(key)),
+                    getAverageTiming(benchmarkResults.firstChunkMs.get(key)),
+                    getAverageTiming(benchmarkResults.decodeMs.get(key)),
+                    getAverageTiming(benchmarkResults.totalMs.get(key)),
+                    fileSizeKb,
+                ].join(','));
+            }
+        }
+    }
 }
 
 document.querySelectorAll('.results-tab').forEach(tab => {
@@ -1449,280 +1787,6 @@ document.querySelectorAll('.export-csv').forEach(btn => {
     });
 });
 
-// ─── Progressive Paint Test ──────────────────────────────────────────────────
-
-function getProgSize() {
-    const radio = document.querySelector('input[name="prog-size"]:checked');
-    if (!radio) return 1080;
-    return radio.value === 'fullsize' ? 'fullsize' : Number(radio.value);
-}
-
-function getProgQuality() {
-    const radio = document.querySelector('input[name="prog-quality"]:checked');
-    return radio ? Number(radio.value) : 85;
-}
-
-function setProgStatus(text) {
-    const el = document.getElementById('prog-status');
-    if (el) el.textContent = text;
-}
-
-function clearViewports() {
-    for (const id of ['vp-overview', 'vp-pixel', 'vp-zoom']) {
-        const canvas = document.getElementById(id);
-        if (!canvas) continue;
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = 'rgba(0,0,0,0.04)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-    for (const id of ['vp-overview-info', 'vp-pixel-info', 'vp-zoom-info']) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = '—';
-    }
-}
-
-function clearPassTimeline() {
-    const el = document.getElementById('pass-timeline');
-    if (el) el.innerHTML = '';
-}
-
-// Returns the overview canvas element for use as a thumbnail source.
-function renderPassToViewports(pixels, width, height) {
-    const arr = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
-    const imgData = new ImageData(new Uint8ClampedArray(arr.buffer, arr.byteOffset, arr.byteLength), width, height);
-
-    const srcCanvas = document.createElement('canvas');
-    srcCanvas.width = width;
-    srcCanvas.height = height;
-    srcCanvas.getContext('2d').putImageData(imgData, 0, 0);
-
-    // Overview — fit whole image
-    const ovCanvas = document.getElementById('vp-overview');
-    if (ovCanvas) {
-        const ctx = ovCanvas.getContext('2d');
-        const scale = Math.min(ovCanvas.width / width, ovCanvas.height / height);
-        const dw = Math.round(width * scale);
-        const dh = Math.round(height * scale);
-        ctx.clearRect(0, 0, ovCanvas.width, ovCanvas.height);
-        ctx.drawImage(srcCanvas, Math.round((ovCanvas.width - dw) / 2), Math.round((ovCanvas.height - dh) / 2), dw, dh);
-    }
-
-    // 1:1 pixels — center crop at actual resolution
-    const pxCanvas = document.getElementById('vp-pixel');
-    if (pxCanvas) {
-        const cw = Math.min(pxCanvas.width, width);
-        const ch = Math.min(pxCanvas.height, height);
-        const sx = Math.floor((width - cw) / 2);
-        const sy = Math.floor((height - ch) / 2);
-        const ctx = pxCanvas.getContext('2d');
-        ctx.clearRect(0, 0, pxCanvas.width, pxCanvas.height);
-        ctx.drawImage(srcCanvas, sx, sy, cw, ch, 0, 0, cw, ch);
-    }
-
-    // 4× zoom — small center crop scaled up, pixelated
-    const zmCanvas = document.getElementById('vp-zoom');
-    if (zmCanvas) {
-        const srcW = Math.max(1, Math.floor(zmCanvas.width / 4));
-        const srcH = Math.max(1, Math.floor(zmCanvas.height / 4));
-        const sx = Math.max(0, Math.floor((width - srcW) / 2));
-        const sy = Math.max(0, Math.floor((height - srcH) / 2));
-        const ctx = zmCanvas.getContext('2d');
-        ctx.imageSmoothingEnabled = false;
-        ctx.clearRect(0, 0, zmCanvas.width, zmCanvas.height);
-        ctx.drawImage(srcCanvas, sx, sy, Math.min(srcW, width - sx), Math.min(srcH, height - sy), 0, 0, zmCanvas.width, zmCanvas.height);
-    }
-
-    return srcCanvas;
-}
-
-function addPassToTimeline(srcCanvas, passIdx, t, isFinal) {
-    const timeline = document.getElementById('pass-timeline');
-    if (!timeline) return;
-
-    const TW = 80, TH = 50;
-    const thumb = document.createElement('canvas');
-    thumb.width = TW;
-    thumb.height = TH;
-    const ctx = thumb.getContext('2d');
-    const scale = Math.min(TW / srcCanvas.width, TH / srcCanvas.height);
-    const dw = Math.round(srcCanvas.width * scale);
-    const dh = Math.round(srcCanvas.height * scale);
-    ctx.drawImage(srcCanvas, Math.round((TW - dw) / 2), Math.round((TH - dh) / 2), dw, dh);
-
-    const wrap = document.createElement('div');
-    wrap.className = 'pass-thumb' + (isFinal ? ' is-final' : '');
-    wrap.title = `Pass ${passIdx + 1} · ${t.toFixed(1)} ms${isFinal ? ' · final' : ''}`;
-
-    const label = document.createElement('div');
-    label.className = 'pass-thumb-label';
-    label.textContent = isFinal ? `${t.toFixed(0)}ms ✓` : `${t.toFixed(0)}ms`;
-
-    wrap.appendChild(thumb);
-    wrap.appendChild(label);
-    timeline.appendChild(wrap);
-}
-
-function updateViewportInfo(passIdx, t, isFinal) {
-    const text = `Pass ${passIdx + 1} · ${t.toFixed(1)} ms${isFinal ? ' · final' : ' · partial'}`;
-    for (const id of ['vp-overview-info', 'vp-pixel-info', 'vp-zoom-info']) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = text;
-    }
-}
-
-function renderProgressiveComparison({ passCount, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB, encodeMs, previewFirst }) {
-    const body = document.getElementById('prog-comparison-body');
-    if (!body) return;
-
-    const speedup = (oneShotFinalMs && progressiveFirstMs)
-        ? `${(oneShotFinalMs / progressiveFirstMs).toFixed(1)}×`
-        : '—';
-
-    body.innerHTML = `
-        <tr>
-            <td><strong>Progressive (emitEveryPass)</strong></td>
-            <td>${passCount}</td>
-            <td><strong>${progressiveFirstMs != null ? progressiveFirstMs.toFixed(1) + ' ms' : '—'}</strong></td>
-            <td>${progressiveFinalMs != null ? progressiveFinalMs.toFixed(1) + ' ms' : '—'}</td>
-            <td>${speedup} faster 1st frame</td>
-        </tr>
-        <tr>
-            <td>One-shot (final only)</td>
-            <td>1</td>
-            <td>—</td>
-            <td>${oneShotFinalMs != null ? oneShotFinalMs.toFixed(1) + ' ms' : '—'}</td>
-            <td>baseline</td>
-        </tr>
-        <tr>
-            <td colspan="5" style="font-size:11px;color:var(--muted);padding:6px 12px;">
-                Encoded ${fileSizeKB.toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · progressive=true previewFirst=${previewFirst}
-            </td>
-        </tr>
-    `;
-}
-
-async function runProgressivePaintTest() {
-    if (!selectedSources.length) { setProgStatus('Load files first.'); return; }
-    if (!wasmReady) { setProgStatus('WASM not ready.'); return; }
-
-    const btn = document.getElementById('run-progressive');
-    if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
-    clearViewports();
-    clearPassTimeline();
-
-    try {
-        const source = selectedSources[0];
-        const size = getProgSize();
-        const quality = getProgQuality();
-        const previewFirst = !!(document.getElementById('prog-preview-first')?.checked);
-
-        setProgStatus(`Resizing to ${size === 'fullsize' ? 'full' : size + 'px'}…`);
-        const resized = resizeRgba(source.rgba, source.width, source.height, size);
-
-        setProgStatus(`Encoding ${resized.width}×${resized.height} Q${quality} progressive…`);
-
-        const opts = getAdvancedOptions();
-        const encoder = createEncoder({
-            format: 'rgba8',
-            width: resized.width,
-            height: resized.height,
-            hasAlpha: true,
-            quality,
-            effort: 3,
-            progressive: true,
-            previewFirst,
-            chunked: opts.chunked,
-            modular: opts.modular,
-            brotliEffort: opts.brotliEffort,
-            copyInput: true,
-        });
-        const encChunks = [];
-        const chunkTask = (async () => { for await (const c of encoder.chunks()) encChunks.push(c); })();
-        const encStart = performance.now();
-        await encoder.pushPixels(exactBuffer(resized.rgba));
-        await encoder.finish();
-        await chunkTask;
-        const encodeMs = performance.now() - encStart;
-        await encoder.dispose();
-        const jxlBytes = concatChunks(encChunks);
-
-        setProgStatus(`Encoded ${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · decoding progressively…`);
-        dbgLog('Progressive paint: encoded', `${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms`, 'info');
-
-        // Progressive decode — collect all passes
-        const decoder = createDecoder({
-            format: 'rgba8',
-            progressionTarget: 'final',
-            emitEveryPass: true,
-            preserveIcc: false,
-            preserveMetadata: false,
-        });
-        decoder.push(jxlBytes);
-        decoder.close();
-
-        const decStart = performance.now();
-        const passes = [];
-        let passIdx = 0;
-
-        for await (const ev of decoder.events()) {
-            if (ev.type === 'progress' || ev.type === 'final') {
-                const t = performance.now() - decStart;
-                const isFinal = ev.type === 'final';
-                const srcCanvas = renderPassToViewports(ev.pixels, ev.info.width, ev.info.height);
-                addPassToTimeline(srcCanvas, passIdx, t, isFinal);
-                updateViewportInfo(passIdx, t, isFinal);
-                passes.push({ passIdx, t, isFinal });
-                dbgLog(`  pass ${passIdx + 1}${isFinal ? ' (final)' : ''}`, `${t.toFixed(1)} ms`, 'info');
-                passIdx++;
-            } else if (ev.type === 'error') {
-                throw new Error(ev.message);
-            }
-        }
-        decoder.dispose();
-
-        const progressiveFirstMs = passes.length ? passes[0].t : null;
-        const progressiveFinalMs = passes.length ? passes[passes.length - 1].t : null;
-
-        // One-shot decode for comparison
-        setProgStatus('Running one-shot decode for comparison…');
-        const decoder2 = createDecoder({
-            format: 'rgba8',
-            progressionTarget: 'final',
-            emitEveryPass: false,
-            preserveIcc: false,
-            preserveMetadata: false,
-        });
-        decoder2.push(jxlBytes.slice());
-        decoder2.close();
-        const oneShotStart = performance.now();
-        let oneShotFinalMs = null;
-        for await (const ev of decoder2.events()) {
-            if (ev.type === 'final') oneShotFinalMs = performance.now() - oneShotStart;
-            else if (ev.type === 'error') throw new Error(ev.message);
-        }
-        decoder2.dispose();
-
-        renderProgressiveComparison({ passCount: passes.length, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB: jxlBytes.length / 1024, encodeMs, previewFirst });
-
-        const summary = `${passes.length} passes · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
-        setProgStatus(`Done. ${summary}`);
-        dbgLog('Progressive paint done', summary, 'success');
-
-    } catch (err) {
-        setProgStatus(`Error: ${err.message}`);
-        dbgLog('Progressive paint error', err.message, 'error');
-    } finally {
-        if (btn) {
-            btn.textContent = 'Run progressive paint';
-            btn.disabled = !selectedSources.length;
-        }
-    }
-}
-
-const runProgressiveBtn = document.getElementById('run-progressive');
-if (runProgressiveBtn) {
-    runProgressiveBtn.addEventListener('click', () => runProgressivePaintTest());
-}
+setGraphExportsEnabled(false);
 
 dbgLog('Benchmark initialized');

@@ -1,22 +1,23 @@
-﻿import initRaw, { process_orf, rgb_to_rgba, downscale_rgba } from '../pkg/raw_converter_wasm.js';
-import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+﻿import initRaw, * as rawWasm from '../pkg/raw_converter_wasm.js';
+import { createDecoder, createEncoder, getWrapperCapabilities } from '@casabio/jxl-wasm';
 import { getContext, resetContext } from './jxl-browser-context.js';
+import { getCapabilities } from '@casabio/jxl-capabilities';
 import {
-    bindRangeLabel,
     clamp,
     setCssVar,
-    setGroupDisabled,
-    wireHelpPopovers,
-    wireSlideoutPanel,
 } from './jxl-dashboard-ui.js';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
+const { process_orf, process_cr2, rgb_to_rgba } = rawWasm;
+
 const MAX_BATCH_LIMIT = 100;
 const RANDOM_LOAD_CONCURRENCY = 4;
+const RACE_CARD_SIZE = 100;
 const WRAPPER_FILE_LOAD_CONCURRENCY = 4;
 const STATUS_UPDATE_INTERVAL_MS = 120;
 const TILE_CANVAS_MAX_EDGE = 256;
 const SESSION_STAGE_TIMEOUT_MS = 1000;
+const SESSION_COMPLETION_TIMEOUT_MS = 5000;
 
 const modeButtons = [...document.querySelectorAll('button[data-mode]')];
 const sourceInput = document.getElementById('source-input');
@@ -28,16 +29,27 @@ const batchLimitInput = document.getElementById('batch-limit');
 const batchConcurrencyInput = document.getElementById('batch-concurrency');
 const batchQualityInput = document.getElementById('batch-quality');
 const batchEffortInput = document.getElementById('batch-effort');
+const batchDecodeSpeedInput = document.getElementById('batch-decode-speed');
+const batchPhotonNoiseIsoInput = document.getElementById('batch-photon-noise-iso');
+const batchResamplingInputs = [...document.querySelectorAll('input[name="batch-resampling"]')];
+const batchModularInputs = [...document.querySelectorAll('input[name="batch-modular"]')];
+const batchBrotliEffortInput = document.getElementById('batch-brotli-effort');
+
+/** Phase 1 first-class advanced filters controls (populated after DOM ready). */
+let batchAdvancedFilters = null;
+const batchAlphaDistanceInput = document.getElementById('batch-alpha-distance');
+const alphaDistanceUnavail = document.getElementById('alpha-distance-unavail');
 const batchLosslessInput = document.getElementById('batch-lossless');
+const batchCompressBoxesInput = document.getElementById('batch-compress-boxes');
+const batchForceContainerInput = document.getElementById('batch-force-container');
+const batchRawCodestreamInput = document.getElementById('batch-raw-codestream');
+const batchJumbfInput = document.getElementById('batch-jumbf-input');
+const batchJumbfSampleBtn = document.getElementById('batch-jumbf-sample');
+const batchThumbSizeInputs = [...document.querySelectorAll('input[name="batch-thumb-size"]')];
 const batchLimitValue = document.getElementById('batch-limit-value');
 const batchConcurrencyValue = document.getElementById('batch-concurrency-value');
 const batchQualityValue = document.getElementById('batch-quality-value');
 const batchEffortValue = document.getElementById('batch-effort-value');
-const batchThumbSizeInput = document.getElementById('batch-thumb-size');
-const batchThumbSizeValue = document.getElementById('batch-thumb-size-value');
-const wrapperDashboard = document.getElementById('wrapper-dashboard');
-const wrapperControlsBtn = document.getElementById('wrapper-controls-btn');
-const wrapperControlsClose = document.getElementById('wrapper-controls-close');
 const selectionStatus = document.getElementById('selection-status');
 const modeStatus = document.getElementById('mode-status');
 const batchStatus = document.getElementById('batch-status');
@@ -46,20 +58,43 @@ const loadedCount = document.getElementById('loaded-count');
 const queuedCount = document.getElementById('queued-count');
 const doneCount = document.getElementById('done-count');
 const errorCount = document.getElementById('error-count');
+const statsExistingTotal = document.getElementById('stats-existing-total');
+const statsWrapperTotal = document.getElementById('stats-wrapper-total');
+const statsTotalDelta = document.getElementById('stats-total-delta');
+const statsWrapperFaster = document.getElementById('stats-wrapper-faster');
 const batchGrid = document.getElementById('batch-grid');
-const controlBand = document.querySelector('.control-band');
-const statusGrid = document.querySelector('.status-grid');
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
+
+// JUMBF demo wiring (jumbf-box-support.md)
+if (batchJumbfInput) {
+  batchJumbfInput.addEventListener('input', updateJumbfStatus);
+  batchJumbfInput.addEventListener('change', updateJumbfStatus);
+}
+if (batchJumbfSampleBtn) {
+  batchJumbfSampleBtn.addEventListener('click', () => {
+    if (!batchJumbfInput) return;
+    const stub = makeSampleJumbfStub();
+    // store for getter
+    _lastJumbfBytes = stub;
+    // show a short base64 preview (demo only)
+    const b64 = btoa(String.fromCharCode(...stub));
+    batchJumbfInput.value = b64.slice(0, 40) + (b64.length > 40 ? '...' : '');
+    updateJumbfStatus();
+  });
+}
 
 let existingContext = getContext();
 const paintScratchCanvas = document.createElement('canvas');
 const sourceCache = new Map();
+const chartInstances = {};
+
+let nativeJxlDecoder = false;
 
 let currentMode = 'existing';
 let selectedSources = [];
 let activeRunId = 0;
 let activeLoadId = 0;
-let batchThumbSize = Number(batchThumbSizeInput?.value) || 220;
+let batchThumbSize = batchThumbSizeInputs.find((input) => input.checked)?.value || '256';
 let lastProgressStatusAt = 0;
 let sessionBackendBroken = false;
 
@@ -109,6 +144,14 @@ async function decodeFromBlob(blob) {
     return { bitmap, decodeMs };
 }
 
+async function decodeJxlNative(bytes) {
+    const started = performance.now();
+    const blob = new Blob([bytes], { type: 'image/jxl' });
+    const bitmap = await createImageBitmap(blob);
+    const decodeMs = performance.now() - started;
+    return { bitmap, decodeMs };
+}
+
 async function encodeToWebp(rgba, width, height, quality) {
     const started = performance.now();
     const canvas = document.createElement('canvas');
@@ -122,13 +165,42 @@ async function encodeToWebp(rgba, width, height, quality) {
 }
 
 function resizeRgba(rgba, width, height, targetWidth) {
+    if (targetWidth === 'fullsize') return { rgba, width, height };
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
+    const resizeRgbaImpl = rawWasm.downscale_rgba ?? downscaleRgbaCanvas;
     return {
-        rgba: downscale_rgba(rgba, width, height, targetWidth, targetHeight),
+        rgba: resizeRgbaImpl(rgba, width, height, targetWidth, targetHeight),
         width: targetWidth,
         height: targetHeight
     };
+}
+
+function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = width;
+    srcCanvas.height = height;
+    const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+
+    const dstCanvas = document.createElement('canvas');
+    dstCanvas.width = targetWidth;
+    dstCanvas.height = targetHeight;
+    const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
+    dstCtx.drawImage(srcCanvas, 0, 0, targetWidth, targetHeight);
+    return new Uint8Array(dstCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer);
+}
+
+function nextFrame() {
+    return new Promise(resolve => requestAnimationFrame(() => resolve()));
+}
+
+function updateRaceCardTimingBars(raceCards) {
+    const runTotalBudget = Math.max(...raceCards.map(raceCard => raceCard.elapsed), 1);
+    for (const raceCard of raceCards) {
+        raceCard.meta.textContent = `${raceCard.format.toUpperCase()} ${fmtMs(raceCard.totalMs)} · ${fmtMs(raceCard.elapsed)}`;
+        raceCard.bar.style.width = `${(raceCard.elapsed / runTotalBudget) * 100}%`;
+    }
 }
 
 async function runRace() {
@@ -140,20 +212,25 @@ async function runRace() {
     }
 
     const formats = raceFormats();
-    const targetWidth = Number(raceSize());
+    const targetSize = raceSize();
     const quality = getQuality();
     const effort = getEffort();
     const started = performance.now();
+    const totalCards = formats.length * sources.length;
 
     raceTrack.innerHTML = '<div class="track-line"></div>';
-    setStatus(`Racing ${sources.length} images in ${formats.join(', ')}...`);
+    setStatus(`Racing ${sources.length} images in ${formats.join(', ')} @ ${targetSize}...`);
 
     const currentRunResults = [];
+    const raceCards = [];
+    const availableTrack = Math.max(0, raceTrack.clientWidth - RACE_CARD_SIZE);
+    const slotSpacing = totalCards > 1 ? availableTrack / (totalCards - 1) : 0;
 
     for (const format of formats) {
         for (let i = 0; i < sources.length; i++) {
             if (runId !== activeRunId) return;
             const source = sources[i];
+            const targetWidth = targetSize === 'fullsize' ? 'fullsize' : Number(targetSize);
 
             // 1. Resize
             const resized = await resizeRgba(source.rgba, source.width, source.height, targetWidth);
@@ -164,14 +241,20 @@ async function runRace() {
                 const enc = await encodeWithWrapper({ ...resized, rgba: resized.rgba });
                 bytes = enc.bytes;
                 encodeMs = enc.encodeMs;
-                const decodeStart = performance.now();
-                const dec = await decodeWithWrapper(bytes);
-                decodeMs = performance.now() - decodeStart;
-                const canvas = document.createElement('canvas');
-                canvas.width = resized.width;
-                canvas.height = resized.height;
-                rgbaToCanvas(canvas, toU8(dec.final.pixels), resized.width, resized.height);
-                bitmap = canvas;
+                if (nativeJxlDecoder) {
+                    const dec = await decodeJxlNative(bytes);
+                    decodeMs = dec.decodeMs;
+                    bitmap = dec.bitmap;
+                } else {
+                    const decodeStart = performance.now();
+                    const dec = await decodeWithWrapper(bytes);
+                    decodeMs = performance.now() - decodeStart;
+                    const canvas = document.createElement('canvas');
+                    canvas.width = resized.width;
+                    canvas.height = resized.height;
+                    rgbaToCanvas(canvas, toU8(dec.final.pixels), resized.width, resized.height);
+                    bitmap = canvas;
+                }
             } else if (format === 'jpeg') {
                 const enc = await encodeToJpeg(resized.rgba, resized.width, resized.height, quality);
                 bytes = enc.bytes;
@@ -206,24 +289,45 @@ async function runRace() {
             const card = document.createElement('div');
             card.className = 'race-card';
             card.style.zIndex = i;
-            if (elapsed > maxRaceTimeSoFar) maxRaceTimeSoFar = elapsed * 1.2;
-            const pos = (elapsed / maxRaceTimeSoFar) * 100;
-            card.style.left = `${pos}%`;
+            const slotIndex = currentRunResults.length - 1;
+            card.style.left = `${slotIndex * slotSpacing}px`;
 
             const canvas = document.createElement('canvas');
-            canvas.width = 100;
-            canvas.height = 100;
+            canvas.width = RACE_CARD_SIZE;
+            canvas.height = RACE_CARD_SIZE;
             const ctx = canvas.getContext('2d');
-            ctx.drawImage(bitmap, 0, 0, 100, 100);
+            ctx.drawImage(bitmap, 0, 0, RACE_CARD_SIZE, RACE_CARD_SIZE);
             card.appendChild(canvas);
+
+            const meta = document.createElement('div');
+            meta.className = 'race-card-meta';
+            card.appendChild(meta);
+
+            const barWrap = document.createElement('div');
+            barWrap.className = 'race-card-bar-wrap';
+            const bar = document.createElement('div');
+            bar.className = 'race-card-bar';
+            barWrap.appendChild(bar);
+            card.appendChild(barWrap);
+
             raceTrack.appendChild(card);
+            raceCards.push({ card, meta, bar, format, totalMs, elapsed });
+            updateRaceCardTimingBars(raceCards);
+
+            dbgLog(
+                `  race ${format} [${i + 1}/${sources.length}]`,
+                `orig ${source.width}×${source.height} → work ${resized.width}×${resized.height} · ${fmtBytes(bytes.byteLength)} · enc ${fmtMs(encodeMs)} · dec ${fmtMs(decodeMs)} · total ${fmtMs(totalMs)} · elapsed ${fmtMs(elapsed)}`,
+                'info'
+            );
+
+            await nextFrame();
 
             updateProgressStatus({ started, jobs: sources, done: currentRunResults.length, errors: 0 });
         }
     }
 
     const runTotalMs = performance.now() - started;
-    const runLabel = `${formats.join('+')} @ ${targetWidth}px · ${fmtMs(runTotalMs)}`;
+    const runLabel = `${formats.join('+')} @ ${targetSize === 'fullsize' ? 'fullsize' : `${targetSize}px`} · ${fmtMs(runTotalMs)}`;
     raceHistory.push({ label: runLabel, totalMs: runTotalMs });
     updateRaceHistory();
     setStatus('Race finished.', `${runLabel} elapsed`);
@@ -249,9 +353,9 @@ function updateRaceHistory() {
 
 
 function syncSettingLabels() {
-    batchLimitValue.textContent = String(getBatchLimit());
-    batchConcurrencyValue.textContent = String(getConcurrency());
-    batchQualityValue.textContent = String(getQuality());
+    if (batchLimitValue) batchLimitValue.textContent = String(getBatchLimit());
+    if (batchConcurrencyValue) batchConcurrencyValue.textContent = String(getConcurrency());
+    if (batchQualityValue) batchQualityValue.textContent = String(getQuality());
     if (batchEffortValue) batchEffortValue.textContent = String(getEffort());
     loadRandomBtn.textContent = `Load ${getBatchLimit()} random Gobabeb file${getBatchLimit() === 1 ? '' : 's'}`;
 }
@@ -272,8 +376,238 @@ function getEffort() {
     return clamp(Number(batchEffortInput.value) || 3, 1, 9);
 }
 
+function getDecodeSpeed() {
+    if (!batchDecodeSpeedInput) return undefined;
+    const v = clamp(Math.round(Number(batchDecodeSpeedInput.value) || 0), 0, 4);
+    return v > 0 ? v : undefined;
+}
+
+function getPhotonNoiseIso() {
+    if (!batchPhotonNoiseIsoInput) return 0;
+    return clamp(Math.round(Number(batchPhotonNoiseIsoInput.value) || 0), 0, 51200);
+}
+
+function getResampling() {
+    const value = Number(batchResamplingInputs.find((input) => input.checked)?.value || 1);
+    return value === 2 || value === 4 || value === 8 ? value : 1;
+}
+
+/** Pixel art upsampling mode control (mandatory benchmark wiring per pixel-art-downsampling.md). */
+function getUpsamplingMode() {
+    const el = document.getElementById('batch-upsampling-mode');
+    if (!el) return 0;
+    const v = Number(el.value);
+    return Number.isFinite(v) ? v : 0;
+}
+
+/** JPEG reconstruction options (jpeg-recompression-polish design note) — mandatory benchmark. */
+function getJpegReconstruction() {
+    const cfl = !!document.getElementById('batch-jpeg-cfl')?.checked;
+    const compress = !!document.getElementById('batch-jpeg-compress-recon')?.checked;
+    const store = !!document.getElementById('batch-jpeg-store-meta')?.checked;
+    if (!cfl && !compress && !store) return undefined;
+    return { cfl, compressBoxes: compress, storeJPEGMetadata: store };
+}
+
+function getModular() {
+    const v = Number(batchModularInputs.find(i => i.checked)?.value ?? -1);
+    return (v === -1 || v === 0 || v === 1) ? v : -1;
+}
+
+function getBrotliEffort() {
+    if (!batchBrotliEffortInput) return -1;
+    const v = Math.round(Number(batchBrotliEffortInput.value) || -1);
+    return Math.max(-1, Math.min(11, v));
+}
+
+/** Phase 1: first-class advanced filters (DOTS/PATCHES/EPF/GABORISH) via the new advancedControls surface. */
+function getAdvancedFilters() {
+    if (!batchAdvancedFilters) return undefined;
+    const f = {};
+    if (batchAdvancedFilters.dots && batchAdvancedFilters.dots.checked) f.dots = true;
+    if (batchAdvancedFilters.patches && batchAdvancedFilters.patches.checked) f.patches = true;
+    if (batchAdvancedFilters.epf) {
+        const v = Number(batchAdvancedFilters.epf.value);
+        if (!Number.isNaN(v)) f.epf = v;
+    }
+    if (batchAdvancedFilters.gaborish && batchAdvancedFilters.gaborish.checked) f.gaborish = true;
+    return Object.keys(f).length > 0 ? { filters: f } : undefined;
+}
+
+function getGroupOrderControls() {
+    const modeInputs = document.querySelectorAll('input[name="batch-group-order-mode"]');
+    const mode = [...modeInputs].find(i => i.checked)?.value || 'scanline';
+    const cxEl = document.getElementById('batch-group-center-x');
+    const cyEl = document.getElementById('batch-group-center-y');
+    const cx = cxEl ? Number(cxEl.value) : NaN;
+    const cy = cyEl ? Number(cyEl.value) : NaN;
+
+    const go = { mode };
+    if (!Number.isNaN(cx)) go.centerX = Math.floor(cx);
+    if (!Number.isNaN(cy)) go.centerY = Math.floor(cy);
+    return (mode === 'center' || go.centerX !== undefined || go.centerY !== undefined) ? { groupOrder: go } : undefined;
+}
+
+/** Buffering + streaming (Phase 2) + low-memory extensions (production-chunked-paths Phase 3). */
+function getBufferingControls() {
+    const strategyEl = document.querySelector('input[name="batch-buffering"]:checked');
+    const strategy = strategyEl ? parseInt(strategyEl.value, 10) : undefined;
+    const streamingInput = !!document.getElementById('batch-streaming-input')?.checked;
+    const streamingOutput = !!document.getElementById('batch-streaming-output')?.checked;
+    const lowMemoryMode = !!document.getElementById('batch-lowmem-mode')?.checked;
+    const preferChunked = !!document.getElementById('batch-prefer-chunked')?.checked;
+
+    const b = {};
+    if (strategy !== undefined && !isNaN(strategy)) b.strategy = strategy;
+    if (streamingInput) b.streamingInput = true;
+    if (streamingOutput) b.streamingOutput = true;
+    if (lowMemoryMode) b.lowMemoryMode = true;
+    if (preferChunked) b.preferChunkedAPI = true;
+
+    return (Object.keys(b).length > 0) ? { buffering: b } : undefined;
+}
+
+/** Gain map (HDR) transport — mandatory benchmark wiring per gain-maps.md.
+ * Returns { data: Uint8Array | ArrayBuffer } when demo checked or a file is selected.
+ * Demo uses a tiny placeholder to exercise the full jhgm box encode/decode path (content is irrelevant for transport test).
+ */
+let currentGainMapBytes = null; // Uint8Array | null
+const DEMO_GAIN_MAP_BYTES = new Uint8Array([0xff, 0x0a, 0x00, 0x10, 0x4a, 0x58, 0x4c, 0x20, 0x67, 0x61, 0x69, 0x6e, 0x20, 0x64, 0x65, 0x6d, 0x6f]); // placeholder (validates transport; replace with real for perceptual use)
+
+function getGainMap() {
+    const useDemo = document.getElementById('batch-gainmap-use-demo');
+    const fileInput = document.getElementById('batch-gainmap-file');
+    if (useDemo && useDemo.checked) {
+        return { data: DEMO_GAIN_MAP_BYTES };
+    }
+    if (currentGainMapBytes && currentGainMapBytes.byteLength > 0) {
+        return { data: currentGainMapBytes };
+    }
+    return undefined;
+}
+
+function getAlphaDistance() {
+    if (!batchAlphaDistanceInput) return undefined;
+    const raw = batchAlphaDistanceInput.value.trim();
+    if (raw === '') return undefined;
+    const v = parseFloat(raw);
+    return isNaN(v) ? undefined : Math.max(0, Math.min(2, v));
+}
+
+/** HDR signaling controls (intensityTarget, premultiply, preferCICPForHDR) — Phase 3 exemplar wiring. */
+function getHDRSignaling() {
+    const intensityEl = document.getElementById('batch-hdr-intensity');
+    const premultEl = document.getElementById('batch-hdr-premultiply');
+    const cicpEl = document.getElementById('batch-hdr-cicp-policy');
+
+    const intensityTarget = intensityEl && intensityEl.value.trim() !== '' ? Number(intensityEl.value) : undefined;
+    const premultiply = premultEl ? !!premultEl.checked : undefined;
+    let preferCICPForHDR;
+    if (cicpEl && cicpEl.value !== '') {
+        preferCICPForHDR = cicpEl.value === 'true';
+    }
+
+    const hasAny = intensityTarget != null || premultiply != null || preferCICPForHDR != null;
+    if (!hasAny) return undefined;
+
+    return { intensityTarget, premultiply, preferCICPForHDR };
+}
+
+// Granular per-EC Modular demo (scoped future-proof surface per granular-extra-channel-modular.md).
+// Returns sample extraChannels with per-channel modular hints for the lab "Mixed alpha + depth" demo.
+// In current libjxl these hints are accepted at the TS surface but most remain global in effect.
+let _granularEcModularDemo = null;
+
+function getGranularExtraChannelModularDemo() {
+  return _granularEcModularDemo;
+}
+
+function updateGranularEcStatus() {
+  const status = document.getElementById('batch-granular-ec-status');
+  if (!status) return;
+  if (_granularEcModularDemo && _granularEcModularDemo.length > 0) {
+    status.textContent = `${_granularEcModularDemo.length} ECs w/ modular hints (demo)`;
+    status.style.color = '#0a0';
+  } else {
+    status.textContent = '';
+  }
+}
+
 function getLossless() {
     return Boolean(batchLosslessInput.checked);
+}
+
+function getCompressBoxes() {
+    return Boolean(batchCompressBoxesInput?.checked);
+}
+
+function getForceContainer() {
+    return Boolean(batchForceContainerInput?.checked);
+}
+
+function getRawCodestream() {
+    return Boolean(batchRawCodestreamInput?.checked);
+}
+
+/** Parse a loose base64 or hex string into Uint8Array (best-effort for lab demo). */
+function parseJumbfInput(str) {
+  if (!str || !str.trim()) return null;
+  const s = str.trim();
+  try {
+    if (/^[0-9a-fA-F\s]+$/.test(s)) {
+      const hex = s.replace(/\s+/g, '');
+      if (hex.length % 2 !== 0) return null;
+      const out = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i*2, i*2+2), 16);
+      return out;
+    }
+    // base64
+    const b64 = s.replace(/[^A-Za-z0-9+/=]/g, '');
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch { return null; }
+}
+
+/** Minimal illustrative JUMBF stub (not a valid C2PA credential — clearly labeled in UI). */
+function makeSampleJumbfStub() {
+  // 8-byte JUMBF superbox header (type "jumb" + size) + tiny JSON claim stub for demo only.
+  const claim = new TextEncoder().encode(JSON.stringify({ "claim": "demo-only", "generator": "CasaWASM-lab", "ts": Date.now() }));
+  const header = new Uint8Array([0x00,0x00,0x00,0x00, 0x6a,0x75,0x6d,0x62]); // placeholder size + 'jumb'
+  const buf = new Uint8Array(8 + claim.length);
+  buf.set(header, 0);
+  buf.set(claim, 8);
+  // Patch big-endian size at [0:4]
+  const size = buf.length;
+  buf[0] = (size >>> 24) & 0xff; buf[1] = (size >>> 16) & 0xff; buf[2] = (size >>> 8) & 0xff; buf[3] = size & 0xff;
+  return buf;
+}
+
+let _lastJumbfBytes = null;
+
+function getJumbfBoxes() {
+  const inputEl = document.getElementById('batch-jumbf-input');
+  const raw = inputEl?.value || '';
+  const parsed = parseJumbfInput(raw);
+  if (parsed && parsed.byteLength > 0) {
+    _lastJumbfBytes = parsed;
+    return [{ data: parsed }];
+  }
+  return _lastJumbfBytes ? [{ data: _lastJumbfBytes }] : null;
+}
+
+function updateJumbfStatus() {
+  const status = document.getElementById('batch-jumbf-status');
+  const inputEl = document.getElementById('batch-jumbf-input');
+  if (!status) return;
+  const bytes = _lastJumbfBytes || parseJumbfInput(inputEl?.value || '');
+  if (bytes && bytes.byteLength > 0) {
+    status.textContent = `${bytes.byteLength} B JUMBF`;
+    status.style.color = '#0a0';
+  } else {
+    status.textContent = '';
+  }
 }
 
 function fmtBytes(n) {
@@ -324,6 +658,39 @@ function formatRunSummary(entries) {
         `dec avg ${fmtTiming(summarizeTiming(rows, 'decodeMs'))}`,
         `first paint avg ${fmtTiming(summarizeTiming(rows, 'firstPaintMs'))}`,
     ].join(' · ');
+}
+
+function resetCompareStats() {
+    if (statsExistingTotal) statsExistingTotal.textContent = '--';
+    if (statsWrapperTotal) statsWrapperTotal.textContent = '--';
+    if (statsTotalDelta) statsTotalDelta.textContent = '--';
+    if (statsWrapperFaster) statsWrapperFaster.textContent = '--';
+}
+
+function updateCompareStats(entries) {
+    if (!statsExistingTotal && !statsWrapperTotal && !statsTotalDelta && !statsWrapperFaster) return;
+    const pairs = entries.filter((entry) => entry?.existing && entry?.wrapper);
+    if (!pairs.length) {
+        resetCompareStats();
+        return;
+    }
+    const existingTotals = pairs.map((entry) => entry.existing.totalMs).filter(Number.isFinite);
+    const wrapperTotals = pairs.map((entry) => entry.wrapper.totalMs).filter(Number.isFinite);
+    const deltas = pairs
+        .map((entry) => Number.isFinite(entry.existing.totalMs) && Number.isFinite(entry.wrapper.totalMs)
+            ? entry.wrapper.totalMs - entry.existing.totalMs
+            : null)
+        .filter((value) => Number.isFinite(value));
+    const wrapperFaster = deltas.filter((value) => value < 0).length;
+    const avg = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+
+    if (statsExistingTotal) statsExistingTotal.textContent = fmtTiming(avg(existingTotals));
+    if (statsWrapperTotal) statsWrapperTotal.textContent = fmtTiming(avg(wrapperTotals));
+    if (statsTotalDelta) {
+        const avgDelta = avg(deltas);
+        statsTotalDelta.textContent = avgDelta == null ? '--' : `${avgDelta >= 0 ? '+' : ''}${avgDelta.toFixed(0)} ms`;
+    }
+    if (statsWrapperFaster) statsWrapperFaster.textContent = `${wrapperFaster}/${pairs.length}`;
 }
 
 function toU8(value) {
@@ -388,6 +755,17 @@ function rgbaToCanvas(canvas, rgba, width, height) {
 }
 
 function paintDecodedToTileCanvas(canvas, decoded) {
+    if (decoded instanceof ImageBitmap) {
+        const target = sizeForMaxEdge(decoded.width, decoded.height);
+        if (canvas.width !== target.width) canvas.width = target.width;
+        if (canvas.height !== target.height) canvas.height = target.height;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'medium';
+        ctx.clearRect(0, 0, target.width, target.height);
+        ctx.drawImage(decoded, 0, 0, target.width, target.height);
+        return;
+    }
     const width = decoded.info.width;
     const height = decoded.info.height;
     const target = sizeForMaxEdge(width, height);
@@ -478,6 +856,7 @@ function resetTile(tile, label = 'Waiting for source') {
 
 function resetGrid() {
     for (const tile of tiles) resetTile(tile);
+    resetCompareStats();
 }
 
 function setCounters({ loaded = selectedSources.length, queued = 0, done = 0, errors = 0 } = {}) {
@@ -501,12 +880,10 @@ function updateProgressStatus({ started, jobs, done, errors, force = false }) {
 }
 
 function syncBatchThumbSize() {
-    if (batchThumbSizeInput) {
-        batchThumbSize = clamp(Number(batchThumbSizeInput.value) || 220, 120, 320);
-        batchThumbSizeInput.value = String(batchThumbSize);
-        if (batchThumbSizeValue) batchThumbSizeValue.textContent = String(batchThumbSize);
-        setCssVar('--batch-thumb-size', `${batchThumbSize}px`);
-    }
+    const selected = batchThumbSizeInputs.find((input) => input.checked)?.value || '256';
+    batchThumbSize = selected;
+    const gridSize = selected === 'fullsize' ? 320 : clamp(Number(selected) || 256, 128, 2048);
+    setCssVar('--batch-thumb-size', `${Math.min(gridSize, 320)}px`);
 }
 
 async function loadRandomFileSource() {
@@ -527,6 +904,13 @@ async function loadFileSource(file) {
     if (ext === 'orf') {
         const raw = new Uint8Array(await file.arrayBuffer());
         const source = loadBytesAsSource(raw, file.name, '', `${fmtBytes(file.size)}`);
+        source.loadMs = performance.now() - started;
+        return source;
+    }
+
+    if (ext === 'cr2') {
+        const raw = new Uint8Array(await file.arrayBuffer());
+        const source = loadBytesAsCr2Source(raw, file.name, '', `${fmtBytes(file.size)}`);
         source.loadMs = performance.now() - started;
         return source;
     }
@@ -594,6 +978,11 @@ async function loadBytesSourceByName(bytes, name, folder = '', sizeLabel = '') {
         source.loadMs = performance.now() - started;
         return source;
     }
+    if (ext === 'cr2') {
+        const source = loadBytesAsCr2Source(bytes, name, folder, sizeLabel);
+        source.loadMs = performance.now() - started;
+        return source;
+    }
     if (ext === 'jxl') {
         const source = await decodeBytesToSource(bytes, `${name} · JXL · ${sizeLabel || fmtBytes(bytes.byteLength)}`);
         source.loadMs = performance.now() - started;
@@ -638,6 +1027,25 @@ function loadBytesAsSource(bytes, name, folder = '', sizeLabel = '') {
         return {
             name,
             label: `${name} · ORF · ${result.width}×${result.height}`,
+            meta: [folder, sizeLabel].filter(Boolean).join(' · '),
+            width: result.width,
+            height: result.height,
+            rgba: rgb_to_rgba(rgb),
+            loadMs: performance.now() - started,
+        };
+    } finally {
+        result.free();
+    }
+}
+
+function loadBytesAsCr2Source(bytes, name, folder = '', sizeLabel = '') {
+    const started = performance.now();
+    const result = process_cr2(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
+    try {
+        const rgb = result.take_rgb();
+        return {
+            name,
+            label: `${name} · CR2 · ${result.width}×${result.height}`,
             meta: [folder, sizeLabel].filter(Boolean).join(' · '),
             width: result.width,
             height: result.height,
@@ -697,12 +1105,14 @@ async function loadSourcesFromFiles(fileList) {
     if (!files.length) return;
     const started = performance.now();
     batchStatus.textContent = `Loading ${files.length} file(s)...`;
+    resetCompareStats();
     const loaded = await loadFilesConcurrently(files);
     selectedSources = loaded;
     const elapsed = performance.now() - started;
     selectionStatus.textContent = `${loaded.length} file(s) ready in ${fmtTiming(elapsed)}.`;
     batchStatus.textContent = `Loaded ${loaded.length} file(s) in ${fmtTiming(elapsed)}.`;
     setCounters({ loaded: loaded.length });
+    updateRunButtons();
 }
 
 async function loadRandomSources(count = MAX_BATCH_LIMIT) {
@@ -711,6 +1121,7 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
     const started = performance.now();
     loadRandomBtn.disabled = true;
     batchStatus.textContent = `Loading Gobabeb files 0/${total}...`;
+    resetCompareStats();
     const loaded = Array(total);
     let nextIndex = 0;
     let completed = 0;
@@ -733,10 +1144,18 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
     selectionStatus.textContent = `${loaded.length} random Gobabeb files ready in ${fmtTiming(elapsed)}.`;
     batchStatus.textContent = `Loaded ${loaded.length}/${total} random Gobabeb files in ${fmtTiming(elapsed)}.`;
     setCounters({ loaded: loaded.length });
+    updateRunButtons();
 }
 
 function makeEncoderOptions(source) {
     const lossless = getLossless();
+    const compressBoxes = getCompressBoxes();
+    const forceContainer = getForceContainer();
+    const rawCodestream = getRawCodestream();
+    const jumbfBoxes = getJumbfBoxes();
+    const hasMetadataOpts = compressBoxes || forceContainer || rawCodestream || !!(jumbfBoxes && jumbfBoxes.length);
+    const modular = getModular();
+    const brotliEffort = getBrotliEffort();
     return {
         format: 'rgba8',
         width: source.width,
@@ -748,6 +1167,50 @@ function makeEncoderOptions(source) {
         progressive: false,
         previewFirst: false,
         chunked: false,
+        decodingSpeed: getDecodeSpeed(),
+        photonNoiseIso: getPhotonNoiseIso() > 0 ? getPhotonNoiseIso() : undefined,
+        resampling: getResampling(),
+        upsamplingMode: getUpsamplingMode(),
+        alreadyDownsampled: false,
+        jpegReconstruction: getJpegReconstruction(),
+        modular: modular !== -1 ? modular : undefined,
+        brotliEffort: brotliEffort >= 0 ? brotliEffort : undefined,
+        metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,
+        jumbfBoxes: jumbfBoxes || undefined,
+        alphaDistance: getAlphaDistance(),
+        // Granular per-EC Modular demo (future-proof surface). When the lab sample is activated this injects
+        // mixed extraChannels with per-channel modular hints so they appear in the advanced payload + results.
+        // Full application is scoped per the design note (global modularOptions already flow to EC paths).
+        extraChannels: getGranularExtraChannelModularDemo() || undefined,
+        // Gain map (HDR) transport — exercises jhgm box path when provided (mandatory per gain-maps.md)
+        gainMap: getGainMap(),
+        // HDR Signaling (intensityTarget / premultiply / preferCICPForHDR) — Phase 3 exemplar (hdr-signaling-color-priority.md)
+        // Currently surfaced for lab visibility + future first-class wiring. Values also influence advanced pairs when the full HDR signaling implementation is active.
+        hdr: getHDRSignaling(),
+        // First-class advanced controls (Phase 1 slice)
+        advancedControls: (() => {
+            const f = getAdvancedFilters();
+            const g = getGroupOrderControls();
+            const buf = getBufferingControls();
+            const out = {};
+            if (f?.filters) out.filters = f.filters;
+            if (g?.groupOrder) out.groupOrder = g.groupOrder;
+            if (buf?.buffering) out.buffering = buf.buffering;
+
+            // Last-minute diagnostic (production-chunked-paths note): surface low-memory hints in lab debug log for every encode
+            const b = buf?.buffering;
+            if (b && (b.lowMemoryMode || b.preferChunkedAPI)) {
+                dbgLog('  low-memory hints active for this encode', `lowMemoryMode=${!!b.lowMemoryMode} preferChunkedAPI=${!!b.preferChunkedAPI} (promotes buffering strategy)`);
+            }
+
+            // HDR signaling diagnostic (hdr-signaling-color-priority.md exemplar)
+            const h = getHDRSignaling();
+            if (h) {
+                dbgLog('  HDR signaling active', `intensity=${h.intensityTarget ?? 'auto'} premult=${!!h.premultiply} preferCICP=${h.preferCICPForHDR ?? 'default'}`);
+            }
+
+            return Object.keys(out).length ? out : undefined;
+        })(),
     };
 }
 
@@ -816,7 +1279,7 @@ async function encodeWithSession(source) {
         await withTimeout(session.finish(), SESSION_STAGE_TIMEOUT_MS, 'session encode finish');
         const [totalBytes] = await withTimeout(
             Promise.all([session.done(), chunkTask]).then(([doneBytes]) => [doneBytes]),
-            SESSION_STAGE_TIMEOUT_MS,
+            SESSION_COMPLETION_TIMEOUT_MS,
             'session encode completion',
         );
         if (chunks.length === 0) {
@@ -835,7 +1298,7 @@ async function decodeWithSession(bytes) {
         await withTimeout(session.push(transferableBuffer(bytes)), SESSION_STAGE_TIMEOUT_MS, 'session decode push');
         await withTimeout(session.close(), SESSION_STAGE_TIMEOUT_MS, 'session decode close');
         let final = null;
-        const doneTask = withTimeout(session.done(), SESSION_STAGE_TIMEOUT_MS, 'session decode completion');
+        const doneTask = withTimeout(session.done(), SESSION_COMPLETION_TIMEOUT_MS, 'session decode completion');
         for await (const ev of session.frames()) {
             if (ev.stage === 'final') final = ev;
         }
@@ -856,9 +1319,11 @@ async function runExistingSessionPipeline(source, attempt = 1) {
     const encodeStart = performance.now();
     const encoded = await encodeWithSession(attemptSource);
     const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
-    dbgLog(`  session enc ← ${fmtBytes(encoded.bytes.byteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
+    // Capture byteLength before decodeWithSession transfers encoded.bytes.buffer.
+    const encodedByteLength = encoded.bytes.byteLength;
+    dbgLog(`  session enc ← ${fmtBytes(encodedByteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
 
-    dbgLog(`  session dec → ${fmtBytes(encoded.bytes.byteLength)} jxl`);
+    dbgLog(`  session dec → ${fmtBytes(encodedByteLength)} jxl`);
     const decodeStart = performance.now();
     const decoded = await decodeWithSession(encoded.bytes);
     const decodeMs = performance.now() - decodeStart;
@@ -866,7 +1331,7 @@ async function runExistingSessionPipeline(source, attempt = 1) {
 
     return {
         bytes: encoded.bytes,
-        byteLength: encoded.bytes.byteLength,
+        byteLength: encodedByteLength,
         encodeMs,
         firstPieceMs: encoded.firstChunkMs ?? null,
         decodeMs,
@@ -879,21 +1344,32 @@ async function runWrapperPipeline(source, label = 'wrapper') {
     const encodeStart = performance.now();
     const encoded = await encodeWithWrapper(source);
     const encodeMs = encoded.encodeMs ?? (performance.now() - encodeStart);
-    dbgLog(`  ${label} enc ← ${fmtBytes(encoded.bytes.byteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
+    // Capture byteLength before decodeWithWrapper transfers encoded.bytes.buffer.
+    const encodedByteLength = encoded.bytes.byteLength;
+    dbgLog(`  ${label} enc ← ${fmtBytes(encodedByteLength)} jxl · enc ${fmtMs(encodeMs)} · first ${fmtMs(encoded.firstChunkMs)}`);
 
-    dbgLog(`  ${label} dec → ${fmtBytes(encoded.bytes.byteLength)} jxl`);
-    const decodeStart = performance.now();
-    const decoded = await decodeWithWrapper(encoded.bytes);
-    const decodeMs = performance.now() - decodeStart;
-    dbgLog(`  ${label} dec ← ${decoded.final?.info?.width}×${decoded.final?.info?.height} · ${fmtMs(decodeMs)}`);
+    dbgLog(`  ${label} dec → ${fmtBytes(encodedByteLength)} jxl`);
+    let decodedFinal, decodeMs;
+    if (nativeJxlDecoder) {
+        const { bitmap, decodeMs: dm } = await decodeJxlNative(encoded.bytes);
+        decodedFinal = bitmap;
+        decodeMs = dm;
+        dbgLog(`  ${label} dec ← ${bitmap.width}×${bitmap.height} [native] · ${fmtMs(decodeMs)}`);
+    } else {
+        const decodeStart = performance.now();
+        const decoded = await decodeWithWrapper(encoded.bytes);
+        decodeMs = performance.now() - decodeStart;
+        decodedFinal = decoded.final;
+        dbgLog(`  ${label} dec ← ${decodedFinal?.info?.width}×${decodedFinal?.info?.height} · ${fmtMs(decodeMs)}`);
+    }
 
     return {
         bytes: encoded.bytes,
-        byteLength: encoded.bytes.byteLength,
+        byteLength: encodedByteLength,
         encodeMs,
         firstPieceMs: encoded.firstChunkMs ?? null,
         decodeMs,
-        final: decoded.final,
+        final: decodedFinal,
     };
 }
 
@@ -921,17 +1397,16 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
     tile.title.textContent = source.label;
     
     tile.existing.textContent = existingResult
-        ? `${fmtBytes(resultByteLength(existingResult))} · load ${fmtMs(existingResult.loadMs)} · enc ${fmtMs(existingResult.encodeMs)} · first ${fmtMs(existingResult.firstPieceMs)} · dec ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
+        ? `${fmtBytes(resultByteLength(existingResult))} · total ${fmtMs(existingResult.totalMs)} · load ${fmtMs(existingResult.loadMs)} · enc ${fmtMs(existingResult.encodeMs)} · first ${fmtMs(existingResult.firstPieceMs)} · dec ${fmtMs(existingResult.decodeMs)}${existingResult.fallback ? ' · fallback' : ''}`
         : '--';
     tile.wrapper.textContent = wrapperResult
-        ? `${fmtBytes(resultByteLength(wrapperResult))} · load ${fmtMs(wrapperResult.loadMs)} · enc ${fmtMs(wrapperResult.encodeMs)} · first ${fmtMs(wrapperResult.firstPieceMs)} · dec ${fmtMs(wrapperResult.decodeMs)}`
+        ? `${fmtBytes(resultByteLength(wrapperResult))} · total ${fmtMs(wrapperResult.totalMs)} · load ${fmtMs(wrapperResult.loadMs)} · enc ${fmtMs(wrapperResult.encodeMs)} · first ${fmtMs(wrapperResult.firstPieceMs)} · dec ${fmtMs(wrapperResult.decodeMs)}`
         : '--';
     tile.timing.textContent = `first paint ${fmtMs(firstPaintMs)} · draw ${fmtMs(paintMs)}`;
     if (existingResult && wrapperResult) {
         const byteDelta = resultByteLength(wrapperResult) - resultByteLength(existingResult);
         const msDelta = wrapperResult.totalMs - existingResult.totalMs;
-        const paintDelta = (wrapperResult.firstPaintMs ?? wrapperResult.totalMs) - (existingResult.firstPaintMs ?? existingResult.totalMs);
-        tile.compare.textContent = `${byteDelta === 0 ? 'bytes match' : `${byteDelta > 0 ? '+' : ''}${byteDelta} B`} · total ${msDelta >= 0 ? '+' : ''}${msDelta.toFixed(0)} ms · paint ${paintDelta >= 0 ? '+' : ''}${paintDelta.toFixed(0)} ms`;
+        tile.compare.textContent = `${byteDelta === 0 ? 'bytes match' : `${byteDelta > 0 ? '+' : ''}${byteDelta} B`} · total ${msDelta >= 0 ? '+' : ''}${msDelta.toFixed(0)} ms · tile ${fmtMs(firstPaintMs)}`;
     } else {
         tile.compare.textContent = '--';
     }
@@ -940,6 +1415,104 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
         tile.chip.textContent = 'Compare';
     }
     tile.el.title = `${source.label} · first paint ${fmtTiming(firstPaintMs)} · total ${fmtTiming(ms)}`;
+
+    // Gain map (HDR) result badge + download action (mandatory benchmark wiring per gain-maps.md)
+    const gm = decoded?.gainMap?.data;
+    if (gm && (gm.byteLength || gm.length)) {
+        const gmSize = gm.byteLength || gm.length;
+        const gmNote = document.createElement('span');
+        gmNote.style.cssText = 'margin-left:6px; font-size:10px; padding:1px 5px; border:1px solid #4a9; border-radius:3px; cursor:pointer; background:#f0f9f4; user-select:none;';
+        gmNote.textContent = `GM ${fmtBytes(gmSize)} ⬇`;
+        gmNote.title = 'Download extracted gain map JXL codestream (from jhgm box via official APIs)';
+        gmNote.onclick = (e) => {
+            e.stopPropagation();
+            const blob = new Blob([gm], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${(source.label || 'image').replace(/[^\w.-]+/g, '_')}.gainmap.jxl`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
+        // Append to the wrapper meta line for visibility in batch results
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(gmNote);
+        } else if (tile.el) {
+            tile.el.appendChild(gmNote);
+        }
+    }
+
+    // HDR Signaling policy badges (educational home for the Phase 3 exemplar)
+    // Shows the user's chosen policy from the HDR signaling controls at encode time.
+    const hdrIntensity = document.getElementById('batch-hdr-intensity')?.value;
+    const hdrPremult = document.getElementById('batch-hdr-premultiply')?.checked;
+    const hdrCICP = document.getElementById('batch-hdr-cicp-policy')?.value;
+    const hdrNotes = [];
+    if (hdrIntensity && hdrIntensity.trim() !== '') hdrNotes.push(`nits ${hdrIntensity}`);
+    if (hdrPremult) hdrNotes.push('premult');
+    if (hdrCICP) hdrNotes.push(hdrCICP === 'true' ? 'CICP' : 'ICC');
+    if (hdrNotes.length > 0) {
+        const hdrBadge = document.createElement('span');
+        hdrBadge.style.cssText = 'margin-left:6px; font-size:9px; padding:0 4px; border:1px solid #c084fc; border-radius:3px; background:#faf5ff; color:#6b21a8;';
+        hdrBadge.textContent = `HDR ${hdrNotes.join(' ')}`;
+        hdrBadge.title = 'HDR signaling policy from lab controls (intensityTarget / premultiply / preferCICPForHDR). See hdr-signaling-color-priority.md (Phase 3 exemplar)';
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(hdrBadge);
+        } else if (tile.el) {
+            tile.el.appendChild(hdrBadge);
+        }
+    }
+
+    // Extra Channels demo badge (educational visibility for the scoped granular modular demo)
+    if (_granularEcModularDemo && _granularEcModularDemo.length > 0) {
+        const ecBadge = document.createElement('span');
+        ecBadge.style.cssText = 'margin-left:6px; font-size:9px; padding:0 4px; border:1px solid #64748b; border-radius:3px; background:#f1f5f9; color:#334155;';
+        ecBadge.textContent = `EC demo ${_granularEcModularDemo.length}ch`;
+        ecBadge.title = 'Granular extraChannels with per-channel modular hints (scoped demo). See granular-extra-channel-modular.md';
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(ecBadge);
+        } else if (tile.el) {
+            tile.el.appendChild(ecBadge);
+        }
+    }
+
+    // Advanced controls feedback in results (filters / groupOrder / buffering) — makes Phase 1 visible per-tile
+    const advF = getAdvancedFilters?.();
+    const advG = getGroupOrderControls?.();
+    const advB = getBufferingControls?.();
+    const advParts = [];
+    if (advF?.filters) {
+        const f = advF.filters;
+        const active = [];
+        if (f.dots) active.push('dots');
+        if (f.patches) active.push('patches');
+        if (f.epf != null) active.push(`epf${f.epf}`);
+        if (f.gaborish) active.push('gaborish');
+        if (active.length) advParts.push(`F:${active.join('+')}`);
+    }
+    if (advG?.groupOrder) {
+        const g = advG.groupOrder;
+        advParts.push(g.mode === 'center' ? `G:center${g.centerX != null ? `(${g.centerX},${g.centerY})` : ''}` : 'G:scan');
+    }
+    if (advB?.buffering) {
+        const b = advB.buffering;
+        if (b.strategy != null) advParts.push(`B:${b.strategy}`);
+        if (b.lowMemoryMode) advParts.push('lowmem');
+    }
+    if (advParts.length > 0) {
+        const advBadge = document.createElement('span');
+        advBadge.style.cssText = 'margin-left:6px; font-size:9px; padding:0 4px; border:1px solid #7c3aed; border-radius:3px; background:#f5f3ff; color:#5b21b6;';
+        advBadge.textContent = advParts.join(' ');
+        advBadge.title = 'Active first-class advancedControls (Phase 1): filters / groupOrder / buffering. See first-class-advanced-encoder-controls.md';
+        if (tile.wrapper && tile.wrapper.parentNode) {
+            tile.wrapper.parentNode.appendChild(advBadge);
+        } else if (tile.el) {
+            tile.el.appendChild(advBadge);
+        }
+    }
+
     return { paintMs, firstPaintMs, totalMs: ms };
 }
 
@@ -953,8 +1526,8 @@ async function processOneSource(source, index, runId) {
 
     dbgLog(`▶ [${index + 1}] ${source.label}`, `orig ${source.width}×${source.height} · ${fmtBytes(source.rgba.byteLength)} rgba`);
 
-    const maxEdge = batchThumbSize || TILE_CANVAS_MAX_EDGE;
-    const needsResize = source.width > maxEdge || source.height > maxEdge;
+    const maxEdge = batchThumbSize === 'fullsize' ? 'fullsize' : (Number(batchThumbSize) || TILE_CANVAS_MAX_EDGE);
+    const needsResize = maxEdge !== 'fullsize' && (source.width > maxEdge || source.height > maxEdge);
     const thumbW = needsResize
         ? (source.width >= source.height ? maxEdge : Math.round(source.width * maxEdge / source.height))
         : source.width;
@@ -973,6 +1546,7 @@ async function processOneSource(source, index, runId) {
     try {
         if (currentMode === 'existing' || currentMode === 'compare' || currentMode === 'race') {
             const sessionSource = encodeSource;
+            const existingStartedAt = performance.now();
 
             if (sessionBackendBroken && (currentMode === 'existing' || currentMode === 'race')) {
                 dbgLog('  session bypass → wrapper', 'session backend marked broken for this page', 'error');
@@ -986,36 +1560,26 @@ async function processOneSource(source, index, runId) {
                     const msg = error?.message || String(error);
                     dbgLog(`  session stall`, msg, 'error');
                     sessionBackendBroken = true;
-                    if (currentMode !== 'existing' && currentMode !== 'race') throw error;
                     dbgLog('  session fallback → wrapper', msg, 'error');
                     existingResult = await runWrapperPipeline(encodeSource, 'fallback');
                     existingResult.fallback = 'wrapper';
                 }
             }
-            existingResult.totalMs = performance.now() - startedAt;
+            existingResult.totalMs = performance.now() - existingStartedAt;
             existingResult.loadMs = source.loadMs ?? null;
             existingResult.firstPaintMs = null;
         }
 
         if (currentMode === 'wrapper' || currentMode === 'compare' || currentMode === 'race') {
+            const wrapperStartedAt = performance.now();
             wrapperResult = await runWrapperPipeline(encodeSource, 'wrapper');
-            wrapperResult.totalMs = performance.now() - startedAt;
+            wrapperResult.totalMs = performance.now() - wrapperStartedAt;
             wrapperResult.loadMs = source.loadMs ?? null;
             wrapperResult.firstPaintMs = null;
         }
 
         if (runId !== activeRunId) return;
         const renderTiming = paintTileResult(tile, source, existingResult, wrapperResult, startedAt);
-        if (existingResult && renderTiming) {
-            existingResult.firstPaintMs = renderTiming.firstPaintMs;
-            existingResult.paintMs = renderTiming.paintMs;
-            existingResult.totalMs = renderTiming.totalMs;
-        }
-        if (wrapperResult && renderTiming) {
-            wrapperResult.firstPaintMs = renderTiming.firstPaintMs;
-            wrapperResult.paintMs = renderTiming.paintMs;
-            wrapperResult.totalMs = renderTiming.totalMs;
-        }
         tile._timings = {
             existing: existingResult,
             wrapper: wrapperResult,
@@ -1077,6 +1641,7 @@ async function runBatch() {
     updateProgressStatus({ started, jobs, done, errors, force: true });
     const finishedTiles = tiles.slice(0, jobs.length).map((tile) => tile._timings).filter(Boolean);
     const summary = formatRunSummary(finishedTiles);
+    updateCompareStats(finishedTiles);
     setStatus(errors ? `Done with ${errors} error(s).` : 'Done.', `${fmtMs(performance.now() - started)} elapsed · ${summary}`);
     drawBatchGraphs(finishedTiles);
 }
@@ -1159,15 +1724,28 @@ function clearBatch() {
     resetGrid();
     setCounters({ loaded: 0, queued: 0, done: 0, errors: 0 });
     setStatus('Idle.', 'Ready.');
+    updateRunButtons();
+}
+
+function updateRunButtons() {
+    const hasFiles = selectedSources.length > 0;
+    runBatchBtn.disabled = !hasFiles;
+    if (clearBatchBtn) clearBatchBtn.disabled = !hasFiles;
+    if (startRaceBtn) startRaceBtn.disabled = !hasFiles;
 }
 
 function wireControls() {
     syncSettingLabels();
-    setMode('race');
+    for (const input of batchThumbSizeInputs) {
+        input.addEventListener('change', syncBatchThumbSize);
+    }
+    syncBatchThumbSize();
+    setMode(document.body.dataset.mode || 'race');
     setStatus('Idle.', 'Ready.');
     resetGrid();
+    updateRunButtons();
 
-    startRaceBtn.addEventListener('click', () => {
+    startRaceBtn?.addEventListener('click', () => {
         runRace().catch((error) => {
             setStatus(`Race failed: ${error?.message || error}`);
         });
@@ -1219,33 +1797,134 @@ function wireControls() {
     batchConcurrencyInput.addEventListener('input', syncSettingLabels);
     batchQualityInput.addEventListener('input', syncSettingLabels);
     batchEffortInput?.addEventListener('input', syncSettingLabels);
+    batchDecodeSpeedInput?.addEventListener('input', syncSettingLabels);
+    batchPhotonNoiseIsoInput?.addEventListener('input', syncSettingLabels);
+    for (const input of batchResamplingInputs) input.addEventListener('change', syncSettingLabels);
+    for (const input of batchModularInputs) input.addEventListener('change', syncSettingLabels);
+    batchBrotliEffortInput?.addEventListener('input', syncSettingLabels);
+
+    // Phase 1: advanced filters (first-class controls)
+    batchAdvancedFilters = {
+        dots: document.getElementById('batch-adv-dots'),
+        patches: document.getElementById('batch-adv-patches'),
+        epf: document.getElementById('batch-adv-epf'),
+        gaborish: document.getElementById('batch-adv-gaborish'),
+    };
+    for (const key of ['dots', 'patches', 'gaborish']) {
+        batchAdvancedFilters[key]?.addEventListener('change', syncSettingLabels);
+    }
+    batchAdvancedFilters.epf?.addEventListener('change', syncSettingLabels);
+
+    // Group order controls
+    document.querySelectorAll('input[name="batch-group-order-mode"]').forEach(r => r.addEventListener('change', syncSettingLabels));
+    document.getElementById('batch-group-center-x')?.addEventListener('input', syncSettingLabels);
+    document.getElementById('batch-group-center-y')?.addEventListener('input', syncSettingLabels);
+
+    // Gain map (HDR) transport benchmark wiring
+    const gainFile = document.getElementById('batch-gainmap-file');
+    const gainDemo = document.getElementById('batch-gainmap-use-demo');
+    const gainStatus = document.getElementById('batch-gainmap-status');
+    function updateGainStatus() {
+        if (!gainStatus) return;
+        const useDemo = gainDemo && gainDemo.checked;
+        if (useDemo) {
+            gainStatus.textContent = 'demo (' + DEMO_GAIN_MAP_BYTES.length + 'B placeholder)';
+            currentGainMapBytes = null;
+        } else if (currentGainMapBytes) {
+            gainStatus.textContent = currentGainMapBytes.length + 'B loaded';
+        } else {
+            gainStatus.textContent = '';
+        }
+        syncSettingLabels();
+    }
+    gainDemo?.addEventListener('change', updateGainStatus);
+    if (gainFile) {
+        gainFile.addEventListener('change', async () => {
+            const f = gainFile.files?.[0];
+            if (!f) { currentGainMapBytes = null; updateGainStatus(); return; }
+            const buf = await f.arrayBuffer();
+            currentGainMapBytes = new Uint8Array(buf);
+            if (gainDemo) gainDemo.checked = false;
+            updateGainStatus();
+        });
+    }
+
+    // Low Memory / Production Chunked (production-chunked-paths note) — educational simulation
+    const lowMemMode = document.getElementById('batch-lowmem-mode');
+    const preferChunked = document.getElementById('batch-prefer-chunked');
+    const simulateBtn = document.getElementById('batch-simulate-large');
+    const lowMemStatus = document.getElementById('batch-lowmem-status');
+
+    function updateLowMemStatus() {
+        if (!lowMemStatus) return;
+        const lm = !!lowMemMode?.checked;
+        const pc = !!preferChunked?.checked;
+        if (!lm && !pc) {
+            lowMemStatus.textContent = '';
+            return;
+        }
+        const parts = [];
+        if (lm) parts.push('lowMemoryMode → strategy=3 + streaming hints');
+        if (pc) parts.push('preferChunkedAPI (Tauri path signal)');
+        lowMemStatus.textContent = parts.join(' | ');
+        syncSettingLabels();
+    }
+    lowMemMode?.addEventListener('change', updateLowMemStatus);
+    preferChunked?.addEventListener('change', updateLowMemStatus);
+
+    if (simulateBtn && lowMemStatus) {
+        simulateBtn.addEventListener('click', () => {
+            // Educational "large image" simulation: 8K RGBA ~256 MB raw buffer
+            const w = 8192, h = 8192;
+            const bytesPerPx = 4;
+            const rawMB = Math.round((w * h * bytesPerPx) / (1024 * 1024));
+            const lowMemMB = Math.round(rawMB * 0.08); // ~8% with tile streaming / high buffering
+            if (lowMemMode) lowMemMode.checked = true;
+            if (preferChunked) preferChunked.checked = true;
+            lowMemStatus.textContent = `Simulated ${w}×${h} RGBA (~${rawMB} MB raw). lowMemoryMode ON → est. peak ~${lowMemMB} MB (chunked tiles). preferChunkedAPI ON. See design note.`;
+            updateLowMemStatus();
+            // Also trigger a visual cue on the batch run button if present
+            const runBtn = document.getElementById('batch-run-btn');
+            if (runBtn) {
+                const old = runBtn.style.outline;
+                runBtn.style.outline = '2px solid #0a0';
+                setTimeout(() => { runBtn.style.outline = old; }, 1200);
+            }
+        });
+    }
+
+    // Extra Channels granular demo button (makes the scoped demo from granular-extra-channel-modular.md visible in the benchmark)
+    const ecDemoBtn = document.getElementById('batch-load-ec-demo');
+    if (ecDemoBtn) {
+        ecDemoBtn.addEventListener('click', () => {
+            // Sample: alpha (lossless) + depth with per-channel modular hints
+            _granularEcModularDemo = [
+                { type: 'alpha', bitsPerSample: 8, distance: 0, modular: { predictor: 5 } },
+                { type: 'depth', bitsPerSample: 16, distance: 1.5, modular: { predictor: 0, groupSize: 128 } }
+            ];
+            updateGranularEcStatus();
+            // Visual feedback
+            ecDemoBtn.style.outline = '2px solid #0a0';
+            setTimeout(() => { ecDemoBtn.style.outline = ''; }, 800);
+            dbgLog('Extra Channels demo activated', '2 channels (alpha lossless + depth) with per-channel modular hints');
+        });
+    }
 }
 
-function wireDashboardControls() {
-    wireSlideoutPanel({
-        panel: wrapperDashboard,
-        openButton: wrapperControlsBtn,
-        closeButton: wrapperControlsClose,
-    });
-    wireHelpPopovers(wrapperDashboard);
-
-    wrapperDashboard?.appendChild(controlBand);
-    wrapperDashboard?.appendChild(statusGrid);
-
-    bindRangeLabel(batchThumbSizeInput, batchThumbSizeValue, (value) => String(value));
-    batchThumbSizeInput?.addEventListener('input', syncBatchThumbSize);
-    syncBatchThumbSize();
-
-    setGroupDisabled(wrapperDashboard?.querySelector('[data-group="progressive"]'), true, 'Progressive encode controls live on the progressive page.');
-    setGroupDisabled(wrapperDashboard?.querySelector('[data-group="display"]'), false);
-}
 
 await initRaw();
+nativeJxlDecoder = (await getCapabilities()).nativeJxlDecoder;
+{
+    const wCaps = getWrapperCapabilities();
+    if (!wCaps.extraChannelEncode && alphaDistanceUnavail) {
+        alphaDistanceUnavail.hidden = false;
+        if (batchAlphaDistanceInput) batchAlphaDistanceInput.disabled = true;
+    }
+}
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
 void resetContext().then((ctx) => {
     existingContext = ctx;
     sessionBackendBroken = false;
 }).catch(() => {});
-wireDashboardControls();
 wireControls();
 setCounters({ loaded: 0, queued: 0, done: 0, errors: 0 });

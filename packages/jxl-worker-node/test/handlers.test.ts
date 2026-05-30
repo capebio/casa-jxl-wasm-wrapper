@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 import type { MsgDecodeStart, MsgEncodeStart, WorkerToMainMessage } from "@casabio/jxl-core/protocol";
-import { DecodeHandler } from "../src/decode-handler";
-import { EncodeHandler } from "../src/encode-handler";
-import type { Backend } from "../src/backend-selector";
+import { DecodeHandler } from "../src/decode-handler.js";
+import { EncodeHandler } from "../src/encode-handler.js";
+import type { Backend } from "../src/backend-selector.js";
+import { expect } from "./expect.js";
 
 const baseDecodeStart: MsgDecodeStart = {
   type: "decode_start",
@@ -16,6 +17,10 @@ const baseDecodeStart: MsgDecodeStart = {
   preserveMetadata: true,
   priority: "visible",
   budgetMs: null,
+  progressiveDetail: null,
+  targetWidth: null,
+  targetHeight: null,
+  fitMode: null,
 };
 
 const baseEncodeStart: MsgEncodeStart = {
@@ -79,6 +84,15 @@ describe("node codec handlers", () => {
             },
           };
         },
+        createEncoder() {
+          return {
+            pushPixels() {},
+            finish() {},
+            cancel() {},
+            dispose() {},
+            async *chunks() {},
+          };
+        },
       },
     };
 
@@ -117,6 +131,15 @@ describe("node codec handlers", () => {
             },
           };
         },
+        createDecoder() {
+          return {
+            push() {},
+            close() {},
+            cancel() {},
+            dispose() {},
+            async *events() {},
+          };
+        },
       },
     };
 
@@ -135,7 +158,7 @@ describe("node codec handlers", () => {
       "encode_chunk",
       "encode_done",
     ]);
-    expect(messages.findLast((msg) => msg.type.startsWith("encode_"))).toEqual({ type: "encode_done", sessionId: "encode-node-1", totalBytes: 5 });
+    expect(messages.filter((msg) => msg.type.startsWith("encode_")).at(-1)).toEqual({ type: "encode_done", sessionId: "encode-node-1", totalBytes: 5 });
   });
 });
 

@@ -24,8 +24,13 @@ interface DecodeHandlerCallbacks {
   port: MessagePort;
 }
 
-const CHUNK_HWM = 4;
+// Adaptive drain HWM: EMA of decoder.push() latency scales the drain threshold.
+// Mirrors the browser decode-handler's coalescing strategy exactly.
+const HWM_BASE = 6;
+const HWM_EMA_ALPHA = 0.25;
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB safety cap — see browser handler
+const DRAIN_MIN_INTERVAL_MS = 8;
+const BYTE_DRAIN_HWM = 2 * 1024 * 1024; // 2 MiB — byte-level secondary drain gate
 
 type NodeDecodeEvent =
   | { type: "header"; info: ImageInfo }
@@ -49,6 +54,7 @@ interface NodeCodecModule {
     downsample: 1 | 2 | 4 | 8;
     progressionTarget: "header" | "dc" | "pass" | "final";
     emitEveryPass: boolean;
+    progressiveDetail?: "dc" | "lastPasses" | "passes" | "dcProgressive";
     preserveIcc: boolean;
     preserveMetadata: boolean;
   }): NodeDecoder;
@@ -74,6 +80,15 @@ export class DecodeHandler {
   private firstPixelMetricPosted = false;
   private decoder: NodeDecoder | null = null;
   private disposePromise: Promise<void> | null = null;
+
+  // Wake/resume coordination — avoids polling; mirrors browser handler.
+  private wakeResolve: (() => void) | null = null;
+  private resumeResolve: (() => void) | null = null;
+
+  // Drain coalescing state — mirrors browser decode-handler exactly.
+  private lastDrainPostedMs = 0;
+  private lastDrainAllowed = false;
+  private pushLatencyEma = 0;
 
   constructor(opts: MsgDecodeStart, backend: Backend, callbacks: DecodeHandlerCallbacks) {
     this.sessionId = opts.sessionId;
@@ -101,11 +116,13 @@ export class DecodeHandler {
     this.chunkQueue.push(buf);
     this.queuedBytes += chunk.byteLength;
     this.queueDepth++;
+    this.wake();
   }
 
   onClose(): void {
     if (this.isTerminal() || this.inputClosed) return;
     this.inputClosed = true;
+    this.wake();
   }
 
   async onCancel(_reason?: string): Promise<void> {
@@ -121,6 +138,7 @@ export class DecodeHandler {
   onPause(): void {
     if (this.isTerminal() || this.paused) return;
     this.paused = true;
+    this.wake(); // wake feedDecoder so it reaches the pause check immediately
     const msg: MsgDecodePaused = { type: "decode_paused", sessionId: this.sessionId };
     this.port.postMessage(msg);
   }
@@ -128,7 +146,7 @@ export class DecodeHandler {
   onResume(): void {
     if (!this.paused) return;
     this.paused = false;
-    // waitForChunk polling detects paused=false within 2 ms.
+    this.wakeResume();
   }
 
   // ---------------------------------------------------------------------------
@@ -145,13 +163,15 @@ export class DecodeHandler {
     );
   }
 
-  // Single path for all session endings. No explicit wake needed — the polling
-  // loop in waitForChunk detects isTerminal() within 2 ms.
+  // Single path for all session endings. Wakes both sleeping loops so
+  // Promise.all resolves promptly and decoder.dispose runs without delay.
   private finishSession(state: DecodeState): boolean {
     if (this.ended) return false;
     this.ended = true;
     this.state = state;
     this.clearInputQueue();
+    this.wake();       // unblock feedDecoder sleeping in waitForChunk
+    this.wakeResume(); // unblock feedDecoder sleeping in waitForResume
     this.callbacks.onSessionEnd(this.sessionId);
     return true;
   }
@@ -161,6 +181,22 @@ export class DecodeHandler {
     this.chunkReadIndex = 0;
     this.queueDepth = 0;
     this.queuedBytes = 0;
+  }
+
+  private wake(): void {
+    const resolve = this.wakeResolve;
+    if (resolve !== null) {
+      this.wakeResolve = null;
+      resolve();
+    }
+  }
+
+  private wakeResume(): void {
+    const resolve = this.resumeResolve;
+    if (resolve !== null) {
+      this.resumeResolve = null;
+      resolve();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -175,6 +211,7 @@ export class DecodeHandler {
       downsample: this.opts.downsample,
       progressionTarget: this.opts.progressionTarget,
       emitEveryPass: this.opts.emitEveryPass,
+      ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
       preserveIcc: this.opts.preserveIcc,
       preserveMetadata: this.opts.preserveMetadata,
     });
@@ -206,16 +243,15 @@ export class DecodeHandler {
   // ---------------------------------------------------------------------------
 
   private waitForChunk(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const check = () => {
-        if (this.isTerminal()) { resolve(); return; }
-        if (!this.paused && (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed)) {
-          resolve(); return;
-        }
-        setTimeout(check, 2);
-      };
-      check();
-    });
+    if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.isTerminal()) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
+  }
+
+  private waitForResume(): Promise<void> {
+    if (!this.paused) return Promise.resolve();
+    return new Promise<void>((resolve) => { this.resumeResolve = resolve; });
   }
 
   private takeNextChunk(): Buffer | null {
@@ -244,20 +280,62 @@ export class DecodeHandler {
 
   private async feedDecoder(decoder: NodeDecoder): Promise<void> {
     while (!this.isTerminal()) {
+      if (this.paused) {
+        await this.waitForResume();
+        continue;
+      }
+
       await this.waitForChunk();
+      if (this.isTerminal() || this.paused) continue;
+
       while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
         const chunk = this.takeNextChunk();
         if (chunk === null) break;
+
+        const t0 = performance.now();
         await decoder.push(chunk);
-        if (this.queueDepth < CHUNK_HWM) {
-          this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });
-        }
+        const pushMs = performance.now() - t0;
+        this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
+
+        this.maybePostDrain();
       }
+
       if (this.inputClosed && !this.isTerminal()) {
         await decoder.close();
         return;
       }
     }
+  }
+
+  private adaptiveHwm(): number {
+    const factor = Math.max(0.6, Math.min(2.0, 120 / (this.pushLatencyEma + 10)));
+    return Math.floor(HWM_BASE * factor);
+  }
+
+  private maybePostDrain(): void {
+    const now = performance.now();
+    const hwm = this.adaptiveHwm();
+
+    const drainAllowed = this.queueDepth < hwm && this.queuedBytes < BYTE_DRAIN_HWM;
+
+    const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
+    const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
+
+    this.lastDrainAllowed = drainAllowed;
+
+    if (!drainAllowed) return;
+    if (!crossedIntoDrain && !intervalElapsed) return;
+
+    this.lastDrainPostedMs = now;
+
+    this.port.postMessage({
+      type: "worker_drain",
+      sessionId: this.sessionId,
+      latencyMs: Math.round(this.pushLatencyEma),
+      queueDepth: this.queueDepth,
+      queuedBytes: this.queuedBytes,
+      adaptiveHwm: hwm,
+    });
   }
 
   private async readDecoderEvents(decoder: NodeDecoder): Promise<void> {
@@ -301,6 +379,12 @@ export class DecodeHandler {
         }
         case "final": {
           const pixels = toBuffer(event.pixels);
+          // Budget check BEFORE posting pixels — mirrors browser handler's
+          // "final" budget check (browser decode-handler.ts lines 371-373).
+          if (this.checkBudget()) {
+            this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride);
+            return;
+          }
           const msg: MsgDecodeFinal = {
             type: "decode_final",
             sessionId: this.sessionId,
@@ -333,6 +417,8 @@ export class DecodeHandler {
     const msg: MsgDecodeError = { type: "decode_error", sessionId: this.sessionId, code, message };
     this.port.postMessage(msg);
     this.finishSession("error");
+    // Best-effort unblock of decoder.events() iterator — mirrors browser handler.
+    void this.disposeActiveDecoder();
   }
 
   private checkBudget(): boolean {
@@ -353,6 +439,8 @@ export class DecodeHandler {
     };
     this.port.postMessage(msg);
     this.finishSession("budget_exceeded");
+    // Best-effort unblock of decoder.events() iterator — mirrors browser handler.
+    void this.disposeActiveDecoder();
   }
 
   private postFirstPixelMetric(): void {

@@ -42,6 +42,14 @@ export class PriorityQueue {
     backgroundIds() {
         return this.background.map((e) => e.sessionId);
     }
+    findBySessionId(sessionId) {
+        for (const lane of [this.visible, this.near, this.background]) {
+            const entry = lane.find((e) => e.sessionId === sessionId);
+            if (entry !== undefined)
+                return entry;
+        }
+        return null;
+    }
     lane(priority) {
         switch (priority) {
             case "visible": return this.visible;

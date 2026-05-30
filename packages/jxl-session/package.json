@@ -17,14 +17,14 @@
     "test": "tsc -p tsconfig.test.json && node --test --test-force-exit dist-test/test/*.test.js"
   },
   "dependencies": {
-    "@casabio/jxl-core": "file:../jxl-core",
-    "@casabio/jxl-scheduler": "file:../jxl-scheduler",
-    "@casabio/jxl-worker-browser": "file:../jxl-worker-browser",
-    "@casabio/jxl-worker-node": "file:../jxl-worker-node",
-    "@casabio/jxl-capabilities": "file:../jxl-capabilities"
+    "@casabio/jxl-capabilities": "^0.1.0",
+    "@casabio/jxl-core": "^0.1.0",
+    "@casabio/jxl-scheduler": "^0.1.0",
+    "@casabio/jxl-worker-browser": "^0.1.0",
+    "@casabio/jxl-worker-node": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "5.5.4",
-    "@types/node": "22.5.0"
+    "@types/node": "^22.12.0"
   }
 }

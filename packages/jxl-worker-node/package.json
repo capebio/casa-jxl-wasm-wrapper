@@ -18,15 +18,15 @@
   "engines": { "node": ">=22.0.0" },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test --test-force-exit dist-test/test/*.test.js"
   },
   "dependencies": {
-    "@casabio/jxl-core": "file:../jxl-core",
-    "@casabio/jxl-native": "file:../jxl-native",
-    "@casabio/jxl-wasm": "file:../jxl-wasm"
+    "@casabio/jxl-core": "^0.1.0",
+    "@casabio/jxl-wasm": "^0.1.0"
   },
   "devDependencies": {
     "typescript": "5.5.4",
-    "@types/node": "22.5.0"
+    "@types/node": "^22.12.0"
   }
 }

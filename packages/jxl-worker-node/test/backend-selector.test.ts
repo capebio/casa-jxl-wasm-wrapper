@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { selectBackend } from "../src/backend-selector";
+import { describe, test } from "node:test";
+import { expect } from "./expect.js";
+import { selectBackend } from "../src/backend-selector.js";
 
 describe("selectBackend", () => {
   test("skips imported native module without codec facade and falls back to WASM", async () => {

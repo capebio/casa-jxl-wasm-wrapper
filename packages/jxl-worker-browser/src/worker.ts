@@ -27,7 +27,7 @@ import type {
 
 import { DecodeHandler } from "./decode-handler.js";
 import { EncodeHandler } from "./encode-handler.js";
-import { loadWasmModule, type JxlModule } from "./wasm-loader.js";
+import { loadWasmModule, detectTier, type JxlModule } from "./wasm-loader.js";
 
 // ---------------------------------------------------------------------------
 // Queued-message types (messages arriving while a session start is in-flight)
@@ -88,7 +88,8 @@ let _wasmUrl: string | null = null;
 
 function resolvedWasmUrl(): string {
   if (_wasmUrl !== null) return _wasmUrl;
-  return new URL("./jxl-core.wasm", self.location.href).href;
+  _wasmUrl = new URL("./jxl-core.wasm", self.location.href).href;
+  return _wasmUrl;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,14 +206,16 @@ function routeEncodeMessage(msg: QueuedEncodeMessage): void {
 function handleReleaseState(sessionId: string): void {
   const decode = decodeSessions.get(sessionId);
   if (decode !== undefined) {
-    decodeSessions.delete(sessionId);
     void decode.onCancel("release_state").catch(() => undefined);
+    decodeSessions.delete(sessionId);
   }
   const encode = encodeSessions.get(sessionId);
   if (encode !== undefined) {
-    encodeSessions.delete(sessionId);
     void encode.onCancel("release_state").catch(() => undefined);
+    encodeSessions.delete(sessionId);
   }
+  pendingDecodeStarts.delete(sessionId);
+  pendingEncodeStarts.delete(sessionId);
   queuedDecodeMessages.delete(sessionId);
   queuedEncodeMessages.delete(sessionId);
 }
@@ -279,13 +282,23 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
     return;
   }
 
-  const startPromise = (async () => {
+  // Register in pendingDecodeStarts BEFORE awaiting getWasm() so that any
+  // messages arriving while WASM is loading are correctly queued by
+  // routeDecodeMessage. If the set() came after the async IIFE, a synchronous
+  // (warm-cache) resolution of getWasm() would finish the entire body before
+  // the map entry existed, causing those in-flight messages to be silently dropped.
+  let resolveStartPromise!: () => void;
+  const startPromise = new Promise<void>((resolve) => { resolveStartPromise = resolve; });
+  pendingDecodeStarts.set(msg.sessionId, startPromise);
+
+  (async () => {
     let wasm: JxlModule;
     try {
       wasm = await getWasm();
     } catch (err) {
       pendingDecodeStarts.delete(msg.sessionId);
       queuedDecodeMessages.delete(msg.sessionId);
+      resolveStartPromise();
       self.postMessage({
         type: "decode_error",
         sessionId: msg.sessionId,
@@ -299,6 +312,7 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
 
     if (shuttingDown) {
       queuedDecodeMessages.delete(msg.sessionId);
+      resolveStartPromise();
       return;
     }
 
@@ -307,9 +321,18 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
     });
     decodeSessions.set(msg.sessionId, handler);
     flushQueuedDecodeMessages(msg.sessionId, handler);
-  })();
-
-  pendingDecodeStarts.set(msg.sessionId, startPromise);
+    resolveStartPromise();
+  })().catch((err: unknown) => {
+    pendingDecodeStarts.delete(msg.sessionId);
+    queuedDecodeMessages.delete(msg.sessionId);
+    resolveStartPromise();
+    self.postMessage({
+      type: "decode_error",
+      sessionId: msg.sessionId,
+      code: "Internal",
+      message: `Unexpected error starting decode session: ${String(err)}`,
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -327,13 +350,21 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
     return;
   }
 
-  const startPromise = (async () => {
+  // Register in pendingEncodeStarts BEFORE awaiting getWasm() — same race as
+  // handleDecodeStart: a warm-cache synchronous resolution would complete the
+  // entire IIFE before a trailing set(), silently dropping in-flight messages.
+  let resolveStartPromise!: () => void;
+  const startPromise = new Promise<void>((resolve) => { resolveStartPromise = resolve; });
+  pendingEncodeStarts.set(msg.sessionId, startPromise);
+
+  (async () => {
     let wasm: JxlModule;
     try {
       wasm = await getWasm();
     } catch (err) {
       pendingEncodeStarts.delete(msg.sessionId);
       queuedEncodeMessages.delete(msg.sessionId);
+      resolveStartPromise();
       self.postMessage({
         type: "encode_error",
         sessionId: msg.sessionId,
@@ -347,6 +378,7 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
 
     if (shuttingDown) {
       queuedEncodeMessages.delete(msg.sessionId);
+      resolveStartPromise();
       return;
     }
 
@@ -355,9 +387,18 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
     });
     encodeSessions.set(msg.sessionId, handler);
     flushQueuedEncodeMessages(msg.sessionId, handler);
-  })();
-
-  pendingEncodeStarts.set(msg.sessionId, startPromise);
+    resolveStartPromise();
+  })().catch((err: unknown) => {
+    pendingEncodeStarts.delete(msg.sessionId);
+    queuedEncodeMessages.delete(msg.sessionId);
+    resolveStartPromise();
+    self.postMessage({
+      type: "encode_error",
+      sessionId: msg.sessionId,
+      code: "Internal",
+      message: `Unexpected error starting encode session: ${String(err)}`,
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -426,5 +467,5 @@ self.addEventListener("unhandledrejection", (event) => {
 // Startup announcement
 // ---------------------------------------------------------------------------
 
-const ready: MsgWorkerReady = { type: "worker_ready", backend: "wasm" };
+const ready: MsgWorkerReady = { type: "worker_ready", backend: "wasm", wasmBuild: detectTier() };
 self.postMessage(ready);

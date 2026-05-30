@@ -22,10 +22,14 @@ export interface MsgDecodeStart {
   downsample: 1 | 2 | 4 | 8;
   progressionTarget: "header" | "dc" | "pass" | "final";
   emitEveryPass: boolean;
+  progressiveDetail: "dc" | "lastPasses" | "passes" | "dcProgressive" | null;
   preserveIcc: boolean;
   preserveMetadata: boolean;
   priority: "visible" | "near" | "background";
   budgetMs: number | null;
+  targetWidth: number | null;
+  targetHeight: number | null;
+  fitMode: "contain" | "cover" | "stretch" | null;
 }
 
 export interface MsgDecodeChunk {
@@ -84,6 +88,12 @@ export interface MsgDecodeFinal {
   format: PixelFormat;
   region?: Region;
   pixelStride: number;
+  /** Byte length of the transferred pixel buffer (avoids a separate metric IPC). */
+  outputBytes?: number;
+  /** Elapsed ms from session start to first pixel (may be set here if no progress event fired). */
+  timeToFirstPixelMs?: number;
+  /** Elapsed ms from session start to final frame. */
+  timeToFinalMs?: number;
 }
 
 export interface MsgDecodeError {
@@ -91,8 +101,10 @@ export interface MsgDecodeError {
   sessionId: string;
   code: string;
   message: string;
-  partialPixels?: ArrayBuffer;  // transferred; present for TruncatedStream
+  partialPixels?: ArrayBuffer;       // transferred; present for TruncatedStream
   partialInfo?: ImageInfo;
+  partialPixelStride?: number;       // bytes per row of partialPixels; required when partialPixels is present
+  partialStage?: DecodeStage;        // stage at which the error occurred; present when partialPixels is present
 }
 
 export interface MsgDecodeCancelled {
@@ -112,6 +124,7 @@ export interface MsgDecodeBudgetExceeded {
   pixels: ArrayBuffer;          // transferred; best frame so far
   info: ImageInfo;
   format: PixelFormat;
+  region?: Region;              // present for region/tile decodes, matching progress/final
   pixelStride: number;
 }
 
@@ -133,6 +146,7 @@ export interface MsgEncodeStart {
   quality: number | null;
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   progressive: boolean;
+  progressiveFlavor?: "dc" | "ac";
   previewFirst: boolean;
   chunked: boolean;
   sidecarSizes?: readonly number[];
@@ -176,6 +190,11 @@ export interface MsgEncodeDone {
   type: "encode_done";
   sessionId: string;
   totalBytes: number;
+  /**
+   * Cumulative byte offsets at sidecar boundaries. Length === sidecarSizes.length
+   * when sidecars were emitted; omitted otherwise. See EncodeStats.sidecarOffsets.
+   */
+  sidecarOffsets?: readonly number[];
 }
 
 export interface MsgEncodeError {

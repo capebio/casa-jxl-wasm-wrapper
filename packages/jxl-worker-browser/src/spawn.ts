@@ -32,6 +32,8 @@ export function spawnWorker(workerUrl?: string): Promise<WorkerHandle> {
 
     let messageHandlers: Array<(msg: WorkerToMainMessage) => void> = [];
     let _terminated = false;
+    // Guard so onerror during startup fires reject exactly once.
+    let _settled = false;
 
     const handle: WorkerHandle = {
       send(msg: MainToWorkerMessage, transfer: Transferable[] = []) {
@@ -80,7 +82,17 @@ export function spawnWorker(workerUrl?: string): Promise<WorkerHandle> {
 
       // Intercept the first worker_ready to resolve this promise.
       if (msg.type === "worker_ready") {
+        _settled = true;
         resolve(handle);
+        // Install persistent post-startup error handler now that the promise
+        // is settled. Crashes after startup are logged so they aren't silent.
+        worker.onerror = (postStartupEv) => {
+          _terminated = true;
+          console.error(
+            `[jxl-worker-browser] Worker crashed after startup: ${postStartupEv.message}`,
+            postStartupEv,
+          );
+        };
         // Do not return — fall through so callers who registered before
         // spawnWorker resolved also see worker_ready.
       }
@@ -89,6 +101,8 @@ export function spawnWorker(workerUrl?: string): Promise<WorkerHandle> {
     };
 
     worker.onerror = (ev) => {
+      if (_settled) return;
+      _settled = true;
       _terminated = true;
       reject(new Error(`[jxl-worker-browser] Worker error: ${ev.message}`));
     };

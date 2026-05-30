@@ -12,7 +12,6 @@ import type {
 } from "@casabio/jxl-core";
 import { JxlError, type JxlErrorCode } from "@casabio/jxl-core/errors";
 import type { Scheduler } from "@casabio/jxl-scheduler";
-import { recommendedEffort } from "@casabio/jxl-capabilities";
 
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer, type Deferred } from "./util.js";
@@ -69,13 +68,13 @@ export class EncodeSessionImpl implements EncodeSession {
       xmp: opts.xmp != null ? toTransferableBuffer(opts.xmp) : null,
       distance,
       quality,
-      effort: opts.effort ?? recommendedEffort(),
+      effort: opts.effort ?? 4,
       progressive: opts.progressive ?? false,
       previewFirst: opts.previewFirst ?? false,
       chunked: opts.chunked ?? false,
-      sidecarSizes: opts.sidecarSizes,
       priority: opts.priority ?? "visible",
     };
+    if (opts.sidecarSizes !== undefined) startMsg.sidecarSizes = opts.sidecarSizes;
 
     // No-op catch so a rejected done() promise with no caller handler (caller
     // used only chunks()) does not surface as an unhandledRejection.
@@ -180,15 +179,12 @@ export class EncodeSessionImpl implements EncodeSession {
 
       case "encode_first_byte_ready":
         // Informational only; time_to_first_byte_ms arrives via a metric message.
+        if (msg.sessionId !== this.id) return;
         break;
 
       case "encode_done":
         if (msg.sessionId !== this.id) return;
-        this.totalBytesWritten = msg.totalBytes;
-        this.chunkStream.end();
-        this.doneDeferred.resolve(msg.totalBytes);
-        this.terminated = true;
-        this.cleanup();
+        this.complete(msg.totalBytes);
         break;
 
       case "encode_error": {
@@ -220,6 +216,18 @@ export class EncodeSessionImpl implements EncodeSession {
   private cleanup(): void {
     if (this.abortSignal !== null && this.abortHandler !== null) {
       this.abortSignal.removeEventListener("abort", this.abortHandler);
+    }
+  }
+
+  // Normal completion: chunk stream ends gracefully, done() resolves.
+  private complete(totalBytes: number): void {
+    if (this.terminated) return;
+    this.terminated = true;
+    this.totalBytesWritten = totalBytes;
+    this.cleanup();
+    this.chunkStream.end();
+    if (!this.doneDeferred.settled) {
+      this.doneDeferred.resolve(totalBytes);
     }
   }
 

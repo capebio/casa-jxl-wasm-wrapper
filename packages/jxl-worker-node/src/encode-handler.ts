@@ -48,6 +48,8 @@ interface NodeCodecModule {
 }
 
 const CHUNK_HWM = 4;
+const CHUNK_MAX_BUFFERED = 32;
+const DRAIN_MIN_INTERVAL_MS = 8;
 
 export class EncodeHandler {
   private readonly sessionId: string;
@@ -62,7 +64,11 @@ export class EncodeHandler {
   private queueDepth = 0;
   private cancelled = false;
   private finished = false;
+  private ended = false;
   private firstByteEmitted = false;
+  private wakeResolve: (() => void) | null = null;
+  private lastDrainPostedMs = 0;
+  private lastDrainAllowed = false;
 
   constructor(opts: MsgEncodeStart, backend: Backend, callbacks: EncodeHandlerCallbacks) {
     this.sessionId = opts.sessionId;
@@ -75,26 +81,49 @@ export class EncodeHandler {
   }
 
   onPixels(chunk: ArrayBuffer | Uint8Array | Buffer, region?: Region): void {
-    if (this.cancelled || this.state === "done") return;
+    if (
+      this.finished ||
+      this.cancelled ||
+      this.state === "done" ||
+      this.state === "error" ||
+      this.state === "cancelled"
+    ) return;
+    if (this.queueDepth >= CHUNK_MAX_BUFFERED) {
+      this.failSession(
+        "BackpressureOverflow",
+        `Encode input queue exceeded ${CHUNK_MAX_BUFFERED} buffered chunks`,
+      );
+      return;
+    }
     const buf = Buffer.from(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, chunk instanceof ArrayBuffer ? 0 : (chunk as Uint8Array).byteOffset, chunk instanceof ArrayBuffer ? chunk.byteLength : (chunk as Uint8Array).byteLength);
     const entry: { chunk: Buffer; region?: Region } = { chunk: buf };
     if (region !== undefined) entry.region = region;
     this.pixelQueue.push(entry);
     this.queueDepth++;
+    this.wake();
   }
 
   onFinish(): void {
+    if (
+      this.finished ||
+      this.cancelled ||
+      this.state === "done" ||
+      this.state === "error" ||
+      this.state === "cancelled"
+    ) return;
     this.finished = true;
+    this.wake();
   }
 
   async onCancel(reason?: string): Promise<void> {
-    if (this.cancelled) return;
+    if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.cancelled = true;
     this.state = "cancelled";
+    this.wake();
 
     const msg: MsgEncodeCancelled = { type: "encode_cancelled", sessionId: this.sessionId };
     this.port.postMessage(msg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.endSessionOnce();
   }
 
   private async run(): Promise<void> {
@@ -123,34 +152,46 @@ export class EncodeHandler {
     }
   }
 
+  private wake(): void {
+    const resolve = this.wakeResolve;
+    if (resolve === null) return;
+    this.wakeResolve = null;
+    resolve();
+  }
+
+  private endSessionOnce(): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.callbacks.onSessionEnd(this.sessionId);
+  }
+
   private waitForPixels(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const check = () => {
-        if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled) resolve();
-        else if (this.state === "done" || this.state === "error") resolve();
-        else setTimeout(check, 2);
-      };
-      check();
-    });
+    if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled
+        || this.state === "done" || this.isErrored()) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
   }
 
   private async feedEncoder(encoder: NodeEncoder): Promise<void> {
-    while (!this.cancelled && this.state !== "done" && this.state !== "error") {
+    while (!this.cancelled && this.state !== "done" && !this.isErrored()) {
       await this.waitForPixels();
       while (this.pixelQueue.length > this.pixelReadIndex) {
         const entry = this.pixelQueue[this.pixelReadIndex++];
         if (entry === undefined) break;
         if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
-          this.pixelQueue = this.pixelQueue.slice(this.pixelReadIndex);
+          this.pixelQueue.copyWithin(0, this.pixelReadIndex);
+          this.pixelQueue.length -= this.pixelReadIndex;
           this.pixelReadIndex = 0;
         }
         this.queueDepth--;
+        if (this.cancelled || this.isErrored()) return;
         await encoder.pushPixels(entry.chunk, entry.region);
-        if (this.queueDepth < CHUNK_HWM) {
-          this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });
-        }
+        if (this.cancelled || this.isErrored()) return;
+        this.maybePostDrain();
       }
       if (this.finished) {
+        if (this.cancelled || this.isErrored()) return;
         this.state = "finalising";
         await encoder.finish();
         return;
@@ -158,8 +199,31 @@ export class EncodeHandler {
     }
   }
 
+  private maybePostDrain(): void {
+    const drainAllowed = this.queueDepth < CHUNK_HWM;
+    const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
+    this.lastDrainAllowed = drainAllowed;
+
+    if (!drainAllowed) return;
+
+    const now = performance.now();
+    const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
+
+    if (!crossedIntoDrain && !intervalElapsed) return;
+
+    this.lastDrainPostedMs = now;
+    this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });
+  }
+
+  private isErrored(): boolean {
+    return this.state === "error";
+  }
+
   private async readEncoderChunks(encoder: NodeEncoder): Promise<void> {
     let totalBytes = 0;
+    let chunkIndex = 0;
+    const sidecarCount = this.opts.sidecarSizes?.length ?? 0;
+    const sidecarOffsets: number[] = [];
     for await (const chunk of encoder.chunks()) {
       if (this.cancelled || this.state === "done" || this.state === "error") return;
       const buffer = toBuffer(chunk);
@@ -172,6 +236,10 @@ export class EncodeHandler {
         this.port.postMessage(msg);
       }
       totalBytes += buffer.byteLength;
+      if (chunkIndex < sidecarCount) {
+        sidecarOffsets.push(totalBytes);
+      }
+      chunkIndex++;
       const msg: MsgEncodeChunk = {
         type: "encode_chunk",
         sessionId: this.sessionId,
@@ -187,17 +255,20 @@ export class EncodeHandler {
       type: "encode_done",
       sessionId: this.sessionId,
       totalBytes,
+      ...(sidecarOffsets.length > 0 ? { sidecarOffsets } : {}),
     };
     this.port.postMessage(doneMsg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.endSessionOnce();
   }
 
   private failSession(code: string, message: string): void {
-    if (this.cancelled || this.state === "done") return;
+    if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.state = "error";
+    // Unblock feedEncoder if it's sleeping in waitForPixels — mirrors browser handler.
+    this.wake();
     const msg: MsgEncodeError = { type: "encode_error", sessionId: this.sessionId, code, message };
     this.port.postMessage(msg);
-    this.callbacks.onSessionEnd(this.sessionId);
+    this.endSessionOnce();
   }
 }
 

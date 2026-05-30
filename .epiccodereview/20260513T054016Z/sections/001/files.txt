@@ -1,3 +1,0 @@
-./pkg/raw_converter_wasm.d.ts
-./pkg/raw_converter_wasm.js
-./pkg/raw_converter_wasm_bg.wasm.d.ts

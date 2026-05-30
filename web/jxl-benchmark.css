@@ -1100,6 +1100,12 @@ canvas {
     transform: scale(0.98);
 }
 
+.primary-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
 .secondary-btn {
     background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(255,255,255,0.88));
     border-color: rgba(30, 31, 35, 0.2);

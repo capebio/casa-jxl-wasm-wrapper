@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
 import type { MsgDecodeStart, MsgEncodeStart, WorkerToMainMessage } from "@casabio/jxl-core/protocol";
-import { DecodeHandler } from "../src/decode-handler";
-import { EncodeHandler } from "../src/encode-handler";
+import { DecodeHandler } from "../src/decode-handler.js";
+import { EncodeHandler } from "../src/encode-handler.js";
+import { expect } from "./expect.js";
 
 const baseDecodeStart: MsgDecodeStart = {
   type: "decode_start",
@@ -15,6 +16,10 @@ const baseDecodeStart: MsgDecodeStart = {
   preserveMetadata: true,
   priority: "visible",
   budgetMs: null,
+  progressiveDetail: null,
+  targetWidth: null,
+  targetHeight: null,
+  fitMode: null,
 };
 
 const baseEncodeStart: MsgEncodeStart = {
@@ -192,13 +197,16 @@ describe("browser codec handlers", () => {
 
     await waitFor(() => ended.length === 1);
 
+    const finalMessage = messages.find((msg) => msg.type === "decode_final") as
+      | { type: "decode_final"; timeToFirstPixelMs?: number; timeToFinalMs?: number }
+      | undefined;
     const metricNames = messages
       .filter((msg) => msg.type === "metric")
       .map((msg) => (msg as { type: "metric"; metric: { name: string } }).metric.name);
 
     expect(metricNames).toContain("time_to_header_ms");
-    expect(metricNames).toContain("time_to_first_pixel_ms");
-    expect(metricNames).toContain("time_to_final_ms");
+    expect(finalMessage?.timeToFirstPixelMs).toBeDefined();
+    expect(finalMessage?.timeToFinalMs).toBeDefined();
   });
 
   test("encode handler streams codec output chunks and done", async () => {
@@ -235,7 +243,7 @@ describe("browser codec handlers", () => {
       "encode_chunk",
       "encode_done",
     ]);
-    expect(messages.findLast((msg) => msg.type.startsWith("encode_"))).toEqual({ type: "encode_done", sessionId: "encode-1", totalBytes: 5 });
+    expect(messages.filter((msg) => msg.type.startsWith("encode_")).at(-1)).toEqual({ type: "encode_done", sessionId: "encode-1", totalBytes: 5 });
   });
 
   test("encode handler coalesces worker_drain while queue stays below HWM", async () => {

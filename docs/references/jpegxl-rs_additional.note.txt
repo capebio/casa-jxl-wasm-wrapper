@@ -1,0 +1,1 @@
+jpegxl-rs additional files (frame, options, etc.) - reference for high-level Rust API design

@@ -31,12 +31,15 @@ export class AsyncEventStream {
         }
     }
     // Signal an error. Pending consumers reject with it; later consumers too.
+    // The buffer is cleared immediately: fail() means "no partial data" —
+    // use end() (after pushing the partial frame) for graceful budget-exceeded.
     fail(err) {
         if (this.ended)
             return;
         this.ended = true;
         this.hasFailure = true;
         this.failure = err;
+        this.buffer.length = 0;
         while (this.waiting.length > 0) {
             const w = this.waiting.shift();
             w.reject(err);
@@ -45,7 +48,9 @@ export class AsyncEventStream {
     [Symbol.asyncIterator]() {
         return {
             next: () => new Promise((resolve, reject) => {
-                // Buffered items drain first, even after end/fail.
+                // Buffered items drain first. After end() this drains remaining frames
+                // (correct for finishWithError/budget-exceeded). After fail() the
+                // buffer was already cleared, so this branch is never reached.
                 if (this.buffer.length > 0) {
                     resolve({ value: this.buffer.shift(), done: false });
                     return;
@@ -60,6 +65,20 @@ export class AsyncEventStream {
                 }
                 this.waiting.push({ resolve, reject });
             }),
+            // Called when a for-await-of loop exits early (break/return/throw in
+            // the loop body). Resolve the pending waiter as done so it does not
+            // leak until the session's own end()/fail() eventually drains it.
+            return: () => {
+                // Drain the pending waiter for this iterator, if any.
+                // Because we use a FIFO queue and each iterator calls next() once
+                // at a time, the outstanding waiter for this iterator is always
+                // the first entry when return() is called.
+                const w = this.waiting.shift();
+                if (w !== undefined) {
+                    w.resolve({ value: undefined, done: true });
+                }
+                return Promise.resolve({ value: undefined, done: true });
+            },
         };
     }
 }

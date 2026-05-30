@@ -45,6 +45,10 @@ export function makeDecodeStart(sessionId, priority = "visible") {
         preserveMetadata: true,
         priority,
         budgetMs: null,
+        progressiveDetail: null,
+        targetWidth: null,
+        targetHeight: null,
+        fitMode: null,
     };
 }
 //# sourceMappingURL=helpers.js.map

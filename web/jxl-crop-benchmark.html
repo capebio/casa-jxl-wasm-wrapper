@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JXL Crop Benchmark</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-crop-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar" data-mode="crop-benchmark">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+            <a class="home-bar-link is-active" href="./jxl-crop-benchmark.html" aria-current="page">Crop benchmark</a>
+            <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
+        </div>
+    </nav>
+
+    <main class="shell">
+        <section class="hero compact hero-with-picker">
+            <div class="hero-copy">
+                <p class="eyebrow">JXL Crop Benchmark &middot; <span id="wasm-status">Initialising…</span></p>
+                <h1>Region decode latency by crop size</h1>
+                <p class="hero-sub">Encodes a raw file to JXL, then benchmarks <code>createDecoder({ region })</code> for each crop size centred on the image.</p>
+            </div>
+        </section>
+
+        <section class="control-band compact">
+            <div class="source-panel">
+                <div class="control-row">
+                    <label class="secondary-btn" for="orf-file-input" style="cursor:pointer;">Pick ORF files…</label>
+                    <input id="orf-file-input" type="file" multiple accept=".orf,.ORF" hidden />
+                    <button id="btn-run" class="primary-btn" type="button" disabled>Run</button>
+                    <button id="btn-clear" class="secondary-btn" type="button" disabled>Clear</button>
+                    <button id="btn-console" class="secondary-btn" type="button">Console</button>
+                    <span class="status-inline-sep"></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Folder</span><strong id="status-folder">No files selected</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Progress</span><strong id="status-progress">Idle</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">File</span><strong id="status-file">—</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Stage</span><strong id="status-stage">—</strong></span>
+                </div>
+
+                <div class="settings-inline">
+                    <div class="spinbox-row-inline">
+                        <div class="spinbox-inline-group">
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="file-count">Files</label>
+                                <button class="info-btn" type="button" data-help-target="cb-files" aria-label="Files info">i</button>
+                            </div>
+                            <input id="file-count" class="spinbox" type="number" min="1" max="20" value="3" />
+                            <div class="help-popover" data-help-popover="cb-files" hidden>
+                                Number of ORF source files from the picked folder to benchmark. More files give broader coverage across image content and more stable averages.
+                            </div>
+                        </div>
+                        <div class="spinbox-inline-group">
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="encode-effort">Encode effort</label>
+                                <button class="info-btn" type="button" data-help-target="cb-effort" aria-label="Encode effort info">i</button>
+                            </div>
+                            <input id="encode-effort" class="spinbox" type="number" min="1" max="9" value="3" />
+                            <div class="help-popover" data-help-popover="cb-effort" hidden>
+                                JXL encode effort (1–9). This benchmark measures <em>decode</em> speed; effort mainly affects file size and thus tile read I/O. Effort 3 gives a realistic photographic JXL. Does not affect visual quality.
+                            </div>
+                        </div>
+                        <div class="spinbox-inline-group">
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="encode-distance">Distance</label>
+                                <button class="info-btn" type="button" data-help-target="cb-distance" aria-label="Distance info">i</button>
+                            </div>
+                            <input id="encode-distance" class="spinbox" type="number" min="0" max="25" step="0.1" value="1.0" />
+                            <div class="help-popover" data-help-popover="cb-distance" hidden>
+                                Butteraugli perceptual quality distance. Lower = higher quality, larger file. 0 = lossless, 1.0 = high quality photographic, 3.0 = moderate quality. This is the internal quality scale (inverse of the Quality slider).
+                            </div>
+                        </div>
+                        <div class="spinbox-inline-group">
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="tile-size">Tile px</label>
+                                <button class="info-btn" type="button" data-help-target="cb-tile" aria-label="Tile size info">i</button>
+                            </div>
+                            <input id="tile-size" class="spinbox" type="number" min="64" max="2048" step="64" value="512" />
+                            <div class="help-popover" data-help-popover="cb-tile" hidden>
+                                Tile size in pixels for the tiled JXL encode. Each tile is an independent frame — only tiles intersecting the crop are decoded. Smaller tiles = faster crop decode, more frame-header overhead. Try 256, 512, and 1024 to find the sweet spot.
+                            </div>
+                        </div>
+                        <div class="spinbox-inline-group">
+                            <div style="display:flex;align-items:center;gap:4px;">
+                                <label class="spinbox-label" for="compare-full"><input id="compare-full" type="checkbox" checked /> vs full-decode</label>
+                                <button class="info-btn" type="button" data-help-target="cb-compare-full" aria-label="Compare full decode info">i</button>
+                            </div>
+                            <div class="help-popover" data-help-popover="cb-compare-full" hidden>
+                                When enabled, each crop size also runs a full-image decode for comparison. Shows how much the tiled crop saves vs. decoding the entire image, across crop sizes.
+                            </div>
+                        </div>
+                        <span class="status-inline-sep"></span>
+                        <span class="sizes-label" style="display:inline-flex;align-items:center;gap:5px;">
+                            Crop sizes (px, centred):
+                            <button class="info-btn" type="button" data-help-target="cb-cropsizes" aria-label="Crop sizes info">i</button>
+                        </span>
+                        <div class="help-popover" data-help-popover="cb-cropsizes" hidden>
+                            Square crop regions centred on the image. For each size, only the tiles intersecting that crop are decoded. Smaller crops should be faster than a full decode — this benchmark measures by how much, and how it scales relative to tile size.
+                        </div>
+                        <div class="sizes-buttons">
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="128" checked /><span>128</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="256" checked /><span>256</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="512" checked /><span>512</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="1024" checked /><span>1024</span></label>
+                            <label class="size-btn"><input type="checkbox" name="crop-size" value="2048" checked /><span>2048</span></label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div id="console-panel" class="console-panel" hidden>
+            <div class="console-toolbar">
+                <span class="console-title">Console</span>
+                <button id="btn-console-copy" class="console-clear-btn" type="button">Copy all</button>
+                <button id="btn-console-clear" class="console-clear-btn" type="button">Clear</button>
+            </div>
+            <pre id="console-output" class="console-output"></pre>
+        </div>
+
+        <section class="crop-results-shell">
+            <header class="crop-results-header">
+                <p class="eyebrow">Results · <span id="tile-px-label">—</span></p>
+                <h2>Decoded crops</h2>
+            </header>
+            <div id="crop-results" class="crop-results">
+                <div class="crop-empty-state">Pick a folder of ORF files and press Run.</div>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-crop-benchmark.js"></script>
+    <script src="./info-popover-init.js"></script>
+</body>
+</html>

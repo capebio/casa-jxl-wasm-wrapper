@@ -1,114 +1,454 @@
 // jxl-scheduler/src/pool.ts
 // Worker pool: creation, idle reaping, recycling on poison.
 // Spec: Section 12.1, 7.2.
-let workerIdCounter = 0;
+//
+// WorkerPool owns only worker lifecycle hygiene:
+// spawn, reserve, bind, release, recycle, reap, shutdown.
+// Scheduling policy — priority, preemption, dedupe, fairness — belongs in Scheduler.
+const DEV = typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
+const DEFAULT_SPAWN_TIMEOUT_MS = 15_000;
+const RECYCLE_SHUTDOWN_TIMEOUT_MS = 1_000;
+const POOL_SHUTDOWN_TIMEOUT_MS = 5_000;
+export const RESERVED_SESSION_ID = "__jxl_reserved__";
 export class WorkerPool {
     factory;
     maxSize;
     idleTimeoutMs;
+    spawnTimeoutMs;
+    minIdle;
     workers = new Map();
+    idle = new Set();
+    active = new Set();
+    spawnPromises = new Set();
     destroyed = false;
+    spawning = 0;
+    generation = 0;
+    nextWorkerId = 0;
+    shutdownPromise = null;
+    lastSpawnFailureMs = 0;
+    consecutiveSpawnFailures = 0;
+    metrics = {
+        spawned: 0,
+        spawnFailed: 0,
+        acquiredIdle: 0,
+        acquiredSpawned: 0,
+        acquireMiss: 0,
+        released: 0,
+        recycled: 0,
+        reaped: 0,
+        maxObservedSize: 0,
+        maxObservedSpawning: 0,
+    };
     constructor(opts) {
         this.factory = opts.factory;
-        this.maxSize = opts.maxSize;
-        this.idleTimeoutMs = opts.idleTimeoutMs;
+        this.maxSize = Math.max(0, opts.maxSize);
+        this.idleTimeoutMs = Math.max(0, opts.idleTimeoutMs);
+        this.spawnTimeoutMs = opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
+        this.minIdle = Math.max(0, Math.min(opts.minIdle ?? 0, this.maxSize));
     }
     get size() {
         return this.workers.size;
     }
-    get idleWorkers() {
-        return [...this.workers.values()].filter((w) => w.activeSessionId === null && !w.cancelling && !w.handle.terminated);
+    get idleCount() {
+        return this.idle.size;
     }
+    get activeCount() {
+        return this.active.size;
+    }
+    get spawningCount() {
+        return this.spawning;
+    }
+    get hasCapacity() {
+        return !this.destroyed && this.workers.size + this.spawning < this.maxSize;
+    }
+    get capacityRemaining() {
+        return Math.max(0, this.maxSize - this.workers.size - this.spawning);
+    }
+    /** Returns a shallow copy for safe external iteration. */
+    get idleWorkers() {
+        return [...this.idle];
+    }
+    /** Returns a shallow copy for safe external iteration. */
     get activeWorkers() {
-        return [...this.workers.values()].filter((w) => w.activeSessionId !== null && !w.handle.terminated);
+        return [...this.active];
+    }
+    /** Zero-allocation iterator for hot scheduler paths. */
+    idleWorkerValues() {
+        return this.idle.values();
+    }
+    /** Zero-allocation iterator for hot scheduler paths. */
+    activeWorkerValues() {
+        return this.active.values();
+    }
+    get totalAllocatedOrSpawning() {
+        return this.workers.size + this.spawning;
+    }
+    getMetrics() {
+        return { ...this.metrics };
+    }
+    healthSnapshot() {
+        return {
+            destroyed: this.destroyed,
+            maxSize: this.maxSize,
+            size: this.workers.size,
+            idle: this.idle.size,
+            active: this.active.size,
+            spawning: this.spawning,
+            spawnPromises: this.spawnPromises.size,
+            capacityRemaining: this.capacityRemaining,
+            workers: [...this.workers.values()].map((w) => ({
+                id: w.id,
+                activeSessionId: w.activeSessionId,
+                cancelling: w.cancelling,
+                terminated: w.handle.terminated,
+                hasIdleTimer: w.idleTimer !== null,
+                indexedIdle: this.idle.has(w),
+                indexedActive: this.active.has(w),
+            })),
+        };
     }
     // Acquire an idle worker, spawning one if the pool is not full.
     // Returns null if no worker is available and pool is at capacity.
-    // The returned worker is immediately marked as reserved (activeSessionId = "__reserved__")
-    // so a subsequent acquire() before bind() does not return the same worker.
+    // The returned worker is immediately reserved so a subsequent acquire()
+    // before bind() does not return the same worker.
     async acquire() {
         if (this.destroyed)
             return null;
-        const idle = this.idleWorkers;
-        if (idle.length > 0) {
-            const worker = idle[0];
-            this.clearIdleTimer(worker);
-            worker.activeSessionId = "__reserved__";
-            return worker;
+        const idleWorker = this.takeIdleWorker();
+        if (idleWorker !== null) {
+            if (this.reserve(idleWorker)) {
+                this.metrics.acquiredIdle++;
+                this.assertInvariants();
+                return idleWorker;
+            }
+            // reserve() returned false — stale worker recycled, fall through to spawn
         }
-        if (this.workers.size < this.maxSize) {
-            const w = await this.spawn();
-            w.activeSessionId = "__reserved__";
-            return w;
+        if (this.totalAllocatedOrSpawning >= this.maxSize) {
+            this.metrics.acquireMiss++;
+            return null;
         }
-        return null;
+        if (!this.canAttemptSpawn()) {
+            this.metrics.acquireMiss++;
+            return null;
+        }
+        const worker = await this.spawnAndReserve();
+        if (worker === null) {
+            this.metrics.acquireMiss++;
+        }
+        else {
+            this.metrics.acquiredSpawned++;
+        }
+        this.assertInvariants();
+        return worker;
+    }
+    bind(worker, sessionId) {
+        if (this.destroyed) {
+            this.destroyWorker(worker);
+            return;
+        }
+        if (!this.workers.has(worker.id) || worker.handle.terminated) {
+            throw new Error(`[jxl-scheduler] Cannot bind unavailable worker ${worker.id}`);
+        }
+        if (worker.activeSessionId !== RESERVED_SESSION_ID) {
+            throw new Error(`[jxl-scheduler] Cannot bind worker ${worker.id}; expected reserved state, got ${worker.activeSessionId}`);
+        }
+        this.transitionToActive(worker, sessionId);
+        this.assertInvariants();
+    }
+    release(worker) {
+        if (!this.workers.has(worker.id))
+            return;
+        this.transitionToIdle(worker);
+        this.metrics.released++;
+        this.assertInvariants();
+    }
+    /** Destroy and remove a poisoned or crashed worker. */
+    recycle(worker) {
+        if (!this.workers.has(worker.id))
+            return;
+        void this.cleanupAndRemove(worker);
+        this.metrics.recycled++;
+    }
+    // Spawn workers eagerly so the first acquire() hits an idle worker rather than
+    // paying the factory boot cost.
+    prewarm(count) {
+        if (this.destroyed || count <= 0)
+            return;
+        const toSpawn = Math.min(count, this.maxSize - this.totalAllocatedOrSpawning);
+        for (let i = 0; i < toSpawn; i++) {
+            void this.spawn()
+                .then((worker) => this.handlePrewarmSuccess(worker))
+                .catch(() => undefined);
+        }
+        this.assertInvariants();
+    }
+    /** Manually evict idle workers, e.g. on memory pressure. Returns count reaped. */
+    reapIdle({ preserveMinIdle = true } = {}) {
+        let count = 0;
+        for (const worker of [...this.idle]) {
+            if (preserveMinIdle && this.idle.size <= this.minIdle)
+                break;
+            this.recycle(worker);
+            count++;
+        }
+        return count;
+    }
+    shutdown() {
+        if (this.shutdownPromise !== null)
+            return this.shutdownPromise;
+        this.shutdownPromise = this.shutdownInner();
+        return this.shutdownPromise;
+    }
+    // ─────────────────────────────────────────────────────────────
+    // Private Implementation
+    // ─────────────────────────────────────────────────────────────
+    async shutdownInner() {
+        this.destroyed = true;
+        this.generation++;
+        // Wait for in-flight spawns so no worker escapes cleanup.
+        await Promise.allSettled([...this.spawnPromises]);
+        const shutdownPromises = [...this.workers.values()].map((worker) => this.cleanupAndRemove(worker, true, POOL_SHUTDOWN_TIMEOUT_MS));
+        await Promise.allSettled(shutdownPromises);
+        this.idle.clear();
+        this.active.clear();
+        this.workers.clear();
+    }
+    allocateWorkerId() {
+        return ++this.nextWorkerId;
+    }
+    canAttemptSpawn() {
+        if (this.consecutiveSpawnFailures === 0)
+            return true;
+        const backoffMs = Math.min(5_000, 100 * 2 ** Math.min(6, this.consecutiveSpawnFailures - 1));
+        return performance.now() - this.lastSpawnFailureMs >= backoffMs;
+    }
+    noteSpawnFailure() {
+        this.consecutiveSpawnFailures++;
+        this.lastSpawnFailureMs = performance.now();
+        this.metrics.spawnFailed++;
+    }
+    noteSpawnSuccess() {
+        this.consecutiveSpawnFailures = 0;
+        this.lastSpawnFailureMs = 0;
+    }
+    noteSize() {
+        this.metrics.maxObservedSize = Math.max(this.metrics.maxObservedSize, this.workers.size);
+        this.metrics.maxObservedSpawning = Math.max(this.metrics.maxObservedSpawning, this.spawning);
+    }
+    async spawnAndReserve() {
+        let worker;
+        try {
+            worker = await this.spawn();
+            this.noteSpawnSuccess();
+        }
+        catch {
+            this.noteSpawnFailure();
+            return null;
+        }
+        if (this.destroyed || worker.handle.terminated || !this.workers.has(worker.id)) {
+            this.destroyWorker(worker);
+            return null;
+        }
+        if (!this.reserve(worker))
+            return null;
+        return worker;
     }
     async spawn() {
-        const id = ++workerIdCounter;
-        const handle = await this.factory();
-        const pw = {
+        this.spawning++;
+        this.noteSize();
+        const promise = this.spawnInner();
+        this.spawnPromises.add(promise);
+        try {
+            return await promise;
+        }
+        finally {
+            this.spawning--;
+            this.spawnPromises.delete(promise);
+        }
+    }
+    async spawnInner() {
+        const generation = this.generation;
+        const id = this.allocateWorkerId();
+        const handle = await this.createWorkerWithTimeout();
+        const worker = {
             id,
             handle,
             activeSessionId: null,
             cancelling: false,
             idleTimer: null,
         };
-        handle.onMessage((msg) => {
-            // If worker crashes (terminated), recycle.
-            if (handle.terminated) {
-                this.recycle(pw);
+        if (this.destroyed || generation !== this.generation) {
+            void handle.shutdown(RECYCLE_SHUTDOWN_TIMEOUT_MS).catch(() => undefined);
+            return worker;
+        }
+        this.workers.set(id, worker);
+        this.idle.add(worker);
+        this.wireWorker(worker);
+        this.metrics.spawned++;
+        this.noteSize();
+        return worker;
+    }
+    async createWorkerWithTimeout() {
+        let timeout;
+        try {
+            return await Promise.race([
+                this.factory(),
+                new Promise((_, reject) => {
+                    timeout = globalThis.setTimeout(() => reject(new Error(`[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`)), this.spawnTimeoutMs);
+                }),
+            ]);
+        }
+        finally {
+            if (timeout !== undefined)
+                globalThis.clearTimeout(timeout);
+        }
+    }
+    wireWorker(worker) {
+        // Forward-compatible: recycles worker on error/exit if the handle supports it.
+        // WorkerHandle does not expose these today; optional chaining is a safe noop.
+        const handle = worker.handle;
+        handle.onError?.(() => this.recycle(worker));
+        handle.onExit?.(() => this.recycle(worker));
+    }
+    takeIdleWorker() {
+        for (const worker of this.idle) {
+            this.idle.delete(worker);
+            if (this.workers.has(worker.id) &&
+                worker.activeSessionId === null &&
+                !worker.cancelling &&
+                !worker.handle.terminated) {
+                return worker;
             }
-        });
-        this.workers.set(id, pw);
-        return pw;
+            this.recycle(worker);
+        }
+        return null;
     }
-    bind(worker, sessionId) {
+    reserve(worker) {
+        if (this.destroyed ||
+            !this.workers.has(worker.id) ||
+            worker.handle.terminated ||
+            worker.cancelling) {
+            this.recycle(worker);
+            return false;
+        }
         this.clearIdleTimer(worker);
-        worker.activeSessionId = sessionId;
+        this.idle.delete(worker);
+        this.active.add(worker);
+        worker.activeSessionId = RESERVED_SESSION_ID;
+        worker.cancelling = false;
+        return true;
     }
-    release(worker) {
+    transitionToActive(worker, sessionId) {
+        this.clearIdleTimer(worker);
+        this.idle.delete(worker);
+        this.active.add(worker);
+        worker.activeSessionId = sessionId;
+        worker.cancelling = false;
+    }
+    transitionToIdle(worker) {
+        this.clearIdleTimer(worker);
+        this.active.delete(worker);
         worker.activeSessionId = null;
         worker.cancelling = false;
+        if (this.destroyed || worker.handle.terminated) {
+            this.destroyWorker(worker);
+            return;
+        }
+        this.idle.add(worker);
+        this.armIdleTimer(worker);
+    }
+    handlePrewarmSuccess(worker) {
         if (this.destroyed) {
             this.destroyWorker(worker);
             return;
         }
-        // Start idle timer. Reap if not re-used within idleTimeoutMs.
-        worker.idleTimer = setTimeout(() => {
-            this.reap(worker);
-        }, this.idleTimeoutMs);
-    }
-    // Destroy and remove a poisoned or crashed worker.
-    recycle(worker) {
-        this.clearIdleTimer(worker);
-        this.workers.delete(worker.id);
-        if (!worker.handle.terminated) {
-            void worker.handle.shutdown(1000).catch(() => undefined);
+        // Only arm timer if worker is still idle — acquire() may have taken it.
+        if (this.workers.has(worker.id) &&
+            worker.activeSessionId === null &&
+            this.idle.has(worker) &&
+            !worker.handle.terminated) {
+            this.armIdleTimer(worker);
         }
     }
     reap(worker) {
+        if (!this.workers.has(worker.id))
+            return;
         if (worker.activeSessionId !== null)
-            return; // re-used before timer fired
-        this.recycle(worker);
+            return;
+        void this.cleanupAndRemove(worker);
+        this.metrics.reaped++;
+    }
+    armIdleTimer(worker) {
+        this.clearIdleTimer(worker);
+        if (this.idleTimeoutMs <= 0) {
+            if (this.idle.size > this.minIdle)
+                this.reap(worker);
+            return;
+        }
+        // Keep below minIdle floor warm indefinitely.
+        if (this.idle.size <= this.minIdle)
+            return;
+        worker.idleTimer = globalThis.setTimeout(() => {
+            if (this.idle.size > this.minIdle)
+                this.reap(worker);
+        }, this.idleTimeoutMs);
     }
     clearIdleTimer(worker) {
         if (worker.idleTimer !== null) {
-            clearTimeout(worker.idleTimer);
+            globalThis.clearTimeout(worker.idleTimer);
             worker.idleTimer = null;
         }
     }
-    destroyWorker(worker) {
+    /** Centralised cleanup path. Returns a promise so shutdown() can await all workers. */
+    cleanupAndRemove(worker, shouldShutdown = true, shutdownTimeoutMs = RECYCLE_SHUTDOWN_TIMEOUT_MS) {
+        this.clearIdleTimer(worker);
+        this.idle.delete(worker);
+        this.active.delete(worker);
         this.workers.delete(worker.id);
-        void worker.handle.shutdown(1000).catch(() => undefined);
+        worker.activeSessionId = null;
+        worker.cancelling = false;
+        if (shouldShutdown && !worker.handle.terminated) {
+            return worker.handle.shutdown(shutdownTimeoutMs).catch(() => undefined);
+        }
+        return Promise.resolve();
     }
-    async shutdown() {
-        this.destroyed = true;
-        const shutdowns = [...this.workers.values()].map((w) => {
-            this.clearIdleTimer(w);
-            return w.handle.shutdown(5000).catch(() => undefined);
-        });
-        await Promise.allSettled(shutdowns);
-        this.workers.clear();
+    destroyWorker(worker) {
+        void this.cleanupAndRemove(worker);
+    }
+    assertInvariants() {
+        if (!DEV)
+            return;
+        for (const worker of this.idle) {
+            if (!this.workers.has(worker.id)) {
+                throw new Error(`[jxl-scheduler] Idle worker ${worker.id} missing from workers map`);
+            }
+            if (this.active.has(worker)) {
+                throw new Error(`[jxl-scheduler] Worker ${worker.id} is both idle and active`);
+            }
+            if (worker.activeSessionId !== null) {
+                throw new Error(`[jxl-scheduler] Idle worker ${worker.id} has activeSessionId=${worker.activeSessionId}`);
+            }
+            if (worker.handle.terminated) {
+                throw new Error(`[jxl-scheduler] Idle worker ${worker.id} is terminated`);
+            }
+        }
+        for (const worker of this.active) {
+            if (!this.workers.has(worker.id)) {
+                throw new Error(`[jxl-scheduler] Active worker ${worker.id} missing from workers map`);
+            }
+            if (worker.activeSessionId === null) {
+                throw new Error(`[jxl-scheduler] Active worker ${worker.id} has no activeSessionId`);
+            }
+            if (worker.handle.terminated) {
+                throw new Error(`[jxl-scheduler] Active worker ${worker.id} is terminated`);
+            }
+        }
+        if (this.idle.size + this.active.size > this.workers.size) {
+            throw new Error("[jxl-scheduler] Worker index sizes exceed workers map size");
+        }
+        if (this.workers.size + this.spawning > this.maxSize) {
+            throw new Error(`[jxl-scheduler] Pool exceeds maxSize: workers=${this.workers.size}, spawning=${this.spawning}, max=${this.maxSize}`);
+        }
     }
 }
 //# sourceMappingURL=pool.js.map

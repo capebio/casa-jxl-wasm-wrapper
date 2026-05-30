@@ -9,12 +9,13 @@ export interface Session {
     signal: AbortSignal | null;
     subscribers: string[];
 }
+export type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 export interface PoolWorker {
     id: number;
     handle: WorkerHandle;
     activeSessionId: string | null;
     cancelling: boolean;
-    idleTimer: ReturnType<typeof setTimeout> | null;
+    idleTimer: TimerHandle | null;
 }
 export interface WorkerHandle {
     send(msg: MainToWorkerMessage, transfer?: ArrayBuffer[]): void;

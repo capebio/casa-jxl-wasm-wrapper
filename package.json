@@ -1,9 +1,22 @@
 {
+  "name": "raw-converter-wasm",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "node tools/run-workspaces.mjs build",
+    "typecheck": "node tools/run-workspaces.mjs typecheck",
+    "test": "node tools/run-workspaces.mjs test",
+    "pack-test": "node tools/pack-test.mjs",
+    "clean": "node tools/clean.mjs"
+  },
   "dependencies": {
     "@jsquash/jxl": "^1.3.0",
     "icodec": "0.6.0"
   },
   "devDependencies": {
+    "@types/node": "^22.12.0",
     "bun": "^1.3.14",
     "playwright": "^1.59.1",
     "sharp": "^0.34.5",

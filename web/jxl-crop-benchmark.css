@@ -1,0 +1,283 @@
+/* Crop benchmark — layout and result cards */
+
+.hero-sub {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+/* ── Control row: inline status items ─────────────────────────────────── */
+
+.control-row {
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 0;
+}
+
+.status-inline-sep {
+    display: inline-block;
+    width: 1px;
+    height: 20px;
+    background: var(--line);
+    margin: 0 4px;
+    align-self: center;
+    flex-shrink: 0;
+}
+
+.status-inline-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.status-inline-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+}
+
+.status-inline-item strong {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+    vertical-align: baseline;
+}
+
+/* Active state for console toggle */
+.secondary-btn.is-active {
+    background: linear-gradient(135deg, rgba(15, 118, 110, 0.15), rgba(15, 118, 110, 0.08));
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* ── Settings row: sizes inline with spinboxes ────────────────────────── */
+
+.spinbox-row-inline {
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.sizes-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.sizes-buttons {
+    display: inline-flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+/* ── Console panel ────────────────────────────────────────────────────── */
+
+.console-panel {
+    margin-top: 12px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: #0e1116;
+    overflow: hidden;
+}
+
+.console-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    background: rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.console-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.console-clear-btn {
+    padding: 3px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 5px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 150ms;
+}
+
+.console-clear-btn:hover {
+    border-color: rgba(255, 255, 255, 0.35);
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.console-output {
+    margin: 0;
+    padding: 10px 14px;
+    font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    max-height: 320px;
+    overflow-y: auto;
+    color: #d4d4d4;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.console-line { display: block; }
+.console-line--log   { color: #d4d4d4; }
+.console-line--warn  { color: #e5c07b; }
+.console-line--error { color: #e06c75; }
+.console-line--group { color: #61afef; font-weight: 600; margin-top: 4px; }
+
+/* Results shell */
+
+.crop-results-shell {
+    margin-top: 28px;
+}
+
+.crop-results-header {
+    margin-bottom: 16px;
+}
+
+.crop-results-header .eyebrow {
+    margin: 0 0 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.crop-results-header h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.crop-empty-state {
+    padding: 40px 0;
+    color: var(--faint);
+    font-size: 14px;
+}
+
+.crop-results {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+}
+
+/* One row per source file */
+
+.crop-file-row {
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 16px 20px 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.crop-file-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.crop-file-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 14px;
+}
+
+/* Horizontal strip of crop cards */
+
+.crop-strip {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+    overflow-x: auto;
+}
+
+/* Individual crop card — width set inline via JS (log-scaled) */
+
+.crop-card {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+.crop-card-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+}
+
+.crop-canvas-wrap {
+    width: 100%;
+    background: var(--bg2);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 60px;
+    position: relative;
+}
+
+.crop-canvas-wrap canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    image-rendering: pixelated;
+}
+
+.crop-canvas-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: var(--faint);
+}
+
+.crop-timing {
+    font-size: 12px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.crop-timing-encode {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+}
+
+.crop-timing.is-fast  { color: var(--success); }
+.crop-timing.is-slow  { color: var(--danger); }
+
+.crop-timing-skip {
+    font-size: 11px;
+    color: var(--faint);
+    font-style: italic;
+}

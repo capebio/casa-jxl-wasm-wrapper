@@ -153,59 +153,6 @@ fn now_ms() -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_look_params(
-    params: &mut pipeline::PipelineParams,
-    exposure_ev: f32,
-    contrast: f32,
-    highlights: f32,
-    shadows: f32,
-    whites: f32,
-    blacks: f32,
-    saturation: f32,
-    vibrance: f32,
-    temp: f32,
-    tint: f32,
-    texture: f32,
-    clarity: f32,
-) {
-    if exposure_ev.is_finite() {
-        params.exposure_ev = exposure_ev;
-    }
-    if contrast.is_finite() {
-        params.contrast = contrast;
-    }
-    if highlights.is_finite() {
-        params.highlights = highlights;
-    }
-    if shadows.is_finite() {
-        params.shadows = shadows;
-    }
-    if whites.is_finite() {
-        params.whites = whites;
-    }
-    if blacks.is_finite() {
-        params.blacks = blacks;
-    }
-    if saturation.is_finite() {
-        params.saturation = saturation;
-    }
-    if vibrance.is_finite() {
-        params.vibrance = vibrance;
-    }
-    if temp.is_finite() {
-        params.temp = temp;
-    }
-    if tint.is_finite() {
-        params.tint = tint;
-    }
-    if texture.is_finite() {
-        params.texture = texture;
-    }
-    if clarity.is_finite() {
-        params.clarity = clarity;
-    }
-}
-
 /// Box-filter downscale an RGB16 (u16) buffer, outputting packed u16 LE bytes
 /// (6 bytes per pixel).  Used to cache a lightbox-sized buffer for live re-render.
 fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
@@ -436,7 +383,7 @@ fn process_orf_impl(
     if look.wb_b.is_finite() && look.wb_b > 0.0 {
         params.wb_b = look.wb_b.min(8.0);
     }
-    apply_look_params(
+    raw_pipeline::pipeline::apply_look_params(
         &mut params,
         look.exposure_ev,
         look.contrast,
@@ -465,7 +412,7 @@ fn process_orf_impl(
         let (fr, fw, fh) = if info.orientation == 1 {
             (rgb8, w, h)
         } else {
-            pipeline::apply_orientation(&rgb8, w, h, info.orientation)
+            pipeline::apply_orientation(rgb8, w, h, info.orientation)
         };
         (fr, fw, fh, tonemap_ms, now_ms() - t2)
     } else {
@@ -884,7 +831,7 @@ pub fn apply_look(
         }
         params.color_matrix = Some(m);
     }
-    apply_look_params(
+    raw_pipeline::pipeline::apply_look_params(
         &mut params,
         exposure_ev,
         contrast,
@@ -913,7 +860,7 @@ pub fn apply_look(
     if orientation == 1 {
         Ok(rgb8)
     } else {
-        let (final_rgb, _, _) = pipeline::apply_orientation(&rgb8, w, h, orientation);
+        let (final_rgb, _, _) = pipeline::apply_orientation(rgb8, w, h, orientation);
         Ok(final_rgb)
     }
 }
@@ -1038,7 +985,7 @@ impl LookRenderer {
             params.wb_b = wb_b;
         }
         params.color_matrix = Some(self.color_matrix);
-        apply_look_params(
+        raw_pipeline::pipeline::apply_look_params(
             &mut params,
             exposure_ev,
             contrast,
@@ -1066,7 +1013,7 @@ impl LookRenderer {
             Ok(rgb8)
         } else {
             let (final_rgb, _, _) =
-                pipeline::apply_orientation(&rgb8, self.width, self.height, self.orientation);
+                pipeline::apply_orientation(rgb8, self.width, self.height, self.orientation);
             Ok(final_rgb)
         }
     }
@@ -1239,9 +1186,8 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
         ]
     };
 
-    // TODO(G3): raw_pipeline::dng::DngImage does not expose ISO; use a fixed
-    // fallback until upstream surfaces it.
-    let iso = 100u32;
+    // Use ISO from DNG metadata for NR strength; fall back to 100 if absent.
+    let iso = dng_img.iso.unwrap_or(100);
     let nr_strength = match iso {
         iso if iso >= 6400 => 0.50f32,
         iso if iso >= 3200 => 0.35,
@@ -1317,7 +1263,7 @@ fn process_dng_impl(
     if look.wb_b.is_finite() && look.wb_b > 0.0 {
         params.wb_b = look.wb_b.min(8.0);
     }
-    apply_look_params(
+    raw_pipeline::pipeline::apply_look_params(
         &mut params,
         look.exposure_ev,
         look.contrast,
@@ -1346,7 +1292,7 @@ fn process_dng_impl(
         let (fr, fw, fh) = if orientation == 1 {
             (rgb8, aw, ah)
         } else {
-            pipeline::apply_orientation(&rgb8, aw, ah, orientation)
+            pipeline::apply_orientation(rgb8, aw, ah, orientation)
         };
         (fr, fw, fh, tonemap_ms, now_ms() - t2)
     } else {
@@ -1488,4 +1434,209 @@ pub fn process_dng_with_flags(
         clarity,
     };
     process_dng_impl(decode_dng_raw(data)?, output_flags, &look)
+}
+
+// ─── CR2 pipeline ─────────────────────────────────────────────────────────────
+
+struct Cr2Decoded {
+    rgb16: Vec<u16>,
+    aw: usize,
+    ah: usize,
+    params: pipeline::PipelineParams,
+    color_matrix_flat: [f32; 9],
+    decode_ms: f64,
+    demosaic_ms: f64,
+    orientation: u16,
+    make: String,
+    model: String,
+    iso: u32,
+}
+
+/// Generic Canon EOS cam-to-sRGB matrix (dcraw/LibRaw coefficients).
+/// Used as the fallback when a CR2 file does not embed its own color matrix.
+const CANON_CAM_TO_SRGB: [[f32; 3]; 3] = [
+    [ 0.4592, 0.3810, 0.1595],
+    [ 0.1638, 0.7718, 0.0644],
+    [ 0.0388, 0.0791, 0.8824],
+];
+
+fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
+    const MAX_DIM: u32 = 8192;
+    const MAX_PIXELS: usize = 50_000_000;
+
+    let t = now_ms();
+    let cr2 = raw_pipeline::cr2::decode_bytes(data)
+        .map_err(|e| JsError::new(&format!("CR2 decode: {}", e)))?;
+    let decode_ms = now_ms() - t;
+
+    let w = cr2.width;
+    let h = cr2.height;
+    if w == 0 || h == 0 {
+        return Err(JsError::new("CR2: zero image dimension"));
+    }
+    if (w as u32) > MAX_DIM || (h as u32) > MAX_DIM {
+        return Err(JsError::new(&format!(
+            "CR2: dimension {}×{} exceeds maximum {}",
+            w, h, MAX_DIM
+        )));
+    }
+    if w.checked_mul(h).unwrap_or(MAX_PIXELS + 1) > MAX_PIXELS {
+        return Err(JsError::new(&format!(
+            "CR2: {} pixels exceeds 50 MP limit",
+            w * h
+        )));
+    }
+
+    // CR2 is always RGGB — no align_to_rggb step.
+    let t = now_ms();
+    let mut rgb16 = demosaic::demosaic_rggb_mhc(&cr2.raw, w, h)
+        .map_err(|e| JsError::new(&format!("CR2 demosaic: {}", e)))?;
+    let demosaic_ms = now_ms() - t;
+
+    let mut params = pipeline::PipelineParams::default_olympus();
+    params.black = cr2.black;
+    params.white = cr2.white;
+    params.wb_r = cr2.wb_r;
+    params.wb_b = cr2.wb_b;
+    params.color_matrix = cr2.color_matrix;
+    let color_matrix_flat: [f32; 9] = {
+        let m = params.color_matrix.unwrap_or(CANON_CAM_TO_SRGB);
+        [m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2]]
+    };
+
+    let iso = cr2.iso.unwrap_or(100);
+    let nr_strength = match iso {
+        iso if iso >= 6400 => 0.50f32,
+        iso if iso >= 3200 => 0.35,
+        iso if iso >= 1600 => 0.20,
+        _ => 0.0,
+    };
+    if nr_strength > 0.0 {
+        pipeline::apply_luminance_nr(&mut rgb16, w, h, nr_strength);
+    }
+
+    Ok(Cr2Decoded {
+        rgb16,
+        aw: w,
+        ah: h,
+        params,
+        color_matrix_flat,
+        decode_ms,
+        demosaic_ms,
+        orientation: cr2.orientation,
+        make: cr2.make,
+        model: cr2.model,
+        iso,
+    })
+}
+
+fn process_cr2_impl(
+    decoded: Cr2Decoded,
+    output_flags: u32,
+    look: &LookOverrides,
+) -> Result<ProcessResult, JsError> {
+    process_dng_impl(
+        DngDecoded {
+            rgb16: decoded.rgb16,
+            aw: decoded.aw,
+            ah: decoded.ah,
+            params: decoded.params,
+            color_matrix_flat: decoded.color_matrix_flat,
+            decode_ms: decoded.decode_ms,
+            demosaic_ms: decoded.demosaic_ms,
+            orientation: decoded.orientation,
+            make: decoded.make,
+            model: decoded.model,
+            iso: decoded.iso,
+        },
+        output_flags,
+        look,
+    )
+}
+
+/// Parse + decode a Canon CR2 file blob.
+///
+/// Always generates full RGB8, 1800 px lightbox RGB16, and 360 px thumbnail RGB16.
+/// Use `process_cr2_with_flags` to skip unused outputs.
+#[wasm_bindgen]
+pub fn process_cr2(
+    data: &[u8],
+    exposure_ev: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    saturation: f32,
+    vibrance: f32,
+    temp: f32,
+    tint: f32,
+    wb_r_override: f32,
+    wb_b_override: f32,
+    texture: f32,
+    clarity: f32,
+) -> Result<ProcessResult, JsError> {
+    let look = LookOverrides {
+        wb_r: wb_r_override,
+        wb_b: wb_b_override,
+        exposure_ev,
+        contrast,
+        highlights,
+        shadows,
+        whites,
+        blacks,
+        saturation,
+        vibrance,
+        temp,
+        tint,
+        texture,
+        clarity,
+    };
+    process_cr2_impl(
+        decode_cr2_raw(data)?,
+        OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB,
+        &look,
+    )
+}
+
+/// Variant of `process_cr2` with explicit output flags.
+///
+/// `output_flags` bitmask: 1 = full RGB8, 2 = 1800 px lightbox RGB16, 4 = 360 px thumb RGB16.
+/// Pass `7` to match `process_cr2`.
+#[wasm_bindgen]
+pub fn process_cr2_with_flags(
+    data: &[u8],
+    output_flags: u32,
+    exposure_ev: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    saturation: f32,
+    vibrance: f32,
+    temp: f32,
+    tint: f32,
+    wb_r_override: f32,
+    wb_b_override: f32,
+    texture: f32,
+    clarity: f32,
+) -> Result<ProcessResult, JsError> {
+    let look = LookOverrides {
+        wb_r: wb_r_override,
+        wb_b: wb_b_override,
+        exposure_ev,
+        contrast,
+        highlights,
+        shadows,
+        whites,
+        blacks,
+        saturation,
+        vibrance,
+        temp,
+        tint,
+        texture,
+        clarity,
+    };
+    process_cr2_impl(decode_cr2_raw(data)?, output_flags, &look)
 }

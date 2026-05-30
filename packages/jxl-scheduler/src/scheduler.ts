@@ -117,6 +117,7 @@ export class Scheduler {
 
   // All active sessions: primaries (running or queued) and dedupe subscribers.
   private readonly sessions = new Map<string, SessionRecord>();
+  private readonly pendingHandlers = new Map<string, Array<(msg: WorkerToMainMessage) => void>>();
 
   // Workers currently running background-priority sessions — enables O(n_background)
   // candidate scan for preemption without iterating the full session map.
@@ -186,7 +187,7 @@ export class Scheduler {
           state: "running",
           priority: params.priority,
           kind: params.startMsg.type === "encode_start" ? "encode" : "decode",
-          handlers: [],
+          handlers: this.takePendingHandlers(params.sessionId),
           createdAt: Date.now(),
           progress: 0,
         });
@@ -228,7 +229,7 @@ export class Scheduler {
         state: "queued",
         priority: params.priority,
         kind: params.startMsg.type === "encode_start" ? "encode" : "decode",
-        handlers: [],
+        handlers: this.takePendingHandlers(params.sessionId),
         pending,
         createdAt: Date.now(),
         progress: 0,
@@ -268,7 +269,15 @@ export class Scheduler {
   // Register a handler to receive messages from the worker for this session.
   onMessage(sessionId: string, handler: (msg: WorkerToMainMessage) => void): void {
     const record = this.sessions.get(sessionId);
-    if (record === undefined) return;
+    if (record === undefined) {
+      let handlers = this.pendingHandlers.get(sessionId);
+      if (handlers === undefined) {
+        handlers = [];
+        this.pendingHandlers.set(sessionId, handlers);
+      }
+      handlers.push(handler);
+      return;
+    }
     record.handlers.push(handler);
   }
 
@@ -498,6 +507,15 @@ export class Scheduler {
         this.backgroundWorkers.delete(backgroundWorker);
       }
       this.workerPausedSession.set(backgroundWorker.id, victimSessionId);
+      this.pool.release(backgroundWorker);
+      const newWorker = await this.pool.acquire();
+      if (newWorker !== null) {
+        this.assignWorker(newWorker, params.sessionId, params.startMsg);
+        this.setupSignalAbort(params.sessionId, params.signal);
+        this.preemptionCount++;
+        return newWorker.id;
+      }
+      return null;
     } else {
       // Cancel: victim's caller receives the cancellation and handles resubmit.
       this.releaseSession(victimSessionId);
@@ -599,7 +617,7 @@ export class Scheduler {
         state: "running",
         priority,
         kind,
-        handlers: [],
+        handlers: this.takePendingHandlers(sessionId),
         worker,
         createdAt: Date.now(),
         progress: 0,
@@ -697,11 +715,19 @@ export class Scheduler {
     signal.addEventListener("abort", () => this.cancelSession(sessionId), { once: true });
   }
 
+  private takePendingHandlers(sessionId: string): Array<(msg: WorkerToMainMessage) => void> {
+    const handlers = this.pendingHandlers.get(sessionId);
+    if (handlers === undefined) return [];
+    this.pendingHandlers.delete(sessionId);
+    return handlers;
+  }
+
   // Tears down session state without triggering a queue drain.
   private cleanupSession(sessionId: string): void {
     this.releaseSession(sessionId);
     this.dedupe.complete(sessionId);
     this.sessions.delete(sessionId);
+    this.pendingHandlers.delete(sessionId);
   }
 
   private releaseSession(sessionId: string): void {
