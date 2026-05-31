@@ -60,3 +60,4 @@ test-images/
 # One-off correlation matrix experiments
 web/jxl-correlation-matrix.html
 web/jxl-correlation-matrix.js
+.worktrees/
