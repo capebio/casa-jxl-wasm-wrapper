@@ -151,31 +151,32 @@
                 <div class="source-actions" style="margin: 8px 0 4px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                     <button id="pick-file-btn" class="secondary-btn" type="button">Pick file</button>
                     <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
-                    <span id="current-source" style="font-size:12px; color:var(--muted); font-family:monospace;"></span>
+                    <span id="current-source" style="font-size:12px; color:var(--muted); font-family:monospace; margin-left:4px;"></span>
                 </div>
 
                 <!-- 3. Run (on its own line, enabled only when file present) -->
                 <button id="run-progressive" class="primary-btn" type="button" disabled title="Choose parameters then load a file first" style="margin: 4px 0 8px;">Run Progressive Paint</button>
 
-                <span class="prog-status" id="prog-status">Choose parameters, load a file (Pick or Random), then Run.</span>
+                <span class="prog-status" id="prog-status">Choose parameters → load a file → Run to see per-pass timing and progressive refinement.</span>
 
                 <!-- 4+5. Console then Export -->
                 <div class="console-export-row" style="margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12px;">
-                    <button id="dbg-console-btn" class="secondary-btn" type="button" style="padding:2px 8px;">Console</button>
+                    <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
                     <span style="color:var(--muted);">Export to:</span>
-                    <button id="export-gallery-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled>Progressive gallery</button>
-                    <button id="export-folder-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled>Folder…</button>
+                    <button id="export-gallery-btn" class="secondary-btn" type="button" disabled>Progressive gallery</button>
+                    <button id="export-folder-btn" class="secondary-btn" type="button" disabled>Folder…</button>
 
                     <span style="color:var(--muted); margin-left:10px;">Measurements:</span>
-                    <button id="export-csv-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled title="Export all runs as CSV (good for spreadsheets / pandas)">CSV</button>
-                    <button id="export-json-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled title="Export all runs as JSON (structured, for scripts/notebooks)">JSON</button>
-                    <button id="export-toon-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled title="Export measurements as TOON (with metadata + compact per-pass tables)">TOON</button>
-                    <button id="clear-measurements-btn" class="dbg-bar-action" type="button" style="padding:2px 6px; font-size:11px;" title="Clear measurement history">Clear</button>
+                    <button id="export-csv-btn" class="secondary-btn" type="button" disabled title="Export all runs as CSV (good for spreadsheets / pandas)">CSV</button>
+                    <button id="export-json-btn" class="secondary-btn" type="button" disabled title="Export all runs as JSON (structured, for scripts/notebooks)">JSON</button>
+                    <button id="export-toon-btn" class="secondary-btn" type="button" disabled title="Export measurements as TOON (with metadata + compact per-pass tables)">TOON</button>
+                    <button id="clear-measurements-btn" class="dbg-bar-action" type="button" style="font-size:11px;" title="Clear measurement history">Clear</button>
+                    <button id="copy-measurements-md" class="secondary-btn" type="button" style="font-size:11px; margin-left:6px;" title="Copy current measurements as Markdown">Copy MD</button>
                 </div>
             </div>
 
             <p class="panel-note">
-                Click pass tiles to pin them into the large compare slots above.
+                Click tiles in the strip below to pin passes into the viewers above.
                 <button id="zoom-btn" class="secondary-btn zoom-btn" type="button" title="Arm wheel zoom + pan (drag) over the three big viewers. Provides identical reticule across all Pass viewers.">Zoom</button>
                 <span id="zoom-readout" class="zoom-readout">1.00×</span>
                 <button id="zoom-reset" class="secondary-btn zoom-btn" type="button" title="Cycle view: Fit → 100% (actual pixels, crisp) → 400%">Fit</button>
@@ -187,21 +188,21 @@
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-overview" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
-                    <div class="viewport-info" id="vp-overview-info">Waiting for pass.</div>
+                    <div class="viewport-info" id="vp-overview-info">No data yet — run the test.</div>
                 </div>
                 <div class="viewport-item">
                     <div class="viewport-label" id="vp-pixel-label">Pass 2</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-pixel" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
-                    <div class="viewport-info" id="vp-pixel-info">Waiting for pass.</div>
+                    <div class="viewport-info" id="vp-pixel-info">No data yet — run the test.</div>
                 </div>
                 <div class="viewport-item">
                     <div class="viewport-label" id="vp-zoom-label">Pass 3</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-zoom" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
-                    <div class="viewport-info" id="vp-zoom-info">Waiting for pass.</div>
+                    <div class="viewport-info" id="vp-zoom-info">No data yet — run the test.</div>
                 </div>
             </div>
 
