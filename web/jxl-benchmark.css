@@ -917,6 +917,15 @@ canvas {
     padding-bottom: 2px;
 }
 
+.results-header-actions .ghost-btn {
+    font-size: 11px;
+    padding: 3px 10px;
+    opacity: 0.85;
+}
+.results-header-actions .ghost-btn:hover {
+    opacity: 1;
+}
+
 .results-tabs {
     display: flex;
     gap: 8px;
