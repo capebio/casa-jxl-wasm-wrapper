@@ -895,11 +895,26 @@ canvas {
 
 .results-header {
     margin-bottom: 16px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.results-header-left {
+    flex: 1;
 }
 
 .results-header h2 {
     margin: 6px 0 0 0;
     font-size: 18px;
+}
+
+.results-header-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding-bottom: 2px;
 }
 
 .results-tabs {
