@@ -10,6 +10,9 @@ import {
 } from './jxl-benchmark-progress.js';
 import { createFilePicker } from './jxl-file-picker.js';
 
+// Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
+console.log('%c[Benchmark] jxl-benchmark.js loaded — JXL Benchmark page (performance batch runs)', 'color:#3b82f6;font-weight:600', { page: 'Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
+
 const { process_orf, rgb_to_rgba } = rawWasm;
 
 const ALL_SIZES = [128, 256, 512, 1080, 1920, 'fullsize'];
@@ -569,6 +572,11 @@ function setTiming(text) {
     timingStatus.textContent = text;
 }
 
+/** Yield to the browser event loop so status text in the header actually paints before the next heavy WASM batch. */
+async function yieldForPaint() {
+    await new Promise(r => requestAnimationFrame(r));
+}
+
 function handleFileSelect(e) {
     const files = Array.from(e.target.files || []);
     loadFiles(files);
@@ -702,6 +710,12 @@ async function loadRandomImages() {
 
     try {
         for (let i = 0; i < maxFiles; i++) {
+            const tentativeName = `random-${i}.orf`;
+            setFileStatus(formatLoadFileStatus({
+                currentIndex: i + 1,
+                totalCount: maxFiles,
+                fileName: tentativeName,
+            }));
             try {
                 const fetchStart = performance.now();
                 const resp = await fetch('/api/random-gobabeb');
@@ -714,8 +728,14 @@ async function loadRandomImages() {
                     break;
                 }
                 const arrayBuffer = await resp.arrayBuffer();
-                const fileName = resp.headers.get('X-File-Name') || `random-${i}.orf`;
+                const fileName = resp.headers.get('X-File-Name') || tentativeName;
                 const fileSizeKB = (arrayBuffer.byteLength / 1024).toFixed(1);
+
+                setFileStatus(formatLoadFileStatus({
+                    currentIndex: i + 1,
+                    totalCount: maxFiles,
+                    fileName,
+                }));
 
                 const processStart = performance.now();
                 const rgba = await processImageFile({ name: fileName, type: 'application/octet-stream' }, arrayBuffer);
@@ -723,6 +743,11 @@ async function loadRandomImages() {
 
                 if (rgba) {
                     selectedSources.push({ file: fileName, ...rgba });
+                    updateSelectionStatus();
+                    setProgress(formatLoadProgress({
+                        loadedCount: selectedSources.length,
+                        totalCount: maxFiles,
+                    }));
                     dbgLog(`✓ ${fileName}`, `${rgba.width}×${rgba.height} | fetch ${fetchMs.toFixed(1)}ms + decode ${processMs.toFixed(1)}ms | ${fileSizeKB} KB`);
                 } else {
                     lastError = `Processing failed for ${fileName}`;
@@ -998,6 +1023,7 @@ async function runBenchmark() {
     const selectedSizes = getSelectedSizes();
     const selectedQualities = getSelectedQualities();
     const selectedEfforts = getSelectedEfforts();
+    console.log('%c[Benchmark] run start', 'color:#3b82f6;font-weight:600', { t: new Date().toISOString(), sources: selectedSources.map(s => s.name ?? s.label ?? '?'), iterations, sizes: selectedSizes, qualities: selectedQualities, efforts: selectedEfforts });
 
     benchmarkResults = {
         decodeMs: new Map(),
@@ -1055,6 +1081,17 @@ async function runBenchmark() {
             totalFiles: selectedSources.length,
             fileName: source.file,
         }));
+        // Force a main progress line update at the *start* of each new image so the UI visibly advances "between images"
+        const startPercent = Math.round((completedSteps / totalSteps) * 100);
+        setProgress(formatBenchmarkProgress({
+            percent: startPercent,
+            size: selectedSizes[0] ?? 512,
+            quality: selectedQualities[0] ?? 85,
+            effort: selectedEfforts[0] ?? 3,
+            completedFiles,
+            totalFiles: selectedSources.length,
+        }));
+        await yieldForPaint();
         dbgLog(`\n📄 FILE ${fileIdx + 1}/${selectedSources.length}`, source.file, 'info');
 
         for (const size of selectedSizes) {
@@ -1141,6 +1178,21 @@ async function runBenchmark() {
         }));
         const fileElapsed = ((performance.now() - fileStart) / 1000).toFixed(1);
         dbgLog(`  ✓ File done in ${fileElapsed}s`, '', 'success');
+
+        // Unconditionally update the main progress header when a whole image finishes.
+        // This guarantees visible progress "between images" even if the inner 120ms throttle never fired
+        // for this file's last steps. Then yield so the browser paints before starting the next image.
+        const fileDonePercent = Math.round((completedSteps / totalSteps) * 100);
+        setProgress(formatBenchmarkProgress({
+            percent: fileDonePercent,
+            size: selectedSizes[0] ?? 512,
+            quality: selectedQualities[0] ?? 85,
+            effort: selectedEfforts[0] ?? 3,
+            completedFiles,
+            totalFiles: selectedSources.length,
+        }));
+        setTiming(`File ${completedFiles}/${selectedSources.length} done in ${fileElapsed}s`);
+        await yieldForPaint();
     }
 
     const totalTime = ((performance.now() - benchmarkStart) / 1000).toFixed(1);

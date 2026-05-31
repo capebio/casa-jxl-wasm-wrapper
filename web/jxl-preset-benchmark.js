@@ -2,6 +2,8 @@ import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createEncoder, createDecoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
+console.log('%c[Preset Benchmark] jxl-preset-benchmark.js loaded — preset/scenario sweep across tiers + sizes', 'color:#f97316;font-weight:600', { page: 'Preset Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
+
 // === IDB ===
 
 const IDB_NAME = 'jxl-preset-bench';
@@ -323,6 +325,8 @@ export const sweepRows   = [];
 export let sweepAborted  = false;
 export let sweepRunning  = false;
 
+let selectedGraphFormat = 'all'; // 'all' | slotId like 'orf'
+
 // --- UI (wired in Task 9) ----------------------------------------------------
 
 export function updatePhaseStatus(phaseNum, status, progress = 0) {
@@ -496,17 +500,25 @@ async function runRawIsolation() {
                  : ext === 'cr2' ? rawWasm.process_cr2_with_flags : null;
 
         let bench = null;
-        try {
-            // Light warm-up + median for consistency with JXL sweeps
-            for (let i = 0; i < 1; i++) rawWasm.bench_decode_orf(bytes); // warm
-            const runs = [];
-            for (let i = 0; i < 3; i++) {
-                const b = rawWasm.bench_decode_orf(bytes);
-                runs.push(b);
+        if (typeof rawWasm?.bench_decode_orf === 'function') {
+            try {
+                // 5 runs + median to reduce measurement noise (was 3 runs).
+                // This is the only place bench_decode_orf is called from the browser.
+                for (let i = 0; i < 1; i++) rawWasm.bench_decode_orf(bytes); // warm-up
+                const runs = [];
+                for (let i = 0; i < 5; i++) {
+                    const b = rawWasm.bench_decode_orf(bytes);
+                    runs.push(b);
+                }
+                runs.sort((a, b) => (a.decompress_ms + a.demosaic_ms) - (b.decompress_ms + b.demosaic_ms));
+                bench = runs[2]; // median of 5
+            } catch (e) {
+                console.warn('[raw-isolation] bench_decode_orf failed', slotId, e);
+                bench = { error: 'bench_decode_orf threw' };
             }
-            runs.sort((a, b) => (a.decompress_ms + a.demosaic_ms) - (b.decompress_ms + b.demosaic_ms));
-            bench = runs[1]; // median of 3
-        } catch (e) { console.warn('[raw-isolation] bench_decode_orf failed', slotId, e); }
+        } else {
+            bench = { error: 'bench_decode_orf not available in this WASM build' };
+        }
 
         const modes = {};
 
@@ -634,6 +646,8 @@ function renderRawIsolationResults() {
         'Re-load originals if bytes missing from IDB.</div>';
 
     el.innerHTML = html;
+    const copyBtn = document.getElementById('btn-raw-isolation-copy');
+    if (copyBtn) copyBtn.disabled = false;
 }
 
 async function getBytesForSlot(slotId) {
@@ -670,6 +684,25 @@ document.getElementById('btn-raw-isolation-clear')?.addEventListener('click', ()
     if (el) el.innerHTML = '';
     const st = document.getElementById('raw-isolation-status');
     if (st) st.textContent = '';
+    const copyBtn = document.getElementById('btn-raw-isolation-copy');
+    if (copyBtn) copyBtn.disabled = true;
+});
+
+document.getElementById('btn-raw-isolation-copy')?.addEventListener('click', () => {
+    if (!rawIsolationData) return;
+    const meta = {
+        exportedAt: new Date().toISOString(),
+        generator: 'jxl-preset-benchmark/raw-isolation',
+        files: Object.keys(rawIsolationData).length,
+        hasBench: Object.values(rawIsolationData).some(d => d.bench),
+    };
+    const text = `RAW ISOLATION MEASUREMENTS\n` +
+        `meta: ${JSON.stringify(meta, null, 2)}\n\n` +
+        JSON.stringify(rawIsolationData, null, 2);
+    navigator.clipboard.writeText(text).then(() => {
+        const st = document.getElementById('raw-isolation-status');
+        if (st) { const old = st.textContent; st.textContent = 'Copied measurements + header to clipboard'; setTimeout(() => { if (st.textContent.includes('Copied')) st.textContent = old || ''; }, 1400); }
+    }).catch(() => alert('Clipboard copy failed'));
 });
 
 // Reactive button state management (called after relevant changes)
@@ -683,6 +716,10 @@ function updateButtonStates() {
         rawBtn.title = hasFiles 
             ? "Measure RAW pipeline costs (bench_decode_orf + selective modes). Results will feed into scenario scoring."
             : "Load at least one file first to enable RAW isolation measurement.";
+    }
+    const rawCopyBtn = document.getElementById('btn-raw-isolation-copy');
+    if (rawCopyBtn) {
+        rawCopyBtn.disabled = !rawIsolationData || Object.keys(rawIsolationData).length === 0;
     }
 
     // Run Sweep button
@@ -703,25 +740,22 @@ function updateButtonStates() {
         }
     }
 
-    // Export CSV
-    const exportBtn = document.getElementById('btn-export-csv');
-    if (exportBtn) {
-        const hasResults = (typeof sweepRows !== 'undefined') && sweepRows.length > 0;
-        exportBtn.disabled = !hasResults;
-        exportBtn.title = hasResults ? "Export current sweep results as CSV" : "Run a sweep first to enable CSV export.";
-    }
+    // Export (unified explicit buttons per progressive-paint pattern)
+    const hasResults = (typeof sweepRows !== 'undefined') && sweepRows.length > 0;
+    const csvBtn = document.getElementById('export-csv-btn');
+    if (csvBtn) csvBtn.disabled = !hasResults;
+    const jsonBtn = document.getElementById('export-json-btn');
+    if (jsonBtn) jsonBtn.disabled = !hasResults;
+    const toonBtn = document.getElementById('export-toon-btn');
+    if (toonBtn) toonBtn.disabled = !hasResults;
+    const clearBtn = document.getElementById('clear-measurements-btn');
+    if (clearBtn) clearBtn.disabled = !hasResults;
+    const recsBtn = document.getElementById('export-recs-btn');
+    if (recsBtn) recsBtn.disabled = !hasResults;
 }
 
-// Call this function at key moments
-// (we'll hook it into existing places below)
-
-async function median(fn, n) {
-    // Run fn() n times; return median of results
-    const results = [];
-    for (let i = 0; i < n; i++) results.push(await fn());
-    results.sort((a, b) => a.encMs - b.encMs);
-    return results[Math.floor(n / 2)];
-}
+// _medianOf is the active median helper (used by sweep aggregation).
+// The previous async median(fn, n) helper was unused and has been removed (P4 hygiene).
 
 function _medianOf(values) {
     const sorted = [...values].sort((a, b) => a - b);
@@ -777,6 +811,7 @@ export async function runSweep(options = {}) {
     const {
         tiers: tierFilter   = TIERS.map(t => t.id),
         sizes: sizeFilter   = SIZES,
+        efforts: effortFilter = EFFORTS,
         scenarios: scenarioFilter = Object.keys(SCENARIO_PROFILES),
         runsPerConfig       = 3,
     } = options;
@@ -785,8 +820,16 @@ export async function runSweep(options = {}) {
     sweepAborted = false;
     sweepRows.length = 0;
 
+    // Reset all phase cards and live status for the new run
+    for (let i = 1; i <= 4; i++) updatePhaseStatus(i, 'pending');
+    const liveCurrentEl = document.getElementById('live-current');
+    if (liveCurrentEl) liveCurrentEl.textContent = 'Starting…';
+
     const activeTiers = TIERS.filter(t => tierFilter.includes(t.id));
     const activeScenarios = scenarioFilter.filter(s => SCENARIO_PROFILES[s]);
+
+    console.log('%c[Preset Benchmark] run start', 'color:#f97316;font-weight:600', { t: new Date().toISOString(), tiers: activeTiers.map(t => t.id), scenarios: activeScenarios, sizes: sizeFilter, runsPerConfig });
+    dbgLog('Sweep starting', `files=${activeFiles.map(f=>f.label).join('+')||'none'} efforts=${(effortFilter||[]).join(',')||'1-6'} sizes=${activeSizes.join(',')}`);
 
     // Union of sizes required by the chosen scenarios (plus any explicit size filter)
     let scenarioSizes = [];
@@ -822,8 +865,9 @@ export async function runSweep(options = {}) {
                 for (const sizePx of activeSizes) {
                     const { rgba, width, height } = resizeRgba(src, sizePx);
                     const effortRows = [];
+                    const activeEfforts = (effortFilter && effortFilter.length) ? effortFilter : EFFORTS;
 
-                    for (const effort of EFFORTS) {
+                    for (const effort of activeEfforts) {
                         if (sweepAborted) return;
                         updateLiveStatus(`P1 ${tier.label} · ${fileSlot.label} · ${sizePx}px · effort ${effort}`);
 
@@ -1185,6 +1229,10 @@ function buildGraphsSection() {
     const body = document.getElementById('phase-graphs-body');
     if (!body) return;
     body.innerHTML = `
+        <div id="graph-format-bar" style="margin-bottom:6px;font-size:8px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+            <span style="opacity:0.6;">Formats:</span>
+            <button type="button" class="fmt-btn" data-fmt="all" style="padding:0 4px;font-size:8px;">All</button>
+        </div>
         <div class="graph-grid">
             <div class="graph-card">
                 <h3>Phase 1a — Encode time vs Effort</h3>
@@ -1204,11 +1252,29 @@ function buildGraphsSection() {
             </div>
         </div>
     `;
+    // Wire format buttons (dynamic ones added in refreshGraphFormatBar)
+    const bar = body.querySelector('#graph-format-bar');
+    if (bar) {
+        bar.addEventListener('click', (e) => {
+            const btn = e.target.closest('.fmt-btn');
+            if (!btn) return;
+            selectedGraphFormat = btn.dataset.fmt || 'all';
+            refreshGraphFormatBar();
+            refreshGraphsWithFilter();
+        });
+    }
 }
 
 /** Render (or re-render) Phase 1a and 1b charts from phase-1 sweep rows. */
 export function renderPhase1Charts(rows) {
-    const sizes = SIZES; // [128, 512, 1920, 'full']
+    // Apply current format filter (so graphs differentiate / switch on file formats)
+    let filtered = rows;
+    if (selectedGraphFormat && selectedGraphFormat !== 'all') {
+        filtered = rows.filter(r => r.file === selectedGraphFormat);
+    }
+    const sizes = SIZES;
+    const presentEfforts = [...new Set(filtered.map(r => r.effort))].sort((a,b)=>a-b);
+    const xLabels = presentEfforts.length ? presentEfforts : EFFORTS;
 
     // --- Phase 1a: Encode ms vs Effort ---
     if (charts.p1a) { charts.p1a.destroy(); charts.p1a = null; }
@@ -1217,10 +1283,10 @@ export function renderPhase1Charts(rows) {
         charts.p1a = new Chart(canvas1a, {
             type: 'line',
             data: {
-                labels: EFFORTS,
+                labels: xLabels,
                 datasets: sizes.map((sz, i) => ({
                     label: sz === 'full' ? 'Full' : `${sz}px`,
-                    data: EFFORTS.map(e => avgFor(rows, sz, e, 'effort', 'encMs')),
+                    data: xLabels.map(e => avgFor(filtered, sz, e, 'effort', 'encMs')),
                     borderColor: SIZE_COLORS[i],
                     backgroundColor: SIZE_COLORS[i] + '22',
                     tension: 0.3,
@@ -1245,8 +1311,8 @@ export function renderPhase1Charts(rows) {
     if (canvas1b) {
         const lineDatasets = sizes.map((sz, i) => ({
             label: sz === 'full' ? 'Full' : `${sz}px`,
-            data: EFFORTS.map(e => {
-                const bytes = avgFor(rows, sz, e, 'effort', 'sizeBytes');
+            data: xLabels.map(e => {
+                const bytes = avgFor(filtered, sz, e, 'effort', 'sizeBytes');
                 return bytes !== null ? bytes / 1024 : null;
             }),
             borderColor: SIZE_COLORS[i],
@@ -1259,9 +1325,9 @@ export function renderPhase1Charts(rows) {
 
         // One scatter dataset per size to mark the knee effort
         const kneeDatasets = sizes.map((sz, i) => {
-            const kneeEffort = kneeEffortFor(rows, sz);
+            const kneeEffort = kneeEffortFor(filtered, sz);
             if (kneeEffort === null) return null;
-            const bytes = avgFor(rows, sz, kneeEffort, 'effort', 'sizeBytes');
+            const bytes = avgFor(filtered, sz, kneeEffort, 'effort', 'sizeBytes');
             const sizeKB = bytes !== null ? bytes / 1024 : null;
             return {
                 label: `Knee ${sz === 'full' ? 'Full' : sz + 'px'}`,
@@ -1278,7 +1344,7 @@ export function renderPhase1Charts(rows) {
         charts.p1b = new Chart(canvas1b, {
             type: 'line',
             data: {
-                labels: EFFORTS,
+                labels: xLabels,
                 datasets: [...lineDatasets, ...kneeDatasets],
             },
             options: {
@@ -1295,6 +1361,10 @@ export function renderPhase1Charts(rows) {
 
 /** Render (or re-render) Phase 2 chart from phase-2 sweep rows. */
 export function renderPhase2Chart(rows) {
+    let filtered = rows;
+    if (selectedGraphFormat && selectedGraphFormat !== 'all') {
+        filtered = rows.filter(r => r.file === selectedGraphFormat);
+    }
     if (charts.p2) { charts.p2.destroy(); charts.p2 = null; }
     const canvas = document.getElementById('chart-p2');
     if (!canvas) return;
@@ -1306,7 +1376,7 @@ export function renderPhase2Chart(rows) {
             labels: DEC_SPEEDS,
             datasets: sizes.map((sz, i) => ({
                 label: sz === 'full' ? 'Full' : `${sz}px`,
-                data: DEC_SPEEDS.map(ds => avgFor(rows, sz, ds, 'decSpeed', 'decMs')),
+                data: DEC_SPEEDS.map(ds => avgFor(filtered, sz, ds, 'decSpeed', 'decMs')),
                 borderColor: SIZE_COLORS[i],
                 backgroundColor: SIZE_COLORS[i] + '22',
                 tension: 0.3,
@@ -1327,6 +1397,10 @@ export function renderPhase2Chart(rows) {
 
 /** Render (or re-render) Phase 3 chart from phase-3 sweep rows. */
 export function renderPhase3Chart(rows) {
+    let filtered = rows;
+    if (selectedGraphFormat && selectedGraphFormat !== 'all') {
+        filtered = rows.filter(r => r.file === selectedGraphFormat);
+    }
     if (charts.p3) { charts.p3.destroy(); charts.p3 = null; }
     const canvas = document.getElementById('chart-p3');
     if (!canvas) return;
@@ -1344,7 +1418,7 @@ export function renderPhase3Chart(rows) {
 
     const datasets = MODULAR_VALS.map((modular, i) => {
         const data = BROTLI_VALS.map(brotli => {
-            const matching = rows.filter(r => r.modular === modular && r.brotli === brotli);
+            const matching = filtered.filter(r => r.modular === modular && r.brotli === brotli);
             if (!matching.length) return null;
             return matching.reduce((s, r) => s + r.encMs, 0) / matching.length;
         });
@@ -1392,6 +1466,13 @@ function buildSweepSettings() {
                 </div>
             </div>
             <div class="control-group">
+                <span>Effort:</span>
+                <div class="chip-group">
+                    ${[1,2,3,4,5,6].map(e => `
+                        <label class="chip-label" style="padding:0 3px;"><input type="checkbox" name="sweep-effort" value="${e}" checked /> <span>${e}</span></label>`).join('')}
+                </div>
+            </div>
+            <div class="control-group">
                 <span>Tiers:</span>
                 <div class="chip-group">
                     ${['low','medium','high','lossless'].map(t => `
@@ -1421,8 +1502,14 @@ function buildSweepSettings() {
                 <button id="btn-run-sweep" class="btn-primary" type="button" style="font-size:8px;padding:0 4px;">Run</button>
                 <button id="btn-stop" class="btn-danger" type="button" disabled style="font-size:8px;padding:0 3px;">Stop</button>
                 <button id="btn-load-saved" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Load</button>
-                <button id="btn-export-csv" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">CSV</button>
-                <button id="btn-console" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Log</button>
+                <span style="color:#94a3b8; margin:0 4px; font-size:8px;">Export:</span>
+                <button id="export-csv-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export sweep + rich meta/RAW flag as CSV (includes # meta block)">CSV</button>
+                <button id="export-json-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export sweep results + rich meta (files, selected, rawIsolation) as JSON">JSON</button>
+                <button id="export-toon-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export as TOON (compact human-readable tables + meta)">TOON</button>
+                <button id="clear-measurements-btn" class="dbg-bar-action" type="button" style="font-size:8px;padding:0 3px;" disabled title="Clear sweep results, preset cards, and graphs (files + RAW isolation preserved)">Clear</button>
+                <button id="export-recs-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Persist citable preset recommendations JSON (best-per-tier + scenario scores + RAW costs + provenance) for docs/outputs + Tauri cross-link">Recs</button>
+                <button id="btn-log" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Log</button>
+                <button id="btn-console-bar" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Console</button>
             </div>
         </div>
     `;
@@ -1439,8 +1526,16 @@ function buildSweepSettings() {
     const settingsBody = document.getElementById('sweep-settings-body');
     if (settingsBody) {
         settingsBody.addEventListener('change', (e) => {
-            if (e.target.name === 'sweep-size' || e.target.name === 'sweep-tier' || e.target.name === 'scenario') {
+            if (e.target.name === 'sweep-size' || e.target.name === 'sweep-tier' || e.target.name === 'scenario' || e.target.name === 'sweep-effort') {
                 updateButtonStates();
+                // Live preview of effort x size in phase card (reflects selection immediately)
+                if (e.target.name === 'sweep-size' || e.target.name === 'sweep-effort') {
+                    const szs = [...document.querySelectorAll('input[name="sweep-size"]:checked')].map(el => el.value);
+                    const efs = [...document.querySelectorAll('input[name="sweep-effort"]:checked')].map(el => el.value);
+                    const p1 = document.getElementById('phase-card-1');
+                    const sub = p1 && p1.querySelector('.phase-sub');
+                    if (sub) sub.textContent = `Effort (${efs.length || 6} vals) × ${szs.length} sizes`;
+                }
             }
         });
     }
@@ -1454,7 +1549,7 @@ function buildPhaseProgress() {
     const cards = document.getElementById('phase-cards');
     if (!cards) return;
     const phases = [
-        'Effort 1–6 × 4 sizes',
+        'Effort (selected) × N sizes',
         'Decode speed 0–4 × 4 sizes',
         'Modular + Brotli',
         'Resampling × 4 sizes',
@@ -1498,6 +1593,7 @@ function wireButtons() {
             const v = el.value; return v === 'full' ? 'full' : Number(v);
         });
         const tiers = [...document.querySelectorAll('input[name="sweep-tier"]:checked')].map(el => el.value);
+        const efforts = [...document.querySelectorAll('input[name="sweep-effort"]:checked')].map(el => Number(el.value));
         const scenarios = [...document.querySelectorAll('input[name="scenario"]:checked')].map(el => el.value);
         const runsPerConfig = Math.max(1, Number(document.getElementById('input-runs')?.value ?? 3));
         if (!sizes.length || !tiers.length) {
@@ -1509,13 +1605,20 @@ function wireButtons() {
             scenarios.push(...Object.keys(SCENARIO_PROFILES));
         }
 
+        // Reflect actual selection in phase card (fixes "1-6 x 4 sizes" when subset chosen)
+        const phase1Card = document.getElementById('phase-card-1');
+        if (phase1Card) {
+            const sub = phase1Card.querySelector('.phase-sub');
+            if (sub) sub.textContent = `Effort (${efforts.length || 6} vals) × ${sizes.length} sizes`;
+        }
+
         const btnRun  = document.getElementById('btn-run-sweep');
         const btnStop = document.getElementById('btn-stop');
         btnRun.disabled  = true;
         btnStop.disabled = false;
 
         try {
-            await runSweep({ tiers, sizes, scenarios, runsPerConfig });
+            await runSweep({ tiers, sizes, efforts, scenarios, runsPerConfig });
         } finally {
             btnRun.disabled  = false;
             btnStop.disabled = true;
@@ -1525,22 +1628,19 @@ function wireButtons() {
         const presets = derivePresets(sweepRows);
         buildPresetCards(presets);
         saveResults(sweepRows, presets);
-        renderPhase1Charts(sweepRows.filter(r => r.phase === 1));
-
         // New: scenario-driven recommendations + diagnostics (core deliverable)
         buildScenarioRecommendations(sweepRows, scenarios);
         updateButtonStates(); // Enable Export CSV etc.
 
-        // Double-check note (from full matrix re-audit 2026-06): The most meaningful remaining items for this exact
-        // optimization goal (sweeps for thumbs/gallery/80MP+/lightbox) that are ✅ implemented but have weak/no
-        // interactive browser optimization exposure are:
-        // - Isolated RAW stage timing via bench_decode_orf (decompress+demosaic cost, the dominant WASM bottleneck)
-        // - Selective processing / LookRenderer impact for different output modes (thumb vs lightbox vs full)
-        // Everything else performance-relevant from §2/3/9 is either covered in the current suite (after the
-        // use-case evolution of this page) or intentionally N/A per the matrix (Tauri-internal, unit tests only,
-        // or the 10 low-ROI escape-hatch JXL_ENC_FRAME_SETTING_* values). Scripted tools already exercise the RAW side.
-        renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
-        renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
+        // Graphs with format differentiation (also populates format buttons so file formats are recognised)
+        selectedGraphFormat = 'all';
+        refreshGraphFormatBar();
+        refreshGraphsWithFilter();
+    });
+
+    // Console button in the controls bar delegates to the hero panel toggle
+    document.getElementById('btn-console-bar')?.addEventListener('click', () => {
+        document.getElementById('dbg-console-btn')?.click();
     });
 
     document.getElementById('btn-stop')?.addEventListener('click', () => {
@@ -1558,15 +1658,55 @@ function wireButtons() {
         sweepRows.push(...saved.rows);
         buildResultsTable(sweepRows);
         buildPresetCards(saved.presets ?? derivePresets(sweepRows));
-        renderPhase1Charts(sweepRows.filter(r => r.phase === 1));
-        renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
-        renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
+        selectedGraphFormat = 'all';
+        refreshGraphFormatBar();
+        refreshGraphsWithFilter();
         updateButtonStates();
     });
 
-    document.getElementById('btn-export-csv')?.addEventListener('click', () => {
+    // Unified explicit export buttons (CSV uses rich exportCsv with per-row RAW; JSON/TOON wire the improved buildExportText+Meta with provenance)
+    document.getElementById('export-csv-btn')?.addEventListener('click', () => {
         if (!sweepRows.length) { alert('No results to export. Run a sweep first.'); return; }
         exportCsv(sweepRows);
+        dbgLog('Exported CSV', `${sweepRows.length} rows (rich RAW columns)`);
+    });
+
+    document.getElementById('export-json-btn')?.addEventListener('click', () => {
+        if (!sweepRows.length) return;
+        const text = buildExportText(sweepRows, 'json');
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const blob = new Blob([text], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `preset-benchmark-${ts}.json`; a.click();
+        URL.revokeObjectURL(url);
+        dbgLog('Exported JSON', `${sweepRows.length} rows + rich meta (buildExportMeta)`);
+    });
+
+    document.getElementById('export-toon-btn')?.addEventListener('click', () => {
+        if (!sweepRows.length) return;
+        const text = buildExportText(sweepRows, 'toon');
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `preset-benchmark-${ts}.toon`; a.click();
+        URL.revokeObjectURL(url);
+        dbgLog('Exported TOON', `${sweepRows.length} rows + rich meta (buildExportMeta)`);
+    });
+
+    document.getElementById('clear-measurements-btn')?.addEventListener('click', () => {
+        clearSweepResults();
+    });
+
+    // P2: minimal citable artifact emission (addresses Owl gap + IA principle #4)
+    document.getElementById('export-recs-btn')?.addEventListener('click', async () => {
+        if (!sweepRows.length) return;
+        const artifact = buildPresetRecommendationsArtifact();
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const fname = `preset-recommendations-${ts}.json`;
+        await saveTextWithPicker(fname, JSON.stringify(artifact, null, 2), 'application/json');
+        dbgLog('Persisted preset recommendations artifact', `for cross-suite use (Tauri thumb-pyramid / docs/outputs/preset-benchmark/)`);
     });
 }
 
@@ -1990,4 +2130,197 @@ export function exportCsv(rows) {
     a.download = 'preset-benchmark.csv';
     a.click();
     URL.revokeObjectURL(url);
+}
+
+function refreshGraphFormatBar() {
+    const bar = document.getElementById('graph-format-bar');
+    if (!bar) return;
+    bar.querySelectorAll('.fmt-btn').forEach(b => b.remove());
+    const makeBtn = (fmt, label, active) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'fmt-btn';
+        b.dataset.fmt = fmt;
+        b.style.cssText = 'padding:0 4px;font-size:8px;';
+        if (active) b.style.fontWeight = '700';
+        b.textContent = label;
+        return b;
+    };
+    const allActive = selectedGraphFormat === 'all';
+    bar.appendChild(makeBtn('all', 'All', allActive));
+    const used = [...new Set(sweepRows.map(r => r.file))];
+    for (const f of used) {
+        const slot = SLOTS.find(s => s.id === f);
+        const label = slot ? slot.label : f.toUpperCase();
+        bar.appendChild(makeBtn(f, label, selectedGraphFormat === f));
+    }
+}
+
+function refreshGraphsWithFilter() {
+    if (!sweepRows.length) return;
+    renderPhase1Charts(sweepRows.filter(r => r.phase === 1));
+    renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
+    renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
+}
+
+// === Export helpers (CSV/JSON/TOON + rich header + file picker) ===
+
+function quoteIfNeeded(str) {
+    if (!str && str !== 0) return '';
+    const s = String(str);
+    const needs = /[\s,:[\]{}"\\]/.test(s) || s === 'true' || s === 'false' || s === 'null' || /^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(s);
+    if (needs) return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    return s;
+}
+
+function buildExportMeta(rows) {
+    const ts = new Date().toISOString();
+    const activeFiles = Object.entries(loadedSources || {}).filter(([,v]) => v).map(([id, src]) => ({
+        slot: id, name: src.name, width: src.width, height: src.height, ext: src.ext || id
+    }));
+    const effortsUsed = [...new Set(rows.map(r => r.effort))].sort((a,b)=>a-b);
+    const sizesUsed = [...new Set(rows.map(r => r.sizePx))];
+    return {
+        exportedAt: ts,
+        generator: 'jxl-preset-benchmark',
+        version: 'preset-v1',
+        browser: navigator.userAgent.slice(0, 120),
+        loadedFiles: activeFiles,
+        selected: {
+            efforts: effortsUsed,
+            sizes: sizesUsed,
+            tiers: [...new Set(rows.map(r => r.tier))],
+            phases: [...new Set(rows.map(r => r.phase))],
+            scenarios: (window.__lastSweepScenarios || []),
+            runsPerConfig: 3,
+        },
+        rawIsolation: !!rawIsolationData && Object.keys(rawIsolationData).length > 0,
+        rowCount: rows.length,
+    };
+}
+
+function buildExportText(rows, format = 'json') {
+    const meta = buildExportMeta(rows);
+    // augment rows snapshot with format label for recognition
+    const enriched = rows.map(r => {
+        const slot = SLOTS.find(s => s.id === r.file);
+        return { ...r, format: slot ? slot.label : r.file };
+    });
+    if (format === 'json') {
+        return JSON.stringify({ meta, rows: enriched }, null, 2);
+    }
+    if (format === 'csv') {
+        const header = ['file','format','sizePx','tier','phase','effort','decSpeed','modular','brotli','resamp','encMs','decMs','sizeKB','score'];
+        const lines = [header.join(',')];
+        for (const r of enriched) {
+            lines.push([
+                r.file, r.format, r.sizePx, r.tier, r.phase, r.effort, r.decSpeed,
+                r.modular, r.brotli, r.resamp,
+                r.encMs.toFixed(1), r.decMs.toFixed(1),
+                (r.sizeBytes/1024).toFixed(1), r.score
+            ].join(','));
+        }
+        // meta as comment block (non-standard but useful when pasted)
+        const metaLines = Object.entries(meta).map(([k,v]) => `# ${k}: ${typeof v==='object'?JSON.stringify(v):v}`);
+        return metaLines.join('\n') + '\n' + lines.join('\n');
+    }
+    if (format === 'toon') {
+        let out = `meta:\n`;
+        out += `  exportedAt: ${meta.exportedAt}\n`;
+        out += `  generator: ${quoteIfNeeded(meta.generator)}\n`;
+        out += `  rowCount: ${meta.rowCount}\n`;
+        out += `  rawIsolation: ${meta.rawIsolation}\n`;
+        out += `  files[${meta.loadedFiles.length}]:\n`;
+        for (const f of meta.loadedFiles) {
+            out += `    - slot: ${f.slot}\n`;
+            out += `      name: ${quoteIfNeeded(f.name)}\n`;
+            out += `      ext: ${f.ext}\n`;
+        }
+        out += `  selectedEfforts: ${meta.selected.efforts.join(',')}\n`;
+        out += `  selectedSizes: ${meta.selected.sizes.join(',')}\n`;
+        const n = enriched.length;
+        out += `rows[${n}]{file,format,sizePx,tier,phase,effort,encMs,decMs,sizeKB,score}:\n`;
+        for (const r of enriched) {
+            out += `  ${r.file},${r.format},${r.sizePx},${r.tier},${r.phase},${r.effort},${r.encMs.toFixed(1)},${r.decMs.toFixed(1)},${(r.sizeBytes/1024).toFixed(1)},${r.score}\n`;
+        }
+        return out;
+    }
+    return JSON.stringify({ meta, rows: enriched }, null, 2);
+}
+
+async function saveTextWithPicker(filename, text, mime = 'text/plain') {
+    if (window.showSaveFilePicker) {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName: filename,
+                types: [{ description: 'Benchmark data', accept: { [mime]: ['.' + filename.split('.').pop()] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(text);
+            await writable.close();
+            return;
+        } catch (e) {
+            if (e.name === 'AbortError') return;
+            // fallthrough to download
+        }
+    }
+    // fallback
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+}
+
+// Clear current sweep outputs (results table, preset recs, graphs) while preserving loaded files and RAW isolation data.
+// Called by the new unified Clear button (P1 export UI unification).
+function clearSweepResults() {
+    if (typeof sweepRows !== 'undefined' && Array.isArray(sweepRows)) {
+        sweepRows.length = 0;
+    }
+    const resBody = document.getElementById('results-table-body');
+    if (resBody) resBody.innerHTML = '<div style="font-size:9px;opacity:0.6;padding:4px;">Results cleared. Run a new sweep to populate table + graphs.</div>';
+    const presetGrid = document.getElementById('preset-cards-grid');
+    if (presetGrid) presetGrid.innerHTML = '<div style="font-size:9px;opacity:0.6;padding:4px;">Preset + scenario recommendations cleared.</div>';
+    const graphsBody = document.getElementById('phase-graphs-body');
+    if (graphsBody) graphsBody.innerHTML = '<div style="font-size:9px;opacity:0.6;padding:4px;">Graphs cleared (next sweep rebuilds canvases + charts).</div>';
+    if (typeof selectedGraphFormat !== 'undefined') {
+        selectedGraphFormat = 'all';
+    }
+    updateButtonStates();
+    dbgLog('Sweep results cleared', 'results/presets/graphs reset; files + RAW isolation preserved');
+}
+
+// P2 minimal artifact (citable recommendations for cross-suite / Tauri thumb-pyramid linking).
+// Produces a self-contained JSON with the derived best presets per tier + scenario context + full provenance.
+// Emitted via the "Recs" button; user places the file in docs/outputs/preset-benchmark/ for the project record.
+export function buildPresetRecommendationsArtifact() {
+    const presets = (typeof derivePresets === 'function') ? derivePresets(sweepRows) : [];
+    const meta = (typeof buildExportMeta === 'function') ? buildExportMeta(sweepRows) : {};
+    const scenarios = window.__lastSweepScenarios || [];
+
+    // Lightweight RAW cost summary (if the isolation panel was used)
+    let rawSummary = null;
+    if (rawIsolationData && Object.keys(rawIsolationData).length > 0) {
+        const vals = Object.values(rawIsolationData).map(d => d.rawCostForScoring).filter(Boolean);
+        if (vals.length) {
+            rawSummary = {
+                files: Object.keys(rawIsolationData).length,
+                avgFullMs: Math.round(vals.reduce((s, v) => s + (v.full || 0), 0) / vals.length),
+                avgThumbMs: Math.round(vals.reduce((s, v) => s + (v.thumb || 0), 0) / vals.length),
+            };
+        }
+    }
+
+    return {
+        meta: {
+            ...meta,
+            generator: 'jxl-preset-benchmark/p2-artifact',
+            scenarios,
+        },
+        recommendedPresets: presets,
+        rawIsolation: rawSummary,
+        generatedAt: new Date().toISOString(),
+        note: 'Commit this (and optional short .md) to docs/outputs/preset-benchmark/ to cross-link with Tauri thumb-pyramid rules. See BENCHMARK_AND_TESTING_HANDOFF.md:68/89 and the Owl handoff.',
+    };
 }

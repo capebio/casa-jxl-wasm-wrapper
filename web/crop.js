@@ -59,6 +59,108 @@
     };
 
     // ---------- geometry helpers ----------
+    /**
+     * Compute a non-destructive straighten + largest-rect crop.
+     * Returns a crop descriptor suitable for storage in card._crop / sidecar.
+     *
+     * The returned rect (x,y,w,h) is in *original unrotated image* normalized [0..1] space.
+     * When the lightbox renders, it will:
+     *   1. Rotate the source pixels by `angle` around center
+     *   2. Then take the rect (which after rotation becomes axis-aligned of the requested aspect)
+     *
+     * This satisfies the user's request: "crops the largest horizontally rectangular section
+     * out of a skew/diagonal one" while keeping the original image uncropped.
+     */
+    function computeStraightenCrop(srcW, srcH, angleDeg, targetRatioKey) {
+        if (!srcW || !srcH) return null;
+        const angle = (angleDeg || 0) * Math.PI / 180;
+        const c = Math.cos(angle);
+        const s = Math.sin(angle);
+
+        // Rotated corners of the source image (centered at origin for math, then shifted back)
+        const hw = srcW / 2, hh = srcH / 2;
+        const corners = [
+            [-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]
+        ].map(([x, y]) => [c * x - s * y, s * x + c * y]);
+
+        // Axis-aligned bounding box after rotation
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const [x, y] of corners) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+        const rotW = maxX - minX;
+        const rotH = maxY - minY;
+
+        // Desired output aspect (width/height)
+        let desiredRatio = ASPECT_VALUES[targetRatioKey];
+        if (targetRatioKey === 'original' || !desiredRatio) {
+            desiredRatio = srcW / srcH;
+        } else if (targetRatioKey === 'free') {
+            desiredRatio = rotW / rotH; // just fit the rotated bounds
+        }
+
+        // Largest rect of desiredRatio that fits inside the rotated bounds (centered)
+        let outW = rotW;
+        let outH = rotW / desiredRatio;
+        if (outH > rotH) {
+            outH = rotH;
+            outW = rotH * desiredRatio;
+        }
+
+        // Convert back to original image coordinates (inverse rotation + shift)
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+
+        // The centered rect in rotated space
+        const halfW = outW / 2, halfH = outH / 2;
+        const rectCornersRot = [
+            [cx - halfW, cy - halfH],
+            [cx + halfW, cy - halfH],
+            [cx + halfW, cy + halfH],
+            [cx - halfW, cy + halfH]
+        ];
+
+        // Inverse-rotate the four corners back to original space
+        const ca = Math.cos(-angle), sa = Math.sin(-angle);
+        const origPts = rectCornersRot.map(([x, y]) => {
+            const rx = x - cx, ry = y - cy; // relative to rotated center
+            const ox = ca * rx - sa * ry;
+            const oy = sa * rx + ca * ry;
+            return [ox + hw, oy + hh]; // back to original [0..W, 0..H]
+        });
+
+        // Axis-aligned bounding rect in original pixels (this is what we store)
+        let oMinX = Infinity, oMaxX = -Infinity, oMinY = Infinity, oMaxY = -Infinity;
+        for (const [x, y] of origPts) {
+            if (x < oMinX) oMinX = x;
+            if (x > oMaxX) oMaxX = x;
+            if (y < oMinY) oMinY = y;
+            if (y > oMaxY) oMaxY = y;
+        }
+
+        const cropW = Math.max(1, oMaxX - oMinX);
+        const cropH = Math.max(1, oMaxY - oMinY);
+        const nx = oMinX / srcW;
+        const ny = oMinY / srcH;
+        const nw = cropW / srcW;
+        const nh = cropH / srcH;
+
+        return {
+            x: Math.max(0, Math.min(1, nx)),
+            y: Math.max(0, Math.min(1, ny)),
+            w: Math.max(0.001, Math.min(1 - nx, nw)),
+            h: Math.max(0.001, Math.min(1 - ny, nh)),
+            ratio: targetRatioKey || 'free',
+            angle: angleDeg || 0,
+            inOriginalSpace: true
+        };
+    }
+
+    window.computeStraightenCrop = computeStraightenCrop; // exposed for debugging / future tools
+
     // Map a canvas client-pixel to normalised image coords [0..1].
     // Uses the canvas's getBoundingClientRect so it respects all the CSS
     // transforms (zoom, pan, rotation) applied by main.js.

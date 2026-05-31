@@ -125,6 +125,14 @@ export interface EncoderOptions {
   photonNoiseIso?: number;
   /** Encoder-native downsampling factor before JXL transform/coding. */
   resampling?: ResamplingFactor;
+  /** Edge-preserving filter level. -1 = libjxl auto, 0 = off, 1–3 = increasing strength. Requires WASM rebuild with _y bridge. */
+  epf?: -1 | 0 | 1 | 2 | 3;
+  /** Gaborish pre-sharpening. -1 = libjxl auto, 0 = off, 1 = on. Requires WASM rebuild with _y bridge. */
+  gaborish?: -1 | 0 | 1;
+  /** Dots detection/synthesis. -1 = libjxl auto, 0 = off, 1 = on. VarDCT only. Requires WASM rebuild with _y bridge. */
+  dots?: -1 | 0 | 1;
+  /** Color transform. -1 = libjxl auto, 0 = XYB, 1 = none (identity), 2 = YCbCr. Requires WASM rebuild with _y bridge. */
+  colorTransform?: -1 | 0 | 1 | 2;
   /**
    * Convenience: per-channel distance for the alpha channel (if hasAlpha is true).
    * 0 = lossless alpha; omit to inherit main distance.
@@ -147,8 +155,23 @@ export interface EncoderOptions {
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. Requires WASM with v2 metadata bridge. */
   customBoxes?: readonly MetadataBoxSpec[];
+  /** JUMBF boxes (C2PA content credentials, archival provenance, etc.). Each becomes a "jumb" box. Pure TS sugar over customBoxes; no new FFI. */
+  jumbfBoxes?: readonly JUMBFBox[];
   /** HDR gain map to embed as a jhgm box. Requires WASM with gain map bridge. */
   gainMap?: GainMapOptions | null;
+  /**
+   * HDR static metadata (mastering display color volume + content light levels).
+   * First-class surface for professional/archival HDR masters (see additional-hdr-signaling.md).
+   * Complements intensityTarget/premultiply/preferCICPForHDR (Phase 3 color priority).
+   * Currently accepted for discoverability + lab dumps; full emission after small bridge extension.
+   */
+  hdrMetadata?: HDRMetadata | null;
+  /** Intensity target in nits (for tone mapping / viewing conditions). Part of HDR signaling surface. */
+  intensityTarget?: number;
+  /** Premultiply alpha before encoding (-1=libjxl default, 0=no, 1=yes). HDR color fidelity knob. */
+  premultiply?: -1 | 0 | 1;
+  /** Prefer CICP (transfer + matrix) over ICC for HDR content when both present. */
+  preferCICPForHDR?: boolean;
   /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
   animation?: AnimationOptions;
   /**
@@ -162,6 +185,38 @@ export interface EncoderOptions {
 export interface GainMapOptions {
   /** Pre-encoded JXL codestream for the gain map image. */
   data: Uint8Array | ArrayBuffer;
+}
+
+/**
+ * Mastering Display Color Volume (MDCV / mdcv box) per SMPTE ST 2086 / ITU-T H.273.
+ * Values are in CIE 1931 xy for chromaticities (0-1 range typical) and nits for luminance.
+ */
+export interface MasteringDisplay {
+  /** CIE 1931 xy chromaticity of red, green, blue primaries (x,y order for each). */
+  primaries: [number, number, number, number, number, number];
+  /** CIE 1931 xy chromaticity of the white point. */
+  whitePoint: [number, number];
+  /** [max, min] luminance of the mastering display in nits (cd/m²). */
+  luminance: [number, number];
+}
+
+/** Content Light Level Information (CLLI / clli box). */
+export interface ContentLightLevel {
+  /** Maximum Content Light Level (MaxCLL) in cd/m². Typical range 0–65535. */
+  maxCLL: number;
+  /** Maximum Frame-Average Light Level (MaxFALL) in cd/m². */
+  maxFALL: number;
+}
+
+/**
+ * Additional static HDR metadata (Mastering Display + Content Light Levels).
+ * Complements intensityTarget / CICP policy from prior HDR signaling work.
+ * Pure TS surface in current slice (per additional-hdr-signaling.md); full codestream
+ * emission via JxlEncoderSetHDRMetadata (or equivalent) is the explicit rebuild follow-up.
+ */
+export interface HDRMetadata {
+  masteringDisplay?: MasteringDisplay;
+  contentLight?: ContentLightLevel;
 }
 
 /** Descriptor for one extra channel beyond the main color channels. */
@@ -221,6 +276,12 @@ export interface MetadataBoxSpec {
   data: Uint8Array;
   /** Compress this box with Brotli. Default false. */
   compress?: boolean;
+}
+
+/** JUMBF box (C2PA / content provenance / archival). The payload is opaque; the wrapper emits it as a "jumb" container box. Pure-TS ergonomic sugar over customBoxes (type "jumb"). */
+export interface JUMBFBox {
+  /** Raw JUMBF superbox bytes (including the JUMBF box header). */
+  data: Uint8Array | ArrayBuffer;
 }
 
 /** Per-encode control over which metadata boxes are included and how the container is written. */
@@ -356,6 +417,7 @@ interface LibjxlWasmModule {
   _jxl_wasm_transcode_jpeg_to_jxl_v2?(jpegPtr: number, jpegSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number): number;
   _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
   _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
+  _jxl_wasm_enc_create_image_y?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, colorTransform: number): number;
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
   _jxl_wasm_enc_advance_written?(state: number, size: number): number;
   _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
@@ -487,7 +549,8 @@ function marshalBoxOpts(
   options: EncoderOptions,
 ): { ptr: number; freePtrs: number[] } {
   const m = options.metadata;
-  const customBoxes = options.customBoxes ?? [];
+  const jumbfCustom = expandJumbfBoxes(options);
+  const customBoxes = [...(options.customBoxes ?? []), ...jumbfCustom];
   if (!m && customBoxes.length === 0) return { ptr: 0, freePtrs: [] };
 
   const freePtrs: number[] = [];
@@ -604,8 +667,12 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
   const decodingSpeed = options.decodingSpeed != null ? Math.max(0, Math.min(4, Math.round(options.decodingSpeed))) : -1;
   const photonNoiseIso = options.photonNoiseIso != null ? Math.max(0, Math.round(options.photonNoiseIso)) : 0;
   const resampling = resolveResampling(options.resampling);
+  const epf = options.epf != null ? Math.max(-1, Math.min(3, Math.round(options.epf))) : -1;
+  const gaborish = options.gaborish != null ? (options.gaborish <= 0 ? 0 : 1) : -1;
+  const dots = options.dots != null ? (options.dots <= 0 ? 0 : 1) : -1;
+  const colorTransform = options.colorTransform != null ? Math.max(-1, Math.min(2, Math.round(options.colorTransform))) : -1;
   if (!options.progressive) {
-    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling };
+    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform };
   }
   const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
   return {
@@ -618,6 +685,10 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
     decodingSpeed,
     photonNoiseIso,
     resampling,
+    epf,
+    gaborish,
+    dots,
+    colorTransform,
   };
 }
 
@@ -1033,6 +1104,9 @@ export function getDecodeGridInfo(): DecodeGridInfo {
 export interface DecodeViewportOptions {
   format: PixelFormat;
   region?: Region | null;
+  /** Full image dimensions — used to pick a downsample factor when no region is specified. */
+  imageWidth?: number;
+  imageHeight?: number;
   targetWidth?: number;
   targetHeight?: number;
   fitMode?: "contain" | "cover" | "stretch";
@@ -1047,7 +1121,7 @@ export function decodeViewport(options: DecodeViewportOptions): JxlDecoder {
   return createDecoder({
     format: options.format,
     region: options.region ?? null,
-    downsample: pickDownsample(options),
+    downsample: pickDownsample({ ...options, imageWidth: options.imageWidth ?? null, imageHeight: options.imageHeight ?? null }),
     progressionTarget: options.progressionTarget ?? "final",
     emitEveryPass: options.emitEveryPass ?? false,
     preserveIcc: options.preserveIcc ?? true,
@@ -1221,8 +1295,13 @@ class LibjxlDecoder implements JxlDecoder {
       // subsequent flushes are AC refinement passes.
       let flushCount = 0;
 
-      const buildInfo = (w: number, h: number): ImageInfo => {
-        info ??= { width: w, height: h, bitsPerSample: 8, hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false };
+      const infoBitsPerSample: 8 | 16 | 32 = fmtIndex === 2 ? 32 : fmtIndex === 1 ? 16 : 8;
+      // buildInfo memoizes on first call from pixel data (hasAlpha from buffer).
+      // The header event calls makeHeaderInfo directly to avoid locking in a wrong hasAlpha.
+      const makeHeaderInfo = (w: number, h: number): ImageInfo =>
+        ({ width: w, height: h, bitsPerSample: infoBitsPerSample, hasAlpha: false, hasAnimation: false, jpegReconstructionAvailable: false });
+      const buildInfo = (w: number, h: number, hasAlpha: boolean): ImageInfo => {
+        info ??= { width: w, height: h, bitsPerSample: infoBitsPerSample, hasAlpha, hasAnimation: false, jpegReconstructionAvailable: false };
         return info;
       };
 
@@ -1237,7 +1316,7 @@ class LibjxlDecoder implements JxlDecoder {
         // buildInfo memoizes on first call (full dims from header), so we must not pass it
         // cropped dims — it would return the already-memoized full-dim object regardless.
         // Instead, derive evInfo from the base info with actual pixel dimensions.
-        const baseInfo = buildInfo(buf.width, buf.height);
+        const baseInfo = buildInfo(buf.width, buf.height, buf.hasAlpha);
         const evInfo: ImageInfo = (pixels.width !== buf.width || pixels.height !== buf.height)
           ? { ...baseInfo, width: pixels.width, height: pixels.height }
           : baseInfo;
@@ -1300,7 +1379,7 @@ class LibjxlDecoder implements JxlDecoder {
           const h = decHeight(dec);
           if (w > 0 && h > 0) {
             headerEmitted = true;
-            yield { type: "header", info: buildInfo(w, h) };
+            yield { type: "header", info: makeHeaderInfo(w, h) };
             if (this.options.progressionTarget === "header") return;
           }
         }
@@ -1828,8 +1907,17 @@ class LibjxlEncoder implements JxlEncoder {
     if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
       const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-      const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
-      if (caps.extOptions && module._jxl_wasm_enc_create_image_x) {
+      const { progressiveDc, progressiveAc, qProgressiveAc, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform } = resolveEncoderBridgeSettings(this.options);
+      if (caps.extOptions && module._jxl_wasm_enc_create_image_y) {
+        this.wasmEncState = module._jxl_wasm_enc_create_image_y(
+          this.options.width, this.options.height,
+          distance, this.options.effort,
+          fmtIndex, this.options.hasAlpha ? 1 : 0,
+          progressiveDc, progressiveAc, qProgressiveAc, buffering,
+          modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling,
+          epf, gaborish, dots, colorTransform,
+        );
+      } else if (caps.extOptions && module._jxl_wasm_enc_create_image_x) {
         this.wasmEncState = module._jxl_wasm_enc_create_image_x(
           this.options.width, this.options.height,
           distance, this.options.effort,
@@ -1846,6 +1934,10 @@ class LibjxlEncoder implements JxlEncoder {
         );
       }
       if (this.wasmEncState === 0) throw new Error("JXL streaming encoder: pixel buffer allocation failed");
+      if (this.cancelled) {
+        this.freeWasmState();
+        return module;
+      }
       this.streamingInputActive = true;
     }
     return module;
@@ -2318,8 +2410,12 @@ class LibjxlEncoder implements JxlEncoder {
 
 async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
   modulePromise ??= (testModuleFactory ?? loadGeneratedLibjxlModule)();
-  cachedModule = await modulePromise;
-  return cachedModule;
+  const awaitedPromise = modulePromise;
+  const mod = await awaitedPromise;
+  // Only write to cachedModule if the promise has not been invalidated by a
+  // concurrent setForcedTier() / setJxlModuleFactoryForTesting() call.
+  if (modulePromise === awaitedPromise) cachedModule = mod;
+  return mod;
 }
 
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
@@ -2789,14 +2885,17 @@ function applyTargetResize(
   return { data: cropped.data, width: targetW, height: targetH };
 }
 
-function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {
+function pickDownsample(options: { region?: Region | null; imageWidth?: number | null; imageHeight?: number | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {
   const region = options.region ?? null;
   const targetWidth = options.targetWidth ?? null;
   const targetHeight = options.targetHeight ?? null;
-  if (region === null || targetWidth == null || targetHeight == null || targetWidth <= 0 || targetHeight <= 0) {
+  if (targetWidth == null || targetHeight == null || targetWidth <= 0 || targetHeight <= 0) {
     return 1;
   }
-  const sourceLongEdge = Math.max(region.w, region.h);
+  const sourceW = region !== null ? region.w : (options.imageWidth ?? null);
+  const sourceH = region !== null ? region.h : (options.imageHeight ?? null);
+  if (sourceW == null || sourceH == null) return 1;
+  const sourceLongEdge = Math.max(sourceW, sourceH);
   const targetLongEdge = Math.max(targetWidth, targetHeight);
   for (const factor of [8, 4, 2] as const) {
     if (Math.ceil(sourceLongEdge / factor) >= targetLongEdge) return factor;

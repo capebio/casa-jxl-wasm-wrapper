@@ -14,6 +14,12 @@
 // Budget invariant (Section 12.3):
 //   budgetMs enforced per-stage transition, not wall-clock across whole decode.
 //   On breach: session emits decode_budget_exceeded with best frame so far.
+//
+// Queue wait observability: when a session is forced to wait for a worker slot,
+// we capture queuedAt and emit "scheduler_queue_wait_ms" (via the normal metric
+// fan-out) on the queued→running transition. This enables parity measurements
+// against the Tauri PrioritySem (ProcessResult.queue_wait_ms) and the synthetic
+// lightbox_bench qwait column under concurrency + promotion (scenarios C/D).
 import { WorkerPool, RESERVED_SESSION_ID } from "./pool.js";
 import { PriorityQueue } from "./queue.js";
 import { DedupeRegistry } from "./dedupe.js";
@@ -118,6 +124,7 @@ export class Scheduler {
                 reject,
                 signal: params.signal,
                 isRequeue: false,
+                queuedAt: performance.now(),
             };
             this.sessions.set(params.sessionId, {
                 sessionId: params.sessionId,
@@ -127,6 +134,7 @@ export class Scheduler {
                 handlers: this.takePendingHandlers(params.sessionId),
                 pending,
                 createdAt: Date.now(),
+                queuedAt: pending.queuedAt,
                 progress: 0,
             });
             this.totalSessionCount++;
@@ -480,6 +488,25 @@ export class Scheduler {
             existing.state = "running";
             existing.worker = worker;
             delete existing.pending;
+            // Emit scheduler-level queue wait metric for benchmarks / parity with
+            // Tauri process_file.queue_wait_ms and the synthetic lightbox_bench qwait.
+            // Only queued sessions have a meaningful wait; immediate/preempt paths
+            // never entered the PendingSession queue.
+            if (existing.queuedAt != null) {
+                const waitMs = performance.now() - existing.queuedAt;
+                const metricMsg = {
+                    type: "metric",
+                    sessionId,
+                    metric: { name: "scheduler_queue_wait_ms", value: waitMs },
+                };
+                for (const h of existing.handlers) {
+                    try {
+                        h(metricMsg);
+                    }
+                    catch { /* handler must not throw */ }
+                }
+            }
+            delete existing.queuedAt;
         }
         else {
             // Fresh session (immediate acquire or post-preemption).

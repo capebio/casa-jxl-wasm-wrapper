@@ -61,6 +61,10 @@ struct JxlWasmEncState {
   int32_t  enc_decoding_speed;
   int32_t  enc_photon_noise_iso;
   uint32_t enc_resampling;
+  int32_t  enc_epf;            // -1=auto, 0=off, 1-3=strength
+  int32_t  enc_gaborish;       // -1=auto, 0=off, 1=on
+  int32_t  enc_dots;           // -1=auto, 0=off, 1=on (VarDCT only)
+  int32_t  enc_color_transform;// -1=auto, 0=XYB, 1=none, 2=YCbCr
 };
 
 // IMPROVEMENT-3: raw malloc for progressive decoder avoids std::vector<uint8_t> zero-init.
@@ -91,7 +95,7 @@ struct JxlWasmDecState {
   char     frame_name[256];      // null-terminated UTF-8 frame name (empty string if absent)
   uint32_t is_last_frame;        // 1 if this is the last animation frame
   // Animation header info (populated after JXL_DEC_BASIC_INFO when have_animation)
-  uint32_t anim_ticks_per_second;
+  double   anim_ticks_per_second;
   uint32_t anim_loop_count;
 };
 
@@ -403,7 +407,9 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
-    const WasmBoxOpts* box_opts = nullptr) {
+    const WasmBoxOpts* box_opts = nullptr,
+    int32_t epf = -1, int32_t gaborish = -1,
+    int32_t dots = -1, int32_t color_transform = -1) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -444,6 +450,7 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
   JxlEncoderSetFrameDistance(frame, distance);
+  if (distance == 0.0f) JxlEncoderSetFrameLossless(frame, JXL_TRUE);
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC, static_cast<int64_t>(progressive_dc));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
@@ -455,6 +462,10 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   if (photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(photon_noise_iso));
   const uint32_t normalized_resampling = NormalizeResampling(resampling);
   if (normalized_resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling));
+  if (epf >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EPF, static_cast<int64_t>(std::clamp(epf, 0, 3)));
+  if (gaborish >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GABORISH, static_cast<int64_t>(gaborish & 1));
+  if (dots >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DOTS, static_cast<int64_t>(dots & 1));
+  if (color_transform >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM, static_cast<int64_t>(std::clamp(color_transform, 0, 2)));
 
   const size_t bytes_per_channel = (fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u;
   const uint32_t num_channels = has_alpha ? 4u : 3u;
@@ -544,8 +555,9 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
 
 static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
-    int32_t modular = -1, int32_t brotli_effort = -1, int32_t decoding_speed = -1, int32_t photon_noise_iso = 0, uint32_t resampling = 1u) {
-  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, nullptr, 0, nullptr, 0, nullptr, 0);
+    int32_t modular = -1, int32_t brotli_effort = -1, int32_t decoding_speed = -1, int32_t photon_noise_iso = 0, uint32_t resampling = 1u,
+    int32_t epf = -1, int32_t gaborish = -1, int32_t dots = -1, int32_t color_transform = -1) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, epf, gaborish, dots, color_transform);
 }
 
 static JxlWasmBuffer* EncodeRgbaWithGainMap(
@@ -1515,12 +1527,12 @@ static JxlWasmBuffer* EncodeAnimation(
     const uint8_t* xmp, size_t xmp_size,
     const WasmBoxOpts* box_opts,
     const WasmAnimationOpts* anim_opts) {
-  if (frames == nullptr || num_frames == 0) return MakeError(60);
+  if (frames == nullptr || num_frames == 0) return MakeError(200);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
-  if (enc == nullptr) return MakeError(61);
+  if (enc == nullptr) return MakeError(201);
   if (ApplyContainerMode(enc, box_opts) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc); return MakeError(62);
+    JxlEncoderDestroy(enc); return MakeError(202);
   }
 
   const uint32_t bits     = FormatToBits(fmt);
@@ -1543,18 +1555,18 @@ static JxlWasmBuffer* EncodeAnimation(
   info.animation.have_timecodes  = JXL_FALSE;
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc); return MakeError(63);
+    JxlEncoderDestroy(enc); return MakeError(203);
   }
 
   if (icc_profile != nullptr && icc_size > 0) {
     if (JxlEncoderSetICCProfile(enc, icc_profile, icc_size) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc); return MakeError(64);
+      JxlEncoderDestroy(enc); return MakeError(204);
     }
   } else {
     JxlColorEncoding color;
     JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
     if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc); return MakeError(65);
+      JxlEncoderDestroy(enc); return MakeError(205);
     }
   }
 
@@ -1573,7 +1585,7 @@ static JxlWasmBuffer* EncodeAnimation(
 
   for (uint32_t fi = 0; fi < num_frames; ++fi) {
     const WasmAnimationFrame& wf = frames[fi];
-    if (wf.pixels_ptr == 0 || wf.pixels_size == 0) { JxlEncoderDestroy(enc); return MakeError(66); }
+    if (wf.pixels_ptr == 0 || wf.pixels_size == 0) { JxlEncoderDestroy(enc); return MakeError(206); }
     const uint8_t* pixels = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(wf.pixels_ptr));
 
     JxlEncoderFrameSettings* fs = JxlEncoderFrameSettingsCreate(enc, frame_settings);
@@ -1582,7 +1594,7 @@ static JxlWasmBuffer* EncodeAnimation(
       JxlEncoderInitFrameHeader(&fh);
       fh.duration = wf.duration;
       if (JxlEncoderSetFrameHeader(fs, &fh) != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc); return MakeError(67);
+        JxlEncoderDestroy(enc); return MakeError(207);
       }
     }
     if (wf.name_ptr != 0 && wf.name_size > 0) {
@@ -1590,7 +1602,7 @@ static JxlWasmBuffer* EncodeAnimation(
       std::vector<char> name_buf(wf.name_size + 1, '\0');
       memcpy(name_buf.data(), name, wf.name_size);
       if (JxlEncoderSetFrameName(fs, name_buf.data()) != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc); return MakeError(68);
+        JxlEncoderDestroy(enc); return MakeError(208);
       }
     }
 
@@ -1603,7 +1615,7 @@ static JxlWasmBuffer* EncodeAnimation(
       const size_t dst_stride = 3u * bytes_per_channel;
       pixel_size = n_pixels * dst_stride;
       rgb_pixels = static_cast<uint8_t*>(malloc(pixel_size));
-      if (rgb_pixels == nullptr) { JxlEncoderDestroy(enc); return MakeError(69); }
+      if (rgb_pixels == nullptr) { JxlEncoderDestroy(enc); return MakeError(209); }
       for (size_t i = 0; i < n_pixels; ++i)
         memcpy(rgb_pixels + i * dst_stride, pixels + i * src_stride, dst_stride);
       encode_src = rgb_pixels;
@@ -1613,28 +1625,28 @@ static JxlWasmBuffer* EncodeAnimation(
 
     const JxlEncoderStatus add_status = JxlEncoderAddImageFrame(fs, &pf, encode_src, pixel_size);
     free(rgb_pixels);
-    if (add_status != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(70); }
+    if (add_status != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(210); }
   }
 
   const JxlBool compress_flag = (box_opts && box_opts->compress_boxes) ? JXL_TRUE : JXL_FALSE;
   if (exif != nullptr && exif_size > 0) {
     if (JxlEncoderAddBox(enc, "Exif", exif, exif_size, compress_flag) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc); return MakeError(71);
+      JxlEncoderDestroy(enc); return MakeError(211);
     }
   }
   if (xmp != nullptr && xmp_size > 0) {
     if (JxlEncoderAddBox(enc, "xml ", xmp, xmp_size, compress_flag) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc); return MakeError(72);
+      JxlEncoderDestroy(enc); return MakeError(212);
     }
   }
   if (AddCustomBoxes(enc, box_opts) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc); return MakeError(73);
+    JxlEncoderDestroy(enc); return MakeError(213);
   }
   JxlEncoderCloseInput(enc);
 
   const size_t initial_size = 65536u;
   uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_size));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(74); }
+  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(214); }
   size_t outbuf_cap = initial_size;
   uint8_t* next_out = outbuf;
   size_t avail_out = outbuf_cap;
@@ -1644,7 +1656,7 @@ static JxlWasmBuffer* EncodeAnimation(
       const size_t final_size = static_cast<size_t>(next_out - outbuf);
       JxlEncoderDestroy(enc);
       JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
-      if (result == nullptr) { free(outbuf); return MakeError(75); }
+      if (result == nullptr) { free(outbuf); return MakeError(215); }
       result->data           = outbuf;
       result->size           = final_size;
       result->width          = frames[0].width;
@@ -1655,16 +1667,16 @@ static JxlWasmBuffer* EncodeAnimation(
     }
     if (status == JXL_ENC_NEED_MORE_OUTPUT) {
       const size_t offset = static_cast<size_t>(next_out - outbuf);
-      if (outbuf_cap >= 128 * 1024 * 1024u) { JxlEncoderDestroy(enc); free(outbuf); return MakeError(76); }
+      if (outbuf_cap >= 128 * 1024 * 1024u) { JxlEncoderDestroy(enc); free(outbuf); return MakeError(216); }
       outbuf_cap *= 2;
       uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(77); }
+      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(217); }
       outbuf = grown;
       next_out = outbuf + offset;
       avail_out = outbuf_cap - offset;
       continue;
     }
-    free(outbuf); JxlEncoderDestroy(enc); return MakeError(78);
+    free(outbuf); JxlEncoderDestroy(enc); return MakeError(218);
   }
 }
 
@@ -1784,7 +1796,9 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
           if (grown != nullptr) { s->pixels = grown; s->pixels_size = expected; }
         }
         if (s->info.have_animation) {
-          s->anim_ticks_per_second = s->info.animation.tps_numerator;
+          s->anim_ticks_per_second = s->info.animation.tps_denominator > 0
+            ? (double)s->info.animation.tps_numerator / s->info.animation.tps_denominator
+            : (double)s->info.animation.tps_numerator;
           s->anim_loop_count       = s->info.animation.num_loops;
         }
       }
@@ -1818,6 +1832,7 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
         s->flushed = grown;
         s->flushed_size = flush_size;
       }
+      if (s->flushed == nullptr) continue;
       if (JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->flushed, s->flushed_size) == JXL_DEC_SUCCESS) {
         if (JxlDecoderFlushImage(s->dec) == JXL_DEC_SUCCESS) {
           s->flushed_ready = true;
@@ -2154,9 +2169,9 @@ uint32_t jxl_wasm_dec_is_last_frame(uint32_t state_ptr) {
   return s ? s->is_last_frame : 0u;
 }
 
-uint32_t jxl_wasm_dec_anim_ticks_per_second(uint32_t state_ptr) {
+double jxl_wasm_dec_anim_ticks_per_second(uint32_t state_ptr) {
   const JxlWasmDecState* s = reinterpret_cast<const JxlWasmDecState*>(static_cast<uintptr_t>(state_ptr));
-  return s ? s->anim_ticks_per_second : 1000u;
+  return s ? s->anim_ticks_per_second : 1000.0;
 }
 
 uint32_t jxl_wasm_dec_anim_loop_count(uint32_t state_ptr) {
@@ -2164,12 +2179,14 @@ uint32_t jxl_wasm_dec_anim_loop_count(uint32_t state_ptr) {
   return s ? s->anim_loop_count : 0u;
 }
 
-// Forward-only seek: skip (target_frame - frame_index) frames from current position.
-// Returns 0 on success, -1 if target_frame <= current frame_index (cannot seek backward).
+// Forward-only seek: skip frames to reach target_frame (zero-based, as exposed by jxl_wasm_dec_frame_index).
+// Returns 0 on success, -1 if target is at or before the current position (cannot seek backward).
 int32_t jxl_wasm_dec_seek_to_frame(uint32_t state_ptr, uint32_t target_frame) {
   JxlWasmDecState* s = reinterpret_cast<JxlWasmDecState*>(static_cast<uintptr_t>(state_ptr));
   if (s == nullptr) return -1;
-  if (target_frame <= s->frame_index) return -1;
+  // s->frame_index is post-increment (count of fully decoded frames); target_frame is zero-based.
+  // target_frame < s->frame_index means we are already past it; == means it is the next to decode.
+  if (target_frame < s->frame_index) return -1;
   uint32_t skip = target_frame - s->frame_index;
   JxlDecoderSkipFrames(s->dec, static_cast<size_t>(skip));
   return 0;
@@ -2457,6 +2474,10 @@ JxlWasmEncState* jxl_wasm_enc_create_image(
   s->enc_decoding_speed = -1;
   s->enc_photon_noise_iso = 0;
   s->enc_resampling = NormalizeResampling(resampling);
+  s->enc_epf = -1;
+  s->enc_gaborish = -1;
+  s->enc_dots = -1;
+  s->enc_color_transform = -1;
   return s;
 }
 
@@ -2472,6 +2493,23 @@ JxlWasmEncState* jxl_wasm_enc_create_image_x(
     s->enc_brotli_effort = brotli_effort;
     s->enc_decoding_speed = decoding_speed;
     s->enc_photon_noise_iso = photon_noise_iso;
+  }
+  return s;
+}
+
+JxlWasmEncState* jxl_wasm_enc_create_image_y(
+    uint32_t width, uint32_t height,
+    float distance, uint32_t effort,
+    uint32_t fmt, uint32_t has_alpha,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
+    int32_t epf, int32_t gaborish, int32_t dots, int32_t color_transform) {
+  JxlWasmEncState* s = jxl_wasm_enc_create_image_x(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  if (s != nullptr) {
+    s->enc_epf = epf;
+    s->enc_gaborish = gaborish;
+    s->enc_dots = dots;
+    s->enc_color_transform = color_transform;
   }
   return s;
 }
@@ -2518,7 +2556,8 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
       s->pixels_buf, s->enc_width, s->enc_height,
       s->enc_distance, s->enc_effort, s->enc_fmt, s->enc_has_alpha,
       s->enc_progressive_dc, s->enc_progressive_ac, s->enc_qprogressive_ac, s->enc_buffering,
-      s->enc_modular, s->enc_brotli_effort, s->enc_decoding_speed, s->enc_photon_noise_iso, s->enc_resampling);
+      s->enc_modular, s->enc_brotli_effort, s->enc_decoding_speed, s->enc_photon_noise_iso, s->enc_resampling,
+      s->enc_epf, s->enc_gaborish, s->enc_dots, s->enc_color_transform);
 
   // libjxl is done with the pixel data — free it now to reclaim memory.
   free(s->pixels_buf);

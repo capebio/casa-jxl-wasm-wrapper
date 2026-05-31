@@ -159,7 +159,7 @@ function printTable(title, rows, limit = rows.length) {
         row.file,
         `${row.type.toUpperCase()} ${fmtDims(row.width, row.height)} work ${fmtDims(row.workWidth ?? row.width, row.workHeight ?? row.height)}`,
         fmtMb(row.sizeBytes),
-        `rawWall ${fmtMs(row.rawWallMs)}`,
+        `rawWall ${fmtMs(row.rawWallMs)} [decomp ${fmtMs(row.decompressMs)} demosaic ${fmtMs(row.demosaicMs)} tonemap ${fmtMs(row.tonemapMs)}]`,
         `prep ${fmtMs(row.rgbaPrepMs)}`,
         `enc ${fmtMs(row.encodeMs)}`,
         `first ${fmtMs(row.firstChunkMs)}`,
@@ -173,6 +173,9 @@ function printTable(title, rows, limit = rows.length) {
 
 function printAggregate(title, rows) {
   const raw = rows.map((row) => row.rawWallMs);
+  const decompress = rows.map((row) => row.decompressMs);
+  const demosaic = rows.map((row) => row.demosaicMs);
+  const tonemap = rows.map((row) => row.tonemapMs);
   const enc = rows.map((row) => row.encodeMs);
   const dec = rows.map((row) => row.decodeMs);
   const total = rows.map((row) => derived(row).totalMs);
@@ -180,7 +183,7 @@ function printAggregate(title, rows) {
     [
       `${title}:`,
       `count=${rows.length}`,
-      `rawWall avg ${fmtMs(mean(raw))}`,
+      `rawWall avg ${fmtMs(mean(raw))} [decomp ${fmtMs(mean(decompress))} demosaic ${fmtMs(mean(demosaic))} tonemap ${fmtMs(mean(tonemap))}]`,
       `enc avg ${fmtMs(mean(enc))}`,
       `dec avg ${fmtMs(mean(dec))}`,
       `total avg ${fmtMs(mean(total))}`,

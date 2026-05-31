@@ -2,12 +2,32 @@ import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import {
     createDecoder,
     createEncoder,
-    encodeTiledRgba8,
-    decodeTiledRegionRgba8,
-    encodeTileContainerRgba8,
-    decodeTileContainerRegionRgba8,
 } from '@casabio/jxl-wasm';
 import { createFilePicker } from './jxl-file-picker.js';
+
+// Lazy-load the advanced tiled/ROI exports (these are Phase 3 features that
+// may not be present in every build of the jxl-wasm package).
+let _tiledFns = null;
+
+// Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
+console.log('%c[Crop Benchmark] jxl-crop-benchmark.js loaded — tiled / JXTC region decode benchmark', 'color:#f59e0b;font-weight:600', { page: 'Crop Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
+
+async function getTiledFns() {
+    if (_tiledFns) return _tiledFns;
+    try {
+        const mod = await import('@casabio/jxl-wasm');
+        _tiledFns = {
+            encodeTiledRgba8: mod.encodeTiledRgba8,
+            decodeTiledRegionRgba8: mod.decodeTiledRegionRgba8,
+            encodeTileContainerRgba8: mod.encodeTileContainerRgba8,
+            decodeTileContainerRegionRgba8: mod.decodeTileContainerRegionRgba8,
+        };
+    } catch (e) {
+        console.warn('[crop-benchmark] Failed to load tiled functions from jxl-wasm:', e);
+        _tiledFns = {};
+    }
+    return _tiledFns;
+}
 
 // Log-scaled display width for each crop size (120px–400px range).
 function logDisplayWidth(px) {
@@ -139,12 +159,11 @@ const filePicker = createFilePicker({
         if (!orfFiles.length) {
             setStatusFolder('No ORF files in selection');
             btnRun.disabled = true;
-    updateWorkflowState();
+            updateWorkflowState();
             return;
         }
         setStatusFolder(`${orfFiles.length} ORF file${orfFiles.length !== 1 ? 's' : ''} selected`);
         btnRun.disabled = !wasmReady;
-    updateWorkflowState();
         updateWorkflowState();
     }
 });
@@ -155,12 +174,10 @@ filePicker?.loadLastPersisted?.().then(f => {
         if (orfFiles.length) {
             setStatusFolder(`${orfFiles.length} ORF file(s) restored from last session`);
             btnRun.disabled = !wasmReady;
-    updateWorkflowState();
             updateWorkflowState();
         }
     }
-});
-});
+}).catch(() => {});
 
 // --- WASM encode/decode ---
 
@@ -253,7 +270,9 @@ async function decodeTileRegion(jxlBytes, tileSize, sourceWidth, sourceHeight, t
     const w    = Math.min(targetSize, sourceWidth  - x);
     const h    = Math.min(targetSize, sourceHeight - y);
 
-    return decodeTiledRegionRgba8(jxlBytes, { tileSize, x, y, w, h, onMetric });
+    const fns = await getTiledFns();
+    if (!fns.decodeTiledRegionRgba8) throw new Error('Tiled decode not available in this build');
+    return fns.decodeTiledRegionRgba8(jxlBytes, { tileSize, x, y, w, h, onMetric });
 }
 
 /**
@@ -271,7 +290,9 @@ async function decodeContainerRegion(containerBytes, sourceWidth, sourceHeight, 
     const w    = Math.min(targetSize, sourceWidth  - x);
     const h    = Math.min(targetSize, sourceHeight - y);
 
-    return decodeTileContainerRegionRgba8(containerBytes, { x, y, w, h, onMetric });
+    const fns = await getTiledFns();
+    if (!fns.decodeTileContainerRegionRgba8) throw new Error('JXTC decode not available in this build');
+    return fns.decodeTileContainerRegionRgba8(containerBytes, { x, y, w, h, onMetric });
 }
 
 // --- UI result rows ---
@@ -386,6 +407,7 @@ async function runBenchmark() {
     const sizes       = getSelectedSizes();
 
     if (!sizes.length) { setStatusProgress('No crop sizes selected.'); endRun(); return; }
+    console.log('%c[Crop Benchmark] run start', 'color:#f59e0b;font-weight:600', { t: new Date().toISOString(), fileCount, effort, distance, tileSize, sizes, compareFull });
 
     const files = shuffled(orfFiles).slice(0, fileCount);
     setStatusProgress(`0 / ${files.length}`);
@@ -426,7 +448,9 @@ async function runBenchmark() {
         const t0tiled = performance.now();
         let tiledBytes;
         try {
-            tiledBytes = await encodeTiledRgba8(rgba, imgWidth, imgHeight, {
+            const fns = await getTiledFns();
+            if (!fns.encodeTiledRgba8) throw new Error('Tiled encode not available in this build');
+            tiledBytes = await fns.encodeTiledRgba8(rgba, imgWidth, imgHeight, {
                 tileSize, distance, effort, hasAlpha: true,
             });
         } catch (err) {
@@ -440,7 +464,9 @@ async function runBenchmark() {
         const t0jxtc = performance.now();
         let jxtcBytes = null;
         try {
-            jxtcBytes = await encodeTileContainerRgba8(rgba, imgWidth, imgHeight, {
+            const fns = await getTiledFns();
+            if (!fns.encodeTileContainerRgba8) throw new Error('JXTC container encode not available in this build');
+            jxtcBytes = await fns.encodeTileContainerRgba8(rgba, imgWidth, imgHeight, {
                 tileSize, distance, effort, hasAlpha: true,
             });
         } catch (err) {

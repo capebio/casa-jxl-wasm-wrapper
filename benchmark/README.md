@@ -34,10 +34,11 @@ File bytes
 ### Native (fastest, for pipeline profiling)
 
 ```powershell
-cargo run --bin raw_decode_bench --release 2>&1 | Tee-Object benchmark/results_latest.txt
+.\build-msvc.ps1 run --bin raw_decode_bench --release 2>&1 | Tee-Object benchmark/results_latest.txt
 ```
 
-Requires test files at `C:\Foo\raw-converter\tests\` (CR2, DNG, ORF files).
+Requires test files at `C:\Foo\raw-converter\tests\` (CR2, DNG, ORF files).  
+Writes `benchmark/results_native.json` (includes JXL encode/decode timings, sub-stage breakdowns, and JSON-serialized rows).
 
 ### WASM (end-to-end browser timing)
 
@@ -47,10 +48,13 @@ Open `web/jxl-benchmark.html` (served via `npx serve .`) in Chrome with COOP/COE
 
 | Metric | What it means |
 |--------|--------------|
-| `decode ms` | Parse + LJPEG decode + crop. Bottleneck for CR2 (single-threaded LJPEG). |
+| `decompress ms` | Parse + LJPEG decode + crop. Bottleneck for CR2 (single-threaded LJPEG). |
 | `demosaic ms` | RGGB MHC interpolation. 10–13× slower in WASM vs native (no rayon). |
-| `tone ms` | WB + color matrix + tone curve. Single-threaded in both native and WASM. |
-| `total ms` | End-to-end RAW → RGB8 (excludes JXL encode). |
+| `tonemap ms` | WB + color matrix + tone curve. Single-threaded in both native and WASM. |
+| `raw ms` | Wall time for full RAW → RGB8 pipeline (decompress + demosaic + tonemap). |
+| `encode ms` | JXL encode time (effort=3 / Falcon, quality=90). |
+| `decode ms` | JXL decode time (full resolution). |
+| `total ms` | End-to-end: raw + encode + decode. |
 
 ## WASM vs Native
 
@@ -59,6 +63,8 @@ Open `web/jxl-benchmark.html` (served via `npx serve .`) in Chrome with COOP/COE
 | LJPEG decode | ~50–80ms | ~50–80ms (I/O bound) |
 | Demosaic 18MP | ~15ms | ~150–200ms |
 | Tonemap | ~33ms | ~33ms |
+| JXL encode (effort=3) | ~200–400ms | ~400–800ms |
+| JXL decode | ~100–300ms | ~200–500ms |
 
 Demosaic is the bottleneck in WASM. See `WASM_DNG_ANALYSIS.md` for full analysis.
 
@@ -84,6 +90,9 @@ Demosaic is the bottleneck in WASM. See `WASM_DNG_ANALYSIS.md` for full analysis
 
 ## Results Archive
 
-Benchmark results are saved as timestamped `.txt` files in this folder:
-- `results_latest.txt` — most recent run (overwritten each run)
-- `results_YYYYMMDD.txt` — dated snapshots (add manually when notable)
+| File | Source | Notes |
+|------|--------|-------|
+| `results_native.json` | `cargo run --bin raw_decode_bench --release` | Overwritten each run; includes JXL encode/decode timings |
+| `raw-format-sweep-results.json` | `node benchmark/raw-format-sweep.mjs` | WASM end-to-end; includes sub-stage breakdowns |
+| `results_latest.txt` | native bench (console stdout) | Human-readable; overwritten each run |
+| `results_YYYYMMDD.txt` | manual snapshot | Dated archive; copy manually when notable |

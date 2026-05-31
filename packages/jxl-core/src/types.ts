@@ -175,7 +175,12 @@ export type CodecMetric =
   | { name: "region_fallback_full_frame"; value: 1 } // emitted when region decode falls back
   | { name: "decode_scale_used"; value: number }
   | { name: "decode_region_area"; value: number }
-  | { name: "source_pixels_decoded"; value: number };
+  | { name: "source_pixels_decoded"; value: number }
+  // Scheduler-level wait (populated by jxl-scheduler when a job had to queue for a worker slot).
+  // Emitted via the normal metric path so onMetric consumers (benchmarks, parity harnesses)
+  // receive it uniformly with time_to_*_ms. 0 or absent for immediate-acquire / preemption paths.
+  // Parity with Tauri ProcessResult.queue_wait_ms and synthetic lightbox_bench qwait.
+  | { name: "scheduler_queue_wait_ms"; value: number };
 
 // Capabilities shape (spec Section 17)
 export interface Capabilities {

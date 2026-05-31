@@ -14,6 +14,12 @@
 // Budget invariant (Section 12.3):
 //   budgetMs enforced per-stage transition, not wall-clock across whole decode.
 //   On breach: session emits decode_budget_exceeded with best frame so far.
+//
+// Queue wait observability: when a session is forced to wait for a worker slot,
+// we capture queuedAt and emit "scheduler_queue_wait_ms" (via the normal metric
+// fan-out) on the queued→running transition. This enables parity measurements
+// against the Tauri PrioritySem (ProcessResult.queue_wait_ms) and the synthetic
+// lightbox_bench qwait column under concurrency + promotion (scenarios C/D).
 
 import type {
   MainToWorkerMessage,
@@ -71,6 +77,10 @@ interface PendingSession {
   reject: (err: unknown) => void;
   signal: AbortSignal | null;
   isRequeue: boolean;
+  // Monotonic timestamp (performance.now()) captured at the moment we decided
+  // to queue this session. Used to compute scheduler queue wait for benchmarks
+  // and parity with the Tauri PrioritySem + lightbox_bench "qwait" metric.
+  queuedAt: number;
 }
 
 interface BackpressureState {
@@ -95,6 +105,9 @@ interface SessionRecord {
   pausedOnWorker?: PoolWorker;
   // Wall-clock time the session was created. Used for victim scoring.
   createdAt: number;
+  // Monotonic time we entered the scheduler queue (only meaningful while state==="queued").
+  // Populated for benchmark observability (parity with Tauri queue_wait_ms and lightbox_bench).
+  queuedAt?: number;
   // Fractional decode progress [0, 1]. Updated from decode_progress stage messages.
   // Encode sessions stay at 0 (no protocol progress messages exist for encode).
   progress: number;
@@ -223,6 +236,7 @@ export class Scheduler {
         reject,
         signal: params.signal,
         isRequeue: false,
+        queuedAt: performance.now(),
       };
       this.sessions.set(params.sessionId, {
         sessionId: params.sessionId,
@@ -232,6 +246,7 @@ export class Scheduler {
         handlers: this.takePendingHandlers(params.sessionId),
         pending,
         createdAt: Date.now(),
+        queuedAt: pending.queuedAt,
         progress: 0,
       });
       this.totalSessionCount++;
@@ -610,6 +625,23 @@ export class Scheduler {
       existing.state = "running";
       existing.worker = worker;
       delete existing.pending;
+
+      // Emit scheduler-level queue wait metric for benchmarks / parity with
+      // Tauri process_file.queue_wait_ms and the synthetic lightbox_bench qwait.
+      // Only queued sessions have a meaningful wait; immediate/preempt paths
+      // never entered the PendingSession queue.
+      if (existing.queuedAt != null) {
+        const waitMs = performance.now() - existing.queuedAt;
+        const metricMsg = {
+          type: "metric" as const,
+          sessionId,
+          metric: { name: "scheduler_queue_wait_ms", value: waitMs },
+        };
+        for (const h of existing.handlers) {
+          try { h(metricMsg as any); } catch { /* handler must not throw */ }
+        }
+      }
+      delete existing.queuedAt;
     } else {
       // Fresh session (immediate acquire or post-preemption).
       this.sessions.set(sessionId, {

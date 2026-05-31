@@ -373,11 +373,12 @@ async function measureFileRun(
   try {
     const rawMs = performance.now() - rawStarted;
 
-    // NEW: isolated RAW decode cost (decompress + demosaic only)
-    let rawBench = null;
-    try {
-      rawBench = bench_decode_orf(bytes);
-    } catch (e) {}
+    // Read per-stage timings from ProcessResult (available for ORF, DNG, CR2).
+    const decompressMs = result.decompress_ms;
+    const demosaicMs = result.demosaic_ms;
+    const tonemapMs = result.tonemap_ms;
+    const orientMs = result.orient_ms;
+
     const rgbaStarted = performance.now();
     const rgb = result.take_rgb();
     const rgba = rgb_to_rgba(rgb);
@@ -405,8 +406,10 @@ async function measureFileRun(
         mode: variant.name,
         run: runIndex,
         rawMs,
-        rawBenchDecompress: rawBench?.decompress_ms ?? null,
-        rawBenchDemosaic: rawBench?.demosaic_ms ?? null,
+        decompressMs,
+        demosaicMs,
+        tonemapMs,
+        orientMs,
         rgbaMs,
         encodeMs: standard.ms,
         decodeMs: standardDec.ms,
@@ -434,6 +437,10 @@ async function measureFileRun(
         run: runIndex,
         tileSize,
         rawMs,
+        decompressMs,
+        demosaicMs,
+        tonemapMs,
+        orientMs,
         rgbaMs,
         encodeMs: tiled.ms,
         decodeMs: tiledDec.ms,
@@ -458,11 +465,15 @@ function buildSummary(rows) {
   }
 
   return [...byKey.entries()].map(([key, group]) => {
+    const raw = stats(group.map((row) => row.rawMs));
+    const decompress = stats(group.map((row) => row.decompressMs));
+    const demosaic = stats(group.map((row) => row.demosaicMs));
+    const tonemap = stats(group.map((row) => row.tonemapMs));
     const enc = stats(group.map((row) => row.encodeMs));
     const dec = stats(group.map((row) => row.decodeMs));
     const total = stats(group.map((row) => row.totalMs));
     const size = stats(group.map((row) => row.sizeKB));
-    return { key, count: group.length, encode: enc, decode: dec, total, size };
+    return { key, count: group.length, raw, decompress, demosaic, tonemap, encode: enc, decode: dec, total, size };
   }).sort((a, b) => a.key.localeCompare(b.key));
 }
 
@@ -490,6 +501,8 @@ function printSummary(title, summaries) {
     console.log([
       s.key,
       `n=${s.count}`,
+      `raw mean ${fmtMs(s.raw.mean)} med ${fmtMs(s.raw.median)} p95 ${fmtMs(s.raw.p95)}`,
+      `  decomp mean ${fmtMs(s.decompress.mean)} demosaic mean ${fmtMs(s.demosaic.mean)} tonemap mean ${fmtMs(s.tonemap.mean)}`,
       `enc mean ${fmtMs(s.encode.mean)} med ${fmtMs(s.encode.median)} p95 ${fmtMs(s.encode.p95)}`,
       `dec mean ${fmtMs(s.decode.mean)} med ${fmtMs(s.decode.median)} p95 ${fmtMs(s.decode.p95)}`,
       `tot mean ${fmtMs(s.total.mean)} med ${fmtMs(s.total.median)} p95 ${fmtMs(s.total.p95)}`,
@@ -558,7 +571,7 @@ async function main() {
   const activeTileSizes = selectedTileSizes();
 
   const initRaw = (await import('../pkg/raw_converter_wasm.js')).default;
-  const { process_orf_with_flags, process_dng_with_flags, process_cr2_with_flags, bench_decode_orf, rgb_to_rgba } = await import('../pkg/raw_converter_wasm.js');
+  const { process_orf_with_flags, process_dng_with_flags, process_cr2_with_flags, rgb_to_rgba } = await import('../pkg/raw_converter_wasm.js');
   await initRaw({ module_or_path: readFileSync(new URL('../pkg/raw_converter_wasm_bg.wasm', import.meta.url)) });
 
   const rows = [];

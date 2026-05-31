@@ -137,6 +137,57 @@
                 const paths = Array.isArray(payload) ? payload : payload.paths ?? [];
                 if (paths.length) uploadFilesByPath(paths);
             });
+
+            // Deep-link handoff from planner gallery (e.g. raw-converter-tauri://casabio-import?baseUrl=...&expeditionId=..&token=..)
+            listen("casabio-handoff", (event) => {
+                try {
+                    const rawUrl = event.payload || "";
+                    const url = new URL(rawUrl);
+                    const base = url.searchParams.get("baseUrl");
+                    const token = url.searchParams.get("token");
+                    const expId = url.searchParams.get("expeditionId");
+                    const jxlSettingsRaw = url.searchParams.get("jxlSettings");
+
+                    if (base) {
+                        $("#casabio-base-url").value = base;
+                        localStorage.setItem(STORAGE_KEY, base);
+                    }
+                    if (token) {
+                        // Save directly to keychain via the existing command (no plaintext in UI)
+                        invoke("casabio_set_token", { token }).then(() => {
+                            $("#casabio-token").value = "";
+                            // show a transient hint in the queue area
+                            const li = appendQueueItem("web-handoff");
+                            setQueueStatus(li, "token received from planner — saved to keychain", "done");
+                        }).catch(() => {});
+                    }
+
+                    if (jxlSettingsRaw) {
+                        try {
+                            const parsed = JSON.parse(jxlSettingsRaw);
+                            // Stash for future advanced controls in the desktop UI
+                            window.__CASABIO_HANDOFF_JXL_SETTINGS = parsed;
+                            const li = appendQueueItem("web-handoff");
+                            setQueueStatus(li, "advanced JXL settings received from planner", "done");
+                        } catch (e) {
+                            console.warn("Failed to parse jxlSettings from handoff", e);
+                        }
+                    }
+
+                    // Show the panel and refresh expeditions (token should now be in keychain)
+                    showPanel();
+                    setTimeout(() => {
+                        refreshExpeditions().then(() => {
+                            if (expId) {
+                                const sel = $("#casabio-expedition");
+                                sel.value = expId;
+                            }
+                        }).catch(() => {});
+                    }, 120);
+                } catch (e) {
+                    console.warn("casabio-handoff parse failed", e);
+                }
+            });
         }
     });
 })();

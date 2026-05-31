@@ -9,6 +9,9 @@ import {
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createFilePicker } from './jxl-file-picker.js';
 
+// Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
+console.log('%c[Wrapper Lab] jxl-wrapper-lab.js loaded — main encode/decode + HDR/granular/JUMBF lab', 'color:#10b981;font-weight:600', { page: 'Wrapper Lab', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
+
 const { process_orf, process_cr2, rgb_to_rgba } = rawWasm;
 
 const MAX_BATCH_LIMIT = 100;
@@ -217,6 +220,7 @@ async function runRace() {
     const quality = getQuality();
     const effort = getEffort();
     const started = performance.now();
+    console.log('%c[Wrapper Lab] run start', 'color:#10b981;font-weight:600', { t: new Date().toISOString(), sources: buildBatchSources().map(s => s.name ?? s.label ?? '?'), formats, targetSize, quality, effort });
     const totalCards = formats.length * sources.length;
 
     raceTrack.innerHTML = '<div class="track-line"></div>';
@@ -823,8 +827,18 @@ const tiles = Array.from({ length: MAX_BATCH_LIMIT }, (_, index) => makeTile(ind
 for (const tile of tiles) {
     batchGrid.appendChild(tile.el);
     tile.chip.addEventListener('click', () => {
-        if (tile.el.dataset.state !== 'error') return;
-        tile.errorDetail.classList.toggle('is-open');
+        const st = tile.el.dataset.state;
+        if (st === 'error') {
+            tile.errorDetail.classList.toggle('is-open');
+            return;
+        }
+        if (st === 'done') {
+            showTileRunInfo(tile);
+        }
+    });
+    // Double-click thumbnail canvas → open in lightbox (enlarged + basic info)
+    tile.canvas.addEventListener('dblclick', () => {
+        openTileLightbox(tile);
     });
     tile.errorCopyBtn.addEventListener('click', () => {
         navigator.clipboard.writeText(tile.errorText.textContent).then(() => {
@@ -1380,9 +1394,12 @@ async function runWrapperPipeline(source, label = 'wrapper') {
 
 function paintTileResult(tile, source, existingResult, wrapperResult, startedAt) {
     const canvas = tile.canvas;
-    const decoded = currentMode === 'existing'
-        ? existingResult?.final
+    let decoded = currentMode === 'existing'
+        ? (existingResult?.final || wrapperResult?.final)
         : (wrapperResult?.final || existingResult?.final);
+    // Defensive: if the chosen path had no final (e.g. session hang/fallback timing), use whatever we have so the thumbnail still appears
+    if (!decoded && existingResult?.final) decoded = existingResult.final;
+    if (!decoded && wrapperResult?.final) decoded = wrapperResult.final;
 
     if (!decoded) {
         throw new Error('No decoded result to paint');
@@ -1519,6 +1536,69 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
     }
 
     return { paintMs, firstPaintMs, totalMs: ms };
+}
+
+function showTileRunInfo(tile) {
+    const timings = tile._timings || {};
+    const q = getQuality ? getQuality() : '?';
+    const eff = getEffort ? getEffort() : '?';
+    const conc = getConcurrency ? getConcurrency() : '?';
+    const info = [
+        `Tile: ${tile.title.textContent}`,
+        `Mode: ${currentMode}`,
+        `Settings: q=${q} effort=${eff} concurrency=${conc}`,
+        `Existing: ${tile.existing?.textContent || '--'}`,
+        `Wrapper: ${tile.wrapper?.textContent || '--'}`,
+        `Timing: ${tile.timing?.textContent || '--'}`,
+        `Compare: ${tile.compare?.textContent || '--'}`,
+    ].join('\n');
+
+    // Minimal non-intrusive floating info card (click anywhere to dismiss)
+    const card = document.createElement('div');
+    card.style.cssText = 'position:fixed;z-index:99999;bottom:16px;right:16px;max-width:440px;padding:10px 14px;border-radius:10px;background:#0f172a;color:#e2e8f0;font:11px/1.4 "Cascadia Mono",monospace;border:1px solid #475569;box-shadow:0 10px 40px rgba(0,0,0,.45);white-space:pre-wrap;';
+    card.textContent = info + '\n\n(click to dismiss)';
+    card.addEventListener('click', () => card.remove(), { once: true });
+    document.body.appendChild(card);
+    setTimeout(() => { if (card.parentNode) card.remove(); }, 12000);
+}
+
+function openTileLightbox(tile) {
+    const srcCanvas = tile.canvas;
+    if (!srcCanvas) return;
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(7,9,12,0.92);display:flex;align-items:center;justify-content:center;padding:20px;';
+    modal.innerHTML = `
+        <div style="background:#111c;border:1px solid #334155;border-radius:16px;max-width:92vw;max-height:92vh;padding:12px 14px;display:flex;flex-direction:column;gap:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+                <div style="font:600 13px/1.2 system-ui;color:#e2e8f0;">${tile.title.textContent || 'Tile'}</div>
+                <button type="button" style="padding:2px 10px;border-radius:999px;border:1px solid #475569;background:#1e2937;color:#cbd5e1;font-size:11px;cursor:pointer;">Close</button>
+            </div>
+            <div style="overflow:auto;max-height:78vh;border-radius:8px;background:#0b0f17;">
+                <canvas style="display:block;max-width:100%;height:auto;"></canvas>
+            </div>
+            <div style="font:10px/1.3 monospace;color:#94a3b8;">${tile.timing?.textContent || ''} · ${tile.existing?.textContent || ''}</div>
+        </div>
+    `;
+    const closeBtn = modal.querySelector('button');
+    const bigCanvas = modal.querySelector('canvas');
+    const ctx = bigCanvas.getContext('2d');
+
+    // Copy & upscale the current tile canvas content
+    const scale = Math.min(4, Math.floor(1200 / Math.max(1, srcCanvas.width)));
+    bigCanvas.width = srcCanvas.width * scale;
+    bigCanvas.height = srcCanvas.height * scale;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(srcCanvas, 0, 0, bigCanvas.width, bigCanvas.height);
+
+    function close() { modal.remove(); document.removeEventListener('keydown', onKey, true); }
+    closeBtn.addEventListener('click', close, { once: true });
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); }, { once: true });
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey, true);
+
+    document.body.appendChild(modal);
 }
 
 async function processOneSource(source, index, runId) {
@@ -1818,14 +1898,6 @@ function wireControls() {
             });
         }
     }).catch(() => {});
-
-    sourceDrop.addEventListener('drop', async (event) => {
-        event.preventDefault();
-        sourceDrop.classList.remove('is-drop-target');
-        if (!event.dataTransfer?.files?.length) return;
-        await loadSourcesFromFiles(event.dataTransfer.files);
-        setCounters({ loaded: selectedSources.length });
-    });
 
     loadRandomBtn.addEventListener('click', async () => {
         try {

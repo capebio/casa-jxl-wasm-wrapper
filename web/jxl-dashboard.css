@@ -248,6 +248,14 @@
     display: none !important;
 }
 
+/* Hero title info popover on progressive-paint page — anchor under the compact h1 */
+.hero-copy .help-popover[data-help-popover="pp-hero"] {
+    left: 0;
+    top: calc(100% - 2px);
+    max-width: min(440px, 94vw);
+    z-index: 400;
+}
+
 @media (max-width: 900px) {
     .dashboard {
         width: min(100vw, 440px);

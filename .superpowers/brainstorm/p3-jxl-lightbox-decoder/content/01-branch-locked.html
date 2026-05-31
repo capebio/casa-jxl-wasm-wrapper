@@ -1,0 +1,29 @@
+<div style="max-width: 780px; margin: 40px auto; padding: 24px;">
+  <h2>Baseline Locked ✓</h2>
+  <p class="subtitle">Clean feature branch created per your direction. Visual companion ready for architecture diagrams.</p>
+
+  <div class="section" style="background:#0f172a; border-radius:8px; padding:16px; margin:20px 0;">
+    <strong style="color:#22c55e;">Current branch:</strong> <code style="color:#e0f2fe;">feature/p3-lightbox-jxl-decoder</code><br>
+    <strong style="color:#22c55e;">Working tree:</strong> clean (as confirmed)<br>
+    <strong style="color:#22c55e;">Visual server:</strong> http://localhost:54334 (new instance)
+  </div>
+
+  <div class="section">
+    <h3>Next (in chat)</h3>
+    <p>The agent will now move to the core technical decision: the integration shape for wiring the real progressive <code>createDecoder</code> into the production lightbox (replacing or augmenting the jsquash one-shot path in the dedicated worker).</p>
+    <p>You will see 2–3 concrete options with a diagram here showing data flow, cancellation, straighten composition, and worker boundaries.</p>
+  </div>
+
+  <div class="section">
+    <h3>Standing constraints (from handoff + CLAUDE.md)</h3>
+    <ul style="font-size:0.95em; line-height:1.5;">
+      <li>Dedicated worker isolation must be preserved (long Emscripten work must not block lightbox)</li>
+      <li>Straighten post-process (<code>applyStraightenToLightboxCanvas</code>) already runs after every JXL paint — new path must call it</li>
+      <li>Live editing (<code>lightbox_live</code>), filmstrip multi-select, source cycling, prefetch, <code>setCleanCanvas</code>, zoom/pan state must all continue working</li>
+      <li>Graceful fallback to jsquash when advanced decoder unavailable</li>
+      <li>No pixel buffer pools, no drain callbacks inside facade/session, budget is session-level</li>
+    </ul>
+  </div>
+
+  <p style="margin-top:24px; opacity:0.75; font-size:0.9em;">Waiting for agent to push the architecture options diagram + recommendation...</p>
+</div>

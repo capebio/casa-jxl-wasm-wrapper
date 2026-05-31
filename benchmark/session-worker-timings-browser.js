@@ -184,7 +184,13 @@ async function encodeWithSession(context, source, timeouts) {
 }
 
 async function decodeWithSession(context, bytes, timeouts) {
-  const session = context.decode(makeDecoderOptions());
+  const metrics = {};
+  const session = context.decode({
+    ...makeDecoderOptions(),
+    onMetric: (m) => {
+      if (m && m.name) metrics[m.name] = m.value;
+    },
+  });
   try {
     await withTimeout(session.push(exactBuffer(bytes)), timeouts.stageMs, "session decode push");
     await withTimeout(session.close(), timeouts.stageMs, "session decode close");
@@ -195,7 +201,7 @@ async function decodeWithSession(context, bytes, timeouts) {
     }
     await doneTask;
     if (!final) throw new Error("session decode produced no final frame");
-    return { final };
+    return { final, metrics };
   } catch (error) {
     await session.cancel?.(`session-worker-timings decode failed: ${error?.message || error}`).catch(() => {});
     throw error;
@@ -214,6 +220,7 @@ async function runSessionPipeline(context, source, timeouts) {
     jxlBytes,
     finalWidth: decoded.final.info.width,
     finalHeight: decoded.final.info.height,
+    schedulerQueueWaitMs: decoded.metrics?.scheduler_queue_wait_ms ?? 0,
   };
 }
 

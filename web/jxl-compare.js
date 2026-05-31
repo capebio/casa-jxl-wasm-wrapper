@@ -214,7 +214,7 @@ async function runFormatRaceAtSize(source, longEdge, tier, effort, thisRunId) {
     try {
         jxlEnc = await withTimeout(
             encodeAsJxl(new Uint8Array(rgba.buffer.slice(0)), dims.width, dims.height, jxlQ, effort),
-            18000,
+            60000,
             `JXL encode ${longEdge}px`
         );
     } catch (e) {

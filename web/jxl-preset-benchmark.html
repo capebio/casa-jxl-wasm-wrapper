@@ -35,6 +35,7 @@
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
@@ -47,9 +48,10 @@
             <div class="hero-copy">
                 <p class="eyebrow">Use-Case Optimization Sweep</p>
                 <h1 style="font-size:1.1rem; margin:2px 0;">Preset + RAW sweeps for real situations</h1>
+                <p style="font-size:9px; opacity:0.85; margin:1px 0 3px; max-width:680px; font-style:italic;">This page exists to derive optimal JXL presets for real use-cases (thumb/gallery/massive) by sweeping encoder controls against per-file RAW costs (bench_decode_orf + LookRenderer) and emitting citable scenario-weighted recommendations.</p>
                 <div style="font-size:10px; opacity:0.7; line-height:1.25; max-width:680px;">
                     Load files → Measure RAW (once) → Run sweep → Get recommended settings per use-case (thumbs, gallery, 80MP+, etc). RAW costs now factor into scoring.
-                    <a href="#" onclick="document.getElementById('matrix-details').open=true; return false;" style="font-size:10px;">[controls matrix]</a>
+                    <a href="#" onclick="document.getElementById('matrix-details').open=true; return false;" style="font-size:10px;color:#7dd3fc;">[controls matrix]</a>
                 </div>
                 <details id="matrix-details" style="margin-top:4px; font-size:9px; opacity:0.65;">
                     <summary>Full controls from FEATURE_PARITY_MATRIX</summary>
@@ -77,20 +79,22 @@
                 <strong style="font-size:8px;">2. RAW (recommended)</strong>
                 <button id="btn-raw-isolation" class="secondary-btn" type="button" disabled style="font-size:8px;padding:0 3px;">Measure</button>
                 <button id="btn-raw-isolation-clear" class="ghost-btn" type="button" style="font-size:8px;padding:0 2px;">Clear</button>
+                <button id="btn-raw-isolation-copy" class="ghost-btn" type="button" style="font-size:8px;padding:0 2px;" disabled>Copy</button>
                 <span id="raw-isolation-status" style="font-size:8px;opacity:0.55;"></span>
             </div>
             <div id="raw-isolation-results" style="font-size:8px;line-height:1.1;"></div>
         </section>
 
-        <section id="sweep-settings">
-            <h2 style="font-size:10px;margin:2px 0 4px;">3. Settings</h2>
-            <div id="sweep-settings-body"></div>
-        </section>
-
-        <section id="phase-progress">
-            <h2 style="font-size:10px;margin:2px 0 4px;">4. Progress</h2>
-            <div class="phase-cards" id="phase-cards"></div>
-            <div class="live-status" id="live-status" aria-live="polite" aria-atomic="false"></div>
+        <section id="run-control">
+            <div id="sweep-settings-pane">
+                <h2 style="font-size:10px;margin:2px 0 4px;">3. Settings</h2>
+                <div id="sweep-settings-body"></div>
+            </div>
+            <div id="progress-pane">
+                <h2 style="font-size:10px;margin:2px 0 4px;">4. Progress</h2>
+                <div class="phase-cards" id="phase-cards"></div>
+                <div class="live-status" id="live-status" aria-live="polite" aria-atomic="false"></div>
+            </div>
         </section>
 
         <section id="phase-graphs">

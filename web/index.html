@@ -33,6 +33,7 @@
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
@@ -315,6 +316,14 @@
             <button class="lb-btn lb-crop-cancel" id="lb-crop-cancel" hidden title="Discard (Esc)">Cancel</button>
             <span class="lb-sep"></span>
             <button class="lb-download-btn" aria-label="Download full-res JPEG">⬇ JPEG</button>
+            <span class="lb-sep"></span>
+            <!-- Straighten control (Phase 2) - sets corrective angle + triggers largest-rect crop -->
+            <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;margin-left:4px">
+                <span>Straighten</span>
+                <input id="lb-straighten" type="range" min="-15" max="15" step="0.2" value="0" style="width:90px">
+                <span id="lb-straighten-val" style="min-width:28px;text-align:right">0°</span>
+            </label>
+            <button id="lb-straighten-auto" class="lb-btn" title="Compute largest rect after straighten for current aspect" style="font-size:11px">Auto</button>
         </div>
         <div class="lightbox-viewport">
             <canvas id="lightbox-canvas"></canvas>
@@ -422,6 +431,21 @@
             </div>
         </div>
         <div class="lightbox-info"></div>
+
+        <!-- Filmstrip: bottom thumbnail row for navigation + multi-select (Phase 1) -->
+        <div id="lightbox-filmstrip" class="lightbox-filmstrip" hidden>
+            <div class="filmstrip-scroll" id="filmstrip-scroll">
+                <!-- Populated dynamically by main.js: thumbnails + selection state -->
+            </div>
+            <div class="filmstrip-actions" id="filmstrip-actions" hidden>
+                <button id="filmstrip-apply-selection" class="lb-btn" type="button">
+                    Apply look to <span id="filmstrip-selection-count">0</span> selected
+                </button>
+                <button id="filmstrip-export-selection" class="lb-btn ghost" type="button" title="Export selected with current look + their crops (future)">
+                    Export selected
+                </button>
+            </div>
+        </div>
     </div>
 
     <script type="module" src="./main.js"></script>

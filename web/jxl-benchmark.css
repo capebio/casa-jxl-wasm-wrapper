@@ -77,29 +77,46 @@ code {
 
 .hero.compact h1 {
     font-size: 24px;
+    margin-bottom: 2px;
 }
 
 .hero-with-picker {
     display: flex;
-    gap: 20px;
-    justify-content: space-between;
+    gap: 8px;
+    justify-content: flex-start;
     align-items: center;
+    flex-wrap: wrap;
 }
 
 .hero-with-picker .hero-copy {
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 220px;
+    position: relative;
+}
+
+.hero-sep {
+    font-size: 18px;
+    line-height: 1;
+    color: var(--muted, #6b7280);
+    opacity: 0.7;
+    align-self: center;
+    padding: 0 6px 0 4px;
+    user-select: none;
+    font-weight: 300;
 }
 
 .file-drop-compact {
     flex-shrink: 0;
-    padding: 16px 12px;
+    padding: 8px 10px;
     text-align: center;
+    min-width: 102px;
 }
 
 .hero-actions {
     display: flex;
-    gap: 12px;
+    gap: 8px;
     align-items: center;
+    margin-top: 6px;
 }
 
 .hero-copy {
@@ -1333,6 +1350,57 @@ canvas {
 
 .prog-comparison-wrap {
     margin-top: 4px;
+}
+
+.run-status-line {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-top: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    background: rgba(255,255,255,0.02);
+    border-radius: 0 0 8px 8px;
+}
+.run-status-line #run-done-summary {
+    font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+    color: var(--text);
+    font-weight: 600;
+    white-space: nowrap;
+}
+.run-status-line .run-live-status {
+    color: var(--muted);
+    font-size: 11px;
+    opacity: 0.9;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Synced zoom controls (next to the "Click pass tiles..." note) */
+.zoom-btn {
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 1;
+    min-height: 18px;
+    margin-left: 6px;
+    vertical-align: baseline;
+}
+.zoom-btn.is-armed {
+    border-color: var(--accent);
+    background: rgba(245, 158, 11, 0.15);
+    color: #fcd34d;
+}
+.zoom-readout {
+    font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    min-width: 42px;
+    display: inline-block;
+    text-align: right;
+    margin-left: 2px;
 }
 
 @media (max-width: 768px) {

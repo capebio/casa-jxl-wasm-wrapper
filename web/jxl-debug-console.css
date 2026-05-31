@@ -66,11 +66,13 @@
 }
 
 .dbg-row {
-    padding: 1px 14px;
+    padding: 3px 14px 4px;
     display: grid;
     grid-template-columns: 90px 1fr;
     gap: 8px;
-    align-items: baseline;
+    align-items: start;           /* was baseline — less likely to overlap on wrapped/detail content */
+    min-height: 18px;
+    line-height: 1.35;
 }
 
 .dbg-row:hover {
@@ -103,11 +105,12 @@
 
 .dbg-detail {
     grid-column: 2;
-    margin: 0;
+    margin: 2px 0 0;
     color: #64748b;
     font-size: 11px;
     white-space: pre-wrap;
     word-break: break-all;
+    padding-bottom: 2px;
 }
 
 /* Ensure [hidden] wins over the display:flex rule above in all browsers */
