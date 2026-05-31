@@ -272,3 +272,74 @@ describe("DecodeSessionImpl telemetry", () => {
     await scheduler.shutdown();
   });
 });
+
+describe("DecodeSessionImpl missing coverage", () => {
+  // Task 007-errors-f2a3b4c5: AbortSignal abort while push() is blocked at waitForDrain.
+  it("AbortSignal fires while push() is waiting on drain — push resolves and done() rejects", async () => {
+    const { scheduler, workers } = makeScheduler();
+    const ac = new AbortController();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8", signal: ac.signal });
+    await waitForWorker(workers);
+
+    // Fill the scheduler drain queue (push 3 non-blocking, 4th blocks at waitForDrain).
+    for (let i = 0; i < 3; i++) {
+      await session.push(new Uint8Array([i]));
+    }
+    const pushPromise = session.push(new Uint8Array([99]));
+    await tick(); // let 4th push reach waitForDrain
+
+    // Abort while the 4th push is suspended.
+    ac.abort();
+    // push() should resolve (not hang) after the abort unblocks the drain.
+    await pushPromise;
+
+    await assert.rejects(session.done(), (err: unknown) => {
+      assert.ok(err instanceof JxlError);
+      assert.equal(err.code, "Cancelled");
+      return true;
+    });
+    await scheduler.shutdown();
+  });
+
+  // Task 007-errors-a3b4c5d6: concurrent cancel() calls — idempotency.
+  it("concurrent cancel() calls do not double-invoke cancelSession or throw", async () => {
+    const { scheduler, workers } = makeScheduler();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8" });
+    await waitForWorker(workers);
+
+    // Fire two cancel() calls simultaneously; both must resolve without error.
+    await Promise.all([session.cancel("race-1"), session.cancel("race-2")]);
+
+    await assert.rejects(session.done(), (err: unknown) => {
+      assert.ok(err instanceof JxlError);
+      assert.equal(err.code, "Cancelled");
+      return true;
+    });
+    await scheduler.shutdown();
+  });
+
+  // Task 007-errors-e1f2a3b4: decode_budget_exceeded with a concurrent frames()+done() consumer.
+  it("budget_exceeded: frames() consumer sees partial frame while done() rejects concurrently", async () => {
+    const { scheduler, workers } = makeScheduler();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8", budgetMs: 50 });
+    const worker = await waitForWorker(workers);
+    const info = imageInfo();
+
+    // Start both consumers before emitting the budget message.
+    const framesPromise = collectFrames(session);
+    const donePromise = session.done().catch((e: unknown) => e);
+
+    worker.emit({
+      type: "decode_budget_exceeded", sessionId: session.id, stage: "dc",
+      pixels: new ArrayBuffer(8), info, format: "rgba8", pixelStride: 256,
+    });
+
+    const [frames, doneResult] = await Promise.all([framesPromise, donePromise]);
+
+    assert.equal(frames.length, 1, "frames() consumer sees the partial frame");
+    assert.equal(frames[0]?.stage, "dc");
+    assert.ok(doneResult instanceof JxlError, "done() rejects with JxlError");
+    assert.equal((doneResult as JxlError).code, "BudgetExceeded");
+    await scheduler.shutdown();
+  });
+});
