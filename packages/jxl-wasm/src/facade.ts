@@ -1104,6 +1104,9 @@ export function getDecodeGridInfo(): DecodeGridInfo {
 export interface DecodeViewportOptions {
   format: PixelFormat;
   region?: Region | null;
+  /** Full image dimensions — used to pick a downsample factor when no region is specified. */
+  imageWidth?: number;
+  imageHeight?: number;
   targetWidth?: number;
   targetHeight?: number;
   fitMode?: "contain" | "cover" | "stretch";
@@ -1118,7 +1121,7 @@ export function decodeViewport(options: DecodeViewportOptions): JxlDecoder {
   return createDecoder({
     format: options.format,
     region: options.region ?? null,
-    downsample: pickDownsample(options),
+    downsample: pickDownsample({ ...options, imageWidth: options.imageWidth ?? null, imageHeight: options.imageHeight ?? null }),
     progressionTarget: options.progressionTarget ?? "final",
     emitEveryPass: options.emitEveryPass ?? false,
     preserveIcc: options.preserveIcc ?? true,
@@ -1292,8 +1295,13 @@ class LibjxlDecoder implements JxlDecoder {
       // subsequent flushes are AC refinement passes.
       let flushCount = 0;
 
-      const buildInfo = (w: number, h: number): ImageInfo => {
-        info ??= { width: w, height: h, bitsPerSample: 8, hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false };
+      const infoBitsPerSample: 8 | 16 | 32 = fmtIndex === 2 ? 32 : fmtIndex === 1 ? 16 : 8;
+      // buildInfo memoizes on first call from pixel data (hasAlpha from buffer).
+      // The header event calls makeHeaderInfo directly to avoid locking in a wrong hasAlpha.
+      const makeHeaderInfo = (w: number, h: number): ImageInfo =>
+        ({ width: w, height: h, bitsPerSample: infoBitsPerSample, hasAlpha: false, hasAnimation: false, jpegReconstructionAvailable: false });
+      const buildInfo = (w: number, h: number, hasAlpha: boolean): ImageInfo => {
+        info ??= { width: w, height: h, bitsPerSample: infoBitsPerSample, hasAlpha, hasAnimation: false, jpegReconstructionAvailable: false };
         return info;
       };
 
@@ -1308,7 +1316,7 @@ class LibjxlDecoder implements JxlDecoder {
         // buildInfo memoizes on first call (full dims from header), so we must not pass it
         // cropped dims — it would return the already-memoized full-dim object regardless.
         // Instead, derive evInfo from the base info with actual pixel dimensions.
-        const baseInfo = buildInfo(buf.width, buf.height);
+        const baseInfo = buildInfo(buf.width, buf.height, buf.hasAlpha);
         const evInfo: ImageInfo = (pixels.width !== buf.width || pixels.height !== buf.height)
           ? { ...baseInfo, width: pixels.width, height: pixels.height }
           : baseInfo;
@@ -1371,7 +1379,7 @@ class LibjxlDecoder implements JxlDecoder {
           const h = decHeight(dec);
           if (w > 0 && h > 0) {
             headerEmitted = true;
-            yield { type: "header", info: buildInfo(w, h) };
+            yield { type: "header", info: makeHeaderInfo(w, h) };
             if (this.options.progressionTarget === "header") return;
           }
         }
@@ -1926,6 +1934,10 @@ class LibjxlEncoder implements JxlEncoder {
         );
       }
       if (this.wasmEncState === 0) throw new Error("JXL streaming encoder: pixel buffer allocation failed");
+      if (this.cancelled) {
+        this.freeWasmState();
+        return module;
+      }
       this.streamingInputActive = true;
     }
     return module;
@@ -2398,8 +2410,12 @@ class LibjxlEncoder implements JxlEncoder {
 
 async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
   modulePromise ??= (testModuleFactory ?? loadGeneratedLibjxlModule)();
-  cachedModule = await modulePromise;
-  return cachedModule;
+  const awaitedPromise = modulePromise;
+  const mod = await awaitedPromise;
+  // Only write to cachedModule if the promise has not been invalidated by a
+  // concurrent setForcedTier() / setJxlModuleFactoryForTesting() call.
+  if (modulePromise === awaitedPromise) cachedModule = mod;
+  return mod;
 }
 
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
@@ -2869,14 +2885,17 @@ function applyTargetResize(
   return { data: cropped.data, width: targetW, height: targetH };
 }
 
-function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {
+function pickDownsample(options: { region?: Region | null; imageWidth?: number | null; imageHeight?: number | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {
   const region = options.region ?? null;
   const targetWidth = options.targetWidth ?? null;
   const targetHeight = options.targetHeight ?? null;
-  if (region === null || targetWidth == null || targetHeight == null || targetWidth <= 0 || targetHeight <= 0) {
+  if (targetWidth == null || targetHeight == null || targetWidth <= 0 || targetHeight <= 0) {
     return 1;
   }
-  const sourceLongEdge = Math.max(region.w, region.h);
+  const sourceW = region !== null ? region.w : (options.imageWidth ?? null);
+  const sourceH = region !== null ? region.h : (options.imageHeight ?? null);
+  if (sourceW == null || sourceH == null) return 1;
+  const sourceLongEdge = Math.max(sourceW, sourceH);
   const targetLongEdge = Math.max(targetWidth, targetHeight);
   for (const factor of [8, 4, 2] as const) {
     if (Math.ceil(sourceLongEdge / factor) >= targetLongEdge) return factor;
