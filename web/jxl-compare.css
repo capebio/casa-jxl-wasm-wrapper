@@ -524,6 +524,38 @@ code {
     padding: 10px;
 }
 
+/* ── Dark theme protection against light dashboard.css bleed ─────────────── */
+/* The linked jxl-dashboard.css (for .info-btn + .help-popover) defines .ghost-btn
+   with dark text + light bg, which produced black-on-grey or low-contrast on this
+   page's dark panels. Same for bare .info-btn (blue on black). These overrides win
+   by specificity and keep the intended dark look + readable contrast. */
+.compare-controls .ghost-btn {
+    background: rgba(16,20,27,0.86);
+    border: 1px solid var(--border);
+    color: var(--text);
+}
+.compare-controls .ghost-btn:hover:not(:disabled) {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.22);
+}
+
+.compare-controls .info-btn,
+.compare-hero .info-btn {
+    color: #e2e8f0;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.15);
+    width: 18px;
+    height: 18px;
+    font-size: 10px;
+    font-weight: 700;
+}
+.compare-controls .info-btn:hover,
+.compare-hero .info-btn:hover {
+    background: rgba(245,158,11,0.18);
+    border-color: rgba(245,158,11,0.35);
+    color: #fff;
+}
+
 .lightbox-canvas {
     width: 100%;
     border-radius: 10px;

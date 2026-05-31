@@ -84,6 +84,8 @@ const lbToggleJpegBtn = lightbox.querySelector('.lb-toggle-jpeg');
 const lbSourceBanner  = lightbox.querySelector('#lb-source-banner');
 const lbSourceLabelEl = document.getElementById('lb-source-label');
 
+initFilmstrip();
+
 const qualityRange = document.getElementById('quality-range');
 const qualityLabel = document.getElementById('quality-label');
 const effortSelect = document.getElementById('effort-select');
@@ -2427,6 +2429,15 @@ function openLightbox(card) {
     promoteRawAroundCurrent();
     prefetchAroundCurrent();
     fetchLargePreviewIfNeeded(card);
+
+    // Filmstrip (Phase 1)
+    if (filmstripEl) {
+        filmstripEl.hidden = false;
+        // Defer population one frame so cards array and thumbs are stable
+        requestAnimationFrame(() => {
+            populateFilmstrip();
+        });
+    }
 }
 
 function drawLightbox() {
@@ -2435,6 +2446,7 @@ function drawLightbox() {
     lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
     drawLightboxForCard(card);
     renderInfoPanel(card);
+    refreshFilmstripPrimary();
 }
 
 function closeLightbox() {
@@ -2443,6 +2455,9 @@ function closeLightbox() {
     if (lbPreviewBadge) lbPreviewBadge.hidden = true;
     lbLoadingBadge.hidden = true;
     lbDisplayLongPx = null;
+    if (filmstripEl) filmstripEl.hidden = true;
+    if (filmstripActions) filmstripActions.hidden = true;
+    filmstripSelection.clear();
 }
 
 function nextInLightbox(dir) {
@@ -2485,6 +2500,182 @@ function nextInLightbox(dir) {
     promoteRawAroundCurrent();
     prefetchAroundCurrent();
     if (card) fetchLargePreviewIfNeeded(card);
+    refreshFilmstripPrimary();
+}
+
+// ---------------------------------------------------------------------------
+// Filmstrip (Phase 1) — lightweight bottom row for navigation + future multi-select
+// ---------------------------------------------------------------------------
+let filmstripEl = null;
+let filmstripScroll = null;
+let filmstripActions = null;
+let filmstripSelection = new Set(); // indices into the global `cards` array
+let filmstripLastClicked = -1;
+
+function initFilmstrip() {
+    filmstripEl = document.getElementById('lightbox-filmstrip');
+    filmstripScroll = document.getElementById('filmstrip-scroll');
+    filmstripActions = document.getElementById('filmstrip-actions');
+    if (!filmstripEl || !filmstripScroll) return;
+
+    // Selection count + apply button (wired in P1-4/P1-5)
+    const applyBtn = document.getElementById('filmstrip-apply-selection');
+    if (applyBtn) {
+        applyBtn.addEventListener('click', () => {
+            applyLookToFilmstripSelection();
+        });
+    }
+}
+
+function updateFilmstripSelectionUI() {
+    if (!filmstripScroll) return;
+    const countEl = document.getElementById('filmstrip-selection-count');
+    const hasSel = filmstripSelection.size > 1; // only show powerful batch UI when 2+
+    if (filmstripActions) filmstripActions.hidden = !hasSel;
+    if (countEl) countEl.textContent = filmstripSelection.size;
+
+    // Update visual state on all thumbs
+    filmstripScroll.querySelectorAll('.filmstrip-thumb').forEach((thumb, idx) => {
+        const isSel = filmstripSelection.has(idx);
+        const isPrimary = idx === lightboxIndex;
+        thumb.classList.toggle('selected', isSel);
+        thumb.classList.toggle('primary', isPrimary);
+        // Simple numeric badge for multi-select
+        let badge = thumb.querySelector('.sel-badge');
+        if (isSel && filmstripSelection.size > 1) {
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'sel-badge';
+                thumb.appendChild(badge);
+            }
+            badge.textContent = [...filmstripSelection].indexOf(idx) + 1;
+        } else if (badge) {
+            badge.remove();
+        }
+    });
+}
+
+function populateFilmstrip() {
+    if (!filmstripScroll || !cards || cards.length === 0) return;
+    filmstripScroll.innerHTML = '';
+    filmstripSelection.clear();
+    filmstripLastClicked = lightboxIndex;
+
+    cards.forEach((card, idx) => {
+        const thumb = document.createElement('div');
+        thumb.className = 'filmstrip-thumb';
+        thumb.dataset.index = String(idx);
+
+        // Best-effort thumbnail source (reuse existing thumb canvas content if present)
+        const srcCanvas = card.querySelector('canvas');
+        if (srcCanvas) {
+            const img = document.createElement('img');
+            try {
+                img.src = srcCanvas.toDataURL('image/jpeg', 0.7);
+            } catch {
+                img.style.background = '#222';
+            }
+            thumb.appendChild(img);
+        } else {
+            // Fallback colored box with filename hint
+            thumb.style.background = idx % 2 ? '#1f2937' : '#111827';
+            const label = document.createElement('div');
+            label.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:9px;opacity:.6;color:#9ca3af;overflow:hidden;padding:2px;text-align:center';
+            label.textContent = (card._file?.name || 'img').replace(/\.[^.]+$/, '').slice(-8);
+            thumb.appendChild(label);
+        }
+
+        thumb.addEventListener('click', (e) => {
+            const targetIdx = Number(thumb.dataset.index);
+            if (e.shiftKey && filmstripLastClicked >= 0) {
+                // Range select
+                const [a, b] = [filmstripLastClicked, targetIdx].sort((x,y)=>x-y);
+                for (let i = a; i <= b; i++) filmstripSelection.add(i);
+            } else if (e.ctrlKey || e.metaKey) {
+                // Toggle
+                if (filmstripSelection.has(targetIdx)) filmstripSelection.delete(targetIdx);
+                else filmstripSelection.add(targetIdx);
+            } else {
+                // Plain click = jump + clear other selection (standard single-select behavior)
+                filmstripSelection.clear();
+                filmstripSelection.add(targetIdx);
+                // Jump the main lightbox view
+                if (targetIdx !== lightboxIndex && cards[targetIdx]) {
+                    lightboxIndex = targetIdx;
+                    const targetCard = cards[targetIdx];
+                    targetCard._sourceMode = targetCard._sourceMode || 'raw';
+                    lbDisplayLongPx = null; lbPanX = 0; lbPanY = 0;
+                    drawLightbox();
+                    promoteRawAroundCurrent();
+                    prefetchAroundCurrent();
+                    if (targetCard) fetchLargePreviewIfNeeded(targetCard);
+                }
+            }
+            filmstripLastClicked = targetIdx;
+            updateFilmstripSelectionUI();
+        });
+
+        // Double-click always jumps (even in multi-select mode)
+        thumb.addEventListener('dblclick', () => {
+            const targetIdx = Number(thumb.dataset.index);
+            if (cards[targetIdx]) {
+                lightboxIndex = targetIdx;
+                const c = cards[targetIdx];
+                c._sourceMode = c._sourceMode || 'raw';
+                lbDisplayLongPx = null; lbPanX = 0; lbPanY = 0;
+                drawLightbox();
+            }
+        });
+
+        filmstripScroll.appendChild(thumb);
+    });
+
+    // Prime primary highlight
+    updateFilmstripSelectionUI();
+}
+
+function refreshFilmstripPrimary() {
+    // Called from drawLightbox / nextInLightbox so the strip stays in sync
+    if (!filmstripScroll) return;
+    filmstripScroll.querySelectorAll('.filmstrip-thumb').forEach((t, i) => {
+        t.classList.toggle('primary', i === lightboxIndex);
+    });
+}
+
+// Called when look changes while filmstrip multi-select is active
+function applyLookToFilmstripSelection() {
+    if (filmstripSelection.size === 0) return;
+    const look = typeof currentLook === 'function' ? currentLook() : null;
+    if (!look) return;
+
+    const indices = [...filmstripSelection];
+    const taskIds = [];
+    indices.forEach(i => {
+        const c = cards[i];
+        if (c && c._taskId) taskIds.push(c._taskId);
+        // Also update any live state on the card objects themselves (for gallery)
+        if (c) c._pendingLookBatch = { ...look };
+    });
+
+    // Reuse the existing live machinery (best effort)
+    if (typeof pool !== 'undefined' && pool.reprocessAllLive && taskIds.length) {
+        pool.reprocessAllLive(taskIds, look);
+    } else if (typeof scheduleGalleryLiveUpdate === 'function') {
+        // Fallback: will at least update visible gallery thumbs
+        scheduleGalleryLiveUpdate();
+    }
+
+    // On Tauri we also want sidecars written for the selected files
+    if (window.IS_TAURI) {
+        indices.forEach(i => {
+            const c = cards[i];
+            const fname = c?._tauriPath || c?._file?.name;
+            if (fname && typeof window.saveSidecar === 'function') {
+                // saveSidecar reads current global look + the card's crop/subjects
+                window.saveSidecar(fname).catch(() => {});
+            }
+        });
+    }
 }
 
 // Toolbar buttons
@@ -3168,6 +3359,7 @@ async function runOneConfig(paths, cfg, opts) {
                 dem_ms:     t.demosaic_ms   || 0,
                 tone_ms:    t.tone_ms       || 0,
                 enc_ms:     t.encode_ms     || 0,
+                qwait_ms:   result?.queue_wait_ms || 0,
                 jxl_bytes:  result?.jxl?.length || 0,
             };
         } catch (err) {
@@ -3195,6 +3387,7 @@ function reportConfig(r) {
     const dem   = _stats(ok.map(p => p.dem_ms));
     const tone  = _stats(ok.map(p => p.tone_ms));
     const enc   = _stats(ok.map(p => p.enc_ms));
+    const qwait = _stats(ok.map(p => p.qwait_ms));
     const wall  = _stats(ok.map(p => p.wall_ms));
     const sizes = _stats(ok.map(p => p.jxl_bytes / 1024));
 
@@ -3202,6 +3395,7 @@ function reportConfig(r) {
     pushStat(`[bench]   dem   avg ${dem.avg.toFixed(0)}  p50 ${dem.p50}  p95 ${dem.p95}  max ${dem.max} ms`);
     pushStat(`[bench]   tone  avg ${tone.avg.toFixed(0)}  p50 ${tone.p50}  p95 ${tone.p95}  max ${tone.max} ms`);
     pushStat(`[bench]   enc   avg ${enc.avg.toFixed(0)}  p50 ${enc.p50}  p95 ${enc.p95}  max ${enc.max} ms`);
+    pushStat(`[bench]   qwait avg ${qwait.avg.toFixed(0)}  p50 ${qwait.p50}  p95 ${qwait.p95}  max ${qwait.max} ms  (priority promotion effect under C/D)`);
     pushStat(`[bench]   wall  avg ${wall.avg.toFixed(0)}  p50 ${wall.p50.toFixed(0)}  p95 ${wall.p95.toFixed(0)}  max ${wall.max.toFixed(0)} ms`);
     pushStat(`[bench]   size  avg ${sizes.avg.toFixed(0)}  p50 ${sizes.p50.toFixed(0)}  p95 ${sizes.p95.toFixed(0)}  min ${sizes.min.toFixed(0)}  max ${sizes.max.toFixed(0)} KB  total ${(sizes.avg * ok.length / 1024).toFixed(1)} MB`);
 
@@ -3224,7 +3418,7 @@ function reportConfig(r) {
     const slowest = ok.slice().sort((a, b) => b.wall_ms - a.wall_ms).slice(0, 3);
     pushStat('[bench]   slowest 3:');
     for (const p of slowest) {
-        pushStat(`[bench]     ${fname(p.path)}  wall ${p.wall_ms.toFixed(0)} ms  dec ${p.dec_ms} dem ${p.dem_ms} tone ${p.tone_ms} enc ${p.enc_ms}  ${(p.jxl_bytes/1024).toFixed(0)} KB`);
+        pushStat(`[bench]     ${fname(p.path)}  wall ${p.wall_ms.toFixed(0)} ms  dec ${p.dec_ms} dem ${p.dem_ms} tone ${p.tone_ms} enc ${p.enc_ms} qwait ${p.qwait_ms}  ${(p.jxl_bytes/1024).toFixed(0)} KB`);
     }
     pushStat('');
 }

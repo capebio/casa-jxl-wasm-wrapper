@@ -2,6 +2,8 @@ import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createEncoder, createDecoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
+console.log('%c[Preset Benchmark] jxl-preset-benchmark.js loaded — preset/scenario sweep across tiers + sizes', 'color:#f97316;font-weight:600', { page: 'Preset Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
+
 // === IDB ===
 
 const IDB_NAME = 'jxl-preset-bench';
@@ -785,8 +787,15 @@ export async function runSweep(options = {}) {
     sweepAborted = false;
     sweepRows.length = 0;
 
+    // Reset all phase cards and live status for the new run
+    for (let i = 1; i <= 4; i++) updatePhaseStatus(i, 'pending');
+    const liveCurrentEl = document.getElementById('live-current');
+    if (liveCurrentEl) liveCurrentEl.textContent = 'Starting…';
+
     const activeTiers = TIERS.filter(t => tierFilter.includes(t.id));
     const activeScenarios = scenarioFilter.filter(s => SCENARIO_PROFILES[s]);
+
+    console.log('%c[Preset Benchmark] run start', 'color:#f97316;font-weight:600', { t: new Date().toISOString(), tiers: activeTiers.map(t => t.id), scenarios: activeScenarios, sizes: sizeFilter, runsPerConfig });
 
     // Union of sizes required by the chosen scenarios (plus any explicit size filter)
     let scenarioSizes = [];
@@ -1422,7 +1431,8 @@ function buildSweepSettings() {
                 <button id="btn-stop" class="btn-danger" type="button" disabled style="font-size:8px;padding:0 3px;">Stop</button>
                 <button id="btn-load-saved" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Load</button>
                 <button id="btn-export-csv" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">CSV</button>
-                <button id="btn-console" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Log</button>
+                <button id="btn-log" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Log</button>
+                <button id="btn-console-bar" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Console</button>
             </div>
         </div>
     `;
@@ -1541,6 +1551,11 @@ function wireButtons() {
         // or the 10 low-ROI escape-hatch JXL_ENC_FRAME_SETTING_* values). Scripted tools already exercise the RAW side.
         renderPhase2Chart(sweepRows.filter(r => r.phase === 2));
         renderPhase3Chart(sweepRows.filter(r => r.phase === 3));
+    });
+
+    // Console button in the controls bar delegates to the hero panel toggle
+    document.getElementById('btn-console-bar')?.addEventListener('click', () => {
+        document.getElementById('dbg-console-btn')?.click();
     });
 
     document.getElementById('btn-stop')?.addEventListener('click', () => {

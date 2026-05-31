@@ -10,7 +10,7 @@ import { createFilePicker } from './jxl-file-picker.js';
 let _tiledFns = null;
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
-console.log('%c[Crop Benchmark] jxl-crop-benchmark.js loaded — tiled / JXTC region decode benchmark', 'color:#f59e0b;font-weight:600');
+console.log('%c[Crop Benchmark] jxl-crop-benchmark.js loaded — tiled / JXTC region decode benchmark', 'color:#f59e0b;font-weight:600', { page: 'Crop Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
 async function getTiledFns() {
     if (_tiledFns) return _tiledFns;
@@ -159,12 +159,11 @@ const filePicker = createFilePicker({
         if (!orfFiles.length) {
             setStatusFolder('No ORF files in selection');
             btnRun.disabled = true;
-    updateWorkflowState();
+            updateWorkflowState();
             return;
         }
         setStatusFolder(`${orfFiles.length} ORF file${orfFiles.length !== 1 ? 's' : ''} selected`);
         btnRun.disabled = !wasmReady;
-    updateWorkflowState();
         updateWorkflowState();
     }
 });
@@ -175,12 +174,10 @@ filePicker?.loadLastPersisted?.().then(f => {
         if (orfFiles.length) {
             setStatusFolder(`${orfFiles.length} ORF file(s) restored from last session`);
             btnRun.disabled = !wasmReady;
-    updateWorkflowState();
             updateWorkflowState();
         }
     }
-});
-});
+}).catch(() => {});
 
 // --- WASM encode/decode ---
 
@@ -410,6 +407,7 @@ async function runBenchmark() {
     const sizes       = getSelectedSizes();
 
     if (!sizes.length) { setStatusProgress('No crop sizes selected.'); endRun(); return; }
+    console.log('%c[Crop Benchmark] run start', 'color:#f59e0b;font-weight:600', { t: new Date().toISOString(), fileCount, effort, distance, tileSize, sizes, compareFull });
 
     const files = shuffled(orfFiles).slice(0, fileCount);
     setStatusProgress(`0 / ${files.length}`);

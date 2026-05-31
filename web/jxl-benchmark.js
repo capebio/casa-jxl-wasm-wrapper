@@ -11,7 +11,7 @@ import {
 import { createFilePicker } from './jxl-file-picker.js';
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
-console.log('%c[Benchmark] jxl-benchmark.js loaded — JXL Benchmark page (performance batch runs)', 'color:#3b82f6;font-weight:600');
+console.log('%c[Benchmark] jxl-benchmark.js loaded — JXL Benchmark page (performance batch runs)', 'color:#3b82f6;font-weight:600', { page: 'Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 
@@ -710,6 +710,12 @@ async function loadRandomImages() {
 
     try {
         for (let i = 0; i < maxFiles; i++) {
+            const tentativeName = `random-${i}.orf`;
+            setFileStatus(formatLoadFileStatus({
+                currentIndex: i + 1,
+                totalCount: maxFiles,
+                fileName: tentativeName,
+            }));
             try {
                 const fetchStart = performance.now();
                 const resp = await fetch('/api/random-gobabeb');
@@ -722,8 +728,14 @@ async function loadRandomImages() {
                     break;
                 }
                 const arrayBuffer = await resp.arrayBuffer();
-                const fileName = resp.headers.get('X-File-Name') || `random-${i}.orf`;
+                const fileName = resp.headers.get('X-File-Name') || tentativeName;
                 const fileSizeKB = (arrayBuffer.byteLength / 1024).toFixed(1);
+
+                setFileStatus(formatLoadFileStatus({
+                    currentIndex: i + 1,
+                    totalCount: maxFiles,
+                    fileName,
+                }));
 
                 const processStart = performance.now();
                 const rgba = await processImageFile({ name: fileName, type: 'application/octet-stream' }, arrayBuffer);
@@ -731,6 +743,11 @@ async function loadRandomImages() {
 
                 if (rgba) {
                     selectedSources.push({ file: fileName, ...rgba });
+                    updateSelectionStatus();
+                    setProgress(formatLoadProgress({
+                        loadedCount: selectedSources.length,
+                        totalCount: maxFiles,
+                    }));
                     dbgLog(`✓ ${fileName}`, `${rgba.width}×${rgba.height} | fetch ${fetchMs.toFixed(1)}ms + decode ${processMs.toFixed(1)}ms | ${fileSizeKB} KB`);
                 } else {
                     lastError = `Processing failed for ${fileName}`;
@@ -1006,6 +1023,7 @@ async function runBenchmark() {
     const selectedSizes = getSelectedSizes();
     const selectedQualities = getSelectedQualities();
     const selectedEfforts = getSelectedEfforts();
+    console.log('%c[Benchmark] run start', 'color:#3b82f6;font-weight:600', { t: new Date().toISOString(), sources: selectedSources.map(s => s.name ?? s.label ?? '?'), iterations, sizes: selectedSizes, qualities: selectedQualities, efforts: selectedEfforts });
 
     benchmarkResults = {
         decodeMs: new Map(),

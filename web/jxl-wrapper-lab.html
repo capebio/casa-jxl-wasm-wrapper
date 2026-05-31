@@ -35,6 +35,7 @@
             <a class="home-bar-link is-active" href="./jxl-wrapper-lab.html" aria-current="page">Wrapper lab</a>
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
@@ -376,8 +377,8 @@
         </section>
 
         <section class="ops-frame">
+            <input id="source-input" type="file" multiple accept=".orf,.ORF,.cr2,.CR2,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
             <label class="file-drop" for="source-input" id="source-drop">
-                <input id="source-input" type="file" multiple accept=".orf,.ORF,.cr2,.CR2,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
                 <strong>Pick files</strong>
                 <span>ORF, JPEG, PNG, TIFF, JXL</span>
             </label>
@@ -393,14 +394,39 @@
                         <button class="mode-btn is-active" type="button" data-mode="race" aria-pressed="true">Drag Race</button>
                         <button class="mode-btn" type="button" data-mode="existing" aria-pressed="false">Session worker</button>
                         <button class="mode-btn" type="button" data-mode="wrapper" aria-pressed="false">Direct wrapper</button>
+                        <button id="dbg-console-btn" class="secondary-btn console-btn" type="button" style="padding-left:6px;padding-right:6px;">Console</button>
                         <button class="info-btn" type="button" data-help-target="wl-modes" aria-label="Mode info" style="margin-left:4px;">i</button>
-                        <button id="dbg-console-btn" class="secondary-btn console-btn" type="button">Console</button>
                     </div>
                     <div class="help-popover" data-help-popover="wl-modes" hidden>
                         <strong>Drag Race</strong> — Encodes the same image with JXL, WebP, and JPEG at matched quality, then races decodes side by side. Good for format comparison.<br><br>
                         <strong>Session worker</strong> — Routes requests through the full browser pipeline (context → scheduler → worker messaging → codec). Measures realistic production latency including orchestration overhead.<br><br>
                         <strong>Direct wrapper</strong> — Calls the WASM facade directly, bypassing all scheduling. Isolates pure codec speed with no orchestration cost. The delta between this and Session worker reveals pipeline overhead.
                     </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Status line moved up per request: directly beneath the Pick files / ops frame -->
+        <section class="status-grid compact" aria-label="Batch status">
+            <div class="status-card">
+                <span class="label">Selection</span>
+                <strong id="selection-status">No files.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Batch</span>
+                <strong id="batch-status">Idle.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Timing</span>
+                <strong id="timing-status">Ready.</strong>
+            </div>
+            <div class="status-card">
+                <span class="label">Metrics</span>
+                <div class="mini-metrics">
+                    L:<span id="loaded-count">0</span>
+                    Q:<span id="queued-count">0</span>
+                    D:<span id="done-count">0</span>
+                    E:<span id="error-count">0</span>
                 </div>
             </div>
         </section>
@@ -431,31 +457,6 @@
                 </div>
                 <div id="previous-runs" class="previous-runs">
                     <!-- Progress bars for previous runs -->
-                </div>
-            </div>
-        </section>
-
-
-        <section class="status-grid compact" aria-label="Batch status">
-            <div class="status-card">
-                <span class="label">Selection</span>
-                <strong id="selection-status">No files.</strong>
-            </div>
-            <div class="status-card">
-                <span class="label">Batch</span>
-                <strong id="batch-status">Idle.</strong>
-            </div>
-            <div class="status-card">
-                <span class="label">Timing</span>
-                <strong id="timing-status">Ready.</strong>
-            </div>
-            <div class="status-card">
-                <span class="label">Metrics</span>
-                <div class="mini-metrics">
-                    L:<span id="loaded-count">0</span>
-                    Q:<span id="queued-count">0</span>
-                    D:<span id="done-count">0</span>
-                    E:<span id="error-count">0</span>
                 </div>
             </div>
         </section>

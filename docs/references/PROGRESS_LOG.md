@@ -106,6 +106,8 @@ Use the template below for every entry.
 
 **Handoff followed:** HANDOFF_B5_InFlight_RAW_Decode_Preemption.md (first slice + all "Do Not Touch" rules respected).
 
+**Light follow-up (2026-05-30, fix/hdr-metadata-parity):** Added `queue_wait_ms` capture in `process_file` (surfaced on `ProcessResult`), revived + used in `bin/lightbox_bench.rs` (new `qwait=` column in report), and `scheduler_queue_wait_ms` metric emission from jxl-scheduler (via existing onMetric path) for cross-side parity when measuring priority promotion effects under load.
+
 ---
 
 ## FEATURE_PARITY_MATRIX Full Cleanup — All 🟡/❌ Resolved to ✅/N/A — 2026-06

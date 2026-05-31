@@ -477,7 +477,7 @@ body:not([data-mode="race"]) .race-container {
     box-shadow: var(--shadow);
     backdrop-filter: blur(12px);
     display: flex;
-    gap: 16px;
+    gap: 8px;
     align-items: flex-start;
     flex-wrap: wrap;
 }
@@ -486,7 +486,7 @@ body:not([data-mode="race"]) .race-container {
     flex: 1 1 320px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
 }
 
 .ops-status-grid {
@@ -507,24 +507,25 @@ body:not([data-mode="race"]) .race-container {
 
 /* Mode frame */
 .mode-frame {
-    margin-top: 12px;
-    padding: 12px 16px;
+    margin-top: 4px;
+    padding: 6px 10px;
     border: 1px solid var(--line);
-    border-radius: 20px;
+    border-radius: 16px;
     background: var(--panel);
     box-shadow: var(--shadow);
     backdrop-filter: blur(12px);
     display: flex;
-    gap: 12px;
+    gap: 8px;
     align-items: center;
     flex-wrap: wrap;
 }
 
 .mode-switch {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
+    display: flex;
+    gap: 4px;
     flex: 1 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
 }
 
 /* dashboard-toggle uses dark bg; --text is light-theme dark — force white text */
@@ -538,7 +539,7 @@ body:not([data-mode="race"]) .race-container {
 .page-link {
     border: 1px solid var(--line);
     border-radius: 12px;
-    padding: 7px 11px;
+    padding: 5px 7px;
     font: inherit;
     font-size: 12px;
     color: #17181b;
@@ -568,6 +569,13 @@ body:not([data-mode="race"]) .race-container {
     border-color: #0f766e;
     color: #ffffff;
     font-weight: 700;
+}
+
+/* Tighter Console button when placed inline next to Direct wrapper */
+.console-btn {
+    padding: 4px 6px !important;
+    font-size: 11px;
+    border-radius: 10px;
 }
 
 .control-band {

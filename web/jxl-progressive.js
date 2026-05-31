@@ -14,7 +14,7 @@ import {
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
-console.log('%c[Progressive] jxl-progressive.js loaded — progressive decode / paint / gallery experiments', 'color:#8b5cf6;font-weight:600');
+console.log('%c[Progressive] jxl-progressive.js loaded — progressive decode / paint / gallery experiments', 'color:#8b5cf6;font-weight:600', { page: 'Progressive', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
 const runBtn = document.getElementById('run-btn');
 const replayBtn = document.getElementById('replay-btn');
@@ -1288,6 +1288,7 @@ async function runThumbBench() {
     const sizes = [...thumbBenchSizes].sort((a, b) => a - b);
     const encodeBackend = session.encodeBackend;
     const decodeBackend = session.decodeBackend;
+    console.log('%c[Progressive] run start', 'color:#8b5cf6;font-weight:600', { t: new Date().toISOString(), sizes, encodeBackend, decodeBackend, progressive: thumbBenchProgressive, detail: thumbBenchProgressiveDetail, concurrency: thumbBenchConcurrency });
     if (!sizes.length) {
         setThumbBenchSize(300, true);
         setThumbBenchSize(800, true);

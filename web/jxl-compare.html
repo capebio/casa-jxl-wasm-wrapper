@@ -35,6 +35,7 @@
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
             <a class="home-bar-link is-active" href="./jxl-compare.html" aria-current="page">Format race</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Settings explorer</a>
+            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
@@ -54,8 +55,8 @@
             <div class="compare-controls-row">
                 <button id="run-btn" class="run-btn" type="button">Load &amp; run race</button>
                 <button id="reset-btn" class="ghost-btn" type="button">New source</button>
-                <button id="dbg-console-btn" class="ghost-btn" type="button" title="Show pipeline debug console" style="margin-left:auto;">Console</button>
-                <span id="random-hint" style="font-size:10px;opacity:0.6;margin-left:8px;">(Random uses private data; falls back to file picker if unavailable)</span>
+                <button id="dbg-console-btn" class="ghost-btn" type="button" title="Show pipeline debug console">Console</button>
+                <span id="random-hint" style="font-size:10px;opacity:0.6;margin-left:auto;">(Random uses private data; falls back to file picker if unavailable)</span>
             </div>
 
             <div class="compare-option-group">
@@ -64,8 +65,8 @@
                     <button class="info-btn" type="button" data-help-target="cmp-quality" aria-label="Quality tier info">i</button>
                 </span>
                 <div class="compare-radio-row">
-                    <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="high" checked /> High &nbsp;&nbsp;<span class="tier-hint">JXL q=90 · JPEG q=90 · WebP q=90</span></label>
-                    <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="medium" /> Medium <span class="tier-hint">JXL q=80 · JPEG q=80 · WebP q=80</span></label>
+                    <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="high" /> High &nbsp;&nbsp;<span class="tier-hint">JXL q=90 · JPEG q=90 · WebP q=90</span></label>
+                    <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="medium" checked /> Medium <span class="tier-hint">JXL q=80 · JPEG q=80 · WebP q=80</span></label>
                     <label class="compare-radio-btn"><input type="radio" name="quality-tier" value="low" /> Low &nbsp;&nbsp;&nbsp;<span class="tier-hint">JXL q=70 · JPEG q=70 · WebP q=70</span></label>
                 </div>
                 <div class="help-popover" data-help-popover="cmp-quality" hidden>
@@ -95,7 +96,7 @@
                 </span>
                 <div class="compare-radio-row">
                     <label class="compare-check-btn"><input type="checkbox" class="size-check" value="300" checked /> 300 long — thumbnail</label>
-                    <label class="compare-check-btn"><input type="checkbox" class="size-check" value="800" checked /> 800 long — gallery card</label>
+                    <label class="compare-check-btn"><input type="checkbox" class="size-check" value="800" /> 800 long — gallery card</label>
                     <label class="compare-check-btn"><input type="checkbox" class="size-check" value="1920" /> 1920 long — display</label>
                     <label class="compare-check-btn"><input type="checkbox" class="size-check" value="full" /> Full size — archive</label>
                 </div>

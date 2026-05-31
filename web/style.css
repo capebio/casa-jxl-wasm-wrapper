@@ -1072,6 +1072,96 @@ main { padding: 24px 32px 64px; }
     opacity: 1;
     pointer-events: auto;
 }
+
+/* ===== Filmstrip (Phase 1) — bottom thumbnail bar for navigation + multi-select ===== */
+.lightbox-filmstrip {
+    width: 100%;
+    max-width: 100vw;
+    height: 78px;
+    background: linear-gradient(to top, rgba(0,0,0,0.88), rgba(0,0,0,0.6));
+    border-top: 1px solid rgba(255,255,255,0.08);
+    z-index: 110;
+    display: flex;
+    flex-direction: column;
+    padding: 4px 8px 6px;
+    gap: 4px;
+    flex-shrink: 0;
+    margin-top: auto; /* works inside the lightbox column flex */
+}
+
+.lightbox-filmstrip .filmstrip-scroll {
+    flex: 1;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 4px;
+    scrollbar-width: thin;
+}
+
+.lightbox-filmstrip .filmstrip-scroll::-webkit-scrollbar {
+    height: 4px;
+}
+
+.lightbox-filmstrip .filmstrip-thumb {
+    width: 58px;
+    height: 58px;
+    flex: 0 0 58px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #111;
+    border: 2px solid transparent;
+    cursor: pointer;
+    position: relative;
+    transition: border-color 80ms, transform 80ms;
+}
+
+.lightbox-filmstrip .filmstrip-thumb img,
+.lightbox-filmstrip .filmstrip-thumb canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.lightbox-filmstrip .filmstrip-thumb.selected {
+    border-color: #7dd3fc;
+    box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.5);
+}
+
+.lightbox-filmstrip .filmstrip-thumb.primary {
+    border-color: #f472b6;
+    box-shadow: 0 0 0 1px rgba(244, 114, 182, 0.6);
+}
+
+.lightbox-filmstrip .filmstrip-thumb .sel-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    background: #7dd3fc;
+    color: #000;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 0 4px;
+    border-radius: 3px;
+    line-height: 1.1;
+}
+
+.lightbox-filmstrip .filmstrip-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 4px;
+}
+
+.lightbox-filmstrip .filmstrip-actions .lb-btn {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 11px;
+    border-radius: 999px;
+    width: auto;
+}
 .lb-btn {
     background: rgba(255, 255, 255, 0.12);
     border: none;

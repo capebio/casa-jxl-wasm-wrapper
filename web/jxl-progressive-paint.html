@@ -35,6 +35,7 @@
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
             <a class="home-bar-link is-active" href="./jxl-progressive-paint.html" aria-current="page">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
@@ -43,23 +44,16 @@
     </nav>
 
     <main class="shell">
-        <section class="hero compact hero-with-picker">
+        <section class="hero compact">
             <div class="hero-copy">
                 <p class="eyebrow">JXL Progressive Paint &middot; <span id="mode-status">Per-pass timing and visual quality</span></p>
-                <h1>Progressive paint test</h1>
-            </div>
-            <label class="file-drop file-drop-compact" for="source-input" id="source-drop">
-                <input id="source-input" type="file" accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
-                <strong>Pick file</strong>
-                <span>ORF, JPEG, PNG, TIFF, JXL</span>
-            </label>
-        </section>
-
-        <section class="control-band compact">
-            <div class="source-panel">
-                <div class="control-row">
-                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
-                    <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
+                <h1>
+                    Progressive paint test
+                    <button class="info-btn" type="button" data-help-target="pp-hero" aria-label="About this test page">i</button>
+                </h1>
+                <div class="help-popover" data-help-popover="pp-hero" hidden>
+                    <p>Encodes the loaded image as a progressive JXL, then decodes it pass-by-pass while measuring real wall time for each refinement stage.</p>
+                    <p><strong>Pass 1 / Pass 2 / Pass 3</strong> viewers (labelled by the actual pass pinned to each). The strip below shows every emitted pass when &gt;1 — click any to pin it. Export the resulting JXL via the controls below.</p>
                 </div>
             </div>
         </section>
@@ -71,8 +65,10 @@
             </header>
 
             <div class="progressive-controls">
-                <button id="run-progressive" class="primary-btn" type="button" disabled title="Load a file first">Run progressive paint</button>
+                <!-- hidden input kept for the unified picker -->
+                <input id="source-input" type="file" accept=".orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*" hidden />
 
+                <!-- 1. Parameters (first, always visible) -->
                 <div class="prog-option-group">
                     <span class="prog-setting-label" style="display:inline-flex;align-items:center;gap:4px;">
                         Size:
@@ -151,28 +147,56 @@
                     </div>
                 </div>
 
-                <span class="prog-status" id="prog-status">Load a file to begin.</span>
+                <!-- 2. File choice (after parameters) -->
+                <div class="source-actions" style="margin: 8px 0 4px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <button id="pick-file-btn" class="secondary-btn" type="button">Pick file</button>
+                    <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
+                    <span id="current-source" style="font-size:12px; color:var(--muted); font-family:monospace;"></span>
+                </div>
+
+                <!-- 3. Run (on its own line, enabled only when file present) -->
+                <button id="run-progressive" class="primary-btn" type="button" disabled title="Choose parameters then load a file first" style="margin: 4px 0 8px;">Run Progressive Paint</button>
+
+                <span class="prog-status" id="prog-status">Choose parameters, load a file (Pick or Random), then Run.</span>
+
+                <!-- 4+5. Console then Export -->
+                <div class="console-export-row" style="margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12px;">
+                    <button id="dbg-console-btn" class="secondary-btn" type="button" style="padding:2px 8px;">Console</button>
+                    <span style="color:var(--muted);">Export to:</span>
+                    <button id="export-gallery-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled>Progressive gallery</button>
+                    <button id="export-folder-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled>Folder…</button>
+
+                    <span style="color:var(--muted); margin-left:10px;">Measurements:</span>
+                    <button id="export-csv-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled title="Export all runs as CSV (good for spreadsheets / pandas)">CSV</button>
+                    <button id="export-json-btn" class="secondary-btn" type="button" style="padding:2px 8px;" disabled title="Export all runs as JSON (structured, for scripts/notebooks)">JSON</button>
+                    <button id="clear-measurements-btn" class="dbg-bar-action" type="button" style="padding:2px 6px; font-size:11px;" title="Clear measurement history">Clear</button>
+                </div>
             </div>
 
-            <p class="panel-note">Click pass tiles to pin them into the large compare slots above.</p>
+            <p class="panel-note">
+                Click pass tiles to pin them into the large compare slots above.
+                <button id="zoom-btn" class="secondary-btn zoom-btn" type="button" title="Arm wheel zoom + pan (drag) over the three big viewers. Provides identical reticule across all Pass viewers.">Zoom</button>
+                <span id="zoom-readout" class="zoom-readout">1.00×</span>
+                <button id="zoom-reset" class="secondary-btn zoom-btn" type="button" title="Cycle view: Fit → 100% (actual pixels, crisp) → 400%">Fit</button>
+            </p>
 
             <div class="viewport-trio" id="viewport-trio">
                 <div class="viewport-item">
-                    <div class="viewport-label" id="vp-overview-label">Compare A</div>
+                    <div class="viewport-label" id="vp-overview-label">Pass 1</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-overview" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
                     <div class="viewport-info" id="vp-overview-info">Waiting for pass.</div>
                 </div>
                 <div class="viewport-item">
-                    <div class="viewport-label" id="vp-pixel-label">Compare B</div>
+                    <div class="viewport-label" id="vp-pixel-label">Pass 2</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-pixel" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
                     <div class="viewport-info" id="vp-pixel-info">Waiting for pass.</div>
                 </div>
                 <div class="viewport-item">
-                    <div class="viewport-label" id="vp-zoom-label">Compare C</div>
+                    <div class="viewport-label" id="vp-zoom-label">Pass 3</div>
                     <div class="viewport-canvas-wrap">
                         <canvas id="vp-zoom" width="480" height="300" class="viewport-canvas"></canvas>
                     </div>
@@ -197,6 +221,11 @@
                         <tr><td colspan="5" class="empty-state">Run progressive paint to populate.</td></tr>
                     </tbody>
                 </table>
+
+                <div id="run-status-line" class="run-status-line" hidden>
+                    <span id="run-done-summary"></span>
+                    <span id="run-live-status" class="run-live-status"></span>
+                </div>
             </div>
         </section>
     </main>

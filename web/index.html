@@ -423,6 +423,21 @@
             </div>
         </div>
         <div class="lightbox-info"></div>
+
+        <!-- Filmstrip: bottom thumbnail row for navigation + multi-select (Phase 1) -->
+        <div id="lightbox-filmstrip" class="lightbox-filmstrip" hidden>
+            <div class="filmstrip-scroll" id="filmstrip-scroll">
+                <!-- Populated dynamically by main.js: thumbnails + selection state -->
+            </div>
+            <div class="filmstrip-actions" id="filmstrip-actions" hidden>
+                <button id="filmstrip-apply-selection" class="lb-btn" type="button">
+                    Apply look to <span id="filmstrip-selection-count">0</span> selected
+                </button>
+                <button id="filmstrip-export-selection" class="lb-btn ghost" type="button" title="Export selected with current look + their crops (future)">
+                    Export selected
+                </button>
+            </div>
+        </div>
     </div>
 
     <script type="module" src="./main.js"></script>

@@ -3,15 +3,72 @@
   "libjxlCommit": "332feb17d17311c748445f7ee75c4fb55cc38530",
   "emscriptenTag": "4.0.13",
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
-  "emsdkImage": null,
-  "buildMode": "host-toolchain",
-  "generatedAt": "2026-05-30T12:00:12.595Z",
+  "emsdkImage": "docker.io/emscripten/emsdk:4.0.13",
+  "buildMode": "docker",
+  "generatedAt": "2026-05-30T19:36:38.011Z",
   "tiers": {
+    "relaxed-simd-mt": {
+      "jsBytes": 29634,
+      "wasmBytes": 2920400,
+      "jsSha256": "6d2cfe50b956dfe8a4e50a7eb89aee393578d560270dc7c89aa98d1eaf7a2a36",
+      "wasmSha256": "80188d0a97033a5ce41b33703ad96cbc9a373c611be4466a63cf26d8e72aee92",
+      "flags": [
+        "-O3",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=67108864",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+        "-sWASM_BIGINT=1",
+        "-flto",
+        "-fno-rtti",
+        "-fno-exceptions",
+        "-pthread",
+        "-sUSE_PTHREADS=1",
+        "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency",
+        "-msimd128",
+        "-mrelaxed-simd"
+      ]
+    },
+    "simd-mt": {
+      "jsBytes": 29610,
+      "wasmBytes": 2920400,
+      "jsSha256": "d213369a1b97aee1d0247cdb393196d7bcc8673985532332ab4011851ee66189",
+      "wasmSha256": "80188d0a97033a5ce41b33703ad96cbc9a373c611be4466a63cf26d8e72aee92",
+      "flags": [
+        "-O3",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=67108864",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+        "-sWASM_BIGINT=1",
+        "-flto",
+        "-fno-rtti",
+        "-fno-exceptions",
+        "-pthread",
+        "-sUSE_PTHREADS=1",
+        "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency",
+        "-msimd128"
+      ]
+    },
     "simd": {
-      "jsBytes": 17839,
-      "wasmBytes": 2858919,
-      "jsSha256": "e6290797bc414ad2a235bb9699fcc1d8b5aafdcc13d0649587c696e43cb8a319",
-      "wasmSha256": "554ec0ca3c82d062d62648243c055d140543bd0795d77065415b828ea3bb5d38",
+      "jsBytes": 17837,
+      "wasmBytes": 2859238,
+      "jsSha256": "3fbc117d60134d0d2e3a98c648b4aa47ce652878e7ee04b5f1e52ef1c422b87f",
+      "wasmSha256": "31cc9e3472523e75f996f23183da5959f025d8a5a580dce6e4a7b4131f7819e2",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -33,10 +90,10 @@
       ]
     },
     "scalar": {
-      "jsBytes": 17843,
-      "wasmBytes": 2646249,
-      "jsSha256": "fc84b450b6c9b1a8ef8a6dfc59e29e67c9bdfcdb13509f482bcd26f0ffa6f8f6",
-      "wasmSha256": "b31c7cf0f1e53a9be5396aca535925423c9c4d1d9717662d2ee447be6a0b23d2",
+      "jsBytes": 17841,
+      "wasmBytes": 2646568,
+      "jsSha256": "b22a404326db8d8237ab9afbbdb985e1839c6266c5b6957c00ed76d92ee685e9",
+      "wasmSha256": "02c24a402776735b25f83792a607328fb2e68e7765de03376b2206cb1d4d66d3",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -57,8 +114,5 @@
       ]
     }
   },
-  "skippedTiers": [
-    "relaxed-simd-mt",
-    "simd-mt"
-  ]
+  "skippedTiers": []
 }

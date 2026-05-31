@@ -168,13 +168,19 @@ export function createFilePicker({
       handleFileList(e.dataTransfer.files);
     });
 
-    // Make the drop zone also trigger the input on click (common pattern)
-    dropZone.addEventListener('click', (e) => {
-      // Only trigger if the click wasn't on the input itself
-      if (e.target !== input) {
-        input.click();
-      }
-    });
+    // Make the drop zone trigger the input on click.
+    // BUT: if the dropZone is a <label for="theInput">, the browser already opens
+    // the dialog natively. Calling input.click() again causes the "opens straight back"
+    // symptom the user reported. Detect and skip the synthetic click in that case.
+    const isNativeLabel = dropZone.tagName === 'LABEL' &&
+                          dropZone.getAttribute('for') === input.id;
+    if (!isNativeLabel) {
+      dropZone.addEventListener('click', (e) => {
+        if (e.target !== input) {
+          input.click();
+        }
+      });
+    }
   }
 
   // Public API

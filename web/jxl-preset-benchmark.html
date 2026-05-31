@@ -35,11 +35,11 @@
             <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
             <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
             <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
             <a class="home-bar-link is-active" href="./jxl-preset-benchmark.html" aria-current="page">Preset benchmark</a>
-            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
         </div>
     </nav>
 
@@ -83,15 +83,16 @@
             <div id="raw-isolation-results" style="font-size:8px;line-height:1.1;"></div>
         </section>
 
-        <section id="sweep-settings">
-            <h2 style="font-size:10px;margin:2px 0 4px;">3. Settings</h2>
-            <div id="sweep-settings-body"></div>
-        </section>
-
-        <section id="phase-progress">
-            <h2 style="font-size:10px;margin:2px 0 4px;">4. Progress</h2>
-            <div class="phase-cards" id="phase-cards"></div>
-            <div class="live-status" id="live-status" aria-live="polite" aria-atomic="false"></div>
+        <section id="run-control">
+            <div id="sweep-settings-pane">
+                <h2 style="font-size:10px;margin:2px 0 4px;">3. Settings</h2>
+                <div id="sweep-settings-body"></div>
+            </div>
+            <div id="progress-pane">
+                <h2 style="font-size:10px;margin:2px 0 4px;">4. Progress</h2>
+                <div class="phase-cards" id="phase-cards"></div>
+                <div class="live-status" id="live-status" aria-live="polite" aria-atomic="false"></div>
+            </div>
         </section>
 
         <section id="phase-graphs">
