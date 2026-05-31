@@ -1439,3 +1439,36 @@ Full rigorous implementation of `jpeg-recompression-polish.md`. Delivered first-
 
 ---
 
+## Feature: Preset Benchmark RAW Isolation Hygiene (P4 from Owl handoff) — 2026-05-31
+
+**Branch:** `epiccodereview/20260531T005354Z`
+
+**Status:** P4 complete (very low effort hygiene slice)
+
+**Scope:** Final explicit item from the Owl strategic review of `jxl-preset-benchmark.html`. Three narrow fidelity fixes in the RAW isolation measurement path:
+- Proper feature gating for `bench_decode_orf` (instead of relying on try/catch).
+- Reduce measurement surface variance (3 runs → 5 runs + median).
+- Remove dead unused `async function median(fn, n)` helper.
+
+**Key Changes (all surgical, one file):**
+- `web/jxl-preset-benchmark.js`:
+  - `runRawIsolation()` (~502-525): Added explicit `typeof rawWasm?.bench_decode_orf === 'function'` guard. On absence, now stores a clean `{ error: '...' }` object instead of throwing into the catch path. Also updated the 3-run block to 5 runs with explanatory comment for better stability.
+  - Removed the completely unused `async function median(fn, n)` (was defined at ~752 but had zero callers). Left a short comment noting that the active helper is `_medianOf` (still used by sweep aggregation).
+
+**Why these three items mattered:**
+- The page is the designated browser surface for RAW costing in realistic use-cases (FEATURE_PARITY_MATRIX §1 rows 1/2/4). Measurements must be defensively gated and reasonably stable.
+- The dead helper was pure noise.
+
+**Docs Updated:**
+- `docs/FEATURE_PARITY_MATRIX.md` (Benchmark Exposure column on the `bench_decode_orf` row).
+- `docs/references/PROGRESS_LOG.md` (this entry).
+- (Prior) Owl handoff + P1/P2 tracking.
+
+**Verification:** `node --check web/jxl-preset-benchmark.js` (clean). Targeted reads + `git diff` of the three narrow hunks. check-work subagent run (narrow scope on the three hygiene items). Functional changes correct; one process note on tracking (addressed in this entry).
+
+**Handoff followed:** `docs/references/historical/PRESET_BENCHMARK_OWL_STRATEGIC_HANDOFF_2026-05-31.md` (P4 as the final low-effort hygiene item after P1/P2; todos; tracking on landing; check-work required).
+
+**Owl workstream status:** P1, P2, and P4 complete. P3 (engine extraction to option-matrix-engine.mjs) remains explicitly deferred per original review.
+
+---
+

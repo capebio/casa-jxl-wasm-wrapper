@@ -26,6 +26,7 @@ bun-persistent-*/
 # Agent / review / automation worktrees and scratch
 .claude/worktrees/
 .epiccodereview/
+docs/superpowers/          # planning artifacts from superpowers/ skill (ephemeral; see docs/references/historical/)
 
 # OS / editor noise
 .DS_Store
