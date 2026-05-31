@@ -48,8 +48,8 @@
             <div class="hero-copy">
                 <p class="eyebrow">Use-Case Optimization Sweep</p>
                 <h1 style="font-size:1.1rem; margin:2px 0;">Preset + RAW sweeps for real situations</h1>
-                <p style="font-size:9px; opacity:0.85; margin:1px 0 3px; max-width:680px; font-style:italic;">This page exists to derive optimal JXL presets for real use-cases (thumb/gallery/massive) by sweeping encoder controls against per-file RAW costs (bench_decode_orf + LookRenderer) and emitting citable scenario-weighted recommendations.</p>
-                <div style="font-size:10px; opacity:0.7; line-height:1.25; max-width:680px;">
+                <p style="font-size:10px; opacity:0.85; margin:2px 0 4px; max-width:680px; font-style:italic;">This page exists to derive optimal JXL presets for real use-cases (thumb/gallery/massive) by sweeping encoder controls against per-file RAW costs (bench_decode_orf + LookRenderer) and emitting citable scenario-weighted recommendations.</p>
+                <div style="font-size:10.5px; opacity:0.75; line-height:1.3; max-width:680px;">
                     Load files → Measure RAW (once) → Run sweep → Get recommended settings per use-case (thumbs, gallery, 80MP+, etc). RAW costs now factor into scoring.
                     <a href="#" onclick="document.getElementById('matrix-details').open=true; return false;" style="font-size:10px;color:#7dd3fc;">[controls matrix]</a>
                 </div>
@@ -64,14 +64,14 @@
                 </details>
             </div>
             <div class="hero-actions">
-                <button id="dbg-console-btn" class="secondary-btn" type="button" style="font-size:10px;padding:1px 6px;">Console</button>
+                <button id="dbg-console-btn" class="secondary-btn" type="button" style="font-size:11px;padding:2px 8px;">Console</button>
             </div>
         </section>
 
         <section id="file-intake">
             <h2 style="font-size:12px;margin:6px 0 10px; font-weight:600;">1. Load Files</h2>
             <div id="file-slots" class="file-slots"></div>
-            <div id="file-workflow-hint" style="font-size:9px;opacity:0.5;margin-top:1px;">After loading → go to step 2 (RAW measurement)</div>
+            <div id="file-workflow-hint" style="font-size:10px;opacity:0.6;margin-top:3px;">After loading → go to step 2 (RAW measurement)</div>
         </section>
 
         <section id="raw-isolation" style="margin:4px 0;">
@@ -82,7 +82,7 @@
                 <button id="btn-raw-isolation-copy" class="ghost-btn" type="button" style="font-size:9px;padding:0 2px;" disabled>Copy</button>
                 <span id="raw-isolation-status" style="font-size:9px;opacity:0.55;"></span>
             </div>
-            <div id="raw-isolation-results" style="font-size:9px;line-height:1.1;"></div>
+            <div id="raw-isolation-results" style="font-size:9px;line-height:1.25; background:rgba(0,0,0,0.25); padding:6px 8px; border-radius:6px; margin-top:4px;"></div>
         </section>
 
         <section id="run-control">
