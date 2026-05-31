@@ -70,7 +70,7 @@
                     <button id="save-settings" class="ghost-btn" type="button">Save settings</button>
                     <label class="upload-settings">
                         <input id="load-settings-input" type="file" accept=".json,.txt" hidden />
-                        <span class="ghost-btn" style="cursor: pointer;">Load settings</span>
+                        <span class="ghost-btn" style="cursor: pointer; font-size:11px;">Load settings</span>
                     </label>
                 </div>
 
@@ -96,7 +96,7 @@
                                 Source files to include in each benchmark run. More files broaden coverage across image content (fine detail, flat areas, high noise) and reduce the impact of any single outlier on averages.
                             </div>
                         </div>
-                        <button id="optimize-btn" class="secondary-btn" type="button" disabled title="Load files first, then optimize codec toggles for this device">Optimize</button>
+                        <button id="optimize-btn" class="secondary-btn" type="button" disabled title="Load files first, then auto-optimize codec settings for this device">Optimize</button>
                         <button id="save-full-btn" class="secondary-btn" type="button" disabled title="Save all fullsize encoded JXL files to a folder">Save full files</button>
                     </div>
 
@@ -307,7 +307,7 @@
         <section class="status-grid compact" aria-label="Benchmark status">
             <div class="status-card">
                 <span class="label">Selection</span>
-                <strong id="selection-status">No files.</strong>
+                <strong id="selection-status">No files loaded.</strong>
             </div>
             <div class="status-card">
                 <span class="label">Progress</span>
@@ -411,7 +411,7 @@
                     </thead>
                     <tbody id="encode-summary-body">
                         <tr>
-                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                            <td colspan="5" class="empty-state">Run benchmark to see per-size encode/decode timings and file sizes.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -430,7 +430,7 @@
                     </thead>
                     <tbody id="decode-summary-body">
                         <tr>
-                            <td colspan="5" class="empty-state">Run benchmark to populate results.</td>
+                            <td colspan="5" class="empty-state">Run benchmark to see per-size encode/decode timings and file sizes.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -438,13 +438,13 @@
 
             <div id="encode-detail" class="results-panel">
                 <div id="encode-detail-body" class="detail-container">
-                    <div class="empty-state">Run benchmark to populate results.</div>
+                    <div class="empty-state">Run benchmark to see detailed timing breakdown across sizes.</div>
                 </div>
             </div>
 
             <div id="decode-detail" class="results-panel">
                 <div id="decode-detail-body" class="detail-container">
-                    <div class="empty-state">Run benchmark to populate results.</div>
+                    <div class="empty-state">Run benchmark to see detailed timing breakdown across sizes.</div>
                 </div>
             </div>
 
@@ -459,7 +459,7 @@
                     </thead>
                     <tbody id="file-size-body">
                         <tr>
-                            <td colspan="3" class="empty-state">Run benchmark to populate results.</td>
+                            <td colspan="3" class="empty-state">Run benchmark to see file size vs quality tradeoffs.</td>
                         </tr>
                     </tbody>
                 </table>
