@@ -48,8 +48,7 @@
             <div class="eyebrow">JPEG XL progressive ladder</div>
             <h1>JPEG XL progressive decode test bench</h1>
             <p class="lede">
-                Load a random ORF, keep the controls in view, and watch the 300-long, 800-long, and full-size JXL variants fill in as bytes arrive.
-                Switch decode mode, transport pace, and benchmark size without opening extra panels.
+                Load a source and watch the 300-long, 800-long, and full-size JXL variants progressively fill as bytes arrive. Toggle backends, progressive detail, and chunk pacing from the controls panel.
             </p>
             <button id="progressive-controls-btn" class="dashboard-toggle" type="button" aria-expanded="false">Controls</button>
             <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
@@ -85,7 +84,7 @@
                             <button id="encode-backend-jsquash" class="toggle-btn" type="button" data-encode-backend="jsquash" aria-pressed="false">jsquash</button>
                             <button id="encode-backend-libjxl" class="toggle-btn is-active" type="button" data-encode-backend="libjxl" aria-pressed="true">libjxl</button>
                         </div>
-                        <p class="panel-note">Encode the same cached ORF with either worker.</p>
+                        <p class="panel-note">Encode using the selected backend (jsquash or native libjxl WASM).</p>
                     </div>
                     <div class="backend-panel">
                         <span class="panel-label">Decode backend</span>
@@ -93,7 +92,7 @@
                             <button id="decode-backend-jsquash" class="toggle-btn" type="button" data-decode-backend="jsquash" aria-pressed="false">jsquash</button>
                             <button id="decode-backend-libjxl" class="toggle-btn is-active" type="button" data-decode-backend="libjxl" aria-pressed="true">libjxl</button>
                         </div>
-                        <p class="panel-note">Decode the same JXL bytes with either worker, including the progressive preview path.</p>
+                        <p class="panel-note">Decode using the selected backend. Progressive mode shows refinement passes as bytes arrive.</p>
                     </div>
                     <div class="decode-panel">
                         <div class="decode-toggle" role="group" aria-label="Decode mode">
@@ -129,11 +128,11 @@
                 <div class="status-strip">
                     <div>
                         <span class="status-label">Status</span>
-                        <strong id="status-text">Loading random ORF.</strong>
+                        <strong id="status-text">Ready — load a source to start progressive decode.</strong>
                     </div>
                     <div>
                         <span class="status-label">Source</span>
-                        <strong id="source-meta">No file loaded.</strong>
+                        <strong id="source-meta">No source loaded yet.</strong>
                     </div>
                 </div>
             </section>
@@ -261,9 +260,9 @@
                     <div class="encode">encode: --</div>
                     <div class="timing-pipeline">
                         <div class="timing-seg-row" data-timing-seg-row aria-label="Timing pipeline"></div>
-                        <div class="timings" data-timing-meta>Waiting for source.</div>
+                        <div class="timings" data-timing-meta>Load a source to see progressive decode timing.</div>
                     </div>
-                    <div class="notes">Waiting for source.</div>
+                    <div class="notes">Load source to begin progressive ladder.</div>
                 </div>
                 <div class="error-detail">
                     <pre class="error-text"></pre>
@@ -286,9 +285,9 @@
                     <div class="encode">encode: --</div>
                     <div class="timing-pipeline">
                         <div class="timing-seg-row" data-timing-seg-row aria-label="Timing pipeline"></div>
-                        <div class="timings" data-timing-meta>Waiting for source.</div>
+                        <div class="timings" data-timing-meta>Load a source to see progressive decode timing.</div>
                     </div>
-                    <div class="notes">Waiting for source.</div>
+                    <div class="notes">Load source to begin progressive ladder.</div>
                 </div>
                 <div class="error-detail">
                     <pre class="error-text"></pre>
@@ -311,9 +310,9 @@
                     <div class="encode">encode: --</div>
                     <div class="timing-pipeline">
                         <div class="timing-seg-row" data-timing-seg-row aria-label="Timing pipeline"></div>
-                        <div class="timings" data-timing-meta>Waiting for source.</div>
+                        <div class="timings" data-timing-meta>Load a source to see progressive decode timing.</div>
                     </div>
-                    <div class="notes">Waiting for source.</div>
+                    <div class="notes">Load source to begin progressive ladder.</div>
                 </div>
                 <div class="error-detail">
                     <pre class="error-text"></pre>
@@ -331,7 +330,7 @@
                 <button id="race-btn" class="run-btn" type="button" disabled>Run race</button>
             </header>
             <p class="backend-race-lede">
-                Encodes and decodes the cached ORF with both backends at 300 px and 800 px — same source, same quality and effort — then surfaces each timing delta so you can see exactly what the optimised wrapper gains.
+                Runs the same ORF through jsquash and libjxl backends at 300 px and 800 px (matched quality/effort) and shows the exact timing deltas between the two paths.
             </p>
             <div id="race-result" class="race-result" hidden></div>
         </section>
@@ -346,8 +345,7 @@
             </header>
 
             <p class="thumb-bench-lede">
-                Five random ORFs, repeated 20 times each. Uses the page's current encode and decode backend toggles.
-                The report is written to <code>timings/</code> at the end of the run. DC vs AC only applies when the encode backend is <code>libjxl</code>.
+                Runs 5 random ORFs (20 reps each) using the current backend + progressive toggles. Writes a report to <code>timings/</code>. DC/AC detail only applies for the libjxl encode path.
             </p>
 
             <div class="thumb-bench-controls">
@@ -388,7 +386,7 @@
                         <div class="badge">5 images × 20</div>
                     </header>
                     <div class="thumb-grid" data-thumb-grid="300" aria-label="300 long thumbnail grid"></div>
-                    <pre class="thumb-log" data-thumb-log="300">Waiting for run.</pre>
+                    <pre class="thumb-log" data-thumb-log="300">Run the thumb bench to populate logs.</pre>
                 </article>
 
                 <article class="thumb-bench-card" data-thumb-bench-card="800">
@@ -400,7 +398,7 @@
                         <div class="badge">5 images × 20</div>
                     </header>
                     <div class="thumb-grid" data-thumb-grid="800" aria-label="800 long thumbnail grid"></div>
-                    <pre class="thumb-log" data-thumb-log="800">Waiting for run.</pre>
+                    <pre class="thumb-log" data-thumb-log="800">Run the thumb bench to populate logs.</pre>
                 </article>
             </div>
         </section>
