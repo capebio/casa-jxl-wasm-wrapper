@@ -542,6 +542,12 @@ class WorkerPool {
             type: 'decode_jxl', decodeId: next.decodeId, url: next.url,
         });
     }
+
+    // NOTE: The default cache policy for visible lightbox JXL paints is currently 'onFirstProgress'.
+    // This is an intentional early-cache choice to give users immediate interaction (straighten, zoom, pan)
+    // during refinement. The policy may change in the future; the per-request flag exists so the
+    // difference remains measurable and controllable. Do not remove the three-policy wiring without
+    // updating the call sites and this comment.
     _onJxlDecodeResponse(data) {
         const entry = this._jxlDecodeCallbacks.get(data.decodeId);
         if (entry) {
