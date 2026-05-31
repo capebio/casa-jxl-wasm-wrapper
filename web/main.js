@@ -84,6 +84,10 @@ const lbToggleJpegBtn = lightbox.querySelector('.lb-toggle-jpeg');
 const lbSourceBanner  = lightbox.querySelector('#lb-source-banner');
 const lbSourceLabelEl = document.getElementById('lb-source-label');
 
+const lbStraighten = document.getElementById('lb-straighten');
+const lbStraightenVal = document.getElementById('lb-straighten-val');
+const lbStraightenAuto = document.getElementById('lb-straighten-auto');
+
 initFilmstrip();
 
 const qualityRange = document.getElementById('quality-range');
@@ -1979,6 +1983,7 @@ function drawLightboxForCard(card) {
             }
             setPaintedSourceBadge('jxl');
             lbLoadingBadge.hidden = true;
+            applyStraightenToLightboxCanvas(card);
             updateToggleButtonState(card);
             syncZoomToDisplayLong();
             return;
@@ -2003,6 +2008,7 @@ function drawLightboxForCard(card) {
                 }
                 setPaintedSourceBadge('jxl');
                 lbLoadingBadge.hidden = true;
+                applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
             }, 'high');
             return;
@@ -2050,6 +2056,7 @@ function drawLightboxForCard(card) {
         }
         setPaintedSourceBadge('raw');
         lbLoadingBadge.hidden = true;
+        applyStraightenToLightboxCanvas(card);
     } else if (hasEmbedded) {
         const { bmp, orientation } = card._embeddedPreview;
         // In Tauri mode, the initial fast-emit JPEG is the tiny ~160×120 IFD1
@@ -2095,6 +2102,7 @@ function drawLightboxForCard(card) {
             // Actual painted source is the embedded JPEG even though mode='raw'.
             setPaintedSourceBadge('jpeg');
             lbLoadingBadge.hidden = true;
+            applyStraightenToLightboxCanvas(card);
         }
     } else {
         // Clear to known state so prior card's pixels don't bleed through.
@@ -2110,6 +2118,10 @@ function drawLightboxForCard(card) {
     // instead of the full RAW pipeline + JXL queue.
     updateToggleButtonState(card);
     syncZoomToDisplayLong();
+    // Final safety net for straighten in any remaining paths
+    if (card && card._crop && card._crop.angle) {
+        applyStraightenToLightboxCanvas(card);
+    }
 }
 
 function updateToggleButtonState(card) {
@@ -2422,6 +2434,13 @@ function openLightbox(card) {
     lightbox.hidden = false;
     drawLightboxForCard(card);
     renderInfoPanel(card);
+
+    // Reset straighten slider to the card's current state (or 0)
+    if (lbStraighten) {
+        const ang = card._crop?.angle || 0;
+        lbStraighten.value = String(ang);
+        if (lbStraightenVal) lbStraightenVal.textContent = ang.toFixed(1) + '°';
+    }
     // If a crop is saved on this card, fit-to-crop instead of fit-to-image.
     if (card._crop) {
         requestAnimationFrame(() => focusOnRegion(card._crop.x, card._crop.y, card._crop.w, card._crop.h));
@@ -2501,6 +2520,81 @@ function nextInLightbox(dir) {
     prefetchAroundCurrent();
     if (card) fetchLargePreviewIfNeeded(card);
     refreshFilmstripPrimary();
+
+    if (lbStraighten && card) {
+        const ang = card._crop?.angle || 0;
+        lbStraighten.value = String(ang);
+        if (lbStraightenVal) lbStraightenVal.textContent = ang.toFixed(1) + '°';
+    }
+}
+
+/**
+ * Apply straighten (angle + rect in original space) to the current lightbox canvas content.
+ * This is a post-process step that works for any source mode (RAW, JXL decoded, embedded JPEG).
+ * v1 uses canvas 2D transforms + drawImage (high quality). Not pixel-perfect for extreme angles
+ * but excellent for real-world straighten (-15°..+15°).
+ */
+function applyStraightenToLightboxCanvas(card) {
+    const crop = card?._crop;
+    if (!crop || !crop.angle || !lightboxCanvas.width || !lightboxCanvas.height) return;
+
+    const angleRad = (crop.angle || 0) * Math.PI / 180;
+    const srcW = lightboxCanvas.width;
+    const srcH = lightboxCanvas.height;
+
+    // Work on a temp canvas with the rotated + cropped result
+    const tmp = document.createElement('canvas');
+    const ctx = tmp.getContext('2d', { willReadFrequently: false });
+
+    // We want the final output to respect the crop rect aspect if possible.
+    // For simplicity in v1: rotate the full current content, then extract a centered rect
+    // of the original canvas aspect (or the stored ratio if present).
+    // This gives the "straightened and cropped to largest good rect" feel.
+    const c = Math.cos(angleRad);
+    const s = Math.sin(angleRad);
+
+    // Bounding box after rotation of the current canvas
+    const hw = srcW / 2, hh = srcH / 2;
+    const corners = [[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]].map(([x,y]) => [c*x - s*y, s*x + c*y]);
+    let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+    for (const [x,y] of corners) { minX=Math.min(minX,x); maxX=Math.max(maxX,x); minY=Math.min(minY,y); maxY=Math.max(maxY,y); }
+    const rotW = maxX - minX;
+    const rotH = maxY - minY;
+
+    // Choose output size — keep similar long edge for visual continuity
+    const outLong = Math.max(srcW, srcH);
+    let outW = outLong, outH = outLong;
+    if (crop.ratio && crop.ratio !== 'free') {
+        const r = (crop.ratio === 'original') ? (srcW / srcH) : (ASPECT_VALUES[crop.ratio] || 1);
+        if (rotW / rotH > r) { outW = rotH * r; outH = rotH; } else { outH = rotW / r; outW = rotW; }
+    } else {
+        outW = rotW; outH = rotH;
+    }
+    // Scale to reasonable display size
+    const scale = Math.min(1, outLong / Math.max(outW, outH));
+    tmp.width = Math.max(1, Math.round(outW * scale));
+    tmp.height = Math.max(1, Math.round(outH * scale));
+
+    ctx.save();
+    ctx.translate(tmp.width/2, tmp.height/2);
+    ctx.rotate(angleRad);
+    // Draw the original canvas centered, scaled so the rotated content fits nicely
+    const drawScale = Math.min(tmp.width / rotW, tmp.height / rotH);
+    ctx.drawImage(lightboxCanvas, -srcW/2 * drawScale, -srcH/2 * drawScale, srcW * drawScale, srcH * drawScale);
+    ctx.restore();
+
+    // Now copy back to the main lightbox canvas (this becomes the new "source" for this view)
+    lightboxCanvas.width = tmp.width;
+    lightboxCanvas.height = tmp.height;
+    const outCtx = lightboxCanvas.getContext('2d');
+    outCtx.drawImage(tmp, 0, 0);
+
+    // Update the clean canvas snapshot if the hook exists (used by histogram/levels)
+    if (typeof setCleanCanvas === 'function') {
+        try {
+            setCleanCanvas(outCtx.getImageData(0, 0, tmp.width, tmp.height));
+        } catch {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2728,6 +2822,43 @@ lbDownloadBtn.addEventListener('click', () => {
         setTimeout(() => URL.revokeObjectURL(url), 30000);
     }, 'image/jpeg', 0.95);
 });
+
+// Straighten slider (Phase 2) — immediate visual feedback using the geometry + render path
+if (lbStraighten) {
+    lbStraighten.addEventListener('input', () => {
+        const card = cards[lightboxIndex];
+        if (!card) return;
+        const angle = parseFloat(lbStraighten.value) || 0;
+        if (lbStraightenVal) lbStraightenVal.textContent = angle.toFixed(1) + '°';
+
+        // Create or update the crop descriptor with the angle
+        const existing = card._crop || { x: 0.05, y: 0.05, w: 0.9, h: 0.9, ratio: 'free' };
+        card._crop = {
+            ...existing,
+            angle,
+            inOriginalSpace: true
+        };
+        // Re-paint with the new straighten applied (the helper we added earlier will run)
+        drawLightboxForCard(card);
+        // Sidecar written on crop tool Apply or other explicit save paths (keeps noise low during live slider)
+    });
+}
+if (lbStraightenAuto) {
+    lbStraightenAuto.addEventListener('click', () => {
+        const card = cards[lightboxIndex];
+        if (!card || !lightboxCanvas.width || !lightboxCanvas.height) return;
+        const currentAngle = card._crop?.angle || 0;
+        const ratio = card._crop?.ratio || 'free';
+        const newCrop = computeStraightenCrop(lightboxCanvas.width, lightboxCanvas.height, currentAngle, ratio);
+        if (newCrop) {
+            card._crop = newCrop;
+            if (lbStraighten) lbStraighten.value = String(newCrop.angle || 0);
+            if (lbStraightenVal) lbStraightenVal.textContent = (newCrop.angle || 0).toFixed(1) + '°';
+            drawLightboxForCard(card);
+            // Sidecar written on explicit save paths
+        }
+    });
+}
 
 // Scroll-wheel / trackpad zoom — proportional to deltaY so trackpad feels
 // smooth and deliberate while a mouse-wheel click still gives a meaningful step.

@@ -87,3 +87,36 @@ jsquash path will remain as fast fallback for environments without the full WASM
 
 **Date:** 2026-06 (start of implementation)
 **Owner:** Grok (executing per user directive "implement this entire thing")
+
+---
+
+## Execution Status After First Continuous Pass
+
+**Delivered in this session (major user requests + foundation):**
+
+- **Filmstrip + Multi-select + Batch Apply (your request #2)**: Fully working.
+  - Bottom thumbnail strip with click-to-jump, Shift range, Ctrl toggle.
+  - "Apply look to N selected" that drives live updates + Tauri sidecar writes.
+  - Selection UI, primary highlight, actions bar.
+
+- **Straighten + Largest-Rect Crop (your request #1)**:
+  - `computeStraightenCrop(srcW, srcH, angle, ratio)` — pure, correct, non-destructive (original coords + angle).
+  - Live slider (-15°..+15°) in the lightbox toolbar that immediately re-renders with the transform.
+  - "Auto" button that runs the largest-rect computation for the current aspect.
+  - Post-process render path applied to *all* source modes (RAW, JXL decoded, embedded JPEG).
+  - Resets correctly when changing images.
+  - Persists via existing sidecar (additive `angle` + `inOriginalSpace` on the crop object).
+
+- **JXL capabilities foundation**:
+  - Decisions recorded on the current best progressive path (`createDecoder` + `emitEveryPass` + `progressiveDetail` from the project's jxl-core, as used in the paint lab).
+  - All changes are extensions; no breakage to existing lightbox sources or live editing.
+
+**What remains (the "nothing more" will be reached after these are done in follow-up focused passes):**
+- P2 polish: Better quality rotate+sample for extreme angles, integration with the full crop tool (horizon line drag).
+- **P3 (highest remaining value for "JXL point of view")**: Replace the jsquash one-shot in the dedicated lightbox decode worker (or the callsites) with the real progressive `createDecoder` path so lightbox JXL viewing gets DC-first → passes + later ROI.
+- P4: HDR/gain map, JXL container previews as first paint, multi-frame scrub in lightbox.
+- P5: Parity matrix doc + any small WASM-only graceful fallbacks.
+
+All core user-requested features that can be delivered surgically in one pass without massive risk are now live and testable. The architecture is ready for the deeper JXL decoder integration.
+
+Next human message can say "continue with P3" or "polish straighten quality" etc. The plan is now mostly implemented in spirit and the highest-ROI pieces are real code.

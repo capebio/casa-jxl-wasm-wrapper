@@ -46,6 +46,7 @@ const exportGalleryBtn = document.getElementById('export-gallery-btn');
 const exportFolderBtn = document.getElementById('export-folder-btn');
 const exportCsvBtn = document.getElementById('export-csv-btn');
 const exportJsonBtn = document.getElementById('export-json-btn');
+const exportToonBtn = document.getElementById('export-toon-btn');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
 
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
@@ -334,6 +335,7 @@ function updateUI() {
     const hasMeasurements = runMeasurements.length > 0;
     if (exportCsvBtn) exportCsvBtn.disabled = !hasMeasurements;
     if (exportJsonBtn) exportJsonBtn.disabled = !hasMeasurements;
+    if (exportToonBtn) exportToonBtn.disabled = !hasMeasurements;
     if (clearMeasurementsBtn) clearMeasurementsBtn.disabled = !hasMeasurements;
 }
 
@@ -1011,6 +1013,61 @@ function exportMeasurementsJSON() {
     dbgLog('Exported measurements', `${runMeasurements.length} runs → JSON`, 'success');
 }
 
+function exportMeasurementsTOON() {
+    if (!runMeasurements.length) return;
+
+    const now = new Date().toISOString();
+
+    // Richer shape: measurements array + meta object at root
+    let out = `measurements[${runMeasurements.length}]:\n`;
+
+    for (const m of runMeasurements) {
+        const s = m.settings || {};
+        out += `- ts: ${m.ts}\n`;
+        out += `  source: ${quoteIfNeeded(m.source)}\n`;
+        out += `  settings:\n`;
+        out += `    size: ${s.size ?? ''}\n`;
+        out += `    quality: ${s.quality ?? ''}\n`;
+        out += `    passesRequested: ${m.passesRequested}\n`;
+        out += `    detail: ${quoteIfNeeded(s.progressiveDetail ?? '')}\n`;
+        if (m.first_ms != null) out += `  first_ms: ${m.first_ms}\n`;
+        if (m.final_ms != null) out += `  final_ms: ${m.final_ms}\n`;
+        if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
+        if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
+        out += `  encode_ms: ${m.encode_ms}\n`;
+        out += `  fileSizeKB: ${m.fileSizeKB}\n`;
+
+        // perPass as compact tabular array (TOON strength)
+        if (m.perPass && m.perPass.length) {
+            out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal}:\n`;
+            for (const p of m.perPass) {
+                const isFinal = p.isFinal ? 'true' : 'false';
+                out += `    ${p.pass},${p.t_ms},${isFinal}\n`;
+            }
+        }
+    }
+
+    // Richer metadata at root level
+    out += `meta:\n`;
+    out += `  exportedAt: ${now}\n`;
+    out += `  generator: jxl-progressive-paint\n`;
+    out += `  count: ${runMeasurements.length}\n`;
+    out += `  format: progressive-paint-measurements-v1\n`;
+
+    const ts = now.replace(/[:.]/g, '-');
+    downloadText(`progressive-paint-measurements-${ts}.toon`, out, 'text/toon');
+    dbgLog('Exported measurements', `${runMeasurements.length} runs → TOON`, 'success');
+}
+
+function quoteIfNeeded(str) {
+    if (!str) return '';
+    const needsQuotes = /[\s,:[\]{}"\\]/.test(str) || str === 'true' || str === 'false' || str === 'null';
+    if (needsQuotes) {
+        return '"' + str.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    }
+    return str;
+}
+
 function clearMeasurements() {
     runMeasurements.length = 0;
     dbgLog('Measurement history cleared', '', 'warn');
@@ -1019,6 +1076,7 @@ function clearMeasurements() {
 
 if (exportCsvBtn) exportCsvBtn.addEventListener('click', exportMeasurementsCSV);
 if (exportJsonBtn) exportJsonBtn.addEventListener('click', exportMeasurementsJSON);
+if (exportToonBtn) exportToonBtn.addEventListener('click', exportMeasurementsTOON);
 if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
 
 dbgLog('Progressive paint initialized');
