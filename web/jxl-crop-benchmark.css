@@ -1,5 +1,33 @@
 /* Crop benchmark — layout and result cards */
 
+.crop-results-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.crop-results-header-left {
+    flex: 1;
+}
+
+.crop-results-header-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding-bottom: 2px;
+}
+
+.crop-results-header-actions .ghost-btn {
+    font-size: 11px;
+    padding: 3px 9px;
+    opacity: 0.85;
+}
+.crop-results-header-actions .ghost-btn:hover {
+    opacity: 1;
+}
+
 .hero-sub {
     margin: 4px 0 0;
     font-size: 13px;
