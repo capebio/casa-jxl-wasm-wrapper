@@ -1855,6 +1855,51 @@ document.querySelectorAll('.export-csv').forEach(btn => {
     });
 });
 
+// Copy active results table as Markdown (extremely useful for posting in PRs/issues)
+const copyMdBtn = document.getElementById('copy-results-md');
+if (copyMdBtn) {
+    copyMdBtn.addEventListener('click', async () => {
+        const activePanel = document.querySelector('.results-panel.is-active');
+        const table = activePanel?.querySelector('table.results-table');
+        if (!table) {
+            dbgLog('No results table visible to copy', '', 'warn');
+            return;
+        }
+        const md = tableToMarkdown(table);
+        try {
+            await navigator.clipboard.writeText(md);
+            dbgLog('Copied active results table as Markdown', '', 'success');
+        } catch (err) {
+            // Fallback
+            const ta = document.createElement('textarea');
+            ta.value = md;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            dbgLog('Copied active results table as Markdown (fallback)', '', 'success');
+        }
+    });
+}
+
+function tableToMarkdown(table) {
+    const rows = Array.from(table.querySelectorAll('tr'));
+    if (!rows.length) return '';
+
+    const lines = [];
+    rows.forEach((row, rowIdx) => {
+        const cells = Array.from(row.querySelectorAll('th, td')).map(cell =>
+            cell.textContent.trim().replace(/\|/g, '\\|')
+        );
+        lines.push('| ' + cells.join(' | ') + ' |');
+        if (rowIdx === 0) {
+            // separator after header
+            lines.push('| ' + cells.map(() => '---').join(' | ') + ' |');
+        }
+    });
+    return lines.join('\n');
+}
+
 setGraphExportsEnabled(false);
 
 dbgLog('Benchmark initialized');
