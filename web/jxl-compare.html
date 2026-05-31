@@ -48,7 +48,7 @@
         <section class="compare-hero">
             <div class="eyebrow">Format race</div>
             <h1>JXL vs JPEG vs WebP</h1>
-            <p class="lede">Encodes the same ORF with all three formats at a matched quality tier, decodes each in the browser, and surfaces encode time, decode time, and compressed file size side-by-side. Click any size row header to open the full-detail quality lightbox.</p>
+            <p class="lede" style="font-size:13.5px; line-height:1.4;">Encodes the same source with JXL / JPEG / WebP at matched quality, then benchmarks real browser decode + reports file sizes. Click any size header in results to open the visual quality lightbox.</p>
         </section>
 
         <section class="compare-controls">
@@ -56,7 +56,7 @@
                 <button id="run-btn" class="run-btn" type="button">Load &amp; run race</button>
                 <button id="reset-btn" class="ghost-btn" type="button">New source</button>
                 <button id="dbg-console-btn" class="ghost-btn" type="button" title="Show pipeline debug console">Console</button>
-                <span id="random-hint" style="font-size:10px;opacity:0.6;margin-left:auto;">(Random uses private data; falls back to file picker if unavailable)</span>
+                <span id="random-hint" style="font-size:10.5px;opacity:0.65;margin-left:auto;">Random uses private test data; falls back to picker if unavailable</span>
             </div>
 
             <div class="compare-option-group">
@@ -114,7 +114,7 @@
 
         <!-- Results grid: one row per size, three columns per format -->
         <section id="compare-results" class="compare-results" aria-label="Format comparison results">
-            <div class="compare-empty">Run the race to see results here.</div>
+            <div class="compare-empty">Click <strong>Load &amp; run race</strong> to encode the same source to JXL / JPEG / WebP and compare encode time, decode time, and file size.</div>
         </section>
 
         <!-- Quality lightbox: full-detail side-by-side canvases -->
