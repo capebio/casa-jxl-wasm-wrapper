@@ -189,7 +189,7 @@
                             <input id="batch-group-center-x" type="number" placeholder="cx" style="width:50px; font-size:11px;" />
                             <input id="batch-group-center-y" type="number" placeholder="cy" style="width:50px; font-size:11px;" />
                         </div>
-                        <div style="font-size:10px; opacity:0.6;">Center mode + coords for better progressive/ROI behavior.</div>
+                        <div style="font-size:10.5px; opacity:0.65;">Center mode + coords for better progressive/ROI behavior.</div>
                     </div>
                     <!-- Phase 2: Buffering + Expert (deeper advanced encoder controls slice) -->
                     <div class="spin-group">
@@ -205,7 +205,7 @@
                             <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-streaming-input" /> <span>streamingInput</span></label>
                             <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-streaming-output" /> <span>streamingOutput</span></label>
                         </div>
-                        <div style="font-size:10px; opacity:0.6;">Rich tradeoffs (memory / density / latency). See design note for cjxl-derived guidance.</div>
+                        <div style="font-size:10.5px; opacity:0.65;">Rich tradeoffs (memory / density / latency). See design note for cjxl-derived guidance.</div>
                     </div>
                     <div class="spin-group">
                         <span class="spin-label" style="display:inline-flex;align-items:center;gap:4px;">Expert <span style="font-size:10.5px;opacity:0.65">(Phase 2)</span></span>
@@ -213,7 +213,7 @@
                             <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-expert-disable-perceptual" /> <span>Disable perceptual heuristics (ID 39)</span></label>
                             <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-expert-allow" /> <span>Allow expert options</span></label>
                         </div>
-                        <div style="font-size:10px; color:#c33; opacity:0.85;">Strong warning: for benchmarking/archival only. May increase size + artifacts. Mirrors cjxl --allow_expert_options.</div>
+                        <div style="font-size:10.5px; color:#c33; opacity:0.85;">Strong warning: for benchmarking/archival only. May increase size + artifacts. Mirrors cjxl --allow_expert_options.</div>
                     </div>
                     <!-- Low Memory / Production Chunked Paths (production-chunked-paths design note, Phase 3) -->
                     <div class="spin-group">
@@ -238,7 +238,7 @@
                                 <input type="checkbox" id="batch-gainmap-use-demo" /> <span>Use demo placeholder</span>
                             </label>
                             <input type="file" id="batch-gainmap-file" accept=".jxl" style="font-size:11px; max-width:160px;" />
-                            <span id="batch-gainmap-status" style="font-size:10px; opacity:0.7; margin-left:4px;"></span>
+                            <span id="batch-gainmap-status" style="font-size:10.5px; opacity:0.7; margin-left:4px;"></span>
                         </div>
                         <div class="help-popover" data-help-popover="wl-gain-map" hidden>
                             HDR gain map transport (ISO 21496-1 jhgm box). Supply a pre-encoded naked JXL codestream for the gain map image (the library wraps it using official JxlGainMapBundle APIs when the build supports &lt;jxl/gain_map.h&gt;). "Use demo" exercises the full encode/decode path with minimal placeholder bytes (content is not meaningful; file size delta and download badge prove the transport). Synergizes with LookRenderer tone-mapping workflows for real scientific HDR use. Graceful no-op on builds without symbols (see caps.gainMapEncode).
@@ -250,7 +250,7 @@
                         <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:11px;">
                             <label style="display:flex; align-items:center; gap:3px;">
                                 nits
-                                <input id="batch-hdr-intensity" type="number" min="0" max="100000" step="50" placeholder="auto" style="width:72px; font-size:10px;" />
+                                <input id="batch-hdr-intensity" type="number" min="0" max="100000" step="50" placeholder="auto" style="width:72px; font-size:10.5px;" />
                             </label>
                             <label style="display:flex; align-items:center; gap:2px;"><input type="checkbox" id="batch-hdr-premultiply" /> <span>premultiply</span></label>
                             <select id="batch-hdr-cicp-policy" style="font-size:10px; max-width:160px;">
@@ -366,7 +366,7 @@
                         <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
                             <input id="batch-jumbf-input" type="text" placeholder="base64 or hex JUMBF bytes (or use sample)" style="font-family:monospace; font-size:11px; width:180px; padding:2px 4px;" />
                             <button id="batch-jumbf-sample" class="secondary-btn" type="button" style="padding:1px 6px; font-size:11px;">Sample C2PA stub</button>
-                            <span id="batch-jumbf-status" style="font-size:10px; opacity:0.8; min-width:90px;"></span>
+                            <span id="batch-jumbf-status" style="font-size:10.5px; opacity:0.8; min-width:90px;"></span>
                         </div>
                         <div class="help-popover" data-help-popover="wl-jumbf" hidden>
                             Attach JUMBF boxes (e.g. C2PA content credentials) as "jumb" container boxes. Uses the existing custom box infrastructure (no new FFI). The sample is a minimal illustrative stub — not a real signed credential. Decode reporting of JUMBF is future work; container roundtrip is reliable today. See docs/references/designs/jumbf-box-support.md.
@@ -434,6 +434,7 @@
         <section id="race-container" class="race-container">
             <header class="race-header">
                 <div class="race-controls">
+                    <button id="race-copy-md" class="ghost-btn" type="button" style="font-size:11px; padding:2px 8px; margin-right:8px;" title="Copy latest race results as Markdown">Copy MD</button>
                     <div class="format-chips" role="radiogroup" aria-label="Race format">
                         <label class="chip-label"><input type="radio" name="race-format" value="jxl" checked /> <span>JXL</span></label>
                         <label class="chip-label"><input type="radio" name="race-format" value="webp" /> <span>WEBP</span></label>
