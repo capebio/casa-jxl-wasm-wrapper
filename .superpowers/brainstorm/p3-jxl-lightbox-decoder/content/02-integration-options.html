@@ -1,0 +1,61 @@
+<div style="max-width: 1100px; margin: 20px auto; padding: 16px;">
+  <h2>Core Decision: Integration Shape</h2>
+  <p class="subtitle">How the real progressive decoder (<code>createDecoder</code> from @casabio/jxl-wasm) enters the production lightbox without breaking straighten, live edits, filmstrip, or worker isolation.</p>
+
+  <div class="options" data-multiselect="false">
+    <!-- Option A -->
+    <div class="option" data-choice="A" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content">
+        <h3>Upgrade the existing dedicated worker (Handoff "Option A")</h3>
+        <p class="subtitle">Minimal surface area. Keep the current pool + jxl-decode-worker.js as the single owner of all lightbox JXL work.</p>
+        <ul style="font-size:0.9em; margin:8px 0 0 16px;">
+          <li>Extend the worker protocol with <code>{type: 'decode_jxl_progressive', options: {progressiveDetail, region, ...}}</code></li>
+          <li>Worker does <code>import { createDecoder } from '@casabio/jxl-wasm'</code> (or pre-bundled) and streams events back as <code>progress</code> / <code>final</code> messages</li>
+          <li>Pool's <code>decodeJxl</code> gains optional <code>onProgress</code> + <code>region</code> params</li>
+          <li>Paint path in main.js stays almost identical (just handles incremental frames + calls straighten on each useful pass)</li>
+        </ul>
+        <div style="margin-top:8px; font-size:0.85em; color:#64748b;">+ Preserves isolation &amp; existing priority/dedup logic<br>+ Smallest diff to main.js</div>
+      </div>
+    </div>
+
+    <!-- Option B -->
+    <div class="option" data-choice="B" onclick="toggleSelect(this)">
+      <div class="letter">B</div>
+      <div class="content">
+        <h3>New high-priority progressive worker (Handoff "Option B")</h3>
+        <p class="subtitle">Strong separation. Lightbox JXL gets its own worker type that loads the full progressive stack.</p>
+        <ul style="font-size:0.9em; margin:8px 0 0 16px;">
+          <li>Create <code>web/jxl-progressive-decode-worker.js</code> that imports the real WASM + facade</li>
+          <li>Only used for the main lightbox canvas when mode==='jxl' (or auto-promote)</li>
+          <li>Thumbs + prefetch continue using the cheap jsquash one-shot worker</li>
+          <li>Can use jxl-session / scheduler if we want preemption &amp; backpressure for free</li>
+        </ul>
+        <div style="margin-top:8px; font-size:0.85em; color:#64748b;">+ Best long-term (real decoder gets real resources)<br>− New worker lifecycle + message protocol to maintain</div>
+      </div>
+    </div>
+
+    <!-- Option C -->
+    <div class="option" data-choice="C" onclick="toggleSelect(this)">
+      <div class="letter">C</div>
+      <div class="content">
+        <h3>Hybrid: DC-first in main + refinement in worker (pragmatic)</h3>
+        <p class="subtitle">Fastest perceived win for P3.1. First useful pixels appear immediately; heavy refinement stays off-UI.</p>
+        <ul style="font-size:0.9em; margin:8px 0 0 16px;">
+          <li>For the lightbox JXL path: fetch the bytes, createDecoder in the main thread just long enough for the first "dc" or "header" + early "progress" event, paint it, then immediately <code>close()</code> + transfer remaining chunks + state to a worker for the rest</li>
+          <li>Or simpler: do the entire progressive decode in a Web Worker but post the very first DC frame back synchronously via Atomics/SharedArrayBuffer (if COOP/COEP headers are present in Tauri/webview)</li>
+          <li>Still re-uses most of the existing pool callback shape</li>
+        </ul>
+        <div style="margin-top:8px; font-size:0.85em; color:#b45309;">Risk: main-thread WASM time for the DC pass could still jank if the file is huge. Needs measurement.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" style="margin-top:24px; border-top:1px solid #334155; padding-top:16px;">
+    <h3 style="margin-bottom:8px;">My current lean (after exploring the code + constraints)</h3>
+    <p><strong>Start with a variant of A</strong> for P3.1 (progressive first paint). It is the smallest, safest surgical change that still delivers the "DC → refine while panning" experience. We can evolve toward B later once the event plumbing is proven in the lightbox context.</p>
+    <p style="font-size:0.9em; color:#94a3b8;">Region/ROI (P3.2) works cleanly on top of either A or B because the decoder already surfaces <code>ev.region</code> and the C++ bridge has fast crop.</p>
+  </div>
+
+  <p style="margin-top:16px; font-size:0.85em; opacity:0.7;">Click an option above if you have a strong preference. Then reply in chat with your choice (A / B / C / hybrid) + whether you want P3.1 only or P3.1+P3.2 ROI in this increment.</p>
+</div>

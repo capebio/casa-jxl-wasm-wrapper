@@ -500,17 +500,25 @@ async function runRawIsolation() {
                  : ext === 'cr2' ? rawWasm.process_cr2_with_flags : null;
 
         let bench = null;
-        try {
-            // Light warm-up + median for consistency with JXL sweeps
-            for (let i = 0; i < 1; i++) rawWasm.bench_decode_orf(bytes); // warm
-            const runs = [];
-            for (let i = 0; i < 3; i++) {
-                const b = rawWasm.bench_decode_orf(bytes);
-                runs.push(b);
+        if (typeof rawWasm?.bench_decode_orf === 'function') {
+            try {
+                // 5 runs + median to reduce measurement noise (was 3 runs).
+                // This is the only place bench_decode_orf is called from the browser.
+                for (let i = 0; i < 1; i++) rawWasm.bench_decode_orf(bytes); // warm-up
+                const runs = [];
+                for (let i = 0; i < 5; i++) {
+                    const b = rawWasm.bench_decode_orf(bytes);
+                    runs.push(b);
+                }
+                runs.sort((a, b) => (a.decompress_ms + a.demosaic_ms) - (b.decompress_ms + b.demosaic_ms));
+                bench = runs[2]; // median of 5
+            } catch (e) {
+                console.warn('[raw-isolation] bench_decode_orf failed', slotId, e);
+                bench = { error: 'bench_decode_orf threw' };
             }
-            runs.sort((a, b) => (a.decompress_ms + a.demosaic_ms) - (b.decompress_ms + b.demosaic_ms));
-            bench = runs[1]; // median of 3
-        } catch (e) { console.warn('[raw-isolation] bench_decode_orf failed', slotId, e); }
+        } else {
+            bench = { error: 'bench_decode_orf not available in this WASM build' };
+        }
 
         const modes = {};
 
@@ -732,30 +740,22 @@ function updateButtonStates() {
         }
     }
 
-    // Export CSV
-    const exportBtn = document.getElementById('btn-export-csv');
-    if (exportBtn) {
-        const hasResults = (typeof sweepRows !== 'undefined') && sweepRows.length > 0;
-        exportBtn.disabled = !hasResults;
-        exportBtn.title = hasResults ? "Export current sweep results as CSV" : "Run a sweep first to enable CSV export.";
-    }
+    // Export (unified explicit buttons per progressive-paint pattern)
     const hasResults = (typeof sweepRows !== 'undefined') && sweepRows.length > 0;
-    const copyBtn = document.getElementById('btn-export-copy');
-    if (copyBtn) copyBtn.disabled = !hasResults;
-    const saveBtn = document.getElementById('btn-export-save');
-    if (saveBtn) saveBtn.disabled = !hasResults;
+    const csvBtn = document.getElementById('export-csv-btn');
+    if (csvBtn) csvBtn.disabled = !hasResults;
+    const jsonBtn = document.getElementById('export-json-btn');
+    if (jsonBtn) jsonBtn.disabled = !hasResults;
+    const toonBtn = document.getElementById('export-toon-btn');
+    if (toonBtn) toonBtn.disabled = !hasResults;
+    const clearBtn = document.getElementById('clear-measurements-btn');
+    if (clearBtn) clearBtn.disabled = !hasResults;
+    const recsBtn = document.getElementById('export-recs-btn');
+    if (recsBtn) recsBtn.disabled = !hasResults;
 }
 
-// Call this function at key moments
-// (we'll hook it into existing places below)
-
-async function median(fn, n) {
-    // Run fn() n times; return median of results
-    const results = [];
-    for (let i = 0; i < n; i++) results.push(await fn());
-    results.sort((a, b) => a.encMs - b.encMs);
-    return results[Math.floor(n / 2)];
-}
+// _medianOf is the active median helper (used by sweep aggregation).
+// The previous async median(fn, n) helper was unused and has been removed (P4 hygiene).
 
 function _medianOf(values) {
     const sorted = [...values].sort((a, b) => a - b);
@@ -1502,14 +1502,12 @@ function buildSweepSettings() {
                 <button id="btn-run-sweep" class="btn-primary" type="button" style="font-size:8px;padding:0 4px;">Run</button>
                 <button id="btn-stop" class="btn-danger" type="button" disabled style="font-size:8px;padding:0 3px;">Stop</button>
                 <button id="btn-load-saved" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Load</button>
-                <button id="btn-export-csv" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">CSV</button>
-                <select id="export-format" style="font-size:8px; padding:0 1px; background:#1f2937; color:#e2e8f0; border:1px solid #334155; border-radius:3px;" title="Format for Copy/Save">
-                    <option value="csv">CSV</option>
-                    <option value="json" selected>JSON</option>
-                    <option value="toon">TOON</option>
-                </select>
-                <button id="btn-export-copy" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Copy raw data + header (meta) to clipboard">Copy</button>
-                <button id="btn-export-save" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Save raw data + header via file picker (or download)">Save</button>
+                <span style="color:#94a3b8; margin:0 4px; font-size:8px;">Export:</span>
+                <button id="export-csv-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export sweep + rich meta/RAW flag as CSV (includes # meta block)">CSV</button>
+                <button id="export-json-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export sweep results + rich meta (files, selected, rawIsolation) as JSON">JSON</button>
+                <button id="export-toon-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export as TOON (compact human-readable tables + meta)">TOON</button>
+                <button id="clear-measurements-btn" class="dbg-bar-action" type="button" style="font-size:8px;padding:0 3px;" disabled title="Clear sweep results, preset cards, and graphs (files + RAW isolation preserved)">Clear</button>
+                <button id="export-recs-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Persist citable preset recommendations JSON (best-per-tier + scenario scores + RAW costs + provenance) for docs/outputs + Tauri cross-link">Recs</button>
                 <button id="btn-log" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Log</button>
                 <button id="btn-console-bar" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Console</button>
             </div>
@@ -1666,30 +1664,49 @@ function wireButtons() {
         updateButtonStates();
     });
 
-    document.getElementById('btn-export-csv')?.addEventListener('click', () => {
+    // Unified explicit export buttons (CSV uses rich exportCsv with per-row RAW; JSON/TOON wire the improved buildExportText+Meta with provenance)
+    document.getElementById('export-csv-btn')?.addEventListener('click', () => {
         if (!sweepRows.length) { alert('No results to export. Run a sweep first.'); return; }
         exportCsv(sweepRows);
+        dbgLog('Exported CSV', `${sweepRows.length} rows (rich RAW columns)`);
     });
 
-    document.getElementById('btn-export-copy')?.addEventListener('click', () => {
+    document.getElementById('export-json-btn')?.addEventListener('click', () => {
         if (!sweepRows.length) return;
-        const fmt = document.getElementById('export-format')?.value || 'json';
-        const text = buildExportText(sweepRows, fmt);
-        navigator.clipboard.writeText(text).then(() => {
-            dbgLog('Copied raw data to clipboard', `format=${fmt} rows=${sweepRows.length}`);
-        }).catch(() => alert('Copy failed'));
-    });
-
-    document.getElementById('btn-export-save')?.addEventListener('click', async () => {
-        if (!sweepRows.length) return;
-        const fmt = document.getElementById('export-format')?.value || 'json';
-        const text = buildExportText(sweepRows, fmt);
+        const text = buildExportText(sweepRows, 'json');
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const ext = fmt === 'csv' ? 'csv' : fmt === 'toon' ? 'toon' : 'json';
-        const mime = fmt === 'csv' ? 'text/csv' : fmt === 'toon' ? 'text/toon' : 'application/json';
-        const fname = `preset-bench-${ts}.${ext}`;
-        await saveTextWithPicker(fname, text, mime);
-        dbgLog('Saved raw data via picker', `format=${fmt}`);
+        const blob = new Blob([text], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `preset-benchmark-${ts}.json`; a.click();
+        URL.revokeObjectURL(url);
+        dbgLog('Exported JSON', `${sweepRows.length} rows + rich meta (buildExportMeta)`);
+    });
+
+    document.getElementById('export-toon-btn')?.addEventListener('click', () => {
+        if (!sweepRows.length) return;
+        const text = buildExportText(sweepRows, 'toon');
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `preset-benchmark-${ts}.toon`; a.click();
+        URL.revokeObjectURL(url);
+        dbgLog('Exported TOON', `${sweepRows.length} rows + rich meta (buildExportMeta)`);
+    });
+
+    document.getElementById('clear-measurements-btn')?.addEventListener('click', () => {
+        clearSweepResults();
+    });
+
+    // P2: minimal citable artifact emission (addresses Owl gap + IA principle #4)
+    document.getElementById('export-recs-btn')?.addEventListener('click', async () => {
+        if (!sweepRows.length) return;
+        const artifact = buildPresetRecommendationsArtifact();
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const fname = `preset-recommendations-${ts}.json`;
+        await saveTextWithPicker(fname, JSON.stringify(artifact, null, 2), 'application/json');
+        dbgLog('Persisted preset recommendations artifact', `for cross-suite use (Tauri thumb-pyramid / docs/outputs/preset-benchmark/)`);
     });
 }
 
@@ -2253,4 +2270,57 @@ async function saveTextWithPicker(filename, text, mime = 'text/plain') {
     const a = document.createElement('a');
     a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
+}
+
+// Clear current sweep outputs (results table, preset recs, graphs) while preserving loaded files and RAW isolation data.
+// Called by the new unified Clear button (P1 export UI unification).
+function clearSweepResults() {
+    if (typeof sweepRows !== 'undefined' && Array.isArray(sweepRows)) {
+        sweepRows.length = 0;
+    }
+    const resBody = document.getElementById('results-table-body');
+    if (resBody) resBody.innerHTML = '<div style="font-size:9px;opacity:0.6;padding:4px;">Results cleared. Run a new sweep to populate table + graphs.</div>';
+    const presetGrid = document.getElementById('preset-cards-grid');
+    if (presetGrid) presetGrid.innerHTML = '<div style="font-size:9px;opacity:0.6;padding:4px;">Preset + scenario recommendations cleared.</div>';
+    const graphsBody = document.getElementById('phase-graphs-body');
+    if (graphsBody) graphsBody.innerHTML = '<div style="font-size:9px;opacity:0.6;padding:4px;">Graphs cleared (next sweep rebuilds canvases + charts).</div>';
+    if (typeof selectedGraphFormat !== 'undefined') {
+        selectedGraphFormat = 'all';
+    }
+    updateButtonStates();
+    dbgLog('Sweep results cleared', 'results/presets/graphs reset; files + RAW isolation preserved');
+}
+
+// P2 minimal artifact (citable recommendations for cross-suite / Tauri thumb-pyramid linking).
+// Produces a self-contained JSON with the derived best presets per tier + scenario context + full provenance.
+// Emitted via the "Recs" button; user places the file in docs/outputs/preset-benchmark/ for the project record.
+export function buildPresetRecommendationsArtifact() {
+    const presets = (typeof derivePresets === 'function') ? derivePresets(sweepRows) : [];
+    const meta = (typeof buildExportMeta === 'function') ? buildExportMeta(sweepRows) : {};
+    const scenarios = window.__lastSweepScenarios || [];
+
+    // Lightweight RAW cost summary (if the isolation panel was used)
+    let rawSummary = null;
+    if (rawIsolationData && Object.keys(rawIsolationData).length > 0) {
+        const vals = Object.values(rawIsolationData).map(d => d.rawCostForScoring).filter(Boolean);
+        if (vals.length) {
+            rawSummary = {
+                files: Object.keys(rawIsolationData).length,
+                avgFullMs: Math.round(vals.reduce((s, v) => s + (v.full || 0), 0) / vals.length),
+                avgThumbMs: Math.round(vals.reduce((s, v) => s + (v.thumb || 0), 0) / vals.length),
+            };
+        }
+    }
+
+    return {
+        meta: {
+            ...meta,
+            generator: 'jxl-preset-benchmark/p2-artifact',
+            scenarios,
+        },
+        recommendedPresets: presets,
+        rawIsolation: rawSummary,
+        generatedAt: new Date().toISOString(),
+        note: 'Commit this (and optional short .md) to docs/outputs/preset-benchmark/ to cross-link with Tauri thumb-pyramid rules. See BENCHMARK_AND_TESTING_HANDOFF.md:68/89 and the Owl handoff.',
+    };
 }

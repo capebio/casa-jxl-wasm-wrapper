@@ -146,6 +146,7 @@
                     const base = url.searchParams.get("baseUrl");
                     const token = url.searchParams.get("token");
                     const expId = url.searchParams.get("expeditionId");
+                    const jxlSettingsRaw = url.searchParams.get("jxlSettings");
 
                     if (base) {
                         $("#casabio-base-url").value = base;
@@ -159,6 +160,18 @@
                             const li = appendQueueItem("web-handoff");
                             setQueueStatus(li, "token received from planner — saved to keychain", "done");
                         }).catch(() => {});
+                    }
+
+                    if (jxlSettingsRaw) {
+                        try {
+                            const parsed = JSON.parse(jxlSettingsRaw);
+                            // Stash for future advanced controls in the desktop UI
+                            window.__CASABIO_HANDOFF_JXL_SETTINGS = parsed;
+                            const li = appendQueueItem("web-handoff");
+                            setQueueStatus(li, "advanced JXL settings received from planner", "done");
+                        } catch (e) {
+                            console.warn("Failed to parse jxlSettings from handoff", e);
+                        }
                     }
 
                     // Show the panel and refresh expeditions (token should now be in keychain)

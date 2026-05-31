@@ -1374,3 +1374,68 @@ Full rigorous implementation of `jpeg-recompression-polish.md`. Delivered first-
 
 ---
 
+## Feature: Preset Benchmark Export UI Unification + IA Hero (Owl P1) — 2026-05-31
+
+**Branch:** `epiccodereview/20260531T005354Z`
+
+**Status:** P1 complete (low-effort, high-impact slice)
+
+**Scope:** First slice of Owl strategic review handoff for `jxl-preset-benchmark.html` (intent #5 use-case optimization surface). Unify the export controls from tiny select + generic Copy/Save to the explicit titled-button pattern (CSV / JSON / TOON + Clear) proven in `jxl-progressive-paint.html:169-174`. Wire the recently-improved `buildExportText`/`buildExportMeta` (rich provenance, loadedFiles, rawIsolation flag, selected config) for JSON/TOON; retain richer per-row RAW `exportCsv` for the CSV button. Add crisp one-sentence hero intent declaration ("This page exists to...") per `BENCHMARK_AND_TESTING_HANDOFF.md` IA principle #2. Implement `clearSweepResults()` that resets outputs while preserving files + RAW isolation data. Update button state guards and remove all dead references to old controls.
+
+**Key Changes:**
+- `web/jxl-preset-benchmark.html:51` — added italic one-sentence hero intent declaration in `.hero-copy`.
+- `web/jxl-preset-benchmark.js`:
+  - `buildSweepSettings` (template at ~1503): replaced cramped select+Copy+Save with "Export:" + explicit CSV/JSON/TOON + Clear (using `dbg-bar-action` class from loaded debug-console.css).
+  - `updateButtonStates` (~735): uniform `hasResults` guard for the four new button IDs.
+  - `wireButtons` (~1664): new direct handlers; JSON/TOON call `buildExportText` + timestamped blob download + `dbgLog`; CSV delegates to `exportCsv`; Clear calls new clearer.
+  - New `clearSweepResults()` (~2264): empties `sweepRows`, targeted innerHTML resets on results/preset/graphs bodies, resets `selectedGraphFormat`, calls `updateButtonStates`, logs preservation of RAW/files.
+- No changes to scoring, scenarios, `option-matrix-engine`, or RAW measurement logic (P2–P4 deferred).
+
+**Benchmark / Educational Value:** The preset benchmark page (unique owner of RAW-costed scenario scoring per FEATURE_PARITY_MATRIX §1 rows 1/2/4) now has consistent, actionable export UI matching sibling optimization surfaces and satisfies the IA principles called out in the 2026-05 benchmark handoff. Clear button enables rapid iteration without losing loaded files or measured `rawCost` data. Direct download for JSON/TOON surfaces the rich `buildExportMeta` (including `rawIsolation` boolean) immediately.
+
+**Docs Updated:**
+- `docs/FEATURE_PARITY_MATRIX.md` (Benchmark Exposure column for §1 rows 1/2/4; notes the P1 export/hero work on the preset-benchmark surface).
+- This PROGRESS_LOG entry.
+- (Prior) `docs/references/historical/PRESET_BENCHMARK_OWL_STRATEGIC_HANDOFF_2026-05-31.md` (the canonical handoff artifact).
+
+**Verification:** `node --check web/jxl-preset-benchmark.js` (clean). Full structural review via `git diff` + cross-read of paint export row, `buildExport*` helpers, `clearSweepResults`, listener attachment order vs. `buildSweepSettings` + `wireButtons`. check-work subagent (general-purpose verifier) executed with VERDICT: PASS (no issues, adequacy confirmed against handoff spec + CLAUDE.md surgical rules, no excess/scope creep, edge cases guarded, project compliance).
+
+**Handoff followed:** `docs/references/historical/PRESET_BENCHMARK_OWL_STRATEGIC_HANDOFF_2026-05-31.md` (start with P1; todos; tracking updates on landing; consider autoclear + check-work on discrete sections).
+
+**Next (per handoff):** P2 (minimal persistent artifact emission to `docs/outputs/preset-benchmark/` closing the cross-link gap at BENCHMARK_AND_TESTING_HANDOFF:68/89). Use N-PresetBenchmark-... tab titles for autoclear continuations.
+
+---
+
+## Feature: Preset Benchmark Citable Artifact Emission (P2 from Owl handoff) — 2026-05-31
+
+**Branch:** `epiccodereview/20260531T005354Z`
+
+**Status:** P2 complete (minimal slice)
+
+**Scope:** Second slice of the Owl handoff for the preset benchmark page. Deliver the "actionable artifacts" required by IA principle #4 and close the specific cross-suite gap at `BENCHMARK_AND_TESTING_HANDOFF.md:68/89` ("Derived 'best preset' outputs (WASM) and thumb-pyramid rules (Tauri) are not cross-linked").
+
+**Key Changes:**
+- Created `docs/outputs/preset-benchmark/` + `README.md` (documents the required artifact shape, generation steps via the browser page, and cross-suite consumption guidance for Tauri thumb-pyramid work).
+- `web/jxl-preset-benchmark.js`:
+  - Added "Recs" button (surgical addition to the P1-unified export bar, `btn-secondary`, gated by `hasResults`).
+  - Wired listener + new exported helper `buildPresetRecommendationsArtifact()` (reuses `derivePresets(sweepRows)`, `buildExportMeta`, `saveTextWithPicker`, `rawIsolationData`, `window.__lastSweepScenarios`).
+  - Artifact shape: `{ meta: { ...full provenance + selected scenarios + generator tag }, recommendedPresets: [per-tier configs from derivePresets], rawIsolation: {summary avgs}, scenarios, generatedAt, note }`.
+- Button emits timestamped `preset-recommendations-*.json` via the existing rich picker (user commits to `docs/outputs/preset-benchmark/` for the project record).
+- No changes to scoring logic, RAW measurement paths, or the 2100-line sweep engine (P3 deferred).
+
+**Benchmark / Educational Value:** The page now produces the portable, citable "best preset per tier + scenario-weighted recommendations with RAW costing" that was the missing piece for cross-linking to Tauri desktop rules. Directly satisfies the Owl review's highest long-term-impact concern for this surface and IA principle #4. The JSON is self-describing and immediately usable by consumers without the browser page.
+
+**Docs Updated:**
+- `docs/FEATURE_PARITY_MATRIX.md` (Benchmark Exposure column, §1 row 4 + related notes).
+- `docs/references/PROGRESS_LOG.md` (this entry).
+- `docs/outputs/preset-benchmark/README.md` (new, canonical landing doc + usage).
+- (Prior) Owl handoff + P1 tracking.
+
+**Verification:** `node --check web/jxl-preset-benchmark.js` (clean). `git diff` + full file reads of helper, listener, template, button state, new README. check-work subagent (general-purpose) executed with **VERDICT: PASS** (artifact shape matches spec exactly, wiring correct + gated, README excellent, changes minimal/surgical, no regressions to P1, Tauri-useful, full compliance with handoff + CLAUDE.md).
+
+**Handoff followed:** `docs/references/historical/PRESET_BENCHMARK_OWL_STRATEGIC_HANDOFF_2026-05-31.md` (P2 after P1; todos; tracking on landing; check-work + autoclear for discrete sections).
+
+**Next (per handoff):** P4 hygiene (low-effort RAW isolation fidelity) or direct to P3 engine alignment if prioritized. Use autoclear with title `3-PresetBenchmark-...`.
+
+---
+
