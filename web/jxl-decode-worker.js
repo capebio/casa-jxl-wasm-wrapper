@@ -58,7 +58,7 @@ async function handleProgressiveDecode(data) {
         if (isFinal) {
           // Copy for legacy jxl_decoded BEFORE transferring the primary buffer.
           const legacyPixels = new Uint8Array(pixelsArray);
-          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH };
+          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses' };
           const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
             { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },
@@ -69,7 +69,7 @@ async function handleProgressiveDecode(data) {
             [legacyPixels.buffer],
           );
         } else {
-          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH };
+          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses' };
           const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
             { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },
