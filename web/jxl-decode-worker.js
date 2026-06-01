@@ -30,8 +30,8 @@ async function handleProgressiveDecode(data) {
     const buf = await resp.arrayBuffer();
     const decoder = createDecoder({
       format: 'rgba8',
-      region: null,
-      downsample: 1,
+      region: data.region ?? null,
+      downsample: data.downsample ?? 1,
       progressionTarget: 'final',
       emitEveryPass: true,
       progressiveDetail: data.progressiveDetail ?? 'lastPasses',
@@ -52,17 +52,21 @@ async function handleProgressiveDecode(data) {
         if (isFinal) {
           // Copy for legacy jxl_decoded BEFORE transferring the primary buffer.
           const legacyPixels = new Uint8Array(pixelsArray);
+          const base = { decodeId, w: info.width, h: info.height };
+          const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
-            { type: 'jxl_progress', decodeId, rgba: pixelsArray, w: info.width, h: info.height, isFinal },
+            { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },
             [pixelsArray.buffer],
           );
           self.postMessage(
-            { type: 'jxl_decoded', decodeId, rgba: legacyPixels, w: info.width, h: info.height },
+            { type: 'jxl_decoded', ...base, ...req, rgba: legacyPixels },
             [legacyPixels.buffer],
           );
         } else {
+          const base = { decodeId, w: info.width, h: info.height };
+          const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
-            { type: 'jxl_progress', decodeId, rgba: pixelsArray, w: info.width, h: info.height, isFinal },
+            { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },
             [pixelsArray.buffer],
           );
         }
@@ -77,6 +81,7 @@ async function handleProgressiveDecode(data) {
     decoder.dispose();
   } catch (err) {
     console.warn('Progressive JXL decode failed in jxl-decode-worker, falling back to jsquash one-shot for decodeId', decodeId, err);
+    // Note: jsquash one-shot (handleJxlDecode) does not support region/downsample; falls back to full frame.
     await handleJxlDecode(data);
   }
 }
