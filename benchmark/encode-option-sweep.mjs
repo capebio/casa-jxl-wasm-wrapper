@@ -153,7 +153,10 @@ async function main() {
   const bytes = new Uint8Array(readFileSync(testPath));
   const type = fileTypeFromPath(testPath);
   const result = processRaw(type, bytes);
-  const rgba = rgb_to_rgba(result.take_rgb());
+  // Prefer direct RGBA output from WASM to minimize boundary crossings.
+  const rgba = (typeof result.take_rgba === 'function')
+    ? result.take_rgba()
+    : rgb_to_rgba(result.take_rgb());
   const { width, height } = result;
   const pixelBytes = width * height * 4;
   console.log(`Dimensions: ${width}×${height} (${(pixelBytes / 1024 / 1024).toFixed(1)} MB RGBA)`);

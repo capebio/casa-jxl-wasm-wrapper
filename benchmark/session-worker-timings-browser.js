@@ -138,7 +138,13 @@ function makeDecoderOptions() {
 
 async function encodeWithSession(context, source, timeouts) {
   const started = performance.now();
-  const session = context.encode(makeEncoderOptions(source));
+  const metrics = {};
+  const session = context.encode({
+    ...makeEncoderOptions(source),
+    onMetric: (m) => {
+      if (m && m.name) metrics[m.name] = m.value;
+    },
+  });
   const chunks = [];
   let firstChunkMs = null;
   const chunkTask = (async () => {
@@ -176,6 +182,7 @@ async function encodeWithSession(context, source, timeouts) {
       bytes: concatChunks(chunks),
       encodeMs: performance.now() - started,
       firstChunkMs,
+      metrics,
     };
   } catch (error) {
     await session.cancel?.(`session-worker-timings encode failed: ${error?.message || error}`).catch(() => {});
@@ -220,7 +227,13 @@ async function runSessionPipeline(context, source, timeouts) {
     jxlBytes,
     finalWidth: decoded.final.info.width,
     finalHeight: decoded.final.info.height,
+    // Rich metrics from both sides (for artifact analysis)
+    encodeMetrics: encoded.metrics ?? {},
+    decodeMetrics: decoded.metrics ?? {},
+    // Common useful shortcuts
     schedulerQueueWaitMs: decoded.metrics?.scheduler_queue_wait_ms ?? 0,
+    timeToFirstPixelMs: decoded.metrics?.time_to_first_pixel_ms ?? null,
+    timeToHeaderMs: decoded.metrics?.time_to_header_ms ?? null,
   };
 }
 
@@ -236,8 +249,10 @@ async function measureOne(context, entry, config) {
 
   try {
     const rgbaStarted = performance.now();
-    const rgb = result.take_rgb();
-    const rgba = rgb_to_rgba(rgb);
+    // Prefer direct RGBA output from WASM to reduce JS boundary crossings.
+    const rgba = (typeof result.take_rgba === 'function')
+      ? result.take_rgba()
+      : rgb_to_rgba(result.take_rgb());
     const rgbaPrepMs = performance.now() - rgbaStarted;
     const resized = resizeRgbaCanvas(rgba, result.width, result.height, config.maxEdge);
 
@@ -272,6 +287,12 @@ async function measureOne(context, entry, config) {
       firstChunkMs: session.firstChunkMs,
       decodeMs: session.decodeMs,
       jxlBytes: session.jxlBytes,
+      // Full session metrics (now captured on both encode and decode)
+      encodeMetrics: session.encodeMetrics ?? {},
+      decodeMetrics: session.decodeMetrics ?? {},
+      schedulerQueueWaitMs: session.schedulerQueueWaitMs ?? 0,
+      timeToFirstPixelMs: session.timeToFirstPixelMs ?? null,
+      timeToHeaderMs: session.timeToHeaderMs ?? null,
     };
   } finally {
     result.free();
@@ -301,6 +322,12 @@ function collapseRuns(runs) {
     firstChunkMs: pick("firstChunkMs"),
     decodeMs: pick("decodeMs"),
     jxlBytes: Math.round(median(runs.map((run) => run.jxlBytes))),
+    // Keep the metric objects from the first run (they are diagnostic, not aggregated)
+    encodeMetrics: first.encodeMetrics ?? {},
+    decodeMetrics: first.decodeMetrics ?? {},
+    schedulerQueueWaitMs: pick("schedulerQueueWaitMs"),
+    timeToFirstPixelMs: pick("timeToFirstPixelMs"),
+    timeToHeaderMs: pick("timeToHeaderMs"),
   };
 }
 

@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -52,6 +52,13 @@ function median(values) {
   return sorted.length % 2 === 0
     ? (sorted[mid - 1] + sorted[mid]) / 2
     : sorted[mid];
+}
+
+function p95(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95));
+  return sorted[idx];
 }
 
 function mean(values) {
@@ -220,8 +227,10 @@ async function measureOne(path) {
   try {
     const rgbStarted = performance.now();
     traceStage(`[stage] ${basename(path)} rgba:start`);
-    const rgb = result.take_rgb();
-    const rgba = rgb_to_rgba(rgb);
+    // Prefer direct RGBA output from WASM when available (reduces boundary copies).
+    const rgba = (typeof result.take_rgba === 'function')
+      ? result.take_rgba()
+      : rgb_to_rgba(result.take_rgb());
     const rgbaPrepMs = performance.now() - rgbStarted;
     traceStage(`[stage] ${basename(path)} rgba:done ${fmtMs(rgbaPrepMs)}`);
 
@@ -313,14 +322,21 @@ function printAggregate(title, rows) {
   const encodes = rows.map((row) => row.encodeMs);
   const decodes = rows.map((row) => row.decodeMs);
   const totals = rows.map((row) => derived(row).totalMs);
+
+  const med = (arr) => {
+    const s = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
   console.log(
     [
       `${title}:`,
       `count=${rows.length}`,
-      `rawWall avg ${fmtMs(mean(rawTotals))}`,
-      `enc avg ${fmtMs(mean(encodes))}`,
-      `dec avg ${fmtMs(mean(decodes))}`,
-      `total avg ${fmtMs(mean(totals))}`,
+      `rawWall avg ${fmtMs(mean(rawTotals))} med ${fmtMs(med(rawTotals))} p95 ${fmtMs(p95(rawTotals))}`,
+      `enc avg ${fmtMs(mean(encodes))} med ${fmtMs(med(encodes))} p95 ${fmtMs(p95(encodes))}`,
+      `dec avg ${fmtMs(mean(decodes))} med ${fmtMs(med(decodes))} p95 ${fmtMs(p95(decodes))}`,
+      `total avg ${fmtMs(mean(totals))} med ${fmtMs(med(totals))} p95 ${fmtMs(p95(totals))}`,
     ].join(" "),
   );
 }
@@ -352,6 +368,49 @@ function rankWorst(rows) {
   return [...rows].sort((a, b) => derived(b).totalMs - derived(a).totalMs);
 }
 
+function exportResultsArtifact(testRows, gobScanRows, gobOffenders, config) {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const outDir = join(process.cwd(), "benchmark", "runs");
+  mkdirSync(outDir, { recursive: true });
+
+  const artifact = {
+    exportedAt: new Date().toISOString(),
+    generator: "targeted-wasm-timings",
+    config,
+    counts: {
+      test: testRows.length,
+      gobScan: gobScanRows.length,
+      offenders: gobOffenders.length,
+    },
+    summary: {
+      testTotalMedian: testRows.length ? median(testRows.map(r => (r.rawWallMs + r.rgbaPrepMs + r.encodeMs + r.decodeMs))) : 0,
+      testTotalP95: testRows.length ? p95(testRows.map(r => (r.rawWallMs + r.rgbaPrepMs + r.encodeMs + r.decodeMs))) : 0,
+      worstTest: testRows[0] ? { file: testRows[0].file, totalMs: (testRows[0].rawWallMs + testRows[0].rgbaPrepMs + testRows[0].encodeMs + testRows[0].decodeMs) } : null,
+    },
+    testRows,
+    gobScanRows,
+    gobOffenders,
+  };
+
+  const jsonPath = join(outDir, `targeted-wasm-timings-${ts}.json`);
+  writeFileSync(jsonPath, JSON.stringify(artifact, null, 2));
+  console.log(`\n[artifact] Wrote ${jsonPath}`);
+
+  if (testRows.length > 0) {
+    const csvPath = join(outDir, `targeted-wasm-timings-${ts}.csv`);
+    const keys = ["file", "type", "width", "height", "rawWallMs", "decompressMs", "demosaicMs", "tonemapMs", "rgbaPrepMs", "encodeMs", "decodeMs", "jxlBytes", "rawBenchDecompress", "rawBenchDemosaic"];
+    const lines = [keys.join(",")];
+    for (const r of testRows) {
+      lines.push(keys.map(k => {
+        const v = r[k];
+        return (v == null) ? "" : (typeof v === "number" ? v.toFixed(1) : String(v).replace(/,/g, ""));
+      }).join(","));
+    }
+    writeFileSync(csvPath, lines.join("\n"));
+    console.log(`[artifact] Wrote ${csvPath}`);
+  }
+}
+
 async function main() {
   setForcedTier("simd");
   console.log("targeted-wasm-timings");
@@ -378,6 +437,14 @@ async function main() {
   const gobOffenders = rankWorst(await runMeasured(offenderPaths, GOB_OFFENDER_RUNS));
   printTable("Gobabeb Offenders Re-measured", gobOffenders);
   printAggregate("Gobabeb offenders aggregate", gobOffenders);
+
+  exportResultsArtifact(testRows, gobScanRows, gobOffenders, {
+    TEST_RUNS, TEST_SCAN_LIMIT, GOB_SCAN_LIMIT,
+    GOB_OFFENDER_COUNT, GOB_OFFENDER_RUNS,
+    TRACE_PROGRESS, TRACE_STAGES,
+    quality: ENCODE_OPTIONS.quality,
+    effort: ENCODE_OPTIONS.effort,
+  });
 
   const worst = gobOffenders[0];
   if (worst) {

@@ -136,6 +136,18 @@ impl ProcessResult {
         std::mem::take(&mut self.rgb16_thumb)
     }
 
+    /// Move the RGBA8 buffer out. Caller owns the bytes.
+    /// Performs RGB→RGBA conversion inside WASM to reduce JS-side boundary crossings.
+    pub fn take_rgba(&mut self) -> Vec<u8> {
+        let rgb = std::mem::take(&mut self.rgb);
+        rgb_to_rgba(&rgb)
+    }
+
+    /// Borrow the RGBA8 buffer (copies).
+    pub fn rgba(&self) -> Vec<u8> {
+        rgb_to_rgba(&self.rgb)
+    }
+
     /// Return the color matrix used (9 floats, row-major).
     pub fn color_matrix_used(&self) -> Vec<f32> {
         self.color_matrix_flat.to_vec()
@@ -213,6 +225,7 @@ fn downscale_rgb_float_path<F>(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
@@ -221,20 +234,20 @@ fn downscale_rgb_float_path<F>(
             let x0 = (dx as f32 * xr) as usize;
             let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
             let x1 = x1.max(x0 + 1);
-            let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
-            for y in y0..y1 {
-                let row_base = y * sw;
+            let n = ((y1 - y0) * (x1 - x0)).max(1) as u32;
+            let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+            let mut row_base = y0 * sw;
+            for _y in y0..y1 {
                 for x in x0..x1 {
                     let (r, g, b) = read_pixel(row_base + x);
                     rr += r;
                     gg += g;
                     bb += b;
-                    n += 1;
                 }
+                row_base += sw;
             }
-            let n = n.max(1);
-            let o = (dy * dw + dx) * 6;
             write_rgb16_le(out, o, (rr / n) as u16, (gg / n) as u16, (bb / n) as u16);
+            o += 6;
         }
     }
 }
@@ -253,6 +266,7 @@ fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize)
         let xstep = sw / dw;
         let ystep = sh / dh;
         let pixel_count = (xstep * ystep) as u32;
+        let mut o = 0usize;
         for dy in 0..dh {
             for dx in 0..dw {
                 let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
@@ -268,8 +282,8 @@ fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize)
                     }
                     row_base += sw;
                 }
-                let o = (dy * dw + dx) * 6;
                 write_rgb16_le(&mut out, o, (rr / pixel_count) as u16, (gg / pixel_count) as u16, (bb / pixel_count) as u16);
+                o += 6;
             }
         }
         return out;
@@ -296,6 +310,7 @@ fn downscale_packed_rgb16_le(src: &[u8], sw: usize, sh: usize, dw: usize, dh: us
         let ystep = sh / dh;
         let pixel_count = (xstep * ystep) as u32;
         let sw6 = sw * 6;
+        let mut o = 0usize;
         for dy in 0..dh {
             for dx in 0..dw {
                 let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
@@ -314,8 +329,8 @@ fn downscale_packed_rgb16_le(src: &[u8], sw: usize, sh: usize, dw: usize, dh: us
                     }
                     row_base += sw6;
                 }
-                let o = (dy * dw + dx) * 6;
                 write_rgb16_le(&mut out, o, (rr / pixel_count) as u16, (gg / pixel_count) as u16, (bb / pixel_count) as u16);
+                o += 6;
             }
         }
         return out;
@@ -834,6 +849,7 @@ pub fn downscale_rgb(
         let xstep = sw / dw;
         let ystep = sh / dh;
         let pixel_count = (xstep * ystep) as u32;
+        let mut o = 0usize;
         for dy in 0..dh {
             for dx in 0..dw {
                 let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
@@ -849,10 +865,10 @@ pub fn downscale_rgb(
                     }
                     row_base += sw;
                 }
-                let o = (dy * dw + dx) * 3;
                 out[o]     = (rr / pixel_count) as u8;
                 out[o + 1] = (gg / pixel_count) as u8;
                 out[o + 2] = (bb / pixel_count) as u8;
+                o += 3;
             }
         }
         return Ok(out);
@@ -860,6 +876,7 @@ pub fn downscale_rgb(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
@@ -868,24 +885,24 @@ pub fn downscale_rgb(
             let x0 = (dx as f32 * xr) as usize;
             let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
             let x1 = x1.max(x0 + 1);
-
-            let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
-            for y in y0..y1 {
-                let row_base = (y * sw + x0) * 3;
-                let x_count = x1 - x0;
-                for k in 0..x_count {
-                    let i = row_base + k * 3;
+            let x_count = x1 - x0;
+            let n = ((y1 - y0) * x_count).max(1) as u32;
+            let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+            let mut row_base = (y0 * sw + x0) * 3;
+            for _y in y0..y1 {
+                let mut i = row_base;
+                for _ in 0..x_count {
                     rr += src[i] as u32;
                     gg += src[i + 1] as u32;
                     bb += src[i + 2] as u32;
-                    n += 1;
+                    i += 3;
                 }
+                row_base += sw * 3;
             }
-            let n = n.max(1);
-            let o = (dy * dw + dx) * 3;
-            out[o] = (rr / n) as u8;
+            out[o]     = (rr / n) as u8;
             out[o + 1] = (gg / n) as u8;
             out[o + 2] = (bb / n) as u8;
+            o += 3;
         }
     }
     Ok(out)
@@ -930,6 +947,7 @@ pub fn downscale_rgba(
         let xstep = sw / dw;
         let ystep = sh / dh;
         let pixel_count = (xstep * ystep) as u32;
+        let mut o = 0usize;
         for dy in 0..dh {
             for dx in 0..dw {
                 let (mut rr, mut gg, mut bb, mut aa) = (0u32, 0u32, 0u32, 0u32);
@@ -946,11 +964,11 @@ pub fn downscale_rgba(
                     }
                     row_base += sw;
                 }
-                let o = (dy * dw + dx) * 4;
                 out[o]     = (rr / pixel_count) as u8;
                 out[o + 1] = (gg / pixel_count) as u8;
                 out[o + 2] = (bb / pixel_count) as u8;
                 out[o + 3] = (aa / pixel_count) as u8;
+                o += 4;
             }
         }
         return Ok(out);
@@ -958,6 +976,7 @@ pub fn downscale_rgba(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
@@ -966,25 +985,26 @@ pub fn downscale_rgba(
             let x0 = (dx as f32 * xr) as usize;
             let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
             let x1 = x1.max(x0 + 1);
-            let (mut rr, mut gg, mut bb, mut aa, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
-            for y in y0..y1 {
-                let row_base = (y * sw + x0) * 4;
-                let x_count = x1 - x0;
-                for k in 0..x_count {
-                    let i = row_base + k * 4;
+            let x_count = x1 - x0;
+            let n = ((y1 - y0) * x_count).max(1) as u32;
+            let (mut rr, mut gg, mut bb, mut aa) = (0u32, 0u32, 0u32, 0u32);
+            let mut row_base = (y0 * sw + x0) * 4;
+            for _y in y0..y1 {
+                let mut i = row_base;
+                for _ in 0..x_count {
                     rr += src[i]     as u32;
                     gg += src[i + 1] as u32;
                     bb += src[i + 2] as u32;
                     aa += src[i + 3] as u32;
-                    n += 1;
+                    i += 4;
                 }
+                row_base += sw * 4;
             }
-            let n = n.max(1);
-            let o = (dy * dw + dx) * 4;
-            out[o] = (rr / n) as u8;
+            out[o]     = (rr / n) as u8;
             out[o + 1] = (gg / n) as u8;
             out[o + 2] = (bb / n) as u8;
             out[o + 3] = (aa / n) as u8;
+            o += 4;
         }
     }
     Ok(out)
@@ -1090,18 +1110,36 @@ pub fn apply_look(
 #[wasm_bindgen]
 pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     let n = rgb.len() / 3;
-    let mut out = vec![0u8; n * 4];
+    let mut out = vec![255u8; n * 4];
     let mut si = 0usize;
     let mut di = 0usize;
     for _ in 0..n {
         out[di] = rgb[si];
         out[di + 1] = rgb[si + 1];
         out[di + 2] = rgb[si + 2];
-        out[di + 3] = 255;
         si += 3;
         di += 4;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_rgb_to_rgba_matches_borrowed_conversion() {
+        let rgb = vec![1, 2, 3, 4, 5, 6];
+
+        assert_eq!(rgb_vec_to_rgba_in_place(rgb.clone()), rgb_to_rgba(&rgb));
+    }
+
+    #[test]
+    fn owned_rgb_to_rgba_ignores_trailing_partial_pixel() {
+        let rgb = vec![9, 8, 7, 123, 45];
+
+        assert_eq!(rgb_vec_to_rgba_in_place(rgb), vec![9, 8, 7, 255]);
+    }
 }
 
 /// WASM-resident rendering state for a single image (lightbox or thumbnail).
