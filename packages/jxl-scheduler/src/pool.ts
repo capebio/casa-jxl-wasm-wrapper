@@ -140,7 +140,7 @@ export class WorkerPool {
       spawning: this.spawning,
       spawnPromises: this.spawnPromises.size,
       capacityRemaining: this.capacityRemaining,
-      workers: [...this.workers.values()].map((w) => ({
+      workers: Array.from(this.workers.values(), (w) => ({
         id: w.id,
         activeSessionId: w.activeSessionId,
         cancelling: w.cancelling,
@@ -240,7 +240,7 @@ export class WorkerPool {
   /** Manually evict idle workers, e.g. on memory pressure. Returns count reaped. */
   reapIdle({ preserveMinIdle = true } = {}): number {
     let count = 0;
-    for (const worker of [...this.idle]) {
+    for (const worker of this.idle) {
       if (preserveMinIdle && this.idle.size <= this.minIdle) break;
       this.recycle(worker);
       count++;
@@ -265,7 +265,7 @@ export class WorkerPool {
     // Wait for in-flight spawns so no worker escapes cleanup.
     await Promise.allSettled([...this.spawnPromises]);
 
-    const shutdownPromises = [...this.workers.values()].map((worker) =>
+    const shutdownPromises = Array.from(this.workers.values(), (worker) =>
       this.cleanupAndRemove(worker, true, POOL_SHUTDOWN_TIMEOUT_MS),
     );
 

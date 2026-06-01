@@ -139,8 +139,7 @@ impl ProcessResult {
     /// Move the RGBA8 buffer out. Caller owns the bytes.
     /// Performs RGB→RGBA conversion inside WASM to reduce JS-side boundary crossings.
     pub fn take_rgba(&mut self) -> Vec<u8> {
-        let rgb = std::mem::take(&mut self.rgb);
-        rgb_to_rgba(&rgb)
+        rgb_vec_to_rgba_in_place(std::mem::take(&mut self.rgb))
     }
 
     /// Borrow the RGBA8 buffer (copies).
@@ -159,18 +158,24 @@ fn now_ms() -> f64 {
         static PERF: std::cell::OnceCell<web_sys::Performance> = const { std::cell::OnceCell::new() };
     }
     PERF.with(|cell| {
-        cell.get_or_init(|| {
-            web_sys::window()
-                .and_then(|w| w.performance())
-                .or_else(|| {
-                    js_sys::global()
-                        .dyn_into::<web_sys::WorkerGlobalScope>()
-                        .ok()
-                        .and_then(|w| w.performance())
-                })
-                .expect("Performance API not available")
-        })
-        .now()
+        if let Some(perf) = cell.get() {
+            return perf.now();
+        }
+        let perf = web_sys::window()
+            .and_then(|w| w.performance())
+            .or_else(|| {
+                js_sys::global()
+                    .dyn_into::<web_sys::WorkerGlobalScope>()
+                    .ok()
+                    .and_then(|w| w.performance())
+            });
+        if let Some(perf) = perf {
+            let now = perf.now();
+            let _ = cell.set(perf);
+            now
+        } else {
+            js_sys::Date::now()
+        }
     })
 }
 
@@ -1121,6 +1126,23 @@ pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
         di += 4;
     }
     out
+}
+
+fn rgb_vec_to_rgba_in_place(mut rgb: Vec<u8>) -> Vec<u8> {
+    let n = rgb.len() / 3;
+    let rgb_len = n * 3;
+    let rgba_len = n * 4;
+    rgb.truncate(rgb_len);
+    rgb.resize(rgba_len, 255);
+    for p in (0..n).rev() {
+        let si = p * 3;
+        let di = p * 4;
+        rgb[di] = rgb[si];
+        rgb[di + 1] = rgb[si + 1];
+        rgb[di + 2] = rgb[si + 2];
+        rgb[di + 3] = 255;
+    }
+    rgb
 }
 
 #[cfg(test)]

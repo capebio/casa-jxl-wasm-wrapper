@@ -181,8 +181,10 @@ async function handleFile(slot, file) {
 async function decodeViaWasm(bytes, wasmFn) {
     const result = wasmFn(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
     try {
-        const rgb = result.take_rgb();
-        const rgba = new Uint8ClampedArray(rawWasm.rgb_to_rgba(rgb).buffer);
+        const rgbaBytes = (typeof result.take_rgba === 'function')
+            ? result.take_rgba()
+            : rawWasm.rgb_to_rgba(result.take_rgb());
+        const rgba = new Uint8ClampedArray(rgbaBytes.buffer, rgbaBytes.byteOffset, rgbaBytes.byteLength);
         return { rgba, width: result.width, height: result.height };
     } finally {
         result.free();
@@ -226,9 +228,10 @@ buildFileIntake();
 buildSweepSettings();
 buildPhaseProgress();
 
-// Initialize debug console with the hero button
+// Initialize debug console with the hero button and the settings container
 const debugConsoleBtn = document.getElementById('dbg-console-btn');
-if (debugConsoleBtn) initDebugConsole(debugConsoleBtn);
+const settingsConsoleContainer = document.getElementById('settings-console-container');
+if (debugConsoleBtn) initDebugConsole(debugConsoleBtn, settingsConsoleContainer);
 
 wireButtons();
 
@@ -828,8 +831,7 @@ export async function runSweep(options = {}) {
     const activeTiers = TIERS.filter(t => tierFilter.includes(t.id));
     const activeScenarios = scenarioFilter.filter(s => SCENARIO_PROFILES[s]);
 
-    console.log('%c[Preset Benchmark] run start', 'color:#f97316;font-weight:600', { t: new Date().toISOString(), tiers: activeTiers.map(t => t.id), scenarios: activeScenarios, sizes: sizeFilter, runsPerConfig });
-    dbgLog('Sweep starting', `files=${activeFiles.map(f=>f.label).join('+')||'none'} efforts=${(effortFilter||[]).join(',')||'1-6'} sizes=${activeSizes.join(',')}`);
+    const activeFiles = SLOTS.filter(s => loadedSources[s.id]);
 
     // Union of sizes required by the chosen scenarios (plus any explicit size filter)
     let scenarioSizes = [];
@@ -839,7 +841,8 @@ export async function runSweep(options = {}) {
     const effectiveSizeFilter = sizeFilter.length ? sizeFilter : [...new Set(scenarioSizes)];
     const activeSizes = SIZES.filter(s => effectiveSizeFilter.includes(s));
 
-    const activeFiles = SLOTS.filter(s => loadedSources[s.id]);
+    console.log('%c[Preset Benchmark] run start', 'color:#f97316;font-weight:600', { t: new Date().toISOString(), tiers: activeTiers.map(t => t.id), scenarios: activeScenarios, sizes: activeSizes, runsPerConfig });
+    dbgLog('Sweep starting', `files=${activeFiles.map(f=>f.label).join('+')||'none'} efforts=${(effortFilter||[]).join(',')||'1-6'} sizes=${activeSizes.join(',')}`);
 
     // Store for post-processing (diagnostics use the chosen scenarios + their weights)
     window.__lastSweepScenarios = activeScenarios;
@@ -1457,61 +1460,65 @@ function buildSweepSettings() {
     const body = document.getElementById('sweep-settings-body');
     if (!body) return;
     body.innerHTML = `
-        <div class="sweep-controls" style="font-size:9px;">
+        <div class="sweep-controls">
             <div class="control-group">
                 <span>Sizes:</span>
                 <div class="chip-group">
                     ${[128, 512, 1920, 'full'].map(sz => `
-                        <label class="chip-label" style="padding:0 3px;"><input type="checkbox" name="sweep-size" value="${sz}" checked /> <span>${sz === 'full' ? 'Full' : sz}</span></label>`).join('')}
+                        <label class="chip-label"><input type="checkbox" name="sweep-size" value="${sz}" checked /> <span>${sz === 'full' ? 'Full' : sz}</span></label>`).join('')}
                 </div>
             </div>
             <div class="control-group">
                 <span>Effort:</span>
                 <div class="chip-group">
                     ${[1,2,3,4,5,6].map(e => `
-                        <label class="chip-label" style="padding:0 3px;"><input type="checkbox" name="sweep-effort" value="${e}" checked /> <span>${e}</span></label>`).join('')}
+                        <label class="chip-label"><input type="checkbox" name="sweep-effort" value="${e}" checked /> <span>${e}</span></label>`).join('')}
                 </div>
             </div>
             <div class="control-group">
                 <span>Tiers:</span>
                 <div class="chip-group">
                     ${['low','medium','high','lossless'].map(t => `
-                        <label class="chip-label" style="padding:0 3px;"><input type="checkbox" name="sweep-tier" value="${t}" checked /> <span>${t}</span></label>`).join('')}
+                        <label class="chip-label"><input type="checkbox" name="sweep-tier" value="${t}" checked /> <span>${t}</span></label>`).join('')}
                 </div>
             </div>
             <div class="control-group">
                 <span>Scenarios:</span>
                 <div class="chip-group" id="scenario-chips">
-                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="thumb" checked /> <span>Thumb</span></label>
-                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="medium" checked /> <span>Med</span></label>
-                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="fullpage" checked /> <span>FullPg</span></label>
-                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="fullres" /> <span>FullRes</span></label>
-                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="massive" /> <span>80M</span></label>
-                    <label class="chip-label" style="padding:0 2px;"><input type="checkbox" name="scenario" value="gallery" checked /> <span>Gallery</span></label>
+                    <label class="chip-label"><input type="checkbox" name="scenario" value="thumb" checked /> <span>Thumb</span></label>
+                    <label class="chip-label"><input type="checkbox" name="scenario" value="medium" checked /> <span>Med</span></label>
+                    <label class="chip-label"><input type="checkbox" name="scenario" value="fullpage" checked /> <span>FullPg</span></label>
+                    <label class="chip-label"><input type="checkbox" name="scenario" value="fullres" /> <span>FullRes</span></label>
+                    <label class="chip-label"><input type="checkbox" name="scenario" value="massive" /> <span>80M</span></label>
+                    <label class="chip-label"><input type="checkbox" name="scenario" value="gallery" checked /> <span>Gallery</span></label>
                 </div>
             </div>
             <div class="control-group">
                 <span>Runs:</span>
                 <div class="spinpicker">
-                    <button class="spin-btn" type="button" id="runs-dec" style="padding:0 2px;">−</button>
-                    <input id="input-runs" type="number" min="1" max="5" step="1" value="3" style="width:28px;text-align:center;font-size:9px;" />
-                    <button class="spin-btn" type="button" id="runs-inc" style="padding:0 2px;">+</button>
+                    <button class="spin-btn" type="button" id="runs-dec">−</button>
+                    <input id="input-runs" type="number" min="1" max="5" step="1" value="3" style="width:36px;text-align:center;" />
+                    <button class="spin-btn" type="button" id="runs-inc">+</button>
                 </div>
             </div>
-            <div class="control-group" style="margin-left:auto;display:flex;gap:3px;align-items:center;flex-wrap:wrap">
-                <button id="btn-run-sweep" class="btn-primary" type="button" style="font-size:8px;padding:0 4px;">Run</button>
-                <button id="btn-stop" class="btn-danger" type="button" disabled style="font-size:8px;padding:0 3px;">Stop</button>
-                <button id="btn-load-saved" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Load</button>
-                <span style="color:#94a3b8; margin:0 4px; font-size:8px;">Export:</span>
-                <button id="export-csv-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export sweep + rich meta/RAW flag as CSV (includes # meta block)">CSV</button>
-                <button id="export-json-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export sweep results + rich meta (files, selected, rawIsolation) as JSON">JSON</button>
-                <button id="export-toon-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Export as TOON (compact human-readable tables + meta)">TOON</button>
-                <button id="clear-measurements-btn" class="dbg-bar-action" type="button" style="font-size:8px;padding:0 3px;" disabled title="Clear sweep results, preset cards, and graphs (files + RAW isolation preserved)">Clear</button>
-                <button id="export-recs-btn" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;" disabled title="Persist citable preset recommendations JSON (best-per-tier + scenario scores + RAW costs + provenance) for docs/outputs + Tauri cross-link">Recs</button>
-                <button id="btn-log" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Log</button>
-                <button id="btn-console-bar" class="btn-secondary" type="button" style="font-size:8px;padding:0 3px;">Console</button>
+            <div class="control-group actions-row" style="margin-top:8px; display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+                <button id="btn-run-sweep" class="btn-primary" type="button">Run</button>
+                <button id="btn-stop" class="btn-danger" type="button" disabled>Stop</button>
+                <button id="btn-load-saved" class="btn-secondary" type="button">Load IDB</button>
+                <label class="btn-secondary" style="cursor:pointer;" title="Load exported preset-benchmark JSON (portable historical run)">Load file
+                    <input id="load-export-json" type="file" accept=".json" hidden />
+                </label>
+                <span style="color:#94a3b8; margin:0 4px; font-size:12px;">Export:</span>
+                <button id="export-csv-btn" class="btn-secondary" type="button" disabled title="Export sweep + rich meta/RAW flag as CSV (includes # meta block)">CSV</button>
+                <button id="export-json-btn" class="btn-secondary" type="button" disabled title="Export sweep results + rich meta (files, selected, rawIsolation) as JSON">JSON</button>
+                <button id="export-toon-btn" class="btn-secondary" type="button" disabled title="Export as TOON (compact human-readable tables + meta)">TOON</button>
+                <button id="clear-measurements-btn" class="dbg-bar-action" type="button" disabled title="Clear sweep results, preset cards, and graphs (files + RAW isolation preserved)">Clear</button>
+                <button id="export-recs-btn" class="btn-secondary" type="button" disabled title="Persist citable preset recommendations JSON (best-per-tier + scenario scores + RAW costs + provenance) for docs/outputs + Tauri cross-link">Recs</button>
+                <button id="btn-log" class="btn-secondary" type="button">Log</button>
+                <button id="btn-console-bar" class="btn-secondary" type="button">Console</button>
             </div>
         </div>
+        <div id="settings-console-container" style="margin-top:12px; border-top: 1px solid var(--border); padding-top: 8px;"></div>
     `;
     document.getElementById('runs-dec').addEventListener('click', () => {
         const inp = document.getElementById('input-runs');
@@ -1653,7 +1660,7 @@ function wireButtons() {
 
     document.getElementById('btn-load-saved')?.addEventListener('click', () => {
         const saved = loadSavedResults();
-        if (!saved) { alert('No saved results found.'); return; }
+        if (!saved) { alert('No saved results found in localStorage.'); return; }
         sweepRows.length = 0;
         sweepRows.push(...saved.rows);
         buildResultsTable(sweepRows);
@@ -1663,6 +1670,40 @@ function wireButtons() {
         refreshGraphsWithFilter();
         updateButtonStates();
     });
+
+    // New: load any exported {meta, rows} JSON file (portable across sessions/machines)
+    const loadJsonInput = document.getElementById('load-export-json');
+    if (loadJsonInput) {
+        loadJsonInput.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            try {
+                const text = await file.text();
+                const data = JSON.parse(text);
+                const rows = Array.isArray(data?.rows) ? data.rows : (Array.isArray(data) ? data : null);
+                if (!rows || !rows.length) {
+                    alert('JSON did not contain a usable "rows" array (expected exported preset-benchmark shape).');
+                    return;
+                }
+                sweepRows.length = 0;
+                sweepRows.push(...rows);
+                buildResultsTable(sweepRows);
+                // Try to derive presets from loaded rows (best effort)
+                const presets = (typeof derivePresets === 'function') ? derivePresets(sweepRows) : null;
+                buildPresetCards(presets || []);
+                selectedGraphFormat = 'all';
+                if (typeof refreshGraphFormatBar === 'function') refreshGraphFormatBar();
+                if (typeof refreshGraphsWithFilter === 'function') refreshGraphsWithFilter();
+                updateButtonStates();
+                dbgLog('Loaded external JSON run', `${rows.length} rows from ${file.name}`);
+            } catch (err) {
+                console.error(err);
+                alert('Failed to load/parse JSON: ' + err.message);
+            } finally {
+                e.target.value = ''; // allow re-select same file
+            }
+        });
+    }
 
     // Unified explicit export buttons (CSV uses rich exportCsv with per-row RAW; JSON/TOON wire the improved buildExportText+Meta with provenance)
     document.getElementById('export-csv-btn')?.addEventListener('click', () => {

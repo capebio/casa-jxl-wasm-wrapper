@@ -113,7 +113,7 @@ jsquash path will remain as fast fallback for environments without the full WASM
 
 **What remains (the "nothing more" will be reached after these are done in follow-up focused passes):**
 - P2 polish: Better quality rotate+sample for extreme angles, integration with the full crop tool (horizon line drag).
-- **P3 (highest remaining value for "JXL point of view")**: Replace the jsquash one-shot in the dedicated lightbox decode worker (or the callsites) with the real progressive `createDecoder` path so lightbox JXL viewing gets DC-first → passes + later ROI.
+- **P3.1 live**: The dedicated lightbox decode worker now uses the real progressive `createDecoder` path for progressive requests, emits early `jxl_progress` frames, keeps jsquash as fallback, and applies the locked cache policies in `web/main.js`.
 - P4: HDR/gain map, JXL container previews as first paint, multi-frame scrub in lightbox.
 - P5: Parity matrix doc + any small WASM-only graceful fallbacks.
 

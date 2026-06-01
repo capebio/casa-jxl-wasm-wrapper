@@ -45,21 +45,21 @@ export function dbgLog(text, detail = '', kind = '') {
     return entry;
 }
 
-export function initDebugConsole(toggleBtn) {
+export function initDebugConsole(toggleBtn, container = null) {
     const panel = document.createElement('div');
     panel.className = 'dbg-panel';
-    panel.hidden = true;
+    if (!container) panel.hidden = true;
     panel.innerHTML = `
         <div class="dbg-bar">
             <span class="dbg-bar-title">Pipeline Console</span>
             <span class="dbg-bar-count"><span id="dbg-entry-count">0</span> entries</span>
             <button class="dbg-bar-action" id="dbg-copy-all" type="button">Copy all</button>
             <button class="dbg-bar-action" id="dbg-clear-btn" type="button">Clear</button>
-            <button class="dbg-bar-action dbg-bar-close" id="dbg-close-btn" type="button">✕</button>
+            ${!container ? '<button class="dbg-bar-action dbg-bar-close" id="dbg-close-btn" type="button">✕</button>' : ''}
         </div>
         <div class="dbg-list" id="dbg-list"></div>
     `;
-    document.body.appendChild(panel);
+    (container || document.body).appendChild(panel);
     panelEl = panel;
     listEl = panel.querySelector('#dbg-list');
     countEl = panel.querySelector('#dbg-entry-count');
@@ -68,17 +68,24 @@ export function initDebugConsole(toggleBtn) {
     for (const e of entries) renderRow(e);
     updateCount();
 
-    let open = false;
-    function setOpen(val) {
-        open = val;
-        panel.hidden = !open;
-        toggleBtn.classList.toggle('is-active', open);
-        if (open) listEl.scrollTop = listEl.scrollHeight;
+    if (!container) {
+        let open = false;
+        function setOpen(val) {
+            open = val;
+            panel.hidden = !open;
+            toggleBtn.classList.toggle('is-active', open);
+            if (open) listEl.scrollTop = listEl.scrollHeight;
+        }
+
+        toggleBtn.addEventListener('click', () => setOpen(!open));
+
+        panel.querySelector('#dbg-close-btn').addEventListener('click', () => setOpen(false));
+    } else {
+        // If in container, it's always "open" conceptually, but we can still use the button to scroll to bottom or focus
+        toggleBtn?.addEventListener('click', () => {
+            listEl.scrollTop = listEl.scrollHeight;
+        });
     }
-
-    toggleBtn.addEventListener('click', () => setOpen(!open));
-
-    panel.querySelector('#dbg-close-btn').addEventListener('click', () => setOpen(false));
 
     panel.querySelector('#dbg-clear-btn').addEventListener('click', () => {
         entries.length = 0;

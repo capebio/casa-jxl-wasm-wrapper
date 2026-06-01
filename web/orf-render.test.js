@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import initRaw, { process_orf, rgb_to_rgba } from './pkg/raw_converter_wasm.js';
 import { encodeBackendForTarget } from './jxl-progressive-policy.js';
 
-const ORF_FOLDER = String.raw`C:\995\2026-02-17 Dave at Kyffhauser`;
+const DEFAULT_ORF_FOLDER = String.raw`C:\995\2026-02-20 Gobabeb To Windhoek`;
+const ORF_FOLDER = process.env.TEST_ORF_FOLDER ?? DEFAULT_ORF_FOLDER;
 const SELECTED_COUNT = 2;
 const ENCODE_BACKENDS = ['jsquash', 'libjxl'];
 const PROGRESSIVE_MODES = [false, true];
+const maybeFixtureTest = existsSync(ORF_FOLDER) ? test : test.skip;
 
 function getOrfEntries() {
     if (!existsSync(ORF_FOLDER)) {
@@ -95,7 +97,7 @@ async function stage(label, fileName, fn) {
     }
 }
 
-test('renders two ORFs across backend and progressive permutations', async () => {
+maybeFixtureTest('renders two ORFs across backend and progressive permutations', async () => {
     const sources = getOrfEntries();
     await initRaw();
 

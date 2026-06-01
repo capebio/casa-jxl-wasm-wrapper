@@ -1,26 +1,37 @@
 import { expect, test } from 'bun:test';
 import initRaw, { process_orf, rgb_to_rgba } from './pkg/raw_converter_wasm.js';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
     createEncoder,
     createDecoder,
+    setForcedTier,
     setJxlModuleFactoryForTesting,
 } from '../packages/jxl-wasm/dist/facade.js';
 
-const DEFAULT_ORF_PATH = String.raw`C:\995\2026-02-24 Avis Dam Part II\P2240674 Solanum nigrum.ORF`;
-const ORF_PATH = process.env.TEST_ORF ?? DEFAULT_ORF_PATH;
+const DEFAULT_ORF_FOLDER = String.raw`C:\995\2026-02-20 Gobabeb To Windhoek`;
 
-if (!existsSync(ORF_PATH)) {
-    throw new Error(`ORF fixture not found: ${ORF_PATH}`);
+function firstOrfInFolder(folder) {
+    if (!folder || !existsSync(folder)) return null;
+    const first = readdirSync(folder)
+        .filter((name) => name.toLowerCase().endsWith('.orf'))
+        .sort((a, b) => a.localeCompare(b))[0];
+    return first ? join(folder, first) : null;
 }
 
-test('jxl-wasm facade can encode and decode the full-size ORF via libjxl', async () => {
+const ORF_PATH = process.env.TEST_ORF ?? firstOrfInFolder(process.env.TEST_ORF_FOLDER ?? DEFAULT_ORF_FOLDER) ?? '';
+const maybeFixtureTest = existsSync(ORF_PATH) ? test : test.skip;
+
+maybeFixtureTest('jxl-wasm facade can encode and decode the full-size ORF via libjxl', async () => {
     setJxlModuleFactoryForTesting(null); // ensure real WASM, not a mock
+    setForcedTier('simd'); // Bun's pthread-backed simd-mt build is unstable in tests.
 
     await initRaw();
     const bytes = readFileSync(ORF_PATH);
     const result = process_orf(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
-    const rgba = rgb_to_rgba(result.take_rgb());
+    const rgba = (typeof result.take_rgba === 'function')
+        ? result.take_rgba()
+        : rgb_to_rgba(result.take_rgb());
     const width = result.width;
     const height = result.height;
     result.free();

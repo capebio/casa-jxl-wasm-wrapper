@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, extname, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "playwright";
@@ -29,6 +29,7 @@ const TRACE_STAGES = readBoolEnv("TRACE_STAGES");
 const SESSION_STAGE_TIMEOUT_MS = readNumberEnv("SESSION_STAGE_TIMEOUT_MS", 30000);
 const SESSION_COMPLETION_TIMEOUT_MS = readNumberEnv("SESSION_COMPLETION_TIMEOUT_MS", 120000);
 const SESSION_MAX_EDGE = readNumberEnv("SESSION_MAX_EDGE", Infinity);
+const RAW_RGBA_MODE = (process.env.RAW_RGBA_MODE || "take").toLowerCase();
 
 const MIME = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -53,6 +54,20 @@ function fmtDims(width, height) {
 
 function mean(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function median(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function p95(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95));
+  return sorted[idx];
 }
 
 function fileTypeFromPath(path) {
@@ -160,7 +175,7 @@ function printTable(title, rows, limit = rows.length) {
         `${row.type.toUpperCase()} ${fmtDims(row.width, row.height)} work ${fmtDims(row.workWidth ?? row.width, row.workHeight ?? row.height)}`,
         fmtMb(row.sizeBytes),
         `rawWall ${fmtMs(row.rawWallMs)} [decomp ${fmtMs(row.decompressMs)} demosaic ${fmtMs(row.demosaicMs)} tonemap ${fmtMs(row.tonemapMs)}]`,
-        `prep ${fmtMs(row.rgbaPrepMs)}`,
+        `prep ${fmtMs(row.rgbaPrepMs)} ${row.rgbaPrepMode ?? "unknown"}`,
         `enc ${fmtMs(row.encodeMs)}`,
         `first ${fmtMs(row.firstChunkMs)}`,
         `dec ${fmtMs(row.decodeMs)}`,
@@ -179,16 +194,77 @@ function printAggregate(title, rows) {
   const enc = rows.map((row) => row.encodeMs);
   const dec = rows.map((row) => row.decodeMs);
   const total = rows.map((row) => derived(row).totalMs);
+
+  const med = (arr) => {
+    const s = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
   console.log(
     [
       `${title}:`,
       `count=${rows.length}`,
-      `rawWall avg ${fmtMs(mean(raw))} [decomp ${fmtMs(mean(decompress))} demosaic ${fmtMs(mean(demosaic))} tonemap ${fmtMs(mean(tonemap))}]`,
-      `enc avg ${fmtMs(mean(enc))}`,
-      `dec avg ${fmtMs(mean(dec))}`,
-      `total avg ${fmtMs(mean(total))}`,
+      `rawWall avg ${fmtMs(mean(raw))} med ${fmtMs(med(raw))} p95 ${fmtMs(p95(raw))}`,
+      `enc avg ${fmtMs(mean(enc))} med ${fmtMs(med(enc))} p95 ${fmtMs(p95(enc))}`,
+      `dec avg ${fmtMs(mean(dec))} med ${fmtMs(med(dec))} p95 ${fmtMs(p95(dec))}`,
+      `total avg ${fmtMs(mean(total))} med ${fmtMs(med(total))} p95 ${fmtMs(p95(total))}`,
     ].join(" "),
   );
+}
+
+function exportResultsArtifact(testRows, gobScanRows, gobOffenders, config) {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const outDir = join(REPO_ROOT, "benchmark", "runs");
+  mkdirSync(outDir, { recursive: true });
+
+  const artifact = {
+    exportedAt: new Date().toISOString(),
+    generator: "session-worker-timings",
+    config: {
+      TEST_RUNS: config.testRuns,
+      GOB_OFFENDER_COUNT: config.gobOffenderCount,
+      GOB_OFFENDER_RUNS: config.gobOffenderRuns,
+      SESSION_MAX_EDGE: config.maxEdge,
+      SESSION_STAGE_TIMEOUT_MS,
+      SESSION_COMPLETION_TIMEOUT_MS,
+      RAW_RGBA_MODE: config.rawRgbaMode,
+      TRACE_PROGRESS: config.traceProgress,
+      TRACE_STAGES: config.traceStages,
+    },
+    counts: {
+      test: testRows.length,
+      gobScan: gobScanRows.length,
+      offenders: gobOffenders.length,
+    },
+    summary: {
+      testTotalMedian: testRows.length ? median(testRows.map(r => (r.rawWallMs + r.rgbaPrepMs + r.encodeMs + r.decodeMs))) : 0,
+      testTotalP95: testRows.length ? p95(testRows.map(r => (r.rawWallMs + r.rgbaPrepMs + r.encodeMs + r.decodeMs))) : 0,
+      worstTest: testRows[0] ? { file: testRows[0].file, totalMs: (testRows[0].rawWallMs + testRows[0].rgbaPrepMs + testRows[0].encodeMs + testRows[0].decodeMs) } : null,
+    },
+    testRows,
+    gobScanRows,
+    gobOffenders,
+  };
+
+  const jsonPath = join(outDir, `session-worker-timings-${ts}.json`);
+  writeFileSync(jsonPath, JSON.stringify(artifact, null, 2));
+  console.log(`\n[artifact] Wrote ${jsonPath}`);
+
+  // Also emit a simple CSV of the main test rows (most commonly needed for analysis)
+  if (testRows.length > 0) {
+    const csvPath = join(outDir, `session-worker-timings-${ts}.csv`);
+    const keys = ["file", "type", "width", "height", "rawWallMs", "rgbaPrepMs", "rgbaPrepMode", "rawRgbBytes", "rgbaBytes", "encodeMs", "decodeMs", "jxlBytes", "schedulerQueueWaitMs", "timeToFirstPixelMs", "timeToHeaderMs"];
+    const lines = [keys.join(",")];
+    for (const r of testRows) {
+      lines.push(keys.map(k => {
+        const v = r[k];
+        return (v == null) ? "" : (typeof v === "number" ? v.toFixed(1) : String(v).replace(/,/g, ""));
+      }).join(","));
+    }
+    writeFileSync(csvPath, lines.join("\n"));
+    console.log(`[artifact] Wrote ${csvPath}`);
+  }
 }
 
 async function main() {
@@ -210,7 +286,7 @@ async function main() {
 
   console.log("session-worker-timings");
   console.log(
-      `config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} sessionMaxEdge=${SESSION_MAX_EDGE} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`,
+      `config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} sessionMaxEdge=${SESSION_MAX_EDGE} rawRgbaMode=${RAW_RGBA_MODE} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`,
   );
 
   try {
@@ -243,6 +319,7 @@ async function main() {
         gobOffenderRuns: GOB_OFFENDER_RUNS,
         traceProgress: TRACE_PROGRESS,
         traceStages: TRACE_STAGES,
+        rawRgbaMode: RAW_RGBA_MODE,
         maxEdge: SESSION_MAX_EDGE,
         timeouts: {
           stageMs: SESSION_STAGE_TIMEOUT_MS,
@@ -257,6 +334,16 @@ async function main() {
     printAggregate("Session worker Gobabeb scan aggregate", result.gobScanRows);
     printTable("Session Worker Gobabeb Offenders Re-measured", result.gobOffenders);
     printAggregate("Session worker Gobabeb offenders aggregate", result.gobOffenders);
+
+    exportResultsArtifact(result.testRows, result.gobScanRows, result.gobOffenders, {
+      testRuns: TEST_RUNS,
+      gobOffenderCount: GOB_OFFENDER_COUNT,
+      gobOffenderRuns: GOB_OFFENDER_RUNS,
+      maxEdge: SESSION_MAX_EDGE,
+      rawRgbaMode: RAW_RGBA_MODE,
+      traceProgress: TRACE_PROGRESS,
+      traceStages: TRACE_STAGES,
+    });
   } finally {
     await browser?.close().catch(() => {});
     await new Promise((resolveClose) => server.close(resolveClose));

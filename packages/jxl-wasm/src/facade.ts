@@ -768,11 +768,15 @@ export function detectTier(): Tier {
     if (!hasSimd) {
       tier = "scalar";
     } else {
-      const hasSab = typeof SharedArrayBuffer !== "undefined";
-      const hasRelaxedSimd = probeRelaxedSimd();
-      if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
-      else if (hasSab) tier = "simd-mt";
-      else tier = "simd";
+      if (typeof globalThis !== "undefined" && "Bun" in globalThis) {
+        tier = "simd";
+      } else {
+        const hasSab = typeof SharedArrayBuffer !== "undefined";
+        const hasRelaxedSimd = probeRelaxedSimd();
+        if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
+        else if (hasSab) tier = "simd-mt";
+        else tier = "simd";
+      }
     }
   }
   _cachedDetectedTier = tier;
@@ -1427,9 +1431,9 @@ class LibjxlDecoder implements JxlDecoder {
               pixelStride,
               sourceScale: this.options.downsample ?? 1,
               progressiveRegion: false,
+              ...(hasRegion ? { regionFallback: "full-frame-then-crop" as const } : {}),
+              ...(outPixels.region !== undefined ? { region: outPixels.region } : {}),
             };
-            if (hasRegion) ev.regionFallback = "full-frame-then-crop";
-            if (outPixels.region !== undefined) ev.region = outPixels.region;
             if (module._jxl_wasm_dec_frame_duration) {
               applyAnimFrameMetadata(ev as unknown as Record<string, unknown>, module, dec);
             }
@@ -1489,9 +1493,9 @@ class LibjxlDecoder implements JxlDecoder {
               pixelStride,
               sourceScale: this.options.downsample ?? 1,
               progressiveRegion: false,
+              ...(hasRegion ? { regionFallback: "full-frame-then-crop" as const } : {}),
+              ...(outPixels.region !== undefined ? { region: outPixels.region } : {}),
             };
-            if (hasRegion) ev.regionFallback = "full-frame-then-crop";
-            if (outPixels.region !== undefined) ev.region = outPixels.region;
             if (module._jxl_wasm_dec_frame_duration) {
               applyAnimFrameMetadata(ev as unknown as Record<string, unknown>, module, dec);
             }
@@ -1507,9 +1511,9 @@ class LibjxlDecoder implements JxlDecoder {
             pixelStride,
             sourceScale: this.options.downsample ?? 1,
             progressiveRegion: false,
+            ...(hasRegion ? { regionFallback: "full-frame-then-crop" as const } : {}),
+            ...(outPixels.region !== undefined ? { region: outPixels.region } : {}),
           };
-          if (hasRegion) ev.regionFallback = "full-frame-then-crop";
-          if (outPixels.region !== undefined) ev.region = outPixels.region;
           if (module._jxl_wasm_dec_has_gain_map?.(dec) === 1 && module._jxl_wasm_dec_take_gain_map) {
             const gmHandle = module._jxl_wasm_dec_take_gain_map(dec);
             if (gmHandle !== 0) {

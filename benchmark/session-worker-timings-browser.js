@@ -8,6 +8,48 @@ import { createBrowserContext } from "@casabio/jxl-session";
 
 const OUTPUT_FULL_RGB = 1;
 const PROCESS_ARGS = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Number.NaN, Number.NaN, 0, 0];
+
+function takeRgbaForMode(result, mode = "take") {
+  const normalized = String(mode || "take").toLowerCase();
+  const rawRgbBytes = result.width * result.height * 3;
+  const rgbaBytes = result.width * result.height * 4;
+  if (normalized === "js") {
+    return {
+      rgba: rgb_to_rgba(result.take_rgb()),
+      rgbaPrepMode: "js-rgb-to-rgba",
+      rawRgbBytes,
+      rgbaBytes,
+    };
+  }
+  if (normalized === "take" || normalized === "a") {
+    if (typeof result.take_rgba !== "function") {
+      return {
+        rgba: rgb_to_rgba(result.take_rgb()),
+        rgbaPrepMode: "js-rgb-to-rgba",
+        rawRgbBytes,
+        rgbaBytes,
+      };
+    }
+    return {
+      rgba: result.take_rgba(),
+      rgbaPrepMode: "wasm-take-rgba",
+      rawRgbBytes,
+      rgbaBytes,
+    };
+  }
+  if (normalized === "direct" || normalized === "b") {
+    if (typeof result.take_rgba_direct !== "function") {
+      throw new Error("RAW_RGBA_MODE=direct requested, but this wasm build does not export take_rgba_direct");
+    }
+    return {
+      rgba: result.take_rgba_direct(),
+      rgbaPrepMode: "wasm-direct-rgba",
+      rawRgbBytes,
+      rgbaBytes,
+    };
+  }
+  throw new Error(`Unsupported RAW_RGBA_MODE=${normalized}; expected js, take, or direct`);
+}
 const ENCODE_OPTIONS = {
   quality: 90,
   effort: 3,
@@ -249,10 +291,12 @@ async function measureOne(context, entry, config) {
 
   try {
     const rgbaStarted = performance.now();
-    // Prefer direct RGBA output from WASM to reduce JS boundary crossings.
-    const rgba = (typeof result.take_rgba === 'function')
-      ? result.take_rgba()
-      : rgb_to_rgba(result.take_rgb());
+    const {
+      rgba,
+      rgbaPrepMode,
+      rawRgbBytes,
+      rgbaBytes,
+    } = takeRgbaForMode(result, config.rawRgbaMode);
     const rgbaPrepMs = performance.now() - rgbaStarted;
     const resized = resizeRgbaCanvas(rgba, result.width, result.height, config.maxEdge);
 
@@ -264,7 +308,7 @@ async function measureOne(context, entry, config) {
 
     if (config.traceStages) {
       console.log(
-        `[session] ${entry.file} rawWall ${fmtMs(rawWallMs)} prep ${fmtMs(rgbaPrepMs)} enc ${fmtMs(session.encodeMs)} dec ${fmtMs(session.decodeMs)}`,
+        `[session] ${entry.file} rawWall ${fmtMs(rawWallMs)} prep ${fmtMs(rgbaPrepMs)} ${rgbaPrepMode} rgb ${fmtMb(rawRgbBytes)} rgba ${fmtMb(rgbaBytes)} enc ${fmtMs(session.encodeMs)} dec ${fmtMs(session.decodeMs)}`,
       );
     }
 
@@ -283,6 +327,9 @@ async function measureOne(context, entry, config) {
       orientMs: result.orient_ms ?? 0,
       rawWallMs,
       rgbaPrepMs,
+      rgbaPrepMode,
+      rawRgbBytes,
+      rgbaBytes,
       encodeMs: session.encodeMs,
       firstChunkMs: session.firstChunkMs,
       decodeMs: session.decodeMs,
@@ -318,6 +365,9 @@ function collapseRuns(runs) {
     orientMs: pick("orientMs"),
     rawWallMs: pick("rawWallMs"),
     rgbaPrepMs: pick("rgbaPrepMs"),
+    rgbaPrepMode: first.rgbaPrepMode ?? "unknown",
+    rawRgbBytes: first.rawRgbBytes ?? 0,
+    rgbaBytes: first.rgbaBytes ?? 0,
     encodeMs: pick("encodeMs"),
     firstChunkMs: pick("firstChunkMs"),
     decodeMs: pick("decodeMs"),

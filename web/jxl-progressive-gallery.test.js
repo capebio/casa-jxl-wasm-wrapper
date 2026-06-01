@@ -8,7 +8,8 @@ const js = source;
 test('progressive gallery uses the default progressive detail path', () => {
     expect(source).toContain("progressionTarget: 'final'");
     expect(source).toContain('emitEveryPass: true');
-    expect(source).not.toContain('progressiveDetail:');
+    expect(source).toContain('const chosenDetail = getGalleryProgressiveDetail();');
+    expect(source).toContain("progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail");
     expect(source).toContain('frame.getImageData()');
     expect(source).toContain('Push chunks');
     expect(source).toContain("let pushMode = 'all-chunks';");

@@ -44,6 +44,48 @@ const GOB_OFFENDER_COUNT = readNumberEnv("GOB_OFFENDER_COUNT", 8);
 const GOB_OFFENDER_RUNS = readNumberEnv("GOB_OFFENDER_RUNS", 3);
 const TRACE_PROGRESS = readBoolEnv("TRACE_PROGRESS");
 const TRACE_STAGES = readBoolEnv("TRACE_STAGES");
+const RAW_RGBA_MODE = (process.env.RAW_RGBA_MODE || "take").toLowerCase();
+
+function takeRgbaForMode(result) {
+  const rawRgbBytes = result.width * result.height * 3;
+  const rgbaBytes = result.width * result.height * 4;
+  if (RAW_RGBA_MODE === "js") {
+    return {
+      rgba: rgb_to_rgba(result.take_rgb()),
+      rgbaPrepMode: "js-rgb-to-rgba",
+      rawRgbBytes,
+      rgbaBytes,
+    };
+  }
+  if (RAW_RGBA_MODE === "take" || RAW_RGBA_MODE === "a") {
+    if (typeof result.take_rgba !== "function") {
+      return {
+        rgba: rgb_to_rgba(result.take_rgb()),
+        rgbaPrepMode: "js-rgb-to-rgba",
+        rawRgbBytes,
+        rgbaBytes,
+      };
+    }
+    return {
+      rgba: result.take_rgba(),
+      rgbaPrepMode: "wasm-take-rgba",
+      rawRgbBytes,
+      rgbaBytes,
+    };
+  }
+  if (RAW_RGBA_MODE === "direct" || RAW_RGBA_MODE === "b") {
+    if (typeof result.take_rgba_direct !== "function") {
+      throw new Error("RAW_RGBA_MODE=direct requested, but this wasm build does not export take_rgba_direct");
+    }
+    return {
+      rgba: result.take_rgba_direct(),
+      rgbaPrepMode: "wasm-direct-rgba",
+      rawRgbBytes,
+      rgbaBytes,
+    };
+  }
+  throw new Error(`Unsupported RAW_RGBA_MODE=${RAW_RGBA_MODE}; expected js, take, or direct`);
+}
 
 function median(values) {
   if (!values.length) return 0;
@@ -227,10 +269,7 @@ async function measureOne(path) {
   try {
     const rgbStarted = performance.now();
     traceStage(`[stage] ${basename(path)} rgba:start`);
-    // Prefer direct RGBA output from WASM when available (reduces boundary copies).
-    const rgba = (typeof result.take_rgba === 'function')
-      ? result.take_rgba()
-      : rgb_to_rgba(result.take_rgb());
+    const { rgba, rgbaPrepMode, rawRgbBytes, rgbaBytes } = takeRgbaForMode(result);
     const rgbaPrepMs = performance.now() - rgbStarted;
     traceStage(`[stage] ${basename(path)} rgba:done ${fmtMs(rgbaPrepMs)}`);
 
@@ -256,6 +295,9 @@ async function measureOne(path) {
       rawBenchDecompress,
       rawBenchDemosaic,
       rgbaPrepMs,
+      rgbaPrepMode,
+      rawRgbBytes,
+      rgbaBytes,
       encodeMs: encode.encodeMs,
       firstChunkMs: encode.firstChunkMs,
       jxlBytes: encode.bytes.byteLength,
@@ -278,6 +320,9 @@ function collapseRuns(runs) {
     orientMs: pick("orientMs"),
     rawWallMs: pick("rawWallMs"),
     rgbaPrepMs: pick("rgbaPrepMs"),
+    rgbaPrepMode: first.rgbaPrepMode ?? "unknown",
+    rawRgbBytes: first.rawRgbBytes ?? 0,
+    rgbaBytes: first.rgbaBytes ?? 0,
     encodeMs: pick("encodeMs"),
     firstChunkMs: pick("firstChunkMs"),
     decodeMs: pick("decodeMs"),
@@ -306,7 +351,7 @@ function printTable(title, rows, limit = rows.length) {
         `decomp ${fmtMs(row.decompressMs)}`,
         `demo ${fmtMs(row.demosaicMs)}`,
         `tone ${fmtMs(row.tonemapMs)}`,
-        `prep ${fmtMs(row.rgbaPrepMs)}`,
+        `prep ${fmtMs(row.rgbaPrepMs)} ${row.rgbaPrepMode ?? "unknown"}`,
         `enc ${fmtMs(row.encodeMs)}`,
         `first ${fmtMs(row.firstChunkMs)}`,
         `dec ${fmtMs(row.decodeMs)}`,
@@ -376,7 +421,7 @@ function exportResultsArtifact(testRows, gobScanRows, gobOffenders, config) {
   const artifact = {
     exportedAt: new Date().toISOString(),
     generator: "targeted-wasm-timings",
-    config,
+    config: { ...config, RAW_RGBA_MODE },
     counts: {
       test: testRows.length,
       gobScan: gobScanRows.length,
@@ -398,7 +443,7 @@ function exportResultsArtifact(testRows, gobScanRows, gobOffenders, config) {
 
   if (testRows.length > 0) {
     const csvPath = join(outDir, `targeted-wasm-timings-${ts}.csv`);
-    const keys = ["file", "type", "width", "height", "rawWallMs", "decompressMs", "demosaicMs", "tonemapMs", "rgbaPrepMs", "encodeMs", "decodeMs", "jxlBytes", "rawBenchDecompress", "rawBenchDemosaic"];
+    const keys = ["file", "type", "width", "height", "rawWallMs", "decompressMs", "demosaicMs", "tonemapMs", "rgbaPrepMs", "rgbaPrepMode", "rawRgbBytes", "rgbaBytes", "encodeMs", "decodeMs", "jxlBytes", "rawBenchDecompress", "rawBenchDemosaic"];
     const lines = [keys.join(",")];
     for (const r of testRows) {
       lines.push(keys.map(k => {
@@ -415,7 +460,7 @@ async function main() {
   setForcedTier("simd");
   console.log("targeted-wasm-timings");
   console.log(`detected-tier=${detectTier()} forced-tier=simd quality=${ENCODE_OPTIONS.quality} effort=${ENCODE_OPTIONS.effort} progressive=${ENCODE_OPTIONS.progressive}`);
-  console.log(`config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`);
+  console.log(`config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} rawRgbaMode=${RAW_RGBA_MODE} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`);
   const rawWasmBytes = readFileSync(new URL("../pkg/raw_converter_wasm_bg.wasm", import.meta.url));
   await initRaw({ module_or_path: rawWasmBytes });
   await warmup();

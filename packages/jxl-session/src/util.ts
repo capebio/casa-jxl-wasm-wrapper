@@ -30,7 +30,7 @@ export function toTransferableBuffer(chunk: ArrayBuffer | Uint8Array): ArrayBuff
   if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
     return chunk.buffer;
   }
-  return chunk.slice().buffer;
+  return chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
 }
 
 // Generate a session id. crypto.randomUUID is available in browsers and Node >= 19.

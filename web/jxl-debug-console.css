@@ -1,17 +1,16 @@
 .dbg-panel {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    z-index: 9000;
+    position: relative;
     height: 320px;
     display: flex;
     flex-direction: column;
     background: #0d1017;
-    border-top: 1px solid rgba(255,255,255,0.10);
-    box-shadow: 0 -8px 32px rgba(0,0,0,0.5);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     font: 12px/1.45 "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
     color: #c9d1dc;
+    overflow: hidden;
+    margin-top: 8px;
 }
 
 .dbg-bar {

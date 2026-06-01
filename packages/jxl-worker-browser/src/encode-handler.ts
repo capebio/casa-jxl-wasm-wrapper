@@ -52,6 +52,21 @@ export class EncodeHandler {
   private lastDrainPostedMs = 0;
   private lastDrainAllowed = false;
 
+  // Pre-allocated message objects — mutated in-place before postMessage (safe: structured clone is synchronous).
+  private readonly _drainMsg = {
+    type: "worker_drain" as const,
+    sessionId: "" as string,
+    latencyMs: 0,
+    queueDepth: 0,
+    queuedBytes: 0,
+    adaptiveHwm: CHUNK_HWM,
+  };
+  private readonly _chunkMsg: MsgEncodeChunk = {
+    type: "encode_chunk",
+    sessionId: "" as string,
+    chunk: new ArrayBuffer(0),
+  };
+
   constructor(
     opts: MsgEncodeStart,
     wasm: JxlModule,
@@ -61,6 +76,9 @@ export class EncodeHandler {
     this.opts = opts;
     this.wasm = wasm;
     this.callbacks = callbacks;
+
+    this._drainMsg.sessionId = this.sessionId;
+    this._chunkMsg.sessionId = this.sessionId;
 
     this.run().catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
@@ -74,8 +92,7 @@ export class EncodeHandler {
 
   onPixels(chunk: ArrayBuffer, region?: Region): void {
     if (this.cancelled || this.state === "done") return;
-    const entry: { chunk: ArrayBuffer; region?: Region } = { chunk };
-    if (region !== undefined) entry.region = region;
+    const entry = region !== undefined ? { chunk, region } : { chunk };
     this.pixelQueue.push(entry);
     this.queueDepth++;
     this.wakeResolve?.();
@@ -209,14 +226,8 @@ export class EncodeHandler {
 
     this.lastDrainPostedMs = now;
 
-    self.postMessage({
-      type: "worker_drain",
-      sessionId: this.sessionId,
-      latencyMs: 0,
-      queueDepth: this.queueDepth,
-      queuedBytes: 0,
-      adaptiveHwm: CHUNK_HWM,
-    });
+    this._drainMsg.queueDepth = this.queueDepth;
+    self.postMessage(this._drainMsg);
   }
 
   private async readEncoderChunks(encoder: BrowserEncoder): Promise<void> {
@@ -243,13 +254,9 @@ export class EncodeHandler {
         sidecarOffsets.push(totalBytes);
       }
       chunkIndex++;
-      const msg: MsgEncodeChunk = {
-        type: "encode_chunk",
-        sessionId: this.sessionId,
-        chunk: buffer,
-      };
+      this._chunkMsg.chunk = buffer;
       this.state = "streaming";
-      self.postMessage(msg, [buffer]);
+      self.postMessage(this._chunkMsg, [buffer]);
     }
 
     if (this.cancelled || this.state === "done" || this.state === "error") return;

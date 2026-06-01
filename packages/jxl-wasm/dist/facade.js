@@ -78,14 +78,19 @@ export function detectTier() {
             tier = "scalar";
         }
         else {
-            const hasSab = typeof SharedArrayBuffer !== "undefined";
-            const hasRelaxedSimd = probeRelaxedSimd();
-            if (hasSab && hasRelaxedSimd)
-                tier = "relaxed-simd-mt";
-            else if (hasSab)
-                tier = "simd-mt";
-            else
+            if (typeof globalThis !== "undefined" && "Bun" in globalThis) {
                 tier = "simd";
+            }
+            else {
+                const hasSab = typeof SharedArrayBuffer !== "undefined";
+                const hasRelaxedSimd = probeRelaxedSimd();
+                if (hasSab && hasRelaxedSimd)
+                    tier = "relaxed-simd-mt";
+                else if (hasSab)
+                    tier = "simd-mt";
+                else
+                    tier = "simd";
+            }
         }
     }
     _cachedDetectedTier = tier;

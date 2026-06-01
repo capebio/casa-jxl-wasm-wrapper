@@ -254,6 +254,58 @@ function loadSettings(settings) {
     }
 }
 
+function exportFullResultsJson() {
+    if (!benchmarkResults || (benchmarkResults.decodeMs.size === 0 && permutations.length === 0)) {
+        dbgLog('No benchmark results to export', '', 'warn');
+        return;
+    }
+    const payload = {
+        exportedAt: new Date().toISOString(),
+        system: getSystemInfo(),
+        memory: getMemoryInfo(),
+        settings: getSettings(),
+        sources: selectedSources.map(s => ({ file: s.file, width: s.width, height: s.height })),
+        sourceCount: selectedSources.length,
+        results: {
+            // Convert Maps to plain objects for JSON
+            decodeMs: Object.fromEntries(Array.from(benchmarkResults.decodeMs.entries())),
+            encodeMs: Object.fromEntries(Array.from(benchmarkResults.encodeMs.entries())),
+            resizeMs: Object.fromEntries(Array.from(benchmarkResults.resizeMs.entries())),
+            firstChunkMs: Object.fromEntries(Array.from(benchmarkResults.firstChunkMs.entries())),
+            totalMs: Object.fromEntries(Array.from(benchmarkResults.totalMs.entries())),
+            fileSize: Object.fromEntries(Array.from(benchmarkResults.fileSize.entries())),
+            // Note: encodedBytes are heavy Uint8Arrays — omitted from JSON export to keep size reasonable; use "Save full files" for binaries
+        },
+        permutations: permutations.map(p => ({
+            id: p.id,
+            label: p.label,
+            color: p.color,
+            visible: p.visible,
+            // Snapshot of results at time of perm capture (already plain-ish from snapshotResults)
+            results: p.results ? {
+                decodeMs: Object.fromEntries(Array.from(p.results.decodeMs.entries())),
+                encodeMs: Object.fromEntries(Array.from(p.results.encodeMs.entries())),
+                resizeMs: Object.fromEntries(Array.from(p.results.resizeMs.entries())),
+                firstChunkMs: Object.fromEntries(Array.from(p.results.firstChunkMs.entries())),
+                totalMs: Object.fromEntries(Array.from(p.results.totalMs.entries())),
+                fileSize: Object.fromEntries(Array.from(p.results.fileSize.entries())),
+            } : null,
+        })),
+        note: 'encodedBytes omitted (use Save full files button for .jxl binaries). Import this JSON into analysis scripts or the option-matrix tools.'
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `jxl-bench-results-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    dbgLog(`Exported full results JSON (${(json.length / 1024).toFixed(1)} KB)`, '', 'success');
+}
+
 const sourceInput = document.getElementById('source-input');
 const sourceDrop = document.getElementById('source-drop');
 const loadRandomBtn = document.getElementById('load-random');
@@ -266,6 +318,9 @@ const progressStatus = document.getElementById('progress-status');
 const fileStatus = document.getElementById('file-status');
 const timingStatus = document.getElementById('timing-status');
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
+const cancelBenchmarkBtn = document.getElementById('cancel-benchmark');
+const exportResultsJsonBtn = document.getElementById('export-results-json');
+if (exportResultsJsonBtn) exportResultsJsonBtn.disabled = true;
 
 let selectedSources = [];
 let benchmarkResults = {
@@ -281,6 +336,7 @@ let addPermutationMode = false;
 let activeBenchmarkId = 0;
 let lastProgressStatusAt = 0;
 let wasmReady = false;
+let isRunning = false;
 
 function makePermLabel(opts, id) {
     const tags = [];
@@ -319,6 +375,7 @@ function addPermutation() {
     drawGraphs();
     const btn = document.getElementById('add-permutation');
     if (btn) btn.disabled = true;
+    if (exportResultsJsonBtn) exportResultsJsonBtn.disabled = false;
     updateButtonStates();
 }
 
@@ -514,6 +571,27 @@ if (loadSettingsInput) {
     });
 }
 
+// Cancel button wiring
+if (cancelBenchmarkBtn) {
+    cancelBenchmarkBtn.addEventListener('click', () => {
+        if (!isRunning) return;
+        // Force cancel by advancing the id — existing run loop checks this on every iter
+        activeBenchmarkId++;
+        setRunningState(false);
+        setProgress('Cancelled by user.');
+        dbgLog('⏹ Benchmark cancelled by user', '', 'warn');
+    });
+} else {
+    console.error('cancel-benchmark btn missing');
+}
+
+// Export full results JSON
+if (exportResultsJsonBtn) {
+    exportResultsJsonBtn.addEventListener('click', () => {
+        exportFullResultsJson();
+    });
+}
+
 let optimizerRunning = false;
 
 function hasAnyEncodedBytes() {
@@ -548,16 +626,38 @@ function updateSelectionStatus() {
     selectionStatus.textContent = ready
         ? `${selectedSources.length} file${selectedSources.length !== 1 ? 's' : ''} ready.`
         : 'No files.';
-    startBenchmarkBtn.disabled = !ready;
+    startBenchmarkBtn.disabled = !ready || isRunning;
     startBenchmarkBtn.title = ready ? '' : 'Press Random Gobabeb first';
-    clearResultsBtn.disabled = !ready;
+    clearResultsBtn.disabled = !ready || isRunning;
     clearResultsBtn.title = ready ? '' : 'Load files first';
     const optBtn = document.getElementById('optimize-btn');
     if (optBtn && !optimizerRunning) {
-        optBtn.disabled = !ready;
+        optBtn.disabled = !ready || isRunning;
         optBtn.title = ready ? 'Auto-optimize codec toggles for this device' : 'Load files first, then optimize codec toggles for this device';
     }
     updateSaveFullBtn();
+}
+
+function setRunningState(running) {
+    isRunning = running;
+    if (cancelBenchmarkBtn) {
+        cancelBenchmarkBtn.style.display = running ? '' : 'none';
+        cancelBenchmarkBtn.disabled = !running;
+    }
+    // Lock primary controls while running
+    if (startBenchmarkBtn) startBenchmarkBtn.disabled = running || (selectedSources.length === 0);
+    if (loadRandomBtn) loadRandomBtn.disabled = running;
+    if (clearResultsBtn) clearResultsBtn.disabled = running || (selectedSources.length === 0);
+    const addBtn = document.getElementById('add-permutation');
+    if (addBtn) addBtn.disabled = running || (benchmarkResults.decodeMs.size === 0 && permutations.length === 0);
+    const optBtn = document.getElementById('optimize-btn');
+    if (optBtn) optBtn.disabled = running || (selectedSources.length === 0);
+    updateSaveFullBtn();
+}
+
+// Back-compat shim for existing calls (file picker, addPerm) — prevents silent runtime errors on button state updates
+function updateButtonStates() {
+    updateSelectionStatus();
 }
 
 function setProgress(text) {
@@ -653,11 +753,12 @@ async function processImageFile(file, arrayBuffer) {
             console.log('Processing ORF:', name, 'bytes:', arrayBuffer.byteLength);
             const result = process_orf(new Uint8Array(arrayBuffer), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
             try {
-                const rgb = result.take_rgb();
-                const rgba = rgb_to_rgba(rgb);
+                const rgba = (typeof result.take_rgba === 'function')
+                    ? result.take_rgba()
+                    : rgb_to_rgba(result.take_rgb());
                 console.log(`Converted: ${result.width}×${result.height}`);
                 return {
-                    rgba: new Uint8Array(rgba),
+                    rgba,
                     width: result.width,
                     height: result.height,
                 };
@@ -1018,6 +1119,7 @@ async function runBenchmark() {
         return;
     }
 
+    setRunningState(true);
     updateTierFromToggles();
     const iterations = Number(iterationsInput.value);
     const selectedSizes = getSelectedSizes();
@@ -1072,7 +1174,10 @@ async function runBenchmark() {
     dbgLog(`═══════════════════════════════════════`, '', 'info');
 
     for (let fileIdx = 0; fileIdx < selectedSources.length; fileIdx++) {
-        if (benchmarkId !== activeBenchmarkId) return;
+        if (benchmarkId !== activeBenchmarkId) {
+            setRunningState(false);
+            return;
+        }
 
         const source = selectedSources[fileIdx];
         const fileStart = performance.now();
@@ -1100,6 +1205,7 @@ async function runBenchmark() {
                     for (let iter = 0; iter < iterations; iter++) {
                         if (benchmarkId !== activeBenchmarkId) {
                             dbgLog('❌ BENCHMARK CANCELLED');
+                            setRunningState(false);
                             return;
                         }
 
@@ -1229,6 +1335,7 @@ async function runBenchmark() {
 
     updateSaveFullBtn(); // call here too — displayResults/drawGraphs may throw
     displayResults();
+    setRunningState(false);
 }
 
 function getAverageTiming(timings) {
@@ -1402,6 +1509,7 @@ function displayResults() {
     }
 
     updateSaveFullBtn(); // must be before drawGraphs() — if charts throw, button still updates
+    if (exportResultsJsonBtn) exportResultsJsonBtn.disabled = false;
     drawGraphs();
 }
 
@@ -1455,11 +1563,13 @@ function clearResults() {
     selectedSources = [];
     resetCharts();
     setGraphExportsEnabled(false);
+    setRunningState(false);
     updateSelectionStatus();
     setProgress('Idle.');
     setFileStatus('—');
     setTiming('Ready.');
     renderPermutationSelector();
+    if (exportResultsJsonBtn) exportResultsJsonBtn.disabled = true;
     const gc = document.getElementById('graph-caption'); if (gc) gc.textContent = '';
     const addBtn = document.getElementById('add-permutation');
     if (addBtn) addBtn.disabled = true;

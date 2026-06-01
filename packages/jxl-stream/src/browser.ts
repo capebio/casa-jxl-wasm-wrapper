@@ -46,8 +46,6 @@ export async function fromReadableStream(
 
       pending = reader.read();
 
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
       await session.push(value);
     }
 
@@ -301,7 +299,6 @@ export async function fromRangePrefix(
       const chunk = value.byteLength <= remaining ? value : value.subarray(0, remaining);
       delivered += chunk.byteLength;
 
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       await session.push(chunk);
 
       if (delivered >= byteCount) {

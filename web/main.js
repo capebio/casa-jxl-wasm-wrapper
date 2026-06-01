@@ -338,9 +338,14 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
         if (card._jxlDecoded) { resolve(card._jxlDecoded); return; }
         pool.decodeJxl(card._blobUrl, (msg) => {
             if (msg.type === 'decode_error') { resolve(null); return; }
-            card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
-            resolve(card._jxlDecoded);
-        }, 'low');
+            if (msg.type !== 'jxl_decoded' && msg.isFinal !== true) return;
+            resolve(card._jxlDecoded ?? { rgba: msg.rgba, w: msg.w, h: msg.h });
+        }, 'low', {
+            progressive: true,
+            cachePolicy: 'onFinal',
+            progressiveDetail: 'lastPasses',
+            cacheTarget: card,
+        });
     });
 };
 
@@ -512,20 +517,41 @@ updatePresetButtons();
 // ---------------------------------------------------------------------------
 // Worker pool
 // ---------------------------------------------------------------------------
+const jxlFirstProgressCacheSeen = new Set();
+
+// NOTE: The default cache policy for visible lightbox JXL paints is currently 'onFirstProgress'.
+// That means straighten/live editing may use the first progressive frame as the clean baseline
+// during refinement. The policy may change in the future; the per-request flag exists so the
+// difference remains measurable and controllable. Do not remove the three-policy wiring without
+// updating the P3.1 lightbox progressive decoder design notes.
+function applyJxlDecodeCachePolicy(card, decodeId, pixels, w, h, isFinal, policy) {
+    if (!card || !pixels || !w || !h || policy === 'never') return;
+    if (policy === 'onFirstProgress') {
+        if (jxlFirstProgressCacheSeen.has(decodeId)) return;
+        jxlFirstProgressCacheSeen.add(decodeId);
+        card._jxlProgressCacheDecodeId = decodeId;
+        card._jxlDecoded = { rgba: pixels, w, h };
+        return;
+    }
+    if (policy === 'onFinal' && isFinal) {
+        card._jxlDecoded = { rgba: pixels, w, h };
+    }
+}
+
 class WorkerPool {
     constructor(size) {
         this.size = size;
         this.workers = [];
         this.free = [];
         this.queue = [];
-        this.tasks = new Map(); // id → handlers
+        this.tasks = new Map(); // id -> handlers
         this.nextId = 1;
-        this.workerForTask = new Map(); // taskId → worker (populated on _releaseWorker)
-        this._jxlDecodeCallbacks = new Map(); // decodeId → { cb, url }
+        this.workerForTask = new Map(); // taskId -> worker (populated on _releaseWorker)
+        this._jxlDecodeCallbacks = new Map(); // decodeId -> { url, listeners: [{ cb, options }] }
         this._jxlNextDecodeId    = 1;
-        this._jxlDecodeQueue = [];           // { decodeId, url, priority }
+        this._jxlDecodeQueue = [];           // { decodeId, url, priority, options }
         this._jxlDecodeBusy  = false;
-        this._jxlPendingByUrl = new Map();   // url → decodeId (dedupe)
+        this._jxlPendingByUrl = new Map();   // url -> decodeId (dedupe)
     }
 
     _jxlPriorityRank(p) { return p === 'high' ? 0 : p === 'low' ? 2 : 1; }
@@ -540,17 +566,42 @@ class WorkerPool {
         this._jxlDecodeBusy = true;
         this._jxlDecodeWorker.postMessage({
             type: 'decode_jxl', decodeId: next.decodeId, url: next.url,
+            progressive: next.options?.progressive === true,
+            cachePolicy: next.options?.cachePolicy,
+            progressiveDetail: next.options?.progressiveDetail,
         });
     }
     _onJxlDecodeResponse(data) {
         const entry = this._jxlDecodeCallbacks.get(data.decodeId);
         if (entry) {
-            this._jxlDecodeCallbacks.delete(data.decodeId);
-            this._jxlPendingByUrl.delete(entry.url);
-            entry.cb(data);
+            const isFinal = data.type === 'jxl_decoded' || data.isFinal === true;
+            const isTerminal = data.type === 'jxl_decoded' || data.type === 'decode_error';
+            for (const listener of entry.listeners) {
+                if (typeof listener.options?.guard === 'function' && !listener.options.guard()) continue;
+                // See the policy note above: cache writes stay centralized here.
+                if (data.type === 'jxl_progress' || data.type === 'jxl_decoded') {
+                    applyJxlDecodeCachePolicy(
+                        listener.options?.cacheTarget,
+                        data.decodeId,
+                        data.rgba,
+                        data.w,
+                        data.h,
+                        isFinal,
+                        listener.options?.cachePolicy ?? 'never',
+                    );
+                }
+                listener.cb(data);
+            }
+            if (isTerminal) {
+                this._jxlDecodeCallbacks.delete(data.decodeId);
+                this._jxlPendingByUrl.delete(entry.url);
+                jxlFirstProgressCacheSeen.delete(data.decodeId);
+            }
         }
-        this._jxlDecodeBusy = false;
-        this._pumpJxlQueue();
+        if (data.type !== 'jxl_progress') {
+            this._jxlDecodeBusy = false;
+            this._pumpJxlQueue();
+        }
     }
 
     init() {
@@ -711,16 +762,22 @@ class WorkerPool {
         this._jxlDecodeWorker = w;
         w.addEventListener('message', ({ data }) => this._onJxlDecodeResponse(data));
         w.addEventListener('error', (ev) => console.error('jxl-decode-worker error:', ev.message));
+        w.postMessage({ type: 'preload' });
     }
 
-    decodeJxl(url, callback, priority = 'normal') {
+    /**
+     * @param {string} url
+     * @param {(msg: any) => void} callback
+     * @param {'high'|'normal'|'low'} [priority='normal']
+     * @param {{progressive?: boolean, cachePolicy?: 'onFirstProgress'|'onFinal'|'never', progressiveDetail?: string, cacheTarget?: any, guard?: () => boolean}} [options]
+     */
+    decodeJxl(url, callback, priority = 'normal', options = {}) {
         // Dedupe — if same URL already pending, chain callback + promote priority.
         const existingId = this._jxlPendingByUrl.get(url);
         if (existingId != null) {
             const entry = this._jxlDecodeCallbacks.get(existingId);
             if (entry) {
-                const prevCb = entry.cb;
-                entry.cb = (msg) => { prevCb(msg); callback(msg); };
+                entry.listeners.push({ cb: callback, options: { ...options } });
             }
             // Promote priority if higher
             const newRank = this._jxlPriorityRank(priority);
@@ -734,9 +791,9 @@ class WorkerPool {
             return;
         }
         const decodeId = this._jxlNextDecodeId++;
-        this._jxlDecodeCallbacks.set(decodeId, { cb: callback, url });
+        this._jxlDecodeCallbacks.set(decodeId, { url, listeners: [{ cb: callback, options: { ...options } }] });
         this._jxlPendingByUrl.set(url, decodeId);
-        this._jxlDecodeQueue.push({ decodeId, url, priority });
+        this._jxlDecodeQueue.push({ decodeId, url, priority, options: { ...options } });
         this._sortJxlQueue();
         this._pumpJxlQueue();
     }
@@ -1998,7 +2055,6 @@ function drawLightboxForCard(card) {
                     lbLoadingBadge.hidden = true;
                     return;
                 }
-                card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
                 lightboxCanvas.width  = msg.w;
                 lightboxCanvas.height = msg.h;
                 const ctx = lightboxCanvas.getContext('2d');
@@ -2010,7 +2066,13 @@ function drawLightboxForCard(card) {
                 lbLoadingBadge.hidden = true;
                 applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
-            }, 'high');
+            }, 'high', {
+                progressive: true,
+                cachePolicy: 'onFirstProgress',
+                progressiveDetail: 'lastPasses',
+                cacheTarget: card,
+                guard: () => lightboxIndex >= 0 && cards[lightboxIndex] === card,
+            });
             return;
         }
     }
@@ -2317,10 +2379,15 @@ function prefetchJxl(card, priority = 'normal') {
     if (card._jxlPrefetching) return;
     card._jxlPrefetching = true;
     pool.decodeJxl(card._blobUrl, (msg) => {
-        card._jxlPrefetching = false;
-        if (msg.type === 'decode_error') return;
-        card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
-    }, priority);
+        if (msg.type === 'decode_error' || msg.type === 'jxl_decoded' || msg.isFinal === true) {
+            card._jxlPrefetching = false;
+        }
+    }, priority, {
+        progressive: true,
+        cachePolicy: 'onFinal',
+        progressiveDetail: 'lastPasses',
+        cacheTarget: card,
+    });
 }
 function prefetchAroundCurrent() {
     if (lightboxIndex < 0) return;

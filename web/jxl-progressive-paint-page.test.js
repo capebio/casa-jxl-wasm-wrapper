@@ -10,7 +10,7 @@ test('progressive paint page exposes requested pass-step controls and compare gu
     expect(html).toContain('value="4"');
     expect(html).toContain('value="6"');
     expect(html).toContain('value="8"');
-    expect(html).toContain('Click pass tiles to pin them into the large compare slots above.');
+    expect(html).toContain('Click tiles in the strip below to pin passes into the viewers above.');
 });
 
 test('progressive paint page streams encoder chunks into decoder instead of pushing full bytes before decode loop', () => {

@@ -233,4 +233,76 @@ Priority: Phase 2A first — it gives the best risk/reward and directly attacks 
 
 ---
 
+## 10. Phase 2A Follow-up: Wider Rollout + Owned-Vec RGBA Expansion
+
+**Implementation update (June 2026)**:
+- `ProcessResult::take_rgba()` now consumes the owned RGB `Vec<u8>` and expands it backward into RGBA8 instead of allocating a separate RGBA `Vec` from a borrowed RGB slice.
+- The fallback `rgb_to_rgba(&[u8])` path remains unchanged for JS callers and `ProcessResult::rgba()`.
+- More hot call sites now prefer `take_rgba()` when they do not need to retain RGB:
+  - `benchmark/raw-format-sweep.mjs`
+  - `web/jxl-wrapper-lab.js`
+  - `web/jxl-benchmark.js`
+  - `web/jxl-preset-benchmark.js`
+  - `web/jxl-crop-benchmark.js`
+  - `web/jxl-progressive-paint.js`
+  - `web/icodec-jxl-worker.test.js`
+  - `web/worker.js` for the no-user-rotation encode path
+
+**Boundary effect**:
+- Old common path: return RGB to JS (`3 * pixels`), allocate/write RGBA in JS (`4 * pixels`), then marshal RGBA into encoder.
+- New `take_rgba()` path: expand RGB to RGBA inside WASM and return only RGBA (`4 * pixels`) to JS.
+- For a 20MP image, this avoids about 57.2 MiB of RGB JS handoff plus a 76.3 MiB JS RGBA allocation/write in no-RGB-needed paths.
+- For a 24MP image, this avoids about 68.7 MiB of RGB JS handoff plus a 91.6 MiB JS RGBA allocation/write.
+- The owned-Vec expansion also avoids holding a second full RGBA allocation inside Rust for `take_rgba()`; allocator reallocation may still move the buffer if RGB capacity cannot grow in place.
+
+**Measurement fields added**:
+- `rgbaPrepMode`: `"wasm-take-rgba"` or `"js-rgb-to-rgba"`
+- `rawRgbBytes`: `width * height * 3`
+- `rgbaBytes`: `width * height * 4`
+
+These fields are emitted by the high-fidelity session worker and targeted timing artifacts so future runs can separate true timing changes from path-selection changes.
+
+**Deferred by design**:
+- Call sites that intentionally keep RGB and RGBA (for comparison, source caches, or RGB-specific tests) were not changed. Using `take_rgba()` there would either consume RGB or require a second conversion, increasing memory traffic.
+- Direct RAW-stage RGBA production was not attempted here. It may save more allocator churn, but it changes output ownership and stage accounting more deeply than this surgical Phase 2A pass.
+
+**Next candidate**:
+- Audit `web/worker.js` rotated encode path and RGB-retaining lab/progressive sources. If those paths can encode from transient RGBA while retaining RGB only when the UI actually needs it, the next win is another full-buffer lifetime reduction rather than a faster conversion loop.
+
+## 11. A/B Measurement Setup
+
+The timing harnesses now accept `RAW_RGBA_MODE`:
+- `RAW_RGBA_MODE=js`: force the old A-baseline path, `take_rgb()` followed by `rgb_to_rgba()`.
+- `RAW_RGBA_MODE=take`: force Option A, `take_rgba()`.
+- `RAW_RGBA_MODE=direct`: reserved for Option B. It fails loudly unless a future build exports `take_rgba_direct()`.
+
+Recommended tiny smoke comparison after rebuilding `pkg/`:
+
+```powershell
+cmd /c "set RAW_RGBA_MODE=js&& set TEST_RUNS=1&& set TEST_SCAN_LIMIT=1&& set GOB_SCAN_LIMIT=0&& set GOB_OFFENDER_COUNT=0&& set GOB_OFFENDER_RUNS=0&& node benchmark\targeted-wasm-timings.mjs"
+cmd /c "set RAW_RGBA_MODE=take&& set TEST_RUNS=1&& set TEST_SCAN_LIMIT=1&& set GOB_SCAN_LIMIT=0&& set GOB_OFFENDER_COUNT=0&& set GOB_OFFENDER_RUNS=0&& node benchmark\targeted-wasm-timings.mjs"
+```
+
+**Fix applied before measurement**:
+- The Node targeted harness was blocked by a bounds panic in `raw_pipeline::pipeline::process` in the non-parallel WASM path.
+- Root cause: the non-parallel loop indexed the 65,536-entry post-tone LUT with `pre_lut_value * 255`, producing indices up to about 16M. It also skipped the matrix/saturation/vibrance math used by the parallel path.
+- The workspace now uses a local `crates/raw-pipeline` copy with the non-parallel loop corrected to mirror the parallel path and clamp post-LUT indices to `0..=65535`.
+
+**Measured A comparison (targeted Node harness, `_MG_1744.CR2`, 5184x3456, `TEST_RUNS=3`, `TEST_SCAN_LIMIT=1`)**:
+
+| Mode | Prep median | Raw wall median | Encode median | Decode median | Total median |
+|------|-------------|-----------------|---------------|---------------|--------------|
+| `RAW_RGBA_MODE=js` | 92.4 ms | 1297.7 ms | 3375.4 ms | 3081.3 ms | 7846.8 ms |
+| `RAW_RGBA_MODE=take` | 70.2 ms | 1219.4 ms | 3407.9 ms | 2892.5 ms | 7590.0 ms |
+
+Interpretation:
+- `take_rgba()` saved 22.2 ms in RGBA prep on this run (~24% lower prep time).
+- End-to-end median improved by 256.8 ms (~3.3%), though encode/decode noise is large enough that more files/runs are needed before treating total delta as stable.
+- This supports keeping Option A while building Option B only if larger multi-file runs show prep/peak memory remains worth targeting.
+
+**Next fair B sequence**:
+1. Add `process_rgba()` / direct RGBA output in `crates/raw-pipeline`.
+2. Expose that as `take_rgba_direct()` or an RGBA output flag in `ProcessResult`.
+3. Run `RAW_RGBA_MODE=js`, `RAW_RGBA_MODE=take`, and `RAW_RGBA_MODE=direct` over the same file set.
+
 *This document is a living sketch started during the 2026 WASM optimization campaign.*

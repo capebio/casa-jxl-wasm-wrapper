@@ -1038,14 +1038,16 @@ function loadBytesAsSource(bytes, name, folder = '', sizeLabel = '') {
     const started = performance.now();
     const result = process_orf(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
     try {
-        const rgb = result.take_rgb();
+        const rgba = (typeof result.take_rgba === 'function')
+            ? result.take_rgba()
+            : rgb_to_rgba(result.take_rgb());
         return {
             name,
             label: `${name} · ORF · ${result.width}×${result.height}`,
             meta: [folder, sizeLabel].filter(Boolean).join(' · '),
             width: result.width,
             height: result.height,
-            rgba: rgb_to_rgba(rgb),
+            rgba,
             loadMs: performance.now() - started,
         };
     } finally {
@@ -1057,14 +1059,16 @@ function loadBytesAsCr2Source(bytes, name, folder = '', sizeLabel = '') {
     const started = performance.now();
     const result = process_cr2(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
     try {
-        const rgb = result.take_rgb();
+        const rgba = (typeof result.take_rgba === 'function')
+            ? result.take_rgba()
+            : rgb_to_rgba(result.take_rgb());
         return {
             name,
             label: `${name} · CR2 · ${result.width}×${result.height}`,
             meta: [folder, sizeLabel].filter(Boolean).join(' · '),
             width: result.width,
             height: result.height,
-            rgba: rgb_to_rgba(rgb),
+            rgba,
             loadMs: performance.now() - started,
         };
     } finally {
@@ -1428,7 +1432,8 @@ function paintTileResult(tile, source, existingResult, wrapperResult, startedAt)
     if (existingResult && wrapperResult) {
         const byteDelta = resultByteLength(wrapperResult) - resultByteLength(existingResult);
         const msDelta = wrapperResult.totalMs - existingResult.totalMs;
-        tile.compare.textContent = `${byteDelta === 0 ? 'bytes match' : `${byteDelta > 0 ? '+' : ''}${byteDelta} B`} · total ${msDelta >= 0 ? '+' : ''}${msDelta.toFixed(0)} ms · tile ${fmtMs(firstPaintMs)}`;
+        const paintDelta = (wrapperResult.firstPaintMs ?? wrapperResult.totalMs) - (existingResult.firstPaintMs ?? existingResult.totalMs);
+        tile.compare.textContent = `${byteDelta === 0 ? 'bytes match' : `${byteDelta > 0 ? '+' : ''}${byteDelta} B`} · total ${msDelta >= 0 ? '+' : ''}${msDelta.toFixed(0)} ms · paint ${paintDelta >= 0 ? '+' : ''}${paintDelta.toFixed(0)} ms`;
     } else {
         tile.compare.textContent = '--';
     }

@@ -152,7 +152,6 @@ self.addEventListener('message', async (ev) => {
         );
         let w = result.width;
         let h = result.height;
-        let fullRgb = result.take_rgb();
         const pipelineMs = performance.now() - pT0;
         const phaseMs = {
             decompress: result.decompress_ms,
@@ -216,17 +215,24 @@ self.addEventListener('message', async (ev) => {
 
         // Bake user rotation into JXL pixels — display rotation is CSS-side in main thread
         const userTurns = Math.round(((options.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
+        let fullRgb = null;
+        let rgba;
         if (userTurns !== 0) {
+            fullRgb = result.take_rgb();
             const rotRes = rotate_rgb8(fullRgb, w, h, userTurns);
             fullRgb = rotRes.take_rgb();
             w = rotRes.width;
             h = rotRes.height;
             rotRes.free();
+            rgba = rgb_to_rgba(fullRgb);
+        } else {
+            rgba = (typeof result.take_rgba === 'function')
+                ? result.take_rgba()
+                : rgb_to_rgba(result.take_rgb());
         }
 
         // Hand off full-res RGBA to the dedicated JXL encode worker (main.js
         // spawns it from the page thread so Emscripten Pthreads work under COOP/COEP).
-        const rgba = rgb_to_rgba(fullRgb);
         fullRgb = null; // allow GC
         // Slice to a zero-offset owned buffer before transfer (rgba is a WASM heap view).
         const rgbaBuf = rgba.buffer.slice(rgba.byteOffset, rgba.byteOffset + rgba.byteLength);

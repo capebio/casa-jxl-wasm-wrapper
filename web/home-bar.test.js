@@ -22,6 +22,6 @@ test('page headings say what the pages do', () => {
     expect(indexHtml).toContain('ORF to JPEG XL browser test bench');
     expect(indexHtml).toContain('Encode, benchmark, and inspect timing across the browser pipeline.');
     expect(progressiveHtml).toContain('JPEG XL progressive decode test bench');
-    expect(wrapperHtml).toContain('JPEG XL wrapper and compare test lab');
+    expect(wrapperHtml).toContain('JPEG XL wrapper test lab');
     expect(wrapperHtml).toContain('Session worker routes JPEG XL through the browser session stack');
 });

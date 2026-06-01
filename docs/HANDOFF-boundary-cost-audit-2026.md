@@ -2,7 +2,11 @@
 
 **Context Window**: This handoff was created when context was at ~220K/512K. Start fresh from here.
 
-**Branch**: `benchmarkfeaturechanges` (already pushed)
+**Branch**: `benchmarkfeaturechanges`
+
+**Latest Commit** (included in this push):
+- "docs + WASM: Boundary Cost Audit + first implementation step (RAW→JXL boundary)"
+- Contains the two main .md documents + the initial `take_rgba()` code + benchmark rollouts.
 
 **Overall Mission**
 We spent many sessions doing aggressive, surgical micro-optimizations on the WASM JXL + RAW pipeline using the "fast-path principles" style (integer exact-ratio fast paths, manual tight loops over iterators, elimination of per-element temporaries like subarray/set/small memcpy, dominant-case specialization, etc.).

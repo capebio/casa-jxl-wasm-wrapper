@@ -380,8 +380,9 @@ async function measureFileRun(
     const orientMs = result.orient_ms;
 
     const rgbaStarted = performance.now();
-    const rgb = result.take_rgb();
-    const rgba = rgb_to_rgba(rgb);
+    const rgba = (typeof result.take_rgba === 'function')
+      ? result.take_rgba()
+      : rgb_to_rgba(result.take_rgb());
     const rgbaMs = performance.now() - rgbaStarted;
     const width = result.width;
     const height = result.height;

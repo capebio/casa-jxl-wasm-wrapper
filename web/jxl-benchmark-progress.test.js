@@ -44,7 +44,7 @@ test('benchmark page uses live counter formatters during file load and benchmark
 test('benchmark and clear buttons stay disabled until files are loaded', () => {
     expect(benchmarkHtml).toContain('<button id="start-benchmark" class="primary-btn" type="button" disabled');
     expect(benchmarkHtml).toContain('<button id="clear-results" class="secondary-btn" type="button" disabled');
-    expect(benchmarkSource).toContain('clearResultsBtn.disabled = !ready;');
+    expect(benchmarkSource).toContain('clearResultsBtn.disabled = !ready || isRunning;');
 });
 
 test('disabled primary buttons have disabled styling', () => {

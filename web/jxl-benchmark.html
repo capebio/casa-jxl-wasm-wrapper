@@ -64,6 +64,7 @@
                 <div class="control-row">
                     <button id="load-random" class="secondary-btn" type="button">Random Gobabeb</button>
                     <button id="start-benchmark" class="primary-btn" type="button" disabled title="Press Random Gobabeb first">Run benchmark</button>
+                    <button id="cancel-benchmark" class="secondary-btn" type="button" disabled style="display:none;">Cancel</button>
                     <button id="add-permutation" class="secondary-btn" type="button" disabled title="Run benchmark first, then add permutation">Add Permutation</button>
                     <button id="clear-results" class="secondary-btn" type="button" disabled title="Load files first">Clear</button>
                     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
@@ -387,6 +388,7 @@
                 </div>
                 <div class="results-header-actions">
                     <button id="copy-results-md" class="ghost-btn" type="button" title="Copy current table as Markdown for issues/PRs">📋 Copy MD</button>
+                    <button id="export-results-json" class="ghost-btn" type="button" disabled title="Export full results + permutations + system info as JSON for analysis/archiving">Export JSON</button>
                 </div>
             </header>
 

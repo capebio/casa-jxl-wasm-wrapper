@@ -1,0 +1,20 @@
+[package]
+name = "raw-pipeline"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["parallel", "jxl-encode"]
+parallel = ["dep:rayon"]
+jxl-encode = ["dep:jpegxl-rs"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+rayon = { version = "1", optional = true }
+jpegxl-rs = { version = "0.10", features = ["vendored"], optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "avif"] }
+thiserror = "1"
+anyhow = "1"
+
+[dev-dependencies]
+jxl-oxide = "0.11"

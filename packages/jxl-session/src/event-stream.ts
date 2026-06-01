@@ -73,7 +73,8 @@ export class AsyncEventStream<T> implements AsyncIterable<T> {
           // Compact when head is beyond 64 entries AND more than half the array
           // is consumed, keeping memory bounded without per-item allocation.
           if (this._head > 64 && this._head > this.buffer.length >> 1) {
-            this.buffer.splice(0, this._head);
+            this.buffer.copyWithin(0, this._head);
+            this.buffer.length -= this._head;
             this._head = 0;
           }
           return Promise.resolve({ value, done: false });

@@ -86,6 +86,7 @@ interface PendingSession {
 interface BackpressureState {
   queueDepth: number;
   pendingPushes: Array<{ resolve: () => void; waitedAt: number }>;
+  pendingHead: number;
 }
 
 // Single record per active session. Replaces six separate Maps that previously
@@ -150,6 +151,13 @@ export class Scheduler {
   private drainingQueue = false;
   private preemptionCount = 0;
   private totalSessionCount = 0;
+  private _runningCount = 0;
+  private _queuedCount = 0;
+  private _pausedCount = 0;
+
+  // Pre-allocated queue-wait metric objects — mutated in-place before fan-out (safe: synchronous).
+  private readonly _metricInner = { name: "scheduler_queue_wait_ms", value: 0 };
+  private readonly _metricMsg = { type: "metric" as const, sessionId: "", metric: this._metricInner };
 
   // Preemption victim scoring weights.
   private readonly PREEMPT_PROGRESS_W = 3.0;
@@ -201,9 +209,10 @@ export class Scheduler {
           priority: params.priority,
           kind: params.startMsg.type === "encode_start" ? "encode" : "decode",
           handlers: this.takePendingHandlers(params.sessionId),
-          createdAt: Date.now(),
+          createdAt: performance.now(),
           progress: 0,
         });
+        this._runningCount++;
         this.totalSessionCount++;
         const primaryRecord = this.sessions.get(primaryId);
         return { workerId: primaryRecord?.worker?.id ?? -1 };
@@ -245,10 +254,11 @@ export class Scheduler {
         kind: params.startMsg.type === "encode_start" ? "encode" : "decode",
         handlers: this.takePendingHandlers(params.sessionId),
         pending,
-        createdAt: Date.now(),
+        createdAt: performance.now(),
         queuedAt: pending.queuedAt,
         progress: 0,
       });
+      this._queuedCount++;
       this.totalSessionCount++;
       this.queue.enqueue({ priority: params.priority, sessionId: params.sessionId, payload: pending });
       this.setupSignalAbort(params.sessionId, params.signal);
@@ -317,6 +327,7 @@ export class Scheduler {
       delete record.pausedOnWorker;
       for (const h of record.handlers) h({ type: "decode_cancelled", sessionId });
       this.dedupe.cancelSubscriber(sessionId);
+      this._pausedCount--;
       this.sessions.delete(sessionId);
       return true;
     }
@@ -328,6 +339,7 @@ export class Scheduler {
         this.unblockBackpressure(record);
         record.pending.reject(new Error("[jxl-scheduler] Session cancelled."));
         this.dedupe.cancelSubscriber(sessionId);
+        this._queuedCount--;
         this.sessions.delete(sessionId);
         return true;
       }
@@ -336,6 +348,9 @@ export class Scheduler {
     // Subscriber (not primary): remove its record; other subscribers continue.
     const shouldCancelPrimary = this.dedupe.cancelSubscriber(sessionId);
     if (!shouldCancelPrimary) {
+      if (record?.state === "running" || record?.state === "cancelling") this._runningCount--;
+      else if (record?.state === "queued") this._queuedCount--;
+      else if (record?.state === "paused") this._pausedCount--;
       this.sessions.delete(sessionId);
       return true;
     }
@@ -344,6 +359,7 @@ export class Scheduler {
     // (terminal message arrives in handleWorkerMessage → cleanupSession).
     if (record?.worker !== undefined) {
       this.unblockBackpressure(record);
+      // running → cancelling: no counter change (cancelling counts as running).
       record.state = "cancelling";
       record.handlers = []; // No more fan-out to this session's caller.
       record.worker.cancelling = true;
@@ -353,6 +369,9 @@ export class Scheduler {
       });
     } else if (record !== undefined) {
       // No worker, no pending — orphaned. Clean up.
+      if (record.state === "running" || record.state === "cancelling") this._runningCount--;
+      else if (record.state === "queued") this._queuedCount--;
+      else if (record.state === "paused") this._pausedCount--;
       this.sessions.delete(sessionId);
     }
 
@@ -368,7 +387,7 @@ export class Scheduler {
     if (record === undefined) return;
 
     if (record.backpressure === undefined) {
-      record.backpressure = { queueDepth: 0, pendingPushes: [] };
+      record.backpressure = { queueDepth: 0, pendingPushes: [], pendingHead: 0 };
     }
 
     const bp = record.backpressure;
@@ -376,7 +395,7 @@ export class Scheduler {
     if (bp.queueDepth < this.adaptiveHwm()) return;
 
     return new Promise<void>((resolve) => {
-      bp.pendingPushes.push({ resolve, waitedAt: Date.now() });
+      bp.pendingPushes.push({ resolve, waitedAt: performance.now() });
     });
   }
 
@@ -384,9 +403,14 @@ export class Scheduler {
     const bp = this.sessions.get(sessionId)?.backpressure;
     if (bp === undefined) return;
     bp.queueDepth = Math.max(0, bp.queueDepth - 1);
-    const waiter = bp.pendingPushes.shift();
-    if (waiter !== undefined) {
-      this.updateDrainEma(Date.now() - waiter.waitedAt);
+    if (bp.pendingHead < bp.pendingPushes.length) {
+      const waiter = bp.pendingPushes[bp.pendingHead++];
+      // Compact when head has consumed the whole array.
+      if (bp.pendingHead >= bp.pendingPushes.length) {
+        bp.pendingPushes.length = 0;
+        bp.pendingHead = 0;
+      }
+      this.updateDrainEma(performance.now() - waiter.waitedAt);
       waiter.resolve();
     }
   }
@@ -407,7 +431,10 @@ export class Scheduler {
   // Unblock all pending waitForDrain calls — used on cancel/shutdown so callers don't hang.
   private unblockBackpressure(record: SessionRecord): void {
     if (record.backpressure === undefined) return;
-    for (const waiter of record.backpressure.pendingPushes) waiter.resolve();
+    const { pendingPushes, pendingHead } = record.backpressure;
+    for (let i = pendingHead; i < pendingPushes.length; i++) {
+      pendingPushes[i].resolve();
+    }
     delete record.backpressure;
   }
 
@@ -416,18 +443,10 @@ export class Scheduler {
   // ---------------------------------------------------------------------------
 
   getMetrics(): SchedulerMetrics {
-    let running = 0;
-    let queued = 0;
-    let paused = 0;
-    for (const record of this.sessions.values()) {
-      if (record.state === "running" || record.state === "cancelling") running++;
-      else if (record.state === "queued") queued++;
-      else if (record.state === "paused") paused++;
-    }
     return {
-      running,
-      queued,
-      paused,
+      running: this._runningCount,
+      queued: this._queuedCount,
+      paused: this._pausedCount,
       background: this.backgroundWorkers.size,
       preemptions: this.preemptionCount,
       totalSessions: this.totalSessionCount,
@@ -467,10 +486,10 @@ export class Scheduler {
         if (matched) {
           ackResolved = true;
           resolve();
-          if (victimRecord) victimRecord.handlers = prevHandlers;
+          if (victimRecord) prevHandlers.shift();
         }
       };
-      if (victimRecord) victimRecord.handlers = [handler, ...prevHandlers];
+      if (victimRecord) prevHandlers.unshift(handler);
 
       if (usePause) {
         backgroundWorker.handle.send({ type: "decode_pause", sessionId: victimSessionId });
@@ -491,7 +510,7 @@ export class Scheduler {
         }),
       ]);
     } catch {
-      if (victimRecord) victimRecord.handlers = prevHandlers;
+      if (victimRecord) prevHandlers.shift();
       this.pool.recycle(backgroundWorker);
     } finally {
       clearTimeout(timeout);
@@ -516,6 +535,9 @@ export class Scheduler {
       // Park the victim: keep its session record alive but detach from the active worker.
       // The WASM decoder state remains in the worker's heap until the session resumes.
       if (victimRecord !== undefined) {
+        // running → paused
+        this._runningCount--;
+        this._pausedCount++;
         victimRecord.state = "paused";
         delete victimRecord.worker;
         victimRecord.pausedOnWorker = backgroundWorker;
@@ -547,6 +569,9 @@ export class Scheduler {
     if (usePause) {
       this.workerPausedSession.delete(backgroundWorker.id);
       if (victimRecord !== undefined) {
+        // paused → cancelling (counts as running for metrics)
+        this._pausedCount--;
+        this._runningCount++;
         victimRecord.state = "cancelling";
         delete victimRecord.pausedOnWorker;
       }
@@ -567,7 +592,7 @@ export class Scheduler {
   // (less wall-clock time invested). Age is normalised to [0,1] to keep it
   // on the same scale as progress.
   private scoreVictim(record: SessionRecord): number {
-    const ageNorm = Math.min(1, (Date.now() - record.createdAt) / this.PREEMPT_AGE_NORM_MS);
+    const ageNorm = Math.min(1, (performance.now() - record.createdAt) / this.PREEMPT_AGE_NORM_MS);
     return record.progress * this.PREEMPT_PROGRESS_W + ageNorm * this.PREEMPT_AGE_W;
   }
 
@@ -600,6 +625,9 @@ export class Scheduler {
       return;
     }
     this.pool.bind(worker, sessionId);
+    // paused → running
+    this._pausedCount--;
+    this._runningCount++;
     record.state = "running";
     record.worker = worker;
     delete record.pausedOnWorker;
@@ -622,6 +650,9 @@ export class Scheduler {
     // Queued → running transition: update existing record in-place.
     const existing = this.sessions.get(sessionId);
     if (existing !== undefined) {
+      // queued → running
+      this._queuedCount--;
+      this._runningCount++;
       existing.state = "running";
       existing.worker = worker;
       delete existing.pending;
@@ -631,14 +662,10 @@ export class Scheduler {
       // Only queued sessions have a meaningful wait; immediate/preempt paths
       // never entered the PendingSession queue.
       if (existing.queuedAt != null) {
-        const waitMs = performance.now() - existing.queuedAt;
-        const metricMsg = {
-          type: "metric" as const,
-          sessionId,
-          metric: { name: "scheduler_queue_wait_ms", value: waitMs },
-        };
+        this._metricInner.value = performance.now() - existing.queuedAt;
+        this._metricMsg.sessionId = sessionId;
         for (const h of existing.handlers) {
-          try { h(metricMsg as any); } catch { /* handler must not throw */ }
+          try { h(this._metricMsg as any); } catch { /* handler must not throw */ }
         }
       }
       delete existing.queuedAt;
@@ -651,9 +678,10 @@ export class Scheduler {
         kind,
         handlers: this.takePendingHandlers(sessionId),
         worker,
-        createdAt: Date.now(),
+        createdAt: performance.now(),
         progress: 0,
       });
+      this._runningCount++;
       this.totalSessionCount++;
     }
 
@@ -756,6 +784,12 @@ export class Scheduler {
 
   // Tears down session state without triggering a queue drain.
   private cleanupSession(sessionId: string): void {
+    const record = this.sessions.get(sessionId);
+    if (record !== undefined) {
+      if (record.state === "running" || record.state === "cancelling") this._runningCount--;
+      else if (record.state === "queued") this._queuedCount--;
+      else if (record.state === "paused") this._pausedCount--;
+    }
     this.releaseSession(sessionId);
     this.dedupe.complete(sessionId);
     this.sessions.delete(sessionId);
@@ -835,6 +869,9 @@ export class Scheduler {
     }
 
     await this.pool.shutdown();
+    this._runningCount = 0;
+    this._queuedCount = 0;
+    this._pausedCount = 0;
     this.sessions.clear();
     this.backgroundWorkers.clear();
     this.workerPausedSession.clear();

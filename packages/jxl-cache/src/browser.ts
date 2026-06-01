@@ -32,6 +32,7 @@ export class JxlCacheBrowser {
   private readonly persistentTracker: LRUCache<PersistentEntry>;
   private readonly inflightGets = new Map<string, Promise<ArrayBuffer | undefined>>();
   private readonly inflightSets = new Map<string, Promise<void>>();
+  private readonly _encoder = new TextEncoder();
 
   private opfsRoot: FileSystemDirectoryHandle | null = null;
   private hitCount = 0;
@@ -97,9 +98,10 @@ export class JxlCacheBrowser {
 
     const previous = this.inflightSets.get(key) ?? Promise.resolve();
 
-    const pending = previous
-      .catch(() => undefined)
-      .then(() => this.setPersistent(key, buffer));
+    const pending = (async () => {
+      try { await previous; } catch { /* previous set failed, proceed anyway */ }
+      await this.setPersistent(key, buffer);
+    })();
 
     this.inflightSets.set(key, pending);
 
@@ -122,13 +124,13 @@ export class JxlCacheBrowser {
     if (!this.opfsRoot) return;
 
     try {
+      const names: string[] = [];
       for await (const name of (this.opfsRoot as IterableDirectoryHandle).keys()) {
-        try {
-          await this.opfsRoot.removeEntry(name);
-        } catch {
-          // Continue clearing remaining entries.
-        }
+        names.push(name);
       }
+      await Promise.allSettled(
+        names.map((name) => this.opfsRoot!.removeEntry(name).catch(() => undefined)),
+      );
     } catch (e) {
       console.warn('[JxlCacheBrowser] Partial clear failure — OPFS directory iteration failed', e);
     }
@@ -328,7 +330,7 @@ export class JxlCacheBrowser {
       }
 
       const manifest = { version: 1 as const, entries };
-      const encoded = new TextEncoder().encode(JSON.stringify(manifest));
+      const encoded = this._encoder.encode(JSON.stringify(manifest));
 
       // Slice the backing buffer to the exact byte range of the encoded view —
       // TextEncoder may return a Uint8Array that does not start at offset 0 or

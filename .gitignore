@@ -14,6 +14,8 @@ node_modules/
 
 # Rust build artifacts (Cargo target dir)
 target/
+.cargo-home/
+.codex-cargo-target-*/
 
 # Temporary / scratch (already partially ignored; ensure all)
 tmp/

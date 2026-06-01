@@ -76,6 +76,28 @@ export class DecodeHandler {
 
   private firstPixelMetricPosted = false;
 
+  // Pre-allocated message objects — avoids per-call allocation in hot paths.
+  // postMessage() performs a synchronous structured clone before returning, so mutating these
+  // fields after the call is safe (JS worker is single-threaded; no interleaving possible).
+  private readonly _metricInner = { name: "", value: 0 };
+  private readonly _metricMsg = {
+    type: "metric" as const,
+    sessionId: "" as string,
+    metric: this._metricInner,
+  };
+  private readonly _drainMsg = {
+    type: "worker_drain" as const,
+    sessionId: "" as string,
+    latencyMs: 0,
+    queueDepth: 0,
+    queuedBytes: 0,
+    adaptiveHwm: 0,
+  };
+
+  // Cached adaptiveHwm result; invalidated when EMA drifts by ≥1 ms.
+  private _cachedHwm = HWM_BASE;
+  private _hwmLastEma = -1;
+
   constructor(
     opts: MsgDecodeStart,
     wasm: JxlModule,
@@ -85,6 +107,9 @@ export class DecodeHandler {
     this.opts = opts;
     this.wasm = wasm;
     this.callbacks = callbacks;
+
+    this._metricMsg.sessionId = this.sessionId;
+    this._drainMsg.sessionId = this.sessionId;
 
     this.run().catch((err: unknown) => this.failSession("Internal", String(err)));
   }
@@ -322,14 +347,11 @@ export class DecodeHandler {
 
     this.lastDrainPostedMs = now;
 
-    self.postMessage({
-      type: "worker_drain",
-      sessionId: this.sessionId,
-      latencyMs: Math.round(this.pushLatencyEma),
-      queueDepth: this.queueDepth,
-      queuedBytes: this.queuedBytes,
-      adaptiveHwm: hwm,
-    });
+    this._drainMsg.latencyMs = Math.round(this.pushLatencyEma);
+    this._drainMsg.queueDepth = this.queueDepth;
+    this._drainMsg.queuedBytes = this.queuedBytes;
+    this._drainMsg.adaptiveHwm = hwm;
+    self.postMessage(this._drainMsg);
   }
 
   private async readDecoderEvents(decoder: BrowserDecoder): Promise<void> {
@@ -364,8 +386,8 @@ export class DecodeHandler {
             pixels,
             format: event.format,
             pixelStride: event.pixelStride,
+            ...(event.region !== undefined ? { region: event.region } : {}),
           };
-          if (event.region !== undefined) msg.region = event.region;
           self.postMessage(msg, [pixels]);
           this.postFirstPixelMetric();
           break;
@@ -389,8 +411,8 @@ export class DecodeHandler {
             pixelStride: event.pixelStride,
             outputBytes: pixels.byteLength,
             timeToFinalMs: now - this.stageStartMs,
+            ...(event.region !== undefined ? { region: event.region } : {}),
           };
-          if (event.region !== undefined) msg.region = event.region;
           // Embed first-pixel timing if it hasn't been reported via a progress event.
           if (!this.firstPixelMetricPosted) {
             msg.timeToFirstPixelMs = now - this.stageStartMs;
@@ -420,8 +442,12 @@ export class DecodeHandler {
   }
 
   private adaptiveHwm(): number {
-    const factor = Math.max(0.6, Math.min(2.0, 120 / (this.pushLatencyEma + 10)));
-    return Math.floor(HWM_BASE * factor);
+    const ema = this.pushLatencyEma;
+    if (Math.abs(ema - this._hwmLastEma) < 1.0) return this._cachedHwm;
+    this._hwmLastEma = ema;
+    const factor = Math.max(0.6, Math.min(2.0, 120 / (ema + 10)));
+    this._cachedHwm = Math.floor(HWM_BASE * factor);
+    return this._cachedHwm;
   }
 
   private checkBudget(): boolean {
@@ -475,8 +501,8 @@ export class DecodeHandler {
       info,
       format,
       pixelStride,
+      ...(region !== undefined ? { region } : {}),
     };
-    if (region !== undefined) msg.region = region;
     this.postMetric("output_bytes", pixels.byteLength);
     self.postMessage(msg, [pixels]);
     this.finishSession("budget_exceeded");
@@ -491,11 +517,9 @@ export class DecodeHandler {
   }
 
   private postMetric(name: string, value: number): void {
-    self.postMessage({
-      type: "metric",
-      sessionId: this.sessionId,
-      metric: { name, value },
-    });
+    this._metricInner.name = name;
+    this._metricInner.value = value;
+    self.postMessage(this._metricMsg);
   }
 }
 
