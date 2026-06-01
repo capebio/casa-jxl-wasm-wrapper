@@ -521,9 +521,9 @@ class WorkerPool {
         this.tasks = new Map(); // id → handlers
         this.nextId = 1;
         this.workerForTask = new Map(); // taskId → worker (populated on _releaseWorker)
-        this._jxlDecodeCallbacks = new Map(); // decodeId → { cb, url }
+        this._jxlDecodeCallbacks = new Map(); // decodeId → { cb, url, options }
         this._jxlNextDecodeId    = 1;
-        this._jxlDecodeQueue = [];           // { decodeId, url, priority }
+        this._jxlDecodeQueue = [];           // { decodeId, url, priority, options }
         this._jxlDecodeBusy  = false;
         this._jxlPendingByUrl = new Map();   // url → decodeId (dedupe)
     }
@@ -539,7 +539,12 @@ class WorkerPool {
         if (!next) return;
         this._jxlDecodeBusy = true;
         this._jxlDecodeWorker.postMessage({
-            type: 'decode_jxl', decodeId: next.decodeId, url: next.url,
+            type: 'decode_jxl',
+            decodeId: next.decodeId,
+            url: next.url,
+            progressive: !!next.options?.progressive,
+            cachePolicy: next.options?.cachePolicy,
+            progressiveDetail: next.options?.progressiveDetail,
         });
     }
 
@@ -719,14 +724,23 @@ class WorkerPool {
         w.addEventListener('error', (ev) => console.error('jxl-decode-worker error:', ev.message));
     }
 
-    decodeJxl(url, callback, priority = 'normal') {
+    /**
+     * @param {string} url
+     * @param {(msg: any) => void} callback
+     * @param {'high'|'normal'|'low'} [priority='normal']
+     * @param {{progressive?: boolean, cachePolicy?: 'onFirstProgress'|'onFinal'|'never', progressiveDetail?: string}} [options]
+     */
+    decodeJxl(url, callback, priority = 'normal', options = {}) {
+        options = options || {};
         // Dedupe — if same URL already pending, chain callback + promote priority.
+        // options/policy from the first caller are kept (simple keep-first for a URL during this session).
         const existingId = this._jxlPendingByUrl.get(url);
         if (existingId != null) {
             const entry = this._jxlDecodeCallbacks.get(existingId);
             if (entry) {
                 const prevCb = entry.cb;
                 entry.cb = (msg) => { prevCb(msg); callback(msg); };
+                // ignore caller's options; first policy wins for this decodeId
             }
             // Promote priority if higher
             const newRank = this._jxlPriorityRank(priority);
@@ -740,9 +754,9 @@ class WorkerPool {
             return;
         }
         const decodeId = this._jxlNextDecodeId++;
-        this._jxlDecodeCallbacks.set(decodeId, { cb: callback, url });
+        this._jxlDecodeCallbacks.set(decodeId, { cb: callback, url, options });
         this._jxlPendingByUrl.set(url, decodeId);
-        this._jxlDecodeQueue.push({ decodeId, url, priority });
+        this._jxlDecodeQueue.push({ decodeId, url, priority, options });
         this._sortJxlQueue();
         this._pumpJxlQueue();
     }
