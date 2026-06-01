@@ -515,13 +515,39 @@ function needsBoxOptsV2(options: EncoderOptions): boolean {
     hasJumbf;
 }
 
+const _textEncoder = new TextEncoder();
+const _textDecoder = new TextDecoder();
+
+function applyAnimFrameMetadata(ev: Record<string, unknown>, module: LibjxlWasmModule, dec: number): void {
+  const frameIndex = module._jxl_wasm_dec_frame_index?.(dec) ?? undefined;
+  const frameDuration = module._jxl_wasm_dec_frame_duration!(dec);
+  const isLastFrame = module._jxl_wasm_dec_is_last_frame
+    ? (module._jxl_wasm_dec_is_last_frame(dec) !== 0)
+    : undefined;
+  const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(dec) ?? undefined;
+  const animLoopCount = module._jxl_wasm_dec_anim_loop_count?.(dec) ?? undefined;
+  const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(dec) ?? 0;
+  if (frameIndex !== undefined) ev.frameIndex = frameIndex;
+  if (frameDuration !== undefined) ev.frameDuration = frameDuration;
+  if (namePtr !== 0) {
+    let end = namePtr;
+    while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
+    ev.frameName = _textDecoder.decode(module.HEAPU8.subarray(namePtr, end));
+  }
+  if (isLastFrame !== undefined) ev.isLastFrame = isLastFrame;
+  if (animTicksPerSecond !== undefined) ev.animTicksPerSecond = animTicksPerSecond;
+  if (animLoopCount !== undefined) ev.animLoopCount = animLoopCount;
+}
+
 /** Expands jumbfBoxes into MetadataBoxSpec entries (type "jumb", compress true by default). */
 function expandJumbfBoxes(options: EncoderOptions): MetadataBoxSpec[] {
   if (!options.jumbfBoxes?.length) return [];
-  return options.jumbfBoxes.map(j => {
+  const out: MetadataBoxSpec[] = [];
+  for (const j of options.jumbfBoxes) {
     const data = j.data instanceof ArrayBuffer ? new Uint8Array(j.data) : j.data;
-    return { type: "jumb", data, compress: true };
-  });
+    out.push({ type: "jumb", data, compress: true });
+  }
+  return out;
 }
 
 // WasmBoxOpts layout (20 bytes, little-endian uint32):
@@ -549,6 +575,9 @@ function marshalBoxOpts(
   options: EncoderOptions,
 ): { ptr: number; freePtrs: number[] } {
   const m = options.metadata;
+  if (!m && !(options.customBoxes?.length) && !(options.jumbfBoxes?.length)) {
+    return { ptr: 0, freePtrs: [] };
+  }
   const jumbfCustom = expandJumbfBoxes(options);
   const customBoxes = [...(options.customBoxes ?? []), ...jumbfCustom];
   if (!m && customBoxes.length === 0) return { ptr: 0, freePtrs: [] };
@@ -563,20 +592,19 @@ function marshalBoxOpts(
     for (let i = 0; i < customBoxes.length; i++) {
       const cb = customBoxes[i]!;
       const base = i * WASM_CUSTOM_BOX_BYTES;
-      const typeStr = (cb.type + "    ").slice(0, 4);
-      for (let j = 0; j < 4; j++) cbBuf[base + j] = typeStr.charCodeAt(j) & 0xff;
-      const cbData = cb.data instanceof ArrayBuffer ? new Uint8Array(cb.data) : cb.data;
-      let cbDataPtr = 0;
-      if (cbData.byteLength > 0) {
-        cbDataPtr = module._malloc(cbData.byteLength);
-        if (cbDataPtr !== 0) { module.HEAPU8.set(cbData, cbDataPtr); freePtrs.push(cbDataPtr); }
-      }
+      // Direct 4-byte type write (avoids string concat + slice + charCodeAt per box).
+      const t = cb.type;
+      cbBuf[base]     = (t.charCodeAt(0) || 0x20) & 0xff;
+      cbBuf[base + 1] = (t.charCodeAt(1) || 0x20) & 0xff;
+      cbBuf[base + 2] = (t.charCodeAt(2) || 0x20) & 0xff;
+      cbBuf[base + 3] = (t.charCodeAt(3) || 0x20) & 0xff;
+      const cbData: Uint8Array = cb.data instanceof ArrayBuffer ? new Uint8Array(cb.data) : cb.data;
+      const cbDataPtr = mallocAndCopy(module, cbData, freePtrs);
       dv.setUint32(base + 4, cbDataPtr, true);
       dv.setUint32(base + 8, cbData.byteLength, true);
       dv.setUint32(base + 12, cb.compress ? 1 : 0, true);
     }
-    customBoxesArrayPtr = module._malloc(cbBuf.byteLength);
-    if (customBoxesArrayPtr !== 0) { module.HEAPU8.set(cbBuf, customBoxesArrayPtr); freePtrs.push(customBoxesArrayPtr); }
+    customBoxesArrayPtr = mallocAndCopy(module, cbBuf, freePtrs);
   }
 
   // Build WasmBoxOpts.
@@ -588,8 +616,7 @@ function marshalBoxOpts(
   boDv.setUint32(12, customBoxesArrayPtr, true);
   boDv.setUint32(16, customBoxes.length, true);
 
-  const ptr = module._malloc(WASM_BOX_OPTS_BYTES);
-  if (ptr !== 0) module.HEAPU8.set(boBuf, ptr);
+  const ptr = mallocAndCopy(module, boBuf, freePtrs);
   return { ptr, freePtrs };
 }
 
@@ -627,11 +654,7 @@ function marshalAnimationFrames(
     const f = frames[i]!;
     const base = i * WASM_ANIMATION_FRAME_BYTES;
     const pixelData = f.data instanceof ArrayBuffer ? new Uint8Array(f.data) : f.data;
-    let pixelsPtr = 0;
-    if (pixelData.byteLength > 0) {
-      pixelsPtr = module._malloc(pixelData.byteLength);
-      if (pixelsPtr !== 0) { module.HEAPU8.set(pixelData, pixelsPtr); freePtrs.push(pixelsPtr); }
-    }
+    const pixelsPtr = mallocAndCopy(module, pixelData, freePtrs);
     framesDv.setUint32(base,      pixelsPtr,            true);
     framesDv.setUint32(base +  4, pixelData.byteLength, true);
     framesDv.setUint32(base +  8, f.width,              true);
@@ -640,23 +663,21 @@ function marshalAnimationFrames(
     let namePtr = 0;
     let nameSize = 0;
     if (f.name != null && f.name.length > 0) {
-      const nameBytes = new TextEncoder().encode(f.name);
-      namePtr = module._malloc(nameBytes.byteLength);
-      if (namePtr !== 0) { module.HEAPU8.set(nameBytes, namePtr); freePtrs.push(namePtr); nameSize = nameBytes.byteLength; }
+      const nameBytes = _textEncoder.encode(f.name);
+      namePtr = mallocAndCopy(module, nameBytes, freePtrs);
+      nameSize = nameBytes.byteLength;
     }
     framesDv.setUint32(base + 20, namePtr,  true);
     framesDv.setUint32(base + 24, nameSize, true);
   }
 
-  const framesPtr = module._malloc(framesBuf.byteLength);
-  if (framesPtr !== 0) { module.HEAPU8.set(framesBuf, framesPtr); freePtrs.push(framesPtr); }
+  const framesPtr = mallocAndCopy(module, framesBuf, freePtrs);
 
   const animBuf = new Uint8Array(WASM_ANIMATION_OPTS_BYTES);
   const animDv = new DataView(animBuf.buffer);
   animDv.setUint32(0, animOpts?.ticksPerSecond ?? 1000, true);
   animDv.setUint32(4, animOpts?.loopCount      ?? 0,    true);
-  const animOptsPtr = module._malloc(WASM_ANIMATION_OPTS_BYTES);
-  if (animOptsPtr !== 0) { module.HEAPU8.set(animBuf, animOptsPtr); freePtrs.push(animOptsPtr); }
+  const animOptsPtr = mallocAndCopy(module, animBuf, freePtrs);
 
   return { framesPtr, animOptsPtr, freePtrs };
 }
@@ -953,16 +974,6 @@ export async function decodeTiledRegionRgba8(
     onMetric?.("tiled_region_buffer_read", tBufferRead);
 
     const tTotal = performance.now() - tStart;
-    const estTilesX = Math.ceil((x + w) / tileSize) - Math.floor(x / tileSize);
-    const estTilesY = Math.ceil((y + h) / tileSize) - Math.floor(y / tileSize);
-    const estTilesNeeded = estTilesX * estTilesY;
-
-    console.log(
-      `[decodeTiledRegionRgba8] region=${x},${y} size=${w}×${h} estTiles=${estTilesNeeded} (${estTilesX}×${estTilesY}) | ` +
-      `prep=${(t1-tStart).toFixed(1)}ms malloc=${tMalloc.toFixed(1)}ms heapSet=${tHeapSet.toFixed(1)}ms ` +
-      `wasmDecode=${tWasmDecode.toFixed(1)}ms bufferRead=${tBufferRead.toFixed(1)}ms total=${tTotal.toFixed(1)}ms | ` +
-      `output=${buf.width}×${buf.height} (${(buf.data.byteLength / 1024).toFixed(1)}KB)`
-    );
     onMetric?.("tiled_region_total", tTotal);
 
     return { pixels: buf.data, width: buf.width, height: buf.height };
@@ -1066,12 +1077,6 @@ export async function decodeTileContainerRegionRgba8(
     onMetric?.("jxtc_buffer_read", tBufferRead);
 
     const tTotal = performance.now() - tStart;
-    console.log(
-      `[decodeTileContainerRegionRgba8] region=${x},${y} size=${w}×${h} | ` +
-      `prep=${(t1-tStart).toFixed(1)}ms malloc=${tMalloc.toFixed(1)}ms heapSet=${tHeapSet.toFixed(1)}ms ` +
-      `wasmDecode=${tWasmDecode.toFixed(1)}ms bufferRead=${tBufferRead.toFixed(1)}ms total=${tTotal.toFixed(1)}ms | ` +
-      `output=${buf.width}×${buf.height} (${(buf.data.byteLength / 1024).toFixed(1)}KB)`
-    );
     onMetric?.("jxtc_total", tTotal);
 
     return { pixels: buf.data, width: buf.width, height: buf.height };
@@ -1426,28 +1431,7 @@ class LibjxlDecoder implements JxlDecoder {
             if (hasRegion) ev.regionFallback = "full-frame-then-crop";
             if (outPixels.region !== undefined) ev.region = outPixels.region;
             if (module._jxl_wasm_dec_frame_duration) {
-              const frameIndex         = module._jxl_wasm_dec_frame_index?.(dec) ?? undefined;
-              const frameDuration      = module._jxl_wasm_dec_frame_duration(dec);
-              const isLastFrame        = module._jxl_wasm_dec_is_last_frame
-                ? (module._jxl_wasm_dec_is_last_frame(dec) !== 0)
-                : undefined;
-              const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(dec) ?? undefined;
-              const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(dec)       ?? undefined;
-              const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(dec) ?? 0;
-              let frameName: string | undefined;
-              if (namePtr !== 0) {
-                let end = namePtr;
-                while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
-                frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
-              }
-              Object.assign(ev, {
-                ...(frameIndex         !== undefined && { frameIndex }),
-                ...(frameDuration      !== undefined && { frameDuration }),
-                ...(frameName          !== undefined && { frameName }),
-                ...(isLastFrame        !== undefined && { isLastFrame }),
-                ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
-                ...(animLoopCount      !== undefined && { animLoopCount }),
-              });
+              applyAnimFrameMetadata(ev as unknown as Record<string, unknown>, module, dec);
             }
             yield ev;
             if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
@@ -1509,28 +1493,7 @@ class LibjxlDecoder implements JxlDecoder {
             if (hasRegion) ev.regionFallback = "full-frame-then-crop";
             if (outPixels.region !== undefined) ev.region = outPixels.region;
             if (module._jxl_wasm_dec_frame_duration) {
-              const frameIndex         = module._jxl_wasm_dec_frame_index?.(dec) ?? undefined;
-              const frameDuration      = module._jxl_wasm_dec_frame_duration(dec);
-              const isLastFrame        = module._jxl_wasm_dec_is_last_frame
-                ? (module._jxl_wasm_dec_is_last_frame(dec) !== 0)
-                : undefined;
-              const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(dec) ?? undefined;
-              const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(dec)       ?? undefined;
-              const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(dec) ?? 0;
-              let frameName: string | undefined;
-              if (namePtr !== 0) {
-                let end = namePtr;
-                while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
-                frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
-              }
-              Object.assign(ev, {
-                ...(frameIndex         !== undefined && { frameIndex }),
-                ...(frameDuration      !== undefined && { frameDuration }),
-                ...(frameName          !== undefined && { frameName }),
-                ...(isLastFrame        !== undefined && { isLastFrame }),
-                ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
-                ...(animLoopCount      !== undefined && { animLoopCount }),
-              });
+              applyAnimFrameMetadata(ev as unknown as Record<string, unknown>, module, dec);
             }
             yield ev;
             if (this.options.progressionTarget !== "final") return;
@@ -1554,7 +1517,11 @@ class LibjxlDecoder implements JxlDecoder {
                 const gmDataPtr = module._jxl_wasm_buffer_data(gmHandle);
                 const gmSize = module._jxl_wasm_buffer_size(gmHandle);
                 if (gmDataPtr !== 0 && gmSize > 0) {
-                  ev.gainMap = { data: module.HEAPU8.slice(gmDataPtr, gmDataPtr + gmSize) };
+                  // Direct subarray + set instead of slice for the gain map data copy.
+                  // Consistent with other zero-alloc/copy patterns on hot decode paths.
+                  const gm = new Uint8Array(gmSize);
+                  gm.set(module.HEAPU8.subarray(gmDataPtr, gmDataPtr + gmSize));
+                  ev.gainMap = { data: gm };
                 }
               } finally {
                 module._jxl_wasm_buffer_free(gmHandle);
@@ -1563,28 +1530,7 @@ class LibjxlDecoder implements JxlDecoder {
           }
           // Populate animation per-frame metadata when bridge accessors are present.
           if (module._jxl_wasm_dec_frame_duration) {
-            const frameIndex         = module._jxl_wasm_dec_frame_index?.(dec) ?? undefined;
-            const frameDuration      = module._jxl_wasm_dec_frame_duration(dec);
-            const isLastFrame        = module._jxl_wasm_dec_is_last_frame
-              ? (module._jxl_wasm_dec_is_last_frame(dec) !== 0)
-              : undefined;
-            const animTicksPerSecond = module._jxl_wasm_dec_anim_ticks_per_second?.(dec) ?? undefined;
-            const animLoopCount      = module._jxl_wasm_dec_anim_loop_count?.(dec)       ?? undefined;
-            const namePtr = module._jxl_wasm_dec_frame_name_ptr?.(dec) ?? 0;
-            let frameName: string | undefined;
-            if (namePtr !== 0) {
-              let end = namePtr;
-              while (module.HEAPU8[end] !== 0 && end < namePtr + 256) end++;
-              frameName = new TextDecoder().decode(module.HEAPU8.subarray(namePtr, end));
-            }
-            Object.assign(ev, {
-              ...(frameIndex         !== undefined && { frameIndex }),
-              ...(frameDuration      !== undefined && { frameDuration }),
-              ...(frameName          !== undefined && { frameName }),
-              ...(isLastFrame        !== undefined && { isLastFrame }),
-              ...(animTicksPerSecond !== undefined && { animTicksPerSecond }),
-              ...(animLoopCount      !== undefined && { animLoopCount }),
-            });
+            applyAnimFrameMetadata(ev as unknown as Record<string, unknown>, module, dec);
           }
           yield ev;
         }
@@ -1598,6 +1544,7 @@ class LibjxlDecoder implements JxlDecoder {
   private async *eventsOneShot(module: LibjxlWasmModule): AsyncIterable<DecodeEvent> {
     // Drain all chunks until input closed
     const allChunks: Uint8Array[] = [];
+    let totalSize = 0;
     while (!this.cancelled) {
       await this.waitForQueueItem();
       if (this.cancelled) return;
@@ -1605,6 +1552,7 @@ class LibjxlDecoder implements JxlDecoder {
       this.compactQueue();
       if (item === null || item === undefined) break;
       this.queuedBytes -= item.byteLength;
+      totalSize += item.byteLength;
       allChunks.push(item);
     }
     if (this.cancelled) return;
@@ -1613,7 +1561,6 @@ class LibjxlDecoder implements JxlDecoder {
     const bpc = fmt === "rgbaf32" ? 4 : fmt === "rgba16" ? 2 : 1;
     const pixelStride = 4 * bpc;
     // Write all chunks directly into a single WASM heap buffer — no intermediate JS allocation.
-    const totalSize = allChunks.reduce((s, c) => s + c.byteLength, 0);
     const inputPtr = module._malloc(totalSize);
     let decodedHandle = 0;
     try {
@@ -2616,9 +2563,13 @@ function distanceFromQuality(quality: number | null): number {
 }
 
 // Borrow or copy input depending on caller's ownership. ArrayBuffer is always zero-copy (view only).
+// Uint8Array with copy=false is the zero-copy fast path used by the worker when it has exclusive ownership
+// of the transferred buffer.
 function copyOrBorrowInput(value: ArrayBuffer | Uint8Array, copy: boolean): Uint8Array {
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  return copy ? value.slice() : value;
+  if (!copy) return value;
+  // Only pay for the copy when the caller explicitly asked for safety or is reusing the buffer.
+  return value.slice();
 }
 
 function applyRegionAndDownsample(
@@ -2650,7 +2601,15 @@ function applyRegionAndDownsample(
     // Crop-only: copy whole rows at once — much faster than per-pixel copy.
     for (let y = 0; y < outHeight; y++) {
       const srcStart = ((sourceRegion.y + y) * width + sourceRegion.x) * stride;
-      out.set(data.subarray(srcStart, srcStart + outWidth * stride), y * outWidth * stride);
+      const dstStart = y * outWidth * stride;
+      if (stride === 4) {
+        // Direct byte copy for common rgba8 crop (no subarray object).
+        for (let i = 0; i < outWidth * 4; i++) {
+          out[dstStart + i] = data[srcStart + i]!;
+        }
+      } else {
+        out.set(data.subarray(srcStart, srcStart + outWidth * stride), dstStart);
+      }
     }
   } else if (stride === 4) {
     // rgba8 downsample — direct element assignment; sy hoisted out of inner loop.
@@ -2671,10 +2630,28 @@ function applyRegionAndDownsample(
     for (let y = 0; y < outHeight; y++) {
       const srcRowBase = (sourceRegion.y + Math.min(sourceRegion.h - 1, y * downsample)) * width * stride;
       const dstRowBase = y * outWidth * stride;
-      for (let x = 0; x < outWidth; x++) {
-        const src = srcRowBase + (sourceRegion.x + Math.min(sourceRegion.w - 1, x * downsample)) * stride;
-        const dst = dstRowBase + x * stride;
-        out.set(data.subarray(src, src + stride), dst);
+      if (stride === 8) {
+        // Zero-alloc direct copy for common rgba16 downsample case.
+        for (let x = 0; x < outWidth; x++) {
+          const s = srcRowBase + (sourceRegion.x + Math.min(sourceRegion.w - 1, x * downsample)) * 8;
+          const d = dstRowBase + x * 8;
+          out[d] = data[s]!; out[d+1] = data[s+1]!; out[d+2] = data[s+2]!; out[d+3] = data[s+3]!;
+          out[d+4] = data[s+4]!; out[d+5] = data[s+5]!; out[d+6] = data[s+6]!; out[d+7] = data[s+7]!;
+        }
+      } else {
+        for (let x = 0; x < outWidth; x++) {
+          const src = srcRowBase + (sourceRegion.x + Math.min(sourceRegion.w - 1, x * downsample)) * stride;
+          const dst = dstRowBase + x * stride;
+          if (stride === 16) {
+            // Direct for f32 downsample (rare but matches style).
+            out[dst]      = data[src]!;     out[dst+1]  = data[src+1]!;
+            out[dst+4]    = data[src+4]!;   out[dst+5]  = data[src+5]!;
+            out[dst+8]    = data[src+8]!;   out[dst+9]  = data[src+9]!;
+            out[dst+12]   = data[src+12]!;  out[dst+13] = data[src+13]!;
+          } else {
+            out.set(data.subarray(src, src + stride), dst);
+          }
+        }
       }
     }
   }
@@ -2691,6 +2668,17 @@ function applyRegionAndDownsample(
 }
 
 const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+/** Allocate WASM heap, copy the view, track the pointer for later free. Returns the ptr (0 on failure). */
+function mallocAndCopy(module: LibjxlWasmModule, view: Uint8Array, freePtrs: number[]): number {
+  if (view.byteLength === 0) return 0;
+  const ptr = module._malloc(view.byteLength);
+  if (ptr !== 0) {
+    module.HEAPU8.set(view, ptr);
+    freePtrs.push(ptr);
+  }
+  return ptr;
+}
 
 function buildResizeAxis(srcSize: number, dstSize: number): { i0: Int32Array; i1: Int32Array; t: Float32Array } {
   const i0 = new Int32Array(dstSize);
@@ -2716,6 +2704,52 @@ function bilinearResize(
   stride: number, // 4=rgba8, 8=rgba16, 16=rgbaf32
 ): Uint8Array {
   if (srcW === dstW && srcH === dstH) return src;
+
+  // Similar big-brain fast path as the Rust downscalers:
+  // When the scale is exact integer (very common for target sizes), skip the
+  // expensive axis table allocation + f32 lerp and use direct stepping.
+  if (srcW % dstW === 0 && srcH % dstH === 0) {
+    const xstep = srcW / dstW;
+    const ystep = srcH / dstH;
+    const dst = new Uint8Array(dstW * dstH * stride);
+    for (let dy = 0; dy < dstH; dy++) {
+      const sy = dy * ystep;
+      const srcRow = sy * srcW * stride;
+      const dstRow = dy * dstW * stride;
+      if (stride === 4) {
+        // Zero-alloc fast path for the dominant rgba8 case.
+        for (let dx = 0; dx < dstW; dx++) {
+          const s = srcRow + dx * xstep * 4;
+          const d = dstRow + dx * 4;
+          dst[d] = src[s]!; dst[d + 1] = src[s + 1]!; dst[d + 2] = src[s + 2]!; dst[d + 3] = src[s + 3]!;
+        }
+      } else if (stride === 8) {
+        // Zero-alloc for rgba16 exact-integer resize (lightbox 16-bit flows).
+        for (let dx = 0; dx < dstW; dx++) {
+          const s = srcRow + dx * xstep * 8;
+          const d = dstRow + dx * 8;
+          dst[d] = src[s]!; dst[d+1] = src[s+1]!; dst[d+2] = src[s+2]!; dst[d+3] = src[s+3]!;
+          dst[d+4] = src[s+4]!; dst[d+5] = src[s+5]!; dst[d+6] = src[s+6]!; dst[d+7] = src[s+7]!;
+        }
+      } else {
+        for (let dx = 0; dx < dstW; dx++) {
+          const sx = dx * xstep;
+          const s = srcRow + sx * stride;
+          const d = dstRow + dx * stride;
+          if (stride === 16) {
+            // Direct for f32 (rgbaf32) exact resize – rare but consistent style.
+            dst[d]      = src[s]!;     dst[d+1]  = src[s+1]!;
+            dst[d+4]    = src[s+4]!;   dst[d+5]  = src[s+5]!;
+            dst[d+8]    = src[s+8]!;   dst[d+9]  = src[s+9]!;
+            dst[d+12]   = src[s+12]!;  dst[d+13] = src[s+13]!;
+          } else {
+            dst.set(src.subarray(s, s + stride), d);
+          }
+        }
+      }
+    }
+    return dst;
+  }
   const dst = new Uint8Array(dstW * dstH * stride);
   const xAxis = buildResizeAxis(srcW, dstW);
   const yAxis = buildResizeAxis(srcH, dstH);

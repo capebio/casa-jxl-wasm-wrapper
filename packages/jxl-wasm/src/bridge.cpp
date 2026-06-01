@@ -258,21 +258,21 @@ static void DownsampleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
       const uint8_t* src_row = src + static_cast<size_t>(y * 2u) * sw * bpp;
       uint8_t*       dst_row = dst + static_cast<size_t>(y)       * dw * bpp;
       for (uint32_t x = 0; x < dw; ++x)
-        memcpy(dst_row + x * bpp, src_row + x * 2u * bpp, bpp);
+        CopyPixel(src_row + x * 2u * bpp, dst_row + x * bpp, bpp);
     }
   } else if (downsample == 4u) {
     for (uint32_t y = 0; y < dh; ++y) {
       const uint8_t* src_row = src + static_cast<size_t>(y * 4u) * sw * bpp;
       uint8_t*       dst_row = dst + static_cast<size_t>(y)       * dw * bpp;
       for (uint32_t x = 0; x < dw; ++x)
-        memcpy(dst_row + x * bpp, src_row + x * 4u * bpp, bpp);
+        CopyPixel(src_row + x * 4u * bpp, dst_row + x * bpp, bpp);
     }
   } else if (downsample == 8u) {
     for (uint32_t y = 0; y < dh; ++y) {
       const uint8_t* src_row = src + static_cast<size_t>(y * 8u) * sw * bpp;
       uint8_t*       dst_row = dst + static_cast<size_t>(y)       * dw * bpp;
       for (uint32_t x = 0; x < dw; ++x)
-        memcpy(dst_row + x * bpp, src_row + x * 8u * bpp, bpp);
+        CopyPixel(src_row + x * 8u * bpp, dst_row + x * bpp, bpp);
     }
   } else {
     for (uint32_t y = 0; y < dh; ++y) {
@@ -281,7 +281,7 @@ static void DownsampleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
       uint8_t*       dst_row = dst + static_cast<size_t>(y)  * dw * bpp;
       for (uint32_t x = 0; x < dw; ++x) {
         const uint32_t sx = std::min(x * downsample, sw - 1u);
-        memcpy(dst_row + x * bpp, src_row + sx * bpp, bpp);
+        CopyPixel(src_row + sx * bpp, dst_row + x * bpp, bpp);
       }
     }
   }
@@ -482,8 +482,7 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     pixel_size = n_pixels * dst_stride;
     rgb_pixels = static_cast<uint8_t*>(malloc(pixel_size));
     if (rgb_pixels == nullptr) { JxlEncoderDestroy(enc); return MakeError(29); }
-    for (size_t i = 0; i < n_pixels; ++i)
-      memcpy(rgb_pixels + i * dst_stride, pixels + i * src_stride, dst_stride);
+    StripAlphaToRgb(pixels, rgb_pixels, n_pixels, bytes_per_channel);
     encode_src = rgb_pixels;
   } else {
     pixel_size = static_cast<size_t>(width) * height * 4u * bytes_per_channel;
@@ -628,8 +627,7 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
     pixel_size = n_pixels * dst_stride;
     rgb_pixels = static_cast<uint8_t*>(malloc(pixel_size));
     if (rgb_pixels == nullptr) { JxlEncoderDestroy(enc); return MakeError(29); }
-    for (size_t i = 0; i < n_pixels; ++i)
-      memcpy(rgb_pixels + i * dst_stride, pixels + i * src_stride, dst_stride);
+    StripAlphaToRgb(pixels, rgb_pixels, n_pixels, bytes_per_channel);
     encode_src = rgb_pixels;
   } else {
     pixel_size = static_cast<size_t>(width) * height * 4u * bytes_per_channel;
@@ -819,8 +817,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
     pixel_size = n_pixels * dst_stride;
     rgb_pixels = static_cast<uint8_t*>(malloc(pixel_size));
     if (rgb_pixels == nullptr) { JxlEncoderDestroy(enc); return MakeError(128); }
-    for (size_t i = 0; i < n_pixels; ++i)
-      memcpy(rgb_pixels + i * dst_stride, pixels + i * src_stride, dst_stride);
+    StripAlphaToRgb(pixels, rgb_pixels, n_pixels, bytes_per_channel);
     encode_src = rgb_pixels;
   } else {
     pixel_size = static_cast<size_t>(width) * height * 4u * bytes_per_channel;
@@ -904,6 +901,35 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
 static void BoxDownscaleRgba8(const uint8_t* src, uint32_t sw, uint32_t sh,
                                uint8_t* dst, uint32_t dw, uint32_t dh) {
   if (dw == 0 || dh == 0) return;
+
+  // Aggressive integer fast path for exact factors (common in thumbnail cascades).
+  // Avoids the general ceiling division per output pixel when sw/dw and sh/dh are exact.
+  if ((sw % dw == 0) && (sh % dh == 0)) {
+    const uint32_t xstep = sw / dw;
+    const uint32_t ystep = sh / dh;
+    for (uint32_t dy = 0; dy < dh; ++dy) {
+      for (uint32_t dx = 0; dx < dw; ++dx) {
+        uint32_t r = 0, g = 0, b = 0, a = 0, count = 0;
+        for (uint32_t yy = 0; yy < ystep; ++yy) {
+          const uint32_t y = dy * ystep + yy;
+          const uint8_t* row = src + y * sw * 4;
+          for (uint32_t xx = 0; xx < xstep; ++xx) {
+            const uint32_t x = dx * xstep + xx;
+            const uint8_t* px = row + x * 4;
+            r += px[0]; g += px[1]; b += px[2]; a += px[3];
+            ++count;
+          }
+        }
+        uint8_t* out = dst + (dy * dw + dx) * 4;
+        out[0] = static_cast<uint8_t>(r / count);
+        out[1] = static_cast<uint8_t>(g / count);
+        out[2] = static_cast<uint8_t>(b / count);
+        out[3] = static_cast<uint8_t>(a / count);
+      }
+    }
+    return;
+  }
+
   for (uint32_t dy = 0; dy < dh; ++dy) {
     const uint32_t y0 = (dy * sh) / dh;
     const uint32_t y1 = ((dy + 1u) * sh + dh - 1u) / dh;  // ceiling division
@@ -930,6 +956,36 @@ static void BoxDownscaleRgba8(const uint8_t* src, uint32_t sw, uint32_t sh,
 
 static bool LooksLikeJpeg(const uint8_t* p, size_t n) {
   return n >= 4 && p[0] == 0xFF && p[1] == 0xD8 && p[n - 2] == 0xFF && p[n - 1] == 0xD9;
+}
+
+// Fast per-pixel copy for decoder downsample paths (power-of-2 and general).
+// Specializes the dominant bpp==4 (rgba8) and bpp==3 cases with direct bytes.
+static inline void CopyPixel(const uint8_t* src, uint8_t* dst, uint32_t bpp) {
+  if (bpp == 4) {
+    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+  } else if (bpp == 3) {
+    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+  } else {
+    memcpy(dst, src, bpp);
+  }
+}
+
+// Fast alpha strip (RGBA -> RGB) for encode paths. Specializes the common 8-bit case
+// with direct byte copies to avoid per-pixel memcpy call overhead on millions of pixels.
+static void StripAlphaToRgb(const uint8_t* src, uint8_t* dst, size_t n_pixels, size_t bytes_per_channel) {
+  const size_t src_stride = 4 * bytes_per_channel;
+  const size_t dst_stride = 3 * bytes_per_channel;
+  if (bytes_per_channel == 1) {
+    for (size_t i = 0; i < n_pixels; ++i) {
+      const uint8_t* s = src + i * 4;
+      uint8_t* d = dst + i * 3;
+      d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+    }
+  } else {
+    for (size_t i = 0; i < n_pixels; ++i) {
+      memcpy(dst + i * dst_stride, src + i * src_stride, dst_stride);
+    }
+  }
 }
 
 // --- Tiled multi-frame encode (ROI support) ---
@@ -1827,10 +1883,17 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
       size_t flush_size = 0;
       if (JxlDecoderImageOutBufferSize(s->dec, &s->pixel_format, &flush_size) != JXL_DEC_SUCCESS) continue;
       if (flush_size > s->flushed_size) {
-        uint8_t* grown = static_cast<uint8_t*>(realloc(s->flushed, flush_size));
+        // Big-brain growth strategy: grow by at least 50% to amortize reallocs
+        // during many progressive passes on large images (common in gallery/lightbox).
+        size_t new_size = flush_size;
+        if (s->flushed_size > 0) {
+          size_t grown = s->flushed_size + (s->flushed_size / 2);
+          if (grown > new_size) new_size = grown;
+        }
+        uint8_t* grown = static_cast<uint8_t*>(realloc(s->flushed, new_size));
         if (grown == nullptr) { s->flushed_size = 0; continue; }
         s->flushed = grown;
-        s->flushed_size = flush_size;
+        s->flushed_size = new_size;
       }
       if (s->flushed == nullptr) continue;
       if (JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->flushed, s->flushed_size) == JXL_DEC_SUCCESS) {
@@ -2432,7 +2495,17 @@ JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
   const size_t take = (remaining < CHUNK) ? remaining : CHUNK;
   // MakeBuffer inlines data — no separate allocation to track; safe for buffer_free.
   JxlWasmBuffer* chunk = MakeBuffer(s->outbuf + s->taken, take, 0, 0, 8, 0);
-  if (chunk != nullptr) s->taken += take;
+  if (chunk != nullptr) {
+    s->taken += take;
+    // Memory efficiency: once we've handed out the last byte, free the big output buffer early.
+    // This reduces peak WASM heap during large encodes (important on memory-constrained devices / mobile).
+    if (s->taken >= s->outbuf_size) {
+      free(s->outbuf);
+      s->outbuf = nullptr;
+      s->outbuf_size = 0;
+      s->taken = 0; // defensive
+    }
+  }
   return chunk;
 }
 

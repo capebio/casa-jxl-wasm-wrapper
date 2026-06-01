@@ -143,24 +143,77 @@ impl ProcessResult {
 }
 
 fn now_ms() -> f64 {
-    let perf = web_sys::window().and_then(|w| w.performance()).or_else(|| {
-        js_sys::global()
-            .dyn_into::<web_sys::WorkerGlobalScope>()
-            .ok()
-            .and_then(|w| w.performance())
-    });
-    perf.map(|p| p.now()).unwrap_or(0.0)
+    thread_local! {
+        static PERF: std::cell::OnceCell<web_sys::Performance> = const { std::cell::OnceCell::new() };
+    }
+    PERF.with(|cell| {
+        cell.get_or_init(|| {
+            web_sys::window()
+                .and_then(|w| w.performance())
+                .or_else(|| {
+                    js_sys::global()
+                        .dyn_into::<web_sys::WorkerGlobalScope>()
+                        .ok()
+                        .and_then(|w| w.performance())
+                })
+                .expect("Performance API not available")
+        })
+        .now()
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Box-filter downscale an RGB16 (u16) buffer, outputting packed u16 LE bytes
-/// (6 bytes per pixel).  Used to cache a lightbox-sized buffer for live re-render.
-fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+#[inline(always)]
+fn write_rgb16_le(out: &mut [u8], o: usize, r: u16, g: u16, b: u16) {
+    // Manual LE writes — eliminates three small copy_from_slice(2) per pixel in the
+    // general (non-integer) downscale fallback path.
+    out[o]     = (r & 0xff) as u8;
+    out[o + 1] = (r >> 8) as u8;
+    out[o + 2] = (g & 0xff) as u8;
+    out[o + 3] = (g >> 8) as u8;
+    out[o + 4] = (b & 0xff) as u8;
+    out[o + 5] = (b >> 8) as u8;
+}
+
+fn downscale_rgb_float_path<F>(
+    sw: usize,
+    sh: usize,
+    dw: usize,
+    dh: usize,
+    out: &mut Vec<u8>,
+    read_pixel: F,
+) where
+    F: Fn(usize) -> (u32, u32, u32),
+{
+    // Integer fast path (same principle as the public downscalers).
+    // Even if callers usually guard, this makes the helper itself robust.
+    if (sw % dw == 0) && (sh % dh == 0) {
+        let xstep = sw / dw;
+        let ystep = sh / dh;
+        let pixel_count = (xstep * ystep) as u32;
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                let x_base = dx * xstep;
+                let mut row_base = dy * ystep * sw;
+                for _yy in 0..ystep {
+                    let mut idx = row_base + x_base;
+                    for _xx in 0..xstep {
+                        let (r, g, b) = read_pixel(idx);
+                        rr += r; gg += g; bb += b;
+                        idx += 1;
+                    }
+                    row_base += sw;
+                }
+                let o = (dy * dw + dx) * 6;
+                write_rgb16_le(out, o, (rr / pixel_count) as u16, (gg / pixel_count) as u16, (bb / pixel_count) as u16);
+            }
+        }
+        return;
+    }
+
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
-    let mut out = vec![0u8; dw * dh * 6];
     for dy in 0..dh {
-        // y bounds depend only on dy — hoist outside dx loop.
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
         let y1 = y1.max(y0 + 1);
@@ -168,40 +221,130 @@ fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize)
             let x0 = (dx as f32 * xr) as usize;
             let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
             let x1 = x1.max(x0 + 1);
-
             let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
             for y in y0..y1 {
                 let row_base = y * sw;
                 for x in x0..x1 {
-                    let i = (row_base + x) * 3;
-                    rr += src[i] as u32;
-                    gg += src[i + 1] as u32;
-                    bb += src[i + 2] as u32;
+                    let (r, g, b) = read_pixel(row_base + x);
+                    rr += r;
+                    gg += g;
+                    bb += b;
                     n += 1;
                 }
             }
             let n = n.max(1);
-            let rv = (rr / n) as u16;
-            let gv = (gg / n) as u16;
-            let bv = (bb / n) as u16;
             let o = (dy * dw + dx) * 6;
-            out[o] = (rv & 0xff) as u8;
-            out[o + 1] = (rv >> 8) as u8;
-            out[o + 2] = (gv & 0xff) as u8;
-            out[o + 3] = (gv >> 8) as u8;
-            out[o + 4] = (bv & 0xff) as u8;
-            out[o + 5] = (bv >> 8) as u8;
+            write_rgb16_le(out, o, (rr / n) as u16, (gg / n) as u16, (bb / n) as u16);
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Box-filter downscale an RGB16 (u16) buffer, outputting packed u16 LE bytes
+/// (6 bytes per pixel).  Used to cache a lightbox-sized buffer for live re-render.
+///
+/// Fast path for integer factors (benefits lb/thumb generation for all RAW formats).
+fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; dw * dh * 6];
+
+    // Integer fast path for common exact factors (same win as the RGB8/RGBA8 versions).
+    // Benefits every lightbox + thumb generation for RAW images.
+    if (sw % dw == 0) && (sh % dh == 0) {
+        let xstep = sw / dw;
+        let ystep = sh / dh;
+        let pixel_count = (xstep * ystep) as u32;
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                let x_base = dx * xstep;
+                let mut row_base = dy * ystep * sw;
+                for _yy in 0..ystep {
+                    let mut i = (row_base + x_base) * 3;
+                    for _xx in 0..xstep {
+                        rr += src[i] as u32;
+                        gg += src[i + 1] as u32;
+                        bb += src[i + 2] as u32;
+                        i += 3;
+                    }
+                    row_base += sw;
+                }
+                let o = (dy * dw + dx) * 6;
+                write_rgb16_le(&mut out, o, (rr / pixel_count) as u16, (gg / pixel_count) as u16, (bb / pixel_count) as u16);
+            }
+        }
+        return out;
+    }
+
+    downscale_rgb_float_path(sw, sh, dw, dh, &mut out, |idx| {
+        let i = idx * 3;
+        (src[i] as u32, src[i + 1] as u32, src[i + 2] as u32)
+    });
+    out
+}
+
+/// Box-filter downscale directly from the packed LE u8 form (6 bytes/pixel)
+/// produced by downscale_rgb16_impl. Avoids a full unpack to Vec<u16> when
+/// generating the 360 px thumb from the 1800 px lightbox buffer.
+///
+/// Also has the integer fast path for common exact scale factors.
+fn downscale_packed_rgb16_le(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; dw * dh * 6];
+
+    // Integer fast path for the packed format too (e.g. 1800→360 thumb from lb is exact 5x).
+    if (sw % dw == 0) && (sh % dh == 0) {
+        let xstep = sw / dw;
+        let ystep = sh / dh;
+        let pixel_count = (xstep * ystep) as u32;
+        let sw6 = sw * 6;
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                let x_base = dx * xstep;
+                let mut row_base = dy * ystep * sw6;
+                for _yy in 0..ystep {
+                    let mut i = row_base + x_base * 6;
+                    for _xx in 0..xstep {
+                        let r = u16::from_le_bytes([src[i], src[i + 1]]) as u32;
+                        let g = u16::from_le_bytes([src[i + 2], src[i + 3]]) as u32;
+                        let b = u16::from_le_bytes([src[i + 4], src[i + 5]]) as u32;
+                        rr += r;
+                        gg += g;
+                        bb += b;
+                        i += 6;
+                    }
+                    row_base += sw6;
+                }
+                let o = (dy * dw + dx) * 6;
+                write_rgb16_le(&mut out, o, (rr / pixel_count) as u16, (gg / pixel_count) as u16, (bb / pixel_count) as u16);
+            }
+        }
+        return out;
+    }
+
+    downscale_rgb_float_path(sw, sh, dw, dh, &mut out, |idx| {
+        let i = idx * 6;
+        let r = u16::from_le_bytes([src[i], src[i + 1]]) as u32;
+        let g = u16::from_le_bytes([src[i + 2], src[i + 3]]) as u32;
+        let b = u16::from_le_bytes([src[i + 4], src[i + 5]]) as u32;
+        (r, g, b)
+    });
     out
 }
 
 fn unpack_rgb16_le(src: &[u8]) -> Vec<u16> {
-    src.chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .collect()
+    // Manual loop for consistency with other hot conversion paths (rgb_to_rgba etc.).
+    // Slightly better codegen / less iterator overhead than chunks_exact+map+collect.
+    let n = src.len() / 2;
+    let mut out = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < src.len() {
+        out.push(u16::from_le_bytes([src[i], src[i + 1]]));
+        i += 2;
+    }
+    out
 }
 
+#[inline(always)]
 fn target_dims(w: usize, h: usize, long_edge: usize) -> (usize, usize) {
     if w >= h {
         let lw = w.min(long_edge);
@@ -368,7 +511,10 @@ fn process_orf_impl(
     let (thumb_w, thumb_h) = target_dims(w, h, 360);
     let (rgb16_thumb, out_thumb_w, out_thumb_h) = if output_flags & OUT_THUMB != 0 {
         let thumb = if output_flags & OUT_LIGHTBOX != 0 {
-            downscale_rgb16_impl(&unpack_rgb16_le(&rgb16_lb), lb_w, lb_h, thumb_w, thumb_h)
+            // Optimized: downscale directly from the packed LE bytes we just created for lb.
+            // Avoids a full unpack allocation + pass when both lb and thumb are requested
+            // (the common UI case for LookRenderer + gallery thumbs).
+            downscale_packed_rgb16_le(&rgb16_lb, lb_w, lb_h, thumb_w, thumb_h)
         } else {
             downscale_rgb16_impl(&rgb16, w, h, thumb_w, thumb_h)
         };
@@ -650,6 +796,9 @@ pub fn rotate_rgb8(
 }
 
 /// Box-filter downscale an RGB8 buffer.  Useful for thumbnail generation.
+///
+/// Fast path: when src dims are exact integer multiple of dst (common for 1/2, 1/4, 1/8 thumbs),
+/// uses a much faster integer stepping loop with no f32 math or edge cases.
 #[wasm_bindgen]
 pub fn downscale_rgb(
     src: &[u8],
@@ -677,9 +826,40 @@ pub fn downscale_rgb(
     if src_w == 0 || src_h == 0 {
         return Err(JsError::new("downscale_rgb: src dimensions must be > 0"));
     }
+    let mut out = vec![0u8; dw * dh * 3];
+
+    // Big-brain fast path: exact integer downsample factors (very common for thumbs 1/2, 1/4, 1/8).
+    // This is dramatically faster and has better cache behavior than the general box filter.
+    if (sw % dw == 0) && (sh % dh == 0) {
+        let xstep = sw / dw;
+        let ystep = sh / dh;
+        let pixel_count = (xstep * ystep) as u32;
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                let x_base = dx * xstep;
+                let mut row_base = dy * ystep * sw;
+                for _yy in 0..ystep {
+                    let mut i = (row_base + x_base) * 3;
+                    for _xx in 0..xstep {
+                        rr += src[i] as u32;
+                        gg += src[i + 1] as u32;
+                        bb += src[i + 2] as u32;
+                        i += 3;
+                    }
+                    row_base += sw;
+                }
+                let o = (dy * dw + dx) * 3;
+                out[o]     = (rr / pixel_count) as u8;
+                out[o + 1] = (gg / pixel_count) as u8;
+                out[o + 2] = (bb / pixel_count) as u8;
+            }
+        }
+        return Ok(out);
+    }
+
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
-    let mut out = vec![0u8; dw * dh * 3];
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
@@ -691,9 +871,10 @@ pub fn downscale_rgb(
 
             let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
             for y in y0..y1 {
-                let row_base = y * sw;
-                for x in x0..x1 {
-                    let i = (row_base + x) * 3;
+                let row_base = (y * sw + x0) * 3;
+                let x_count = x1 - x0;
+                for k in 0..x_count {
+                    let i = row_base + k * 3;
                     rr += src[i] as u32;
                     gg += src[i + 1] as u32;
                     bb += src[i + 2] as u32;
@@ -711,6 +892,9 @@ pub fn downscale_rgb(
 }
 
 /// Box-filter downscale an RGBA8 buffer.  Useful for thumbnail generation.
+///
+/// Fast path: when src dims are exact integer multiple of dst (common for 1/2, 1/4, 1/8 thumbs),
+/// uses a much faster integer stepping loop with no f32 math or edge cases.
 #[wasm_bindgen]
 pub fn downscale_rgba(
     src: &[u8],
@@ -738,9 +922,42 @@ pub fn downscale_rgba(
     if src_w == 0 || src_h == 0 {
         return Err(JsError::new("downscale_rgba: src dimensions must be > 0"));
     }
+
+    let mut out = vec![0u8; dw * dh * 4];
+
+    // Same big-brain integer fast path as downscale_rgb for common power-of-two thumbnail cases.
+    if (sw % dw == 0) && (sh % dh == 0) {
+        let xstep = sw / dw;
+        let ystep = sh / dh;
+        let pixel_count = (xstep * ystep) as u32;
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let (mut rr, mut gg, mut bb, mut aa) = (0u32, 0u32, 0u32, 0u32);
+                let x_base = dx * xstep;
+                let mut row_base = dy * ystep * sw;
+                for _yy in 0..ystep {
+                    let mut i = (row_base + x_base) * 4;
+                    for _xx in 0..xstep {
+                        rr += src[i]     as u32;
+                        gg += src[i + 1] as u32;
+                        bb += src[i + 2] as u32;
+                        aa += src[i + 3] as u32;
+                        i += 4;
+                    }
+                    row_base += sw;
+                }
+                let o = (dy * dw + dx) * 4;
+                out[o]     = (rr / pixel_count) as u8;
+                out[o + 1] = (gg / pixel_count) as u8;
+                out[o + 2] = (bb / pixel_count) as u8;
+                out[o + 3] = (aa / pixel_count) as u8;
+            }
+        }
+        return Ok(out);
+    }
+
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
-    let mut out = vec![0u8; dw * dh * 4];
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
@@ -751,10 +968,11 @@ pub fn downscale_rgba(
             let x1 = x1.max(x0 + 1);
             let (mut rr, mut gg, mut bb, mut aa, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
             for y in y0..y1 {
-                let row_base = y * sw;
-                for x in x0..x1 {
-                    let i = (row_base + x) * 4;
-                    rr += src[i] as u32;
+                let row_base = (y * sw + x0) * 4;
+                let x_count = x1 - x0;
+                for k in 0..x_count {
+                    let i = row_base + k * 4;
+                    rr += src[i]     as u32;
                     gg += src[i + 1] as u32;
                     bb += src[i + 2] as u32;
                     aa += src[i + 3] as u32;
@@ -867,15 +1085,21 @@ pub fn apply_look(
 
 /// Convert interleaved RGB8 → RGBA8 (alpha = 255).  HTML canvas wants RGBA.
 // Input must be a multiple of 3 bytes; trailing bytes are ignored.
+// Manual indexing version — tends to produce tighter codegen than chunks+zip
+// for this extremely hot conversion path (called on every RAW frame).
 #[wasm_bindgen]
 pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     let n = rgb.len() / 3;
     let mut out = vec![0u8; n * 4];
-    for (src, dst) in rgb.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
-        dst[0] = src[0];
-        dst[1] = src[1];
-        dst[2] = src[2];
-        dst[3] = 255;
+    let mut si = 0usize;
+    let mut di = 0usize;
+    for _ in 0..n {
+        out[di] = rgb[si];
+        out[di + 1] = rgb[si + 1];
+        out[di + 2] = rgb[si + 2];
+        out[di + 3] = 255;
+        si += 3;
+        di += 4;
     }
     out
 }
@@ -1247,7 +1471,8 @@ fn process_dng_impl(
     let (thumb_w, thumb_h) = target_dims(aw, ah, 360);
     let (rgb16_thumb, out_thumb_w, out_thumb_h) = if output_flags & OUT_THUMB != 0 {
         let thumb = if output_flags & OUT_LIGHTBOX != 0 {
-            downscale_rgb16_impl(&unpack_rgb16_le(&rgb16_lb), lb_w, lb_h, thumb_w, thumb_h)
+            // Same packed optimization as the main path for consistency and speed.
+            downscale_packed_rgb16_le(&rgb16_lb, lb_w, lb_h, thumb_w, thumb_h)
         } else {
             downscale_rgb16_impl(&rgb16, aw, ah, thumb_w, thumb_h)
         };
