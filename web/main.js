@@ -338,7 +338,10 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
         if (card._jxlDecoded) { resolve(card._jxlDecoded); return; }
         pool.decodeJxl(card._blobUrl, (msg) => {
             if (msg.type === 'decode_error') { resolve(null); return; }
-            card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+            const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+            if (msg.sourceW) decoded.sourceW = msg.sourceW;
+            if (msg.sourceH) decoded.sourceH = msg.sourceH;
+            card._jxlDecoded = decoded;
             resolve(card._jxlDecoded);
         }, 'low', { progressive: true, cachePolicy: 'onFinal' });
     });
@@ -2077,7 +2080,15 @@ function _triggerJxlRoiUpdate() {
               if (msg.region) {
                 const ox = msg.region.x || 0;
                 const oy = msg.region.y || 0;
-                ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), ox, oy);
+                const ds = msg.downsample || 1;
+                if (ds > 1) {
+                  const temp = document.createElement('canvas');
+                  temp.width = msg.w; temp.height = msg.h;
+                  temp.getContext('2d').putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                  ctx.drawImage(temp, 0, 0, msg.w, msg.h, ox, oy, msg.region.w, msg.region.h);
+                } else {
+                  ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), ox, oy);
+                }
               } else {
                 ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
               }
@@ -2091,7 +2102,8 @@ function _triggerJxlRoiUpdate() {
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                 setCleanCanvas(ctx2.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
-            setPaintedSourceBadge('jxl');
+            const roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI)` : '';
+            setPaintedSourceBadge('jxl', roiExtra);
             // Straighten on a sub-rect view may be approximate; full source is forced on slider interaction.
             applyStraightenToLightboxCanvas(card);
             syncZoomToDisplayLong();
@@ -2135,7 +2147,10 @@ function ensureFullJxlSourceForEditing(card) {
     pool.decodeJxl(card._blobUrl, (msg) => {
         if (msg.type === 'decode_error') return;
         if (!card._jxlDecoded || (msg.w >= (card._jxlDecoded.w || 0) && msg.h >= (card._jxlDecoded.h || 0))) {
-            card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+            const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+            if (msg.sourceW) decoded.sourceW = msg.sourceW;
+            if (msg.sourceH) decoded.sourceH = msg.sourceH;
+            card._jxlDecoded = decoded;
         }
     }, 'low', { progressive: true, cachePolicy: 'onFinal' });
 }
@@ -2212,15 +2227,40 @@ function drawLightboxForCard(card) {
             card._sourceMode = 'raw';
         } else if (card._jxlDecoded) {
             // Cached from prefetch — instant paint.
-            const { rgba, w, h } = card._jxlDecoded;
-            lightboxCanvas.width  = w;
-            lightboxCanvas.height = h;
-            const ctx = lightboxCanvas.getContext('2d');
-            ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
-            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-                setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            // P3.2b: support cached ROI sub by painting on full logical canvas at offset if info present.
+            const d = card._jxlDecoded;
+            const rgba = d.rgba, w = d.w, h = d.h;
+            const sourceW = d.sourceW || w, sourceH = d.sourceH || h;
+            const reg = d.region;
+            const ds = d.downsample || 1;
+            const useFull = (sourceW > w || sourceH > h) && reg;
+            if (useFull) {
+              lightboxCanvas.width = sourceW;
+              lightboxCanvas.height = sourceH;
+              const ctx = lightboxCanvas.getContext('2d');
+              const ox = reg.x || 0;
+              const oy = reg.y || 0;
+              if (ds > 1) {
+                const temp = document.createElement('canvas');
+                temp.width = w; temp.height = h;
+                temp.getContext('2d').putImageData(new ImageData(rgba, w, h), 0, 0);
+                ctx.drawImage(temp, 0, 0, w, h, ox, oy, reg.w, reg.h);
+              } else {
+                ctx.putImageData(new ImageData(rgba, w, h), ox, oy);
+              }
+            } else {
+              lightboxCanvas.width  = w;
+              lightboxCanvas.height = h;
+              const ctx = lightboxCanvas.getContext('2d');
+              ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
             }
-            setPaintedSourceBadge('jxl');
+            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                const ctx2 = lightboxCanvas.getContext('2d');
+                setCleanCanvas(ctx2.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            }
+            const d = card._jxlDecoded || {};
+            const roiExtra = (d.region) ? ` (ROI${d.downsample > 1 ? ' @' + d.downsample + 'x' : ''})` : '';
+            setPaintedSourceBadge('jxl', roiExtra);
             lbLoadingBadge.hidden = true;
             applyStraightenToLightboxCanvas(card);
             updateToggleButtonState(card);
@@ -2258,7 +2298,12 @@ function drawLightboxForCard(card) {
                 // For ROI decodes this may be a sub-rect (w/h < logical). We still assign
                 // so the current view paint works; full source for editing is forced elsewhere
                 // when needed (see Task 5 polish).
-                card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+                const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+                if (msg.sourceW) decoded.sourceW = msg.sourceW;
+                if (msg.sourceH) decoded.sourceH = msg.sourceH;
+                if (msg.region) decoded.region = msg.region;
+                if (msg.downsample) decoded.downsample = msg.downsample;
+                card._jxlDecoded = decoded;
                 // P3.2b: if this is a region decode and we know the full source size
                 // (from header or echoed), size the canvas to the logical full source
                 // and place the sub-region pixels at the appropriate offset. This keeps
@@ -2272,7 +2317,15 @@ function drawLightboxForCard(card) {
                   if (msg.region) {
                     const ox = msg.region.x || 0;
                     const oy = msg.region.y || 0;
-                    ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), ox, oy);
+                    const ds = msg.downsample || 1;
+                    if (ds > 1) {
+                      const temp = document.createElement('canvas');
+                      temp.width = msg.w; temp.height = msg.h;
+                      temp.getContext('2d').putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                      ctx.drawImage(temp, 0, 0, msg.w, msg.h, ox, oy, msg.region.w, msg.region.h);
+                    } else {
+                      ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), ox, oy);
+                    }
                   } else {
                     ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
                   }
@@ -2286,7 +2339,8 @@ function drawLightboxForCard(card) {
                 if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                     setCleanCanvas(ctxAfter.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
                 }
-                setPaintedSourceBadge('jxl');
+                const roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''})` : '';
+                setPaintedSourceBadge('jxl', roiExtra);
                 lbLoadingBadge.hidden = true;
                 applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
@@ -2425,14 +2479,14 @@ function updateToggleButtonState(card) {
 // Dims are read from the canvas — that is the natural pixel size of the
 // painted source, which the user wants to see so they can correlate apparent
 // sharpness with source resolution (Embedded JPEG ~1620×1080 vs JXL ~5184×3888).
-function setPaintedSourceBadge(source) {
+function setPaintedSourceBadge(source, extra = '') {
     if (!lbPreviewBadge) return;
     const labels = { raw: 'RAW', jxl: 'JPEG XL', jpeg: 'Embedded JPEG' };
     const label = labels[source] ?? labels.raw;
     const cw = lightboxCanvas.width | 0;
     const ch = lightboxCanvas.height | 0;
     const dims = (cw > 1 && ch > 1) ? `  ${cw}×${ch}` : '';
-    lbPreviewBadge.textContent = label + dims;
+    lbPreviewBadge.textContent = label + dims + extra;
     lbPreviewBadge.setAttribute('data-source', source);
     lbPreviewBadge.hidden = false;
 }
@@ -2602,7 +2656,10 @@ function prefetchJxl(card, priority = 'normal') {
     pool.decodeJxl(card._blobUrl, (msg) => {
         card._jxlPrefetching = false;
         if (msg.type === 'decode_error') return;
-        card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+        const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+        if (msg.sourceW) decoded.sourceW = msg.sourceW;
+        if (msg.sourceH) decoded.sourceH = msg.sourceH;
+        card._jxlDecoded = decoded;
     }, priority, { progressive: true, cachePolicy: 'onFinal' });
 }
 function prefetchAroundCurrent() {
