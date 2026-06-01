@@ -2068,8 +2068,8 @@ function _triggerJxlRoiUpdate() {
 
         const roi = computeLightboxVisibleRegion();
         const opts = (roi && roi.region)
-            ? { progressive: true, cachePolicy: 'never', region: roi.region, downsample: roi.downsample }
-            : { progressive: true, cachePolicy: 'onFirstProgress' };
+            ? { progressive: true, cachePolicy: 'never', region: roi.region, downsample: roi.downsample, progressiveDetail: 'lastPasses' }
+            : { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses' };
 
         // Direct decode (bypasses any _jxlDecoded early-out in drawLightboxForCard).
         // The guard inside the cb + existing lightboxIndex check will drop stale.
@@ -2284,7 +2284,7 @@ function drawLightboxForCard(card) {
 
             // P3.2: compute ROI for the current view (zoom/pan). Prefer full when
             // straighten is active (applyStraightenToLightboxCanvas expects full source pixels).
-            let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress' };
+            let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses' };  // P3.3 polish
             const straightenActive = !!(card && card._crop && card._crop.angle);
             if (!straightenActive) {
                 const roi = computeLightboxVisibleRegion();
@@ -2293,8 +2293,11 @@ function drawLightboxForCard(card) {
                         progressive: true,
                         cachePolicy: 'never',   // ROI payloads are transient view artifacts
                         region: roi.region,
-                        downsample: roi.downsample
+                        downsample: roi.downsample,
+                        progressiveDetail: 'lastPasses'  // P3.3: explicit for quality + early DC (container preview path)
                     };
+                } else {
+                    jxlOpts.progressiveDetail = 'lastPasses';
                 }
             }
 

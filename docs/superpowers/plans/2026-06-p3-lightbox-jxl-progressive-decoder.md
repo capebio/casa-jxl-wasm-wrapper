@@ -318,6 +318,26 @@ Which approach would you like to use? (Reply with 1 or 2, or any adjustments to 
 - b7845c9: fix(p3.2): ensure jxl-decode-worker.js region/downsample plumbing...
 - 480363c: docs(p3.2): add verification observations...
 
+## P3.2b + P3.3 Progress (continued per user "Run more P3.2b, then P3.3")
+
+**More P3.2b enhancements:**
+- Region-aware dedup key (url + region + ds) to prevent incorrect sharing between full and ROI requests for same JXL.
+- Extended _jxlDecoded cache objects everywhere to preserve sourceW/H, region, downsample.
+- Enhanced all paint paths (cached instant from _jxlDecoded, in-flight draw cb, trigger re-decode cb) to paint ROI subs on full logical source canvas at correct offset, with drawImage scaling for downsampled cases (proper compositing, no blocky for ds>1, keeps logical size for math/zoom/crop).
+- Source badge now shows e.g. "JPEG XL  4000×3000 (ROI @2x)" for visibility.
+- Header + source info propagated for early full size knowledge.
+
+**P3.3 start (JXL Container Previews + JXTC + Polish):**
+- Region/ROI path now documented to automatically benefit from JXTC if the source JXL was encoded as tiled container (zero frame walking for ROI; the createDecoder + region uses internal tiled paths when applicable, as in crop-bench).
+- Source badge extended with ROI strategy info as start of "decode strategy UI".
+- Worker now emits jxl_header early (with full dims) for previews/container info.
+- Comments added for future embedded preview/DC first + animated multi-frame in lightbox.
+- See updated handoff notes and code for next steps (e.g. explicit preview kick, JXTC force, badge with passes/bytes).
+
+**Latest commits include P3.2b dedup/compositing (16561e6, 516fe9d) pushed to origin/feature branch.**
+
+Ready for full P3.3 impl (container preview extraction, JXTC specific, animated support, more debug UI).
+
 **Key artifacts added:**
 - Full plumbing + echo in `web/main.js` + `web/jxl-decode-worker.js`.
 - `computeLightboxVisibleRegion`, `_triggerJxlRoiUpdate` (debounced), `ensureFullJxlSourceForEditing`.
