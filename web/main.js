@@ -1890,9 +1890,10 @@ function classifyJpegThumbSource(w, h) {
     return Math.max(w | 0, h | 0) > THUMB_EMBEDDED_MAX_LONG ? 'downsized' : 'embedded';
 }
 
-// After JXL encode finishes, decode and downsample to thumb dims so the grid
-// shows what the JXL roundtrip actually looks like (replacing whatever embedded
-// or RAW-pipeline thumb was there). Best-effort — failures stay silent.
+// After JXL encode finishes, decode (at reduced resolution via downsample for
+// large sources) and downsample to thumb dims so the grid shows what the JXL
+// roundtrip actually looks like (replacing whatever embedded or RAW-pipeline
+// thumb was there). Best-effort — failures stay silent.
 function repaintThumbFromJxl(card) {
     if (!card?._blobUrl) return;
     pool.decodeJxl(card._blobUrl, (msg) => {
@@ -1900,6 +1901,9 @@ function repaintThumbFromJxl(card) {
             console.warn('JXL thumb decode error:', msg.error);
             return;
         }
+        // Only process the final frame (progressive may emit intermediates);
+        // we only care about the downsampled final for the thumb.
+        if (msg.type === 'jxl_progress' && !msg.isFinal) return;
         const canvas = card.querySelector('canvas');
         if (!canvas) return;
         const { rgba, w, h } = msg;
@@ -1926,7 +1930,7 @@ function repaintThumbFromJxl(card) {
             card.classList.remove('embedded-thumb');
             setThumbSource(card, 'jxl');
         }).catch(e => console.warn('JXL thumb bitmap failed:', e));
-    }, 'low', { cachePolicy: 'never' });
+    }, 'low', { progressive: true, cachePolicy: 'never', downsample: 2 });
 }
 
 function applyLbTransform() {
@@ -2061,17 +2065,34 @@ function _triggerJxlRoiUpdate() {
                 console.warn('JXL ROI decode error:', msg.error);
                 return;
             }
+            if (!msg.rgba) return; // e.g. jxl_header (P3.2b); pixel msgs have rgba + sourceW/H
             // Paint the (possibly sub-rect) payload directly for the live view.
             // We intentionally do not (always) overwrite card._jxlDecoded here for ROI payloads.
-            lightboxCanvas.width  = msg.w;
-            lightboxCanvas.height = msg.h;
-            const ctx = lightboxCanvas.getContext('2d');
-            ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+            // P3.2b: size to full source if known and place sub at offset (keeps logical size for math).
+            const useFullForROI2 = !!(msg.sourceW && msg.sourceH && (msg.sourceW > msg.w || msg.sourceH > msg.h));
+            if (useFullForROI2) {
+              lightboxCanvas.width = msg.sourceW;
+              lightboxCanvas.height = msg.sourceH;
+              const ctx = lightboxCanvas.getContext('2d');
+              if (msg.region) {
+                const ox = msg.region.x || 0;
+                const oy = msg.region.y || 0;
+                ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), ox, oy);
+              } else {
+                ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+              }
+            } else {
+              lightboxCanvas.width  = msg.w;
+              lightboxCanvas.height = msg.h;
+              const ctx = lightboxCanvas.getContext('2d');
+              ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+            }
+            const ctx2 = lightboxCanvas.getContext('2d');
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-                setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                setCleanCanvas(ctx2.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
             setPaintedSourceBadge('jxl');
-            // Straighten on a sub-rect view may be approximate; full source is forced on slider interaction (Task 5).
+            // Straighten on a sub-rect view may be approximate; full source is forced on slider interaction.
             applyStraightenToLightboxCanvas(card);
             syncZoomToDisplayLong();
         }, 'high', opts);
@@ -2233,16 +2254,37 @@ function drawLightboxForCard(card) {
                     lbLoadingBadge.hidden = true;
                     return;
                 }
+                if (!msg.rgba) return; // e.g. jxl_header for P3.2b full size; pixels will follow
                 // For ROI decodes this may be a sub-rect (w/h < logical). We still assign
                 // so the current view paint works; full source for editing is forced elsewhere
                 // when needed (see Task 5 polish).
                 card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
-                lightboxCanvas.width  = msg.w;
-                lightboxCanvas.height = msg.h;
-                const ctx = lightboxCanvas.getContext('2d');
-                ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                // P3.2b: if this is a region decode and we know the full source size
+                // (from header or echoed), size the canvas to the logical full source
+                // and place the sub-region pixels at the appropriate offset. This keeps
+                // zoom/pan/straighten/crop math based on the full image while only
+                // decoding the visible portion (view-only; editing forces full source).
+                const useFullForROI = !!(msg.sourceW && msg.sourceH && (msg.sourceW > msg.w || msg.sourceH > msg.h));
+                if (useFullForROI) {
+                  lightboxCanvas.width = msg.sourceW;
+                  lightboxCanvas.height = msg.sourceH;
+                  const ctx = lightboxCanvas.getContext('2d');
+                  if (msg.region) {
+                    const ox = msg.region.x || 0;
+                    const oy = msg.region.y || 0;
+                    ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), ox, oy);
+                  } else {
+                    ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                  }
+                } else {
+                  lightboxCanvas.width  = msg.w;
+                  lightboxCanvas.height = msg.h;
+                  const ctx = lightboxCanvas.getContext('2d');
+                  ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                }
+                const ctxAfter = lightboxCanvas.getContext('2d');
                 if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-                    setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                    setCleanCanvas(ctxAfter.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
                 }
                 setPaintedSourceBadge('jxl');
                 lbLoadingBadge.hidden = true;
@@ -2270,7 +2312,9 @@ function drawLightboxForCard(card) {
     //      a slider edit in Tauri)
     //   2. Embedded JPEG preview (the fast-arriving JPEG, swapped to the
     //      larger ~1620×1080 preview via fetchLargePreviewIfNeeded)
-    //   3. JXL decode (WASM only — Tauri stays on embedded)
+    //   3. JXL decode (WASM only — Tauri stays on embedded by default;
+    //      P3.2 ROI/region + downsample now applies to any WASM JXL lightbox
+    //      decode path in Tauri webview, and to shared thumb/crop decodes)
     //   4. 1×1 clear (nothing available yet)
     const hasFullRgb     = !!(card._lightbox && card._lightbox.rgb);
     const hasEmbedded    = !!card._embeddedPreview;
@@ -2278,7 +2322,8 @@ function drawLightboxForCard(card) {
     // WASM only: when JXL bytes arrive before RGB, jump to JXL mode so the
     // user sees real encoded output instead of the JPEG preview placeholder.
     // Tauri intentionally skips this — embedded JPEG stays primary until a
-    // slider edit triggers `apply_look`.
+    // slider edit triggers `apply_look`. (P3.2 ROI applies to JXL lightbox
+    // decodes when used in Tauri webview.)
     if (!hasFullRgb && card._blobUrl && !IS_TAURI) {
         card._sourceMode = 'jxl';
         drawLightboxForCard(card);
