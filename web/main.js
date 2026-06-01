@@ -533,6 +533,13 @@ class WorkerPool {
     }
 
     _jxlPriorityRank(p) { return p === 'high' ? 0 : p === 'low' ? 2 : 1; }
+    _jxlDedupKey(url, options = {}) {
+      const o = options || {};
+      if (!o.region) return url + '|full';
+      const r = o.region;
+      const ds = o.downsample || 1;
+      return `${url}|r${r.x},${r.y},${r.w}x${r.h}@${ds}`;
+    }
     _sortJxlQueue() {
         const rank = this._jxlPriorityRank.bind(this);
         this._jxlDecodeQueue.sort((a, b) => rank(a.priority) - rank(b.priority));
@@ -596,7 +603,8 @@ class WorkerPool {
         if (isTerminal) {
             if (entry) {
                 this._jxlDecodeCallbacks.delete(decodeId);
-                this._jxlPendingByUrl.delete(entry.url);
+                const delKey = entry.key || entry.url;  // P3.2b: region-aware dedup key
+                this._jxlPendingByUrl.delete(delKey);
                 this._jxlFirstProgressByDecodeId.delete(decodeId);
             }
             this._jxlDecodeBusy = false;
@@ -793,9 +801,12 @@ class WorkerPool {
      */
     decodeJxl(url, callback, priority = 'normal', options = {}) {
         options = options || {};
-        // Dedupe — if same URL already pending, chain callback + promote priority.
-        // options/policy from the first caller are kept (simple keep-first for a URL during this session).
-        const existingId = this._jxlPendingByUrl.get(url);
+        // P3.2b dedup: key includes region+ds so different viewports for same URL don't incorrectly dedup.
+        // Full (no region) still dedups across callers.
+        const key = this._jxlDedupKey(url, options);
+        // Dedupe — if same key already pending, chain callback + promote priority.
+        // options from first kept.
+        const existingId = this._jxlPendingByUrl.get(key);
         if (existingId != null) {
             const entry = this._jxlDecodeCallbacks.get(existingId);
             if (entry) {
@@ -815,9 +826,9 @@ class WorkerPool {
             return;
         }
         const decodeId = this._jxlNextDecodeId++;
-        this._jxlDecodeCallbacks.set(decodeId, { cb: callback, url, options });
-        this._jxlPendingByUrl.set(url, decodeId);
-        this._jxlDecodeQueue.push({ decodeId, url, priority, options });
+        this._jxlDecodeCallbacks.set(decodeId, { cb: callback, url, options, key });
+        this._jxlPendingByUrl.set(key, decodeId);
+        this._jxlDecodeQueue.push({ decodeId, url, priority, options, key });
         this._sortJxlQueue();
         this._pumpJxlQueue();
     }
