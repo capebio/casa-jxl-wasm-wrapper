@@ -546,6 +546,8 @@ class WorkerPool {
             progressive: !!next.options?.progressive,
             cachePolicy: next.options?.cachePolicy,
             progressiveDetail: next.options?.progressiveDetail,
+            region: next.options?.region ?? null,
+            downsample: next.options?.downsample ?? 1,
         });
     }
 
@@ -784,7 +786,7 @@ class WorkerPool {
      * @param {string} url
      * @param {(msg: any) => void} callback
      * @param {'high'|'normal'|'low'} [priority='normal']
-     * @param {{progressive?: boolean, cachePolicy?: 'onFirstProgress'|'onFinal'|'never', progressiveDetail?: string}} [options]
+     * @param {{progressive?: boolean, cachePolicy?: 'onFirstProgress'|'onFinal'|'never', progressiveDetail?: string, region?: {x:number,y:number,w:number,h:number}|null, downsample?: 1|2|4|8}} [options]
      */
     decodeJxl(url, callback, priority = 'normal', options = {}) {
         options = options || {};
@@ -1954,6 +1956,128 @@ function _lbCanvasLongPx() {
     return d ? Math.max(d.fitW, d.fitH) : null;
 }
 
+/**
+ * Compute the visible source region (in current canvas pixel / post-straighten source space)
+ * for ROI/region decode during zoom/pan. Pure-ish (uses globals only for defaults).
+ * Returns { region: {x,y,w,h} | null, downsample: 1|2|4|8 }.
+ * For P3.2 initial: simple center + bleed; rotation handled at display (CSS) level.
+ * Callers should pass explicit values for testability.
+ */
+function computeLightboxVisibleRegion(opts = {}) {
+    const {
+        zoom = lbZoom,
+        panX = lbPanX,
+        panY = lbPanY,
+        /* rotation = lbRotation, */ // display-only for now; source rect is pre-lbRotation
+        vpRect = null,
+        srcW = (typeof lightboxCanvas !== 'undefined' ? lightboxCanvas.width : 0),
+        srcH = (typeof lightboxCanvas !== 'undefined' ? lightboxCanvas.height : 0),
+        bleed = 0.12
+    } = opts;
+
+    let vpW, vpH;
+    if (vpRect && vpRect.width > 0 && vpRect.height > 0) {
+        vpW = vpRect.width;
+        vpH = vpRect.height;
+    } else if (typeof lbViewport !== 'undefined') {
+        const r = lbViewport.getBoundingClientRect();
+        vpW = r.width;
+        vpH = r.height;
+    } else {
+        return { region: null, downsample: 1 };
+    }
+
+    if (!srcW || !srcH || srcW < 2 || srcH < 2 || vpW <= 0 || vpH <= 0 || zoom <= 0) {
+        return { region: null, downsample: 1 };
+    }
+
+    // Visible source size at current zoom (unrotated source pixels)
+    let visW = vpW / zoom;
+    let visH = vpH / zoom;
+
+    // Center of the viewport in source pixels (inverting the pan)
+    // pan is the CSS offset of the scaled canvas origin relative to viewport center.
+    const cx = (srcW / 2) - (panX / zoom);
+    const cy = (srcH / 2) - (panY / zoom);
+
+    let x = cx - visW / 2;
+    let y = cy - visH / 2;
+    let w = visW;
+    let h = visH;
+
+    // Bleed for smooth panning
+    x -= w * bleed * 0.5;
+    y -= h * bleed * 0.5;
+    w *= (1 + bleed);
+    h *= (1 + bleed);
+
+    // Clamp to source
+    x = Math.max(0, Math.min(x, srcW - 1));
+    y = Math.max(0, Math.min(y, srcH - 1));
+    w = Math.min(w, srcW - x);
+    h = Math.min(h, srcH - y);
+
+    if (w < 2 || h < 2) return { region: null, downsample: 1 };
+
+    const region = {
+        x: Math.floor(x),
+        y: Math.floor(y),
+        w: Math.ceil(w),
+        h: Math.ceil(h)
+    };
+
+    // Simple downsample heuristic (full source long edge vs visible)
+    const srcLong = Math.max(srcW, srcH);
+    const visLong = Math.max(w, h);
+    let downsample = 1;
+    if (visLong < srcLong * 0.55) downsample = 2;
+    if (visLong < srcLong * 0.28) downsample = 4;
+    if (visLong < srcLong * 0.14) downsample = 8;
+
+    return { region, downsample };
+}
+
+let _jxlRoiSettleTimer = null;
+/** Debounced trigger for ROI re-decode on view changes (pan/zoom/rotate settle). */
+function _triggerJxlRoiUpdate() {
+    if (_jxlRoiSettleTimer) clearTimeout(_jxlRoiSettleTimer);
+    _jxlRoiSettleTimer = setTimeout(() => {
+        _jxlRoiSettleTimer = null;
+        if (lightboxIndex < 0) return;
+        const card = cards[lightboxIndex];
+        if (!card || !card._blobUrl) return;
+        if ((card._sourceMode ?? 'raw') !== 'jxl') return;
+
+        const roi = computeLightboxVisibleRegion();
+        const opts = (roi && roi.region)
+            ? { progressive: true, cachePolicy: 'never', region: roi.region, downsample: roi.downsample }
+            : { progressive: true, cachePolicy: 'onFirstProgress' };
+
+        // Direct decode (bypasses any _jxlDecoded early-out in drawLightboxForCard).
+        // The guard inside the cb + existing lightboxIndex check will drop stale.
+        pool.decodeJxl(card._blobUrl, (msg) => {
+            if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
+            if (msg.type === 'decode_error') {
+                console.warn('JXL ROI decode error:', msg.error);
+                return;
+            }
+            // Paint the (possibly sub-rect) payload directly for the live view.
+            // We intentionally do not (always) overwrite card._jxlDecoded here for ROI payloads.
+            lightboxCanvas.width  = msg.w;
+            lightboxCanvas.height = msg.h;
+            const ctx = lightboxCanvas.getContext('2d');
+            ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            }
+            setPaintedSourceBadge('jxl');
+            // Straighten on a sub-rect view may be approximate; full source is forced on slider interaction (Task 5).
+            applyStraightenToLightboxCanvas(card);
+            syncZoomToDisplayLong();
+        }, 'high', opts);
+    }, 110);
+}
+
 // Set lbZoom from current lbDisplayLongPx (preserving displayed size across
 // source swaps). If lbDisplayLongPx is null or canvas is a placeholder, fall
 // back to fit-to-viewport. Call after every canvas-paint that changed dims.
@@ -1978,6 +2102,21 @@ function syncZoomToDisplayLong() {
 function fitLbZoom() {
     lbDisplayLongPx = null;
     syncZoomToDisplayLong();
+    _triggerJxlRoiUpdate();
+}
+
+/** Ensure a full-frame (non-ROI) JXL source is available for editing consumers (straighten, hist, crop). */
+function ensureFullJxlSourceForEditing(card) {
+    if (!card || !card._blobUrl) return;
+    if ((card._sourceMode ?? 'raw') !== 'jxl') return;
+    // Kick a low-pri full onFinal. Dedup + policy will do the right thing.
+    // Call this on first slider interaction or straighten apply while a view-ROI may be active.
+    pool.decodeJxl(card._blobUrl, (msg) => {
+        if (msg.type === 'decode_error') return;
+        if (!card._jxlDecoded || (msg.w >= (card._jxlDecoded.w || 0) && msg.h >= (card._jxlDecoded.h || 0))) {
+            card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+        }
+    }, 'low', { progressive: true, cachePolicy: 'onFinal' });
 }
 
 // Toolbar ⊙ button: toggle between fit-to-viewport and 100% (actual pixels).
@@ -1992,6 +2131,7 @@ function resetLbZoom() {
     lbPanY = 0;
     lbDisplayLongPx = canvasLong * lbZoom;
     applyLbTransform();
+    _triggerJxlRoiUpdate();
 }
 
 function rotateBy(delta) {
@@ -2004,6 +2144,7 @@ function rotateBy(delta) {
     }
     // Rotation swaps long-edge orientation → refit.
     fitLbZoom();
+    _triggerJxlRoiUpdate();
 }
 
 function zoomAtPoint(clientX, clientY, factor) {
@@ -2019,6 +2160,7 @@ function zoomAtPoint(clientX, clientY, factor) {
     if (canvasLong != null) lbDisplayLongPx = canvasLong * lbZoom;
     applyLbTransform();
     if (pixelPeepActive) updatePeepBadges();
+    _triggerJxlRoiUpdate();
 }
 
 function drawLightboxForCard(card) {
@@ -2067,6 +2209,23 @@ function drawLightboxForCard(card) {
             // Decode in flight — keep whatever pixels are on screen, show loader.
             lbLoadingBadge.hidden = false;
             updateToggleButtonState(card);
+
+            // P3.2: compute ROI for the current view (zoom/pan). Prefer full when
+            // straighten is active (applyStraightenToLightboxCanvas expects full source pixels).
+            let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress' };
+            const straightenActive = !!(card && card._crop && card._crop.angle);
+            if (!straightenActive) {
+                const roi = computeLightboxVisibleRegion();
+                if (roi && roi.region) {
+                    jxlOpts = {
+                        progressive: true,
+                        cachePolicy: 'never',   // ROI payloads are transient view artifacts
+                        region: roi.region,
+                        downsample: roi.downsample
+                    };
+                }
+            }
+
             pool.decodeJxl(card._blobUrl, (msg) => {
                 if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
                 if (msg.type === 'decode_error') {
@@ -2074,6 +2233,9 @@ function drawLightboxForCard(card) {
                     lbLoadingBadge.hidden = true;
                     return;
                 }
+                // For ROI decodes this may be a sub-rect (w/h < logical). We still assign
+                // so the current view paint works; full source for editing is forced elsewhere
+                // when needed (see Task 5 polish).
                 card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
                 lightboxCanvas.width  = msg.w;
                 lightboxCanvas.height = msg.h;
@@ -2086,7 +2248,7 @@ function drawLightboxForCard(card) {
                 lbLoadingBadge.hidden = true;
                 applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
-            }, 'high', { progressive: true, cachePolicy: 'onFirstProgress' });
+            }, 'high', jxlOpts);
             return;
         }
     }
@@ -2612,6 +2774,9 @@ function nextInLightbox(dir) {
  */
 function applyStraightenToLightboxCanvas(card) {
     const crop = card?._crop;
+    if (card && (card._sourceMode ?? 'raw') === 'jxl') {
+        ensureFullJxlSourceForEditing(card);  // P3.2: make sure we have full source pixels for the rotate/extract
+    }
     if (!crop || !crop.angle || !lightboxCanvas.width || !lightboxCanvas.height) return;
 
     const angleRad = (crop.angle || 0) * Math.PI / 180;
@@ -2874,6 +3039,7 @@ window.addEventListener('resize', () => {
         const wasAtFit = Math.abs(lbZoom - prevFit) < 0.005;
         if (wasAtFit) fitLbZoom();
         // else: preserve absolute displayed-pixel size (lbZoom unchanged).
+        _triggerJxlRoiUpdate();
     });
 });
 
@@ -2971,6 +3137,7 @@ window.addEventListener('mouseup', () => {
     if (!lbDragging) return;
     lbDragging = false;
     lbViewport.classList.remove('dragging');
+    _triggerJxlRoiUpdate();
 });
 
 // Pinch-to-zoom + single-finger pan (touch)
@@ -3010,7 +3177,7 @@ lbViewport.addEventListener('touchmove', (e) => {
     e.preventDefault();
 }, { passive: false });
 
-lbViewport.addEventListener('touchend', () => { lbTouchPan = null; });
+lbViewport.addEventListener('touchend', () => { lbTouchPan = null; _triggerJxlRoiUpdate(); });
 
 lightboxClose.addEventListener('click', () => pixelPeepActive ? exitPixelPeep() : closeLightbox());
 lightboxPrev.addEventListener('click', () => pixelPeepActive ? peepNavPhoto(-1) : nextInLightbox(-1));
