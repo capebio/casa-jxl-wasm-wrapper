@@ -566,15 +566,16 @@ class WorkerPool {
             // No painting or cache write logic runs in the routing path before cb() returns.
             entry.cb(data);
 
-            // Policy applicator invoked from the central JXL response handling path (listener
-            // → _onJxlDecodeResponse) for jxl_progress and jxl_decoded messages, then cb.
+            // Policy applicator invoked from the central JXL response handling path after
+            // delivering the message to the original user callback. Only invoked for success
+            // messages that carry pixels (jxl_progress and jxl_decoded). Errors are deliberately
+            // skipped here to avoid passing undefined pixels into the applicator.
             // When card===null we intentionally perform no tracking mutation and no write
             // (harmless during Task 4; real card supplied from guarded callbacks after Task 5).
             const policy = entry.options && entry.options.cachePolicy;
-            if (policy) {
+            if (policy && (data.type === 'jxl_progress' || data.type === 'jxl_decoded') && data.rgba) {
                 const isFinal = (data.isFinal === true) || (data.type === 'jxl_decoded');
-                const px = data.rgba;
-                this._applyJxlCachePolicy(null, decodeId, px, data.w, data.h, isFinal, policy);
+                this._applyJxlCachePolicy(null, decodeId, data.rgba, data.w, data.h, isFinal, policy);
             }
         }
 
