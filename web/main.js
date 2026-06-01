@@ -526,6 +526,7 @@ class WorkerPool {
         this._jxlDecodeQueue = [];           // { decodeId, url, priority, options }
         this._jxlDecodeBusy  = false;
         this._jxlPendingByUrl = new Map();   // url → decodeId (dedupe)
+        this._jxlFirstProgressByDecodeId = new Map(); // decodeId → true (tracks first progress for 'onFirstProgress' policy)
     }
 
     _jxlPriorityRank(p) { return p === 'high' ? 0 : p === 'low' ? 2 : 1; }
@@ -554,14 +555,68 @@ class WorkerPool {
     // difference remains measurable and controllable. Do not remove the three-policy wiring without
     // updating the call sites and this comment.
     _onJxlDecodeResponse(data) {
-        const entry = this._jxlDecodeCallbacks.get(data.decodeId);
+        const decodeId = data && data.decodeId;
+        const entry = (decodeId != null) ? this._jxlDecodeCallbacks.get(decodeId) : null;
+
         if (entry) {
-            this._jxlDecodeCallbacks.delete(data.decodeId);
-            this._jxlPendingByUrl.delete(entry.url);
+            // Deliver message (jxl_progress or jxl_decoded or error) to original user callback.
+            // Per Step 4.3: the existing "is this still the current lightbox card?" guard
+            // (e.g. `if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;`)
+            // remains the very first executable statement inside every lightbox callback.
+            // No painting or cache write logic runs in the routing path before cb() returns.
             entry.cb(data);
+
+            // Policy applicator invoked from the central JXL response handling path (listener
+            // → _onJxlDecodeResponse) for jxl_progress and jxl_decoded messages, then cb.
+            // When card===null we intentionally perform no tracking mutation and no write
+            // (harmless during Task 4; real card supplied from guarded callbacks after Task 5).
+            const policy = entry.options && entry.options.cachePolicy;
+            if (policy) {
+                const isFinal = (data.isFinal === true) || (data.type === 'jxl_decoded');
+                const px = data.rgba;
+                this._applyJxlCachePolicy(null, decodeId, px, data.w, data.h, isFinal, policy);
+            }
         }
-        this._jxlDecodeBusy = false;
-        this._pumpJxlQueue();
+
+        // Terminal messages are: errors, legacy jxl_decoded, or jxl_progress with isFinal.
+        // Only on terminal do we drop the callback registration (so intermediate progress
+        // frames continue to reach chained callbacks) and release the worker for the next
+        // queued JXL decode. This is the key routing change enabling progressive delivery.
+        const isTerminal = !data ||
+            data.type === 'decode_error' ||
+            data.type === 'jxl_decoded' ||
+            (data.type === 'jxl_progress' && data.isFinal === true);
+
+        if (isTerminal) {
+            if (entry) {
+                this._jxlDecodeCallbacks.delete(decodeId);
+                this._jxlPendingByUrl.delete(entry.url);
+                this._jxlFirstProgressByDecodeId.delete(decodeId);
+            }
+            this._jxlDecodeBusy = false;
+            this._pumpJxlQueue();
+        }
+    }
+
+    /**
+     * Policy applicator — the heart of the onFirstProgress / onFinal / never system.
+     * Implements the exact rules from the P3.1 plan (Step 4.1).
+     * Must be called with the target card (after any per-caller guard).
+     * Small, self-contained, no DOM/paint side effects.
+     * References the policy NOTE above _onJxlDecodeResponse.
+     */
+    _applyJxlCachePolicy(card, decodeId, pixels, w, h, isFinal, policy) {
+        if (!card || !policy || policy === 'never') return;
+
+        if (policy === 'onFirstProgress') {
+            if (this._jxlFirstProgressByDecodeId.has(decodeId)) return; // already saw first for this decodeId
+            this._jxlFirstProgressByDecodeId.set(decodeId, true);
+            card._jxlDecoded = { rgba: pixels, w, h };
+            return;
+        }
+        if (policy === 'onFinal' && isFinal) {
+            card._jxlDecoded = { rgba: pixels, w, h };
+        }
     }
 
     init() {
