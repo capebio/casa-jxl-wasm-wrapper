@@ -79,6 +79,8 @@ This (from `jxl-progressive-paint.js` + jxl-core + scheduler) is markedly better
 
 jsquash path will remain as fast fallback for environments without the full WASM progressive build.
 
+**P3.1 status (2026-06):** Complete. Production lightbox JXL path now uses the real progressive decoder (`@casabio/jxl-wasm` via dedicated `jxl-decode-worker.js` with `emitEveryPass` + `lastPasses`). `WorkerPool.decodeJxl` accepts `{progressive, cachePolicy}`. Wired call sites: visible lightbox=`onFirstProgress`, prefetch + `decodeFullJxlFor`=`onFinal`, thumb/peep=`never`. Automatic jsquash fallback preserved. Early first paint + refinement during straighten/zoom/pan enabled for JXL sources. See `docs/superpowers/handoffs/2026-06-p3.1-remaining-tasks-5-6-7.md` and plan.
+
 ## Other Standing Decisions
 - All changes are **extensions** of existing systems (`crop.js`, sidecar in panels.js, draw paths in main.js, existing card model). No big rewrites.
 - Tauri keeps its Rgb16State live-edit advantage. Pure WASM path gets the JXL progressive/ROI advantages (the main parity goal).

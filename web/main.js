@@ -340,7 +340,7 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
             if (msg.type === 'decode_error') { resolve(null); return; }
             card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
             resolve(card._jxlDecoded);
-        }, 'low');
+        }, 'low', { progressive: true, cachePolicy: 'onFinal' });
     });
 };
 
@@ -1924,7 +1924,7 @@ function repaintThumbFromJxl(card) {
             card.classList.remove('embedded-thumb');
             setThumbSource(card, 'jxl');
         }).catch(e => console.warn('JXL thumb bitmap failed:', e));
-    }, 'low');
+    }, 'low', { cachePolicy: 'never' });
 }
 
 function applyLbTransform() {
@@ -2086,7 +2086,7 @@ function drawLightboxForCard(card) {
                 lbLoadingBadge.hidden = true;
                 applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
-            }, 'high');
+            }, 'high', { progressive: true, cachePolicy: 'onFirstProgress' });
             return;
         }
     }
@@ -2396,7 +2396,7 @@ function prefetchJxl(card, priority = 'normal') {
         card._jxlPrefetching = false;
         if (msg.type === 'decode_error') return;
         card._jxlDecoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
-    }, priority);
+    }, priority, { progressive: true, cachePolicy: 'onFinal' });
 }
 function prefetchAroundCurrent() {
     if (lightboxIndex < 0) return;
@@ -4216,7 +4216,7 @@ function decodePeepQuality(idx, q) {
         e.decoded[q] = { rgba: msg.rgba, w: msg.w, h: msg.h };
         pushStat(`[peep]   photo ${idx+1} ${fmtPeepQ(q)} decoded  ${msg.w}×${msg.h}`);
         if (idx === peepIdx) { paintPeepCurrent(); updatePeepBadges(); }
-    });
+    }, 'normal', { cachePolicy: 'never' });
 }
 
 // Walk outward from peepQuality to find the nearest decoded variant.
