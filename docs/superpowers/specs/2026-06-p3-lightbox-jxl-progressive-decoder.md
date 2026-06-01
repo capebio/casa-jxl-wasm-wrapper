@@ -172,7 +172,7 @@ P3.1 is complete when the success criteria in Section 1 are met, the required co
 
 ## 7. Deferred Work (Future Phases)
 
-- **P3.2**: Viewport/ROI awareness (`region` + `downsample` on zoom/pan). This is the phase where efficient partial decoding becomes possible.
+- **P3.2**: Viewport/ROI awareness (`region` + `downsample` on zoom/pan). Initial slice complete (plumbing + math + re-decode on view + editing protection via full-source kicks). See `docs/superpowers/handoffs/2026-06-p3.2-verification-observations.md` + worktree commits on `feature/p3.1-lightbox-jxl-progressive-decoder`. Efficient partial for *viewing* path; full for editing consumers.
 - **P3.3**: JXTC integration, container previews, animated JXL support, and decode strategy UI.
 - Explicit worker cancellation protocol (only if profiling shows significant wasted work).
 

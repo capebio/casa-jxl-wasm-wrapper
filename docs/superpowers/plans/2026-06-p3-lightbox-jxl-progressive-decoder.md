@@ -304,3 +304,34 @@ Two execution options:
 **2. Inline Execution** — Execute tasks in this session using the executing-plans skill, batch execution with checkpoints for review.
 
 Which approach would you like to use? (Reply with 1 or 2, or any adjustments to the plan first.)
+
+---
+
+## P3.2 Status Addendum (Post-Initial Implementation)
+
+**P3.2 (Viewport/ROI) initial slice executed immediately after P3.1 remaining tasks (5-6-7) per user request "Next phase then" + approved plan.**
+
+**Worktree/branch:** `feature/p3.1-lightbox-jxl-progressive-decoder` (isolated worktree at `.worktrees/p3.1-lightbox-jxl-progressive-decoder`).
+
+**Commits (in worktree):**
+- fdc75b3: feat(p3.2): initial viewport/ROI plumbing + view-driven re-decode...
+- b7845c9: fix(p3.2): ensure jxl-decode-worker.js region/downsample plumbing...
+- 480363c: docs(p3.2): add verification observations...
+
+**Key artifacts added:**
+- Full plumbing + echo in `web/main.js` + `web/jxl-decode-worker.js`.
+- `computeLightboxVisibleRegion`, `_triggerJxlRoiUpdate` (debounced), `ensureFullJxlSourceForEditing`.
+- Wiring in high-pri JXL path + direct paint in triggers + protection in straighten.
+- `docs/superpowers/handoffs/2026-06-p3.2-verification-observations.md` (full matrix + static results + run steps + current observations).
+- Updated `docs/lightbox-impl-decisions.md` with P3.2 progress + observations blurb.
+
+**Verification performed (per plan Task 6 + this addendum doc):**
+- All static checks, test syntax, invariant greps, serve launch passed.
+- Full browser manual matrix (especially high-zoom pan/zoom during progressive + editing) is documented with exact steps; requires human + large assets.
+- No regressions on P3.1 matrix per static review.
+
+**Open per plan:** Refine math after real runs; P3.2b (better placement model); P3.3 (JXTC etc.).
+
+**Next assessment:** See the verification-observations.md "Open Items / Follow-ups" + plan's "Open Decisions". User to choose (P3.2b, P3.3, Tauri native, scheduler migration, or new handoff).
+
+**This P3.2 initial slice is considered "finished off" for the plan.** Clean working tree in worktree after final docs commit.
