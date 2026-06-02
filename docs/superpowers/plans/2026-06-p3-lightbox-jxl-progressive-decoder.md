@@ -353,7 +353,13 @@ Which approach would you like to use? (Reply with 1 or 2, or any adjustments to 
 
 **Latest commits include P3.2b dedup/compositing (16561e6, 516fe9d) pushed to origin/feature branch.**
 
-Ready for full P3.3 impl (container preview extraction, JXTC specific, animated support, more debug UI). Progress: animation metadata + '(anim)' badges + explicit preview kick delivered in this continuation slice (d72f76c, db15bae).
+**Core P3.3 delivered and pushed** (previewFirst early dc container previews via quick decoder + jxl_preview, strategy UI/badges with preview/ROI/stage/anim/fN, smart cache + explicit low-pri dc kicks, frameIndex + hasAnimation/anim meta plumbing + detection, all in thin dedicated path). Last feature-bearing push d72f76c; doc syncs (0ce62b4 etc.) on origin. All local=origin.
+
+Remaining (per original plan + active comments): full dynamic multi-frame *nav + UI* in *primary* main lightbox (gallery lab already has it; main lightbox has detection + static fN/(anim) badges but always forces frame 0 + no key switching), actual container/sidecar preview extraction (beyond dc), explicit JXTC force/detect, richer passes/bytes in badges (stage is live proxy), more debug UI, full large-file verification execution (matrix documented but manual).
+
+**Assessment for "diminishing returns"**: High-ROI core (early pixels, reduced work at view, visible strategy) is in and matches the "excellent ROI" pattern from P3.1/P3.2. Further items are more completeness/polish with lower marginal user-visible perf/UX gain in the editing-focused primary lightbox, plus some scope (key conflicts for frame nav, possible facade work for extraction). The "animated frame support start" comment remains as the main signal of incompleteness for full nav.
+
+Recommendation: Core P3.3 done pushing for now. Can mark as advanced; treat remaining as optional follow-ups or new phase unless specific request (e.g. "add frame nav to main lightbox" or "add pass counter to badge"). Clean "start" comment + update this section on next doc pass if user agrees we're at a good stopping point.
 
 **Key artifacts added:**
 - Full plumbing + echo in `web/main.js` + `web/jxl-decode-worker.js`.
