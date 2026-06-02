@@ -333,9 +333,10 @@ Which approach would you like to use? (Reply with 1 or 2, or any adjustments to 
 - Worker now emits jxl_header early (with full dims) for previews/container info; also echoes progressiveDetail and source in pixel msgs.
 - P3.3 smart cache + on-demand high detail: if high zoom on low full cache or cached sub doesn't overlap current view, fallthrough to decode high detail ROI instead of low. Kick low-pri 'dc' full preview when using ROI view, to populate early full low res cache.
 - **More P3.3 container previews**: full support for `previewFirst: true` (set in lightbox view/ROI opts); worker first performs quick 'dc' preview decode (low-res full, posts as `jxl_preview`), then the main progressive/ROI. Lightbox cbs (in-flight and trigger) handle `jxl_preview` by painting the early preview and setting as full low cache if it has better area. Central policy applicator handles jxl_preview too (early cache set). This delivers "first try embedded preview/DC before full progressive decode".
+- **More P3.3 animated JXL support start**: full wiring for `frameIndex` (through options, pump, worker createDecoder calls for preview and main, dedup key includes |fN, echoed in all jxl_ and preview posts). Lightbox sets frameIndex: 0. Badge/strategy can use for multi-frame nav later. JXTC benefit for ROI (region decode prefers container paths).
 - Comments added for future embedded preview/DC first + animated multi-frame in lightbox.
-- See updated handoff notes and code for next steps (e.g. explicit preview kick before full, JXTC force, richer badge with passes/bytes decoded, animated frame support).
-- Latest: more P3.3 echo detail, smart cache, low dc kick, previewFirst + jxl_preview handling + policy (6d1be48, 24b3cc9, f11bc9a, 34ba580).
+- See updated handoff notes and code for next steps (e.g. explicit preview kick before full, JXTC force, richer badge with passes/bytes decoded, animated frame support, full multi-frame lightbox nav).
+- Latest: more P3.3 echo detail, smart cache, low dc kick, previewFirst + jxl_preview handling + policy, frameIndex wiring (6d1be48, 24b3cc9, f11bc9a, 34ba580, 29e9814).
 
 **Latest commits include P3.2b dedup/compositing (16561e6, 516fe9d) pushed to origin/feature branch.**
 
