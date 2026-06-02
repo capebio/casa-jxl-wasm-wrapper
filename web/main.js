@@ -535,10 +535,12 @@ class WorkerPool {
     _jxlPriorityRank(p) { return p === 'high' ? 0 : p === 'low' ? 2 : 1; }
     _jxlDedupKey(url, options = {}) {
       const o = options || {};
-      if (!o.region) return url + '|full';
+      const frame = o.frameIndex ?? 0;
+      const base = url + (frame ? `|f${frame}` : '|full');
+      if (!o.region) return base;
       const r = o.region;
       const ds = o.downsample || 1;
-      return `${url}|r${r.x},${r.y},${r.w}x${r.h}@${ds}`;
+      return `${base}|r${r.x},${r.y},${r.w}x${r.h}@${ds}`;
     }
 
     // P3.3: helper for smart cache use vs on-demand ROI decode
@@ -565,6 +567,8 @@ class WorkerPool {
             progressiveDetail: next.options?.progressiveDetail,
             region: next.options?.region ?? null,
             downsample: next.options?.downsample ?? 1,
+            previewFirst: !!next.options?.previewFirst,
+            frameIndex: next.options?.frameIndex ?? 0,
         });
     }
 
@@ -2075,8 +2079,8 @@ function _triggerJxlRoiUpdate() {
 
         const roi = computeLightboxVisibleRegion();
         const opts = (roi && roi.region)
-            ? { progressive: true, cachePolicy: 'never', region: roi.region, downsample: roi.downsample, progressiveDetail: 'lastPasses', previewFirst: true }
-            : { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true };
+            ? { progressive: true, cachePolicy: 'never', region: roi.region, downsample: roi.downsample, progressiveDetail: 'lastPasses', previewFirst: true, frameIndex: 0 }
+            : { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true, frameIndex: 0 };
 
         // Direct decode (bypasses any _jxlDecoded early-out in drawLightboxForCard).
         // The guard inside the cb + existing lightboxIndex check will drop stale.
@@ -2320,7 +2324,7 @@ function drawLightboxForCard(card) {
 
         // P3.2: compute ROI for the current view (zoom/pan). Prefer full when
         // straighten is active (applyStraightenToLightboxCanvas expects full source pixels).
-        let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true };  // P3.3: preview first for container/embedded preview style
+        let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true, frameIndex: 0 };  // P3.3: preview first, animated frame support start
         const straightenActive = !!(card && card._crop && card._crop.angle);
         if (!straightenActive) {
             const roi = computeLightboxVisibleRegion();
@@ -2331,7 +2335,8 @@ function drawLightboxForCard(card) {
                     region: roi.region,
                     downsample: roi.downsample,
                     progressiveDetail: 'lastPasses',  // P3.3: explicit for quality + early DC (container preview path)
-                    previewFirst: true
+                    previewFirst: true,
+                    frameIndex: 0
                 };
             } else {
                 jxlOpts.progressiveDetail = 'lastPasses';
