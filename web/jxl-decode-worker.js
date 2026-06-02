@@ -8,6 +8,31 @@ import('../packages/jxl-wasm/dist/index.js')
   .then(({ preloadJxlModule }) => preloadJxlModule?.())
   .catch(() => {});
 
+// Extract embedded JPEG bitstream(s) from a JXL container (for JXTC/recon cases).
+// Same strategy as RAW/TIFF: scan for SOI (FF D8 FF), take up to next or EOI.
+// Used only when jpegReconstructionAvailable to provide fast native-JPEG first paint
+// for container-derived JXL sources. Pure JXLs (no recon) never hit this.
+function extractEmbeddedJpegs(bytes) {
+    const sois = [];
+    for (let i = 0; i < bytes.length - 2; i++) {
+        if (bytes[i] === 0xFF && bytes[i + 1] === 0xD8 && bytes[i + 2] === 0xFF) {
+            sois.push(i);
+            i += 2;
+        }
+    }
+    const blobs = [];
+    for (let n = 0; n < sois.length; n++) {
+        const start = sois[n];
+        const end = n + 1 < sois.length ? sois[n + 1] : bytes.length;
+        let eoi = -1;
+        for (let j = end - 2; j >= start + 2; j--) {
+            if (bytes[j] === 0xFF && bytes[j + 1] === 0xD9) { eoi = j; break; }
+        }
+        if (eoi !== -1) blobs.push(bytes.slice(start, eoi + 2));
+    }
+    return blobs;
+}
+
 async function handleJxlDecode(data) {
   const { decodeId, url } = data;
   try {
@@ -28,6 +53,30 @@ async function handleProgressiveDecode(data) {
   try {
     const resp = await fetch(url);
     const buf = await resp.arrayBuffer();
+
+    // P3.3 JXTC / container preview extraction: for JXLs that were produced from JPEG with
+    // reconstruction (jpegReconstructionAvailable), the original JPEG bitstream is stored
+    // in the container. Extract it here (pure JS scan, no extra decode cost) and post early
+    // so the lightbox can paint a full-quality preview *instantly* using the browser's native
+    // JPEG decoder (createImageBitmap / drawImage), before or instead of any JXL DC progressive
+    // RGBA work.
+    // This path is *only* taken for container-derived JXL sources. Pure JXL encodings (no recon
+    // flag) never extract or use JPEG bytes — they go through the normal previewFirst DC or
+    // progressive JXL RGBA path. This respects the design preference for optimized JXL while
+    // providing the fast "embedded preview" experience for JXTC-wrapped cases.
+    try {
+      const bytes = new Uint8Array(buf);
+      const reconBlobs = extractEmbeddedJpegs(bytes);
+      if (reconBlobs.length > 0) {
+        const reconJpeg = reconBlobs[0]; // primary embedded JPEG
+        self.postMessage(
+          { type: 'jxl_recon_jpeg', decodeId, jpeg: reconJpeg, frameIndex: data.frameIndex ?? 0 },
+          [reconJpeg.buffer]
+        );
+      }
+    } catch (e) {
+      // Non-fatal; fall through to normal JXL progressive preview.
+    }
 
     // P3.3: first try quick DC preview (container/embedded preview style) if previewFirst
     // Quick full low-res (downsampled) 'dc' decode first → emit jxl_preview + header → dispose → main (ROI/ds/detail) decode.

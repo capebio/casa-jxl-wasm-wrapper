@@ -342,6 +342,7 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
               if (msg.jpegReconstructionAvailable != null) card._jxlJxtc = !!msg.jpegReconstructionAvailable;
               return;
             }
+            if (msg.type === 'jxl_recon_jpeg') { resolve(null); return; } // full JXL RGBA wanted for crop/subjects
             if (msg.type === 'decode_error') { resolve(null); return; }
             const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
             if (msg.sourceW) decoded.sourceW = msg.sourceW;
@@ -2102,6 +2103,32 @@ function _triggerJxlRoiUpdate() {
                 console.warn('JXL ROI decode error:', msg.error);
                 return;
             }
+            if (msg.type === 'jxl_recon_jpeg') {
+                // P3.3 JXTC container preview extraction (ROI path too): fast recon JPEG preview.
+                // Same fast native JPEG paint as above; subsequent ROI JXL decode will composite/refine.
+                try {
+                    const blob = new Blob([msg.jpeg], { type: 'image/jpeg' });
+                    const url = URL.createObjectURL(blob);
+                    const img = new Image();
+                    img.onload = () => {
+                        lightboxCanvas.width = img.width;
+                        lightboxCanvas.height = img.height;
+                        const ctx = lightboxCanvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0);
+                        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                        }
+                        setPaintedSourceBadge('jxl', ' (JXTC recon)');
+                        applyStraightenToLightboxCanvas(card);
+                        syncZoomToDisplayLong();
+                        URL.revokeObjectURL(url);
+                    };
+                    img.onerror = () => { URL.revokeObjectURL(url); };
+                    img.src = url;
+                } catch (e) {
+                    console.warn('jxl_recon_jpeg (ROI) fast preview failed:', e);
+                }
+            }
             if (msg.type === 'jxl_preview') {
                 // P3.3: paint early container preview (low res full); also populate cache if larger area
                 const area = (msg.w || 0) * (msg.h || 0);
@@ -2225,8 +2252,10 @@ function ensureFullJxlSourceForEditing(card) {
     pool.decodeJxl(card._blobUrl, (msg) => {
         if (msg.type === 'jxl_header') {
           if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+          if (msg.jpegReconstructionAvailable != null) card._jxlJxtc = !!msg.jpegReconstructionAvailable;
           return;
         }
+        if (msg.type === 'jxl_recon_jpeg') return; // editing wants full JXL RGBA source
         if (msg.type === 'decode_error') return;
         if (!card._jxlDecoded || (msg.w >= (card._jxlDecoded.w || 0) && msg.h >= (card._jxlDecoded.h || 0))) {
             const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
@@ -2412,6 +2441,41 @@ function drawLightboxForCard(card) {
                 lbLoadingBadge.hidden = true;
                 return;
             }
+            if (msg.type === 'jxl_recon_jpeg') {
+                // P3.3 JXTC container preview extraction: fast full-quality first paint using
+                // the embedded original JPEG from the JXL container (when jpegReconstructionAvailable).
+                // Uses browser native JPEG decode (very fast) for instant preview in JXL source mode,
+                // exactly like camera embedded JPEGs. Then the normal JXL progressive (previewFirst DC
+                // or main) will refine with JXL-native pixels if needed.
+                // This path is *only* for JXL files that are containers around a JPEG (roundtrip case).
+                // Pure JXL sources (no recon flag) never take this; they use the DC RGBA previewFirst path.
+                // Addresses the design goal of "container embedded previews as first paint" while
+                // preferring pure optimized JXL for non-container cases.
+                try {
+                    const blob = new Blob([msg.jpeg], { type: 'image/jpeg' });
+                    const url = URL.createObjectURL(blob);
+                    const img = new Image();
+                    img.onload = () => {
+                        lightboxCanvas.width = img.width;
+                        lightboxCanvas.height = img.height;
+                        const ctx = lightboxCanvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0);
+                        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                        }
+                        setPaintedSourceBadge('jxl', ' (JXTC recon)');
+                        lbLoadingBadge.hidden = true;
+                        applyStraightenToLightboxCanvas(card);
+                        syncZoomToDisplayLong();
+                        URL.revokeObjectURL(url);
+                    };
+                    img.onerror = () => { URL.revokeObjectURL(url); };
+                    img.src = url;
+                } catch (e) {
+                    console.warn('jxl_recon_jpeg fast preview failed:', e);
+                }
+                // Do not return — subsequent jxl_preview / jxl_progress from the decoder will refine.
+            }
             if (msg.type === 'jxl_preview') {
                 // P3.3: early container/embedded preview (usually low-res full)
                 // paint it, set as cache if it provides full low res (better for overview)
@@ -2522,8 +2586,10 @@ function drawLightboxForCard(card) {
                 if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
                 if (msg.type === 'jxl_header') {
                   if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+                  if (msg.jpegReconstructionAvailable != null) card._jxlJxtc = !!msg.jpegReconstructionAvailable;
                   return;
                 }
+                if (msg.type === 'jxl_recon_jpeg') return; // fast preview only; JXL path populates the RGBA cache for this kick
                 if (msg.type === 'decode_error') return;
                 if (msg.type === 'jxl_progress' && !msg.isFinal) return;
                 const area = (msg.w || 0) * (msg.h || 0);
@@ -2854,8 +2920,10 @@ function prefetchJxl(card, priority = 'normal') {
         card._jxlPrefetching = false;
         if (msg.type === 'jxl_header') {
           if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+          if (msg.jpegReconstructionAvailable != null) card._jxlJxtc = !!msg.jpegReconstructionAvailable;
           return;
         }
+        if (msg.type === 'jxl_recon_jpeg') return; // prefetch wants full JXL RGBA cache
         if (msg.type === 'decode_error') return;
         const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
         if (msg.sourceW) decoded.sourceW = msg.sourceW;
