@@ -28,6 +28,41 @@ async function handleProgressiveDecode(data) {
   try {
     const resp = await fetch(url);
     const buf = await resp.arrayBuffer();
+
+    // P3.3: first try quick DC preview (container/embedded preview style) if previewFirst
+    if (data.previewFirst) {
+      try {
+        const previewDec = createDecoder({
+          format: 'rgba8',
+          region: null, // preview is full low-res
+          downsample: (data.downsample ?? 1) > 1 ? data.downsample : 2, // slight down for preview
+          progressionTarget: 'final',
+          emitEveryPass: false,
+          progressiveDetail: 'dc',
+          preserveIcc: true,
+          preserveMetadata: true,
+        });
+        await previewDec.push(buf);
+        await previewDec.close();
+        for await (const ev of previewDec.events()) {
+          if (ev.type === 'progress' || ev.type === 'final') {
+            const isFinal = ev.type === 'final';
+            let pixelsArray = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
+            if (pixelsArray.byteOffset !== 0 || pixelsArray.byteLength !== pixelsArray.buffer.byteLength) {
+              pixelsArray = new Uint8Array(pixelsArray);
+            }
+            self.postMessage(
+              { type: 'jxl_preview', decodeId, rgba: pixelsArray, w: ev.info.width, h: ev.info.height, isFinal },
+              [pixelsArray.buffer]
+            );
+          }
+        }
+        previewDec.dispose();
+      } catch (e) {
+        console.warn('P3.3 preview decode failed for', decodeId, e);
+      }
+    }
+
     const decoder = createDecoder({
       format: 'rgba8',
       region: data.region ?? null,

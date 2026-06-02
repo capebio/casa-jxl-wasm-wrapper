@@ -2075,8 +2075,8 @@ function _triggerJxlRoiUpdate() {
 
         const roi = computeLightboxVisibleRegion();
         const opts = (roi && roi.region)
-            ? { progressive: true, cachePolicy: 'never', region: roi.region, downsample: roi.downsample, progressiveDetail: 'lastPasses' }
-            : { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses' };
+            ? { progressive: true, cachePolicy: 'never', region: roi.region, downsample: roi.downsample, progressiveDetail: 'lastPasses', previewFirst: true }
+            : { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true };
 
         // Direct decode (bypasses any _jxlDecoded early-out in drawLightboxForCard).
         // The guard inside the cb + existing lightboxIndex check will drop stale.
@@ -2084,6 +2084,20 @@ function _triggerJxlRoiUpdate() {
             if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
             if (msg.type === 'decode_error') {
                 console.warn('JXL ROI decode error:', msg.error);
+                return;
+            }
+            if (msg.type === 'jxl_preview') {
+                // P3.3: paint preview (low res)
+                lightboxCanvas.width = msg.w;
+                lightboxCanvas.height = msg.h;
+                const ctx = lightboxCanvas.getContext('2d');
+                ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                    setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                }
+                setPaintedSourceBadge('jxl', ' (preview)');
+                applyStraightenToLightboxCanvas(card);
+                syncZoomToDisplayLong();
                 return;
             }
             if (!msg.rgba) return; // e.g. jxl_header (P3.2b); pixel msgs have rgba + sourceW/H
@@ -2306,7 +2320,7 @@ function drawLightboxForCard(card) {
 
         // P3.2: compute ROI for the current view (zoom/pan). Prefer full when
         // straighten is active (applyStraightenToLightboxCanvas expects full source pixels).
-        let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses' };  // P3.3 polish
+        let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true };  // P3.3: preview first for container/embedded preview style
         const straightenActive = !!(card && card._crop && card._crop.angle);
         if (!straightenActive) {
             const roi = computeLightboxVisibleRegion();
@@ -2316,7 +2330,8 @@ function drawLightboxForCard(card) {
                     cachePolicy: 'never',   // ROI payloads are transient view artifacts
                     region: roi.region,
                     downsample: roi.downsample,
-                    progressiveDetail: 'lastPasses'  // P3.3: explicit for quality + early DC (container preview path)
+                    progressiveDetail: 'lastPasses',  // P3.3: explicit for quality + early DC (container preview path)
+                    previewFirst: true
                 };
             } else {
                 jxlOpts.progressiveDetail = 'lastPasses';
@@ -2329,6 +2344,30 @@ function drawLightboxForCard(card) {
                 console.warn('JXL decode error:', msg.error);
                 lbLoadingBadge.hidden = true;
                 return;
+            }
+            if (msg.type === 'jxl_preview') {
+                // P3.3: early container/embedded preview (usually low-res full)
+                // paint it, set as cache if it provides full low res (better for overview)
+                const area = (msg.w || 0) * (msg.h || 0);
+                const curArea = card._jxlDecoded ? (card._jxlDecoded.w || 0) * (card._jxlDecoded.h || 0) : 0;
+                if (!card._jxlDecoded || area > curArea) {
+                    const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+                    if (msg.sourceW) decoded.sourceW = msg.sourceW;
+                    if (msg.sourceH) decoded.sourceH = msg.sourceH;
+                    card._jxlDecoded = decoded;
+                }
+                lightboxCanvas.width = msg.w;
+                lightboxCanvas.height = msg.h;
+                const ctx = lightboxCanvas.getContext('2d');
+                ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
+                if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                    setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                }
+                setPaintedSourceBadge('jxl', ' (preview)');
+                lbLoadingBadge.hidden = true;
+                applyStraightenToLightboxCanvas(card);
+                syncZoomToDisplayLong();
+                return; // continue to main progress for refine/ROI
             }
             if (!msg.rgba) return; // e.g. jxl_header for P3.2b full size; pixels will follow
             // For ROI decodes this may be a sub-rect (w/h < logical). We still assign
