@@ -32,25 +32,19 @@ export function applyDecodePolicy(name, base) {
     return out;
 }
 // Section 11.3 effort defaults: 2 thumbnail, 4 viewer, 7 archival.
-// Interactive (thumbnail/viewer) use Modular fast-path + capped brotli.
 export const encodePolicies = {
-    thumbnail: { effort: 2, progressive: false, previewFirst: false, priority: "near", modular: 1, brotliEffort: 4 },
-    viewer: { effort: 4, progressive: true, previewFirst: true, priority: "visible", modular: 1, brotliEffort: 4 },
-    archival: { effort: 7, progressive: true, previewFirst: false, priority: "background", modular: -1 },
+    thumbnail: { effort: 2, progressive: false, previewFirst: false, priority: "near" },
+    viewer: { effort: 4, progressive: true, previewFirst: true, priority: "visible" },
+    archival: { effort: 7, progressive: true, previewFirst: false, priority: "background" },
 };
 export function applyEncodePolicy(name, base) {
     const p = encodePolicies[name];
-    const out = {
+    return {
         ...base,
         effort: base.effort ?? p.effort,
         progressive: base.progressive ?? p.progressive,
         previewFirst: base.previewFirst ?? p.previewFirst,
         priority: base.priority ?? p.priority,
     };
-    if (base.modular === undefined && p.modular !== undefined)
-        out.modular = p.modular;
-    if (base.brotliEffort === undefined && p.brotliEffort !== undefined)
-        out.brotliEffort = p.brotliEffort;
-    return out;
 }
 //# sourceMappingURL=index.js.map

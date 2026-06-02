@@ -7,7 +7,6 @@
 // `navigator.hardwareConcurrency` so a batch saturates all cores.
 
 import { getContext } from './jxl-browser-context.js';
-import { applyEncodePolicy } from '@casabio/jxl-policy';
 
 const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
 window.IS_TAURI = IS_TAURI;
@@ -834,11 +833,7 @@ pool.init();
 pool.setJxlDecodeWorker(new Worker(new URL('./jxl-decode-worker.js', import.meta.url), { type: 'module' }));
 
 async function encodeJxlSession(rgba, width, height, quality, effort, lossless, progressive) {
-    // Progressive flag = interactive viewer path → "viewer" preset (Modular fast-path
-    // + brotliEffort cap 4). Non-progressive = export → "archival" (VarDCT auto, no cap).
-    // Caller-supplied effort/quality/distance/progressive always win over preset defaults.
-    const presetName = progressive ? 'viewer' : 'archival';
-    const opts = applyEncodePolicy(presetName, {
+    const session = getContext().encode({
         format: 'rgba8',
         width,
         height,
@@ -849,7 +844,6 @@ async function encodeJxlSession(rgba, width, height, quality, effort, lossless, 
         progressive,
         priority: 'visible',
     });
-    const session = getContext().encode(opts);
     const buf = rgba instanceof ArrayBuffer ? rgba : rgba.buffer;
     await session.pushPixels(buf);
     await session.finish();
