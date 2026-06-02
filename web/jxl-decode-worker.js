@@ -126,7 +126,7 @@ async function handleProgressiveDecode(data) {
         if (isFinal) {
           // Copy for legacy jxl_decoded BEFORE transferring the primary buffer.
           const legacyPixels = new Uint8Array(pixelsArray);
-          // P3.3: forward animation/frame meta (when present on ev from facade) + hasAnimation for strategy badges and future multi-frame lightbox nav
+          // P3.3: forward animation/frame meta (when present on ev from facade) + hasAnimation for strategy badges (full dynamic multi-frame nav in primary lightbox is follow-up)
           const animMeta = {
             hasAnimation: !!info.hasAnimation,
             ...(ev.frameDuration !== undefined ? { frameDuration: ev.frameDuration } : {}),

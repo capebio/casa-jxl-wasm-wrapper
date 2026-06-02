@@ -2371,7 +2371,7 @@ function drawLightboxForCard(card) {
 
         // P3.2: compute ROI for the current view (zoom/pan). Prefer full when
         // straighten is active (applyStraightenToLightboxCanvas expects full source pixels).
-        let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true, frameIndex: 0 };  // P3.3: preview first, animated frame support start
+        let jxlOpts = { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'lastPasses', previewFirst: true, frameIndex: 0 };  // P3.3: preview first + animated metadata (hasAnimation, frame meta) delivered; full dynamic nav in primary lightbox is follow-up (gallery lab has it)
         const straightenActive = !!(card && card._crop && card._crop.angle);
         if (!straightenActive) {
             const roi = computeLightboxVisibleRegion();
