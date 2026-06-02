@@ -181,9 +181,8 @@ async function handleFile(slot, file) {
 async function decodeViaWasm(bytes, wasmFn) {
     const result = wasmFn(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
     try {
-        const rgbaBytes = (typeof result.take_rgba === 'function')
-            ? result.take_rgba()
-            : rawWasm.rgb_to_rgba(result.take_rgb());
+        // Legacy WASM-side RGBA path removed per Boundary Cost Audit (browser prefers JS conversion)
+        const rgbaBytes = rawWasm.rgb_to_rgba(result.take_rgb());
         const rgba = new Uint8ClampedArray(rgbaBytes.buffer, rgbaBytes.byteOffset, rgbaBytes.byteLength);
         return { rgba, width: result.width, height: result.height };
     } finally {

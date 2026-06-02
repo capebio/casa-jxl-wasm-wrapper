@@ -51,7 +51,47 @@ let orfFiles   = [];
 let wasmReady  = false;
 let running    = false;
 let abortController = null;
-let lastCropRun = null; // { timestamp, config: {effort, distance, tileSize, sizes, compareFull}, records: [{file, size, tileMs, jxtcMs?, fullMs?}] }
+let lastCropRun = null;
+
+// Lightweight collector for the new decode pixel handoff metrics from the Boundary Cost Audit instrumentation
+const decodePixelMetrics = {
+  decode_buffer_extract_ms: [],
+  decode_region_downsample_ms: [],
+  decode_toarraybuffer_ms: [],
+};
+
+function logDecodePixelMetric(name, value) {
+  if (name in decodePixelMetrics) {
+    decodePixelMetrics[name].push(value);
+    // Log individual values for visibility during runs
+    console.log(`[crop] ${name}=${value.toFixed(2)} ms`);
+  }
+}
+
+function resetDecodePixelMetrics() {
+  Object.keys(decodePixelMetrics).forEach(k => decodePixelMetrics[k] = []);
+}
+
+function summarizeDecodePixelMetrics(label = '') {
+  const summary = {};
+  Object.keys(decodePixelMetrics).forEach(key => {
+    const vals = decodePixelMetrics[key];
+    if (vals.length > 0) {
+      const sum = vals.reduce((a, b) => a + b, 0);
+      summary[key] = {
+        count: vals.length,
+        avg: sum / vals.length,
+        min: Math.min(...vals),
+        max: Math.max(...vals),
+        total: sum
+      };
+    }
+  });
+  if (Object.keys(summary).length > 0) {
+    console.log(`[crop] Decode Pixel Handoff Metrics ${label}:`, summary);
+  }
+  return summary;
+} // { timestamp, config: {effort, distance, tileSize, sizes, compareFull}, records: [{file, size, tileMs, jxtcMs?, fullMs?}] }
 
 // --- DOM refs ---
 
@@ -85,9 +125,20 @@ function setStatusFile(text)     { statusFile.textContent     = text; }
 function setStatusStage(text)    { statusStage.textContent    = text; }
 function setStatusFolder(text)   { statusFolder.textContent   = text; }
 
-function recordCropTiming(fileName, size, tileMs, jxtcMs = null, fullMs = null) {
+function recordCropTiming(fileName, size, tileMs, jxtcMs = null, fullMs = null, decodeMetrics = {}) {
     if (!lastCropRun) return;
-    lastCropRun.records.push({ file: fileName, size, tileMs, jxtcMs, fullMs });
+    const region = decodeMetrics.region || {};
+    const fullM = decodeMetrics.full || {};
+    lastCropRun.records.push({ 
+        file: fileName, 
+        size, 
+        tileMs, 
+        jxtcMs, 
+        fullMs,
+        decode_buffer_extract_ms: region.decode_buffer_extract_ms ?? fullM.decode_buffer_extract_ms ?? null,
+        decode_region_downsample_ms: region.decode_region_downsample_ms ?? fullM.decode_region_downsample_ms ?? null,
+        decode_toarraybuffer_ms: region.decode_toarraybuffer_ms ?? fullM.decode_toarraybuffer_ms ?? null,
+    });
 }
 
 function updateWorkflowState() {
@@ -187,12 +238,44 @@ function copyCropResultsMd() {
     }
 
     lines.push('');
+    lines.push('## Decode Pixel Handoff Metrics (per-size averages, ms)');
+    lines.push('');
+    lines.push('| Size | buffer_extract avg | region_downsample avg | toarraybuffer avg | #samples |');
+    lines.push('|------|--------------------|-----------------------|-------------------|----------|');
+
+    for (const sz of sizes) {
+        const szRecs = records.filter(r => r.size === sz);
+        const beVals = szRecs.map(r => r.decode_buffer_extract_ms).filter(v => v != null && Number.isFinite(v));
+        const rdVals = szRecs.map(r => r.decode_region_downsample_ms).filter(v => v != null && Number.isFinite(v));
+        const taVals = szRecs.map(r => r.decode_toarraybuffer_ms).filter(v => v != null && Number.isFinite(v));
+        const beAvg = beVals.length ? (beVals.reduce((a,b)=>a+b,0)/beVals.length).toFixed(1) : '—';
+        const rdAvg = rdVals.length ? (rdVals.reduce((a,b)=>a+b,0)/rdVals.length).toFixed(1) : '—';
+        const taAvg = taVals.length ? (taVals.reduce((a,b)=>a+b,0)/taVals.length).toFixed(1) : '—';
+        lines.push(`| ${sz}px | ${beAvg} | ${rdAvg} | ${taAvg} | ${szRecs.length} |`);
+    }
+
+    // Also include overall decode pixel handoff summary for the run
+    const allBe = records.map(r => r.decode_buffer_extract_ms).filter(v => v != null && Number.isFinite(v));
+    const allRd = records.map(r => r.decode_region_downsample_ms).filter(v => v != null && Number.isFinite(v));
+    const allTa = records.map(r => r.decode_toarraybuffer_ms).filter(v => v != null && Number.isFinite(v));
+    if (allBe.length || allRd.length || allTa.length) {
+        lines.push('');
+        lines.push('**Overall Decode Pixel Handoff (across all samples):**');
+        if (allBe.length) lines.push(`- buffer_extract: avg=${(allBe.reduce((a,b)=>a+b,0)/allBe.length).toFixed(1)} ms over ${allBe.length} samples`);
+        if (allRd.length) lines.push(`- region_downsample: avg=${(allRd.reduce((a,b)=>a+b,0)/allRd.length).toFixed(1)} ms over ${allRd.length} samples`);
+        if (allTa.length) lines.push(`- toarraybuffer: avg=${(allTa.reduce((a,b)=>a+b,0)/allTa.length).toFixed(1)} ms over ${allTa.length} samples`);
+    }
+
+    lines.push('');
     lines.push('## Per-file details');
     lines.push('');
-    lines.push('| File | Size | Tile (ms) | JXTC (ms) | Full (ms) |');
-    lines.push('|------|------|-----------|-----------|-----------|');
+    lines.push('| File | Size | Tile (ms) | JXTC (ms) | Full (ms) | buf_extract | region_ds | toarr |');
+    lines.push('|------|------|-----------|-----------|-----------|-------------|-----------|-------|');
     for (const r of records) {
-        lines.push(`| ${r.file} | ${r.size}px | ${r.tileMs.toFixed(1)} | ${r.jxtcMs != null ? r.jxtcMs.toFixed(1) : '—'} | ${r.fullMs != null ? r.fullMs.toFixed(1) : '—'} |`);
+        const be = r.decode_buffer_extract_ms != null ? r.decode_buffer_extract_ms.toFixed(1) : '—';
+        const rd = r.decode_region_downsample_ms != null ? r.decode_region_downsample_ms.toFixed(1) : '—';
+        const ta = r.decode_toarraybuffer_ms != null ? r.decode_toarraybuffer_ms.toFixed(1) : '—';
+        lines.push(`| ${r.file} | ${r.size}px | ${r.tileMs.toFixed(1)} | ${r.jxtcMs != null ? r.jxtcMs.toFixed(1) : '—'} | ${r.fullMs != null ? r.fullMs.toFixed(1) : '—'} | ${be} | ${rd} | ${ta} |`);
     }
     lines.push('');
     lines.push('_Generated by jxl-crop-benchmark.html_');
@@ -224,7 +307,7 @@ function exportCropResultsJson() {
         config: lastCropRun.config,
         records: lastCropRun.records,
         sourceCount: new Set(lastCropRun.records.map(r => r.file)).size,
-        note: 'Crop region decode timings from jxl-crop-benchmark. Use with main benchmark JSONs for correlation analysis.'
+        note: 'Crop region decode timings from jxl-crop-benchmark. Includes decode pixel handoff metrics (decode_buffer_extract_ms, decode_region_downsample_ms, decode_toarraybuffer_ms) from Boundary Cost Audit. Use with main benchmark JSONs for correlation analysis.'
     };
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
@@ -321,7 +404,7 @@ async function encodeStandard(rgba, width, height, effort, distance) {
  * Full-image decode + JS crop — the slow baseline for comparison.
  * Decodes the entire JXL, then memcpys the requested region.
  */
-async function decodeFullThenCrop(jxlBytes, sourceWidth, sourceHeight, targetSize) {
+async function decodeFullThenCrop(jxlBytes, sourceWidth, sourceHeight, targetSize, onMetric) {
     const half = Math.floor(targetSize / 2);
     const cx   = Math.floor(sourceWidth  / 2);
     const cy   = Math.floor(sourceHeight / 2);
@@ -330,6 +413,8 @@ async function decodeFullThenCrop(jxlBytes, sourceWidth, sourceHeight, targetSiz
     const w    = Math.min(targetSize, sourceWidth  - x);
     const h    = Math.min(targetSize, sourceHeight - y);
 
+    const decodeStart = performance.now();
+    const tCreate = performance.now();
     const decoder = createDecoder({
         format: 'rgba8',
         region: { x, y, w, h },
@@ -338,9 +423,23 @@ async function decodeFullThenCrop(jxlBytes, sourceWidth, sourceHeight, targetSiz
         emitEveryPass: false,
         preserveIcc: false,
         preserveMetadata: false,
+        onMetric: (name, value) => {
+          if (onMetric) onMetric(name, value);
+          logDecodePixelMetric(name, value);
+          // Also collect some decoder internal metrics for full path breakdown
+          if (name === 'source_pixels_decoded' || name === 'decode_scale_used' || name === 'decode_region_area') {
+            logDecodePixelMetric('full_' + name, value);
+          }
+        },
     });
+    const createTime = performance.now() - tCreate;
+    logDecodePixelMetric('full_decoder_create_ms', createTime);
+    const tPush = performance.now();
     await decoder.push(jxlBytes);
+    const pushTime = performance.now() - tPush;
+    logDecodePixelMetric('full_decoder_push_ms', pushTime);
     await decoder.close();
+    const tEvents = performance.now();
     let result = null;
     for await (const event of decoder.events()) {
         if (event.type === 'final') {
@@ -352,7 +451,12 @@ async function decodeFullThenCrop(jxlBytes, sourceWidth, sourceHeight, targetSiz
             throw new Error(event.message);
         }
     }
+    const eventsTime = performance.now() - tEvents;
+    logDecodePixelMetric('full_decoder_events_ms', eventsTime);
     await decoder.dispose();
+    const decodeTime = performance.now() - decodeStart;
+    logDecodePixelMetric('decode_buffer_extract_ms', decodeTime);  // proxy for full
+    logDecodePixelMetric('full_total_ms', decodeTime);
     if (!result) throw new Error('no final frame emitted');
     return result;
 }
@@ -517,6 +621,8 @@ async function runBenchmark() {
         records: [],
     };
 
+    resetDecodePixelMetrics();
+
     const files = shuffled(orfFiles).slice(0, fileCount);
     setStatusProgress(`0 / ${files.length}`);
 
@@ -541,9 +647,8 @@ async function runBenchmark() {
         try {
             const result = rawWasm.process_orf(new Uint8Array(arrayBuffer), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
             try {
-                rgba      = (typeof result.take_rgba === 'function')
-                    ? result.take_rgba()
-                    : rawWasm.rgb_to_rgba(result.take_rgb());
+                // Legacy WASM-side RGBA path removed per Boundary Cost Audit
+                rgba      = rawWasm.rgb_to_rgba(result.take_rgb());
                 imgWidth  = result.width;
                 imgHeight = result.height;
             } finally { result.free(); }
@@ -612,6 +717,9 @@ async function runBenchmark() {
         console.group(`Crop benchmark: ${file.name}`);
         console.log(`${imgWidth}×${imgHeight}  tiles=${tilesX}×${tilesY}  tiledKB=${tiledKb}  jxtcKB=${jxtcKb}  encodeTiledMs=${tiledEncodeMs.toFixed(1)}  encodeJxtcMs=${jxtcEncodeMs.toFixed(1)}  tilePx=${tileSize}`);
 
+        // Reset decode pixel metrics for this file so per-file numbers in the report are meaningful
+        resetDecodePixelMetrics();
+
         for (const size of sizes) {
             if (signal.aborted) break;
 
@@ -623,12 +731,21 @@ async function runBenchmark() {
 
             setStatusStage(`Tile region ${size}px…`);
 
+            resetDecodePixelMetrics();  // per-size for accurate decode handoff metrics per crop size
+
             const t0 = performance.now();
             let decoded;
             const metrics = {};
             try {
                 decoded = await decodeTileRegion(tiledBytes, tileSize, imgWidth, imgHeight, size, (name, value) => {
                     metrics[name] = value;
+                    logDecodePixelMetric(name, value);
+                    if (name === 'tiled_region_buffer_read' || name.includes('buffer_read')) {
+                        logDecodePixelMetric('decode_buffer_extract_ms', value);
+                    }
+                    if (name.includes('region') || name.includes('downsample') || name.includes('wasm_decode')) {
+                        logDecodePixelMetric('decode_region_downsample_ms', value);
+                    }
                 });
             } catch (err) {
                 console.error(`  ${size}px tile region ERROR:`, err.message || err);
@@ -645,12 +762,36 @@ async function runBenchmark() {
                 setStatusStage(`JXTC region ${size}px…`);
                 const tJ = performance.now();
                 try {
-                    await decodeContainerRegion(jxtcBytes, imgWidth, imgHeight, size, () => {});
+                    await decodeContainerRegion(jxtcBytes, imgWidth, imgHeight, size, (name, value) => {
+                        logDecodePixelMetric(name, value);
+                        if (name === 'tiled_region_buffer_read' || name.includes('buffer_read')) {
+                            logDecodePixelMetric('decode_buffer_extract_ms', value);
+                        }
+                        if (name.includes('region') || name.includes('downsample') || name.includes('wasm_decode')) {
+                            logDecodePixelMetric('decode_region_downsample_ms', value);
+                        }
+                    });
                     jxtcMs = performance.now() - tJ;
                 } catch (err) {
                     console.warn(`  ${size}px JXTC region failed:`, err.message || err);
                 }
             }
+
+            // Snapshot region decode handoff metrics (tile + JXTC for this size)
+            const regionDecodeMetrics = {
+                decode_buffer_extract_ms: decodePixelMetrics.decode_buffer_extract_ms.length 
+                    ? decodePixelMetrics.decode_buffer_extract_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_buffer_extract_ms.length 
+                    : null,
+                decode_region_downsample_ms: decodePixelMetrics.decode_region_downsample_ms.length 
+                    ? decodePixelMetrics.decode_region_downsample_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_region_downsample_ms.length 
+                    : null,
+                decode_toarraybuffer_ms: decodePixelMetrics.decode_toarraybuffer_ms.length 
+                    ? decodePixelMetrics.decode_toarraybuffer_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_toarraybuffer_ms.length 
+                    : null,
+            };
+
+            // Reset for full decode baseline
+            resetDecodePixelMetrics();
 
             // Update timing display to show both tile and jxtc
             if (jxtcMs !== null) {
@@ -664,7 +805,7 @@ async function runBenchmark() {
                 setStatusStage(`Full decode ${size}px (compare)…`);
                 const t1 = performance.now();
                 try {
-                    await decodeFullThenCrop(standardBytes, imgWidth, imgHeight, size);
+                    await decodeFullThenCrop(standardBytes, imgWidth, imgHeight, size, () => {});
                     const fullMs = performance.now() - t1;
                     fullMsForRecord = fullMs;
                     showCompareTiming(cards[size], tileMs, fullMs);
@@ -679,13 +820,35 @@ async function runBenchmark() {
                 console.log(`  ${size}px → ${decoded.width}×${decoded.height}: tile ${tileMs.toFixed(1)} ms${jxtcStr}`);
             }
 
-            // Record complete timings for this file+size (for Copy MD / Export)
-            recordCropTiming(file.name, size, tileMs, jxtcMs, fullMsForRecord);
+            // Snapshot full decode handoff (the whole full decode time as extract cost)
+            const fullDecodeMetrics = {
+                decode_buffer_extract_ms: decodePixelMetrics.decode_buffer_extract_ms.length 
+                    ? decodePixelMetrics.decode_buffer_extract_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_buffer_extract_ms.length 
+                    : null,
+                decode_region_downsample_ms: decodePixelMetrics.decode_region_downsample_ms.length 
+                    ? decodePixelMetrics.decode_region_downsample_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_region_downsample_ms.length 
+                    : null,
+                decode_toarraybuffer_ms: decodePixelMetrics.decode_toarraybuffer_ms.length 
+                    ? decodePixelMetrics.decode_toarraybuffer_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_toarraybuffer_ms.length 
+                    : null,
+            };
+
+            // Record with separate region and full handoff metrics
+            recordCropTiming(file.name, size, tileMs, jxtcMs, fullMsForRecord, {
+                region: regionDecodeMetrics,
+                full: fullDecodeMetrics
+            });
 
             await new Promise(r => setTimeout(r, 0));
         }
 
         console.groupEnd();
+
+        // Print summary of new decode pixel handoff metrics for this file
+        summarizeDecodePixelMetrics(`for ${file.name}`);
+
+        // Also reset for next file
+        resetDecodePixelMetrics();
     }
 
     setStatusStage('Done');

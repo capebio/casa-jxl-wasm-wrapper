@@ -800,6 +800,10 @@ async function streamDecodeJxlSession(bytes, { onChunk, onFrame } = {}, streamOp
         chunkSize = transportChunkKb * 1024,
         iterations = transportIterations,
     } = streamOptions;
+    // P3.3 (crop benchmark): for full loads, progressive + emitEveryPass hides the 2.5–3 s full-file
+    // WASM decode latency by surfacing DC/early passes first. When region known + JXL is JXTC/tiled,
+    // prefer decodeTileContainerRegionRgba8 etc. (see suggested-settings.md + audit §13).
+    // DecodeSession forwards region/downsample; current callers here use full (region null).
     const session = getContext().decode({
         format: 'rgba8',
         progressionTarget: 'final',

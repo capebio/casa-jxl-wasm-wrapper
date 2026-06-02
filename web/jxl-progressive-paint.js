@@ -226,9 +226,8 @@ async function processImageFile(file, arrayBuffer) {
             if (!wasmReady) { dbgLog('WASM not ready'); return null; }
             const result = process_orf(new Uint8Array(arrayBuffer), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
             try {
-                const rgba = (typeof result.take_rgba === 'function')
-                    ? result.take_rgba()
-                    : rgb_to_rgba(result.take_rgb());
+                // Legacy WASM-side RGBA path removed per Boundary Cost Audit
+                const rgba = rgb_to_rgba(result.take_rgb());
                 return { rgba, width: result.width, height: result.height };
             } finally {
                 result.free();

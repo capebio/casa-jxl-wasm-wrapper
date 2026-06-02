@@ -371,7 +371,11 @@ export class DecodeHandler {
         }
         case "progress": {
           this.state = "progressive";
+          const t0 = performance.now();
           const pixels = toArrayBuffer(event.pixels);
+          const tToArray = performance.now() - t0;
+          this.postMetric("decode_toarraybuffer_ms", tToArray);
+
           // Budget check BEFORE transferring pixels. postMessage([pixels]) detaches the
           // buffer — reusing it in postBudgetExceeded would send a zero-length payload.
           if (this.checkBudget()) {
@@ -393,7 +397,11 @@ export class DecodeHandler {
           break;
         }
         case "final": {
+          const t0 = performance.now();
           const pixels = toArrayBuffer(event.pixels);
+          const tToArray = performance.now() - t0;
+          this.postMetric("decode_toarraybuffer_ms", tToArray);
+
           // Budget check BEFORE transferring pixels — same pattern as "progress".
           // postMessage([pixels]) detaches the buffer; reusing it in postBudgetExceeded
           // would send a zero-length payload.

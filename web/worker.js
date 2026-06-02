@@ -226,9 +226,8 @@ self.addEventListener('message', async (ev) => {
             rotRes.free();
             rgba = rgb_to_rgba(fullRgb);
         } else {
-            rgba = (typeof result.take_rgba === 'function')
-                ? result.take_rgba()
-                : rgb_to_rgba(result.take_rgb());
+            // Rotation path must use RGB (for rotate_rgb8). Non-rotation path uses recommended JS conversion.
+            rgba = rgb_to_rgba(result.take_rgb());
         }
 
         // Hand off full-res RGBA to the dedicated JXL encode worker (main.js

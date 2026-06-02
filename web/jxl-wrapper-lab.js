@@ -1038,9 +1038,8 @@ function loadBytesAsSource(bytes, name, folder = '', sizeLabel = '') {
     const started = performance.now();
     const result = process_orf(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
     try {
-        const rgba = (typeof result.take_rgba === 'function')
-            ? result.take_rgba()
-            : rgb_to_rgba(result.take_rgb());
+        // Legacy WASM-side RGBA path removed per Boundary Cost Audit (browser prefers JS conversion)
+        const rgba = rgb_to_rgba(result.take_rgb());
         return {
             name,
             label: `${name} · ORF · ${result.width}×${result.height}`,
@@ -1059,9 +1058,8 @@ function loadBytesAsCr2Source(bytes, name, folder = '', sizeLabel = '') {
     const started = performance.now();
     const result = process_cr2(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
     try {
-        const rgba = (typeof result.take_rgba === 'function')
-            ? result.take_rgba()
-            : rgb_to_rgba(result.take_rgb());
+        // Legacy WASM-side RGBA path removed per Boundary Cost Audit (browser prefers JS conversion)
+        const rgba = rgb_to_rgba(result.take_rgb());
         return {
             name,
             label: `${name} · CR2 · ${result.width}×${result.height}`,

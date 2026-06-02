@@ -29,7 +29,7 @@ const TRACE_STAGES = readBoolEnv("TRACE_STAGES");
 const SESSION_STAGE_TIMEOUT_MS = readNumberEnv("SESSION_STAGE_TIMEOUT_MS", 30000);
 const SESSION_COMPLETION_TIMEOUT_MS = readNumberEnv("SESSION_COMPLETION_TIMEOUT_MS", 120000);
 const SESSION_MAX_EDGE = readNumberEnv("SESSION_MAX_EDGE", Infinity);
-const RAW_RGBA_MODE = (process.env.RAW_RGBA_MODE || "take").toLowerCase();
+// RAW_RGBA_MODE / legacy take_rgba A/B support removed per Boundary Cost Audit.
 
 const MIME = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -228,7 +228,7 @@ function exportResultsArtifact(testRows, gobScanRows, gobOffenders, config) {
       SESSION_MAX_EDGE: config.maxEdge,
       SESSION_STAGE_TIMEOUT_MS,
       SESSION_COMPLETION_TIMEOUT_MS,
-      RAW_RGBA_MODE: config.rawRgbaMode,
+      // (legacy RAW_RGBA_MODE support removed)
       TRACE_PROGRESS: config.traceProgress,
       TRACE_STAGES: config.traceStages,
     },
@@ -286,7 +286,7 @@ async function main() {
 
   console.log("session-worker-timings");
   console.log(
-      `config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} sessionMaxEdge=${SESSION_MAX_EDGE} rawRgbaMode=${RAW_RGBA_MODE} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`,
+      `config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} sessionMaxEdge=${SESSION_MAX_EDGE} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`,
   );
 
   try {
@@ -319,7 +319,7 @@ async function main() {
         gobOffenderRuns: GOB_OFFENDER_RUNS,
         traceProgress: TRACE_PROGRESS,
         traceStages: TRACE_STAGES,
-        rawRgbaMode: RAW_RGBA_MODE,
+        // (legacy rawRgbaMode removed)
         maxEdge: SESSION_MAX_EDGE,
         timeouts: {
           stageMs: SESSION_STAGE_TIMEOUT_MS,
@@ -340,7 +340,7 @@ async function main() {
       gobOffenderCount: GOB_OFFENDER_COUNT,
       gobOffenderRuns: GOB_OFFENDER_RUNS,
       maxEdge: SESSION_MAX_EDGE,
-      rawRgbaMode: RAW_RGBA_MODE,
+      // (legacy rawRgbaMode removed)
       traceProgress: TRACE_PROGRESS,
       traceStages: TRACE_STAGES,
     });

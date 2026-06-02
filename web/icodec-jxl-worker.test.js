@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import {
     createEncoder,
     createDecoder,
-    setForcedTier,
     setJxlModuleFactoryForTesting,
 } from '../packages/jxl-wasm/dist/facade.js';
 
@@ -24,14 +23,12 @@ const maybeFixtureTest = existsSync(ORF_PATH) ? test : test.skip;
 
 maybeFixtureTest('jxl-wasm facade can encode and decode the full-size ORF via libjxl', async () => {
     setJxlModuleFactoryForTesting(null); // ensure real WASM, not a mock
-    setForcedTier('simd'); // Bun's pthread-backed simd-mt build is unstable in tests.
 
     await initRaw();
     const bytes = readFileSync(ORF_PATH);
     const result = process_orf(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
-    const rgba = (typeof result.take_rgba === 'function')
-        ? result.take_rgba()
-        : rgb_to_rgba(result.take_rgb());
+    // Legacy WASM-side RGBA path removed per Boundary Cost Audit
+    const rgba = rgb_to_rgba(result.take_rgb());
     const width = result.width;
     const height = result.height;
     result.free();

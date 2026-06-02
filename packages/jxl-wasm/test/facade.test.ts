@@ -4,6 +4,7 @@ import {
   createDecoder,
   createEncoder,
   detectTier,
+  setForcedTier,
   setJxlModuleFactoryForTesting,
   normalizedToPixelExtent,
   pixelToNormalizedExtent,
@@ -63,7 +64,7 @@ describe("@casabio/jxl-wasm facade", () => {
   test("viewport helper chooses power-of-two downsample from region and target size", () => {
     const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
 
-    expect(source).toContain("function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8");
+    expect(source).toContain("function pickDownsample(options: { region?: Region | null; imageWidth?: number | null; imageHeight?: number | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8");
     expect(source).toContain("Math.ceil(sourceLongEdge / factor) >= targetLongEdge");
   });
 
@@ -167,7 +168,7 @@ describe("@casabio/jxl-wasm facade", () => {
 
     expect(events[0]).toMatchObject({
       type: "header",
-      info: { width: 1, height: 1, bitsPerSample: 8, hasAlpha: true },
+      info: { width: 1, height: 1, bitsPerSample: 8 },
     });
     expect(events[1]).toMatchObject({
       type: "final",
@@ -415,6 +416,12 @@ describe("@casabio/jxl-wasm facade", () => {
 });
 
 describe("detectTier", () => {
+  afterEach(() => {
+    delete process.env.JXL_WASM_FORCE_TIER;
+    setForcedTier(null);
+    setJxlModuleFactoryForTesting(null);
+  });
+
   test("returns a valid tier string", () => {
     const tier = detectTier();
     expect(["relaxed-simd-mt", "simd-mt", "simd", "scalar"]).toContain(tier);
@@ -425,6 +432,32 @@ describe("detectTier", () => {
     // Bun/Node may expose SIMD without cross-origin isolation; accept simd-mt or scalar.
     expect(["simd-mt", "scalar"]).toContain(tier);
   });
+
+  test("uses explicit env override without changing the default simd-mt path", () => {
+    process.env.JXL_WASM_FORCE_TIER = "simd";
+    expect(detectTier()).toBe("simd");
+  });
+
+  test("forced simd-mt tier can load pthread workers in Bun", async () => {
+    const dist = await import("../dist/facade.js");
+    dist.setForcedTier("simd-mt");
+    dist.setJxlModuleFactoryForTesting(null);
+
+    try {
+      const rgba = new Uint8Array([255, 0, 0, 255]);
+      const encoder = dist.createEncoder({ ...encodeOptions, width: 1, height: 1, progressive: false });
+      encoder.pushPixels(rgba);
+      encoder.finish();
+
+      const chunks = [];
+      for await (const chunk of encoder.chunks()) chunks.push(chunk);
+      expect(chunks.length).toBeGreaterThan(0);
+      await encoder.dispose();
+    } finally {
+      dist.setForcedTier(null);
+      dist.setJxlModuleFactoryForTesting(null);
+    }
+  }, 30000);
 });
 
 describe("bilinear resize via targetWidth/targetHeight", () => {

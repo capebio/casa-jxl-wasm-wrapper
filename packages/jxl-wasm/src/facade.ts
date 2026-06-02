@@ -759,6 +759,8 @@ export interface DecodeGridInfo {
 }
 
 export function detectTier(): Tier {
+  const envTier = getEnvForcedTier();
+  if (envTier) return envTier;
   if (_cachedDetectedTier !== undefined) return _cachedDetectedTier;
   let tier: Tier;
   if (typeof WebAssembly === "undefined") {
@@ -768,19 +770,21 @@ export function detectTier(): Tier {
     if (!hasSimd) {
       tier = "scalar";
     } else {
-      if (typeof globalThis !== "undefined" && "Bun" in globalThis) {
-        tier = "simd";
-      } else {
-        const hasSab = typeof SharedArrayBuffer !== "undefined";
-        const hasRelaxedSimd = probeRelaxedSimd();
-        if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
-        else if (hasSab) tier = "simd-mt";
-        else tier = "simd";
-      }
+      const hasSab = typeof SharedArrayBuffer !== "undefined";
+      const hasRelaxedSimd = probeRelaxedSimd();
+      if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
+      else if (hasSab) tier = "simd-mt";
+      else tier = "simd";
     }
   }
   _cachedDetectedTier = tier;
   return tier;
+}
+
+function getEnvForcedTier(): Tier | null {
+  const env = (globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  const tier = env?.JXL_WASM_FORCE_TIER;
+  return tier === "relaxed-simd-mt" || tier === "simd-mt" || tier === "simd" || tier === "scalar" ? tier : null;
 }
 
 /**
@@ -1319,8 +1323,16 @@ class LibjxlDecoder implements JxlDecoder {
       const fmt = this.options.format;
       const takeAndWrap = (handle: number): { pixels: { data: Uint8Array; width: number; height: number; region?: Region }; evInfo: ImageInfo } | null => {
         if (handle === 0) return null;
+        const tBufStart = performance.now();
         const buf = takeBuffer(module, handle, "decode");
+        const tBuf = performance.now() - tBufStart;
+        onMetric?.("decode_buffer_extract_ms", tBuf);
+
+        const tRegionStart = performance.now();
         const pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region ?? null, this.options.downsample ?? 1, bpc);
+        const tRegion = performance.now() - tRegionStart;
+        onMetric?.("decode_region_downsample_ms", tRegion);
+
         // When ROI/downsample crops the frame, pixels.width/height differ from full image dims.
         // buildInfo memoizes on first call (full dims from header), so we must not pass it
         // cropped dims — it would return the already-memoized full-dim object regardless.
@@ -2381,6 +2393,9 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
   const options: Record<string, unknown> = {
     locateFile: (path: string) => new URL(path, baseUrl).href,
   };
+  if (isBunRuntime() && tier.endsWith("-mt")) {
+    options.mainScriptUrlOrBlob = makeBunPthreadBootstrap(new URL(`jxl-core.${tier}.js`, baseUrl).href);
+  }
   // Emscripten web output can fetch the .wasm in the browser. Pre-read the
   // binary only in Node/Bun so the same bundle works in both environments.
   if (typeof process !== "undefined" && !!process.versions?.node) {
@@ -2393,6 +2408,24 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
     }
   }
   return await (factory as (options: Record<string, unknown>) => Promise<LibjxlWasmModule>)(options);
+}
+
+function isBunRuntime(): boolean {
+  return typeof globalThis !== "undefined" && "Bun" in globalThis;
+}
+
+function makeBunPthreadBootstrap(moduleUrl: string): Blob {
+  return new Blob([
+    [
+      'globalThis.WorkerGlobalScope ??= function WorkerGlobalScope() {};',
+      'try {',
+      '  Object.defineProperty(globalThis.self, "name", { value: "em-pthread", configurable: true });',
+      '} catch {',
+      '  globalThis.self.name = "em-pthread";',
+      '}',
+      `await import(${JSON.stringify(moduleUrl)});`,
+    ].join("\n"),
+  ], { type: "text/javascript" });
 }
 
 interface JxlCapabilities {

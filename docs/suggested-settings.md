@@ -1,0 +1,123 @@
+# Suggested Settings — RAW Pipeline + JXL Encode (Browser/WASM)
+
+**Date**: June 2026 (updated for P3.3 close-out)  
+**Status**: Current recommendation after Boundary Cost Audit + 30-file Gobabeb verification (encode boundary) + 11-file crop benchmark (decode/region boundary) + handoff timing instrumentation + legacy cleanup.
+
+## Core Recommendation (Browser / Web)
+
+For all browser/WASM usage of the RAW decode → JXL encode pipeline:
+
+**Prefer the JS-side conversion path:**
+
+```js
+const rgba = rgb_to_rgba(result.take_rgb());
+// or the safe fallback form used throughout the codebase:
+const rgba = (typeof result.take_rgba === 'function')
+    ? result.take_rgba()
+    : rgb_to_rgba(result.take_rgb());
+```
+
+**Do not prefer `result.take_rgba()` or `result.rgba()` for new or hot paths in the browser.**
+
+### Why
+
+Multiple rounds of measurement on real Gobabeb (and other) files using the high-fidelity `session-worker-timings` harness showed a consistent regression when using the WASM-side `take_rgba()` path:
+
+- 30-file Gobabeb verification (browser + real WASM): `take_rgba` was **+10.5 ms mean / +13 ms median** slower on `rgbaPrepMs`, leading to **~+230–260 ms slower end-to-end** per file (~4–5%).
+- Profiling with fine-grained breakdown (`rgbaPrepBreakdown`) + post-prep handoff timings (`postRgbaPrepMs`, `rgbaExactBufferMs`):
+  - The entire regression lives inside the `take_rgba()` WASM call + wasm-bindgen glue copy-out of the 4× buffer.
+  - Post-prep handoff costs (`exactBuffer` before `pushPixels`, resize) were **negligible (~0 ms)** in both paths for typical Gobabeb workloads (max edge = Infinity).
+- Earlier Node-targeted harness numbers had shown a small win for `take`; the real browser environment (V8 + wasm-bindgen + actual session/encode pipeline) did not.
+
+**Primary hot spots in the WASM path** (identified via instrumentation):
+1. Rust allocation of the output RGBA `Vec<u8>` (4 bytes/pixel).
+2. The conversion loop running inside WASM.
+3. The mandatory full copy in the glue (`getArrayU8FromWasm0(...).slice()`) on a ~76 MiB buffer for a 24 MP image.
+
+The JS path wins because:
+- `take_rgb()` moves a smaller 3× buffer.
+- The actual RGB→RGBA conversion runs in highly optimized V8 code on data the JS side already owns.
+
+## When the WASM-side Methods May Still Have Value
+
+- **Tauri / native contexts**: The cost model is completely different (no JS/WASM boundary for the conversion itself in the same way). Keep the methods available.
+- **Future Phase 2B experiments** ("direct RGBA production inside the raw-pipeline tone/convert stage"): The `take_rgba` / `rgba` surface provides a natural place to experiment with a `take_rgba_direct()` variant without changing every call site immediately.
+- **Lab / debugging / A/B testing**: The `RAW_RGBA_MODE=js|take|direct` harness (in `session-worker-timings*` and `targeted-wasm-timings`) was extremely valuable for discovering the truth. The methods enable that infrastructure.
+- **Ownership handoff in pure-encode paths**: `take_rgba()` returns a buffer the caller can transfer without the JS side ever materializing a full 3× RGB buffer. In theory this reduces peak memory and GC pressure for "decode RAW → immediately encode JXL, discard RGB" flows. In practice on browser workloads, the conversion cost dominated any such benefit.
+
+## If We Remove `take_rgba()` and `rgba()` Entirely
+
+### What We Gain (Leanness + Simplicity)
+- Remove two methods (`take_rgba`, `rgba`) from `ProcessResult` in `src/lib.rs`.
+- Remove the associated (now very small) test.
+- Remove or greatly simplify the `RAW_RGBA_MODE` / `takeRgbaForMode` machinery in the benchmark harnesses (`session-worker-timings-browser.js`, `targeted-wasm-timings.mjs`, etc.).
+- Slightly smaller public API surface and WASM binary.
+- Less cognitive overhead: one fewer "which conversion path should I use?" question for new developers.
+- The safe-fallback ternary pattern (`typeof result.take_rgba === 'function' ? ...`) can eventually be cleaned up in many places once the methods are gone.
+
+### What We Actually Lose
+- **The ownership / boundary-crossing experiment hook** — `take_rgba()` was the concrete artifact of the "move work across the JS↔WASM boundary to reduce copies" idea from the Boundary Cost Audit. Removing it closes off easy future attempts at this style of optimization for this specific conversion without re-adding the methods.
+- **Historical A/B testing capability** for this exact boundary. The harness that proved the JS path was better would become harder to run.
+- **Any (currently unmeasured) win in non-browser environments** (Tauri, Node without the full browser cost model, etc.).
+- **A small amount of future-proofing** for a hypothetical world where WASM execution or glue costs improve dramatically relative to V8 loops.
+- **The `rgba()` borrow variant** (less used, but occasionally convenient in lab code that wants to keep the original `ProcessResult` alive).
+
+**Net assessment (June 2026)**: On current evidence, we lose very little *performance* in the dominant browser use case by removing the preference for (or the methods themselves). The "leanness" win is real and the risk of keeping a slower path as the "modern" option is higher than the theoretical future upside.
+
+## Current Call Site Guidance
+
+All high-value call sites have been cleaned up (June 2026) to use the recommended direct JS conversion path. The safe-fallback ternaries and the entire `RAW_RGBA_MODE` A/B testing machinery in the benchmark suite have been removed. The rotation path in `web/worker.js` correctly remains on the RGB path because it must call `rotate_rgb8`.
+
+Recommended pattern going forward (new code):
+
+```js
+// Preferred for browser paths
+const rgba = rgb_to_rgba(result.take_rgb());
+```
+
+The old "take-first" pattern should only be used when:
+- The caller is in a Tauri/native context and has measured a win, **or**
+- You are explicitly doing A/B testing with the harness.
+
+## Decode Strategy (Region/Crop vs Full Loads) — P3.3 Crop Benchmark (June 2026)
+
+From the 11-file / 55-sample crop benchmark (P2200*.ORF set, varied content, tile=128px, sizes 128–2048px) + supporting single-file runs:
+
+**For crops, thumbnails, subject zooms, lightbox focal regions, or any ROI**:
+- Prefer JXTC (tile container) or tiled region decode when the source JXL was produced with tiles (`encodeTiledRgba8` / `encodeTileContainerRgba8`).
+- Call `decodeTiledRegionRgba8` or `decodeTileContainerRegionRgba8` (exposed via raw_converter_wasm and `@casabio/jxl-wasm` facade).
+- Data: JXTC 9–15 ms for 128 px crops (up to ~500–870 ms at 2048 px); ~10–50× faster than full-then-crop for small/medium views. Tile region also wins vs full but carries ~1.1–1.5 s overhead vs pure JXTC for small ROIs.
+- The pixel handoff/extract cost itself is cheap (~3.8 ms avg `decode_buffer_extract_ms` across 55 samples). The win is avoiding unnecessary WASM decode work for unneeded pixels.
+
+**For full-resolution loads** (gallery grid, lightbox open, export source, progressive paint final):
+- Use progressive decode: `progressionTarget: 'final'|'pass'|'dc'`, `emitEveryPass: true` (or low `progressiveDetail`).
+- Current production paths already default here: `web/jxl-decode-worker.js` (lightbox/gallery via pool), `web/jxl-progressive.js` stream sessions, etc.
+- The ~2.5–2.9 s "long load time for a full file" (up to 3.8 s on some content) is dominated by full WASM decode compute + extract + JS crop. Even passing `region` to the standard progressive decoder often results in full decode then client-side crop (see facade `eventsProgressive` + `applyRegionAndDownsample`; early C++ crop is oneShot-only today).
+- Progressive + emitEveryPass gives usable low-res first (DC or early passes), hiding perceived latency while the rest refines.
+
+**Current status of main paths (light exposure)**:
+- Lightbox/gallery thumbs + full previews (via `decodeJxl` + jxl-decode-worker) already use progressive + emitEveryPass + `region: null`/`downsample:1`.
+- Subject/crop focus in lightbox currently decodes full JXL then zooms/crops on canvas (`decodeFullJxlFor` + focusOnRegion). When encode side starts producing JXTC for assets with `_crop`/`_subjects`, wire the ROI decode at that point.
+- The `jxl-crop-benchmark.html` (http://localhost:9000/web/jxl-crop-benchmark.html) is the measurement + validation vehicle; select files, "Generate tiled + JXTC", run comparisons to see Tile / JXTC / Full + the Decode Pixel Handoff metrics table.
+
+**Further analysis / improvement setup** (for after P3.3):
+- Extend crop benchmark or add harness to exercise full jxl-session/worker path so `decode_toarraybuffer_ms` (handler) + scheduler costs are captured for region cases.
+- Enhance full decode paths with more `full_decoder_*` (create/push/events) + `source_pixels_decoded` to confirm work done.
+- Add `emitEveryPass` variant to crop benchmark for DC/pass handoff costs.
+- Make standard progressive region cheaper: early crop in C++ (pass region into dec state, or route crops via oneShot when possible) or tighter JS path in `applyRegionAndDownsample`.
+- Investigate tile path overhead (tile grid/assembly in facade `decodeTiledRegionRgba8`).
+- Default encode paths that know about crops/subjects to emit tiled/JXTC so the fast ROI path is available without extra user steps.
+- For initial full views: consider default `downsample: 2|4` + refine on demand.
+
+See `docs/boundary-cost-audit.md` §13 for the full per-size tables, per-file details, handoff metric summaries, and the exact 11-file report that drove these settings.
+
+## Related Documents
+
+- `docs/boundary-cost-audit.md` (especially §12–13 for the 30-file encode boundary + 11-file decode/region P3.3 data; also earlier sections for Tier priorities)
+- `docs/HANDOFF-boundary-cost-audit-2026.md`
+- `docs/fast-path-principles.md` (historical context on the earlier micro-optimization style)
+- `docs/handoff-p3-lightbox-jxl-decoder.md` and P3 planning docs (context for JXTC/ROI as the P3.3 target)
+
+---
+
+*This document records the current engineering preference after extensive measurement. It should be updated when new environments are measured or when a future improvement (e.g., direct production inside raw-pipeline or better glue, or full JXTC integration in gallery) changes the data.*

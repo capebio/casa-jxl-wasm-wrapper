@@ -137,9 +137,12 @@ impl ProcessResult {
     }
 
     /// Move the RGBA8 buffer out. Caller owns the bytes.
-    /// Performs RGB→RGBA conversion inside WASM to reduce JS-side boundary crossings.
+    /// Performs RGB→RGBA conversion inside WASM using the same tight loop as the
+    /// JS-facing rgb_to_rgba, then transfers ownership. This still avoids the
+    /// JS-side 3x buffer allocation that the old take_rgb + rgb_to_rgba pattern
+    /// required for "encode only" paths.
     pub fn take_rgba(&mut self) -> Vec<u8> {
-        rgb_vec_to_rgba_in_place(std::mem::take(&mut self.rgb))
+        rgb_to_rgba(&std::mem::take(&mut self.rgb))
     }
 
     /// Borrow the RGBA8 buffer (copies).
@@ -1128,39 +1131,20 @@ pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     out
 }
 
-fn rgb_vec_to_rgba_in_place(mut rgb: Vec<u8>) -> Vec<u8> {
-    let n = rgb.len() / 3;
-    let rgb_len = n * 3;
-    let rgba_len = n * 4;
-    rgb.truncate(rgb_len);
-    rgb.resize(rgba_len, 255);
-    for p in (0..n).rev() {
-        let si = p * 3;
-        let di = p * 4;
-        rgb[di] = rgb[si];
-        rgb[di + 1] = rgb[si + 1];
-        rgb[di + 2] = rgb[si + 2];
-        rgb[di + 3] = 255;
-    }
-    rgb
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn owned_rgb_to_rgba_matches_borrowed_conversion() {
-        let rgb = vec![1, 2, 3, 4, 5, 6];
-
-        assert_eq!(rgb_vec_to_rgba_in_place(rgb.clone()), rgb_to_rgba(&rgb));
-    }
-
-    #[test]
-    fn owned_rgb_to_rgba_ignores_trailing_partial_pixel() {
-        let rgb = vec![9, 8, 7, 123, 45];
-
-        assert_eq!(rgb_vec_to_rgba_in_place(rgb), vec![9, 8, 7, 255]);
+    fn take_rgba_via_rgb_to_rgba_roundtrip() {
+        // Basic sanity: the take_rgba path ultimately uses the same conversion
+        // as the public rgb_to_rgba helper.
+        let rgb = vec![10, 20, 30, 40, 50, 60];
+        // We can't easily unit-test take_rgba without a full ProcessResult,
+        // but we can at least ensure the shared helper is stable.
+        let expected = rgb_to_rgba(&rgb);
+        assert_eq!(expected.len(), 8);
+        assert_eq!(&expected[0..4], &[10, 20, 30, 255]);
     }
 }
 

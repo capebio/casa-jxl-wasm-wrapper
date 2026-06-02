@@ -40,6 +40,8 @@ This is the first concrete implementation step coming out of the Boundary Cost A
 
 **Note for the next session**: The user has asked to "commit and push and ensure everything is written up in that .md document" before continuing deeper implementation. The handoff + audit docs should be the primary artifacts.
 
+**Later-session update (this run)**: Real browser/WASM measurements (including 30-file Gobabeb verification + post-prep handoff timing instrumentation for `postRgbaPrepMs` / `rgbaExactBufferMs`) were executed on the session-worker harness. The data showed a consistent regression for Phase 2A in the actual browser environment; the extra cost was entirely inside the `take_rgba()` WASM call + glue copy, not in post-prep handoff. A new canonical document `docs/suggested-settings.md` now records the clear preference for browser paths (prefer JS-side `rgb_to_rgba(result.take_rgb())`). The audit doc was updated with the final writeup. The `take_rgba`/`rgba` methods remain for Tauri, future experiments, and historical A/B harness value, but are no longer recommended for browser encode flows.
+
 ### 3. Previous Work (for context)
 - Dozens of micro-wins across `src/lib.rs`, `packages/jxl-wasm/src/facade.ts`, and `bridge.cpp` (downscale integer paths, blur kernel manualization, orientation tightening, alpha strip helper, mallocAndCopy helper for encode marshaling, etc.).
 - Created `docs/fast-path-principles.md` as the reference for the original hunting style.

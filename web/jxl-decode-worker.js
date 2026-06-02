@@ -54,6 +54,13 @@ async function decodeWithJsquashFallback(decodeId, buf) {
 }
 
 async function decodeProgressive(decodeId, buf, progressiveDetail) {
+    // P3.3 decode strategy (post crop benchmark): for *full* loads we use progressive + emitEveryPass
+    // to surface low-res (DC/early passes) quickly and hide the 2.5–3s full WASM decode cost.
+    // When a region/crop is known (subject focus, viewport zoom) *and* the JXL was encoded with tiles
+    // (encodeTiledRgba8 or encodeTileContainerRgba8/JXTC), prefer decodeTiledRegionRgba8 or
+    // decodeTileContainerRegionRgba8 instead — 10-50× wins for small crops (see jxl-crop-benchmark + §13).
+    // Current lightbox/gallery path passes region:null; wiring ROI will require encode-side JXTC default
+    // for cropped assets + decode options from sidecar/_crop/_subjects. See suggested-settings.md.
     const decoder = createDecoder({
         format: 'rgba8',
         region: null,

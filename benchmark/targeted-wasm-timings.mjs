@@ -44,48 +44,8 @@ const GOB_OFFENDER_COUNT = readNumberEnv("GOB_OFFENDER_COUNT", 8);
 const GOB_OFFENDER_RUNS = readNumberEnv("GOB_OFFENDER_RUNS", 3);
 const TRACE_PROGRESS = readBoolEnv("TRACE_PROGRESS");
 const TRACE_STAGES = readBoolEnv("TRACE_STAGES");
-const RAW_RGBA_MODE = (process.env.RAW_RGBA_MODE || "take").toLowerCase();
-
-function takeRgbaForMode(result) {
-  const rawRgbBytes = result.width * result.height * 3;
-  const rgbaBytes = result.width * result.height * 4;
-  if (RAW_RGBA_MODE === "js") {
-    return {
-      rgba: rgb_to_rgba(result.take_rgb()),
-      rgbaPrepMode: "js-rgb-to-rgba",
-      rawRgbBytes,
-      rgbaBytes,
-    };
-  }
-  if (RAW_RGBA_MODE === "take" || RAW_RGBA_MODE === "a") {
-    if (typeof result.take_rgba !== "function") {
-      return {
-        rgba: rgb_to_rgba(result.take_rgb()),
-        rgbaPrepMode: "js-rgb-to-rgba",
-        rawRgbBytes,
-        rgbaBytes,
-      };
-    }
-    return {
-      rgba: result.take_rgba(),
-      rgbaPrepMode: "wasm-take-rgba",
-      rawRgbBytes,
-      rgbaBytes,
-    };
-  }
-  if (RAW_RGBA_MODE === "direct" || RAW_RGBA_MODE === "b") {
-    if (typeof result.take_rgba_direct !== "function") {
-      throw new Error("RAW_RGBA_MODE=direct requested, but this wasm build does not export take_rgba_direct");
-    }
-    return {
-      rgba: result.take_rgba_direct(),
-      rgbaPrepMode: "wasm-direct-rgba",
-      rawRgbBytes,
-      rgbaBytes,
-    };
-  }
-  throw new Error(`Unsupported RAW_RGBA_MODE=${RAW_RGBA_MODE}; expected js, take, or direct`);
-}
+// Legacy RAW_RGBA_MODE / take_rgba A/B testing removed per Boundary Cost Audit.
+// All runs now use the recommended browser JS conversion path.
 
 function median(values) {
   if (!values.length) return 0;
@@ -216,6 +176,12 @@ async function encodeJxl(rgba, width, height) {
 
 async function decodeJxl(bytes) {
   const started = performance.now();
+  const decodePixelMetrics = {
+    decode_buffer_extract_ms: 0,
+    decode_region_downsample_ms: 0,
+    decode_toarraybuffer_ms: 0, // only populated in full session path
+  };
+
   const decoder = createDecoder({
     format: "rgba8",
     region: null,
@@ -224,6 +190,11 @@ async function decodeJxl(bytes) {
     emitEveryPass: false,
     preserveIcc: true,
     preserveMetadata: true,
+    onMetric: (name, value) => {
+      if (name in decodePixelMetrics) {
+        decodePixelMetrics[name] += value;
+      }
+    },
   });
   try {
     await decoder.push(exactBuffer(bytes));
@@ -237,6 +208,7 @@ async function decodeJxl(bytes) {
       decodeMs: performance.now() - started,
       width: final.info.width,
       height: final.info.height,
+      ...decodePixelMetrics,
     };
   } finally {
     await decoder.dispose();
@@ -269,7 +241,10 @@ async function measureOne(path) {
   try {
     const rgbStarted = performance.now();
     traceStage(`[stage] ${basename(path)} rgba:start`);
-    const { rgba, rgbaPrepMode, rawRgbBytes, rgbaBytes } = takeRgbaForMode(result);
+    const rgba = rgb_to_rgba(result.take_rgb());
+    const rgbaPrepMode = "js-rgb-to-rgba";
+    const rawRgbBytes = result.width * result.height * 3;
+    const rgbaBytes = result.width * result.height * 4;
     const rgbaPrepMs = performance.now() - rgbStarted;
     traceStage(`[stage] ${basename(path)} rgba:done ${fmtMs(rgbaPrepMs)}`);
 
@@ -302,6 +277,9 @@ async function measureOne(path) {
       firstChunkMs: encode.firstChunkMs,
       jxlBytes: encode.bytes.byteLength,
       decodeMs: decode.decodeMs,
+      decode_buffer_extract_ms: decode.decode_buffer_extract_ms ?? 0,
+      decode_region_downsample_ms: decode.decode_region_downsample_ms ?? 0,
+      decode_toarraybuffer_ms: decode.decode_toarraybuffer_ms ?? 0,
     };
   } finally {
     result.free();
@@ -326,6 +304,9 @@ function collapseRuns(runs) {
     encodeMs: pick("encodeMs"),
     firstChunkMs: pick("firstChunkMs"),
     decodeMs: pick("decodeMs"),
+    decode_buffer_extract_ms: pick("decode_buffer_extract_ms"),
+    decode_region_downsample_ms: pick("decode_region_downsample_ms"),
+    decode_toarraybuffer_ms: pick("decode_toarraybuffer_ms"),
     jxlBytes: Math.round(median(runs.map((run) => run.jxlBytes))),
   };
 }
@@ -421,7 +402,7 @@ function exportResultsArtifact(testRows, gobScanRows, gobOffenders, config) {
   const artifact = {
     exportedAt: new Date().toISOString(),
     generator: "targeted-wasm-timings",
-    config: { ...config, RAW_RGBA_MODE },
+    config: { ...config },
     counts: {
       test: testRows.length,
       gobScan: gobScanRows.length,
@@ -443,7 +424,7 @@ function exportResultsArtifact(testRows, gobScanRows, gobOffenders, config) {
 
   if (testRows.length > 0) {
     const csvPath = join(outDir, `targeted-wasm-timings-${ts}.csv`);
-    const keys = ["file", "type", "width", "height", "rawWallMs", "decompressMs", "demosaicMs", "tonemapMs", "rgbaPrepMs", "rgbaPrepMode", "rawRgbBytes", "rgbaBytes", "encodeMs", "decodeMs", "jxlBytes", "rawBenchDecompress", "rawBenchDemosaic"];
+    const keys = ["file", "type", "width", "height", "rawWallMs", "decompressMs", "demosaicMs", "tonemapMs", "rgbaPrepMs", "rgbaPrepMode", "rawRgbBytes", "rgbaBytes", "encodeMs", "decodeMs", "decode_buffer_extract_ms", "decode_region_downsample_ms", "decode_toarraybuffer_ms", "jxlBytes", "rawBenchDecompress", "rawBenchDemosaic"];
     const lines = [keys.join(",")];
     for (const r of testRows) {
       lines.push(keys.map(k => {
@@ -460,7 +441,7 @@ async function main() {
   setForcedTier("simd");
   console.log("targeted-wasm-timings");
   console.log(`detected-tier=${detectTier()} forced-tier=simd quality=${ENCODE_OPTIONS.quality} effort=${ENCODE_OPTIONS.effort} progressive=${ENCODE_OPTIONS.progressive}`);
-  console.log(`config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} rawRgbaMode=${RAW_RGBA_MODE} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`);
+  console.log(`config testRuns=${TEST_RUNS} testScanLimit=${TEST_SCAN_LIMIT} gobScanLimit=${GOB_SCAN_LIMIT} gobOffenderCount=${GOB_OFFENDER_COUNT} gobOffenderRuns=${GOB_OFFENDER_RUNS} traceProgress=${TRACE_PROGRESS} traceStages=${TRACE_STAGES}`);
   const rawWasmBytes = readFileSync(new URL("../pkg/raw_converter_wasm_bg.wasm", import.meta.url));
   await initRaw({ module_or_path: rawWasmBytes });
   await warmup();

@@ -66,6 +66,9 @@ export class CapabilityMissing extends Error {
     }
 }
 export function detectTier() {
+    const envTier = getEnvForcedTier();
+    if (envTier)
+        return envTier;
     if (_cachedDetectedTier !== undefined)
         return _cachedDetectedTier;
     let tier;
@@ -78,23 +81,23 @@ export function detectTier() {
             tier = "scalar";
         }
         else {
-            if (typeof globalThis !== "undefined" && "Bun" in globalThis) {
+            const hasSab = typeof SharedArrayBuffer !== "undefined";
+            const hasRelaxedSimd = probeRelaxedSimd();
+            if (hasSab && hasRelaxedSimd)
+                tier = "relaxed-simd-mt";
+            else if (hasSab)
+                tier = "simd-mt";
+            else
                 tier = "simd";
-            }
-            else {
-                const hasSab = typeof SharedArrayBuffer !== "undefined";
-                const hasRelaxedSimd = probeRelaxedSimd();
-                if (hasSab && hasRelaxedSimd)
-                    tier = "relaxed-simd-mt";
-                else if (hasSab)
-                    tier = "simd-mt";
-                else
-                    tier = "simd";
-            }
         }
     }
     _cachedDetectedTier = tier;
     return tier;
+}
+function getEnvForcedTier() {
+    const env = globalThis.process?.env;
+    const tier = env?.JXL_WASM_FORCE_TIER;
+    return tier === "relaxed-simd-mt" || tier === "simd-mt" || tier === "simd" || tier === "scalar" ? tier : null;
 }
 /**
  * Returns a sensible default effort level for the current WASM tier.
@@ -1241,6 +1244,9 @@ async function loadGeneratedLibjxlModule() {
     const options = {
         locateFile: (path) => new URL(path, baseUrl).href,
     };
+    if (isBunRuntime() && tier.endsWith("-mt")) {
+        options.mainScriptUrlOrBlob = makeBunPthreadBootstrap(new URL(`jxl-core.${tier}.js`, baseUrl).href);
+    }
     // Emscripten web output can fetch the .wasm in the browser. Pre-read the
     // binary only in Node/Bun so the same bundle works in both environments.
     if (typeof process !== "undefined" && !!process.versions?.node) {
@@ -1254,6 +1260,22 @@ async function loadGeneratedLibjxlModule() {
         }
     }
     return await factory(options);
+}
+function isBunRuntime() {
+    return typeof globalThis !== "undefined" && "Bun" in globalThis;
+}
+function makeBunPthreadBootstrap(moduleUrl) {
+    return new Blob([
+        [
+            'globalThis.WorkerGlobalScope ??= function WorkerGlobalScope() {};',
+            'try {',
+            '  Object.defineProperty(globalThis.self, "name", { value: "em-pthread", configurable: true });',
+            '} catch {',
+            '  globalThis.self.name = "em-pthread";',
+            '}',
+            `await import(${JSON.stringify(moduleUrl)});`,
+        ].join("\n"),
+    ], { type: "text/javascript" });
 }
 const capabilityCache = new WeakMap();
 function getCapabilities(module) {
