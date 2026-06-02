@@ -343,6 +343,7 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
             if (msg.sourceH) decoded.sourceH = msg.sourceH;
             if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
             if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
+            if (msg.stage) decoded.stage = msg.stage;
             card._jxlDecoded = decoded;
             resolve(card._jxlDecoded);
         }, 'low', { progressive: true, cachePolicy: 'onFinal' });
@@ -1930,6 +1931,8 @@ function repaintThumbFromJxl(card) {
         }
         // Only process the final frame (progressive may emit intermediates);
         // we only care about the downsampled final for the thumb.
+        // P3.3: skip early dc container previews (thumb wants client-downsampled final quality).
+        if (msg.type === 'jxl_preview') return;
         if (msg.type === 'jxl_progress' && !msg.isFinal) return;
         const canvas = card.querySelector('canvas');
         if (!canvas) return;
@@ -2103,6 +2106,7 @@ function _triggerJxlRoiUpdate() {
                     if (msg.downsample != null) decoded.downsample = msg.downsample;
                     if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
                     if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+                    if (msg.stage) decoded.stage = msg.stage;
                     card._jxlDecoded = decoded;
                 }
                 lightboxCanvas.width = msg.w;
@@ -2152,7 +2156,7 @@ function _triggerJxlRoiUpdate() {
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                 setCleanCanvas(ctx2.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
-            let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''})` : '';
+            let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''}${msg.stage && msg.stage !== 'final' ? ' ' + msg.stage : ''})` : '';
             if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
             if (msg.region) roiExtra += ' (JXTC if container)';
             setPaintedSourceBadge('jxl', roiExtra);
@@ -2204,6 +2208,7 @@ function ensureFullJxlSourceForEditing(card) {
             if (msg.sourceH) decoded.sourceH = msg.sourceH;
             if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
             if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
+            if (msg.stage) decoded.stage = msg.stage;
             card._jxlDecoded = decoded;
         }
     }, 'low', { progressive: true, cachePolicy: 'onFinal' });
@@ -2325,7 +2330,7 @@ function drawLightboxForCard(card) {
                 const ctx2 = lightboxCanvas.getContext('2d');
                 setCleanCanvas(ctx2.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
               }
-              let roiExtra = (d.region) ? ` (ROI${d.downsample > 1 ? ' @' + d.downsample + 'x' : ''}${d.progressiveDetail ? ' ' + d.progressiveDetail : ''})` : '';
+              let roiExtra = (d.region) ? ` (ROI${d.downsample > 1 ? ' @' + d.downsample + 'x' : ''}${d.progressiveDetail ? ' ' + d.progressiveDetail : ''}${d.stage && d.stage !== 'final' ? ' ' + d.stage : ''})` : '';
               if (d.frameIndex > 0) roiExtra += ` f${d.frameIndex}`;
               if (d.region) roiExtra += ' (JXTC if container)';
               if (!roiExtra && d.fromPreview) roiExtra = ' (preview)';
@@ -2384,6 +2389,7 @@ function drawLightboxForCard(card) {
                     if (msg.downsample != null) decoded.downsample = msg.downsample;
                     if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
                     if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+                    if (msg.stage) decoded.stage = msg.stage;
                     card._jxlDecoded = decoded;
                 }
                 lightboxCanvas.width = msg.w;
@@ -2411,6 +2417,7 @@ function drawLightboxForCard(card) {
             if (msg.downsample != null) decoded.downsample = msg.downsample;
             if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
             if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
+            if (msg.stage) decoded.stage = msg.stage;
             card._jxlDecoded = decoded;
             // P3.2b: if this is a region decode and we know the full source size
             // (from header or echoed), size the canvas to the logical full source
@@ -2447,7 +2454,7 @@ function drawLightboxForCard(card) {
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                 setCleanCanvas(ctxAfter.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
-            let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''})` : '';
+            let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''}${msg.stage && msg.stage !== 'final' ? ' ' + msg.stage : ''})` : '';
             if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
             if (msg.region) roiExtra += ' (JXTC if container)';
             setPaintedSourceBadge('jxl', roiExtra);
@@ -2471,6 +2478,7 @@ function drawLightboxForCard(card) {
                     if (msg.downsample != null) decoded.downsample = msg.downsample;
                     if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
                     if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+                    if (msg.stage) decoded.stage = msg.stage;
                     if (msg.type === 'jxl_preview') decoded.fromPreview = true;
                     card._jxlDecoded = decoded;
                 }
@@ -2790,6 +2798,7 @@ function prefetchJxl(card, priority = 'normal') {
         if (msg.sourceH) decoded.sourceH = msg.sourceH;
         if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
         if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
+        if (msg.stage) decoded.stage = msg.stage;
         card._jxlDecoded = decoded;
     }, priority, { progressive: true, cachePolicy: 'onFinal' });
 }
