@@ -14,6 +14,8 @@ export interface EncodePolicy {
     progressive: boolean;
     previewFirst: boolean;
     priority: "visible" | "near" | "background";
+    modular?: -1 | 0 | 1;
+    brotliEffort?: number;
 }
 export declare const encodePolicies: Record<EncodePolicyName, EncodePolicy>;
 export declare function applyEncodePolicy(name: EncodePolicyName, base: EncodeOptions): EncodeOptions;
