@@ -111,6 +111,26 @@ From the 11-file / 55-sample crop benchmark (P2200*.ORF set, varied content, til
 
 See `docs/boundary-cost-audit.md` §13 for the full per-size tables, per-file details, handoff metric summaries, and the exact 11-file report that drove these settings.
 
+## Progressive Encode for Early Recognition (Benchmark + Demo Use)
+
+For the progressive paint/gallery benchmarks (`jxl-progressive-paint.html`, `jxl-progressive-gallery.html`) and any "early usable preview" testing:
+
+**Canonical settings** (use these for multi-layer center-first demos):
+- `progressive: true`
+- `progressiveDc: 2`
+- `groupOrder: 1`
+- `previewFirst: true`
+- `progressiveDetail: 'passes'` (or `emitEveryPass: true` + detail in decoder)
+- `progressiveFlavor: 'ac'` (derived)
+
+**Why**: progressiveDc=2 gives more granular low-frequency stages; groupOrder=1 (center-out) makes the first DC layers start from the middle of the image rather than scanline strips — dramatically more recognizable at low byte counts. Combined they turn the "only two nearly-identical passes" symptom into visibly useful staged reveals (3+ distinct events). Cost of the SetOption is negligible (one frame setting write).
+
+**In paint page (6/8 passes + Preview 1st checked)**: now defaults to the above via the new Center-out checkbox + computed Dc (user can uncheck for A/B scanline comparison). Export to gallery pushes the exact codestream for round-robin multi-layer viewing.
+
+**In gallery onfly**: the controls (`gallery-prog-dc`, `gallery-group-order`, `gallery-preview-first`, detail="All passes") drive the same.
+
+See `docs/HANDOFF-predator-progressive-2026.md` (continuation block + progress) and `docs/references/designs/progressive-encode-options.md` for wiring, UI, and measurement notes. Update with real "first recognizable at X ms / Y KB" numbers once page runs + A/B captured on Gobabeb/P2200 images.
+
 ## Native / Tauri Preferences (Post-P3.3 Parity, June 2026)
 
 The WASM/browser cost model (JS glue copies on 4× return, transfer taxes, etc.) does not apply to direct Rust callers (Tauri desktop using `raw-pipeline` + `jpegxl-rs` in-process).
