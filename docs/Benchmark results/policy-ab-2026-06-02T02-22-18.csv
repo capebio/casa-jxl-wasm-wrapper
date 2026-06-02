@@ -1,0 +1,3 @@
+file,width,height,baseline_ms,baseline_bytes,viewer_ms,viewer_bytes,ms_delta_pct,size_delta_pct
+ADH 1234.CR2,6000,4000,17663.38,1964695,33477.05,2206304,89.53,12.30
+PXL_20260526_194439088.RAW-02.ORIGINAL.dng,3071,4080,3884.02,1025080,14136.64,1189395,263.97,16.03
