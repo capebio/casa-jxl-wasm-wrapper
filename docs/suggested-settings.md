@@ -111,6 +111,36 @@ From the 11-file / 55-sample crop benchmark (P2200*.ORF set, varied content, til
 
 See `docs/boundary-cost-audit.md` §13 for the full per-size tables, per-file details, handoff metric summaries, and the exact 11-file report that drove these settings.
 
+## Native / Tauri Preferences (Post-P3.3 Parity, June 2026)
+
+The WASM/browser cost model (JS glue copies on 4× return, transfer taxes, etc.) does not apply to direct Rust callers (Tauri desktop using `raw-pipeline` + `jpegxl-rs` in-process).
+
+**For encode (RAW → JXL) paths in Tauri**:
+- **Prefer `pipeline::process_rgba(&rgb16, &params)`** (added as part of this parity work) for any flow whose next step is JXL encode (casabio_encode variants, direct jpegxl-rs, export, gallery ingest).
+- This is the "Phase 2B direct-RGBA production" experiment, now higher-leverage in native: fuses tone + alpha write, never allocates the 3× RGB8 intermediate owned buffer.
+- Wire pure-encode call sites (decode RAW → encode the three JXL variants, discard pixels) to use rgba8 directly with 4-channel encoder frames. Peak memory during ingest drops; one fewer full-buffer pass.
+- Keep `pipeline::process` (3ch) for paths that must retain RGB (rotation, further CPU-side editing, LookRenderer consumers that need the 3ch form, etc.).
+- Measurement: `src/bin/raw_decode_bench.rs` now runs head-to-head (tone 3ch vs direct rgba) and uses the direct-rgba + 4ch encode path for its reported JXL timings. Emits `directRgbaMs` in `benchmark/results_native.json`.
+- Update `docs/suggested-settings.md` (this section) + audit once real Tauri gallery/export numbers on Gobabeb/P2200 sets are captured.
+
+**Do not port the browser rule** ("always prefer JS rgb_to_rgba after take_rgb"). The native rule is the opposite for encode-heavy flows.
+
+**For decode / region / progressive (P3.1–P3.3 parity)**:
+- Progressive first-paint (P3.1 equiv): use libjxl's `JXL_DEC_FRAME_PROGRESSION` + `JxlDecoderFlushImage` + `JxlDecoderSetProgressiveDetail` via `jpegxl-sys` (or jpegxl-rs when it exposes) in the Tauri lightbox. Paint DC/early passes to egui/surface immediately. No worker hop = can beat WASM perceived latency.
+- ROI/region (P3.2): use `JxlDecoderSetCropEnabled` + box-aware output buffer sizing for subject focus, zoom/pan, thumbs. Avoid full decode + crop.
+- JXTC / tiled (P3.3): At encode time for assets with `_crop`/`_subjects` sidecars (or on demand), use libjxl tiled encoding (jpegxl-rs builder or sys) or implement the JXTC custom container (per-tile independent codestreams + 'JXTC' index) in native for 10-50× crop wins on small ROIs (see WASM `encodeTileContainerRgba8` / `decodeTileContainerRegionRgba8` numbers: 9-15 ms @128 px).
+  - Native equivalent of tiled region decode can be direct (no tile-assembly tax if using libjxl's own region + tile cache, or manual for JXTC).
+  - Fallback to full + crop only when fast path unavailable; emit metric.
+- The custom JXTC container is WASM-bridge specific today; native Tauri can achieve equivalent (or better, zero-copy to texture) using standard libjxl tiled features + `JxlDecoderSetImageOutBuffer` for the ROI rect. Replicate the crop-benchmark harness on Tauri side for apples-to-apples JXTC vs full vs region numbers.
+- onMetric parity: surface the same names (`decode_buffer_extract_ms` near-zero in native, `decode_region_downsample_ms`, `source_pixels_decoded`, `full_decoder_*` etc.) from native decode paths.
+
+**Measurement harness for parity**:
+- Reuse/extend `raw_decode_bench` + any existing Tauri `lightbox_bench` / `casabio` benches to run the 30-file Gobabeb (encode) and 11-file P2200 (decode/region) sets.
+- Target: native encode prep+encode <= best WASM JS-path numbers (ideally better by saved boundary copies). Native region/JXTC should beat or match the 9-15 ms small-crop class.
+- Record results; update this doc + `boundary-cost-audit.md` §12/13 with native columns.
+
+See HANDOFF-tauri-wasm-parity-2026.md for the full mission and guiding principles.
+
 ## Related Documents
 
 - `docs/boundary-cost-audit.md` (especially §12–13 for the 30-file encode boundary + 11-file decode/region P3.3 data; also earlier sections for Tier priorities)

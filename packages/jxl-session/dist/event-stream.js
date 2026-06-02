@@ -2,8 +2,18 @@
 // Push-driven AsyncIterable. The session pushes events as worker messages
 // arrive; callers consume via for-await. Backpressure on the consumer side
 // is naturally applied — push() buffers when no consumer is waiting.
+//
+// SINGLE-CONSUMER CONTRACT: AsyncEventStream is designed for exactly one
+// active iterator at a time. The waiting queue and return() logic are not
+// safe with multiple concurrent for-await consumers. The public
+// [Symbol.asyncIterator]() is unrestricted by the AsyncIterable<T> type,
+// but callers must not open a second loop while the first is still running
+// (task 007-contracts-7s8t9u).
 export class AsyncEventStream {
     buffer = [];
+    // Head-index cursor: O(1) amortised reads instead of O(n) Array.shift()
+    // (task 007-performance-c9d0e1f2).
+    _head = 0;
     waiting = [];
     ended = false;
     failure = null;
@@ -39,7 +49,9 @@ export class AsyncEventStream {
         this.ended = true;
         this.hasFailure = true;
         this.failure = err;
+        // Drop buffered items to release any held references (e.g. pixel ArrayBuffers).
         this.buffer.length = 0;
+        this._head = 0;
         while (this.waiting.length > 0) {
             const w = this.waiting.shift();
             w.reject(err);
@@ -47,32 +59,42 @@ export class AsyncEventStream {
     }
     [Symbol.asyncIterator]() {
         return {
-            next: () => new Promise((resolve, reject) => {
-                // Buffered items drain first. After end() this drains remaining frames
-                // (correct for finishWithError/budget-exceeded). After fail() the
-                // buffer was already cleared, so this branch is never reached.
-                if (this.buffer.length > 0) {
-                    resolve({ value: this.buffer.shift(), done: false });
-                    return;
+            next: () => {
+                // Warm paths: avoid allocating a Promise when we can resolve synchronously
+                // (task 007-performance-e5f6a7b8).
+                if (this._head < this.buffer.length) {
+                    // O(1) read via head-index cursor (task 007-performance-c9d0e1f2).
+                    const value = this.buffer[this._head++];
+                    // Compact when head is beyond 64 entries AND more than half the array
+                    // is consumed, keeping memory bounded without per-item allocation.
+                    if (this._head > 64 && this._head > this.buffer.length >> 1) {
+                        this.buffer.copyWithin(0, this._head);
+                        this.buffer.length -= this._head;
+                        this._head = 0;
+                    }
+                    return Promise.resolve({ value, done: false });
                 }
                 if (this.hasFailure) {
-                    reject(this.failure);
-                    return;
+                    return Promise.reject(this.failure);
                 }
                 if (this.ended) {
-                    resolve({ value: undefined, done: true });
-                    return;
+                    return Promise.resolve({ value: undefined, done: true });
                 }
-                this.waiting.push({ resolve, reject });
-            }),
+                // Cold path: no item ready — suspend and wait.
+                return new Promise((resolve, reject) => {
+                    this.waiting.push({ resolve, reject });
+                });
+            },
             // Called when a for-await-of loop exits early (break/return/throw in
             // the loop body). Resolve the pending waiter as done so it does not
             // leak until the session's own end()/fail() eventually drains it.
+            //
+            // SINGLE-CONSUMER ASSUMPTION: Because we use a FIFO queue and each
+            // iterator calls next() once at a time, the outstanding waiter for
+            // this iterator is always waiting[0] when return() is called
+            // (task 007-logic-c9d0e1f2 / 007-concurrency-e1f2a3b4).
+            // Multi-consumer usage would require keying waiters by iterator identity.
             return: () => {
-                // Drain the pending waiter for this iterator, if any.
-                // Because we use a FIFO queue and each iterator calls next() once
-                // at a time, the outstanding waiter for this iterator is always
-                // the first entry when return() is called.
                 const w = this.waiting.shift();
                 if (w !== undefined) {
                     w.resolve({ value: undefined, done: true });

@@ -13,7 +13,7 @@ import { createFilePicker } from './jxl-file-picker.js';
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Benchmark] jxl-benchmark.js loaded — JXL Benchmark page (performance batch runs)', 'color:#3b82f6;font-weight:600', { page: 'Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
-const { process_orf, rgb_to_rgba } = rawWasm;
+const { process_orf } = rawWasm;
 
 const ALL_SIZES = [128, 256, 512, 1080, 1920, 'fullsize'];
 const DEFAULT_SIZES = [128, 512, 1080];
@@ -471,7 +471,10 @@ function updateTierFromToggles() {
 }
 
 // Initialize wasm
-initRaw().then(() => {
+initRaw().then(async () => {
+    if (typeof rawWasm.initThreadPool === 'function') {
+        await rawWasm.initThreadPool(navigator.hardwareConcurrency);
+    }
     wasmReady = true;
     dbgLog('WASM module initialized');
 }).catch(err => {
@@ -753,11 +756,11 @@ async function processImageFile(file, arrayBuffer) {
             console.log('Processing ORF:', name, 'bytes:', arrayBuffer.byteLength);
             const result = process_orf(new Uint8Array(arrayBuffer), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
             try {
-                // Legacy WASM-side RGBA path removed per Boundary Cost Audit
-                const rgba = rgb_to_rgba(result.take_rgb());
+                const pixels = result.take_rgb();
                 console.log(`Converted: ${result.width}×${result.height}`);
                 return {
-                    rgba,
+                    pixels,
+                    format: 'rgb8',
                     width: result.width,
                     height: result.height,
                 };
@@ -774,9 +777,10 @@ async function processImageFile(file, arrayBuffer) {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(bitmap, 0, 0);
             const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-            const rgba = new Uint8Array(imageData.data.buffer);
+            const pixels = new Uint8Array(imageData.data.buffer);
             return {
-                rgba,
+                pixels,
+                format: 'rgba8',
                 width: bitmap.width,
                 height: bitmap.height,
             };
@@ -874,18 +878,35 @@ async function loadRandomImages() {
     dbgLog(`Loaded ${selectedSources.length} random files`);
 }
 
-function resizeRgba(rgba, width, height, targetWidth) {
-    if (targetWidth === 'fullsize') {
-        return { rgba, width, height };
-    }
+function resizePixels(pixels, width, height, targetWidth, format) {
+    if (targetWidth === 'fullsize') return { pixels, width, height };
     const scale = targetWidth / width;
     const targetHeight = Math.round(height * scale);
-    const resizeRgbaImpl = rawWasm.downscale_rgba ?? downscaleRgbaCanvas;
-    return {
-        rgba: resizeRgbaImpl(rgba, width, height, targetWidth, targetHeight),
-        width: targetWidth,
-        height: targetHeight
-    };
+    if (format === 'rgb8') {
+        const fn = rawWasm.downscale_rgb ?? downscaleRgbCanvas;
+        return { pixels: fn(pixels, width, height, targetWidth, targetHeight), width: targetWidth, height: targetHeight };
+    }
+    const fn = rawWasm.downscale_rgba ?? downscaleRgbaCanvas;
+    return { pixels: fn(pixels, width, height, targetWidth, targetHeight), width: targetWidth, height: targetHeight };
+}
+
+function downscaleRgbCanvas(rgb, width, height, targetWidth, targetHeight) {
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
+        rgba[j] = rgb[i]; rgba[j+1] = rgb[i+1]; rgba[j+2] = rgb[i+2]; rgba[j+3] = 255;
+    }
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = width; srcCanvas.height = height;
+    srcCanvas.getContext('2d', { willReadFrequently: true }).putImageData(new ImageData(rgba, width, height), 0, 0);
+    const dstCanvas = document.createElement('canvas');
+    dstCanvas.width = targetWidth; dstCanvas.height = targetHeight;
+    dstCanvas.getContext('2d', { willReadFrequently: true }).drawImage(srcCanvas, 0, 0, targetWidth, targetHeight);
+    const outData = dstCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, targetWidth, targetHeight).data;
+    const out = new Uint8Array(targetWidth * targetHeight * 3);
+    for (let i = 0, j = 0; i < outData.length; i += 4, j += 3) {
+        out[j] = outData[i]; out[j+1] = outData[i+1]; out[j+2] = outData[i+2];
+    }
+    return out;
 }
 
 function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
@@ -927,16 +948,16 @@ function concatChunks(chunks) {
     return out;
 }
 
-async function encodeJxl(rgba, width, height, quality, effort = null) {
+async function encodeJxl(pixels, width, height, quality, effort = null, format = 'rgba8') {
     const started = performance.now();
     let encoder = null;
     try {
         const opts = getAdvancedOptions();
         const encoderConfig = {
-            format: 'rgba8',
+            format,
             width,
             height,
-            hasAlpha: true,
+            hasAlpha: format !== 'rgb8',
             distance: opts.lossless ? 0 : (opts.butteraugliTarget > 0 ? opts.butteraugliTarget : null),
             quality: opts.lossless ? null : quality,
             effort: effort !== null ? effort : 3,
@@ -958,7 +979,7 @@ async function encodeJxl(rgba, width, height, quality, effort = null) {
         })();
         // Zero-copy mode: pass Uint8Array so the copyInput=false path is exercised.
         // Standard mode: pass ArrayBuffer (ownership transfer — no copy either way).
-        await encoder.pushPixels(opts.skipCopy ? toU8(rgba) : exactBuffer(rgba));
+        await encoder.pushPixels(opts.skipCopy ? toU8(pixels) : exactBuffer(pixels));
         await encoder.finish();
         await chunkTask;
         const bytes = concatChunks(chunks);
@@ -1019,11 +1040,11 @@ async function runOptimizer() {
 
     try {
         const src = selectedSources[0];
-        const resized = await resizeRgba(src.rgba, src.width, src.height, OPT_SIZE);
+        const resized = await resizePixels(src.pixels, src.width, src.height, OPT_SIZE, src.format);
 
         // Runs one encode+decode cycle with current toggle state; returns total ms.
         async function oneCycle() {
-            const enc = await encodeJxl(resized.rgba, resized.width, resized.height, OPT_QUALITY, OPT_EFFORT);
+            const enc = await encodeJxl(resized.pixels, resized.width, resized.height, OPT_QUALITY, OPT_EFFORT, src.format);
             const dec = await decodeJxl(enc.bytes);
             return enc.encodeMs + dec.decodeMs;
         }
@@ -1214,12 +1235,12 @@ async function runBenchmark() {
                     try {
                         // Resize
                         const resizeStart = performance.now();
-                        const resized = await resizeRgba(source.rgba, source.width, source.height, size);
+                        const resized = await resizePixels(source.pixels, source.width, source.height, size, source.format);
                         const resizeMs = performance.now() - resizeStart;
 
                         // Encode
                         const encStart = performance.now();
-                        const encResult = await encodeJxl(resized.rgba, resized.width, resized.height, quality, effort);
+                        const encResult = await encodeJxl(resized.pixels, resized.width, resized.height, quality, effort, source.format);
                         const encMs = encResult.encodeMs;
 
                         recordTiming(benchmarkResults.resizeMs, key, resizeMs);

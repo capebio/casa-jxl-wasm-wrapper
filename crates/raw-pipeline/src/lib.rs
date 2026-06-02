@@ -47,6 +47,32 @@ mod compile_tests {
     }
 
     #[test]
+    fn process_rgba_produces_4ch_and_alpha_255() {
+        let rgb16 = vec![4095u16; 2 * 2 * 3];
+        let params = pipeline::PipelineParams::default_olympus();
+
+        let rgba = pipeline::process_rgba(&rgb16, &params);
+
+        assert_eq!(rgba.len(), 2 * 2 * 4);
+        // alpha channel every 4th byte
+        for (i, &v) in rgba.iter().enumerate() {
+            if (i % 4) == 3 {
+                assert_eq!(v, 255, "alpha must be 255");
+            } else {
+                assert!(v > 200);
+            }
+        }
+
+        // cross-check roundtrip-ish: last 3 of each 4 should match a process() output
+        let rgb8 = pipeline::process(&rgb16, &params);
+        for y in 0..4 {
+            for x in 0..3 {
+                assert_eq!(rgba[y * 4 + x], rgb8[y * 3 + x]);
+            }
+        }
+    }
+
+    #[test]
     fn real_orf_parses_and_renders() {
         // Integration smoke test — requires a real ORF on this machine.
         // Skipped automatically if file absent (CI / other machines).

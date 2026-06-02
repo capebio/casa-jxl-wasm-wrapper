@@ -21,6 +21,7 @@ export class DecodeSessionImpl {
     lastInfo = null;
     closed = false;
     terminated = false;
+    framesConsumed = false;
     constructor(scheduler, opts) {
         this.scheduler = scheduler;
         this.opts = opts;
@@ -66,6 +67,9 @@ export class DecodeSessionImpl {
         this.abortSignal = opts.signal ?? null;
         if (this.abortSignal !== null) {
             this.abortHandler = () => {
+                // Cancel the scheduler slot before failing so the worker is told to stop
+                // and the pool slot is released immediately (task 007-concurrency-e7f8a9b0).
+                this.scheduler.cancelSession(this.id);
                 this.fail(new JxlError("Cancelled", "Decode aborted by signal", { sessionId: this.id }));
             };
             if (this.abortSignal.aborted) {
@@ -87,7 +91,9 @@ export class DecodeSessionImpl {
             throw new JxlError("ConfigError", "push() after close/cancel/error", { sessionId: this.id });
         }
         await this.acquirePromise;
-        if (this.terminated)
+        // Re-check closed: close() may have set it while we awaited acquirePromise
+        // (task 007-concurrency-e5f6a7b8 / 007-errors-f6a7b8c9).
+        if (this.terminated || this.closed)
             return;
         // Backpressure: resolves when the worker queue is below the high-water mark.
         await this.scheduler.waitForDrain(this.id);
@@ -107,15 +113,25 @@ export class DecodeSessionImpl {
         this.scheduler.send(this.id, { type: "decode_close", sessionId: this.id });
     }
     frames() {
+        this.framesConsumed = true;
         return this.frameStream;
     }
     done() {
         return this.doneDeferred.promise;
     }
     async cancel(reason) {
-        if (this.terminated)
+        // Guard against closed (task 007-logic-a1b2c3d4): cancel after close() but
+        // before decode_final must not call fail() and corrupt the completion path.
+        // Guard terminated to prevent concurrent callers from racing past the await
+        // and invoking cancelSession()+fail() twice (tasks 007-concurrency-c9d0e1f2,
+        // 007-errors-c3d4e5f6). JS is single-threaded so both flags are read atomically
+        // before the first await point.
+        if (this.terminated || this.closed)
             return;
         await this.acquirePromise.catch(() => undefined);
+        // Re-check: abort handler or error may have terminated us during the await.
+        if (this.terminated)
+            return;
         this.scheduler.cancelSession(this.id);
         this.fail(new JxlError("Cancelled", reason ?? "Decode cancelled", { sessionId: this.id }));
     }
@@ -135,15 +151,19 @@ export class DecodeSessionImpl {
                 if (msg.sessionId !== this.id)
                     return;
                 this.lastInfo = msg.info;
+                // Spread region conditionally so the optional property is always
+                // present-or-absent at construction time rather than added via post-
+                // mutation, keeping all three cases on the same V8 hidden class
+                // (task 007-performance-a1b2c3d4). exactOptionalPropertyTypes prevents
+                // assigning undefined to the optional field directly.
                 const ev = {
                     stage: msg.stage,
                     info: msg.info,
                     pixels: msg.pixels,
                     format: msg.format,
                     pixelStride: msg.pixelStride,
+                    ...(msg.region !== undefined ? { region: msg.region } : {}),
                 };
-                if (msg.region !== undefined)
-                    ev.region = msg.region;
                 this.frameStream.push(ev);
                 break;
             }
@@ -157,9 +177,8 @@ export class DecodeSessionImpl {
                     pixels: msg.pixels,
                     format: msg.format,
                     pixelStride: msg.pixelStride,
+                    ...(msg.region !== undefined ? { region: msg.region } : {}),
                 };
-                if (msg.region !== undefined)
-                    ev.region = msg.region;
                 this.frameStream.push(ev);
                 this.finish(msg.info);
                 break;
@@ -174,9 +193,8 @@ export class DecodeSessionImpl {
                     pixels: msg.pixels,
                     format: msg.format,
                     pixelStride: msg.pixelStride,
+                    ...(msg.region !== undefined ? { region: msg.region } : {}),
                 };
-                if (msg.region !== undefined)
-                    ev.region = msg.region;
                 this.frameStream.push(ev);
                 this.finishWithError(new JxlError("BudgetExceeded", "Session budget exceeded", {
                     sessionId: this.id,
@@ -190,15 +208,24 @@ export class DecodeSessionImpl {
                 const code = this.normalizeCode(msg.code);
                 let partial;
                 if (code === "TruncatedStream" && msg.partialPixels !== undefined && msg.partialInfo !== undefined) {
+                    // partialPixelStride is required whenever partialPixels is present; a
+                    // stride of 0 would produce a malformed frame (task 007-errors-a7b8c9d0).
+                    if (msg.partialPixelStride === undefined || msg.partialPixelStride === 0) {
+                        this.fail(new JxlError("Internal", "TruncatedStream: worker sent partialPixels without a valid partialPixelStride", { sessionId: this.id }));
+                        return;
+                    }
                     partial = {
                         stage: msg.partialStage ?? "pass",
                         info: msg.partialInfo,
                         pixels: msg.partialPixels,
                         format: this.opts.format,
-                        pixelStride: msg.partialPixelStride ?? 0,
+                        pixelStride: msg.partialPixelStride,
                     };
                 }
-                const err = new JxlError(code, msg.message, {
+                // Truncate worker-supplied message to prevent unbounded strings in
+                // error objects (task 007-security-i9j0k1l2).
+                const safeMessage = String(msg.message).slice(0, 512);
+                const err = new JxlError(code, safeMessage, {
                     sessionId: this.id,
                     ...(partial !== undefined ? { partial } : {}),
                 });
@@ -216,6 +243,12 @@ export class DecodeSessionImpl {
                 }
                 break;
             default:
+                // Unrecognized message type — log in dev mode so missing handlers are
+                // caught early when the protocol gains new message types
+                // (task 007-contracts-0b1c2d).
+                if (typeof process !== "undefined" && process.env?.["NODE_ENV"] === "development") {
+                    console.warn(`[jxl-session] decode: unhandled message type '${msg.type}'`);
+                }
                 break;
         }
     }
@@ -245,7 +278,16 @@ export class DecodeSessionImpl {
             return;
         this.terminated = true;
         this.cleanup();
-        this.frameStream.end();
+        if (this.framesConsumed) {
+            // Active consumer: end gracefully so all buffered frames are visible.
+            this.frameStream.end();
+        }
+        else {
+            // No consumer ever called frames() — discard the buffered pixel
+            // ArrayBuffers immediately rather than retaining them until GC
+            // (task 007-concurrency-a7b8c9d0).
+            this.frameStream.fail(err);
+        }
         if (!this.doneDeferred.settled) {
             this.doneDeferred.reject(err);
         }

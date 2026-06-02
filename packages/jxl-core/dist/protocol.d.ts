@@ -112,6 +112,9 @@ export interface MsgEncodeStart {
     progressive: boolean;
     progressiveFlavor?: "dc" | "ac";
     previewFirst: boolean;
+    /** progressiveDc (0/1/2) and groupOrder (0/1) for multi-layer/center-out progressive encodes (predator focus). */
+    progressiveDc?: 0 | 1 | 2;
+    groupOrder?: 0 | 1;
     chunked: boolean;
     sidecarSizes?: readonly number[];
     priority: "visible" | "near" | "background";

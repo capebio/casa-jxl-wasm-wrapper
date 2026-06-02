@@ -5,7 +5,8 @@
 export type PixelFormat =
   | "rgba8"     // 4 channels, 8-bit, premultiplied alpha = false
   | "rgba16"    // 4 channels, 16-bit
-  | "rgbaf32";  // 4 channels, 32-bit float (linear)
+  | "rgbaf32"   // 4 channels, 32-bit float (linear)
+  | "rgb8";     // encode input only: 3 channels, 8-bit, no alpha (skips RGBA round-trip)
 
 export interface ImageInfo {
   width: number;
@@ -132,6 +133,15 @@ export interface EncodeOptions {
   progressive?: boolean;            // enable progressive frames
   progressiveFlavor?: "dc" | "ac";  // DC-only or DC+AC refinement progression
   previewFirst?: boolean;           // bias for early bytes over compression
+  /**
+   * Progressive DC layers (0/1/2). 2 gives more granular early DC stages for visibly distinct passes.
+   * Works with groupOrder and progressive decode detail='passes'.
+   */
+  progressiveDc?: 0 | 1 | 2;
+  /**
+   * 0=scanline, 1=center-out group order. Strongly recommended for useful early progressive bytes.
+   */
+  groupOrder?: 0 | 1;
   chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs
   /**
    * Max dimension (px, long edge) of sidecar thumbnail(s) to yield BEFORE the

@@ -448,6 +448,21 @@ function getRequestedProgressiveFlavor(stepCount, previewFirst) {
     return stepCount > 2 || previewFirst ? 'ac' : 'dc';
 }
 
+// Sync the group-order checkbox default per handoff: checked for requested >=4 or when previewFirst.
+// Allows user override (uncheck for scanline A/B). We set on init and on passes/preview changes
+// only if the user has not yet manually toggled it in this session (tracked via data-user-toggled).
+function syncGroupOrderDefault(forceRespectUser = false) {
+    const cb = document.getElementById('prog-group-order');
+    if (!cb) return;
+    const passes = getRequestedPassCount();
+    const preview = !!(document.getElementById('prog-preview-first')?.checked);
+    const recommended = passes >= 4 || preview;
+    if (cb.dataset.userToggled === '1' && !forceRespectUser) {
+        return; // leave user's explicit choice
+    }
+    cb.checked = recommended;
+}
+
 function setProgStatus(text) {
     const el = document.getElementById('prog-status');
     if (el) el.textContent = text;
@@ -639,7 +654,7 @@ async function streamIntoDecoder(decoder, jxlBytes, stepCount) {
     return streamSteps.length;
 }
 
-function renderProgressiveComparison({ requestedPassCount, passCount, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB, encodeMs, previewFirst, progressiveDetail }) {
+function renderProgressiveComparison({ requestedPassCount, passCount, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB, encodeMs, previewFirst, progressiveDetail, progressiveDc, groupOrder }) {
     const body = document.getElementById('prog-comparison-body');
     if (!body) return;
     const speedup = (oneShotFinalMs && progressiveFirstMs)
@@ -662,7 +677,7 @@ function renderProgressiveComparison({ requestedPassCount, passCount, progressiv
         </tr>
         <tr>
             <td colspan="5" style="font-size:11px;color:var(--muted);padding:6px 12px;">
-                Encoded ${fileSizeKB.toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · progressive=true previewFirst=${previewFirst} · detail=${progressiveDetail}
+                Encoded ${fileSizeKB.toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · progressive=true previewFirst=${previewFirst} dc=${progressiveDc ?? '?'} group=${groupOrder ?? '?'} · detail=${progressiveDetail}
             </td>
         </tr>
     `;
@@ -699,12 +714,16 @@ async function runProgressivePaintTest() {
         const progressiveFlavor = (detailChoice !== 'auto' && detailChoice !== 'dc')
             ? 'ac'
             : getRequestedProgressiveFlavor(requestedPassCount, previewFirst);
+        // Predator progressive: for higher requested passes, request more DC layers + center-out group order
+        // so the encoded JXL actually contains structure for >2 distinct early passes that look different.
+        const progressiveDc = requestedPassCount >= 6 ? 2 : (requestedPassCount >= 4 ? 1 : 1);
+        const groupOrder = !!(document.getElementById('prog-group-order')?.checked) ? 1 : 0;
 
         setProgStatus(`Resizing to ${size === 'fullsize' ? 'full' : size + 'px'}…`);
         const resized = resizeRgba(selectedSource.rgba, selectedSource.width, selectedSource.height, size);
 
         setProgStatus(`Encoding ${resized.width}×${resized.height} Q${quality} progressive with ${requestedPassCount} stream steps…`);
-        dbgLog('Encoder config', `progressive=true, progressiveFlavor=${progressiveFlavor}, previewFirst=${previewFirst}, quality=${quality}, effort=3`, 'info');
+        dbgLog('Encoder config', `progressive=true, progressiveFlavor=${progressiveFlavor}, previewFirst=${previewFirst}, progressiveDc=${progressiveDc}, groupOrder=${groupOrder}, quality=${quality}, effort=3`, 'info');
 
         const encoder = createEncoder({
             format: 'rgba8',
@@ -716,6 +735,8 @@ async function runProgressivePaintTest() {
             progressive: true,
             progressiveFlavor,
             previewFirst,
+            progressiveDc,
+            groupOrder,
             chunked: false,
         });
         const encChunks = [];
@@ -735,7 +756,7 @@ async function runProgressivePaintTest() {
         // Capture for export buttons (Progressive gallery / Folder)
         lastJxlBytes = jxlBytes;
         lastJxlFileName = `${(selectedSource?.file || 'source').replace(/\.[^.]+$/, '')}-prog-p${requestedPassCount}-q${quality}.jxl`;
-        lastSettings = { size, quality, requestedPassCount, progressiveDetail, previewFirst };
+        lastSettings = { size, quality, requestedPassCount, progressiveDetail, previewFirst, progressiveDc, groupOrder };
 
         setProgStatus(`Encoded ${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · streaming into decoder…`);
         dbgLog('Encoded', `${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms`, 'info');
@@ -852,6 +873,8 @@ async function runProgressivePaintTest() {
             encodeMs,
             previewFirst,
             progressiveDetail,
+            progressiveDc,
+            groupOrder,
         });
 
         const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
@@ -902,11 +925,20 @@ function triggerJxlDownload(bytes, filename) {
 async function exportToGallery() {
     if (!lastJxlBytes) return;
     const name = lastJxlFileName || 'progressive-paint.jxl';
+    // "Push" support for testing multi-pass progressive: store in localStorage (base64) so gallery tab can auto-ingest on load.
+    // (For very large files this may hit quota; falls back to plain download.)
+    try {
+        const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(lastJxlBytes)));
+        localStorage.setItem('__progGalleryPush', JSON.stringify({ name, b64, ts: Date.now() }));
+        dbgLog('Pushed JXL to localStorage for gallery auto-load', name, 'info');
+    } catch (e) {
+        dbgLog('localStorage push failed (too large?) — will just download', e?.message || e, 'warn');
+    }
     triggerJxlDownload(lastJxlBytes, name);
     dbgLog('Exported JXL for gallery', name, 'success');
-    // Open the gallery in a new tab. User can then use its "Pick file" to load the just-downloaded .jxl.
-    window.open('./jxl-progressive-gallery.html', '_blank');
-    dbgLog('Progressive gallery opened in new tab — use its file picker to load the downloaded JXL for multi-image progressive viewing.', '', 'info');
+    // Open the gallery — it will check for the pending push on load and auto-add it for multi-layer progressive testing.
+    const w = window.open('./jxl-progressive-gallery.html?autopush=1', '_blank');
+    dbgLog('Progressive gallery opened — it should auto-load the pushed progressive JXL (multiple layers if Dc>=2 + detail=passes). Use its controls to vary progressiveDc/groupOrder.', '', 'info');
 }
 
 async function exportToFolder() {
@@ -1078,5 +1110,18 @@ if (exportCsvBtn) exportCsvBtn.addEventListener('click', exportMeasurementsCSV);
 if (exportJsonBtn) exportJsonBtn.addEventListener('click', exportMeasurementsJSON);
 if (exportToonBtn) exportToonBtn.addEventListener('click', exportMeasurementsTOON);
 if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
+
+// Wire progressive group-order checkbox + smart defaults (handoff step: UI polish so no more hacks for A/B).
+// Default checked when passes>=4 or previewFirst (as recommended for early-recognizable layers).
+// User toggle is respected on subsequent passes/preview changes via data-userToggled marker.
+const passesRadios = document.querySelectorAll('input[name="prog-passes"]');
+passesRadios.forEach(r => r.addEventListener('change', () => syncGroupOrderDefault()));
+const previewCb = document.getElementById('prog-preview-first');
+if (previewCb) previewCb.addEventListener('change', () => syncGroupOrderDefault());
+const groupCb = document.getElementById('prog-group-order');
+if (groupCb) {
+    groupCb.addEventListener('change', () => { groupCb.dataset.userToggled = '1'; });
+}
+syncGroupOrderDefault(); // run once at init (corrects html 'checked' for the initial 2-pass case)
 
 dbgLog('Progressive paint initialized');

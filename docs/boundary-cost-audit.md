@@ -456,3 +456,23 @@ This data (plus smaller runs) confirms the boundary: extract cheap, savings in s
 - Audit §13 + suggested-settings now form the complete record for the decode/region boundary. Next: commit/push, then Tauri/WASM parity handoff doc.
 
 See also the Tauri handoff for how native should approach region/ROI and progressive to achieve (or beat) these timings without JS/WASM boundaries.
+
+**Post-handoff (Tauri parity implementation)**: The core of 4.1 (direct-RGBA) from the Tauri handoff was implemented here:
+- Added `pipeline::process_rgba` (fused tone→RGBA8, parallel+serial paths, shared math helper) + `encode_variants_from_rgb16` in `crates/raw-pipeline` (and vendor snapshot).
+- `raw_decode_bench` now measures head-to-head (directRgbaMs) and drives its JXL encode timing through the 4ch direct path (no 3ch intermediate for the "encode-only" measurement).
+- Smoke tests + WASM crate test ensure linkage.
+- `docs/suggested-settings.md` gained a full "Native / Tauri Preferences" section recording the opposite rule from browser (prefer direct rgba for encode flows) + guidance for progressive/ROI/JXTC parity (P3.1–P3.3) on the desktop side.
+- No changes to WASM call sites or ProcessResult (per browser preference after 30-file data).
+- JXTC/tiled/region decode (P3.3) and true progressive (P3.1) for Tauri lightbox remain Tauri-app specific (use jpegxl-sys low-level + JxlDecoderSetCropEnabled etc.); the shared pipeline piece (encode side) and measurement harness are now in place for parity verification on Gobabeb/P2200 sets. Update audit with native numbers once Tauri runs are captured.
+
+## 14. Progressive Encode Boundary (GroupOrder + multi-DC) — 2026-06 predator note
+
+**Cost of JXL_ENC_FRAME_SETTING_GROUP_ORDER (and progressiveDc=2)**: Negligible. Single `JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, 1)` call (int64) per encode, done once in the three configure sites in bridge.cpp right after the PROGRESSIVE_DC/AC sets. No extra mallocs, no per-pixel work, no change to buffering or chunking paths. Same for Dc=2 (already wired).
+
+**Observed decode-side effects**: None negative. The option only affects the *codestream structure* produced by libjxl (center-first DC blocks + more DC layers). Decode machinery (JxlDecoderSetProgressiveDetail(kPasses), FRAME_PROGRESSION flushes, facade progressive event yield) is unchanged in cost per surfaced pass. Result: more distinct 'progress' events surface earlier with recognizable content (center bias), which is the entire point. No extra WASM/JS boundary crossings; the extra events are just more frequent small pixel handoffs (same per-event cost).
+
+**Data (from progressive-detail.test.ts roundtrip with Dc=2 + group=1 + preview + passes + noise source)**: encode produces codestream that yields header + >=1 'progress' + final (total events >=3). Test now asserts this. Prior hard-coded Dc=1 produced minimal (often 2 total) events regardless of decoder detail.
+
+**Recommendation**: Always use groupOrder=1 + progressiveDc=2 (when progressive) for any demo/benchmark path that wants "early usable" layers (paint 4/6/8 pass cases, gallery onfly). Cost is zero; win is large for perceived progressive quality. See HANDOFF and progressive-encode-options design note for UI + settings.
+
+*Living — added per predator progressive handoff. Full page A/B numbers (paint 6-pass first-recognizable ms/KB with group=0 vs 1) to be captured on next serve + eyeball.*

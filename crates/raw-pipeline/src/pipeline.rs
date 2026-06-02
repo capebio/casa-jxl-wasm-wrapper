@@ -388,6 +388,42 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
     }
 }
 
+/// Core per-pixel tone-mapping math (matrix + sat/vibrance around luma).
+/// Shared by `process` (RGB8) and `process_rgba` (RGBA8) to avoid duplication
+/// of the hot arithmetic while keeping tight loops.
+#[inline(always)]
+fn apply_tone_math(
+    r: f32,
+    g: f32,
+    b: f32,
+    m: &[[f32; 3]; 3],
+    sat: f32,
+    vib: f32,
+    vib_zero: bool,
+) -> (f32, f32, f32) {
+    // 1) Matrix.
+    let mut r2 = m[0][0] * r + m[0][1] * g + m[0][2] * b;
+    let mut g2 = m[1][0] * r + m[1][1] * g + m[1][2] * b;
+    let mut b2 = m[2][0] * r + m[2][1] * g + m[2][2] * b;
+
+    // 2) Saturation + vibrance around luma.
+    let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
+    let scale = if vib_zero {
+        sat
+    } else {
+        let raw_mx = r2.max(g2).max(b2);
+        let mx = raw_mx.max(1.0);
+        let mn = r2.min(g2).min(b2).max(0.0);
+        let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
+        let vib_w = 1.0 - pixel_sat;
+        sat * (1.0 + vib * vib_w * 0.6)
+    };
+    r2 = luma + (r2 - luma) * scale;
+    g2 = luma + (g2 - luma) * scale;
+    b2 = luma + (b2 - luma) * scale;
+    (r2, g2, b2)
+}
+
 pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
 
@@ -462,24 +498,7 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             let g = pre_g[rgb16[i] as usize] as f32; i += 1;
             let b = pre_b[rgb16[i] as usize] as f32; i += 1;
 
-            let mut r2 = m[0][0] * r + m[0][1] * g + m[0][2] * b;
-            let mut g2 = m[1][0] * r + m[1][1] * g + m[1][2] * b;
-            let mut b2 = m[2][0] * r + m[2][1] * g + m[2][2] * b;
-
-            let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
-            let scale = if vib_zero {
-                sat
-            } else {
-                let raw_mx = r2.max(g2).max(b2);
-                let mx = raw_mx.max(1.0);
-                let mn = r2.min(g2).min(b2).max(0.0);
-                let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
-                let vib_w = 1.0 - pixel_sat;
-                sat * (1.0 + vib * vib_w * 0.6)
-            };
-            r2 = luma + (r2 - luma) * scale;
-            g2 = luma + (g2 - luma) * scale;
-            b2 = luma + (b2 - luma) * scale;
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
 
             out[o] = post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
             out[o] = post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
@@ -493,34 +512,126 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             let g = pre_g[in_px[1] as usize] as f32;
             let b = pre_b[in_px[2] as usize] as f32;
 
-            // 1) Matrix.
-            let mut r2 = m[0][0] * r + m[0][1] * g + m[0][2] * b;
-            let mut g2 = m[1][0] * r + m[1][1] * g + m[1][2] * b;
-            let mut b2 = m[2][0] * r + m[2][1] * g + m[2][2] * b;
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
 
-            // 2) Saturation + vibrance around luma.
-            let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
-            let scale = if vib_zero {
-                sat
-            } else {
-                let raw_mx = r2.max(g2).max(b2);
-                let mx = raw_mx.max(1.0);
-                let mn = r2.min(g2).min(b2).max(0.0);
-                let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
-                let vib_w = 1.0 - pixel_sat;
-                sat * (1.0 + vib * vib_w * 0.6)
-            };
-            r2 = luma + (r2 - luma) * scale;
-            g2 = luma + (g2 - luma) * scale;
-            b2 = luma + (b2 - luma) * scale;
-
-            // 3) Tone curve + sRGB + u8 via post-LUT.
+            // Tone curve + sRGB + u8 via post-LUT.
             let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
             let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
             let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
             out_px[0] = post[ri];
             out_px[1] = post[gi];
             out_px[2] = post[bi];
+        });
+
+    out
+}
+
+/// Like `process`, but writes interleaved RGBA8 directly (A=255).
+///
+/// This is the native/Tauri equivalent of the "direct RGBA" (Phase 2B) path.
+/// For pure "RAW decode → JXL encode, discard pixels" flows it avoids ever
+/// allocating or writing the intermediate 3-channel RGB8 buffer, fusing the
+/// trivial alpha insertion into the tone pass. The arithmetic cost of the
+/// conversion itself is negligible once there is no JS/WASM boundary.
+///
+/// Callers that must retain RGB (e.g. rotation, further CPU processing) should
+/// continue to use `process` + manual convert or the WASM `rgb_to_rgba` helper.
+pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
+    let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
+
+    // Temp / tint folded into WB.  Temp ±1 → ±40% R/B shift; tint ±1 →
+    // ±20% G shift with mild R+B counter-balance.
+    let temp = params.temp.clamp(-1.0, 1.0);
+    let tint = params.tint.clamp(-1.0, 1.0);
+    let wb_r = params.wb_r * (1.0 + temp * 0.40) * (1.0 + tint * 0.10);
+    let wb_g = params.wb_g * (1.0 - tint * 0.20);
+    let wb_b = params.wb_b * (1.0 - temp * 0.40) * (1.0 + tint * 0.10);
+
+    let tone = TonePost {
+        contrast: params.contrast.clamp(-1.0, 1.0),
+        shadows: params.shadows.clamp(-1.0, 1.0),
+        highlights: params.highlights.clamp(-1.0, 1.0),
+        whites: params.whites.clamp(-1.0, 1.0),
+        blacks: params.blacks.clamp(-1.0, 1.0),
+    };
+
+    // Saturation: asymmetric around zero so -1.0 reaches true black-and-white.
+    // Negative side scales BASELINE_SAT → 0; positive side adds up to +0.8.
+    let sat_param = params.saturation.clamp(-1.0, 1.0);
+    let sat = if sat_param < 0.0 {
+        BASELINE_SAT * (1.0 + sat_param)
+    } else {
+        BASELINE_SAT + sat_param * 0.8
+    }.max(0.0);
+    let vib = params.vibrance.clamp(-1.0, 1.0);
+    let vib_zero = vib.abs() < 1e-6;
+
+    let fallback = CAM_TO_SRGB;
+    let m = params.color_matrix.as_ref().unwrap_or(&fallback);
+
+    let n = rgb16.len() / 3;
+    let mut out = vec![0u8; n * 4];
+
+    // Build/update LUT on calling thread, then clone out for parallel use.
+    let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
+        let mut cache = cache_cell.borrow_mut();
+        if cache.as_ref().map_or(true, |c| {
+            !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+        }) {
+            *cache = Some(LutCache {
+                black: params.black, white: params.white,
+                wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                contrast_bits:   tone.contrast.to_bits(),
+                shadows_bits:    tone.shadows.to_bits(),
+                highlights_bits: tone.highlights.to_bits(),
+                whites_bits:     tone.whites.to_bits(),
+                blacks_bits:     tone.blacks.to_bits(),
+                pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                post: build_post_lut(&tone),
+            });
+        }
+        let c = cache.as_ref().unwrap();
+        (c.pre_r.clone(), c.pre_g.clone(), c.pre_b.clone(), c.post.clone())
+    });
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        // Manual loop (matches the style and perf characteristics of `process` serial path).
+        let nbytes = rgb16.len();
+        let mut i = 0;
+        let mut o = 0;
+        while i < nbytes {
+            let r = pre_r[rgb16[i] as usize] as f32; i += 1;
+            let g = pre_g[rgb16[i] as usize] as f32; i += 1;
+            let b = pre_b[rgb16[i] as usize] as f32; i += 1;
+
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+
+            out[o] = post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+            out[o] = post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+            out[o] = post[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+            out[o] = 255; o += 1;
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    out.par_chunks_mut(4).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
+            let r = pre_r[in_px[0] as usize] as f32;
+            let g = pre_g[in_px[1] as usize] as f32;
+            let b = pre_b[in_px[2] as usize] as f32;
+
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+
+            let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
+            let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
+            let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
+            out_px[0] = post[ri];
+            out_px[1] = post[gi];
+            out_px[2] = post[bi];
+            out_px[3] = 255;
         });
 
     out

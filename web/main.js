@@ -688,9 +688,10 @@ class WorkerPool {
             return;
         }
         if (type === 'encode_request') {
-            const { id, rgba, width, height, quality, effort, lossless, progressive } = ev.data;
+            const { id, pixels, rgba, format, width, height, quality, effort, lossless, progressive } = ev.data;
             const t0 = performance.now();
-            encodeJxlSession(rgba, width, height, quality, effort, Boolean(lossless), Boolean(progressive))
+            // A3: accept new pixels/format fields; fall back to legacy rgba field for jxl-progressive.js
+            encodeJxlSession(pixels ?? rgba, width, height, quality, effort, Boolean(lossless), Boolean(progressive), format ?? 'rgba8')
                 .then((jxl) => {
                     const jxlMs = performance.now() - t0;
                     const t = this.tasks.get(id);
@@ -832,19 +833,21 @@ pool.init();
 
 pool.setJxlDecodeWorker(new Worker(new URL('./jxl-decode-worker.js', import.meta.url), { type: 'module' }));
 
-async function encodeJxlSession(rgba, width, height, quality, effort, lossless, progressive) {
+async function encodeJxlSession(pixels, width, height, quality, effort, lossless, progressive, format = 'rgba8') {
+    // A3: rgb8 carries 3 channels (no alpha), rgba8/rgba16/rgbaf32 carry 4.
+    const hasAlpha = format !== 'rgb8';
     const session = getContext().encode({
-        format: 'rgba8',
+        format,
         width,
         height,
-        hasAlpha: true,
+        hasAlpha,
         distance: lossless ? 0 : null,
         quality: lossless ? null : quality,
         effort,
         progressive,
         priority: 'visible',
     });
-    const buf = rgba instanceof ArrayBuffer ? rgba : rgba.buffer;
+    const buf = pixels instanceof ArrayBuffer ? pixels : pixels.buffer;
     await session.pushPixels(buf);
     await session.finish();
     const parts = [];

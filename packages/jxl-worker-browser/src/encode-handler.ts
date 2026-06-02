@@ -143,8 +143,13 @@ export class EncodeHandler {
       // node_modules copy of jxl-core — cast to access it safely.
       progressiveFlavor: (this.opts as MsgEncodeStart & { progressiveFlavor?: "dc" | "ac" }).progressiveFlavor,
       previewFirst: this.opts.previewFirst,
+      // progressiveDc + groupOrder (predator progressive layers + Tauri parity): forwarded so high-level session.encode
+      // can produce files with >1 DC layer and center-out for the gallery/paint benchmarks and Tauri parity.
+      progressiveDc: (this.opts as MsgEncodeStart).progressiveDc,
+      groupOrder: (this.opts as MsgEncodeStart).groupOrder,
       chunked: this.opts.chunked,
       sidecarSizes: this.opts.sidecarSizes,
+      copyInput: false,
     } as Parameters<JxlModule["createEncoder"]>[0];
     const encoder = this.wasm.createEncoder(encoderOpts);
     this.state = "configured";

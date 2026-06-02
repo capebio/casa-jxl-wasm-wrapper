@@ -43,6 +43,13 @@ test('libjxl is pinned to v0.11.2 or later for VarDCT progressive fix', () => {
   expect(ge).toBe(true);
 });
 
+test('groupOrder (center-out) is exposed in EncoderOptions and plumbed through FFI/bridge (predator next heat)', () => {
+  expect(facade).toContain('groupOrder?: 0 | 1');
+  expect(bridge).toContain('JXL_ENC_FRAME_SETTING_GROUP_ORDER');
+  expect(bridge).toContain('enc_group_order');
+  expect(bridge).toContain('group_order');
+});
+
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {
   // Synthetic noise image: enough entropy that the encoder cannot collapse to a
   // single trivial pass under VarDCT progressive_ac.
@@ -81,7 +88,9 @@ describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', 
       progressive: true,
       progressiveFlavor: 'ac',
       previewFirst: true,
+      progressiveDc: 2,
       chunked: false,
+      groupOrder: 1,
     });
     encoder.pushPixels(pixels);
     encoder.finish();
@@ -122,6 +131,12 @@ describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', 
     expect(eventTypes[eventTypes.length - 1]).toBe('final');
     expect(finalPixels).not.toBeNull();
     expect(finalPixels!.byteLength).toBe(width * height * 4);
+
+    // Test/measurement improvement (handoff): with progressiveDc=2 + groupOrder=1 + 'passes' + noise,
+    // expect multiple distinct progress events (header + >=1 progress + final) so benchmark surfaces show layers.
+    // (Total >=3 events signals the early/more passes win is live in the encode codestream.)
+    expect(eventTypes.length).toBeGreaterThanOrEqual(3);
+    expect(eventTypes).toContain('progress');
   }, 30000);
 });
 

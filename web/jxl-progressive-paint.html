@@ -145,6 +145,14 @@
                     <div class="help-popover" data-help-popover="pp-preview" hidden>
                         Inserts a small low-resolution preview frame at the very start of the encoded stream. The viewer can display this placeholder immediately, before the main progressive decode begins. Useful for measuring time-to-first-pixel.
                     </div>
+                    <label class="toggle-opt">
+                        <input type="checkbox" id="prog-group-order" checked />
+                        <span class="opt-label">Center-out</span>
+                    </label>
+                    <button class="info-btn" type="button" data-help-target="pp-group" aria-label="Group order info">i</button>
+                    <div class="help-popover" data-help-popover="pp-group" hidden>
+                        Center-out (groupOrder=1) starts early progressive passes from image center radiating out (vs scanline strips). With progressiveDc=2 + All passes, early layers are far more recognizable for low-byte "first useful" measurement. Recommended default for benchmark passes >=4.
+                    </div>
                 </div>
 
                 <!-- 2. File choice (after parameters) -->

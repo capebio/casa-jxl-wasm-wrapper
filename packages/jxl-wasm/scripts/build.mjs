@@ -58,6 +58,11 @@ const baseFlags = [
   "-fno-exceptions"
 ];
 
+const relaxedSimdHighwayFlags = [
+  "-mrelaxed-simd",
+  "-DHWY_WANT_WASM2"
+];
+
 const sourceDir = join(workDir, "libjxl");
 
 async function main() {
@@ -96,7 +101,7 @@ async function main() {
       ...baseFlags.filter((flag) => flag !== "-sUSE_PTHREADS=1" && flag !== "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency"),
       ...(tier.threads ? ["-pthread", "-sUSE_PTHREADS=1", "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency"] : []),
       ...(tier.simd ? ["-msimd128"] : []),
-      ...(tier.relaxedSimd ? ["-mrelaxed-simd"] : [])
+      ...(tier.relaxedSimd ? relaxedSimdHighwayFlags : [])
     ];
 
     const cmakeArgs = [
@@ -152,7 +157,19 @@ async function main() {
     }
   }
 
+  assertDistinctRelaxedSimdMt(manifest);
   await writeManifest(manifest);
+}
+
+function assertDistinctRelaxedSimdMt(manifest) {
+  const relaxed = manifest.tiers["relaxed-simd-mt"];
+  const simdMt = manifest.tiers["simd-mt"];
+  if (!relaxed || !simdMt) return;
+  if (relaxed.wasmSha256 === simdMt.wasmSha256) {
+    throw new Error(
+      "relaxed-simd-mt wasm matched simd-mt wasm; relaxed tier did not produce a distinct optimized artifact"
+    );
+  }
 }
 
 async function runDockerBuild() {

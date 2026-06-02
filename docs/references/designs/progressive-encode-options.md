@@ -113,8 +113,9 @@ This work pairs perfectly with the dedicated preview frame *decode* support adde
   - Respects explicit `progressiveDc` value instead of hardcoding to 1.
   - When `previewFirst` is true and no explicit `progressiveDc`, ensures at least 1 (basic early DC layer).
 - `groupOrder` (from previous micro-slice) now has smart promotion when `previewFirst` + automatic injection into `advancedControls` (sustainable pattern).
-- Mirrored `progressiveDc` and `groupOrder` fields into `jxl-native` `EncoderOptions` for parity.
-- Discovered that native.cc already fully supports `progressive_dc > 1` via direct `JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC` application (no extra work needed on C++ side).
+- Mirrored `progressiveDc` and `groupOrder` fields into `jxl-native` `EncoderOptions` for parity (via advanced injection, zero native.cc touch this pass; adv loop already drives the ids).
+- Extended raw-pipeline casabio_encode with *_with_progressive entrypoints + internal set (transmute for FrameSetting to keep Cargo surface small) + test smoke.
+- Updated workers/session to clean casts; added source test + live native encode exercise (Dc=2 path produced bytes).
 - Updated the design note itself with this progress and clarified priorities.
 
 These changes mean callers can now do:
@@ -131,10 +132,7 @@ const opts = {
 The values flow to the bridge (and will reach native encode path).
 
 **Next immediate work (still in this Task 3 slice):**
-- Ensure the returned `progressiveDc`/`groupOrder` are actually passed through all low-level encode call sites in facade (some paths still hardcode).
-- Add similar wiring in native.cc (read the new fields).
-- Add a focused test for granular progressiveDc + previewFirst combination.
-- Light UI exposure in progressive-paint.html (sliders for these new options).
+See the top of `docs/HANDOFF-predator-progressive-2026.md` — the "Handoff for Next Continuation..." block + new "Progress This Continuation" section (added 2026-06) is the living task list. UI checkbox + smart defaults + wiring + render surfacing + test extension (assert >=3 events for Dc=2+group=1+passes) + doc updates landed. Page source tests + progressive-detail roundtrip test now pass and enforce the multi-layer signal. Full visual A/B on served paint/gallery pages + real "bytes to recognizable" numbers remain for next heat (or full rebuild confirmation).
 
 **Rationale:** `progressiveDc` layers + center-out group order are the two highest-leverage encode-time controls for producing files that become useful extremely early — directly complementing the decode-side preview machinery.
 

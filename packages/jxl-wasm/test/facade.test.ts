@@ -76,6 +76,61 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(source).not.toContain("Progressive JXL encode requires a rebuilt WASM with a progressive bridge flag");
   });
 
+  test("forwards groupOrder into extended buffered encode bridge", async () => {
+    const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
+      __encodeArgs?: number[];
+      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
+    };
+    module._jxl_wasm_encode_rgba8_x = (...args: number[]) => {
+      module.__encodeArgs = args;
+      return module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
+    };
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, progressive: true, progressiveDc: 2, groupOrder: 1 });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    await encoder.finish();
+    await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    expect(module.__encodeArgs?.[10]).toBe(1);
+    expect(module.__encodeArgs?.[11]).toBe(-1);
+    await encoder.dispose();
+  });
+
+  test("forwards groupOrder into streaming input create bridge", async () => {
+    const module = createFakeStreamingInputLibjxlModule() as ReturnType<typeof createFakeStreamingInputLibjxlModule> & {
+      __createImageArgs?: number[];
+      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
+      _jxl_wasm_enc_create_image_x: (...args: number[]) => number;
+    };
+    const baseCreate = module._jxl_wasm_enc_create_image.bind(module);
+    module._jxl_wasm_encode_rgba8_x = (...args: number[]) =>
+      module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
+    module._jxl_wasm_enc_create_image_x = (...args: number[]) => {
+      module.__createImageArgs = args;
+      return baseCreate(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!, args[9]!, args[10]!, args[15]!);
+    };
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, quality: 90, progressive: true, progressiveDc: 2, groupOrder: 1 });
+    await encoder.pushPixels(new Uint8Array([255, 255, 255, 255]));
+    await encoder.finish();
+    await encoder.chunks()[Symbol.asyncIterator]().next();
+
+    expect(module.__createImageArgs?.[10]).toBe(1);
+    expect(module.__createImageArgs?.[11]).toBe(-1);
+    await encoder.dispose();
+  });
+
+  test("bridge exposes group_order on extended encode wrappers", () => {
+    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
+
+    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_GROUP_ORDER");
+    expect(bridge).toMatch(/jxl_wasm_encode_rgba8_x[\s\S]*?buffering,\s*uint32_t group_order,[\s\S]*?modular/);
+    expect(bridge).toMatch(/jxl_wasm_encode_rgba8_with_metadata_x[\s\S]*?buffering,\s*uint32_t group_order,[\s\S]*?modular/);
+    expect(bridge).toMatch(/jxl_wasm_encode_with_gain_map[\s\S]*?buffering,\s*uint32_t group_order,[\s\S]*?modular/);
+  });
+
   test("forwards photonNoiseIso into the extended WASM encode bridge", async () => {
     const module = createFakeLibjxlModule() as ReturnType<typeof createFakeLibjxlModule> & {
       __encodeArgs?: number[];
@@ -83,7 +138,7 @@ describe("@casabio/jxl-wasm facade", () => {
     };
     module._jxl_wasm_encode_rgba8_x = (...args: number[]) => {
       module.__encodeArgs = args;
-      return module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!, args[9]!, args[14]!);
+      return module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!, args[6]!, args[7]!, args[8]!, args[9]!, args[10]!, args[15]!);
     };
     setJxlModuleFactoryForTesting(async () => module);
 
@@ -93,7 +148,7 @@ describe("@casabio/jxl-wasm facade", () => {
     const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
 
     expect(encoded.done).toBe(false);
-    expect(module.__encodeArgs?.[13]).toBe(1600);
+    expect(module.__encodeArgs?.[14]).toBe(1600);
     await encoder.dispose();
   });
 
@@ -111,6 +166,11 @@ describe("@casabio/jxl-wasm facade", () => {
 
     expect(bridge).toContain("JXL_ENC_FRAME_SETTING_BROTLI_EFFORT");
     expect(native).toContain("JXL_ENC_FRAME_SETTING_BROTLI_EFFORT");
+  });
+
+  test("bridge sets the libjxl group order frame option (predator groupOrder heat)", () => {
+    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
+    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_GROUP_ORDER");
   });
 
   test("chunks waits for in-flight streaming pixel pushes", async () => {
@@ -383,7 +443,9 @@ describe("@casabio/jxl-wasm facade", () => {
   test("encodes with ICC profile, EXIF, and XMP metadata", async () => {
     setJxlModuleFactoryForTesting(loadPreferredLibjxlModule);
     const rgba = new Uint8Array([255, 128, 64, 255]);
-    const iccProfile = new Uint8Array([1, 2, 3, 4]); // dummy ICC profile
+    // sRGB-v2-nano.icc from Compact-ICC-Profiles (410 bytes). libjxl 0.11+ validates
+    // ICC profiles via its bundled CMS, so a dummy byte array no longer suffices.
+    const iccProfile = Buffer.from("AAABmmxjbXMCEAAAbW50clJHQiBYWVogB+IAAwAUAAkADgAdYWNzcE1TRlQAAAAAc2F3c2N0cmwAAAAAAAAAAAAAAAAAAPbWAAEAAAAA0y1oYW5k63cfPKpTUQLpPihskUauVwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJZGVzYwAAAPAAAABfd3RwdAAAAQwAAAAUclhZWgAAASAAAAAUZ1hZWgAAATQAAAAUYlhZWgAAAUgAAAAUclRSQwAAAVwAAAA0Z1RSQwAAAVwAAAA0YlRSQwAAAVwAAAA0Y3BydAAAAZAAAAAKZGVzYwAAAAAAAAAFblJHQgAAAAAAAAAAAAAAAFhZWiAAAAAAAADzVAABAAAAARbJWFlaIAAAAAAAAG+gAAA48gAAA49YWVogAAAAAAAAYpYAALeJAAAY2lhZWiAAAAAAAAAkoAAAD4UAALbEY3VydgAAAAAAAAAUAAABBwK1BWsJNg5QFLEcgCXIMKE9GUtAWyds24BrleOtUMbC4jH//3RleHQAAAAAMAA=", "base64");
     const exif = new Uint8Array([5, 6, 7, 8]); // dummy EXIF
     const xmp = new Uint8Array([9, 10, 11, 12]); // dummy XMP
 
@@ -458,6 +520,19 @@ describe("detectTier", () => {
       dist.setJxlModuleFactoryForTesting(null);
     }
   }, 30000);
+
+  test("Bun pthread bootstrap unrefs generated workers so relaxed-simd-mt can exit", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+    expect(source).toContain("withBunPthreadWorkerUnref");
+    expect(source).toContain(".unref()");
+    expect(source).toContain('options?.name === "em-pthread"');
+  });
+
+  test("relaxed-simd-mt build path is stronger than simd-mt and rejects duplicate wasm", () => {
+    const source = readFileSync(new URL("../scripts/build.mjs", import.meta.url), "utf8");
+    expect(source).toContain("-DHWY_WANT_WASM2");
+    expect(source).toContain("assertDistinctRelaxedSimdMt");
+  });
 });
 
 describe("bilinear resize via targetWidth/targetHeight", () => {
@@ -618,7 +693,7 @@ describe("resampling encoder option", () => {
     return { module, calls };
   }
 
-  test("resampling:4 forwards as 11th arg to encode bridge (index 10)", async () => {
+  test("resampling:4 forwards as 12th arg to encode bridge (index 11)", async () => {
     const { module, calls } = makeModuleCapturingEncodeArgs();
     setJxlModuleFactoryForTesting(async () => module as never);
     const encoder = createEncoder({ ...encodeOptions, resampling: 4 });
@@ -626,7 +701,7 @@ describe("resampling encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][10]).toBe(4);
+    expect(calls[0][11]).toBe(4);
   });
 
   test("invalid resampling resolves to 1", async () => {
@@ -637,7 +712,7 @@ describe("resampling encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][10]).toBe(1);
+    expect(calls[0][11]).toBe(1);
   });
 });
 
@@ -659,7 +734,7 @@ describe("decodingSpeed encoder option", () => {
     return { module, calls };
   }
 
-  test("decodingSpeed:2 forwards as 13th arg to _x bridge (index 12)", async () => {
+  test("decodingSpeed:2 forwards as 14th arg to _x bridge (index 13)", async () => {
     const { module, calls } = makeModuleCapturingXArgs();
     setJxlModuleFactoryForTesting(async () => module as never);
     const encoder = createEncoder({ ...encodeOptions, quality: 90, decodingSpeed: 2 });
@@ -667,7 +742,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][12]).toBe(2);
+    expect(calls[0][13]).toBe(2);
     await encoder.dispose();
   });
 
@@ -679,7 +754,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][12]).toBe(-1);
+    expect(calls[0][13]).toBe(-1);
     await encoder.dispose();
   });
 
@@ -691,7 +766,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][12]).toBe(0);
+    expect(calls[0][13]).toBe(0);
     await encoder.dispose();
   });
 
@@ -703,7 +778,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][12]).toBe(4);
+    expect(calls[0][13]).toBe(4);
     await encoder.dispose();
   });
 
@@ -715,7 +790,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][12]).toBe(0);
+    expect(calls[0][13]).toBe(0);
     await encoder.dispose();
   });
 
@@ -734,9 +809,9 @@ describe("decodingSpeed encoder option", () => {
     encoder.pushPixels(new Uint8Array(4));
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
-    // exifSize arg (index 19) must be 0 when includeExif: false
+    // exifSize arg (index 20) must be 0 when includeExif: false
     expect(v2Calls.length).toBeGreaterThan(0);
-    expect(v2Calls[0]![19]).toBe(0);
+    expect(v2Calls[0]![20]).toBe(0);
     await encoder.dispose();
   });
 
@@ -753,7 +828,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
     expect(boxOpts.compressBoxes).toBe(1);
     await encoder.dispose();
   });
@@ -769,7 +844,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
     expect(boxOpts.rawCodestream).toBe(1);
     expect(boxOpts.forceContainer).toBe(0);
     await encoder.dispose();
@@ -786,7 +861,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
     expect(boxOpts.forceContainer).toBe(1);
     expect(boxOpts.rawCodestream).toBe(0);
     await encoder.dispose();
@@ -803,7 +878,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
     expect(boxOpts.numCustomBoxes).toBe(1);
     await encoder.dispose();
   });
@@ -820,7 +895,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
     // At least the one JUMBF entry (may be >1 if other metadata also triggers boxes)
     expect(boxOpts.numCustomBoxes).toBeGreaterThanOrEqual(1);
     await encoder.dispose();
@@ -837,7 +912,7 @@ describe("decodingSpeed encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(v2Calls.length).toBeGreaterThan(0);
-    const boxOpts = readBoxOpts(v2Calls[0]![22]!);
+    const boxOpts = readBoxOpts(v2Calls[0]![23]!);
     expect(boxOpts.rawCodestream).toBe(1);
     expect(boxOpts.forceContainer).toBe(0);
     await encoder.dispose();
@@ -870,8 +945,8 @@ describe("gain map encode/decode", () => {
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(gainMapCalls.length).toBe(1);
     const args = gainMapCalls[0]!;
-    // gain map ptr and size are the last two args (indices 22, 23)
-    const gmSize = args[23];
+    // gain map ptr and size are the last two args (indices 23, 24)
+    const gmSize = args[24];
     expect(gmSize).toBe(4);
     await encoder.dispose();
   });
@@ -896,7 +971,7 @@ describe("gain map encode/decode", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(gainMapCalls.length).toBe(1);
-    expect(gainMapCalls[0]![23]).toBe(3); // gain_map_jxl_size
+    expect(gainMapCalls[0]![24]).toBe(3); // gain_map_jxl_size
     await encoder.dispose();
   });
 
@@ -971,7 +1046,7 @@ describe("extra channel encode", () => {
     await encoder.dispose();
   });
 
-  test("passes alphaDistance at correct arg index (22)", async () => {
+  test("passes alphaDistance at correct arg index (23)", async () => {
     const module = createFakeEcModule();
     setJxlModuleFactoryForTesting(async () => module);
 
@@ -981,7 +1056,7 @@ describe("extra channel encode", () => {
     await encoder.chunks()[Symbol.asyncIterator]().next();
 
     const args = module.__ecCalls[0]!;
-    expect(Math.abs((args[22] ?? -999) - 0.5)).toBeLessThan(0.001);
+    expect(Math.abs((args[23] ?? -999) - 0.5)).toBeLessThan(0.001);
     await encoder.dispose();
   });
 
@@ -999,8 +1074,8 @@ describe("extra channel encode", () => {
     await encoder.chunks()[Symbol.asyncIterator]().next();
 
     const args = module.__ecCalls[0]!;
-    expect(args[24]).toBe(1);   // numEc = 1
-    expect(args[22]).toBe(-1);  // alphaDistance = -1 (no override)
+    expect(args[25]).toBe(1);   // numEc = 1
+    expect(args[23]).toBe(-1);  // alphaDistance = -1 (no override)
     await encoder.dispose();
   });
 
@@ -1018,7 +1093,7 @@ describe("extra channel encode", () => {
     await encoder.chunks()[Symbol.asyncIterator]().next();
 
     const args = module.__ecCalls[0]!;
-    const ecDescPtr = args[23]!;
+    const ecDescPtr = args[24]!;
     expect(ecDescPtr).toBeGreaterThan(0);
 
     const dv = new DataView(module.HEAPU8.buffer);
@@ -1113,7 +1188,7 @@ describe("brotliEffort encoder option", () => {
     return { module, calls };
   }
 
-  test("brotliEffort:5 forwards as index 11 to _x bridge", async () => {
+  test("brotliEffort:5 forwards as index 12 to _x bridge", async () => {
     const { module, calls } = makeModuleCapturingXArgs();
     setJxlModuleFactoryForTesting(async () => module as never);
     const encoder = createEncoder({ ...encodeOptions, quality: 90, brotliEffort: 5 });
@@ -1121,7 +1196,7 @@ describe("brotliEffort encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![11]).toBe(5);
+    expect(calls[0]![12]).toBe(5);
     await encoder.dispose();
   });
 
@@ -1133,7 +1208,7 @@ describe("brotliEffort encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![11]).toBe(-1);
+    expect(calls[0]![12]).toBe(-1);
     await encoder.dispose();
   });
 
@@ -1145,7 +1220,7 @@ describe("brotliEffort encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![11]).toBe(0);
+    expect(calls[0]![12]).toBe(0);
     await encoder.dispose();
   });
 
@@ -1157,7 +1232,7 @@ describe("brotliEffort encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![11]).toBe(11);
+    expect(calls[0]![12]).toBe(11);
     await encoder.dispose();
   });
 
@@ -1169,7 +1244,7 @@ describe("brotliEffort encoder option", () => {
     encoder.finish();
     for await (const _ of encoder.chunks()) { /* drain */ }
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0]![11]).toBe(-1);
+    expect(calls[0]![12]).toBe(-1);
     await encoder.dispose();
   });
 });

@@ -87,6 +87,9 @@ export class EncodeHandler {
             // node_modules copy of jxl-core — cast to access it safely.
             progressiveFlavor: this.opts.progressiveFlavor,
             previewFirst: this.opts.previewFirst,
+            // progressiveDc + groupOrder (predator progressive layers)
+            progressiveDc: this.opts.progressiveDc,
+            groupOrder: this.opts.groupOrder,
             chunked: this.opts.chunked,
             sidecarSizes: this.opts.sidecarSizes,
         };

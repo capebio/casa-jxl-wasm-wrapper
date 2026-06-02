@@ -1,4 +1,5 @@
-/* @ts-self-types="./raw_converter_wasm.d.ts" */
+import { startWorkers } from './snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.js';
+
 
 /**
  * Timing results for the decompress + demosaic stages only.
@@ -566,6 +567,16 @@ export class ProcessResult {
         return v1;
     }
     /**
+     * Borrow the RGBA8 buffer (copies).
+     * @returns {Uint8Array}
+     */
+    rgba() {
+        const ret = wasm.processresult_rgba(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
      * Move the RGB buffer out as a `Uint8Array`.  Caller owns the bytes.
      * @returns {Uint8Array}
      */
@@ -591,6 +602,20 @@ export class ProcessResult {
      */
     take_rgb16_thumb() {
         const ret = wasm.processresult_take_rgb16_thumb(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * Move the RGBA8 buffer out. Caller owns the bytes.
+     * Performs RGB→RGBA conversion inside WASM using the same tight loop as the
+     * JS-facing rgb_to_rgba, then transfers ownership. This still avoids the
+     * JS-side 3x buffer allocation that the old take_rgb + rgb_to_rgba pattern
+     * required for "encode only" paths.
+     * @returns {Uint8Array}
+     */
+    take_rgba() {
+        const ret = wasm.processresult_take_rgba(this.__wbg_ptr);
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
@@ -705,6 +730,9 @@ export function bench_decode_orf(data) {
 
 /**
  * Box-filter downscale an RGB8 buffer.  Useful for thumbnail generation.
+ *
+ * Fast path: when src dims are exact integer multiple of dst (common for 1/2, 1/4, 1/8 thumbs),
+ * uses a much faster integer stepping loop with no f32 math or edge cases.
  * @param {Uint8Array} src
  * @param {number} src_w
  * @param {number} src_h
@@ -726,6 +754,9 @@ export function downscale_rgb(src, src_w, src_h, dst_w, dst_h) {
 
 /**
  * Box-filter downscale an RGBA8 buffer.  Useful for thumbnail generation.
+ *
+ * Fast path: when src dims are exact integer multiple of dst (common for 1/2, 1/4, 1/8 thumbs),
+ * uses a much faster integer stepping loop with no f32 math or edge cases.
  * @param {Uint8Array} src
  * @param {number} src_w
  * @param {number} src_h
@@ -743,6 +774,15 @@ export function downscale_rgba(src, src_w, src_h, dst_w, dst_h) {
     var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
+}
+
+/**
+ * @param {number} num_threads
+ * @returns {Promise<any>}
+ */
+export function initThreadPool(num_threads) {
+    const ret = wasm.initThreadPool(num_threads);
+    return ret;
 }
 
 /**
@@ -1006,6 +1046,50 @@ export function rotate_rgb8(src, width, height, turns) {
     }
     return RotateResult.__wrap(ret[0]);
 }
+
+export class wbg_rayon_PoolBuilder {
+    static __wrap(ptr) {
+        const obj = Object.create(wbg_rayon_PoolBuilder.prototype);
+        obj.__wbg_ptr = ptr;
+        wbg_rayon_PoolBuilderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        wbg_rayon_PoolBuilderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 0);
+    }
+    build() {
+        wasm.wbg_rayon_poolbuilder_build(this.__wbg_ptr);
+    }
+    /**
+     * @returns {number}
+     */
+    numThreads() {
+        const ret = wasm.wbg_rayon_poolbuilder_numThreads(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    receiver() {
+        const ret = wasm.wbg_rayon_poolbuilder_receiver(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) wbg_rayon_PoolBuilder.prototype[Symbol.dispose] = wbg_rayon_PoolBuilder.prototype.free;
+
+/**
+ * @param {number} receiver
+ */
+export function wbg_rayon_start_worker(receiver) {
+    wasm.wbg_rayon_start_worker(receiver);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -1015,6 +1099,14 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_undefined_35bb9f4c7fd651d5: function(arg0) {
             const ret = arg0 === undefined;
+            return ret;
+        },
+        __wbg___wbindgen_memory_9544558992fc5400: function() {
+            const ret = wasm.memory;
+            return ret;
+        },
+        __wbg___wbindgen_module_598c7f098f85bbd9: function() {
+            const ret = wasmModule;
             return ret;
         },
         __wbg___wbindgen_throw_9c31b086c2b26051: function(arg0, arg1) {
@@ -1044,6 +1136,10 @@ function __wbg_get_imports() {
             const ret = arg0.now();
             return ret;
         },
+        __wbg_now_81363d44c96dd239: function() {
+            const ret = Date.now();
+            return ret;
+        },
         __wbg_performance_a22a4e2bf3e69855: function(arg0) {
             const ret = arg0.performance;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
@@ -1051,6 +1147,10 @@ function __wbg_get_imports() {
         __wbg_performance_ddd4e7eeef6254f3: function(arg0) {
             const ret = arg0.performance;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
+        __wbg_startWorkers_8b582d57e92bd2d4: function(arg0, arg1, arg2) {
+            const ret = startWorkers(arg0, arg1, wbg_rayon_PoolBuilder.__wrap(arg2));
+            return ret;
         },
         __wbg_static_accessor_GLOBAL_THIS_02344c9b09eb08a9: function() {
             const ret = typeof globalThis === 'undefined' ? null : globalThis;
@@ -1099,6 +1199,9 @@ const ProcessResultFinalization = (typeof FinalizationRegistry === 'undefined')
 const RotateResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rotateresult_free(ptr, 1));
+const wbg_rayon_PoolBuilderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();

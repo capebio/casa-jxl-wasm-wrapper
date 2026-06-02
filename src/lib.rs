@@ -15,6 +15,10 @@ use raw_pipeline::tiff;
 
 use wasm_bindgen::prelude::*;
 
+// A2: expose rayon thread-pool init to JS when built with --features parallel-wasm
+#[cfg(feature = "parallel-wasm")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 /// Result of processing an ORF: RGB8 buffer + dims (post-orientation).
 #[wasm_bindgen]
 pub struct ProcessResult {
@@ -1145,6 +1149,18 @@ mod tests {
         let expected = rgb_to_rgba(&rgb);
         assert_eq!(expected.len(), 8);
         assert_eq!(&expected[0..4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn raw_pipeline_direct_rgba_available_for_native_parity() {
+        // Smoke that the direct-RGBA entry (for Tauri P3 encode parity) is linked
+        // and produces correct channel count + sentinel alpha. The heavy impl
+        // and benches live in the raw-pipeline crate.
+        let rgb16 = vec![2048u16; 2 * 2 * 3];
+        let params = raw_pipeline::pipeline::PipelineParams::default_olympus();
+        let rgba = raw_pipeline::pipeline::process_rgba(&rgb16, &params);
+        assert_eq!(rgba.len(), 16);
+        assert!(rgba.chunks_exact(4).all(|px| px[3] == 255));
     }
 }
 

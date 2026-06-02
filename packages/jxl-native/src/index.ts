@@ -277,6 +277,13 @@ export interface EncoderOptions {
   progressive: boolean;
   previewFirst: boolean;
   chunked: boolean;
+  /**
+   * progressiveDc (0/1/2) and groupOrder (0/1) for multi-layer/center-out progressive encodes (predator focus, Tauri parity).
+   * Mirrors WASM EncoderOptions; when set these are injected via advancedFrameSettings (id 19/13) so the existing
+   * libjxl frame option path in native.cc applies them. Use with progressive:true + decode emitEveryPass + 'passes' detail.
+   */
+  progressiveDc?: 0 | 1 | 2;
+  groupOrder?: 0 | 1;
   /** Container format and per-box options. */
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. */
@@ -488,6 +495,18 @@ function convertAdvancedControlsToPairs(options: EncoderOptions): { id: number; 
     if (g.centerY !== undefined) out.push({ id: 15, value: g.centerY });
   }
 
+  // Top-level progressiveDc (id 19) + groupOrder (id 13) for predator parity with WASM/jxl-core.
+  // These are forwarded by jxl-worker-node encode-handler (and high-level session.encode) for Tauri/desktop paths.
+  // The adv loop in native.cc will apply; explicit here ensures direct {progressiveDc:2} calls and non-advancedControls
+  // usage work without caller having to use the escape hatch. Later entries in mergedAdvanced win on duplicates.
+  if (options.progressiveDc != null) {
+    const dc = Math.max(0, Math.min(2, (options.progressiveDc | 0)));
+    out.push({ id: 19, value: dc });
+  }
+  if (options.groupOrder != null) {
+    out.push({ id: 13, value: options.groupOrder ? 1 : 0 });
+  }
+
   if (ac?.buffering) {
     const b = ac.buffering;
     if (b.strategy !== undefined) out.push({ id: 34, value: b.strategy });
@@ -505,6 +524,14 @@ function convertAdvancedControlsToPairs(options: EncoderOptions): { id: number; 
   // jpegReconstruction scalars (CFL etc.) can ride advanced pairs (ID 30 for CFL)
   if (options.jpegReconstruction?.cfl !== undefined) {
     out.push({ id: 30, value: options.jpegReconstruction.cfl ? 1 : 0 });
+  }
+
+  // Smart defaults (predator parity with WASM resolve): previewFirst promotes Dc>=1 + group=1 unless explicit.
+  const hasProgDc = options.progressiveDc != null || out.some(p => p.id === 19);
+  const hasGroup = options.groupOrder != null || out.some(p => p.id === 13);
+  if (options.previewFirst) {
+    if (!hasProgDc) out.push({ id: 19, value: 1 });
+    if (!hasGroup) out.push({ id: 13, value: 1 });
   }
 
   return out;

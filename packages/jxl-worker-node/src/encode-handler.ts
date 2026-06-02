@@ -44,6 +44,7 @@ interface NodeCodecModule {
     progressive: boolean;
     previewFirst: boolean;
     chunked: boolean;
+    // progressive (predator) accepted via any at call site to satisfy exactOptional + MsgEncodeStart source
   }): NodeEncoder;
 }
 
@@ -128,7 +129,7 @@ export class EncodeHandler {
 
   private async run(): Promise<void> {
     const codec = this.backend.module as NodeCodecModule;
-    const encoder = codec.createEncoder({
+    const encOpts: any = {
       format: this.opts.format,
       width: this.opts.width,
       height: this.opts.height,
@@ -142,7 +143,10 @@ export class EncodeHandler {
       progressive: this.opts.progressive,
       previewFirst: this.opts.previewFirst,
       chunked: this.opts.chunked,
-    });
+    };
+    if (this.opts.progressiveDc != null) encOpts.progressiveDc = this.opts.progressiveDc;
+    if (this.opts.groupOrder != null) encOpts.groupOrder = this.opts.groupOrder;
+    const encoder = codec.createEncoder(encOpts);
     this.state = "configured";
 
     try {

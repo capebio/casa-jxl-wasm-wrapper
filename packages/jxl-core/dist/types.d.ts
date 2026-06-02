@@ -1,4 +1,4 @@
-export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32";
+export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32" | "rgb8";
 export interface ImageInfo {
     width: number;
     height: number;
@@ -95,9 +95,22 @@ export interface EncodeOptions {
     distance?: number;
     quality?: number;
     effort?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+    modular?: -1 | 0 | 1;
+    brotliEffort?: number;
+    decodingSpeed?: number;
+    photonNoiseIso?: number;
     progressive?: boolean;
     progressiveFlavor?: "dc" | "ac";
     previewFirst?: boolean;
+    /**
+     * Progressive DC layers (0/1/2). 2 gives more granular early DC stages for visibly distinct passes.
+     * Works with groupOrder and progressive decode detail='passes'.
+     */
+    progressiveDc?: 0 | 1 | 2;
+    /**
+     * 0=scanline, 1=center-out group order. Strongly recommended for useful early progressive bytes.
+     */
+    groupOrder?: 0 | 1;
     chunked?: boolean;
     /**
      * Max dimension (px, long edge) of sidecar thumbnail(s) to yield BEFORE the
@@ -155,6 +168,9 @@ export type CodecMetric = {
     value: number;
 } | {
     name: "source_pixels_decoded";
+    value: number;
+} | {
+    name: "scheduler_queue_wait_ms";
     value: number;
 };
 export interface Capabilities {

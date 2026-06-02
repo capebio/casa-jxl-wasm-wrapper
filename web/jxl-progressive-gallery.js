@@ -59,7 +59,9 @@ concurrentEl.addEventListener('input', () => {
 
 function getGalleryProgressiveDetail() {
   const sel = document.getElementById('gallery-prog-detail');
-  return sel ? sel.value : 'dc';
+  // Default to 'passes' so that when testing multi-layer encodes (Dc=2 + groupOrder from paint/gallery onfly)
+  // the benchmark actually shows the earlier + more passes the user asked for.
+  return sel ? sel.value : 'passes';
 }
 
 function getGalleryEncodeOptions() {
@@ -89,6 +91,44 @@ sourceInput.addEventListener('change', () => {
   dbgLog('Gallery start', `${filesToUse.length} files`, 'info');
   startGallery(filesToUse, { encodeOnTheFly: rawFiles.length > 0 && jxlFiles.length === 0 }).catch(e => log(`Gallery error: ${e.message}`, 'error'));
 });
+
+// Predator push support: if paint page "pushed" a JXL via localStorage (or ?autopush), auto-ingest it as a .jxl
+// so you can immediately see multi-layer progressive decode without manual pick. Clears after use.
+function consumePendingProgressivePush() {
+  try {
+    const raw = localStorage.getItem('__progGalleryPush');
+    if (!raw) return null;
+    const { name, b64, ts } = JSON.parse(raw);
+    if (!b64 || Date.now() - (ts || 0) > 5 * 60 * 1000) { localStorage.removeItem('__progGalleryPush'); return null; }
+    // decode base64 to Uint8Array
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    localStorage.removeItem('__progGalleryPush');
+    return { filename: name || 'pushed-from-paint.jxl', bytes };
+  } catch (e) {
+    console.warn('[gallery] consume push failed', e);
+    localStorage.removeItem('__progGalleryPush');
+    return null;
+  }
+}
+
+(function autoIngestPushIfPresent() {
+  const urlHasAuto = /[?&]autopush=1/.test(location.search);
+  const pending = consumePendingProgressivePush();
+  if (pending) {
+    pickerStatus.textContent = `Auto-pushed from progressive-paint: ${pending.filename} (testing multi-layer progressive)`;
+    // Feed it directly as if picked (as JXL)
+    setTimeout(() => {
+      galleryRowsEl.innerHTML = '';
+      log(`Auto-ingesting pushed progressive JXL: ${pending.filename}`);
+      startGallery([new File([pending.bytes], pending.filename, { type: 'image/jxl' })], { encodeOnTheFly: false })
+        .catch(e => log(`Auto-push gallery error: ${e.message}`, 'error'));
+    }, 50);
+  } else if (urlHasAuto) {
+    pickerStatus.textContent = 'Opened for autopush — generate in paint page and click its "Export to progressive gallery" to push a test file here.';
+  }
+})();
 
 function wirePushModeControls() {
   for (const button of pushModeButtons) {

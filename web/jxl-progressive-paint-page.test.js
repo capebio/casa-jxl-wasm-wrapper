@@ -47,3 +47,15 @@ test('progressive paint JS reads detail selector and applies auto-detection or m
     expect(source).toContain('getRequestedProgressiveDetail(requestedPassCount)');
     expect(source).toContain(": detailChoice;");
 });
+
+test('progressive paint exposes group-order center-out checkbox (UI polish for A/B + defaults) and wires it + render metadata', () => {
+    expect(html).toContain('id="prog-group-order"');
+    expect(html).toContain('Center-out');
+    expect(html).toContain('data-help-target="pp-group"');
+    expect(source).toContain('prog-group-order');
+    expect(source).toContain('syncGroupOrderDefault');
+    expect(source).toContain('groupOrder = !!(document.getElementById');
+    // render now surfaces the dc/group actually used (for hunt data visibility)
+    expect(source).toContain('progressiveDc, groupOrder');
+    expect(source).toContain('dc=${progressiveDc ??');
+});

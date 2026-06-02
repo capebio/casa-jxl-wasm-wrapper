@@ -1,4 +1,5 @@
 export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
+export declare function canUseThreadedWasm(wasmThreads: boolean, sharedArrayBuffer: boolean, crossOriginIsolated: boolean): boolean;
 export declare function detectTier(): Tier;
 export declare function recommendedEffort(): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 export interface Capabilities {

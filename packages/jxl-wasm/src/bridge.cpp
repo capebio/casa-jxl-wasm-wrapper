@@ -8,6 +8,7 @@
 #include <jxl/color_encoding.h>
 #include <jxl/decode.h>
 #include <jxl/encode.h>
+#include <jxl/thread_parallel_runner.h>
 #include <jxl/types.h>
 #if __has_include(<jxl/gain_map.h>)
 #include <jxl/gain_map.h>
@@ -56,6 +57,7 @@ struct JxlWasmEncState {
   uint32_t enc_progressive_ac;
   uint32_t enc_qprogressive_ac;
   uint32_t enc_buffering;
+  uint32_t enc_group_order;  // 0=scanline, 1=center-out (predator groupOrder for early recognizable passes)
   int32_t  enc_modular;
   int32_t  enc_brotli_effort;
   int32_t  enc_decoding_speed;
@@ -65,6 +67,13 @@ struct JxlWasmEncState {
   int32_t  enc_gaborish;       // -1=auto, 0=off, 1=on
   int32_t  enc_dots;           // -1=auto, 0=off, 1=on (VarDCT only)
   int32_t  enc_color_transform;// -1=auto, 0=XYB, 1=none, 2=YCbCr
+  // B3: optional metadata stored for enc_finish to pass to EncodeRgbaWithMetadata
+  uint8_t* enc_icc;
+  size_t   enc_icc_size;
+  uint8_t* enc_exif;
+  size_t   enc_exif_size;
+  uint8_t* enc_xmp;
+  size_t   enc_xmp_size;
 };
 
 // IMPROVEMENT-3: raw malloc for progressive decoder avoids std::vector<uint8_t> zero-init.
@@ -148,6 +157,37 @@ static void FreeBufferNoChain(JxlWasmBuffer* buf) {
   }
   free(buf);
 }
+
+// A1: Parallel runner — wires libjxl to the Emscripten pthread pool.
+// Only active on threaded builds (-pthread / __EMSCRIPTEN_PTHREADS__).
+// Cached as a module-level singleton: creating a runner is expensive (~50 ms).
+#ifdef __EMSCRIPTEN_PTHREADS__
+static void* g_parallel_runner = nullptr;
+static void* GetSharedRunner() {
+  if (g_parallel_runner == nullptr) {
+    g_parallel_runner = JxlThreadParallelRunnerCreate(nullptr, 0);
+  }
+  return g_parallel_runner;
+}
+// Inline helpers so the call-site error path can return any type.
+static bool ApplyRunnerEnc(JxlEncoder* enc) {
+  return JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner,
+                                     GetSharedRunner()) == JXL_ENC_SUCCESS;
+}
+static bool ApplyRunnerDec(JxlDecoder* dec) {
+  return JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner,
+                                     GetSharedRunner()) == JXL_DEC_SUCCESS;
+}
+#define JXL_SETUP_ENC_RUNNER(enc, err_ret)                       \
+  do { if (!ApplyRunnerEnc(enc)) {                               \
+    JxlEncoderDestroy(enc); return err_ret; } } while (0)
+#define JXL_SETUP_DEC_RUNNER(dec, err_ret)                       \
+  do { if (!ApplyRunnerDec(dec)) {                               \
+    JxlDecoderDestroy(dec); return err_ret; } } while (0)
+#else
+#define JXL_SETUP_ENC_RUNNER(enc, err_ret) ((void)0)
+#define JXL_SETUP_DEC_RUNNER(dec, err_ret) ((void)0)
+#endif
 
 static JxlDataType FormatToDataType(uint32_t fmt) {
   if (fmt == 1) return JXL_TYPE_UINT16;
@@ -248,6 +288,10 @@ static JxlEncoderStatus AddCustomBoxes(JxlEncoder* enc, const WasmBoxOpts* opts)
   return JXL_ENC_SUCCESS;
 }
 
+// Forward declarations — defined later in file, used here first.
+static inline void CopyPixel(const uint8_t* src, uint8_t* dst, uint32_t bpp);
+static void StripAlphaToRgb(const uint8_t* src, uint8_t* dst, size_t n_pixels, size_t bytes_per_channel);
+
 // Nearest-neighbour downsampler. Power-of-two factors special-cased to avoid per-pixel std::min.
 // src/dst are RGBA with bpp bytes per pixel (4, 8, or 16).
 static void DownsampleRgba(const uint8_t* src, uint32_t sw, uint32_t sh,
@@ -293,6 +337,7 @@ static JxlWasmBuffer* DecodeRgba(const uint8_t* input, size_t input_size, uint32
 
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return MakeError(2);
+  JXL_SETUP_DEC_RUNNER(dec, MakeError(58));
 
   if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
     JxlDecoderDestroy(dec); return MakeError(3);
@@ -403,6 +448,7 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t group_order,  // predator: 0=scanline, 1=center-out for early passes
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
@@ -414,8 +460,14 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(21);
+  JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
   if (ApplyContainerMode(enc, box_opts) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(54);
+  }
+  // libjxl 0.11+: JxlEncoderAddBox requires use_container=true; enable it
+  // whenever metadata boxes will be attached.
+  if ((exif != nullptr && exif_size > 0) || (xmp != nullptr && xmp_size > 0)) {
+    JxlEncoderUseContainer(enc, JXL_TRUE);
   }
 
   const uint32_t bits     = FormatToBits(fmt);
@@ -431,6 +483,9 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   info.num_extra_channels     = has_alpha ? 1u : 0u;
   info.alpha_bits             = has_alpha ? bits : 0u;
   info.alpha_exponent_bits    = has_alpha ? exp_bits : 0u;
+  // libjxl 0.11+: must declare uses_original_profile before SetBasicInfo when
+  // an ICC profile will follow; encoder rejects SetICCProfile if XYB mode is locked in.
+  info.uses_original_profile = (icc_profile != nullptr && icc_size > 0) ? JXL_TRUE : JXL_FALSE;
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
 
@@ -456,6 +511,7 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, static_cast<int64_t>(qprogressive_ac));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING, static_cast<int64_t>(buffering));
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, static_cast<int64_t>(group_order));
   if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
@@ -468,16 +524,20 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   if (color_transform >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM, static_cast<int64_t>(std::clamp(color_transform, 0, 2)));
 
   const size_t bytes_per_channel = (fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u;
-  const uint32_t num_channels = has_alpha ? 4u : 3u;
+  // A3: fmt==3 means caller already provides 3-channel RGB (no alpha in buffer).
+  const bool input_is_rgb = (fmt == 3u);
+  const uint32_t num_channels = (input_is_rgb || !has_alpha) ? 3u : 4u;
   JxlPixelFormat pf = {num_channels, FormatToDataType(fmt), JXL_NATIVE_ENDIAN, 0};
 
-  // Strip alpha channel via raw malloc (avoids std::vector zero-init overhead).
   uint8_t* rgb_pixels = nullptr;
   const uint8_t* encode_src = pixels;
   size_t pixel_size;
-  if (!has_alpha) {
-    const size_t n_pixels  = static_cast<size_t>(width) * height;
-    const size_t src_stride = 4u * bytes_per_channel;
+  if (input_is_rgb) {
+    // Input is already 3-channel RGB — pass through directly, no strip needed.
+    pixel_size = static_cast<size_t>(width) * height * 3u * bytes_per_channel;
+  } else if (!has_alpha) {
+    // 4-channel RGBA with has_alpha=false — strip alpha to 3-channel RGB.
+    const size_t n_pixels   = static_cast<size_t>(width) * height;
     const size_t dst_stride = 3u * bytes_per_channel;
     pixel_size = n_pixels * dst_stride;
     rgb_pixels = static_cast<uint8_t*>(malloc(pixel_size));
@@ -553,16 +613,16 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
 }
 
 static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular = -1, int32_t brotli_effort = -1, int32_t decoding_speed = -1, int32_t photon_noise_iso = 0, uint32_t resampling = 1u,
     int32_t epf = -1, int32_t gaborish = -1, int32_t dots = -1, int32_t color_transform = -1) {
-  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, epf, gaborish, dots, color_transform);
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, epf, gaborish, dots, color_transform);
 }
 
 static JxlWasmBuffer* EncodeRgbaWithGainMap(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
@@ -572,6 +632,10 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(21);
+  JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
+  if ((exif != nullptr && exif_size > 0) || (xmp != nullptr && xmp_size > 0) || gain_map_jxl_size > 0) {
+    JxlEncoderUseContainer(enc, JXL_TRUE);
+  }
 
   const uint32_t bits     = FormatToBits(fmt);
   const uint32_t exp_bits = FormatToExponentBits(fmt);
@@ -586,6 +650,7 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
   info.num_extra_channels       = has_alpha ? 1u : 0u;
   info.alpha_bits               = has_alpha ? bits : 0u;
   info.alpha_exponent_bits      = has_alpha ? exp_bits : 0u;
+  info.uses_original_profile    = (icc_profile != nullptr && icc_size > 0) ? JXL_TRUE : JXL_FALSE;
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
 
@@ -606,6 +671,7 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, static_cast<int64_t>(qprogressive_ac));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING, static_cast<int64_t>(buffering));
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, static_cast<int64_t>(group_order));
   if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
@@ -614,15 +680,17 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
   if (normalized_resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling));
 
   const size_t bytes_per_channel = (fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u;
-  const uint32_t num_channels = has_alpha ? 4u : 3u;
+  const bool input_is_rgb = (fmt == 3u);
+  const uint32_t num_channels = (input_is_rgb || !has_alpha) ? 3u : 4u;
   JxlPixelFormat pf = {num_channels, FormatToDataType(fmt), JXL_NATIVE_ENDIAN, 0};
 
   uint8_t* rgb_pixels = nullptr;
   const uint8_t* encode_src = pixels;
   size_t pixel_size;
-  if (!has_alpha) {
+  if (input_is_rgb) {
+    pixel_size = static_cast<size_t>(width) * height * 3u * bytes_per_channel;
+  } else if (!has_alpha) {
     const size_t n_pixels   = static_cast<size_t>(width) * height;
-    const size_t src_stride = 4u * bytes_per_channel;
     const size_t dst_stride = 3u * bytes_per_channel;
     pixel_size = n_pixels * dst_stride;
     rgb_pixels = static_cast<uint8_t*>(malloc(pixel_size));
@@ -716,7 +784,7 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
 static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed,
     int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
@@ -729,6 +797,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(121);
+  JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
   if (ApplyContainerMode(enc, box_opts) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(134);
   }
@@ -784,6 +853,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, static_cast<int64_t>(qprogressive_ac));
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING, static_cast<int64_t>(buffering));
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, static_cast<int64_t>(group_order));
   if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
@@ -1003,6 +1073,7 @@ static JxlWasmBuffer* EncodeRgba8Tiled(const uint8_t* pixels,
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(61);
+  JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
 
   JxlBasicInfo info;
   JxlEncoderInitBasicInfo(&info);
@@ -1136,6 +1207,7 @@ static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_
 
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return MakeError(71);
+  JXL_SETUP_DEC_RUNNER(dec, MakeError(58));
 
   if (JxlDecoderSubscribeEvents(dec,
         JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
@@ -1284,6 +1356,7 @@ static uint8_t* EncodeStandaloneJxlTileRgba8(const uint8_t* rgba_pixels,
     uint32_t has_alpha, size_t* out_size) {
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return nullptr;
+  JXL_SETUP_ENC_RUNNER(enc, nullptr);
 
   JxlBasicInfo info;
   JxlEncoderInitBasicInfo(&info);
@@ -1365,6 +1438,7 @@ static uint8_t* DecodeStandaloneJxlTileRgba8(const uint8_t* input, size_t input_
   *out_w = 0; *out_h = 0;
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return nullptr;
+  JXL_SETUP_DEC_RUNNER(dec, nullptr);
 
   if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
     JxlDecoderDestroy(dec); return nullptr;
@@ -1587,6 +1661,7 @@ static JxlWasmBuffer* EncodeAnimation(
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(201);
+  JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
   if (ApplyContainerMode(enc, box_opts) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(202);
   }
@@ -1748,6 +1823,7 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_s
 JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t progressive_detail) {
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return nullptr;
+  JXL_SETUP_DEC_RUNNER(dec, nullptr);
 
   int events = JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE | JXL_DEC_BOX;
   if (progressive_detail != 0) events |= JXL_DEC_FRAME_PROGRESSION;
@@ -2038,49 +2114,49 @@ JxlWasmBuffer* jxl_wasm_decode_rgbaf32(const uint8_t* input, size_t input_size, 
 }
 
 JxlWasmBuffer* jxl_wasm_encode_rgba8(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t resampling) {
-  return EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, -1, -1, -1, 0, resampling);
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
+  return EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
 }
 JxlWasmBuffer* jxl_wasm_encode_rgba16(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t resampling) {
-  return EncodeRgba(pixels, width, height, distance, effort, 1, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, -1, -1, -1, 0, resampling);
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
+  return EncodeRgba(pixels, width, height, distance, effort, 1, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
 }
 JxlWasmBuffer* jxl_wasm_encode_rgbaf32(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t resampling) {
-  return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, -1, -1, -1, 0, resampling);
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
+  return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
 }
 
 JxlWasmBuffer* jxl_wasm_encode_rgba8_x(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
-  return EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  return EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
 }
 JxlWasmBuffer* jxl_wasm_encode_rgba16_x(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
-  return EncodeRgba(pixels, width, height, distance, effort, 1, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  return EncodeRgba(pixels, width, height, distance, effort, 1, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
 }
 JxlWasmBuffer* jxl_wasm_encode_rgbaf32_x(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
-  return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
 }
 
 // fmt: 0=rgba8, 1=rgba16, 2=rgbaf32.  Matches the TypeScript facade type.
 // Previously this function had no fmt param and hardcoded 0, which also
 // shifted every subsequent argument by one slot in the WASM call frame.
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size, const uint8_t* exif, size_t exif_size, const uint8_t* xmp, size_t xmp_size) {
-  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, -1, -1, -1, 0, resampling, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
 }
 
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_x(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size, const uint8_t* exif, size_t exif_size, const uint8_t* xmp, size_t xmp_size) {
-  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, icc_profile, icc_size, exif, exif_size, xmp, xmp_size);
 }
 
 // Extra-channel encode: per-channel distance + optional separate plane buffers.
@@ -2089,7 +2165,7 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_x(const uint8_t* pixels, uint
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed,
     int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
@@ -2100,7 +2176,7 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec(
   const WasmExtraChannel* ec = (ec_ptr != nullptr && num_ec > 0u) ? ec_ptr : nullptr;
   const uint32_t n_ec = (ec != nullptr) ? num_ec : 0u;
   return EncodeRgbaWithExtraChannels(pixels, width, height, distance, effort, fmt, has_alpha,
-      progressive_dc, progressive_ac, qprogressive_ac, buffering,
+      progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size,
       alpha_distance, ec, n_ec);
@@ -2113,14 +2189,14 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec(
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_v2(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
     const WasmBoxOpts* box_opts) {
   return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha,
-      progressive_dc, progressive_ac, qprogressive_ac, buffering,
+      progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size, box_opts);
 }
@@ -2128,7 +2204,7 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_v2(
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec_v2(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed,
     int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
@@ -2140,7 +2216,7 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec_v2(
   const WasmExtraChannel* ec = (ec_ptr != nullptr && num_ec > 0u) ? ec_ptr : nullptr;
   const uint32_t n_ec = (ec != nullptr) ? num_ec : 0u;
   return EncodeRgbaWithExtraChannels(pixels, width, height, distance, effort, fmt, has_alpha,
-      progressive_dc, progressive_ac, qprogressive_ac, buffering,
+      progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size,
       alpha_distance, ec, n_ec, box_opts);
@@ -2152,14 +2228,14 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec_v2(
 JxlWasmBuffer* jxl_wasm_encode_with_gain_map(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
     const uint8_t* icc_profile, size_t icc_size,
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
     const uint8_t* gain_map_jxl, size_t gain_map_jxl_size) {
   return EncodeRgbaWithGainMap(pixels, width, height, distance, effort, fmt, has_alpha,
-      progressive_dc, progressive_ac, qprogressive_ac, buffering,
+      progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size,
       gain_map_jxl, gain_map_jxl_size);
@@ -2266,7 +2342,7 @@ JxlWasmBuffer* jxl_wasm_encode_auto(
   if (LooksLikeJpeg(data, data_size)) {
     return jxl_wasm_transcode_jpeg_to_jxl(data, data_size);
   }
-  return EncodeRgba(data, width, height, distance, effort, fmt, has_alpha, 0, 0, 0, 0);
+  return EncodeRgba(data, width, height, distance, effort, fmt, has_alpha, 0, 0, 0, 0, 0);
 }
 
 JxlWasmBuffer* jxl_wasm_encode_auto_x(
@@ -2279,7 +2355,7 @@ JxlWasmBuffer* jxl_wasm_encode_auto_x(
   if (LooksLikeJpeg(data, data_size)) {
     return jxl_wasm_transcode_jpeg_to_jxl(data, data_size);
   }
-  return EncodeRgba(data, width, height, distance, effort, fmt, has_alpha, 0, 0, 0, 0, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  return EncodeRgba(data, width, height, distance, effort, fmt, has_alpha, 0, 0, 0, 0, 0, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
 }
 
 // Encode full image + N sidecar thumbnails in one call.
@@ -2346,7 +2422,7 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
 
     // Thumbnails tolerate more loss; cap effort at 5 to keep encode fast.
     JxlWasmBuffer* sidecar = EncodeRgba(thumb, tw, th,
-        std::max(distance, 1.5f), std::min(effort, 5u), 0, 1u, 0, 0, 0, 0,
+        std::max(distance, 1.5f), std::min(effort, 5u), 0, 1u, 0, 0, 0, 0, 0,
         modular, brotli_effort, decoding_speed, photon_noise_iso);
     if (sidecar == nullptr) continue;
 
@@ -2356,7 +2432,7 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
   }
   free(cascade_owned);
 
-  JxlWasmBuffer* full = EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, 0, 0, 0, 0,
+  JxlWasmBuffer* full = EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, 0, 0, 0, 0, 0,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
   if (full == nullptr) {
     JxlWasmBuffer* cur = sc_chain;
@@ -2455,10 +2531,10 @@ JxlWasmEncState* jxl_wasm_enc_create(void) {
 int jxl_wasm_enc_push_pixels(JxlWasmEncState* s,
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t resampling) {
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
   if (s == nullptr) return -1;
   if (s->error_code != 0) return s->error_code;
-  JxlWasmBuffer* buf = EncodeRgba(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, -1, -1, -1, 0, resampling);
+  JxlWasmBuffer* buf = EncodeRgba(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
   if (buf == nullptr) { s->error_code = 25; return s->error_code; }
   if (buf->error != 0) { int ec = buf->error; FreeBufferNoChain(buf); s->error_code = ec; return ec; }
   // EncodeRgba always uses a separate outbuf (not inline) — steal the pointer.
@@ -2472,11 +2548,11 @@ int jxl_wasm_enc_push_pixels(JxlWasmEncState* s,
 int jxl_wasm_enc_push_pixels_x(JxlWasmEncState* s,
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
   if (s == nullptr) return -1;
   if (s->error_code != 0) return s->error_code;
-  JxlWasmBuffer* buf = EncodeRgba(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  JxlWasmBuffer* buf = EncodeRgba(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
   if (buf == nullptr) { s->error_code = 25; return s->error_code; }
   if (buf->error != 0) { int ec = buf->error; FreeBufferNoChain(buf); s->error_code = ec; return ec; }
   s->outbuf      = buf->data;
@@ -2521,10 +2597,11 @@ JxlWasmEncState* jxl_wasm_enc_create_image(
     uint32_t width, uint32_t height,
     float distance, uint32_t effort,
     uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t resampling) {
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
   if (width == 0 || height == 0) return nullptr;
   const size_t bpc        = (fmt == 2u) ? 4u : (fmt == 1u) ? 2u : 1u;
-  const size_t pixel_size = static_cast<size_t>(width) * height * 4u * bpc;
+  const size_t channels   = (fmt == 3u) ? 3u : 4u;  // A3: rgb8 has no alpha plane
+  const size_t pixel_size = static_cast<size_t>(width) * height * channels * bpc;
 
   JxlWasmEncState* s = static_cast<JxlWasmEncState*>(calloc(1, sizeof(JxlWasmEncState)));
   if (s == nullptr) return nullptr;
@@ -2542,6 +2619,7 @@ JxlWasmEncState* jxl_wasm_enc_create_image(
   s->enc_progressive_ac = progressive_ac;
   s->enc_qprogressive_ac = qprogressive_ac;
   s->enc_buffering = buffering;
+  s->enc_group_order = group_order;
   s->enc_modular = -1;
   s->enc_brotli_effort = -1;
   s->enc_decoding_speed = -1;
@@ -2558,9 +2636,9 @@ JxlWasmEncState* jxl_wasm_enc_create_image_x(
     uint32_t width, uint32_t height,
     float distance, uint32_t effort,
     uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
-  JxlWasmEncState* s = jxl_wasm_enc_create_image(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, resampling);
+  JxlWasmEncState* s = jxl_wasm_enc_create_image(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, resampling);
   if (s != nullptr) {
     s->enc_modular = modular;
     s->enc_brotli_effort = brotli_effort;
@@ -2574,10 +2652,10 @@ JxlWasmEncState* jxl_wasm_enc_create_image_y(
     uint32_t width, uint32_t height,
     float distance, uint32_t effort,
     uint32_t fmt, uint32_t has_alpha,
-    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
     int32_t epf, int32_t gaborish, int32_t dots, int32_t color_transform) {
-  JxlWasmEncState* s = jxl_wasm_enc_create_image_x(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  JxlWasmEncState* s = jxl_wasm_enc_create_image_x(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
   if (s != nullptr) {
     s->enc_epf = epf;
     s->enc_gaborish = gaborish;
@@ -2625,12 +2703,15 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
   if (s->pixels_buf == nullptr) { s->error_code = -2; return -2; }
   if (s->pixels_written != s->pixels_size) { s->error_code = -4; return -4; }
 
-  JxlWasmBuffer* buf = EncodeRgba(
+  // B3: use metadata path when ICC/EXIF/XMP were set via jxl_wasm_enc_set_metadata,
+  // eliminating the buffered-encode malloc+copy that was forced when metadata was present.
+  JxlWasmBuffer* buf = EncodeRgbaWithMetadata(
       s->pixels_buf, s->enc_width, s->enc_height,
       s->enc_distance, s->enc_effort, s->enc_fmt, s->enc_has_alpha,
-      s->enc_progressive_dc, s->enc_progressive_ac, s->enc_qprogressive_ac, s->enc_buffering,
+      s->enc_progressive_dc, s->enc_progressive_ac, s->enc_qprogressive_ac, s->enc_buffering, s->enc_group_order,
       s->enc_modular, s->enc_brotli_effort, s->enc_decoding_speed, s->enc_photon_noise_iso, s->enc_resampling,
-      s->enc_epf, s->enc_gaborish, s->enc_dots, s->enc_color_transform);
+      s->enc_icc, s->enc_icc_size, s->enc_exif, s->enc_exif_size, s->enc_xmp, s->enc_xmp_size,
+      nullptr, s->enc_epf, s->enc_gaborish, s->enc_dots, s->enc_color_transform);
 
   // libjxl is done with the pixel data — free it now to reclaim memory.
   free(s->pixels_buf);
@@ -2653,7 +2734,42 @@ void jxl_wasm_enc_free(JxlWasmEncState* s) {
   if (s == nullptr) return;
   free(s->pixels_buf);  // no-op after enc_finish (set to nullptr); safety net on cancel
   free(s->outbuf);
+  free(s->enc_icc);
+  free(s->enc_exif);
+  free(s->enc_xmp);
   free(s);
+}
+
+// B3: Store ICC/EXIF/XMP for the streaming-input path. Must be called before enc_finish.
+// Copies the data into WASM-owned buffers so JS can release its copies immediately.
+// Returns 0 on success, -1 on malloc failure.
+int jxl_wasm_enc_set_metadata(JxlWasmEncState* s,
+    const uint8_t* icc, size_t icc_size,
+    const uint8_t* exif, size_t exif_size,
+    const uint8_t* xmp, size_t xmp_size) {
+  if (s == nullptr) return -1;
+  free(s->enc_icc);  s->enc_icc = nullptr;  s->enc_icc_size = 0;
+  free(s->enc_exif); s->enc_exif = nullptr; s->enc_exif_size = 0;
+  free(s->enc_xmp);  s->enc_xmp = nullptr;  s->enc_xmp_size = 0;
+  if (icc != nullptr && icc_size > 0) {
+    s->enc_icc = static_cast<uint8_t*>(malloc(icc_size));
+    if (s->enc_icc == nullptr) return -1;
+    memcpy(s->enc_icc, icc, icc_size);
+    s->enc_icc_size = icc_size;
+  }
+  if (exif != nullptr && exif_size > 0) {
+    s->enc_exif = static_cast<uint8_t*>(malloc(exif_size));
+    if (s->enc_exif == nullptr) return -1;
+    memcpy(s->enc_exif, exif, exif_size);
+    s->enc_exif_size = exif_size;
+  }
+  if (xmp != nullptr && xmp_size > 0) {
+    s->enc_xmp = static_cast<uint8_t*>(malloc(xmp_size));
+    if (s->enc_xmp == nullptr) return -1;
+    memcpy(s->enc_xmp, xmp, xmp_size);
+    s->enc_xmp_size = xmp_size;
+  }
+  return 0;
 }
 
 // --- #15: Lossless JPEG → JXL transcode ---
@@ -2663,6 +2779,7 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_s
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(41);
+  JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
 
   if (JxlEncoderStoreJPEGMetadata(enc, JXL_TRUE) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(42);
@@ -2722,6 +2839,7 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl_v2(
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(41);
+  JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
 
   if (JxlEncoderStoreJPEGMetadata(enc, JXL_TRUE) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(42);

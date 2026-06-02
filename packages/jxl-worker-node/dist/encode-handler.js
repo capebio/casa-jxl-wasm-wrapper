@@ -70,7 +70,7 @@ export class EncodeHandler {
     }
     async run() {
         const codec = this.backend.module;
-        const encoder = codec.createEncoder({
+        const encOpts = {
             format: this.opts.format,
             width: this.opts.width,
             height: this.opts.height,
@@ -84,7 +84,12 @@ export class EncodeHandler {
             progressive: this.opts.progressive,
             previewFirst: this.opts.previewFirst,
             chunked: this.opts.chunked,
-        });
+        };
+        if (this.opts.progressiveDc != null)
+            encOpts.progressiveDc = this.opts.progressiveDc;
+        if (this.opts.groupOrder != null)
+            encOpts.groupOrder = this.opts.groupOrder;
+        const encoder = codec.createEncoder(encOpts);
         this.state = "configured";
         try {
             await Promise.all([this.feedEncoder(encoder), this.readEncoderChunks(encoder)]);

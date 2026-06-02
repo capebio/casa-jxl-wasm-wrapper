@@ -18,6 +18,9 @@
 //!   encodeMs / decodeMs use the same effort=3 / quality=90 settings as the
 //!   WASM bench, but native threading is used (expected faster than WASM
 //!   single-threaded encode).
+//!   directRgbaMs: time for pipeline::process_rgba (fused tone→RGBA8 for direct
+//!   JXL encode feed, P3/Tauri parity experiment). The reported encode path now
+//!   uses 4ch direct rgba to demonstrate never-materialized 3ch intermediate.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -50,10 +53,10 @@ fn bench<F: Fn() -> T, T>(f: F) -> (Duration, T) {
 
 // ─── JXL encode / decode ─────────────────────────────────────────────────────
 
-/// Encode RGB8 (3-channel, no alpha) to JXL bytes using jpegxl-rs.
-/// effort=3 (Falcon), quality=JXL_QUALITY — matches WASM bench defaults.
-/// Returns (min encode duration over RUNS, jxl bytes from last run).
-fn bench_jxl_encode(rgb8: &[u8], width: u32, height: u32) -> Option<(Duration, Vec<u8>)> {
+/// Encode buffer (RGB8 or RGBA8) to JXL. num_ch must be 3 or 4.
+/// Used for the direct-RGBA (native parity) encode path: tone directly to 4ch
+/// and feed encoder without ever materializing a retained 3ch RGB8.
+fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -> Option<(Duration, Vec<u8>)> {
     use jpegxl_rs::encode::{encoder_builder, EncoderFrame, EncoderResult, EncoderSpeed};
     use jpegxl_rs::ThreadsRunner;
 
@@ -69,7 +72,7 @@ fn bench_jxl_encode(rgb8: &[u8], width: u32, height: u32) -> Option<(Duration, V
         builder.parallel_runner(&runner).speed(EncoderSpeed::Falcon);
         builder.set_jpeg_quality(JXL_QUALITY);
         let mut encoder = builder.build().ok()?;
-        let frame = EncoderFrame::new(rgb8).num_channels(3);
+        let frame = EncoderFrame::new(data).num_channels(num_ch);
         let t = Instant::now();
         let result: EncoderResult<u8> = encoder
             .encode_frame::<u8, u8>(&frame, width, height)
@@ -118,6 +121,9 @@ struct BenchRow {
     jxl_size_kb: Option<f64>,
     /// JXL decode time; None if decode failed (requires encode success).
     decode_ms: Option<f64>,
+    /// Direct RGBA tone time (process_rgba) — the native "prep" path for encode-only flows.
+    /// Measures the fused tone+alpha path that avoids an intermediate RGB8 Vec.
+    direct_rgba_ms: Option<f64>,
 }
 
 fn opt_f64(v: f64) -> String {
@@ -154,7 +160,8 @@ fn rows_to_json(rows: &[BenchRow], generated_at: &str) -> String {
         out.push_str(&format!("      \"totalMs\": {},\n", opt_f64(row.total_ms)));
         out.push_str(&format!("      \"encodeMs\": {},\n", json_opt(row.encode_ms)));
         out.push_str(&format!("      \"jxlSizeKB\": {},\n", json_opt(row.jxl_size_kb)));
-        out.push_str(&format!("      \"decodeMs\": {}\n", json_opt(row.decode_ms)));
+        out.push_str(&format!("      \"decodeMs\": {},\n", json_opt(row.decode_ms)));
+        out.push_str(&format!("      \"directRgbaMs\": {}\n", json_opt(row.direct_rgba_ms)));
         out.push_str(&format!("    }}{comma}\n"));
     }
     out.push_str("  ]\n");
@@ -187,9 +194,12 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     params.wb_r = img.wb_r;
     params.wb_b = img.wb_b;
     params.color_matrix = img.color_matrix;
-    let (tone_dur, rgb8) = bench(|| pipeline::process(&rgb16, &params));
+    let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
+    let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
 
-    let jxl = bench_jxl_encode(&rgb8, w as u32, h as u32);
+    // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
+    // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
+    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4);
     let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
     let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
     let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
@@ -201,13 +211,13 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     println!("DNG  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
     println!(
-        "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  total {:.1}ms",
-        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(total)
+        "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
+        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
     );
     println!("  WB R={:.3} B={:.3}  black={}  white={}", img.wb_r, img.wb_b, img.black, img.white);
     match (encode_ms, jxl_size_kb, decode_ms) {
         (Some(enc), Some(sz), Some(dec)) =>
-            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms"),
+            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
         _ =>
             println!("  jxl encode/decode: failed"),
     }
@@ -226,6 +236,7 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
         encode_ms,
         jxl_size_kb,
         decode_ms,
+        direct_rgba_ms: Some(ms(direct_rgba_dur)),
     });
 }
 
@@ -251,9 +262,12 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     params.wb_r = img.wb_r;
     params.wb_b = img.wb_b;
     params.color_matrix = img.color_matrix;
-    let (tone_dur, rgb8) = bench(|| pipeline::process(&rgb16, &params));
+    let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
+    let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
 
-    let jxl = bench_jxl_encode(&rgb8, w as u32, h as u32);
+    // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
+    // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
+    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4);
     let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
     let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
     let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
@@ -265,13 +279,13 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     println!("CR2  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
     println!(
-        "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  total {:.1}ms",
-        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(total)
+        "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
+        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
     );
     println!("  WB R={:.3} B={:.3}  black={}  white={}  ISO={:?}", img.wb_r, img.wb_b, img.black, img.white, img.iso);
     match (encode_ms, jxl_size_kb, decode_ms) {
         (Some(enc), Some(sz), Some(dec)) =>
-            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms"),
+            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
         _ =>
             println!("  jxl encode/decode: failed"),
     }
@@ -290,6 +304,7 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
         encode_ms,
         jxl_size_kb,
         decode_ms,
+        direct_rgba_ms: Some(ms(direct_rgba_dur)),
     });
 }
 
@@ -316,9 +331,12 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     if let Some(r) = info.wb_r { params.wb_r = r; }
     if let Some(b) = info.wb_b { params.wb_b = b; }
     if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
-    let (tone_dur, rgb8) = bench(|| pipeline::process(&rgb16, &params));
+    let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
+    let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
 
-    let jxl = bench_jxl_encode(&rgb8, w as u32, h as u32);
+    // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
+    // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
+    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4);
     let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
     let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
     let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
@@ -330,12 +348,12 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     println!("ORF  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
     println!(
-        "  parse {:.1}ms  decomp {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  total {:.1}ms",
-        ms(parse_dur), ms(decomp_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(total)
+        "  parse {:.1}ms  decomp {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
+        ms(parse_dur), ms(decomp_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
     );
     match (encode_ms, jxl_size_kb, decode_ms) {
         (Some(enc), Some(sz), Some(dec)) =>
-            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms"),
+            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
         _ =>
             println!("  jxl encode/decode: failed"),
     }
@@ -356,6 +374,7 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
         encode_ms,
         jxl_size_kb,
         decode_ms,
+        direct_rgba_ms: Some(ms(direct_rgba_dur)),
     });
 }
 

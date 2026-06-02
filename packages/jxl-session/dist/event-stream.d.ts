@@ -1,5 +1,6 @@
 export declare class AsyncEventStream<T> implements AsyncIterable<T> {
     private readonly buffer;
+    private _head;
     private readonly waiting;
     private ended;
     private failure;

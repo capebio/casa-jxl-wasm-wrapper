@@ -885,6 +885,9 @@ btnClear.addEventListener('click', clearResults);
     setWasmStatus('Initialising WASM…');
     try {
         await initRaw();
+        if (typeof rawWasm.initThreadPool === 'function') {
+            await rawWasm.initThreadPool(navigator.hardwareConcurrency);
+        }
         wasmReady = true;
         setWasmStatus('Ready');
     } catch (err) {

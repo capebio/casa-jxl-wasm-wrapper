@@ -57,6 +57,11 @@ The default build path is Docker-first. The container:
 - emits the four build tiers
 - writes `dist/build-manifest.json`
 
+`relaxed-simd-mt` is intentionally stronger than `simd-mt`: it adds
+`-mrelaxed-simd` plus Highway's `-DHWY_WANT_WASM2` path. The build fails if the
+resulting `relaxed-simd-mt` and `simd-mt` WASM hashes match, because that means
+the relaxed tier did not produce a distinct optimized artifact.
+
 On Windows, Docker Desktop must be running before invoking the build. A stopped
 Docker service leaves the CLI installed but the daemon pipe absent; the build
 will fail before pulling GHCR with a daemon-reachability error.

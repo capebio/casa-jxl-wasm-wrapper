@@ -18,12 +18,9 @@
 //   { id, type: 'done',          jxl, jxlMs, w, h }
 //   { id, type: 'error',         error }
 
-import init, {
-    process_orf,
-    rgb_to_rgba,
-    LookRenderer,
-    rotate_rgb8,
-} from './pkg/raw_converter_wasm.js';
+import init, * as rawWasm from './pkg/raw_converter_wasm.js';
+// A3: rgb_to_rgba removed — send RGB8 directly to JXL worker (saves ~250ms + 25% transfer)
+const { process_orf, LookRenderer, rotate_rgb8 } = rawWasm;
 
 // JXL encoding is handled by jxl-worker.js (spawned from the main thread).
 
@@ -33,11 +30,17 @@ const liveStateMap  = new Map(); // taskId → {renderer: LookRenderer, outW, ou
 const thumbStateMap = new Map(); // taskId → same shape but thumb-sized LookRenderer
 
 async function ensureWasm() {
-    if (!wasmReady) wasmReady = init();
+    if (!wasmReady) wasmReady = (async () => {
+        await init();
+        // A2: init rayon thread pool when parallel-wasm feature is compiled in
+        if (typeof rawWasm.initThreadPool === 'function') {
+            await rawWasm.initThreadPool(navigator.hardwareConcurrency);
+        }
+    })();
     try {
         await wasmReady;
     } catch (err) {
-        wasmReady = null; // allow retry on next call
+        wasmReady = null;
         throw err;
     }
 }
@@ -215,32 +218,27 @@ self.addEventListener('message', async (ev) => {
 
         // Bake user rotation into JXL pixels — display rotation is CSS-side in main thread
         const userTurns = Math.round(((options.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
-        let fullRgb = null;
-        let rgba;
+        let fullRgb;
         if (userTurns !== 0) {
-            fullRgb = result.take_rgb();
-            const rotRes = rotate_rgb8(fullRgb, w, h, userTurns);
+            const rawRgb = result.take_rgb();
+            const rotRes = rotate_rgb8(rawRgb, w, h, userTurns);
             fullRgb = rotRes.take_rgb();
             w = rotRes.width;
             h = rotRes.height;
             rotRes.free();
-            rgba = rgb_to_rgba(fullRgb);
         } else {
-            // Rotation path must use RGB (for rotate_rgb8). Non-rotation path uses recommended JS conversion.
-            rgba = rgb_to_rgba(result.take_rgb());
+            fullRgb = result.take_rgb();
         }
 
-        // Hand off full-res RGBA to the dedicated JXL encode worker (main.js
-        // spawns it from the page thread so Emscripten Pthreads work under COOP/COEP).
+        // A3: send RGB8 directly — skip the ~210ms rgb_to_rgba conversion and 25% larger transfer.
+        const rgbBuf = fullRgb.buffer.slice(fullRgb.byteOffset, fullRgb.byteOffset + fullRgb.byteLength);
         fullRgb = null; // allow GC
-        // Slice to a zero-offset owned buffer before transfer (rgba is a WASM heap view).
-        const rgbaBuf = rgba.buffer.slice(rgba.byteOffset, rgba.byteOffset + rgba.byteLength);
         self.postMessage(
-            { id, type: 'encode_request', rgba: rgbaBuf, width: w, height: h,
+            { id, type: 'encode_request', pixels: rgbBuf, format: 'rgb8', width: w, height: h,
               quality: options.lossless ? 100 : options.quality,
               effort: options.effort ?? 3,
               lossless: !!options.lossless },
-            [rgbaBuf],
+            [rgbBuf],
         );
     } catch (err) {
         // Free any LookRenderer objects stored before the failure so WASM memory

@@ -12,6 +12,7 @@ export declare class EncodeSessionImpl implements EncodeSession {
     private finished;
     private terminated;
     private totalBytesWritten;
+    private sidecarOffsets;
     constructor(scheduler: Scheduler, opts: EncodeOptions);
     pushPixels(chunk: ArrayBuffer, region?: Region): Promise<void>;
     finish(): Promise<void>;

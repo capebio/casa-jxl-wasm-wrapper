@@ -166,6 +166,19 @@ describe("animation types in native index.ts", () => {
   });
 });
 
+describe("progressive encode types (predator Tauri parity) in native index.ts", () => {
+  test("EncoderOptions declares progressiveDc and groupOrder for multi-layer progressive", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(source).toContain("progressiveDc?: 0 | 1 | 2");
+    expect(source).toContain("groupOrder?: 0 | 1");
+    // wiring via convert to adv ids (19=PROGRESSIVE_DC, 13=GROUP_ORDER) so no cc change needed
+    expect(source).toContain("id: 19");
+    expect(source).toContain("id: 13");
+    expect(source).toContain("Top-level progressiveDc");
+  });
+});
+
 describe("@casabio/jxl-native extra channel roundtrips", () => {
   test("encodes with alphaDistance:0 (lossless alpha) and round-trips correctly", async () => {
     expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);

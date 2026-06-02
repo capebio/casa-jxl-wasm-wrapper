@@ -78,6 +78,10 @@ export class EncodeSessionImpl implements EncodeSession {
       chunked: opts.chunked ?? false,
       priority: opts.priority ?? "visible",
     };
+    // progressiveDc + groupOrder (predator): assign conditionally to satisfy exactOptionalPropertyTypes in MsgEncodeStart
+    // (the ? in protocol + exact mode dislikes explicit undefined in the literal from opts?: )
+    if (opts.progressiveDc != null) (startMsg as any).progressiveDc = opts.progressiveDc;
+    if (opts.groupOrder != null) (startMsg as any).groupOrder = opts.groupOrder;
     if (opts.sidecarSizes !== undefined) startMsg.sidecarSizes = opts.sidecarSizes;
 
     // No-op catch so a rejected done() promise with no caller handler (caller

@@ -12,6 +12,7 @@ export declare class DecodeSessionImpl implements DecodeSession {
     private lastInfo;
     private closed;
     private terminated;
+    private framesConsumed;
     constructor(scheduler: Scheduler, opts: DecodeOptions);
     push(chunk: ArrayBuffer | Uint8Array): Promise<void>;
     close(): Promise<void>;

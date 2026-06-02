@@ -2,7 +2,6 @@
 // EncodeSession implementation. Routes through jxl-scheduler to a worker.
 // Spec: Sections 5, 11, 16.2.
 import { JxlError } from "@casabio/jxl-core/errors";
-import { recommendedEffort } from "@casabio/jxl-capabilities";
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer } from "./util.js";
 const KNOWN_JXL_ERROR_CODES = new Set([
@@ -15,6 +14,7 @@ const KNOWN_JXL_ERROR_CODES = new Set([
     "WorkerCrashed",
     "CapabilityMissing",
     "ConfigError",
+    "QueueOverflow", // task 007-contracts-2d3e4f: was missing, decode side already had it
     "Internal",
 ]);
 export class EncodeSessionImpl {
@@ -29,15 +29,18 @@ export class EncodeSessionImpl {
     finished = false;
     terminated = false;
     totalBytesWritten = null;
+    sidecarOffsets = undefined;
     constructor(scheduler, opts) {
         this.scheduler = scheduler;
         this.opts = opts;
         this.id = newSessionId();
         // Quality/distance: if the caller gave neither, default distance to 1.0.
+        // When both are provided, distance takes precedence and quality is ignored
+        // (task 007-logic-k7l8m9n0: make the precedence rule explicit).
         const hasDistance = opts.distance !== undefined;
         const hasQuality = opts.quality !== undefined;
         const distance = hasDistance ? opts.distance : hasQuality ? null : 1.0;
-        const quality = hasQuality ? opts.quality : null;
+        const quality = !hasDistance && hasQuality ? opts.quality : null;
         const startMsg = {
             type: "encode_start",
             sessionId: this.id,
@@ -50,12 +53,18 @@ export class EncodeSessionImpl {
             xmp: opts.xmp != null ? toTransferableBuffer(opts.xmp) : null,
             distance,
             quality,
-            effort: opts.effort ?? recommendedEffort(),
+            effort: opts.effort ?? 4,
             progressive: opts.progressive ?? false,
             previewFirst: opts.previewFirst ?? false,
             chunked: opts.chunked ?? false,
             priority: opts.priority ?? "visible",
         };
+        // progressiveDc + groupOrder (predator): assign conditionally to satisfy exactOptionalPropertyTypes in MsgEncodeStart
+        // (the ? in protocol + exact mode dislikes explicit undefined in the literal from opts?: )
+        if (opts.progressiveDc != null)
+            startMsg.progressiveDc = opts.progressiveDc;
+        if (opts.groupOrder != null)
+            startMsg.groupOrder = opts.groupOrder;
         if (opts.sidecarSizes !== undefined)
             startMsg.sidecarSizes = opts.sidecarSizes;
         // No-op catch so a rejected done() promise with no caller handler (caller
@@ -78,6 +87,10 @@ export class EncodeSessionImpl {
         this.abortSignal = opts.signal ?? null;
         if (this.abortSignal !== null) {
             this.abortHandler = () => {
+                // Cancel the scheduler slot before terminating so the worker receives
+                // encode_cancel and releases its pool slot immediately
+                // (task 007-concurrency-a3b4c5d6).
+                this.scheduler.cancelSession(this.id);
                 this.terminate(new JxlError("Cancelled", "Encode aborted by signal", { sessionId: this.id }));
             };
             if (this.abortSignal.aborted) {
@@ -105,17 +118,27 @@ export class EncodeSessionImpl {
         if (this.terminated || this.finished)
             return;
         const ab = toTransferableBuffer(chunk);
-        this.scheduler.send(this.id, region !== undefined
-            ? { type: "encode_pixels", sessionId: this.id, chunk: ab, region }
-            : { type: "encode_pixels", sessionId: this.id, chunk: ab }, [ab]);
+        // Use conditional spread so the object always has the same shape (single
+        // hidden class), avoiding a polymorphic scheduler.send() call site
+        // (task 007-performance-g3h4i5j6).
+        this.scheduler.send(this.id, {
+            type: "encode_pixels",
+            sessionId: this.id,
+            chunk: ab,
+            ...(region !== undefined ? { region } : {}),
+        }, [ab]);
     }
     async finish() {
         if (this.terminated || this.finished)
             return;
-        this.finished = true;
+        // Do not set this.finished until after acquirePromise resolves so that a
+        // failed acquire doesn't leave the session with finished=true, which would
+        // cause subsequent pushPixels() to throw ConfigError rather than a more
+        // accurate error (task 007-contracts-5m6n7o).
         await this.acquirePromise;
-        if (this.terminated)
+        if (this.terminated || this.finished)
             return;
+        this.finished = true;
         this.scheduler.send(this.id, { type: "encode_finish", sessionId: this.id });
     }
     chunks() {
@@ -130,12 +153,25 @@ export class EncodeSessionImpl {
         const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : 16;
         const originalBytes = this.opts.width * this.opts.height * bpp;
         const compressedBytes = this.totalBytesWritten;
-        return { originalBytes, compressedBytes, ratio: compressedBytes / originalBytes };
+        return {
+            originalBytes,
+            compressedBytes,
+            ratio: compressedBytes / originalBytes,
+            // Include sidecarOffsets when the worker produced them
+            // (task 007-contracts-1a2b3c).
+            ...(this.sidecarOffsets !== undefined ? { sidecarOffsets: this.sidecarOffsets } : {}),
+        };
     }
     async cancel(reason) {
-        if (this.terminated)
+        // Guard finished: cancel() after finish() but before encode_done would
+        // discard already-received encode_chunk buffers (task 007-logic-e5f6a7b8).
+        if (this.terminated || this.finished)
             return;
         await this.acquirePromise.catch(() => undefined);
+        // Re-check after the await: abort handler or encode completion may have
+        // run during the suspend, preventing double-cancel (task 007-errors-d4e5f6a7).
+        if (this.terminated || this.finished)
+            return;
         this.scheduler.cancelSession(this.id);
         this.terminate(new JxlError("Cancelled", reason ?? "Encode cancelled", { sessionId: this.id }));
     }
@@ -159,6 +195,9 @@ export class EncodeSessionImpl {
             case "encode_done":
                 if (msg.sessionId !== this.id)
                     return;
+                // Capture sidecarOffsets before calling complete() so getStats() can
+                // return them (task 007-contracts-1a2b3c).
+                this.sidecarOffsets = msg.sidecarOffsets;
                 this.complete(msg.totalBytes);
                 break;
             case "encode_error": {
