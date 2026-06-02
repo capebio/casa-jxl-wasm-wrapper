@@ -353,7 +353,7 @@ Which approach would you like to use? (Reply with 1 or 2, or any adjustments to 
 
 **Latest commits include P3.2b dedup/compositing (16561e6, 516fe9d) pushed to origin/feature branch.**
 
-Ready for full P3.3 impl (container preview extraction, JXTC specific, animated support, more debug UI).
+Ready for full P3.3 impl (container preview extraction, JXTC specific, animated support, more debug UI). Progress: animation metadata + '(anim)' badges + explicit preview kick delivered in this continuation slice (d72f76c, db15bae).
 
 **Key artifacts added:**
 - Full plumbing + echo in `web/main.js` + `web/jxl-decode-worker.js`.
