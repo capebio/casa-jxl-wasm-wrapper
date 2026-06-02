@@ -592,7 +592,7 @@ class WorkerPool {
             // When card===null we intentionally perform no tracking mutation and no write
             // (harmless during Task 4; real card supplied from guarded callbacks after Task 5).
             const policy = entry.options && entry.options.cachePolicy;
-            if (policy && (data.type === 'jxl_progress' || data.type === 'jxl_decoded') && data.rgba) {
+            if (policy && (data.type === 'jxl_progress' || data.type === 'jxl_decoded' || data.type === 'jxl_preview') && data.rgba) {
                 const isFinal = (data.isFinal === true) || (data.type === 'jxl_decoded');
                 this._applyJxlCachePolicy(null, decodeId, data.rgba, data.w, data.h, isFinal, policy);
             }
