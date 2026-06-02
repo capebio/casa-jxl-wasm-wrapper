@@ -2513,8 +2513,8 @@ function drawLightboxForCard(card) {
     // WASM only: when JXL bytes arrive before RGB, jump to JXL mode so the
     // user sees real encoded output instead of the JPEG preview placeholder.
     // Tauri intentionally skips this — embedded JPEG stays primary until a
-    // slider edit triggers `apply_look`. (P3.2 ROI applies to JXL lightbox
-    // decodes when used in Tauri webview.)
+    // slider edit triggers `apply_look`. (P3.2 ROI + P3.3 previewFirst/region/ds apply to JXL lightbox
+    // decodes when used in Tauri webview; shared main.js + jxl-decode-worker.)
     if (!hasFullRgb && card._blobUrl && !IS_TAURI) {
         card._sourceMode = 'jxl';
         drawLightboxForCard(card);
@@ -2590,6 +2590,7 @@ function drawLightboxForCard(card) {
     // apply_look returns a fresh RAW frame and paints it directly).  This
     // keeps lightbox display latency bounded by the embedded preview path
     // instead of the full RAW pipeline + JXL queue.
+    // (P3.3: when JXL source is used in Tauri webview, previewFirst gives early dc container preview + ROI for free via the shared code.)
     updateToggleButtonState(card);
     syncZoomToDisplayLong();
     // Final safety net for straighten in any remaining paths
