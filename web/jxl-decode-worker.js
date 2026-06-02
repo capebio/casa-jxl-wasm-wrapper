@@ -30,12 +30,15 @@ async function handleProgressiveDecode(data) {
     const buf = await resp.arrayBuffer();
 
     // P3.3: first try quick DC preview (container/embedded preview style) if previewFirst
+    // Quick full low-res (downsampled) 'dc' decode first → emit jxl_preview + header → dispose → main (ROI/ds/detail) decode.
     if (data.previewFirst) {
+      let previewDec = null;
       try {
-        const previewDec = createDecoder({
+        const prevDs = (data.downsample ?? 1) > 1 ? data.downsample : 2;
+        previewDec = createDecoder({
           format: 'rgba8',
-          region: null, // preview is full low-res
-          downsample: (data.downsample ?? 1) > 1 ? data.downsample : 2, // slight down for preview
+          region: null, // preview is always full low-res; main decoder may apply region/ds
+          downsample: prevDs,
           progressionTarget: 'final',
           emitEveryPass: false,
           progressiveDetail: 'dc',
@@ -45,22 +48,42 @@ async function handleProgressiveDecode(data) {
         });
         await previewDec.push(buf);
         await previewDec.close();
+        let psw = 0, psh = 0;
         for await (const ev of previewDec.events()) {
-          if (ev.type === 'progress' || ev.type === 'final') {
-            const isFinal = ev.type === 'final';
+          if (ev.type === 'header') {
+            psw = ev.info.width || 0;
+            psh = ev.info.height || 0;
+            self.postMessage({ type: 'jxl_header', decodeId, w: psw, h: psh });
+          } else if (ev.type === 'progress' || ev.type === 'final') {
             let pixelsArray = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
             if (pixelsArray.byteOffset !== 0 || pixelsArray.byteLength !== pixelsArray.buffer.byteLength) {
               pixelsArray = new Uint8Array(pixelsArray);
             }
             self.postMessage(
-              { type: 'jxl_preview', decodeId, rgba: pixelsArray, w: ev.info.width, h: ev.info.height, isFinal, frameIndex: data.frameIndex ?? 0 },
+              {
+                type: 'jxl_preview',
+                decodeId,
+                rgba: pixelsArray,
+                w: ev.info.width,
+                h: ev.info.height,
+                isFinal: true,
+                frameIndex: data.frameIndex ?? 0,
+                sourceW: psw,
+                sourceH: psh,
+                region: null,
+                downsample: prevDs,
+                progressiveDetail: 'dc'
+              },
               [pixelsArray.buffer]
             );
           }
         }
-        previewDec.dispose();
       } catch (e) {
         console.warn('P3.3 preview decode failed for', decodeId, e);
+      } finally {
+        if (previewDec) {
+          try { previewDec.dispose(); } catch (_) {}
+        }
       }
     }
 

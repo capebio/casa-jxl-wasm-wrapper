@@ -341,6 +341,8 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
             const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
             if (msg.sourceW) decoded.sourceW = msg.sourceW;
             if (msg.sourceH) decoded.sourceH = msg.sourceH;
+            if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+            if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
             card._jxlDecoded = decoded;
             resolve(card._jxlDecoded);
         }, 'low', { progressive: true, cachePolicy: 'onFinal' });
@@ -2091,7 +2093,18 @@ function _triggerJxlRoiUpdate() {
                 return;
             }
             if (msg.type === 'jxl_preview') {
-                // P3.3: paint preview (low res)
+                // P3.3: paint early container preview (low res full); also populate cache if larger area
+                const area = (msg.w || 0) * (msg.h || 0);
+                const curArea = card._jxlDecoded ? (card._jxlDecoded.w || 0) * (card._jxlDecoded.h || 0) : 0;
+                if (!card._jxlDecoded || area > curArea) {
+                    const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h, fromPreview: true };
+                    if (msg.sourceW) decoded.sourceW = msg.sourceW;
+                    if (msg.sourceH) decoded.sourceH = msg.sourceH;
+                    if (msg.downsample != null) decoded.downsample = msg.downsample;
+                    if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
+                    if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+                    card._jxlDecoded = decoded;
+                }
                 lightboxCanvas.width = msg.w;
                 lightboxCanvas.height = msg.h;
                 const ctx = lightboxCanvas.getContext('2d');
@@ -2099,7 +2112,8 @@ function _triggerJxlRoiUpdate() {
                 if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                     setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
                 }
-                setPaintedSourceBadge('jxl', ' (preview)');
+                const previewExtra = ' (preview)' + (msg.progressiveDetail ? ' ' + msg.progressiveDetail : '');
+                setPaintedSourceBadge('jxl', previewExtra);
                 applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
                 return;
@@ -2138,7 +2152,9 @@ function _triggerJxlRoiUpdate() {
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                 setCleanCanvas(ctx2.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
-            const roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''})` : '';
+            let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''})` : '';
+            if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
+            if (msg.region) roiExtra += ' (JXTC if container)';
             setPaintedSourceBadge('jxl', roiExtra);
             // Straighten on a sub-rect view may be approximate; full source is forced on slider interaction.
             applyStraightenToLightboxCanvas(card);
@@ -2186,6 +2202,8 @@ function ensureFullJxlSourceForEditing(card) {
             const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
             if (msg.sourceW) decoded.sourceW = msg.sourceW;
             if (msg.sourceH) decoded.sourceH = msg.sourceH;
+            if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+            if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
             card._jxlDecoded = decoded;
         }
     }, 'low', { progressive: true, cachePolicy: 'onFinal' });
@@ -2307,7 +2325,11 @@ function drawLightboxForCard(card) {
                 const ctx2 = lightboxCanvas.getContext('2d');
                 setCleanCanvas(ctx2.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
               }
-              const roiExtra = (d.region) ? ` (ROI${d.downsample > 1 ? ' @' + d.downsample + 'x' : ''})` : '';
+              let roiExtra = (d.region) ? ` (ROI${d.downsample > 1 ? ' @' + d.downsample + 'x' : ''}${d.progressiveDetail ? ' ' + d.progressiveDetail : ''})` : '';
+              if (d.frameIndex > 0) roiExtra += ` f${d.frameIndex}`;
+              if (d.region) roiExtra += ' (JXTC if container)';
+              if (!roiExtra && d.fromPreview) roiExtra = ' (preview)';
+              if (!roiExtra && d.progressiveDetail === 'dc') roiExtra = ' (dc)';
               setPaintedSourceBadge('jxl', roiExtra);
               lbLoadingBadge.hidden = true;
               applyStraightenToLightboxCanvas(card);
@@ -2356,9 +2378,12 @@ function drawLightboxForCard(card) {
                 const area = (msg.w || 0) * (msg.h || 0);
                 const curArea = card._jxlDecoded ? (card._jxlDecoded.w || 0) * (card._jxlDecoded.h || 0) : 0;
                 if (!card._jxlDecoded || area > curArea) {
-                    const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
+                    const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h, fromPreview: true };
                     if (msg.sourceW) decoded.sourceW = msg.sourceW;
                     if (msg.sourceH) decoded.sourceH = msg.sourceH;
+                    if (msg.downsample != null) decoded.downsample = msg.downsample;
+                    if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
+                    if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
                     card._jxlDecoded = decoded;
                 }
                 lightboxCanvas.width = msg.w;
@@ -2368,7 +2393,8 @@ function drawLightboxForCard(card) {
                 if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                     setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
                 }
-                setPaintedSourceBadge('jxl', ' (preview)');
+                const previewExtra = ' (preview)' + (msg.progressiveDetail ? ' ' + msg.progressiveDetail : '');
+                setPaintedSourceBadge('jxl', previewExtra);
                 lbLoadingBadge.hidden = true;
                 applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
@@ -2382,7 +2408,9 @@ function drawLightboxForCard(card) {
             if (msg.sourceW) decoded.sourceW = msg.sourceW;
             if (msg.sourceH) decoded.sourceH = msg.sourceH;
             if (msg.region) decoded.region = msg.region;
-            if (msg.downsample) decoded.downsample = msg.downsample;
+            if (msg.downsample != null) decoded.downsample = msg.downsample;
+            if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+            if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
             card._jxlDecoded = decoded;
             // P3.2b: if this is a region decode and we know the full source size
             // (from header or echoed), size the canvas to the logical full source
@@ -2419,7 +2447,9 @@ function drawLightboxForCard(card) {
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                 setCleanCanvas(ctxAfter.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
-            const roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''})` : '';
+            let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''})` : '';
+            if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
+            if (msg.region) roiExtra += ' (JXTC if container)';
             setPaintedSourceBadge('jxl', roiExtra);
             lbLoadingBadge.hidden = true;
             applyStraightenToLightboxCanvas(card);
@@ -2438,9 +2468,13 @@ function drawLightboxForCard(card) {
                     const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
                     if (msg.sourceW) decoded.sourceW = msg.sourceW;
                     if (msg.sourceH) decoded.sourceH = msg.sourceH;
+                    if (msg.downsample != null) decoded.downsample = msg.downsample;
+                    if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
+                    if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+                    if (msg.type === 'jxl_preview') decoded.fromPreview = true;
                     card._jxlDecoded = decoded;
                 }
-            }, 'low', { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'dc' });
+            }, 'low', { progressive: true, cachePolicy: 'onFirstProgress', progressiveDetail: 'dc', previewFirst: true, frameIndex: 0 });
         }
     }
 
@@ -2754,6 +2788,8 @@ function prefetchJxl(card, priority = 'normal') {
         const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
         if (msg.sourceW) decoded.sourceW = msg.sourceW;
         if (msg.sourceH) decoded.sourceH = msg.sourceH;
+        if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
+        if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
         card._jxlDecoded = decoded;
     }, priority, { progressive: true, cachePolicy: 'onFinal' });
 }
