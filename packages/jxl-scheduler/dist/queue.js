@@ -8,47 +8,102 @@ export class PriorityQueue {
     visible = [];
     near = [];
     background = [];
+    _visibleHead = 0;
+    _nearHead = 0;
+    _backgroundHead = 0;
+    _size = 0;
     enqueue(entry) {
         this.lane(entry.priority).push(entry);
+        this._size++;
     }
     // Peek at the highest-priority pending entry without removing it.
     peek() {
-        return this.visible[0] ?? this.near[0] ?? this.background[0] ?? null;
+        if (this.visible.length > this._visibleHead)
+            return this.visible[this._visibleHead] ?? null;
+        if (this.near.length > this._nearHead)
+            return this.near[this._nearHead] ?? null;
+        if (this.background.length > this._backgroundHead)
+            return this.background[this._backgroundHead] ?? null;
+        return null;
     }
     // Remove and return the highest-priority entry.
     dequeue() {
-        const lane = this.visible.length > 0 ? this.visible :
-            this.near.length > 0 ? this.near :
-                this.background;
-        return lane.shift() ?? null;
+        // Try visible first
+        if (this.visible.length > this._visibleHead) {
+            const entry = this.visible[this._visibleHead++];
+            if (this._visibleHead >= this.visible.length) {
+                this.visible.length = 0;
+                this._visibleHead = 0;
+            }
+            else if (this._visibleHead > 64 && this._visibleHead * 2 > this.visible.length) {
+                this.visible.copyWithin(0, this._visibleHead);
+                this.visible.length -= this._visibleHead;
+                this._visibleHead = 0;
+            }
+            this._size--;
+            return entry ?? null;
+        }
+        // Then near
+        if (this.near.length > this._nearHead) {
+            const entry = this.near[this._nearHead++];
+            if (this._nearHead >= this.near.length) {
+                this.near.length = 0;
+                this._nearHead = 0;
+            }
+            else if (this._nearHead > 64 && this._nearHead * 2 > this.near.length) {
+                this.near.copyWithin(0, this._nearHead);
+                this.near.length -= this._nearHead;
+                this._nearHead = 0;
+            }
+            this._size--;
+            return entry ?? null;
+        }
+        // Then background
+        if (this.background.length > this._backgroundHead) {
+            const entry = this.background[this._backgroundHead++];
+            if (this._backgroundHead >= this.background.length) {
+                this.background.length = 0;
+                this._backgroundHead = 0;
+            }
+            else if (this._backgroundHead > 64 && this._backgroundHead * 2 > this.background.length) {
+                this.background.copyWithin(0, this._backgroundHead);
+                this.background.length -= this._backgroundHead;
+                this._backgroundHead = 0;
+            }
+            this._size--;
+            return entry ?? null;
+        }
+        return null;
     }
     remove(sessionId) {
-        for (const lane of [this.visible, this.near, this.background]) {
-            const idx = lane.findIndex((e) => e.sessionId === sessionId);
-            if (idx !== -1) {
-                lane.splice(idx, 1);
+        for (let i = this._visibleHead; i < this.visible.length; i++) {
+            if (this.visible[i].sessionId === sessionId) {
+                this.visible.splice(i, 1);
+                this._size--;
+                return true;
+            }
+        }
+        for (let i = this._nearHead; i < this.near.length; i++) {
+            if (this.near[i].sessionId === sessionId) {
+                this.near.splice(i, 1);
+                this._size--;
+                return true;
+            }
+        }
+        for (let i = this._backgroundHead; i < this.background.length; i++) {
+            if (this.background[i].sessionId === sessionId) {
+                this.background.splice(i, 1);
+                this._size--;
                 return true;
             }
         }
         return false;
     }
     get size() {
-        return this.visible.length + this.near.length + this.background.length;
+        return this._size;
     }
     get isEmpty() {
-        return this.size === 0;
-    }
-    // Return all background session IDs (candidates for preemption).
-    backgroundIds() {
-        return this.background.map((e) => e.sessionId);
-    }
-    findBySessionId(sessionId) {
-        for (const lane of [this.visible, this.near, this.background]) {
-            const entry = lane.find((e) => e.sessionId === sessionId);
-            if (entry !== undefined)
-                return entry;
-        }
-        return null;
+        return this._size === 0;
     }
     lane(priority) {
         switch (priority) {

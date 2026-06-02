@@ -1,3 +1,5 @@
+/// <reference types="node" />
+/// <reference types="node" />
 import type { WorkerToMainMessage, MainToWorkerMessage } from "@casabio/jxl-core/protocol";
 export type Priority = "visible" | "near" | "background";
 export interface Session {

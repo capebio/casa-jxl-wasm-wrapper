@@ -172,6 +172,7 @@ struct LutCache {
     whites_bits: u32, blacks_bits: u32,
     pre_r: Vec<u16>, pre_g: Vec<u16>, pre_b: Vec<u16>,
     post: Vec<u8>,
+    post16: Option<Vec<u16>>,
 }
 
 impl LutCache {
@@ -193,6 +194,8 @@ impl LutCache {
 thread_local! {
     static LUT_CACHE: std::cell::RefCell<Option<LutCache>> =
         const { std::cell::RefCell::new(None) };
+    static BLUR_SCRATCH: std::cell::RefCell<(Vec<u16>, Vec<u16>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 fn build_post_lut(t: &TonePost) -> Vec<u8> {
@@ -200,6 +203,15 @@ fn build_post_lut(t: &TonePost) -> Vec<u8> {
     for i in 0..65536usize {
         let y = tone_curve(i as f32 / 65535.0, t);
         lut[i] = (y * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    }
+    lut
+}
+
+fn build_post16_lut(t: &TonePost) -> Vec<u16> {
+    let mut lut = vec![0u16; 65536];
+    for i in 0..65536usize {
+        let y = tone_curve(i as f32 / 65535.0, t);
+        lut[i] = (y * 65535.0 + 0.5).clamp(0.0, 65535.0) as u16;
     }
     lut
 }
@@ -249,19 +261,21 @@ fn separable_blur_into(src: &[u16], width: usize, _height: usize,
         }
         // Interior — no clamping; reads are contiguous in `src`.
         for x in int_start..int_end {
-            let mut acc = [0f32; 3];
+            let mut acc_r = 0f32;
+            let mut acc_g = 0f32;
+            let mut acc_b = 0f32;
             let b0 = (y * width + x - half) * 3;
             for ki in 0..kernel.len() {
                 let kv = kernel[ki];
                 let b = b0 + ki * 3;
-                acc[0] += src[b]   as f32 * kv;
-                acc[1] += src[b+1] as f32 * kv;
-                acc[2] += src[b+2] as f32 * kv;
+                acc_r += src[b]   as f32 * kv;
+                acc_g += src[b+1] as f32 * kv;
+                acc_b += src[b+2] as f32 * kv;
             }
             let b = x * 3;
-            row[b]   = acc[0].round() as u16;
-            row[b+1] = acc[1].round() as u16;
-            row[b+2] = acc[2].round() as u16;
+            row[b]   = acc_r.round() as u16;
+            row[b+1] = acc_g.round() as u16;
+            row[b+2] = acc_b.round() as u16;
         }
         // Right border — kernel window reaches outside right edge; clamp xi.
         for x in right_start..width {
@@ -294,23 +308,31 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
 
     #[cfg(feature = "parallel")]
     {
+        const VTILE: usize = 128;
         let temp_slice = temp.as_slice();
         out.par_chunks_mut(width * 3).enumerate().for_each(|(y, row)| {
-            for x in 0..width {
-                let mut acc = [0f32; 3];
+            for x0 in (0..width).step_by(VTILE) {
+                let x1 = (x0 + VTILE).min(width);
+                let tile = x1 - x0;
+                let mut acc = [[0f32; 3]; VTILE];
                 for ki in 0..kernel.len() {
                     let kv = kernel[ki];
                     let yi = (y as isize + ki as isize - half as isize)
                         .clamp(0, height as isize - 1) as usize;
-                    let base = (yi * width + x) * 3;
-                    acc[0] += temp_slice[base]   as f32 * kv;
-                    acc[1] += temp_slice[base+1] as f32 * kv;
-                    acc[2] += temp_slice[base+2] as f32 * kv;
+                    let row_base = yi * width * 3;
+                    for xi in 0..tile {
+                        let b = row_base + (x0 + xi) * 3;
+                        acc[xi][0] += temp_slice[b]   as f32 * kv;
+                        acc[xi][1] += temp_slice[b+1] as f32 * kv;
+                        acc[xi][2] += temp_slice[b+2] as f32 * kv;
+                    }
                 }
-                let o = x * 3;
-                row[o]   = acc[0].round() as u16;
-                row[o+1] = acc[1].round() as u16;
-                row[o+2] = acc[2].round() as u16;
+                for xi in 0..tile {
+                    let o = (x0 + xi) * 3;
+                    row[o]   = acc[xi][0].round() as u16;
+                    row[o+1] = acc[xi][1].round() as u16;
+                    row[o+2] = acc[xi][2].round() as u16;
+                }
             }
         });
     }
@@ -351,41 +373,36 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
 
 pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                             params: &PipelineParams) {
-    // Two reusable scratch buffers across both passes: peak is always 2 full
-    // images rather than 4 (original) or 3 (prior incomplete fix).
-    let mut temp: Vec<u16> = Vec::new();
-    let mut blurred: Vec<u16> = Vec::new();
-    if params.texture != 0.0 {
-        separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_5(), &mut temp, &mut blurred);
-        // Manual tight loop (consistent with fast-path style in downscalers and WASM glue).
-        // Single index increment, direct mutation.
-        let n = rgb16.len();
-        let mut i = 0;
-        while i < n {
-            let orig = rgb16[i] as i32;
-            let blur = blurred[i] as i32;
-            rgb16[i] = (orig + (params.texture * (orig - blur) as f32).round() as i32)
-                .clamp(0, 65535) as u16;
-            i += 1;
+    if params.texture == 0.0 && params.clarity == 0.0 { return; }
+    BLUR_SCRATCH.with(|scratch| {
+        let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
+        if params.texture != 0.0 {
+            separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_5(), temp, blurred);
+            let n = rgb16.len();
+            let mut i = 0;
+            while i < n {
+                let orig = rgb16[i] as i32;
+                let blur = blurred[i] as i32;
+                rgb16[i] = (orig + (params.texture * (orig - blur) as f32).round() as i32)
+                    .clamp(0, 65535) as u16;
+                i += 1;
+            }
         }
-    }
-    if params.clarity != 0.0 {
-        separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_13(), &mut temp, &mut blurred);
-        // Manual tight loop (same style as texture pass and other hot pixel loops).
-        let n = rgb16.len();
-        let mut i = 0;
-        while i < n {
-            let orig = rgb16[i] as i32;
-            let blur = blurred[i] as i32;
-            // Midtone-weighted USM: weight peaks at 0.5 (midtones) and falls to 0
-            // at shadows/highlights, suppressing the dark halo artifact at high-contrast edges.
-            let v = orig as f32 / 65535.0;
-            let w = 4.0 * v * (1.0 - v);
-            rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
-                .clamp(0, 65535) as u16;
-            i += 1;
+        if params.clarity != 0.0 {
+            separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_13(), temp, blurred);
+            let n = rgb16.len();
+            let mut i = 0;
+            while i < n {
+                let orig = rgb16[i] as i32;
+                let blur = blurred[i] as i32;
+                let v = orig as f32 / 65535.0;
+                let w = 4.0 * v * (1.0 - v);
+                rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                    .clamp(0, 65535) as u16;
+                i += 1;
+            }
         }
-    }
+    });
 }
 
 /// Core per-pixel tone-mapping math (matrix + sat/vibrance around luma).
@@ -460,61 +477,80 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 3];
 
-    // Build/update LUT on calling thread, then clone out for parallel use.
-    // LUT is ~448 KB; clone cost is negligible vs 20 Mpx pixel loop.
-    let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
-        let mut cache = cache_cell.borrow_mut();
-        if cache.as_ref().map_or(true, |c| {
-            !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-        }) {
-            *cache = Some(LutCache {
-                black: params.black, white: params.white,
-                wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                contrast_bits:   tone.contrast.to_bits(),
-                shadows_bits:    tone.shadows.to_bits(),
-                highlights_bits: tone.highlights.to_bits(),
-                whites_bits:     tone.whites.to_bits(),
-                blacks_bits:     tone.blacks.to_bits(),
-                pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                post: build_post_lut(&tone),
-            });
-        }
-        let c = cache.as_ref().unwrap();
-        (c.pre_r.clone(), c.pre_g.clone(), c.pre_b.clone(), c.post.clone())
-    });
-
     #[cfg(not(feature = "parallel"))]
     {
-        // Manual byte-indexed loop for the common WASM (non-parallel) build.
-        // Avoids zip + chunks iterator overhead on the final full-buffer pass.
-        let n = rgb16.len();
-        let mut i = 0;
-        let mut o = 0;
-        while i < n {
-            let r = pre_r[rgb16[i] as usize] as f32; i += 1;
-            let g = pre_g[rgb16[i] as usize] as f32; i += 1;
-            let b = pre_b[rgb16[i] as usize] as f32; i += 1;
-
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
-
-            out[o] = post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
-            out[o] = post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
-            out[o] = post[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
-        }
+        // Borrow LUT in-place — no 448KB clone on the WASM hot path.
+        LUT_CACHE.with(|cache_cell| {
+            {
+                let mut cache = cache_cell.borrow_mut();
+                if cache.as_ref().map_or(true, |c| {
+                    !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+                }) {
+                    *cache = Some(LutCache {
+                        black: params.black, white: params.white,
+                        wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                        wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                        contrast_bits:   tone.contrast.to_bits(),
+                        shadows_bits:    tone.shadows.to_bits(),
+                        highlights_bits: tone.highlights.to_bits(),
+                        whites_bits:     tone.whites.to_bits(),
+                        blacks_bits:     tone.blacks.to_bits(),
+                        pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                        pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                        pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                        post: build_post_lut(&tone),
+                        post16: None,
+                    });
+                }
+            }
+            let cache = cache_cell.borrow();
+            let c = cache.as_ref().unwrap();
+            let n = rgb16.len();
+            let mut i = 0;
+            let mut o = 0;
+            while i < n {
+                let r = c.pre_r[rgb16[i] as usize] as f32; i += 1;
+                let g = c.pre_g[rgb16[i] as usize] as f32; i += 1;
+                let b = c.pre_b[rgb16[i] as usize] as f32; i += 1;
+                let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+                out[o] = c.post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+                out[o] = c.post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+                out[o] = c.post[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+            }
+        });
     }
 
     #[cfg(feature = "parallel")]
-    out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
+    {
+        let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            if cache.as_ref().map_or(true, |c| {
+                !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+            }) {
+                *cache = Some(LutCache {
+                    black: params.black, white: params.white,
+                    wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                    wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                    contrast_bits:   tone.contrast.to_bits(),
+                    shadows_bits:    tone.shadows.to_bits(),
+                    highlights_bits: tone.highlights.to_bits(),
+                    whites_bits:     tone.whites.to_bits(),
+                    blacks_bits:     tone.blacks.to_bits(),
+                    pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                    pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                    pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                    post: build_post_lut(&tone),
+                    post16: None,
+                });
+            }
+            let c = cache.as_ref().unwrap();
+            (c.pre_r.clone(), c.pre_g.clone(), c.pre_b.clone(), c.post.clone())
+        });
+        out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
             let r = pre_r[in_px[0] as usize] as f32;
             let g = pre_g[in_px[1] as usize] as f32;
             let b = pre_b[in_px[2] as usize] as f32;
-
             let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
-
-            // Tone curve + sRGB + u8 via post-LUT.
             let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
             let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
             let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
@@ -522,6 +558,7 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             out_px[1] = post[gi];
             out_px[2] = post[bi];
         });
+    }
 
     out
 }
@@ -572,59 +609,80 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 4];
 
-    // Build/update LUT on calling thread, then clone out for parallel use.
-    let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
-        let mut cache = cache_cell.borrow_mut();
-        if cache.as_ref().map_or(true, |c| {
-            !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-        }) {
-            *cache = Some(LutCache {
-                black: params.black, white: params.white,
-                wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                contrast_bits:   tone.contrast.to_bits(),
-                shadows_bits:    tone.shadows.to_bits(),
-                highlights_bits: tone.highlights.to_bits(),
-                whites_bits:     tone.whites.to_bits(),
-                blacks_bits:     tone.blacks.to_bits(),
-                pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                post: build_post_lut(&tone),
-            });
-        }
-        let c = cache.as_ref().unwrap();
-        (c.pre_r.clone(), c.pre_g.clone(), c.pre_b.clone(), c.post.clone())
-    });
-
     #[cfg(not(feature = "parallel"))]
     {
-        // Manual loop (matches the style and perf characteristics of `process` serial path).
-        let nbytes = rgb16.len();
-        let mut i = 0;
-        let mut o = 0;
-        while i < nbytes {
-            let r = pre_r[rgb16[i] as usize] as f32; i += 1;
-            let g = pre_g[rgb16[i] as usize] as f32; i += 1;
-            let b = pre_b[rgb16[i] as usize] as f32; i += 1;
-
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
-
-            out[o] = post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
-            out[o] = post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
-            out[o] = post[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
-            out[o] = 255; o += 1;
-        }
+        LUT_CACHE.with(|cache_cell| {
+            {
+                let mut cache = cache_cell.borrow_mut();
+                if cache.as_ref().map_or(true, |c| {
+                    !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+                }) {
+                    *cache = Some(LutCache {
+                        black: params.black, white: params.white,
+                        wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                        wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                        contrast_bits:   tone.contrast.to_bits(),
+                        shadows_bits:    tone.shadows.to_bits(),
+                        highlights_bits: tone.highlights.to_bits(),
+                        whites_bits:     tone.whites.to_bits(),
+                        blacks_bits:     tone.blacks.to_bits(),
+                        pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                        pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                        pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                        post: build_post_lut(&tone),
+                        post16: None,
+                    });
+                }
+            }
+            let cache = cache_cell.borrow();
+            let c = cache.as_ref().unwrap();
+            let nbytes = rgb16.len();
+            let mut i = 0;
+            let mut o = 0;
+            while i < nbytes {
+                let r = c.pre_r[rgb16[i] as usize] as f32; i += 1;
+                let g = c.pre_g[rgb16[i] as usize] as f32; i += 1;
+                let b = c.pre_b[rgb16[i] as usize] as f32; i += 1;
+                let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+                out[o] = c.post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+                out[o] = c.post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+                out[o] = c.post[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+                out[o] = 255; o += 1;
+            }
+        });
     }
 
     #[cfg(feature = "parallel")]
-    out.par_chunks_mut(4).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
+    {
+        let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            if cache.as_ref().map_or(true, |c| {
+                !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+            }) {
+                *cache = Some(LutCache {
+                    black: params.black, white: params.white,
+                    wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                    wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                    contrast_bits:   tone.contrast.to_bits(),
+                    shadows_bits:    tone.shadows.to_bits(),
+                    highlights_bits: tone.highlights.to_bits(),
+                    whites_bits:     tone.whites.to_bits(),
+                    blacks_bits:     tone.blacks.to_bits(),
+                    pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                    pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                    pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                    post: build_post_lut(&tone),
+                    post16: None,
+                });
+            }
+            let c = cache.as_ref().unwrap();
+            (c.pre_r.clone(), c.pre_g.clone(), c.pre_b.clone(), c.post.clone())
+        });
+        out.par_chunks_mut(4).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
             let r = pre_r[in_px[0] as usize] as f32;
             let g = pre_g[in_px[1] as usize] as f32;
             let b = pre_b[in_px[2] as usize] as f32;
-
             let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
-
             let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
             let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
             let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
@@ -633,6 +691,7 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             out_px[2] = post[bi];
             out_px[3] = 255;
         });
+    }
 
     out
 }
@@ -681,18 +740,18 @@ pub fn apply_luminance_nr(rgb16: &mut [u16], width: usize, height: usize, streng
     if strength <= 0.0 { return; }
     let s = strength.clamp(0.0, 1.0);
     let kernel = gaussian_kernel_5();
-    let mut temp: Vec<u16> = Vec::new();
-    let mut blurred: Vec<u16> = Vec::new();
-    separable_blur_with_bufs(rgb16, width, height, &kernel, &mut temp, &mut blurred);
-    // Manual tight loop (eliminates zip iterator overhead on full buffer).
-    let n = rgb16.len();
-    let mut i = 0;
-    while i < n {
-        let o = rgb16[i] as f32;
-        let b = blurred[i] as f32;
-        rgb16[i] = (o + (b - o) * s).round().clamp(0.0, 65535.0) as u16;
-        i += 1;
-    }
+    BLUR_SCRATCH.with(|scratch| {
+        let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
+        separable_blur_with_bufs(rgb16, width, height, &kernel, temp, blurred);
+        let n = rgb16.len();
+        let mut i = 0;
+        while i < n {
+            let o = rgb16[i] as f32;
+            let b = blurred[i] as f32;
+            rgb16[i] = (o + (b - o) * s).round().clamp(0.0, 65535.0) as u16;
+            i += 1;
+        }
+    });
 }
 
 /// Full pipeline → 16-bit sRGB output (same pipeline as `process` but u16 output).
@@ -725,46 +784,100 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     let n = rgb16.len() / 3;
     let mut out = vec![0u16; n * 3];
 
-    // Build 16-bit post-LUT: tone_curve maps [0,1] → [0,1] with sRGB gamma,
-    // then we scale to [0, 65535] instead of [0, 255].
-    let post16: Vec<u16> = (0..65536u32).map(|i| {
-        let y = tone_curve(i as f32 / 65535.0, &tone);
-        (y * 65535.0 + 0.5).clamp(0.0, 65535.0) as u16
-    }).collect();
-
-    let pre_r = build_pre_lut(params.black, params.white, wb_r, exp_gain);
-    let pre_g = build_pre_lut(params.black, params.white, wb_g, exp_gain);
-    let pre_b = build_pre_lut(params.black, params.white, wb_b, exp_gain);
+    #[cfg(not(feature = "parallel"))]
+    {
+        LUT_CACHE.with(|cache_cell| {
+            {
+                let mut cache = cache_cell.borrow_mut();
+                if cache.as_ref().map_or(true, |c| {
+                    !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+                }) {
+                    *cache = Some(LutCache {
+                        black: params.black, white: params.white,
+                        wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                        wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                        contrast_bits:   tone.contrast.to_bits(),
+                        shadows_bits:    tone.shadows.to_bits(),
+                        highlights_bits: tone.highlights.to_bits(),
+                        whites_bits:     tone.whites.to_bits(),
+                        blacks_bits:     tone.blacks.to_bits(),
+                        pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                        pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                        pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                        post: build_post_lut(&tone),
+                        post16: Some(build_post16_lut(&tone)),
+                    });
+                } else {
+                    let c = cache.as_mut().unwrap();
+                    if c.post16.is_none() {
+                        c.post16 = Some(build_post16_lut(&tone));
+                    }
+                }
+            }
+            let cache = cache_cell.borrow();
+            let c = cache.as_ref().unwrap();
+            let post16 = c.post16.as_ref().unwrap();
+            let n = rgb16.len();
+            let mut i = 0;
+            let mut o = 0;
+            while i < n {
+                let r = c.pre_r[rgb16[i] as usize] as f32; i += 1;
+                let g = c.pre_g[rgb16[i] as usize] as f32; i += 1;
+                let b = c.pre_b[rgb16[i] as usize] as f32; i += 1;
+                let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+                out[o] = post16[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+                out[o] = post16[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+                out[o] = post16[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
+            }
+        });
+    }
 
     #[cfg(feature = "parallel")]
-    let pixel_iter = out.par_chunks_mut(3).zip(rgb16.par_chunks(3));
-    #[cfg(not(feature = "parallel"))]
-    let pixel_iter = out.chunks_mut(3).zip(rgb16.chunks(3));
-
-    pixel_iter.for_each(|(out_px, in_px)| {
-        let r = pre_r[in_px[0] as usize] as f32;
-        let g = pre_g[in_px[1] as usize] as f32;
-        let b = pre_b[in_px[2] as usize] as f32;
-        let mut r2 = m[0][0]*r + m[0][1]*g + m[0][2]*b;
-        let mut g2 = m[1][0]*r + m[1][1]*g + m[1][2]*b;
-        let mut b2 = m[2][0]*r + m[2][1]*g + m[2][2]*b;
-        let luma = 0.2126*r2 + 0.7152*g2 + 0.0722*b2;
-        let scale = if vib_zero {
-            sat
-        } else {
-            let raw_mx = r2.max(g2).max(b2);
-            let mx = raw_mx.max(1.0);
-            let mn = r2.min(g2).min(b2).max(0.0);
-            let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
-            sat * (1.0 + vib * (1.0 - pixel_sat) * 0.6)
-        };
-        r2 = luma + (r2 - luma) * scale;
-        g2 = luma + (g2 - luma) * scale;
-        b2 = luma + (b2 - luma) * scale;
-        out_px[0] = post16[r2.clamp(0.0, 65535.0) as u16 as usize];
-        out_px[1] = post16[g2.clamp(0.0, 65535.0) as u16 as usize];
-        out_px[2] = post16[b2.clamp(0.0, 65535.0) as u16 as usize];
-    });
+    {
+        let (pre_r, pre_g, pre_b, post16) = LUT_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            if cache.as_ref().map_or(true, |c| {
+                !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
+            }) {
+                *cache = Some(LutCache {
+                    black: params.black, white: params.white,
+                    wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
+                    wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
+                    contrast_bits:   tone.contrast.to_bits(),
+                    shadows_bits:    tone.shadows.to_bits(),
+                    highlights_bits: tone.highlights.to_bits(),
+                    whites_bits:     tone.whites.to_bits(),
+                    blacks_bits:     tone.blacks.to_bits(),
+                    pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
+                    pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
+                    pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
+                    post: build_post_lut(&tone),
+                    post16: Some(build_post16_lut(&tone)),
+                });
+            } else {
+                let c = cache.as_mut().unwrap();
+                if c.post16.is_none() {
+                    c.post16 = Some(build_post16_lut(&tone));
+                }
+            }
+            let c = cache.as_ref().unwrap();
+            (
+                c.pre_r.clone(),
+                c.pre_g.clone(),
+                c.pre_b.clone(),
+                c.post16.as_ref().unwrap().clone(),
+            )
+        });
+        out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
+            let r = pre_r[in_px[0] as usize] as f32;
+            let g = pre_g[in_px[1] as usize] as f32;
+            let b = pre_b[in_px[2] as usize] as f32;
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+            out_px[0] = post16[r2.clamp(0.0, 65535.0) as u16 as usize];
+            out_px[1] = post16[g2.clamp(0.0, 65535.0) as u16 as usize];
+            out_px[2] = post16[b2.clamp(0.0, 65535.0) as u16 as usize];
+        });
+    }
 
     out
 }
@@ -792,13 +905,13 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
         let ystep = sh / dh;
+        let n = (xstep * ystep) as u32;
         for dy in 0..dh {
             let row = &mut out[dy * dw * 3..(dy + 1) * dw * 3];
             for dx in 0..dw {
                 let mut rr = 0u32;
                 let mut gg = 0u32;
                 let mut bb = 0u32;
-                let mut n = 0u32;
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let base = (y * sw + dx * xstep) * 3;
@@ -807,7 +920,6 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
                         rr += src[i] as u32;
                         gg += src[i + 1] as u32;
                         bb += src[i + 2] as u32;
-                        n += 1;
                     }
                 }
                 let o = dx * 3;
@@ -866,13 +978,13 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
         let ystep = sh / dh;
+        let n = (xstep * ystep) as u32;
         for dy in 0..dh {
             let row = &mut out[dy * dw * 3..(dy + 1) * dw * 3];
             for dx in 0..dw {
                 let mut rr = 0u32;
                 let mut gg = 0u32;
                 let mut bb = 0u32;
-                let mut n = 0u32;
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let base = (y * sw + dx * xstep) * 3;
@@ -881,7 +993,6 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
                         rr += src[i] as u32;
                         gg += src[i + 1] as u32;
                         bb += src[i + 2] as u32;
-                        n += 1;
                     }
                 }
                 let o = dx * 3;
@@ -1007,66 +1118,91 @@ pub fn apply_orientation(
     }
 }
 
+// Tile-blocked transpose. TILE chosen so a tile of TILE × TILE × 3 bytes fits
+// comfortably in L1 along with the dst-row strips it touches (≈ 6 KB working
+// set per thread at TILE=32). Parallel chunks distribute exclusive dst row
+// bands → no cross-thread aliasing.
 const TILE: usize = 32;
 
+/// dst[c, h-1-r] = src[r, c].  Output dims: (h, w).
 pub fn rotate_90_cw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut dst = vec![0u8; src.len()];
     let w_dst = h;
-    dst.chunks_mut(TILE * w_dst * 3)
-        .enumerate()
-        .for_each(|(tile_row, band)| {
-            let band_rows = band.len() / (w_dst * 3);
-            let nr0 = tile_row * TILE;
-            for nr_local in 0..band_rows {
-                let c = nr0 + nr_local;
-                let dst_row = &mut band[nr_local * w_dst * 3..(nr_local + 1) * w_dst * 3];
-                for nc in 0..w_dst {
-                    let r = h - 1 - nc;
-                    let s = (r * w + c) * 3;
-                    let d = nc * 3;
-                    dst_row[d] = src[s];
-                    dst_row[d + 1] = src[s + 1];
-                    dst_row[d + 2] = src[s + 2];
+    let dst_row_bytes = w_dst * 3;
+    let mut dst = vec![0u8; src.len()];
+    let band_bytes = TILE * dst_row_bytes;
+
+    let body = |(band_idx, band): (usize, &mut [u8])| {
+        let c0 = band_idx * TILE;
+        let band_rows = band.len() / dst_row_bytes;
+        for r0 in (0..h).step_by(TILE) {
+            let r_end = (r0 + TILE).min(h);
+            for r in r0..r_end {
+                let dst_col_off = (h - 1 - r) * 3;
+                let src_row_off = r * w * 3;
+                for c_local in 0..band_rows {
+                    let s = src_row_off + (c0 + c_local) * 3;
+                    let d = c_local * dst_row_bytes + dst_col_off;
+                    band[d]     = src[s];
+                    band[d + 1] = src[s + 1];
+                    band[d + 2] = src[s + 2];
                 }
             }
-        });
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    dst.par_chunks_mut(band_bytes).enumerate().for_each(body);
+    #[cfg(not(feature = "parallel"))]
+    dst.chunks_mut(band_bytes).enumerate().for_each(body);
     dst
 }
 
+/// dst[w-1-c, r] = src[r, c].  Output dims: (h, w).
 pub fn rotate_90_ccw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut dst = vec![0u8; src.len()];
     let w_dst = h;
-    dst.chunks_mut(TILE * w_dst * 3)
-        .enumerate()
-        .for_each(|(tile_row, band)| {
-            let band_rows = band.len() / (w_dst * 3);
-            let nr0 = tile_row * TILE;
-            for nr_local in 0..band_rows {
-                let nr = nr0 + nr_local;
-                let c = w - 1 - nr;
-                let dst_row = &mut band[nr_local * w_dst * 3..(nr_local + 1) * w_dst * 3];
-                for nc in 0..w_dst {
-                    let r = nc;
-                    let s = (r * w + c) * 3;
-                    let d = nc * 3;
-                    dst_row[d] = src[s];
-                    dst_row[d + 1] = src[s + 1];
-                    dst_row[d + 2] = src[s + 2];
+    let dst_row_bytes = w_dst * 3;
+    let mut dst = vec![0u8; src.len()];
+    let band_bytes = TILE * dst_row_bytes;
+
+    let body = |(band_idx, band): (usize, &mut [u8])| {
+        let band_rows = band.len() / dst_row_bytes;
+        // Band owns dst rows [band_idx*TILE, band_idx*TILE+band_rows).
+        // dst row index = w-1-c  →  c = w-1-dst_row_idx.
+        let c_top = w - 1 - band_idx * TILE;        // c for c_local=0
+        for r0 in (0..h).step_by(TILE) {
+            let r_end = (r0 + TILE).min(h);
+            for r in r0..r_end {
+                let dst_col_off = r * 3;
+                let src_row_off = r * w * 3;
+                for c_local in 0..band_rows {
+                    let c = c_top - c_local;
+                    let s = src_row_off + c * 3;
+                    let d = c_local * dst_row_bytes + dst_col_off;
+                    band[d]     = src[s];
+                    band[d + 1] = src[s + 1];
+                    band[d + 2] = src[s + 2];
                 }
             }
-        });
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    dst.par_chunks_mut(band_bytes).enumerate().for_each(body);
+    #[cfg(not(feature = "parallel"))]
+    dst.chunks_mut(band_bytes).enumerate().for_each(body);
     dst
 }
 
+/// dst[h-1-r, w-1-c] = src[r, c].  Output dims: (w, h).  Already row-sequential;
+/// just parallelize over dst rows.
 pub fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut dst = vec![0u8; src.len()];
     let row_bytes = w * 3;
-    for nr in 0..h {
-        let r = h - 1 - nr;
-        let s_row = &src[r * row_bytes..(r + 1) * row_bytes];
-        let dst_row = &mut dst[nr * row_bytes..(nr + 1) * row_bytes];
+    let mut dst = vec![0u8; src.len()];
+
+    let body = |(dst_row_idx, dst_row): (usize, &mut [u8])| {
+        let src_row_idx = h - 1 - dst_row_idx;
+        let s_row = &src[src_row_idx * row_bytes..(src_row_idx + 1) * row_bytes];
         for c in 0..w {
-            // Direct byte writes. Plain row loop (no chunks_mut + for_each overhead).
             let sc = w - 1 - c;
             let s = sc * 3;
             let d = c * 3;
@@ -1074,6 +1210,189 @@ pub fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
             dst_row[d + 1] = s_row[s + 1];
             dst_row[d + 2] = s_row[s + 2];
         }
-    }
+    };
+
+    #[cfg(feature = "parallel")]
+    dst.par_chunks_mut(row_bytes).enumerate().for_each(body);
+    #[cfg(not(feature = "parallel"))]
+    dst.chunks_mut(row_bytes).enumerate().for_each(body);
     dst
+}
+
+#[cfg(test)]
+mod rotate_tests {
+    use super::*;
+
+    // Build a synthetic image where pixel (r, c) = (r as u8, c as u8, (r+c) as u8).
+    fn synth(w: usize, h: usize) -> Vec<u8> {
+        let mut v = vec![0u8; w * h * 3];
+        for r in 0..h {
+            for c in 0..w {
+                let i = (r * w + c) * 3;
+                v[i]     = (r & 0xff) as u8;
+                v[i + 1] = (c & 0xff) as u8;
+                v[i + 2] = ((r + c) & 0xff) as u8;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn rotate_90_cw_then_ccw_is_identity() {
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31), (100, 60)] {
+            let src = synth(w, h);
+            let rot = rotate_90_cw(&src, w, h);
+            let back = rotate_90_ccw(&rot, h, w);
+            assert_eq!(back, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn rotate_180_is_involution() {
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31), (100, 60)] {
+            let src = synth(w, h);
+            let twice = rotate_180(&rotate_180(&src, w, h), w, h);
+            assert_eq!(twice, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn rotate_90_cw_four_times_is_identity() {
+        let (w, h) = (33usize, 17usize);
+        let src = synth(w, h);
+        let a = rotate_90_cw(&src, w, h);          // h x w
+        let b = rotate_90_cw(&a, h, w);            // w x h
+        let c = rotate_90_cw(&b, w, h);            // h x w
+        let d = rotate_90_cw(&c, h, w);            // w x h
+        assert_eq!(d, src);
+    }
+
+    #[test]
+    fn rotate_90_cw_corner_pixel() {
+        let (w, h) = (4usize, 3usize);
+        let mut src = vec![0u8; w * h * 3];
+        // mark (0,0) = (10, 20, 30)
+        src[0] = 10; src[1] = 20; src[2] = 30;
+        // After CW: src (0,0) → dst (0, h-1) = (0, 2)
+        let rot = rotate_90_cw(&src, w, h);
+        // dst dims: w_dst = h = 3, h_dst = w = 4
+        let i = (0 * 3 + 2) * 3;
+        assert_eq!(&rot[i..i + 3], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn rotate_90_cw_matches_naive() {
+        let (w, h) = (37usize, 19usize);
+        let src = synth(w, h);
+        let fast = rotate_90_cw(&src, w, h);
+        // Naive reference.
+        let mut naive = vec![0u8; src.len()];
+        let w_dst = h;
+        for r in 0..h {
+            for c in 0..w {
+                let s = (r * w + c) * 3;
+                let d = (c * w_dst + (h - 1 - r)) * 3;
+                naive[d]     = src[s];
+                naive[d + 1] = src[s + 1];
+                naive[d + 2] = src[s + 2];
+            }
+        }
+        assert_eq!(fast, naive);
+    }
+
+    #[test]
+    fn rotate_90_ccw_matches_naive() {
+        let (w, h) = (37usize, 19usize);
+        let src = synth(w, h);
+        let fast = rotate_90_ccw(&src, w, h);
+        let mut naive = vec![0u8; src.len()];
+        let w_dst = h;
+        for r in 0..h {
+            for c in 0..w {
+                let s = (r * w + c) * 3;
+                let d = ((w - 1 - c) * w_dst + r) * 3;
+                naive[d]     = src[s];
+                naive[d + 1] = src[s + 1];
+                naive[d + 2] = src[s + 2];
+            }
+        }
+        assert_eq!(fast, naive);
+    }
+}
+
+#[cfg(test)]
+mod rotate_bench {
+    use super::*;
+    use std::time::Instant;
+
+    // Run with: cargo test --lib --release --no-default-features --features parallel rotate_bench::bench -- --nocapture
+    // Naive single-threaded column-walk rotation (mirrors the OLD untiled
+    // implementation) — for direct A/B benchmark vs the new tile-blocked + parallel one.
+    fn rotate_90_cw_naive(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+        let mut dst = vec![0u8; src.len()];
+        let w_dst = h;
+        for c in 0..w {
+            let dst_row = &mut dst[c * w_dst * 3..(c + 1) * w_dst * 3];
+            for nc in 0..w_dst {
+                let r = h - 1 - nc;
+                let s = (r * w + c) * 3;
+                let d = nc * 3;
+                dst_row[d]     = src[s];
+                dst_row[d + 1] = src[s + 1];
+                dst_row[d + 2] = src[s + 2];
+            }
+        }
+        dst
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_rotate_90_cw_full_orf() {
+        // Olympus full-frame after demosaic: ~5184 × 3888 RGB8.
+        let (w, h) = (5184usize, 3888usize);
+        // Varying content so the CPU can't trivially cache constant fills.
+        let mut src = vec![0u8; w * h * 3];
+        for (i, b) in src.iter_mut().enumerate() { *b = (i & 0xff) as u8; }
+
+        // Warm up.
+        let _ = rotate_90_cw(&src, w, h);
+        let _ = rotate_90_cw_naive(&src, w, h);
+
+        const N: usize = 5;
+        let t0 = Instant::now();
+        for _ in 0..N {
+            let _ = rotate_90_cw(&src, w, h);
+        }
+        let new_ms = (t0.elapsed().as_secs_f64() / N as f64) * 1000.0;
+
+        let t1 = Instant::now();
+        for _ in 0..N {
+            let _ = rotate_90_cw_naive(&src, w, h);
+        }
+        let old_ms = (t1.elapsed().as_secs_f64() / N as f64) * 1000.0;
+
+        let mb = (w * h * 3) as f64 / 1_048_576.0;
+        println!("rotate_90_cw 5184×3888 RGB8 ({:.1} MB):", mb);
+        println!("  new (tile-blocked + parallel): {:.2} ms", new_ms);
+        println!("  old (naive column-walk):       {:.2} ms", old_ms);
+        println!("  speedup:                        {:.1}×", old_ms / new_ms);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_rotate_90_cw_lightbox() {
+        // Lightbox-sized — what LookRenderer hits per slider tick.
+        let (w, h) = (1800usize, 1200usize);
+        let src = vec![42u8; w * h * 3];
+        let _ = rotate_90_cw(&src, w, h);
+
+        const N: usize = 20;
+        let t0 = Instant::now();
+        for _ in 0..N {
+            let _ = rotate_90_cw(&src, w, h);
+        }
+        let avg_ms = (t0.elapsed().as_secs_f64() / N as f64) * 1000.0;
+        let mb = (w * h * 3) as f64 / 1_048_576.0;
+        println!("rotate_90_cw 1800×1200 RGB8 ({:.1} MB): {:.2} ms (avg of {} runs)", mb, avg_ms, N);
+    }
 }

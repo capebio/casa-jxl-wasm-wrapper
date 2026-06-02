@@ -14,6 +14,12 @@
 // Budget invariant (Section 12.3):
 //   budgetMs enforced per-stage transition, not wall-clock across whole decode.
 //   On breach: session emits decode_budget_exceeded with best frame so far.
+//
+// Queue wait observability: when a session is forced to wait for a worker slot,
+// we capture queuedAt and emit "scheduler_queue_wait_ms" (via the normal metric
+// fan-out) on the queued→running transition. This enables parity measurements
+// against the Tauri PrioritySem (ProcessResult.queue_wait_ms) and the synthetic
+// lightbox_bench qwait column under concurrency + promotion (scenarios C/D).
 import { WorkerPool, RESERVED_SESSION_ID } from "./pool.js";
 import { PriorityQueue } from "./queue.js";
 import { DedupeRegistry } from "./dedupe.js";
@@ -45,6 +51,12 @@ export class Scheduler {
     drainingQueue = false;
     preemptionCount = 0;
     totalSessionCount = 0;
+    _runningCount = 0;
+    _queuedCount = 0;
+    _pausedCount = 0;
+    // Pre-allocated queue-wait metric objects — mutated in-place before fan-out (safe: synchronous).
+    _metricInner = { name: "scheduler_queue_wait_ms", value: 0 };
+    _metricMsg = { type: "metric", sessionId: "", metric: this._metricInner };
     // Preemption victim scoring weights.
     PREEMPT_PROGRESS_W = 3.0;
     PREEMPT_AGE_W = 1.0;
@@ -85,9 +97,10 @@ export class Scheduler {
                     priority: params.priority,
                     kind: params.startMsg.type === "encode_start" ? "encode" : "decode",
                     handlers: this.takePendingHandlers(params.sessionId),
-                    createdAt: Date.now(),
+                    createdAt: performance.now(),
                     progress: 0,
                 });
+                this._runningCount++;
                 this.totalSessionCount++;
                 const primaryRecord = this.sessions.get(primaryId);
                 return { workerId: primaryRecord?.worker?.id ?? -1 };
@@ -118,6 +131,7 @@ export class Scheduler {
                 reject,
                 signal: params.signal,
                 isRequeue: false,
+                queuedAt: performance.now(),
             };
             this.sessions.set(params.sessionId, {
                 sessionId: params.sessionId,
@@ -126,9 +140,11 @@ export class Scheduler {
                 kind: params.startMsg.type === "encode_start" ? "encode" : "decode",
                 handlers: this.takePendingHandlers(params.sessionId),
                 pending,
-                createdAt: Date.now(),
+                createdAt: performance.now(),
+                queuedAt: pending.queuedAt,
                 progress: 0,
             });
+            this._queuedCount++;
             this.totalSessionCount++;
             this.queue.enqueue({ priority: params.priority, sessionId: params.sessionId, payload: pending });
             this.setupSignalAbort(params.sessionId, params.signal);
@@ -189,6 +205,7 @@ export class Scheduler {
             for (const h of record.handlers)
                 h({ type: "decode_cancelled", sessionId });
             this.dedupe.cancelSubscriber(sessionId);
+            this._pausedCount--;
             this.sessions.delete(sessionId);
             return true;
         }
@@ -199,6 +216,7 @@ export class Scheduler {
                 this.unblockBackpressure(record);
                 record.pending.reject(new Error("[jxl-scheduler] Session cancelled."));
                 this.dedupe.cancelSubscriber(sessionId);
+                this._queuedCount--;
                 this.sessions.delete(sessionId);
                 return true;
             }
@@ -206,6 +224,12 @@ export class Scheduler {
         // Subscriber (not primary): remove its record; other subscribers continue.
         const shouldCancelPrimary = this.dedupe.cancelSubscriber(sessionId);
         if (!shouldCancelPrimary) {
+            if (record?.state === "running" || record?.state === "cancelling")
+                this._runningCount--;
+            else if (record?.state === "queued")
+                this._queuedCount--;
+            else if (record?.state === "paused")
+                this._pausedCount--;
             this.sessions.delete(sessionId);
             return true;
         }
@@ -213,6 +237,7 @@ export class Scheduler {
         // (terminal message arrives in handleWorkerMessage → cleanupSession).
         if (record?.worker !== undefined) {
             this.unblockBackpressure(record);
+            // running → cancelling: no counter change (cancelling counts as running).
             record.state = "cancelling";
             record.handlers = []; // No more fan-out to this session's caller.
             record.worker.cancelling = true;
@@ -223,6 +248,12 @@ export class Scheduler {
         }
         else if (record !== undefined) {
             // No worker, no pending — orphaned. Clean up.
+            if (record.state === "running" || record.state === "cancelling")
+                this._runningCount--;
+            else if (record.state === "queued")
+                this._queuedCount--;
+            else if (record.state === "paused")
+                this._pausedCount--;
             this.sessions.delete(sessionId);
         }
         return true;
@@ -235,14 +266,14 @@ export class Scheduler {
         if (record === undefined)
             return;
         if (record.backpressure === undefined) {
-            record.backpressure = { queueDepth: 0, pendingPushes: [] };
+            record.backpressure = { queueDepth: 0, pendingPushes: [], pendingHead: 0 };
         }
         const bp = record.backpressure;
         bp.queueDepth++;
         if (bp.queueDepth < this.adaptiveHwm())
             return;
         return new Promise((resolve) => {
-            bp.pendingPushes.push({ resolve, waitedAt: Date.now() });
+            bp.pendingPushes.push({ resolve, waitedAt: performance.now() });
         });
     }
     signalDrain(sessionId) {
@@ -250,9 +281,14 @@ export class Scheduler {
         if (bp === undefined)
             return;
         bp.queueDepth = Math.max(0, bp.queueDepth - 1);
-        const waiter = bp.pendingPushes.shift();
-        if (waiter !== undefined) {
-            this.updateDrainEma(Date.now() - waiter.waitedAt);
+        if (bp.pendingHead < bp.pendingPushes.length) {
+            const waiter = bp.pendingPushes[bp.pendingHead++];
+            // Compact when head has consumed the whole array.
+            if (bp.pendingHead >= bp.pendingPushes.length) {
+                bp.pendingPushes.length = 0;
+                bp.pendingHead = 0;
+            }
+            this.updateDrainEma(performance.now() - waiter.waitedAt);
             waiter.resolve();
         }
     }
@@ -271,29 +307,20 @@ export class Scheduler {
     unblockBackpressure(record) {
         if (record.backpressure === undefined)
             return;
-        for (const waiter of record.backpressure.pendingPushes)
-            waiter.resolve();
+        const { pendingPushes, pendingHead } = record.backpressure;
+        for (let i = pendingHead; i < pendingPushes.length; i++) {
+            pendingPushes[i].resolve();
+        }
         delete record.backpressure;
     }
     // ---------------------------------------------------------------------------
     // Metrics
     // ---------------------------------------------------------------------------
     getMetrics() {
-        let running = 0;
-        let queued = 0;
-        let paused = 0;
-        for (const record of this.sessions.values()) {
-            if (record.state === "running" || record.state === "cancelling")
-                running++;
-            else if (record.state === "queued")
-                queued++;
-            else if (record.state === "paused")
-                paused++;
-        }
         return {
-            running,
-            queued,
-            paused,
+            running: this._runningCount,
+            queued: this._queuedCount,
+            paused: this._pausedCount,
             background: this.backgroundWorkers.size,
             preemptions: this.preemptionCount,
             totalSessions: this.totalSessionCount,
@@ -324,11 +351,11 @@ export class Scheduler {
                     ackResolved = true;
                     resolve();
                     if (victimRecord)
-                        victimRecord.handlers = prevHandlers;
+                        prevHandlers.shift();
                 }
             };
             if (victimRecord)
-                victimRecord.handlers = [handler, ...prevHandlers];
+                prevHandlers.unshift(handler);
             if (usePause) {
                 backgroundWorker.handle.send({ type: "decode_pause", sessionId: victimSessionId });
             }
@@ -351,7 +378,7 @@ export class Scheduler {
         }
         catch {
             if (victimRecord)
-                victimRecord.handlers = prevHandlers;
+                prevHandlers.shift();
             this.pool.recycle(backgroundWorker);
         }
         finally {
@@ -375,6 +402,9 @@ export class Scheduler {
             // Park the victim: keep its session record alive but detach from the active worker.
             // The WASM decoder state remains in the worker's heap until the session resumes.
             if (victimRecord !== undefined) {
+                // running → paused
+                this._runningCount--;
+                this._pausedCount++;
                 victimRecord.state = "paused";
                 delete victimRecord.worker;
                 victimRecord.pausedOnWorker = backgroundWorker;
@@ -405,6 +435,9 @@ export class Scheduler {
         if (usePause) {
             this.workerPausedSession.delete(backgroundWorker.id);
             if (victimRecord !== undefined) {
+                // paused → cancelling (counts as running for metrics)
+                this._pausedCount--;
+                this._runningCount++;
                 victimRecord.state = "cancelling";
                 delete victimRecord.pausedOnWorker;
             }
@@ -424,7 +457,7 @@ export class Scheduler {
     // (less wall-clock time invested). Age is normalised to [0,1] to keep it
     // on the same scale as progress.
     scoreVictim(record) {
-        const ageNorm = Math.min(1, (Date.now() - record.createdAt) / this.PREEMPT_AGE_NORM_MS);
+        const ageNorm = Math.min(1, (performance.now() - record.createdAt) / this.PREEMPT_AGE_NORM_MS);
         return record.progress * this.PREEMPT_PROGRESS_W + ageNorm * this.PREEMPT_AGE_W;
     }
     findBackgroundWorker() {
@@ -457,6 +490,9 @@ export class Scheduler {
             return;
         }
         this.pool.bind(worker, sessionId);
+        // paused → running
+        this._pausedCount--;
+        this._runningCount++;
         record.state = "running";
         record.worker = worker;
         delete record.pausedOnWorker;
@@ -477,9 +513,27 @@ export class Scheduler {
         // Queued → running transition: update existing record in-place.
         const existing = this.sessions.get(sessionId);
         if (existing !== undefined) {
+            // queued → running
+            this._queuedCount--;
+            this._runningCount++;
             existing.state = "running";
             existing.worker = worker;
             delete existing.pending;
+            // Emit scheduler-level queue wait metric for benchmarks / parity with
+            // Tauri process_file.queue_wait_ms and the synthetic lightbox_bench qwait.
+            // Only queued sessions have a meaningful wait; immediate/preempt paths
+            // never entered the PendingSession queue.
+            if (existing.queuedAt != null) {
+                this._metricInner.value = performance.now() - existing.queuedAt;
+                this._metricMsg.sessionId = sessionId;
+                for (const h of existing.handlers) {
+                    try {
+                        h(this._metricMsg);
+                    }
+                    catch { /* handler must not throw */ }
+                }
+            }
+            delete existing.queuedAt;
         }
         else {
             // Fresh session (immediate acquire or post-preemption).
@@ -490,9 +544,10 @@ export class Scheduler {
                 kind,
                 handlers: this.takePendingHandlers(sessionId),
                 worker,
-                createdAt: Date.now(),
+                createdAt: performance.now(),
                 progress: 0,
             });
+            this._runningCount++;
             this.totalSessionCount++;
         }
         if (priority === "background")
@@ -592,6 +647,15 @@ export class Scheduler {
     }
     // Tears down session state without triggering a queue drain.
     cleanupSession(sessionId) {
+        const record = this.sessions.get(sessionId);
+        if (record !== undefined) {
+            if (record.state === "running" || record.state === "cancelling")
+                this._runningCount--;
+            else if (record.state === "queued")
+                this._queuedCount--;
+            else if (record.state === "paused")
+                this._pausedCount--;
+        }
         this.releaseSession(sessionId);
         this.dedupe.complete(sessionId);
         this.sessions.delete(sessionId);
@@ -614,6 +678,32 @@ export class Scheduler {
         if (this.queue.isEmpty || this.drainingQueue)
             return;
         this.drainingQueue = true;
+        // Sync fast path: drain all entries that have an immediately available idle
+        // worker, skipping the async hop (Promise allocation + microtask scheduling).
+        // Common steady-state case: a worker just finished, queue has work, pool has
+        // an idle slot — no need for an async round-trip.
+        while (!this.queue.isEmpty) {
+            const worker = this.pool.tryAcquireIdle();
+            if (worker === null)
+                break;
+            const entry = this.queue.dequeue();
+            if (entry === null) {
+                this.pool.release(worker);
+                break;
+            }
+            const { payload: pending } = entry;
+            this.assignWorker(worker, pending.sessionId, pending.startMsg);
+            this.setupSignalAbort(pending.sessionId, pending.signal);
+            for (const { msg, transfer } of pending.bufferedChunks) {
+                worker.handle.send(msg, transfer);
+            }
+            pending.resolve();
+        }
+        if (this.queue.isEmpty) {
+            this.drainingQueue = false;
+            return;
+        }
+        // Async path: no idle workers available; wait for spawn or worker release.
         void (async () => {
             try {
                 while (!this.queue.isEmpty) {
@@ -635,9 +725,6 @@ export class Scheduler {
                 }
             }
             catch (err) {
-                // Log the error so it's visible in diagnostics rather than silently consumed.
-                // Re-trigger after a short delay so queued sessions are not permanently stuck
-                // waiting for a drain that never comes.
                 console.error("[jxl-scheduler] drainQueue error:", err);
                 setTimeout(() => this.drainQueue(), 50);
             }
@@ -665,6 +752,9 @@ export class Scheduler {
             }
         }
         await this.pool.shutdown();
+        this._runningCount = 0;
+        this._queuedCount = 0;
+        this._pausedCount = 0;
         this.sessions.clear();
         this.backgroundWorkers.clear();
         this.workerPausedSession.clear();

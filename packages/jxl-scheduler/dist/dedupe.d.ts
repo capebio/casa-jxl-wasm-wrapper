@@ -12,6 +12,7 @@ export declare class DedupeRegistry {
     subscribe(subscriberId: string, primarySessionId: string): Subscription;
     cancelSubscriber(subscriberId: string): boolean;
     complete(sessionId: string): void;
+    /** @internal — prefer forEachSubscriber for zero-allocation iteration */
     subscribers(primaryId: string): string[];
     forEachSubscriber(primaryId: string, fn: (subId: string) => void): void;
 }

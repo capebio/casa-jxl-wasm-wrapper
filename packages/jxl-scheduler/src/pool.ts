@@ -189,6 +189,20 @@ export class WorkerPool {
     return worker;
   }
 
+  // Synchronous fast path: returns an idle worker immediately without any Promise
+  // allocation. Returns null if no idle worker is available (caller must fall
+  // back to the async acquire() path to spawn a new worker).
+  tryAcquireIdle(): PoolWorker | null {
+    if (this.destroyed) return null;
+    const worker = this.takeIdleWorker();
+    if (worker !== null && this.reserve(worker)) {
+      this.metrics.acquiredIdle++;
+      this.assertInvariants();
+      return worker;
+    }
+    return null;
+  }
+
   bind(worker: PoolWorker, sessionId: string): void {
     if (this.destroyed) {
       this.destroyWorker(worker);

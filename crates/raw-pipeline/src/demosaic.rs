@@ -154,6 +154,77 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
 
+    // Per-pixel MHC math. Caller resolves all neighbor indices; interior pixels
+    // pass col±1/col±2 directly (no clamping); border pixels pass clamped values.
+    #[inline(always)]
+    fn mhc_pixel(
+        raw: &[u16], width: usize,
+        r_c: usize, r_n: usize, r_s: usize, r_n2: usize, r_s2: usize,
+        col: usize, c_w: usize, c_e: usize, c_w2: usize, c_e2: usize,
+    ) -> (i32, i32, i32) {
+        match (r_c & 1, col & 1) {
+            (0, 0) => {
+                let rc  = at(raw, width, r_c, col);
+                let gn  = at(raw, width, r_n, col);
+                let ge  = at(raw, width, r_c, c_e);
+                let gs  = at(raw, width, r_s, col);
+                let gw  = at(raw, width, r_c, c_w);
+                let rn2 = at(raw, width, r_n2, col);
+                let re2 = at(raw, width, r_c,  c_e2);
+                let rs2 = at(raw, width, r_s2, col);
+                let rw2 = at(raw, width, r_c,  c_w2);
+                let g_mhc = (2*(gn+ge+gs+gw) + 4*rc - rn2-re2-rs2-rw2) >> 3;
+                let b_v = (at(raw,width,r_n,c_w)+at(raw,width,r_n,c_e)
+                          +at(raw,width,r_s,c_w)+at(raw,width,r_s,c_e)) >> 2;
+                (rc, g_mhc.clamp(0,65535), b_v.clamp(0,65535))
+            }
+            (0, 1) => {
+                let gc  = at(raw, width, r_c, col);
+                let re  = at(raw, width, r_c, c_e);
+                let rw  = at(raw, width, r_c, c_w);
+                let bn  = at(raw, width, r_n, col);
+                let bs  = at(raw, width, r_s, col);
+                let ge2 = at(raw, width, r_c,  c_e2);
+                let gw2 = at(raw, width, r_c,  c_w2);
+                let gn2 = at(raw, width, r_n2, col);
+                let gs2 = at(raw, width, r_s2, col);
+                let r_v = (2*(re+rw) + 2*gc - ge2-gw2) >> 2;
+                let b_v = (2*(bn+bs) + 2*gc - gn2-gs2) >> 2;
+                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
+            }
+            (1, 0) => {
+                let gc  = at(raw, width, r_c, col);
+                let rn  = at(raw, width, r_n, col);
+                let rs  = at(raw, width, r_s, col);
+                let be  = at(raw, width, r_c, c_e);
+                let bw  = at(raw, width, r_c, c_w);
+                let gn2 = at(raw, width, r_n2, col);
+                let gs2 = at(raw, width, r_s2, col);
+                let ge2 = at(raw, width, r_c,  c_e2);
+                let gw2 = at(raw, width, r_c,  c_w2);
+                let r_v = (2*(rn+rs) + 2*gc - gn2-gs2) >> 2;
+                let b_v = (2*(be+bw) + 2*gc - ge2-gw2) >> 2;
+                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
+            }
+            _ => {
+                let bc  = at(raw, width, r_c, col);
+                let gn  = at(raw, width, r_n, col);
+                let ge  = at(raw, width, r_c, c_e);
+                let gs  = at(raw, width, r_s, col);
+                let gw  = at(raw, width, r_c, c_w);
+                let bn2 = at(raw, width, r_n2, col);
+                let be2 = at(raw, width, r_c,  c_e2);
+                let bs2 = at(raw, width, r_s2, col);
+                let bw2 = at(raw, width, r_c,  c_w2);
+                let g_mhc = (2*(gn+ge+gs+gw) + 4*bc - bn2-be2-bs2-bw2) >> 3;
+                let r_v = (2*(at(raw,width,r_n,c_e)+at(raw,width,r_n,c_w)
+                             +at(raw,width,r_s,c_e)+at(raw,width,r_s,c_w))
+                           + 4*bc - bn2-be2-bs2-bw2) >> 3;
+                (r_v.clamp(0,65535), g_mhc.clamp(0,65535), bc)
+            }
+        }
+    }
+
     let do_row = |row: usize, out_row: &mut [u16]| {
         let r = row as isize;
         let r_n  = clamp(r - 1, 0, h_max);
@@ -162,108 +233,33 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
         let r_s2 = clamp(r + 2, 0, h_max);
         let r_c  = row;
 
-        for col in 0..width {
-            let c    = col as isize;
-            let c_w  = clamp(c - 1, 0, w_max);
-            let c_e  = clamp(c + 1, 0, w_max);
-            let c_w2 = clamp(c - 2, 0, w_max);
-            let c_e2 = clamp(c + 2, 0, w_max);
+        let int_start = 2.min(width);
+        let int_end   = width.saturating_sub(2);
 
-            let (rr, gg, bb) = match (row & 1, col & 1) {
-                // R pixel (even row, even col)
-                (0, 0) => {
-                    let rc  = at(raw, width, r_c,  col);
-                    // Cardinal G neighbors at distance 1
-                    let gn  = at(raw, width, r_n,  col);
-                    let ge  = at(raw, width, r_c,  c_e);
-                    let gs  = at(raw, width, r_s,  col);
-                    let gw  = at(raw, width, r_c,  c_w);
-                    // R pixels 2 steps away (same parity — all R)
-                    let rn2 = at(raw, width, r_n2, col);
-                    let re2 = at(raw, width, r_c,  c_e2);
-                    let rs2 = at(raw, width, r_s2, col);
-                    let rw2 = at(raw, width, r_c,  c_w2);
-                    // MHC: 8G = 2(G_N+G_E+G_S+G_W) + 4R_C − R_N2 − R_E2 − R_S2 − R_W2
-                    let g_mhc = (2*(gn + ge + gs + gw) + 4*rc - rn2 - re2 - rs2 - rw2) >> 3;
-                    // B: bilinear from 4 diagonal B neighbors
-                    let b_v = (at(raw, width, r_n, c_w)
-                               + at(raw, width, r_n, c_e)
-                               + at(raw, width, r_s, c_w)
-                               + at(raw, width, r_s, c_e)) >> 2;
-                    (rc, g_mhc.clamp(0, 65535), b_v.clamp(0, 65535))
-                }
-                // G in R row (even row, odd col)
-                (0, 1) => {
-                    let gc  = at(raw, width, r_c,  col);
-                    // R at distance 1 E/W (same row, even cols → R)
-                    let re  = at(raw, width, r_c,  c_e);
-                    let rw  = at(raw, width, r_c,  c_w);
-                    // B at distance 1 N/S (odd rows, odd col → B)
-                    let bn  = at(raw, width, r_n,  col);
-                    let bs  = at(raw, width, r_s,  col);
-                    // G at distance 2 E/W (same row, odd cols → G)
-                    let ge2 = at(raw, width, r_c,  c_e2);
-                    let gw2 = at(raw, width, r_c,  c_w2);
-                    // G at distance 2 N/S (even rows, odd col → G)
-                    let gn2 = at(raw, width, r_n2, col);
-                    let gs2 = at(raw, width, r_s2, col);
-                    // 4R = 2(R_E+R_W) + 2G_C − G_E2 − G_W2
-                    let r_v = (2*(re + rw) + 2*gc - ge2 - gw2) >> 2;
-                    // 4B = 2(B_N+B_S) + 2G_C − G_N2 − G_S2
-                    let b_v = (2*(bn + bs) + 2*gc - gn2 - gs2) >> 2;
-                    (r_v.clamp(0, 65535), gc, b_v.clamp(0, 65535))
-                }
-                // G in B row (odd row, even col)
-                (1, 0) => {
-                    let gc  = at(raw, width, r_c,  col);
-                    // R at distance 1 N/S (even rows, even col → R)
-                    let rn  = at(raw, width, r_n,  col);
-                    let rs  = at(raw, width, r_s,  col);
-                    // B at distance 1 E/W (odd row, odd cols → B)
-                    let be  = at(raw, width, r_c,  c_e);
-                    let bw  = at(raw, width, r_c,  c_w);
-                    // G at distance 2 N/S (odd rows, even col → G)
-                    let gn2 = at(raw, width, r_n2, col);
-                    let gs2 = at(raw, width, r_s2, col);
-                    // G at distance 2 E/W (odd row, even cols → G)
-                    let ge2 = at(raw, width, r_c,  c_e2);
-                    let gw2 = at(raw, width, r_c,  c_w2);
-                    // 4R = 2(R_N+R_S) + 2G_C − G_N2 − G_S2
-                    let r_v = (2*(rn + rs) + 2*gc - gn2 - gs2) >> 2;
-                    // 4B = 2(B_E+B_W) + 2G_C − G_E2 − G_W2
-                    let b_v = (2*(be + bw) + 2*gc - ge2 - gw2) >> 2;
-                    (r_v.clamp(0, 65535), gc, b_v.clamp(0, 65535))
-                }
-                // B pixel (odd row, odd col)
-                _ => {
-                    let bc  = at(raw, width, r_c,  col);
-                    // Cardinal G neighbors at distance 1
-                    let gn  = at(raw, width, r_n,  col);
-                    let ge  = at(raw, width, r_c,  c_e);
-                    let gs  = at(raw, width, r_s,  col);
-                    let gw  = at(raw, width, r_c,  c_w);
-                    // B pixels 2 steps away (same parity — all B)
-                    let bn2 = at(raw, width, r_n2, col);
-                    let be2 = at(raw, width, r_c,  c_e2);
-                    let bs2 = at(raw, width, r_s2, col);
-                    let bw2 = at(raw, width, r_c,  c_w2);
-                    // MHC: 8G = 2(G_N+G_E+G_S+G_W) + 4B_C − B_N2 − B_E2 − B_S2 − B_W2
-                    let g_mhc = (2*(gn + ge + gs + gw) + 4*bc - bn2 - be2 - bs2 - bw2) >> 3;
-                    // R: bilinear from 4 diagonal R neighbors + B Laplacian correction
-                    // 8R = 2(R_NE+R_NW+R_SE+R_SW) + 4B_C − B_N2 − B_E2 − B_S2 − B_W2
-                    let rne = at(raw, width, r_n, c_e);
-                    let rnw = at(raw, width, r_n, c_w);
-                    let rse = at(raw, width, r_s, c_e);
-                    let rsw = at(raw, width, r_s, c_w);
-                    let r_v = (2*(rne + rnw + rse + rsw) + 4*bc - bn2 - be2 - bs2 - bw2) >> 3;
-                    (r_v.clamp(0, 65535), g_mhc.clamp(0, 65535), bc)
-                }
-            };
-
+        // Left border (cols 0..2): clamp column neighbors.
+        for col in 0..int_start {
+            let c = col as isize;
+            let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
+                clamp(c-1,0,w_max), clamp(c+1,0,w_max),
+                clamp(c-2,0,w_max), clamp(c+2,0,w_max));
             let o = col * 3;
-            out_row[o]     = rr as u16;
-            out_row[o + 1] = gg as u16;
-            out_row[o + 2] = bb as u16;
+            out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
+        }
+        // Interior (cols 2..width-2): no column clamping — all neighbors in bounds.
+        for col in int_start..int_end {
+            let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2,
+                col, col-1, col+1, col-2, col+2);
+            let o = col * 3;
+            out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
+        }
+        // Right border (cols width-2..width): clamp column neighbors.
+        for col in int_end..width {
+            let c = col as isize;
+            let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
+                clamp(c-1,0,w_max), clamp(c+1,0,w_max),
+                clamp(c-2,0,w_max), clamp(c+2,0,w_max));
+            let o = col * 3;
+            out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
         }
     };
 

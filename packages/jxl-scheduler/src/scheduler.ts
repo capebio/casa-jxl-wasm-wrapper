@@ -410,8 +410,8 @@ export class Scheduler {
         bp.pendingPushes.length = 0;
         bp.pendingHead = 0;
       }
-      this.updateDrainEma(performance.now() - waiter.waitedAt);
-      waiter.resolve();
+      this.updateDrainEma(performance.now() - waiter!.waitedAt);
+      waiter!.resolve();
     }
   }
 
@@ -433,7 +433,7 @@ export class Scheduler {
     if (record.backpressure === undefined) return;
     const { pendingPushes, pendingHead } = record.backpressure;
     for (let i = pendingHead; i < pendingPushes.length; i++) {
-      pendingPushes[i].resolve();
+      pendingPushes[i]!.resolve();
     }
     delete record.backpressure;
   }
@@ -815,32 +815,49 @@ export class Scheduler {
     if (this.queue.isEmpty || this.drainingQueue) return;
     this.drainingQueue = true;
 
+    // Sync fast path: drain all entries that have an immediately available idle
+    // worker, skipping the async hop (Promise allocation + microtask scheduling).
+    // Common steady-state case: a worker just finished, queue has work, pool has
+    // an idle slot — no need for an async round-trip.
+    while (!this.queue.isEmpty) {
+      const worker = this.pool.tryAcquireIdle();
+      if (worker === null) break;
+      const entry = this.queue.dequeue();
+      if (entry === null) { this.pool.release(worker); break; }
+      const { payload: pending } = entry;
+      this.assignWorker(worker, pending.sessionId, pending.startMsg);
+      this.setupSignalAbort(pending.sessionId, pending.signal);
+      for (const { msg, transfer } of pending.bufferedChunks) {
+        worker.handle.send(msg, transfer);
+      }
+      pending.resolve();
+    }
+
+    if (this.queue.isEmpty) {
+      this.drainingQueue = false;
+      return;
+    }
+
+    // Async path: no idle workers available; wait for spawn or worker release.
     void (async () => {
       try {
         while (!this.queue.isEmpty) {
           const worker = await this.pool.acquire();
           if (worker === null) break;
-
           const entry = this.queue.dequeue();
           if (entry === null) {
             this.pool.release(worker);
             break;
           }
-
           const { payload: pending } = entry;
           this.assignWorker(worker, pending.sessionId, pending.startMsg);
           this.setupSignalAbort(pending.sessionId, pending.signal);
-
           for (const { msg, transfer } of pending.bufferedChunks) {
             worker.handle.send(msg, transfer);
           }
-
           pending.resolve();
         }
       } catch (err: unknown) {
-        // Log the error so it's visible in diagnostics rather than silently consumed.
-        // Re-trigger after a short delay so queued sessions are not permanently stuck
-        // waiting for a drain that never comes.
         console.error("[jxl-scheduler] drainQueue error:", err);
         setTimeout(() => this.drainQueue(), 50);
       } finally {
@@ -877,3 +894,4 @@ export class Scheduler {
     this.workerPausedSession.clear();
   }
 }
+
