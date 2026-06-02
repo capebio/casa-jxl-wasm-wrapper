@@ -34,7 +34,7 @@ async function handleProgressiveDecode(data) {
     if (data.previewFirst) {
       let previewDec = null;
       try {
-        const prevDs = (data.downsample ?? 1) > 1 ? data.downsample : 2;
+        const prevDs = 2; // P3.3: fixed quick recognizable overview for container preview (dc); main uses the (possibly higher) requested ds for detail. Faster than matching ultra-low ROI ds.
         previewDec = createDecoder({
           format: 'rgba8',
           region: null, // preview is always full low-res; main decoder may apply region/ds

@@ -344,7 +344,8 @@ Which approach would you like to use? (Reply with 1 or 2, or any adjustments to 
 - Comments added for future embedded preview/DC first + animated multi-frame in lightbox.
 - See updated handoff notes and code for next steps (e.g. explicit preview kick before full, JXTC force, richer badge with passes/bytes decoded, animated frame support, full multi-frame lightbox nav).
 - Latest: more P3.3 echo detail, smart cache, low dc kick, previewFirst + jxl_preview handling + policy, frameIndex wiring (6d1be48, 24b3cc9, f11bc9a, 34ba580, 29e9814).
-- P3.3 previewFirst completion: worker if(previewFirst) hardened with header capture + full echo on jxl_preview, cbs/badge/fromPreview strategy + low-kick previewFirst, propagation, cached badge polish (next commit).
+- P3.3 previewFirst completion + stage: worker if(previewFirst) hardened..., badges show live stage, thumb guard (22fe49a, bcb1540).
+- Additional P3.3: libjxl 'stage' (dc/pass/final) now echoed in jxl_ progress msgs and copied to _jxlDecoded; all badge builders append non-final stage for live " (ROI @2 lastPasses pass)" visibility into progressive refinement (excellent ROI for user/debug intuition). Thumb repaint guards against preview. Pushed (bcb1540).
 
 **Latest commits include P3.2b dedup/compositing (16561e6, 516fe9d) pushed to origin/feature branch.**
 
