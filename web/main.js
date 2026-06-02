@@ -3405,8 +3405,9 @@ async function startBatchTauri(paths) {
     // instantly, then onFileDoneTauri replaces it with the pipeline thumbnail.
     const unlistenFastThumb = await listen('file_thumb_fast', ({ payload }) => {
         const card = findTauriCard(payload.path);
-        if (!card || !payload.jpeg?.length) return;
-        const blob = new Blob([new Uint8Array(payload.jpeg)], { type: 'image/jpeg' });
+        if (!card || !payload.jpeg_b64) return;
+        const jpeg = Uint8Array.from(atob(payload.jpeg_b64), c => c.charCodeAt(0));
+        const blob = new Blob([jpeg], { type: 'image/jpeg' });
         createImageBitmap(blob).then(bmp => {
             const orientation = payload.orientation || 1;
             // Compute the RAW-pipeline thumb dims from sensor dims so the
@@ -4675,26 +4676,30 @@ async function triggerLiveUpdateTauri(look) {
     if (tauriLiveInFlight) { tauriLivePending = look; return; }
     tauriLiveInFlight = true;
     try {
-        const frame = await invoke('apply_look', {
+        const buf = await invoke('apply_look', {
             id: card._tauriResult.id,
             look: lookToSnake(look),
         });
+        const view = new DataView(buf);
+        const w = view.getUint16(0, true);
+        const h = view.getUint16(2, true);
+        const rgb = new Uint8Array(buf, 4);
         // First slider edit on a card flips the lightbox from embedded JPEG
         // preview (potentially 3:2 ~1620×1080) to the RAW pipeline output
         // (4:3 1800×1350 for Olympus).  Resize the canvas to the RAW dims so
         // putImageData paints the full frame, not just the overlapping rect.
-        const dimsChanged = (lightboxCanvas.width !== frame.width || lightboxCanvas.height !== frame.height);
+        const dimsChanged = (lightboxCanvas.width !== w || lightboxCanvas.height !== h);
         if (dimsChanged) {
-            lightboxCanvas.width = frame.width;
-            lightboxCanvas.height = frame.height;
+            lightboxCanvas.width = w;
+            lightboxCanvas.height = h;
             // Also cache on card so subsequent draws know the RAW dims and
             // the embedded fallback branch matches.
             if (!card._lightbox) card._lightbox = {};
-            card._lightbox.w = frame.width;
-            card._lightbox.h = frame.height;
+            card._lightbox.w = w;
+            card._lightbox.h = h;
         }
         const ctx = lightboxCanvas.getContext('2d');
-        ctx.putImageData(new ImageData(rgbToRgbaArr(frame.data), frame.width, frame.height), 0, 0);
+        ctx.putImageData(new ImageData(rgbToRgbaArr(rgb), w, h), 0, 0);
         if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
             setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
         }
