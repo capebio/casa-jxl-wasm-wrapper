@@ -329,10 +329,12 @@ Which approach would you like to use? (Reply with 1 or 2, or any adjustments to 
 
 **P3.3 start (JXL Container Previews + JXTC + Polish):**
 - Region/ROI path now documented to automatically benefit from JXTC if the source JXL was encoded as tiled container (zero frame walking for ROI; the createDecoder + region uses internal tiled paths when applicable, as in crop-bench).
-- Source badge extended with ROI strategy info as start of "decode strategy UI".
-- Worker now emits jxl_header early (with full dims) for previews/container info.
+- Source badge extended with ROI strategy info as start of "decode strategy UI" (now shows e.g. (ROI @2x lastPasses), echoed progressiveDetail).
+- Worker now emits jxl_header early (with full dims) for previews/container info; also echoes progressiveDetail and source in pixel msgs.
+- P3.3 smart cache + on-demand high detail: if high zoom on low full cache or cached sub doesn't overlap current view, fallthrough to decode high detail ROI instead of low. Kick low-pri 'dc' full preview when using ROI view, to populate early full low res cache.
 - Comments added for future embedded preview/DC first + animated multi-frame in lightbox.
-- See updated handoff notes and code for next steps (e.g. explicit preview kick, JXTC force, badge with passes/bytes).
+- See updated handoff notes and code for next steps (e.g. explicit preview kick before full, JXTC force, richer badge with passes/bytes decoded, animated frame support).
+- Latest: more P3.3 echo detail, smart cache, low dc kick (f11bc9a).
 
 **Latest commits include P3.2b dedup/compositing (16561e6, 516fe9d) pushed to origin/feature branch.**
 
