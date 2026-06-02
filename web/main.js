@@ -339,6 +339,7 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
         pool.decodeJxl(card._blobUrl, (msg) => {
             if (msg.type === 'jxl_header') {
               if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+              if (msg.jpegReconstructionAvailable != null) card._jxlJxtc = !!msg.jpegReconstructionAvailable;
               return;
             }
             if (msg.type === 'decode_error') { resolve(null); return; }
@@ -2115,6 +2116,7 @@ function _triggerJxlRoiUpdate() {
                     if (msg.stage) decoded.stage = msg.stage;
                     if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
                     if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
+                    if (msg.jpegReconstructionAvailable != null) decoded.jpegReconstructionAvailable = !!msg.jpegReconstructionAvailable;
                     card._jxlDecoded = decoded;
                 }
                 lightboxCanvas.width = msg.w;
@@ -2132,6 +2134,7 @@ function _triggerJxlRoiUpdate() {
             }
             if (msg.type === 'jxl_header') {
               if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+              if (msg.jpegReconstructionAvailable != null) card._jxlJxtc = !!msg.jpegReconstructionAvailable;
               return;
             }
             if (!msg.rgba) return; // e.g. jxl_header (P3.2b); pixel msgs have rgba + sourceW/H
@@ -2170,7 +2173,13 @@ function _triggerJxlRoiUpdate() {
             }
             let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''}${msg.stage && msg.stage !== 'final' ? ' ' + msg.stage : ''})` : '';
             if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
-            if (msg.region) roiExtra += ' (JXTC if container)';
+            if (msg.region) {
+              if (msg.jpegReconstructionAvailable || (card._jxlDecoded && card._jxlDecoded.jpegReconstructionAvailable) || card._jxlJxtc) {
+                roiExtra += ' (JXTC)';
+              } else {
+                roiExtra += ' (region)';
+              }
+            }
             if (msg.hasAnimation || (card._jxlDecoded && card._jxlDecoded.hasAnimation) || card._jxlHasAnimation) roiExtra += ' (anim)';
             setPaintedSourceBadge('jxl', roiExtra);
             // Straighten on a sub-rect view may be approximate; full source is forced on slider interaction.
@@ -2351,7 +2360,13 @@ function drawLightboxForCard(card) {
               }
               let roiExtra = (d.region) ? ` (ROI${d.downsample > 1 ? ' @' + d.downsample + 'x' : ''}${d.progressiveDetail ? ' ' + d.progressiveDetail : ''}${d.stage && d.stage !== 'final' ? ' ' + d.stage : ''})` : '';
               if (d.frameIndex > 0) roiExtra += ` f${d.frameIndex}`;
-              if (d.region) roiExtra += ' (JXTC if container)';
+              if (d.region) {
+                if (d.jpegReconstructionAvailable || card._jxlJxtc) {
+                  roiExtra += ' (JXTC)';
+                } else {
+                  roiExtra += ' (region)';
+                }
+              }
               if (d.hasAnimation) roiExtra += ' (anim)';
               if (!roiExtra && d.fromPreview) roiExtra = ' (preview)';
               if (!roiExtra && d.progressiveDetail === 'dc') roiExtra = ' (dc)';
@@ -2381,7 +2396,7 @@ function drawLightboxForCard(card) {
                     cachePolicy: 'never',   // ROI payloads are transient view artifacts
                     region: roi.region,
                     downsample: roi.downsample,
-                    progressiveDetail: 'lastPasses',  // P3.3: explicit for quality + early DC (container preview path)
+                    progressiveDetail: 'lastPasses',  // P3.3: explicit for quality + early DC (container preview path); JXTC flag enables accurate (JXTC) badge + auto fast ROI in decoder
                     previewFirst: true,
                     frameIndex: 0
                 };
@@ -2412,6 +2427,7 @@ function drawLightboxForCard(card) {
                     if (msg.stage) decoded.stage = msg.stage;
                     if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
                     if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
+                    if (msg.jpegReconstructionAvailable != null) decoded.jpegReconstructionAvailable = !!msg.jpegReconstructionAvailable;
                     card._jxlDecoded = decoded;
                 }
                 lightboxCanvas.width = msg.w;
@@ -2430,6 +2446,7 @@ function drawLightboxForCard(card) {
             }
             if (msg.type === 'jxl_header') {
               if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+              if (msg.jpegReconstructionAvailable != null) card._jxlJxtc = !!msg.jpegReconstructionAvailable;
               return;
             }
             if (!msg.rgba) return; // e.g. jxl_header for P3.2b full size; pixels will follow
@@ -2484,7 +2501,13 @@ function drawLightboxForCard(card) {
             }
             let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''}${msg.stage && msg.stage !== 'final' ? ' ' + msg.stage : ''})` : '';
             if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
-            if (msg.region) roiExtra += ' (JXTC if container)';
+            if (msg.region) {
+              if (msg.jpegReconstructionAvailable || (card._jxlDecoded && card._jxlDecoded.jpegReconstructionAvailable) || card._jxlJxtc) {
+                roiExtra += ' (JXTC)';
+              } else {
+                roiExtra += ' (region)';
+              }
+            }
             if (msg.hasAnimation || (card._jxlDecoded && card._jxlDecoded.hasAnimation) || card._jxlHasAnimation) roiExtra += ' (anim)';
             setPaintedSourceBadge('jxl', roiExtra);
             lbLoadingBadge.hidden = true;

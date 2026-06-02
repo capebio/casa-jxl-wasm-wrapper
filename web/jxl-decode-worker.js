@@ -53,7 +53,7 @@ async function handleProgressiveDecode(data) {
           if (ev.type === 'header') {
             psw = ev.info.width || 0;
             psh = ev.info.height || 0;
-            self.postMessage({ type: 'jxl_header', decodeId, w: psw, h: psh, hasAnimation: !!ev.info.hasAnimation });
+            self.postMessage({ type: 'jxl_header', decodeId, w: psw, h: psh, hasAnimation: !!ev.info.hasAnimation, jpegReconstructionAvailable: !!ev.info.jpegReconstructionAvailable });
           } else if (ev.type === 'progress' || ev.type === 'final') {
             let pixelsArray = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
             if (pixelsArray.byteOffset !== 0 || pixelsArray.byteLength !== pixelsArray.buffer.byteLength) {
@@ -64,6 +64,9 @@ async function handleProgressiveDecode(data) {
               hasAnimation: !!ev.info.hasAnimation,
               ...(ev.frameDuration !== undefined ? { frameDuration: ev.frameDuration } : {}),
               ...(ev.animTicksPerSecond !== undefined ? { animTicksPerSecond: ev.animTicksPerSecond } : {}),
+            };
+            const previewJxtc = {
+              jpegReconstructionAvailable: !!ev.info.jpegReconstructionAvailable,
             };
             self.postMessage(
               {
@@ -79,7 +82,8 @@ async function handleProgressiveDecode(data) {
                 region: null,
                 downsample: prevDs,
                 progressiveDetail: 'dc',
-                ...previewAnim
+                ...previewAnim,
+                ...previewJxtc
               },
               [pixelsArray.buffer]
             );
@@ -113,8 +117,8 @@ async function handleProgressiveDecode(data) {
         sourceW = ev.info.width || 0;
         sourceH = ev.info.height || 0;
         // Header gives full source dims even for region decodes (P3.2b)
-        // P3.3: forward hasAnimation (and other info) for richer badges / multi-frame detection in main lightbox
-        self.postMessage({ type: 'jxl_header', decodeId, w: sourceW, h: sourceH, hasAnimation: !!ev.info.hasAnimation });
+        // P3.3: forward hasAnimation + jpegReconstructionAvailable (JXTC/container flag) for accurate badges and JXTC extraction / fast ROI path detection
+        self.postMessage({ type: 'jxl_header', decodeId, w: sourceW, h: sourceH, hasAnimation: !!ev.info.hasAnimation, jpegReconstructionAvailable: !!ev.info.jpegReconstructionAvailable });
       } else if (ev.type === 'progress' || ev.type === 'final') {
         const isFinal = ev.type === 'final';
         const info = ev.info;
@@ -133,7 +137,10 @@ async function handleProgressiveDecode(data) {
             ...(ev.animTicksPerSecond !== undefined ? { animTicksPerSecond: ev.animTicksPerSecond } : {}),
             ...(ev.isLastFrame !== undefined ? { isLastFrame: ev.isLastFrame } : {}),
           };
-          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage, ...animMeta };
+          const jxtcMeta = {
+            jpegReconstructionAvailable: !!info.jpegReconstructionAvailable,
+          };
+          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage, ...animMeta, ...jxtcMeta };
           const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
             { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },
@@ -150,7 +157,10 @@ async function handleProgressiveDecode(data) {
             ...(ev.animTicksPerSecond !== undefined ? { animTicksPerSecond: ev.animTicksPerSecond } : {}),
             ...(ev.isLastFrame !== undefined ? { isLastFrame: ev.isLastFrame } : {}),
           };
-          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage, ...animMeta };
+          const jxtcMeta = {
+            jpegReconstructionAvailable: !!info.jpegReconstructionAvailable,
+          };
+          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage, ...animMeta, ...jxtcMeta };
           const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
             { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },
