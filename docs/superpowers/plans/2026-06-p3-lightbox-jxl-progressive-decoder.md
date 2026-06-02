@@ -349,6 +349,7 @@ Which approach would you like to use? (Reply with 1 or 2, or any adjustments to 
 - P3.3: previewFirst now always emits its dc preview at fixed ds=2 (quick usable overview, independent of main's possibly higher ROI ds for speed/quality balance). Pushed (2757b9c).
 - Tauri comment updates: P3.3 (previewFirst + ROI) applies to JXL lightbox in Tauri webview via the shared web/main.js + jxl-decode-worker (no native Rust port yet). Pushed (1c49cd0).
 - All slices for this round of "MORE P3.3" complete + pushed. Worker/main verified (node --check, bun gallery tests). Plan updated. Ready for user direction on next P3.3 slice (e.g. multi-frame lightbox UI, richer ev info in badge, JXTC, Rust Tauri mirror, or full live verification with large JXLs).
+- Next P3.3 slice (enrich + kick): worker now forwards hasAnimation + frame/anim meta (frameDuration, animTicks etc) from header and pixel events (both main decoder and previewFirst path) into jxl_header / jxl_progress / jxl_preview / jxl_decoded. Main lightbox cbs capture into _jxlDecoded + card._jxlHasAnimation on header too. All decoded sets and 5+ badge roiExtra/previewExtra sites updated to surface '(anim)' + existing strategy. Explicit low-pri previewFirst+dc kick added (unconditional when no cache) for guaranteed early overview (extends the ROI-only one). Syntax + gallery tests green. (next commit)
 
 **Latest commits include P3.2b dedup/compositing (16561e6, 516fe9d) pushed to origin/feature branch.**
 

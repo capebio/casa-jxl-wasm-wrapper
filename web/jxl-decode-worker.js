@@ -53,12 +53,18 @@ async function handleProgressiveDecode(data) {
           if (ev.type === 'header') {
             psw = ev.info.width || 0;
             psh = ev.info.height || 0;
-            self.postMessage({ type: 'jxl_header', decodeId, w: psw, h: psh });
+            self.postMessage({ type: 'jxl_header', decodeId, w: psw, h: psh, hasAnimation: !!ev.info.hasAnimation });
           } else if (ev.type === 'progress' || ev.type === 'final') {
             let pixelsArray = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
             if (pixelsArray.byteOffset !== 0 || pixelsArray.byteLength !== pixelsArray.buffer.byteLength) {
               pixelsArray = new Uint8Array(pixelsArray);
             }
+            // P3.3: include hasAnimation (and any frame meta) on preview too for early strategy / animated detection
+            const previewAnim = {
+              hasAnimation: !!ev.info.hasAnimation,
+              ...(ev.frameDuration !== undefined ? { frameDuration: ev.frameDuration } : {}),
+              ...(ev.animTicksPerSecond !== undefined ? { animTicksPerSecond: ev.animTicksPerSecond } : {}),
+            };
             self.postMessage(
               {
                 type: 'jxl_preview',
@@ -72,7 +78,8 @@ async function handleProgressiveDecode(data) {
                 sourceH: psh,
                 region: null,
                 downsample: prevDs,
-                progressiveDetail: 'dc'
+                progressiveDetail: 'dc',
+                ...previewAnim
               },
               [pixelsArray.buffer]
             );
@@ -106,7 +113,8 @@ async function handleProgressiveDecode(data) {
         sourceW = ev.info.width || 0;
         sourceH = ev.info.height || 0;
         // Header gives full source dims even for region decodes (P3.2b)
-        self.postMessage({ type: 'jxl_header', decodeId, w: sourceW, h: sourceH });
+        // P3.3: forward hasAnimation (and other info) for richer badges / multi-frame detection in main lightbox
+        self.postMessage({ type: 'jxl_header', decodeId, w: sourceW, h: sourceH, hasAnimation: !!ev.info.hasAnimation });
       } else if (ev.type === 'progress' || ev.type === 'final') {
         const isFinal = ev.type === 'final';
         const info = ev.info;
@@ -118,7 +126,14 @@ async function handleProgressiveDecode(data) {
         if (isFinal) {
           // Copy for legacy jxl_decoded BEFORE transferring the primary buffer.
           const legacyPixels = new Uint8Array(pixelsArray);
-          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage };
+          // P3.3: forward animation/frame meta (when present on ev from facade) + hasAnimation for strategy badges and future multi-frame lightbox nav
+          const animMeta = {
+            hasAnimation: !!info.hasAnimation,
+            ...(ev.frameDuration !== undefined ? { frameDuration: ev.frameDuration } : {}),
+            ...(ev.animTicksPerSecond !== undefined ? { animTicksPerSecond: ev.animTicksPerSecond } : {}),
+            ...(ev.isLastFrame !== undefined ? { isLastFrame: ev.isLastFrame } : {}),
+          };
+          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage, ...animMeta };
           const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
             { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },
@@ -129,7 +144,13 @@ async function handleProgressiveDecode(data) {
             [legacyPixels.buffer],
           );
         } else {
-          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage };
+          const animMeta = {
+            hasAnimation: !!info.hasAnimation,
+            ...(ev.frameDuration !== undefined ? { frameDuration: ev.frameDuration } : {}),
+            ...(ev.animTicksPerSecond !== undefined ? { animTicksPerSecond: ev.animTicksPerSecond } : {}),
+            ...(ev.isLastFrame !== undefined ? { isLastFrame: ev.isLastFrame } : {}),
+          };
+          const base = { decodeId, w: info.width, h: info.height, sourceW, sourceH, progressiveDetail: data.progressiveDetail ?? 'lastPasses', frameIndex: data.frameIndex ?? 0, stage: ev.stage, ...animMeta };
           const req = (data.region != null || data.downsample != null) ? { region: data.region ?? null, downsample: data.downsample ?? 1 } : {};
           self.postMessage(
             { type: 'jxl_progress', ...base, ...req, rgba: pixelsArray, isFinal },

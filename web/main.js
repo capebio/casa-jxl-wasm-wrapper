@@ -337,6 +337,10 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
         if (!card?._blobUrl) { resolve(null); return; }
         if (card._jxlDecoded) { resolve(card._jxlDecoded); return; }
         pool.decodeJxl(card._blobUrl, (msg) => {
+            if (msg.type === 'jxl_header') {
+              if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+              return;
+            }
             if (msg.type === 'decode_error') { resolve(null); return; }
             const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
             if (msg.sourceW) decoded.sourceW = msg.sourceW;
@@ -344,6 +348,8 @@ window.decodeFullJxlFor = function decodeFullJxlFor(card) {
             if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
             if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
             if (msg.stage) decoded.stage = msg.stage;
+            if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
+            if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
             card._jxlDecoded = decoded;
             resolve(card._jxlDecoded);
         }, 'low', { progressive: true, cachePolicy: 'onFinal' });
@@ -2107,6 +2113,8 @@ function _triggerJxlRoiUpdate() {
                     if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
                     if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
                     if (msg.stage) decoded.stage = msg.stage;
+                    if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
+                    if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
                     card._jxlDecoded = decoded;
                 }
                 lightboxCanvas.width = msg.w;
@@ -2116,11 +2124,15 @@ function _triggerJxlRoiUpdate() {
                 if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
                     setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
                 }
-                const previewExtra = ' (preview)' + (msg.progressiveDetail ? ' ' + msg.progressiveDetail : '');
+                const previewExtra = ' (preview)' + (msg.progressiveDetail ? ' ' + msg.progressiveDetail : '') + ((msg.hasAnimation || card._jxlHasAnimation) ? ' (anim)' : '');
                 setPaintedSourceBadge('jxl', previewExtra);
                 applyStraightenToLightboxCanvas(card);
                 syncZoomToDisplayLong();
                 return;
+            }
+            if (msg.type === 'jxl_header') {
+              if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+              return;
             }
             if (!msg.rgba) return; // e.g. jxl_header (P3.2b); pixel msgs have rgba + sourceW/H
             // Paint the (possibly sub-rect) payload directly for the live view.
@@ -2159,6 +2171,7 @@ function _triggerJxlRoiUpdate() {
             let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''}${msg.stage && msg.stage !== 'final' ? ' ' + msg.stage : ''})` : '';
             if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
             if (msg.region) roiExtra += ' (JXTC if container)';
+            if (msg.hasAnimation || (card._jxlDecoded && card._jxlDecoded.hasAnimation) || card._jxlHasAnimation) roiExtra += ' (anim)';
             setPaintedSourceBadge('jxl', roiExtra);
             // Straighten on a sub-rect view may be approximate; full source is forced on slider interaction.
             applyStraightenToLightboxCanvas(card);
@@ -2201,6 +2214,10 @@ function ensureFullJxlSourceForEditing(card) {
     // Kick a low-pri full onFinal. Dedup + policy will do the right thing.
     // Call this on first slider interaction or straighten apply while a view-ROI may be active.
     pool.decodeJxl(card._blobUrl, (msg) => {
+        if (msg.type === 'jxl_header') {
+          if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+          return;
+        }
         if (msg.type === 'decode_error') return;
         if (!card._jxlDecoded || (msg.w >= (card._jxlDecoded.w || 0) && msg.h >= (card._jxlDecoded.h || 0))) {
             const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
@@ -2209,6 +2226,8 @@ function ensureFullJxlSourceForEditing(card) {
             if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
             if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
             if (msg.stage) decoded.stage = msg.stage;
+            if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
+            if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
             card._jxlDecoded = decoded;
         }
     }, 'low', { progressive: true, cachePolicy: 'onFinal' });
@@ -2333,6 +2352,7 @@ function drawLightboxForCard(card) {
               let roiExtra = (d.region) ? ` (ROI${d.downsample > 1 ? ' @' + d.downsample + 'x' : ''}${d.progressiveDetail ? ' ' + d.progressiveDetail : ''}${d.stage && d.stage !== 'final' ? ' ' + d.stage : ''})` : '';
               if (d.frameIndex > 0) roiExtra += ` f${d.frameIndex}`;
               if (d.region) roiExtra += ' (JXTC if container)';
+              if (d.hasAnimation) roiExtra += ' (anim)';
               if (!roiExtra && d.fromPreview) roiExtra = ' (preview)';
               if (!roiExtra && d.progressiveDetail === 'dc') roiExtra = ' (dc)';
               setPaintedSourceBadge('jxl', roiExtra);
@@ -2390,6 +2410,8 @@ function drawLightboxForCard(card) {
                     if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
                     if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
                     if (msg.stage) decoded.stage = msg.stage;
+                    if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
+                    if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
                     card._jxlDecoded = decoded;
                 }
                 lightboxCanvas.width = msg.w;
@@ -2406,6 +2428,10 @@ function drawLightboxForCard(card) {
                 syncZoomToDisplayLong();
                 return; // continue to main progress for refine/ROI
             }
+            if (msg.type === 'jxl_header') {
+              if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+              return;
+            }
             if (!msg.rgba) return; // e.g. jxl_header for P3.2b full size; pixels will follow
             // For ROI decodes this may be a sub-rect (w/h < logical). We still assign
             // so the current view paint works; full source for editing is forced elsewhere
@@ -2418,6 +2444,8 @@ function drawLightboxForCard(card) {
             if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
             if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
             if (msg.stage) decoded.stage = msg.stage;
+            if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
+            if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
             card._jxlDecoded = decoded;
             // P3.2b: if this is a region decode and we know the full source size
             // (from header or echoed), size the canvas to the logical full source
@@ -2457,16 +2485,22 @@ function drawLightboxForCard(card) {
             let roiExtra = (msg.region || (card._jxlDecoded && card._jxlDecoded.region)) ? ` (ROI${msg.downsample > 1 ? ' @' + msg.downsample + 'x' : ''}${msg.progressiveDetail ? ' ' + msg.progressiveDetail : ''}${msg.stage && msg.stage !== 'final' ? ' ' + msg.stage : ''})` : '';
             if (msg.frameIndex > 0) roiExtra += ` f${msg.frameIndex}`;
             if (msg.region) roiExtra += ' (JXTC if container)';
+            if (msg.hasAnimation || (card._jxlDecoded && card._jxlDecoded.hasAnimation) || card._jxlHasAnimation) roiExtra += ' (anim)';
             setPaintedSourceBadge('jxl', roiExtra);
             lbLoadingBadge.hidden = true;
             applyStraightenToLightboxCanvas(card);
             syncZoomToDisplayLong();
         }, 'high', jxlOpts);
 
-        // P3.3: also kick a low-pri DC full for early preview / fallback cache (when using ROI view)
-        if (jxlOpts.region && !card._jxlDecoded) {
+        // P3.3: explicit low-pri kick using previewFirst + 'dc' to populate early full low-res container preview / overview cache
+        // (always when no _jxlDecoded yet; for ROI this runs in parallel to high-detail ROI decode; for full view it ensures low cache even if high-pri refines)
+        if (!card._jxlDecoded) {
             pool.decodeJxl(card._blobUrl, (msg) => {
                 if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
+                if (msg.type === 'jxl_header') {
+                  if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+                  return;
+                }
                 if (msg.type === 'decode_error') return;
                 if (msg.type === 'jxl_progress' && !msg.isFinal) return;
                 const area = (msg.w || 0) * (msg.h || 0);
@@ -2479,6 +2513,8 @@ function drawLightboxForCard(card) {
                     if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
                     if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
                     if (msg.stage) decoded.stage = msg.stage;
+                    if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
+                    if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
                     if (msg.type === 'jxl_preview') decoded.fromPreview = true;
                     card._jxlDecoded = decoded;
                 }
@@ -2793,6 +2829,10 @@ function prefetchJxl(card, priority = 'normal') {
     card._jxlPrefetching = true;
     pool.decodeJxl(card._blobUrl, (msg) => {
         card._jxlPrefetching = false;
+        if (msg.type === 'jxl_header') {
+          if (msg.hasAnimation != null) card._jxlHasAnimation = !!msg.hasAnimation;
+          return;
+        }
         if (msg.type === 'decode_error') return;
         const decoded = { rgba: msg.rgba, w: msg.w, h: msg.h };
         if (msg.sourceW) decoded.sourceW = msg.sourceW;
@@ -2800,6 +2840,8 @@ function prefetchJxl(card, priority = 'normal') {
         if (msg.frameIndex != null) decoded.frameIndex = msg.frameIndex;
         if (msg.progressiveDetail) decoded.progressiveDetail = msg.progressiveDetail;
         if (msg.stage) decoded.stage = msg.stage;
+        if (msg.hasAnimation != null) decoded.hasAnimation = !!msg.hasAnimation;
+        if (msg.animTicksPerSecond != null) decoded.animTicksPerSecond = msg.animTicksPerSecond;
         card._jxlDecoded = decoded;
     }, priority, { progressive: true, cachePolicy: 'onFinal' });
 }
