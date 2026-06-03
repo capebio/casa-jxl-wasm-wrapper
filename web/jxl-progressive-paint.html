@@ -163,6 +163,25 @@
                     <span id="current-source" style="font-size:12px; color:var(--muted); font-family:monospace; margin-left:4px;"></span>
                 </div>
 
+                <div class="prog-option-group">
+                    <span class="prog-setting-label">Preset:</span>
+                    <select id="preset-name" class="prog-select">
+                        <option value="default">Default (createProgressiveWebPreset)</option>
+                        <option value="sneyers" selected>Sneyers (truly-progressive)</option>
+                    </select>
+                </div>
+
+                <div class="prog-option-group">
+                    <span class="prog-setting-label">Throttle:</span>
+                    <select id="throttle-rate" class="prog-select">
+                        <option value="0">Unthrottled</option>
+                        <option value="2048">2 MB/s</option>
+                        <option value="500">500 KB/s</option>
+                        <option value="100" selected>100 KB/s</option>
+                        <option value="50">50 KB/s</option>
+                    </select>
+                </div>
+
                 <!-- 3. Run (on its own line, enabled only when file present) -->
                 <button id="run-progressive" class="primary-btn" type="button" disabled title="Choose parameters then load a file first" style="margin: 4px 0 8px;">Run Progressive Paint</button>
 

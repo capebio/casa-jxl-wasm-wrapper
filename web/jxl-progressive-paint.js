@@ -3,6 +3,8 @@ import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createFilePicker } from './jxl-file-picker.js';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
+import { createProgressiveWebPreset, createSneyersPreset } from './jxl-progressive-best-preset.js';
+import { computePsnrVsFinal } from './jxl-progressive-quality.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 
@@ -482,6 +484,34 @@ function nextPaint() {
     return new Promise(resolve => requestAnimationFrame(() => resolve()));
 }
 
+function readPresetName() {
+    return document.getElementById('preset-name')?.value ?? 'sneyers';
+}
+
+function readThrottleKbPerSec() {
+    const raw = document.getElementById('throttle-rate')?.value;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function buildPresetFor(name, dims) {
+    if (name === 'sneyers') return createSneyersPreset(dims);
+    return createProgressiveWebPreset(dims);
+}
+
+async function feedThrottled(decoder, bytes, kbPerSec) {
+    const chunkBytes = 16 * 1024;
+    const msPerChunk = kbPerSec > 0 ? (chunkBytes / 1024) * (1000 / kbPerSec) : 0;
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+        const end = Math.min(offset + chunkBytes, bytes.byteLength);
+        await decoder.push(exactBuffer(bytes.subarray(offset, end)));
+        offset = end;
+        if (msPerChunk > 0) await sleep(msPerChunk);
+    }
+    await decoder.close();
+}
+
 function clearCompareSlots() {
     compareSlotCursor = 0;
     for (const slot of compareSlots) {
@@ -830,22 +860,24 @@ async function runProgressivePaintTest() {
     if (liveEl) liveEl.textContent = '';
 
     try {
+        const presetName = readPresetName();
+        const throttleKbPerSec = readThrottleKbPerSec();
         const size = getProgSize();
         const quality = getProgQuality();
         const requestedPassCount = getRequestedPassCount();
-        console.log('%c[Progressive Paint] run start', 'color:#ec4899;font-weight:600', { t: new Date().toISOString(), source: selectedSource?.name ?? selectedSource?.label ?? '?', size, quality, passCount: requestedPassCount });
+        console.log('%c[Progressive Paint] run start', 'color:#ec4899;font-weight:600', { t: new Date().toISOString(), source: selectedSource?.name ?? selectedSource?.label ?? '?', size, quality, passCount: requestedPassCount, preset: presetName, throttleKbPerSec });
         const detailChoice = document.querySelector('input[name="prog-detail"]:checked')?.value ?? 'auto';
         const progressiveDetail = detailChoice === 'auto'
             ? getRequestedProgressiveDetail(requestedPassCount)
             : detailChoice;
-        const previewFirst = !!(document.getElementById('prog-preview-first')?.checked);
+        const previewFirst = presetName === 'sneyers' ? true : !!(document.getElementById('prog-preview-first')?.checked);
         const progressiveFlavor = (detailChoice !== 'auto' && detailChoice !== 'dc')
             ? 'ac'
             : getRequestedProgressiveFlavor(requestedPassCount, previewFirst);
         // Predator progressive: for higher requested passes, request more DC layers + center-out group order
         // so the encoded JXL actually contains structure for >2 distinct early passes that look different.
-        const progressiveDc = requestedPassCount >= 6 ? 2 : (requestedPassCount >= 4 ? 1 : 1);
-        const groupOrder = !!(document.getElementById('prog-group-order')?.checked) ? 1 : 0;
+        const progressiveDc = presetName === 'sneyers' ? 2 : (requestedPassCount >= 6 ? 2 : (requestedPassCount >= 4 ? 1 : 1));
+        const groupOrder = presetName === 'sneyers' ? 1 : (!!(document.getElementById('prog-group-order')?.checked) ? 1 : 0);
 
         setProgStatus(`Resizing to ${size === 'fullsize' ? 'full' : size + 'px'}…`);
         const resized = resizeRgba(selectedSource.rgba, selectedSource.width, selectedSource.height, size);
@@ -864,6 +896,9 @@ async function runProgressivePaintTest() {
             progressiveFlavor,
             previewFirst,
             progressiveDc,
+            progressiveAc: presetName === 'sneyers' ? 1 : undefined,
+            qProgressiveAc: presetName === 'sneyers' ? 1 : undefined,
+            decodingSpeed: presetName === 'sneyers' ? 0 : undefined,
             groupOrder,
             chunked: false,
         });
@@ -884,7 +919,7 @@ async function runProgressivePaintTest() {
         // Capture for export buttons (Progressive gallery / Folder)
         lastJxlBytes = jxlBytes;
         lastJxlFileName = `${(selectedSource?.file || 'source').replace(/\.[^.]+$/, '')}-prog-p${requestedPassCount}-q${quality}.jxl`;
-        lastSettings = { size, quality, requestedPassCount, progressiveDetail, previewFirst, progressiveDc, groupOrder };
+        lastSettings = { size, quality, requestedPassCount, progressiveDetail, previewFirst, progressiveDc, groupOrder, presetName, throttleKbPerSec };
 
         setProgStatus(`Encoded ${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · streaming into decoder…`);
         dbgLog('Encoded', `${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms`, 'info');
@@ -906,11 +941,16 @@ async function runProgressivePaintTest() {
         const passes = [];
         const passIndexState = { value: 0 };
         const eventTask = collectProgressivePaintEvents(decoder, decStart, passes, passIndexState);
-        dbgLog('Streaming bytes…', `${jxlBytes.length} bytes total over ${requestedPassCount} requested steps`, 'info');
+        dbgLog('Streaming bytes…', `${jxlBytes.length} bytes total · throttle=${throttleKbPerSec > 0 ? throttleKbPerSec + ' KB/s' : 'off'} · steps=${requestedPassCount}`, 'info');
         let streamError = null;
         try {
-            const streamStepCount = await streamIntoDecoder(decoder, jxlBytes, requestedPassCount);
-            dbgLog('Stream closed', `${streamStepCount} steps pushed · waiting for event task…`, 'info');
+            if (throttleKbPerSec > 0) {
+                await feedThrottled(decoder, jxlBytes, throttleKbPerSec);
+                dbgLog('Stream closed', `throttled feed done · waiting for event task…`, 'info');
+            } else {
+                const streamStepCount = await streamIntoDecoder(decoder, jxlBytes, requestedPassCount);
+                dbgLog('Stream closed', `${streamStepCount} steps pushed · waiting for event task…`, 'info');
+            }
             await eventTask;
         } catch (err) {
             streamError = err;
