@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JXL Encode Space Explorer</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-crop-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-encode-space.css" />
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar" data-mode="encode-space">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link" href="./jxl-correlation-matrix.html">Correlation Matrix</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+            <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
+            <a class="home-bar-link is-active" href="./jxl-encode-space.html" aria-current="page">Encode Space</a>
+        </div>
+    </nav>
+
+    <main class="shell">
+        <section class="hero compact hero-with-picker">
+            <div class="hero-copy">
+                <p class="eyebrow">Encode Space Explorer &middot; <span id="wasm-status">Initialising&hellip;</span></p>
+                <h1>Distance &times; Effort: quality and file-size tradeoffs on your own images</h1>
+                <p class="hero-sub">Encodes one ORF at reduced resolution across all effort/distance combinations. Sliders snap instantly once the sweep completes.</p>
+            </div>
+        </section>
+
+        <section class="control-band compact">
+            <div class="source-panel">
+                <div class="control-row">
+                    <label class="secondary-btn" for="orf-file-input" style="cursor:pointer;">Pick ORF&hellip;</label>
+                    <input id="orf-file-input" type="file" accept=".orf,.ORF" hidden />
+                    <button id="btn-run" class="primary-btn" type="button" disabled>Run</button>
+                    <button id="btn-console" class="secondary-btn" type="button">Console</button>
+                    <span class="status-inline-sep"></span>
+                    <span class="status-inline-item"><span class="status-inline-label">File</span><strong id="status-file">&mdash;</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Progress</span><strong id="status-progress">Idle</strong></span>
+                    <span class="status-inline-item"><span class="status-inline-label">Stage</span><strong id="status-stage">&mdash;</strong></span>
+                </div>
+                <div class="settings-inline">
+                    <div class="es-settings-row">
+                        <div class="es-setting-group">
+                            <span class="es-setting-label">Effort</span>
+                            <div class="es-effort-checks">
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="1" /><span>1</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="2" /><span>2</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="3" checked /><span>3</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="4" /><span>4</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="5" checked /><span>5</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="6" /><span>6</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="7" checked /><span>7</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="8" /><span>8</span></label>
+                                <label class="size-btn"><input type="checkbox" name="effort-cb" value="9" checked /><span>9</span></label>
+                            </div>
+                        </div>
+                        <div class="es-setting-group">
+                            <span class="es-setting-label">Distance</span>
+                            <select id="distance-preset" class="es-select">
+                                <option value="coarse" selected>Coarse (8 steps)</option>
+                                <option value="fine">Fine (15 steps)</option>
+                                <option value="custom">Custom&hellip;</option>
+                            </select>
+                            <input id="custom-distance" type="text" class="es-text-input"
+                                   placeholder="0, 0.5, 1, 2, 4, 8" hidden />
+                        </div>
+                        <div class="es-setting-group">
+                            <span class="es-setting-label">Output scale</span>
+                            <select id="output-scale" class="es-select">
+                                <option value="0.25" selected>&frac14; (fast)</option>
+                                <option value="0.5">&frac12;</option>
+                                <option value="1.0">Full (slow)</option>
+                            </select>
+                        </div>
+                        <span class="es-estimate" id="estimate-label"></span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div id="console-panel" class="console-panel" hidden>
+            <div class="console-toolbar">
+                <span class="console-title">Console</span>
+                <button id="btn-console-copy" class="console-clear-btn" type="button">Copy all</button>
+                <button id="btn-console-clear" class="console-clear-btn" type="button">Clear</button>
+            </div>
+            <pre id="console-output" class="console-output"></pre>
+        </div>
+
+        <!-- Section 1: Interactive viewer -->
+        <section class="es-viewer-section">
+            <div class="es-viewer-layout">
+                <div class="es-canvas-wrap">
+                    <div id="viewer-spinner" class="es-viewer-spinner">Pick an ORF and press Run to begin the sweep.</div>
+                    <canvas id="viewer-canvas" class="es-viewer-canvas" hidden></canvas>
+                </div>
+                <div class="es-effort-slider-wrap">
+                    <label class="es-slider-label" for="effort-slider" id="stat-effort">e&mdash;</label>
+                    <input type="range" orient="vertical" id="effort-slider"
+                           min="0" max="0" value="0" disabled />
+                    <div class="es-slider-labels" id="effort-slider-labels"></div>
+                </div>
+            </div>
+            <div class="es-distance-slider-wrap">
+                <label class="es-slider-label" for="distance-slider" id="stat-distance">d&mdash;</label>
+                <input type="range" id="distance-slider" min="0" max="0" value="0" disabled />
+                <div class="es-slider-labels" id="distance-slider-labels"></div>
+            </div>
+            <div class="es-stats-bar">
+                <span class="es-stat"><span class="es-stat-label">Size</span><strong id="stat-size">&mdash;</strong></span>
+                <span class="es-stat"><span class="es-stat-label">BPP</span><strong id="stat-bpp">&mdash;</strong></span>
+                <span class="es-stat"><span class="es-stat-label">Encode</span><strong id="stat-encode">&mdash;</strong></span>
+            </div>
+        </section>
+
+        <!-- Section 2: Matrix grid -->
+        <section class="es-matrix-section">
+            <header class="es-matrix-header">
+                <div>
+                    <p class="eyebrow">Matrix</p>
+                    <h2>All combinations</h2>
+                </div>
+                <div class="es-matrix-actions">
+                    <button id="btn-copy-md" class="ghost-btn" type="button" disabled>Copy MD</button>
+                    <button id="btn-export-json" class="ghost-btn" type="button" disabled>Export JSON</button>
+                </div>
+            </header>
+            <div id="matrix-grid" class="es-matrix-grid">
+                <div class="es-empty-state">Run a sweep to populate the matrix.</div>
+            </div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-encode-space.js"></script>
+    <script src="./info-popover-init.js"></script>
+</body>
+</html>
