@@ -3,7 +3,7 @@
 This document consolidates the remaining tasks, goals, and follow-ups from various handoff and plan documents across the repository.
 
 ## Environment & Build Issues (`issues.md`)
-- [ ] **Rebuild WASM Artifacts:** Fix Docker API connection issue and run `npm --workspace packages/jxl-wasm run build`. (Docker currently unavailable — see WASM rebuild note below.)
+- [x] **Rebuild WASM Artifacts:** Built 2026-06-03T15:07 UTC via Docker (emscripten 4.0.13). `_jxl_wasm_dec_create` exported and functional — `progressive-detail.test.ts` asserts `eventTypes.length >= 3` (VarDCT Dc=2+group=1 noise source, 10/10 pass). Bench `paints=1` on small real photos is expected behavior (cutoff probe rarely sees an intermediate paint on 300×225 images), not a binary defect.
 - [x] **Rebuild Native Addon:** `npx node-gyp rebuild` from `packages/jxl-native/` succeeded (MSVC, 2026-06-03). Binary at `packages/jxl-native/build/Release/jxl_native.node`. All 9 native facade tests pass.
 - [x] **Fix Full Facade Test Failure:** `packages/jxl-wasm/test/facade.test.ts` — 88 pass / 0 fail as of 2026-06-03. Was stale entry.
 - [x] **Fix Wrapper Lab Test Failure:** `web/jxl-wrapper-lab.test.js` — 1 pass / 0 fail as of 2026-06-03. Was stale entry.
@@ -26,7 +26,7 @@ This document consolidates the remaining tasks, goals, and follow-ups from vario
   - See `docs/HANDOFF-predator-continuation-2026-06-encode-matrix.md` (the measurement run results block + remaining next steps: visual confirmation in paint page, Tauri equivalent, report updates — some docs now done).
 - [ ] **Tauri Parity:** Wire the new `encode_variants_with_progressive` to provide progressive output for the desktop gallery/lightbox. (encode_variants_with_progressive with dc/group already present in crates/raw-pipeline/src/casabio_encode.rs; sibling Tauri app + matrix bench integration pending.)
 - [x] **Test/Heuristics Polish (CSV/JSON export):** Paint tool has `exportMeasurementsCSV()`, `exportMeasurementsJSON()`, `exportMeasurementsTOON()` (all wired to buttons, emitting structured per-run data including preset, throttle, paints, timing). Benchmark scripts write JSON to `docs/Benchmark results/`. Matrix worker carries Dc/group columns.
-- [ ] **Test/Heuristics Polish (prefix-probe):** Prefix-probe enhancement for true "min bytes to first progress" (byte-cutoff probe with 8-20 prefixes per file) gives more accurate firstProgressBytes than chunk-streaming. Blocked on WASM rebuild (`_jxl_wasm_dec_create` must be present for >1 paint). Wire after Docker available.
+- [ ] **Test/Heuristics Polish (prefix-probe):** Prefix-probe enhancement for true "min bytes to first progress" (byte-cutoff probe with 8-20 prefixes per file) gives more accurate firstProgressBytes than chunk-streaming. WASM rebuild done (2026-06-03); blocker was incorrect. Wire probe loop into bench script — lower priority.
 
 ## Tauri / WASM Parity (`docs/HANDOFF-tauri-parity-2026-06-03.md` — active on tauriparity branch; see also archived `docs/Completed plans/Archived_HANDOFF-tauri-wasm-parity-2026.md`)
 - [x] **Encode (RAW → JXL):** Implement a direct-RGBA production path inside `crates/raw-pipeline` (bypassing intermediate RGB arrays). `process_rgba` + `encode_variants_from_rgb16*` (with progressive support) now fuse the tone/convert + alpha write; pure-encode Tauri callers (ingest/export) never allocate/retain a 3ch RGB8 intermediate. See crates/raw-pipeline/src/casabio_encode.rs and docs/suggested-settings.md "Native / Tauri Preferences". (Work started on tauriparity branch.)

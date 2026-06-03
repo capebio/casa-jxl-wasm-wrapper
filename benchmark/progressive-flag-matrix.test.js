@@ -55,7 +55,7 @@ test('sneyers-e3 row meets truly-progressive thresholds on smallest available OR
   const sneyers = file.cases.find((c) => c.name === 'sneyers-e3');
   expect(sneyers).toBeDefined();
   if (sneyers.summary.paintedCutoffs < 2) {
-    console.warn('[skip] WASM binary lacks multi-paint decode (_jxl_wasm_dec_create missing); rebuild required');
+    console.warn('[skip] cutoff probe sees paints=1 on this image; thresholds require a file where the progressive structure surfaces multiple probe-visible paints (e.g. larger/more complex source)');
     return;
   }
   expect(sneyers.summary.paintedCutoffs).toBeGreaterThanOrEqual(4);
