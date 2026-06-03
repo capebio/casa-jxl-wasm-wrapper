@@ -4,7 +4,7 @@
 // Feed each file in chunks with emitEveryPass=true to show dc → pass → full.
 
 import { createBrowserContext } from '../packages/jxl-session/dist/index.js';
-import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { createDecoder, createEncoder, setForcedTier } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createGalleryCoordinator } from './jxl-progressive-gallery-coordinator.js';
 import { createGalleryLightbox } from './jxl-progressive-gallery-lightbox.js';
@@ -23,7 +23,9 @@ const galleryRowsEl  = document.querySelector('[data-gallery-rows]');
 const lightboxRoot   = document.querySelector('[data-lightbox-root]');
 const logEl         = document.getElementById('log');
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
+const decodeBtn     = document.getElementById('decode-btn');
 const decodePushedBtn = document.getElementById('decode-pushed-btn');
+const wasmTierEl    = document.getElementById('wasm-tier');
 const pushModeButtons = [...document.querySelectorAll('[data-push-mode]')];
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -31,6 +33,7 @@ const pushModeButtons = [...document.querySelectorAll('[data-push-mode]')];
 let ctx = null;
 let ctxReadyPromise = null;
 let pushMode = 'all-chunks';
+let pendingFiles = null;
 let activeKeyHandler = null;  // cleaned up on each startGallery() call
 let lastPushedPayload = null;
 const consumedPushIds = new Set();
@@ -162,21 +165,38 @@ sourceInput.addEventListener('change', () => {
   const allFiles = [...sourceInput.files];
   const jxlFiles = allFiles.filter(f => /\.jxl$/i.test(f.name));
   const rawFiles = allFiles.filter(f => /\.(png|jpe?g|webp)$/i.test(f.name));
-
   const filesToUse = jxlFiles.length > 0 ? jxlFiles : rawFiles;
 
   if (filesToUse.length === 0) {
     pickerStatus.textContent = 'Pick .jxl files (or PNG/JPG for on-the-fly encode demo)';
+    pendingFiles = null;
+    if (decodeBtn) decodeBtn.hidden = true;
     return;
   }
 
-  pickerStatus.textContent = `${filesToUse.length} file${filesToUse.length > 1 ? 's' : ''} selected${rawFiles.length > 0 && jxlFiles.length === 0 ? ' (will encode with new options)' : ''}`;
-  galleryRowsEl.innerHTML = '';
-
-  log(`Starting round-robin gallery for ${filesToUse.length} file${filesToUse.length > 1 ? 's' : ''}`);
-  dbgLog('Gallery start', `${filesToUse.length} files`, 'info');
-  startGallery(filesToUse, { encodeOnTheFly: rawFiles.length > 0 && jxlFiles.length === 0 }).catch(e => log(`Gallery error: ${e.message}`, 'error'));
+  pendingFiles = { files: filesToUse, encodeOnTheFly: rawFiles.length > 0 && jxlFiles.length === 0 };
+  pickerStatus.textContent = `${filesToUse.length} file${filesToUse.length > 1 ? 's' : ''} ready${pendingFiles.encodeOnTheFly ? ' (will encode)' : ''} — click Decode`;
+  if (decodeBtn) decodeBtn.hidden = false;
 });
+
+if (decodeBtn) {
+  decodeBtn.addEventListener('click', () => {
+    if (!pendingFiles) return;
+    const { files, encodeOnTheFly } = pendingFiles;
+    galleryRowsEl.innerHTML = '';
+    log(`Gallery start · ${files.length} file${files.length > 1 ? 's' : ''}`);
+    dbgLog('Gallery start', `${files.length} files`, 'info');
+    startGallery(files, { encodeOnTheFly }).catch(e => log(`Gallery error: ${e.message}`, 'error'));
+  });
+}
+
+if (wasmTierEl) {
+  wasmTierEl.addEventListener('change', () => {
+    const val = wasmTierEl.value;
+    setForcedTier(val === 'auto' ? null : val);
+    log(`WASM tier → ${val}`);
+  });
+}
 
 // Predator push support: if paint page "pushed" a JXL via localStorage (or ?autopush), auto-ingest it as a .jxl
 // so you can immediately see multi-layer progressive decode without manual pick. Clears after use.

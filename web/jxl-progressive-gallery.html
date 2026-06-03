@@ -230,8 +230,19 @@
     </label>
     <input id="source-input" type="file" multiple accept=".jxl,.JXL,.png,.jpg,.jpeg,.webp" />
     <span class="picker-status" id="picker-status">No files selected</span>
+    <button id="decode-btn" class="file-pick-btn" type="button" hidden>▶ Decode</button>
     <button id="decode-pushed-btn" class="file-pick-btn" type="button" hidden>Decode pushed file</button>
     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
+    <label style="display:inline-flex;align-items:center;gap:0.35rem;font-size:0.82rem;color:#aaa;">
+      Tier
+      <select id="wasm-tier" style="font-size:0.82rem;background:#202020;color:#ccc;border:1px solid #444;border-radius:4px;padding:0.2rem 0.4rem;">
+        <option value="auto">auto</option>
+        <option value="relaxed-simd-mt">relaxed-simd-mt</option>
+        <option value="simd-mt">simd-mt</option>
+        <option value="simd">simd</option>
+        <option value="scalar">scalar</option>
+      </select>
+    </label>
     <div class="push-mode-group" aria-label="Chunk push mode">
       <span class="push-mode-label">Push mode</span>
       <button class="push-mode-btn is-active" type="button" data-push-mode="full-file" aria-pressed="true">Full file</button>
