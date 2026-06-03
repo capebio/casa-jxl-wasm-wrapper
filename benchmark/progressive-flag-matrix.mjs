@@ -107,7 +107,7 @@ async function mainCollect() {
           const cutoffs = streamed.cutoffs.map((cutoff) => classifyByteCutoffFrame(cutoff));
           const summary = summarizeByteCutoffResults(cutoffs, jxlBytes.byteLength, { qualitySeries });
           const targetUsefulEarlyPaint = summary.usefulEarlyPaint;
-          cases.push({ name: caseName, effort, ...matrixCase, encode: encodeOptions, encodeMs, jxlBytes: jxlBytes.byteLength, targetUsefulEarlyPaint, summary, cutoffs, qualitySeries });
+          cases.push({ effort, ...matrixCase, name: caseName, encode: encodeOptions, encodeMs, jxlBytes: jxlBytes.byteLength, targetUsefulEarlyPaint, summary, cutoffs, qualitySeries });
           console.log(`  ${caseName.padEnd(22)} jxl=${fmtBytes(jxlBytes.byteLength)} first=${fmtBytes(summary.firstPaintBytes)} recog=${fmtBytes(summary.firstRecognizableBytes)} preview=${fmtBytes(summary.previewBytes)} paints=${summary.paintedCutoffs} mono=${summary.monotone} finalPsnr=${summary.finalPsnr?.toFixed(1)}`);
         }
       }

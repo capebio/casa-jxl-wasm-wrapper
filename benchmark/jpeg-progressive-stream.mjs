@@ -98,7 +98,7 @@ export async function runJpegMatrix() {
         const qualitySeries = await computeQualitySeries(streamed.cutoffs);
         const cutoffs = streamed.cutoffs.map((cutoff) => classifyByteCutoffFrame(cutoff));
         const summary = summarizeByteCutoffResults(cutoffs, jxlBytes.byteLength, { qualitySeries });
-        cases.push({ name: caseName, effort, ...matrixCase, encodeMs, jxlBytes: jxlBytes.byteLength, summary, cutoffs, qualitySeries });
+        cases.push({ effort, ...matrixCase, name: caseName, encodeMs, jxlBytes: jxlBytes.byteLength, summary, cutoffs, qualitySeries });
         console.log(`  ${caseName.padEnd(22)} jxl=${fmtBytes(jxlBytes.byteLength)} first=${fmtBytes(summary.firstPaintBytes)} recog=${fmtBytes(summary.firstRecognizableBytes)} preview=${fmtBytes(summary.previewBytes)} paints=${summary.paintedCutoffs} mono=${summary.monotone} finalPsnr=${summary.finalPsnr?.toFixed(1)}`);
       }
     }
