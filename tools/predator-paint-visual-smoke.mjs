@@ -5,6 +5,7 @@ import path from 'path';
 const APP_URL = process.env.APP_URL ?? 'http://localhost:9000/web/jxl-progressive-paint.html';
 const TEST_JPG = path.resolve('tmp/predator-visual-test.jpg');
 const OUT_SHOT = path.resolve('tmp/predator-paint-visual-evidence.png');
+const OUT_SHOT_SNEYERS = path.resolve('tmp/predator-paint-visual-evidence-sneyers.png');
 const BROWSER_PATH = process.env.BROWSER_PATH ?? String.raw`C:\Users\User\AppData\Local\ms-playwright\chromium_headless_shell-1217\chrome-headless-shell-win64\chrome-headless-shell.exe`;
 
 const t0 = Date.now();
@@ -130,6 +131,58 @@ const mark = (m) => console.log(`[+${(Date.now()-t0).toString().padStart(6)}ms] 
   console.log(JSON.stringify(data, null, 2));
   console.log('Evidence screenshot:', OUT_SHOT);
   console.log('Group=1 (center) + Dc~2 + passes + previewFirst exercised for A/B readiness.');
+
+  // ─── Sneyers preset run ──────────────────────────────────────────────────────
+  mark('--- Sneyers preset run (truly-progressive + 100 KB/s throttle) ---');
+  await page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  mark('page reloaded for Sneyers run');
+
+  await page.evaluate(() => {
+    const presetEl = document.getElementById('preset-name');
+    if (presetEl) presetEl.value = 'sneyers';
+    const throttleEl = document.getElementById('throttle-rate');
+    if (throttleEl) throttleEl.value = '100';
+    const dPasses = document.querySelector('input[name="prog-detail"][value="passes"]');
+    if (dPasses) dPasses.checked = true;
+  });
+  mark('Sneyers settings set (preset=sneyers, throttle=100 KB/s, detail=passes)');
+
+  await page.setInputFiles('#source-input', TEST_JPG);
+  await page.waitForFunction(() => {
+    const s = document.getElementById('prog-status');
+    return s && s.textContent && !/Choose parameters/.test(s.textContent);
+  }, { timeout: 15000 });
+  mark('file processed for Sneyers run');
+
+  await page.click('#run-progressive');
+  mark('Sneyers run clicked');
+
+  try {
+    await page.waitForFunction(() => {
+      const st = (document.getElementById('prog-status') || {}).textContent || '';
+      return /ms|complete|Done|paint/i.test(st);
+    }, { timeout: 60000, polling: 300 });
+    mark('Sneyers run complete');
+  } catch (w) {
+    mark('Sneyers run soft wait timed out');
+  }
+
+  await page.waitForTimeout(1200);
+
+  const sneyersData = await page.evaluate(() => {
+    const status = (document.getElementById('prog-status') || {}).textContent || '';
+    const settings = (window.runMeasurements && window.runMeasurements.length
+      ? window.runMeasurements[window.runMeasurements.length - 1]
+      : null);
+    const tl = document.getElementById('pass-timeline');
+    const entryCount = tl ? (tl.querySelectorAll('.pass, .entry, li, [data-pass], tr, div').length || tl.children.length) : 0;
+    return { statusSample: status.slice(0, 120), timelineEntries: entryCount, lastSettings: settings };
+  });
+
+  await page.screenshot({ path: OUT_SHOT_SNEYERS, fullPage: true }).catch(() => {});
+  mark('Sneyers screenshot saved to ' + OUT_SHOT_SNEYERS);
+  console.log('=== SNEYERS PRESET SMOKE (truly-progressive + 100 KB/s) ===');
+  console.log(JSON.stringify(sneyersData, null, 2));
 
   await browser.close();
   process.exit(0);

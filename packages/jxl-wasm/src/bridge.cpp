@@ -545,7 +545,6 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   // CasaSneyers_Parity (Ch3): non-zero signals display dims separate from encoded pixel dims
   // (e.g. Retina @2×). JxlBasicInfo.intrinsic_xsize/ysize; 0 = not set (default).
   if (intrinsic_width > 0u && intrinsic_height > 0u) {
-    info.have_intrinsic_size = JXL_TRUE;
     info.intrinsic_xsize = intrinsic_width;
     info.intrinsic_ysize = intrinsic_height;
   }
