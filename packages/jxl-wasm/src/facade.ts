@@ -146,6 +146,12 @@ export interface EncoderOptions {
    * Requires WASM rebuild with enc_set_frame_flags bridge.
    */
   disablePerceptualHeuristics?: boolean;
+  /**
+   * Force the JPEG XL codestream level. -1/omitted = libjxl automatic,
+   * 5 = Level 5, 10 = Level 10 for features such as CMYK/black-channel workflows.
+   * Requires WASM rebuild with enc_set_codestream_level bridge.
+   */
+  codestreamLevel?: -1 | 5 | 10;
   /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
   modular?: -1 | 0 | 1;
   /** Brotli effort for metadata/entropy coding. -1 = libjxl default, 0-11. */
@@ -482,6 +488,7 @@ interface LibjxlWasmModule {
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
   _jxl_wasm_enc_advance_written?(state: number, size: number): number;
   _jxl_wasm_enc_set_metadata?(state: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
+  _jxl_wasm_enc_set_codestream_level?(state: number, level: number): number;
   _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_enc_finish?(state: number): number;
   // Tiled multi-frame ROI: encode an image as N JXL frames each carrying
@@ -773,13 +780,39 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
   if (!options.progressive) {
     return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform, groupOrder: 0 };
   }
+  // Single rollback boolean — flip to false to revert to legacy previewFirst defaults.
+  const USE_SNEYERS_DEFAULT = true;
+  // SNEYERS_PRESET defaults: applied when progressive+previewFirst are set and the
+  // caller has NOT explicitly overridden the relevant flags. Locked recipe from
+  // docs/Benchmark results/truly-progressive-2026-06-03.md.
+  if (USE_SNEYERS_DEFAULT && options.previewFirst) {
+    const dc = options.progressiveDc != null
+      ? Math.max(0, Math.min(2, options.progressiveDc | 0))
+      : 2;
+    const ac = options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : 1;
+    const qac = options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : 1;
+    const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : 1;
+    return {
+      progressiveDc: dc,
+      progressiveAc: ac,
+      qProgressiveAc: qac,
+      buffering: options.chunked ? 2 : 0,
+      modular,
+      brotliEffort,
+      decodingSpeed: decodingSpeed >= 0 ? decodingSpeed : 0,
+      photonNoiseIso,
+      resampling,
+      epf,
+      gaborish,
+      dots,
+      colorTransform,
+      groupOrder,
+    };
+  }
   const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
-  // Respect explicit progressiveDc (0/1/2) for multi-layer DC progression; fall back to 1 when progressive.
-  // previewFirst implies at least basic early DC.
   const progressiveDc = options.progressiveDc != null
     ? Math.max(0, Math.min(2, options.progressiveDc | 0))
     : (options.previewFirst ? 1 : 1);
-  // Smart default: previewFirst or high passes bias to center-out group order (predator).
   const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : (options.previewFirst ? 1 : 0);
   return {
     progressiveDc,
@@ -801,6 +834,10 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
 
 function resolveResampling(value: unknown): ResamplingFactor {
   return value === 2 || value === 4 || value === 8 ? value : 1;
+}
+
+function resolveCodestreamLevel(value: unknown): -1 | 5 | 10 {
+  return value === 5 || value === 10 ? value : -1;
 }
 
 export class CapabilityMissing extends Error {
@@ -2086,6 +2123,10 @@ class LibjxlEncoder implements JxlEncoder {
       if (this.options.disablePerceptualHeuristics === true && typeof (module as unknown as Record<string, unknown>)._jxl_wasm_enc_set_frame_flags === "function") {
         (module as unknown as { _jxl_wasm_enc_set_frame_flags: (s: number, disablePerceptual: number) => void })
           ._jxl_wasm_enc_set_frame_flags(this.wasmEncState, 1);
+      }
+      const codestreamLevel = resolveCodestreamLevel(this.options.codestreamLevel);
+      if (codestreamLevel !== -1 && typeof module._jxl_wasm_enc_set_codestream_level === "function") {
+        module._jxl_wasm_enc_set_codestream_level(this.wasmEncState, codestreamLevel);
       }
       this.streamingInputActive = true;
     }
