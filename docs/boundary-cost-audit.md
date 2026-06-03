@@ -475,4 +475,13 @@ See also the Tauri handoff for how native should approach region/ROI and progres
 
 **Recommendation**: Always use groupOrder=1 + progressiveDc=2 (when progressive) for any demo/benchmark path that wants "early usable" layers (paint 4/6/8 pass cases, gallery onfly). Cost is zero; win is large for perceived progressive quality. See HANDOFF and progressive-encode-options design note for UI + settings.
 
-*Living — added per predator progressive handoff. Full page A/B numbers (paint 6-pass first-recognizable ms/KB with group=0 vs 1) to be captured on next serve + eyeball.*
+**2026-06-03 measurement on reference-small (300×225 @ q85, 18-cell Dc×group×effort sweep via predator-progressive-metrics.mjs)**:
+- Encode speed: center-out (group=1) wins big at low effort (e=3: ~15-27ms vs 100+ms for g=0; ~5-6×). Gap narrows at e=5/7 but still present.
+- Size: Dc=2 costs ~20-25% (14.1k vs 9.5-12k). Dc<=1 similar size.
+- Layer events (with full paint-style decoder: emitEveryPass + progressiveDetail:'passes'): consistently 2 events (1 progress + final) across *all* Dc=0/1/2 + g=0/1. Higher Dc did not increase surfaced event count on this real photo (unlike 128² noise in unit tests, which hit ≥3).
+- firstProgressBytes (from incremental chunk feed): always == total bytes for the cell. First progress event surfaced only after entire codestream fed. (Implies for this image+settings, the "first" layer's byte position in codestream is late, or chunk granularity hides it; byte-prefix probe would be better proxy.)
+- Interpretation (from run): plumbing live (Dc/group affect encode + decode events collected); for small photos the # of *surfaced* passes under 'passes' is small/fixed (2). The practical "recognizable early" value of group=1 is the *spatial quality* (center content first) of that first event, not higher event count. Encode time + size are the measurable diffs; Dc=2 for extra internal DC detail if size affordable.
+- Best observed combo here: groupOrder=1 + low effort + Dc=1 (or 2 if visual DC benefit wanted).
+- Artifacts: `docs/outputs/reference-small/predator-progressive-layers-2026-06-03T05-35-40.{json,csv}`; full table + obs in `docs/HANDOFF-predator-continuation-2026-06-encode-matrix.md`.
+
+*Next for page-level "first recognizable": human A/B g=0 vs g=1 (Dc=2, passes, previewFirst) on Gobabeb/large refs for spatial quality; use byte-cutoff probe. (Automation smoke via tools/predator-paint-visual-smoke.mjs + serve already executed on small ref: 2 timeline entries, first ~443ms, center proxy score 18.8 with g=1; screenshot in tmp/.) Update this + suggested-settings with full numbers.*

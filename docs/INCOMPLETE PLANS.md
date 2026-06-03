@@ -22,16 +22,20 @@ This document consolidates the remaining tasks, goals, and follow-ups from vario
 - [ ] **Boundary Cost Audit (Desktop):** Trace data flows to eliminate unnecessary buffer copies/handoffs. Focus on priority semaphores, gallery rendering, OPFS-like caches, and IPC command boundaries.
 
 ## Progressive Encode & Decode Predator Mode (`docs/HANDOFF-predator-progressive-2026.md`)
-- [ ] **Measurement & A/B Testing:** Run A/B testing on real images via served pages to find "bytes to recognizable". Serve web pages and compare early passes.
-  - See fresh continuation: `docs/HANDOFF-predator-continuation-2026-06-encode-matrix.md` (correlation matrix now has progressiveDc + groupOrder as first-class sweep factors + bias; decode-side layer metrics (numEvents, firstProgress* from feeding chunks to progressive decoder) landed in worker + live table/CSV/summaries heatmaps. Next: real ref runs on the matrix + capture "bytes to first" numbers + data back into docs).
-- [ ] **Tauri Parity:** Wire the new `encode_variants_with_progressive` to provide progressive output for the desktop gallery/lightbox.
-- [ ] **Test/Heuristics Polish:** Add per-pass bytes/quality logging/CSV export in the paint tool. (Partially addressed by paint exports + byte-benchmark + now matrix CSV carrying the Dc/group columns.)
+- [x] **Measurement & A/B Testing (ref run + numbers):** 2026-06-03 predator-progressive-metrics run on small_file.jpg (300×225 q85) captured 18-cell Dc×group×effort data (encodeMs, size, progressEvents=2 always, first* bytes/ms). Numbers + analysis fed to HANDOFF continuation, suggested-settings.md, boundary-cost-audit.md, and reference-small-matrix-report.md (new section). Decode collection now also wired in correlation matrix worker (so page sweeps produce the layer metrics). Full visual A/B ("first recognizable" spatial quality on paint page for g=0 vs 1) + larger refs (Gobabeb) + prefix-probe for true early bytes remain.
+  - See `docs/HANDOFF-predator-continuation-2026-06-encode-matrix.md` (the measurement run results block + remaining next steps: visual confirmation in paint page, Tauri equivalent, report updates — some docs now done).
+- [ ] **Tauri Parity:** Wire the new `encode_variants_with_progressive` to provide progressive output for the desktop gallery/lightbox. (encode_variants_with_progressive with dc/group already present in crates/raw-pipeline/src/casabio_encode.rs; sibling Tauri app + matrix bench integration pending.)
+- [ ] **Test/Heuristics Polish:** Add per-pass bytes/quality logging/CSV export in the paint tool. (Partially addressed by paint exports + byte-benchmark + now matrix CSV carrying the Dc/group columns. Prefix-probe enhancement identified as headroom in the 2026-06 ref run for better "min bytes to first progress".)
 
 ## Tauri / WASM Parity (`docs/HANDOFF-tauri-parity-2026-06-03.md` — active on tauriparity branch; see also archived `docs/Completed plans/Archived_HANDOFF-tauri-wasm-parity-2026.md`)
 - [x] **Encode (RAW → JXL):** Implement a direct-RGBA production path inside `crates/raw-pipeline` (bypassing intermediate RGB arrays). `process_rgba` + `encode_variants_from_rgb16*` (with progressive support) now fuse the tone/convert + alpha write; pure-encode Tauri callers (ingest/export) never allocate/retain a 3ch RGB8 intermediate. See crates/raw-pipeline/src/casabio_encode.rs and docs/suggested-settings.md "Native / Tauri Preferences". (Work started on tauriparity branch.)
+  - Harness extended (src/bin/raw_decode_bench.rs) with GOB/P2200 ref scanning + direct path always used for reported encode; sample release direct-rgba ~322 ms on 20 MP Gobabeb ORF.
 - [ ] **Decode (Region/ROI):** Default to JXTC/tiled ROI when available for crops/thumbs. Pass the normalized subject rect down to the decoder instead of full-decode-then-crop.
+  - (Harness ready with metric plumbing + scan; native crop impl + JXTC/tiled encode/decode wiring pending in Tauri codec or bench low-level.)
 - [ ] **Decode (Full Loads):** Use progressive decode to deliver DC/early passes to Tauri textures immediately without JS worker boundary overhead.
+  - (See progressive note in Tauri-progressive-implementation.md; low-level jpegxl-sys event loop + early paint in desktop UI.)
 - [ ] **Shared Metrics:** Implement equivalent `onMetric` hooks in Tauri for apples-to-apples comparisons with WASM.
+  - (Bench now emits the canonical names decode_buffer_extract_ms (0), decode_region_downsample_ms, source_pixels_decoded + summary/JSON; ready for Tauri surface to match.)
 
 ## Boundary Cost Audit Phase 2 (`docs/HANDOFF-boundary-cost-audit-2026.md`)
 - [ ] **Deepen RAW → JXL Implementation:** Consider producing RGBA8 directly inside tone/convert stage instead of post-hoc conversion. Update benchmarks and add traces.

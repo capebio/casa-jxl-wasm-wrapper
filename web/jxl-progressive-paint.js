@@ -804,7 +804,7 @@ function renderProgressiveComparison({ requestedPassCount, passCount, progressiv
         </tr>
         <tr>
             <td colspan="5" style="font-size:11px;color:var(--muted);padding:6px 12px;">
-                Encoded ${fileSizeKB.toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · progressive=true previewFirst=${previewFirst} dc=${progressiveDc ?? '?'} group=${groupOrder ?? '?'} · detail=${progressiveDetail}${actualPaintWarning}
+                Encoded ${fileSizeKB.toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · progressive=true previewFirst=${previewFirst} dc=${progressiveDc ?? '?'} group=${groupOrder ?? '?'} · detail=${progressiveDetail}${actualPaintWarning}${ (groupOrder===1 && progressiveDc>=1 ? ' [predator center-out]' : '') }
             </td>
         </tr>
     `;

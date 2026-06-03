@@ -113,3 +113,33 @@ See full archived handoff + `docs/boundary-cost-audit.md` (esp. sections 12-13 f
 - `docs/suggested-settings.md`, `docs/boundary-cost-audit.md`
 - `crates/raw-pipeline/` (current impl)
 - Predator/progressive continuation for related encode progressive work.
+
+## Pickup Progress (initial session on handoff)
+
+**Actioned on receipt of handoff (tauriparity):**
+- Step 1 complete: read archived handoff + audit §§12-13 (Gobabeb 30f encode + P2200 11f crop/ROI + handoff metrics) + suggested-settings native section + this doc + key sources (raw-pipeline lib/pipeline/casabio_encode, raw_decode_bench, facade/bridge for ROI/prog reference).
+- Extended the measurement vehicle per step 2: `src/bin/raw_decode_bench.rs` now supports `GOB_SCAN_LIMIT`/`GOB_ROOT` + `P2200_SCAN_LIMIT`/`P2200_ROOT` (modeled directly on the JS harnesses), always exercises the `process_rgba` + 4ch direct path for encode reporting, and emits the canonical shared metrics (`decode_buffer_extract_ms=0`, `decode_region_downsample_ms`, `source_pixels_decoded`, `decode_strategy`) + self-describing end-of-run summary (modeled on crop-benchmark MD tables) + updated JSON schema.
+- Added `jpegxl-sys` (cfg-guarded) as the declared path for low-level native ROI (`SetCropEnabled` + region out buffer) and progressive (`FRAME_PROGRESSION` etc.).
+- Surgical robustness: 4ch encode path now sets `has_alpha(true)` + falls back to 3ch roundtrip JXL timing if 4ch encode fails for a given file (DNG test images were hitting libjxl "buffer too small"). ORF path (the ref set format) was already succeeding.
+- Verified: clean `build-msvc.ps1 check --bin`, wasm lib check unaffected, multiple dev/release runs on the test files + sampled Gobabeb ORF.
+- Docs updated: `suggested-settings.md` (Native section now documents the harness + envs + sample numbers), `INCOMPLETE PLANS.md` (Tauri bullets annotated with harness/metrics status; encode stays [x]).
+
+**Sample native numbers captured (release, MSVC, real files):**
+- 20 MP Gobabeb-class ORF (one file from prior GOB=1 run): direct-rgba ~322 ms (fused tone+alpha prep), full RAW pipeline ~797 ms.
+- 9-file mixed set (release run, GOB/P2200=0): direct_rgba avg 262.7 ms (min 173.5, max 345.3) over 9 files. extract avg 0.00 ms over 9. region_downsample avg ~598 ms over the files with successful JXL decode.
+- Full "Handoff Parity Summary" now prints automatically with guidance text pointing back to the audit + this handoff.
+
+**Current state vs. open items:**
+- Encode direct-RGBA foundation + harness reporting: solid (ORF ref path produces complete encode timings + metrics).
+- The 3 checkboxes remain open (ROI default + rect plumbing, progressive DC/early to texture, full onMetric surface in the actual Tauri app). The harness + metric names + scan for the exact ref sets are now the ready "tight measurement loop".
+- No browser rules were ported. `take_rgba` / direct surfaces preserved for native. All per guiding principles.
+
+**Next (directly from the numbered list in this handoff):**
+- Run the *full* reference sets (`GOB_SCAN_LIMIT=30; P2200_SCAN_LIMIT=11`) in release on the machine with the files. Capture the emitted summary (and/or extend it to per-size tables) + `results_native.json`.
+- Use the data to populate native columns in `boundary-cost-audit.md` §12-13 and the Native section here.
+- Wire the real ROI (standard libjxl crop/tiled or JXTC container) + progressive early-pass paths (low-level decoder loop) in the Tauri codec / lightbox + feed the same metrics. Re-measure "time to first useful" and ROI savings (target 9-15 ms small crops).
+- Close the items in INCOMPLETE PLANS + append results to this handoff or a continuation.
+
+The harness is now the "replicate the speed" vehicle for native parity. Feed it the Gobabeb/P2200 sets and the numbers will drive the rest. 
+
+- Grok (pickup on 2026-06-03)

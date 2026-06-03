@@ -169,7 +169,7 @@ Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or comp
 - JXTC container + certain WASM-specific streaming/zero-copy optimizations remain N/A on Tauri (native libjxl path).
 - Gain maps: library-level support (with runtime probe) is complete on both sides when the optional build flag is used. High-level Tauri desktop integration remains in the sibling repo.
 - First-class advanced encoder controls: Phase 1 (filters + GROUP_ORDER + validation + buffering foundation) complete on both sides (row 11b ✅). Deeper buffering, metrics, and expert gating phases remain future per the design note.
-- **Predator Mode Optimizations (2026-06)**: Successfully resolved `progressiveDc` hardcoding and plumbed center-out `groupOrder` support. Benchmarks now demonstrate genuinely distinct early progressive layers (Item 11).
+- **Predator Mode Optimizations (2026-06)**: Successfully resolved `progressiveDc` hardcoding and plumbed center-out `groupOrder` support. Benchmarks now demonstrate genuinely distinct early progressive layers (Item 11). Follow-ups: matrix worker decode+prefix-probe for min-bytes, paint automation smoke (2 events, center proxy), doc+report updates, native fn check.
 - Benchmark exposure for pure Rust internal tools is N/A (browser lab is the public surface).
 
 **Parity Already Excellent (do not regress):**
@@ -218,5 +218,5 @@ While not strictly new "features," these aggressive surgical optimizations (per 
 |--------------|--------|--------|
 | **Progressive Encode Resolution** | WASM Encode | Fixed hardcoded `progressiveDc: 1` in facade; now respects caller intent (0-2). Allows benchmarks (paint, gallery, byte-tier) to finally exercise and demonstrate genuinely distinct early progressive layers. |
 | **GroupOrder (Center-out) Support** | WASM Encode | Fully plumbed `groupOrder` (0/1) via FFI and smart defaults (auto-set to 1 when `previewFirst` is active). Early passes are now center-weighted and much more "recognizable" at low byte counts compared to scanline order. |
-| **Center-out UX Parity** | Native / Tauri | Added analogous `groupOrder` + `progressiveDc` promotion in `jxl-native` and `raw-pipeline` surfaces for desktop export parity. |
+| **Center-out UX Parity** | Native / Tauri | Added analogous `groupOrder` + `progressiveDc` promotion in `jxl-native` and `raw-pipeline` surfaces for desktop export parity. (Post-2026-06-03: encode_variants_with_progressive smoke + ps1 check verified; matrix decode+probe now live for parity sweeps.) |
 | **Automated "Push" Iteration** | Benchmarks | Replaced manual file picking with a localStorage-based "Push to Gallery" mechanism in `jxl-progressive-paint.html`. Enables rapid "encode → view layers in gallery" test loops. |

@@ -123,13 +123,13 @@ For the progressive paint/gallery benchmarks (`jxl-progressive-paint.html`, `jxl
 - `progressiveDetail: 'passes'` (or `emitEveryPass: true` + detail in decoder)
 - `progressiveFlavor: 'ac'` (derived)
 
-**Why**: progressiveDc=2 gives more granular low-frequency stages; groupOrder=1 (center-out) makes the first DC layers start from the middle of the image rather than scanline strips — dramatically more recognizable at low byte counts. Combined they turn the "only two nearly-identical passes" symptom into visibly useful staged reveals (3+ distinct events). Cost of the SetOption is negligible (one frame setting write).
+**Why**: progressiveDc=2 gives more granular low-frequency stages; groupOrder=1 (center-out) makes the first DC layers start from the middle of the image rather than scanline strips — dramatically more recognizable at low byte counts. Combined they turn the "only two nearly-identical passes" symptom into visibly useful staged reveals (3+ distinct events in some cases; 2 on small 300×225 refs per 2026-06 ref measurement run). 2026-06 measurement on small_file.jpg (q=85): always 2 events surfaced; group=1 gave major encode speed wins at low effort (~5-6× at e=3); Dc=2 cost ~20-25% size with no event count increase on that ref (visual/spatial quality of the early layer is the win). Cost of the SetOption is negligible (one frame setting write). See predator continuation handoff + the predator-progressive-layers-*.json for raw numbers.
 
 **In paint page (6/8 passes + Preview 1st checked)**: now defaults to the above via the new Center-out checkbox + computed Dc (user can uncheck for A/B scanline comparison). Export to gallery pushes the exact codestream for round-robin multi-layer viewing.
 
 **In gallery onfly**: the controls (`gallery-prog-dc`, `gallery-group-order`, `gallery-preview-first`, detail="All passes") drive the same.
 
-See `docs/HANDOFF-predator-progressive-2026.md` (continuation block + progress) and `docs/references/designs/progressive-encode-options.md` for wiring, UI, and measurement notes. Update with real "first recognizable at X ms / Y KB" numbers once page runs + A/B captured on Gobabeb/P2200 images.
+See `docs/HANDOFF-predator-progressive-2026.md` (continuation block + progress) and `docs/references/designs/progressive-encode-options.md` for wiring, UI, and measurement notes. Small-ref "first layer" numbers (always 2 events on 300×225 photo; group=1 speed win; Dc=2 size cost; firstBytes==total under chunk feed) captured 2026-06-03 and backfilled here + audit + handoff + outputs report. Automation smoke (tools/predator-paint-visual-smoke + matrix probe) executed: 2 paints, first~443ms, center-bias proxy~18.8 on g=1/passes/preview run. Still need human A/B + cutoff-probe "bytes to recognizable" on larger refs (Gobabeb/P2200).
 
 ## Native / Tauri Preferences (Post-P3.3 Parity, June 2026)
 
@@ -155,9 +155,11 @@ The WASM/browser cost model (JS glue copies on 4× return, transfer taxes, etc.)
 - onMetric parity: surface the same names (`decode_buffer_extract_ms` near-zero in native, `decode_region_downsample_ms`, `source_pixels_decoded`, `full_decoder_*` etc.) from native decode paths.
 
 **Measurement harness for parity**:
-- Reuse/extend `raw_decode_bench` + any existing Tauri `lightbox_bench` / `casabio` benches to run the 30-file Gobabeb (encode) and 11-file P2200 (decode/region) sets.
+- `src/bin/raw_decode_bench.rs` extended (tauriparity) with GOB_SCAN_LIMIT / GOB_ROOT / P2200_SCAN_LIMIT / P2200_ROOT (modeled on JS harnesses), direct-rgba always-on for encode reporting, and handoff metric columns (decode_buffer_extract_ms=0 in native, decode_region_downsample_ms, source_pixels_decoded, decode_strategy) + self-describing summary at end + JSON.
+- Run e.g. `$env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\build-msvc.ps1 run --bin raw_decode_bench --release`
+- Sample (release, one Gobabeb 20 MP ORF): direct-rgba ~322 ms (fused tone+alpha; the "prep" after RAW tone in native), full RAW pipeline ~797 ms. (WASM JS-path "rgbaPrep" was ~65 ms mean post-tone convert on same set; tone cost paid in WASM process before that.)
 - Target: native encode prep+encode <= best WASM JS-path numbers (ideally better by saved boundary copies). Native region/JXTC should beat or match the 9-15 ms small-crop class.
-- Record results; update this doc + `boundary-cost-audit.md` §12/13 with native columns.
+- Record results; update this doc + `boundary-cost-audit.md` §12/13 with native columns. See also docs/HANDOFF-tauri-parity-2026-06-03.md Immediate Next Steps.
 
 See HANDOFF-tauri-wasm-parity-2026.md for the full mission and guiding principles.
 

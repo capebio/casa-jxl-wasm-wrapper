@@ -63,6 +63,22 @@ test('correlation matrix (encode-space benchmark tool) treats progressiveDc + gr
   // Forwarding in the off-main encode worker (the actual call site for the matrix)
   expect(worker).toContain('progressiveDc: combo.progressive');
   expect(worker).toContain('groupOrder: combo.progressive');
+
+  // Decode-side layer metrics collection (progressEvents / firstProgress*) now lives in worker so matrix surfaces
+  // Prog Events + 1st Prog KB for predator sweeps (Dc x group). Matches the collection in predator-progressive-metrics.
+  expect(worker).toContain('exactBuffer');
+  expect(worker).toContain('createDecoder');
+  expect(worker).toContain("progressiveDetail: 'passes'");
+  expect(worker).toContain('for await (const ev of decoder.events())');
+  expect(worker).toContain('progressEvents');
+  expect(worker).toContain('firstProgressBytes');
+  expect(worker).toContain('decode-side layer metrics');
+
+  // Prefix-probe for minBytesToFirstProgress (handoff headroom: true early bytes independent of chunk feed)
+  expect(worker).toContain('probeMinBytesToFirstProgress');
+  expect(worker).toContain('minBytesToFirstProgress');
+  expect(matrix).toContain('Min 1st KB (probe)'); // UI label in matrix table
+  expect(worker).toContain('Prefix-probe helper');
 });
 
 test('progressive encoder enables responsive ordering like cjxl --progressive', () => {
