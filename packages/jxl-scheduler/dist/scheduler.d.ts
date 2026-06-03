@@ -1,4 +1,3 @@
-/// <reference types="node" />
 import type { MainToWorkerMessage, WorkerToMainMessage, MsgDecodeStart, MsgEncodeStart } from "@casabio/jxl-core/protocol";
 import type { Priority, WorkerFactory } from "./types.js";
 export interface SchedulerOptions {

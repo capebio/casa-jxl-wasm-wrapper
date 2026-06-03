@@ -16,6 +16,7 @@ export declare class PriorityQueue<T> {
     peek(): QueueEntry<T> | null;
     dequeue(): QueueEntry<T> | null;
     remove(sessionId: string): boolean;
+    private swapDelete;
     get size(): number;
     get isEmpty(): boolean;
     private lane;

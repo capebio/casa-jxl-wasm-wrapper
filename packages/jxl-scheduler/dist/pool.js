@@ -326,13 +326,17 @@ export class WorkerPool {
     }
     takeIdleWorker() {
         for (const worker of this.idle) {
-            this.idle.delete(worker);
             if (this.workers.has(worker.id) &&
                 worker.activeSessionId === null &&
                 !worker.cancelling &&
                 !worker.handle.terminated) {
+                // Remove before returning; reserve() will also call idle.delete
+                // (no-op), but that is safe and cheaper than the previous pattern
+                // of always deleting first then calling recycle/reserve.
+                this.idle.delete(worker);
                 return worker;
             }
+            // Stale: recycle() → cleanupAndRemove() handles idle.delete.
             this.recycle(worker);
         }
         return null;

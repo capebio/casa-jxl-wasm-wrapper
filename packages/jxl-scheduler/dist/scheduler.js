@@ -107,7 +107,15 @@ export class Scheduler {
             }
             this.dedupe.register(params.sessionId, params.sourceKey);
         }
-        // Try to immediately acquire a worker.
+        // Sync fast path: if an idle worker is available immediately, skip the
+        // async hop (Promise + microtask) that pool.acquire() always incurs.
+        const idleWorker = this.pool.tryAcquireIdle();
+        if (idleWorker !== null) {
+            this.assignWorker(idleWorker, params.sessionId, params.startMsg);
+            this.setupSignalAbort(params.sessionId, params.signal);
+            return { workerId: idleWorker.id };
+        }
+        // No idle worker — try spawn (async path).
         const worker = await this.pool.acquire();
         if (worker !== null) {
             this.assignWorker(worker, params.sessionId, params.startMsg);

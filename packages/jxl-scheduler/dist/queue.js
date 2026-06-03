@@ -75,25 +75,31 @@ export class PriorityQueue {
         }
         return null;
     }
+    // Swap-delete: O(1) removal by overwriting the target with the lane tail and
+    // truncating. This relaxes strict FIFO within a lane for cancelled sessions
+    // only — acceptable since cancel is a rare, user-driven path.
     remove(sessionId) {
-        for (let i = this._visibleHead; i < this.visible.length; i++) {
-            if (this.visible[i].sessionId === sessionId) {
-                this.visible.splice(i, 1);
-                this._size--;
-                return true;
-            }
+        if (this.swapDelete(this.visible, this._visibleHead, sessionId)) {
+            this._size--;
+            return true;
         }
-        for (let i = this._nearHead; i < this.near.length; i++) {
-            if (this.near[i].sessionId === sessionId) {
-                this.near.splice(i, 1);
-                this._size--;
-                return true;
-            }
+        if (this.swapDelete(this.near, this._nearHead, sessionId)) {
+            this._size--;
+            return true;
         }
-        for (let i = this._backgroundHead; i < this.background.length; i++) {
-            if (this.background[i].sessionId === sessionId) {
-                this.background.splice(i, 1);
-                this._size--;
+        if (this.swapDelete(this.background, this._backgroundHead, sessionId)) {
+            this._size--;
+            return true;
+        }
+        return false;
+    }
+    swapDelete(lane, head, sessionId) {
+        for (let i = head; i < lane.length; i++) {
+            if (lane[i].sessionId === sessionId) {
+                const last = lane.length - 1;
+                if (i !== last)
+                    lane[i] = lane[last];
+                lane.length = last;
                 return true;
             }
         }
