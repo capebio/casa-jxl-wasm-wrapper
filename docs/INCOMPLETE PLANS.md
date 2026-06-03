@@ -27,7 +27,7 @@ This document consolidates the remaining tasks, goals, and follow-ups from vario
 - [ ] **Tauri Parity:** Wire the new `encode_variants_with_progressive` to provide progressive output for the desktop gallery/lightbox.
 - [ ] **Test/Heuristics Polish:** Add per-pass bytes/quality logging/CSV export in the paint tool. (Partially addressed by paint exports + byte-benchmark + now matrix CSV carrying the Dc/group columns.)
 
-## Tauri / WASM Parity (`docs/HANDOFF-tauri-wasm-parity-2026.md`)
+## Tauri / WASM Parity (`docs/HANDOFF-tauri-parity-2026-06-03.md` — active on tauriparity branch; see also archived `docs/Completed plans/Archived_HANDOFF-tauri-wasm-parity-2026.md`)
 - [x] **Encode (RAW → JXL):** Implement a direct-RGBA production path inside `crates/raw-pipeline` (bypassing intermediate RGB arrays). `process_rgba` + `encode_variants_from_rgb16*` (with progressive support) now fuse the tone/convert + alpha write; pure-encode Tauri callers (ingest/export) never allocate/retain a 3ch RGB8 intermediate. See crates/raw-pipeline/src/casabio_encode.rs and docs/suggested-settings.md "Native / Tauri Preferences". (Work started on tauriparity branch.)
 - [ ] **Decode (Region/ROI):** Default to JXTC/tiled ROI when available for crops/thumbs. Pass the normalized subject rect down to the decoder instead of full-decode-then-crop.
 - [ ] **Decode (Full Loads):** Use progressive decode to deliver DC/early passes to Tauri textures immediately without JS worker boundary overhead.
