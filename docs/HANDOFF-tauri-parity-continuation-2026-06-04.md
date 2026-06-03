@@ -52,7 +52,7 @@ Do **not** re-derive browser numbers. Use the data already in `boundary-cost-aud
 ## Key Files & Cross-References (Start Here)
 **Shared / measurement (already in tree)**
 - `src/bin/raw_decode_bench.rs` (the harness – extend it if you want a "native region decode" entry point that the Tauri side can also call for validation).
-- `crates/raw-pipeline/src/{pipeline.rs, casabio_encode.rs}` (process_rgba + progressive encode variants).
+- `crates/raw-pipeline/src/{pipeline.rs, casabio_encode.rs, jxl_lowlevel.rs}` (process_rgba + progressive encode variants + the shared low-level jpegxl-sys stateful decoder model (feature "jxl-lowlevel")).
 - `docs/HANDOFF-tauri-parity-2026-06-03.md` + the new report in `docs/outputs/tauri/`.
 - `docs/boundary-cost-audit.md` §12-13, `docs/suggested-settings.md` (Native section).
 
@@ -96,7 +96,9 @@ Before starting implementation or after a measurement run, capture a clean, time
 
 4. Run via the MSVC helper (this ensures the right toolchain + vendored libjxl):
    ```powershell
-   .\build-msvc.ps1 run --bin raw_decode_bench --release 2>&1 | Tee-Object "benchmark/results_native_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
+   # Enable the shared low-level decoder + (recommended) progressive encode helpers so the
+   # lowlevel-prog full-load "first pixel" numbers reflect real progressive assets (Dc+groupOrder).
+   .\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode 2>&1 | Tee-Object "benchmark/results_native_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
    ```
    - The console will show per-file detailed output (RAW stages + direct-rgba + jxl encode/decode).
    - At the very end you will see the full `=== Handoff Parity Summary ...` block (includes the small-crop section when P2200 files were processed).
@@ -113,7 +115,7 @@ Before starting implementation or after a measurement run, capture a clean, time
    $env:SKIP_INITIAL_TEST_BENCHES = "1"
    $env:P2200_SCAN_LIMIT = 3   # or 11 when you want the full set
    # (leave GOB at 0)
-   .\build-msvc.ps1 run --bin raw_decode_bench --release
+   .\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode
    ```
 
 This process is the "tight measurement loop" the original handoff asked for. Do it after every meaningful wiring change on the Tauri side.
@@ -234,3 +236,28 @@ Keep the existing one-shot paths as fallbacks (emit a metric when you fall back 
 - `docs/suggested-settings.md` (will need the final native rules after measurement)
 - `docs/boundary-cost-audit.md` §12-13 (the WASM baselines to beat)
 - The updated bench + small-crop helpers in `src/bin/raw_decode_bench.rs` (use as a model or even call into a shared native decode helper if you factor one out)
+
+## Work in this continuation slice (Grok)
+- Implemented the "Consider adding optional 'jxl-lowlevel' feature + thin pub API in crates/raw-pipeline" item (the last bullet under Next in the 2026-06-04 report).
+  - Added feature + (target-gated optional) jpegxl-sys dep to crates/raw-pipeline/Cargo.toml.
+  - New src/jxl_lowlevel.rs: the stateful fns moved here (with Tauri-focused module docs, thin pub decode_full + decode_progressive_first_total, compat aliases so bench call-sites unchanged).
+  - lib.rs: conditional pub mod.
+  - Root Cargo.toml: forwarding `jxl-lowlevel` (and `jxl-encode`) features + comment on bench usage.
+  - Bench: removed the 140-line duplication, added cfg-gated use + guarded the demo call blocks (so `cargo check --bin ...` succeeds without the feature; lowlevel demo only when enabled). Fixed summary text (removed stale hardcoded 428.8, updated extend note, improved lowlevel aggregate wording).
+  - Docs: sprinkled references to the new shared module in INCOMPLETE (annotated the 3 bullets), suggested-settings (Native), boundary-cost-audit, the 06-04 report (appended continuation section), and recipes in HANDOFF-continuation + the report.
+- Verified mechanically:
+  - MSVC check with/without --features jxl-lowlevel --bin raw_decode_bench : clean.
+  - Limited P2200=1 + feature run: "Compiling raw-pipeline" with feature, lowlevel-prog lines emitted from *shared* path, summary block now carries the "ROI/progressive exercised via..." and improved lowlevel text.
+- Updated run recipes everywhere to pass --features jxl-lowlevel,jxl-encode (recommended; the extra flag makes the lowlevel-prog full-load first-pixel numbers use real progressive assets via the shared encode path).
+- Bench enhancement (the "enhance the bench" follow-up): Added `encode_full_proxy_jxl` helper that (when `jxl-encode` is also enabled) produces the full-load JXL for the lowlevel progressive demo using `casabio_encode::encode_variants_with_progressive(Dc=2, group=1)`. This is the same progressive flavor Tauri will use. The call site and summary printing were updated to note ", progressive asset". Clean fallback when only `jxl-lowlevel` is passed. Verified with checks + limited runs (both feature combos compile and produce the expected log lines + better firsts on prog assets). The 06-05 report was extended with the details.
+- The supplied 2026-06-03 numbers + pre-crop sim win still stand as the parity target; the verify runs here showed higher absolute times (clean msvc target dir + possible load) but the *structure* (small << full, first for prog loads, extract=0, lowlevel path exercised) matches.
+- Still no src-tauri checkout, so Tauri wiring, sidecar emission, and production metric emission are unchanged (still the path to close the []s). The shared low-level model + bench is now ready for that integration to call into without forking the FFI.
+
+To obtain a fresh full reference run with the new shared code (recommended before declaring any Tauri parity closed):
+```
+$env:SKIP_INITIAL_TEST_BENCHES="1"; $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11
+.\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode 2>&1 | Tee-Object "benchmark/results_native_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
+```
+Then copy the `=== Handoff Parity Summary` block (the one at the very end) + any lowlevel first-pixel per-file lines of interest into a new `docs/outputs/tauri/gob30-p2200-11-native-parity-2026-06-YY.md` (or paste back here for analysis + report append).
+
+This slice closes the "share the impl" readiness item. The remaining work is on the Tauri app side (as described in the handoff "Immediate Next Steps" 3-9).
