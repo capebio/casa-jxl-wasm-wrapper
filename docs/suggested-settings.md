@@ -111,6 +111,32 @@ From the 11-file / 55-sample crop benchmark (P2200*.ORF set, varied content, til
 
 See `docs/boundary-cost-audit.md` §13 for the full per-size tables, per-file details, handoff metric summaries, and the exact 11-file report that drove these settings.
 
+## Truly-Progressive Web JPEG / RAW Pipeline (SNEYERS_PRESET, 2026-06-03)
+
+Recipe (verified via `benchmark/progressive-flag-matrix.mjs` + `benchmark/jpeg-progressive-stream.mjs`, see docs/Benchmark results/truly-progressive-2026-06-03.md):
+
+| Setting        | Value | Notes |
+|----------------|-------|-------|
+| progressive    | true  | enables PROGRESSIVE_* flags in bridge |
+| previewFirst   | true  | triggers SNEYERS_PRESET branch in resolveEncoderBridgeSettings |
+| progressiveDc  | 2     | multi-layer DC pyramid for very-early thumbnail |
+| progressiveAc  | 1     | spectral AC progression |
+| qProgressiveAc | 1     | quantized AC progression |
+| groupOrder     | 1     | center-out — best perceived early quality |
+| effort         | 3     | measured best on this codebase; libjxl's ≥7 recommendation does NOT apply here |
+| decodingSpeed  | 0     | bias bitstream for decoder speed at progressive boundaries |
+
+Decoder pair:
+- `progressionTarget: "final"`
+- `emitEveryPass: true`
+- `progressiveDetail: "passes"` (kPasses — finest spectral progression)
+
+Result targets (representative file, reference binary): firstRecognizable ≤ 1% bytes, ≥17 paints, monotone PSNR, final PSNR ≥ 40 dB.
+
+Use `createSneyersPreset({ width, height, targetLongEdge, quality })` from `web/jxl-progressive-best-preset.js` to get the full encode+decode triple.
+
+---
+
 ## Progressive Encode for Early Recognition (Benchmark + Demo Use)
 
 For the progressive paint/gallery benchmarks (`jxl-progressive-paint.html`, `jxl-progressive-gallery.html`) and any "early usable preview" testing:

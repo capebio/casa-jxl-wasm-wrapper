@@ -3,7 +3,7 @@
 **Feature:** First-class, fine-grained control over progressive encoding knobs that directly affect how early a usable preview appears (progressive DC layers, group order, preview bias, etc.).
 
 **Date:** 2026-06
-**Status:** In progress (Task 3 following dedicated preview decode support)
+**Status:** Implemented (2026-06-03) — see docs/superpowers/specs/2026-06-03-truly-progressive-jxl-design.md and docs/Benchmark results/truly-progressive-2026-06-03.md for the measurement-driven SNEYERS_PRESET.
 **Priority:** High — directly addresses the gap between our decode capabilities and the earliest previews possible with well-encoded files (as noted by Jon Sneyers regarding jxl-rs vs libjxl C).
 
 ---
@@ -141,3 +141,18 @@ Post 2026-06-03 measurement + follow-ups: decode collection + prefix-probe wired
 ---
 
 **End of current note (living document).**
+
+---
+
+## 2026-06-03 Update
+
+**SNEYERS_PRESET locked** in `web/jxl-progressive-best-preset.js`:
+- `progressiveDc=2, progressiveAc=1, qProgressiveAc=1, groupOrder=1, effort=3, decodingSpeed=0`
+- Wired into `facade.ts:resolveEncoderBridgeSettings` behind `USE_SNEYERS_DEFAULT=true` (single-line rollback).
+- Default applies whenever `progressive=true && previewFirst=true`.
+
+**JPEG path mirror bench** added (`benchmark/jpeg-progressive-stream.mjs`) — same flag matrix, effort sweep {3,5}, JPEG pixel source via sharp. Proves the preset works on both RAW and JPEG inputs.
+
+**Monotonicity asserted** — `web/jxl-progressive-quality.js` computes PSNR per cutoff; `detectMonotone()` validates each paint ≥ prior − 0.5 dB. Summary metrics: `firstRecognizableBytes`, `previewBytes`, `finalPsnr`, `monotone` added to `summarizeByteCutoffResults`.
+
+**UI throttle wired** — `web/jxl-progressive-paint.html` gains `#preset-name` (default: Sneyers) and `#throttle-rate` (default: 100 KB/s) selects. `feedThrottled()` replaces `streamIntoDecoder` when throttle > 0, producing real network-rate progressive reveals.
