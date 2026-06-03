@@ -150,6 +150,12 @@ export interface EncoderOptions {
      * Requires WASM rebuild with enc_set_frame_flags bridge.
      */
     disablePerceptualHeuristics?: boolean;
+    /**
+     * Force the JPEG XL codestream level. -1/omitted = libjxl automatic,
+     * 5 = Level 5, 10 = Level 10 for features such as CMYK/black-channel workflows.
+     * Requires WASM rebuild with enc_set_codestream_level bridge.
+     */
+    codestreamLevel?: -1 | 5 | 10;
     /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
     modular?: -1 | 0 | 1;
     /** Brotli effort for metadata/entropy coding. -1 = libjxl default, 0-11. */
@@ -451,6 +457,8 @@ interface LibjxlWasmModule {
     _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
     _jxl_wasm_enc_advance_written?(state: number, size: number): number;
     _jxl_wasm_enc_set_metadata?(state: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
+    _jxl_wasm_enc_set_codestream_level?(state: number, level: number): number;
+    _jxl_wasm_enc_set_alpha_premultiply?(state: number, premultiply: number): number;
     _jxl_wasm_enc_push_chunk?(state: number, dataPtr: number, size: number): number;
     _jxl_wasm_enc_finish?(state: number): number;
     _jxl_wasm_encode_tiled_rgba8?(pixelsPtr: number, width: number, height: number, tileSize: number, distance: number, effort: number, hasAlpha: number): number;

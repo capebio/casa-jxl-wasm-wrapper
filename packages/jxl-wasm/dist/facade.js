@@ -234,13 +234,39 @@ function resolveEncoderBridgeSettings(options) {
     if (!options.progressive) {
         return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform, groupOrder: 0 };
     }
+    // Single rollback boolean — flip to false to revert to legacy previewFirst defaults.
+    const USE_SNEYERS_DEFAULT = true;
+    // SNEYERS_PRESET defaults: applied when progressive+previewFirst are set and the
+    // caller has NOT explicitly overridden the relevant flags. Locked recipe from
+    // docs/Benchmark results/truly-progressive-2026-06-03.md.
+    if (USE_SNEYERS_DEFAULT && options.previewFirst) {
+        const dc = options.progressiveDc != null
+            ? Math.max(0, Math.min(2, options.progressiveDc | 0))
+            : 2;
+        const ac = options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : 1;
+        const qac = options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : 1;
+        const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : 1;
+        return {
+            progressiveDc: dc,
+            progressiveAc: ac,
+            qProgressiveAc: qac,
+            buffering: options.chunked ? 2 : 0,
+            modular,
+            brotliEffort,
+            decodingSpeed: decodingSpeed >= 0 ? decodingSpeed : 0,
+            photonNoiseIso,
+            resampling,
+            epf,
+            gaborish,
+            dots,
+            colorTransform,
+            groupOrder,
+        };
+    }
     const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
-    // Respect explicit progressiveDc (0/1/2) for multi-layer DC progression; fall back to 1 when progressive.
-    // previewFirst implies at least basic early DC.
     const progressiveDc = options.progressiveDc != null
         ? Math.max(0, Math.min(2, options.progressiveDc | 0))
         : (options.previewFirst ? 1 : 1);
-    // Smart default: previewFirst or high passes bias to center-out group order (predator).
     const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : (options.previewFirst ? 1 : 0);
     return {
         progressiveDc,
@@ -261,6 +287,9 @@ function resolveEncoderBridgeSettings(options) {
 }
 function resolveResampling(value) {
     return value === 2 || value === 4 || value === 8 ? value : 1;
+}
+function resolveCodestreamLevel(value) {
+    return value === 5 || value === 10 ? value : -1;
 }
 export class CapabilityMissing extends Error {
     code = "CapabilityMissing";
@@ -1426,6 +1455,13 @@ class LibjxlEncoder {
             if (this.options.disablePerceptualHeuristics === true && typeof module._jxl_wasm_enc_set_frame_flags === "function") {
                 module
                     ._jxl_wasm_enc_set_frame_flags(this.wasmEncState, 1);
+            }
+            const codestreamLevel = resolveCodestreamLevel(this.options.codestreamLevel);
+            if (codestreamLevel !== -1 && typeof module._jxl_wasm_enc_set_codestream_level === "function") {
+                module._jxl_wasm_enc_set_codestream_level(this.wasmEncState, codestreamLevel);
+            }
+            if (this.options.premultiply !== undefined && typeof module._jxl_wasm_enc_set_alpha_premultiply === "function") {
+                module._jxl_wasm_enc_set_alpha_premultiply(this.wasmEncState, this.options.premultiply > 0 ? 1 : 0);
             }
             this.streamingInputActive = true;
         }
