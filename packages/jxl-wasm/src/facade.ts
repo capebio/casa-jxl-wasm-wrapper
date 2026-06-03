@@ -131,6 +131,21 @@ export interface EncoderOptions {
   sidecarSizes?: readonly number[];
   /** When false, skip the defensive .slice() copy on pushPixels() — caller must not mutate the buffer after push returns. Default true. */
   copyInput?: boolean;
+  /**
+   * Intrinsic (display) size override. When set, JXL signals a different display
+   * resolution from the encoded pixel dimensions — useful for Retina/HiDPI (@2×)
+   * assets where encoded pixels are 2× the logical size (e.g. intrinsicSize 512×512
+   * for a 1024×1024 encoded image). Maps to JxlBasicInfo.have_intrinsic_size.
+   * Requires WASM rebuild with enc_set_intrinsic_size bridge.
+   */
+  intrinsicSize?: { width: number; height: number };
+  /**
+   * Disable libjxl perceptual quality heuristics (butteraugli/XYB psychovisual model).
+   * Useful for fair benchmarking against other codecs without perceptual optimisation.
+   * Maps to JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS (ID 39).
+   * Requires WASM rebuild with enc_set_frame_flags bridge.
+   */
+  disablePerceptualHeuristics?: boolean;
   /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
   modular?: -1 | 0 | 1;
   /** Brotli effort for metadata/entropy coding. -1 = libjxl default, 0-11. */
@@ -247,8 +262,14 @@ export interface HDRMetadata {
 
 /** Descriptor for one extra channel beyond the main color channels. */
 export interface ExtraChannel {
-  /** Channel type. 'other' maps to JXL_CHANNEL_OPTIONAL. */
-  type: "alpha" | "depth" | "spot" | "selection" | "other";
+  /**
+   * Channel type.
+   * - 'black' → JXL_CHANNEL_BLACK (4): CMYK K component; requires modular:1 and CMYK ICC profile (Level 10 feature).
+   * - 'cfa'   → JXL_CHANNEL_CFA (5): Bayer CFA raw sensor channel.
+   * - 'thermal' → JXL_CHANNEL_THERMAL (6): thermal/infrared sensor channel.
+   * - 'other' → JXL_CHANNEL_OPTIONAL (15): generic optional channel.
+   */
+  type: "alpha" | "depth" | "spot" | "selection" | "black" | "cfa" | "thermal" | "other";
   /** Bits per sample for this channel (typically 8, 16, or 32). */
   bitsPerSample: number;
   /**
@@ -285,6 +306,16 @@ export interface AnimationFrame {
   duration: number;
   /** Optional human-readable frame name (informational; embedded in the JXL bitstream). */
   name?: string;
+  /**
+   * Frame blend mode (JxlBlendMode). Controls how this frame composites onto the canvas.
+   * - 'replace' (default): replace all pixels (JXL_BLEND_REPLACE = 0)
+   * - 'add':      additive blend — adds pixel values (JXL_BLEND_ADD = 1)
+   * - 'blend':    alpha-blend using the alpha channel (JXL_BLEND_BLEND = 2)
+   * - 'muladd':   multiply-add blend (JXL_BLEND_MULADD = 3)
+   * - 'mul':      multiplicative blend (JXL_BLEND_MUL = 4)
+   * Requires WASM rebuild with extended WasmAnimationFrame struct (32 bytes).
+   */
+  blendMode?: "replace" | "add" | "blend" | "muladd" | "mul";
 }
 
 /** Animation header options written to JxlAnimationHeader. */
@@ -519,7 +550,20 @@ function encodeExtraChannelType(type: ExtraChannel["type"]): number {
     case "depth":     return 1;  // JXL_CHANNEL_DEPTH
     case "spot":      return 2;  // JXL_CHANNEL_SPOT_COLOR
     case "selection": return 3;  // JXL_CHANNEL_SELECTION_MASK
+    case "black":     return 4;  // JXL_CHANNEL_BLACK (CMYK K; Level 10 + modular + CMYK ICC)
+    case "cfa":       return 5;  // JXL_CHANNEL_CFA (Bayer raw sensor)
+    case "thermal":   return 6;  // JXL_CHANNEL_THERMAL
     default:          return 15; // JXL_CHANNEL_OPTIONAL
+  }
+}
+
+function encodeBlendMode(mode: AnimationFrame["blendMode"]): number {
+  switch (mode) {
+    case "add":    return 1; // JXL_BLEND_ADD
+    case "blend":  return 2; // JXL_BLEND_BLEND
+    case "muladd": return 3; // JXL_BLEND_MULADD
+    case "mul":    return 4; // JXL_BLEND_MUL
+    default:       return 0; // JXL_BLEND_REPLACE
   }
 }
 
@@ -659,7 +703,8 @@ function marshalBoxOpts(
 //   offset 16: duration    — frame duration in ticks
 //   offset 20: name_ptr    — WASM heap ptr to UTF-8 name string (0 if absent)
 //   offset 24: name_size   — byte length of name string
-const WASM_ANIMATION_FRAME_BYTES = 28;
+//   offset 28: blend_mode  — JxlBlendMode value (0=replace, 1=add, 2=blend, 3=muladd, 4=mul)
+const WASM_ANIMATION_FRAME_BYTES = 32;
 
 // WasmAnimationOpts layout (8 bytes):
 //   offset 0: ticks_per_second (uint32)
@@ -700,6 +745,8 @@ function marshalAnimationFrames(
     }
     framesDv.setUint32(base + 20, namePtr,  true);
     framesDv.setUint32(base + 24, nameSize, true);
+    const blendMode = encodeBlendMode(f.blendMode);
+    framesDv.setUint32(base + 28, blendMode, true);
   }
 
   const framesPtr = mallocAndCopy(module, framesBuf, freePtrs);
@@ -1389,6 +1436,10 @@ class LibjxlDecoder implements JxlDecoder {
       let drainPending = false;
       let inputClosed = false;
       let pushWasmMs = 0;
+      let pushCopyMs = 0;
+      let pushInputWasmMs = 0;
+      let pushFlushWasmMs = 0;
+      let headerProbeMs = 0;
       let takeFlushedMs = 0;
       let takeFinalMs = 0;
 
@@ -1406,7 +1457,9 @@ class LibjxlDecoder implements JxlDecoder {
         if (drainPending) {
           const tPushStart = performance.now();
           result = decPush(dec, 0, 0);
-          pushWasmMs += performance.now() - tPushStart;
+          const tPushMs = performance.now() - tPushStart;
+          pushWasmMs += tPushMs;
+          pushFlushWasmMs += tPushMs;
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
         } else if (this.chunkQueue.length > this.readIndex && this.chunkQueue[this.readIndex] === null) {
           // Close sentinel — flush remaining decoder state, then keep draining until done.
@@ -1416,7 +1469,9 @@ class LibjxlDecoder implements JxlDecoder {
           inputClosed = true;
           const tPushStart = performance.now();
           result = decPush(dec, 0, 0);
-          pushWasmMs += performance.now() - tPushStart;
+          const tPushMs = performance.now() - tPushStart;
+          pushWasmMs += tPushMs;
+          pushFlushWasmMs += tPushMs;
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
         } else {
           // Pending byte count maintained incrementally — no scan needed.
@@ -1437,15 +1492,21 @@ class LibjxlDecoder implements JxlDecoder {
             woff += chunk.byteLength;
           }
           this.compactQueue();
+          const tCopyStart = performance.now();
+          pushCopyMs += performance.now() - tCopyStart;
           const tPushStart = performance.now();
           result = decPush(dec, chunkBufPtr, batchBytes);
-          pushWasmMs += performance.now() - tPushStart;
+          const tPushMs = performance.now() - tPushStart;
+          pushWasmMs += tPushMs;
+          pushInputWasmMs += tPushMs;
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
         }
 
         if (!headerEmitted) {
+          const tHeaderProbeStart = performance.now();
           const w = decWidth(dec);
           const h = decHeight(dec);
+          headerProbeMs += performance.now() - tHeaderProbeStart;
           if (w > 0 && h > 0) {
             headerEmitted = true;
             yield { type: "header", info: makeHeaderInfo(w, h) };
@@ -1605,6 +1666,10 @@ class LibjxlDecoder implements JxlDecoder {
       }
       if (onMetric) {
         onMetric("progressive_decoder_push_wasm_ms", pushWasmMs);
+        onMetric("progressive_decoder_push_copy_ms", pushCopyMs);
+        onMetric("progressive_decoder_push_input_wasm_ms", pushInputWasmMs);
+        onMetric("progressive_decoder_push_flush_wasm_ms", pushFlushWasmMs);
+        onMetric("progressive_decoder_header_probe_ms", headerProbeMs);
         onMetric("progressive_decoder_take_flushed_ms", takeFlushedMs);
         onMetric("progressive_decoder_take_final_ms", takeFinalMs);
       }
@@ -1867,7 +1932,7 @@ class LibjxlEncoder implements JxlEncoder {
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
     this.pixelByteTotal = expectedPixelBytes(options.width, options.height, options.format);
-    this.onMetric = options.onMetric;
+    if (options.onMetric !== undefined) this.onMetric = options.onMetric;
   }
 
   async pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): Promise<void> {
@@ -2011,6 +2076,16 @@ class LibjxlEncoder implements JxlEncoder {
         if (exifPtr) module._free(exifPtr);
         if (xmpPtr) module._free(xmpPtr);
         this.onMetric?.("enc_set_metadata_ms", performance.now() - tMetaStart);
+      }
+      // intrinsicSize: signal display dimensions separate from encoded pixels (Retina @2×, etc.)
+      if (this.options.intrinsicSize != null && typeof (module as unknown as Record<string, unknown>)._jxl_wasm_enc_set_intrinsic_size === "function") {
+        (module as unknown as { _jxl_wasm_enc_set_intrinsic_size: (s: number, w: number, h: number) => void })
+          ._jxl_wasm_enc_set_intrinsic_size(this.wasmEncState, this.options.intrinsicSize.width, this.options.intrinsicSize.height);
+      }
+      // disablePerceptualHeuristics: bypass butteraugli/XYB psychovisual model for fair benchmarking
+      if (this.options.disablePerceptualHeuristics === true && typeof (module as unknown as Record<string, unknown>)._jxl_wasm_enc_set_frame_flags === "function") {
+        (module as unknown as { _jxl_wasm_enc_set_frame_flags: (s: number, disablePerceptual: number) => void })
+          ._jxl_wasm_enc_set_frame_flags(this.wasmEncState, 1);
       }
       this.streamingInputActive = true;
     }

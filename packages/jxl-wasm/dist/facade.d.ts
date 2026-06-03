@@ -132,6 +132,24 @@ export interface EncoderOptions {
     sidecarSizes?: readonly number[];
     /** When false, skip the defensive .slice() copy on pushPixels() — caller must not mutate the buffer after push returns. Default true. */
     copyInput?: boolean;
+    /**
+     * Intrinsic (display) size override. When set, JXL signals a different display
+     * resolution from the encoded pixel dimensions — useful for Retina/HiDPI (@2×)
+     * assets where encoded pixels are 2× the logical size (e.g. intrinsicSize 512×512
+     * for a 1024×1024 encoded image). Maps to JxlBasicInfo.have_intrinsic_size.
+     * Requires WASM rebuild with enc_set_intrinsic_size bridge.
+     */
+    intrinsicSize?: {
+        width: number;
+        height: number;
+    };
+    /**
+     * Disable libjxl perceptual quality heuristics (butteraugli/XYB psychovisual model).
+     * Useful for fair benchmarking against other codecs without perceptual optimisation.
+     * Maps to JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS (ID 39).
+     * Requires WASM rebuild with enc_set_frame_flags bridge.
+     */
+    disablePerceptualHeuristics?: boolean;
     /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
     modular?: -1 | 0 | 1;
     /** Brotli effort for metadata/entropy coding. -1 = libjxl default, 0-11. */
@@ -200,6 +218,7 @@ export interface EncoderOptions {
      * must rotate pixels themselves in that fallback case).
      */
     orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+    onMetric?: (name: string, value: number) => void;
     /**
      * Frame data for animation encode. When set, replaces the single-image pushPixels path.
      * Requires rebuilt WASM with animation bridge (_jxl_wasm_encode_animation).
@@ -242,8 +261,14 @@ export interface HDRMetadata {
 }
 /** Descriptor for one extra channel beyond the main color channels. */
 export interface ExtraChannel {
-    /** Channel type. 'other' maps to JXL_CHANNEL_OPTIONAL. */
-    type: "alpha" | "depth" | "spot" | "selection" | "other";
+    /**
+     * Channel type.
+     * - 'black' → JXL_CHANNEL_BLACK (4): CMYK K component; requires modular:1 and CMYK ICC profile (Level 10 feature).
+     * - 'cfa'   → JXL_CHANNEL_CFA (5): Bayer CFA raw sensor channel.
+     * - 'thermal' → JXL_CHANNEL_THERMAL (6): thermal/infrared sensor channel.
+     * - 'other' → JXL_CHANNEL_OPTIONAL (15): generic optional channel.
+     */
+    type: "alpha" | "depth" | "spot" | "selection" | "black" | "cfa" | "thermal" | "other";
     /** Bits per sample for this channel (typically 8, 16, or 32). */
     bitsPerSample: number;
     /**
@@ -278,6 +303,16 @@ export interface AnimationFrame {
     duration: number;
     /** Optional human-readable frame name (informational; embedded in the JXL bitstream). */
     name?: string;
+    /**
+     * Frame blend mode (JxlBlendMode). Controls how this frame composites onto the canvas.
+     * - 'replace' (default): replace all pixels (JXL_BLEND_REPLACE = 0)
+     * - 'add':      additive blend — adds pixel values (JXL_BLEND_ADD = 1)
+     * - 'blend':    alpha-blend using the alpha channel (JXL_BLEND_BLEND = 2)
+     * - 'muladd':   multiply-add blend (JXL_BLEND_MULADD = 3)
+     * - 'mul':      multiplicative blend (JXL_BLEND_MUL = 4)
+     * Requires WASM rebuild with extended WasmAnimationFrame struct (32 bytes).
+     */
+    blendMode?: "replace" | "add" | "blend" | "muladd" | "mul";
 }
 /** Animation header options written to JxlAnimationHeader. */
 export interface AnimationOptions {

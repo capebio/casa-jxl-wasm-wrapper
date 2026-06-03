@@ -135,6 +135,24 @@ export interface EncodeOptions {
      * silently when absent (caller must rotate pixels themselves in that case).
      */
     orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+    /**
+     * Intrinsic (display) size override. When set, the JXL codestream signals a
+     * different display resolution from the encoded pixel dimensions — useful for
+     * Retina/@2× assets (intrinsicSize 512×512, encoded 1024×1024).
+     * Maps to JxlBasicInfo.have_intrinsic_size.
+     * Requires WASM build with enc_set_intrinsic_size bridge.
+     */
+    intrinsicSize?: {
+        width: number;
+        height: number;
+    };
+    /**
+     * Disable libjxl perceptual quality heuristics (butteraugli/XYB psychovisual model).
+     * Useful for fair codec benchmarking without perceptual optimisation.
+     * Maps to JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS (ID 39).
+     * Requires WASM build with enc_set_frame_flags bridge.
+     */
+    disablePerceptualHeuristics?: boolean;
 }
 export interface EncodeSession {
     readonly id: string;

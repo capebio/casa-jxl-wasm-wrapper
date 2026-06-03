@@ -8,6 +8,53 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
+## Feature: CasaSneyers_Parity — Paper Gap Closure (Ch3/Ch4/Ch7) — 2026-06-03
+
+**Branch:** `CasaSneyers_Parity`
+
+**Status:** Source complete; requires WASM rebuild (Emscripten) to activate bridge-level features.
+
+**Scope:** Systematic gap closure from Sneyers et al. paper against CasaWasm, guided by `docs/Research/SneyersCasaWasm comparison.md`. Four tractable shortfalls addressed at source level.
+
+**Key Changes:**
+
+### 1. Extra Channel types: `black`, `cfa`, `thermal` (Ch4/Ch5)
+- `packages/jxl-wasm/src/facade.ts` — Added `"black" | "cfa" | "thermal"` to `ExtraChannel.type` union.
+- `encodeExtraChannelType()` now maps: `black`→4 (`JXL_CHANNEL_BLACK`), `cfa`→5 (`JXL_CHANNEL_CFA`), `thermal`→6 (`JXL_CHANNEL_THERMAL`).
+- Previously `thermal` silently mapped to `JXL_CHANNEL_OPTIONAL` (15). Now correct. CMYK K channel: use `type:"black"` + `modular:1` + CMYK ICC profile + codestream Level 10.
+- No bridge.cpp change needed — existing `WasmExtraChannel.type` field already passes through to libjxl.
+
+### 2. Animation frame blend modes (Ch3 / Ch9.3.2)
+- `packages/jxl-wasm/src/facade.ts` — Added `blendMode?: "replace"|"add"|"blend"|"muladd"|"mul"` to `AnimationFrame`. Updated `WASM_ANIMATION_FRAME_BYTES` 28→32. Added `encodeBlendMode()` helper. `marshalAnimationFrames()` writes blend_mode at offset 28.
+- `packages/jxl-wasm/src/bridge.cpp` — Extended `WasmAnimationFrame` struct to 32 bytes (added `uint32_t blend_mode` at offset 28). Animation encode loop now applies blend mode to `fh.layer_info.blend_info.blendmode` (clamped to 0-4). Default (0) = JXL_BLEND_REPLACE, backward compatible.
+
+### 3. `intrinsicSize` encoder option (Ch3)
+- `packages/jxl-wasm/src/facade.ts` — Added `intrinsicSize?: { width: number; height: number }` to `EncoderOptions`. After `enc_set_metadata`, calls `_jxl_wasm_enc_set_intrinsic_size` if the bridge exports it.
+- `packages/jxl-core/src/types.ts` — Added same field to public `EncodeOptions`.
+- `packages/jxl-wasm/src/bridge.cpp` — Added `enc_intrinsic_width`/`enc_intrinsic_height` to `JxlWasmEncState`. New `jxl_wasm_enc_set_intrinsic_size(s, w, h)` setter. `EncodeRgbaWithMetadata` applies `have_intrinsic_size` when nonzero. `enc_finish` threads the values.
+
+### 4. `disablePerceptualHeuristics` encoder option (ID 39)
+- `packages/jxl-wasm/src/facade.ts` — Added `disablePerceptualHeuristics?: boolean` to `EncoderOptions`. After `enc_set_metadata`, calls `_jxl_wasm_enc_set_frame_flags` if the bridge exports it.
+- `packages/jxl-core/src/types.ts` — Added same field to public `EncodeOptions`.
+- `packages/jxl-wasm/src/bridge.cpp` — Added `enc_disable_perceptual` field to state. New `jxl_wasm_enc_set_frame_flags(s, disable_perceptual)` setter. `EncodeRgbaWithMetadata` applies `JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS` when > 0.
+
+### Bonus: Pre-existing `exactOptionalPropertyTypes` fix
+- `packages/jxl-wasm/src/facade.ts` — Fixed `this.onMetric = options.onMetric` → `if (options.onMetric !== undefined) this.onMetric = options.onMetric` to satisfy TS2412.
+
+**Deferred (not in this slice):**
+- CMYK full pipeline (Black extra channel + Level 10 codestream + Modular mode enforcement + CMYK ICC generation): tracked as future slice. Source foundations laid (`black` channel type now correctly routes to `JXL_CHANNEL_BLACK`).
+- intrinsic_size + disablePerceptualHeuristics in the worker/session path (`MsgEncodeStart` protocol): only the direct facade path is wired. Session-level threading deferred.
+- Patches/Splines first-class (Ch7): remain experimental escape-hatch per design — no API shape exists in libjxl that makes first-class exposure safe without deep bridge work.
+- Tauri native progressive path (Ch9): by-design N/A; Tauri uses one-shot + shared frontend.
+
+**TypeScript build:** `tsc` clean (0 errors) in jxl-wasm, jxl-core, jxl-session, jxl-worker-browser post-change.
+
+**WASM rebuild required** for bridge-level features (intrinsicSize, disablePerceptualHeuristics, blend modes, WasmAnimationFrame ABI change). ExtraChannel type mapping fix is TypeScript-only and takes effect immediately.
+
+**Docs Updated:** `docs/FEATURE_PARITY_MATRIX.md` (Section 2 row 4 annotation updated); this PROGRESS_LOG entry.
+
+---
+
 ## Feature: Predator Mode — Progressive Encode & Decode Optimizations — 2026-06
 
 **Branch:** `benchmarkfeaturechanges`
@@ -1494,4 +1541,14 @@ Full rigorous implementation of `jpeg-recompression-polish.md`. Delivered first-
 **Owl workstream status:** P1, P2, and P4 complete. P3 (engine extraction to option-matrix-engine.mjs) remains explicitly deferred per original review.
 
 ---
+
+
+## Investigation: Reference Libraries Located - 2026-06
+
+**Scope:** The user requested the location of reference libraries \jsquoosh\ and \libvips\.
+
+**Findings:**
+- **\jsquoosh\**: This library is listed as \@jsquash/jxl\ in the \package.json\ dependencies.
+- **\libvips\**: This library is provided by the \sharp\ dependency, listed in \package.json\ devDependencies.
+- \libvips\ is extensively referenced in architecture and design documents under \docs/references/\ (e.g., \REFERENCE_INDEX.md\, \REFERENCE_CODE_AUDIT.md\) as a \pragmatic production C abstraction\ standard.
 

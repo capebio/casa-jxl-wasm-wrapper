@@ -67,6 +67,11 @@ struct JxlWasmEncState {
   int32_t  enc_gaborish;       // -1=auto, 0=off, 1=on
   int32_t  enc_dots;           // -1=auto, 0=off, 1=on (VarDCT only)
   int32_t  enc_color_transform;// -1=auto, 0=XYB, 1=none, 2=YCbCr
+  // CasaSneyers_Parity: intrinsic_size (Ch3) — display dims differ from encoded dims (Retina @2×)
+  uint32_t enc_intrinsic_width;  // 0 = not set
+  uint32_t enc_intrinsic_height; // 0 = not set
+  // CasaSneyers_Parity: disable perceptual heuristics (ID 39) — for fair codec benchmarking
+  int32_t  enc_disable_perceptual; // -1=auto, 1=disable butteraugli/XYB psychovisual
   // B3: optional metadata stored for enc_finish to pass to EncodeRgbaWithMetadata
   uint8_t* enc_icc;
   size_t   enc_icc_size;
@@ -251,8 +256,9 @@ struct WasmCustomBox {
   uint32_t compress;    // offset 12: 0 or 1
 };
 
-// Animation frame descriptor — 28 bytes, 4-byte aligned.
+// Animation frame descriptor — 32 bytes, 4-byte aligned.
 // Layout matches TypeScript DataView writes in marshalAnimationFrames().
+// CasaSneyers_Parity (Ch3/Ch9.3.2): blend_mode added at offset 28 for per-frame composition.
 struct WasmAnimationFrame {
   uint32_t pixels_ptr;  // offset  0: WASM heap ptr to RGBA pixel data
   uint32_t pixels_size; // offset  4: byte length
@@ -261,6 +267,7 @@ struct WasmAnimationFrame {
   uint32_t duration;    // offset 16: in ticks
   uint32_t name_ptr;    // offset 20: WASM heap ptr to UTF-8 name (0 = none)
   uint32_t name_size;   // offset 24: byte length of name
+  uint32_t blend_mode;  // offset 28: JxlBlendMode (0=replace, 1=add, 2=blend, 3=muladd, 4=mul)
 };
 
 // Animation header options — 8 bytes.
@@ -488,7 +495,11 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     const WasmBoxOpts* box_opts = nullptr,
     int32_t epf = -1, int32_t gaborish = -1,
     int32_t dots = -1, int32_t color_transform = -1,
-    uint32_t orientation = 1u) {
+    uint32_t orientation = 1u,
+    // CasaSneyers_Parity (Ch3): display dims separate from encoded pixel dims (Retina @2×)
+    uint32_t intrinsic_width = 0u, uint32_t intrinsic_height = 0u,
+    // CasaSneyers_Parity: disable psychovisual butteraugli/XYB model (ID 39) for fair benchmarking
+    int32_t disable_perceptual = -1) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -525,6 +536,15 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
 
+  // CasaSneyers_Parity (Ch3): intrinsic_size — signal display dims separate from encoded pixel dims.
+  // Useful for Retina/@2× assets where encoded pixels are 2× the logical display size.
+  if (intrinsic_width > 0u && intrinsic_height > 0u) {
+    info.have_intrinsic_size = JXL_TRUE;
+    info.intrinsic_xsize = intrinsic_width;
+    info.intrinsic_ysize = intrinsic_height;
+    if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
+  }
+
   if (icc_profile != nullptr && icc_size > 0) {
     if (JxlEncoderSetICCProfile(enc, icc_profile, icc_size) != JXL_ENC_SUCCESS) {
       JxlEncoderDestroy(enc);
@@ -554,6 +574,8 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   if (gaborish >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GABORISH, static_cast<int64_t>(gaborish & 1));
   if (dots >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DOTS, static_cast<int64_t>(dots & 1));
   if (color_transform >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM, static_cast<int64_t>(std::clamp(color_transform, 0, 2)));
+  // CasaSneyers_Parity: disable psychovisual heuristics (ID 39) — bypass butteraugli/XYB model.
+  if (disable_perceptual > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS, 1LL);
 
   const size_t bytes_per_channel = (fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u;
   // A3: fmt==3 means caller already provides 3-channel RGB (no alpha in buffer).
@@ -1751,6 +1773,14 @@ static JxlWasmBuffer* EncodeAnimation(
       JxlFrameHeader fh;
       JxlEncoderInitFrameHeader(&fh);
       fh.duration = wf.duration;
+      // CasaSneyers_Parity (Ch3/Ch9.3.2): per-frame blend mode (Replace/Add/Blend/MulAdd/Mul).
+      // blend_mode field added at offset 28 of WasmAnimationFrame in this build.
+      // Clamp to valid JxlBlendMode range (0-4); 0 = JXL_BLEND_REPLACE (default/safe).
+      const uint32_t bm = std::min(wf.blend_mode, static_cast<uint32_t>(4));
+      fh.layer_info.blend_info.blendmode = static_cast<JxlBlendMode>(bm);
+      fh.layer_info.blend_info.source    = 0;
+      fh.layer_info.blend_info.alpha     = 0;
+      fh.layer_info.blend_info.clamp     = JXL_FALSE;
       if (JxlEncoderSetFrameHeader(fs, &fh) != JXL_ENC_SUCCESS) {
         JxlEncoderDestroy(enc); return MakeError(207);
       }
@@ -2712,6 +2742,9 @@ JxlWasmEncState* jxl_wasm_enc_create_image(
   s->enc_gaborish = -1;
   s->enc_dots = -1;
   s->enc_color_transform = -1;
+  s->enc_intrinsic_width = 0u;
+  s->enc_intrinsic_height = 0u;
+  s->enc_disable_perceptual = -1;
   s->enc_orientation = 1u;
   return s;
 }
@@ -2813,7 +2846,9 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
       s->enc_modular, s->enc_brotli_effort, s->enc_decoding_speed, s->enc_photon_noise_iso, s->enc_resampling,
       s->enc_icc, s->enc_icc_size, s->enc_exif, s->enc_exif_size, s->enc_xmp, s->enc_xmp_size,
       nullptr, s->enc_epf, s->enc_gaborish, s->enc_dots, s->enc_color_transform,
-      s->enc_orientation);
+      s->enc_orientation,
+      s->enc_intrinsic_width, s->enc_intrinsic_height,
+      s->enc_disable_perceptual);
 
   // libjxl is done with the pixel data — free it now to reclaim memory.
   free(s->pixels_buf);
@@ -2872,6 +2907,23 @@ int jxl_wasm_enc_set_metadata(JxlWasmEncState* s,
     s->enc_xmp_size = xmp_size;
   }
   return 0;
+}
+
+// CasaSneyers_Parity (Ch3): intrinsic_size setter — call before enc_finish.
+// Sets the JXL display dimensions independently from the encoded pixel dimensions.
+// w=0 or h=0 clears the override (no intrinsic_size in the output codestream).
+void jxl_wasm_enc_set_intrinsic_size(JxlWasmEncState* s, uint32_t w, uint32_t h) {
+  if (s == nullptr) return;
+  s->enc_intrinsic_width  = w;
+  s->enc_intrinsic_height = h;
+}
+
+// CasaSneyers_Parity (ID 39): frame flags setter — call before enc_finish.
+// disable_perceptual=1 bypasses the butteraugli/XYB psychovisual model for fair benchmarking.
+// disable_perceptual=0 or -1 restores default perceptual optimization.
+void jxl_wasm_enc_set_frame_flags(JxlWasmEncState* s, int32_t disable_perceptual) {
+  if (s == nullptr) return;
+  s->enc_disable_perceptual = disable_perceptual;
 }
 
 // --- #15: Lossless JPEG → JXL transcode ---
