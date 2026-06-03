@@ -134,10 +134,10 @@ function processRaw(type, bytes) {
 async function encodeJxl(rgba, width, height) {
   const started = performance.now();
   const encoder = createEncoder({
-    format: "rgba8",
+    format: "rgb8",
     width,
     height,
-    hasAlpha: true,
+    hasAlpha: false,
     distance: ENCODE_OPTIONS.lossless ? 0 : null,
     quality: ENCODE_OPTIONS.lossless ? null : ENCODE_OPTIONS.quality,
     effort: ENCODE_OPTIONS.effort,
@@ -241,15 +241,15 @@ async function measureOne(path) {
   try {
     const rgbStarted = performance.now();
     traceStage(`[stage] ${basename(path)} rgba:start`);
-    const rgba = rgb_to_rgba(result.take_rgb());
-    const rgbaPrepMode = "js-rgb-to-rgba";
+    const rgb = result.take_rgb();
+    const rgbaPrepMode = "js-rgb-to-rgba (skipped - A3)";
     const rawRgbBytes = result.width * result.height * 3;
-    const rgbaBytes = result.width * result.height * 4;
+    const rgbaBytes = rawRgbBytes; // same for A3
     const rgbaPrepMs = performance.now() - rgbStarted;
     traceStage(`[stage] ${basename(path)} rgba:done ${fmtMs(rgbaPrepMs)}`);
 
     traceStage(`[stage] ${basename(path)} encode:start`);
-    const encode = await encodeJxl(rgba, result.width, result.height);
+    const encode = await encodeJxl(rgb, result.width, result.height);
     traceStage(`[stage] ${basename(path)} encode:done ${fmtMs(encode.encodeMs)}`);
     traceStage(`[stage] ${basename(path)} decode:start`);
     const decode = await decodeJxl(encode.bytes);

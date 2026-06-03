@@ -15,7 +15,7 @@ This matrix supersedes and consolidates:
 - ❌ Not implemented (gap)
 - N/A — Does not apply (e.g., WASM-only allocator strategy, browser-specific native JXL probe, Tauri-only desktop FS integration)
 
-**Benchmark Exposure column:** Names the specific web/ page(s) or "N/A". "all" = exercised across the main lab + dedicated pages. "wrapper-lab" = jxl-wrapper-lab.html (primary option surface). Other pages: jxl-crop-benchmark.html, animation-lab.html, jxl-progressive-paint.html, jxl-benchmark.html, jxl-progressive-gallery.html.
+**Benchmark Exposure column:** Names the specific web/ page(s) or "N/A". "all" = exercised across the main lab + dedicated pages. "wrapper-lab" = jxl-wrapper-lab.html (primary option surface). Other pages: jxl-crop-benchmark.html, animation-lab.html, jxl-progressive-paint.html, jxl-benchmark.html, jxl-progressive-gallery.html, jxl-progressive-byte-benchmark.html.
 
 **Maintenance:** Update this matrix + PROGRESS_LOG.md on every feature landing or audit. Link from HANDOFF, DESIGNS_INDEX, REFERENCE_INDEX, and the two legacy comparison docs (now thin redirects).
 
@@ -45,7 +45,7 @@ This matrix supersedes and consolidates:
 | # | Feature | WASM (jxl-wasm) | Tauri/Native (jxl-native + jpegxl-rs paths) | Benchmark Exposure | Notes |
 |---|---------|-----------------|---------------------------------------------|--------------------|-------|
 | 1 | Basic encode (effort, distance/quality, lossless) | ✅ | ✅ (jpegxl-rs + casabio_encode) | wrapper-lab | Parity |
-| 2 | Progressive / interlace encode options | ✅ (preview-first bias) | N/A (Tauri uses one-shot encode via jpegxl-rs for desktop export; progressive encode UX is handled at ingest time via early-pass settings where needed) | N/A (encode side) | Different strategy: Tauri favors fast one-shot + shared progressive decode UX |
+| 2 | Progressive / interlace encode options | ✅ (preview-first bias) | N/A (Tauri uses one-shot encode via jpegxl-rs for desktop export; progressive encode UX is handled at ingest time via early-pass settings where needed) | N/A (encode side) | Different strategy: Tauri favors fast one-shot + shared progressive decode UX; WASM now supports full `groupOrder` (center-out) + `progressiveDc` (0-2) intent via FFI and smart defaults (2026-06).
 | 3 | Modular mode advanced controls (force, groupSize, predictor, palette, MA tree, etc.) | ✅ (COMPLETE: full parity with native + refs. Types + marshalAdvancedAndModular + force-buffered + ApplyAdvancedFrameSettings helper in bridge.cpp + all 12 call sites + all public C wrappers (rgba*_x, metadata_*_x, ec_v2, gain, animation, sidecars_x, enc_create_x) updated and forwarding. 70/70 tests pass. One Emscripten rebuild activates the feature from cjxl/jpegxl-rs/chafey references.) | ✅ (jxl-native parity: modular + modularOptions + advancedFrameSettings; verified 2026-05-29) | wrapper-lab (basic today; full advanced available post-rebuild) | designs/core-modular-controls.md; REFERENCE #3; cjxl_main.cc; jpegxl-rs escape; 2026-06 full implementation on finishing_feature_parity |
 | 4 | Full Extra Channel infrastructure (alpha/depth/spot/thermal + 72B descriptors + symmetry) | ✅ (Phase 2 complete: facade + bridge + tests matrix) | ✅ (jxl-native parity: encode + decode; descriptors + pixel planes on final event; ExtraChannelDescriptor on header) | wrapper-lab (alpha distance + visible "Extra Channels demo" section with button, status, and per-tile result badges for granular modular hints; full dynamic multi-EC panel + per-plane inspector scoped/future per granular-extra-channel-modular.md) | PROGRESS 2026-05-29; designs/extra-channel*; strengthened in 2026-06 audit |
 | 5 | Photon noise (ISO-based) | ✅ (`photonNoiseIso?: number` + JXL_ENC_FRAME_SETTING_PHOTON_NOISE; WASM rebuilt) | ✅ (jxl-native parity) | wrapper-lab | designs/photon-noise.md; PROGRESS 2026-05-28; REFERENCE #5 |
@@ -64,7 +64,7 @@ This matrix supersedes and consolidates:
 
 | # | Feature | WASM | Tauri | Benchmark Exposure | Notes |
 |---|---------|------|-------|--------------------|-------|
-| 1 | Progressive decode (DC + passes, emitEveryPass) | ✅ | ✅ (via shared web/ frontend + jxl-native) | jxl-progressive-paint.html, jxl-progressive-gallery.html, all | Strong parity via frontend |
+| 1 | Progressive decode (DC + passes, emitEveryPass) | ✅ | ✅ (via shared web/ frontend + jxl-native) | jxl-progressive-paint.html, jxl-progressive-gallery.html, jxl-progressive-byte-benchmark.html, all | Strong parity via frontend |
 | 2 | ROI / region decode (viewport, exact-size, fit modes contain/cover/stretch) | ✅ (decodeViewport, decodeRegionLod, normalized helpers) | ✅ (shared) | jxl-crop-benchmark.html + wrapper-lab | Exact-size + power-of-two downsample |
 | 3 | JXTC tile-container encode + zero-overhead round-trip ROI decode | ✅ (primary path, 5–23× on large crops; unit tests) | N/A (Tauri uses standard JXL via jpegxl-rs + native one-shot; JXTC is a WASM-specific container optimization) | jxl-crop-benchmark.html (full validation) | Old table #14; bridge.cpp + facade. Not applicable on native libjxl path. |
 | 4 | Tile-based multi-frame fallback ROI | ✅ | N/A (Tauri relies on standard region decode + shared frontend; tile-based multi-frame fallback is a WASM streaming concern) | crop-benchmark | Not applicable on native one-shot paths |
@@ -107,6 +107,7 @@ This matrix supersedes and consolidates:
 | 5 | Drag-race + auto + tier sweep + graphs + CSV | ✅ | N/A (Rust benches in bin/examples; browser lab is the primary public surface) | jxl-benchmark.html | Tauri uses native profiling + shared web telemetry |
 | 6 | Telemetry (time_to_first_pixel, decode_scale_used, region_area, etc.) + onMetric | ✅ | ✅ (shared CodecMetric + onMetric; Tauri additionally logs via Rust) | all | Full parity via shared frontend + Tauri extras |
 | 7 | JXTC unit tests + facade matrix tests (extra channels, animation, roundtrips) | ✅ | ✅ (jxl-native tests) | N/A (unit) | 69+ tests in facade.test.ts |
+| 8 | Progressive byte benchmark (byte-tier measurement, target-size output, Gobabeb corpus, SSIMULACRA2 placeholder) | ✅ | N/A (WASM-focused) | jxl-progressive-byte-benchmark.html | New 2026-06 dedicated CLI script & page for precise early-pass progression measurement |
 
 ## 7. Tauri Desktop App Specific (Not Applicable to Pure WASM)
 
@@ -204,3 +205,16 @@ Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or comp
 - Production Low-Memory Chunked Paths (`production-chunked-paths.md`): ✅ First-class `lowMemoryMode` + `preferChunkedAPI` inside `buffering` (WASM + Native parity), smart ID 34 promotion, rich lab section with "Simulate Large Image (8K)" + memory delta feedback + design note link, acceptance test, full living docs + handoff. (The full `JxlEncoderAddChunkedFrame` custom source remains future Tauri slice per design.)
 - HDR Signaling (the gold-standard exemplar): Full interactive control group (intensityTarget, premultiply, preferCICPForHDR) + per-tile result badges now live in wrapper-lab (delivered in 2026-06 benchmark wiring pass).
 - All four Phase 3 notes now at exemplar bar (see DESIGNS_INDEX and PROGRESS_LOG for details).
+
+---
+
+## 11. Recent Optimizations (Predator Mode) — 2026-06
+
+While not strictly new "features," these aggressive surgical optimizations (per `fast-path-principles.md`) closed critical UX and benchmark gaps in the progressive decode pathway.
+
+| Optimization | Target | Impact |
+|--------------|--------|--------|
+| **Progressive Encode Resolution** | WASM Encode | Fixed hardcoded `progressiveDc: 1` in facade; now respects caller intent (0-2). Allows benchmarks (paint, gallery, byte-tier) to finally exercise and demonstrate genuinely distinct early progressive layers. |
+| **GroupOrder (Center-out) Support** | WASM Encode | Fully plumbed `groupOrder` (0/1) via FFI and smart defaults (auto-set to 1 when `previewFirst` is active). Early passes are now center-weighted and much more "recognizable" at low byte counts compared to scanline order. |
+| **Center-out UX Parity** | Native / Tauri | Added analogous `groupOrder` + `progressiveDc` promotion in `jxl-native` and `raw-pipeline` surfaces for desktop export parity. |
+| **Automated "Push" Iteration** | Benchmarks | Replaced manual file picking with a localStorage-based "Push to Gallery" mechanism in `jxl-progressive-paint.html`. Enables rapid "encode → view layers in gallery" test loops. |

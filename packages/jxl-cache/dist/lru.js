@@ -31,8 +31,9 @@ export class LRUCache {
             this.currentSize -= this.cache.get(key).size;
             this.cache.delete(key);
         }
+        const iter = this.cache.keys();
         while (this.currentSize + size > this.maxSize && this.cache.size > 0) {
-            const oldestKey = this.cache.keys().next().value;
+            const oldestKey = iter.next().value;
             if (oldestKey === undefined)
                 break;
             this.currentSize -= this.cache.get(oldestKey).size;

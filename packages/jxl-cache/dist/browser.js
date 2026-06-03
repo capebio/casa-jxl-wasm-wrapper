@@ -9,6 +9,7 @@ export class JxlCacheBrowser {
     persistentTracker;
     inflightGets = new Map();
     inflightSets = new Map();
+    _encoder = new TextEncoder();
     opfsRoot = null;
     hitCount = 0;
     missCount = 0;
@@ -71,9 +72,13 @@ export class JxlCacheBrowser {
         if (!this.opfsRoot || size > this.opts.persistentLimit)
             return;
         const previous = this.inflightSets.get(key) ?? Promise.resolve();
-        const pending = previous
-            .catch(() => undefined)
-            .then(() => this.setPersistent(key, buffer));
+        const pending = (async () => {
+            try {
+                await previous;
+            }
+            catch { /* previous set failed, proceed anyway */ }
+            await this.setPersistent(key, buffer);
+        })();
         this.inflightSets.set(key, pending);
         try {
             await pending;
@@ -93,14 +98,11 @@ export class JxlCacheBrowser {
         if (!this.opfsRoot)
             return;
         try {
+            const names = [];
             for await (const name of this.opfsRoot.keys()) {
-                try {
-                    await this.opfsRoot.removeEntry(name);
-                }
-                catch {
-                    // Continue clearing remaining entries.
-                }
+                names.push(name);
             }
+            await Promise.allSettled(names.map((name) => this.opfsRoot.removeEntry(name).catch(() => undefined)));
         }
         catch (e) {
             console.warn('[JxlCacheBrowser] Partial clear failure — OPFS directory iteration failed', e);
@@ -283,7 +285,7 @@ export class JxlCacheBrowser {
                 entries.push({ key, name: entry.name, size });
             }
             const manifest = { version: 1, entries };
-            const encoded = new TextEncoder().encode(JSON.stringify(manifest));
+            const encoded = this._encoder.encode(JSON.stringify(manifest));
             // Slice the backing buffer to the exact byte range of the encoded view —
             // TextEncoder may return a Uint8Array that does not start at offset 0 or
             // does not extend to the end of its backing ArrayBuffer.

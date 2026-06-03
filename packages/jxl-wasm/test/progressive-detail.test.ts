@@ -50,6 +50,19 @@ test('groupOrder (center-out) is exposed in EncoderOptions and plumbed through F
   expect(bridge).toContain('group_order');
 });
 
+test('progressive encoder enables responsive ordering like cjxl --progressive', () => {
+  expect(bridge).toContain('JXL_ENC_FRAME_SETTING_RESPONSIVE');
+  expect(bridge).toContain('ApplyProgressiveFrameSettings');
+  expect(bridge).toContain('progressive_dc > 0 || progressive_ac > 0 || qprogressive_ac > 0');
+});
+
+test('stateful progressive decoder releases prior input before appending stream chunks', () => {
+  expect(bridge).toContain('JxlDecoderReleaseInput(s->dec)');
+  expect(bridge).toContain('unprocessed tail + newly appended bytes');
+  expect(bridge).toContain('memmove(s->input_buf');
+  expect(bridge).toContain('JxlDecoderSetInput(s->dec, s->input_buf, s->input_size)');
+});
+
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {
   // Synthetic noise image: enough entropy that the encoder cannot collapse to a
   // single trivial pass under VarDCT progressive_ac.

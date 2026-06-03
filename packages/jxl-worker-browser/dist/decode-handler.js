@@ -40,11 +40,33 @@ export class DecodeHandler {
     // Elapsed from session creation; used for both budget and timing metrics.
     stageStartMs = performance.now();
     firstPixelMetricPosted = false;
+    // Pre-allocated message objects — avoids per-call allocation in hot paths.
+    // postMessage() performs a synchronous structured clone before returning, so mutating these
+    // fields after the call is safe (JS worker is single-threaded; no interleaving possible).
+    _metricInner = { name: "", value: 0 };
+    _metricMsg = {
+        type: "metric",
+        sessionId: "",
+        metric: this._metricInner,
+    };
+    _drainMsg = {
+        type: "worker_drain",
+        sessionId: "",
+        latencyMs: 0,
+        queueDepth: 0,
+        queuedBytes: 0,
+        adaptiveHwm: 0,
+    };
+    // Cached adaptiveHwm result; invalidated when EMA drifts by ≥1 ms.
+    _cachedHwm = HWM_BASE;
+    _hwmLastEma = -1;
     constructor(opts, wasm, callbacks) {
         this.sessionId = opts.sessionId;
         this.opts = opts;
         this.wasm = wasm;
         this.callbacks = callbacks;
+        this._metricMsg.sessionId = this.sessionId;
+        this._drainMsg.sessionId = this.sessionId;
         this.run().catch((err) => this.failSession("Internal", String(err)));
     }
     // ---------------------------------------------------------------------------
@@ -260,14 +282,11 @@ export class DecodeHandler {
         if (!crossedIntoDrain && !intervalElapsed)
             return;
         this.lastDrainPostedMs = now;
-        self.postMessage({
-            type: "worker_drain",
-            sessionId: this.sessionId,
-            latencyMs: Math.round(this.pushLatencyEma),
-            queueDepth: this.queueDepth,
-            queuedBytes: this.queuedBytes,
-            adaptiveHwm: hwm,
-        });
+        this._drainMsg.latencyMs = Math.round(this.pushLatencyEma);
+        this._drainMsg.queueDepth = this.queueDepth;
+        this._drainMsg.queuedBytes = this.queuedBytes;
+        this._drainMsg.adaptiveHwm = hwm;
+        self.postMessage(this._drainMsg);
     }
     async readDecoderEvents(decoder) {
         for await (const event of decoder.events()) {
@@ -287,7 +306,10 @@ export class DecodeHandler {
                 }
                 case "progress": {
                     this.state = "progressive";
+                    const t0 = performance.now();
                     const pixels = toArrayBuffer(event.pixels);
+                    const tToArray = performance.now() - t0;
+                    this.postMetric("decode_toarraybuffer_ms", tToArray);
                     // Budget check BEFORE transferring pixels. postMessage([pixels]) detaches the
                     // buffer — reusing it in postBudgetExceeded would send a zero-length payload.
                     if (this.checkBudget()) {
@@ -302,15 +324,17 @@ export class DecodeHandler {
                         pixels,
                         format: event.format,
                         pixelStride: event.pixelStride,
+                        ...(event.region !== undefined ? { region: event.region } : {}),
                     };
-                    if (event.region !== undefined)
-                        msg.region = event.region;
                     self.postMessage(msg, [pixels]);
                     this.postFirstPixelMetric();
                     break;
                 }
                 case "final": {
+                    const t0 = performance.now();
                     const pixels = toArrayBuffer(event.pixels);
+                    const tToArray = performance.now() - t0;
+                    this.postMetric("decode_toarraybuffer_ms", tToArray);
                     // Budget check BEFORE transferring pixels — same pattern as "progress".
                     // postMessage([pixels]) detaches the buffer; reusing it in postBudgetExceeded
                     // would send a zero-length payload.
@@ -328,9 +352,8 @@ export class DecodeHandler {
                         pixelStride: event.pixelStride,
                         outputBytes: pixels.byteLength,
                         timeToFinalMs: now - this.stageStartMs,
+                        ...(event.region !== undefined ? { region: event.region } : {}),
                     };
-                    if (event.region !== undefined)
-                        msg.region = event.region;
                     // Embed first-pixel timing if it hasn't been reported via a progress event.
                     if (!this.firstPixelMetricPosted) {
                         msg.timeToFirstPixelMs = now - this.stageStartMs;
@@ -352,8 +375,13 @@ export class DecodeHandler {
         }
     }
     adaptiveHwm() {
-        const factor = Math.max(0.6, Math.min(2.0, 120 / (this.pushLatencyEma + 10)));
-        return Math.floor(HWM_BASE * factor);
+        const ema = this.pushLatencyEma;
+        if (Math.abs(ema - this._hwmLastEma) < 1.0)
+            return this._cachedHwm;
+        this._hwmLastEma = ema;
+        const factor = Math.max(0.6, Math.min(2.0, 120 / (ema + 10)));
+        this._cachedHwm = Math.floor(HWM_BASE * factor);
+        return this._cachedHwm;
     }
     checkBudget() {
         if (this.opts.budgetMs == null)
@@ -395,9 +423,8 @@ export class DecodeHandler {
             info,
             format,
             pixelStride,
+            ...(region !== undefined ? { region } : {}),
         };
-        if (region !== undefined)
-            msg.region = region;
         this.postMetric("output_bytes", pixels.byteLength);
         self.postMessage(msg, [pixels]);
         this.finishSession("budget_exceeded");
@@ -411,11 +438,9 @@ export class DecodeHandler {
         this.postMetric("time_to_first_pixel_ms", performance.now() - this.stageStartMs);
     }
     postMetric(name, value) {
-        self.postMessage({
-            type: "metric",
-            sessionId: this.sessionId,
-            metric: { name, value },
-        });
+        this._metricInner.name = name;
+        this._metricInner.value = value;
+        self.postMessage(this._metricMsg);
     }
 }
 function toArrayBuffer(value) {

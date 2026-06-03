@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" href="data:," />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Progressive byte benchmark</title>
+  <link rel="stylesheet" href="./test-nav.css" />
+  <link rel="stylesheet" href="./jxl-benchmark.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "@casabio/jxl-wasm": "../packages/jxl-wasm/dist/index.js"
+    }
+  }
+  </script>
+  <style>
+    body { margin: 0; background: #101418; color: #ecf4f1; font-family: Inter, Segoe UI, sans-serif; }
+    .bytebench-shell { max-width: 1500px; margin: 0 auto; padding: 24px; }
+    .bytebench-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: end; border-bottom: 1px solid #31414a; padding-bottom: 18px; }
+    .bytebench-head h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    .bytebench-head p { margin: 8px 0 0; color: #afc4c0; max-width: 820px; line-height: 1.45; }
+    .bytebench-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 18px 0; padding: 14px; background: #172026; border: 1px solid #31414a; border-radius: 8px; }
+    .bytebench-controls label { display: grid; gap: 5px; min-width: 130px; color: #b7c9c6; font-size: 12px; }
+    .bytebench-controls input, .bytebench-controls select { background: #0d1216; color: #f3fbf8; border: 1px solid #42545d; border-radius: 6px; padding: 8px; }
+    .bytebench-controls button, .bytebench-actions button { background: #62d6a3; color: #07100d; border: 0; border-radius: 6px; padding: 9px 12px; font-weight: 700; cursor: pointer; }
+    .bytebench-controls button[disabled] { opacity: .55; cursor: wait; }
+    .bytebench-status { color: #b7c9c6; min-height: 22px; margin: 8px 0 18px; }
+    .bytebench-summary { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .bytebench-stat { background: #172026; border: 1px solid #31414a; border-radius: 8px; padding: 10px; }
+    .bytebench-stat span { display: block; color: #9db3af; font-size: 12px; }
+    .bytebench-stat strong { display: block; margin-top: 4px; font-size: 18px; }
+    .bytebench-results { display: grid; gap: 18px; }
+    .bytebench-card { background: #131b20; border: 1px solid #31414a; border-radius: 8px; overflow: hidden; }
+    .bytebench-card header { display: flex; justify-content: space-between; gap: 12px; padding: 14px; border-bottom: 1px solid #26343b; }
+    .bytebench-card h2 { margin: 0; font-size: 17px; }
+    .bytebench-card p { margin: 4px 0 0; color: #adc2be; font-size: 13px; }
+    .bytebench-ladder { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; padding: 14px; }
+    .bytebench-tile { background: #0d1216; border: 1px solid #2c3d45; border-radius: 8px; min-height: 132px; display: grid; grid-template-rows: 1fr auto; overflow: hidden; cursor: pointer; }
+    .bytebench-tile.is-empty { cursor: default; border-style: dashed; }
+    .bytebench-tile canvas { width: 100%; height: 112px; object-fit: contain; background: #070a0d; }
+    .bytebench-tile-meta { padding: 7px; color: #b9cbc8; font-size: 11px; line-height: 1.25; }
+    .bytebench-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .bytebench-table th, .bytebench-table td { border-top: 1px solid #26343b; padding: 8px; text-align: left; color: #c7d8d4; }
+    .progressive-lightbox { position: fixed; inset: 0; background: rgba(5, 8, 10, .88); display: grid; place-items: center; padding: 22px; z-index: 20; }
+    .progressive-lightbox[hidden] { display: none; }
+    .progressive-lightbox-inner { width: min(1180px, 96vw); max-height: 94vh; background: #101820; border: 1px solid #52666d; border-radius: 8px; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .progressive-lightbox-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #2f4148; }
+    .progressive-lightbox canvas { width: 100%; height: min(76vh, 820px); object-fit: contain; background: #05080a; }
+    @media (max-width: 800px) {
+      .bytebench-head { grid-template-columns: 1fr; }
+      .bytebench-summary { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body class="has-home-bar">
+  <nav class="home-bar" aria-label="Test pages">
+    <div class="home-bar-label">Test pages</div>
+    <div class="home-bar-links">
+      <a class="home-bar-link" href="./index.html">Home</a>
+      <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+      <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+      <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+      <a class="home-bar-link is-active" href="./jxl-progressive-byte-benchmark.html" aria-current="page">Byte benchmark</a>
+      <a class="home-bar-link" href="./jxl-benchmark.html">Settings explorer</a>
+    </div>
+  </nav>
+
+  <main class="bytebench-shell">
+    <section class="bytebench-head">
+      <div>
+        <h1>Progressive byte benchmark</h1>
+        <p>Loads Gobabeb ORFs, encodes target-size progressive JPEG XL files with the web preview preset, then decodes byte prefixes so the first few bytes, thumbnails, and larger lightbox frames are visible.</p>
+      </div>
+      <div class="bytebench-actions">
+        <button id="export-json" type="button" disabled>Export JSON</button>
+      </div>
+    </section>
+
+    <section class="bytebench-controls" aria-label="Benchmark controls">
+      <label>
+        Runs
+        <input id="run-count" type="number" min="1" max="12" step="1" value="3" />
+      </label>
+      <label>
+        Target long edge
+        <select id="target-long-edge">
+          <option value="300">300 thumbnail</option>
+          <option value="800" selected>800 preview</option>
+          <option value="1600">1600 large</option>
+          <option value="full">Full source</option>
+        </select>
+      </label>
+      <label>
+        Quality
+        <input id="quality" type="number" min="1" max="100" step="1" value="85" />
+      </label>
+      <label>
+        SSIMULACRA2 target
+        <input id="ssimulacra2-target" type="number" min="0" max="100" step="1" placeholder="unavailable" />
+      </label>
+      <label>
+        Detail
+        <select id="progressive-detail">
+          <option value="passes" selected>passes</option>
+          <option value="dcProgressive">dcProgressive</option>
+          <option value="lastPasses">lastPasses</option>
+          <option value="dc">dc</option>
+        </select>
+      </label>
+      <button id="run-byte-benchmark" type="button">Run Gobabeb benchmark</button>
+    </section>
+
+    <div id="bytebench-status" class="bytebench-status">Ready.</div>
+
+    <section class="bytebench-summary" aria-label="Summary">
+      <div class="bytebench-stat"><span>Files</span><strong id="stat-files">0</strong></div>
+      <div class="bytebench-stat"><span>First paint median</span><strong id="stat-first">--</strong></div>
+      <div class="bytebench-stat"><span>Preview median</span><strong id="stat-preview">--</strong></div>
+      <div class="bytebench-stat"><span>Final median</span><strong id="stat-final">--</strong></div>
+      <div class="bytebench-stat"><span>SSIMULACRA2</span><strong id="stat-ssimulacra2">not wired</strong></div>
+    </section>
+
+    <section id="bytebench-results" class="bytebench-results" aria-live="polite"></section>
+  </main>
+
+  <div id="progressive-lightbox" class="progressive-lightbox" hidden>
+    <div class="progressive-lightbox-inner">
+      <div class="progressive-lightbox-head">
+        <strong id="lightbox-title">Frame</strong>
+        <button id="lightbox-close" type="button">Close</button>
+      </div>
+      <canvas id="lightbox-canvas" width="16" height="16"></canvas>
+    </div>
+  </div>
+
+  <script type="module" src="./jxl-progressive-byte-benchmark.js"></script>
+</body>
+</html>
+

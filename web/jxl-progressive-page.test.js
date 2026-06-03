@@ -12,6 +12,12 @@ test('libjxl progressive stream path uses session chunks instead of blob decode 
     expect(source).toContain('wireSlideoutPanel');
 });
 
+test('progressive page links to focused byte benchmark', () => {
+    const html = readFileSync(new URL('./jxl-progressive.html', import.meta.url), 'utf8');
+    expect(html).toContain('./jxl-progressive-byte-benchmark.html');
+    expect(html).toContain('Byte benchmark');
+});
+
 test('progressive page paints a source preview before encode/decode awaits', () => {
     const previewCall = 'paintPreparedPreview(card, source, rgba, targetDims);';
     const previewIndex = source.indexOf(previewCall);

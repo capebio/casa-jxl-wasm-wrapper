@@ -1,0 +1,134 @@
+{
+  "exportedAt": "2026-06-02T22:16:31.976Z",
+  "generator": "progressive-byte-benchmark",
+  "tier": "simd",
+  "target": "1600",
+  "quality": 70,
+  "detail": "dcProgressive",
+  "results": [
+    {
+      "file": "P2200571.ORF",
+      "rawBytes": 22967654,
+      "source": {
+        "width": 5240,
+        "height": 3912
+      },
+      "target": {
+        "width": 1600,
+        "height": 1195,
+        "longEdge": 1600,
+        "scale": 0.3053435114503817
+      },
+      "encode": {
+        "format": "rgba8",
+        "width": 1600,
+        "height": 1195,
+        "hasAlpha": true,
+        "quality": 70,
+        "effort": 3,
+        "progressive": true,
+        "progressiveFlavor": "ac",
+        "previewFirst": true,
+        "progressiveDc": 2,
+        "groupOrder": 1,
+        "chunked": false
+      },
+      "encodeMs": 433.1372000000001,
+      "jxlBytes": 310626,
+      "summary": {
+        "totalBytes": 310626,
+        "firstPaintBytes": null,
+        "firstPaintPercent": null,
+        "previewBytes": null,
+        "previewPercent": null,
+        "finalBytes": 310626,
+        "finalPercent": 100,
+        "paintedCutoffs": 0,
+        "maxFrameCount": 0,
+        "usefulEarlyPaint": false
+      },
+      "cutoffs": [
+        {
+          "bytes": 1024,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 2048,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 5120,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 10240,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 25600,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 51200,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 102400,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 153600,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 256000,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        },
+        {
+          "bytes": 310626,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL progressive decoder creation failed"
+        }
+      ]
+    }
+  ]
+}

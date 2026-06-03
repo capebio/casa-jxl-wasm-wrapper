@@ -115,10 +115,10 @@ function processRaw(type, bytes) {
 
 function makeEncoderOptions(source) {
   return {
-    format: "rgba8",
+    format: "rgb8",
     width: source.width,
     height: source.height,
-    hasAlpha: true,
+    hasAlpha: false,
     iccProfile: new Uint8Array(0),
     distance: ENCODE_OPTIONS.lossless ? 0 : null,
     quality: ENCODE_OPTIONS.lossless ? null : ENCODE_OPTIONS.quality,
@@ -257,14 +257,21 @@ async function measureOne(context, entry, config) {
   const rawWallMs = performance.now() - rawStarted;
 
   try {
-    const rgbaStarted = performance.now();
-    const rgba = rgb_to_rgba(result.take_rgb());
-    const rgbaPrepMode = "js-rgb-to-rgba";
+    const rgbStarted = performance.now();
+    const rgb = result.take_rgb();
+    const rgbaPrepMode = "js-rgb-to-rgba (skipped - A3)";
     const rawRgbBytes = result.width * result.height * 3;
-    const rgbaBytes = result.width * result.height * 4;
+    const rgbaBytes = rawRgbBytes; // Same size for A3
     const rgbaPrepMs = performance.now() - rgbaStarted;
 
-    const resized = resizeRgbaCanvas(rgba, result.width, result.height, config.maxEdge);
+    let resized = {
+      rgba: new Uint8Array(rgb.buffer.slice(rgb.byteOffset, rgb.byteOffset + rgb.byteLength)),
+      width: result.width,
+      height: result.height,
+    };
+    if (Number.isFinite(config.maxEdge) && config.maxEdge > 0 && Math.max(result.width, result.height) > config.maxEdge) {
+      console.warn("resizeRgbaCanvas is not supported for RGB8. Returning original size.");
+    }
 
     const session = await runSessionPipeline(
       context,

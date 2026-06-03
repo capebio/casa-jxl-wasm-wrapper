@@ -10,6 +10,7 @@ export declare class JxlCacheBrowser {
     private readonly persistentTracker;
     private readonly inflightGets;
     private readonly inflightSets;
+    private readonly _encoder;
     private opfsRoot;
     private hitCount;
     private missCount;

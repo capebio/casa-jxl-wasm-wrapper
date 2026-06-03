@@ -1372,6 +1372,73 @@ canvas {
     font-weight: 600;
 }
 
+.byte-cutoff-section {
+    margin: 0 0 16px;
+    padding: 10px 0 14px;
+    border-bottom: 1px solid var(--line);
+}
+
+.byte-cutoff-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.byte-cutoff-head h3 {
+    margin: 0;
+    font-size: 15px;
+}
+
+.byte-cutoff-status {
+    color: var(--muted);
+    font-size: 11px;
+    text-align: right;
+}
+
+.byte-cutoff-ladder {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+    gap: 8px;
+}
+
+.byte-cutoff-tile {
+    min-height: 112px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.035);
+    overflow: hidden;
+}
+
+.byte-cutoff-tile canvas {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    background: #050505;
+}
+
+.byte-cutoff-tile.is-final {
+    border-color: var(--accent);
+}
+
+.byte-cutoff-tile.is-empty {
+    display: grid;
+    align-content: center;
+    justify-items: center;
+    gap: 4px;
+    padding: 12px;
+    color: var(--muted);
+}
+
+.byte-cutoff-meta {
+    padding: 5px 6px 6px;
+    font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: 10px;
+    color: var(--muted);
+    line-height: 1.35;
+}
+
 .prog-comparison-wrap {
     margin-top: 4px;
 }

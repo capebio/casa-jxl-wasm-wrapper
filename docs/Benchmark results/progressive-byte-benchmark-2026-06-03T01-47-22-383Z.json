@@ -1,0 +1,247 @@
+{
+  "exportedAt": "2026-06-03T01:47:22.384Z",
+  "generator": "progressive-byte-benchmark",
+  "tier": "simd",
+  "target": "1600",
+  "quality": 85,
+  "detail": "passes",
+  "results": [
+    {
+      "file": "P2200571.ORF",
+      "rawBytes": 22967654,
+      "source": {
+        "width": 5240,
+        "height": 3912
+      },
+      "variants": [
+        {
+          "label": "sidecar-300",
+          "sidecar": true,
+          "target": {
+            "width": 300,
+            "height": 224,
+            "longEdge": 300,
+            "scale": 0.05725190839694656
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 300,
+            "height": 224,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 120.42190000000005,
+          "jxlBytes": 21761,
+          "summary": {
+            "totalBytes": 21761,
+            "firstPaintBytes": 21761,
+            "firstPaintPercent": 100,
+            "previewBytes": 21761,
+            "previewPercent": 100,
+            "finalBytes": 21761,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 21761,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        },
+        {
+          "label": "target-1600",
+          "sidecar": false,
+          "target": {
+            "width": 1600,
+            "height": 1195,
+            "longEdge": 1600,
+            "scale": 0.3053435114503817
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 1600,
+            "height": 1195,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 394.2335000000003,
+          "jxlBytes": 517434,
+          "summary": {
+            "totalBytes": 517434,
+            "firstPaintBytes": 517434,
+            "firstPaintPercent": 100,
+            "previewBytes": 517434,
+            "previewPercent": 100,
+            "finalBytes": 517434,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 25600,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 51200,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 102400,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 153600,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 256000,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 512000,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 517434,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        }
+      ],
+      "target": {
+        "width": 1600,
+        "height": 1195,
+        "longEdge": 1600,
+        "scale": 0.3053435114503817
+      },
+      "summary": {
+        "totalBytes": 517434,
+        "firstPaintBytes": 517434,
+        "firstPaintPercent": 100,
+        "previewBytes": 517434,
+        "previewPercent": 100,
+        "finalBytes": 517434,
+        "finalPercent": 100,
+        "paintedCutoffs": 1,
+        "maxFrameCount": 2,
+        "usefulEarlyPaint": false
+      },
+      "firstVisibleBytes": 21761
+    }
+  ]
+}

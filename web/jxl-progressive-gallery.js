@@ -4,10 +4,11 @@
 // Feed each file in chunks with emitEveryPass=true to show dc → pass → full.
 
 import { createBrowserContext } from '../packages/jxl-session/dist/index.js';
-import { createEncoder } from '@casabio/jxl-wasm';
+import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createGalleryCoordinator } from './jxl-progressive-gallery-coordinator.js';
 import { createGalleryLightbox } from './jxl-progressive-gallery-lightbox.js';
+import { buildPushBatches } from './jxl-progressive-gallery-push.js';
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Progressive Gallery] jxl-progressive-gallery.js loaded — multi-frame progressive gallery + lightbox', 'color:#06b6d4;font-weight:600', { page: 'Progressive Gallery', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
@@ -22,13 +23,17 @@ const galleryRowsEl  = document.querySelector('[data-gallery-rows]');
 const lightboxRoot   = document.querySelector('[data-lightbox-root]');
 const logEl         = document.getElementById('log');
 const dbgConsoleBtn = document.getElementById('dbg-console-btn');
+const decodePushedBtn = document.getElementById('decode-pushed-btn');
 const pushModeButtons = [...document.querySelectorAll('[data-push-mode]')];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let ctx = null;
+let ctxReadyPromise = null;
 let pushMode = 'all-chunks';
 let activeKeyHandler = null;  // cleaned up on each startGallery() call
+let lastPushedPayload = null;
+const consumedPushIds = new Set();
 
 const CHUNK_SIZE = 65536; // 64 KiB per chunk
 // Keep this comfortably above the scheduler drain HWM so the worker can
@@ -37,7 +42,7 @@ const WINDOW_SIZE = 32;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-(async () => {
+ctxReadyPromise = (async () => {
   try {
     ctx = createBrowserContext();
     log('JXL context ready');
@@ -49,7 +54,18 @@ const WINDOW_SIZE = 32;
 })();
 
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
+if (decodePushedBtn) {
+  decodePushedBtn.addEventListener('click', async () => {
+    if (!lastPushedPayload) return;
+    try {
+      await decodePushedGalleryPayload(lastPushedPayload);
+    } catch (e) {
+      log(`Pushed file decode error: ${e.message}`, 'error');
+    }
+  });
+}
 wirePushModeControls();
+wireProgressivePaintHandoff();
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
@@ -70,6 +86,76 @@ function getGalleryEncodeOptions() {
     progressiveDc: Number(document.getElementById('gallery-prog-dc')?.value ?? 2),
     groupOrder: document.getElementById('gallery-group-order')?.checked ? 1 : 0,
   };
+}
+
+function applyPushedGallerySettings(settings) {
+  if (!settings) return;
+  const detailEl = document.getElementById('gallery-prog-detail');
+  if (detailEl && settings.progressiveDetail) {
+    detailEl.value = settings.progressiveDetail;
+  }
+  const previewEl = document.getElementById('gallery-preview-first');
+  if (previewEl && settings.previewFirst != null) {
+    previewEl.checked = settings.previewFirst;
+  }
+  const dcEl = document.getElementById('gallery-prog-dc');
+  if (dcEl && settings.progressiveDc != null) {
+    dcEl.value = String(settings.progressiveDc);
+  }
+  const groupEl = document.getElementById('gallery-group-order');
+  if (groupEl && settings.groupOrder != null) {
+    groupEl.checked = settings.groupOrder === 1;
+  }
+}
+
+async function ingestPushedGalleryPayload(payload) {
+  if (!payload?.bytes) return;
+  if (payload.transferId && consumedPushIds.has(payload.transferId)) return;
+  if (payload.transferId) consumedPushIds.add(payload.transferId);
+
+  await decodePushedGalleryPayload(payload);
+}
+
+async function decodePushedGalleryPayload(payload) {
+  if (!payload?.bytes) return;
+  lastPushedPayload = payload;
+  syncPushedAction();
+  applyPushedGallerySettings(payload.settings);
+
+  const filename = payload.name || payload.filename || 'pushed-from-paint.jxl';
+
+  pickerStatus.textContent = `Received from Progressive Paint: ${filename}. Decoding now...`;
+  galleryRowsEl.innerHTML = '';
+  log(`Auto-ingesting pushed progressive JXL: ${filename}`);
+
+  await ctxReadyPromise;
+  if (!ctx) throw new Error('Context failed to initialize');
+  const result = await startGallery([new File([payload.bytes], filename, { type: 'image/jxl' })], { encodeOnTheFly: false });
+  if (result.totalFrames > 0) {
+    pickerStatus.textContent = `Decoded pushed file: ${filename}. Click any thumbnail to inspect progressive frames.`;
+  } else {
+    pickerStatus.textContent = `Pushed file received, but no frames rendered. Use Decode pushed file to retry, or send a fresh file from Progressive Paint.`;
+  }
+}
+
+function syncPushedAction() {
+  if (!decodePushedBtn) return;
+  decodePushedBtn.hidden = !lastPushedPayload;
+}
+
+function wireProgressivePaintHandoff() {
+  window.addEventListener('message', (ev) => {
+    if (ev.origin !== location.origin) return;
+    if (ev.data?.type === 'progressive-gallery-push') {
+      const payload = ev.data.payload;
+      ingestPushedGalleryPayload(payload)
+        .catch(e => log(`Auto-push gallery error: ${e.message}`, 'error'));
+    }
+  });
+
+  if (window.opener) {
+    window.opener.postMessage({ type: 'progressive-gallery-ready' }, location.origin);
+  }
 }
 
 sourceInput.addEventListener('change', () => {
@@ -98,14 +184,14 @@ function consumePendingProgressivePush() {
   try {
     const raw = localStorage.getItem('__progGalleryPush');
     if (!raw) return null;
-    const { name, b64, ts } = JSON.parse(raw);
+    const { name, b64, settings, ts } = JSON.parse(raw);
     if (!b64 || Date.now() - (ts || 0) > 5 * 60 * 1000) { localStorage.removeItem('__progGalleryPush'); return null; }
     // decode base64 to Uint8Array
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     localStorage.removeItem('__progGalleryPush');
-    return { filename: name || 'pushed-from-paint.jxl', bytes };
+    return { filename: name || 'pushed-from-paint.jxl', bytes, settings };
   } catch (e) {
     console.warn('[gallery] consume push failed', e);
     localStorage.removeItem('__progGalleryPush');
@@ -117,16 +203,10 @@ function consumePendingProgressivePush() {
   const urlHasAuto = /[?&]autopush=1/.test(location.search);
   const pending = consumePendingProgressivePush();
   if (pending) {
-    pickerStatus.textContent = `Auto-pushed from progressive-paint: ${pending.filename} (testing multi-layer progressive)`;
-    // Feed it directly as if picked (as JXL)
-    setTimeout(() => {
-      galleryRowsEl.innerHTML = '';
-      log(`Auto-ingesting pushed progressive JXL: ${pending.filename}`);
-      startGallery([new File([pending.bytes], pending.filename, { type: 'image/jxl' })], { encodeOnTheFly: false })
-        .catch(e => log(`Auto-push gallery error: ${e.message}`, 'error'));
-    }, 50);
+    decodePushedGalleryPayload(pending)
+      .catch(e => log(`Auto-push gallery error: ${e.message}`, 'error'));
   } else if (urlHasAuto) {
-    pickerStatus.textContent = 'Opened for autopush — generate in paint page and click its "Export to progressive gallery" to push a test file here.';
+    pickerStatus.textContent = 'Opened for autopush — generate in paint page and click "Send to Progressive Gallery" to push a test file here.';
   }
 })();
 
@@ -162,7 +242,7 @@ function slotId(file) {
 async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
   if (!ctx) {
     log('Context not ready', 'warn');
-    return;
+    return { totalFrames: 0 };
   }
 
   const encodeOpts = encodeOnTheFly ? getGalleryEncodeOptions() : null;
@@ -395,53 +475,68 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
       }
     } catch (e) {
       log(`${file.name}: ${encodeOnTheFly ? 'encode' : 'read'} error — ${e.message}`, 'error');
-      return;
+      return 0;
     }
 
     dbgLog('Decoding', `${file.name} · ${buffer.byteLength} bytes · mode=${pushMode}`, 'info');
 
     const chosenDetail = getGalleryProgressiveDetail();
-    const session = ctx.decode({
+    const decoder = createDecoder({
       format: 'rgba8',
+      region: null,
+      downsample: 1,
       progressionTarget: 'final',
       emitEveryPass: true,
       progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail,
+      preserveIcc: false,
+      preserveMetadata: false,
     });
 
-    // Push chunks — all at once (round-robin reveal works because coordinator
-    // gates visibility, not because push is serialised per file)
-    const pushes = [];
-    for (let offset = 0; offset < buffer.byteLength; offset += CHUNK_SIZE) {
-      const end = Math.min(offset + CHUNK_SIZE, buffer.byteLength);
-      pushes.push(session.push(buffer.slice(offset, end)));
-    }
-    const pushPromise = Promise.all(pushes).then(() => session.close());
+    const pushState = { bytesFed: 0 };
+    const pushBatches = buildPushBatches(buffer, { mode: pushMode, chunkSize: CHUNK_SIZE, windowSize: WINDOW_SIZE });
+    const pushPromise = (async () => {
+      for (const batch of pushBatches) {
+        await Promise.all(batch.map(chunk => {
+          pushState.bytesFed += chunk.byteLength;
+          return decoder.push(chunk);
+        }));
+      }
+      await decoder.close();
+    })();
 
     let frameIndex = 0;
     const framesPromise = (async () => {
-      for await (const frame of session.frames()) {
-        const elapsedMs = Date.now() - startMs;
-        const bytesFed = buffer.byteLength; // all bytes fed upfront in all-chunks mode
-        const percentFed = 100;
-
-        let stage = frame.stage;
-        if (frame.type === 'preview' || stage === 'preview') {
-          stage = 'preview';
+      for await (const ev of decoder.events()) {
+        if (ev.type === 'header') {
+          dbgLog('Header', `${file.name} · ${ev.info.width}x${ev.info.height}`, 'info');
+          continue;
         }
+        if (ev.type === 'error') {
+          throw new Error(`Decoder error (${ev.code}): ${ev.message}`);
+        }
+        if (!(ev.type === 'progress' || ev.type === 'final')) continue;
+
+        const elapsedMs = Date.now() - startMs;
+        const bytesFed = Math.min(buffer.byteLength, pushState.bytesFed);
+        const percentFed = buffer.byteLength ? (bytesFed / buffer.byteLength) * 100 : 100;
 
         const enriched = {
-          ...frame,
+          info: ev.info,
+          pixels: ev.pixels,
+          format: ev.format,
+          pixelStride: ev.pixelStride,
+          ...(ev.region !== undefined ? { region: ev.region } : {}),
           frameIndex: frameIndex++,
           elapsedMs,
           bytesFed,
           percentFed,
           totalBytes: buffer.byteLength,
-          stage,
+          stage: ev.type === 'final' ? 'final' : ev.stage,
         };
         framesByFile.get(fileId).push(enriched);
         coordinator.registerFrame(fileId, enriched);
         reRenderAll();
-        dbgLog('Frame', `${file.name} · ${stage || frame.stage}`, 'info');
+        dbgLog('Frame', `${file.name} · ${enriched.stage}`, 'info');
       }
       coordinator.markFileClosed(fileId);
       reRenderAll();
@@ -451,13 +546,20 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
 
     try {
       await Promise.all([pushPromise, framesPromise]);
+      return frameIndex;
     } catch (e) {
       log(`${file.name}: ${e.message}`, 'error');
       dbgLog('Decode error', `${file.name}\n${e.stack ?? e.message}`, 'error');
+      return frameIndex;
+    } finally {
+      await decoder.dispose();
     }
   });
 
-  await Promise.all(filePromises);
+  const frameCounts = await Promise.all(filePromises);
+  return {
+    totalFrames: frameCounts.reduce((sum, count) => sum + (count || 0), 0),
+  };
 }
 
 function drawFrameToCanvas(canvas, frame) {
@@ -465,13 +567,12 @@ function drawFrameToCanvas(canvas, frame) {
   canvas.width = width;
   canvas.height = height;
   const ctx2d = canvas.getContext('2d');
+  const pixels = frame.pixels instanceof Uint8Array
+    ? new Uint8ClampedArray(frame.pixels.buffer, frame.pixels.byteOffset, frame.pixels.byteLength)
+    : new Uint8ClampedArray(frame.pixels);
   const imageData = typeof frame.getImageData === 'function'
     ? frame.getImageData()
-    : new ImageData(
-        new Uint8ClampedArray(frame.pixels instanceof ArrayBuffer ? frame.pixels : frame.pixels.buffer),
-        width,
-        height,
-      );
+    : new ImageData(pixels, width, height);
   ctx2d.putImageData(imageData, 0, 0);
 }
 

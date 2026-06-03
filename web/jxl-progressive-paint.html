@@ -102,8 +102,8 @@
 
                 <div class="prog-option-group">
                     <span class="prog-setting-label" style="display:inline-flex;align-items:center;gap:4px;">
-                        Passes:
-                        <button class="info-btn" type="button" data-help-target="pp-passes" aria-label="Passes info">i</button>
+                        Stream steps:
+                        <button class="info-btn" type="button" data-help-target="pp-passes" aria-label="Stream steps info">i</button>
                     </span>
                     <div class="prog-radio-group">
                         <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="2" checked /> 2</label>
@@ -112,7 +112,7 @@
                         <label class="prog-radio-btn"><input type="radio" name="prog-passes" value="8" /> 8</label>
                     </div>
                     <div class="help-popover" data-help-popover="pp-passes" hidden>
-                        Number of progressive AC passes encoded in the JXL stream. More passes = smoother quality ladder (coarse → fine). 2 passes gives a minimal two-step reveal (preview → final); 8 gives fine-grained progression. More passes slightly increases file size.
+                        Number of byte-feed steps used during the progressive decode test. Actual paints can be lower than requested steps because libjxl only emits frames when the encoded codestream has a displayable DC/pass/final layer.
                     </div>
                 </div>
 
@@ -165,13 +165,13 @@
                 <!-- 3. Run (on its own line, enabled only when file present) -->
                 <button id="run-progressive" class="primary-btn" type="button" disabled title="Choose parameters then load a file first" style="margin: 4px 0 8px;">Run Progressive Paint</button>
 
-                <span class="prog-status" id="prog-status">Choose parameters → load a file → Run to see per-pass timing and progressive refinement.</span>
+                <span class="prog-status" id="prog-status">Choose parameters → load a file → Run to see per-paint timing and progressive refinement.</span>
 
                 <!-- 4+5. Console then Export -->
                 <div class="console-export-row" style="margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12px;">
                     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
                     <span style="color:var(--muted);">Export to:</span>
-                    <button id="export-gallery-btn" class="secondary-btn" type="button" disabled>Progressive gallery</button>
+                    <button id="export-gallery-btn" class="secondary-btn" type="button" disabled>Send to Progressive Gallery</button>
                     <button id="export-folder-btn" class="secondary-btn" type="button" disabled>Folder…</button>
 
                     <span style="color:var(--muted); margin-left:10px;">Measurements:</span>
@@ -184,7 +184,7 @@
             </div>
 
             <p class="panel-note">
-                Click tiles in the strip below to pin passes into the viewers above.
+                Click tiles in the strip below to pin actual paints into the viewers above.
                 <button id="zoom-btn" class="secondary-btn zoom-btn" type="button" title="Arm wheel zoom + pan (drag) over the three big viewers. Provides identical reticule across all Pass viewers.">Zoom</button>
                 <span id="zoom-readout" class="zoom-readout">1.00×</span>
                 <button id="zoom-reset" class="secondary-btn zoom-btn" type="button" title="Cycle view: Fit → 100% (actual pixels, crisp) → 400%">Fit</button>
@@ -216,12 +216,23 @@
 
             <div class="pass-timeline" id="pass-timeline"></div>
 
+            <section class="byte-cutoff-section" aria-label="Byte cutoff progressive probe">
+                <div class="byte-cutoff-head">
+                    <div>
+                        <p class="eyebrow">Network-style probe</p>
+                        <h3>Byte cutoff ladder</h3>
+                    </div>
+                    <div id="byte-cutoff-status" class="byte-cutoff-status">Run Progressive Paint to decode fixed byte prefixes.</div>
+                </div>
+                <div id="byte-cutoff-ladder" class="byte-cutoff-ladder"></div>
+            </section>
+
             <div class="prog-comparison-wrap">
                 <table class="results-table">
                     <thead>
                         <tr>
                             <th>Mode</th>
-                            <th>Passes</th>
+                            <th>Actual paints</th>
                             <th>First frame (ms)</th>
                             <th>Final (ms)</th>
                             <th>1st-frame speedup</th>

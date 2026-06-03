@@ -5,13 +5,13 @@
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
   "emsdkImage": "docker.io/emscripten/emsdk:4.0.13",
   "buildMode": "docker",
-  "generatedAt": "2026-06-02T21:13:55.991Z",
+  "generatedAt": "2026-06-03T01:18:23.505Z",
   "tiers": {
     "relaxed-simd-mt": {
       "jsBytes": 31234,
-      "wasmBytes": 2754803,
+      "wasmBytes": 2754860,
       "jsSha256": "b49e4d38e59df5d3ce0852012c0d9f72ca8957c2ee669932cf41f8eb99787cf5",
-      "wasmSha256": "40984296ab96b66eb2549c0100fba5006e73dd4e5ea00f0ba21f4d8ab094995b",
+      "wasmSha256": "0b6c7435079b2a5318462fb496a5a77114f547a86d0ca0037dc6cebb0920ec62",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -38,9 +38,9 @@
     },
     "simd-mt": {
       "jsBytes": 31210,
-      "wasmBytes": 2771691,
+      "wasmBytes": 2771748,
       "jsSha256": "2309f05aee3760900d4e46f6275b5ce57a5b7a79bd9b634b3cd74d12c7ae23f7",
-      "wasmSha256": "c5a10e39aea4b0c3218caa9ca8d323652ca67f712e0ac58b9b02c07ad93002e8",
+      "wasmSha256": "54db1912f8df6a12a10e448c4551855cbfb09cacca56b83169ae13160c958eeb",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -65,9 +65,9 @@
     },
     "simd": {
       "jsBytes": 18545,
-      "wasmBytes": 2705934,
+      "wasmBytes": 2705991,
       "jsSha256": "877dc95ff7f2b6f46ed84cabf03fae692853d729b477b89ce77fc08d4ea7ec41",
-      "wasmSha256": "0ca8c32e90c472a54e3cb1ab146cef22dfecded37870331afda40a76022fbd25",
+      "wasmSha256": "ad10e3682aa8a815682d8e9916c9144e12981392760c7705c569d8ff5e085e43",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -89,9 +89,9 @@
     },
     "scalar": {
       "jsBytes": 18549,
-      "wasmBytes": 2623486,
+      "wasmBytes": 2623543,
       "jsSha256": "89243ef58c5516ac3526dda43938dc409f5aca4accc43c6ff9854f911fc4015b",
-      "wasmSha256": "b1d71fd1b4d5f4287d807c101e293306e44fae01eb4213f6d4da0ed963de8222",
+      "wasmSha256": "941af3cc40c33e180322c6463c6d3d4fae233aa96790a34879e63c3774d83025",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",

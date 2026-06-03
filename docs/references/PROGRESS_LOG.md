@@ -8,6 +8,29 @@ Use the template below for every entry.
 
 **Doc Sync with REFERENCE_INDEX.md (2026-06 review):** All major features logged here map to sections in the Feature Index (e.g. Full Extra Channel Infrastructure → #4 Extra Channels with full CasaWASM Phase 2 lines; Brotli Effort → #7; Animation → #8; Metadata Boxes → #9 + container notes; Patches & Splines → audit #11 escape-hatch design; Core Modular → #3). See REFERENCE_INDEX.md for the authoritative reference implementations (cjxl_main.cc prioritized for real usage patterns across options; jpegxl-rs for clean high-level API shape). Individual entries below have been qualified for branch visibility where work occurred outside the primary epic branch. This sync ensures the log remains the accurate historical complement to the static feature-to-reference mapping.
 
+## Feature: Predator Mode — Progressive Encode & Decode Optimizations — 2026-06
+
+**Branch:** `benchmarkfeaturechanges`
+
+**Status:** Complete
+
+**Scope:** Aggressive surgical optimizations (per `fast-path-principles.md` and boundary cost lens) focused on the progressive JXL pathway. Resolved long-standing "near-duplicate early passes" issue by fixing hardcoded facade settings and plumbing center-out support.
+
+**Key Changes:**
+- `packages/jxl-wasm/src/facade.ts` — Resolved `progressiveDc` hardcoding; now respects caller intent (0-2). Added `groupOrder` (0/1 center-out) to `EncoderOptions`.
+- `packages/jxl-wasm/src/bridge.cpp` — Plumbed `group_order` through all FFI encode entrypoints (~20+ functions) and applied `JXL_ENC_FRAME_SETTING_GROUP_ORDER` in frame configuration.
+- `packages/jxl-native` + `raw-pipeline` — Added `groupOrder` and `progressiveDc` promotion logic for desktop export parity.
+- `web/jxl-progressive-paint.js` — Implemented localStorage-based "Push to Gallery" mechanism for rapid iteration; wired new center-out controls.
+- `web/jxl-progressive-byte-benchmark.html` — New dedicated benchmark page for precise early-pass progression measurement using Gobabeb corpus and byte-prefix decode probes.
+
+**Benchmark / Educational Value:** Benchmarks can finally demonstrate genuinely distinct, useful early progressive layers. Center-out support makes images "recognizable" much earlier at low byte counts. The new byte-tier benchmark provides sub-pass precision for quality-per-byte measurements.
+
+**Docs Updated:** `docs/FEATURE_PARITY_MATRIX.md` (Section 11 added, Section 2/3/6 updated); `docs/HANDOFF-predator-progressive-2026.md`.
+
+**Verification:** `bun test packages/jxl-wasm/test/progressive-detail.test.ts` (asserts >=3 events for Dc=2); visual A/B on paint/gallery benchmarks confirms center-first staged reveals.
+
+---
+
 ## Feature: Remaining Low-Level Frame Settings (completeness audit) — 2026-06
 
 **Branch:** `feature/animation-decode-enhancements`

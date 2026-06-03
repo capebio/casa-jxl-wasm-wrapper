@@ -11,7 +11,7 @@ test('progressive gallery uses the default progressive detail path', () => {
     expect(source).toContain('const chosenDetail = getGalleryProgressiveDetail();');
     expect(source).toContain("progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail");
     expect(source).toContain('frame.getImageData()');
-    expect(source).toContain('Push chunks');
+    expect(source).toContain('buildPushBatches');
     expect(source).toContain("let pushMode = 'all-chunks';");
     expect(source).toContain('const WINDOW_SIZE = 32;');
     expect(html).toContain('data-push-mode="full-file"');
@@ -43,6 +43,40 @@ test('gallery keeps one decode per file and round-robin reveals progressive fram
   expect(js).toContain('createGalleryCoordinator');
   expect(js).toContain('createGalleryLightbox');
   expect(js).toContain('round-robin');
-  expect(js).toContain('session.frames()');
-  expect(js).toContain('Promise.all(pushes)');
+  expect(js).toContain('decoder.events()');
+  expect(js).toContain('Promise.all(batch.map');
+});
+
+test('gallery accepts progressive paint handoff messages and applies pushed settings before decode', () => {
+  expect(js).toContain("ev.data?.type === 'progressive-gallery-push'");
+  expect(js).toContain('applyPushedGallerySettings(payload.settings)');
+  expect(js).toContain('new File([payload.bytes], filename');
+  expect(js).toContain('Auto-ingesting pushed progressive JXL');
+  expect(js).toContain('await ctxReadyPromise;');
+  expect(js).toContain("detailEl.value = settings.progressiveDetail");
+  expect(js).toContain("previewEl.checked = settings.previewFirst");
+  expect(js).toContain("dcEl.value = String(settings.progressiveDc)");
+  expect(js).toContain("groupEl.checked = settings.groupOrder === 1");
+});
+
+test('gallery autopush has an actionable retry path and waits for decoder context', () => {
+  expect(html).toContain('id="decode-pushed-btn"');
+  expect(html).toContain('Decode pushed file');
+  expect(js).toContain('const decodePushedBtn = document.getElementById');
+  expect(js).toContain('let lastPushedPayload = null;');
+  expect(js).toContain('decodePushedBtn.hidden = !lastPushedPayload;');
+  expect(js).toContain('await decodePushedGalleryPayload(lastPushedPayload);');
+  expect(js).toContain('await ctxReadyPromise;');
+  expect(js).toContain('Context failed to initialize');
+  expect(js).toContain('no frames rendered');
+  expect(js).toContain('totalFrames');
+});
+
+test('gallery push mode controls drive the chunk push pipeline', () => {
+  expect(js).toContain("import { createDecoder, createEncoder } from '@casabio/jxl-wasm';");
+  expect(js).toContain("import { buildPushBatches } from './jxl-progressive-gallery-push.js';");
+  expect(js).toContain('buildPushBatches(buffer, { mode: pushMode');
+  expect(js).toContain('for (const batch of pushBatches)');
+  expect(js).toContain("ev.type === 'progress' || ev.type === 'final'");
+  expect(js).toContain("stage: ev.type === 'final' ? 'final' : ev.stage");
 });

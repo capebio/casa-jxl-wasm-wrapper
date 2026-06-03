@@ -99,6 +99,10 @@
     }
 
     .push-mode-btn.is-active {
+      background: #0d3b66;
+      border-color: #3a78c2;
+      color: #fff;
+    }
 
     /* New controls for progressive encode/decode options */
     .prog-controls {
@@ -116,10 +120,6 @@
       padding: 0.2rem 0.5rem;
       border-radius: 4px;
       border: 1px solid #444;
-    }
-      background: #0d3b66;
-      border-color: #3a78c2;
-      color: #fff;
     }
 
     #concurrent-label {
@@ -229,6 +229,7 @@
     </label>
     <input id="source-input" type="file" multiple accept=".jxl,.JXL,.png,.jpg,.jpeg,.webp" />
     <span class="picker-status" id="picker-status">No files selected</span>
+    <button id="decode-pushed-btn" class="file-pick-btn" type="button" hidden>Decode pushed file</button>
     <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
     <div class="push-mode-group" aria-label="Chunk push mode">
       <span class="push-mode-label">Push mode</span>
@@ -256,6 +257,7 @@
           <select id="gallery-prog-detail" style="font-size:0.75rem;">
             <option value="dc">Earliest DC + Preview (new)</option>
             <option value="passes" selected>All passes</option>
+            <option value="lastPasses">Last passes</option>
             <option value="auto">Auto</option>
           </select>
         </label>

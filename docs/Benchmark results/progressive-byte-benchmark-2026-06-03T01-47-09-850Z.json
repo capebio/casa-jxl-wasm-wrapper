@@ -1,0 +1,657 @@
+{
+  "exportedAt": "2026-06-03T01:47:09.852Z",
+  "generator": "progressive-byte-benchmark",
+  "tier": "simd",
+  "target": "800",
+  "quality": 85,
+  "detail": "passes",
+  "results": [
+    {
+      "file": "P2200571.ORF",
+      "rawBytes": 22967654,
+      "source": {
+        "width": 5240,
+        "height": 3912
+      },
+      "variants": [
+        {
+          "label": "sidecar-300",
+          "sidecar": true,
+          "target": {
+            "width": 300,
+            "height": 224,
+            "longEdge": 300,
+            "scale": 0.05725190839694656
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 300,
+            "height": 224,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 129.17560000000003,
+          "jxlBytes": 21761,
+          "summary": {
+            "totalBytes": 21761,
+            "firstPaintBytes": 21761,
+            "firstPaintPercent": 100,
+            "previewBytes": 21761,
+            "previewPercent": 100,
+            "finalBytes": 21761,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 21761,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        },
+        {
+          "label": "target-800",
+          "sidecar": false,
+          "target": {
+            "width": 800,
+            "height": 597,
+            "longEdge": 800,
+            "scale": 0.15267175572519084
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 800,
+            "height": 597,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 146.63549999999987,
+          "jxlBytes": 143791,
+          "summary": {
+            "totalBytes": 143791,
+            "firstPaintBytes": 143791,
+            "firstPaintPercent": 100,
+            "previewBytes": 143791,
+            "previewPercent": 100,
+            "finalBytes": 143791,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 25600,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 51200,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 102400,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 143791,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        }
+      ],
+      "target": {
+        "width": 800,
+        "height": 597,
+        "longEdge": 800,
+        "scale": 0.15267175572519084
+      },
+      "summary": {
+        "totalBytes": 143791,
+        "firstPaintBytes": 143791,
+        "firstPaintPercent": 100,
+        "previewBytes": 143791,
+        "previewPercent": 100,
+        "finalBytes": 143791,
+        "finalPercent": 100,
+        "paintedCutoffs": 1,
+        "maxFrameCount": 2,
+        "usefulEarlyPaint": false
+      },
+      "firstVisibleBytes": 21761
+    },
+    {
+      "file": "P2200570.ORF",
+      "rawBytes": 22509022,
+      "source": {
+        "width": 5240,
+        "height": 3912
+      },
+      "variants": [
+        {
+          "label": "sidecar-300",
+          "sidecar": true,
+          "target": {
+            "width": 300,
+            "height": 224,
+            "longEdge": 300,
+            "scale": 0.05725190839694656
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 300,
+            "height": 224,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 33.65779999999995,
+          "jxlBytes": 19769,
+          "summary": {
+            "totalBytes": 19769,
+            "firstPaintBytes": 19769,
+            "firstPaintPercent": 100,
+            "previewBytes": 19769,
+            "previewPercent": 100,
+            "finalBytes": 19769,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 19769,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        },
+        {
+          "label": "target-800",
+          "sidecar": false,
+          "target": {
+            "width": 800,
+            "height": 597,
+            "longEdge": 800,
+            "scale": 0.15267175572519084
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 800,
+            "height": 597,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 152.44909999999982,
+          "jxlBytes": 126564,
+          "summary": {
+            "totalBytes": 126564,
+            "firstPaintBytes": 126564,
+            "firstPaintPercent": 100,
+            "previewBytes": 126564,
+            "previewPercent": 100,
+            "finalBytes": 126564,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 25600,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 51200,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 102400,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 126564,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        }
+      ],
+      "target": {
+        "width": 800,
+        "height": 597,
+        "longEdge": 800,
+        "scale": 0.15267175572519084
+      },
+      "summary": {
+        "totalBytes": 126564,
+        "firstPaintBytes": 126564,
+        "firstPaintPercent": 100,
+        "previewBytes": 126564,
+        "previewPercent": 100,
+        "finalBytes": 126564,
+        "finalPercent": 100,
+        "paintedCutoffs": 1,
+        "maxFrameCount": 2,
+        "usefulEarlyPaint": false
+      },
+      "firstVisibleBytes": 19769
+    },
+    {
+      "file": "P2200476 Pogonospermum cleomoides.ORF",
+      "rawBytes": 22063810,
+      "source": {
+        "width": 5240,
+        "height": 3912
+      },
+      "variants": [
+        {
+          "label": "sidecar-300",
+          "sidecar": true,
+          "target": {
+            "width": 300,
+            "height": 224,
+            "longEdge": 300,
+            "scale": 0.05725190839694656
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 300,
+            "height": 224,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 21.424999999999272,
+          "jxlBytes": 25107,
+          "summary": {
+            "totalBytes": 25107,
+            "firstPaintBytes": 25107,
+            "firstPaintPercent": 100,
+            "previewBytes": 25107,
+            "previewPercent": 100,
+            "finalBytes": 25107,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 25107,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        },
+        {
+          "label": "target-800",
+          "sidecar": false,
+          "target": {
+            "width": 800,
+            "height": 597,
+            "longEdge": 800,
+            "scale": 0.15267175572519084
+          },
+          "encode": {
+            "format": "rgba8",
+            "width": 800,
+            "height": 597,
+            "hasAlpha": true,
+            "quality": 85,
+            "effort": 3,
+            "progressive": true,
+            "progressiveFlavor": "ac",
+            "previewFirst": true,
+            "progressiveDc": 2,
+            "groupOrder": 1,
+            "chunked": false
+          },
+          "encodeMs": 107.55379999999968,
+          "jxlBytes": 169400,
+          "summary": {
+            "totalBytes": 169400,
+            "firstPaintBytes": 169400,
+            "firstPaintPercent": 100,
+            "previewBytes": 169400,
+            "previewPercent": 100,
+            "finalBytes": 169400,
+            "finalPercent": 100,
+            "paintedCutoffs": 1,
+            "maxFrameCount": 2,
+            "usefulEarlyPaint": false
+          },
+          "cutoffs": [
+            {
+              "bytes": 1024,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 2048,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 5120,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 10240,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 25600,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 51200,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 102400,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 153600,
+              "painted": false,
+              "frameCount": 0,
+              "isFinal": false,
+              "stage": null,
+              "error": null
+            },
+            {
+              "bytes": 169400,
+              "painted": true,
+              "frameCount": 2,
+              "isFinal": true,
+              "stage": "final",
+              "error": null
+            }
+          ]
+        }
+      ],
+      "target": {
+        "width": 800,
+        "height": 597,
+        "longEdge": 800,
+        "scale": 0.15267175572519084
+      },
+      "summary": {
+        "totalBytes": 169400,
+        "firstPaintBytes": 169400,
+        "firstPaintPercent": 100,
+        "previewBytes": 169400,
+        "previewPercent": 100,
+        "finalBytes": 169400,
+        "finalPercent": 100,
+        "paintedCutoffs": 1,
+        "maxFrameCount": 2,
+        "usefulEarlyPaint": false
+      },
+      "firstVisibleBytes": 25107
+    }
+  ]
+}

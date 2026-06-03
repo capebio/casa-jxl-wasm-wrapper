@@ -1,0 +1,94 @@
+{
+  "exportedAt": "2026-06-02T22:14:10.909Z",
+  "generator": "progressive-byte-benchmark",
+  "tier": "simd",
+  "target": "300",
+  "quality": 85,
+  "detail": "passes",
+  "results": [
+    {
+      "file": "P2200571.ORF",
+      "rawBytes": 22967654,
+      "source": {
+        "width": 5240,
+        "height": 3912
+      },
+      "target": {
+        "width": 300,
+        "height": 224,
+        "longEdge": 300,
+        "scale": 0.05725190839694656
+      },
+      "encode": {
+        "format": "rgba8",
+        "width": 300,
+        "height": 224,
+        "hasAlpha": true,
+        "quality": 85,
+        "effort": 3,
+        "progressive": true,
+        "progressiveFlavor": "ac",
+        "previewFirst": true,
+        "progressiveDc": 2,
+        "groupOrder": 1,
+        "chunked": false
+      },
+      "encodeMs": 107.25530000000003,
+      "jxlBytes": 21820,
+      "summary": {
+        "totalBytes": 21820,
+        "firstPaintBytes": 21820,
+        "firstPaintPercent": 100,
+        "previewBytes": 21820,
+        "previewPercent": 100,
+        "finalBytes": 21820,
+        "finalPercent": 100,
+        "paintedCutoffs": 1,
+        "maxFrameCount": 2,
+        "usefulEarlyPaint": false
+      },
+      "cutoffs": [
+        {
+          "bytes": 1024,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 2048,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 5120,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 10240,
+          "painted": false,
+          "frameCount": 0,
+          "isFinal": false,
+          "stage": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 21820,
+          "painted": true,
+          "frameCount": 2,
+          "isFinal": true,
+          "stage": "final",
+          "error": null
+        }
+      ]
+    }
+  ]
+}

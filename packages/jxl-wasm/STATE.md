@@ -38,10 +38,10 @@ T-NATIVE-BIND
 
 ## Blockers
 
-- Local non-Docker toolchain execution is blocked because `emcc` is unavailable.
+- Local non-Docker (`--host-toolchain`) execution now works (emcc 4.0.13 via C:\Users\User\emsdk); demonstrated 2026-06-02 with successful simd+scalar rebuild (no Docker).
 - PGO input is blocked until `jxl-test-corpus/pgo-manifest.json` lands from the Gemini branch.
 - Git commit creation is blocked because this workspace refuses writes to `.git/index.lock`.
-- Metadata/ICC extraction, rgba16/rgbaf32, chunked region encode, and the pinned four-tier build matrix still need the generated T-WASM-BUILD artifacts and a runnable Emscripten container.
+- Metadata/ICC extraction, rgba16/rgbaf32, chunked region encode, and the pinned four-tier build matrix still need the generated T-WASM-BUILD artifacts and a runnable Emscripten container (full MT tiers require Docker path).
 
 ## Files Touched
 
