@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Correlation Matrix — Benchmark</title>
+    <link rel="stylesheet" href="./test-nav.css" />
+    <link rel="stylesheet" href="./jxl-benchmark.css" />
+    <link rel="stylesheet" href="./jxl-dashboard.css" />
+    <link rel="stylesheet" href="./jxl-debug-console.css" />
+    <style>
+        .cm-factor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+        .cm-factor { border: 1px solid #334155; border-radius: 6px; padding: 8px; background: #0f172a; }
+        .cm-factor h4 { margin: 0 0 6px; font-size: 12px; color: #94a3b8; }
+        .cm-levels { display: flex; flex-wrap: wrap; gap: 4px; }
+        .cm-level { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; background: #1e2937; border: 1px solid #475569; color: #e2e8f0; cursor: pointer; user-select: none; }
+        .cm-level.active { background: #3b82f6; border-color: #60a5fa; color: white; }
+        .cm-results-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        .cm-results-table th, .cm-results-table td { padding: 4px 8px; border: 1px solid #334155; text-align: center; }
+        .cm-results-table th { background: #1e2937; color: #e2e8f0; }
+        .cm-heatmap { font-family: ui-monospace, monospace; }
+    </style>
+    <script type="importmap">
+    {
+      "imports": {
+        "@casabio/jxl-core":             "../packages/jxl-core/dist/index.js",
+        "@casabio/jxl-core/errors":      "../packages/jxl-core/dist/errors.js",
+        "@casabio/jxl-core/protocol":    "../packages/jxl-core/dist/protocol.js",
+        "@casabio/jxl-core/types":       "../packages/jxl-core/dist/types.js",
+        "@casabio/jxl-wasm":             "../packages/jxl-wasm/dist/index.js",
+        "@casabio/jxl-worker-browser":   "../packages/jxl-worker-browser/dist/index.js",
+        "@casabio/jxl-session":          "../packages/jxl-session/dist/index.js",
+        "@casabio/jxl-scheduler":        "../packages/jxl-scheduler/dist/index.js",
+        "@casabio/jxl-capabilities":     "../packages/jxl-capabilities/dist/index.js",
+        "@casabio/jxl-policy":           "../packages/jxl-policy/dist/index.js"
+      }
+    }
+    </script>
+</head>
+<body class="has-home-bar" data-mode="correlation-matrix">
+    <nav class="home-bar" aria-label="Test pages">
+        <div class="home-bar-label">Test pages</div>
+        <div class="home-bar-links">
+            <a class="home-bar-link" href="./index.html">Home</a>
+            <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+            <a class="home-bar-link" href="./jxl-wrapper-lab.html">Wrapper lab</a>
+            <a class="home-bar-link" href="./jxl-compare.html">Compare</a>
+            <a class="home-bar-link" href="./jxl-benchmark.html">Benchmark</a>
+            <a class="home-bar-link is-active" href="./jxl-correlation-matrix.html" aria-current="page">Correlation Matrix</a>
+            <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+            <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+            <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
+            <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
+            <a class="home-bar-link" href="./jxl-encode-space.html">Encode Space</a>
+        </div>
+    </nav>
+
+    <main class="shell">
+        <section class="hero compact">
+            <div class="hero-copy">
+                <p class="eyebrow">Systematic Encoder Sweep</p>
+                <h1>Correlation Matrix</h1>
+                <div style="font-size:12px; opacity:0.75;">
+                    3–5 point sampling across key knobs • Live results • Pivot heatmaps (effort × quality, etc.)<br>
+                    Optimized for the small reference image. Runs in browser WASM (or native via Tauri invoke for true desktop numbers).
+                    Reports auto-target <code>docs/outputs/reference-small/</code> for WASM/Tauri parity.
+                </div>
+            </div>
+            <div class="hero-actions">
+                <button id="load-ref-btn" class="secondary-btn" type="button">Load Small Ref</button>
+                <button id="run-matrix-btn" class="primary-btn" type="button" disabled>Run Matrix</button>
+                <button id="dbg-console-btn" class="secondary-btn" type="button">Console</button>
+            </div>
+        </section>
+
+        <section id="cm-controls">
+            <h3 style="font-size:14px; margin-bottom:8px;">Factors (3–5 values each)</h3>
+            <div class="cm-factor-grid" id="factor-grid">
+                <!-- Populated by JS -->
+            </div>
+            <div style="margin-top:8px; font-size:12px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; opacity:0.85;">
+                <span id="combo-count" style="font-weight:600; font-variant-numeric:tabular-nums;"></span>
+                <span style="opacity:0.5;">·</span>
+                Pivot axes —
+                X: <select id="pivot-x-sel" style="font-size:11px; background:#1e2937; color:#e2e8f0; border:1px solid #475569; border-radius:4px; padding:1px 4px;"></select>
+                Y: <select id="pivot-y-sel" style="font-size:11px; background:#1e2937; color:#e2e8f0; border:1px solid #475569; border-radius:4px; padding:1px 4px;"></select>
+                <button id="download-csv-btn" class="ghost-btn" style="font-size:11px; padding:3px 10px;" disabled>Download CSV</button>
+                <button id="download-json-btn" class="ghost-btn" style="font-size:11px; padding:3px 10px;" disabled title="Export full results + factors + meta as JSON (for archiving / cross-tool analysis)">Download JSON</button>
+            </div>
+        </section>
+
+        <section id="cm-progress" style="display:none; margin:12px 0;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <strong>Running…</strong>
+                <span id="progress-text"></span>
+                <button id="abort-btn" class="ghost-btn">Abort</button>
+            </div>
+            <progress id="run-progress" value="0" max="100" style="width:100%; height:6px; margin-top:6px; display:block; accent-color:#3b82f6;"></progress>
+            <div style="margin-top:4px; font-size:12px; opacity:0.7;">
+                Running in Web Worker pool (off main thread). Continues in background. Table updates paused when tab hidden. Use Tauri path for very large sweeps.
+            </div>
+            <div class="cm-results-table-wrapper" style="margin-top:8px; max-height:240px; overflow:auto; border:1px solid #334155;">
+                <table class="cm-results-table" id="live-results-table">
+                    <thead><tr id="live-head"></tr></thead>
+                    <tbody id="live-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="cm-viewer" style="display:none;">
+            <h3>Heatmaps</h3>
+            <div id="heatmap-time" class="cm-heatmap"></div>
+            <div id="heatmap-size" class="cm-heatmap" style="margin-top:16px;"></div>
+
+            <h3 style="margin-top:24px;">Summaries &amp; Top Results</h3>
+            <div id="summaries"></div>
+            <div id="top-results"></div>
+        </section>
+    </main>
+
+    <script type="module" src="./jxl-correlation-matrix.js"></script>
+</body>
+</html>
