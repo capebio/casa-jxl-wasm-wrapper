@@ -31,11 +31,11 @@ This document consolidates the remaining tasks, goals, and follow-ups from vario
 - [x] **Encode (RAW → JXL):** Implement a direct-RGBA production path inside `crates/raw-pipeline` (bypassing intermediate RGB arrays). `process_rgba` + `encode_variants_from_rgb16*` (with progressive support) now fuse the tone/convert + alpha write; pure-encode Tauri callers (ingest/export) never allocate/retain a 3ch RGB8 intermediate. See crates/raw-pipeline/src/casabio_encode.rs and docs/suggested-settings.md "Native / Tauri Preferences". (Work started on tauriparity branch.)
   - Harness extended (src/bin/raw_decode_bench.rs) with GOB/P2200 ref scanning + direct path always used for reported encode; sample release direct-rgba ~322 ms on 20 MP Gobabeb ORF.
 - [ ] **Decode (Region/ROI):** Default to JXTC/tiled ROI when available for crops/thumbs. Pass the normalized subject rect down to the decoder instead of full-decode-then-crop.
-  - (Harness ready with metric plumbing + scan; native crop impl + JXTC/tiled encode/decode wiring pending in Tauri codec or bench low-level.)
+  - (Harness ready with metric plumbing + scan + pre-crop simulation (0.5-2.1 ms @128/256 px on P2200 refs, beating WASM JXTC 9-15 ms); low-level decode paths on small assets wired 2026-06-04 (bench). Real Tauri codec + sidecar emit / JXTC or SetCrop native-crop pending (src-tauri not in this workspace). See outputs/tauri/*-2026-06-04.md + HANDOFF continuation.)
 - [ ] **Decode (Full Loads):** Use progressive decode to deliver DC/early passes to Tauri textures immediately without JS worker boundary overhead.
-  - (See progressive note in Tauri-progressive-implementation.md; low-level jpegxl-sys event loop + early paint in desktop UI.)
+  - (See progressive note in Tauri-progressive-implementation.md; low-level jpegxl-sys event loop + early paint in desktop UI. Bench stateful prog (FRAME_PROGRESSION/Flush/SetProgressiveDetail) implemented + verified 2026-06-04; first-pixel before total on full loads. Tauri lightbox/gallery wiring pending.)
 - [ ] **Shared Metrics:** Implement equivalent `onMetric` hooks in Tauri for apples-to-apples comparisons with WASM.
-  - (Bench now emits the canonical names decode_buffer_extract_ms (0), decode_region_downsample_ms, source_pixels_decoded + summary/JSON; ready for Tauri surface to match.)
+  - (Bench now emits the canonical names decode_buffer_extract_ms (0), decode_region_downsample_ms, source_pixels_decoded + summary/JSON + time_to_first from lowlevel prog; ready for Tauri surface to match. 2026-06-04 run on supplied timings updated audit/suggested/outputs.)
 
 ## Boundary Cost Audit Phase 2 (`docs/HANDOFF-boundary-cost-audit-2026.md`)
 - [ ] **Deepen RAW → JXL Implementation:** Consider producing RGBA8 directly inside tone/convert stage instead of post-hoc conversion. Update benchmarks and add traces.

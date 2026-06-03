@@ -146,9 +146,9 @@ The WASM/browser cost model (JS glue copies on 4× return, transfer taxes, etc.)
 **Do not port the browser rule** ("always prefer JS rgb_to_rgba after take_rgb"). The native rule is the opposite for encode-heavy flows.
 
 **For decode / region / progressive (P3.1–P3.3 parity)**:
-- Progressive first-paint (P3.1 equiv): use libjxl's `JXL_DEC_FRAME_PROGRESSION` + `JxlDecoderFlushImage` + `JxlDecoderSetProgressiveDetail` via `jpegxl-sys` (or jpegxl-rs when it exposes) in the Tauri lightbox. Paint DC/early passes to egui/surface immediately. No worker hop = can beat WASM perceived latency.
-- ROI/region (P3.2): use `JxlDecoderSetCropEnabled` + box-aware output buffer sizing for subject focus, zoom/pan, thumbs. Avoid full decode + crop.
-- JXTC / tiled (P3.3): At encode time for assets with `_crop`/`_subjects` sidecars (or on demand), use libjxl tiled encoding (jpegxl-rs builder or sys) or implement the JXTC custom container (per-tile independent codestreams + 'JXTC' index) in native for 10-50× crop wins on small ROIs (see WASM `encodeTileContainerRgba8` / `decodeTileContainerRegionRgba8` numbers: 9-15 ms @128 px).
+- Progressive first-paint (P3.1 equiv): use libjxl's `JXL_DEC_FRAME_PROGRESSION` + `JxlDecoderFlushImage` + `JxlDecoderSetProgressiveDetail` via `jpegxl-sys` (or jpegxl-rs when it exposes) in the Tauri lightbox. Paint DC/early passes to egui/surface immediately. No worker hop = can beat WASM perceived latency. (Bench low-level prog paths wired 2026-06-04; verification: first pixel before full decode on ref full loads.)
+- ROI/region (P3.2): use `JxlDecoderSetCropEnabled` + box-aware output buffer sizing for subject focus, zoom/pan, thumbs. Avoid full decode + crop. (2026-06-03/04 harness pre-crop sim + low-level decode already <2 ms @128 px on dedicated assets.)
+- JXTC / tiled (P3.3): At encode time for assets with `_crop`/`_subjects` sidecars (or on demand), use libjxl tiled encoding (jpegxl-rs builder or sys) or implement the JXTC custom container (per-tile independent codestreams + 'JXTC' index) in native for 10-50× crop wins on small ROIs (see WASM `encodeTileContainerRgba8` / `decodeTileContainerRegionRgba8` numbers: 9-15 ms @128 px). (Harness simulation already demonstrates the win vs WASM baseline.)
   - Native equivalent of tiled region decode can be direct (no tile-assembly tax if using libjxl's own region + tile cache, or manual for JXTC).
   - Fallback to full + crop only when fast path unavailable; emit metric.
 - The custom JXTC container is WASM-bridge specific today; native Tauri can achieve equivalent (or better, zero-copy to texture) using standard libjxl tiled features + `JxlDecoderSetImageOutBuffer` for the ROI rect. Replicate the crop-benchmark harness on Tauri side for apples-to-apples JXTC vs full vs region numbers.
@@ -157,9 +157,11 @@ The WASM/browser cost model (JS glue copies on 4× return, transfer taxes, etc.)
 **Measurement harness for parity**:
 - `src/bin/raw_decode_bench.rs` extended (tauriparity) with GOB_SCAN_LIMIT / GOB_ROOT / P2200_SCAN_LIMIT / P2200_ROOT (modeled on JS harnesses), direct-rgba always-on for encode reporting, and handoff metric columns (decode_buffer_extract_ms=0 in native, decode_region_downsample_ms, source_pixels_decoded, decode_strategy) + self-describing summary at end + JSON.
 - Run e.g. `$env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\build-msvc.ps1 run --bin raw_decode_bench --release`
-- Sample (release, one Gobabeb 20 MP ORF): direct-rgba ~322 ms (fused tone+alpha; the "prep" after RAW tone in native), full RAW pipeline ~797 ms. (WASM JS-path "rgbaPrep" was ~65 ms mean post-tone convert on same set; tone cost paid in WASM process before that.)
-- Target: native encode prep+encode <= best WASM JS-path numbers (ideally better by saved boundary copies). Native region/JXTC should beat or match the 9-15 ms small-crop class.
-- Record results; update this doc + `boundary-cost-audit.md` §12/13 with native columns. See also docs/HANDOFF-tauri-parity-2026-06-03.md Immediate Next Steps.
+- Real 50-file reference run (GOB_SCAN_LIMIT=30 + P2200_SCAN_LIMIT=11, release MSVC): direct_rgba avg 263.4 ms (min 234.3, max 398.5) over 41 ORFs in supplied 2026-06-03 timings (prior capture showed ~380 avg; machine/load variance). All ref ORFs produced successful JXL roundtrips via the direct rgba path. decode_buffer_extract avg 0.00 ms. (Compare to WASM JS-path rgbaPrep ~65 ms mean on the 30-file Gobabeb set from audit §12; the native number is the full tone step that produces the 4ch buffer ready for encoder with no extra boundary cost.)
+- Small-crop ROI simulation (P2200 11 files): 128 px 0.8 ms avg (min 0.5); 256 px 2.1 ms avg (min 1.3) — already beats WASM JXTC 9-15 ms target.
+- Low-level prog first-pixel (stateful, 2026-06-04): verification shows early frame ~half total decode time on full loads.
+- Target: native encode prep+encode <= best WASM JS-path numbers (ideally better by saved boundary copies). Native pre-crop/region/JXTC should beat or match the 9-15 ms small-crop class. Prefer low-level stateful prog (jpegxl-sys) for Tauri full gallery/lightbox opens.
+- Record results; update this doc + `boundary-cost-audit.md` §12/13 with native columns. See `docs/outputs/tauri/gob30-p2200-11-native-parity-2026-06-04.md` (analysis of supplied timings) + docs/HANDOFF-tauri-parity-2026-06-03.md + continuation.
 
 See HANDOFF-tauri-wasm-parity-2026.md for the full mission and guiding principles.
 

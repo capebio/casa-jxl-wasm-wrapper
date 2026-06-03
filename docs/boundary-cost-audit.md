@@ -457,6 +457,30 @@ This data (plus smaller runs) confirms the boundary: extract cheap, savings in s
 
 See also the Tauri handoff for how native should approach region/ROI and progressive to achieve (or beat) these timings without JS/WASM boundaries.
 
+### 13.1 Native (Tauri parity harness) — 2026-06-03 timings (supplied results_native.json)
+**Dataset**: Same 11 P2200 files (plus Gobabeb 30 for encode side), using `src/bin/raw_decode_bench.rs` (GOB=30/P2200=11, direct-rgba 4ch path, min-of-3, MSVC release). Small-crop = pre-produced dedicated JXL simulation of subject-rect ROI assets (center 128/256 px). Low-level stateful prog added 2026-06-04 continuation (exercised in verification).
+
+**Native numbers (from Handoff Parity Summary in log + supplied JSON)**:
+- direct_rgba (process_rgba tone+RGBA8): n=41 avg=263.4 ms min=234.3 max=398.5 (full tone step; compare WASM glue-only ~65 ms mean — native includes the real work and has zero post-step boundary).
+- decode_buffer_extract_ms: avg=0.00 ms over 41 (near-zero native ownership).
+- decode_region_downsample_ms (full): avg=428.8 ms over 41.
+- Pre-crop ROI simulation (dedicated small JXLs): 128 px avg=0.8 ms (min 0.5) over 11; 256 px avg=2.1 ms (min 1.3).
+- Low-level prog (jpegxl-sys stateful, verification P2200=1): first ~522 ms for full 5240x3912 load (before total ~990 ms); small ROI first collapses to total (tiny codestream).
+
+**Comparison table (WASM §13 crop-bench vs this native run)**:
+
+| Metric                  | WASM (JXTC best / full)     | Native (pre-crop sim / full)     | Delta / note |
+|-------------------------|-----------------------------|----------------------------------|--------------|
+| 128 px crop/ROI        | 9-15 ms                    | 0.5-0.8 ms                      | 10-30x faster (pre-crop asset) |
+| 256 px                   | ~ (scales from 128)        | 1.3-2.1 ms                      | Same class win |
+| Full decode (20 MP)    | 2.5-2.9 s (up to 3.8 s)    | ~383-429 ms avg                 | ~6x faster wall |
+| buffer_extract         | 3.8 ms avg                 | 0.00 ms                         | Native zero-copy win |
+| time_to_first (prog)   | (via emitEveryPass)        | ~half total (e.g. 522/990 ms)   | Early paint direct from Rust |
+
+**Interpretation**: The simulation already beats the WASM "best smart path" target the browser side worked toward. Native full is compute-bound (tone + libjxl decode) not boundary. Pre-produce small JXLs (or JXTC) at ingest for any asset with known subjects/crops; decode them (high or low-level) for thumbs/focus/zoom. Use stateful low-level prog (as wired in bench) for gallery/lightbox full opens to surface usable pixels as soon as FRAME_PROGRESSION fires. Update when real Tauri runs + JXTC or SetCropEnabled paths land (will add "native-crop" / "jxtc" strategy rows + source_pixels savings in JSON).
+
+See `docs/outputs/tauri/gob30-p2200-11-native-parity-2026-06-04.md` for the verbatim supplied summary block + full analysis performed on receipt of the timings.
+
 **Post-handoff (Tauri parity implementation)**: The core of 4.1 (direct-RGBA) from the Tauri handoff was implemented here:
 - Added `pipeline::process_rgba` (fused tone→RGBA8, parallel+serial paths, shared math helper) + `encode_variants_from_rgb16` in `crates/raw-pipeline` (and vendor snapshot).
 - `raw_decode_bench` now measures head-to-head (directRgbaMs) and drives its JXL encode timing through the 4ch direct path (no 3ch intermediate for the "encode-only" measurement).
