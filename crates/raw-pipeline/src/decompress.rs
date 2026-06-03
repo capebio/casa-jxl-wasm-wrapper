@@ -19,7 +19,7 @@ pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Result<Vec<
             compressed.len(), HEADER_SKIP
         ));
     }
-    let huff = build_huff();
+    let huff = huff_table();
     let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
 
     for row in 0..height {
@@ -109,6 +109,11 @@ fn build_huff() -> [u16; 4096] {
     huff
 }
 
+fn huff_table() -> &'static [u16; 4096] {
+    static HUFF: std::sync::OnceLock<[u16; 4096]> = std::sync::OnceLock::new();
+    HUFF.get_or_init(build_huff)
+}
+
 /// MSB-first bit reader.  No byte stuffing (Olympus does not set `zero_after_ff`).
 struct BitReader<'a> {
     data: &'a [u8],
@@ -129,15 +134,19 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     fn fill(&mut self, need: u32) {
+        if self.nbits >= need { return; }
+        // Batch-fill to 56 bits so subsequent calls are usually no-ops.
+        // Safe headroom: 56 + 8 (one more read_huff/read_bits) = 64 = u64 max.
+        let in_bounds = self.data.len().saturating_sub(self.pos)
+            .min(((56 - self.nbits.min(56)) / 8) as usize);
+        for i in 0..in_bounds {
+            self.buf = (self.buf << 8) | self.data[self.pos + i] as u64;
+        }
+        self.pos += in_bounds;
+        self.nbits += (in_bounds as u32) * 8;
+        // Zero-pad if at end of stream.
         while self.nbits < need {
-            let byte = if self.pos < self.data.len() {
-                let b = self.data[self.pos];
-                self.pos += 1;
-                b
-            } else {
-                0
-            };
-            self.buf = (self.buf << 8) | byte as u64;
+            self.buf <<= 8;
             self.nbits += 8;
         }
     }

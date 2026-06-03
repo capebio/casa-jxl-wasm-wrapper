@@ -76,11 +76,9 @@ fn bayer_pixel(
             (r_v, g_v, b_v)
         }
     };
-    (
-        rr.clamp(0, 0xFFFF) as u16,
-        gg.clamp(0, 0xFFFF) as u16,
-        bb.clamp(0, 0xFFFF) as u16,
-    )
+    // All match arms only average u16 sensor values via >> 1 or >> 2, so
+    // results are always in [0, 65535] — no clamp needed.
+    (rr as u16, gg as u16, bb as u16)
 }
 
 /// Bilinear RGGB demosaic — fast path.
