@@ -99,7 +99,7 @@ export function createNativeCodecFacade(binding) {
             const mergedAdvanced = [...baseAdvanced, ...extraAdvanced];
             // Destructure to drop high-level sugar fields that the native binding does not yet understand
             // (or that we convert). This pattern is robust under exactOptionalPropertyTypes.
-            const { jpegReconstruction, alreadyDownsampled, upsamplingMode, advancedControls, hdrMetadata, intensityTarget, preferCICPForHDR, ...base } = options;
+            const { jpegReconstruction, alreadyDownsampled, upsamplingMode, advancedControls, hdrMetadata, intensityTarget, preferCICPForHDR, frameIndexing, allowExpertOptions, disablePerceptualHeuristics, ...base } = options;
             const normalized = {
                 ...base,
                 customBoxes: [
@@ -146,22 +146,57 @@ function convertAdvancedControlsToPairs(options) {
     if (options.groupOrder != null) {
         out.push({ id: 13, value: options.groupOrder ? 1 : 0 });
     }
+    if (options.centerX != null)
+        out.push({ id: 14, value: Math.floor(options.centerX) });
+    if (options.centerY != null)
+        out.push({ id: 15, value: Math.floor(options.centerY) });
     if (ac?.buffering) {
         const b = ac.buffering;
-        const strategy = resolveBufferingStrategy(b);
-        if (strategy !== null)
-            out.push({ id: 34, value: strategy });
+        let strat = b.strategy;
+        if (strat === undefined) {
+            if (b.lowMemoryMode || b.streamingInput || b.streamingOutput)
+                strat = 3;
+        }
+        if (strat !== undefined)
+            out.push({ id: 34, value: strat });
     }
     // Simple scalars
     if (options.alreadyDownsampled !== undefined) {
         out.push({ id: 4, value: options.alreadyDownsampled ? 1 : 0 });
     }
     if (options.upsamplingMode !== undefined) {
-        out.push({ id: 55, value: options.upsamplingMode }); // approximate ID; adjust if needed
+        out.push({ id: 55, value: options.upsamplingMode }); // note: upsampling_mode is via JxlEncoderSetUpsamplingMode(enc, factor, mode), not pure frame ID; 55 placeholder for pairs compat
+    }
+    if (options.ecResampling !== undefined) {
+        out.push({ id: 3, value: options.ecResampling });
     }
     // jpegReconstruction scalars (CFL etc.) can ride advanced pairs (ID 30 for CFL)
     if (options.jpegReconstruction?.cfl !== undefined) {
         out.push({ id: 30, value: options.jpegReconstruction.cfl ? 1 : 0 });
+    }
+    // Fine-grained JPEG strip (row 7): keep* emit as pairs (35/36/37); last-wins adv escape preserved.
+    if (options.jpegReconstruction?.keepExif !== undefined) {
+        out.push({ id: 35, value: options.jpegReconstruction.keepExif ? 1 : 0 });
+    }
+    if (options.jpegReconstruction?.keepXmp !== undefined) {
+        out.push({ id: 36, value: options.jpegReconstruction.keepXmp ? 1 : 0 });
+    }
+    if (options.jpegReconstruction?.keepJumbf !== undefined) {
+        out.push({ id: 37, value: options.jpegReconstruction.keepJumbf ? 1 : 0 });
+    }
+    // Row 12 full dec-hints: colorSpace / icc accepted in jpegReconstruction for API parity (raw color override or recon). No direct frame ID; handled at extras layer in reference. Pairs not emitted (higher-level than 35-37).
+    // (colorSpace / icc on options.jpegReconstruction are dropped above and not converted to pairs; available for consumer if needed.)
+    // Row 9/10/11 (cjxl audit): frameIndexing (31), allowExpert (effort gate), disablePerceptual (39). Emitted as pairs (last-wins with escape).
+    if (options.frameIndexing) {
+        // Note: full regex validation lives in WASM resolve (cjxl ProcessFlags); native trusts caller or escape.
+        out.push({ id: 31, value: 1 }); // basic single-frame mark; per-frame future
+    }
+    if (options.allowExpertOptions !== undefined) {
+        // The effort range gate (1-11 vs 1-10) is enforced in WASM resolve when flag set; native binding + libjxl accept 11 when passed.
+        // We emit a no-op marker or rely on pairs for 11; here just ensure flag presence doesn't break.
+    }
+    if (options.disablePerceptualHeuristics !== undefined) {
+        out.push({ id: 39, value: options.disablePerceptualHeuristics ? 1 : 0 });
     }
     // Smart defaults (predator parity with WASM resolve): previewFirst promotes Dc>=1 + group=1 unless explicit.
     const hasProgDc = options.progressiveDc != null || out.some(p => p.id === 19);
@@ -173,25 +208,6 @@ function convertAdvancedControlsToPairs(options) {
             out.push({ id: 13, value: 1 });
     }
     return out;
-}
-function resolveBufferingStrategy(buffering) {
-    if (buffering.strategy !== undefined)
-        return clampBufferingStrategy(buffering.strategy);
-    if (buffering.streamingInput === true ||
-        buffering.streamingOutput === true ||
-        buffering.lowMemoryMode === true ||
-        buffering.preferChunkedAPI === true) {
-        return 3;
-    }
-    return null;
-}
-function clampBufferingStrategy(value) {
-    const rounded = Math.round(value);
-    if (rounded <= -1)
-        return -1;
-    if (rounded >= 3)
-        return 3;
-    return rounded;
 }
 export function createDecoder(options) {
     return createNativeCodecFacade(loadNativeBinding()).createDecoder(options);

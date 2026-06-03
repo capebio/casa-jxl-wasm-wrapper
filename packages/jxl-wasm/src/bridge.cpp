@@ -63,6 +63,7 @@ struct JxlWasmEncState {
   int32_t  enc_decoding_speed;
   int32_t  enc_photon_noise_iso;
   uint32_t enc_resampling;
+  int32_t  enc_ec_resampling;
   int32_t  enc_epf;            // -1=auto, 0=off, 1-3=strength
   int32_t  enc_gaborish;       // -1=auto, 0=off, 1=on
   int32_t  enc_dots;           // -1=auto, 0=off, 1=on (VarDCT only)
@@ -224,6 +225,21 @@ static uint32_t FormatToExponentBits(uint32_t fmt) {
 
 static uint32_t NormalizeResampling(uint32_t value) {
   return (value == 2u || value == 4u || value == 8u) ? value : 1u;
+}
+
+static int32_t NormalizeOptionalResampling(int32_t value) {
+  return (value == 1 || value == 2 || value == 4 || value == 8) ? value : -1;
+}
+
+static void ApplyResamplingFrameSettings(JxlEncoderFrameSettings* frame, uint32_t resampling, int32_t ec_resampling) {
+  const uint32_t normalized_resampling = NormalizeResampling(resampling);
+  if (normalized_resampling > 1u) {
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling));
+  }
+  const int32_t normalized_ec_resampling = NormalizeOptionalResampling(ec_resampling);
+  if (normalized_ec_resampling >= 1) {
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EXTRA_CHANNEL_RESAMPLING, static_cast<int64_t>(normalized_ec_resampling));
+  }
 }
 
 static JxlDataType BitsToDataType(uint32_t bits) {
@@ -505,7 +521,8 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     // CasaSneyers_Parity: disable psychovisual butteraugli/XYB model (ID 39) for fair benchmarking
     int32_t disable_perceptual = -1,
     int32_t codestream_level = -1,
-    int32_t premultiply_alpha = -1) {
+    int32_t premultiply_alpha = -1,
+    int32_t ec_resampling = -1) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -580,8 +597,7 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
   if (photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(photon_noise_iso));
-  const uint32_t normalized_resampling = NormalizeResampling(resampling);
-  if (normalized_resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling));
+  ApplyResamplingFrameSettings(frame, resampling, ec_resampling);
   if (epf >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EPF, static_cast<int64_t>(std::clamp(epf, 0, 3)));
   if (gaborish >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GABORISH, static_cast<int64_t>(gaborish & 1));
   if (dots >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DOTS, static_cast<int64_t>(dots & 1));
@@ -856,7 +872,8 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
     float alpha_distance,
     const WasmExtraChannel* extra_channels, uint32_t num_extra_channels,
     const WasmBoxOpts* box_opts = nullptr,
-    uint32_t orientation = 1u) {
+    uint32_t orientation = 1u,
+    int32_t ec_resampling = -1) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(120);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -919,8 +936,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
   if (photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(photon_noise_iso));
-  const uint32_t normalized_resampling = NormalizeResampling(resampling);
-  if (normalized_resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling));
+  ApplyResamplingFrameSettings(frame, resampling, ec_resampling);
 
   // Per-extra-channel distances.
   if (has_alpha && alpha_distance >= 0.0f) {
@@ -2279,14 +2295,15 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec(
     const uint8_t* exif, size_t exif_size,
     const uint8_t* xmp, size_t xmp_size,
     float alpha_distance,
-    const WasmExtraChannel* ec_ptr, uint32_t num_ec) {
+    const WasmExtraChannel* ec_ptr, uint32_t num_ec,
+    int32_t ec_resampling) {
   const WasmExtraChannel* ec = (ec_ptr != nullptr && num_ec > 0u) ? ec_ptr : nullptr;
   const uint32_t n_ec = (ec != nullptr) ? num_ec : 0u;
   return EncodeRgbaWithExtraChannels(pixels, width, height, distance, effort, fmt, has_alpha,
       progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size,
-      alpha_distance, ec, n_ec);
+      alpha_distance, ec, n_ec, nullptr, 1u, ec_resampling);
 }
 
 // --- Box-options v2 encode ---
@@ -2337,14 +2354,15 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec_v2(
     const uint8_t* xmp, size_t xmp_size,
     float alpha_distance,
     const WasmExtraChannel* ec_ptr, uint32_t num_ec,
-    const WasmBoxOpts* box_opts) {
+    const WasmBoxOpts* box_opts,
+    int32_t ec_resampling) {
   const WasmExtraChannel* ec = (ec_ptr != nullptr && num_ec > 0u) ? ec_ptr : nullptr;
   const uint32_t n_ec = (ec != nullptr) ? num_ec : 0u;
   return EncodeRgbaWithExtraChannels(pixels, width, height, distance, effort, fmt, has_alpha,
       progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size,
-      alpha_distance, ec, n_ec, box_opts);
+      alpha_distance, ec, n_ec, box_opts, 1u, ec_resampling);
 }
 
 // Gain map encode: same as _with_metadata_x but attaches a jhgm box (JXL gain map).
@@ -2750,6 +2768,7 @@ JxlWasmEncState* jxl_wasm_enc_create_image(
   s->enc_decoding_speed = -1;
   s->enc_photon_noise_iso = 0;
   s->enc_resampling = NormalizeResampling(resampling);
+  s->enc_ec_resampling = -1;
   s->enc_epf = -1;
   s->enc_gaborish = -1;
   s->enc_dots = -1;
@@ -2768,13 +2787,17 @@ JxlWasmEncState* jxl_wasm_enc_create_image_x(
     float distance, uint32_t effort,
     uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
-    int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
+    int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
+    int32_t jpeg_keep_exif, int32_t jpeg_keep_xmp, int32_t jpeg_keep_jumbf,
+    int32_t already_downsampled, int32_t upsampling_mode, int32_t ec_resampling) {
   JxlWasmEncState* s = jxl_wasm_enc_create_image(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, resampling);
   if (s != nullptr) {
+    (void)jpeg_keep_exif; (void)jpeg_keep_xmp; (void)jpeg_keep_jumbf; (void)already_downsampled; (void)upsampling_mode;
     s->enc_modular = modular;
     s->enc_brotli_effort = brotli_effort;
     s->enc_decoding_speed = decoding_speed;
     s->enc_photon_noise_iso = photon_noise_iso;
+    s->enc_ec_resampling = NormalizeOptionalResampling(ec_resampling);
   }
   return s;
 }
@@ -2785,8 +2808,12 @@ JxlWasmEncState* jxl_wasm_enc_create_image_y(
     uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
-    int32_t epf, int32_t gaborish, int32_t dots, int32_t color_transform) {
-  JxlWasmEncState* s = jxl_wasm_enc_create_image_x(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+    int32_t epf, int32_t gaborish, int32_t dots, int32_t patches, int32_t color_transform,
+    int32_t center_x, int32_t center_y,
+    int32_t jpeg_keep_exif, int32_t jpeg_keep_xmp, int32_t jpeg_keep_jumbf,
+    int32_t already_downsampled, int32_t upsampling_mode, int32_t ec_resampling) {
+  (void)patches; (void)center_x; (void)center_y;
+  JxlWasmEncState* s = jxl_wasm_enc_create_image_x(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, jpeg_keep_exif, jpeg_keep_xmp, jpeg_keep_jumbf, already_downsampled, upsampling_mode, ec_resampling);
   if (s != nullptr) {
     s->enc_epf = epf;
     s->enc_gaborish = gaborish;
@@ -2804,9 +2831,12 @@ JxlWasmEncState* jxl_wasm_enc_create_image_z(
     uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
-    int32_t epf, int32_t gaborish, int32_t dots, int32_t color_transform,
-    uint32_t orientation) {
-  JxlWasmEncState* s = jxl_wasm_enc_create_image_y(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, epf, gaborish, dots, color_transform);
+    int32_t epf, int32_t gaborish, int32_t dots, int32_t patches, int32_t color_transform,
+    uint32_t orientation,
+    int32_t center_x, int32_t center_y,
+    int32_t jpeg_keep_exif, int32_t jpeg_keep_xmp, int32_t jpeg_keep_jumbf,
+    int32_t already_downsampled, int32_t upsampling_mode, int32_t ec_resampling) {
+  JxlWasmEncState* s = jxl_wasm_enc_create_image_y(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, epf, gaborish, dots, patches, color_transform, center_x, center_y, jpeg_keep_exif, jpeg_keep_xmp, jpeg_keep_jumbf, already_downsampled, upsampling_mode, ec_resampling);
   if (s != nullptr) {
     s->enc_orientation = (orientation >= 1u && orientation <= 8u) ? orientation : 1u;
   }
@@ -2864,7 +2894,8 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
       s->enc_intrinsic_width, s->enc_intrinsic_height,
       s->enc_disable_perceptual,
       s->enc_codestream_level,
-      s->enc_premultiply_alpha);
+      s->enc_premultiply_alpha,
+      s->enc_ec_resampling);
 
   // libjxl is done with the pixel data — free it now to reclaim memory.
   free(s->pixels_buf);

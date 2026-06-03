@@ -112,6 +112,33 @@ export interface EncodeStats {
   sidecarOffsets?: readonly number[];
 }
 
+export interface AdvancedEncoderControls {
+  filters?: FiltersControls;
+  groupOrder?: GroupOrderControls;
+  buffering?: BufferingControls;
+}
+
+export interface FiltersControls {
+  dots?: boolean;
+  patches?: boolean;
+  epf?: -1 | 0 | 1 | 2 | 3;
+  gaborish?: boolean;
+}
+
+export interface GroupOrderControls {
+  mode: "scanline" | "center";
+  centerX?: number;
+  centerY?: number;
+}
+
+export interface BufferingControls {
+  strategy?: -1 | 0 | 1 | 2 | 3;
+  streamingInput?: boolean;
+  streamingOutput?: boolean;
+  lowMemoryMode?: boolean;
+  preferChunkedAPI?: boolean;
+}
+
 export interface EncodeOptions {
   format: PixelFormat;
   width: number;
@@ -174,6 +201,7 @@ export interface EncodeOptions {
     preferChunkedAPI?: boolean;
   };
 
+  advancedControls?: AdvancedEncoderControls;
   chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs (legacy alias for buffering.strategy=2-ish)
   /**
    * Max dimension (px, long edge) of sidecar thumbnail(s) to yield BEFORE the

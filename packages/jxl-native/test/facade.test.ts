@@ -86,6 +86,25 @@ describe("@casabio/jxl-native facade", () => {
       .toContainEqual({ id: 34, value: 3 });
   });
 
+  test("lowers ecResampling to native frame setting ID 3", () => {
+    const encoder = { pushPixels() {}, finish() {}, async *chunks() {}, cancel() {}, dispose() {} };
+    let received: unknown;
+    const facade = createNativeCodecFacade({
+      version: () => "test",
+      probe: () => ({ loaded: true, path: "memory" }),
+      createDecoder: () => ({ push() {}, close() {}, async *events() {}, cancel() {}, dispose() {} }),
+      createEncoder: (options) => {
+        received = options;
+        return encoder;
+      },
+    });
+
+    facade.createEncoder({ ...encodeOptions, ecResampling: 4 });
+
+    expect((received as { advancedFrameSettings?: readonly { id: number; value: number }[] }).advancedFrameSettings)
+      .toContainEqual({ id: 3, value: 4 });
+  });
+
   test("native addon parses and applies codestreamLevel", () => {
     const source = readFileSync(new URL("../src/native.cc", import.meta.url), "utf8");
 

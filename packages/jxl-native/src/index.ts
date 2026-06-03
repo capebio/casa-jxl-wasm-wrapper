@@ -286,6 +286,8 @@ export interface EncoderOptions {
    */
   progressiveDc?: 0 | 1 | 2;
   groupOrder?: 0 | 1;
+  centerX?: number;
+  centerY?: number;
   /** Container format and per-box options. */
   metadata?: MetadataOptions;
   /** Additional custom metadata boxes to embed. */

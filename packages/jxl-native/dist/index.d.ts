@@ -304,6 +304,8 @@ export interface EncoderOptions {
      */
     progressiveDc?: 0 | 1 | 2;
     groupOrder?: 0 | 1;
+    centerX?: number;
+    centerY?: number;
     /** Container format and per-box options. */
     metadata?: MetadataOptions;
     /** Additional custom metadata boxes to embed. */
@@ -319,11 +321,37 @@ export interface EncoderOptions {
         compressBoxes?: boolean;
         emitWarnings?: boolean;
         storeJPEGMetadata?: boolean;
+        /** 0=strip, 1=keep (default). Fine-grained per cjxl dec-hints strip= (row 7 audit). */
+        keepExif?: 0 | 1;
+        keepXmp?: 0 | 1;
+        keepJumbf?: 0 | 1;
+        /** Full dec-hints row12: color_space override / icc for raw or recon. */
+        colorSpace?: string;
+        icc?: Uint8Array;
     };
     /** The input image has already been downsampled by the resampling factor. */
     alreadyDownsampled?: boolean;
     /** Encoder upsampling mode (0 = nearest for pixel art, etc.). */
     upsamplingMode?: number;
+    /** Separate resampling for extra channels (cjxl row 8, ID 3). */
+    ecResampling?: -1 | 1 | 2 | 4 | 8;
+    /**
+     * Row 9 (cjxl): frame indexing string for JXL_ENC_FRAME_INDEX_BOX (ID 31).
+     * Strict ^(0*|1[01]*)$ + first frame rule (if any 1, position 0 must be 1).
+     */
+    frameIndexing?: string;
+    /**
+     * Row 10 (cjxl): allow expert options (effort=11 gate).
+     * Per cjxl --allow_expert_options.
+     */
+    allowExpertOptions?: boolean;
+    /**
+     * Row 11 (cjxl): --disable_perceptual_optimizations (ID 39).
+     * Disable libjxl perceptual quality heuristics (butteraugli/XYB psychovisual model).
+     * Critical for reproducible benchmarking and archival/scientific workflows.
+     * Maps to JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS.
+     */
+    disablePerceptualHeuristics?: boolean;
     /**
      * First-class advanced encoder controls (post-audit).
      * Provides ergonomic access to filters, group order, buffering strategy, etc.

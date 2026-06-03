@@ -227,17 +227,120 @@ function resolveEncoderBridgeSettings(options) {
     const decodingSpeed = options.decodingSpeed != null ? Math.max(0, Math.min(4, Math.round(options.decodingSpeed))) : -1;
     const photonNoiseIso = options.photonNoiseIso != null ? Math.max(0, Math.round(options.photonNoiseIso)) : 0;
     const resampling = resolveResampling(options.resampling);
+    const alreadyDownsampled = !!options.alreadyDownsampled;
+    const upsamplingMode = options.upsamplingMode != null ? Math.max(-1, Math.min(1, Math.round(options.upsamplingMode))) : -1;
+    const ecResampling = options.ecResampling != null
+        ? (options.ecResampling === -1 ? -1 : resolveResampling(options.ecResampling))
+        : -1;
     const filters = options.advancedControls?.filters;
     const epfSource = options.epf ?? filters?.epf;
     const gaborishSource = options.gaborish ?? (filters?.gaborish === undefined ? undefined : (filters.gaborish ? 1 : 0));
     const dotsSource = options.dots ?? (filters?.dots === undefined ? undefined : (filters.dots ? 1 : 0));
-    const epf = epfSource != null ? Math.max(-1, Math.min(3, Math.round(epfSource))) : -1;
+    const patchesSource = options.patches ?? (filters?.patches === undefined ? undefined : (filters.patches ? 1 : 0));
+    let epf = epfSource != null ? Math.round(epfSource) : -1;
+    if (epf < -1 || epf > 3) {
+        // eslint-disable-next-line no-console
+        console.warn('[jxl-wasm] epf out of range (-1..3 per cjxl ProcessFlag); clamped.');
+        epf = Math.max(-1, Math.min(3, epf));
+    }
     const gaborish = gaborishSource != null ? (gaborishSource <= 0 ? 0 : 1) : -1;
     const dots = dotsSource != null ? (dotsSource <= 0 ? 0 : 1) : -1;
+    const patches = patchesSource != null ? (patchesSource <= 0 ? 0 : 1) : -1;
     const colorTransform = options.colorTransform != null ? Math.max(-1, Math.min(2, Math.round(options.colorTransform))) : -1;
-    const buffering = resolveBufferingStrategy(options);
+    // JPEG strip controls (cjxl row 7 / dec-hints strip=exif|xmp|jumbf + enum 35-37). Default 1=keep. Extract from jpegReconstruction (or advancedControls for lab). Warnings emitted at transcode use sites (exact cjxl text).
+    // Row 12: full dec-hints also carries colorSpace / icc for color override (raw or recon).
+    let jpegKeepExif = 1, jpegKeepXmp = 1, jpegKeepJumbf = 1;
+    let jpegColorSpace;
+    let jpegIcc;
+    const jr = options.jpegReconstruction || options.jpegReconstruction;
+    if (jr) {
+        if (jr.keepExif !== undefined)
+            jpegKeepExif = (jr.keepExif ? 1 : 0);
+        if (jr.keepXmp !== undefined)
+            jpegKeepXmp = (jr.keepXmp ? 1 : 0);
+        if (jr.keepJumbf !== undefined)
+            jpegKeepJumbf = (jr.keepJumbf ? 1 : 0);
+        if (jr.colorSpace)
+            jpegColorSpace = jr.colorSpace;
+        if (jr.icc)
+            jpegIcc = jr.icc;
+    }
+    const acJr = options.advancedControls && options.advancedControls.jpegReconstruction;
+    if (acJr) {
+        if (acJr.keepExif !== undefined)
+            jpegKeepExif = (acJr.keepExif ? 1 : 0);
+        if (acJr.keepXmp !== undefined)
+            jpegKeepXmp = (acJr.keepXmp ? 1 : 0);
+        if (acJr.keepJumbf !== undefined)
+            jpegKeepJumbf = (acJr.keepJumbf ? 1 : 0);
+        if (acJr.colorSpace)
+            jpegColorSpace = acJr.colorSpace;
+        if (acJr.icc)
+            jpegIcc = acJr.icc;
+    }
+    // Row 9: frameIndexing validation (exact regex + first-char rule from cjxl ProcessFlags).
+    let frameIndexing = options.frameIndexing || '';
+    if (frameIndexing) {
+        let must_be_all_zeros = frameIndexing[0] !== '1';
+        for (let c of frameIndexing) {
+            if (c === '1') {
+                if (must_be_all_zeros) {
+                    // eslint-disable-next-line no-console
+                    console.warn('[jxl-wasm] Invalid --frame_indexing (starts with 0 but has 1); per cjxl must all 0 if first 0. Ignoring.');
+                    frameIndexing = '';
+                    break;
+                }
+            }
+            else if (c !== '0') {
+                // eslint-disable-next-line no-console
+                console.warn('[jxl-wasm] Invalid frameIndexing; must match ^(0*|1[01]*)$ per cjxl. Ignoring.');
+                frameIndexing = '';
+                break;
+            }
+        }
+    }
+    const allowExpertOptions = !!options.allowExpertOptions;
+    const disablePerceptualHeuristics = !!options.disablePerceptualHeuristics;
+    // First-class GROUP_ORDER + centers (cjxl row 1 / enum 13-15). Light validation mirroring cjxl ProcessFlags mutual-exclusion.
+    let groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : 0;
+    let centerX = options.centerX != null ? Math.floor(options.centerX) : -1;
+    let centerY = options.centerY != null ? Math.floor(options.centerY) : -1;
+    // Support nested advancedControls.groupOrder (lab emits it; native parity; design note shape).
+    const acGo = options.advancedControls?.groupOrder;
+    if (acGo) {
+        if (acGo.mode === 'center')
+            groupOrder = 1;
+        if (acGo.centerX != null)
+            centerX = Math.floor(acGo.centerX);
+        if (acGo.centerY != null)
+            centerY = Math.floor(acGo.centerY);
+    }
+    if ((centerX !== -1 || centerY !== -1) && groupOrder !== 1) {
+        // eslint-disable-next-line no-console
+        console.warn('[jxl-wasm] centerX/centerY set without groupOrder=1; cjxl requires --group_order=1. Ignoring centers (per cjxl validation).');
+        centerX = -1;
+        centerY = -1;
+    }
+    // Buffering / streaming (cjxl row 6 / ID 34). Full first-class: strategy + streaming* + lowmem hints.
+    // Priority: explicit strategy > lowMemoryMode/streaming/preferChunked promotions > chunked legacy > 0.
+    let buffering = 0;
+    const b = options.buffering || options.advancedControls?.buffering;
+    if (b) {
+        if (b.strategy !== undefined) {
+            buffering = clampBufferingStrategy(b.strategy);
+        }
+        else if (b.lowMemoryMode || b.preferChunkedAPI) {
+            buffering = 3; // promote per phase3 / design
+        }
+        else if (b.streamingInput || b.streamingOutput) {
+            buffering = 3;
+        }
+    }
+    else if (options.chunked) {
+        buffering = 2;
+    }
     if (!options.progressive) {
-        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform, groupOrder: resolveGroupOrder(options, 0) };
+        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, alreadyDownsampled, upsamplingMode, ecResampling, frameIndexing, allowExpertOptions, disablePerceptualHeuristics, epf, gaborish, dots, patches, colorTransform, groupOrder, centerX, centerY, jpegKeepExif, jpegKeepXmp, jpegKeepJumbf };
     }
     // Single rollback boolean — flip to false to revert to legacy previewFirst defaults.
     const USE_SNEYERS_DEFAULT = true;
@@ -250,7 +353,24 @@ function resolveEncoderBridgeSettings(options) {
             : 2;
         const ac = options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : 1;
         const qac = options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : 1;
-        const groupOrder = resolveGroupOrder(options, 1);
+        groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : 1;
+        centerX = options.centerX != null ? Math.floor(options.centerX) : -1;
+        centerY = options.centerY != null ? Math.floor(options.centerY) : -1;
+        const acGo2 = options.advancedControls?.groupOrder;
+        if (acGo2) {
+            if (acGo2.mode === 'center')
+                groupOrder = 1;
+            if (acGo2.centerX != null)
+                centerX = Math.floor(acGo2.centerX);
+            if (acGo2.centerY != null)
+                centerY = Math.floor(acGo2.centerY);
+        }
+        if ((centerX !== -1 || centerY !== -1) && groupOrder !== 1) {
+            // eslint-disable-next-line no-console
+            console.warn('[jxl-wasm] centerX/centerY without groupOrder=1 (cjxl requires it); centers ignored.');
+            centerX = -1;
+            centerY = -1;
+        }
         return {
             progressiveDc: dc,
             progressiveAc: ac,
@@ -261,18 +381,47 @@ function resolveEncoderBridgeSettings(options) {
             decodingSpeed: decodingSpeed >= 0 ? decodingSpeed : 0,
             photonNoiseIso,
             resampling,
+            alreadyDownsampled,
+            upsamplingMode,
+            ecResampling,
+            frameIndexing,
+            allowExpertOptions,
+            disablePerceptualHeuristics,
             epf,
             gaborish,
             dots,
+            patches,
             colorTransform,
             groupOrder,
+            centerX,
+            centerY,
+            jpegKeepExif,
+            jpegKeepXmp,
+            jpegKeepJumbf,
         };
     }
     const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
     const progressiveDc = options.progressiveDc != null
         ? Math.max(0, Math.min(2, options.progressiveDc | 0))
         : (options.previewFirst ? 1 : 1);
-    const groupOrder = resolveGroupOrder(options, options.previewFirst ? 1 : 0);
+    groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : (options.previewFirst ? 1 : 0);
+    centerX = options.centerX != null ? Math.floor(options.centerX) : -1;
+    centerY = options.centerY != null ? Math.floor(options.centerY) : -1;
+    const acGo3 = options.advancedControls?.groupOrder;
+    if (acGo3) {
+        if (acGo3.mode === 'center')
+            groupOrder = 1;
+        if (acGo3.centerX != null)
+            centerX = Math.floor(acGo3.centerX);
+        if (acGo3.centerY != null)
+            centerY = Math.floor(acGo3.centerY);
+    }
+    if ((centerX !== -1 || centerY !== -1) && groupOrder !== 1) {
+        // eslint-disable-next-line no-console
+        console.warn('[jxl-wasm] centerX/centerY without groupOrder=1 (cjxl requires it); centers ignored.');
+        centerX = -1;
+        centerY = -1;
+    }
     return {
         progressiveDc,
         progressiveAc: options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
@@ -283,33 +432,24 @@ function resolveEncoderBridgeSettings(options) {
         decodingSpeed,
         photonNoiseIso,
         resampling,
+        alreadyDownsampled,
+        upsamplingMode,
+        ecResampling,
+        frameIndexing,
+        allowExpertOptions,
+        disablePerceptualHeuristics,
         epf,
         gaborish,
         dots,
+        patches,
         colorTransform,
         groupOrder,
+        centerX,
+        centerY,
+        jpegKeepExif,
+        jpegKeepXmp,
+        jpegKeepJumbf,
     };
-}
-function resolveGroupOrder(options, fallback) {
-    if (options.groupOrder != null)
-        return options.groupOrder ? 1 : 0;
-    const groupOrder = options.advancedControls?.groupOrder;
-    if (groupOrder != null)
-        return groupOrder.mode === "center" ? 1 : 0;
-    return fallback;
-}
-function resolveBufferingStrategy(options) {
-    const buffering = options.advancedControls?.buffering;
-    if (buffering?.strategy !== undefined) {
-        return clampBufferingStrategy(buffering.strategy);
-    }
-    if (buffering?.streamingInput === true ||
-        buffering?.streamingOutput === true ||
-        buffering?.lowMemoryMode === true ||
-        buffering?.preferChunkedAPI === true) {
-        return 3;
-    }
-    return options.chunked ? 2 : 0;
 }
 function clampBufferingStrategy(value) {
     const rounded = Math.round(value);
@@ -320,10 +460,10 @@ function clampBufferingStrategy(value) {
     return rounded;
 }
 function wantsStreamingInput(options) {
-    return options.advancedControls?.buffering?.streamingInput !== false;
+    return options.buffering?.streamingInput !== false && options.advancedControls?.buffering?.streamingInput !== false;
 }
 function wantsStreamingOutput(options) {
-    return options.advancedControls?.buffering?.streamingOutput !== false;
+    return options.buffering?.streamingOutput !== false && options.advancedControls?.buffering?.streamingOutput !== false;
 }
 function resolveResampling(value) {
     return value === 2 || value === 4 || value === 8 ? value : 1;
@@ -451,15 +591,33 @@ export function createEncoder(options) {
  * The resulting JXL embeds the original JPEG bitstream for round-trip fidelity.
  * Requires a WASM build that includes the #15 bridge (jxl_wasm_transcode_jpeg_to_jxl).
  */
-export async function transcodeJpegToJxl(jpeg) {
+export async function transcodeJpegToJxl(jpeg, recon) {
     const module = await loadLibjxlModule();
     if (!getCapabilities(module).jpegTranscode) {
         throw new CapabilityMissing("JPEG→JXL transcode requires a rebuilt WASM with transcode bridge");
     }
+    // Row 7: reconstruction warnings (exact text pattern from cjxl ProcessFlags color_hints_proxy + allow_jpeg_recon checks).
+    const kx = recon?.keepExif ?? 1;
+    const km = recon?.keepXmp ?? 1;
+    const store = recon?.storeJPEGMetadata ?? true;
+    if (kx === 0) {
+        // eslint-disable-next-line no-console
+        console.warn("Cannot strip exif metadata, try setting --allow_jpeg_reconstruction=0 (storeJPEGMetadata:false). Note that with that setting byte exact reconstruction of the JPEG file won't be possible.");
+    }
+    if (km === 0) {
+        // eslint-disable-next-line no-console
+        console.warn("Cannot strip xmp metadata, try setting --allow_jpeg_reconstruction=0 (storeJPEGMetadata:false). Note that with that setting byte exact reconstruction of the JPEG file won't be possible.");
+    }
+    // jumbf strip never warns per cjxl.
     const view = copyOrBorrowInput(jpeg, false);
     const ptr = module._malloc(view.byteLength);
     try {
         module.HEAPU8.set(view, ptr);
+        const storeFlag = store ? 1 : 0;
+        if (module._jxl_wasm_transcode_jpeg_to_jxl_v3) {
+            const handle = module._jxl_wasm_transcode_jpeg_to_jxl_v3(ptr, view.byteLength, storeFlag, kx, km, recon?.keepJumbf ?? 1);
+            return takeBuffer(module, handle, "transcode").data;
+        }
         const handle = module._jxl_wasm_transcode_jpeg_to_jxl(ptr, view.byteLength);
         return takeBuffer(module, handle, "transcode").data;
     }
@@ -1430,7 +1588,7 @@ class LibjxlEncoder {
             const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
             // A3: rgb8 maps to fmtIndex 3; rgba16→1, rgbaf32→2, rgba8→0
             const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : this.options.format === "rgb8" ? 3 : 0;
-            const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform } = resolveEncoderBridgeSettings(this.options);
+            const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, centerX, centerY, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, alreadyDownsampled, upsamplingMode, ecResampling, frameIndexing, allowExpertOptions, disablePerceptualHeuristics, epf, gaborish, dots, patches, colorTransform, jpegKeepExif, jpegKeepXmp, jpegKeepJumbf } = resolveEncoderBridgeSettings(this.options);
             const orientation = this.options.orientation ?? 1;
             if (orientation !== 1 && !caps.orientation) {
                 // Bridge lacks the _z / _v3 entrypoints. Pixels are still encoded but
@@ -1444,16 +1602,16 @@ class LibjxlEncoder {
             const tCreateStart = performance.now();
             if (caps.extOptions && orientation !== 1 && module._jxl_wasm_enc_create_image_z) {
                 // JXL "free rotation": record orientation in basic info, pixels stay sensor-native.
-                this.wasmEncState = module._jxl_wasm_enc_create_image_z(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform, orientation);
+                this.wasmEncState = module._jxl_wasm_enc_create_image_z(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, patches, colorTransform, orientation, centerX ?? -1, centerY ?? -1, jpegKeepExif, jpegKeepXmp, jpegKeepJumbf, alreadyDownsampled ? 1 : 0, upsamplingMode, ecResampling);
             }
             else if (caps.extOptions && module._jxl_wasm_enc_create_image_y) {
-                this.wasmEncState = module._jxl_wasm_enc_create_image_y(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform);
+                this.wasmEncState = module._jxl_wasm_enc_create_image_y(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, patches, colorTransform, centerX ?? -1, centerY ?? -1, jpegKeepExif, jpegKeepXmp, jpegKeepJumbf, alreadyDownsampled ? 1 : 0, upsamplingMode, ecResampling);
             }
             else if (caps.extOptions && module._jxl_wasm_enc_create_image_x) {
-                this.wasmEncState = module._jxl_wasm_enc_create_image_x(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling);
+                this.wasmEncState = module._jxl_wasm_enc_create_image_x(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, jpegKeepExif, jpegKeepXmp, jpegKeepJumbf, alreadyDownsampled ? 1 : 0, upsamplingMode, ecResampling);
             }
             else {
-                this.wasmEncState = module._jxl_wasm_enc_create_image(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, resampling);
+                this.wasmEncState = module._jxl_wasm_enc_create_image(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, resampling, centerX ?? -1, centerY ?? -1);
             }
             this.onMetric?.("enc_create_image_ms", performance.now() - tCreateStart);
             if (this.wasmEncState === 0)
@@ -1541,7 +1699,7 @@ class LibjxlEncoder {
                 const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
                 const hasAlpha = this.options.hasAlpha ? 1 : 0;
                 const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
-                const { modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
+                const { modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, alreadyDownsampled, upsamplingMode, ecResampling, frameIndexing, allowExpertOptions, disablePerceptualHeuristics, jpegKeepExif, jpegKeepXmp, jpegKeepJumbf } = resolveEncoderBridgeSettings(this.options);
                 const { iccProfile: effIcc, exif: effExif, xmp: effXmp } = resolveEffectiveMetadata(this.options);
                 const iccView = effIcc ? copyOrBorrowInput(effIcc, false) : new Uint8Array(0);
                 const exifView = effExif ? copyOrBorrowInput(effExif, false) : new Uint8Array(0);
@@ -1631,7 +1789,7 @@ class LibjxlEncoder {
                 const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
                 const hasAlpha = this.options.hasAlpha ? 1 : 0;
                 const caps = getCapabilities(module);
-                const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling } = resolveEncoderBridgeSettings(this.options);
+                const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, centerX, centerY, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, alreadyDownsampled, upsamplingMode, ecResampling, frameIndexing, allowExpertOptions, disablePerceptualHeuristics, jpegKeepExif, jpegKeepXmp, jpegKeepJumbf } = resolveEncoderBridgeSettings(this.options);
                 // Gain map encode path: embeds pre-encoded JXL codestream as jhgm box.
                 const wantGainMap = this.options.gainMap != null && caps.gainMapEncode &&
                     typeof module._jxl_wasm_encode_with_gain_map === "function";
@@ -1733,8 +1891,8 @@ class LibjxlEncoder {
                                 module.HEAPU8.set(ecDescBuf, ecDescPtr);
                         }
                         const handle = useBoxV2
-                            ? module._jxl_wasm_encode_rgba8_with_metadata_ec_v2(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength, alphaDistance, ecDescPtr, extraChannels.length, boxOptsPtr)
-                            : module._jxl_wasm_encode_rgba8_with_metadata_ec(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength, alphaDistance, ecDescPtr, extraChannels.length);
+                            ? module._jxl_wasm_encode_rgba8_with_metadata_ec_v2(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength, alphaDistance, ecDescPtr, extraChannels.length, boxOptsPtr, ecResampling)
+                            : module._jxl_wasm_encode_rgba8_with_metadata_ec(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength, alphaDistance, ecDescPtr, extraChannels.length, ecResampling);
                         const encoded = takeBuffer(module, handle, "encode (extra channels)");
                         compressedBytes += encoded.data.byteLength;
                         yield encoded.data;
@@ -1810,8 +1968,8 @@ class LibjxlEncoder {
                     const encState = module._jxl_wasm_enc_create();
                     try {
                         const rc = caps.extOptions && module._jxl_wasm_enc_push_pixels_x
-                            ? module._jxl_wasm_enc_push_pixels_x(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling)
-                            : module._jxl_wasm_enc_push_pixels(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, resampling);
+                            ? module._jxl_wasm_enc_push_pixels_x(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, centerX ?? -1, centerY ?? -1)
+                            : module._jxl_wasm_enc_push_pixels(encState, ptr, this.options.width, this.options.height, distance, this.options.effort, fmtIndex, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, resampling, centerX ?? -1, centerY ?? -1);
                         if (rc !== 0)
                             throw new Error(`JXL streaming encode failed (${rc})`);
                         let chunkHandle;

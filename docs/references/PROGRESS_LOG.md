@@ -6,6 +6,61 @@ Use the template below for every entry.
 
 ---
 
+## Feature: Reference Audit Backwards Pass — EC Resampling Parity — 2026-06-03
+
+**Branch:** `Reference_code_audit_parity`
+
+**Status:** Source complete. WASM rebuild required for bridge ABI updates.
+
+**Scope:** Backwards implementation pass through `REFERENCE_CODE_AUDIT.md`, closing cjxl audit row 18 (`--resampling` separate from `--ec_resampling`) for WASM first, then native parity.
+
+**Key Changes:**
+- `packages/jxl-wasm/src/facade.ts` — Keeps `ecResampling?: -1 | 1 | 2 | 4 | 8` separate from main `resampling`, forwards it on streaming create and buffered extra-channel calls.
+- `packages/jxl-wasm/src/bridge.cpp` — Added `enc_ec_resampling`, `NormalizeOptionalResampling`, and `ApplyResamplingFrameSettings`; applies `JXL_ENC_FRAME_SETTING_EXTRA_CHANNEL_RESAMPLING` (ID 3) independently from main `RESAMPLING` (ID 2).
+- `packages/jxl-native/src/index.ts` — Native package already lowers `ecResampling` to advanced frame setting ID 3; added test coverage.
+- `packages/jxl-wasm/test/facade.test.ts` + `packages/jxl-native/test/facade.test.ts` — Added row 18 coverage for WASM forwarding/source bridge apply and native lowering.
+
+**Tauri note:** `C:\Foo\raw-converter-tauri` remains on `Reference_code_audit_parity`. Its RAW encode path has no public command-level advanced JXL encoder option for this slice, so no external Tauri repo code was changed.
+
+**Docs Updated:** `docs/references/REFERENCE_CODE_AUDIT.md` row 18 and encode.h row 3; this entry.
+
+**Verification:**
+- `bun test packages/jxl-wasm/test/facade.test.ts --grep "resampling encoder option|advanced buffering"` — 6 pass, 0 fail.
+- `bun test packages/jxl-native/test/facade.test.ts` — 9 pass, 0 fail.
+- `bun run --cwd packages/jxl-wasm typecheck` — pass.
+- `bun run --cwd packages/jxl-native typecheck` — pass.
+- `bun run --cwd packages/jxl-core typecheck` — pass.
+
+---
+
+## Feature: Reference Audit Backwards Pass — Streaming Buffering + Container Policy — 2026-06-03
+
+**Branch:** `Reference_code_audit_parity`
+
+**Status:** Complete. No C++/WASM rebuild required for this slice; it lowers to existing bridge/native settings. TS source and dist surfaces refreshed in the same branch.
+
+**Scope:** Backwards implementation pass through `REFERENCE_CODE_AUDIT.md`, closing cjxl audit rows 22 (`--streaming_input` / `--streaming_output` with `BUFFERING=3`) and 6 (`--buffering -1..3`). Row 23 (container + compress boxes) was re-verified as already implemented and marked complete.
+
+**Key Changes:**
+- `packages/jxl-wasm/src/facade.ts` — Added `AdvancedEncoderControls` / `BufferingControls` to the WASM public surface. `advancedControls.buffering.strategy` maps to the existing bridge `BUFFERING` argument. `streamingInput`, `streamingOutput`, `lowMemoryMode`, and `preferChunkedAPI` promote `BUFFERING=3` when `strategy` is omitted. `streamingInput:false` and `streamingOutput:false` opt out of matching streaming paths.
+- `packages/jxl-core/src/types.ts` — Added the same shared type surface so session/worker callers can pass the controls.
+- `packages/jxl-native/src/index.ts` — Lowered the same buffering controls to `advancedFrameSettings` ID 34 for native package parity.
+- `packages/jxl-wasm/test/facade.test.ts` + `packages/jxl-native/test/facade.test.ts` — Added tests for streaming-input promotion, explicit strategy override, and native lowering.
+
+**Tauri note:** `C:\Foo\raw-converter-tauri` was moved to branch `Reference_code_audit_parity` and inspected. Its RAW encode path uses one-shot helpers with no user-facing advanced encoder command for this item, so no external Tauri code was changed.
+
+**Docs Updated:** `docs/references/REFERENCE_CODE_AUDIT.md` rows 6, 22, 23 and encode.h row 34; this entry.
+
+**Verification:**
+- `bun test packages/jxl-wasm/test/facade.test.ts` — 86 pass, 0 fail.
+- `bun test packages/jxl-wasm/test/facade.test.ts --grep "advanced buffering|MetadataOptions"` — 6 pass, 0 fail.
+- `bun test packages/jxl-native/test/facade.test.ts` — 8 pass, 0 fail.
+- `bun run --cwd packages/jxl-wasm typecheck` — pass.
+- `bun run --cwd packages/jxl-native typecheck` — pass.
+- `bun run --cwd packages/jxl-core typecheck` — pass.
+
+---
+
 ## Feature: Reference Audit Backwards Pass — Premultiply + Codestream Level — 2026-06-03
 
 **Branch:** Current working tree

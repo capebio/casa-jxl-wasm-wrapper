@@ -97,6 +97,29 @@ export interface DecoderOptions {
     fitMode?: "contain" | "cover" | "stretch" | null;
     onMetric?: (name: string, value: number) => void;
 }
+export interface AdvancedEncoderControls {
+    filters?: FiltersControls;
+    groupOrder?: GroupOrderControls;
+    buffering?: BufferingControls;
+}
+export interface FiltersControls {
+    dots?: boolean;
+    patches?: boolean;
+    epf?: -1 | 0 | 1 | 2 | 3;
+    gaborish?: boolean;
+}
+export interface GroupOrderControls {
+    mode: "scanline" | "center";
+    centerX?: number;
+    centerY?: number;
+}
+export interface BufferingControls {
+    strategy?: -1 | 0 | 1 | 2 | 3;
+    streamingInput?: boolean;
+    streamingOutput?: boolean;
+    lowMemoryMode?: boolean;
+    preferChunkedAPI?: boolean;
+}
 export interface EncoderOptions {
     format: PixelFormat;
     width: number;
@@ -125,8 +148,37 @@ export interface EncoderOptions {
     /**
      * Group order for scan vs center-out (ROI + progressive friendly).
      * 0 = scanline (default), 1 = center-out (recommended for progressive and thumbnails; makes early bytes look better).
+     * Matches cjxl --group_order (ID 13).
      */
     groupOrder?: 0 | 1;
+    /**
+     * Center X (pixels) for center-first group order. -1 or omit = auto middle.
+     * Only effective with groupOrder=1. Matches cjxl --center_x (ID 14) + validation.
+     */
+    centerX?: number;
+    /**
+     * Center Y (pixels) for center-first group order. -1 or omit = auto middle.
+     * Only effective with groupOrder=1. Matches cjxl --center_y (ID 15).
+     */
+    centerY?: number;
+    /**
+     * Buffering / streaming strategy (cjxl --buffering + streaming flags).
+     * strategy: -1=encoder chooses, 0=buffer all (max mem/best density), 1/2=stream input+buffer out (large imgs),
+     * 3=stream both (min mem/worst density). See cjxl --help for tradeoffs.
+     * lowMemoryMode + preferChunkedAPI are hints (promote to 3 when unset).
+     */
+    buffering?: {
+        strategy?: -1 | 0 | 1 | 2 | 3;
+        streamingInput?: boolean;
+        streamingOutput?: boolean;
+        lowMemoryMode?: boolean;
+        preferChunkedAPI?: boolean;
+    };
+    /**
+     * First-class expert controls for libjxl filters, group order, and buffering.
+     * Flat fields remain canonical; this nested shape mirrors lab/native controls.
+     */
+    advancedControls?: AdvancedEncoderControls;
     chunked: boolean;
     /** Max dimensions (px) of sidecar thumbnails to yield before the full image. Sorted ascending. */
     sidecarSizes?: readonly number[];
@@ -156,6 +208,27 @@ export interface EncoderOptions {
      * Requires WASM rebuild with enc_set_codestream_level bridge.
      */
     codestreamLevel?: -1 | 5 | 10;
+    /**
+     * JPEG reconstruction controls (when input is JPEG for lossless transcode).
+     * Full dec-hints (color_space, icc_pathname, strip=*) per cjxl row 12 audit.
+     * Strip + warnings from row 7.
+     */
+    jpegReconstruction?: {
+        cfl?: boolean;
+        compressBoxes?: boolean;
+        emitWarnings?: boolean;
+        storeJPEGMetadata?: boolean;
+        /** 0=strip, 1=keep (default). ID 35 JXL_ENC_FRAME_SETTING_JPEG_KEEP_EXIF. Only for AddJPEGFrame paths. */
+        keepExif?: 0 | 1;
+        /** 0=strip, 1=keep (default). ID 36. */
+        keepXmp?: 0 | 1;
+        /** 0=strip, 1=keep (default). ID 37. */
+        keepJumbf?: 0 | 1;
+        /** color_space from -x dec-hints (for raw color or recon). */
+        colorSpace?: string;
+        /** icc_pathname bytes equivalent. */
+        icc?: Uint8Array;
+    };
     /** -1 = libjxl auto (default), 0 = VarDCT (lossy), 1 = Modular. */
     modular?: -1 | 0 | 1;
     /** Brotli effort for metadata/entropy coding. -1 = libjxl default, 0-11. */
@@ -166,12 +239,39 @@ export interface EncoderOptions {
     photonNoiseIso?: number;
     /** Encoder-native downsampling factor before JXL transform/coding. */
     resampling?: ResamplingFactor;
+    /**
+     * Row 8 (cjxl audit): input already downsampled by the resampling factor (decoder will upsample).
+     * Matches --already_downsampled. Usually used with resampling>1.
+     */
+    alreadyDownsampled?: boolean;
+    /**
+     * Row 8 (cjxl): upsampling mode (0=nearest for pixel art). Matches --upsampling_mode + JxlEncoderSetUpsamplingMode.
+     * -1=default (non-separable), 0=nearest.
+     */
+    upsamplingMode?: -1 | 0 | 1;
+    /**
+     * Row 8 (cjxl): separate resampling for extra channels (alpha etc). ID 3.
+     * -1 or 1/2/4/8. Independent control.
+     */
+    ecResampling?: -1 | 1 | 2 | 4 | 8;
+    /**
+     * Row 9 (cjxl): frame indexing string ^(0*|1[01]*)$ for ID 31 JXL_ENC_FRAME_INDEX_BOX.
+     * Validation (regex + first-frame rule) per cjxl ProcessFlags; '1' marks frame for index.
+     */
+    frameIndexing?: string;
+    /**
+     * Row 10 (cjxl): allow effort=11 expert (extreme cost denser lossless).
+     * Gate per cjxl; when true effort 1-11, else 1-10. Validation in resolve.
+     */
+    allowExpertOptions?: boolean;
     /** Edge-preserving filter level. -1 = libjxl auto, 0 = off, 1–3 = increasing strength. Requires WASM rebuild with _y bridge. */
     epf?: -1 | 0 | 1 | 2 | 3;
     /** Gaborish pre-sharpening. -1 = libjxl auto, 0 = off, 1 = on. Requires WASM rebuild with _y bridge. */
     gaborish?: -1 | 0 | 1;
     /** Dots detection/synthesis. -1 = libjxl auto, 0 = off, 1 = on. VarDCT only. Requires WASM rebuild with _y bridge. */
     dots?: -1 | 0 | 1;
+    /** Patches generation (dictionary modeling for repeated content). -1=auto, 0=off, 1=on. Explicitly called out in escape-hatch docs as primary use case. Matches cjxl --patches (ID 8). */
+    patches?: -1 | 0 | 1;
     /** Color transform. -1 = libjxl auto, 0 = XYB, 1 = none (identity), 2 = YCbCr. Requires WASM rebuild with _y bridge. */
     colorTransform?: -1 | 0 | 1 | 2;
     /**
@@ -213,12 +313,6 @@ export interface EncoderOptions {
     premultiply?: -1 | 0 | 1;
     /** Prefer CICP (transfer + matrix) over ICC for HDR content when both present. */
     preferCICPForHDR?: boolean;
-    /**
-     * First-class expert controls for libjxl filters, group order, and buffering.
-     * `advancedControls.buffering.streamingInput` / `streamingOutput` are the
-     * typed equivalents of cjxl's streaming flags.
-     */
-    advancedControls?: AdvancedEncoderControls;
     /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
     animation?: AnimationOptions;
     /**
@@ -346,37 +440,6 @@ export interface JUMBFBox {
     /** Raw JUMBF superbox bytes (including the JUMBF box header). */
     data: Uint8Array | ArrayBuffer;
 }
-/**
- * First-class advanced encoder controls promoted from the cjxl/libjxl audit.
- * `buffering.streamingInput` and `streamingOutput` mirror cjxl's explicit
- * streaming flags and promote `JXL_ENC_FRAME_SETTING_BUFFERING` to 3 unless
- * `strategy` is set.
- */
-export interface AdvancedEncoderControls {
-    filters?: FiltersControls;
-    groupOrder?: GroupOrderControls;
-    buffering?: BufferingControls;
-}
-export interface FiltersControls {
-    dots?: boolean;
-    epf?: -1 | 0 | 1 | 2 | 3;
-    gaborish?: boolean;
-}
-export interface GroupOrderControls {
-    mode: "scanline" | "center";
-}
-export interface BufferingControls {
-    /** libjxl BUFFERING strategy: -1 default, 0/1/2 buffered variants, 3 streaming-friendly. */
-    strategy?: -1 | 0 | 1 | 2 | 3;
-    /** Prefer the stateful streaming input path; promotes BUFFERING=3 when strategy is omitted. */
-    streamingInput?: boolean;
-    /** Prefer chunked output draining; promotes BUFFERING=3 when strategy is omitted. */
-    streamingOutput?: boolean;
-    /** Prefer low peak memory; promotes BUFFERING=3 when strategy is omitted. */
-    lowMemoryMode?: boolean;
-    /** Prefer libjxl chunked/streaming APIs where available; promotes BUFFERING=3 when strategy is omitted. */
-    preferChunkedAPI?: boolean;
-}
 /** Per-encode control over which metadata boxes are included and how the container is written. */
 export interface MetadataOptions {
     /** Include ICC profile (default true when iccProfile is non-null). */
@@ -444,10 +507,10 @@ interface LibjxlWasmModule {
     _jxl_wasm_decode_rgba8(inputPtr: number, inputSize: number, downsample: number): number;
     _jxl_wasm_decode_rgba16?(inputPtr: number, inputSize: number, downsample: number): number;
     _jxl_wasm_decode_rgbaf32?(inputPtr: number, inputSize: number, downsample: number): number;
-    _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
-    _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
-    _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
-    _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
+    _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number, centerX?: number, centerY?: number): number;
+    _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number, centerX?: number, centerY?: number): number;
+    _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number, centerX?: number, centerY?: number): number;
+    _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, centerX?: number, centerY?: number): number;
     _jxl_wasm_buffer_data(handle: number): number;
     _jxl_wasm_buffer_size(handle: number): number;
     _jxl_wasm_buffer_width(handle: number): number;
@@ -471,25 +534,26 @@ interface LibjxlWasmModule {
     _jxl_wasm_decode_rgba16_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
     _jxl_wasm_decode_rgbaf32_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
     _jxl_wasm_enc_create?(): number;
-    _jxl_wasm_enc_push_pixels?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
+    _jxl_wasm_enc_push_pixels?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number, centerX?: number, centerY?: number): number;
     _jxl_wasm_enc_take_chunk?(state: number): number;
     _jxl_wasm_enc_error?(state: number): number;
     _jxl_wasm_enc_free?(state: number): void;
     _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
-    _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
+    _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number, centerX?: number, centerY?: number): number;
     _jxl_wasm_encode_rgba8_with_sidecars_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
     _jxl_wasm_encode_rgba8_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
     _jxl_wasm_encode_rgba16_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
     _jxl_wasm_encode_rgbaf32_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
     _jxl_wasm_encode_rgba8_with_metadata_x?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
-    _jxl_wasm_encode_rgba8_with_metadata_ec?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number): number;
+    _jxl_wasm_encode_rgba8_with_metadata_ec?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number, ecResampling?: number): number;
     _jxl_wasm_encode_rgba8_with_metadata_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number): number;
-    _jxl_wasm_encode_rgba8_with_metadata_ec_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number, boxOptsPtr: number): number;
+    _jxl_wasm_encode_rgba8_with_metadata_ec_v2?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, alphaDistance: number, ecPtr: number, numEc: number, boxOptsPtr: number, ecResampling?: number): number;
     _jxl_wasm_transcode_jpeg_to_jxl_v2?(jpegPtr: number, jpegSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number): number;
-    _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
-    _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
-    _jxl_wasm_enc_create_image_y?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, colorTransform: number): number;
-    _jxl_wasm_enc_create_image_z?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, colorTransform: number, orientation: number): number;
+    _jxl_wasm_transcode_jpeg_to_jxl_v3?(jpegPtr: number, jpegSize: number, store: number, keepExif: number, keepXmp: number, keepJumbf: number): number;
+    _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, centerX?: number, centerY?: number): number;
+    _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, jpegKeepExif?: number, jpegKeepXmp?: number, jpegKeepJumbf?: number, alreadyDownsampled?: number, upsamplingMode?: number, ecResampling?: number): number;
+    _jxl_wasm_enc_create_image_y?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, patches: number, colorTransform: number, centerX?: number, centerY?: number, jpegKeepExif?: number, jpegKeepXmp?: number, jpegKeepJumbf?: number, alreadyDownsampled?: number, upsamplingMode?: number, ecResampling?: number): number;
+    _jxl_wasm_enc_create_image_z?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, patches: number, colorTransform: number, orientation: number, centerX?: number, centerY?: number, jpegKeepExif?: number, jpegKeepXmp?: number, jpegKeepJumbf?: number, alreadyDownsampled?: number, upsamplingMode?: number, ecResampling?: number): number;
     _jxl_wasm_encode_rgba8_with_metadata_v3?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, orientation: number): number;
     _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
     _jxl_wasm_enc_advance_written?(state: number, size: number): number;
@@ -566,7 +630,17 @@ export declare function createEncoder(options: EncoderOptions): JxlEncoder;
  * The resulting JXL embeds the original JPEG bitstream for round-trip fidelity.
  * Requires a WASM build that includes the #15 bridge (jxl_wasm_transcode_jpeg_to_jxl).
  */
-export declare function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
+export declare function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array, recon?: {
+    cfl?: boolean;
+    compressBoxes?: boolean;
+    emitWarnings?: boolean;
+    storeJPEGMetadata?: boolean;
+    keepExif?: 0 | 1;
+    keepXmp?: 0 | 1;
+    keepJumbf?: 0 | 1;
+    colorSpace?: string;
+    icc?: Uint8Array;
+}): Promise<Uint8Array>;
 /**
  * Encode an RGBA8 image as a tiled multi-frame JXL.
  * Each tile becomes one JXL frame with layer_info.have_crop = JXL_TRUE.

@@ -714,6 +714,37 @@ describe("resampling encoder option", () => {
     expect(calls.length).toBeGreaterThan(0);
     expect(calls[0][11]).toBe(1);
   });
+
+  test("ecResampling forwards independently on streaming create bridge", async () => {
+    const module = createFakeStreamingInputLibjxlModule() as ReturnType<typeof createFakeStreamingInputLibjxlModule> & {
+      __createImageArgs?: number[];
+      _jxl_wasm_encode_rgba8_x: (...args: number[]) => number;
+      _jxl_wasm_enc_create_image_x: (...args: number[]) => number;
+    };
+    const baseCreate = module._jxl_wasm_enc_create_image.bind(module);
+    module._jxl_wasm_encode_rgba8_x = (...args: number[]) =>
+      module._jxl_wasm_encode_rgba8(args[0]!, args[1]!, args[2]!, args[3]!, args[4]!);
+    module._jxl_wasm_enc_create_image_x = (...args: number[]) => {
+      module.__createImageArgs = args;
+      return baseCreate(args[0]!, args[1]!);
+    };
+    setJxlModuleFactoryForTesting(async () => module as never);
+
+    const encoder = createEncoder({ ...encodeOptions, resampling: 2, ecResampling: 4 });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(module.__createImageArgs?.[15]).toBe(2);
+    expect(module.__createImageArgs?.[21]).toBe(4);
+    await encoder.dispose();
+  });
+
+  test("bridge applies JXL_ENC_FRAME_SETTING_EXTRA_CHANNEL_RESAMPLING", () => {
+    const bridge = readFileSync(new URL("../src/bridge.cpp", import.meta.url), "utf8");
+
+    expect(bridge).toContain("JXL_ENC_FRAME_SETTING_EXTRA_CHANNEL_RESAMPLING");
+    expect(bridge).toContain("enc_ec_resampling");
+  });
 });
 
 describe("advanced buffering encoder controls", () => {
