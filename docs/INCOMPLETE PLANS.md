@@ -3,19 +3,19 @@
 This document consolidates the remaining tasks, goals, and follow-ups from various handoff and plan documents across the repository.
 
 ## Environment & Build Issues (`issues.md`)
-- [ ] **Rebuild WASM Artifacts:** Fix Docker API connection issue and run `npm --workspace packages/jxl-wasm run build`.
+- [ ] **Rebuild WASM Artifacts:** Fix Docker API connection issue and run `npm --workspace packages/jxl-wasm run build`. (Docker currently unavailable — see WASM rebuild note below.)
 - [ ] **Rebuild Native Addon:** Fix missing `node-gyp` module issue and run `npm --workspace packages/jxl-native run build`.
-- [ ] **Fix Full Facade Test Failure:** Resolve the tier-detection expectation (`detectTier` returning `simd-mt` instead of `scalar`).
-- [ ] **Fix Wrapper Lab Test Failure:** Address the pre-existing test/page mismatch in `web/jxl-wrapper-lab.test.js`.
+- [x] **Fix Full Facade Test Failure:** `packages/jxl-wasm/test/facade.test.ts` — 88 pass / 0 fail as of 2026-06-03. Was stale entry.
+- [x] **Fix Wrapper Lab Test Failure:** `web/jxl-wrapper-lab.test.js` — 1 pass / 0 fail as of 2026-06-03. Was stale entry.
 
-## P3 Lightbox JXL Decoder (`docs/handoff-p3-lightbox-jxl-decoder.md`)
-- [ ] **P3.2 — Viewport / ROI Awareness:** On zoom/pan changes, compute visible region and pass `region` to the decoder. Re-decode the new visible region when the user pans/zooms significantly.
-- [ ] **P3.3 — JXL Container Previews + JXTC + Polish:** Extract and use embedded preview/DC before full decode. Prefer JXTC decode path for ROI. Wire multi-frame progressive navigation for animated JXLs. Expose a "JXL decode strategy" badge.
+## P3 Lightbox JXL Decoder (handoff archived at `docs/Completed plans/Archived_handoff-p3-lightbox-jxl-decoder.md`)
+- [x] **P3.2 — Viewport / ROI Awareness:** `computeLightboxVisibleRegion()` + `roi.region` wired into `jxlOpts` in `drawLightboxForCard`. ROI re-decode triggered on zoom/pan. All on `feature/p3.1-lightbox-jxl-progressive-decoder` branch.
+- [x] **P3.3 — JXL Container Previews + JXTC + Polish:** `previewFirst` container preview (DC + JXTC recon JPEG fast path), strategy badges with detail/stage echo, animated JXL metadata, multi-frame `frameIndex` wiring. Delivered across 15+ commits on feature branch. Remaining: full multi-frame nav scrub (follow-up, lower ROI — see `docs/Completed plans/2026-06-p3-lightbox-jxl-progressive-decoder.md`).
 
-## P3.1 Lightbox Progressive Decoder (`docs/superpowers/handoffs/2026-06-p3.1-remaining-tasks-5-6-7.md`)
-- [ ] **Task 5 (Update Call Sites):** Update call sites (`drawLightboxForCard`, `prefetchJxl`, `decodeFullJxlFor`, `repaintThumbFromJxl`) with correct cache policies (`onFirstProgress`, `onFinal`, `never`).
-- [ ] **Task 6 (Verification):** Verify progressive first paint, `'onFirstProgress'` slider behavior, `'onFinal'` prefetch behavior, jsquash fallback, and no regressions in live editing/source cycling.
-- [ ] **Task 7 (Polish):** Clean up leftover TODOs, verify prominent NOTE comments, update `lightbox-impl-decisions.md`.
+## P3.1 Lightbox Progressive Decoder (handoff archived at `docs/Completed plans/Archived_2026-06-p3.1-remaining-tasks-5-6-7.md`)
+- [x] **Task 5 (Update Call Sites):** All 8 `pool.decodeJxl` call sites in `web/main.js` on branch `feature/p3.1-lightbox-jxl-progressive-decoder` have priority + `{ progressive, cachePolicy }` args. Verified 2026-06-03.
+- [ ] **Task 6 (Verification):** Requires live browser + Tauri. Manual check: progressive first paint, `'onFirstProgress'` slider, `'onFinal'` prefetch, jsquash fallback, no regressions. Cannot automate.
+- [x] **Task 7 (Polish):** No `TODO P3` markers remain. NOTE comment at `main.js:586` accurate. `docs/lightbox-impl-decisions.md` line 116 records P3.1 live. Done.
 
 ## Tauri Optimization: Predator Mode (`docs/HANDOFF-tauri-predator-mode.md`)
 - [ ] **Image Pipeline Hot Paths:** Hunt for inefficiencies in thumbnail/lightbox generation paths. Optimize downscaling, unsharp masking, and tone mapping with manual loops and integer paths.
@@ -31,16 +31,16 @@ This document consolidates the remaining tasks, goals, and follow-ups from vario
 - [x] **Encode (RAW → JXL):** Implement a direct-RGBA production path inside `crates/raw-pipeline` (bypassing intermediate RGB arrays). `process_rgba` + `encode_variants_from_rgb16*` (with progressive support) now fuse the tone/convert + alpha write; pure-encode Tauri callers (ingest/export) never allocate/retain a 3ch RGB8 intermediate. See crates/raw-pipeline/src/casabio_encode.rs and docs/suggested-settings.md "Native / Tauri Preferences". (Work started on tauriparity branch.)
   - Harness extended (src/bin/raw_decode_bench.rs) with GOB/P2200 ref scanning + direct path always used for reported encode; sample release direct-rgba ~322 ms on 20 MP Gobabeb ORF.
 - [ ] **Decode (Region/ROI):** Default to JXTC/tiled ROI when available for crops/thumbs. Pass the normalized subject rect down to the decoder instead of full-decode-then-crop.
-  - (Harness ready with metric plumbing + scan + pre-crop simulation (0.5-2.1 ms @128/256 px on P2200 refs, beating WASM JXTC 9-15 ms); low-level decode paths on small assets wired 2026-06-04 (bench). Real Tauri codec + sidecar emit / JXTC or SetCrop native-crop pending (src-tauri not in this workspace). See outputs/tauri/*-2026-06-04.md + HANDOFF continuation.)
+  - (Harness ready with metric plumbing + scan + pre-crop simulation (0.5-2.1 ms @128/256 px on P2200 refs, beating WASM JXTC 9-15 ms); low-level decode paths on small assets wired 2026-06-04 (bench). **2026-06 continuation: extracted to shared `crates/raw-pipeline::jxl_lowlevel` (opt-in feature "jxl-lowlevel", thin pub fns decode_full + decode_progressive_first_total + compat aliases). Bench + Tauri will share identical FFI state machine. Real Tauri codec + sidecar emit / JXTC or SetCrop native-crop pending (src-tauri not in this workspace). See outputs/tauri/* + HANDOFF continuation.**
 - [x] **Decode (Full Loads):** Progressive decode delivering DC/early passes directly to Tauri textures (no worker hop).
-  - Truly-progressive proof landed for WASM path 2026-06-03 — see docs/superpowers/specs/2026-06-03-truly-progressive-jxl-design.md and docs/Benchmark results/truly-progressive-2026-06-03.md. SNEYERS_PRESET wired in facade.ts (USE_SNEYERS_DEFAULT=true); firstPaint < 1% bytes, ≥17 paints on reference binary. Tauri native port: pending separate handoff.
+  - Truly-progressive proof landed for WASM path 2026-06-03 — see docs/superpowers/specs/2026-06-03-truly-progressive-jxl-design.md and docs/Benchmark results/truly-progressive-2026-06-03.md. SNEYERS_PRESET wired in facade.ts (USE_SNEYERS_DEFAULT=true); firstPaint < 1% bytes, ≥17 paints on reference binary. Tauri native port: pending separate handoff. **Shared low-level prog decoder model now in jxl_lowlevel (2026-06).**
 - [ ] **Shared Metrics:** Implement equivalent `onMetric` hooks in Tauri for apples-to-apples comparisons with WASM.
-  - (Bench now emits the canonical names decode_buffer_extract_ms (0), decode_region_downsample_ms, source_pixels_decoded + summary/JSON + time_to_first from lowlevel prog; ready for Tauri surface to match. 2026-06-04 run on supplied timings updated audit/suggested/outputs.)
+  - (Bench now emits the canonical names decode_buffer_extract_ms (0), decode_region_downsample_ms, source_pixels_decoded + summary/JSON + time_to_first from lowlevel prog; ready for Tauri surface to match. 2026-06-04 run on supplied timings updated audit/suggested/outputs. **Canonical impl + metric surface point is now the jxl_lowlevel module.**)
 
-## Boundary Cost Audit Phase 2 (`docs/HANDOFF-boundary-cost-audit-2026.md`)
-- [ ] **Deepen RAW → JXL Implementation:** Consider producing RGBA8 directly inside tone/convert stage instead of post-hoc conversion. Update benchmarks and add traces.
-- [ ] **Strengthen Audit Document:** Add precise before/after cost estimates. Flesh out decode pixel handoff, animation marshaling, and worker transfers.
-- [ ] **Next Targets:** Decide on the next Tier 1 opportunity (e.g., keeping decoded pixels in WASM longer, progressive output ownership).
+## Boundary Cost Audit Phase 2 (`docs/boundary-cost-audit.md`)
+- [x] **Deepen RAW → JXL Implementation:** `take_rgba()` (Phase 2A) implemented + measured (30-file Gobabeb: JS path wins, +10-13 ms WASM prep, ~4-5% regression). Phase 2B deprioritized. Decision recorded in `docs/boundary-cost-audit.md` §12.2 and `docs/suggested-settings.md`.
+- [x] **Strengthen Audit Document:** Sections 12–15 now cover: RAW boundary (30-file), decode pixel handoff (11-file crop bench), native parity (§13.1), progressive encode boundary (§14), Tier 1 decision + remaining unquantified costs (§15). Done.
+- [x] **Next Targets:** Decided in §15: JXTC ingest at ingest-time for subject-crop assets is Tier 1 (10-30x crop win). Animation marshaling and `toArrayBuffer` slice are lower-priority deferred items. See `docs/boundary-cost-audit.md` §15.
 
 ## Grand Unification Roadmap (`docs/ai-unification/unification-roadmap.md`)
 - [ ] **Tier 1 Migrations:** Canonicalize `check-work`, `owl`, and Epic review skills.

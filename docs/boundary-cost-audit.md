@@ -458,7 +458,7 @@ This data (plus smaller runs) confirms the boundary: extract cheap, savings in s
 See also the Tauri handoff for how native should approach region/ROI and progressive to achieve (or beat) these timings without JS/WASM boundaries.
 
 ### 13.1 Native (Tauri parity harness) — 2026-06-03 timings (supplied results_native.json)
-**Dataset**: Same 11 P2200 files (plus Gobabeb 30 for encode side), using `src/bin/raw_decode_bench.rs` (GOB=30/P2200=11, direct-rgba 4ch path, min-of-3, MSVC release). Small-crop = pre-produced dedicated JXL simulation of subject-rect ROI assets (center 128/256 px). Low-level stateful prog added 2026-06-04 continuation (exercised in verification).
+**Dataset**: Same 11 P2200 files (plus Gobabeb 30 for encode side), using `src/bin/raw_decode_bench.rs` (GOB=30/P2200=11, direct-rgba 4ch path, min-of-3, MSVC release). Small-crop = pre-produced dedicated JXL simulation of subject-rect ROI assets (center 128/256 px). Low-level stateful prog added 2026-06-04 continuation (exercised in verification); 2026-06 continuation: moved to shared `raw-pipeline/jxl_lowlevel` (feature-gated) for Tauri reuse.
 
 **Native numbers (from Handoff Parity Summary in log + supplied JSON)**:
 - direct_rgba (process_rgba tone+RGBA8): n=41 avg=263.4 ms min=234.3 max=398.5 (full tone step; compare WASM glue-only ~65 ms mean — native includes the real work and has zero post-step boundary).
@@ -487,7 +487,7 @@ See `docs/outputs/tauri/gob30-p2200-11-native-parity-2026-06-04.md` for the verb
 - Smoke tests + WASM crate test ensure linkage.
 - `docs/suggested-settings.md` gained a full "Native / Tauri Preferences" section recording the opposite rule from browser (prefer direct rgba for encode flows) + guidance for progressive/ROI/JXTC parity (P3.1–P3.3) on the desktop side.
 - No changes to WASM call sites or ProcessResult (per browser preference after 30-file data).
-- JXTC/tiled/region decode (P3.3) and true progressive (P3.1) for Tauri lightbox remain Tauri-app specific (use jpegxl-sys low-level + JxlDecoderSetCropEnabled etc.); the shared pipeline piece (encode side) and measurement harness are now in place for parity verification on Gobabeb/P2200 sets. Update audit with native numbers once Tauri runs are captured.
+- JXTC/tiled/region decode (P3.3) and true progressive (P3.1) for Tauri lightbox remain Tauri-app specific (use jpegxl-sys low-level + JxlDecoderSetCropEnabled etc.); the shared pipeline piece (encode side) and measurement harness are now in place for parity verification on Gobabeb/P2200 sets. **2026-06: low-level decoder (the state machine itself) is now a first-class shared export in crates/raw-pipeline under jxl-lowlevel so the exact same FFI loop powers bench + Tauri without copy/paste.** Update audit with native numbers once Tauri runs are captured.
 
 ## 14. Progressive Encode Boundary (GroupOrder + multi-DC) — 2026-06 predator note
 
@@ -509,3 +509,47 @@ See `docs/outputs/tauri/gob30-p2200-11-native-parity-2026-06-04.md` for the verb
 - Artifacts: `docs/outputs/reference-small/predator-progressive-layers-2026-06-03T05-35-40.{json,csv}`; full table + obs in `docs/HANDOFF-predator-continuation-2026-06-encode-matrix.md`.
 
 *Next for page-level "first recognizable": human A/B g=0 vs g=1 (Dc=2, passes, previewFirst) on Gobabeb/large refs for spatial quality; use byte-cutoff probe. (Automation smoke via tools/predator-paint-visual-smoke.mjs + serve already executed on small ref: 2 timeline entries, first ~443ms, center proxy score 18.8 with g=1; screenshot in tmp/.) Update this + suggested-settings with full numbers.*
+
+---
+
+## 15. Decision Summary — Next Tier 1 Opportunity (June 2026 close-out)
+
+This section records the formal Tier 1 decision prompted by sections 12–14 data.
+
+### What the data shows
+
+| Boundary | Status | Finding |
+|---|---|---|
+| RAW RGB → RGBA conversion (Phase 2A) | Measured (30-file) | JS path beats `take_rgba()` in browser by ~10-13 ms prep / ~4-5% total. Phase 2B deprioritized. |
+| Decode pixel handoff (buffer_extract) | Measured (11-file) | ~3.8 ms avg in WASM; ~0 ms native. Not a bottleneck. |
+| JXTC vs full decode for crops | Measured (11-file) | 10-30x win for small crops (9-15 ms vs 2.5-2.9 s). This is the biggest remaining win. |
+| Progressive groupOrder + DC boundary cost | Measured (§14) | Zero cost; structural win. Already applied as SNEYERS_PRESET default. |
+| Animation frame marshaling | Code inspection only | N malloc+set per frame. Batching opportunity exists. Not yet measured. |
+| Worker toArrayBuffer transfer | Code inspection only | `slice()` copy in some paths. Not measured in harness. |
+
+### Tier 1 decision: JXTC/tiled pre-production at ingest
+
+**The highest remaining leverage** is to **produce tiled/JXTC JXLs at ingest time** for any asset with known subject rects (focal crop, portrait subject, etc.), so that subsequent thumbnail, lightbox-open, and zoom-crop requests decode in 0.5–15 ms instead of 2.5–3 s.
+
+Evidence: §13 WASM crop benchmark (10-50x win); §13.1 native (10-30x win, 0.8 ms at 128 px). This is already tracked as the top item in the Tauri parity handoff.
+
+For **browser paths** the WASM JXTC decode already exists (`decodeTileContainerRegionRgba8`). The gap is encode-side — not every asset is tiled yet. Rolling out tiled encode at ingest for subject-crop assets closes this.
+
+**Next Tier 1 actions** (ordered):
+1. Tauri ingest: call `encode_variants_with_progressive` with a JXTC pass for any asset where the subject crop is known at ingest. The `crates/raw-pipeline::jxl_lowlevel` module already provides the decode side.
+2. Browser: ensure the lightbox worker uses `decodeTileContainerRegionRgba8` when `card._jxlJxtc` is true (JXTC flag already captured per §P3.3). The `cachePolicy: 'never'` ROI path is already wired; it just needs to prefer the JXTC decode entrypoint when available.
+3. Measure: add a `jxtcEncodeMs` + `jxtcDecodeMs` pair to the ingest harness to confirm the tile overhead at encode time (expected: +50-150 ms on a 20 MP ORF; payoff at first crop request is immediate).
+
+### Remaining unquantified costs (lower priority)
+
+**Animation marshaling**: Estimated 4–6 full buffer copies (malloc+set per frame). Batching into a single large allocation with an index table (one malloc for all pixel data + one for descriptors) would reduce allocator pressure. Not measured; only relevant for multi-frame JXL workflows (rare for RAW/JPEG sources). Deferred until animation workflows are a measured bottleneck.
+
+**Worker `toArrayBuffer` copy**: The `slice()` path in `decode-handler.ts:526` is only taken when the underlying buffer's byteOffset or length doesn't match exactly. Code audit shows most pixel handoffs go through the direct ownership path. Not measured in the harness. Can be quantified by adding `toArrayBufferMs` to DecodeHandler and comparing slice vs transfer call counts in a `wasm-pack` debug build.
+
+### What this closes from INCOMPLETE PLANS
+
+- "Deepen RAW → JXL Implementation": **Closed**. 30-file data shows JS conversion wins; Phase 2B (direct RGBA in crates/raw-pipeline) deprioritized until `take_rgba()` is competitive on prep in browser.
+- "Strengthen Audit Document": **Closed** (sections 12–15 now cover all major boundaries with numbers).
+- "Next Targets": **Decided** — JXTC ingest is Tier 1; animation and toArrayBuffer are lower-priority deferred items.
+
+*Updated June 2026.*
