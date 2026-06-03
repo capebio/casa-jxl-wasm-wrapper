@@ -50,6 +50,21 @@ test('groupOrder (center-out) is exposed in EncoderOptions and plumbed through F
   expect(bridge).toContain('group_order');
 });
 
+test('correlation matrix (encode-space benchmark tool) treats progressiveDc + groupOrder as first-class sweep factors and forwards to createEncoder (predator continuation heat)', () => {
+  const matrix = readFileSync(new URL('../../../web/jxl-correlation-matrix.js', import.meta.url), 'utf8');
+  const worker = readFileSync(new URL('../../../web/jxl-correlation-worker.js', import.meta.url), 'utf8');
+
+  // Factors + bias + N/A (UI side)
+  expect(matrix).toContain('progressiveDc:');
+  expect(matrix).toContain('groupOrder:');
+  expect(matrix).toContain('Predator bias');
+  expect(matrix).toContain('progressiveDc requires progressive');
+
+  // Forwarding in the off-main encode worker (the actual call site for the matrix)
+  expect(worker).toContain('progressiveDc: combo.progressive');
+  expect(worker).toContain('groupOrder: combo.progressive');
+});
+
 test('progressive encoder enables responsive ordering like cjxl --progressive', () => {
   expect(bridge).toContain('JXL_ENC_FRAME_SETTING_RESPONSIVE');
   expect(bridge).toContain('ApplyProgressiveFrameSettings');
@@ -80,6 +95,8 @@ test('stateful progressive decoder releases prior input before appending stream 
 test('stateful progressive decoder opportunistically flushes partial pixels on NEED_MORE_INPUT', () => {
   expect(bridge).toContain('TryFlushProgressiveImage');
   expect(bridge).toContain('status == JXL_DEC_NEED_MORE_INPUT');
+  expect(bridge).toContain('opportunistic_flush_generation != s->input_generation');
+  expect(bridge).toContain('s->opportunistic_flush_generation = s->input_generation');
   expect(bridge).toContain('return JXL_DEC_RESULT_PROGRESS');
 });
 

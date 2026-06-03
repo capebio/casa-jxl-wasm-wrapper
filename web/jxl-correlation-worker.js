@@ -62,6 +62,10 @@ self.onmessage = async (event) => {
         effort: combo.effort ?? 5,
         modular: isLossless ? 1 : (combo.modular !== undefined && combo.modular !== -1 ? combo.modular : undefined),
         progressive: !!combo.progressive,
+        // Predator progressive continuation: forward Dc layers + center-out group order so matrix sweeps
+        // can quantify the early recognizable passes (Dc=2 + group=1) vs baselines.
+        progressiveDc: combo.progressive && combo.progressiveDc != null ? combo.progressiveDc : (combo.progressive ? 1 : 0),
+        groupOrder: combo.progressive && combo.groupOrder != null ? combo.groupOrder : (combo.progressive ? 1 : 0),
         brotliEffort: combo.brotliEffort != null && combo.brotliEffort >= 0 ? combo.brotliEffort : undefined,
         decodingSpeed: combo.decodingSpeed,
         resampling: combo.resampling,

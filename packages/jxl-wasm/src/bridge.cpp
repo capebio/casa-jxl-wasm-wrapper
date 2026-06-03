@@ -97,6 +97,8 @@ struct JxlWasmDecState {
   uint8_t* input_buf;    // owned decoder input: unprocessed tail + newly appended bytes
   size_t   input_size;
   size_t   input_capacity;
+  size_t   input_generation;
+  size_t   opportunistic_flush_generation;
   int error_code;
   // Gain map (jhgm box accumulation + parsed JXL codestream)
   uint8_t* gm_buf;           // raw jhgm box bytes being accumulated
@@ -1933,6 +1935,7 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
     }
     memcpy(s->input_buf + s->input_size, data, size);
     s->input_size = needed;
+    s->input_generation++;
     JxlDecoderSetInput(s->dec, s->input_buf, s->input_size);
     s->input_set = true;
   }
@@ -1942,7 +1945,8 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
     status = JxlDecoderProcessInput(s->dec);
 
     if (status == JXL_DEC_NEED_MORE_INPUT) {
-      if (!s->input_closed && TryFlushProgressiveImage(s)) {
+      if (!s->input_closed && s->opportunistic_flush_generation != s->input_generation && TryFlushProgressiveImage(s)) {
+        s->opportunistic_flush_generation = s->input_generation;
         return JXL_DEC_RESULT_PROGRESS;
       }
       if (s->input_closed) {

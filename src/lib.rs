@@ -5,8 +5,8 @@
 //! and EXIF orientation, returning an interleaved RGB8 buffer plus dims.
 //!
 //! Encoding (JXL / WebP) is left to JS via jSquash — keeps the wasm small.
-//! All stages here are single-threaded; switch to `wasm-bindgen-rayon` if
-//! the host can set COOP/COEP and we want to use Web Workers.
+//! Stages use rayon (when built with `parallel-wasm` feature + initThreadPool()
+//! called). Requires COOP/COEP (already needed for libjxl MT).
 
 use raw_pipeline::decompress;
 use raw_pipeline::demosaic;
@@ -1676,7 +1676,7 @@ fn process_dng_impl(
 }
 
 /// Parse + decode a DNG file blob. Returns an error string on failure.
-/// Single-threaded (no rayon in WASM).  Look params: LR-style (-1..+1), except
+/// (Rayon when parallel-wasm feature active.) Look params: LR-style (-1..+1), except
 /// exposure_ev in stops.  Pass NaN/≤0 for wb_r_override/wb_b_override to use defaults.
 ///
 /// Always generates full RGB8, 1800 px lightbox RGB16, and 360 px thumbnail RGB16.

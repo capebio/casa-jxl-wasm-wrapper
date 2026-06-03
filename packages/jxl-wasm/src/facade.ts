@@ -199,6 +199,7 @@ export interface EncoderOptions {
    * must rotate pixels themselves in that fallback case).
    */
   orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  onMetric?: (name: string, value: number) => void;
   /**
    * Frame data for animation encode. When set, replaces the single-image pushPixels path.
    * Requires rebuilt WASM with animation bridge (_jxl_wasm_encode_animation).
@@ -1387,6 +1388,9 @@ class LibjxlDecoder implements JxlDecoder {
       let fallbackMetricEmitted = false;
       let drainPending = false;
       let inputClosed = false;
+      let pushWasmMs = 0;
+      let takeFlushedMs = 0;
+      let takeFinalMs = 0;
 
       // IMPROVEMENT-7: Batch all queued data chunks into one WASM write per tick.
       // IMPROVEMENT-9: Guard dec_width/dec_height calls behind !headerEmitted — skip 2 WASM
@@ -1400,7 +1404,9 @@ class LibjxlDecoder implements JxlDecoder {
         let result = 0;
 
         if (drainPending) {
+          const tPushStart = performance.now();
           result = decPush(dec, 0, 0);
+          pushWasmMs += performance.now() - tPushStart;
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
         } else if (this.chunkQueue.length > this.readIndex && this.chunkQueue[this.readIndex] === null) {
           // Close sentinel — flush remaining decoder state, then keep draining until done.
@@ -1408,7 +1414,9 @@ class LibjxlDecoder implements JxlDecoder {
           this.compactQueue();
           decCloseInput(dec);
           inputClosed = true;
+          const tPushStart = performance.now();
           result = decPush(dec, 0, 0);
+          pushWasmMs += performance.now() - tPushStart;
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
         } else {
           // Pending byte count maintained incrementally — no scan needed.
@@ -1429,7 +1437,9 @@ class LibjxlDecoder implements JxlDecoder {
             woff += chunk.byteLength;
           }
           this.compactQueue();
+          const tPushStart = performance.now();
           result = decPush(dec, chunkBufPtr, batchBytes);
+          pushWasmMs += performance.now() - tPushStart;
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
         }
 
@@ -1448,7 +1458,9 @@ class LibjxlDecoder implements JxlDecoder {
           gotRealFlush = true;
           flushCount++;
           const stage: DecodeStage = flushCount === 1 ? "dc" : "pass";
+          const tTakeStart = performance.now();
           const wrapped = takeAndWrap(decTakeFlushed(dec));
+          takeFlushedMs += performance.now() - tTakeStart;
           if (wrapped !== null) {
             const { pixels: rawPixels, evInfo } = wrapped;
 
@@ -1502,7 +1514,9 @@ class LibjxlDecoder implements JxlDecoder {
       }
 
       if (done) {
+        const tTakeFinalStart = performance.now();
         const wrapped = takeAndWrap(decTakeFinal(dec));
+        takeFinalMs += performance.now() - tTakeFinalStart;
         if (wrapped !== null) {
           const { pixels: rawPixels, evInfo } = wrapped;
 
@@ -1589,6 +1603,11 @@ class LibjxlDecoder implements JxlDecoder {
           yield ev;
         }
       }
+      if (onMetric) {
+        onMetric("progressive_decoder_push_wasm_ms", pushWasmMs);
+        onMetric("progressive_decoder_take_flushed_ms", takeFlushedMs);
+        onMetric("progressive_decoder_take_final_ms", takeFinalMs);
+      }
     } finally {
       if (chunkBufPtr !== 0) module._free(chunkBufPtr);
       decFree(dec);
@@ -1617,6 +1636,7 @@ class LibjxlDecoder implements JxlDecoder {
     // Write all chunks directly into a single WASM heap buffer — no intermediate JS allocation.
     const inputPtr = module._malloc(totalSize);
     let decodedHandle = 0;
+    const onMetric = this.options.onMetric;
     try {
       let woff = 0;
       for (const chunk of allChunks) {
@@ -1632,7 +1652,9 @@ class LibjxlDecoder implements JxlDecoder {
         (fmt === "rgba16" && !!module._jxl_wasm_decode_rgba16_region) ||
         (fmt === "rgbaf32" && !!module._jxl_wasm_decode_rgbaf32_region)
       );
+      const tDecodeWasmStart = performance.now();
       const decoded = callDecodeFromPtr(module, inputPtr, totalSize, this.options.downsample ?? 1, fmt, cppDidCrop ? regionForDecode : null);
+      onMetric?.("full_decoder_wasm_ms", performance.now() - tDecodeWasmStart);
       decodedHandle = decoded.handle;
       // If C++ did the crop, decoded.width/height already reflect the region; no further JS crop.
       // Otherwise, scale region into downsampled coords and apply in JS.
@@ -1643,6 +1665,7 @@ class LibjxlDecoder implements JxlDecoder {
         w: Math.ceil(regionForDecode.w / ds),
         h: Math.ceil(regionForDecode.h / ds),
       } : null;
+      const tRegionStart = performance.now();
       const pixels = applyRegionAndDownsample(
         decoded.data,
         decoded.width,
@@ -1651,6 +1674,7 @@ class LibjxlDecoder implements JxlDecoder {
         1,
         bpc,
       );
+      onMetric?.("full_decoder_region_downsample_ms", performance.now() - tRegionStart);
       // C++ crop path skips applyRegionAndDownsample's region-setter; restore it to match JS path.
       if (cppDidCrop) pixels.region = { x: 0, y: 0, w: pixels.width, h: pixels.height };
       // P1: apply bilinear resize to exact target size if requested.
@@ -1659,7 +1683,9 @@ class LibjxlDecoder implements JxlDecoder {
       const fitMode = this.options.fitMode ?? "contain";
       let outPixels = pixels;
       if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+        const tResizeStart = performance.now();
         const resized = applyTargetResize(pixels.data, pixels.width, pixels.height, targetW, targetH, fitMode, bpc);
+        onMetric?.("full_decoder_resize_ms", performance.now() - tResizeStart);
         outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(pixels.region !== undefined ? { region: pixels.region } : {}) };
       }
 
@@ -1674,7 +1700,6 @@ class LibjxlDecoder implements JxlDecoder {
 
       // P5: emit decode metrics via onMetric callback.
       const actualScale = this.options.downsample ?? 1;
-      const onMetric = this.options.onMetric;
       if (onMetric) {
         onMetric("decode_scale_used", actualScale);
         onMetric("source_pixels_decoded", decoded.width * decoded.height);
@@ -1837,10 +1862,12 @@ class LibjxlEncoder implements JxlEncoder {
   private moduleInitPromise: Promise<LibjxlWasmModule> | null = null;
   private pendingPushPromise: Promise<void> = Promise.resolve();
   private pendingPushError: unknown = null;
+  private readonly onMetric?: (name: string, value: number) => void;
 
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
     this.pixelByteTotal = expectedPixelBytes(options.width, options.height, options.format);
+    this.onMetric = options.onMetric;
   }
 
   async pushPixels(chunk: ArrayBuffer | Uint8Array, region?: Region): Promise<void> {
@@ -1858,6 +1885,7 @@ class LibjxlEncoder implements JxlEncoder {
       if (this.cancelled) return;
 
       if (this.streamingInputActive) {
+        const tWasmPushStart = performance.now();
         if (module._jxl_wasm_enc_pixels_ptr && module._jxl_wasm_enc_advance_written) {
           const ptr = module._jxl_wasm_enc_pixels_ptr(this.wasmEncState, view.byteLength);
           if (ptr === 0) throw new Error("JXL streaming pixel push failed (0)");
@@ -1875,6 +1903,7 @@ class LibjxlEncoder implements JxlEncoder {
             module._free(ptr);
           }
         }
+        this.onMetric?.("enc_push_pixels_ms", performance.now() - tWasmPushStart);
       } else {
         this.pixelChunks.push(view);
       }
@@ -1891,7 +1920,9 @@ class LibjxlEncoder implements JxlEncoder {
   }
 
   private async initModule(): Promise<LibjxlWasmModule> {
+    const tLoadStart = performance.now();
     const module = await loadLibjxlModule();
+    this.onMetric?.("enc_module_load_ms", performance.now() - tLoadStart);
     this.wasmModule = module;
     if (this.cancelled) return module;
 
@@ -1920,6 +1951,7 @@ class LibjxlEncoder implements JxlEncoder {
             "Rebuild packages/jxl-wasm to enable JXL's orientation-tag fast path.",
         );
       }
+      const tCreateStart = performance.now();
       if (caps.extOptions && orientation !== 1 && module._jxl_wasm_enc_create_image_z) {
         // JXL "free rotation": record orientation in basic info, pixels stay sensor-native.
         this.wasmEncState = module._jxl_wasm_enc_create_image_z(
@@ -1956,6 +1988,7 @@ class LibjxlEncoder implements JxlEncoder {
           progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, resampling,
         );
       }
+      this.onMetric?.("enc_create_image_ms", performance.now() - tCreateStart);
       if (this.wasmEncState === 0) throw new Error("JXL streaming encoder: pixel buffer allocation failed");
       if (this.cancelled) {
         this.freeWasmState();
@@ -1963,6 +1996,7 @@ class LibjxlEncoder implements JxlEncoder {
       }
       // B3: push ICC/EXIF/XMP into WASM before pixels arrive
       if (module._jxl_wasm_enc_set_metadata && (effIcc !== null || effExif !== null || effXmp !== null)) {
+        const tMetaStart = performance.now();
         const iccV = effIcc ? new Uint8Array(effIcc) : new Uint8Array(0);
         const exifV = effExif ? new Uint8Array(effExif) : new Uint8Array(0);
         const xmpV = effXmp ? new Uint8Array(effXmp) : new Uint8Array(0);
@@ -1976,6 +2010,7 @@ class LibjxlEncoder implements JxlEncoder {
         if (iccPtr) module._free(iccPtr);
         if (exifPtr) module._free(exifPtr);
         if (xmpPtr) module._free(xmpPtr);
+        this.onMetric?.("enc_set_metadata_ms", performance.now() - tMetaStart);
       }
       this.streamingInputActive = true;
     }
@@ -2068,14 +2103,22 @@ class LibjxlEncoder implements JxlEncoder {
       // #16: Streaming input path — pixels already in WASM pixel buffer.
       // enc_finish runs the encode; enc_take_chunk drains the output.
       try {
+        const tFinishStart = performance.now();
         const rc = module._jxl_wasm_enc_finish!(this.wasmEncState);
         if (rc !== 0) throw new Error(`JXL streaming encode finish failed (${rc})`);
+        this.onMetric?.("enc_finish_wasm_ms", performance.now() - tFinishStart);
+        const tDrainStart = performance.now();
+        let takeChunkMs = 0;
         let chunkHandle: number;
         while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(this.wasmEncState)) !== 0) {
+          const tTakeStart = performance.now();
           const chunk = takeBuffer(module, chunkHandle, "encode");
+          takeChunkMs += performance.now() - tTakeStart;
           compressedBytes += chunk.data.byteLength;
           yield chunk.data;
         }
+        this.onMetric?.("enc_take_chunk_ms", takeChunkMs);
+        this.onMetric?.("enc_drain_ms", performance.now() - tDrainStart);
       } finally {
         module._jxl_wasm_enc_free!(this.wasmEncState);
         this.wasmEncState = 0;
