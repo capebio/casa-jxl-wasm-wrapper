@@ -1,5 +1,4 @@
-import { startWorkers } from './snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.js';
-
+/* @ts-self-types="./raw_converter_wasm.d.ts" */
 
 /**
  * Timing results for the decompress + demosaic stages only.
@@ -65,6 +64,12 @@ if (Symbol.dispose) DecodeBench.prototype[Symbol.dispose] = DecodeBench.prototyp
  * in-place sharpening so the cached buffer is never mutated.
  */
 export class LookRenderer {
+    static __wrap(ptr) {
+        const obj = Object.create(LookRenderer.prototype);
+        obj.__wbg_ptr = ptr;
+        LookRendererFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -74,6 +79,21 @@ export class LookRenderer {
     free() {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_lookrenderer_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get native_height() {
+        const ret = wasm.lookrenderer_native_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Source-buffer dimensions (sensor orientation, pre-rotation).
+     * @returns {number}
+     */
+    get native_width() {
+        const ret = wasm.lookrenderer_native_width(this.__wbg_ptr);
+        return ret >>> 0;
     }
     /**
      * Construct from a packed u16-LE buffer (6 bytes per pixel, as returned by
@@ -98,6 +118,40 @@ export class LookRenderer {
         this.__wbg_ptr = ret[0];
         LookRendererFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * Variant of `new` that lets the caller opt out of CPU rotation in
+     * `render()`. When `apply_rotation` is `false`, `render()` returns
+     * sensor-orientation RGB8 (same dims as `rgb16` source) and the JS side
+     * must apply the EXIF rotation at display time (canvas/CSS transform).
+     * Saves a full-buffer transpose per slider tick for non-identity orientations.
+     * @param {Uint8Array} rgb16_bytes
+     * @param {number} width
+     * @param {number} height
+     * @param {number} orientation
+     * @param {Float32Array} color_matrix_flat
+     * @param {boolean} apply_rotation
+     * @returns {LookRenderer}
+     */
+    static new_with_options(rgb16_bytes, width, height, orientation, color_matrix_flat, apply_rotation) {
+        const ptr0 = passArray8ToWasm0(rgb16_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(color_matrix_flat, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.lookrenderer_new_with_options(ptr0, len0, width, height, orientation, ptr1, len1, apply_rotation);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return LookRenderer.__wrap(ret[0]);
+    }
+    /**
+     * EXIF orientation tag (1..8) stored at construction. Consumers using
+     * `apply_rotation=false` read this to drive display-time rotation.
+     * @returns {number}
+     */
+    get orientation() {
+        const ret = wasm.lookrenderer_orientation(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Apply look parameters and return an RGB8 buffer (post-orientation).
@@ -777,15 +831,6 @@ export function downscale_rgba(src, src_w, src_h, dst_w, dst_h) {
 }
 
 /**
- * @param {number} num_threads
- * @returns {Promise<any>}
- */
-export function initThreadPool(num_threads) {
-    const ret = wasm.initThreadPool(num_threads);
-    return ret;
-}
-
-/**
  * Parse ORF EXIF metadata only — no decompress, no demosaic, no tonemap.
  * Returns camera, lens, exposure, GPS for batch ingest and gallery views.
  * @param {Uint8Array} data
@@ -1046,50 +1091,6 @@ export function rotate_rgb8(src, width, height, turns) {
     }
     return RotateResult.__wrap(ret[0]);
 }
-
-export class wbg_rayon_PoolBuilder {
-    static __wrap(ptr) {
-        const obj = Object.create(wbg_rayon_PoolBuilder.prototype);
-        obj.__wbg_ptr = ptr;
-        wbg_rayon_PoolBuilderFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        wbg_rayon_PoolBuilderFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 0);
-    }
-    build() {
-        wasm.wbg_rayon_poolbuilder_build(this.__wbg_ptr);
-    }
-    /**
-     * @returns {number}
-     */
-    numThreads() {
-        const ret = wasm.wbg_rayon_poolbuilder_numThreads(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    receiver() {
-        const ret = wasm.wbg_rayon_poolbuilder_receiver(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-}
-if (Symbol.dispose) wbg_rayon_PoolBuilder.prototype[Symbol.dispose] = wbg_rayon_PoolBuilder.prototype.free;
-
-/**
- * @param {number} receiver
- */
-export function wbg_rayon_start_worker(receiver) {
-    wasm.wbg_rayon_start_worker(receiver);
-}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -1099,14 +1100,6 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_undefined_35bb9f4c7fd651d5: function(arg0) {
             const ret = arg0 === undefined;
-            return ret;
-        },
-        __wbg___wbindgen_memory_9544558992fc5400: function() {
-            const ret = wasm.memory;
-            return ret;
-        },
-        __wbg___wbindgen_module_598c7f098f85bbd9: function() {
-            const ret = wasmModule;
             return ret;
         },
         __wbg___wbindgen_throw_9c31b086c2b26051: function(arg0, arg1) {
@@ -1147,10 +1140,6 @@ function __wbg_get_imports() {
         __wbg_performance_ddd4e7eeef6254f3: function(arg0) {
             const ret = arg0.performance;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
-        },
-        __wbg_startWorkers_8b582d57e92bd2d4: function(arg0, arg1, arg2) {
-            const ret = startWorkers(arg0, arg1, wbg_rayon_PoolBuilder.__wrap(arg2));
-            return ret;
         },
         __wbg_static_accessor_GLOBAL_THIS_02344c9b09eb08a9: function() {
             const ret = typeof globalThis === 'undefined' ? null : globalThis;
@@ -1199,9 +1188,6 @@ const ProcessResultFinalization = (typeof FinalizationRegistry === 'undefined')
 const RotateResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rotateresult_free(ptr, 1));
-const wbg_rayon_PoolBuilderFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();

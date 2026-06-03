@@ -1298,7 +1298,21 @@ class LibjxlEncoder {
             // A3: rgb8 maps to fmtIndex 3; rgba16→1, rgbaf32→2, rgba8→0
             const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : this.options.format === "rgb8" ? 3 : 0;
             const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform } = resolveEncoderBridgeSettings(this.options);
-            if (caps.extOptions && module._jxl_wasm_enc_create_image_y) {
+            const orientation = this.options.orientation ?? 1;
+            if (orientation !== 1 && !caps.orientation) {
+                // Bridge lacks the _z / _v3 entrypoints. Pixels are still encoded but
+                // JXL stores orientation = identity — viewers will display the sensor
+                // orientation (rotated wrong for portrait shots). Rebuild jxl-wasm to
+                // pick up the orientation bridge for correct output.
+                // eslint-disable-next-line no-console
+                console.warn(`[jxl-wasm] orientation=${orientation} requested but WASM bridge lacks _z/_v3 support. ` +
+                    "Rebuild packages/jxl-wasm to enable JXL's orientation-tag fast path.");
+            }
+            if (caps.extOptions && orientation !== 1 && module._jxl_wasm_enc_create_image_z) {
+                // JXL "free rotation": record orientation in basic info, pixels stay sensor-native.
+                this.wasmEncState = module._jxl_wasm_enc_create_image_z(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform, orientation);
+            }
+            else if (caps.extOptions && module._jxl_wasm_enc_create_image_y) {
                 this.wasmEncState = module._jxl_wasm_enc_create_image_y(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform);
             }
             else if (caps.extOptions && module._jxl_wasm_enc_create_image_x) {
@@ -1664,9 +1678,12 @@ class LibjxlEncoder {
                         const iccPtr = iccView.byteLength > 0 ? module._malloc(iccView.byteLength) : 0;
                         const exifPtr = exifView.byteLength > 0 ? module._malloc(exifView.byteLength) : 0;
                         const xmpPtr = xmpView.byteLength > 0 ? module._malloc(xmpView.byteLength) : 0;
-                        const useBoxV2Std = needsBoxOptsV2(this.options) && caps.metadataBoxesV2 &&
+                        const orientationStd = this.options.orientation ?? 1;
+                        const useV3Std = orientationStd !== 1 &&
+                            typeof module._jxl_wasm_encode_rgba8_with_metadata_v3 === "function";
+                        const useBoxV2Std = !useV3Std && needsBoxOptsV2(this.options) && caps.metadataBoxesV2 &&
                             typeof module._jxl_wasm_encode_rgba8_with_metadata_v2 === "function";
-                        const { ptr: boxOptsPtr2, freePtrs: boxOptsPtrs2 } = useBoxV2Std
+                        const { ptr: boxOptsPtr2, freePtrs: boxOptsPtrs2 } = (useV3Std || useBoxV2Std)
                             ? marshalBoxOpts(module, this.options)
                             : { ptr: 0, freePtrs: [] };
                         try {
@@ -1676,7 +1693,10 @@ class LibjxlEncoder {
                                 module.HEAPU8.set(exifView, exifPtr);
                             if (xmpPtr !== 0)
                                 module.HEAPU8.set(xmpView, xmpPtr);
-                            if (useBoxV2Std) {
+                            if (useV3Std) {
+                                handle = module._jxl_wasm_encode_rgba8_with_metadata_v3(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength, boxOptsPtr2, orientationStd);
+                            }
+                            else if (useBoxV2Std) {
                                 handle = module._jxl_wasm_encode_rgba8_with_metadata_v2(ptr, this.options.width, this.options.height, distance, this.options.effort, fmt, hasAlpha, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, iccPtr, iccView.byteLength, exifPtr, exifView.byteLength, xmpPtr, xmpView.byteLength, boxOptsPtr2);
                             }
                             else {
@@ -1860,6 +1880,8 @@ function getCapabilities(module) {
         extOptions: typeof module._jxl_wasm_encode_rgba8_x === "function",
         extraChannelEncode: typeof module._jxl_wasm_encode_rgba8_with_metadata_ec === "function",
         metadataBoxesV2: typeof module._jxl_wasm_encode_rgba8_with_metadata_v2 === "function",
+        orientation: typeof module._jxl_wasm_enc_create_image_z === "function" ||
+            typeof module._jxl_wasm_encode_rgba8_with_metadata_v3 === "function",
         gainMapEncode: typeof module._jxl_wasm_encode_with_gain_map === "function",
         animationEncode: typeof module._jxl_wasm_encode_animation === "function",
         animationSeek: typeof module._jxl_wasm_dec_seek_to_frame === "function",

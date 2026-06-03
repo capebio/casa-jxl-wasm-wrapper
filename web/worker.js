@@ -20,7 +20,25 @@
 
 import init, * as rawWasm from './pkg/raw_converter_wasm.js';
 // A3: rgb_to_rgba removed — send RGB8 directly to JXL worker (saves ~250ms + 25% transfer)
-const { process_orf, LookRenderer, rotate_rgb8 } = rawWasm;
+const { process_orf, process_orf_with_flags, LookRenderer, rotate_rgb8 } = rawWasm;
+
+// EXIF orientation flag bits (mirror src/lib.rs).
+const OUT_FULL_RGB8 = 1;
+const OUT_LIGHTBOX  = 2;
+const OUT_THUMB     = 4;
+const OUT_NO_ORIENT = 8;
+
+// Compose EXIF orientation tag (1..8) with N additional CW quarter-turns.
+// Only handles the cycle {1, 6, 3, 8} that maps to pure rotations — Olympus
+// ORFs never produce 2/4/5/7 (mirror variants). Returns the original tag
+// unchanged for those edge cases (caller still gets a correct image since
+// JXL will record the mirror; userTurns just doesn't compose with mirrors).
+function composeOrientation(exifOri, cwTurns) {
+    const cycle = [1, 6, 3, 8];          // 0°, 90° CW, 180°, 270° CW
+    const idx = cycle.indexOf(exifOri);
+    if (idx < 0) return exifOri;          // mirror variants — pass through
+    return cycle[(idx + (cwTurns & 3)) & 3];
+}
 
 // JXL encoding is handled by jxl-worker.js (spawned from the main thread).
 
@@ -48,16 +66,25 @@ async function ensureWasm() {
 // makeLiveState constructs a LookRenderer (WASM-resident) from packed rgb16 bytes.
 // The renderer owns the RGB16 buffer inside WASM; subsequent render() calls
 // transfer only the output RGB8, not the cached buffer.
+//
+// Phase 2: construct with apply_rotation=false. render() returns sensor-orient
+// pixels with sensor dims. Main thread applies EXIF rotation as a canvas
+// transform during draw — GPU-accelerated, decoupled from slider tick rate.
 function makeLiveState(rgb16Bytes, w, h, orientation, wbR, wbB, colorMatrix) {
     // Only orientations 6 (90° CW) and 8 (90° CCW) actually swap axes in
     // apply_orientation (pipeline.rs).  Tags 5/7 are pass-through there, so
     // using orientation >= 5 overreports axisSwap and mis-sizes the canvas.
     const axisSwap = orientation === 6 || orientation === 8;
-    const renderer = new LookRenderer(rgb16Bytes, w, h, orientation, colorMatrix);
+    const renderer = LookRenderer.new_with_options(rgb16Bytes, w, h, orientation, colorMatrix, false);
     return {
         renderer,
+        // Native source dims (sensor orientation).
+        nativeW: w,
+        nativeH: h,
+        // Display dims after rotation (what the canvas should be sized to).
         outW: axisSwap ? h : w,
         outH: axisSwap ? w : h,
+        orientation,
         wbR, wbB,
     };
 }
@@ -97,7 +124,13 @@ self.addEventListener('message', async (ev) => {
             const rgb = applyLookToState(state, look);
             const liveMs = performance.now() - t0;
             self.postMessage(
-                { id, type: 'lightbox_live', rgb, w: state.outW, h: state.outH, liveMs },
+                { id, type: 'lightbox_live', rgb,
+                  // Phase 2: rgb is in sensor orientation (nativeW × nativeH).
+                  // Display canvas is sized outW × outH. Main thread rotates via canvas transform.
+                  w: state.outW, h: state.outH,
+                  nativeW: state.nativeW, nativeH: state.nativeH,
+                  orientation: state.orientation,
+                  liveMs },
                 [rgb.buffer],
             );
         } catch (err) {
@@ -115,7 +148,10 @@ self.addEventListener('message', async (ev) => {
             try {
                 const rgb = applyLookToState(state, look);
                 self.postMessage(
-                    { id: tid, type: 'thumb_live', rgb, w: state.outW, h: state.outH },
+                    { id: tid, type: 'thumb_live', rgb,
+                      w: state.outW, h: state.outH,
+                      nativeW: state.nativeW, nativeH: state.nativeH,
+                      orientation: state.orientation },
                     [rgb.buffer],
                 );
             } catch (err) {
@@ -136,8 +172,13 @@ self.addEventListener('message', async (ev) => {
 
         const pT0 = performance.now();
         const look = options.look || {};
-        const result = process_orf(
+        // OUT_NO_ORIENT: skip apply_orientation on the full RGB8 — JXL records
+        // rotation as metadata, so pixels stay sensor-native and we avoid the
+        // 60–200 MB intermediate buffer + cache-hostile transpose at encode prep.
+        const fullPipeFlags = OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB | OUT_NO_ORIENT;
+        const result = process_orf_with_flags(
             bytes,
+            fullPipeFlags,
             look.exposureEv ?? 0,
             look.contrast   ?? 0,
             look.highlights ?? 0,
@@ -153,6 +194,7 @@ self.addEventListener('message', async (ev) => {
             look.texture ?? 0,
             look.clarity ?? 0,
         );
+        // OUT_NO_ORIENT: result.width/height are sensor dims (pre-rotation).
         let w = result.width;
         let h = result.height;
         const pipelineMs = performance.now() - pT0;
@@ -200,10 +242,14 @@ self.addEventListener('message', async (ev) => {
 
         // thumb RGB8 — apply look to the pre-scaled rgb16 (360px) already cached in thumbStateMap.
         // Avoids downscaling the full 20MP fullRgb (~200× more pixels) for the same result.
+        // Phase 2: rgb is sensor-orient; main thread rotates via canvas transform.
         const thumbState = thumbStateMap.get(id);
         const thumbRgb = applyLookToState(thumbState, look);
         self.postMessage(
-            { id, type: 'thumb', rgb: thumbRgb, w: thumbState.outW, h: thumbState.outH,
+            { id, type: 'thumb', rgb: thumbRgb,
+              w: thumbState.outW, h: thumbState.outH,
+              nativeW: thumbState.nativeW, nativeH: thumbState.nativeH,
+              orientation: thumbState.orientation,
               pipelineMs, phaseMs, wbR, wbB, make, model, colorMatrixFromMn, exif },
             [thumbRgb.buffer],
         );
@@ -212,23 +258,19 @@ self.addEventListener('message', async (ev) => {
         const lbState = liveStateMap.get(id);
         const bigRgb = applyLookToState(lbState, look);
         self.postMessage(
-            { id, type: 'lightbox', rgb: bigRgb, w: lbState.outW, h: lbState.outH },
+            { id, type: 'lightbox', rgb: bigRgb,
+              w: lbState.outW, h: lbState.outH,
+              nativeW: lbState.nativeW, nativeH: lbState.nativeH,
+              orientation: lbState.orientation },
             [bigRgb.buffer],
         );
 
-        // Bake user rotation into JXL pixels — display rotation is CSS-side in main thread
+        // JXL records orientation as metadata — no pixel rotation needed for the
+        // EXIF tag. User rotation (90° turns from the UI) composes into the
+        // same tag, so userTurns also never triggers a CPU rotate.
         const userTurns = Math.round(((options.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
-        let fullRgb;
-        if (userTurns !== 0) {
-            const rawRgb = result.take_rgb();
-            const rotRes = rotate_rgb8(rawRgb, w, h, userTurns);
-            fullRgb = rotRes.take_rgb();
-            w = rotRes.width;
-            h = rotRes.height;
-            rotRes.free();
-        } else {
-            fullRgb = result.take_rgb();
-        }
+        const encodeOrientation = composeOrientation(ori, userTurns);
+        let fullRgb = result.take_rgb();
 
         // A3: send RGB8 directly — skip the ~210ms rgb_to_rgba conversion and 25% larger transfer.
         const rgbBuf = fullRgb.buffer.slice(fullRgb.byteOffset, fullRgb.byteOffset + fullRgb.byteLength);
@@ -237,7 +279,8 @@ self.addEventListener('message', async (ev) => {
             { id, type: 'encode_request', pixels: rgbBuf, format: 'rgb8', width: w, height: h,
               quality: options.lossless ? 100 : options.quality,
               effort: options.effort ?? 3,
-              lossless: !!options.lossless },
+              lossless: !!options.lossless,
+              orientation: encodeOrientation },
             [rgbBuf],
         );
     } catch (err) {

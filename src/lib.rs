@@ -386,6 +386,11 @@ fn target_dims(w: usize, h: usize, long_edge: usize) -> (usize, usize) {
 const OUT_FULL_RGB8: u32 = 1; // full-resolution RGB8 for JXL encoding
 const OUT_LIGHTBOX: u32 = 2; // 1800 px RGB16 for LookRenderer
 const OUT_THUMB: u32 = 4; // 360 px RGB16 for thumb LookRenderer
+// Skip apply_orientation on the OUT_FULL_RGB8 output. Pixels and width/height
+// stay in sensor orientation; consumer reads `orientation` to know how to display
+// (or to pass to JXL encoder via basic info). Saves the 60–200 MB intermediate
+// rotate when feeding the encoder (JXL stores orientation as metadata).
+const OUT_NO_ORIENT: u32 = 8;
 
 struct LookOverrides {
     wb_r: f32,
@@ -582,7 +587,10 @@ fn process_orf_impl(
         let tonemap_ms = now_ms() - t;
         drop(rgb16);
         let t2 = now_ms();
-        let (fr, fw, fh) = if info.orientation == 1 {
+        // OUT_NO_ORIENT lets the encoder use JXL's basic-info orientation field
+        // — no CPU rotate, no 60–200 MB intermediate buffer.
+        let skip_orient = (output_flags & OUT_NO_ORIENT) != 0;
+        let (fr, fw, fh) = if skip_orient || info.orientation == 1 {
             (rgb8, w, h)
         } else {
             pipeline::apply_orientation(rgb8, w, h, info.orientation)
@@ -1179,6 +1187,11 @@ pub struct LookRenderer {
     width: usize,
     height: usize,
     orientation: u16,
+    // When false, `render()` returns sensor-orientation RGB8 (sensor width/height)
+    // and the consumer is responsible for applying the rotation — typically via
+    // a CSS / canvas-transform draw, which is free on the GPU. When true (legacy
+    // default), the rotation is baked into pixels during render.
+    apply_rotation: bool,
     color_matrix: [[f32; 3]; 3],
 }
 
@@ -1195,6 +1208,22 @@ impl LookRenderer {
         height: u32,
         orientation: u16,
         color_matrix_flat: &[f32],
+    ) -> Result<LookRenderer, JsError> {
+        Self::new_with_options(rgb16_bytes, width, height, orientation, color_matrix_flat, true)
+    }
+
+    /// Variant of `new` that lets the caller opt out of CPU rotation in
+    /// `render()`. When `apply_rotation` is `false`, `render()` returns
+    /// sensor-orientation RGB8 (same dims as `rgb16` source) and the JS side
+    /// must apply the EXIF rotation at display time (canvas/CSS transform).
+    /// Saves a full-buffer transpose per slider tick for non-identity orientations.
+    pub fn new_with_options(
+        rgb16_bytes: &[u8],
+        width: u32,
+        height: u32,
+        orientation: u16,
+        color_matrix_flat: &[f32],
+        apply_rotation: bool,
     ) -> Result<LookRenderer, JsError> {
         let w = width as usize;
         let h = height as usize;
@@ -1237,8 +1266,27 @@ impl LookRenderer {
             width: w,
             height: h,
             orientation,
+            apply_rotation,
             color_matrix,
         })
+    }
+
+    /// EXIF orientation tag (1..8) stored at construction. Consumers using
+    /// `apply_rotation=false` read this to drive display-time rotation.
+    #[wasm_bindgen(getter)]
+    pub fn orientation(&self) -> u16 {
+        self.orientation
+    }
+
+    /// Source-buffer dimensions (sensor orientation, pre-rotation).
+    #[wasm_bindgen(getter)]
+    pub fn native_width(&self) -> u32 {
+        self.width as u32
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn native_height(&self) -> u32 {
+        self.height as u32
     }
 
     /// Apply look parameters and return an RGB8 buffer (post-orientation).
@@ -1293,7 +1341,7 @@ impl LookRenderer {
             pipeline::process(&self.rgb16, &params)
         };
 
-        if self.orientation == 1 {
+        if !self.apply_rotation || self.orientation == 1 {
             Ok(rgb8)
         } else {
             let (final_rgb, _, _) =
@@ -1574,7 +1622,8 @@ fn process_dng_impl(
         let tonemap_ms = now_ms() - t;
         drop(rgb16);
         let t2 = now_ms();
-        let (fr, fw, fh) = if orientation == 1 {
+        let skip_orient = (output_flags & OUT_NO_ORIENT) != 0;
+        let (fr, fw, fh) = if skip_orient || orientation == 1 {
             (rgb8, aw, ah)
         } else {
             pipeline::apply_orientation(rgb8, aw, ah, orientation)

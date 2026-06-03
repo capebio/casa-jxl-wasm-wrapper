@@ -53,7 +53,9 @@ const baseFlags = [
   "-sINVOKE_RUN=0",
   "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
   "-sWASM_BIGINT=1",
-  "-flto",
+  // -flto removed: emscripten 4.0.13 + libjxl emits LTO metadata that breaks
+  // binaryen's wasm-metadce parser ("invalid UTF-8 at offset 0:N"). Bridge
+  // still links cleanly without LTO; wasm grows ~3-5 % but builds reliably.
   "-fno-rtti",
   "-fno-exceptions"
 ];

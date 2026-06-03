@@ -155,6 +155,14 @@ export interface EncodeOptions {
   priority?: "visible" | "near" | "background";
   signal?: AbortSignal;
   onMetric?: (m: CodecMetric) => void;
+  /**
+   * EXIF orientation tag (1..8) recorded in JXL basic info. When set to >1,
+   * pixels remain in sensor orientation and decoders apply the rotation as
+   * metadata — no CPU rotation at encode time. Default: 1 (identity).
+   * Requires a WASM build with the `_z` / `_v3` orientation bridge; ignored
+   * silently when absent (caller must rotate pixels themselves in that case).
+   */
+  orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }
 
 export interface EncodeSession {

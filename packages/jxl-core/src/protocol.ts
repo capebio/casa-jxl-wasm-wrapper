@@ -154,6 +154,12 @@ export interface MsgEncodeStart {
   chunked: boolean;
   sidecarSizes?: readonly number[];
   priority: "visible" | "near" | "background";
+  /**
+   * EXIF orientation tag (1..8) recorded in JXL basic info — pixels stay in
+   * sensor orientation, decoders apply the rotation as metadata. Default 1.
+   * Requires WASM with _z / _v3 bridge; older builds ignore this field.
+   */
+  orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }
 
 export interface MsgEncodePixels {

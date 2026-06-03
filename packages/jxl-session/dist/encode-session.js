@@ -67,6 +67,8 @@ export class EncodeSessionImpl {
             startMsg.groupOrder = opts.groupOrder;
         if (opts.sidecarSizes !== undefined)
             startMsg.sidecarSizes = opts.sidecarSizes;
+        if (opts.orientation != null)
+            startMsg.orientation = opts.orientation;
         // No-op catch so a rejected done() promise with no caller handler (caller
         // used only chunks()) does not surface as an unhandledRejection.
         void this.doneDeferred.promise.catch(() => undefined);

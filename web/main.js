@@ -688,10 +688,10 @@ class WorkerPool {
             return;
         }
         if (type === 'encode_request') {
-            const { id, pixels, rgba, format, width, height, quality, effort, lossless, progressive } = ev.data;
+            const { id, pixels, rgba, format, width, height, quality, effort, lossless, progressive, orientation } = ev.data;
             const t0 = performance.now();
             // A3: accept new pixels/format fields; fall back to legacy rgba field for jxl-progressive.js
-            encodeJxlSession(pixels ?? rgba, width, height, quality, effort, Boolean(lossless), Boolean(progressive), format ?? 'rgba8')
+            encodeJxlSession(pixels ?? rgba, width, height, quality, effort, Boolean(lossless), Boolean(progressive), format ?? 'rgba8', orientation)
                 .then((jxl) => {
                     const jxlMs = performance.now() - t0;
                     const t = this.tasks.get(id);
@@ -833,10 +833,10 @@ pool.init();
 
 pool.setJxlDecodeWorker(new Worker(new URL('./jxl-decode-worker.js', import.meta.url), { type: 'module' }));
 
-async function encodeJxlSession(pixels, width, height, quality, effort, lossless, progressive, format = 'rgba8') {
+async function encodeJxlSession(pixels, width, height, quality, effort, lossless, progressive, format = 'rgba8', orientation) {
     // A3: rgb8 carries 3 channels (no alpha), rgba8/rgba16/rgbaf32 carry 4.
     const hasAlpha = format !== 'rgb8';
-    const session = getContext().encode({
+    const encOpts = {
         format,
         width,
         height,
@@ -846,7 +846,13 @@ async function encodeJxlSession(pixels, width, height, quality, effort, lossless
         effort,
         progressive,
         priority: 'visible',
-    });
+    };
+    // JXL "free rotation": record EXIF orientation in basic info instead of
+    // rotating pixels. Pixels are sensor-native, decoder applies the transform.
+    if (orientation != null && orientation >= 1 && orientation <= 8) {
+        encOpts.orientation = orientation;
+    }
+    const session = getContext().encode(encOpts);
     const buf = pixels instanceof ArrayBuffer ? pixels : pixels.buffer;
     await session.pushPixels(buf);
     await session.finish();
@@ -904,12 +910,15 @@ pool.setLiveHandler((msg) => {
     if (lightboxIndex >= 0) {
         const card = cards[lightboxIndex];
         if (msg.type === 'lightbox_live' && card && msg.id === card._taskId) {
-            // Update pixels without resetting zoom
-            const ctx = lightboxCanvas.getContext('2d');
-            const rgba = rgbToRgba(msg.rgb, msg.w, msg.h);
-            ctx.putImageData(new ImageData(rgba, msg.w, msg.h), 0, 0);
+            // Phase 2: worker sends sensor-orientation pixels + orientation tag.
+            // Apply rotation via GPU canvas transform — no CPU pixel-shuffle.
+            const sW = msg.nativeW ?? msg.w;
+            const sH = msg.nativeH ?? msg.h;
+            const ori = msg.orientation ?? 1;
+            drawSensorWithOrientation(lightboxCanvas, msg.rgb, sW, sH, ori);
             // Histogram panel reads back canvas pixels — only runs when panel is open (guard inside)
             if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                const ctx = lightboxCanvas.getContext('2d');
                 setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
         }
@@ -947,6 +956,10 @@ pool.setThumbLiveHandler((msg) => {
         card._thumbRgb = msg.rgb;
         card._thumbW   = msg.w;
         card._thumbH   = msg.h;
+        // Phase 2: sensor dims + orientation for GPU-rotate draw.
+        card._thumbNativeW = msg.nativeW ?? msg.w;
+        card._thumbNativeH = msg.nativeH ?? msg.h;
+        card._thumbOrientation = msg.orientation ?? 1;
         redrawThumbRotated(card);
     }
 });
@@ -1134,6 +1147,47 @@ function drawCanvas(canvas, w, h, rgb) {
     ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
 }
 
+// Draw a sensor-orientation RGB8 buffer into a canvas, applying the EXIF
+// orientation tag (1..8) as a 2D-context transform. drawImage with rotation is
+// GPU-accelerated, so this costs ~0 ms regardless of image size — the rotation
+// no longer lives in CPU pixel-shuffle work.
+//
+// Canvas dims are set to the displayed (post-rotation) size; sensor dims come
+// from `sw`/`sh`. For mirror variants (2/4/5/7) a horizontal flip is composed.
+function drawSensorWithOrientation(canvas, rgb, sw, sh, orientation) {
+    if (!canvas) return;
+    const ori = (orientation >= 1 && orientation <= 8) ? orientation : 1;
+    // Map EXIF ori → (cw degrees, flipX).
+    // 1=0/no, 2=0/yes, 3=180/no, 4=180/yes, 5=90/yes, 6=90/no, 7=270/yes, 8=270/no.
+    const cw = (ori === 6 || ori === 5) ? 90
+             : (ori === 3 || ori === 4) ? 180
+             : (ori === 8 || ori === 7) ? 270
+             : 0;
+    const flipX = (ori === 2 || ori === 4 || ori === 5 || ori === 7);
+    const swap = (cw === 90 || cw === 270);
+    const dW = swap ? sh : sw;
+    const dH = swap ? sw : sh;
+    if (canvas.width !== dW)  canvas.width = dW;
+    if (canvas.height !== dH) canvas.height = dH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const rgba = rgbToRgba(rgb, sw, sh);
+    if (cw === 0 && !flipX) {
+        ctx.putImageData(new ImageData(rgba, sw, sh), 0, 0);
+        return;
+    }
+    const tmp = document.createElement('canvas');
+    tmp.width = sw; tmp.height = sh;
+    const tctx = tmp.getContext('2d');
+    if (tctx) tctx.putImageData(new ImageData(rgba, sw, sh), 0, 0);
+    ctx.save();
+    ctx.translate(dW / 2, dH / 2);
+    ctx.rotate(cw * Math.PI / 180);
+    if (flipX) ctx.scale(-1, 1);
+    ctx.drawImage(tmp, -sw / 2, -sh / 2, sw, sh);
+    ctx.restore();
+}
+
 // Draw an RGB8 buffer into canvas with an arbitrary CW rotation (0/90/180/270).
 function drawRotatedCanvas(canvas, rgb, w, h, degrees) {
     if (!canvas) return;
@@ -1183,7 +1237,15 @@ function redrawThumbRotated(card) {
         return;
     }
     if (!card._thumbRgb) return;
-    drawCanvas(canvas, card._thumbW, card._thumbH, card._thumbRgb);
+    // Phase 2: rgb is sensor-orientation if nativeW/H/orientation present;
+    // GPU-rotated draw avoids the CPU transpose. Falls back to plain putImageData
+    // for older messages or when orientation is identity.
+    if (card._thumbNativeW && card._thumbOrientation && card._thumbOrientation !== 1) {
+        drawSensorWithOrientation(canvas, card._thumbRgb,
+            card._thumbNativeW, card._thumbNativeH, card._thumbOrientation);
+    } else {
+        drawCanvas(canvas, card._thumbW, card._thumbH, card._thumbRgb);
+    }
     canvas.style.transform = deg ? `rotate(${deg}deg)` : '';
     // RAW-pipeline thumb — no badge.
     setThumbSource(card, null);
@@ -1532,6 +1594,10 @@ function startConvert(file, existingCard) {
                     card._thumbRgb = msg.rgb;
                     card._thumbW   = msg.w;
                     card._thumbH   = msg.h;
+                    // Phase 2: sensor dims + orientation for GPU-rotate draw.
+                    card._thumbNativeW = msg.nativeW ?? msg.w;
+                    card._thumbNativeH = msg.nativeH ?? msg.h;
+                    card._thumbOrientation = msg.orientation ?? 1;
                     // Fresh RAW thumb — drop any stale JXL bitmap from a prior
                     // process so redrawThumbRotated paints the new RAW pixels
                     // rather than the old JXL cache.
@@ -1559,7 +1625,15 @@ function startConvert(file, existingCard) {
                     setThumbSource(card, null);
                 },
                 onLightbox(msg) {
-                    card._lightbox = { rgb: msg.rgb, w: msg.w, h: msg.h };
+                    // Phase 2: cache sensor pixels + orientation so the lightbox
+                    // draw applies rotation via canvas transform (GPU) rather than CPU.
+                    card._lightbox = {
+                        rgb: msg.rgb,
+                        w: msg.w, h: msg.h,
+                        nativeW: msg.nativeW ?? msg.w,
+                        nativeH: msg.nativeH ?? msg.h,
+                        orientation: msg.orientation ?? 1,
+                    };
                     // Keep _embeddedPreview around — the JXL/JPEG toggle needs it.
                     refreshThumbToggleButton(card);
                     if (lightboxIndex >= 0 && cards[lightboxIndex] === card) {
@@ -2113,8 +2187,13 @@ function drawLightboxForCard(card) {
     }
 
     if (hasFullRgb) {
-        const { rgb, w, h } = card._lightbox;
-        drawCanvas(lightboxCanvas, w, h, rgb);
+        const lb = card._lightbox;
+        // Phase 2: if sensor-orient pixels with EXIF orientation, draw rotated via GPU.
+        if (lb.nativeW && lb.orientation && lb.orientation !== 1) {
+            drawSensorWithOrientation(lightboxCanvas, lb.rgb, lb.nativeW, lb.nativeH, lb.orientation);
+        } else {
+            drawCanvas(lightboxCanvas, lb.w, lb.h, lb.rgb);
+        }
         if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
             const _ctx = lightboxCanvas.getContext('2d');
             setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));

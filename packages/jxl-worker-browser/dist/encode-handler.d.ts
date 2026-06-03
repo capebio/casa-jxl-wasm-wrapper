@@ -20,6 +20,8 @@ export declare class EncodeHandler {
     private wakeResolve;
     private lastDrainPostedMs;
     private lastDrainAllowed;
+    private readonly _drainMsg;
+    private readonly _chunkMsg;
     constructor(opts: MsgEncodeStart, wasm: JxlModule, callbacks: EncodeHandlerCallbacks);
     onPixels(chunk: ArrayBuffer, region?: Region): void;
     onFinish(): void;

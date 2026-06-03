@@ -149,6 +149,8 @@ export class EncodeHandler {
       groupOrder: (this.opts as MsgEncodeStart).groupOrder,
       chunked: this.opts.chunked,
       sidecarSizes: this.opts.sidecarSizes,
+      // EXIF orientation (1..8). When set, JXL records rotation as metadata instead of rotating pixels.
+      orientation: (this.opts as MsgEncodeStart).orientation,
       copyInput: false,
     } as Parameters<JxlModule["createEncoder"]>[0];
     const encoder = this.wasm.createEncoder(encoderOpts);

@@ -188,6 +188,15 @@ export interface EncoderOptions {
     /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
     animation?: AnimationOptions;
     /**
+     * EXIF orientation tag (1..8) to record in the JXL basic info.
+     * 1 = identity, 3 = 180°, 6 = 90° CW, 8 = 90° CCW (matches EXIF semantics).
+     * When set to >1, pixels stay in sensor orientation; decoders apply the
+     * rotation as metadata — no CPU rotate at encode time.
+     * Requires WASM with _z / _v3 bridge; otherwise silently ignored (caller
+     * must rotate pixels themselves in that fallback case).
+     */
+    orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+    /**
      * Frame data for animation encode. When set, replaces the single-image pushPixels path.
      * Requires rebuilt WASM with animation bridge (_jxl_wasm_encode_animation).
      */
@@ -398,6 +407,8 @@ interface LibjxlWasmModule {
     _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
     _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
     _jxl_wasm_enc_create_image_y?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, colorTransform: number): number;
+    _jxl_wasm_enc_create_image_z?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, colorTransform: number, orientation: number): number;
+    _jxl_wasm_encode_rgba8_with_metadata_v3?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, orientation: number): number;
     _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
     _jxl_wasm_enc_advance_written?(state: number, size: number): number;
     _jxl_wasm_enc_set_metadata?(state: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;

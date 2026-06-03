@@ -187,6 +187,15 @@ export interface EncoderOptions {
   /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
   animation?: AnimationOptions;
   /**
+   * EXIF orientation tag (1..8) to record in the JXL basic info.
+   * 1 = identity, 3 = 180°, 6 = 90° CW, 8 = 90° CCW (matches EXIF semantics).
+   * When set to >1, pixels stay in sensor orientation; decoders apply the
+   * rotation as metadata — no CPU rotate at encode time.
+   * Requires WASM with _z / _v3 bridge; otherwise silently ignored (caller
+   * must rotate pixels themselves in that fallback case).
+   */
+  orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  /**
    * Frame data for animation encode. When set, replaces the single-image pushPixels path.
    * Requires rebuilt WASM with animation bridge (_jxl_wasm_encode_animation).
    */
@@ -430,6 +439,10 @@ interface LibjxlWasmModule {
   _jxl_wasm_enc_push_pixels_x?(state: number, pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
   _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number): number;
   _jxl_wasm_enc_create_image_y?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, colorTransform: number): number;
+  // _z: _y + orientation (1..8, EXIF semantics). Records rotation in JXL basic info instead of rotating pixels.
+  _jxl_wasm_enc_create_image_z?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, colorTransform: number, orientation: number): number;
+  // v3: v2 + orientation
+  _jxl_wasm_encode_rgba8_with_metadata_v3?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, boxOptsPtr: number, orientation: number): number;
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
   _jxl_wasm_enc_advance_written?(state: number, size: number): number;
   _jxl_wasm_enc_set_metadata?(state: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
@@ -1891,7 +1904,30 @@ class LibjxlEncoder implements JxlEncoder {
       // A3: rgb8 maps to fmtIndex 3; rgba16→1, rgbaf32→2, rgba8→0
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : this.options.format === "rgb8" ? 3 : 0;
       const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform } = resolveEncoderBridgeSettings(this.options);
-      if (caps.extOptions && module._jxl_wasm_enc_create_image_y) {
+      const orientation = this.options.orientation ?? 1;
+      if (orientation !== 1 && !caps.orientation) {
+        // Bridge lacks the _z / _v3 entrypoints. Pixels are still encoded but
+        // JXL stores orientation = identity — viewers will display the sensor
+        // orientation (rotated wrong for portrait shots). Rebuild jxl-wasm to
+        // pick up the orientation bridge for correct output.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[jxl-wasm] orientation=${orientation} requested but WASM bridge lacks _z/_v3 support. ` +
+            "Rebuild packages/jxl-wasm to enable JXL's orientation-tag fast path.",
+        );
+      }
+      if (caps.extOptions && orientation !== 1 && module._jxl_wasm_enc_create_image_z) {
+        // JXL "free rotation": record orientation in basic info, pixels stay sensor-native.
+        this.wasmEncState = module._jxl_wasm_enc_create_image_z(
+          this.options.width, this.options.height,
+          distance, this.options.effort,
+          fmtIndex, this.options.hasAlpha ? 1 : 0,
+          progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder,
+          modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling,
+          epf, gaborish, dots, colorTransform,
+          orientation,
+        );
+      } else if (caps.extOptions && module._jxl_wasm_enc_create_image_y) {
         this.wasmEncState = module._jxl_wasm_enc_create_image_y(
           this.options.width, this.options.height,
           distance, this.options.effort,
@@ -2292,9 +2328,12 @@ class LibjxlEncoder implements JxlEncoder {
             const exifPtr = exifView.byteLength > 0 ? module._malloc(exifView.byteLength) : 0;
             const xmpPtr = xmpView.byteLength > 0 ? module._malloc(xmpView.byteLength) : 0;
 
-            const useBoxV2Std = needsBoxOptsV2(this.options) && caps.metadataBoxesV2 &&
+            const orientationStd = this.options.orientation ?? 1;
+            const useV3Std = orientationStd !== 1 &&
+              typeof module._jxl_wasm_encode_rgba8_with_metadata_v3 === "function";
+            const useBoxV2Std = !useV3Std && needsBoxOptsV2(this.options) && caps.metadataBoxesV2 &&
               typeof module._jxl_wasm_encode_rgba8_with_metadata_v2 === "function";
-            const { ptr: boxOptsPtr2, freePtrs: boxOptsPtrs2 } = useBoxV2Std
+            const { ptr: boxOptsPtr2, freePtrs: boxOptsPtrs2 } = (useV3Std || useBoxV2Std)
               ? marshalBoxOpts(module, this.options)
               : { ptr: 0, freePtrs: [] };
 
@@ -2303,7 +2342,19 @@ class LibjxlEncoder implements JxlEncoder {
               if (exifPtr !== 0) module.HEAPU8.set(exifView, exifPtr);
               if (xmpPtr !== 0) module.HEAPU8.set(xmpView, xmpPtr);
 
-              if (useBoxV2Std) {
+              if (useV3Std) {
+                handle = module._jxl_wasm_encode_rgba8_with_metadata_v3!(
+                  ptr, this.options.width, this.options.height,
+                  distance, this.options.effort, fmt, hasAlpha,
+                  progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder,
+                  modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling,
+                  iccPtr, iccView.byteLength,
+                  exifPtr, exifView.byteLength,
+                  xmpPtr, xmpView.byteLength,
+                  boxOptsPtr2,
+                  orientationStd,
+                );
+              } else if (useBoxV2Std) {
                 handle = module._jxl_wasm_encode_rgba8_with_metadata_v2!(
                   ptr, this.options.width, this.options.height,
                   distance, this.options.effort, fmt, hasAlpha,
@@ -2497,6 +2548,8 @@ interface JxlCapabilities {
   extOptions: boolean;
   extraChannelEncode: boolean;
   metadataBoxesV2: boolean;
+  /** WASM exports the _z / _v3 bridges that record EXIF orientation in JXL basic info. */
+  orientation: boolean;
   gainMapEncode: boolean;
   animationEncode: boolean;
 
@@ -2532,6 +2585,9 @@ function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
     extOptions: typeof module._jxl_wasm_encode_rgba8_x === "function",
     extraChannelEncode: typeof module._jxl_wasm_encode_rgba8_with_metadata_ec === "function",
     metadataBoxesV2: typeof module._jxl_wasm_encode_rgba8_with_metadata_v2 === "function",
+    orientation:
+      typeof module._jxl_wasm_enc_create_image_z === "function" ||
+      typeof module._jxl_wasm_encode_rgba8_with_metadata_v3 === "function",
     gainMapEncode: typeof module._jxl_wasm_encode_with_gain_map === "function",
     animationEncode: typeof module._jxl_wasm_encode_animation === "function",
     animationSeek: typeof module._jxl_wasm_dec_seek_to_frame === "function",

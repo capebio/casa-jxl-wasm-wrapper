@@ -74,6 +74,9 @@ struct JxlWasmEncState {
   size_t   enc_exif_size;
   uint8_t* enc_xmp;
   size_t   enc_xmp_size;
+  // EXIF orientation tag (1..8). 1 = identity, 3 = 180°, 6 = 90° CW, 8 = 90° CCW.
+  // Stored in JXL basic info so pixels stay sensor-native — no CPU rotation.
+  uint32_t enc_orientation;
 };
 
 // IMPROVEMENT-3: raw malloc for progressive decoder avoids std::vector<uint8_t> zero-init.
@@ -89,6 +92,10 @@ struct JxlWasmDecState {
   bool flushed_ready;
   bool final_ready;
   bool input_closed;
+  bool input_set;
+  uint8_t* input_buf;    // owned decoder input: unprocessed tail + newly appended bytes
+  size_t   input_size;
+  size_t   input_capacity;
   int error_code;
   // Gain map (jhgm box accumulation + parsed JXL codestream)
   uint8_t* gm_buf;           // raw jhgm box bytes being accumulated
@@ -444,6 +451,28 @@ static JxlWasmBuffer* DecodeRgbaRegion(const uint8_t* input, size_t input_size,
   return result != nullptr ? result : MakeError(31);
 }
 
+// Clamp arbitrary uint to a valid JxlOrientation (1..8). Out-of-range → identity.
+static inline JxlOrientation ToJxlOrientation(uint32_t o) {
+  return (o >= 1u && o <= 8u) ? static_cast<JxlOrientation>(o) : JXL_ORIENT_IDENTITY;
+}
+
+static inline void ApplyProgressiveFrameSettings(
+    JxlEncoderFrameSettings* frame,
+    uint32_t progressive_dc,
+    uint32_t progressive_ac,
+    uint32_t qprogressive_ac,
+    uint32_t buffering,
+    uint32_t group_order) {
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC, static_cast<int64_t>(progressive_dc));
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, static_cast<int64_t>(qprogressive_ac));
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING, static_cast<int64_t>(buffering));
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, static_cast<int64_t>(group_order));
+  if (progressive_dc > 0 || progressive_ac > 0 || qprogressive_ac > 0) {
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESPONSIVE, 1);
+  }
+}
+
 static JxlWasmBuffer* EncodeRgbaWithMetadata(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
@@ -455,7 +484,8 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     const uint8_t* xmp, size_t xmp_size,
     const WasmBoxOpts* box_opts = nullptr,
     int32_t epf = -1, int32_t gaborish = -1,
-    int32_t dots = -1, int32_t color_transform = -1) {
+    int32_t dots = -1, int32_t color_transform = -1,
+    uint32_t orientation = 1u) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -464,10 +494,10 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   if (ApplyContainerMode(enc, box_opts) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(54);
   }
-  // libjxl 0.11+: JxlEncoderAddBox requires use_container=true; enable it
-  // whenever metadata boxes will be attached.
+  // libjxl 0.11+: JxlEncoderAddBox requires JxlEncoderUseBoxes (distinct from
+  // JxlEncoderUseContainer). Must be called before any bytes are written.
   if ((exif != nullptr && exif_size > 0) || (xmp != nullptr && xmp_size > 0)) {
-    JxlEncoderUseContainer(enc, JXL_TRUE);
+    JxlEncoderUseBoxes(enc);
   }
 
   const uint32_t bits     = FormatToBits(fmt);
@@ -483,6 +513,9 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   info.num_extra_channels     = has_alpha ? 1u : 0u;
   info.alpha_bits             = has_alpha ? bits : 0u;
   info.alpha_exponent_bits    = has_alpha ? exp_bits : 0u;
+  // JXL's free rotation: store EXIF orientation in the basic info. Decoders apply
+  // the transform via metadata (canvas/CSS), no pixel rotation needed on encode.
+  info.orientation            = ToJxlOrientation(orientation);
   // libjxl 0.11+: must declare uses_original_profile before SetBasicInfo when
   // an ICC profile will follow; encoder rejects SetICCProfile if XYB mode is locked in.
   info.uses_original_profile = (icc_profile != nullptr && icc_size > 0) ? JXL_TRUE : JXL_FALSE;
@@ -507,11 +540,7 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   JxlEncoderSetFrameDistance(frame, distance);
   if (distance == 0.0f) JxlEncoderSetFrameLossless(frame, JXL_TRUE);
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC, static_cast<int64_t>(progressive_dc));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, static_cast<int64_t>(qprogressive_ac));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING, static_cast<int64_t>(buffering));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, static_cast<int64_t>(group_order));
+  ApplyProgressiveFrameSettings(frame, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order);
   if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
@@ -615,8 +644,9 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
 static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
     int32_t modular = -1, int32_t brotli_effort = -1, int32_t decoding_speed = -1, int32_t photon_noise_iso = 0, uint32_t resampling = 1u,
-    int32_t epf = -1, int32_t gaborish = -1, int32_t dots = -1, int32_t color_transform = -1) {
-  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, epf, gaborish, dots, color_transform);
+    int32_t epf = -1, int32_t gaborish = -1, int32_t dots = -1, int32_t color_transform = -1,
+    uint32_t orientation = 1u) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, epf, gaborish, dots, color_transform, orientation);
 }
 
 static JxlWasmBuffer* EncodeRgbaWithGainMap(
@@ -634,7 +664,7 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
   if (enc == nullptr) return MakeError(21);
   JXL_SETUP_ENC_RUNNER(enc, MakeError(57));
   if ((exif != nullptr && exif_size > 0) || (xmp != nullptr && xmp_size > 0) || gain_map_jxl_size > 0) {
-    JxlEncoderUseContainer(enc, JXL_TRUE);
+    JxlEncoderUseBoxes(enc);
   }
 
   const uint32_t bits     = FormatToBits(fmt);
@@ -667,11 +697,7 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
   JxlEncoderSetFrameDistance(frame, distance);
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC, static_cast<int64_t>(progressive_dc));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, static_cast<int64_t>(qprogressive_ac));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING, static_cast<int64_t>(buffering));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, static_cast<int64_t>(group_order));
+  ApplyProgressiveFrameSettings(frame, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order);
   if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
@@ -792,7 +818,8 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
     const uint8_t* xmp, size_t xmp_size,
     float alpha_distance,
     const WasmExtraChannel* extra_channels, uint32_t num_extra_channels,
-    const WasmBoxOpts* box_opts = nullptr) {
+    const WasmBoxOpts* box_opts = nullptr,
+    uint32_t orientation = 1u) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(120);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -815,6 +842,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
   info.num_extra_channels       = (has_alpha ? 1u : 0u) + num_extra_channels;
   info.alpha_bits               = has_alpha ? bits : 0u;
   info.alpha_exponent_bits      = has_alpha ? exp_bits : 0u;
+  info.orientation              = ToJxlOrientation(orientation);
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc); return MakeError(122);
@@ -849,11 +877,7 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
   JxlEncoderSetFrameDistance(frame, distance);
   JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC, static_cast<int64_t>(progressive_dc));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, static_cast<int64_t>(progressive_ac));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, static_cast<int64_t>(qprogressive_ac));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BUFFERING, static_cast<int64_t>(buffering));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GROUP_ORDER, static_cast<int64_t>(group_order));
+  ApplyProgressiveFrameSettings(frame, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order);
   if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
   if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
   if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
@@ -1854,8 +1878,30 @@ JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t progressive_detai
 
 int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
   if (s == nullptr || s->error_code != 0) return JXL_DEC_RESULT_ERROR;
-  if (data != nullptr && size > 0)
-    JxlDecoderSetInput(s->dec, data, size);
+  if (data != nullptr && size > 0) {
+    size_t remaining = 0;
+    if (s->input_set) {
+      remaining = JxlDecoderReleaseInput(s->dec);
+      if (remaining > s->input_size) remaining = 0;
+      if (remaining > 0) {
+        memmove(s->input_buf, s->input_buf + (s->input_size - remaining), remaining);
+      }
+      s->input_size = remaining;
+      s->input_set = false;
+    }
+
+    const size_t needed = s->input_size + size;
+    if (needed > s->input_capacity) {
+      uint8_t* grown = static_cast<uint8_t*>(realloc(s->input_buf, needed));
+      if (grown == nullptr) { s->error_code = 15; return JXL_DEC_RESULT_ERROR; }
+      s->input_buf = grown;
+      s->input_capacity = needed;
+    }
+    memcpy(s->input_buf + s->input_size, data, size);
+    s->input_size = needed;
+    JxlDecoderSetInput(s->dec, s->input_buf, s->input_size);
+    s->input_set = true;
+  }
 
   JxlDecoderStatus status;
   while (true) {
@@ -2098,6 +2144,7 @@ void jxl_wasm_dec_free(JxlWasmDecState* s) {
   if (s->dec != nullptr) JxlDecoderDestroy(s->dec);
   free(s->pixels);       // no-op if ownership was transferred via dec_take_final
   free(s->flushed);      // no-op if ownership was transferred via dec_take_flushed
+  free(s->input_buf);
   free(s->gm_buf);       // no-op if box was fully consumed or never started
   free(s->gain_map_jxl); // no-op if ownership was transferred via dec_take_gain_map
   free(s);
@@ -2199,6 +2246,24 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_v2(
       progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
       icc_profile, icc_size, exif, exif_size, xmp, xmp_size, box_opts);
+}
+
+// v3: v2 + EXIF orientation (1..8). Pixels stay sensor-native; rotation lives in JXL basic info.
+JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_v3(
+    const uint8_t* pixels, uint32_t width, uint32_t height,
+    float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
+    int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
+    const uint8_t* icc_profile, size_t icc_size,
+    const uint8_t* exif, size_t exif_size,
+    const uint8_t* xmp, size_t xmp_size,
+    const WasmBoxOpts* box_opts,
+    uint32_t orientation) {
+  return EncodeRgbaWithMetadata(pixels, width, height, distance, effort, fmt, has_alpha,
+      progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
+      modular, brotli_effort, decoding_speed, photon_noise_iso, resampling,
+      icc_profile, icc_size, exif, exif_size, xmp, xmp_size, box_opts,
+      -1, -1, -1, -1, orientation);
 }
 
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_metadata_ec_v2(
@@ -2629,6 +2694,7 @@ JxlWasmEncState* jxl_wasm_enc_create_image(
   s->enc_gaborish = -1;
   s->enc_dots = -1;
   s->enc_color_transform = -1;
+  s->enc_orientation = 1u;
   return s;
 }
 
@@ -2661,6 +2727,23 @@ JxlWasmEncState* jxl_wasm_enc_create_image_y(
     s->enc_gaborish = gaborish;
     s->enc_dots = dots;
     s->enc_color_transform = color_transform;
+  }
+  return s;
+}
+
+// _z variant: same as _y plus orientation (1..8, EXIF semantics). When >1, JXL
+// records the rotation in basic info and pixels stay sensor-native — no CPU rotate.
+JxlWasmEncState* jxl_wasm_enc_create_image_z(
+    uint32_t width, uint32_t height,
+    float distance, uint32_t effort,
+    uint32_t fmt, uint32_t has_alpha,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order,
+    int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling,
+    int32_t epf, int32_t gaborish, int32_t dots, int32_t color_transform,
+    uint32_t orientation) {
+  JxlWasmEncState* s = jxl_wasm_enc_create_image_y(width, height, distance, effort, fmt, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling, epf, gaborish, dots, color_transform);
+  if (s != nullptr) {
+    s->enc_orientation = (orientation >= 1u && orientation <= 8u) ? orientation : 1u;
   }
   return s;
 }
@@ -2711,7 +2794,8 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
       s->enc_progressive_dc, s->enc_progressive_ac, s->enc_qprogressive_ac, s->enc_buffering, s->enc_group_order,
       s->enc_modular, s->enc_brotli_effort, s->enc_decoding_speed, s->enc_photon_noise_iso, s->enc_resampling,
       s->enc_icc, s->enc_icc_size, s->enc_exif, s->enc_exif_size, s->enc_xmp, s->enc_xmp_size,
-      nullptr, s->enc_epf, s->enc_gaborish, s->enc_dots, s->enc_color_transform);
+      nullptr, s->enc_epf, s->enc_gaborish, s->enc_dots, s->enc_color_transform,
+      s->enc_orientation);
 
   // libjxl is done with the pixel data — free it now to reclaim memory.
   free(s->pixels_buf);
