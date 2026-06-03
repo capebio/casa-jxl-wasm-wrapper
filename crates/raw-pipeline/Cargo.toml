@@ -7,6 +7,11 @@ edition = "2021"
 default = ["parallel", "jxl-encode"]
 parallel = ["dep:rayon"]
 jxl-encode = ["dep:jpegxl-rs"]
+# jxl-lowlevel: stateful jpegxl-sys decoder (FRAME_PROGRESSION, FlushImage, SetProgressiveDetail, SetCropEnabled when avail).
+# Provides the reference implementation for Tauri native progressive + ROI decode (no high-level one-shot).
+# Native only; enable when depending from Tauri desktop crate or native bench.
+# Usage: raw-pipeline = { path = "...", default-features = false, features = ["jxl-lowlevel"] }
+jxl-lowlevel = ["dep:jpegxl-sys"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -15,6 +20,13 @@ jpegxl-rs = { version = "0.10", features = ["vendored"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "avif"] }
 thiserror = "1"
 anyhow = "1"
+
+# Low-level libjxl FFI (jpegxl-sys) gated behind jxl-lowlevel feature.
+# Declared at crate root level (optional) so that `cargo build -p raw-pipeline --features jxl-lowlevel`
+# on native succeeds; WASM builds keep default-features=false and never request this feature.
+# (Vendored libjxl cross to wasm32 requires Emscripten and is not supported here; see root CLAUDE.md.)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+jpegxl-sys = { version = "0.10", features = ["vendored"], optional = true }
 
 [dev-dependencies]
 jxl-oxide = "0.11"

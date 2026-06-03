@@ -1,5 +1,7 @@
 #[cfg(feature = "jxl-encode")]
 pub mod casabio_encode;
+#[cfg(feature = "jxl-lowlevel")]
+pub mod jxl_lowlevel;
 pub mod cr2;
 pub mod decompress;
 pub mod demosaic;

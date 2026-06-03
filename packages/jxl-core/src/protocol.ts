@@ -162,6 +162,32 @@ export interface MsgEncodeStart {
    * Requires WASM with _z / _v3 bridge; older builds ignore this field.
    */
   orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  /**
+   * Center X (pixels) for center-first group order. -1 or omit = auto middle.
+   * Only effective with groupOrder=1. Matches cjxl --center_x (ID 14).
+   */
+  centerX?: number;
+  /**
+   * Center Y (pixels) for center-first group order. -1 or omit = auto middle.
+   * Only effective with groupOrder=1. Matches cjxl --center_y (ID 15).
+   */
+  centerY?: number;
+  /**
+   * Intrinsic (display) size override. Signals a different display resolution
+   * from encoded pixels — useful for HiDPI/Retina (@2×) assets.
+   * Maps to JxlBasicInfo.have_intrinsic_size. Requires enc_set_intrinsic_size bridge.
+   */
+  intrinsicSize?: { width: number; height: number };
+  /**
+   * Disable libjxl perceptual quality heuristics (butteraugli/XYB psychovisual model).
+   * Useful for fair benchmarking. Maps to JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS (ID 39).
+   */
+  disablePerceptualHeuristics?: boolean;
+  /**
+   * Force codestream level. -1/omit = auto, 5 = Level 5, 10 = Level 10 (CMYK/black-channel).
+   * Requires enc_set_codestream_level bridge.
+   */
+  codestreamLevel?: -1 | 5 | 10;
 }
 
 export interface MsgEncodePixels {

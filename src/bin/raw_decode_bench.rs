@@ -1,7 +1,7 @@
 //! RAW decode pipeline benchmark: ORF, DNG, and CR2.
 //!
 //! Run: `cargo run --bin raw_decode_bench --release`
-//!   or via MSVC toolchain: `.\build-msvc.ps1 run --bin raw_decode_bench --release`
+//!   or via MSVC toolchain: `.\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode`
 //!
 //! Measures each stage independently:
 //!   - File I/O (excluded from timing)
@@ -22,17 +22,33 @@
 //!   JXL encode feed, P3/Tauri parity experiment). The reported encode path now
 //!   uses 4ch direct rgba to demonstrate never-materialized 3ch intermediate.
 //!
-//! Reference sets for Tauri/WASM parity (see docs/HANDOFF-tauri-parity-2026-06-03.md):
+//! Reference sets for Tauri/WASM parity (see docs/HANDOFF-tauri-parity-2026-06-03.md + continuation):
 //!   GOB_SCAN_LIMIT + GOB_ROOT for 30-file Gobabeb encode (direct-rgba prep/encode).
 //!   P2200_SCAN_LIMIT + P2200_ROOT for 11-file P2200 decode/ROI (extend for JXTC/tiled/progressive).
 //!   Emits decode_buffer_extract_ms (0 in native), decode_region_downsample_ms, source_pixels_decoded,
 //!   decode_strategy for apples-to-apples with WASM onMetric + crop-benchmark reports.
+//!
+//! Low-level progressive/ROI decode model lives in `raw_pipeline::jxl_lowlevel` (feature "jxl-lowlevel").
+//! For the full-load lowlevel progressive demo to use *progressively-encoded* assets (realistic early
+//! first-pixel via Dc/groupOrder), also enable "jxl-encode":
+//!   cargo ... --features jxl-lowlevel,jxl-encode
+//!   or: .\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode
+//! This lets the bench and (future) Tauri app share the exact same jpegxl-sys state machine + encode variants.
 
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use raw_pipeline::{cr2, demosaic, dng, pipeline};
+
+#[cfg(feature = "jxl-lowlevel")]
+use raw_pipeline::jxl_lowlevel::{
+    bench_jxl_decode_lowlevel_full as bench_jxl_decode_lowlevel_full,
+    bench_jxl_decode_lowlevel_progressive as bench_jxl_decode_lowlevel_progressive,
+};
+
+#[cfg(all(feature = "jxl-lowlevel", feature = "jxl-encode"))]
+use raw_pipeline::casabio_encode::{encode_variants_with_progressive, SourceType};
 
 static SMALL_CROP_TIMES: Mutex<Vec<(String, usize, f64)>> = Mutex::new(Vec::new());
 static LOWLEVEL_PROG_FIRSTS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
@@ -468,9 +484,9 @@ fn main() {
 
     println!("=== Done ===");
     println!("Tip: use --release + MSVC toolchain for representative numbers:");
-    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release 2>&1 | tee benchmark/results_latest.txt");
+    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode 2>&1 | tee benchmark/results_latest.txt");
     println!("For Tauri/WASM parity ref sets (per HANDOFF-tauri-parity-2026-06-03.md):");
-    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release");
+    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode");
 
     if rows.is_empty() {
         eprintln!("[warn] no files processed; JSON not written");
@@ -528,7 +544,7 @@ fn print_handoff_parity_summary(rows: &[BenchRow], generated_at: &str) {
     if !strategies.is_empty() {
         println!("\nStrategies seen: {:?}", strategies);
     }
-    println!("(Extend for ROI: add tiled/native-crop + JXTC paths + progressive early-pass timings to beat WASM 9-15ms small-crop and perceived full-load.)");
+    println!("(ROI/progressive exercised via pre-crop sim + lowlevel-prog when P2200 scan active. See jxl_lowlevel.rs + handoff for Tauri wiring of real SetCrop/JXTC.)");
 
     // Small pre-cropped region results (from P2200 scan simulation of subject-rect fast path)
     if let Ok(crops) = SMALL_CROP_TIMES.lock() {
@@ -552,8 +568,8 @@ fn print_handoff_parity_summary(rows: &[BenchRow], generated_at: &str) {
             let n = firsts.len(); let avg = firsts.iter().sum::<f64>() / n as f64;
             let minv = firsts.iter().fold(f64::MAX, |a, &b| a.min(b));
             println!("\nLow-level progressive (jpegxl-sys stateful, first FRAME_PROGRESSION+Flush):");
-            println!("  time_to_first_pixel_ms: avg={:.1}ms min={:.1} over {} samples (early paint target; vs full decode ~{}ms)", avg, minv, n, 428.8);
-            println!("  (Wire equivalent in Tauri lightbox/gallery for DC/early passes direct to egui/wgpu; no worker hop.)");
+            println!("  time_to_first_pixel_ms: avg={:.1}ms min={:.1} over {} samples (early paint target; vs full decode cost reported above)", avg, minv, n);
+            println!("  (Wire equivalent in Tauri lightbox/gallery for DC/early passes direct to egui/wgpu; no worker hop. For small assets first often collapses to total.)");
         }
     }
 }
@@ -658,6 +674,8 @@ fn run_p2200_decode_roi_scan(rows: &mut Vec<BenchRow>, limit: usize) {
                     }
                     // Real low-level stateful progressive decode (the continuation target for full loads + ROI assets).
                     // Exercises FRAME_PROGRESSION + FlushImage + SetProgressiveDetail. Emits first-pixel timing.
+                    // Only available when bench built with --features jxl-lowlevel (shared impl in raw-pipeline).
+                    #[cfg(feature = "jxl-lowlevel")]
                     if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl) {
                         println!("  lowlevel-prog (stateful) {}px: first={:.1}ms total={:.1}ms", sz, first_ms, total_ms);
                     }
@@ -665,9 +683,15 @@ fn run_p2200_decode_roi_scan(rows: &mut Vec<BenchRow>, limit: usize) {
 
             }
             // Demo real low-level progressive for a "full load" using the file's rgba (proxy for produced JXL variant in Tauri ingest).
-            if let Some(jxl_full) = encode_small_rgba_jxl(&rgba, w as u32, h as u32) {
+            // Gated: requires --features jxl-lowlevel at bench build time (pulls the shared jxl_lowlevel impl).
+            #[cfg(feature = "jxl-lowlevel")]
+            if let Some(jxl_full) = encode_full_proxy_jxl(&rgba, w as u32, h as u32) {
                 if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl_full) {
-                    println!("  lowlevel-prog full-load ({}x{}): first={:.1}ms total={:.1}ms (model for Tauri direct-to-texture)", w, h, first_ms, total_ms);
+                    let prog_note = if cfg!(feature = "jxl-encode") { ", progressive asset" } else { "" };
+                    println!(
+                        "  lowlevel-prog full-load ({}x{}): first={:.1}ms total={:.1}ms (model for Tauri direct-to-texture{})",
+                        w, h, first_ms, total_ms, prog_note
+                    );
                     if let Ok(mut v) = LOWLEVEL_PROG_FIRSTS.lock() { v.push(first_ms); }
                 }
                 if let Some(d) = bench_jxl_decode_lowlevel_full(&jxl_full) {
@@ -722,139 +746,28 @@ fn encode_small_rgba_jxl(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>
     Some(result.data)
 }
 
-// ─── Low-level libjxl (jpegxl-sys) for real native progressive / ROI parity model ───
-// Exercises the stateful decoder API recommended for Tauri (no high-level one-shot).
-// Provides time-to-first (FRAME_PROGRESSION + FlushImage) for full loads and can host
-// SetCropEnabled (when available in vendored) + sized out buffer for native-crop.
-// Metrics: populates equivalent of time_to_first_pixel_ms; keeps decode_* handoff names.
-
-#[cfg(not(target_arch = "wasm32"))]
-unsafe fn make_rgba8_pixel_format(channels: u32) -> jpegxl_sys::types::JxlPixelFormat {
-    // JxlPixelFormat layout from jpegxl-rs + sys usage: num_channels, data_type, endianness, align
-    jpegxl_sys::types::JxlPixelFormat {
-        num_channels: channels,
-        data_type: jpegxl_sys::types::JxlDataType::Uint8,
-        endianness: jpegxl_sys::types::JxlEndianness::Native,
-        align: 0,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn bench_jxl_decode_lowlevel_full(jxl_bytes: &[u8]) -> Option<Duration> {
-    use std::mem::MaybeUninit;
-    use jpegxl_sys::decode::*;
-    use jpegxl_sys::codestream_header::JxlBasicInfo;
-
-    unsafe {
-        let dec = JxlDecoderCreate(std::ptr::null());
-        if dec.is_null() { return None; }
-        // Subscribe to info + full for a complete decode. Values from JxlDecoderStatus are the event bits.
-        let events = (JxlDecoderStatus::BasicInfo as std::os::raw::c_int) | (JxlDecoderStatus::FullImage as std::os::raw::c_int);
-        if JxlDecoderSubscribeEvents(dec, events) != JxlDecoderStatus::Success {
-            JxlDecoderDestroy(dec);
-            return None;
-        }
-        if JxlDecoderSetInput(dec, jxl_bytes.as_ptr(), jxl_bytes.len()) != JxlDecoderStatus::Success {
-            JxlDecoderDestroy(dec);
-            return None;
-        }
-
-        let mut info: MaybeUninit<JxlBasicInfo> = MaybeUninit::uninit();
-        let mut pf = make_rgba8_pixel_format(4);
-        let mut out_buf: Vec<u8> = Vec::new();
-        let mut status;
-        let t0 = Instant::now();
-        loop {
-            status = JxlDecoderProcessInput(dec);
-            match status {
-                JxlDecoderStatus::BasicInfo => {
-                    if JxlDecoderGetBasicInfo(dec, info.as_mut_ptr()) == JxlDecoderStatus::Success {
-                        pf = make_rgba8_pixel_format(4);
-                    }
-                }
-                JxlDecoderStatus::NeedImageOutBuffer => {
-                    let mut size: usize = 0;
-                    if JxlDecoderImageOutBufferSize(dec, &pf, &mut size) == JxlDecoderStatus::Success {
-                        out_buf.resize(size, 0);
-                        let _ = JxlDecoderSetImageOutBuffer(dec, &pf, out_buf.as_mut_ptr() as *mut _, size);
-                    }
-                }
-                JxlDecoderStatus::FullImage | JxlDecoderStatus::Success => break,
-                JxlDecoderStatus::Error | JxlDecoderStatus::NeedMoreInput => break,
-                _ => {}
+/// Returns bytes for a full-size JXL to feed the low-level progressive decoder demo
+/// ("full load" case in P2200 scan). 
+/// 
+/// When the "jxl-encode" feature is active we use the real progressive variant
+/// (progressive_dc=2, group_order=1) so that the measured `time_to_first_pixel_ms`
+/// (via FRAME_PROGRESSION + FlushImage) is representative of what Tauri will see
+/// for gallery/lightbox full progressive loads.
+/// Falls back to the basic encoder otherwise (so `--features jxl-lowlevel` alone still works).
+fn encode_full_proxy_jxl(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    #[cfg(feature = "jxl-encode")]
+    {
+        match encode_variants_with_progressive(rgba, w, h, SourceType::Raw, false, 2, 1) {
+            Ok(variants) => return Some(variants.full),
+            Err(e) => {
+                eprintln!("  [warn] progressive encode for lowlevel full proxy failed ({e}); falling back to basic");
             }
         }
-        let elapsed = t0.elapsed();
-        JxlDecoderDestroy(dec);
-        if status == JxlDecoderStatus::FullImage || status == JxlDecoderStatus::Success { Some(elapsed) } else { None }
     }
+    encode_small_rgba_jxl(rgba, w, h)
 }
 
-/// Low-level progressive: returns (time_to_first_progression_flush_ms, total_ms)
-/// Uses FRAME_PROGRESSION + FlushImage to model "paint DC/early pass immediately".
-#[cfg(not(target_arch = "wasm32"))]
-fn bench_jxl_decode_lowlevel_progressive(jxl_bytes: &[u8]) -> Option<(f64, f64)> {
-    use std::mem::MaybeUninit;
-    use jpegxl_sys::decode::*;
-    use jpegxl_sys::codestream_header::JxlBasicInfo;
-
-    unsafe {
-        let dec = JxlDecoderCreate(std::ptr::null());
-        if dec.is_null() { return None; }
-        let events = (JxlDecoderStatus::BasicInfo as std::os::raw::c_int)
-            | (JxlDecoderStatus::FrameProgression as std::os::raw::c_int)
-            | (JxlDecoderStatus::FullImage as std::os::raw::c_int);
-        if JxlDecoderSubscribeEvents(dec, events) != JxlDecoderStatus::Success {
-            JxlDecoderDestroy(dec); return None;
-        }
-        // kPasses style (or DC=1 for coarser); use Passes to match "emitEveryPass" intent
-        let _ = JxlDecoderSetProgressiveDetail(dec, JxlProgressiveDetail::Passes);
-        if JxlDecoderSetInput(dec, jxl_bytes.as_ptr(), jxl_bytes.len()) != JxlDecoderStatus::Success {
-            JxlDecoderDestroy(dec); return None;
-        }
-
-        let mut info: MaybeUninit<JxlBasicInfo> = MaybeUninit::uninit();
-        let mut pf = make_rgba8_pixel_format(4);
-        let mut out_buf: Vec<u8> = Vec::new();
-        let mut first_ms: Option<f64> = None;
-        let t_start = Instant::now();
-        let mut status;
-        loop {
-            status = JxlDecoderProcessInput(dec);
-            match status {
-                JxlDecoderStatus::BasicInfo => {
-                    if JxlDecoderGetBasicInfo(dec, info.as_mut_ptr()) == JxlDecoderStatus::Success {
-                        pf = make_rgba8_pixel_format(4);
-                    }
-                }
-                JxlDecoderStatus::NeedImageOutBuffer => {
-                    let mut size: usize = 0;
-                    if JxlDecoderImageOutBufferSize(dec, &pf, &mut size) == JxlDecoderStatus::Success {
-                        out_buf.resize(size, 0);
-                        let _ = JxlDecoderSetImageOutBuffer(dec, &pf, out_buf.as_mut_ptr() as *mut _, size);
-                    }
-                }
-                JxlDecoderStatus::FrameProgression => {
-                    // Flush current partial (DC or pass)
-                    if JxlDecoderFlushImage(dec) == JxlDecoderStatus::Success {
-                        if first_ms.is_none() {
-                            first_ms = Some(ms(t_start.elapsed()));
-                        }
-                        // In real Tauri: emit/copy the current out_buf (size per current info or crop) to texture immediately.
-                    }
-                    // continue feeding for more passes
-                }
-                JxlDecoderStatus::FullImage | JxlDecoderStatus::Success => break,
-                JxlDecoderStatus::Error | JxlDecoderStatus::NeedMoreInput => break,
-                _ => {}
-            }
-        }
-        let total = t_start.elapsed();
-        JxlDecoderDestroy(dec);
-        if (status == JxlDecoderStatus::FullImage || status == JxlDecoderStatus::Success) && !out_buf.is_empty() {
-            Some((first_ms.unwrap_or(0.0), ms(total)))
-        } else {
-            None
-        }
-    }
-}
+// Low-level decode impls moved to crates/raw-pipeline/src/jxl_lowlevel.rs (behind "jxl-lowlevel" feature).
+// The bench conditionally re-exports the old `bench_jxl_decode_lowlevel_*` names from there
+// (see top of file) so that call sites in run_p2200_decode_roi_scan continue to work when the
+// feature is enabled. The shared module is the single source the Tauri side can depend on.

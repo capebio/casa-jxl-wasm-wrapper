@@ -104,11 +104,18 @@ export class EncodeHandler {
             // progressiveDc + groupOrder (predator progressive layers + Tauri parity): forwarded so high-level session.encode
             // can produce files with >1 DC layer and center-out for the gallery/paint benchmarks and Tauri parity.
             progressiveDc: this.opts.progressiveDc,
+            progressiveAc: this.opts.progressiveAc,
+            qProgressiveAc: this.opts.qProgressiveAc,
             groupOrder: this.opts.groupOrder,
             chunked: this.opts.chunked,
             sidecarSizes: this.opts.sidecarSizes,
             // EXIF orientation (1..8). When set, JXL records rotation as metadata instead of rotating pixels.
             orientation: this.opts.orientation,
+            centerX: this.opts.centerX,
+            centerY: this.opts.centerY,
+            intrinsicSize: this.opts.intrinsicSize,
+            disablePerceptualHeuristics: this.opts.disablePerceptualHeuristics,
+            codestreamLevel: this.opts.codestreamLevel,
             copyInput: false,
         };
         const encoder = this.wasm.createEncoder(encoderOpts);

@@ -876,6 +876,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "image",
+ "jpegxl-rs",
+ "jpegxl-sys",
  "rayon",
  "serde",
  "thiserror 1.0.69",

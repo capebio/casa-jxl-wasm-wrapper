@@ -157,11 +157,9 @@ export class DecodeHandler {
     // Terminal-state helpers
     // ---------------------------------------------------------------------------
     isTerminal() {
-        return (this.cancelled ||
-            this.state === "final" ||
-            this.state === "cancelled" ||
-            this.state === "error" ||
-            this.state === "budget_exceeded");
+        // finishSession() is the single path that sets ended=true for all terminal
+        // states; this.ended is always true when any individual state flag is set.
+        return this.ended;
     }
     // Single path for all session endings. Sets state, clears the input queue,
     // and wakes both sleeping loops so Promise.all resolves and decoder.dispose runs.
@@ -246,32 +244,38 @@ export class DecodeHandler {
         }
     }
     async feedDecoder(decoder) {
-        while (!this.isTerminal()) {
+        while (!this.ended) {
             if (this.paused) {
                 await this.waitForResume();
                 continue;
             }
-            await this.waitForChunk();
-            if (this.isTerminal() || this.paused)
-                continue;
-            while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
+            // Skip the await when chunks are already queued — avoids a microtask
+            // yield on every outer iteration during active streaming.
+            if (this.chunkQueue.length <= this.chunkReadIndex && !this.inputClosed) {
+                await this.waitForChunk();
+                if (this.ended || this.paused)
+                    continue;
+            }
+            while (!this.ended && this.chunkQueue.length > this.chunkReadIndex) {
                 const chunk = this.takeNextChunk();
                 if (chunk === null)
                     break;
                 const t0 = performance.now();
                 await decoder.push(chunk);
-                const pushMs = performance.now() - t0;
+                // Reuse the post-push timestamp for drain coalescing — avoids a
+                // redundant performance.now() call in maybePostDrain.
+                const now = performance.now();
+                const pushMs = now - t0;
                 this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
-                this.maybePostDrain();
+                this.maybePostDrain(now);
             }
-            if (this.inputClosed && !this.isTerminal()) {
+            if (this.inputClosed && !this.ended) {
                 await decoder.close();
                 return;
             }
         }
     }
-    maybePostDrain() {
-        const now = performance.now();
+    maybePostDrain(now) {
         const hwm = this.adaptiveHwm();
         const drainAllowed = this.queueDepth < hwm && this.queuedBytes < BYTE_DRAIN_HWM;
         const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
@@ -324,8 +328,9 @@ export class DecodeHandler {
                         pixels,
                         format: event.format,
                         pixelStride: event.pixelStride,
-                        ...(event.region !== undefined ? { region: event.region } : {}),
                     };
+                    if (event.region !== undefined)
+                        msg.region = event.region;
                     self.postMessage(msg, [pixels]);
                     this.postFirstPixelMetric();
                     break;
@@ -352,8 +357,9 @@ export class DecodeHandler {
                         pixelStride: event.pixelStride,
                         outputBytes: pixels.byteLength,
                         timeToFinalMs: now - this.stageStartMs,
-                        ...(event.region !== undefined ? { region: event.region } : {}),
                     };
+                    if (event.region !== undefined)
+                        msg.region = event.region;
                     // Embed first-pixel timing if it hasn't been reported via a progress event.
                     if (!this.firstPixelMetricPosted) {
                         msg.timeToFirstPixelMs = now - this.stageStartMs;
@@ -423,8 +429,9 @@ export class DecodeHandler {
             info,
             format,
             pixelStride,
-            ...(region !== undefined ? { region } : {}),
         };
+        if (region !== undefined)
+            msg.region = region;
         this.postMetric("output_bytes", pixels.byteLength);
         self.postMessage(msg, [pixels]);
         this.finishSession("budget_exceeded");
