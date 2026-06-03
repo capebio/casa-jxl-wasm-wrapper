@@ -150,6 +150,8 @@ export interface MsgEncodeStart {
   previewFirst: boolean;
   /** progressiveDc (0/1/2) and groupOrder (0/1) for multi-layer/center-out progressive encodes (predator focus). */
   progressiveDc?: 0 | 1 | 2;
+  progressiveAc?: 0 | 1;
+  qProgressiveAc?: 0 | 1;
   groupOrder?: 0 | 1;
   chunked: boolean;
   sidecarSizes?: readonly number[];

@@ -229,8 +229,8 @@ function resolveEncoderBridgeSettings(options) {
     const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : (options.previewFirst ? 1 : 0);
     return {
         progressiveDc,
-        progressiveAc: acEnabled ? 1 : 0,
-        qProgressiveAc: acEnabled ? 1 : 0,
+        progressiveAc: options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
+        qProgressiveAc: options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
         buffering: options.chunked ? 2 : 0,
         modular,
         brotliEffort,

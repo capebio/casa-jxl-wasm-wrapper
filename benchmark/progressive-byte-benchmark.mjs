@@ -85,10 +85,13 @@ async function main() {
           summary,
           cutoffs,
         });
-        console.log(`  ${label} jxl=${fmtBytes(jxlBytes.byteLength)} encode=${encodeMs.toFixed(0)}ms first=${fmtBytes(summary.firstPaintBytes)} preview=${fmtBytes(summary.previewBytes)} paints=${summary.paintedCutoffs}`);
+        const useful = summary.usefulEarlyPaint ? "early=yes" : "early=no";
+        console.log(`  ${label} jxl=${fmtBytes(jxlBytes.byteLength)} encode=${encodeMs.toFixed(0)}ms first=${fmtBytes(summary.firstPaintBytes)} preview=${fmtBytes(summary.previewBytes)} paints=${summary.paintedCutoffs} ${useful}`);
       }
       const targetVariant = variants.at(-1);
       const firstVisible = variants.find((variant) => variant.summary.firstPaintBytes != null) ?? targetVariant;
+      const sidecarFirst = variants.find((variant) => variant.sidecar && variant.summary.firstPaintBytes != null) ?? null;
+      console.log(`  effective first-visible=${fmtBytes(firstVisible?.summary.firstPaintBytes)} sidecar-first=${fmtBytes(sidecarFirst?.summary.firstPaintBytes)} target-progressive=${targetVariant?.summary.usefulEarlyPaint ? "yes" : "no"}`);
       results.push({
         file: basename(file),
         rawBytes: raw.byteLength,
@@ -96,6 +99,8 @@ async function main() {
         variants,
         target: targetVariant?.target ?? null,
         summary: targetVariant?.summary ?? null,
+        targetUsefulEarlyPaint: targetVariant?.summary.usefulEarlyPaint ?? false,
+        sidecarFirstVisibleBytes: sidecarFirst?.summary.firstPaintBytes ?? null,
         firstVisibleBytes: firstVisible?.summary.firstPaintBytes ?? null,
       });
     } finally {

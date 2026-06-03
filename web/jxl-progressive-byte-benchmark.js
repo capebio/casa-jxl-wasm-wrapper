@@ -121,12 +121,15 @@ async function runBenchmark() {
       }
       const targetVariant = variants.at(-1);
       const firstVisible = variants.find((variant) => variant.summary.firstPaintBytes != null) ?? targetVariant;
+      const sidecarFirst = variants.find((variant) => variant.sidecar && variant.summary.firstPaintBytes != null) ?? null;
       const record = {
         source: source.name,
         rawBytes: source.rawBytes,
         variants,
         target: targetVariant?.target ?? null,
         summary: targetVariant?.summary ?? null,
+        targetUsefulEarlyPaint: targetVariant?.summary.usefulEarlyPaint ?? false,
+        sidecarFirstVisibleBytes: sidecarFirst?.summary.firstPaintBytes ?? null,
         firstVisibleBytes: firstVisible?.summary.firstPaintBytes ?? null,
         ssimulacra2: resolveRecordSsimulacra2(variants, ssimulacra2Target),
       };
@@ -290,6 +293,7 @@ function renderSummaryTable(container, record) {
       <td>${fmtMaybeBytes(variant.summary.firstPaintBytes)} (${fmtMaybePercent(variant.summary.firstPaintPercent)})</td>
       <td>${fmtMaybeBytes(variant.summary.previewBytes)} (${fmtMaybePercent(variant.summary.previewPercent)})</td>
       <td>${fmtMaybeBytes(variant.summary.finalBytes)} (${fmtMaybePercent(variant.summary.finalPercent)})</td>
+      <td>${variant.summary.usefulEarlyPaint ? 'yes' : 'no'}</td>
       <td>${variant.summary.paintedCutoffs}</td>
       <td>${variant.summary.maxFrameCount}</td>
     </tr>
@@ -297,7 +301,7 @@ function renderSummaryTable(container, record) {
   container.innerHTML = `
     <table class="bytebench-table">
       <thead>
-        <tr><th>Variant</th><th>First paint</th><th>Preview</th><th>Final</th><th>Painted cutoffs</th><th>Frames</th></tr>
+        <tr><th>Variant</th><th>First paint</th><th>Preview</th><th>Final</th><th>Early?</th><th>Painted cutoffs</th><th>Frames</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>

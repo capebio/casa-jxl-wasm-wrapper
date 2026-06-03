@@ -118,6 +118,10 @@ export interface EncoderOptions {
      * Requires the file to be viewed with progressiveDetail that requests the layers (e.g. 'passes' or 'dcProgressive').
      */
     progressiveDc?: 0 | 1 | 2;
+    /** Explicit VarDCT spectral AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
+    progressiveAc?: 0 | 1;
+    /** Explicit VarDCT quantized AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
+    qProgressiveAc?: 0 | 1;
     /**
      * Group order for scan vs center-out (ROI + progressive friendly).
      * 0 = scanline (default), 1 = center-out (recommended for progressive and thumbnails; makes early bytes look better).

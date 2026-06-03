@@ -146,6 +146,8 @@ export class EncodeHandler {
       // progressiveDc + groupOrder (predator progressive layers + Tauri parity): forwarded so high-level session.encode
       // can produce files with >1 DC layer and center-out for the gallery/paint benchmarks and Tauri parity.
       progressiveDc: (this.opts as MsgEncodeStart).progressiveDc,
+      progressiveAc: (this.opts as MsgEncodeStart).progressiveAc,
+      qProgressiveAc: (this.opts as MsgEncodeStart).qProgressiveAc,
       groupOrder: (this.opts as MsgEncodeStart).groupOrder,
       chunked: this.opts.chunked,
       sidecarSizes: this.opts.sidecarSizes,

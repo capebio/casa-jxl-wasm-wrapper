@@ -9,6 +9,10 @@ test('non-client progressive byte benchmark uses Gobabeb corpus and shared prese
   expect(source).toContain('createSidecarTargetPlan');
   expect(source).toContain('summarizeByteCutoffResults');
   expect(source).toContain('sidecar');
+  expect(source).toContain('targetUsefulEarlyPaint');
+  expect(source).toContain('sidecarFirstVisibleBytes');
+  expect(source).toContain('early=yes');
+  expect(source).toContain('target-progressive=');
   expect(source).toContain('streamDecodeCutoffs');
   expect(source).toContain('progressive-byte-benchmark-');
 });

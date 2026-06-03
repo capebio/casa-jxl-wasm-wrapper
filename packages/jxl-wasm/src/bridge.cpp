@@ -89,6 +89,7 @@ struct JxlWasmDecState {
   size_t   pixels_size;
   uint8_t* flushed;      // most recent flushed progressive frame (raw malloc; transferred on take)
   size_t   flushed_size;
+  size_t   flushed_capacity;
   bool flushed_ready;
   bool final_ready;
   bool input_closed;
@@ -1844,6 +1845,39 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_s
 
 // --- Stateful progressive decoder ---
 
+static bool TryFlushProgressiveImage(JxlWasmDecState* s) {
+  if (s == nullptr || s->dec == nullptr || !s->info_known || s->final_ready || s->pixels == nullptr) return false;
+
+  size_t flush_size = 0;
+  if (JxlDecoderImageOutBufferSize(s->dec, &s->pixel_format, &flush_size) != JXL_DEC_SUCCESS || flush_size == 0) {
+    return false;
+  }
+  if (flush_size > s->flushed_capacity) {
+    size_t new_capacity = flush_size;
+    if (s->flushed_capacity > 0) {
+      size_t grown_capacity = s->flushed_capacity + (s->flushed_capacity / 2);
+      if (grown_capacity > new_capacity) new_capacity = grown_capacity;
+    }
+    uint8_t* grown = static_cast<uint8_t*>(realloc(s->flushed, new_capacity));
+    if (grown == nullptr) return false;
+    s->flushed = grown;
+    s->flushed_capacity = new_capacity;
+  }
+  if (s->flushed == nullptr) return false;
+
+  bool ok = false;
+  if (JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->flushed, s->flushed_capacity) == JXL_DEC_SUCCESS) {
+    if (JxlDecoderFlushImage(s->dec) == JXL_DEC_SUCCESS) {
+      s->flushed_size = flush_size;
+      s->flushed_ready = true;
+      ok = true;
+    }
+  }
+  // Restore the main output buffer so decoding can continue toward FULL_IMAGE.
+  JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->pixels, s->pixels_size);
+  return ok;
+}
+
 JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t progressive_detail) {
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return nullptr;
@@ -1908,6 +1942,9 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
     status = JxlDecoderProcessInput(s->dec);
 
     if (status == JXL_DEC_NEED_MORE_INPUT) {
+      if (!s->input_closed && TryFlushProgressiveImage(s)) {
+        return JXL_DEC_RESULT_PROGRESS;
+      }
       if (s->input_closed) {
         s->error_code = static_cast<int>(status);
         return JXL_DEC_RESULT_ERROR;
@@ -2001,31 +2038,7 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
       continue;
     }
     if (status == JXL_DEC_FRAME_PROGRESSION) {
-      if (!s->info_known || s->pixels == nullptr) continue;
-      size_t flush_size = 0;
-      if (JxlDecoderImageOutBufferSize(s->dec, &s->pixel_format, &flush_size) != JXL_DEC_SUCCESS) continue;
-      if (flush_size > s->flushed_size) {
-        // Big-brain growth strategy: grow by at least 50% to amortize reallocs
-        // during many progressive passes on large images (common in gallery/lightbox).
-        size_t new_size = flush_size;
-        if (s->flushed_size > 0) {
-          size_t grown = s->flushed_size + (s->flushed_size / 2);
-          if (grown > new_size) new_size = grown;
-        }
-        uint8_t* grown = static_cast<uint8_t*>(realloc(s->flushed, new_size));
-        if (grown == nullptr) { s->flushed_size = 0; continue; }
-        s->flushed = grown;
-        s->flushed_size = new_size;
-      }
-      if (s->flushed == nullptr) continue;
-      if (JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->flushed, s->flushed_size) == JXL_DEC_SUCCESS) {
-        if (JxlDecoderFlushImage(s->dec) == JXL_DEC_SUCCESS) {
-          s->flushed_ready = true;
-          // Restore main buffer for final image.
-          JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->pixels, s->pixels_size);
-          return JXL_DEC_RESULT_PROGRESS;
-        }
-      }
+      if (TryFlushProgressiveImage(s)) return JXL_DEC_RESULT_PROGRESS;
       continue;
     }
     if (status == JXL_DEC_FULL_IMAGE) {
@@ -2126,6 +2139,7 @@ JxlWasmBuffer* jxl_wasm_dec_take_flushed(JxlWasmDecState* s) {
   JxlWasmBuffer* buf = MakeBufferFromOwned(s->flushed, s->flushed_size, s->info.xsize, s->info.ysize, bits, 1);
   s->flushed = nullptr;
   s->flushed_size = 0;
+  s->flushed_capacity = 0;
   return buf;
 }
 

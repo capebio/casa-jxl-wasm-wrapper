@@ -26,6 +26,9 @@ test('progressive byte benchmark script uses best preset, byte metrics, and Goba
   expect(js).toContain('createSidecarTargetPlan');
   expect(js).toContain('summarizeByteCutoffResults');
   expect(js).toContain('sidecar');
+  expect(js).toContain('targetUsefulEarlyPaint');
+  expect(js).toContain('sidecarFirstVisibleBytes');
+  expect(js).toContain('usefulEarlyPaint');
   expect(js).toContain('streamDecodeCutoffs');
   expect(js).not.toContain('decodeBytePrefix');
   expect(js).toContain('openLightbox');

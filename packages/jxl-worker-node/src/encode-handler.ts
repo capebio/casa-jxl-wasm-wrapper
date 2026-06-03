@@ -145,6 +145,8 @@ export class EncodeHandler {
       chunked: this.opts.chunked,
     };
     if (this.opts.progressiveDc != null) encOpts.progressiveDc = this.opts.progressiveDc;
+    if (this.opts.progressiveAc != null) encOpts.progressiveAc = this.opts.progressiveAc;
+    if (this.opts.qProgressiveAc != null) encOpts.qProgressiveAc = this.opts.qProgressiveAc;
     if (this.opts.groupOrder != null) encOpts.groupOrder = this.opts.groupOrder;
     const encoder = codec.createEncoder(encOpts);
     this.state = "configured";

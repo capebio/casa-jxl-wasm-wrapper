@@ -56,11 +56,31 @@ test('progressive encoder enables responsive ordering like cjxl --progressive', 
   expect(bridge).toContain('progressive_dc > 0 || progressive_ac > 0 || qprogressive_ac > 0');
 });
 
+test('encoder exposes explicit VarDCT AC/Q-progressive overrides for progressive truth matrix', () => {
+  const distFacade = readFileSync(new URL('../dist/facade.js', import.meta.url), 'utf8');
+  const distTypes = readFileSync(new URL('../dist/facade.d.ts', import.meta.url), 'utf8');
+
+  expect(facade).toContain('progressiveAc?: 0 | 1');
+  expect(facade).toContain('qProgressiveAc?: 0 | 1');
+  expect(facade).toContain('options.progressiveAc != null');
+  expect(facade).toContain('options.qProgressiveAc != null');
+  expect(distFacade).toContain('options.progressiveAc != null');
+  expect(distFacade).toContain('options.qProgressiveAc != null');
+  expect(distTypes).toContain('progressiveAc?: 0 | 1');
+  expect(distTypes).toContain('qProgressiveAc?: 0 | 1');
+});
+
 test('stateful progressive decoder releases prior input before appending stream chunks', () => {
   expect(bridge).toContain('JxlDecoderReleaseInput(s->dec)');
   expect(bridge).toContain('unprocessed tail + newly appended bytes');
   expect(bridge).toContain('memmove(s->input_buf');
   expect(bridge).toContain('JxlDecoderSetInput(s->dec, s->input_buf, s->input_size)');
+});
+
+test('stateful progressive decoder opportunistically flushes partial pixels on NEED_MORE_INPUT', () => {
+  expect(bridge).toContain('TryFlushProgressiveImage');
+  expect(bridge).toContain('status == JXL_DEC_NEED_MORE_INPUT');
+  expect(bridge).toContain('return JXL_DEC_RESULT_PROGRESS');
 });
 
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {

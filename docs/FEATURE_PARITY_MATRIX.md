@@ -1,7 +1,7 @@
 # WASM ↔ Tauri Feature Parity Matrix (Master)
 
 **Single Source of Truth for Feature Completeness**  
-**Date:** 2026-06 (post-audit unification)  
+**Date:** 2026-06-03 (post-Predator progressive optimizations)  
 **Purpose:** Complete inventory of *all* features across the stack (raw-pipeline + CasaWASM JXL wrapper + scheduling + benchmark harness + Tauri desktop), with implementation status for the browser WASM pathway vs. the native Tauri/desktop pathway, plus exposure in the web Benchmark UIs. Extends the earlier partial "new features" comparison (WASM_Tauri_feature_comparison.md) to full coverage.
 
 This matrix supersedes and consolidates:
@@ -161,6 +161,7 @@ Implemented on `feature/animation-decode-enhancements`. See git history for the 
 ---
 
 ## Summary of Remaining High-Impact Gaps (2026-06)
+**Date:** 2026-06-03 (post-Predator progressive optimizations)
 
 Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or completed B-series work). 
 
@@ -168,6 +169,7 @@ Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or comp
 - JXTC container + certain WASM-specific streaming/zero-copy optimizations remain N/A on Tauri (native libjxl path).
 - Gain maps: library-level support (with runtime probe) is complete on both sides when the optional build flag is used. High-level Tauri desktop integration remains in the sibling repo.
 - First-class advanced encoder controls: Phase 1 (filters + GROUP_ORDER + validation + buffering foundation) complete on both sides (row 11b ✅). Deeper buffering, metrics, and expert gating phases remain future per the design note.
+- **Predator Mode Optimizations (2026-06)**: Successfully resolved `progressiveDc` hardcoding and plumbed center-out `groupOrder` support. Benchmarks now demonstrate genuinely distinct early progressive layers (Item 11).
 - Benchmark exposure for pure Rust internal tools is N/A (browser lab is the public surface).
 
 **Parity Already Excellent (do not regress):**

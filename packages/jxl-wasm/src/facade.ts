@@ -117,6 +117,10 @@ export interface EncoderOptions {
    * Requires the file to be viewed with progressiveDetail that requests the layers (e.g. 'passes' or 'dcProgressive').
    */
   progressiveDc?: 0 | 1 | 2;
+  /** Explicit VarDCT spectral AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
+  progressiveAc?: 0 | 1;
+  /** Explicit VarDCT quantized AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
+  qProgressiveAc?: 0 | 1;
   /**
    * Group order for scan vs center-out (ROI + progressive friendly).
    * 0 = scanline (default), 1 = center-out (recommended for progressive and thumbnails; makes early bytes look better).
@@ -731,8 +735,8 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
   const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : (options.previewFirst ? 1 : 0);
   return {
     progressiveDc,
-    progressiveAc: acEnabled ? 1 : 0,
-    qProgressiveAc: acEnabled ? 1 : 0,
+    progressiveAc: options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
+    qProgressiveAc: options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
     buffering: options.chunked ? 2 : 0,
     modular,
     brotliEffort,
