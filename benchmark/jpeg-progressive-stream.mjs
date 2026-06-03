@@ -15,6 +15,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import sharp from 'sharp';
 
@@ -194,6 +195,6 @@ function clampInt(value, min, max) {
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : min;
 }
 
-if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, '/')}`) {
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   runJpegMatrix().catch((error) => { console.error(error); process.exit(1); });
 }
