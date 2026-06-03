@@ -93,6 +93,57 @@ export function createProgressiveWebPreset({
   };
 }
 
+export const SNEYERS_PRESET = Object.freeze({
+  progressive: true,
+  previewFirst: true,
+  progressiveDc: 2,
+  progressiveAc: 1,
+  qProgressiveAc: 1,
+  groupOrder: 1,
+  effort: 3,
+  decodingSpeed: 0,
+});
+
+export function createSneyersPreset({
+  width,
+  height,
+  targetLongEdge = 1200,
+  quality = 85,
+  hasAlpha = true,
+  progressiveDetail = 'passes',
+  ssimulacra2Target = null,
+} = {}) {
+  const target = resolveTargetDimensions(width, height, targetLongEdge);
+  const qualityPolicy = resolveQualityPolicy({ quality, ssimulacra2Target });
+  const encode = {
+    format: 'rgba8',
+    width: target.width,
+    height: target.height,
+    hasAlpha,
+    quality: qualityPolicy.quality,
+    chunked: false,
+    ...SNEYERS_PRESET,
+  };
+  const decode = {
+    format: 'rgba8',
+    region: null,
+    downsample: 1,
+    progressionTarget: 'final',
+    emitEveryPass: true,
+    progressiveDetail,
+    preserveIcc: false,
+    preserveMetadata: false,
+  };
+  return {
+    name: 'sneyers',
+    target,
+    qualityPolicy,
+    encode,
+    decode,
+    byteCutoffs: [...PROGRESSIVE_WEB_BYTE_CUTOFFS],
+  };
+}
+
 export function createSidecarTargetPlan(targetLongEdge, { thumbnailLongEdge = 300 } = {}) {
   const target = targetLongEdge === 'full' ? 'full' : Math.max(1, Math.floor(Number(targetLongEdge)));
   const thumb = Math.max(1, Math.floor(Number(thumbnailLongEdge)));

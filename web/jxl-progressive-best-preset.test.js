@@ -2,8 +2,10 @@ import { expect, test } from 'bun:test';
 import {
   createProgressiveWebPreset,
   createSidecarTargetPlan,
+  createSneyersPreset,
   resolveQualityPolicy,
   resolveTargetDimensions,
+  SNEYERS_PRESET,
 } from './jxl-progressive-best-preset.js';
 
 test('createProgressiveWebPreset returns cjxl-style early preview encoder settings', () => {
@@ -45,6 +47,35 @@ test('resolveQualityPolicy reports SSIMULACRA2 target as unavailable instead of 
   expect(policy.ssimulacra2.requested).toBe(true);
   expect(policy.ssimulacra2.available).toBe(false);
   expect(policy.ssimulacra2.message).toContain('SSIMULACRA2');
+});
+
+test('SNEYERS_PRESET is frozen and contains expected Sneyers flags', () => {
+  expect(Object.isFrozen(SNEYERS_PRESET)).toBe(true);
+  expect(SNEYERS_PRESET.progressive).toBe(true);
+  expect(SNEYERS_PRESET.previewFirst).toBe(true);
+  expect(SNEYERS_PRESET.progressiveDc).toBe(2);
+  expect(SNEYERS_PRESET.progressiveAc).toBe(1);
+  expect(SNEYERS_PRESET.qProgressiveAc).toBe(1);
+  expect(SNEYERS_PRESET.groupOrder).toBe(1);
+  expect(SNEYERS_PRESET.effort).toBe(3);
+  expect(SNEYERS_PRESET.decodingSpeed).toBe(0);
+});
+
+test('createSneyersPreset returns target/encode/decode triple', () => {
+  const preset = createSneyersPreset({ width: 4000, height: 3000, targetLongEdge: 1200, quality: 80 });
+  expect(preset.target.width).toBe(1200);
+  expect(preset.target.height).toBe(900);
+  expect(preset.encode.progressiveDc).toBe(2);
+  expect(preset.encode.qProgressiveAc).toBe(1);
+  expect(preset.encode.effort).toBe(3);
+  expect(preset.encode.quality).toBe(80);
+  expect(preset.decode.emitEveryPass).toBe(true);
+  expect(preset.decode.progressiveDetail).toBe('passes');
+});
+
+test('createSneyersPreset honours progressiveDetail override', () => {
+  const preset = createSneyersPreset({ width: 100, height: 100, progressiveDetail: 'dc' });
+  expect(preset.decode.progressiveDetail).toBe('dc');
 });
 
 test('createSidecarTargetPlan sends a 300px thumbnail before larger target output', () => {
