@@ -84,6 +84,11 @@ export class EncodeSessionImpl implements EncodeSession {
     if (opts.groupOrder != null) (startMsg as any).groupOrder = opts.groupOrder;
     if (opts.sidecarSizes !== undefined) startMsg.sidecarSizes = opts.sidecarSizes;
     if (opts.orientation != null) startMsg.orientation = opts.orientation;
+    if (opts.centerX != null) startMsg.centerX = opts.centerX;
+    if (opts.centerY != null) startMsg.centerY = opts.centerY;
+    if (opts.intrinsicSize != null) startMsg.intrinsicSize = opts.intrinsicSize;
+    if (opts.disablePerceptualHeuristics === true) startMsg.disablePerceptualHeuristics = true;
+    if (opts.codestreamLevel != null) startMsg.codestreamLevel = opts.codestreamLevel;
 
     // No-op catch so a rejected done() promise with no caller handler (caller
     // used only chunks()) does not surface as an unhandledRejection.
