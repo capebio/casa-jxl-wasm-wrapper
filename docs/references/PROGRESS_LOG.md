@@ -6,6 +6,29 @@ Use the template below for every entry.
 
 ---
 
+## Feature: Prefix-Probe Bench + Tauri Progressive Parity — 2026-06-03
+
+**Branch:** `CasaSneyers_Parity`
+
+**Status:** Complete.
+
+**Scope:** True "min bytes to first progress paint" measurement via fresh-decoder prefix probes. Tauri encode parity with SNEYERS_PRESET. Shared decode metric events.
+
+**Key Changes:**
+- `benchmark/progressive-prefix-probe.mjs` — 18-point ladder (0.5%→100%), each probe a fresh WASM decoder fed exactly N bytes then closed. Eliminates carry-over vs stream-cutoff probing.
+- `benchmark/progressive-prefix-probe.test.js` — 4 pass, 0 fail (3 structural + 1 live WASM).
+- Skip guard messages in `progressive-flag-matrix.test.js` / `jpeg-progressive-stream.test.js` corrected — `paints=1` is a probe calibration issue on small real photos, not a missing `_jxl_wasm_dec_create`.
+- `raw-converter-tauri/raw-pipeline/src/casabio_encode.rs` — `encode_variants_with_progressive(dc, group_order)` added, mirrors WASM repo. `set_frame_option` IDs 19/13. 21/21 pipeline tests pass.
+- `raw-converter-tauri/src-tauri/src/pipeline.rs` — `ProcessOptions` gains `progressive_dc`/`group_order`. `encode_jxl_with_channels` wires them. Bg lightbox prefill emits `jxl_metrics` (`decode_buffer_extract_ms`, `decode_region_downsample_ms`, `source_pixels_decoded`). DC preview adds `time_to_first`.
+- `docs/suggested-settings.md` — prefix-probe measurement table added to SNEYERS_PRESET section.
+
+**Measurement (prefix-probe, simd-mt, Gobabeb ORF, 1600px, q=85, e=3):**
+- P2200717: first DC paint @ **2,063 B = 2%** (103 KB JXL). 56 ms cold decode. Full 1600×1195.
+- P2200712: first DC paint @ **2,303 B = 3%** (76 KB JXL). 13 ms warm decode. Full 1600×1195.
+- Min bytes ~2 KB absolute (not %-dependent). DC = full spatial resolution, blurry.
+
+---
+
 ## Feature: Reference Audit Backwards Pass — EC Resampling Parity — 2026-06-03
 
 **Branch:** `Reference_code_audit_parity`
