@@ -405,13 +405,19 @@ function getUpsamplingMode() {
     return Number.isFinite(v) ? v : 0;
 }
 
-/** JPEG reconstruction options (jpeg-recompression-polish design note) — mandatory benchmark. */
+/** JPEG reconstruction options (jpeg-recompression-polish design note + row12 full dec-hints) — mandatory benchmark. */
 function getJpegReconstruction() {
     const cfl = !!document.getElementById('batch-jpeg-cfl')?.checked;
     const compress = !!document.getElementById('batch-jpeg-compress-recon')?.checked;
     const store = !!document.getElementById('batch-jpeg-store-meta')?.checked;
-    if (!cfl && !compress && !store) return undefined;
-    return { cfl, compressBoxes: compress, storeJPEGMetadata: store };
+    // Row 7: fine strip keeps (default 1=keep). UI els optional; when absent keep full recon.
+    const kx = document.getElementById('batch-jpeg-keep-exif') ? (!!document.getElementById('batch-jpeg-keep-exif').checked ? 1 : 0) : 1;
+    const km = document.getElementById('batch-jpeg-keep-xmp') ? (!!document.getElementById('batch-jpeg-keep-xmp').checked ? 1 : 0) : 1;
+    const kj = document.getElementById('batch-jpeg-keep-jumbf') ? (!!document.getElementById('batch-jpeg-keep-jumbf').checked ? 1 : 0) : 1;
+    // Row 12: colorSpace / icc for full dec-hints (color_space, icc_pathname). No UI els yet; can be set programmatically or via advanced.
+    // For lab, omitted unless explicit (future: text input + file picker for icc).
+    if (!cfl && !compress && !store && kx===1 && km===1 && kj===1) return undefined;
+    return { cfl, compressBoxes: compress, storeJPEGMetadata: store, keepExif: kx, keepXmp: km, keepJumbf: kj };
 }
 
 function getModular() {
@@ -1194,6 +1200,9 @@ function makeEncoderOptions(source) {
         upsamplingMode: getUpsamplingMode(),
         alreadyDownsampled: false,
         jpegReconstruction: getJpegReconstruction(),
+        // Row 10/11 expert (cjxl --allow_expert_options + --disable_perceptual_optimizations ID 39). UI present in html; now wired.
+        ...(document.getElementById('batch-expert-allow')?.checked ? { allowExpertOptions: true } : {}),
+        ...(document.getElementById('batch-expert-disable-perceptual')?.checked ? { disablePerceptualHeuristics: true } : {}),
         modular: modular !== -1 ? modular : undefined,
         brotliEffort: brotliEffort >= 0 ? brotliEffort : undefined,
         metadata: hasMetadataOpts ? { compressBoxes, forceContainer, rawCodestream } : undefined,

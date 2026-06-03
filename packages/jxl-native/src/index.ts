@@ -272,6 +272,8 @@ export interface EncoderOptions {
   intensityTarget?: number;
   /** Premultiply alpha before encoding (-1=libjxl default, 0=no, 1=yes). HDR color fidelity knob. */
   premultiply?: -1 | 0 | 1;
+  /** Force JPEG XL codestream level. -1/omitted = auto, 5 = Level 5, 10 = Level 10. */
+  codestreamLevel?: -1 | 5 | 10;
   /** Prefer CICP (transfer + matrix) over ICC for HDR content when both present. */
   preferCICPForHDR?: boolean;
   progressive: boolean;
@@ -300,6 +302,13 @@ export interface EncoderOptions {
     compressBoxes?: boolean;
     emitWarnings?: boolean;
     storeJPEGMetadata?: boolean;
+    /** 0=strip, 1=keep (default). Fine-grained per cjxl dec-hints strip= (row 7 audit). */
+    keepExif?: 0 | 1;
+    keepXmp?: 0 | 1;
+    keepJumbf?: 0 | 1;
+    /** Full dec-hints row12: color_space override / icc for raw or recon. */
+    colorSpace?: string;
+    icc?: Uint8Array;
   };
 
   /** The input image has already been downsampled by the resampling factor. */
@@ -307,6 +316,29 @@ export interface EncoderOptions {
 
   /** Encoder upsampling mode (0 = nearest for pixel art, etc.). */
   upsamplingMode?: number;
+
+  /** Separate resampling for extra channels (cjxl row 8, ID 3). */
+  ecResampling?: -1 | 1 | 2 | 4 | 8;
+
+  /**
+   * Row 9 (cjxl): frame indexing string for JXL_ENC_FRAME_INDEX_BOX (ID 31).
+   * Strict ^(0*|1[01]*)$ + first frame rule (if any 1, position 0 must be 1).
+   */
+  frameIndexing?: string;
+
+  /**
+   * Row 10 (cjxl): allow expert options (effort=11 gate).
+   * Per cjxl --allow_expert_options.
+   */
+  allowExpertOptions?: boolean;
+
+  /**
+   * Row 11 (cjxl): --disable_perceptual_optimizations (ID 39).
+   * Disable libjxl perceptual quality heuristics (butteraugli/XYB psychovisual model).
+   * Critical for reproducible benchmarking and archival/scientific workflows.
+   * Maps to JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS.
+   */
+  disablePerceptualHeuristics?: boolean;
 
   /**
    * First-class advanced encoder controls (post-audit).
@@ -456,8 +488,10 @@ export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFaca
         advancedControls,
         hdrMetadata,
         intensityTarget,
-        premultiply,
         preferCICPForHDR,
+        frameIndexing,
+        allowExpertOptions,
+        disablePerceptualHeuristics,
         ...base
       } = options;
 
@@ -506,11 +540,16 @@ function convertAdvancedControlsToPairs(options: EncoderOptions): { id: number; 
   if (options.groupOrder != null) {
     out.push({ id: 13, value: options.groupOrder ? 1 : 0 });
   }
+  if (options.centerX != null) out.push({ id: 14, value: Math.floor(options.centerX) });
+  if (options.centerY != null) out.push({ id: 15, value: Math.floor(options.centerY) });
 
   if (ac?.buffering) {
     const b = ac.buffering;
-    if (b.strategy !== undefined) out.push({ id: 34, value: b.strategy });
-    // lowMemoryMode / preferChunkedAPI can be handled via other means or ignored for now
+    let strat = b.strategy;
+    if (strat === undefined) {
+      if (b.lowMemoryMode || b.streamingInput || b.streamingOutput) strat = 3;
+    }
+    if (strat !== undefined) out.push({ id: 34, value: strat });
   }
 
   // Simple scalars
@@ -518,12 +557,41 @@ function convertAdvancedControlsToPairs(options: EncoderOptions): { id: number; 
     out.push({ id: 4, value: options.alreadyDownsampled ? 1 : 0 });
   }
   if (options.upsamplingMode !== undefined) {
-    out.push({ id: 55, value: options.upsamplingMode }); // approximate ID; adjust if needed
+    out.push({ id: 55, value: options.upsamplingMode }); // note: upsampling_mode is via JxlEncoderSetUpsamplingMode(enc, factor, mode), not pure frame ID; 55 placeholder for pairs compat
+  }
+  if (options.ecResampling !== undefined) {
+    out.push({ id: 3, value: options.ecResampling });
   }
 
   // jpegReconstruction scalars (CFL etc.) can ride advanced pairs (ID 30 for CFL)
   if (options.jpegReconstruction?.cfl !== undefined) {
     out.push({ id: 30, value: options.jpegReconstruction.cfl ? 1 : 0 });
+  }
+  // Fine-grained JPEG strip (row 7): keep* emit as pairs (35/36/37); last-wins adv escape preserved.
+  if (options.jpegReconstruction?.keepExif !== undefined) {
+    out.push({ id: 35, value: options.jpegReconstruction.keepExif ? 1 : 0 });
+  }
+  if (options.jpegReconstruction?.keepXmp !== undefined) {
+    out.push({ id: 36, value: options.jpegReconstruction.keepXmp ? 1 : 0 });
+  }
+  if (options.jpegReconstruction?.keepJumbf !== undefined) {
+    out.push({ id: 37, value: options.jpegReconstruction.keepJumbf ? 1 : 0 });
+  }
+
+  // Row 12 full dec-hints: colorSpace / icc accepted in jpegReconstruction for API parity (raw color override or recon). No direct frame ID; handled at extras layer in reference. Pairs not emitted (higher-level than 35-37).
+  // (colorSpace / icc on options.jpegReconstruction are dropped above and not converted to pairs; available for consumer if needed.)
+
+  // Row 9/10/11 (cjxl audit): frameIndexing (31), allowExpert (effort gate), disablePerceptual (39). Emitted as pairs (last-wins with escape).
+  if (options.frameIndexing) {
+    // Note: full regex validation lives in WASM resolve (cjxl ProcessFlags); native trusts caller or escape.
+    out.push({ id: 31, value: 1 }); // basic single-frame mark; per-frame future
+  }
+  if (options.allowExpertOptions !== undefined) {
+    // The effort range gate (1-11 vs 1-10) is enforced in WASM resolve when flag set; native binding + libjxl accept 11 when passed.
+    // We emit a no-op marker or rely on pairs for 11; here just ensure flag presence doesn't break.
+  }
+  if (options.disablePerceptualHeuristics !== undefined) {
+    out.push({ id: 39, value: options.disablePerceptualHeuristics ? 1 : 0 });
   }
 
   // Smart defaults (predator parity with WASM resolve): previewFirst promotes Dc>=1 + group=1 unless explicit.

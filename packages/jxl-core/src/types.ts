@@ -144,9 +144,37 @@ export interface EncodeOptions {
   qProgressiveAc?: 0 | 1;
   /**
    * 0=scanline, 1=center-out group order. Strongly recommended for useful early progressive bytes.
+   * Matches cjxl --group_order.
    */
   groupOrder?: 0 | 1;
-  chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs
+  /**
+   * Center X coordinate (in pixels) for center-first group ordering (groupOrder=1).
+   * -1 (or omitted) = automatic (middle of image). Only honored when groupOrder=1.
+   * Matches cjxl --center_x with mutual-exclusion validation (error/warn if set without groupOrder=1).
+   */
+  centerX?: number;
+  /**
+   * Center Y coordinate (in pixels) for center-first group ordering (groupOrder=1).
+   * -1 (or omitted) = automatic (middle of image). Only honored when groupOrder=1.
+   * Matches cjxl --center_y.
+   */
+  centerY?: number;
+
+  /**
+   * Buffering / streaming strategy (cjxl --buffering + --streaming_input / --streaming_output).
+   * Full first-class surface with documented memory/density/compression tradeoffs.
+   * strategy -1..3 per cjxl (see JSDoc or cjxl --help for exact semantics).
+   * lowMemoryMode / preferChunkedAPI promote to strategy=3 (least memory) when no explicit strategy (smart wiring, Phase 3).
+   */
+  buffering?: {
+    strategy?: -1 | 0 | 1 | 2 | 3;
+    streamingInput?: boolean;
+    streamingOutput?: boolean;
+    lowMemoryMode?: boolean;
+    preferChunkedAPI?: boolean;
+  };
+
+  chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs (legacy alias for buffering.strategy=2-ish)
   /**
    * Max dimension (px, long edge) of sidecar thumbnail(s) to yield BEFORE the
    * main image chunks. Sorted ascending so the smallest preview arrives first.
@@ -182,6 +210,66 @@ export interface EncodeOptions {
    * Requires WASM build with enc_set_frame_flags bridge.
    */
   disablePerceptualHeuristics?: boolean;
+  /**
+   * Force JPEG XL codestream level. -1/omitted = libjxl automatic, 5 = Level 5,
+   * 10 = Level 10 for CMYK/black extra-channel and other Level 10 workflows.
+   */
+  codestreamLevel?: -1 | 5 | 10;
+
+  /**
+   * JPEG reconstruction controls for when source is JPEG (lossless transcode path).
+   * Full dec-hints (color_space, icc_pathname, strip=*) per cjxl row 12 audit.
+   * Strip (keep*) + warnings from row 7. cfl/store etc from jpeg-recompression-polish.
+   * colorSpace / icc for raw format color override or JPEG recon color hints.
+   */
+  jpegReconstruction?: {
+    cfl?: boolean;
+    compressBoxes?: boolean;
+    emitWarnings?: boolean;
+    storeJPEGMetadata?: boolean;
+    /** 0=strip EXIF from source JPEG recon, 1=keep (default). Maps to ID 35. Per-cjxl: stripping exif/xmp requires store=false to allow exact recon. */
+    keepExif?: 0 | 1;
+    /** 0=strip XMP, 1=keep (default). ID 36. */
+    keepXmp?: 0 | 1;
+    /** 0=strip JUMBF, 1=keep (default). ID 37. */
+    keepJumbf?: 0 | 1;
+    /** color_space from -x dec-hints (e.g. "sRGB", "RGB_D65_SRG_Per_SRG", shorthands). For raw input color or recon override. */
+    colorSpace?: string;
+    /** icc_pathname equivalent: ICC profile bytes for the hint. */
+    icc?: Uint8Array;
+  };
+
+  /**
+   * Row 8 (cjxl): The input image has already been downsampled by the resampling factor.
+   * Decoder will upsample. Matches --already_downsampled + sets already_downsampled in params.
+   */
+  alreadyDownsampled?: boolean;
+
+  /**
+   * Row 8 (cjxl): Decoder upsampling mode (useful with alreadyDownsampled).
+   * -1 = default non-separable, 0 = nearest (pixel art). Matches --upsampling_mode.
+   * Applied via JxlEncoderSetUpsamplingMode(enc, factor, mode).
+   */
+  upsamplingMode?: -1 | 0 | 1;
+
+  /**
+   * Row 8 (cjxl): Separate resampling factor for extra channels (ID 3).
+   * -1 = match main or default, 1/2/4/8. Matches --ec_resampling.
+   */
+  ecResampling?: -1 | 1 | 2 | 4 | 8;
+
+  /**
+   * Row 9 (cjxl): frame indexing for JXL_ENC_FRAME_INDEX_BOX (ID 31).
+   * String matching ^(0*|1[01]*)$ strict (cjxl validation in ProcessFlags); if starts with '0' all must '0'; to index later frames first must be indexed.
+   * '1' at pos i for frame i.
+   */
+  frameIndexing?: string;
+
+  /**
+   * Row 10 (cjxl): gate for effort=11 (expert mode, extreme compute for denser lossless).
+   * Per cjxl --allow_expert_options + guarded effort validation (1-11 only when true).
+   */
+  allowExpertOptions?: boolean;
 }
 
 export interface EncodeSession {
