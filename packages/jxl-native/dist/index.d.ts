@@ -290,6 +290,8 @@ export interface EncoderOptions {
     intensityTarget?: number;
     /** Premultiply alpha before encoding (-1=libjxl default, 0=no, 1=yes). HDR color fidelity knob. */
     premultiply?: -1 | 0 | 1;
+    /** Force JPEG XL codestream level. -1/omitted = auto, 5 = Level 5, 10 = Level 10. */
+    codestreamLevel?: -1 | 5 | 10;
     /** Prefer CICP (transfer + matrix) over ICC for HDR content when both present. */
     preferCICPForHDR?: boolean;
     progressive: boolean;

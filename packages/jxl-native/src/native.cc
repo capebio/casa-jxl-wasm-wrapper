@@ -63,6 +63,8 @@ struct EncoderData {
   int32_t brotli_effort = -1;
   int32_t decoding_speed = -1;
   int32_t photon_noise_iso = 0;
+  int32_t codestream_level = -1;
+  int32_t premultiply_alpha = -1;
   uint32_t resampling = 1;
   // Metadata boxes
   std::vector<uint8_t> icc_profile;
@@ -697,6 +699,12 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   } else if (data->force_container || !data->exif.empty() || !data->xmp.empty() || !data->icc_profile.empty() || !data->custom_boxes.empty()) {
     JxlEncoderUseContainer(enc, JXL_TRUE);
   }
+  if (data->codestream_level == 5 || data->codestream_level == 10) {
+    if (JxlEncoderSetCodestreamLevel(enc, data->codestream_level) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+  }
 
   const uint32_t bits = BitsForFormat(data->format);
   const uint32_t exp_bits = ExponentBitsForFormat(data->format);
@@ -710,6 +718,9 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   info.num_extra_channels = (data->has_alpha ? 1u : 0u) + static_cast<uint32_t>(data->extra_channels.size());
   info.alpha_bits = data->has_alpha ? bits : 0;
   info.alpha_exponent_bits = data->has_alpha ? exp_bits : 0;
+  if (data->has_alpha && data->premultiply_alpha >= 0) {
+    info.alpha_premultiplied = data->premultiply_alpha > 0 ? JXL_TRUE : JXL_FALSE;
+  }
 
   if (data->has_animation && !data->anim_frames.empty()) {
     info.have_animation             = JXL_TRUE;
@@ -1118,6 +1129,14 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
   {
     const double iso = GetNullableNumberProp(env, args[0], "photonNoiseIso", 0.0);
     data->photon_noise_iso = (iso <= 0.0) ? 0 : static_cast<int32_t>(iso);
+  }
+  {
+    const double level = GetNullableNumberProp(env, args[0], "codestreamLevel", -1.0);
+    data->codestream_level = (level == 5.0 || level == 10.0) ? static_cast<int32_t>(level) : -1;
+  }
+  {
+    const double premultiply = GetNullableNumberProp(env, args[0], "premultiply", -1.0);
+    data->premultiply_alpha = (premultiply == 0.0 || premultiply == 1.0) ? static_cast<int32_t>(premultiply) : -1;
   }
   data->resampling = NormalizeResampling(GetUint32Prop(env, args[0], "resampling", 1));
   {

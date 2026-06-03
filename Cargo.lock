@@ -862,6 +862,7 @@ name = "raw-converter-wasm"
 version = "0.1.0"
 dependencies = [
  "jpegxl-rs",
+ "jpegxl-sys",
  "js-sys",
  "raw-pipeline",
  "wasm-bindgen",

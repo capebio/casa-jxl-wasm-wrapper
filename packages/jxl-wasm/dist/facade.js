@@ -227,12 +227,17 @@ function resolveEncoderBridgeSettings(options) {
     const decodingSpeed = options.decodingSpeed != null ? Math.max(0, Math.min(4, Math.round(options.decodingSpeed))) : -1;
     const photonNoiseIso = options.photonNoiseIso != null ? Math.max(0, Math.round(options.photonNoiseIso)) : 0;
     const resampling = resolveResampling(options.resampling);
-    const epf = options.epf != null ? Math.max(-1, Math.min(3, Math.round(options.epf))) : -1;
-    const gaborish = options.gaborish != null ? (options.gaborish <= 0 ? 0 : 1) : -1;
-    const dots = options.dots != null ? (options.dots <= 0 ? 0 : 1) : -1;
+    const filters = options.advancedControls?.filters;
+    const epfSource = options.epf ?? filters?.epf;
+    const gaborishSource = options.gaborish ?? (filters?.gaborish === undefined ? undefined : (filters.gaborish ? 1 : 0));
+    const dotsSource = options.dots ?? (filters?.dots === undefined ? undefined : (filters.dots ? 1 : 0));
+    const epf = epfSource != null ? Math.max(-1, Math.min(3, Math.round(epfSource))) : -1;
+    const gaborish = gaborishSource != null ? (gaborishSource <= 0 ? 0 : 1) : -1;
+    const dots = dotsSource != null ? (dotsSource <= 0 ? 0 : 1) : -1;
     const colorTransform = options.colorTransform != null ? Math.max(-1, Math.min(2, Math.round(options.colorTransform))) : -1;
+    const buffering = resolveBufferingStrategy(options);
     if (!options.progressive) {
-        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform, groupOrder: 0 };
+        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering, modular, brotliEffort, decodingSpeed, photonNoiseIso, resampling, epf, gaborish, dots, colorTransform, groupOrder: resolveGroupOrder(options, 0) };
     }
     // Single rollback boolean — flip to false to revert to legacy previewFirst defaults.
     const USE_SNEYERS_DEFAULT = true;
@@ -245,12 +250,12 @@ function resolveEncoderBridgeSettings(options) {
             : 2;
         const ac = options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : 1;
         const qac = options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : 1;
-        const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : 1;
+        const groupOrder = resolveGroupOrder(options, 1);
         return {
             progressiveDc: dc,
             progressiveAc: ac,
             qProgressiveAc: qac,
-            buffering: options.chunked ? 2 : 0,
+            buffering,
             modular,
             brotliEffort,
             decodingSpeed: decodingSpeed >= 0 ? decodingSpeed : 0,
@@ -267,12 +272,12 @@ function resolveEncoderBridgeSettings(options) {
     const progressiveDc = options.progressiveDc != null
         ? Math.max(0, Math.min(2, options.progressiveDc | 0))
         : (options.previewFirst ? 1 : 1);
-    const groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : (options.previewFirst ? 1 : 0);
+    const groupOrder = resolveGroupOrder(options, options.previewFirst ? 1 : 0);
     return {
         progressiveDc,
         progressiveAc: options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
         qProgressiveAc: options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
-        buffering: options.chunked ? 2 : 0,
+        buffering,
         modular,
         brotliEffort,
         decodingSpeed,
@@ -284,6 +289,41 @@ function resolveEncoderBridgeSettings(options) {
         colorTransform,
         groupOrder,
     };
+}
+function resolveGroupOrder(options, fallback) {
+    if (options.groupOrder != null)
+        return options.groupOrder ? 1 : 0;
+    const groupOrder = options.advancedControls?.groupOrder;
+    if (groupOrder != null)
+        return groupOrder.mode === "center" ? 1 : 0;
+    return fallback;
+}
+function resolveBufferingStrategy(options) {
+    const buffering = options.advancedControls?.buffering;
+    if (buffering?.strategy !== undefined) {
+        return clampBufferingStrategy(buffering.strategy);
+    }
+    if (buffering?.streamingInput === true ||
+        buffering?.streamingOutput === true ||
+        buffering?.lowMemoryMode === true ||
+        buffering?.preferChunkedAPI === true) {
+        return 3;
+    }
+    return options.chunked ? 2 : 0;
+}
+function clampBufferingStrategy(value) {
+    const rounded = Math.round(value);
+    if (rounded <= -1)
+        return -1;
+    if (rounded >= 3)
+        return 3;
+    return rounded;
+}
+function wantsStreamingInput(options) {
+    return options.advancedControls?.buffering?.streamingInput !== false;
+}
+function wantsStreamingOutput(options) {
+    return options.advancedControls?.buffering?.streamingOutput !== false;
 }
 function resolveResampling(value) {
     return value === 2 || value === 4 || value === 8 ? value : 1;
@@ -1386,7 +1426,7 @@ class LibjxlEncoder {
         const wantSidecars = this.sortedSidecarSizes.length > 0 && caps.sidecars;
         const { iccProfile: effIcc, exif: effExif, xmp: effXmp } = resolveEffectiveMetadata(this.options);
         const needsBufferedPath = wantSidecars || needsBoxOptsV2(this.options) || this.options.gainMap != null;
-        if (!needsBufferedPath && caps.streamingInput) {
+        if (!needsBufferedPath && caps.streamingInput && wantsStreamingInput(this.options)) {
             const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
             // A3: rgb8 maps to fmtIndex 3; rgba16→1, rgbaf32→2, rgba8→0
             const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : this.options.format === "rgb8" ? 3 : 0;
@@ -1764,7 +1804,7 @@ class LibjxlEncoder {
                         module._free(dimsPtr);
                     }
                 }
-                else if (caps.streamingEncode) {
+                else if (caps.streamingEncode && wantsStreamingOutput(this.options)) {
                     // #11: streaming encoder — yields 256 KB chunks, reducing peak JS heap usage.
                     const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : this.options.format === "rgb8" ? 3 : 0;
                     const encState = module._jxl_wasm_enc_create();

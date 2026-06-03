@@ -213,6 +213,12 @@ export interface EncoderOptions {
     premultiply?: -1 | 0 | 1;
     /** Prefer CICP (transfer + matrix) over ICC for HDR content when both present. */
     preferCICPForHDR?: boolean;
+    /**
+     * First-class expert controls for libjxl filters, group order, and buffering.
+     * `advancedControls.buffering.streamingInput` / `streamingOutput` are the
+     * typed equivalents of cjxl's streaming flags.
+     */
+    advancedControls?: AdvancedEncoderControls;
     /** When present, encode as a multi-frame animation. ticksPerSecond and loopCount control the animation header. */
     animation?: AnimationOptions;
     /**
@@ -339,6 +345,37 @@ export interface MetadataBoxSpec {
 export interface JUMBFBox {
     /** Raw JUMBF superbox bytes (including the JUMBF box header). */
     data: Uint8Array | ArrayBuffer;
+}
+/**
+ * First-class advanced encoder controls promoted from the cjxl/libjxl audit.
+ * `buffering.streamingInput` and `streamingOutput` mirror cjxl's explicit
+ * streaming flags and promote `JXL_ENC_FRAME_SETTING_BUFFERING` to 3 unless
+ * `strategy` is set.
+ */
+export interface AdvancedEncoderControls {
+    filters?: FiltersControls;
+    groupOrder?: GroupOrderControls;
+    buffering?: BufferingControls;
+}
+export interface FiltersControls {
+    dots?: boolean;
+    epf?: -1 | 0 | 1 | 2 | 3;
+    gaborish?: boolean;
+}
+export interface GroupOrderControls {
+    mode: "scanline" | "center";
+}
+export interface BufferingControls {
+    /** libjxl BUFFERING strategy: -1 default, 0/1/2 buffered variants, 3 streaming-friendly. */
+    strategy?: -1 | 0 | 1 | 2 | 3;
+    /** Prefer the stateful streaming input path; promotes BUFFERING=3 when strategy is omitted. */
+    streamingInput?: boolean;
+    /** Prefer chunked output draining; promotes BUFFERING=3 when strategy is omitted. */
+    streamingOutput?: boolean;
+    /** Prefer low peak memory; promotes BUFFERING=3 when strategy is omitted. */
+    lowMemoryMode?: boolean;
+    /** Prefer libjxl chunked/streaming APIs where available; promotes BUFFERING=3 when strategy is omitted. */
+    preferChunkedAPI?: boolean;
 }
 /** Per-encode control over which metadata boxes are included and how the container is written. */
 export interface MetadataOptions {

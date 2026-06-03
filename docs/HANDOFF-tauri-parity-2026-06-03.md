@@ -124,10 +124,15 @@ See full archived handoff + `docs/boundary-cost-audit.md` (esp. sections 12-13 f
 - Verified: clean `build-msvc.ps1 check --bin`, wasm lib check unaffected, multiple dev/release runs on the test files + sampled Gobabeb ORF.
 - Docs updated: `suggested-settings.md` (Native section now documents the harness + envs + sample numbers), `INCOMPLETE PLANS.md` (Tauri bullets annotated with harness/metrics status; encode stays [x]).
 
-**Sample native numbers captured (release, MSVC, real files):**
-- 20 MP Gobabeb-class ORF (one file from prior GOB=1 run): direct-rgba ~322 ms (fused tone+alpha prep), full RAW pipeline ~797 ms.
-- 9-file mixed set (release run, GOB/P2200=0): direct_rgba avg 262.7 ms (min 173.5, max 345.3) over 9 files. extract avg 0.00 ms over 9. region_downsample avg ~598 ms over the files with successful JXL decode.
-- Full "Handoff Parity Summary" now prints automatically with guidance text pointing back to the audit + this handoff.
+**Real reference run data (GOB=30 + P2200=11 = 50 files, release MSVC, 2026-06-03):**
+- All 41 ORF ref files succeeded with full direct-rgba + JXL roundtrip ("via direct rgba").
+- Gobabeb 30-file encode parity: direct-rgba typically 330-420 ms (outlier 625 ms); jxl encode ~400-550 ms, decode ~520-700 ms (release).
+- P2200 11-file: similar range, one higher tone outlier at 1003 ms direct-rgba.
+- Overall (n=50): direct_rgba avg=380.7 ms (min 214.5, max 1003.0).
+- decode_buffer_extract_ms: avg=0.00 ms over 50.
+- decode_region_downsample_ms: avg=682.0 ms over 47.
+- Strategies seen: only {"full"} (ROI simulation code landed in same session — next P2200 run will also report small pre-crop dedicated JXL decodes for the 9-15 ms class).
+- The emitted Handoff Parity Summary from this exact run is in the conversation paste + benchmark/results_native.json + bench logs.
 
 **Current state vs. open items:**
 - Encode direct-RGBA foundation + harness reporting: solid (ORF ref path produces complete encode timings + metrics).
@@ -141,5 +146,7 @@ See full archived handoff + `docs/boundary-cost-audit.md` (esp. sections 12-13 f
 - Close the items in INCOMPLETE PLANS + append results to this handoff or a continuation.
 
 The harness is now the "replicate the speed" vehicle for native parity. Feed it the Gobabeb/P2200 sets and the numbers will drive the rest. 
+
+See the continuation handoff `docs/HANDOFF-tauri-parity-continuation-2026-06-04.md` for wiring the real Tauri-side ROI + progressive + metrics surface.
 
 - Grok (pickup on 2026-06-03)

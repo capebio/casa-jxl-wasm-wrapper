@@ -99,7 +99,7 @@ export function createNativeCodecFacade(binding) {
             const mergedAdvanced = [...baseAdvanced, ...extraAdvanced];
             // Destructure to drop high-level sugar fields that the native binding does not yet understand
             // (or that we convert). This pattern is robust under exactOptionalPropertyTypes.
-            const { jpegReconstruction, alreadyDownsampled, upsamplingMode, advancedControls, hdrMetadata, intensityTarget, premultiply, preferCICPForHDR, ...base } = options;
+            const { jpegReconstruction, alreadyDownsampled, upsamplingMode, advancedControls, hdrMetadata, intensityTarget, preferCICPForHDR, ...base } = options;
             const normalized = {
                 ...base,
                 customBoxes: [
@@ -148,9 +148,9 @@ function convertAdvancedControlsToPairs(options) {
     }
     if (ac?.buffering) {
         const b = ac.buffering;
-        if (b.strategy !== undefined)
-            out.push({ id: 34, value: b.strategy });
-        // lowMemoryMode / preferChunkedAPI can be handled via other means or ignored for now
+        const strategy = resolveBufferingStrategy(b);
+        if (strategy !== null)
+            out.push({ id: 34, value: strategy });
     }
     // Simple scalars
     if (options.alreadyDownsampled !== undefined) {
@@ -173,6 +173,25 @@ function convertAdvancedControlsToPairs(options) {
             out.push({ id: 13, value: 1 });
     }
     return out;
+}
+function resolveBufferingStrategy(buffering) {
+    if (buffering.strategy !== undefined)
+        return clampBufferingStrategy(buffering.strategy);
+    if (buffering.streamingInput === true ||
+        buffering.streamingOutput === true ||
+        buffering.lowMemoryMode === true ||
+        buffering.preferChunkedAPI === true) {
+        return 3;
+    }
+    return null;
+}
+function clampBufferingStrategy(value) {
+    const rounded = Math.round(value);
+    if (rounded <= -1)
+        return -1;
+    if (rounded >= 3)
+        return 3;
+    return rounded;
 }
 export function createDecoder(options) {
     return createNativeCodecFacade(loadNativeBinding()).createDecoder(options);

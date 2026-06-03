@@ -72,6 +72,10 @@ struct JxlWasmEncState {
   uint32_t enc_intrinsic_height; // 0 = not set
   // CasaSneyers_Parity: disable perceptual heuristics (ID 39) — for fair codec benchmarking
   int32_t  enc_disable_perceptual; // -1=auto, 1=disable butteraugli/XYB psychovisual
+  // -1=libjxl automatic, 5/10=forced codestream level.
+  int32_t  enc_codestream_level;
+  // -1=default, 0=straight/unassociated alpha, 1=premultiplied/associated alpha.
+  int32_t  enc_premultiply_alpha;
   // B3: optional metadata stored for enc_finish to pass to EncodeRgbaWithMetadata
   uint8_t* enc_icc;
   size_t   enc_icc_size;
@@ -499,7 +503,9 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
     // CasaSneyers_Parity (Ch3): display dims separate from encoded pixel dims (Retina @2×)
     uint32_t intrinsic_width = 0u, uint32_t intrinsic_height = 0u,
     // CasaSneyers_Parity: disable psychovisual butteraugli/XYB model (ID 39) for fair benchmarking
-    int32_t disable_perceptual = -1) {
+    int32_t disable_perceptual = -1,
+    int32_t codestream_level = -1,
+    int32_t premultiply_alpha = -1) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
@@ -527,22 +533,29 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
   info.num_extra_channels     = has_alpha ? 1u : 0u;
   info.alpha_bits             = has_alpha ? bits : 0u;
   info.alpha_exponent_bits    = has_alpha ? exp_bits : 0u;
+  if (has_alpha && premultiply_alpha >= 0) {
+    info.alpha_premultiplied = premultiply_alpha > 0 ? JXL_TRUE : JXL_FALSE;
+  }
   // JXL's free rotation: store EXIF orientation in the basic info. Decoders apply
   // the transform via metadata (canvas/CSS), no pixel rotation needed on encode.
   info.orientation            = ToJxlOrientation(orientation);
   // libjxl 0.11+: must declare uses_original_profile before SetBasicInfo when
   // an ICC profile will follow; encoder rejects SetICCProfile if XYB mode is locked in.
   info.uses_original_profile = (icc_profile != nullptr && icc_size > 0) ? JXL_TRUE : JXL_FALSE;
-
-  if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
-
-  // CasaSneyers_Parity (Ch3): intrinsic_size — signal display dims separate from encoded pixel dims.
-  // Useful for Retina/@2× assets where encoded pixels are 2× the logical display size.
+  // CasaSneyers_Parity (Ch3): non-zero signals display dims separate from encoded pixel dims
+  // (e.g. Retina @2×). JxlBasicInfo.intrinsic_xsize/ysize; 0 = not set (default).
   if (intrinsic_width > 0u && intrinsic_height > 0u) {
     info.have_intrinsic_size = JXL_TRUE;
     info.intrinsic_xsize = intrinsic_width;
     info.intrinsic_ysize = intrinsic_height;
-    if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
+  }
+
+  if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) { JxlEncoderDestroy(enc); return MakeError(22); }
+  if (codestream_level == 5 || codestream_level == 10) {
+    if (JxlEncoderSetCodestreamLevel(enc, codestream_level) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return MakeError(64);
+    }
   }
 
   if (icc_profile != nullptr && icc_size > 0) {
@@ -2745,6 +2758,8 @@ JxlWasmEncState* jxl_wasm_enc_create_image(
   s->enc_intrinsic_width = 0u;
   s->enc_intrinsic_height = 0u;
   s->enc_disable_perceptual = -1;
+  s->enc_codestream_level = -1;
+  s->enc_premultiply_alpha = -1;
   s->enc_orientation = 1u;
   return s;
 }
@@ -2848,7 +2863,9 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
       nullptr, s->enc_epf, s->enc_gaborish, s->enc_dots, s->enc_color_transform,
       s->enc_orientation,
       s->enc_intrinsic_width, s->enc_intrinsic_height,
-      s->enc_disable_perceptual);
+      s->enc_disable_perceptual,
+      s->enc_codestream_level,
+      s->enc_premultiply_alpha);
 
   // libjxl is done with the pixel data — free it now to reclaim memory.
   free(s->pixels_buf);
@@ -2924,6 +2941,20 @@ void jxl_wasm_enc_set_intrinsic_size(JxlWasmEncState* s, uint32_t w, uint32_t h)
 void jxl_wasm_enc_set_frame_flags(JxlWasmEncState* s, int32_t disable_perceptual) {
   if (s == nullptr) return;
   s->enc_disable_perceptual = disable_perceptual;
+}
+
+// Force codestream level for workflows that need Level 10 (e.g. black/CMYK EC).
+// level=-1/other leaves libjxl automatic; accepted explicit levels are 5 and 10.
+void jxl_wasm_enc_set_codestream_level(JxlWasmEncState* s, int32_t level) {
+  if (s == nullptr) return;
+  s->enc_codestream_level = (level == 5 || level == 10) ? level : -1;
+}
+
+// Force alpha association signaling for the main alpha channel.
+// This does not rewrite pixel values; callers must provide data matching the signal.
+void jxl_wasm_enc_set_alpha_premultiply(JxlWasmEncState* s, int32_t premultiply) {
+  if (s == nullptr) return;
+  s->enc_premultiply_alpha = premultiply > 0 ? 1 : 0;
 }
 
 // --- #15: Lossless JPEG → JXL transcode ---

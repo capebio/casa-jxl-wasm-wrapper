@@ -84,6 +84,31 @@ export interface EncodeStats {
      */
     sidecarOffsets?: readonly number[];
 }
+export interface AdvancedEncoderControls {
+    filters?: FiltersControls;
+    groupOrder?: GroupOrderControls;
+    buffering?: BufferingControls;
+}
+export interface FiltersControls {
+    dots?: boolean;
+    epf?: -1 | 0 | 1 | 2 | 3;
+    gaborish?: boolean;
+}
+export interface GroupOrderControls {
+    mode: "scanline" | "center";
+}
+export interface BufferingControls {
+    /** libjxl BUFFERING strategy: -1 default, 0/1/2 buffered variants, 3 streaming-friendly. */
+    strategy?: -1 | 0 | 1 | 2 | 3;
+    /** Prefer stateful streaming input; promotes BUFFERING=3 when strategy is omitted. */
+    streamingInput?: boolean;
+    /** Prefer chunked output draining; promotes BUFFERING=3 when strategy is omitted. */
+    streamingOutput?: boolean;
+    /** Prefer low peak memory; promotes BUFFERING=3 when strategy is omitted. */
+    lowMemoryMode?: boolean;
+    /** Prefer libjxl chunked/streaming APIs where available; promotes BUFFERING=3 when strategy is omitted. */
+    preferChunkedAPI?: boolean;
+}
 export interface EncodeOptions {
     format: PixelFormat;
     width: number;
@@ -115,6 +140,12 @@ export interface EncodeOptions {
      * 0=scanline, 1=center-out group order. Strongly recommended for useful early progressive bytes.
      */
     groupOrder?: 0 | 1;
+    /**
+     * First-class expert controls for libjxl filters, group order, and buffering.
+     * streamingInput/streamingOutput mirror cjxl streaming flags and promote
+     * JXL_ENC_FRAME_SETTING_BUFFERING=3 unless strategy is set.
+     */
+    advancedControls?: AdvancedEncoderControls;
     chunked?: boolean;
     /**
      * Max dimension (px, long edge) of sidecar thumbnail(s) to yield BEFORE the
@@ -153,6 +184,11 @@ export interface EncodeOptions {
      * Requires WASM build with enc_set_frame_flags bridge.
      */
     disablePerceptualHeuristics?: boolean;
+    /**
+     * Force JPEG XL codestream level. -1/omitted = libjxl automatic, 5 = Level 5,
+     * 10 = Level 10 for CMYK/black extra-channel and other Level 10 workflows.
+     */
+    codestreamLevel?: -1 | 5 | 10;
 }
 export interface EncodeSession {
     readonly id: string;

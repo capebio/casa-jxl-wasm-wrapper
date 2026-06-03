@@ -716,6 +716,53 @@ describe("resampling encoder option", () => {
   });
 });
 
+describe("advanced buffering encoder controls", () => {
+  afterEach(() => {
+    setJxlModuleFactoryForTesting(null);
+  });
+
+  function makeStreamingInputModuleCapturingCreateArgs() {
+    const module = createFakeStreamingInputLibjxlModule();
+    const calls: number[][] = [];
+    const baseCreate = module._jxl_wasm_enc_create_image.bind(module);
+    module._jxl_wasm_enc_create_image = (...args: number[]) => {
+      calls.push(args);
+      return baseCreate(args[0]!, args[1]!);
+    };
+    return { module, calls };
+  }
+
+  test("advancedControls.buffering.streamingInput promotes BUFFERING=3", async () => {
+    const { module, calls } = makeStreamingInputModuleCapturingCreateArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({
+      ...encodeOptions,
+      advancedControls: { buffering: { streamingInput: true } },
+    });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![9]).toBe(3);
+    await encoder.dispose();
+  });
+
+  test("advancedControls.buffering.strategy overrides streamingInput promotion", async () => {
+    const { module, calls } = makeStreamingInputModuleCapturingCreateArgs();
+    setJxlModuleFactoryForTesting(async () => module as never);
+    const encoder = createEncoder({
+      ...encodeOptions,
+      advancedControls: { buffering: { strategy: 2, streamingInput: true } },
+    });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![9]).toBe(2);
+    await encoder.dispose();
+  });
+});
+
 describe("decodingSpeed encoder option", () => {
   afterEach(() => {
     setJxlModuleFactoryForTesting(null);
@@ -915,6 +962,54 @@ describe("decodingSpeed encoder option", () => {
     const boxOpts = readBoxOpts(v2Calls[0]![23]!);
     expect(boxOpts.rawCodestream).toBe(1);
     expect(boxOpts.forceContainer).toBe(0);
+    await encoder.dispose();
+  });
+
+  test("codestreamLevel forwards to encoder state setter when bridge supports it", async () => {
+    const base = createFakeStreamingInputLibjxlModule();
+    const codestreamLevelCalls: number[] = [];
+    const module = {
+      ...base,
+      _jxl_wasm_enc_set_codestream_level: (_state: number, level: number) => {
+        codestreamLevelCalls.push(level);
+      },
+    };
+    setJxlModuleFactoryForTesting(async () => module as never);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      codestreamLevel: 10,
+      quality: 90,
+    });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+
+    expect(codestreamLevelCalls).toEqual([10]);
+    await encoder.dispose();
+  });
+
+  test("premultiply forwards to encoder state setter when bridge supports it", async () => {
+    const base = createFakeStreamingInputLibjxlModule();
+    const premultiplyCalls: number[] = [];
+    const module = {
+      ...base,
+      _jxl_wasm_enc_set_alpha_premultiply: (_state: number, premultiply: number) => {
+        premultiplyCalls.push(premultiply);
+      },
+    };
+    setJxlModuleFactoryForTesting(async () => module as never);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      premultiply: 1,
+      quality: 90,
+    });
+    encoder.pushPixels(new Uint8Array(4));
+    encoder.finish();
+    for await (const _ of encoder.chunks()) { /* drain */ }
+
+    expect(premultiplyCalls).toEqual([1]);
     await encoder.dispose();
   });
 });

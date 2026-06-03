@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { CapabilityMissing, createNativeCodecFacade, loadNativeBinding } from "../src/index";
 
 const decodeOptions = {
@@ -38,8 +39,65 @@ describe("@casabio/jxl-native facade", () => {
       createEncoder: () => encoder,
     });
 
-    expect(facade.createDecoder(decodeOptions)).toBe(decoder);
+    const wrappedDecoder = facade.createDecoder(decodeOptions);
+    expect(wrappedDecoder.push).toBe(decoder.push);
+    expect(typeof wrappedDecoder.seekToFrame).toBe("function");
+    expect(typeof wrappedDecoder.seekToTime).toBe("function");
     expect(facade.createEncoder(encodeOptions)).toBe(encoder);
+  });
+
+  test("forwards codestreamLevel to the native binding", () => {
+    const encoder = { pushPixels() {}, finish() {}, async *chunks() {}, cancel() {}, dispose() {} };
+    let received: unknown;
+    const facade = createNativeCodecFacade({
+      version: () => "test",
+      probe: () => ({ loaded: true, path: "memory" }),
+      createDecoder: () => ({ push() {}, close() {}, async *events() {}, cancel() {}, dispose() {} }),
+      createEncoder: (options) => {
+        received = options;
+        return encoder;
+      },
+    });
+
+    facade.createEncoder({ ...encodeOptions, codestreamLevel: 10 } as typeof encodeOptions & { codestreamLevel: 10 });
+
+    expect((received as { codestreamLevel?: number }).codestreamLevel).toBe(10);
+  });
+
+  test("lowers streamingInput buffering controls to native frame setting ID 34", () => {
+    const encoder = { pushPixels() {}, finish() {}, async *chunks() {}, cancel() {}, dispose() {} };
+    let received: unknown;
+    const facade = createNativeCodecFacade({
+      version: () => "test",
+      probe: () => ({ loaded: true, path: "memory" }),
+      createDecoder: () => ({ push() {}, close() {}, async *events() {}, cancel() {}, dispose() {} }),
+      createEncoder: (options) => {
+        received = options;
+        return encoder;
+      },
+    });
+
+    facade.createEncoder({
+      ...encodeOptions,
+      advancedControls: { buffering: { streamingInput: true } },
+    });
+
+    expect((received as { advancedFrameSettings?: readonly { id: number; value: number }[] }).advancedFrameSettings)
+      .toContainEqual({ id: 34, value: 3 });
+  });
+
+  test("native addon parses and applies codestreamLevel", () => {
+    const source = readFileSync(new URL("../src/native.cc", import.meta.url), "utf8");
+
+    expect(source).toContain("\"codestreamLevel\"");
+    expect(source).toContain("JxlEncoderSetCodestreamLevel");
+  });
+
+  test("native addon parses and applies premultiply alpha signaling", () => {
+    const source = readFileSync(new URL("../src/native.cc", import.meta.url), "utf8");
+
+    expect(source).toContain("\"premultiply\"");
+    expect(source).toContain("alpha_premultiplied");
   });
 
   test("rejects a native addon that reports loaded false", () => {

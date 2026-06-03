@@ -22,6 +22,9 @@ wasm-bindgen-rayon = { version = "1", optional = true }
 # but the guard prevents any accidental wasm32 compilation of vendored libjxl).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 jpegxl-rs = { version = "0.10", features = ["vendored"] }
+# Low-level libjxl for native progressive (FRAME_PROGRESSION / FlushImage / SetProgressiveDetail)
+# and ROI crop (JxlDecoderSetCropEnabled + SetImageOutBuffer) in parity harness / Tauri paths.
+jpegxl-sys = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
 opt-level = 3

@@ -76,10 +76,31 @@ test('progressive paint exposes group-order center-out checkbox (UI polish for A
     expect(html).toContain('data-help-target="pp-group"');
     expect(source).toContain('prog-group-order');
     expect(source).toContain('syncGroupOrderDefault');
-    expect(source).toContain('groupOrder = !!(document.getElementById');
+    expect(source).toContain("document.getElementById('prog-group-order')");
     // render now surfaces the dc/group actually used (for hunt data visibility)
     expect(source).toContain('progressiveDc, groupOrder');
     expect(source).toContain('dc=${progressiveDc ??');
+});
+
+test('Sneyers preset + throttle controls present and wired', () => {
+    // HTML has both selects with correct defaults
+    expect(html).toContain('id="preset-name"');
+    expect(html).toContain('value="sneyers" selected');
+    expect(html).toContain('id="throttle-rate"');
+    expect(html).toContain('value="100" selected');
+    expect(html).toContain('Sneyers (truly-progressive)');
+    expect(html).toContain('100 KB/s');
+    // JS has helper functions and wires throttle into streaming path
+    expect(source).toContain('function readPresetName()');
+    expect(source).toContain('function readThrottleKbPerSec()');
+    expect(source).toContain('function feedThrottled(');
+    expect(source).toContain("import { createProgressiveWebPreset, createSneyersPreset }");
+    expect(source).toContain('throttleKbPerSec > 0');
+    expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec)');
+    // Sneyers preset forces previewFirst + Sneyers flags
+    expect(source).toContain("presetName === 'sneyers' ? true");
+    expect(source).toContain("presetName === 'sneyers' ? 2");
+    expect(source).toContain("presetName === 'sneyers' ? 0");
 });
 
 test('progressive paint sends generated JXL and settings directly to gallery without mandatory download', () => {
