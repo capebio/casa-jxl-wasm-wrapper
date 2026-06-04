@@ -1,0 +1,801 @@
+import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
+import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+import { createSneyersPreset } from './jxl-progressive-best-preset.js';
+import { computePsnrVsFinal } from './jxl-progressive-quality.js';
+import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog } from './jxl-progressive-frame-stats.js';
+
+const { process_orf, rgb_to_rgba } = rawWasm;
+const PROGRESSIVE_DETAIL = 'passes';
+
+// Size presets define output long-edge in pixels. "original" preserves source dims.
+const SIZE_PRESETS = {
+    'tiny':       { label: 'Tiny',       longEdge: 160 },
+    'small':      { label: 'Small',      longEdge: 320 },
+    'medium':     { label: 'Medium',     longEdge: 640 },
+    'large':      { label: 'Large',      longEdge: 1080 },
+    'very-large': { label: 'Very Large', longEdge: 2160 },
+    'original':   { label: 'Original',   longEdge: 'source' },
+};
+const DEFAULT_SIZE_PRESET = 'very-large';
+
+// Quality presets define libjxl distance (and quality number for display). kbPerMp is a
+// rough heuristic for the "Estimate" readout — actual file size depends on content.
+const QUALITY_PRESETS = {
+    'very-low':  { label: 'Very Low',  quality: 75,  kbPerMp: 80 },
+    'low':       { label: 'Low',       quality: 80,  kbPerMp: 110 },
+    'medium':    { label: 'Medium',    quality: 85,  kbPerMp: 150 },
+    'high':      { label: 'High',      quality: 90,  kbPerMp: 220 },
+    'very-high': { label: 'Very High', quality: 95,  kbPerMp: 400 },
+    'lossless':  { label: 'Lossless',  quality: 100, distance: 0, kbPerMp: 3000 },
+};
+const DEFAULT_QUALITY_PRESET = 'high';
+
+const retrieveBtn = document.getElementById('retrieve-run');
+const statusEl = document.getElementById('single-status');
+const canvas = document.getElementById('progressive-canvas');
+const viewerTitle = document.getElementById('viewer-title');
+const viewerMeta = document.getElementById('viewer-meta');
+const passStrip = document.getElementById('pass-strip');
+const consoleBtn = document.getElementById('dbg-console-btn');
+const consoleMount = document.getElementById('dbg-console-mount');
+const exportCsvBtn = document.getElementById('export-csv-btn');
+const exportJsonBtn = document.getElementById('export-json-btn');
+const exportToonBtn = document.getElementById('export-toon-btn');
+const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
+const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
+
+const runMeasurements = [];
+let rawReady = false;
+let running = false;
+
+initDebugConsole(consoleBtn, consoleMount);
+console.log('%c[Single progressive] loaded', 'color:#7de0b0;font-weight:600', {
+    page: 'Single progressive',
+    url: location.href,
+    t: new Date().toISOString(),
+});
+
+initRaw().then(() => {
+    rawReady = true;
+    setStatus('Ready. Settings first, then retrieve raw file.');
+    dbgLog('RAW WASM initialized', '', 'success');
+}).catch((error) => {
+    setStatus(`RAW WASM failed: ${error?.message ?? error}`);
+    dbgLog('RAW WASM failed', error?.message ?? String(error), 'error');
+});
+
+retrieveBtn?.addEventListener('click', () => {
+    void retrieveAndRun();
+});
+if (exportCsvBtn) exportCsvBtn.addEventListener('click', exportMeasurementsCSV);
+if (exportJsonBtn) exportJsonBtn.addEventListener('click', exportMeasurementsJSON);
+if (exportToonBtn) exportToonBtn.addEventListener('click', exportMeasurementsTOON);
+if (copyMeasurementsMdBtn) copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown);
+if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
+
+const sizePresetEl = document.getElementById('size-preset');
+const qualityPresetEl = document.getElementById('quality-preset');
+const sizeEstimateEl = document.getElementById('size-estimate');
+let lastLoadedSourceDims = null;
+
+if (sizePresetEl) sizePresetEl.addEventListener('change', updateSizeEstimateDisplay);
+if (qualityPresetEl) qualityPresetEl.addEventListener('change', updateSizeEstimateDisplay);
+updateSizeEstimateDisplay();
+
+function updateSizeEstimateDisplay() {
+    if (!sizeEstimateEl) return;
+    const settings = readSettings();
+    // Until a RAW is loaded, show estimate per 1 MP at chosen long-edge.
+    const sourceDims = lastLoadedSourceDims;
+    const sourceLong = sourceDims ? Math.max(sourceDims.width, sourceDims.height) : null;
+    const longEdge = settings.longEdgeRequest === 'source'
+        ? (sourceLong ?? 'source')
+        : Math.min(settings.longEdgeRequest, sourceLong ?? settings.longEdgeRequest);
+    if (sourceDims) {
+        const target = resolveTarget(sourceDims, settings.longEdgeRequest);
+        const kb = estimateTargetKb(target.width, target.height, settings.qualityPreset);
+        sizeEstimateEl.textContent = `${target.width}x${target.height} · ~${kb} KB`;
+    } else {
+        const fallbackLong = typeof longEdge === 'number' ? longEdge : 1080;
+        const fallbackKb = estimateTargetKb(fallbackLong, Math.round(fallbackLong * 0.75), settings.qualityPreset);
+        sizeEstimateEl.textContent = settings.lossless
+            ? `~${fallbackKb} KB · lossless`
+            : `~${fallbackKb} KB · q${settings.qualityNumber}`;
+    }
+}
+
+async function retrieveAndRun() {
+    if (running) return;
+    if (!rawReady) {
+        setStatus('RAW WASM not ready yet.');
+        return;
+    }
+
+    running = true;
+    retrieveBtn.disabled = true;
+    clearRunView();
+    const settings = readSettings();
+
+    try {
+        dbgLog('Run start', JSON.stringify(settings), 'info');
+        setStatus('Retrieving random Gobabeb RAW...');
+        const source = await loadRandomRaw();
+        renderSourceShell(source);
+
+        setStatus(`Preparing ${source.file} at ${settings.sizePresetLabel} (${settings.longEdgeRequest === 'source' ? 'source dims' : `${settings.longEdgeRequest} px`})...`);
+        const target = resolveTarget(source, settings.longEdgeRequest);
+        const targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
+
+        const estimateKb = estimateTargetKb(target.width, target.height, settings.qualityPreset);
+        setStatus(`Encoding Sneyers at ${settings.qualityPresetLabel} (q=${settings.qualityNumber}${settings.lossless ? ', lossless' : ''})... estimate ${estimateKb} KB`);
+        const encodeStart = performance.now();
+        const encodeBytes = await encodeSneyersDirect({
+            rgba: targetRgba,
+            width: target.width,
+            height: target.height,
+            quality: settings.qualityNumber,
+            lossless: settings.lossless,
+            progressiveDc: settings.progressiveDc,
+        });
+        const encodeTotalMs = performance.now() - encodeStart;
+        const selected = {
+            quality: settings.qualityNumber,
+            bytes: encodeBytes,
+            encodeMs: encodeTotalMs,
+            attempts: [{
+                quality: settings.qualityNumber,
+                byteLength: encodeBytes.byteLength,
+                encodeMs: encodeTotalMs,
+                errorPct: estimateKb ? ((encodeBytes.byteLength - estimateKb * 1024) / (estimateKb * 1024)) * 100 : 0,
+            }],
+        };
+        dbgLog('Encoded', `q=${selected.quality} size=${formatBytes(encodeBytes.byteLength)} estimate=${estimateKb} KB`, 'success');
+
+        setStatus(`Decoding ${formatBytes(encodeBytes.byteLength)} JXL with ${formatThrottle(settings.throttleKbPerSec)} throttle...`);
+        const decode = await decodeProgressively({
+            jxlBytes: encodeBytes,
+            width: target.width,
+            height: target.height,
+            throttleKbPerSec: settings.throttleKbPerSec,
+        });
+        setStatus('Running one-shot decode comparison...');
+        const oneShotMs = await decodeOneShotFinal(encodeBytes);
+
+        const finalFrame = decode.passes.find(p => p.isFinal) ?? decode.passes.at(-1);
+        const finalPsnr = finalFrame?.pixels?.byteLength === targetRgba.byteLength
+            ? computePsnrVsFinal(targetRgba, finalFrame.pixels)
+            : null;
+        const metrics = buildMeasurement({
+            source,
+            target,
+            targetKb: estimateKb,
+            throttleKbPerSec: settings.throttleKbPerSec,
+            selected,
+            encodeTotalMs,
+            decode,
+            oneShotMs,
+            finalPsnr,
+            sizePreset: settings.sizePreset,
+            qualityPreset: settings.qualityPreset,
+        });
+        runMeasurements.push(metrics);
+        renderMetrics(metrics);
+        updateExportButtons();
+        setStatus(`Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms.`);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`Run failed: ${message}`);
+        dbgLog('Run failed', message, 'error');
+        console.error('[Single progressive] run failed', error);
+    } finally {
+        running = false;
+        retrieveBtn.disabled = false;
+    }
+}
+
+function readSettings() {
+    const sizeKey = document.getElementById('size-preset')?.value ?? DEFAULT_SIZE_PRESET;
+    const qualityKey = document.getElementById('quality-preset')?.value ?? DEFAULT_QUALITY_PRESET;
+    const sizePreset = SIZE_PRESETS[sizeKey] ?? SIZE_PRESETS[DEFAULT_SIZE_PRESET];
+    const qualityPreset = QUALITY_PRESETS[qualityKey] ?? QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
+    const dcRaw = document.getElementById('progressive-dc')?.value ?? '1';
+    const progressiveDc = Math.max(0, Math.min(2, Number(dcRaw) || 0));
+    return {
+        sizePreset: sizeKey,
+        sizePresetLabel: sizePreset.label,
+        longEdgeRequest: sizePreset.longEdge,
+        qualityPreset: qualityKey,
+        qualityPresetLabel: qualityPreset.label,
+        qualityNumber: qualityPreset.quality,
+        lossless: qualityPreset.distance === 0,
+        throttleKbPerSec: Math.max(0, Number(document.getElementById('throttle-rate')?.value) || 0),
+        progressiveDc,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+    };
+}
+
+function estimateTargetKb(width, height, qualityKey) {
+    const preset = QUALITY_PRESETS[qualityKey] ?? QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
+    const megapixels = (width * height) / 1_000_000;
+    return Math.max(1, Math.round(megapixels * preset.kbPerMp));
+}
+
+async function loadRandomRaw() {
+    const response = await fetch('/api/random-gobabeb', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`/api/random-gobabeb returned ${response.status}`);
+    const file = response.headers.get('X-File-Name') || response.headers.get('x-file-name') || 'random-gobabeb.orf';
+    const rawBytes = new Uint8Array(await response.arrayBuffer());
+    dbgLog('RAW loaded', `${file} | ${formatBytes(rawBytes.byteLength)}`, 'info');
+    const result = process_orf(rawBytes, 0.3, 0.1, 0, 0, 0, 0, 0.15, 0.1, 0, 0, NaN, NaN, 0, 0);
+    try {
+        const rgba = rgb_to_rgba(result.take_rgb());
+        dbgLog('RAW processed', `${result.width}x${result.height} rgba=${formatBytes(rgba.byteLength)}`, 'info');
+        return {
+            file,
+            rawBytes: rawBytes.byteLength,
+            rgba,
+            width: result.width,
+            height: result.height,
+        };
+    } finally {
+        result.free();
+    }
+}
+
+function resolveTarget(source, longEdgeRequest) {
+    const sourceLong = Math.max(source.width, source.height);
+    const requested = (longEdgeRequest === 'source' || longEdgeRequest === 'full')
+        ? sourceLong
+        : Math.max(1, Number(longEdgeRequest) || 1080);
+    const longEdge = Math.min(sourceLong, requested);
+    const scale = longEdge / sourceLong;
+    return {
+        width: Math.max(1, Math.round(source.width * scale)),
+        height: Math.max(1, Math.round(source.height * scale)),
+        longEdge,
+    };
+}
+
+function resizeRgba(rgba, width, height, targetWidth, targetHeight) {
+    if (width === targetWidth && height === targetHeight) return exactView(rgba);
+    if (rawWasm.downscale_rgba) {
+        return exactView(rawWasm.downscale_rgba(rgba, width, height, targetWidth, targetHeight));
+    }
+    const src = document.createElement('canvas');
+    src.width = width;
+    src.height = height;
+    src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height), 0, 0);
+    const dst = document.createElement('canvas');
+    dst.width = targetWidth;
+    dst.height = targetHeight;
+    const ctx = dst.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0, targetWidth, targetHeight);
+    const data = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+}
+
+async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc }) {
+    const preset = createSneyersPreset({
+        width,
+        height,
+        targetLongEdge: 'full',
+        quality,
+        hasAlpha: true,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+    });
+    const encoder = createEncoder({
+        ...preset.encode,
+        width,
+        height,
+        quality,
+        // distance=0 triggers libjxl lossless path (overrides quality-derived distance).
+        ...(lossless ? { distance: 0 } : {}),
+        // Override Sneyers preset's progressiveDc=2 with user choice. 1 = single 1:8 DC
+        // (earlier first paint than 2). 0 = no DC progressive.
+        ...(progressiveDc != null ? { progressiveDc } : {}),
+        progressiveDetail: undefined,
+        buffering: { strategy: 0 },
+        chunked: false,
+    });
+    const chunks = [];
+    const chunkTask = (async () => {
+        for await (const chunk of encoder.chunks()) {
+            chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+        }
+    })();
+    await encoder.pushPixels(exactBuffer(rgba));
+    await encoder.finish();
+    await chunkTask;
+    await encoder.dispose();
+    return concatChunks(chunks);
+}
+
+async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }) {
+    const decoder = createDecoder({
+        format: 'rgba8',
+        region: null,
+        downsample: 1,
+        progressionTarget: 'final',
+        emitEveryPass: true,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+        preserveIcc: false,
+        preserveMetadata: false,
+    });
+    const passes = [];
+    const decStart = performance.now();
+    const feedState = { bytesFed: 0, totalBytes: jxlBytes.byteLength };
+    const eventTask = (async () => {
+        for await (const event of decoder.events()) {
+            if (event.type === 'header') {
+                dbgLog('Decoder header', `${event.info.width}x${event.info.height}`, 'info');
+            } else if (event.type === 'progress' || event.type === 'final') {
+                const t = performance.now() - decStart;
+                const bytesFed = Math.min(feedState.totalBytes, feedState.bytesFed);
+                const percentFed = feedState.totalBytes ? (bytesFed / feedState.totalBytes) * 100 : 100;
+                const pass = makePassRecord(event, passes.length, t, width, height);
+                pass.bytesFed = bytesFed;
+                pass.percentFed = Number(percentFed.toFixed(2));
+                passes.push(pass);
+                renderProgressivePass(pass);
+                dbgLog(
+                    `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`,
+                    `${pass.t_ms} ms · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) | ${formatFrameStatsLog(pass.stats)}`,
+                    'info'
+                );
+                console.log('[Single progressive] frame stats', {
+                    pass: pass.pass,
+                    isFinal: pass.isFinal,
+                    t_ms: pass.t_ms,
+                    bytesFed: pass.bytesFed,
+                    percentFed: pass.percentFed,
+                    ...pass.stats,
+                });
+                await nextPaint();
+            } else if (event.type === 'error') {
+                throw new Error(`${event.code}: ${event.message}`);
+            }
+        }
+    })();
+
+    try {
+        await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState);
+        await eventTask;
+    } finally {
+        await decoder.dispose();
+    }
+    return { passes };
+}
+
+async function decodeOneShotFinal(jxlBytes) {
+    const decoder = createDecoder({
+        format: 'rgba8',
+        region: null,
+        downsample: 1,
+        progressionTarget: 'final',
+        emitEveryPass: false,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+        preserveIcc: false,
+        preserveMetadata: false,
+    });
+    const start = performance.now();
+    let finalMs = null;
+    const eventTask = (async () => {
+        for await (const event of decoder.events()) {
+            if (event.type === 'final') finalMs = performance.now() - start;
+            else if (event.type === 'error') throw new Error(`${event.code}: ${event.message}`);
+        }
+    })();
+    try {
+        await decoder.push(exactBuffer(jxlBytes));
+        await decoder.close();
+        await eventTask;
+    } finally {
+        await decoder.dispose();
+    }
+    const ms = finalMs == null ? null : Number(finalMs.toFixed(2));
+    dbgLog('One-shot decode', ms == null ? 'no final event' : `${ms} ms`, ms == null ? 'warn' : 'info');
+    return ms;
+}
+
+function makePassRecord(event, index, t, width, height) {
+    const pixels = event.pixels instanceof Uint8Array ? new Uint8Array(event.pixels) : new Uint8Array(event.pixels);
+    const stats = analyzeProgressiveFrame(pixels, event.info?.width ?? width, event.info?.height ?? height);
+    return {
+        pass: index + 1,
+        t_ms: Number(t.toFixed(2)),
+        isFinal: event.type === 'final',
+        width: event.info?.width ?? width,
+        height: event.info?.height ?? height,
+        pixels,
+        stats,
+    };
+}
+
+async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
+    const chunkBytes = 16 * 1024;
+    const delayMs = throttleKbPerSec > 0 ? (chunkBytes / 1024) * (1000 / throttleKbPerSec) : 0;
+    let offset = 0;
+    while (offset < jxlBytes.byteLength) {
+        const end = Math.min(jxlBytes.byteLength, offset + chunkBytes);
+        await decoder.push(exactBuffer(jxlBytes.subarray(offset, end)));
+        offset = end;
+        if (feedState) feedState.bytesFed = offset;
+        if (delayMs > 0 && offset < jxlBytes.byteLength) await sleep(delayMs);
+    }
+    await decoder.close();
+}
+
+function renderProgressivePass(pass) {
+    drawPixels(canvas, pass.pixels, pass.width, pass.height);
+    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${pass.t_ms} ms | hash ${pass.stats.frameHash}`;
+    const tile = document.createElement('button');
+    tile.className = 'pass-tile';
+    tile.type = 'button';
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = pass.width;
+    tileCanvas.height = pass.height;
+    drawPixels(tileCanvas, pass.pixels, pass.width, pass.height);
+    const label = document.createElement('span');
+    label.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${pass.t_ms} ms`;
+    tile.append(tileCanvas, label);
+    tile.addEventListener('click', () => {
+        drawPixels(canvas, pass.pixels, pass.width, pass.height);
+        viewerMeta.textContent = `pinned pass ${pass.pass} | ${formatFrameStatsCompact(pass.stats)}`;
+    });
+    passStrip.append(tile);
+}
+
+function drawPixels(targetCanvas, pixels, width, height) {
+    targetCanvas.width = width;
+    targetCanvas.height = height;
+    const ctx = targetCanvas.getContext('2d');
+    const data = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+    ctx.putImageData(new ImageData(data, width, height), 0, 0);
+}
+
+function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset }) {
+    const perPass = decode.passes.map(pass => ({
+        pass: pass.pass,
+        t_ms: pass.t_ms,
+        isFinal: pass.isFinal,
+        bytesFed: pass.bytesFed ?? null,
+        percentFed: pass.percentFed ?? null,
+        stats: normalizeFrameStatsForExport(pass.stats),
+    }));
+    const visibleProgressFrames = perPass
+        .filter(p => !p.isFinal && isVisibleFrame(p.stats))
+        .map(p => p.stats.frameHash)
+        .filter((hash, index, list) => list.indexOf(hash) === index)
+        .length;
+    const uniqueFrameHashes = new Set(perPass.map(p => p.stats.frameHash)).size;
+    const first = perPass[0] ?? null;
+    const final = perPass.find(p => p.isFinal) ?? perPass.at(-1) ?? null;
+    const actualKb = selected.bytes.byteLength / 1024;
+    return {
+        ts: new Date().toISOString(),
+        source: source.file,
+        sourceWidth: source.width,
+        sourceHeight: source.height,
+        rawBytes: source.rawBytes,
+        targetWidth: target.width,
+        targetHeight: target.height,
+        sizePreset: sizePreset ?? null,
+        qualityPreset: qualityPreset ?? null,
+        estimateKb: targetKb,
+        actualKb: Number(actualKb.toFixed(1)),
+        sizeErrorPct: targetKb ? Number((((actualKb - targetKb) / targetKb) * 100).toFixed(2)) : null,
+        quality: selected.quality,
+        encode_ms: Number(selected.encodeMs.toFixed(2)),
+        encode_total_ms: Number(encodeTotalMs.toFixed(2)),
+        encodeAttempts: selected.attempts.map(a => ({
+            quality: a.quality,
+            kb: Number((a.byteLength / 1024).toFixed(1)),
+            encode_ms: Number(a.encodeMs.toFixed(2)),
+            errorPct: Number(a.errorPct.toFixed(2)),
+        })),
+        throttleKbPerSec,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+        passCount: perPass.length,
+        visibleProgressFrames,
+        uniqueFrameHashes,
+        first_ms: first?.t_ms ?? null,
+        final_ms: final?.t_ms ?? null,
+        oneShot_ms: oneShotMs,
+        speedup: oneShotMs && first?.t_ms ? Number((oneShotMs / first.t_ms).toFixed(2)) : null,
+        final_psnr_vs_source: Number.isFinite(finalPsnr) ? Number(finalPsnr.toFixed(2)) : finalPsnr,
+        perPass,
+    };
+}
+
+function isVisibleFrame(stats) {
+    return stats
+        && stats.rgbNonzeroCount > 0
+        && stats.alphaZeroPct < 95
+        && stats.lumaVariance > 1;
+}
+
+function normalizeFrameStatsForExport(stats) {
+    return {
+        alphaMin: stats.alphaMin,
+        alphaMax: stats.alphaMax,
+        alphaZeroPct: Number(stats.alphaZeroPct.toFixed(2)),
+        rgbNonzeroCount: stats.rgbNonzeroCount,
+        lumaVariance: Number(stats.lumaVariance.toFixed(2)),
+        frameHash: stats.frameHash,
+        pixelCount: stats.pixelCount,
+        byteLength: stats.byteLength,
+    };
+}
+
+function renderSourceShell(source) {
+    viewerTitle.textContent = source.file;
+    viewerMeta.textContent = `${source.width}x${source.height} RAW processed. Waiting for progressive decode.`;
+    lastLoadedSourceDims = { width: source.width, height: source.height };
+    updateSizeEstimateDisplay();
+}
+
+function renderMetrics(m) {
+    setMetric('m-source', `${m.sourceWidth}x${m.sourceHeight}`);
+    setMetric('m-dims', `${m.targetWidth}x${m.targetHeight}`);
+    const qualityLabel = m.qualityPreset === 'lossless' ? 'lossless' : `q${m.quality}`;
+    setMetric('m-quality', m.qualityPreset ? `${qualityLabel} (${m.qualityPreset})` : qualityLabel);
+    setMetric('m-size', `${m.actualKb} KB`);
+    setMetric('m-size-error', m.sizeErrorPct == null ? '--' : `est ${m.estimateKb} KB / actual diff ${m.sizeErrorPct}%`);
+    setMetric('m-encode', `${m.encode_total_ms} ms`);
+    setMetric('m-first', m.first_ms == null ? '--' : `${m.first_ms} ms`);
+    setMetric('m-final', m.final_ms == null ? '--' : `${m.final_ms} ms`);
+    setMetric('m-oneshot', m.oneShot_ms == null ? '--' : `${m.oneShot_ms} ms`);
+    setMetric('m-speedup', m.speedup == null ? '--' : `${m.speedup}x`);
+    setMetric('m-passes', `${m.passCount} (${m.uniqueFrameHashes} unique)`);
+    setMetric('m-visible', `${m.visibleProgressFrames}`);
+    setMetric('m-psnr', m.final_psnr_vs_source === Infinity ? 'Infinity' : `${m.final_psnr_vs_source ?? '--'} dB`);
+    setMetric('m-throttle', formatThrottle(m.throttleKbPerSec));
+    const attemptsEl = document.getElementById('encode-attempts');
+    if (attemptsEl) {
+        attemptsEl.textContent = `Encode attempts: ${m.encodeAttempts.map(a => `q${a.quality}=${a.kb}KB (${a.errorPct}%)`).join(' | ')}`;
+    }
+}
+
+function setMetric(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+}
+
+function clearRunView() {
+    passStrip.innerHTML = '';
+    viewerTitle.textContent = 'Progressive image';
+    viewerMeta.textContent = 'Loading...';
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function exportMeasurementsCSV() {
+    if (!runMeasurements.length) return;
+    const headers = [
+        'ts', 'source', 'source_width', 'source_height', 'target_width', 'target_height',
+        'size_preset', 'quality_preset', 'estimate_kb', 'actual_kb', 'size_error_pct',
+        'quality', 'encode_ms', 'encode_total_ms',
+        'throttle_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
+        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_stats'
+    ];
+    const rows = runMeasurements.map(m => [
+        m.ts,
+        m.source,
+        m.sourceWidth,
+        m.sourceHeight,
+        m.targetWidth,
+        m.targetHeight,
+        m.sizePreset,
+        m.qualityPreset,
+        m.estimateKb,
+        m.actualKb,
+        m.sizeErrorPct,
+        m.quality,
+        m.encode_ms,
+        m.encode_total_ms,
+        m.throttleKbPerSec,
+        m.passCount,
+        m.visibleProgressFrames,
+        m.uniqueFrameHashes,
+        m.first_ms ?? '',
+        m.final_ms ?? '',
+        m.oneShot_ms ?? '',
+        m.speedup ?? '',
+        m.final_psnr_vs_source ?? '',
+        (m.perPass || []).map(p => `${p.pass}:${formatFrameStatsCompact(p.stats)}`).join(';')
+    ].map(csvCell).join(','));
+    downloadText(`single-progressive-${timestamp()}.csv`, [headers.join(','), ...rows].join('\n'), 'text/csv');
+    dbgLog('Exported CSV', `${runMeasurements.length} measurement(s)`, 'success');
+}
+
+function exportMeasurementsJSON() {
+    if (!runMeasurements.length) return;
+    downloadText(`single-progressive-${timestamp()}.json`, JSON.stringify(runMeasurements, null, 2), 'application/json');
+    dbgLog('Exported JSON', `${runMeasurements.length} measurement(s)`, 'success');
+}
+
+function exportMeasurementsTOON() {
+    if (!runMeasurements.length) return;
+    let out = `measurements[${runMeasurements.length}]:\n`;
+    for (const m of runMeasurements) {
+        out += `- ts: ${m.ts}\n`;
+        out += `  source: ${quoteIfNeeded(m.source)}\n`;
+        out += `  target: ${m.targetWidth}x${m.targetHeight}\n`;
+        if (m.sizePreset) out += `  sizePreset: ${m.sizePreset}\n`;
+        if (m.qualityPreset) out += `  qualityPreset: ${m.qualityPreset}\n`;
+        out += `  estimateKb: ${m.estimateKb}\n`;
+        out += `  actualKb: ${m.actualKb}\n`;
+        if (m.sizeErrorPct != null) out += `  sizeErrorPct: ${m.sizeErrorPct}\n`;
+        out += `  quality: ${m.quality}\n`;
+        out += `  encodeTotalMs: ${m.encode_total_ms}\n`;
+        out += `  throttleKbPerSec: ${m.throttleKbPerSec}\n`;
+        out += `  passCount: ${m.passCount}\n`;
+        out += `  visibleProgressFrames: ${m.visibleProgressFrames}\n`;
+        out += `  uniqueFrameHashes: ${m.uniqueFrameHashes}\n`;
+        if (m.first_ms != null) out += `  first_ms: ${m.first_ms}\n`;
+        if (m.final_ms != null) out += `  final_ms: ${m.final_ms}\n`;
+        if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
+        if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
+        if (m.final_psnr_vs_source != null) out += `  final_psnr_vs_source: ${m.final_psnr_vs_source}\n`;
+        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
+        for (const p of m.perPass) {
+            out += [
+                `    ${p.pass}`,
+                p.t_ms,
+                p.isFinal ? 'true' : 'false',
+                p.stats.alphaMin,
+                p.stats.alphaMax,
+                p.stats.alphaZeroPct,
+                p.stats.rgbNonzeroCount,
+                p.stats.lumaVariance,
+                p.stats.frameHash
+            ].join(',') + '\n';
+        }
+    }
+    out += `meta:\n  exportedAt: ${new Date().toISOString()}\n  generator: single-progressive\n`;
+    downloadText(`single-progressive-${timestamp()}.toon`, out, 'text/toon');
+    dbgLog('Exported TOON', `${runMeasurements.length} measurement(s)`, 'success');
+}
+
+async function copyMeasurementsMarkdown() {
+    if (!runMeasurements.length) return;
+    const text = buildMeasurementsMarkdown();
+    try {
+        await navigator.clipboard.writeText(text);
+        dbgLog('Copied measurements Markdown', `${runMeasurements.length} measurement(s)`, 'success');
+    } catch (error) {
+        downloadText(`single-progressive-${timestamp()}.md`, text, 'text/markdown');
+        dbgLog('Clipboard blocked; downloaded Markdown', error?.message ?? String(error), 'warn');
+    }
+}
+
+function buildMeasurementsMarkdown() {
+    let out = '# Single progressive measurements\n\n';
+    out += '| Source | Target | Size preset | Quality preset | Estimate KB | Actual KB | Quality | Passes | Visible progress | First ms | Final ms | One-shot ms | Speedup | PSNR |\n';
+    out += '|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+    for (const m of runMeasurements) {
+        out += [
+            mdCell(m.source),
+            `${m.targetWidth}x${m.targetHeight}`,
+            m.sizePreset ?? '',
+            m.qualityPreset ?? '',
+            m.estimateKb,
+            m.actualKb,
+            m.quality,
+            m.passCount,
+            m.visibleProgressFrames,
+            m.first_ms ?? '',
+            m.final_ms ?? '',
+            m.oneShot_ms ?? '',
+            m.speedup ?? '',
+            m.final_psnr_vs_source ?? '',
+        ].join(' | ') + '\n';
+    }
+    for (const m of runMeasurements) {
+        out += `\n## ${mdCell(m.source)}\n\n`;
+        out += '| Pass | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
+        for (const p of m.perPass) {
+            out += [
+                p.pass,
+                p.t_ms,
+                p.isFinal ? 'true' : 'false',
+                p.stats.alphaMin,
+                p.stats.alphaMax,
+                p.stats.alphaZeroPct,
+                p.stats.rgbNonzeroCount,
+                p.stats.lumaVariance,
+                mdCell(p.stats.frameHash),
+            ].join(' | ') + '\n';
+        }
+    }
+    return out;
+}
+
+function clearMeasurements() {
+    runMeasurements.length = 0;
+    updateExportButtons();
+    dbgLog('Measurements cleared', '', 'warn');
+}
+
+function updateExportButtons() {
+    const enabled = runMeasurements.length > 0;
+    for (const btn of [exportCsvBtn, exportJsonBtn, exportToonBtn, copyMeasurementsMdBtn, clearMeasurementsBtn]) {
+        if (btn) btn.disabled = !enabled;
+    }
+}
+
+function exactBuffer(view) {
+    if (view instanceof ArrayBuffer) return view;
+    if (view.byteOffset === 0 && view.byteLength === view.buffer.byteLength) return view.buffer;
+    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+}
+
+function exactView(view) {
+    return view instanceof Uint8Array ? new Uint8Array(view) : new Uint8Array(view);
+}
+
+function concatChunks(chunks) {
+    const views = chunks.map(chunk => chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    const total = views.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of views) {
+        out.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return out;
+}
+
+function downloadText(filename, text, mime) {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function csvCell(value) {
+    const text = String(value ?? '');
+    if (text.includes(',') || text.includes('"') || text.includes('\n')) return `"${text.replace(/"/g, '""')}"`;
+    return text;
+}
+
+function quoteIfNeeded(str) {
+    const text = String(str ?? '');
+    return /[\s,:[\]{}"\\]/.test(text) ? `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : text;
+}
+
+function mdCell(value) {
+    return String(value ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+function timestamp() {
+    return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function setStatus(text) {
+    if (statusEl) statusEl.textContent = text;
+}
+
+function formatBytes(bytes) {
+    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+    return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function formatThrottle(kbPerSec) {
+    return kbPerSec > 0 ? `${kbPerSec} KB/s` : 'unthrottled';
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function nextPaint() {
+    return new Promise(resolve => requestAnimationFrame(() => resolve()));
+}

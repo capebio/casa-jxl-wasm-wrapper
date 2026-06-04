@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" href="data:," />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Single progressive</title>
+  <link rel="stylesheet" href="./test-nav.css" />
+  <link rel="stylesheet" href="./jxl-benchmark.css" />
+  <link rel="stylesheet" href="./jxl-debug-console.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "@casabio/jxl-wasm": "../packages/jxl-wasm/dist/index.js"
+    }
+  }
+  </script>
+  <style>
+    :root {
+      --sp-bg: #0b1012;
+      --sp-panel: #121b1f;
+      --sp-panel-2: #182328;
+      --sp-line: #2e4248;
+      --sp-text: #eef7f4;
+      --sp-muted: #9fb6b0;
+      --sp-accent: #7de0b0;
+      --sp-warn: #f0c86a;
+      --sp-bad: #ff8c7d;
+    }
+    body { margin: 0; background: var(--sp-bg); color: var(--sp-text); font-family: "Segoe UI", Verdana, sans-serif; }
+    .single-shell { max-width: 1560px; margin: 0 auto; padding: 22px; }
+    .single-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: end; padding-bottom: 16px; border-bottom: 1px solid var(--sp-line); }
+    .single-head h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    .single-head p { margin: 7px 0 0; color: var(--sp-muted); max-width: 860px; line-height: 1.45; }
+    .single-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; padding: 12px; background: var(--sp-panel); border: 1px solid var(--sp-line); border-radius: 8px; }
+    .single-controls label { display: grid; gap: 5px; min-width: 132px; color: var(--sp-muted); font-size: 12px; }
+    .single-controls input, .single-controls select { background: #090e10; color: var(--sp-text); border: 1px solid #40565d; border-radius: 6px; padding: 8px; }
+    .single-controls button, .single-actions button, .metric-actions button { background: var(--sp-accent); color: #04100c; border: 0; border-radius: 6px; padding: 9px 12px; font-weight: 700; cursor: pointer; }
+    .single-controls button[disabled], .single-actions button[disabled], .metric-actions button[disabled] { opacity: .55; cursor: wait; }
+    .setting-lock { min-width: 140px; color: var(--sp-muted); font-size: 12px; }
+    .setting-lock strong { display: block; margin-top: 5px; color: var(--sp-text); font-size: 13px; }
+    .single-status { min-height: 24px; color: var(--sp-muted); margin: 8px 0 14px; }
+    .single-grid { display: grid; grid-template-columns: minmax(360px, 1fr) 420px; gap: 16px; align-items: start; }
+    .viewer-panel, .metrics-panel, .console-panel { background: var(--sp-panel); border: 1px solid var(--sp-line); border-radius: 8px; overflow: hidden; }
+    .viewer-head, .metrics-head, .console-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px 12px; border-bottom: 1px solid #263940; background: var(--sp-panel-2); }
+    .viewer-head h2, .metrics-head h2, .console-head h2 { margin: 0; font-size: 16px; }
+    .viewer-meta { color: var(--sp-muted); font-size: 12px; }
+    .canvas-wrap { min-height: 520px; display: grid; place-items: center; background: #050708; }
+    #progressive-canvas { width: 100%; max-height: 78vh; object-fit: contain; background: #040607; }
+    .pass-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 8px; padding: 10px; border-top: 1px solid #263940; }
+    .pass-tile { background: #0a0f11; border: 1px solid #2d4248; border-radius: 6px; padding: 0; overflow: hidden; color: var(--sp-muted); text-align: left; }
+    .pass-tile canvas { width: 100%; height: 82px; object-fit: contain; display: block; background: #040607; }
+    .pass-tile span { display: block; padding: 6px; font-size: 11px; line-height: 1.25; }
+    .metric-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; }
+    .metric { background: #0d1417; border: 1px solid #273c43; border-radius: 6px; padding: 8px; min-height: 50px; }
+    .metric span { display: block; color: var(--sp-muted); font-size: 11px; }
+    .metric strong { display: block; margin-top: 4px; font-size: 16px; overflow-wrap: anywhere; }
+    .metric-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border-top: 1px solid #263940; }
+    .attempts { padding: 0 10px 10px; color: var(--sp-muted); font-size: 12px; line-height: 1.35; }
+    .console-panel { margin-top: 16px; }
+    #dbg-console-mount .dbg-panel { position: static; width: auto; max-height: none; border: 0; border-radius: 0; }
+    #dbg-console-mount .dbg-list { max-height: 300px; }
+    @media (max-width: 1000px) {
+      .single-head, .single-grid { grid-template-columns: 1fr; }
+      .canvas-wrap { min-height: 360px; }
+    }
+    @media (max-width: 640px) {
+      .single-shell { padding: 14px; }
+      .metric-list { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body class="has-home-bar">
+  <nav class="home-bar" aria-label="Test pages">
+    <div class="home-bar-label">Test pages</div>
+    <div class="home-bar-links">
+      <a class="home-bar-link" href="./index.html">Home</a>
+      <a class="home-bar-link" href="./jxl-progressive.html">Progressive decode</a>
+      <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
+      <a class="home-bar-link is-active" href="./jxl-single-progressive.html" aria-current="page">Single progressive</a>
+      <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
+      <a class="home-bar-link" href="./jxl-progressive-byte-benchmark.html">Byte benchmark</a>
+      <a class="home-bar-link" href="./jxl-benchmark.html">Settings explorer</a>
+      <a class="home-bar-link" href="./jxl-encode-space.html">Encode Space</a>
+    </div>
+  </nav>
+
+  <main class="single-shell">
+    <section class="single-head">
+      <div>
+        <h1>Single progressive</h1>
+        <p>Retrieves one Gobabeb RAW image, chooses a Sneyers truly-progressive encode closest to the desired file size, then decodes the selected JXL with throttled byte feed so the canvas improves in place.</p>
+      </div>
+      <div class="single-actions">
+        <button id="dbg-console-btn" type="button">Console</button>
+      </div>
+    </section>
+
+    <section class="single-controls" aria-label="Single progressive settings">
+      <label>
+        Size preset
+        <select id="size-preset">
+          <option value="tiny">Tiny · 160 px</option>
+          <option value="small">Small · 320 px</option>
+          <option value="medium">Medium · 640 px</option>
+          <option value="large">Large · 1080 px</option>
+          <option value="very-large" selected>Very Large · 2160 px</option>
+          <option value="original">Original · source size</option>
+        </select>
+      </label>
+      <label>
+        Quality preset
+        <select id="quality-preset">
+          <option value="very-low">Very Low · q75</option>
+          <option value="low">Low · q80</option>
+          <option value="medium">Medium · q85</option>
+          <option value="high" selected>High · q90</option>
+          <option value="very-high">Very High · q95</option>
+          <option value="lossless">Lossless</option>
+        </select>
+      </label>
+      <label>
+        Throttle
+        <select id="throttle-rate">
+          <option value="0">Unthrottled</option>
+          <option value="2048">2 MB/s</option>
+          <option value="500">500 KB/s</option>
+          <option value="100" selected>100 KB/s</option>
+          <option value="50">50 KB/s</option>
+        </select>
+      </label>
+      <label>
+        Progressive DC
+        <select id="progressive-dc">
+          <option value="2">2 · 1:32 then 1:8 preview</option>
+          <option value="1" selected>1 · single 1:8 DC</option>
+          <option value="0">0 · no DC progressive</option>
+        </select>
+      </label>
+      <div class="setting-lock">
+        Estimate
+        <strong id="size-estimate">--</strong>
+      </div>
+      <div class="setting-lock">
+        Detail
+        <strong>All passes</strong>
+      </div>
+      <div class="setting-lock">
+        Preset
+        <strong>Sneyers truly-progressive</strong>
+      </div>
+      <button id="retrieve-run" type="button">Retrieve raw file</button>
+    </section>
+
+    <div id="single-status" class="single-status">Ready.</div>
+
+    <section class="single-grid">
+      <article class="viewer-panel">
+        <header class="viewer-head">
+          <h2 id="viewer-title">Progressive image</h2>
+          <div id="viewer-meta" class="viewer-meta">No image loaded.</div>
+        </header>
+        <div class="canvas-wrap">
+          <canvas id="progressive-canvas" width="16" height="16"></canvas>
+        </div>
+        <div id="pass-strip" class="pass-strip"></div>
+      </article>
+
+      <aside class="metrics-panel">
+        <header class="metrics-head">
+          <h2>Measurements</h2>
+        </header>
+        <div class="metric-list">
+          <div class="metric"><span>Source</span><strong id="m-source">--</strong></div>
+          <div class="metric"><span>Target dims</span><strong id="m-dims">--</strong></div>
+          <div class="metric"><span>Quality</span><strong id="m-quality">--</strong></div>
+          <div class="metric"><span>JXL size</span><strong id="m-size">--</strong></div>
+          <div class="metric"><span>Estimate vs actual</span><strong id="m-size-error">--</strong></div>
+          <div class="metric"><span>Encode total</span><strong id="m-encode">--</strong></div>
+          <div class="metric"><span>First paint</span><strong id="m-first">--</strong></div>
+          <div class="metric"><span>Final paint</span><strong id="m-final">--</strong></div>
+          <div class="metric"><span>One-shot final</span><strong id="m-oneshot">--</strong></div>
+          <div class="metric"><span>First-paint speedup</span><strong id="m-speedup">--</strong></div>
+          <div class="metric"><span>Passes</span><strong id="m-passes">--</strong></div>
+          <div class="metric"><span>Visible progress</span><strong id="m-visible">--</strong></div>
+          <div class="metric"><span>Final PSNR</span><strong id="m-psnr">--</strong></div>
+          <div class="metric"><span>Throttle</span><strong id="m-throttle">--</strong></div>
+        </div>
+        <div id="encode-attempts" class="attempts"></div>
+        <div class="metric-actions">
+          <button id="export-csv-btn" type="button" disabled>CSV</button>
+          <button id="export-json-btn" type="button" disabled>JSON</button>
+          <button id="export-toon-btn" type="button" disabled>TOON</button>
+          <button id="copy-measurements-md" type="button" disabled>Copy MD</button>
+          <button id="clear-measurements-btn" type="button" disabled>Clear</button>
+        </div>
+      </aside>
+    </section>
+
+    <section class="console-panel">
+      <header class="console-head">
+        <h2>Pipeline console</h2>
+        <span class="viewer-meta">Includes Copy all.</span>
+      </header>
+      <div id="dbg-console-mount"></div>
+    </section>
+  </main>
+
+  <script type="module" src="./jxl-single-progressive.js"></script>
+</body>
+</html>

@@ -108,12 +108,19 @@ test('stateful progressive decoder releases prior input before appending stream 
   expect(bridge).toContain('JxlDecoderSetInput(s->dec, s->input_buf, s->input_size)');
 });
 
-test('stateful progressive decoder opportunistically flushes partial pixels on NEED_MORE_INPUT', () => {
+test('stateful progressive decoder opportunistically flushes once per input push and once on input close', () => {
+  // FRAME_PROGRESSION fires only for the libjxl-supported set (kDC, kLastPasses, kPasses,
+  // kFrames). VarDCT at low/medium effort often emits only DC + final, so the opportunistic
+  // NEED_MORE_INPUT flush is needed for chunked-feed progressive paint and for byte-truncated
+  // (Sneyers) decode. Gated on JXL_DEC_FRAME having fired (libjxl precondition for FlushImage)
+  // and on the all-zero buffer guard inside TryFlushProgressiveImage to suppress pre-DC empties.
   expect(bridge).toContain('TryFlushProgressiveImage');
+  expect(bridge).toContain('status == JXL_DEC_FRAME_PROGRESSION');
   expect(bridge).toContain('status == JXL_DEC_NEED_MORE_INPUT');
+  expect(bridge).toContain('s->frame_started');
+  // Generation gate ensures one opportunistic flush per push (and one on close).
   expect(bridge).toContain('opportunistic_flush_generation != s->input_generation');
   expect(bridge).toContain('s->opportunistic_flush_generation = s->input_generation');
-  expect(bridge).toContain('return JXL_DEC_RESULT_PROGRESS');
 });
 
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {

@@ -3,15 +3,62 @@
   "libjxlCommit": "332feb17d17311c748445f7ee75c4fb55cc38530",
   "emscriptenTag": "4.0.13",
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
-  "emsdkImage": "docker.io/emscripten/emsdk:4.0.13",
-  "buildMode": "docker",
-  "generatedAt": "2026-06-03T15:07:25.264Z",
+  "emsdkImage": null,
+  "buildMode": "host-toolchain",
+  "generatedAt": "2026-06-04T15:47:39.743Z",
   "tiers": {
+    "simd": {
+      "jsBytes": 18547,
+      "wasmBytes": 2707212,
+      "jsSha256": "0aba1e489ffbb9f5a6fe4e7f114da3cd67b05b8480adf19d1599a7011f588776",
+      "wasmSha256": "1718f2a3362e8522651233853c92cffa49f5848b42708625fbf4e569889578eb",
+      "flags": [
+        "-O3",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=67108864",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+        "-sWASM_BIGINT=1",
+        "-fno-rtti",
+        "-fno-exceptions",
+        "-msimd128"
+      ]
+    },
+    "scalar": {
+      "jsBytes": 18551,
+      "wasmBytes": 2624765,
+      "jsSha256": "f8cdd9ae49fac5a9e771c775bf3673f398e49eac6801d52fd3c34825e0cdd57f",
+      "wasmSha256": "55cb677bf8f1a9013e76b40084424dc527c99366c9d5befa9bd1746e26f374e0",
+      "flags": [
+        "-O3",
+        "-sENVIRONMENT=web,worker",
+        "-sMODULARIZE=1",
+        "-sEXPORT_ES6=1",
+        "-sEXPORT_NAME=createJxlModule",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sINITIAL_MEMORY=67108864",
+        "-sMAXIMUM_MEMORY=4294967296",
+        "-sFILESYSTEM=0",
+        "-sASSERTIONS=0",
+        "-sINVOKE_RUN=0",
+        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+        "-sWASM_BIGINT=1",
+        "-fno-rtti",
+        "-fno-exceptions"
+      ]
+    },
     "relaxed-simd-mt": {
-      "jsBytes": 31234,
-      "wasmBytes": 2755462,
-      "jsSha256": "b49e4d38e59df5d3ce0852012c0d9f72ca8957c2ee669932cf41f8eb99787cf5",
-      "wasmSha256": "bb56787b07b03f58f1369106d5c8088ebb1a6ba2bf99a69c52881d7b9735dfff",
+      "jsBytes": 31236,
+      "wasmBytes": 2755948,
+      "jsSha256": "c56d867384a6e0b25178a1c70ef34b8f534d9cbf92a04c6a1dafeca1bac5a98e",
+      "wasmSha256": "9253104937f0ef47552740f6b42d9d129968f942090839576810884c786612a6",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -37,10 +84,10 @@
       ]
     },
     "simd-mt": {
-      "jsBytes": 31210,
-      "wasmBytes": 2772583,
-      "jsSha256": "2309f05aee3760900d4e46f6275b5ce57a5b7a79bd9b634b3cd74d12c7ae23f7",
-      "wasmSha256": "408e4f5140e9b84b3c9f85d977233304568d910d366ae128ce3e4fd78f799e88",
+      "jsBytes": 31212,
+      "wasmBytes": 2772854,
+      "jsSha256": "710cff6b8799ff1b6e8e5581577c579dd6f45bc336421ad793146813292a05df",
+      "wasmSha256": "0d338fbbb4a082723233fa7fa14c805404e27144033043a232dabefd9b60ea1c",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -61,53 +108,6 @@
         "-sUSE_PTHREADS=1",
         "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency",
         "-msimd128"
-      ]
-    },
-    "simd": {
-      "jsBytes": 18545,
-      "wasmBytes": 2706927,
-      "jsSha256": "877dc95ff7f2b6f46ed84cabf03fae692853d729b477b89ce77fc08d4ea7ec41",
-      "wasmSha256": "0946c73c5f1abe7189c9992d2398ea5a9ab80eb63dd01ad37dce377c954930dd",
-      "flags": [
-        "-O3",
-        "-sENVIRONMENT=web,worker",
-        "-sMODULARIZE=1",
-        "-sEXPORT_ES6=1",
-        "-sEXPORT_NAME=createJxlModule",
-        "-sALLOW_MEMORY_GROWTH=1",
-        "-sINITIAL_MEMORY=67108864",
-        "-sMAXIMUM_MEMORY=4294967296",
-        "-sFILESYSTEM=0",
-        "-sASSERTIONS=0",
-        "-sINVOKE_RUN=0",
-        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
-        "-sWASM_BIGINT=1",
-        "-fno-rtti",
-        "-fno-exceptions",
-        "-msimd128"
-      ]
-    },
-    "scalar": {
-      "jsBytes": 18549,
-      "wasmBytes": 2624479,
-      "jsSha256": "89243ef58c5516ac3526dda43938dc409f5aca4accc43c6ff9854f911fc4015b",
-      "wasmSha256": "de9bb66c84d4ad70850bf92745989b61a0470cf2d3fb505f24a5840ff952baae",
-      "flags": [
-        "-O3",
-        "-sENVIRONMENT=web,worker",
-        "-sMODULARIZE=1",
-        "-sEXPORT_ES6=1",
-        "-sEXPORT_NAME=createJxlModule",
-        "-sALLOW_MEMORY_GROWTH=1",
-        "-sINITIAL_MEMORY=67108864",
-        "-sMAXIMUM_MEMORY=4294967296",
-        "-sFILESYSTEM=0",
-        "-sASSERTIONS=0",
-        "-sINVOKE_RUN=0",
-        "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
-        "-sWASM_BIGINT=1",
-        "-fno-rtti",
-        "-fno-exceptions"
       ]
     }
   },

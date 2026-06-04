@@ -87,10 +87,13 @@ async function main() {
     buildMode: hostToolchain ? "host-toolchain" : insideDocker ? "docker" : "local",
     generatedAt: new Date().toISOString(),
     tiers: {},
-    skippedTiers: hostToolchain ? config.tiers.filter((tier) => tier.threads).map((tier) => tier.name) : []
+    skippedTiers: (hostToolchain && !process.argv.includes("--include-mt")) ? config.tiers.filter((tier) => tier.threads).map((tier) => tier.name) : []
   };
 
-  const activeTiers = hostToolchain ? config.tiers.filter((tier) => !tier.threads) : config.tiers;
+  const onlyMt = process.argv.includes("--only-mt");
+  const activeTiers = onlyMt
+    ? config.tiers.filter((tier) => tier.threads)
+    : (hostToolchain && !process.argv.includes("--include-mt")) ? config.tiers.filter((tier) => !tier.threads) : config.tiers;
 
   for (const tier of activeTiers) {
     const outJs = join(distDir, `jxl-core.${tier.name}.js`);
@@ -324,7 +327,25 @@ async function clonePinnedSource() {
 }
 
 async function writeManifest(manifest) {
-  await writeFile(join(distDir, "build-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  const manifestPath = join(distDir, "build-manifest.json");
+  // Merge with existing manifest so partial builds (--only-mt, --host-toolchain) preserve
+  // tier entries produced by an earlier run instead of clobbering them.
+  let existing = null;
+  try {
+    const text = await readFile(manifestPath, "utf8");
+    existing = JSON.parse(text);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  if (existing && existing.buildId === manifest.buildId && existing.libjxlCommit === manifest.libjxlCommit) {
+    const mergedTiers = { ...(existing.tiers ?? {}), ...manifest.tiers };
+    const builtNames = new Set(Object.keys(manifest.tiers));
+    const mergedSkipped = Array.isArray(manifest.skippedTiers)
+      ? manifest.skippedTiers.filter((name) => !builtNames.has(name))
+      : [];
+    manifest = { ...existing, ...manifest, tiers: mergedTiers, skippedTiers: mergedSkipped };
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 async function sha256File(path) {
