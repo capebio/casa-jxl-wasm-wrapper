@@ -10,11 +10,10 @@ try {
 }
 
 function asTightRgba(pixels) {
+    if (!pixels) return pixels;
     if (pixels instanceof ArrayBuffer) return new Uint8ClampedArray(pixels);
-    if (pixels.byteOffset === 0 && pixels.byteLength === pixels.buffer.byteLength) {
-        return pixels instanceof Uint8ClampedArray ? pixels : new Uint8ClampedArray(pixels.buffer);
-    }
-    return new Uint8ClampedArray(pixels);
+    const view = (pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray) ? pixels : new Uint8Array(pixels);
+    return new Uint8ClampedArray(view.buffer, view.byteOffset, view.byteLength);
 }
 
 function copyPixels(pixels) {

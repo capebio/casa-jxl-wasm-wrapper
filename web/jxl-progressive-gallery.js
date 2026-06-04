@@ -170,6 +170,13 @@ async function decodePushedGalleryPayload(payload) {
 
 function syncPushedAction() {
   if (!decodePushedBtn) return;
+  if (lastPushedPayload) {
+    const isBatch = !!(lastPushedPayload.batch && Array.isArray(lastPushedPayload.items) && lastPushedPayload.items.length > 1);
+    const n = isBatch ? lastPushedPayload.items.length : 1;
+    decodePushedBtn.textContent = isBatch ? `Decode pushed batch (${n})` : 'Decode pushed file';
+  } else {
+    decodePushedBtn.textContent = 'Decode pushed file';
+  }
   decodePushedBtn.hidden = !lastPushedPayload;
 }
 

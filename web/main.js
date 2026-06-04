@@ -1142,7 +1142,7 @@ function drawCanvas(canvas, w, h, rgb) {
     const ctx = canvas.getContext('2d');
     // If worker already sent RGBA (byteLength === w*h*4) use it directly.
     const rgba = (rgb.byteLength === w * h * 4)
-        ? (rgb instanceof Uint8ClampedArray ? rgb : new Uint8ClampedArray(rgb.buffer))
+        ? (rgb instanceof Uint8ClampedArray ? rgb : new Uint8ClampedArray(rgb.buffer, rgb.byteOffset, rgb.byteLength))
         : rgbToRgba(rgb, w, h);
     ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
 }

@@ -65,6 +65,8 @@ test('gallery autopush has an actionable retry path and waits for decoder contex
   expect(js).toContain('const decodePushedBtn = document.getElementById');
   expect(js).toContain('let lastPushedPayload = null;');
   expect(js).toContain('decodePushedBtn.hidden = !lastPushedPayload;');
+  // button text now dynamic for batch from paint
+  expect(js).toContain('decodePushedBtn.textContent = isBatch');
   expect(js).toContain('await decodePushedGalleryPayload(lastPushedPayload);');
   expect(js).toContain('await ctxReadyPromise;');
   expect(js).toContain('Context failed to initialize');
@@ -73,7 +75,7 @@ test('gallery autopush has an actionable retry path and waits for decoder contex
 });
 
 test('gallery push mode controls drive the chunk push pipeline', () => {
-  expect(js).toContain("import { createDecoder, createEncoder } from '@casabio/jxl-wasm';");
+  expect(js).toContain("import { createDecoder, createEncoder, setForcedTier } from '@casabio/jxl-wasm';");
   expect(js).toContain("import { buildPushBatches } from './jxl-progressive-gallery-push.js';");
   expect(js).toContain('buildPushBatches(buffer, { mode: pushMode');
   expect(js).toContain('for (const batch of pushBatches)');

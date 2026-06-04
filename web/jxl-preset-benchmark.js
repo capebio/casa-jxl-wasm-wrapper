@@ -389,10 +389,11 @@ function resizeRgba(source, targetPx) {
     const ctx = canvas.getContext('2d');
     const srcCanvas = new OffscreenCanvas(source.width, source.height);
     const srcCtx = srcCanvas.getContext('2d');
-    srcCtx.putImageData(new ImageData(source.rgba, source.width, source.height), 0, 0);
+    const srcView = source.rgba instanceof Uint8Array ? source.rgba : new Uint8Array(source.rgba);
+    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(srcView.buffer, srcView.byteOffset, srcView.byteLength), source.width, source.height), 0, 0);
     ctx.drawImage(srcCanvas, 0, 0, w, h);
     const { data } = ctx.getImageData(0, 0, w, h);
-    return { rgba: data, width: w, height: h };
+    return { rgba: new Uint8Array(data.buffer, data.byteOffset, data.byteLength), width: w, height: h };
 }
 
 async function encodeOnce(rgbaResized, width, height, opts) {

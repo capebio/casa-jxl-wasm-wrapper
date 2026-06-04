@@ -5,6 +5,7 @@ import { createFilePicker } from './jxl-file-picker.js';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
 import { computePsnrVsFinal } from './jxl-progressive-quality.js';
+import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 
@@ -54,6 +55,7 @@ const exportCsvBtn = document.getElementById('export-csv-btn');
 const exportJsonBtn = document.getElementById('export-json-btn');
 const exportToonBtn = document.getElementById('export-toon-btn');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
+const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
 const randomCountInput = document.getElementById('random-count');
 
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
@@ -233,7 +235,9 @@ async function processImageFile(file, arrayBuffer) {
     try {
         if (name.match(/\.(orf|raw)$/i)) {
             if (!wasmReady) { dbgLog('WASM not ready'); return null; }
-            const result = process_orf(new Uint8Array(arrayBuffer), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
+            // Use mild "nice preview" look params (unlike the strict neutral 0/NaN used in raw fidelity benches/tests).
+            // This makes Gobabeb .orf etc look representative in paint viewers/timeline/gallery without affecting JXL encode fidelity testing.
+            const result = process_orf(new Uint8Array(arrayBuffer), 0.3, 0.1, 0, 0, 0, 0, 0.15, 0.1, 0, 0, NaN, NaN, 0, 0);
             try {
                 // Legacy WASM-side RGBA path removed per Boundary Cost Audit
                 const rgba = rgb_to_rgba(result.take_rgb());
@@ -272,6 +276,7 @@ async function loadFiles(files) {
     const rsLine = document.getElementById('run-status-line');
     if (rsLine) rsLine.hidden = true;
     clearLastExport();
+    hideSourcePreview();
 
     selectedSources = [];
     selectedSource = null;
@@ -285,6 +290,7 @@ async function loadFiles(files) {
                 const entry = { file: file.name, ...result };
                 selectedSources.push(entry);
                 dbgLog(`✓ ${file.name}`, `${result.width}×${result.height}`);
+                paintSourcePreview();
             } else {
                 dbgLog(`✗ Failed to process: ${file.name}`);
             }
@@ -322,6 +328,7 @@ async function loadRandomImages() {
     const rsLine = document.getElementById('run-status-line');
     if (rsLine) rsLine.hidden = true;
     clearLastExport();
+    hideSourcePreview();
 
     selectedSources = [];
     selectedSource = null;
@@ -344,6 +351,7 @@ async function loadRandomImages() {
                     loaded++;
                     if (currentSourceEl) currentSourceEl.textContent = `${loaded}/${count} loaded`;
                     dbgLog(`✓ ${fileName}`, `${result.width}×${result.height}`);
+                    paintSourcePreview();
                 } else {
                     dbgLog(`✗ Failed to process random image: ${fileName}`);
                 }
@@ -388,6 +396,7 @@ function updateUI() {
     if (exportCsvBtn) exportCsvBtn.disabled = !hasMeasurements;
     if (exportJsonBtn) exportJsonBtn.disabled = !hasMeasurements;
     if (exportToonBtn) exportToonBtn.disabled = !hasMeasurements;
+    if (copyMeasurementsMdBtn) copyMeasurementsMdBtn.disabled = !hasMeasurements;
     if (clearMeasurementsBtn) clearMeasurementsBtn.disabled = !hasMeasurements;
 }
 
@@ -597,6 +606,32 @@ function clearLastExport() {
     lastExportedJxls = [];
 }
 
+function hideSourcePreview() {
+    const wrap = document.getElementById('source-preview-wrap');
+    if (wrap) wrap.style.display = 'none';
+}
+
+function paintSourcePreview() {
+    const wrap = document.getElementById('source-preview-wrap');
+    const c = document.getElementById('source-preview');
+    if (!c || !selectedSource || !wrap) { hideSourcePreview(); return; }
+    wrap.style.display = 'inline-block';
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    // draw source rgba (may be large) scaled into the 64x48 preview
+    const srcC = document.createElement('canvas');
+    srcC.width = selectedSource.width;
+    srcC.height = selectedSource.height;
+    const srcCtx = srcC.getContext('2d');
+    const srcView = selectedSource.rgba;
+    const clamped = new Uint8ClampedArray(srcView.buffer, srcView.byteOffset, srcView.byteLength);
+    srcCtx.putImageData(new ImageData(clamped, selectedSource.width, selectedSource.height), 0, 0);
+    const scale = Math.min(c.width / selectedSource.width, c.height / selectedSource.height);
+    const dw = Math.max(1, Math.round(selectedSource.width * scale));
+    const dh = Math.max(1, Math.round(selectedSource.height * scale));
+    ctx.drawImage(srcC, Math.round((c.width - dw) / 2), Math.round((c.height - dh) / 2), dw, dh);
+}
+
 function makePassCanvas(pixels, width, height) {
     const arr = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
     const len = arr.length;
@@ -804,16 +839,27 @@ async function collectProgressivePaintEvents(decoder, decStart, passes, passInde
                 const t = performance.now() - decStart;
                 const isFinal = ev.type === 'final';
                 const passIdx = passIndexState.value;
+                const frameStats = analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height);
+                const passPixels = ev.pixels instanceof Uint8Array ? new Uint8Array(ev.pixels) : new Uint8Array(ev.pixels);
                 const passRecord = {
                     passIdx,
                     t,
                     isFinal,
-                    srcCanvas: makePassCanvas(ev.pixels, ev.info.width, ev.info.height),
+                    stats: frameStats,
+                    srcCanvas: makePassCanvas(passPixels, ev.info.width, ev.info.height),
+                    pixels: passPixels,
                 };
                 addPassToTimeline(passRecord);
                 autoAssignPass(passRecord);
                 passes.push(passRecord);
-                dbgLog(`  pass ${passIdx + 1}${isFinal ? ' (final)' : ''}`, `${t.toFixed(1)} ms`, 'info');
+                const statsLine = formatFrameStatsLog(frameStats);
+                dbgLog(`  pass ${passIdx + 1}${isFinal ? ' (final)' : ''}`, `${t.toFixed(1)} ms | ${statsLine}`, 'info');
+                console.log('[Progressive Paint] frame stats', {
+                    pass: passIdx + 1,
+                    isFinal,
+                    t_ms: Number(t.toFixed(2)),
+                    ...frameStats,
+                });
                 passIndexState.value++;
                 await nextPaint();
             } else if (ev.type === 'error') {
@@ -1101,7 +1147,21 @@ async function runProgressivePaintTest() {
             const progressiveFirstMs = passes.length ? passes[0].t : null;
             const progressiveFinalMs = passes.length ? passes[passes.length - 1].t : null;
 
-            setProgStatus(`${statusPrefix}Running one-shot decode for comparison…`);
+            let finalPsnrVsSource = null;
+            if (isLast && resized && passes.length) {
+                const finalRec = passes.find(p => p.isFinal) || passes[passes.length - 1];
+                if (finalRec && finalRec.pixels && resized.rgba && finalRec.pixels.length === resized.rgba.length) {
+                    try {
+                        finalPsnrVsSource = computePsnrVsFinal(resized.rgba, finalRec.pixels);
+                    } catch (e) {
+                        dbgLog('PSNR vs source failed', e?.message || e, 'warn');
+                    }
+                }
+            }
+
+            if (isLast) {
+                setProgStatus(`${statusPrefix}Running one-shot decode for comparison…`);
+            }
             const decoder2 = createDecoder({
                 format: 'rgba8',
                 region: null,
@@ -1133,7 +1193,8 @@ async function runProgressivePaintTest() {
                 perPass: passes.map(p => ({
                     pass: p.passIdx + 1,
                     t_ms: Number(p.t.toFixed(2)),
-                    isFinal: !!p.isFinal
+                    isFinal: !!p.isFinal,
+                    stats: p.stats && normalizeFrameStatsForExport(p.stats)
                 })),
                 first_ms: progressiveFirstMs != null ? Number(progressiveFirstMs.toFixed(2)) : null,
                 final_ms: progressiveFinalMs != null ? Number(progressiveFinalMs.toFixed(2)) : null,
@@ -1142,7 +1203,8 @@ async function runProgressivePaintTest() {
                 fileSizeKB: Number((jxlBytes.length / 1024).toFixed(1)),
                 speedup: (oneShotFinalMs && progressiveFirstMs)
                     ? Number((oneShotFinalMs / progressiveFirstMs).toFixed(2))
-                    : null
+                    : null,
+                final_psnr_vs_source: finalPsnrVsSource != null ? Number(finalPsnrVsSource.toFixed(2)) : null,
             };
             runMeasurements.push(measurement);
 
@@ -1161,7 +1223,7 @@ async function runProgressivePaintTest() {
                     groupOrder,
                 });
 
-                const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
+                const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms${finalPsnrVsSource != null ? ` · final PSNR ${finalPsnrVsSource.toFixed(1)} dB vs source` : ''}`;
                 const doneText = `Done. ${summary}`;
 
                 // Put the prominent "Done..." summary in the results area (left side of the new status line).
@@ -1192,6 +1254,7 @@ async function runProgressivePaintTest() {
         dbgLog('Progressive paint error', errMsg, 'error');
         dbgLog('Error stack', errStack, 'error');
         console.error('Full error:', err);
+        clearLastExport(); // prevent partial last* from a failed batch run from being exported later
     } finally {
         runProgressiveBtn.textContent = 'Run progressive paint';
         runProgressiveBtn.disabled = !(selectedSource || selectedSources.length);
@@ -1376,19 +1439,44 @@ function downloadText(filename, text, mime = 'text/plain') {
     URL.revokeObjectURL(url);
 }
 
+function normalizeFrameStatsForExport(stats) {
+    if (!stats) return null;
+    return {
+        alphaMin: stats.alphaMin,
+        alphaMax: stats.alphaMax,
+        alphaZeroPct: Number(stats.alphaZeroPct.toFixed(2)),
+        rgbNonzeroCount: stats.rgbNonzeroCount,
+        lumaVariance: Number(stats.lumaVariance.toFixed(2)),
+        frameHash: stats.frameHash,
+        pixelCount: stats.pixelCount,
+        byteLength: stats.byteLength,
+    };
+}
+
+function csvCell(value) {
+    const str = String(value ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+}
+
 function exportMeasurementsCSV() {
     if (!runMeasurements.length) return;
 
     const headers = [
         'ts', 'source', 'size', 'quality', 'stream_steps_requested', 'actual_paints',
         'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'encode_ms', 'file_kb',
-        'pass_timings'
+        'pass_timings', 'pass_stats'
     ];
 
     const rows = runMeasurements.map(m => {
         const s = m.settings || {};
         const passTimings = (m.perPass || [])
             .map(p => `${p.pass}:${p.t_ms}${p.isFinal ? 'f' : ''}`)
+            .join(';');
+        const perPassStats = (m.perPass || [])
+            .map(p => `${p.pass}:${p.stats ? formatFrameStatsCompact(p.stats) : ''}`)
             .join(';');
 
         return [
@@ -1404,15 +1492,9 @@ function exportMeasurementsCSV() {
             m.speedup ?? '',
             m.encode_ms ?? '',
             m.fileSizeKB ?? '',
-            passTimings
-        ].map(v => {
-            const str = String(v ?? '');
-            // CSV escape
-            if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-                return '"' + str.replace(/"/g, '""') + '"';
-            }
-            return str;
-        }).join(',');
+            passTimings,
+            perPassStats
+        ].map(csvCell).join(',');
     });
 
     const csv = [headers.join(','), ...rows].join('\n');
@@ -1456,10 +1538,21 @@ function exportMeasurementsTOON() {
 
         // perPass as compact tabular array (TOON strength)
         if (m.perPass && m.perPass.length) {
-            out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal}:\n`;
+            out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
             for (const p of m.perPass) {
                 const isFinal = p.isFinal ? 'true' : 'false';
-                out += `    ${p.pass},${p.t_ms},${isFinal}\n`;
+                const stats = p.stats || {};
+                out += [
+                    `    ${p.pass}`,
+                    p.t_ms,
+                    isFinal,
+                    stats.alphaMin ?? '',
+                    stats.alphaMax ?? '',
+                    stats.alphaZeroPct ?? '',
+                    stats.rgbNonzeroCount ?? '',
+                    stats.lumaVariance ?? '',
+                    stats.frameHash ?? ''
+                ].join(',') + '\n';
             }
         }
     }
@@ -1474,6 +1567,64 @@ function exportMeasurementsTOON() {
     const ts = now.replace(/[:.]/g, '-');
     downloadText(`progressive-paint-measurements-${ts}.toon`, out, 'text/toon');
     dbgLog('Exported measurements', `${runMeasurements.length} runs → TOON`, 'success');
+}
+
+function markdownCell(value) {
+    return String(value ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+function buildMeasurementsMarkdown() {
+    let out = '# Progressive Paint Measurements\n\n';
+    out += '| Source | Paints | First ms | Final ms | One-shot ms | Encode ms | File KB | Final PSNR |\n';
+    out += '|---|---:|---:|---:|---:|---:|---:|---:|\n';
+    for (const m of runMeasurements) {
+        out += [
+            markdownCell(m.source),
+            m.paintsReceived ?? m.passesReceived ?? '',
+            m.first_ms ?? '',
+            m.final_ms ?? '',
+            m.oneShot_ms ?? '',
+            m.encode_ms ?? '',
+            m.fileSizeKB ?? '',
+            m.final_psnr_vs_source ?? ''
+        ].join(' | ');
+        out += '\n';
+    }
+
+    for (const m of runMeasurements) {
+        out += `\n## ${markdownCell(m.source)}\n\n`;
+        out += '| Pass | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
+        for (const p of m.perPass || []) {
+            const stats = p.stats || {};
+            out += [
+                p.pass,
+                p.t_ms,
+                p.isFinal ? 'true' : 'false',
+                stats.alphaMin ?? '',
+                stats.alphaMax ?? '',
+                stats.alphaZeroPct ?? '',
+                stats.rgbNonzeroCount ?? '',
+                stats.lumaVariance ?? '',
+                markdownCell(stats.frameHash ?? '')
+            ].join(' | ');
+            out += '\n';
+        }
+    }
+    return out;
+}
+
+async function copyMeasurementsMarkdown() {
+    if (!runMeasurements.length) return;
+    const markdown = buildMeasurementsMarkdown();
+    try {
+        await navigator.clipboard.writeText(markdown);
+        dbgLog('Copied measurements', `${runMeasurements.length} runs -> Markdown`, 'success');
+    } catch (err) {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        downloadText(`progressive-paint-measurements-${ts}.md`, markdown, 'text/markdown');
+        dbgLog('Clipboard blocked; downloaded Markdown', err instanceof Error ? err.message : String(err), 'warn');
+    }
 }
 
 function quoteIfNeeded(str) {
@@ -1494,6 +1645,7 @@ function clearMeasurements() {
 if (exportCsvBtn) exportCsvBtn.addEventListener('click', exportMeasurementsCSV);
 if (exportJsonBtn) exportJsonBtn.addEventListener('click', exportMeasurementsJSON);
 if (exportToonBtn) exportToonBtn.addEventListener('click', exportMeasurementsTOON);
+if (copyMeasurementsMdBtn) copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown);
 if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
 
 // Wire progressive group-order checkbox + smart defaults (handoff step: UI polish so no more hacks for A/B).
@@ -1508,5 +1660,21 @@ if (groupCb) {
     groupCb.addEventListener('change', () => { groupCb.dataset.userToggled = '1'; });
 }
 syncGroupOrderDefault(); // run once at init (corrects html 'checked' for the initial 2-pass case)
+
+// Sync Detail + steps when Sneyers preset selected (needs 'passes' + >=4-6 steps for visible multi-layer refinement).
+// Mirrors syncGroupOrderDefault pattern; forces on preset change/init (user can tweak radios after if desired).
+const presetEl = document.getElementById('preset-name');
+function syncSneyersDefaults() {
+    if (!presetEl || presetEl.value !== 'sneyers') return;
+    const detailPasses = document.querySelector('input[name="prog-detail"][value="passes"]');
+    if (detailPasses) detailPasses.checked = true;
+    // Prefer 6 steps for good demo of truly-progressive layers (DC=2 + groupOrder gives several early paints)
+    const steps6 = document.querySelector('input[name="prog-passes"][value="6"]');
+    if (steps6) steps6.checked = true;
+}
+if (presetEl) {
+    presetEl.addEventListener('change', syncSneyersDefaults);
+}
+syncSneyersDefaults(); // init (html default is sneyers + auto/2, this corrects)
 
 dbgLog('Progressive paint initialized');

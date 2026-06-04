@@ -90,6 +90,9 @@ test('Sneyers preset + throttle controls present and wired', () => {
     expect(html).toContain('value="100" selected');
     expect(html).toContain('Sneyers (truly-progressive)');
     expect(html).toContain('100 KB/s');
+    // optional source preview canvas for fidelity visual comparison (original pre-encode vs passes)
+    expect(html).toContain('id="source-preview"');
+    expect(source).toContain('function paintSourcePreview');
     // JS has helper functions and wires throttle into streaming path
     expect(source).toContain('function readPresetName()');
     expect(source).toContain('function readThrottleKbPerSec()');
@@ -106,6 +109,12 @@ test('Sneyers preset + throttle controls present and wired', () => {
     // Sneyers preset uses buffering=0 (non-streamed encode). libjxl 0.11 encode.h says 2/3 are
     // streaming mode and "might not be progressively decodeable" — defeats progressive paint.
     expect(source).toContain("presetName === 'sneyers' ? { strategy: 0 } : undefined");
+    // UI sync for sneyers forces detail='passes' + steps=6 (for visible refinement layers)
+    expect(source).toContain("syncSneyersDefaults");
+    expect(source).toContain("presetEl.value !== 'sneyers'");
+    // final PSNR vs source wired for fidelity QA in measurements/summary
+    expect(source).toContain("final_psnr_vs_source");
+    expect(source).toContain("computePsnrVsFinal");
 });
 
 test('progressive paint sends generated JXL and settings directly to gallery without mandatory download', () => {
@@ -118,4 +127,17 @@ test('progressive paint sends generated JXL and settings directly to gallery wit
     expect(source).toContain('postProgressiveGalleryPayload(toExport)');
     expect(source).toContain('toExport.forEach(e => triggerJxlDownload(e.bytes, e.name))');
     expect(source.indexOf('postProgressiveGalleryPayload(toExport)')).toBeLessThan(source.indexOf('toExport.forEach(e => triggerJxlDownload'));
+});
+
+test('progressive paint records per-frame visibility stats in console and measurement exports', () => {
+    expect(source).toContain("import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog } from './jxl-progressive-frame-stats.js';");
+    expect(source).toContain('const frameStats = analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height);');
+    expect(source).toContain('formatFrameStatsLog(frameStats)');
+    expect(source).toContain("console.log('[Progressive Paint] frame stats'");
+    expect(source).toContain('stats: p.stats');
+    expect(source).toContain('pass_stats');
+    expect(source).toContain('formatFrameStatsCompact(p.stats)');
+    expect(source).toContain('perPassStats');
+    expect(source).toContain('copyMeasurementsMarkdown');
+    expect(source).toContain("copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown)");
 });

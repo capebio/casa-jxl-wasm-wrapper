@@ -124,7 +124,7 @@ async function encodeAsJxl(rgba, width, height, quality, effort) {
         progressive: false, previewFirst: false, chunked: false,
         priority: 'visible',
     });
-    const buf = rgba instanceof ArrayBuffer ? rgba : rgba.buffer;
+    const buf = rgba instanceof ArrayBuffer ? rgba : new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength);
     const parts = [];
     const chunkTask = (async () => {
         for await (const chunk of session.chunks()) {
@@ -213,7 +213,7 @@ async function runFormatRaceAtSize(source, longEdge, tier, effort, thisRunId) {
     let jxlEnc;
     try {
         jxlEnc = await withTimeout(
-            encodeAsJxl(new Uint8Array(rgba.buffer.slice(0)), dims.width, dims.height, jxlQ, effort),
+            encodeAsJxl(new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), dims.width, dims.height, jxlQ, effort),
             60000,
             `JXL encode ${longEdge}px`
         );

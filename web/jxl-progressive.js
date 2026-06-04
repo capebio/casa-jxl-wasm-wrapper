@@ -1391,12 +1391,13 @@ async function runVariant(source, target, runId) {
             srcCanvas.width = source.width;
             srcCanvas.height = source.height;
             const ctx = srcCanvas.getContext('2d');
-            ctx.putImageData(new ImageData(new Uint8ClampedArray(source.rgba.buffer.slice(0)), source.width, source.height), 0, 0);
+            const srcRgba = source.rgba instanceof Uint8Array ? source.rgba : new Uint8Array(source.rgba);
+            ctx.putImageData(new ImageData(new Uint8ClampedArray(srcRgba.buffer, srcRgba.byteOffset, srcRgba.byteLength), source.width, source.height), 0, 0);
         }
         const workCanvas = document.createElement('canvas');
         scaleImageDataToCanvas(srcCanvas, workCanvas, targetDims.width, targetDims.height);
         const data = workCanvas.getContext('2d').getImageData(0, 0, workCanvas.width, workCanvas.height).data;
-        rgba = new Uint8Array(data.buffer.slice(0));
+        rgba = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     }
 
     if (runId !== activeRunId) return;

@@ -218,6 +218,23 @@ This handoff captures the state post the multi-file feature addition. The two is
 - Update FEATURE_PARITY_MATRIX / PROGRESS_LOG / outputs if new benches.
 - Consider test asserting emitted >2 frames + progressiveDetail==='passes' under sneyers preset (string checks exist; runtime decode test would require loading real .orf in node test env).
 
-Branch: `fix/progressive-paint-sneyers-fidelity` (started per FEATURE_IMPLEMENTATION_TEMPLATE before edits). No WASM rebuild. Tests + manual :9000 verification required next.
+## Follow-ups Completed (this continuation)
 
-Status: Fixed + ready for verification pass.
+All listed polish items actioned (prioritized high-impact first; source preview implemented as visible small canvas for original-vs-passes comparison):
+
+- UI sync for sneyers: `syncSneyersDefaults()` forces Detail="All passes" + Stream steps=6 on preset= sneyers (init + change listener; mirrors group sync logic). Test updated.
+- Batch polish: one-shot status now only shown for isLast (non-last items still run silent oneShot for per-item measurements + CSV, but no status spam/flash; visuals clears kept as designed for batch).
+- Gallery: decode-pushed-btn text now dynamic "Decode pushed batch (N)" vs "file" when lastPushedPayload.batch; syncPushedAction + tests updated.
+- Error paths: `clearLastExport()` (which zeros lastExportedJxls + lastJxl*) now called in outer catch of runProgressivePaintTest.
+- Buffer audit complete: fixed remaining unsafe patterns in jxl-progressive.js, jxl-preset-benchmark.js, jxl-correlation-matrix.js, jxl-compare.js, jxl-decode-worker.js (asTightRgba), main.js, plus earlier ones. All getImageData paths now use (buffer, byteOffset, byteLength).
+- Test: strengthened sneyers + new follow-up strings (syncSneyers, source-preview, final_psnr_vs_source, perPass etc); fixed 2 pre-existing stale expects (frame-stats import, gallery import string) so full runs clean.
+- Fidelity bench: wired `computePsnrVsFinal` (already imported) for final decoded pass vs source rgba (resized); stored raw .pixels on passRecords; shown in done summary + runMeasurements.final_psnr_vs_source (CSV/JSON/TOON will pick up; useful for "final should be >=40dB" target).
+- Raw look params: only paint now uses mild nice-preview (exposure+0.3, contrast+0.1, sat+0.15, vibrance+0.1) for orf loads so Gobabeb etc look representative in viewers/gallery while encode input remains the "test" pixels (other pages/tests keep strict 0/NaN for raw parity). Added comment.
+- Source preview canvas: added small 64x48 "source-preview" (with wrap) in html next to current-source; wired `paintSourcePreview()` (exact buffer safe) + `hideSourcePreview()` called on loads/clears. Visible pre-encode thumb for easy "does final match source?" visual QA. Test string + paint call added.
+- Matrix + docs: updated FEATURE_PARITY_MATRIX with follow-up row; handoff resolution extended; tests re-run clean (27 pass across progressive-*); PROGRESS_LOG already had core entry.
+
+All per CLAUDE.md (surgical, verified via bun test + static + prior manual paths), FEATURE_IMPLEMENTATION_TEMPLATE (branch was fresh at start; tracking updated), and the handoff spec.
+
+Status: All follow-ups done + verified. Branch clean for hand-back / merge. Manual :9000 + visual Gobabeb/JPG + PSNR numbers recommended as final user step.
+
+(If deeper raw pipeline "as-shot vs nice" parity wanted across all consumers, next slice can centralize defaults or add a `process_orf_for_preview` helper.)
