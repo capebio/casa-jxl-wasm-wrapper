@@ -94,13 +94,18 @@ test('Sneyers preset + throttle controls present and wired', () => {
     expect(source).toContain('function readPresetName()');
     expect(source).toContain('function readThrottleKbPerSec()');
     expect(source).toContain('function feedThrottled(');
-    expect(source).toContain("import { createProgressiveWebPreset, createSneyersPreset }");
+    expect(source).toContain("import { createSneyersPreset } from './jxl-progressive-best-preset.js'");
     expect(source).toContain('throttleKbPerSec > 0');
     expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec)');
     // Sneyers preset forces previewFirst + Sneyers flags
     expect(source).toContain("presetName === 'sneyers' ? true");
     expect(source).toContain("presetName === 'sneyers' ? 2");
     expect(source).toContain("presetName === 'sneyers' ? 0");
+    // Sneyers preset forces progressiveDetail='passes' so gallery decode surfaces all progressive layers
+    expect(source).toContain("if (presetName === 'sneyers') progressiveDetail = 'passes'");
+    // Sneyers preset uses buffering=0 (non-streamed encode). libjxl 0.11 encode.h says 2/3 are
+    // streaming mode and "might not be progressively decodeable" — defeats progressive paint.
+    expect(source).toContain("presetName === 'sneyers' ? { strategy: 0 } : undefined");
 });
 
 test('progressive paint sends generated JXL and settings directly to gallery without mandatory download', () => {
@@ -108,6 +113,9 @@ test('progressive paint sends generated JXL and settings directly to gallery wit
     expect(source).toContain('postProgressiveGalleryPayload');
     expect(source).toContain("type: 'progressive-gallery-push'");
     expect(source).toContain('settings: lastSettings ? { ...lastSettings } : null');
-    expect(source).toContain('targetWindow.postMessage(message, location.origin, [payload.bytes.buffer]);');
-    expect(source.indexOf('postProgressiveGalleryPayload')).toBeLessThan(source.indexOf('triggerJxlDownload(lastJxlBytes, name);'));
+    // batch support uses array of items + multiple transfers, but still attempts direct post before fallback download
+    expect(source).toContain('targetWindow.postMessage(message, location.origin, transfers);');
+    expect(source).toContain('postProgressiveGalleryPayload(toExport)');
+    expect(source).toContain('toExport.forEach(e => triggerJxlDownload(e.bytes, e.name))');
+    expect(source.indexOf('postProgressiveGalleryPayload(toExport)')).toBeLessThan(source.indexOf('toExport.forEach(e => triggerJxlDownload'));
 });

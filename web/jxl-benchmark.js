@@ -777,7 +777,8 @@ async function processImageFile(file, arrayBuffer) {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(bitmap, 0, 0);
             const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-            const pixels = new Uint8Array(imageData.data.buffer);
+            const d = imageData.data;
+            const pixels = new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
             return {
                 pixels,
                 format: 'rgba8',
@@ -914,14 +915,16 @@ function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
     srcCanvas.width = width;
     srcCanvas.height = height;
     const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
-    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+    const srcClamped = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+    srcCtx.putImageData(new ImageData(srcClamped, width, height), 0, 0);
 
     const dstCanvas = document.createElement('canvas');
     dstCanvas.width = targetWidth;
     dstCanvas.height = targetHeight;
     const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
     dstCtx.drawImage(srcCanvas, 0, 0, targetWidth, targetHeight);
-    return new Uint8Array(dstCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer);
+    const dstData = dstCtx.getImageData(0, 0, targetWidth, targetHeight).data;
+    return new Uint8Array(dstData.buffer, dstData.byteOffset, dstData.byteLength);
 }
 
 function exactBuffer(view) {

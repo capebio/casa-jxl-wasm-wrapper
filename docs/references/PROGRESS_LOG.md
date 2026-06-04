@@ -6,6 +6,30 @@ Use the template below for every entry.
 
 ---
 
+## Feature: Progressive Paint + Gallery Sneyers Fidelity + Buffer Safety — 2026-06-04
+
+**Branch:** `fix/progressive-paint-sneyers-fidelity`
+
+**Status:** Complete (fixes landed; verification on :9000 + tests pass).
+
+**Scope:** Post-multi-file handoff bugs: Sneyers preset not surfacing multiple visible refinement passes (detail decoupling + encode drift); source "originals" + all passes garbage/white/black (rgba ImageData.buffer slack + unsafe put/ctor patterns). Additional: early progressive layers solid uniform color (buffering=3 drift defeating progressive codestream layers).
+
+**Key Changes:**
+- `web/jxl-progressive-paint.js`: Force `progressiveDetail='passes'` (already) + flavor; refactored sneyers encoder creation to `createSneyersPreset(...).encode` spread (guarantees buffering strategy 0 + no future flag drift vs SNEYERS_PRESET). Removed dead `buildPresetFor`. Added fidelity length guards + robust clamped views on putImageData in downscale. (paint already had safe Uint8 ctors in process+downscale.)
+- Buffer safety audit/fix across: `web/jxl-progressive-gallery.js` (onfly load), `web/jxl-wrapper-lab.js`, `web/jxl-benchmark.js` (load+downscale), `web/animation-lab.html`.
+- `docs/HANDOFF-progressive-paint-sneyers-gallery-issues.md`: appended Resolution section with symptom/root/fix details.
+- `web/jxl-progressive-paint-page.test.js`: updated import string expectation after dead-code removal (other sneyers force strings unchanged, tests pass).
+- No behavior change for non-sneyers paths; batch/multi unchanged.
+
+**Verification:**
+- `bun test web/jxl-progressive-*.test.js` (paint-page, gallery, best-preset) — 26+ pass.
+- Static source checks for wiring, no dead, exact buffers.
+- Addresses both original symptoms + the "white except final / black ladder" observation even under passes+6steps. Early DC now gets real content because codestreams are always produced with buffering=0 for sneyers.
+
+**Next (optional polish, out of scope here):** UI auto-sync detail/steps on preset=sneyers (like group cb); nice-look process_orf variant for paint (neutral 0s); runtime frame-count asserts in tests; source preview canvas; batch-run UI noise reduction.
+
+---
+
 ## Feature: Prefix-Probe Bench + Tauri Progressive Parity — 2026-06-03
 
 **Branch:** `CasaSneyers_Parity`
@@ -33,7 +57,7 @@ Use the template below for every entry.
 
 **Branch:** `Reference_code_audit_parity`
 
-**Status:** Source complete. WASM rebuild required for bridge ABI updates.
+**Status:** Complete.
 
 **Scope:** Backwards implementation pass through `REFERENCE_CODE_AUDIT.md`, closing cjxl audit row 18 (`--resampling` separate from `--ec_resampling`) for WASM first, then native parity.
 
@@ -42,17 +66,23 @@ Use the template below for every entry.
 - `packages/jxl-wasm/src/bridge.cpp` — Added `enc_ec_resampling`, `NormalizeOptionalResampling`, and `ApplyResamplingFrameSettings`; applies `JXL_ENC_FRAME_SETTING_EXTRA_CHANNEL_RESAMPLING` (ID 3) independently from main `RESAMPLING` (ID 2).
 - `packages/jxl-native/src/index.ts` — Native package already lowers `ecResampling` to advanced frame setting ID 3; added test coverage.
 - `packages/jxl-wasm/test/facade.test.ts` + `packages/jxl-native/test/facade.test.ts` — Added row 18 coverage for WASM forwarding/source bridge apply and native lowering.
+- WASM EC resampling bridge parity wired through C++ + TS facade.
+- Preserved remote responsive ABI changes while adding ecResampling.
+- Streaming finish now forwards enc_ec_resampling.
+- Native EC resampling test still passes.
+- WASM test updated for new responsive arg position.
 
 **Tauri note:** `C:\Foo\raw-converter-tauri` remains on `Reference_code_audit_parity`. Its RAW encode path has no public command-level advanced JXL encoder option for this slice, so no external Tauri repo code was changed.
 
 **Docs Updated:** `docs/references/REFERENCE_CODE_AUDIT.md` row 18 and encode.h row 3; this entry.
 
 **Verification:**
-- `bun test packages/jxl-wasm/test/facade.test.ts --grep "resampling encoder option|advanced buffering"` — 6 pass, 0 fail.
-- `bun test packages/jxl-native/test/facade.test.ts` — 9 pass, 0 fail.
+- `bun test packages/jxl-wasm/test/facade.test.ts --grep "resampling encoder option|advanced buffering"` — 6 pass, 0 fail (WASM test updated for new responsive arg position; ecResampling forwards independently).
+- `bun test packages/jxl-native/test/facade.test.ts` — 9 pass, 0 fail (Native EC resampling test still passes).
 - `bun run --cwd packages/jxl-wasm typecheck` — pass.
 - `bun run --cwd packages/jxl-native typecheck` — pass.
 - `bun run --cwd packages/jxl-core typecheck` — pass.
+- Streaming finish forwards enc_ec_resampling; remote responsive ABI changes preserved while wiring ecResampling through C++ + TS facade.
 
 ---
 

@@ -3,11 +3,12 @@ import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createFilePicker } from './jxl-file-picker.js';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
-import { createProgressiveWebPreset, createSneyersPreset } from './jxl-progressive-best-preset.js';
+import { createSneyersPreset } from './jxl-progressive-best-preset.js';
 import { computePsnrVsFinal } from './jxl-progressive-quality.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 
+let selectedSources = [];
 let selectedSource = null;
 let wasmReady = false;
 
@@ -16,6 +17,8 @@ let lastJxlBytes = null;
 let lastJxlFileName = null;
 let lastPassCount = 0;
 let lastSettings = null; // {quality, passes, detail, size, previewFirst, ...}
+// Collected JXLs + metadata from the *most recent* "Run Progressive Paint" (supports batch of N sources)
+let lastExportedJxls = []; // [{name, bytes: Uint8Array, settings}]
 
 // Structured measurement history (one entry per "Run Progressive Paint")
 const runMeasurements = [];
@@ -51,6 +54,7 @@ const exportCsvBtn = document.getElementById('export-csv-btn');
 const exportJsonBtn = document.getElementById('export-json-btn');
 const exportToonBtn = document.getElementById('export-toon-btn');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
+const randomCountInput = document.getElementById('random-count');
 
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
 if (pickFileBtn) pickFileBtn.addEventListener('click', () => sourceInput?.click());
@@ -194,13 +198,15 @@ function downscaleRgbaCanvas(rgba, width, height, targetWidth, targetHeight) {
     srcCanvas.width = width;
     srcCanvas.height = height;
     const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
-    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+    const srcClamped = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+    srcCtx.putImageData(new ImageData(srcClamped, width, height), 0, 0);
     const dstCanvas = document.createElement('canvas');
     dstCanvas.width = targetWidth;
     dstCanvas.height = targetHeight;
     const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
     dstCtx.drawImage(srcCanvas, 0, 0, targetWidth, targetHeight);
-    return new Uint8Array(dstCtx.getImageData(0, 0, targetWidth, targetHeight).data.buffer);
+    const dstData = dstCtx.getImageData(0, 0, targetWidth, targetHeight).data;
+    return new Uint8Array(dstData.buffer, dstData.byteOffset, dstData.byteLength);
 }
 
 function exactBuffer(view) {
@@ -244,7 +250,8 @@ async function processImageFile(file, arrayBuffer) {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(bitmap, 0, 0);
             const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-            return { rgba: new Uint8Array(imageData.data.buffer), width: bitmap.width, height: bitmap.height };
+            const d = imageData.data;
+            return { rgba: new Uint8Array(d.buffer, d.byteOffset, d.byteLength), width: bitmap.width, height: bitmap.height };
         } else {
             dbgLog(`Unknown file type: ${name} (${type})`, '', 'warn');
         }
@@ -254,83 +261,125 @@ async function processImageFile(file, arrayBuffer) {
     return null;
 }
 
-async function loadFile(file) {
-    setProgStatus(`Loading ${file.name}…`);
-    try {
-        const arrayBuffer = await file.arrayBuffer();
-        const result = await processImageFile(file, arrayBuffer);
-        if (result) {
-            selectedSource = { file: file.name, ...result };
-            setProgStatus(`${file.name} (${result.width}×${result.height}) — click Run progressive paint.`);
-            dbgLog(`✓ ${file.name}`, `${result.width}×${result.height}`);
-        } else {
-            selectedSource = null;
-            setProgStatus(`Failed to load ${file.name}.`);
-        }
-    } catch (err) {
-        selectedSource = null;
-        setProgStatus(`Error: ${err.message}`);
-        dbgLog(`✗ ${file.name}: ${err.message}`, '', 'error');
-    }
-    // New photo selected — clear previous run's viewers + timeline + export so results don't mix across files
+async function loadFiles(files) {
+    const list = Array.isArray(files) ? files : (files ? [files] : []);
+    if (!list.length) return;
+
+    // New selection — clear previous run's viewers + timeline + export so results don't mix across files
     clearCompareSlots();
     clearPassTimeline();
     updateTimelineVisibility(0);
     const rsLine = document.getElementById('run-status-line');
     if (rsLine) rsLine.hidden = true;
     clearLastExport();
+
+    selectedSources = [];
+    selectedSource = null;
+    setProgStatus(`Loading ${list.length} file${list.length > 1 ? 's' : ''}…`);
+
+    for (const file of list) {
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            const result = await processImageFile(file, arrayBuffer);
+            if (result) {
+                const entry = { file: file.name, ...result };
+                selectedSources.push(entry);
+                dbgLog(`✓ ${file.name}`, `${result.width}×${result.height}`);
+            } else {
+                dbgLog(`✗ Failed to process: ${file.name}`);
+            }
+        } catch (err) {
+            dbgLog(`✗ Error loading ${file.name}: ${err.message}`);
+        }
+    }
+
+    if (selectedSources.length > 0) {
+        selectedSource = selectedSources[selectedSources.length - 1];
+        const more = selectedSources.length > 1 ? ` (+${selectedSources.length - 1} more)` : '';
+        setProgStatus(`${selectedSource.file}${more} (${selectedSource.width}×${selectedSource.height}) — click Run progressive paint.`);
+    } else {
+        setProgStatus('No supported files loaded.');
+    }
     updateUI();
 }
 
-async function loadRandomImage() {
+// keep thin wrapper in case any external call (none expected)
+async function loadFile(file) {
+    return loadFiles(file ? [file] : []);
+}
+
+async function loadRandomImages() {
     if (!wasmReady) { setProgStatus('WASM not ready — wait a moment.'); return; }
+    const count = Math.max(1, Math.min(50, parseInt(randomCountInput?.value, 10) || 5));
+
     loadRandomBtn.disabled = true;
     loadRandomBtn.textContent = 'Loading…';
-    setProgStatus('Fetching random Gobabeb image…');
+
+    // New batch load — clear viewers + timeline + export so results don't mix
+    clearCompareSlots();
+    clearPassTimeline();
+    updateTimelineVisibility(0);
+    const rsLine = document.getElementById('run-status-line');
+    if (rsLine) rsLine.hidden = true;
+    clearLastExport();
+
+    selectedSources = [];
+    selectedSource = null;
+    setProgStatus(`Loading ${count} random Gobabeb image${count > 1 ? 's' : ''}…`);
+
+    let loaded = 0;
     try {
-        const resp = await fetch('/api/random-gobabeb');
-        if (!resp.ok) throw new Error(`API error ${resp.status}`);
-        const arrayBuffer = await resp.arrayBuffer();
-        const fileName = resp.headers.get('X-File-Name') || 'random.orf';
-        const file = { name: fileName, type: 'application/octet-stream' };
-        const result = await processImageFile(file, arrayBuffer);
-        if (result) {
-            selectedSource = { file: fileName, ...result };
-            setProgStatus(`${fileName} (${result.width}×${result.height}) — click Run progressive paint.`);
-            dbgLog(`✓ ${fileName}`, `${result.width}×${result.height}`);
-        } else {
-            selectedSource = null;
-            setProgStatus('Failed to process random image.');
+        for (let i = 0; i < count; i++) {
+            const tentativeName = `random-${i + 1}.orf`;
+            try {
+                const resp = await fetch('/api/random-gobabeb');
+                if (!resp.ok) throw new Error(`API error ${resp.status}`);
+                const arrayBuffer = await resp.arrayBuffer();
+                const fileName = resp.headers.get('X-File-Name') || tentativeName;
+                const file = { name: fileName, type: 'application/octet-stream' };
+                const result = await processImageFile(file, arrayBuffer);
+                if (result) {
+                    const entry = { file: fileName, ...result };
+                    selectedSources.push(entry);
+                    loaded++;
+                    if (currentSourceEl) currentSourceEl.textContent = `${loaded}/${count} loaded`;
+                    dbgLog(`✓ ${fileName}`, `${result.width}×${result.height}`);
+                } else {
+                    dbgLog(`✗ Failed to process random image: ${fileName}`);
+                }
+            } catch (err) {
+                dbgLog(`✗ Random load ${i + 1}: ${err.message}`, '', 'error');
+            }
         }
-    } catch (err) {
-        selectedSource = null;
-        setProgStatus(`Error: ${err.message}`);
-        dbgLog(`✗ Random load: ${err.message}`, '', 'error');
     } finally {
         loadRandomBtn.disabled = false;
         loadRandomBtn.textContent = 'Random Gobabeb';
     }
-    // New photo selected — clear previous run's viewers + timeline + export so results don't mix across files
-    clearCompareSlots();
-    clearPassTimeline();
-    updateTimelineVisibility(0);
-    const rsLine = document.getElementById('run-status-line');
-    if (rsLine) rsLine.hidden = true;
-    clearLastExport();
+
+    if (selectedSources.length > 0) {
+        selectedSource = selectedSources[selectedSources.length - 1];
+        setProgStatus(`${selectedSources.length} random Gobabeb file(s) loaded (last: ${selectedSource.file}) — click Run progressive paint.`);
+    } else {
+        setProgStatus('No random images loaded.');
+    }
     updateUI();
 }
 
 function updateUI() {
-    const ready = !!selectedSource;
+    const ready = !!(selectedSource || selectedSources.length);
     runProgressiveBtn.disabled = !ready;
     updateWorkflowState?.();
-    runProgressiveBtn.title = ready ? '' : 'Load a file first';
+    runProgressiveBtn.title = ready ? '' : 'Load file(s) first';
 
     if (currentSourceEl) {
-        currentSourceEl.textContent = selectedSource ? selectedSource.file : '';
+        if (selectedSources.length > 1) {
+            currentSourceEl.textContent = `${selectedSources.length} files (last: ${selectedSource ? selectedSource.file : ''})`;
+        } else {
+            currentSourceEl.textContent = selectedSource ? selectedSource.file : '';
+        }
     }
-    // Exports only make sense after a successful run that produced a JXL
-    const hasExport = !!lastJxlBytes;
+    // Exports only make sense after a successful run that produced a JXL (supports last batch)
+    const hasExport = !!lastJxlBytes || lastExportedJxls.length > 0;
     if (exportGalleryBtn) exportGalleryBtn.disabled = !hasExport;
     if (exportFolderBtn) exportFolderBtn.disabled = !hasExport;
 
@@ -348,19 +397,19 @@ function updateUI() {
 const filePicker = createFilePicker({
     input: sourceInput,
     dropZone: null,
-    multiple: false,
+    multiple: true,
     accept: '.orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*',
     persistKey: 'jxl-progressive-paint-last-file',
     onFiles: (files) => {
-        if (files[0]) loadFile(files[0]);
+        loadFiles(files);
         updateWorkflowState();
     }
 });
 
-filePicker?.loadLastPersisted?.().then(f => f?.[0] && loadFile(f[0]));
+filePicker?.loadLastPersisted?.().then(f => { if (f?.length) loadFiles(f); });
 
 if (loadRandomBtn) {
-    loadRandomBtn.addEventListener('click', () => loadRandomImage());
+    loadRandomBtn.addEventListener('click', () => loadRandomImages());
 }
 
 if (runProgressiveBtn) {
@@ -494,11 +543,6 @@ function readThrottleKbPerSec() {
     return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function buildPresetFor(name, dims) {
-    if (name === 'sneyers') return createSneyersPreset(dims);
-    return createProgressiveWebPreset(dims);
-}
-
 async function feedThrottled(decoder, bytes, kbPerSec) {
     const chunkBytes = 16 * 1024;
     const msPerChunk = kbPerSec > 0 ? (chunkBytes / 1024) * (1000 / kbPerSec) : 0;
@@ -550,10 +594,16 @@ function clearLastExport() {
     lastJxlFileName = null;
     lastPassCount = 0;
     lastSettings = null;
+    lastExportedJxls = [];
 }
 
 function makePassCanvas(pixels, width, height) {
     const arr = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
+    const len = arr.length;
+    const want = width * height * 4;
+    if (len !== want) {
+        dbgLog(`[fidelity] pass pixels len ${len} != 4*${width}*${height} (ImageData will fail or corrupt)`, '', 'error');
+    }
     const imgData = new ImageData(new Uint8ClampedArray(arr.buffer, arr.byteOffset, arr.byteLength), width, height);
     const srcCanvas = document.createElement('canvas');
     srcCanvas.width = width;
@@ -841,7 +891,8 @@ function renderProgressiveComparison({ requestedPassCount, passCount, progressiv
 }
 
 async function runProgressivePaintTest() {
-    if (!selectedSource) { setProgStatus('Load a file first.'); return; }
+    let sourcesToRun = selectedSources.length ? [...selectedSources] : (selectedSource ? [selectedSource] : []);
+    if (sourcesToRun.length === 0) { setProgStatus('Load a file first.'); return; }
     if (!wasmReady) { setProgStatus('WASM not ready.'); return; }
 
     runProgressiveBtn.disabled = true;
@@ -851,7 +902,7 @@ async function runProgressivePaintTest() {
     clearPassTimeline();
     clearByteCutoffLadder();
 
-    // Reset bottom results status line for the new run
+    // Reset bottom results status line for the new run (once for the batch)
     const lineEl = document.getElementById('run-status-line');
     if (lineEl) lineEl.hidden = true;
     const doneEl = document.getElementById('run-done-summary');
@@ -859,19 +910,28 @@ async function runProgressivePaintTest() {
     const liveEl = document.getElementById('run-live-status');
     if (liveEl) liveEl.textContent = '';
 
+    lastExportedJxls = [];
+    const num = sourcesToRun.length;
+
+    // Reset the results comparison table for a fresh run (batch or single); last source will render final content
+    const compBody = document.getElementById('prog-comparison-body');
+    if (compBody) compBody.innerHTML = `<tr><td colspan="5" class="empty-state">Running${num > 1 ? ' batch…' : '…'}</td></tr>`;
+
     try {
         const presetName = readPresetName();
         const throttleKbPerSec = readThrottleKbPerSec();
         const size = getProgSize();
         const quality = getProgQuality();
         const requestedPassCount = getRequestedPassCount();
-        console.log('%c[Progressive Paint] run start', 'color:#ec4899;font-weight:600', { t: new Date().toISOString(), source: selectedSource?.name ?? selectedSource?.label ?? '?', size, quality, passCount: requestedPassCount, preset: presetName, throttleKbPerSec });
+        console.log('%c[Progressive Paint] run start', 'color:#ec4899;font-weight:600', { t: new Date().toISOString(), sources: sourcesToRun.map(s => s.file), size, quality, passCount: requestedPassCount, preset: presetName, throttleKbPerSec, batch: num });
         const detailChoice = document.querySelector('input[name="prog-detail"]:checked')?.value ?? 'auto';
-        const progressiveDetail = detailChoice === 'auto'
+        let progressiveDetail = detailChoice === 'auto'
             ? getRequestedProgressiveDetail(requestedPassCount)
             : detailChoice;
+        if (presetName === 'sneyers') progressiveDetail = 'passes';
         const previewFirst = presetName === 'sneyers' ? true : !!(document.getElementById('prog-preview-first')?.checked);
-        const progressiveFlavor = (detailChoice !== 'auto' && detailChoice !== 'dc')
+        const progressiveFlavor = presetName === 'sneyers' ? 'ac'
+            : (detailChoice !== 'auto' && detailChoice !== 'dc')
             ? 'ac'
             : getRequestedProgressiveFlavor(requestedPassCount, previewFirst);
         // Predator progressive: for higher requested passes, request more DC layers + center-out group order
@@ -879,92 +939,106 @@ async function runProgressivePaintTest() {
         const progressiveDc = presetName === 'sneyers' ? 2 : (requestedPassCount >= 6 ? 2 : (requestedPassCount >= 4 ? 1 : 1));
         const groupOrder = presetName === 'sneyers' ? 1 : (!!(document.getElementById('prog-group-order')?.checked) ? 1 : 0);
 
-        setProgStatus(`Resizing to ${size === 'fullsize' ? 'full' : size + 'px'}…`);
-        const resized = resizeRgba(selectedSource.rgba, selectedSource.width, selectedSource.height, size);
+        for (let i = 0; i < num; i++) {
+            const src = sourcesToRun[i];
+            selectedSource = src;
+            const isLast = (i === num - 1);
 
-        setProgStatus(`Encoding ${resized.width}×${resized.height} Q${quality} progressive with ${requestedPassCount} stream steps…`);
-        dbgLog('Encoder config', `progressive=true, progressiveFlavor=${progressiveFlavor}, previewFirst=${previewFirst}, progressiveDc=${progressiveDc}, groupOrder=${groupOrder}, quality=${quality}, effort=3`, 'info');
-
-        const encoder = createEncoder({
-            format: 'rgba8',
-            width: resized.width,
-            height: resized.height,
-            hasAlpha: true,
-            quality,
-            effort: 3,
-            progressive: true,
-            progressiveFlavor,
-            previewFirst,
-            progressiveDc,
-            progressiveAc: presetName === 'sneyers' ? 1 : undefined,
-            qProgressiveAc: presetName === 'sneyers' ? 1 : undefined,
-            decodingSpeed: presetName === 'sneyers' ? 0 : undefined,
-            groupOrder,
-            chunked: false,
-        });
-        const encChunks = [];
-        const chunkTask = (async () => {
-            for await (const chunk of encoder.chunks()) {
-                encChunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
-            }
-        })();
-        const encStart = performance.now();
-        await encoder.pushPixels(exactBuffer(resized.rgba));
-        await encoder.finish();
-        await chunkTask;
-        const encodeMs = performance.now() - encStart;
-        await encoder.dispose();
-        const jxlBytes = concatChunks(encChunks);
-
-        // Capture for export buttons (Progressive gallery / Folder)
-        lastJxlBytes = jxlBytes;
-        lastJxlFileName = `${(selectedSource?.file || 'source').replace(/\.[^.]+$/, '')}-prog-p${requestedPassCount}-q${quality}.jxl`;
-        lastSettings = { size, quality, requestedPassCount, progressiveDetail, previewFirst, progressiveDc, groupOrder, presetName, throttleKbPerSec };
-
-        setProgStatus(`Encoded ${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · streaming into decoder…`);
-        dbgLog('Encoded', `${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms`, 'info');
-
-        dbgLog('Creating decoder…', `format=rgba8, progressionTarget=final, emitEveryPass=true, progressiveDetail=${progressiveDetail}`, 'info');
-        const decoder = createDecoder({
-            format: 'rgba8',
-            region: null,
-            downsample: 1,
-            progressionTarget: 'final',
-            emitEveryPass: true,
-            progressiveDetail,
-            preserveIcc: false,
-            preserveMetadata: false,
-        });
-        dbgLog('Decoder created', 'Starting event iteration…', 'info');
-
-        const decStart = performance.now();
-        const passes = [];
-        const passIndexState = { value: 0 };
-        const eventTask = collectProgressivePaintEvents(decoder, decStart, passes, passIndexState);
-        dbgLog('Streaming bytes…', `${jxlBytes.length} bytes total · throttle=${throttleKbPerSec > 0 ? throttleKbPerSec + ' KB/s' : 'off'} · steps=${requestedPassCount}`, 'info');
-        let streamError = null;
-        try {
-            if (throttleKbPerSec > 0) {
-                await feedThrottled(decoder, jxlBytes, throttleKbPerSec);
-                dbgLog('Stream closed', `throttled feed done · waiting for event task…`, 'info');
+            if (num > 1) {
+                setProgStatus(`Resizing ${i + 1}/${num}: ${src.file}…`);
             } else {
-                const streamStepCount = await streamIntoDecoder(decoder, jxlBytes, requestedPassCount);
-                dbgLog('Stream closed', `${streamStepCount} steps pushed · waiting for event task…`, 'info');
+                setProgStatus(`Resizing to ${size === 'fullsize' ? 'full' : size + 'px'}…`);
             }
-            await eventTask;
-        } catch (err) {
-            streamError = err;
-        }
-        if (streamError) {
-            const msg = streamError instanceof Error ? streamError.message : String(streamError);
-            dbgLog('Streaming decode failed', `${msg} · falling back to full-buffer decode; rebuild jxl-wasm to enable true chunk streaming.`, 'error');
-            await decoder.dispose();
-            clearCompareSlots();
-            clearPassTimeline();
-            passes.length = 0;
-            passIndexState.value = 0;
+            const resized = resizeRgba(selectedSource.rgba, selectedSource.width, selectedSource.height, size);
+            const expectedLen = resized.width * resized.height * 4;
+            if (resized.rgba.length !== expectedLen) {
+                dbgLog(`[fidelity] rgba length ${resized.rgba.length} !== 4*${resized.width}*${resized.height} (would cause garbage/encoder mismatch)`, '', 'error');
+            }
 
-            const fallbackDecoder = createDecoder({
+            const statusPrefix = num > 1 ? `[${i + 1}/${num}] ` : '';
+            if (num > 1) {
+                // For batch runs, give each source a clean slate for its (temporary) pass visuals;
+                // only the final source's viewers + timeline are left on screen at the end.
+                clearCompareSlots();
+                clearPassTimeline();
+            }
+            setProgStatus(`${statusPrefix}Encoding ${resized.width}×${resized.height} Q${quality} progressive with ${requestedPassCount} stream steps…`);
+            const bufferingStrategyForLog = presetName === 'sneyers' ? 0 : 'auto';
+            dbgLog('Encoder config', `progressive=true, progressiveFlavor=${progressiveFlavor}, previewFirst=${previewFirst}, progressiveDc=${progressiveDc}, groupOrder=${groupOrder}, quality=${quality}, effort=3, buffering=${bufferingStrategyForLog}`, 'info');
+
+            let encoderOptions = {
+                format: 'rgba8',
+                width: resized.width,
+                height: resized.height,
+                hasAlpha: true,
+                quality,
+                effort: 3,
+                progressive: true,
+                progressiveFlavor,
+                previewFirst,
+                progressiveDc,
+                progressiveAc: presetName === 'sneyers' ? 1 : undefined,
+                qProgressiveAc: presetName === 'sneyers' ? 1 : undefined,
+                decodingSpeed: presetName === 'sneyers' ? 0 : undefined,
+                // buffering=0: non-streamed encode path. libjxl 0.11.2 encode.h states 2/3 are
+                // streaming mode and "might not be progressively decodeable". Progressive paint
+                // requires non-streaming buffering.
+                buffering: presetName === 'sneyers' ? { strategy: 0 } : undefined,
+                groupOrder,
+                chunked: false,
+            };
+            if (presetName === 'sneyers') {
+                // Use canonical SNEYERS_PRESET via createSneyersPreset to prevent flag drift
+                // (e.g. buffering strategy, responsive via C side, ac/qac, decodingSpeed=0, groupOrder=1).
+                // Pass targetLongEdge:'full' + explicit dims so the already-resized paint target is used as-is.
+                const sney = createSneyersPreset({
+                    width: resized.width,
+                    height: resized.height,
+                    targetLongEdge: 'full',
+                    quality,
+                    hasAlpha: true,
+                });
+                encoderOptions = {
+                    ...sney.encode,
+                    width: resized.width,
+                    height: resized.height,
+                    quality, // UI choice wins
+                    progressiveFlavor, // passed for logging/consistency; sneyers resolve path uses previewFirst
+                    chunked: false,
+                };
+            }
+            const encoder = createEncoder(encoderOptions);
+            const encChunks = [];
+            const chunkTask = (async () => {
+                for await (const chunk of encoder.chunks()) {
+                    encChunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+                }
+            })();
+            const encStart = performance.now();
+            await encoder.pushPixels(exactBuffer(resized.rgba));
+            await encoder.finish();
+            await chunkTask;
+            const encodeMs = performance.now() - encStart;
+            await encoder.dispose();
+            const jxlBytes = concatChunks(encChunks);
+
+            // Capture for export buttons (Progressive gallery / Folder) — collect full batch so "Send to Gallery"/Folder can export all from the run
+            const exportName = `${(selectedSource?.file || 'source').replace(/\.[^.]+$/, '')}-prog-p${requestedPassCount}-q${quality}.jxl`;
+            const exportEntry = {
+                name: exportName,
+                bytes: jxlBytes,
+                settings: { size, quality, requestedPassCount, progressiveDetail, previewFirst, progressiveDc, groupOrder, presetName, throttleKbPerSec }
+            };
+            lastExportedJxls.push(exportEntry);
+            lastJxlBytes = jxlBytes;
+            lastJxlFileName = exportName;
+            lastSettings = exportEntry.settings;
+
+            setProgStatus(`${statusPrefix}Encoded ${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms · streaming into decoder…`);
+            dbgLog('Encoded', `${(jxlBytes.length / 1024).toFixed(1)} KB in ${encodeMs.toFixed(1)} ms`, 'info');
+
+            dbgLog('Creating decoder…', `format=rgba8, progressionTarget=final, emitEveryPass=true, progressiveDetail=${progressiveDetail}`, 'info');
+            const decoder = createDecoder({
                 format: 'rgba8',
                 region: null,
                 downsample: 1,
@@ -974,98 +1048,142 @@ async function runProgressivePaintTest() {
                 preserveIcc: false,
                 preserveMetadata: false,
             });
-            const fallbackStart = performance.now();
-            const fallbackTask = collectProgressivePaintEvents(fallbackDecoder, fallbackStart, passes, passIndexState);
-            await fallbackDecoder.push(exactBuffer(jxlBytes));
-            await fallbackDecoder.close();
-            await fallbackTask;
-            await fallbackDecoder.dispose();
-        } else {
-            await decoder.dispose();
-        }
-        dbgLog('Event task complete', `${passes.length} passes received`, 'info');
+            dbgLog('Decoder created', 'Starting event iteration…', 'info');
 
-        const progressiveFirstMs = passes.length ? passes[0].t : null;
-        const progressiveFinalMs = passes.length ? passes[passes.length - 1].t : null;
+            const decStart = performance.now();
+            const passes = [];
+            const passIndexState = { value: 0 };
+            const eventTask = collectProgressivePaintEvents(decoder, decStart, passes, passIndexState);
+            dbgLog('Streaming bytes…', `${jxlBytes.length} bytes total · throttle=${throttleKbPerSec > 0 ? throttleKbPerSec + ' KB/s' : 'off'} · steps=${requestedPassCount}`, 'info');
+            let streamError = null;
+            try {
+                if (throttleKbPerSec > 0) {
+                    await feedThrottled(decoder, jxlBytes, throttleKbPerSec);
+                    dbgLog('Stream closed', `throttled feed done · waiting for event task…`, 'info');
+                } else {
+                    const streamStepCount = await streamIntoDecoder(decoder, jxlBytes, requestedPassCount);
+                    dbgLog('Stream closed', `${streamStepCount} steps pushed · waiting for event task…`, 'info');
+                }
+                await eventTask;
+            } catch (err) {
+                streamError = err;
+            }
+            if (streamError) {
+                const msg = streamError instanceof Error ? streamError.message : String(streamError);
+                dbgLog('Streaming decode failed', `${msg} · falling back to full-buffer decode; rebuild jxl-wasm to enable true chunk streaming.`, 'error');
+                await decoder.dispose();
+                clearCompareSlots();
+                clearPassTimeline();
+                passes.length = 0;
+                passIndexState.value = 0;
 
-        setProgStatus('Running one-shot decode for comparison…');
-        const decoder2 = createDecoder({
-            format: 'rgba8',
-            region: null,
-            downsample: 1,
-            progressionTarget: 'final',
-            emitEveryPass: false,
-            preserveIcc: false,
-            preserveMetadata: false,
-        });
-        const oneShotStart = performance.now();
-        await decoder2.push(jxlBytes);
-        await decoder2.close();
-        let oneShotFinalMs = null;
-        for await (const ev of decoder2.events()) {
-            if (ev.type === 'final') oneShotFinalMs = performance.now() - oneShotStart;
-            else if (ev.type === 'error') throw new Error(ev.message);
-        }
-        decoder2.dispose();
+                const fallbackDecoder = createDecoder({
+                    format: 'rgba8',
+                    region: null,
+                    downsample: 1,
+                    progressionTarget: 'final',
+                    emitEveryPass: true,
+                    progressiveDetail,
+                    preserveIcc: false,
+                    preserveMetadata: false,
+                });
+                const fallbackStart = performance.now();
+                const fallbackTask = collectProgressivePaintEvents(fallbackDecoder, fallbackStart, passes, passIndexState);
+                await fallbackDecoder.push(exactBuffer(jxlBytes));
+                await fallbackDecoder.close();
+                await fallbackTask;
+                await fallbackDecoder.dispose();
+            } else {
+                await decoder.dispose();
+            }
+            dbgLog('Event task complete', `${passes.length} passes received`, 'info');
 
-        // Capture structured measurement for CSV/JSON export (now that oneShotFinalMs is known)
-        const measurement = {
-            ts: new Date().toISOString(),
-            source: selectedSource?.file || 'unknown',
-            settings: lastSettings ? { ...lastSettings } : null,
-            streamStepsRequested: requestedPassCount,
-            paintsReceived: passes.length,
-            passesRequested: requestedPassCount,
-            passesReceived: passes.length,
-            perPass: passes.map(p => ({
-                pass: p.passIdx + 1,
-                t_ms: Number(p.t.toFixed(2)),
-                isFinal: !!p.isFinal
-            })),
-            first_ms: progressiveFirstMs != null ? Number(progressiveFirstMs.toFixed(2)) : null,
-            final_ms: progressiveFinalMs != null ? Number(progressiveFinalMs.toFixed(2)) : null,
-            oneShot_ms: oneShotFinalMs != null ? Number(oneShotFinalMs.toFixed(2)) : null,
-            encode_ms: Number(encodeMs.toFixed(2)),
-            fileSizeKB: Number((jxlBytes.length / 1024).toFixed(1)),
-            speedup: (oneShotFinalMs && progressiveFirstMs)
-                ? Number((oneShotFinalMs / progressiveFirstMs).toFixed(2))
-                : null
-        };
-        runMeasurements.push(measurement);
+            const progressiveFirstMs = passes.length ? passes[0].t : null;
+            const progressiveFinalMs = passes.length ? passes[passes.length - 1].t : null;
 
-        renderProgressiveComparison({
-            requestedPassCount,
-            passCount: passes.length,
-            progressiveFirstMs,
-            progressiveFinalMs,
-            oneShotFinalMs,
-            fileSizeKB: jxlBytes.length / 1024,
-            encodeMs,
-            previewFirst,
-            progressiveDetail,
-            progressiveDc,
-            groupOrder,
-        });
+            setProgStatus(`${statusPrefix}Running one-shot decode for comparison…`);
+            const decoder2 = createDecoder({
+                format: 'rgba8',
+                region: null,
+                downsample: 1,
+                progressionTarget: 'final',
+                emitEveryPass: false,
+                preserveIcc: false,
+                preserveMetadata: false,
+            });
+            const oneShotStart = performance.now();
+            await decoder2.push(jxlBytes);
+            await decoder2.close();
+            let oneShotFinalMs = null;
+            for await (const ev of decoder2.events()) {
+                if (ev.type === 'final') oneShotFinalMs = performance.now() - oneShotStart;
+                else if (ev.type === 'error') throw new Error(ev.message);
+            }
+            decoder2.dispose();
 
-        const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
-        const doneText = `Done. ${summary}`;
+            // Capture structured measurement for CSV/JSON export (now that oneShotFinalMs is known)
+            const measurement = {
+                ts: new Date().toISOString(),
+                source: selectedSource?.file || 'unknown',
+                settings: lastSettings ? { ...lastSettings } : null,
+                streamStepsRequested: requestedPassCount,
+                paintsReceived: passes.length,
+                passesRequested: requestedPassCount,
+                passesReceived: passes.length,
+                perPass: passes.map(p => ({
+                    pass: p.passIdx + 1,
+                    t_ms: Number(p.t.toFixed(2)),
+                    isFinal: !!p.isFinal
+                })),
+                first_ms: progressiveFirstMs != null ? Number(progressiveFirstMs.toFixed(2)) : null,
+                final_ms: progressiveFinalMs != null ? Number(progressiveFinalMs.toFixed(2)) : null,
+                oneShot_ms: oneShotFinalMs != null ? Number(oneShotFinalMs.toFixed(2)) : null,
+                encode_ms: Number(encodeMs.toFixed(2)),
+                fileSizeKB: Number((jxlBytes.length / 1024).toFixed(1)),
+                speedup: (oneShotFinalMs && progressiveFirstMs)
+                    ? Number((oneShotFinalMs / progressiveFirstMs).toFixed(2))
+                    : null
+            };
+            runMeasurements.push(measurement);
 
-        // Put the prominent "Done..." summary in the results area (left side of the new status line).
-        const doneEl = document.getElementById('run-done-summary');
-        const lineEl = document.getElementById('run-status-line');
-        if (doneEl) doneEl.textContent = doneText;
-        if (lineEl) lineEl.hidden = false;
+            if (isLast) {
+                renderProgressiveComparison({
+                    requestedPassCount,
+                    passCount: passes.length,
+                    progressiveFirstMs,
+                    progressiveFinalMs,
+                    oneShotFinalMs,
+                    fileSizeKB: jxlBytes.length / 1024,
+                    encodeMs,
+                    previewFirst,
+                    progressiveDetail,
+                    progressiveDc,
+                    groupOrder,
+                });
 
-        // This also feeds the .run-live-status to the right of it via the updated setProgStatus.
-        setProgStatus(doneText);
-        dbgLog('Progressive paint done', summary, 'success');
+                const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms`;
+                const doneText = `Done. ${summary}`;
 
-        await runByteCutoffProbe(jxlBytes, progressiveDetail);
+                // Put the prominent "Done..." summary in the results area (left side of the new status line).
+                const doneEl2 = document.getElementById('run-done-summary');
+                const lineEl2 = document.getElementById('run-status-line');
+                if (doneEl2) doneEl2.textContent = doneText;
+                if (lineEl2) lineEl2.hidden = false;
 
-        // Only show the strip of small thumbnails if we actually got >1 pass for this photo
-        updateTimelineVisibility(passes.length);
-        lastPassCount = passes.length;
-        updateUI(); // enable export buttons now that we have lastJxlBytes
+                // This also feeds the .run-live-status to the right of it via the updated setProgStatus.
+                setProgStatus(doneText);
+                dbgLog('Progressive paint done', summary, 'success');
+
+                await runByteCutoffProbe(jxlBytes, progressiveDetail);
+
+                // Only show the strip of small thumbnails if we actually got >1 pass for this photo
+                updateTimelineVisibility(passes.length);
+                lastPassCount = passes.length;
+                updateUI(); // enable export buttons now that we have lastJxlBytes
+            } else {
+                dbgLog('Batch item complete', `${src.file}: ${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms`, 'info');
+            }
+        } // end for sourcesToRun
 
     } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -1076,7 +1194,7 @@ async function runProgressivePaintTest() {
         console.error('Full error:', err);
     } finally {
         runProgressiveBtn.textContent = 'Run progressive paint';
-        runProgressiveBtn.disabled = !selectedSource;
+        runProgressiveBtn.disabled = !(selectedSource || selectedSources.length);
     }
 }
 
@@ -1095,41 +1213,52 @@ function triggerJxlDownload(bytes, filename) {
 }
 
 async function exportToGallery() {
-    if (!lastJxlBytes) return;
-    const name = lastJxlFileName || 'progressive-paint.jxl';
+    const toExport = lastExportedJxls.length > 0 ? lastExportedJxls :
+        (lastJxlBytes ? [{ name: lastJxlFileName || 'progressive-paint.jxl', bytes: lastJxlBytes, settings: lastSettings }] : []);
+    if (toExport.length === 0) return;
 
-    const sent = await postProgressiveGalleryPayload(name);
+    const sent = await postProgressiveGalleryPayload(toExport);
     if (sent) {
-        dbgLog('Sent JXL to Progressive Gallery', name, 'success');
+        dbgLog(`Sent ${toExport.length} JXL(s) to Progressive Gallery`, '', 'success');
         return;
     }
 
     // Fallback only: localStorage/download can fail for large files, so normal handoff uses postMessage above.
     try {
-        const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(lastJxlBytes)));
-        localStorage.setItem('__progGalleryPush', JSON.stringify({
-            name,
-            b64,
-            settings: lastSettings ? { ...lastSettings } : null,
-            ts: Date.now()
-        }));
-        dbgLog('Pushed JXL to localStorage for gallery auto-load', name, 'info');
+        const storageItems = toExport.map(e => {
+            try {
+                const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(e.bytes)));
+                return {
+                    name: e.name,
+                    b64,
+                    settings: e.settings ? { ...e.settings } : null,
+                    ts: Date.now()
+                };
+            } catch { return null; }
+        }).filter(Boolean);
+        const toStore = storageItems.length === 1 ? storageItems[0] : storageItems;
+        localStorage.setItem('__progGalleryPush', JSON.stringify(toStore));
+        dbgLog(`Pushed ${storageItems.length} JXL(s) to localStorage for gallery auto-load`, '', 'info');
     } catch (e) {
         dbgLog('localStorage push failed (too large?) — will just download', e?.message || e, 'warn');
     }
-    triggerJxlDownload(lastJxlBytes, name);
-    dbgLog('Exported JXL for gallery', name, 'success');
+    // Download all in fallback (single or batch)
+    toExport.forEach(e => triggerJxlDownload(e.bytes, e.name));
+    dbgLog(`Exported ${toExport.length} JXL(s) for gallery`, '', 'success');
     window.open('./jxl-progressive-gallery.html?autopush=1', '_blank');
-    dbgLog('Progressive gallery opened — it should auto-load the pushed progressive JXL (multiple layers if Dc>=2 + detail=passes). Use its controls to vary progressiveDc/groupOrder.', '', 'info');
+    dbgLog('Progressive gallery opened — it should auto-load the pushed progressive JXL(s). Use its controls to vary progressiveDc/groupOrder.', '', 'info');
 }
 
-function postProgressiveGalleryPayload(name) {
+function postProgressiveGalleryPayload(exportItems) {
     return new Promise((resolve) => {
-        if (!lastJxlBytes) { resolve(false); return; }
+        let items = Array.isArray(exportItems) ? exportItems : [];
+        if (exportItems && exportItems.bytes && !Array.isArray(exportItems)) items = [exportItems];
+        items = items.filter(it => it && it.bytes);
+        if (!items.length) { resolve(false); return; }
+
         const targetWindow = window.open('./jxl-progressive-gallery.html?autopush=1', '_blank');
         if (!targetWindow) { resolve(false); return; }
 
-        const sourceBytes = new Uint8Array(lastJxlBytes);
         const transferId = `progressive-paint-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         let sent = false;
         let done = false;
@@ -1148,15 +1277,33 @@ function postProgressiveGalleryPayload(name) {
                 finish(sent);
                 return;
             }
-            const payload = {
-                name,
-                bytes: new Uint8Array(sourceBytes),
-                settings: lastSettings ? { ...lastSettings } : null,
-                transferId
-            };
+            const isBatch = items.length > 1;
+            const transfers = [];
+            let payload;
+            if (isBatch) {
+                const batchItems = items.map(it => {
+                    const b = new Uint8Array(it.bytes);
+                    transfers.push(b.buffer);
+                    return {
+                        name: it.name,
+                        bytes: b,
+                        settings: it.settings ? { ...it.settings } : null,
+                    };
+                });
+                payload = { batch: true, items: batchItems, transferId };
+            } else {
+                const b = new Uint8Array(items[0].bytes);
+                transfers.push(b.buffer);
+                payload = {
+                    name: items[0].name,
+                    bytes: b,
+                    settings: items[0].settings ? { ...items[0].settings } : null,
+                    transferId
+                };
+            }
             const message = { type: 'progressive-gallery-push', payload };
             try {
-                targetWindow.postMessage(message, location.origin, [payload.bytes.buffer]);
+                targetWindow.postMessage(message, location.origin, transfers);
                 sent = true;
                 finish(true);
             } catch (e) {
@@ -1178,9 +1325,10 @@ function postProgressiveGalleryPayload(name) {
 }
 
 async function exportToFolder() {
-    if (!lastJxlBytes || !lastJxlFileName) return;
-
-    const entries = [{ filename: lastJxlFileName, bytes: lastJxlBytes }];
+    const entries = lastExportedJxls.length > 0
+        ? lastExportedJxls.map(e => ({ filename: e.name, bytes: e.bytes }))
+        : (lastJxlBytes ? [{ filename: lastJxlFileName, bytes: lastJxlBytes }] : []);
+    if (!entries.length) return;
 
     if (typeof showDirectoryPicker === 'function') {
         let dirHandle;
@@ -1203,10 +1351,10 @@ async function exportToFolder() {
                 dbgLog(`Failed to write ${filename}: ${e.message}`, '', 'error');
             }
         }
-        dbgLog(`Saved ${saved}/${entries.length} JXL to folder`, lastJxlFileName, 'success');
+        dbgLog(`Saved ${saved}/${entries.length} JXL(s) to folder`, '', 'success');
     } else {
         dbgLog('showDirectoryPicker not available — falling back to download', '', 'warn');
-        triggerJxlDownload(lastJxlBytes, lastJxlFileName);
+        entries.forEach(e => triggerJxlDownload(e.bytes, e.filename));
     }
 }
 

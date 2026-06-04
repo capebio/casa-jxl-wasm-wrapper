@@ -69,6 +69,7 @@ if (decodePushedBtn) {
 }
 wirePushModeControls();
 wireProgressivePaintHandoff();
+wireDragAndDrop();
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
@@ -112,7 +113,9 @@ function applyPushedGallerySettings(settings) {
 }
 
 async function ingestPushedGalleryPayload(payload) {
-  if (!payload?.bytes) return;
+  if (!payload) return;
+  // allow batch payloads (which have .items not top-level .bytes) for multi from paint
+  if (!payload?.bytes && !(payload.batch && Array.isArray(payload.items))) return;
   if (payload.transferId && consumedPushIds.has(payload.transferId)) return;
   if (payload.transferId) consumedPushIds.add(payload.transferId);
 
@@ -120,9 +123,33 @@ async function ingestPushedGalleryPayload(payload) {
 }
 
 async function decodePushedGalleryPayload(payload) {
-  if (!payload?.bytes) return;
+  if (!payload) return;
   lastPushedPayload = payload;
   syncPushedAction();
+
+  if (payload.batch && Array.isArray(payload.items) && payload.items.length > 0) {
+    applyPushedGallerySettings(payload.items[0]?.settings);
+    const count = payload.items.length;
+    pickerStatus.textContent = `Received ${count} file(s) from Progressive Paint. Decoding now...`;
+    galleryRowsEl.innerHTML = '';
+    log(`Auto-ingesting pushed batch of ${count} progressive JXL(s) from paint`);
+
+    await ctxReadyPromise;
+    if (!ctx) throw new Error('Context failed to initialize');
+    const files = payload.items.map((it, i) => {
+      const fname = it.name || it.filename || `pushed-from-paint-${i}.jxl`;
+      return new File([it.bytes], fname, { type: 'image/jxl' });
+    });
+    const result = await startGallery(files, { encodeOnTheFly: false });
+    if (result.totalFrames > 0) {
+      pickerStatus.textContent = `Decoded pushed batch of ${files.length} file(s). Click thumbnails to inspect progressive frames per image.`;
+    } else {
+      pickerStatus.textContent = `Pushed batch received, but no frames rendered. Use "Decode pushed file" to retry.`;
+    }
+    return;
+  }
+
+  if (!payload?.bytes) return;
   applyPushedGallerySettings(payload.settings);
 
   const filename = payload.name || payload.filename || 'pushed-from-paint.jxl';
@@ -184,8 +211,15 @@ if (decodeBtn) {
     if (!pendingFiles) return;
     const { files, encodeOnTheFly } = pendingFiles;
     galleryRowsEl.innerHTML = '';
-    log(`Gallery start · ${files.length} file${files.length > 1 ? 's' : ''}`);
-    dbgLog('Gallery start', `${files.length} files`, 'info');
+    const _tier   = wasmTierEl?.value ?? 'auto';
+    const _push   = pushMode;
+    const _decode = getGalleryProgressiveDetail();
+    const _prev   = document.getElementById('gallery-preview-first')?.checked ? 'on' : 'off';
+    const _dc     = document.getElementById('gallery-prog-dc')?.value ?? '?';
+    const _center = document.getElementById('gallery-group-order')?.checked ? 'on' : 'off';
+    const galleryStartLine = `Gallery start · ${files.length} file${files.length > 1 ? 's' : ''} · tier=${_tier} · push=${_push} · decode=${_decode} · preview=${_prev} · dc=${_dc} · center-out=${_center}`;
+    log(galleryStartLine);
+    dbgLog(galleryStartLine);
     startGallery(files, { encodeOnTheFly }).catch(e => log(`Gallery error: ${e.message}`, 'error'));
   });
 }
@@ -204,14 +238,25 @@ function consumePendingProgressivePush() {
   try {
     const raw = localStorage.getItem('__progGalleryPush');
     if (!raw) return null;
-    const { name, b64, settings, ts } = JSON.parse(raw);
-    if (!b64 || Date.now() - (ts || 0) > 5 * 60 * 1000) { localStorage.removeItem('__progGalleryPush'); return null; }
-    // decode base64 to Uint8Array
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const parsed = JSON.parse(raw);
     localStorage.removeItem('__progGalleryPush');
-    return { filename: name || 'pushed-from-paint.jxl', bytes, settings };
+    const items = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+    const now = Date.now();
+    const valid = items.filter(it => it && it.b64 && (now - (it.ts || 0) < 5 * 60 * 1000));
+    if (!valid.length) return null;
+    const decoded = valid.map(({ name, b64, settings }) => {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return { filename: name || 'pushed-from-paint.jxl', bytes, settings };
+    });
+    if (decoded.length === 1) {
+      return decoded[0];
+    }
+    return {
+      batch: true,
+      items: decoded.map(d => ({ name: d.filename, bytes: d.bytes, settings: d.settings }))
+    };
   } catch (e) {
     console.warn('[gallery] consume push failed', e);
     localStorage.removeItem('__progGalleryPush');
@@ -230,6 +275,50 @@ function consumePendingProgressivePush() {
   }
 })();
 
+function wireDragAndDrop() {
+  let dragDepth = 0;
+
+  document.addEventListener('dragenter', (ev) => {
+    if ([...ev.dataTransfer.types].includes('Files')) {
+      dragDepth++;
+      document.body.classList.add('drag-over');
+    }
+  });
+
+  document.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) document.body.classList.remove('drag-over');
+  });
+
+  document.addEventListener('dragover', (ev) => {
+    if ([...ev.dataTransfer.types].includes('Files')) {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'copy';
+    }
+  });
+
+  document.addEventListener('drop', (ev) => {
+    dragDepth = 0;
+    document.body.classList.remove('drag-over');
+    if (![...ev.dataTransfer.types].includes('Files')) return;
+    ev.preventDefault();
+
+    const all = [...ev.dataTransfer.files];
+    const jxlFiles = all.filter(f => /\.jxl$/i.test(f.name));
+    const rawFiles = all.filter(f => /\.(png|jpe?g|webp)$/i.test(f.name));
+    const files = jxlFiles.length > 0 ? jxlFiles : rawFiles;
+    if (files.length === 0) {
+      log(`Drop ignored — no .jxl / image files in ${all.length} dropped item(s)`, 'warn');
+      return;
+    }
+
+    const encodeOnTheFly = rawFiles.length > 0 && jxlFiles.length === 0;
+    galleryRowsEl.innerHTML = '';
+    log(`Drop: ${files.length} file${files.length > 1 ? 's' : ''} → starting gallery`);
+    startGallery(files, { encodeOnTheFly }).catch(e => log(`Gallery error: ${e.message}`, 'error'));
+  });
+}
+
 function wirePushModeControls() {
   for (const button of pushModeButtons) {
     button.addEventListener('click', () => {
@@ -237,7 +326,7 @@ function wirePushModeControls() {
       if (!next || next === pushMode) return;
       pushMode = next;
       syncPushModeButtons();
-      dbgLog('Push mode', next, 'info');
+      dbgLog(`Push mode → ${next}`);
     });
   }
   syncPushModeButtons();
@@ -435,7 +524,8 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
       const ctx2d = c.getContext('2d');
       ctx2d.drawImage(img, 0, 0);
       const data = ctx2d.getImageData(0, 0, c.width, c.height);
-      return { rgba: new Uint8Array(data.data.buffer), width: c.width, height: c.height };
+      const d = data.data;
+      return { rgba: new Uint8Array(d.buffer, d.byteOffset, d.byteLength), width: c.width, height: c.height };
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -481,24 +571,32 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
   // Decode all files concurrently, register frames with coordinator
   const filePromises = selectedFiles.map(async file => {
     const fileId = slotId(file);
-    const startMs = Date.now();
 
     let buffer;
+    const loadStart = Date.now();
     try {
       if (encodeOnTheFly) {
         log(`${file.name}: encoding on the fly with progressiveDc=${encodeOpts.progressiveDc}, groupOrder=${encodeOpts.groupOrder}, previewFirst=${encodeOpts.previewFirst}...`);
         const raw = await loadImageToRgba(file);
         buffer = await encodeToProgressiveJxl(raw, encodeOpts);
-        log(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL`);
+        const encodeMs = Date.now() - loadStart;
+        log(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL in ${encodeMs.toFixed(1)} ms`);
+        dbgLog(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL in ${encodeMs.toFixed(1)} ms`);
       } else {
         buffer = await file.arrayBuffer();
+        const loadMs = Date.now() - loadStart;
+        log(`${file.name}: loaded ${(buffer.byteLength / 1024).toFixed(1)} KB in ${loadMs.toFixed(1)} ms`);
+        dbgLog(`${file.name}: loaded ${(buffer.byteLength / 1024).toFixed(1)} KB in ${loadMs.toFixed(1)} ms`);
       }
     } catch (e) {
       log(`${file.name}: ${encodeOnTheFly ? 'encode' : 'read'} error — ${e.message}`, 'error');
       return 0;
     }
 
-    dbgLog('Decoding', `${file.name} · ${buffer.byteLength} bytes · mode=${pushMode}`, 'info');
+    const decodeStartMs = Date.now();
+    const decodingLine = `Decoding ${file.name} · ${buffer.byteLength} bytes · mode=${pushMode} (after load)`;
+    log(decodingLine);
+    dbgLog(decodingLine);
 
     const chosenDetail = getGalleryProgressiveDetail();
     const decoder = createDecoder({
@@ -528,7 +626,10 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     const framesPromise = (async () => {
       for await (const ev of decoder.events()) {
         if (ev.type === 'header') {
-          dbgLog('Header', `${file.name} · ${ev.info.width}x${ev.info.height}`, 'info');
+          const hMs = Date.now() - decodeStartMs;
+          const headerLine = `${file.name}: header ${ev.info.width}×${ev.info.height} @ ${hMs.toFixed(1)} ms`;
+          log(headerLine);
+          dbgLog(headerLine);
           continue;
         }
         if (ev.type === 'error') {
@@ -536,7 +637,7 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
         }
         if (!(ev.type === 'progress' || ev.type === 'final')) continue;
 
-        const elapsedMs = Date.now() - startMs;
+        const elapsedMs = Date.now() - decodeStartMs;
         const bytesFed = Math.min(buffer.byteLength, pushState.bytesFed);
         const percentFed = buffer.byteLength ? (bytesFed / buffer.byteLength) * 100 : 100;
 
@@ -556,20 +657,24 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
         framesByFile.get(fileId).push(enriched);
         coordinator.registerFrame(fileId, enriched);
         reRenderAll();
-        dbgLog('Frame', `${file.name} · ${enriched.stage}`, 'info');
+        const frameLine = `${file.name}: [${enriched.stage}] ${elapsedMs.toFixed(1)} ms · ${bytesFed.toLocaleString()} / ${buffer.byteLength.toLocaleString()} B · ${percentFed.toFixed(1)}%`;
+        log(frameLine);
+        dbgLog(frameLine);
       }
       coordinator.markFileClosed(fileId);
       reRenderAll();
-      log(`${file.name}: done (${frameIndex} frame${frameIndex !== 1 ? 's' : ''})`);
-      dbgLog('Decode done', `${file.name} · ${frameIndex} frames`, 'success');
+      const doneLine = `${file.name}: done (${frameIndex} frame${frameIndex !== 1 ? 's' : ''})`;
+      log(doneLine);
+      dbgLog(doneLine, '', 'success');
     })();
 
     try {
       await Promise.all([pushPromise, framesPromise]);
       return frameIndex;
     } catch (e) {
-      log(`${file.name}: ${e.message}`, 'error');
-      dbgLog('Decode error', `${file.name}\n${e.stack ?? e.message}`, 'error');
+      const errLine = `${file.name}: ${e.message}`;
+      log(errLine, 'error');
+      dbgLog(errLine, e.stack ?? '', 'error');
       return frameIndex;
     } finally {
       await decoder.dispose();
