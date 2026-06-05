@@ -113,4 +113,7 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain('deltaKbPerSec');
     expect(source).toContain('group_order');
     expect(source).toContain('progressive_dc');
+    expect(source).toContain('paint_ms');
+    expect(source).toContain('decode_ms');
+    expect(source).toContain('paintMs');
 });

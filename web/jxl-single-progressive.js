@@ -487,11 +487,14 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                 passes.push(pass);
                 feedState.passCount = passes.length;
                 currentPasses = passes;
+                const paintStart = performance.now();
                 renderProgressivePass(pass);
-                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · ${formatTransferSpeed(deltaKbPerSec)} delta · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
+                pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
+                pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
+                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
                 dbgLog(
                     `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`,
-                    `${pass.t_ms} ms (+${pass.deltaMs} ms) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta`,
+                    `${pass.t_ms} ms (+${pass.deltaMs} ms = ${pass.decodeMs} decode + ${pass.paintMs} paint) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta`,
                     'info'
                 );
                 await sleep(0);
@@ -852,6 +855,8 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
             delta_bytes: pass.deltaBytes ?? null,
             delta_kb_per_sec: pass.deltaKbPerSec ?? null,
             deltaKbPerSec: pass.deltaKbPerSec ?? null,
+            paint_ms: pass.paintMs ?? null,
+            decode_ms: pass.decodeMs ?? null,
             stats: normalizeFrameStatsForExport(stats),
         };
     });
@@ -983,7 +988,7 @@ function exportMeasurementsCSV() {
         'size_preset', 'quality_preset', 'progressive_dc', 'group_order', 'group_order_label', 'estimate_kb', 'actual_kb', 'size_error_pct',
         'quality', 'encode_ms', 'encode_total_ms',
         'throttle_kb_per_sec', 'avg_transfer_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
-        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_stats'
+        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_paint_ms', 'pass_decode_ms', 'pass_stats'
     ];
     const rows = runMeasurements.map(m => [
         m.ts,
@@ -1017,6 +1022,8 @@ function exportMeasurementsCSV() {
         (m.perPass || []).map(p => `${p.pass}:${p.delta_ms ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.delta_bytes ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.delta_kb_per_sec ?? ''}`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.paint_ms ?? ''}`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.decode_ms ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${formatFrameStatsCompact(p.stats)}`).join(';')
     ].map(csvCell).join(','));
     downloadText(`single-progressive-${timestamp()}.csv`, [headers.join(','), ...rows].join('\n'), 'text/csv');
@@ -1056,7 +1063,7 @@ function exportMeasurementsTOON() {
         if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
         if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
         if (m.final_psnr_vs_source != null) out += `  final_psnr_vs_source: ${m.final_psnr_vs_source}\n`;
-        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,delta_ms,delta_bytes,delta_kb_per_sec,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
+        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,delta_ms,delta_bytes,delta_kb_per_sec,paint_ms,decode_ms,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
         for (const p of m.perPass) {
             out += [
                 `    ${p.pass}`,
@@ -1068,6 +1075,8 @@ function exportMeasurementsTOON() {
                 p.delta_ms ?? '',
                 p.delta_bytes ?? '',
                 p.delta_kb_per_sec ?? '',
+                p.paint_ms ?? '',
+                p.decode_ms ?? '',
                 p.stats.alphaMin,
                 p.stats.alphaMax,
                 p.stats.alphaZeroPct,
@@ -1121,8 +1130,8 @@ function buildMeasurementsMarkdown() {
     }
     for (const m of runMeasurements) {
         out += `\n## ${mdCell(m.source)}\n\n`;
-        out += '| Pass | KB streamed | Streamed % | Transfer KB/s | Delta ms | Delta KB | Delta KB/s | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
-        out += '|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
+        out += '| Pass | KB streamed | Streamed % | Transfer KB/s | Delta ms | Delta KB | Delta KB/s | Paint ms | Decode ms | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
         for (const p of m.perPass) {
             out += [
                 p.pass,
@@ -1132,6 +1141,8 @@ function buildMeasurementsMarkdown() {
                 p.delta_ms ?? '',
                 p.delta_bytes == null ? '' : Number((p.delta_bytes / 1024).toFixed(1)),
                 p.delta_kb_per_sec ?? '',
+                p.paint_ms ?? '',
+                p.decode_ms ?? '',
                 p.t_ms,
                 p.isFinal ? 'true' : 'false',
                 p.stats.alphaMin,
