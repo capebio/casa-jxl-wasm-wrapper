@@ -29,14 +29,14 @@
     }
     body { margin: 0; background: var(--sp-bg); color: var(--sp-text); font-family: "Segoe UI", Verdana, sans-serif; }
     .single-shell { max-width: 1560px; margin: 0 auto; padding: 22px; }
-    .single-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: end; padding-bottom: 16px; border-bottom: 1px solid var(--sp-line); }
+    .single-head { padding-bottom: 16px; border-bottom: 1px solid var(--sp-line); }
     .single-head h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
     .single-head p { margin: 7px 0 0; color: var(--sp-muted); max-width: 860px; line-height: 1.45; }
     .single-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; padding: 12px; background: var(--sp-panel); border: 1px solid var(--sp-line); border-radius: 8px; }
     .single-controls label { display: grid; gap: 5px; min-width: 132px; color: var(--sp-muted); font-size: 12px; }
     .single-controls input, .single-controls select { background: #090e10; color: var(--sp-text); border: 1px solid #40565d; border-radius: 6px; padding: 8px; }
-    .single-controls button, .single-actions button, .metric-actions button { background: var(--sp-accent); color: #04100c; border: 0; border-radius: 6px; padding: 9px 12px; font-weight: 700; cursor: pointer; }
-    .single-controls button[disabled], .single-actions button[disabled], .metric-actions button[disabled] { opacity: .55; cursor: wait; }
+    .single-controls button, .metric-actions button, .lightbox-close { background: var(--sp-accent); color: #04100c; border: 0; border-radius: 6px; padding: 9px 12px; font-weight: 700; cursor: pointer; }
+    .single-controls button[disabled], .metric-actions button[disabled] { opacity: .55; cursor: wait; }
     .setting-lock { min-width: 140px; color: var(--sp-muted); font-size: 12px; }
     .setting-lock strong { display: block; margin-top: 5px; color: var(--sp-text); font-size: 13px; }
     .single-status { min-height: 24px; color: var(--sp-muted); margin: 8px 0 14px; }
@@ -49,6 +49,7 @@
     #progressive-canvas { width: 100%; max-height: 78vh; object-fit: contain; background: #040607; }
     .pass-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 8px; padding: 10px; border-top: 1px solid #263940; }
     .pass-tile { background: #0a0f11; border: 1px solid #2d4248; border-radius: 6px; padding: 0; overflow: hidden; color: var(--sp-muted); text-align: left; }
+    .pass-tile:focus-visible { outline: 2px solid var(--sp-accent); outline-offset: 2px; }
     .pass-tile canvas { width: 100%; height: 82px; object-fit: contain; display: block; background: #040607; }
     .pass-tile span { display: block; padding: 6px; font-size: 11px; line-height: 1.25; }
     .metric-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; }
@@ -60,8 +61,22 @@
     .console-panel { margin-top: 16px; }
     #dbg-console-mount .dbg-panel { position: static; width: auto; max-height: none; border: 0; border-radius: 0; }
     #dbg-console-mount .dbg-list { max-height: 300px; }
+    .pass-lightbox { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 18px; background: rgba(3, 6, 7, .88); }
+    .pass-lightbox[hidden] { display: none; }
+    .pass-lightbox-inner { width: min(1280px, 96vw); max-height: 94vh; display: grid; grid-template-rows: auto minmax(0, 1fr); background: #0d1417; border: 1px solid #4c666d; border-radius: 8px; overflow: hidden; }
+    .pass-lightbox-head { display: flex; justify-content: space-between; gap: 14px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #2c4249; background: var(--sp-panel-2); }
+    .pass-lightbox-title { display: grid; gap: 3px; }
+    .pass-lightbox-title strong { font-size: 16px; }
+    .pass-lightbox-title span { color: var(--sp-muted); font-size: 12px; }
+    .pass-lightbox-body { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 320px; }
+    #pass-lightbox-canvas { width: 100%; height: min(78vh, 860px); object-fit: contain; background: #040607; }
+    .pass-lightbox-stats { padding: 12px; border-left: 1px solid #2c4249; display: grid; align-content: start; gap: 8px; color: var(--sp-muted); font-size: 12px; }
+    .pass-lightbox-stats div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #203137; padding-bottom: 6px; }
+    .pass-lightbox-stats strong { color: var(--sp-text); text-align: right; overflow-wrap: anywhere; }
     @media (max-width: 1000px) {
-      .single-head, .single-grid { grid-template-columns: 1fr; }
+      .single-grid { grid-template-columns: 1fr; }
+      .pass-lightbox-body { grid-template-columns: 1fr; }
+      .pass-lightbox-stats { border-left: 0; border-top: 1px solid #2c4249; grid-template-columns: 1fr 1fr; }
       .canvas-wrap { min-height: 360px; }
     }
     @media (max-width: 640px) {
@@ -89,10 +104,7 @@
     <section class="single-head">
       <div>
         <h1>Single progressive</h1>
-        <p>Retrieves one Gobabeb RAW image, chooses a Sneyers truly-progressive encode closest to the desired file size, then decodes the selected JXL with throttled byte feed so the canvas improves in place.</p>
-      </div>
-      <div class="single-actions">
-        <button id="dbg-console-btn" type="button">Console</button>
+        <p>Retrieves one Gobabeb RAW image, encodes it with the selected Sneyers truly-progressive size and quality presets, then decodes the JXL with throttled byte feed so the canvas improves in place.</p>
       </div>
     </section>
 
@@ -150,6 +162,8 @@
         <strong>Sneyers truly-progressive</strong>
       </div>
       <button id="retrieve-run" type="button">Retrieve raw file</button>
+      <button id="run-rerun" type="button" disabled>Run</button>
+      <button id="dbg-console-btn" type="button">Console</button>
     </section>
 
     <div id="single-status" class="single-status">Ready.</div>
@@ -205,6 +219,22 @@
       <div id="dbg-console-mount"></div>
     </section>
   </main>
+
+  <div id="pass-lightbox" class="pass-lightbox" hidden>
+    <div class="pass-lightbox-inner" role="dialog" aria-modal="true" aria-labelledby="pass-lightbox-title">
+      <header class="pass-lightbox-head">
+        <div class="pass-lightbox-title">
+          <strong id="pass-lightbox-title">Pass</strong>
+          <span id="pass-lightbox-subtitle">Arrow keys move between passes.</span>
+        </div>
+        <button id="pass-lightbox-close" class="lightbox-close" type="button">Close</button>
+      </header>
+      <div class="pass-lightbox-body">
+        <canvas id="pass-lightbox-canvas" width="16" height="16"></canvas>
+        <div id="pass-lightbox-stats" class="pass-lightbox-stats"></div>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="./jxl-single-progressive.js"></script>
 </body>

@@ -7,6 +7,7 @@ import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog }
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 const PROGRESSIVE_DETAIL = 'passes';
+const STEADY_DECODE_CHUNK_BYTES = 16 * 1024;
 
 // Size presets define output long-edge in pixels. "original" preserves source dims.
 const SIZE_PRESETS = {
@@ -32,11 +33,18 @@ const QUALITY_PRESETS = {
 const DEFAULT_QUALITY_PRESET = 'high';
 
 const retrieveBtn = document.getElementById('retrieve-run');
+const runBtn = document.getElementById('run-rerun');
 const statusEl = document.getElementById('single-status');
 const canvas = document.getElementById('progressive-canvas');
 const viewerTitle = document.getElementById('viewer-title');
 const viewerMeta = document.getElementById('viewer-meta');
 const passStrip = document.getElementById('pass-strip');
+const lightbox = document.getElementById('pass-lightbox');
+const lightboxTitle = document.getElementById('pass-lightbox-title');
+const lightboxSubtitle = document.getElementById('pass-lightbox-subtitle');
+const lightboxCanvas = document.getElementById('pass-lightbox-canvas');
+const lightboxStats = document.getElementById('pass-lightbox-stats');
+const lightboxClose = document.getElementById('pass-lightbox-close');
 const consoleBtn = document.getElementById('dbg-console-btn');
 const consoleMount = document.getElementById('dbg-console-mount');
 const exportCsvBtn = document.getElementById('export-csv-btn');
@@ -48,6 +56,9 @@ const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
 const runMeasurements = [];
 let rawReady = false;
 let running = false;
+let currentPasses = [];
+let lightboxIndex = -1;
+let loadedSource = null;
 
 initDebugConsole(consoleBtn, consoleMount);
 console.log('%c[Single progressive] loaded', 'color:#7de0b0;font-weight:600', {
@@ -68,11 +79,31 @@ initRaw().then(() => {
 retrieveBtn?.addEventListener('click', () => {
     void retrieveAndRun();
 });
+runBtn?.addEventListener('click', () => {
+    void rerunLoadedSource();
+});
 if (exportCsvBtn) exportCsvBtn.addEventListener('click', exportMeasurementsCSV);
 if (exportJsonBtn) exportJsonBtn.addEventListener('click', exportMeasurementsJSON);
 if (exportToonBtn) exportToonBtn.addEventListener('click', exportMeasurementsTOON);
 if (copyMeasurementsMdBtn) copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown);
 if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
+lightboxClose?.addEventListener('click', closePassLightbox);
+lightbox?.addEventListener('click', (event) => {
+    if (event.target === lightbox) closePassLightbox();
+});
+window.addEventListener('keydown', (event) => {
+    if (!lightbox || lightbox.hidden) return;
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closePassLightbox();
+    } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        showPassInLightbox(lightboxIndex + 1);
+    } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        showPassInLightbox(lightboxIndex - 1);
+    }
+});
 
 const sizePresetEl = document.getElementById('size-preset');
 const qualityPresetEl = document.getElementById('quality-preset');
@@ -120,69 +151,8 @@ async function retrieveAndRun() {
     try {
         dbgLog('Run start', JSON.stringify(settings), 'info');
         setStatus('Retrieving random Gobabeb RAW...');
-        const source = await loadRandomRaw();
-        renderSourceShell(source);
-
-        setStatus(`Preparing ${source.file} at ${settings.sizePresetLabel} (${settings.longEdgeRequest === 'source' ? 'source dims' : `${settings.longEdgeRequest} px`})...`);
-        const target = resolveTarget(source, settings.longEdgeRequest);
-        const targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
-
-        const estimateKb = estimateTargetKb(target.width, target.height, settings.qualityPreset);
-        setStatus(`Encoding Sneyers at ${settings.qualityPresetLabel} (q=${settings.qualityNumber}${settings.lossless ? ', lossless' : ''})... estimate ${estimateKb} KB`);
-        const encodeStart = performance.now();
-        const encodeBytes = await encodeSneyersDirect({
-            rgba: targetRgba,
-            width: target.width,
-            height: target.height,
-            quality: settings.qualityNumber,
-            lossless: settings.lossless,
-            progressiveDc: settings.progressiveDc,
-        });
-        const encodeTotalMs = performance.now() - encodeStart;
-        const selected = {
-            quality: settings.qualityNumber,
-            bytes: encodeBytes,
-            encodeMs: encodeTotalMs,
-            attempts: [{
-                quality: settings.qualityNumber,
-                byteLength: encodeBytes.byteLength,
-                encodeMs: encodeTotalMs,
-                errorPct: estimateKb ? ((encodeBytes.byteLength - estimateKb * 1024) / (estimateKb * 1024)) * 100 : 0,
-            }],
-        };
-        dbgLog('Encoded', `q=${selected.quality} size=${formatBytes(encodeBytes.byteLength)} estimate=${estimateKb} KB`, 'success');
-
-        setStatus(`Decoding ${formatBytes(encodeBytes.byteLength)} JXL with ${formatThrottle(settings.throttleKbPerSec)} throttle...`);
-        const decode = await decodeProgressively({
-            jxlBytes: encodeBytes,
-            width: target.width,
-            height: target.height,
-            throttleKbPerSec: settings.throttleKbPerSec,
-        });
-        setStatus('Running one-shot decode comparison...');
-        const oneShotMs = await decodeOneShotFinal(encodeBytes);
-
-        const finalFrame = decode.passes.find(p => p.isFinal) ?? decode.passes.at(-1);
-        const finalPsnr = finalFrame?.pixels?.byteLength === targetRgba.byteLength
-            ? computePsnrVsFinal(targetRgba, finalFrame.pixels)
-            : null;
-        const metrics = buildMeasurement({
-            source,
-            target,
-            targetKb: estimateKb,
-            throttleKbPerSec: settings.throttleKbPerSec,
-            selected,
-            encodeTotalMs,
-            decode,
-            oneShotMs,
-            finalPsnr,
-            sizePreset: settings.sizePreset,
-            qualityPreset: settings.qualityPreset,
-        });
-        runMeasurements.push(metrics);
-        renderMetrics(metrics);
-        updateExportButtons();
-        setStatus(`Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms.`);
+        const source = await loadRandomAndCacheSource();
+        await runSourceWithSettings(source, settings);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setStatus(`Run failed: ${message}`);
@@ -191,7 +161,105 @@ async function retrieveAndRun() {
     } finally {
         running = false;
         retrieveBtn.disabled = false;
+        updateRunButtonState();
     }
+}
+
+async function rerunLoadedSource() {
+    if (running || !loadedSource) return;
+    if (!rawReady) {
+        setStatus('RAW WASM not ready yet.');
+        return;
+    }
+    running = true;
+    retrieveBtn.disabled = true;
+    updateRunButtonState();
+    try {
+        const settings = readSettings();
+        dbgLog('Run start', JSON.stringify(settings), 'info');
+        await runSourceWithSettings(loadedSource, settings);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`Run failed: ${message}`);
+        dbgLog('Run failed', message, 'error');
+        console.error('[Single progressive] run failed', error);
+    } finally {
+        running = false;
+        retrieveBtn.disabled = false;
+        updateRunButtonState();
+    }
+}
+
+async function loadRandomAndCacheSource() {
+    const source = await loadRandomRaw();
+    loadedSource = source;
+    renderSourceShell(source);
+    updateRunButtonState();
+    return source;
+}
+
+async function runSourceWithSettings(source, settings) {
+    renderSourceShell(source);
+    setStatus(`Preparing ${source.file} at ${settings.sizePresetLabel} (${settings.longEdgeRequest === 'source' ? 'source dims' : `${settings.longEdgeRequest} px`})...`);
+    const target = resolveTarget(source, settings.longEdgeRequest);
+    const targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
+
+    const estimateKb = estimateTargetKb(target.width, target.height, settings.qualityPreset);
+    setStatus(`Encoding Sneyers at ${settings.qualityPresetLabel} (q=${settings.qualityNumber}${settings.lossless ? ', lossless' : ''})... estimate ${estimateKb} KB`);
+    const encodeStart = performance.now();
+    const encodeBytes = await encodeSneyersDirect({
+        rgba: targetRgba,
+        width: target.width,
+        height: target.height,
+        quality: settings.qualityNumber,
+        lossless: settings.lossless,
+        progressiveDc: settings.progressiveDc,
+    });
+    const encodeTotalMs = performance.now() - encodeStart;
+    const selected = {
+        quality: settings.qualityNumber,
+        bytes: encodeBytes,
+        encodeMs: encodeTotalMs,
+        attempts: [{
+            quality: settings.qualityNumber,
+            byteLength: encodeBytes.byteLength,
+            encodeMs: encodeTotalMs,
+            errorPct: estimateKb ? ((encodeBytes.byteLength - estimateKb * 1024) / (estimateKb * 1024)) * 100 : 0,
+        }],
+    };
+    dbgLog('Encoded', `q=${selected.quality} size=${formatBytes(encodeBytes.byteLength)} estimate=${estimateKb} KB`, 'success');
+
+    setStatus(`Decoding ${formatBytes(encodeBytes.byteLength)} JXL with ${formatThrottle(settings.throttleKbPerSec)} throttle...`);
+    const decode = await decodeProgressively({
+        jxlBytes: encodeBytes,
+        width: target.width,
+        height: target.height,
+        throttleKbPerSec: settings.throttleKbPerSec,
+    });
+    setStatus('Running one-shot decode comparison...');
+    const oneShotMs = await decodeOneShotFinal(encodeBytes);
+
+    const finalFrame = decode.passes.find(p => p.isFinal) ?? decode.passes.at(-1);
+    const finalPsnr = finalFrame?.pixels?.byteLength === targetRgba.byteLength
+        ? computePsnrVsFinal(targetRgba, finalFrame.pixels)
+        : null;
+    const metrics = buildMeasurement({
+        source,
+        target,
+        targetKb: estimateKb,
+        throttleKbPerSec: settings.throttleKbPerSec,
+        selected,
+        encodeTotalMs,
+        decode,
+        oneShotMs,
+        finalPsnr,
+        sizePreset: settings.sizePreset,
+        qualityPreset: settings.qualityPreset,
+    });
+    runMeasurements.push(metrics);
+    renderMetrics(metrics);
+    updateExportButtons();
+    setStatus(`Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms.`);
 }
 
 function readSettings() {
@@ -324,7 +392,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
     });
     const passes = [];
     const decStart = performance.now();
-    const feedState = { bytesFed: 0, totalBytes: jxlBytes.byteLength };
+    const feedState = { bytesFed: 0, totalBytes: jxlBytes.byteLength, passCount: 0 };
     const eventTask = (async () => {
         for await (const event of decoder.events()) {
             if (event.type === 'header') {
@@ -337,6 +405,8 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                 pass.bytesFed = bytesFed;
                 pass.percentFed = Number(percentFed.toFixed(2));
                 passes.push(pass);
+                feedState.passCount = passes.length;
+                currentPasses = passes;
                 renderProgressivePass(pass);
                 dbgLog(
                     `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`,
@@ -413,22 +483,24 @@ function makePassRecord(event, index, t, width, height) {
 }
 
 async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
-    const chunkBytes = 16 * 1024;
-    const delayMs = throttleKbPerSec > 0 ? (chunkBytes / 1024) * (1000 / throttleKbPerSec) : 0;
     let offset = 0;
     while (offset < jxlBytes.byteLength) {
+        const chunkBytes = STEADY_DECODE_CHUNK_BYTES;
+        const start = offset;
         const end = Math.min(jxlBytes.byteLength, offset + chunkBytes);
         await decoder.push(exactBuffer(jxlBytes.subarray(offset, end)));
         offset = end;
         if (feedState) feedState.bytesFed = offset;
+        const delayMs = throttleKbPerSec > 0 ? ((end - start) / 1024) * (1000 / throttleKbPerSec) : 0;
         if (delayMs > 0 && offset < jxlBytes.byteLength) await sleep(delayMs);
+        else if (offset < jxlBytes.byteLength) await nextPaint();
     }
     await decoder.close();
 }
 
 function renderProgressivePass(pass) {
     drawPixels(canvas, pass.pixels, pass.width, pass.height);
-    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${pass.t_ms} ms | hash ${pass.stats.frameHash}`;
+    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${pass.t_ms} ms | hash ${pass.stats.frameHash}`;
     const tile = document.createElement('button');
     tile.className = 'pass-tile';
     tile.type = 'button';
@@ -437,13 +509,54 @@ function renderProgressivePass(pass) {
     tileCanvas.height = pass.height;
     drawPixels(tileCanvas, pass.pixels, pass.width, pass.height);
     const label = document.createElement('span');
-    label.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${pass.t_ms} ms`;
+    label.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} | ${pass.t_ms} ms`;
     tile.append(tileCanvas, label);
     tile.addEventListener('click', () => {
-        drawPixels(canvas, pass.pixels, pass.width, pass.height);
-        viewerMeta.textContent = `pinned pass ${pass.pass} | ${formatFrameStatsCompact(pass.stats)}`;
+        showPassInLightbox(pass.pass - 1);
     });
     passStrip.append(tile);
+}
+
+function showPassInLightbox(index) {
+    if (!currentPasses.length || !lightbox || !lightboxCanvas || !lightboxStats) return;
+    lightboxIndex = ((index % currentPasses.length) + currentPasses.length) % currentPasses.length;
+    const pass = currentPasses[lightboxIndex];
+    drawPixels(lightboxCanvas, pass.pixels, pass.width, pass.height);
+    drawPixels(canvas, pass.pixels, pass.width, pass.height);
+    viewerMeta.textContent = `pinned pass ${pass.pass} | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${formatFrameStatsCompact(pass.stats)}`;
+    if (lightboxTitle) lightboxTitle.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`;
+    if (lightboxSubtitle) {
+        lightboxSubtitle.textContent = `${lightboxIndex + 1}/${currentPasses.length} | ArrowLeft/ArrowRight to compare passes`;
+    }
+    lightboxStats.innerHTML = '';
+    for (const [label, value] of passLightboxStats(pass)) {
+        const row = document.createElement('div');
+        const name = document.createElement('span');
+        const metric = document.createElement('strong');
+        name.textContent = label;
+        metric.textContent = value;
+        row.append(name, metric);
+        lightboxStats.append(row);
+    }
+    lightbox.hidden = false;
+}
+
+function closePassLightbox() {
+    if (lightbox) lightbox.hidden = true;
+    lightboxIndex = -1;
+}
+
+function passLightboxStats(pass) {
+    return [
+        ['Pass', `${pass.pass}${pass.isFinal ? ' final' : ''}`],
+        ['Streamed', `${formatBytes(pass.bytesFed ?? 0)} (${pass.percentFed ?? 0}%)`],
+        ['Time', `${pass.t_ms} ms`],
+        ['Dimensions', `${pass.width}x${pass.height}`],
+        ['Hash', pass.stats.frameHash],
+        ['Alpha', `${pass.stats.alphaMin}-${pass.stats.alphaMax}, zero ${pass.stats.alphaZeroPct.toFixed(2)}%`],
+        ['RGB nonzero', String(pass.stats.rgbNonzeroCount)],
+        ['Luma variance', pass.stats.lumaVariance.toFixed(2)],
+    ];
 }
 
 function drawPixels(targetCanvas, pixels, width, height) {
@@ -533,6 +646,7 @@ function renderSourceShell(source) {
     viewerMeta.textContent = `${source.width}x${source.height} RAW processed. Waiting for progressive decode.`;
     lastLoadedSourceDims = { width: source.width, height: source.height };
     updateSizeEstimateDisplay();
+    updateRunButtonState();
 }
 
 function renderMetrics(m) {
@@ -564,6 +678,8 @@ function setMetric(id, text) {
 
 function clearRunView() {
     passStrip.innerHTML = '';
+    currentPasses = [];
+    closePassLightbox();
     viewerTitle.textContent = 'Progressive image';
     viewerMeta.textContent = 'Loading...';
     const ctx = canvas.getContext('2d');
@@ -577,7 +693,7 @@ function exportMeasurementsCSV() {
         'size_preset', 'quality_preset', 'estimate_kb', 'actual_kb', 'size_error_pct',
         'quality', 'encode_ms', 'encode_total_ms',
         'throttle_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
-        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_stats'
+        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_stats'
     ];
     const rows = runMeasurements.map(m => [
         m.ts,
@@ -603,6 +719,7 @@ function exportMeasurementsCSV() {
         m.oneShot_ms ?? '',
         m.speedup ?? '',
         m.final_psnr_vs_source ?? '',
+        (m.perPass || []).map(p => `${p.pass}:${p.bytesFed ?? ''}:${p.percentFed ?? ''}%`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${formatFrameStatsCompact(p.stats)}`).join(';')
     ].map(csvCell).join(','));
     downloadText(`single-progressive-${timestamp()}.csv`, [headers.join(','), ...rows].join('\n'), 'text/csv');
@@ -638,12 +755,14 @@ function exportMeasurementsTOON() {
         if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
         if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
         if (m.final_psnr_vs_source != null) out += `  final_psnr_vs_source: ${m.final_psnr_vs_source}\n`;
-        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
+        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
         for (const p of m.perPass) {
             out += [
                 `    ${p.pass}`,
                 p.t_ms,
                 p.isFinal ? 'true' : 'false',
+                p.bytesFed ?? '',
+                p.percentFed ?? '',
                 p.stats.alphaMin,
                 p.stats.alphaMax,
                 p.stats.alphaZeroPct,
@@ -694,11 +813,13 @@ function buildMeasurementsMarkdown() {
     }
     for (const m of runMeasurements) {
         out += `\n## ${mdCell(m.source)}\n\n`;
-        out += '| Pass | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
-        out += '|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
+        out += '| Pass | KB streamed | Streamed % | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
         for (const p of m.perPass) {
             out += [
                 p.pass,
+                p.bytesFed == null ? '' : Number((p.bytesFed / 1024).toFixed(1)),
+                p.percentFed ?? '',
                 p.t_ms,
                 p.isFinal ? 'true' : 'false',
                 p.stats.alphaMin,
@@ -724,6 +845,10 @@ function updateExportButtons() {
     for (const btn of [exportCsvBtn, exportJsonBtn, exportToonBtn, copyMeasurementsMdBtn, clearMeasurementsBtn]) {
         if (btn) btn.disabled = !enabled;
     }
+}
+
+function updateRunButtonState() {
+    if (runBtn) runBtn.disabled = !loadedSource || running;
 }
 
 function exactBuffer(view) {

@@ -113,9 +113,6 @@ struct JxlWasmDecState {
   // fired and JXL_DEC_FULL_IMAGE to not yet have fired (per decode.h). Without this gate,
   // pre-frame flush returns useless state.
   bool frame_started;
-  // Sampled checksum of the last delivered flush snapshot. Used to skip duplicate flushes
-  // when libjxl hasn't decoded new groups between opportunistic calls.
-  uint64_t prev_flush_checksum;
   int error_code;
   // Gain map (jhgm box accumulation + parsed JXL codestream)
   uint8_t* gm_buf;           // raw jhgm box bytes being accumulated
@@ -1959,18 +1956,6 @@ static bool TryFlushProgressiveImage(JxlWasmDecState* s) {
   }
   if (!any_nonzero) return false;
 
-  // Dedup: skip if libjxl hasn't decoded new groups since the last delivered snapshot.
-  // Sampled FNV-1a 64 over ~1024 stride positions; cheap (~µs) and reliable for spotting
-  // identical buffers without scanning the full 80 MB.
-  uint64_t checksum = 0xcbf29ce484222325ULL;
-  const size_t stride = s->pixels_size > 0x100000 ? (s->pixels_size / 1024) : 8;
-  for (size_t i = 0; i < s->pixels_size; i += stride) {
-    checksum ^= s->flushed[i];
-    checksum *= 0x100000001b3ULL;
-  }
-  if (checksum == s->prev_flush_checksum) return false;
-  s->prev_flush_checksum = checksum;
-
   s->flushed_size = s->pixels_size;
   s->flushed_ready = true;
   return true;
@@ -2048,8 +2033,8 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
       // partial flush returns clean DC-upsampled content. The all-zero guard inside
       // TryFlushProgressiveImage suppresses pre-DC empty flushes (otherwise the consumer
       // would see a black/transparent frame as the first paint).
-      // The generation gate ensures only one opportunistic flush per input push, so a fast
-      // chain of pushes doesn't spam duplicate frames.
+      // One flush per input generation. The JS feeder yields between chunks when it wants
+      // many visible checkpoints; without this gate the facade can drain the same snapshot forever.
       if (!s->input_closed && s->frame_started && !s->final_ready &&
           s->opportunistic_flush_generation != s->input_generation &&
           TryFlushProgressiveImage(s)) {
@@ -2059,8 +2044,6 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
       if (s->input_closed) {
         // On byte-truncated streams, attempt one final flush of any decoded prefix so the
         // consumer gets the best partial image (Sneyers truly-progressive byte-cutoff demo).
-        // Generation gate prevents repeated flush on subsequent re-entry: input_generation
-        // doesn't advance after close, so once opportunistic_flush_generation matches we skip.
         if (s->frame_started && !s->final_ready &&
             s->opportunistic_flush_generation != s->input_generation &&
             TryFlushProgressiveImage(s)) {

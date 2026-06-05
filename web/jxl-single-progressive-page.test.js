@@ -25,14 +25,21 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html).toContain('id="throttle-rate"');
     expect(html).toContain('All passes');
     expect(html).toContain('id="retrieve-run"');
+    expect(html).toContain('id="run-rerun"');
     expect(html).toContain('Retrieve raw file');
+    expect(html.indexOf('id="retrieve-run"')).toBeLessThan(html.indexOf('id="dbg-console-btn"'));
+    expect(html.indexOf('id="retrieve-run"')).toBeLessThan(html.indexOf('id="run-rerun"'));
+    expect(html.indexOf('id="run-rerun"')).toBeLessThan(html.indexOf('id="dbg-console-btn"'));
     expect(source).toContain("fetch('/api/random-gobabeb'");
     expect(source).toContain("const PROGRESSIVE_DETAIL = 'passes';");
     expect(source).toContain("createSneyersPreset");
     expect(source).toContain('encodeSneyersDirect');
+    expect(source).toContain('runBtn');
+    expect(source).toContain('rerunLoadedSource');
     expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState)');
-    // Defaults: Very Large 2160 + High q90 per spec
+    // Defaults restored to Very Large 2160 + High q90 so pass granularity matches the prior baseline.
     expect(html).toContain('value="very-large" selected');
+    expect(html).toContain('value="large"');
     expect(html).toContain('value="high" selected');
     expect(source).toContain("DEFAULT_SIZE_PRESET = 'very-large'");
     expect(source).toContain("DEFAULT_QUALITY_PRESET = 'high'");
@@ -45,6 +52,7 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain('...(progressiveDc != null ? { progressiveDc } : {})');
     // Bytes-fed tracking per pass
     expect(source).toContain('feedState');
+    expect(source).toContain('STEADY_DECODE_CHUNK_BYTES');
     expect(source).toContain('bytesFed');
     expect(source).toContain('percentFed');
 });
@@ -62,4 +70,11 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain('exportMeasurementsTOON');
     expect(source).toContain('exportMeasurementsJSON');
     expect(source).toContain('copyMeasurementsMarkdown');
+    expect(source).toContain('showPassInLightbox');
+    expect(source).toContain('passLightboxStats');
+    expect(source).toContain("event.key === 'ArrowRight'");
+    expect(source).toContain("event.key === 'ArrowLeft'");
+    expect(html).toContain('id="pass-lightbox"');
+    expect(html).toContain('id="pass-lightbox-stats"');
+    expect(source).toContain('pass_bytes');
 });
