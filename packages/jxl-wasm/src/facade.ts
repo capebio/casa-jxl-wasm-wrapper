@@ -2,6 +2,10 @@ export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32";
 export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = { x: number; y: number; w: number; h: number };
 export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";
+export type CachePolicy = "onFirst" | "onFinal" | "onProgress" | "disabled";
+
+export const DOWNSAMPLE_THUMBNAILS = 2;
+export const DOWNSAMPLE_GRID = 4;
 
 export interface ImageInfo {
   width: number;
@@ -61,6 +65,14 @@ export type DecodeEvent =
       message: string;
       partialPixels?: ArrayBuffer | Uint8Array;
       partialInfo?: ImageInfo;
+    }
+  | {
+      type: "preview";
+      info: ImageInfo;
+      pixels: ArrayBuffer | Uint8Array;
+      format: PixelFormat;
+      pixelStride: number;
+      isFinal?: boolean;
     };
 
 export interface DecoderOptions {
@@ -74,6 +86,10 @@ export interface DecoderOptions {
   preserveMetadata: boolean;
   /** Zero-based frame index for multi-frame JXL animations. Default 0 (first frame). */
   frameIndex?: number;
+  /** Emit early DC-only preview before full progressive decode. Default false. */
+  previewFirst?: boolean;
+  /** Cache policy: when to store decoded frames. Default "onFinal". */
+  cachePolicy?: CachePolicy;
   /** When false, skip the defensive .slice() copy on push() — caller must not mutate the buffer after push returns. Default true. */
   copyInput?: boolean;
   targetWidth?: number | null;
