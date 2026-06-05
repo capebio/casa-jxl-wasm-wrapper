@@ -335,15 +335,38 @@ async function runSourceWithSettings(source, settings) {
     const estimateKb = estimateTargetKb(target.width, target.height, settings.qualityPreset);
     setStatus(`Encoding Sneyers at ${settings.qualityPresetLabel} (q=${settings.qualityNumber}${settings.lossless ? ', lossless' : ''})... estimate ${estimateKb} KB`);
     const encodeStart = performance.now();
-    const encodeBytes = await encodeSneyersDirect({
-        rgba: targetRgba,
-        width: target.width,
-        height: target.height,
-        quality: settings.qualityNumber,
-        lossless: settings.lossless,
-        progressiveDc: settings.progressiveDc,
-        groupOrder: settings.groupOrder,
-    });
+    const useSidecar = document.getElementById('emit-sidecar-thumb')?.checked === true;
+    let encodeBytes;
+    let thumbBytes = null;
+    if (useSidecar) {
+        const result = await encodeWithSidecarThumbnail({
+            rgba: targetRgba,
+            width: target.width,
+            height: target.height,
+            quality: settings.qualityNumber,
+            lossless: settings.lossless,
+            progressiveDc: settings.progressiveDc,
+            progressiveAc: 1,
+            qProgressiveAc: 1,
+            decodingSpeed: 0,
+            groupOrder: settings.groupOrder,
+        });
+        encodeBytes = result.full;
+        thumbBytes = result.thumb;
+    } else {
+        encodeBytes = await encodeSneyersDirect({
+            rgba: targetRgba,
+            width: target.width,
+            height: target.height,
+            quality: settings.qualityNumber,
+            lossless: settings.lossless,
+            progressiveDc: settings.progressiveDc,
+            progressiveAc: 1,
+            qProgressiveAc: 1,
+            decodingSpeed: 0,
+            groupOrder: settings.groupOrder,
+        });
+    }
     const encodeTotalMs = performance.now() - encodeStart;
     const selected = {
         quality: settings.qualityNumber,
@@ -373,6 +396,15 @@ async function runSourceWithSettings(source, settings) {
     setStatus('Running one-shot decode comparison...');
     const oneShotMs = await decodeOneShotFinal(encodeBytes);
 
+    let thumbDecodeMs = null;
+    let thumbSize = null;
+    if (thumbBytes) {
+        const t0 = performance.now();
+        await decodeOneShotFinal(thumbBytes);
+        thumbDecodeMs = Number((performance.now() - t0).toFixed(2));
+        thumbSize = thumbBytes.byteLength;
+    }
+
     const finalFrame = decode.passes.find(p => p.isFinal) ?? decode.passes.at(-1);
     const finalPsnr = finalFrame?.pixels?.byteLength === targetRgba.byteLength
         ? computePsnrVsFinal(targetRgba, finalFrame.pixels)
@@ -393,6 +425,10 @@ async function runSourceWithSettings(source, settings) {
         groupOrder: settings.groupOrder,
         groupOrderLabel: settings.groupOrderLabel,
     });
+    if (thumbDecodeMs != null) {
+        metrics.thumbDecodeMs = thumbDecodeMs;
+        metrics.thumbBytes = thumbSize;
+    }
     runMeasurements.push(metrics);
     renderMetrics(metrics);
     drawPsnrChart(decode.passes, targetRgba);
@@ -490,7 +526,65 @@ function resizeRgba(rgba, width, height, targetWidth, targetHeight) {
     return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
-async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc, groupOrder }) {
+const SIDECAR_THUMB_LONG_EDGE = 320;
+const SIDECAR_THUMB_QUALITY = 75; // kept for plan surface / future separate path; native sidecar uses internal caps (distance >=1.5, effort<=5)
+
+async function encodeWithSidecarThumbnail({ rgba, width, height, quality, lossless, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder }) {
+    const longEdge = Math.max(width, height);
+    if (longEdge <= SIDECAR_THUMB_LONG_EDGE) {
+        const full = await encodeSneyersDirect({
+            rgba, width, height, quality, lossless,
+            progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder,
+        });
+        return { full, thumb: null };
+    }
+    const preset = createSneyersPreset({
+        width,
+        height,
+        targetLongEdge: 'full',
+        quality,
+        hasAlpha: true,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+    });
+    const encoder = createEncoder({
+        ...preset.encode,
+        width,
+        height,
+        quality,
+        ...(lossless ? { distance: 0 } : {}),
+        ...(progressiveDc != null ? { progressiveDc } : {}),
+        ...(progressiveAc != null ? { progressiveAc } : {}),
+        ...(qProgressiveAc != null ? { qProgressiveAc } : {}),
+        ...(decodingSpeed != null ? { decodingSpeed } : {}),
+        ...(groupOrder != null ? { groupOrder } : {}),
+        progressiveDetail: undefined,
+        buffering: { strategy: 0 },
+        chunked: false,
+        sidecarSizes: [SIDECAR_THUMB_LONG_EDGE],
+    });
+    const chunks = [];
+    const chunkTask = (async () => {
+        for await (const chunk of encoder.chunks()) {
+            chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+        }
+    })();
+    await encoder.pushPixels(exactBuffer(rgba));
+    await encoder.finish();
+    await chunkTask;
+    await encoder.dispose();
+    let thumb = null;
+    let full;
+    if (chunks.length >= 2) {
+        // Native sidecar: leading chunks are standalone thumb JXLs (smallest first), last is full.
+        thumb = chunks[0];
+        full = chunks[chunks.length - 1];
+    } else {
+        full = chunks[0] || new Uint8Array(0);
+    }
+    return { full, thumb };
+}
+
+async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder }) {
     const preset = createSneyersPreset({
         width,
         height,
@@ -509,6 +603,9 @@ async function encodeSneyersDirect({ rgba, width, height, quality, lossless, pro
         // Override Sneyers preset's progressiveDc=2 with user choice. 1 = single 1:8 DC
         // (earlier first paint than 2). 0 = no DC progressive.
         ...(progressiveDc != null ? { progressiveDc } : {}),
+        ...(progressiveAc != null ? { progressiveAc } : {}),
+        ...(qProgressiveAc != null ? { qProgressiveAc } : {}),
+        ...(decodingSpeed != null ? { decodingSpeed } : {}),
         ...(groupOrder != null ? { groupOrder } : {}),
         progressiveDetail: undefined,
         buffering: { strategy: 0 },
@@ -1251,6 +1348,8 @@ function renderMetrics(m) {
     setMetric('m-transfer', formatTransferSpeed(m.avgTransferKbPerSec));
     setMetric('m-group-order', `${m.groupOrderLabel ?? '--'}${m.groupOrder == null ? '' : ` (${m.groupOrder})`}`);
     setMetric('m-progressive-dc', m.progressiveDc == null ? '--' : String(m.progressiveDc));
+    setMetric('m-thumb-decode', m.thumbDecodeMs == null ? '--' : `${m.thumbDecodeMs} ms`);
+    setMetric('m-thumb-size', m.thumbBytes == null ? '--' : formatBytes(m.thumbBytes));
     const attemptsEl = document.getElementById('encode-attempts');
     if (attemptsEl) {
         attemptsEl.textContent = `Encode attempts: ${m.encodeAttempts.map(a => `q${a.quality}=${a.kb}KB (${a.errorPct}%)`).join(' | ')}`;
