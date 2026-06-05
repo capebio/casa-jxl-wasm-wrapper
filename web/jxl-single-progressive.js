@@ -260,7 +260,8 @@ async function runSourceWithSettings(source, settings) {
     runMeasurements.push(metrics);
     renderMetrics(metrics);
     updateExportButtons();
-    setStatus(`Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms.`);
+    setStatus(`Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)}.`);
+    dbgLog('Run transfer average', `${formatTransferSpeed(metrics.avgTransferKbPerSec)} over ${formatBytes(selected.bytes.byteLength)} · final ${metrics.final_ms ?? '--'} ms`, 'info');
 }
 
 function readSettings() {
@@ -402,16 +403,19 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                 const t = performance.now() - decStart;
                 const bytesFed = Math.min(feedState.totalBytes, feedState.bytesFed);
                 const percentFed = feedState.totalBytes ? (bytesFed / feedState.totalBytes) * 100 : 100;
+                const transferKbPerSec = computeTransferKbPerSec(bytesFed, t);
                 const pass = makePassRecord(event, passes.length, t, width, height);
                 pass.bytesFed = bytesFed;
                 pass.percentFed = Number(percentFed.toFixed(2));
+                pass.transferKbPerSec = transferKbPerSec;
                 passes.push(pass);
                 feedState.passCount = passes.length;
                 currentPasses = passes;
                 renderProgressivePass(pass);
+                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · ${formatTransferSpeed(transferKbPerSec)} current · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
                 dbgLog(
                     `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`,
-                    `${pass.t_ms} ms · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) | ${formatFrameStatsLog(pass.stats)}`,
+                    `${pass.t_ms} ms · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · ${formatTransferSpeed(transferKbPerSec)} | ${formatFrameStatsLog(pass.stats)}`,
                     'info'
                 );
                 console.log('[Single progressive] frame stats', {
@@ -420,6 +424,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                     t_ms: pass.t_ms,
                     bytesFed: pass.bytesFed,
                     percentFed: pass.percentFed,
+                    transferKbPerSec: pass.transferKbPerSec,
                     ...pass.stats,
                 });
                 await nextPaint();
@@ -435,7 +440,10 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
     } finally {
         await decoder.dispose();
     }
-    return { passes };
+    const finalMs = passes.find(pass => pass.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
+    const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
+    dbgLog('Decode transfer summary', `${formatBytes(jxlBytes.byteLength)} in ${finalMs ?? '--'} ms · avg ${formatTransferSpeed(avgTransferKbPerSec)} · requested ${formatThrottle(throttleKbPerSec)}`, 'info');
+    return { passes, avgTransferKbPerSec };
 }
 
 async function decodeOneShotFinal(jxlBytes) {
@@ -575,6 +583,7 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
         isFinal: pass.isFinal,
         bytesFed: pass.bytesFed ?? null,
         percentFed: pass.percentFed ?? null,
+        transferKbPerSec: pass.transferKbPerSec ?? null,
         stats: normalizeFrameStatsForExport(pass.stats),
     }));
     const visibleProgressFrames = perPass
@@ -617,6 +626,7 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
         final_ms: final?.t_ms ?? null,
         oneShot_ms: oneShotMs,
         speedup: oneShotMs && first?.t_ms ? Number((oneShotMs / first.t_ms).toFixed(2)) : null,
+        avgTransferKbPerSec: decode.avgTransferKbPerSec == null ? null : Number(decode.avgTransferKbPerSec.toFixed(2)),
         final_psnr_vs_source: Number.isFinite(finalPsnr) ? Number(finalPsnr.toFixed(2)) : finalPsnr,
         perPass,
     };
@@ -666,6 +676,7 @@ function renderMetrics(m) {
     setMetric('m-visible', `${m.visibleProgressFrames}`);
     setMetric('m-psnr', m.final_psnr_vs_source === Infinity ? 'Infinity' : `${m.final_psnr_vs_source ?? '--'} dB`);
     setMetric('m-throttle', formatThrottle(m.throttleKbPerSec));
+    setMetric('m-transfer', formatTransferSpeed(m.avgTransferKbPerSec));
     const attemptsEl = document.getElementById('encode-attempts');
     if (attemptsEl) {
         attemptsEl.textContent = `Encode attempts: ${m.encodeAttempts.map(a => `q${a.quality}=${a.kb}KB (${a.errorPct}%)`).join(' | ')}`;
@@ -693,7 +704,7 @@ function exportMeasurementsCSV() {
         'ts', 'source', 'source_width', 'source_height', 'target_width', 'target_height',
         'size_preset', 'quality_preset', 'estimate_kb', 'actual_kb', 'size_error_pct',
         'quality', 'encode_ms', 'encode_total_ms',
-        'throttle_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
+        'throttle_kb_per_sec', 'avg_transfer_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
         'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_stats'
     ];
     const rows = runMeasurements.map(m => [
@@ -712,6 +723,7 @@ function exportMeasurementsCSV() {
         m.encode_ms,
         m.encode_total_ms,
         m.throttleKbPerSec,
+        m.avgTransferKbPerSec ?? '',
         m.passCount,
         m.visibleProgressFrames,
         m.uniqueFrameHashes,
@@ -748,6 +760,7 @@ function exportMeasurementsTOON() {
         out += `  quality: ${m.quality}\n`;
         out += `  encodeTotalMs: ${m.encode_total_ms}\n`;
         out += `  throttleKbPerSec: ${m.throttleKbPerSec}\n`;
+        if (m.avgTransferKbPerSec != null) out += `  avgTransferKbPerSec: ${m.avgTransferKbPerSec}\n`;
         out += `  passCount: ${m.passCount}\n`;
         out += `  visibleProgressFrames: ${m.visibleProgressFrames}\n`;
         out += `  uniqueFrameHashes: ${m.uniqueFrameHashes}\n`;
@@ -756,7 +769,7 @@ function exportMeasurementsTOON() {
         if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
         if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
         if (m.final_psnr_vs_source != null) out += `  final_psnr_vs_source: ${m.final_psnr_vs_source}\n`;
-        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
+        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
         for (const p of m.perPass) {
             out += [
                 `    ${p.pass}`,
@@ -764,6 +777,7 @@ function exportMeasurementsTOON() {
                 p.isFinal ? 'true' : 'false',
                 p.bytesFed ?? '',
                 p.percentFed ?? '',
+                p.transferKbPerSec ?? '',
                 p.stats.alphaMin,
                 p.stats.alphaMax,
                 p.stats.alphaZeroPct,
@@ -792,8 +806,8 @@ async function copyMeasurementsMarkdown() {
 
 function buildMeasurementsMarkdown() {
     let out = '# Single progressive measurements\n\n';
-    out += '| Source | Target | Size preset | Quality preset | Estimate KB | Actual KB | Quality | Passes | Visible progress | First ms | Final ms | One-shot ms | Speedup | PSNR |\n';
-    out += '|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+    out += '| Source | Target | Size preset | Quality preset | Estimate KB | Actual KB | Quality | Passes | Visible progress | Avg transfer | First ms | Final ms | One-shot ms | Speedup | PSNR |\n';
+    out += '|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
     for (const m of runMeasurements) {
         out += [
             mdCell(m.source),
@@ -805,6 +819,7 @@ function buildMeasurementsMarkdown() {
             m.quality,
             m.passCount,
             m.visibleProgressFrames,
+            m.avgTransferKbPerSec ?? '',
             m.first_ms ?? '',
             m.final_ms ?? '',
             m.oneShot_ms ?? '',
@@ -814,13 +829,14 @@ function buildMeasurementsMarkdown() {
     }
     for (const m of runMeasurements) {
         out += `\n## ${mdCell(m.source)}\n\n`;
-        out += '| Pass | KB streamed | Streamed % | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
-        out += '|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
+        out += '| Pass | KB streamed | Streamed % | Transfer KB/s | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
         for (const p of m.perPass) {
             out += [
                 p.pass,
                 p.bytesFed == null ? '' : Number((p.bytesFed / 1024).toFixed(1)),
                 p.percentFed ?? '',
+                p.transferKbPerSec ?? '',
                 p.t_ms,
                 p.isFinal ? 'true' : 'false',
                 p.stats.alphaMin,
@@ -916,6 +932,17 @@ function formatBytes(bytes) {
 
 function formatThrottle(kbPerSec) {
     return kbPerSec > 0 ? `${kbPerSec} KB/s` : 'unthrottled';
+}
+
+function computeTransferKbPerSec(bytes, elapsedMs) {
+    if (!Number.isFinite(bytes) || !Number.isFinite(elapsedMs) || elapsedMs <= 0) return null;
+    return Number(((bytes / 1024) / (elapsedMs / 1000)).toFixed(2));
+}
+
+function formatTransferSpeed(kbPerSec) {
+    if (!Number.isFinite(kbPerSec) || kbPerSec == null) return '-- KB/s';
+    if (kbPerSec >= 1024) return `${(kbPerSec / 1024).toFixed(2)} MB/s`;
+    return `${kbPerSec.toFixed(1)} KB/s`;
 }
 
 function sleep(ms) {

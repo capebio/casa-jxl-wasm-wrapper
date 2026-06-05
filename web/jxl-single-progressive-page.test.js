@@ -67,6 +67,9 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain('decodeOneShotFinal');
     expect(source).toContain('oneShot_ms');
     expect(source).toContain('speedup');
+    expect(html).toContain('id="m-transfer"');
+    expect(source).toContain('avgTransferKbPerSec');
+    expect(source).toContain('formatTransferSpeed');
     expect(source).toContain('exportMeasurementsCSV');
     expect(source).toContain('exportMeasurementsTOON');
     expect(source).toContain('exportMeasurementsJSON');
