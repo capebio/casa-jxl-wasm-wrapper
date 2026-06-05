@@ -7,6 +7,7 @@ import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog }
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 const PROGRESSIVE_DETAIL = 'passes';
+const FIRST_PAINT_DECODE_CHUNK_BYTES = 2 * 1024;
 const STEADY_DECODE_CHUNK_BYTES = 16 * 1024;
 
 // Size presets define output long-edge in pixels. "original" preserves source dims.
@@ -18,7 +19,7 @@ const SIZE_PRESETS = {
     'very-large': { label: 'Very Large', longEdge: 2160 },
     'original':   { label: 'Original',   longEdge: 'source' },
 };
-const DEFAULT_SIZE_PRESET = 'very-large';
+const DEFAULT_SIZE_PRESET = 'large';
 
 // Quality presets define libjxl distance (and quality number for display). kbPerMp is a
 // rough heuristic for the "Estimate" readout — actual file size depends on content.
@@ -485,7 +486,7 @@ function makePassRecord(event, index, t, width, height) {
 async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
     let offset = 0;
     while (offset < jxlBytes.byteLength) {
-        const chunkBytes = STEADY_DECODE_CHUNK_BYTES;
+        const chunkBytes = feedState?.passCount > 0 ? STEADY_DECODE_CHUNK_BYTES : FIRST_PAINT_DECODE_CHUNK_BYTES;
         const start = offset;
         const end = Math.min(jxlBytes.byteLength, offset + chunkBytes);
         await decoder.push(exactBuffer(jxlBytes.subarray(offset, end)));

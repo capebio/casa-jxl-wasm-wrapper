@@ -37,11 +37,11 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain('runBtn');
     expect(source).toContain('rerunLoadedSource');
     expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState)');
-    // Defaults restored to Very Large 2160 + High q90 so pass granularity matches the prior baseline.
-    expect(html).toContain('value="very-large" selected');
-    expect(html).toContain('value="large"');
+    // Default keeps memory pressure lower; Very Large remains available for max-resolution runs.
+    expect(html).toContain('value="large" selected');
+    expect(html).toContain('value="very-large"');
     expect(html).toContain('value="high" selected');
-    expect(source).toContain("DEFAULT_SIZE_PRESET = 'very-large'");
+    expect(source).toContain("DEFAULT_SIZE_PRESET = 'large'");
     expect(source).toContain("DEFAULT_QUALITY_PRESET = 'high'");
     // Lossless maps to distance=0
     expect(source).toContain("...(lossless ? { distance: 0 } : {})");
@@ -52,6 +52,7 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain('...(progressiveDc != null ? { progressiveDc } : {})');
     // Bytes-fed tracking per pass
     expect(source).toContain('feedState');
+    expect(source).toContain('FIRST_PAINT_DECODE_CHUNK_BYTES');
     expect(source).toContain('STEADY_DECODE_CHUNK_BYTES');
     expect(source).toContain('bytesFed');
     expect(source).toContain('percentFed');
