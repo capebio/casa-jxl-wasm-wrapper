@@ -25,6 +25,10 @@ export type DecodeEvent =
       sourceScale?: number;
       progressiveRegion?: boolean;
       regionFallback?: "full-frame-then-crop";
+      frameIndex?: number;
+      frameDuration?: number;
+      frameName?: string;
+      animTicksPerSecond?: number;
     }
   | {
       type: "final";
@@ -36,6 +40,12 @@ export type DecodeEvent =
       sourceScale?: number;
       progressiveRegion?: boolean;
       regionFallback?: "full-frame-then-crop";
+      frameIndex?: number;
+      frameDuration?: number;
+      frameName?: string;
+      isLastFrame?: boolean;
+      animTicksPerSecond?: number;
+      animLoopCount?: number;
     }
   | {
       type: "budget_exceeded";
@@ -62,6 +72,8 @@ export interface DecoderOptions {
   progressiveDetail?: ProgressiveDetail;
   preserveIcc: boolean;
   preserveMetadata: boolean;
+  /** Zero-based frame index for multi-frame JXL animations. Default 0 (first frame). */
+  frameIndex?: number;
   /** When false, skip the defensive .slice() copy on push() — caller must not mutate the buffer after push returns. Default true. */
   copyInput?: boolean;
   targetWidth?: number | null;
@@ -523,6 +535,42 @@ export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promis
   } finally {
     module._free(ptr);
   }
+}
+
+/**
+ * Extract embedded JPEG reconstruction from JXL container (if present).
+ * Container JXLs (created with encodeTileContainerRgba8/JXTC) may embed
+ * the original JPEG bitstream for fast native preview. Scans container
+ * header for jbrd (JPEG Reconstruction) box.
+ * Returns null if no embedded JPEG or not a container JXL.
+ */
+export function extractJpegReconstructionFromJxl(jxlData: ArrayBuffer | Uint8Array): Uint8Array | null {
+  const view = jxlData instanceof Uint8Array ? jxlData : new Uint8Array(jxlData);
+  // JXTC magic: 0x4354584A ('JXTC' little-endian at offset 0)
+  const isJxtc = view.byteLength >= 4 &&
+    view[0] === 0x4A && view[1] === 0x58 && view[2] === 0x54 && view[3] === 0x43;
+
+  if (!isJxtc) return null;
+
+  // Scan JXTC container for embedded JPEG (jbrd box signature).
+  // Box header: magic (4B) + size (4B); jbrd is common for container JXLs.
+  // Exact format depends on container layout; heuristic: scan for JPEG SOI marker (0xFFD8).
+  let offset = 32; // skip JXTC header
+  while (offset < view.byteLength - 2) {
+    if (view[offset] === 0xFF && view[offset + 1] === 0xD8) {
+      // Found JPEG SOI marker; scan for EOI (0xFFD9) to find end
+      let jpegEnd = offset + 2;
+      while (jpegEnd < view.byteLength - 1) {
+        if (view[jpegEnd] === 0xFF && view[jpegEnd + 1] === 0xD9) {
+          return new Uint8Array(view.buffer, view.byteOffset + offset, jpegEnd - offset + 2);
+        }
+        jpegEnd++;
+      }
+      break;
+    }
+    offset++;
+  }
+  return null;
 }
 
 /**
