@@ -72,6 +72,12 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html).toContain('id="decode-in-worker"');
     expect(source).toContain('decodeProgressivelyViaWorker');
     expect(source).toContain('createBrowserContext');
+    // Phase I: sidecar thumb toggle for fast preview decode measurement (uses unified sidecarSizes path)
+    expect(html).toContain('id="emit-sidecar-thumb"');
+    expect(source).toContain('encodeWithSidecarThumbnail');
+    expect(source).toContain('SIDECAR_THUMB_LONG_EDGE');
+    expect(html).toContain('id="m-thumb-decode"');
+    expect(html).toContain('id="m-thumb-size"');
 });
 
 test('single progressive page exposes console and measurement exports', () => {

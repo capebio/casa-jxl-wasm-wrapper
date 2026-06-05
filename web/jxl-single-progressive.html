@@ -188,6 +188,10 @@
         <input id="perceptual-cutoff" type="checkbox" />
         Perceptual cutoff
       </label>
+      <label class="inline-toggle" title="Also encode a 320px sidecar thumbnail (via unified pipeline sidecarSizes) for fast preview decode measurement">
+        <input id="emit-sidecar-thumb" type="checkbox" />
+        Sidecar thumb
+      </label>
       <div class="setting-lock">
         Estimate
         <strong id="size-estimate">--</strong>
@@ -241,6 +245,8 @@
           <div class="metric"><span>Avg transfer</span><strong id="m-transfer">--</strong></div>
           <div class="metric"><span>Group order</span><strong id="m-group-order">--</strong></div>
           <div class="metric"><span>Progressive DC</span><strong id="m-progressive-dc">--</strong></div>
+          <div class="metric"><span>Sidecar thumb decode</span><strong id="m-thumb-decode">--</strong></div>
+          <div class="metric"><span>Sidecar thumb size</span><strong id="m-thumb-size">--</strong></div>
         </div>
         <div class="psnr-chart-wrap">
           <div class="psnr-chart-head">

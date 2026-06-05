@@ -31,3 +31,13 @@ const buffer = await cache.get('my-key');
 // Stats
 console.log(cache.stats());
 ```
+
+## Key conventions
+
+Callers SHOULD use these prefixes/suffixes to avoid collisions:
+
+- `${sourceHash}` — the full-resolution encoded JXL.
+- `${sourceHash}:thumb` — a 320 px long-edge sidecar thumbnail JXL (produced via separate encode or first chunk of a sidecarSizes encode), if available.
+- `${sourceHash}:dc-prefix-${kb}kb` — a byte-truncated DC-only prefix (Chapter 2 of investigations).
+
+The cache itself is content-agnostic and does not enforce these — it is purely a convention for cross-page reuse.
