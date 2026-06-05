@@ -49,7 +49,7 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain("...(lossless ? { distance: 0 } : {})");
     // Progressive DC and group order are explicit tuning controls.
     expect(html).toContain('id="progressive-dc"');
-    expect(html).toContain('value="0" selected>0 · no DC progressive');
+    expect(html).toContain('value="2" selected>2 · 1:32 then 1:8 preview');
     expect(source).toContain('progressiveDc: settings.progressiveDc');
     expect(source).toContain('...(progressiveDc != null ? { progressiveDc } : {})');
     expect(html).toContain('id="group-order"');
@@ -119,4 +119,10 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain('paint_ms');
     expect(source).toContain('decode_ms');
     expect(source).toContain('paintMs');
+    expect(html).toContain('id="psnr-chart"');
+    expect(html).toContain('id="psnr-chart-legend"');
+    expect(html).toContain('PSNR vs pass');
+    expect(source).toContain('drawPsnrChart');
+    expect(source).toContain('computePsnrVsFinal');
+    expect(source).toContain('drawPsnrChart(decode.passes, targetRgba)');
 });

@@ -335,6 +335,7 @@ async function runSourceWithSettings(source, settings) {
     });
     runMeasurements.push(metrics);
     renderMetrics(metrics);
+    drawPsnrChart(decode.passes, targetRgba);
     updateExportButtons();
     setStatus(`Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)}.`);
     dbgLog('Run transfer average', `${formatTransferSpeed(metrics.avgTransferKbPerSec)} over ${formatBytes(selected.bytes.byteLength)} · final ${metrics.final_ms ?? '--'} ms`, 'info');
@@ -1070,6 +1071,95 @@ function renderMetrics(m) {
     }
 }
 
+function drawPsnrChart(passes, targetRgba) {
+    const chartCanvas = document.getElementById('psnr-chart');
+    const legend = document.getElementById('psnr-chart-legend');
+    if (!chartCanvas) return;
+
+    const ctx = chartCanvas.getContext('2d');
+    const w = chartCanvas.width;
+    const h = chartCanvas.height;
+    ctx.fillStyle = '#0a0f11';
+    ctx.fillRect(0, 0, w, h);
+
+    if (!passes?.length) {
+        if (legend) legend.textContent = '--';
+        return;
+    }
+
+    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
+    const reference = targetRgba ?? finalPass?.pixels ?? null;
+    if (!reference) {
+        if (legend) legend.textContent = 'final pixels released';
+        return;
+    }
+
+    const psnrs = passes.map(pass => {
+        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
+        return computePsnrVsFinal(reference, pass.pixels);
+    });
+    const finite = psnrs.filter(value => Number.isFinite(value));
+    if (!finite.length) {
+        if (legend) legend.textContent = 'no comparable passes';
+        return;
+    }
+
+    const padL = 30;
+    const padR = 8;
+    const padT = 8;
+    const padB = 18;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+    const minY = Math.max(10, Math.min(...finite) - 2);
+    const maxY = Math.min(80, Math.max(...finite) + 2);
+    const rangeY = Math.max(0.01, maxY - minY);
+
+    ctx.strokeStyle = '#2c4249';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT);
+    ctx.lineTo(padL, padT + plotH);
+    ctx.lineTo(padL + plotW, padT + plotH);
+    ctx.stroke();
+
+    ctx.fillStyle = '#9fb6b0';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${maxY.toFixed(0)}`, padL - 4, padT + 8);
+    ctx.fillText(`${minY.toFixed(0)}`, padL - 4, padT + plotH);
+    ctx.textAlign = 'left';
+    ctx.fillText('dB', 2, padT + 8);
+
+    ctx.strokeStyle = '#7de0b0';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let drewFirst = false;
+    psnrs.forEach((psnr, index) => {
+        if (!Number.isFinite(psnr)) return;
+        const x = padL + (index / Math.max(1, passes.length - 1)) * plotW;
+        const y = padT + plotH - ((psnr - minY) / rangeY) * plotH;
+        if (drewFirst) ctx.lineTo(x, y);
+        else {
+            ctx.moveTo(x, y);
+            drewFirst = true;
+        }
+    });
+    ctx.stroke();
+
+    psnrs.forEach((psnr, index) => {
+        if (!Number.isFinite(psnr)) return;
+        const x = padL + (index / Math.max(1, passes.length - 1)) * plotW;
+        const y = padT + plotH - ((psnr - minY) / rangeY) * plotH;
+        ctx.fillStyle = passes[index].isFinal ? '#f0c86a' : '#7de0b0';
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    const lastFinite = finite.at(-1);
+    if (legend) legend.textContent = `${finite.length} of ${passes.length} passes plotted · ${lastFinite.toFixed(1)} dB final`;
+}
+
 function setMetric(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
@@ -1083,6 +1173,7 @@ function clearRunView() {
     viewerMeta.textContent = 'Loading...';
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawPsnrChart([], null);
 }
 
 function exportMeasurementsCSV() {
