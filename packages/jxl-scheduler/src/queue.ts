@@ -113,6 +113,14 @@ export class PriorityQueue<T> {
     return this._size === 0;
   }
 
+  backgroundIds(): string[] {
+    const ids: string[] = [];
+    for (let i = this._backgroundHead; i < this.background.length; i++) {
+      ids.push(this.background[i]!.sessionId);
+    }
+    return ids;
+  }
+
   private lane(priority: Priority): QueueEntry<T>[] {
     switch (priority) {
       case "visible": return this.visible;
