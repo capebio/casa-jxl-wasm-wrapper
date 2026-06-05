@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 const html = readFileSync(new URL('./jxl-single-progressive.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('./jxl-single-progressive.js', import.meta.url), 'utf8');
 const indexHtml = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+const statsWorkerSource = readFileSync(new URL('./jxl-frame-stats-worker.js', import.meta.url), 'utf8');
 
 test('single progressive page is discoverable and named', () => {
     expect(html).toContain('<title>Single progressive</title>');
@@ -125,4 +126,17 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain('drawPsnrChart');
     expect(source).toContain('computePsnrVsFinal');
     expect(source).toContain('drawPsnrChart(decode.passes, targetRgba)');
+    expect(source).toContain('intendedDownsamplingRatio');
+    expect(source).toContain('ratioLabel');
+    expect(source).toContain('intended_ratio');
+    expect(source).toContain('ratio_label');
+    expect(source).toContain('pass_intended_ratio');
+    expect(source).toContain('analyzeFrameInWorker');
+    expect(source).toContain('precomputePassStatsInWorker');
+    expect(source).toContain('jxl-frame-stats-worker.js');
+    expect(statsWorkerSource).toContain('analyzeProgressiveFrame');
+    expect(statsWorkerSource).toContain('self.postMessage');
+    expect(html).toContain('id="perceptual-cutoff"');
+    expect(source).toContain('shouldStopAtPass');
+    expect(source).toContain('PERCEPTUAL_CUTOFF_PSNR_DELTA_DB');
 });

@@ -14,6 +14,9 @@ const BLOCK_BORDER_TILE_SIZE = 256;
 const BLOCK_BORDER_SIZE = 2;
 const BLOCK_BORDER_COLOR = '#ff2d2d';
 
+const PERCEPTUAL_CUTOFF_PSNR_DELTA_DB = 0.5;
+const PERCEPTUAL_CUTOFF_LOW_KBPS = 1.0;
+
 // Size presets define output long-edge in pixels. "original" preserves source dims.
 const SIZE_PRESETS = {
     'tiny':       { label: 'Tiny',       longEdge: 160 },
@@ -26,10 +29,63 @@ const SIZE_PRESETS = {
 };
 
 let _sessionCtx = null;
+let _statsWorker = null;
+let _statsWorkerDisabled = false;
+let _statsId = 0;
+const _statsPending = new Map();
 
 function getSessionCtx() {
     if (_sessionCtx === null) _sessionCtx = createBrowserContext();
     return _sessionCtx;
+}
+
+function rejectPendingStats(error) {
+    for (const pending of _statsPending.values()) {
+        pending.reject(error);
+    }
+    _statsPending.clear();
+}
+
+function disableStatsWorker(error) {
+    _statsWorkerDisabled = true;
+    if (_statsWorker) {
+        _statsWorker.terminate();
+        _statsWorker = null;
+    }
+    rejectPendingStats(error);
+}
+
+function getStatsWorker() {
+    if (_statsWorkerDisabled) {
+        throw new Error('stats worker disabled');
+    }
+    if (_statsWorker === null) {
+        _statsWorker = new Worker(new URL('./jxl-frame-stats-worker.js', import.meta.url), { type: 'module' });
+        _statsWorker.onmessage = (event) => {
+            const { id, ok, stats, pixels, error } = event.data ?? {};
+            const pending = _statsPending.get(id);
+            if (pending === undefined) return;
+            _statsPending.delete(id);
+            const returnedPixels = pixels ? new Uint8Array(pixels) : null;
+            if (ok) pending.resolve({ stats, pixels: returnedPixels });
+            else pending.reject(new Error(error ?? 'stats worker error'));
+        };
+        _statsWorker.onerror = (event) => {
+            console.warn('[stats-worker] disabling after error', event);
+            disableStatsWorker(new Error(event?.message ?? 'stats worker error'));
+        };
+    }
+    return _statsWorker;
+}
+
+async function analyzeFrameInWorker(pixels, width, height) {
+    const id = ++_statsId;
+    const worker = getStatsWorker();
+    const buffer = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+    return new Promise((resolve, reject) => {
+        _statsPending.set(id, { resolve, reject });
+        worker.postMessage({ id, pixels: buffer, width, height }, [buffer]);
+    });
 }
 const DEFAULT_SIZE_PRESET = 'display';
 
@@ -172,6 +228,9 @@ window.addEventListener('keydown', (event) => {
         resetLightboxZoom();
     }
 });
+window.addEventListener('beforeunload', () => {
+    if (_statsWorker) _statsWorker.terminate();
+});
 
 const sizePresetEl = document.getElementById('size-preset');
 const qualityPresetEl = document.getElementById('quality-preset');
@@ -306,6 +365,7 @@ async function runSourceWithSettings(source, settings) {
         width: target.width,
         height: target.height,
         throttleKbPerSec: settings.throttleKbPerSec,
+        targetRgba,  // for perceptual cutoff PSNR trigger (only after full AC per E)
     };
     const decode = await (useWorker
         ? decodeProgressivelyViaWorker(decodeArgs)
@@ -337,8 +397,12 @@ async function runSourceWithSettings(source, settings) {
     renderMetrics(metrics);
     drawPsnrChart(decode.passes, targetRgba);
     updateExportButtons();
-    setStatus(`Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)}.`);
-    dbgLog('Run transfer average', `${formatTransferSpeed(metrics.avgTransferKbPerSec)} over ${formatBytes(selected.bytes.byteLength)} · final ${metrics.final_ms ?? '--'} ms`, 'info');
+    const cutoffFired = !decode.passes.some(p => p.isFinal);
+    const finalLine = cutoffFired
+        ? `Stopped early at pass ${decode.passes.length} (perceptual cutoff) · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)}.`
+        : `Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)}.`;
+    setStatus(finalLine);
+    dbgLog('Run transfer average', `${formatTransferSpeed(metrics.avgTransferKbPerSec)} over ${formatBytes(selected.bytes.byteLength)} · final ${metrics.final_ms ?? '--'} ms${cutoffFired ? ' (cutoff)' : ''}`, 'info');
 }
 
 function readSettings() {
@@ -463,7 +527,7 @@ async function encodeSneyersDirect({ rgba, width, height, quality, lossless, pro
     return concatChunks(chunks);
 }
 
-async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }) {
+async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, targetRgba = null }) {
     const decoder = createDecoder({
         format: 'rgba8',
         region: null,
@@ -497,6 +561,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                 pass.deltaMs = Number(deltaMs.toFixed(2));
                 pass.deltaBytes = deltaBytes;
                 pass.deltaKbPerSec = deltaKbPerSec;
+                annotatePassTelemetry(pass, event);
                 passes.push(pass);
                 feedState.passCount = passes.length;
                 currentPasses = passes;
@@ -504,13 +569,30 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                 renderProgressivePass(pass);
                 pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
                 pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
-                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
+                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
                 dbgLog(
-                    `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`,
+                    `Pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`,
                     `${pass.t_ms} ms (+${pass.deltaMs} ms = ${pass.decodeMs} decode + ${pass.paintMs} paint) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta`,
                     'info'
                 );
                 await sleep(0);
+
+                // Perceptual cutoff check (opt-in). After non-final pass recorded.
+                // Eager stats for hash trigger only when enabled (avoids paying analyze cost on diagnostic default-OFF runs; makes hash-equal viable despite post-F lazy precompute).
+                const cutoffEnabled = document.getElementById('perceptual-cutoff')?.checked === true;
+                if (cutoffEnabled && !pass.isFinal && passes.length >= 2) {
+                    computeAndCachePassStats(passes.at(-1));
+                    computeAndCachePassStats(passes.at(-2));
+                }
+                if (cutoffEnabled && !pass.isFinal) {
+                    const verdict = shouldStopAtPass(passes, targetRgba);
+                    if (verdict) {
+                        setStatus(`Perceptual cutoff: ${verdict.reason} after pass ${pass.pass}. Cancelling.`);
+                        dbgLog('Perceptual cutoff', JSON.stringify(verdict), 'info');
+                        await decoder.cancel?.();
+                        return; // end event consumption gracefully; feed will harmlessly no-op remaining pushes (facade guards), post-steps below still run for stats/metrics
+                    }
+                }
             } else if (event.type === 'error') {
                 throw new Error(`${event.code}: ${event.message}`);
             }
@@ -526,11 +608,12 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
     const finalMs = passes.find(pass => pass.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
     const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
     dbgLog('Decode transfer summary', `${formatBytes(jxlBytes.byteLength)} in ${finalMs ?? '--'} ms · avg ${formatTransferSpeed(avgTransferKbPerSec)} · requested ${formatThrottle(throttleKbPerSec)}`, 'info');
+    await precomputePassStatsInWorker(passes);
     thinRetainedPassPixels(passes);
     return { passes, avgTransferKbPerSec };
 }
 
-async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleKbPerSec }) {
+async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleKbPerSec, targetRgba = null }) {
     const ctx = getSessionCtx();
     const session = ctx.decode({
         format: 'rgba8',
@@ -546,6 +629,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
     const passes = [];
     const decStart = performance.now();
     const feedState = { bytesFed: 0, totalBytes: jxlBytes.byteLength, passCount: 0 };
+    let stoppedEarlyReason = null;
 
     const frameTask = (async () => {
         for await (const frame of session.frames()) {
@@ -566,31 +650,67 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
             pass.bytesFed = bytesFed;
             pass.percentFed = Number(percentFed.toFixed(2));
             pass.transferKbPerSec = transferKbPerSec;
-            pass.deltaMs = Number(deltaMs.toFixed(2));
-            pass.deltaBytes = deltaBytes;
-            pass.deltaKbPerSec = deltaKbPerSec;
-            passes.push(pass);
+                pass.deltaMs = Number(deltaMs.toFixed(2));
+                pass.deltaBytes = deltaBytes;
+                pass.deltaKbPerSec = deltaKbPerSec;
+                annotatePassTelemetry(pass, frame);
+                passes.push(pass);
             feedState.passCount = passes.length;
             currentPasses = passes;
             const paintStart = performance.now();
             renderProgressivePass(pass);
             pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
             pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
-            setStatus(`[worker] ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
+            setStatus(`[worker] ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
             await sleep(0);
+
+            // Perceptual cutoff check (opt-in). After non-final pass recorded.
+            // Use session.cancel() (not close) for early abort semantics; close would be "end of source" and risks marking this pass isFinal.
+            // Eager stats for hash (only under toggle; see main decode path comment).
+            const cutoffEnabled = document.getElementById('perceptual-cutoff')?.checked === true;
+            if (cutoffEnabled && !(frame.stage === 'final' || frame.isFinal) && passes.length >= 2) {
+                computeAndCachePassStats(passes.at(-1));
+                computeAndCachePassStats(passes.at(-2));
+            }
+            if (cutoffEnabled && !(frame.stage === 'final' || frame.isFinal)) {
+                const verdict = shouldStopAtPass(passes, targetRgba);
+                if (verdict) {
+                    stoppedEarlyReason = verdict.reason;
+                    setStatus(`Perceptual cutoff: ${verdict.reason} after pass ${pass.pass}. Cancelling.`);
+                    dbgLog('Perceptual cutoff', JSON.stringify(verdict), 'info');
+                    await session.cancel?.(verdict.reason);
+                    return; // end frame consumption; feed+done awaits below will catch the resulting Cancelled as expected path
+                }
+            }
         }
     })();
 
     try {
-        await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState);
-        await frameTask;
-        await session.done();
+        await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState).catch((e) => {
+            if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
+                return; // expected: cutoff caused cancel mid-feed; subsequent pushes after cancel would throw, we swallow
+            }
+            throw e;
+        });
+        await frameTask.catch((e) => {
+            if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
+                return;
+            }
+            throw e;
+        });
+        if (!stoppedEarlyReason) {
+            await session.done().catch((e) => {
+                if (/cancel|Cancel|closed/i.test(String(e && (e.message || e)))) return;
+                throw e;
+            });
+        }
     } finally {
-        await session.close();
+        await session.close().catch(() => {});
     }
     const finalMs = passes.find(pass => pass.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
     const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
     dbgLog('Worker decode transfer summary', `${formatBytes(jxlBytes.byteLength)} in ${finalMs ?? '--'} ms · avg ${formatTransferSpeed(avgTransferKbPerSec)} · requested ${formatThrottle(throttleKbPerSec)}`, 'info');
+    await precomputePassStatsInWorker(passes);
     thinRetainedPassPixels(passes);
     return { passes, avgTransferKbPerSec };
 }
@@ -651,6 +771,69 @@ function computeAndCachePassStats(pass) {
     return pass.stats;
 }
 
+function shouldStopAtPass(passes, targetRgba) {
+    if (passes.length < 3) return false;
+    const last = passes.at(-1);
+    const prev = passes.at(-2);
+    if (!last || !prev) return false;
+
+    // Trigger 1: hash equality.
+    if (last.stats && prev.stats && last.stats.frameHash === prev.stats.frameHash && last.stats.frameHash !== '--') {
+        return { reason: 'hash-equal', last: last.pass };
+    }
+
+    // Trigger 2: low byte rate two passes running.
+    if (Number.isFinite(last.deltaKbPerSec) && Number.isFinite(prev.deltaKbPerSec)
+        && last.deltaKbPerSec < PERCEPTUAL_CUTOFF_LOW_KBPS
+        && prev.deltaKbPerSec < PERCEPTUAL_CUTOFF_LOW_KBPS) {
+        return { reason: 'low-byterate', last: last.pass };
+    }
+
+    // Trigger 3: PSNR plateau, but only once we've reached full-resolution AC.
+    if ((last.intendedRatio ?? 8) <= 1 && (prev.intendedRatio ?? 8) <= 1 && targetRgba) {
+        if (last.pixels?.byteLength === targetRgba.byteLength && prev.pixels?.byteLength === targetRgba.byteLength) {
+            const psnrLast = computePsnrVsFinal(targetRgba, last.pixels);
+            const psnrPrev = computePsnrVsFinal(targetRgba, prev.pixels);
+            if (Number.isFinite(psnrLast) && Number.isFinite(psnrPrev)
+                && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB) {
+                return { reason: 'psnr-plateau', last: last.pass, deltaDb: Math.abs(psnrLast - psnrPrev) };
+            }
+        }
+    }
+
+    return false;
+}
+
+async function precomputePassStatsInWorker(passes) {
+    for (const pass of passes) {
+        if (pass.stats || !pass.pixels) continue;
+        try {
+            const { stats, pixels } = await analyzeFrameInWorker(pass.pixels, pass.width, pass.height);
+            if (!pass.stats) pass.stats = stats;
+            if (pixels) pass.pixels = pixels;
+        } catch (error) {
+            console.warn('[stats] worker failed; falling back to main thread', error);
+            pass.stats = computeAndCachePassStats(pass);
+        }
+    }
+}
+
+function labelIntendedRatio(ratio) {
+    const value = Number(ratio);
+    if (!Number.isFinite(value) || value <= 0) return '--';
+    if (value >= 8) return '1:8 DC';
+    if (value >= 4) return '1:4 coarse-AC';
+    if (value >= 2) return '1:2 mid-AC';
+    return 'full AC';
+}
+
+function annotatePassTelemetry(pass, event) {
+    const ratio = event?.intendedDownsamplingRatio ?? event?.sourceScale ?? 1;
+    pass.intendedRatio = ratio;
+    pass.ratioLabel = labelIntendedRatio(ratio);
+    pass.isLastFlag = event?.isLastFrame === true;
+}
+
 const RETAINED_PASS_BYTES_BUDGET = 64 * 1024 * 1024;
 
 function thinRetainedPassPixels(passes) {
@@ -702,7 +885,7 @@ const TILE_LONG_EDGE_PX = 192; // 2x typical CSS render size for crisp HiDPI til
 function renderProgressivePass(pass) {
     const previousPass = currentPasses[pass.pass - 2] ?? null;
     drawPassWithOverlay(canvas, pass, previousPass);
-    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms | hash ${pass.stats?.frameHash ?? '--'}`;
+    viewerMeta.textContent = `pass ${pass.pass} (${pass.ratioLabel ?? '--'})${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms`;
     const tile = document.createElement('button');
     tile.className = 'pass-tile';
     tile.type = 'button';
@@ -715,7 +898,7 @@ function renderProgressivePass(pass) {
     tileCtx.imageSmoothingQuality = 'medium';
     tileCtx.drawImage(canvas, 0, 0, tileCanvas.width, tileCanvas.height);
     const label = document.createElement('span');
-    label.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} | +${pass.deltaMs ?? '--'} ms`;
+    label.textContent = `Pass ${pass.pass} ${pass.ratioLabel ?? ''}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} | +${pass.deltaMs ?? '--'} ms`;
     tile.append(tileCanvas, label);
     tile.addEventListener('click', () => {
         showPassInLightbox(pass.pass - 1);
@@ -735,7 +918,7 @@ function showPassInLightbox(index) {
     drawPassWithOverlay(lightboxCanvas, pass, previousPass);
     applyLightboxZoom();
     drawPassWithOverlay(canvas, pass, previousPass);
-    viewerMeta.textContent = `pinned pass ${pass.pass} | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${formatFrameStatsCompact(computeAndCachePassStats(pass))}`;
+    viewerMeta.textContent = `pinned pass ${pass.pass} (${pass.ratioLabel ?? '--'}) | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${formatFrameStatsCompact(computeAndCachePassStats(pass))}`;
     if (lightboxTitle) lightboxTitle.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`;
     if (lightboxSubtitle) {
         lightboxSubtitle.textContent = `${lightboxIndex + 1}/${currentPasses.length} | ArrowLeft/ArrowRight to compare passes`;
@@ -850,6 +1033,7 @@ function passLightboxStats(pass) {
     const s = computeAndCachePassStats(pass);
     return [
         ['Pass', `${pass.pass}${pass.isFinal ? ' final' : ''}`],
+        ['Stage', `${pass.ratioLabel ?? '--'} | ratio ${pass.intendedRatio ?? '--'}`],
         ['Streamed', `${formatBytes(pass.bytesFed ?? 0)} (${pass.percentFed ?? 0}%)`],
         ['Time', `${pass.t_ms} ms`],
         ['Delta', `${pass.deltaMs ?? '--'} ms, ${formatBytes(pass.deltaBytes ?? 0)}`],
@@ -962,6 +1146,8 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
             deltaKbPerSec: pass.deltaKbPerSec ?? null,
             paint_ms: pass.paintMs ?? null,
             decode_ms: pass.decodeMs ?? null,
+            intended_ratio: pass.intendedRatio ?? null,
+            ratio_label: pass.ratioLabel ?? null,
             stats: normalizeFrameStatsForExport(stats),
         };
     });
@@ -1183,7 +1369,7 @@ function exportMeasurementsCSV() {
         'size_preset', 'quality_preset', 'progressive_dc', 'group_order', 'group_order_label', 'estimate_kb', 'actual_kb', 'size_error_pct',
         'quality', 'encode_ms', 'encode_total_ms',
         'throttle_kb_per_sec', 'avg_transfer_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
-        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_paint_ms', 'pass_decode_ms', 'pass_stats'
+        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_paint_ms', 'pass_decode_ms', 'pass_intended_ratio', 'pass_ratio_label', 'pass_stats'
     ];
     const rows = runMeasurements.map(m => [
         m.ts,
@@ -1219,6 +1405,8 @@ function exportMeasurementsCSV() {
         (m.perPass || []).map(p => `${p.pass}:${p.delta_kb_per_sec ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.paint_ms ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.decode_ms ?? ''}`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.intended_ratio ?? ''}`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.ratio_label ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${formatFrameStatsCompact(p.stats)}`).join(';')
     ].map(csvCell).join(','));
     downloadText(`single-progressive-${timestamp()}.csv`, [headers.join(','), ...rows].join('\n'), 'text/csv');
@@ -1258,7 +1446,7 @@ function exportMeasurementsTOON() {
         if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
         if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
         if (m.final_psnr_vs_source != null) out += `  final_psnr_vs_source: ${m.final_psnr_vs_source}\n`;
-        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,delta_ms,delta_bytes,delta_kb_per_sec,paint_ms,decode_ms,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
+        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,delta_ms,delta_bytes,delta_kb_per_sec,paint_ms,decode_ms,intended_ratio,ratio_label,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
         for (const p of m.perPass) {
             out += [
                 `    ${p.pass}`,
@@ -1272,6 +1460,8 @@ function exportMeasurementsTOON() {
                 p.delta_kb_per_sec ?? '',
                 p.paint_ms ?? '',
                 p.decode_ms ?? '',
+                p.intended_ratio ?? '',
+                quoteIfNeeded(p.ratio_label ?? ''),
                 p.stats.alphaMin,
                 p.stats.alphaMax,
                 p.stats.alphaZeroPct,
@@ -1325,11 +1515,13 @@ function buildMeasurementsMarkdown() {
     }
     for (const m of runMeasurements) {
         out += `\n## ${mdCell(m.source)}\n\n`;
-        out += '| Pass | KB streamed | Streamed % | Transfer KB/s | Delta ms | Delta KB | Delta KB/s | Paint ms | Decode ms | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
-        out += '|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
+        out += '| Pass | Stage | Ratio | KB streamed | Streamed % | Transfer KB/s | Delta ms | Delta KB | Delta KB/s | Paint ms | Decode ms | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
         for (const p of m.perPass) {
             out += [
                 p.pass,
+                mdCell(p.ratio_label ?? ''),
+                p.intended_ratio ?? '',
                 p.bytesFed == null ? '' : Number((p.bytesFed / 1024).toFixed(1)),
                 p.percentFed ?? '',
                 p.transferKbPerSec ?? '',
