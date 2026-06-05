@@ -494,7 +494,7 @@ async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
         if (feedState) feedState.bytesFed = offset;
         const delayMs = throttleKbPerSec > 0 ? ((end - start) / 1024) * (1000 / throttleKbPerSec) : 0;
         if (delayMs > 0 && offset < jxlBytes.byteLength) await sleep(delayMs);
-        else if (offset < jxlBytes.byteLength) await nextPaint();
+        else if (offset < jxlBytes.byteLength) await sleep(0);
     }
     await decoder.close();
 }
