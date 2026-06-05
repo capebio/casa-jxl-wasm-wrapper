@@ -79,6 +79,14 @@ This (from `jxl-progressive-paint.js` + jxl-core + scheduler) is markedly better
 
 jsquash path will remain as fast fallback for environments without the full WASM progressive build.
 
+**P3.1 status (2026-06):** Complete. Production lightbox JXL path now uses the real progressive decoder (`@casabio/jxl-wasm` via dedicated `jxl-decode-worker.js` with `emitEveryPass` + `lastPasses`). `WorkerPool.decodeJxl` accepts `{progressive, cachePolicy}`. Wired call sites: visible lightbox=`onFirstProgress`, prefetch + `decodeFullJxlFor`=`onFinal`, thumb/peep=`never`. Automatic jsquash fallback preserved. Early first paint + refinement during straighten/zoom/pan enabled for JXL sources. See `docs/superpowers/handoffs/2026-06-p3.1-remaining-tasks-5-6-7.md` and plan.
+
+**P3.2 progress (immediate follow-up):** Plumbing extended for `region` + `downsample` in `decodeJxl` options (forwarded to worker + createDecoder). Added `computeLightboxVisibleRegion` (viewport inversion with bleed + heuristic downsample) + debounce trigger on zoom/pan/rotate/resize/drag settle. High-pri JXL paint path now passes ROI when !straightenActive and zoomed/panned. Re-decode on view change; `ensureFullJxlSourceForEditing` + guard in draw site protect straighten/histogram (force full onFirst for edits). 'never' policy for transient ROI view payloads. All per approved P3.2 plan. See sessions plan + upcoming handoff note.
+
+**P3.2 verification observations (code + static + partial manual prep):** Syntax clean (node --check on main.js + worker). All P3.1 call sites + guards + cache policies + live precedence paths untouched in structure. New helpers (compute..., ensure..., trigger) are isolated or called from existing mutation points. Worker createDecoder now receives passed region/ds (defaults preserve full behavior). Bun serve launch from worktree succeeded (no parse/start crash on changes; expected data-folder warnings only). Grep confirms 5+ ROI paths active, old progressive/prefetch paths still emit full options. Full interactive matrix (large JXL zoom 400%+ pan during progressive, straighten slider mid-ROI, source cycle, rapid nav, memory at high zoom, fallback) requires real browser + large test files (steps: cd to worktree; bun serve.ts; load JXL/ORF in http://localhost:9000 lightbox; toggle JXL source; use zoom/pan tools + sliders). Expected: smaller w/h in progressive paint cbs for zoomed views, continued refinement, no breakage on edit consumers (full kicked), no leaks on nav. Will be documented in next handoff or run log. (Executed per plan Task 6.)
+
+## Other Standing Decisions
+
 ## Other Standing Decisions
 - All changes are **extensions** of existing systems (`crop.js`, sidecar in panels.js, draw paths in main.js, existing card model). No big rewrites.
 - Tauri keeps its Rgb16State live-edit advantage. Pure WASM path gets the JXL progressive/ROI advantages (the main parity goal).
