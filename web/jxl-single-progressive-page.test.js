@@ -37,19 +37,31 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain('runBtn');
     expect(source).toContain('rerunLoadedSource');
     expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState)');
-    // Default keeps memory pressure lower; Very Large remains available for max-resolution runs.
-    expect(html).toContain('value="large" selected');
+    // Default targets display-scale tuning while keeping larger/source-size runs available.
+    expect(html).toContain('value="display" selected');
+    expect(html).toContain('Display · 1920 px');
     expect(html).toContain('value="very-large"');
-    expect(html).toContain('value="high" selected');
-    expect(source).toContain("DEFAULT_SIZE_PRESET = 'large'");
-    expect(source).toContain("DEFAULT_QUALITY_PRESET = 'high'");
+    expect(html).toContain('value="very-high" selected');
+    expect(html).toContain('value="0" selected>Unthrottled');
+    expect(source).toContain("DEFAULT_SIZE_PRESET = 'display'");
+    expect(source).toContain("DEFAULT_QUALITY_PRESET = 'very-high'");
     // Lossless maps to distance=0
     expect(source).toContain("...(lossless ? { distance: 0 } : {})");
-    // Progressive DC toggle (default 1 = single 1:8 DC for earlier first paint)
+    // Progressive DC and group order are explicit tuning controls.
     expect(html).toContain('id="progressive-dc"');
-    expect(html).toContain('value="1" selected');
+    expect(html).toContain('value="0" selected>0 · no DC progressive');
     expect(source).toContain('progressiveDc: settings.progressiveDc');
     expect(source).toContain('...(progressiveDc != null ? { progressiveDc } : {})');
+    expect(html).toContain('id="group-order"');
+    expect(html).toContain('value="1" selected>Center-out');
+    expect(source).toContain('groupOrder: settings.groupOrder');
+    expect(source).toContain('groupOrderLabel');
+    expect(source).toContain('...(groupOrder != null ? { groupOrder } : {})');
+    expect(html).toContain('id="show-block-borders"');
+    expect(source).toContain('drawPassWithOverlay');
+    expect(source).toContain('computeChangedBlocks');
+    expect(source).toContain('BLOCK_BORDER_SIZE = 2');
+    expect(source).toContain("BLOCK_BORDER_COLOR = '#ff2d2d'");
     // Bytes-fed tracking per pass
     expect(source).toContain('feedState');
     expect(source).toContain('FIRST_PAINT_DECODE_CHUNK_BYTES');
@@ -80,5 +92,25 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain("event.key === 'ArrowLeft'");
     expect(html).toContain('id="pass-lightbox"');
     expect(html).toContain('id="pass-lightbox-stats"');
+    expect(html).toContain('lightbox-canvas-wrap');
+    expect(html).toContain('id="lightbox-zoom-out"');
+    expect(html).toContain('id="lightbox-zoom-in"');
+    expect(html).toContain('id="lightbox-zoom-reset"');
+    expect(html).toContain('id="lightbox-zoom-level"');
+    expect(html).toContain('max-width: 100%');
+    expect(html).toContain('max-height: 100%');
+    expect(html).toContain('transform-origin: 0 0');
+    expect(source).toContain('lightboxZoomState');
+    expect(source).toContain('applyLightboxZoom');
+    expect(source).toContain('zoomLightboxAt');
+    expect(source).toContain('panLightboxBy');
+    expect(source).toContain('resetLightboxZoom');
+    expect(source).toContain('showPassInLightbox(lightboxIndex + 1)');
     expect(source).toContain('pass_bytes');
+    expect(source).toContain('delta_ms');
+    expect(source).toContain('delta_bytes');
+    expect(source).toContain('delta_kb_per_sec');
+    expect(source).toContain('deltaKbPerSec');
+    expect(source).toContain('group_order');
+    expect(source).toContain('progressive_dc');
 });

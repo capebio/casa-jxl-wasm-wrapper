@@ -9,6 +9,9 @@ const { process_orf, rgb_to_rgba } = rawWasm;
 const PROGRESSIVE_DETAIL = 'passes';
 const FIRST_PAINT_DECODE_CHUNK_BYTES = 2 * 1024;
 const STEADY_DECODE_CHUNK_BYTES = 16 * 1024;
+const BLOCK_BORDER_TILE_SIZE = 256;
+const BLOCK_BORDER_SIZE = 2;
+const BLOCK_BORDER_COLOR = '#ff2d2d';
 
 // Size presets define output long-edge in pixels. "original" preserves source dims.
 const SIZE_PRESETS = {
@@ -16,10 +19,11 @@ const SIZE_PRESETS = {
     'small':      { label: 'Small',      longEdge: 320 },
     'medium':     { label: 'Medium',     longEdge: 640 },
     'large':      { label: 'Large',      longEdge: 1080 },
+    'display':    { label: 'Display',    longEdge: 1920 },
     'very-large': { label: 'Very Large', longEdge: 2160 },
     'original':   { label: 'Original',   longEdge: 'source' },
 };
-const DEFAULT_SIZE_PRESET = 'large';
+const DEFAULT_SIZE_PRESET = 'display';
 
 // Quality presets define libjxl distance (and quality number for display). kbPerMp is a
 // rough heuristic for the "Estimate" readout — actual file size depends on content.
@@ -31,7 +35,11 @@ const QUALITY_PRESETS = {
     'very-high': { label: 'Very High', quality: 95,  kbPerMp: 400 },
     'lossless':  { label: 'Lossless',  quality: 100, distance: 0, kbPerMp: 3000 },
 };
-const DEFAULT_QUALITY_PRESET = 'high';
+const DEFAULT_QUALITY_PRESET = 'very-high';
+const GROUP_ORDER_LABELS = {
+    0: 'scanline',
+    1: 'center-out',
+};
 
 const retrieveBtn = document.getElementById('retrieve-run');
 const runBtn = document.getElementById('run-rerun');
@@ -44,8 +52,13 @@ const lightbox = document.getElementById('pass-lightbox');
 const lightboxTitle = document.getElementById('pass-lightbox-title');
 const lightboxSubtitle = document.getElementById('pass-lightbox-subtitle');
 const lightboxCanvas = document.getElementById('pass-lightbox-canvas');
+const lightboxCanvasWrap = document.querySelector('.lightbox-canvas-wrap');
 const lightboxStats = document.getElementById('pass-lightbox-stats');
 const lightboxClose = document.getElementById('pass-lightbox-close');
+const lightboxZoomOut = document.getElementById('lightbox-zoom-out');
+const lightboxZoomIn = document.getElementById('lightbox-zoom-in');
+const lightboxZoomReset = document.getElementById('lightbox-zoom-reset');
+const lightboxZoomLevel = document.getElementById('lightbox-zoom-level');
 const consoleBtn = document.getElementById('dbg-console-btn');
 const consoleMount = document.getElementById('dbg-console-mount');
 const exportCsvBtn = document.getElementById('export-csv-btn');
@@ -53,6 +66,7 @@ const exportJsonBtn = document.getElementById('export-json-btn');
 const exportToonBtn = document.getElementById('export-toon-btn');
 const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
+const showBlockBordersEl = document.getElementById('show-block-borders');
 
 const runMeasurements = [];
 let rawReady = false;
@@ -60,6 +74,8 @@ let running = false;
 let currentPasses = [];
 let lightboxIndex = -1;
 let loadedSource = null;
+const lightboxZoomState = { scale: 1, x: 0, y: 0 };
+let lightboxPanStart = null;
 
 initDebugConsole(consoleBtn, consoleMount);
 console.log('%c[Single progressive] loaded', 'color:#7de0b0;font-weight:600', {
@@ -88,7 +104,41 @@ if (exportJsonBtn) exportJsonBtn.addEventListener('click', exportMeasurementsJSO
 if (exportToonBtn) exportToonBtn.addEventListener('click', exportMeasurementsTOON);
 if (copyMeasurementsMdBtn) copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown);
 if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
+showBlockBordersEl?.addEventListener('change', redrawCurrentPassView);
 lightboxClose?.addEventListener('click', closePassLightbox);
+lightboxZoomOut?.addEventListener('click', () => zoomLightboxAt(1 / 1.25));
+lightboxZoomIn?.addEventListener('click', () => zoomLightboxAt(1.25));
+lightboxZoomReset?.addEventListener('click', resetLightboxZoom);
+lightboxCanvasWrap?.addEventListener('wheel', (event) => {
+    if (!lightbox || lightbox.hidden) return;
+    event.preventDefault();
+    const factor = event.deltaY < 0 ? 1.18 : 1 / 1.18;
+    zoomLightboxAt(factor, event);
+}, { passive: false });
+lightboxCanvasWrap?.addEventListener('pointerdown', (event) => {
+    if (!lightbox || lightbox.hidden || event.button !== 0) return;
+    event.preventDefault();
+    lightboxPanStart = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        stateX: lightboxZoomState.x,
+        stateY: lightboxZoomState.y,
+    };
+    lightboxCanvasWrap.setPointerCapture?.(event.pointerId);
+    lightboxCanvasWrap.classList.add('is-panning');
+});
+lightboxCanvasWrap?.addEventListener('pointermove', (event) => {
+    if (!lightboxPanStart || event.pointerId !== lightboxPanStart.pointerId) return;
+    panLightboxBy(
+        lightboxPanStart.stateX + event.clientX - lightboxPanStart.x,
+        lightboxPanStart.stateY + event.clientY - lightboxPanStart.y,
+        true
+    );
+});
+lightboxCanvasWrap?.addEventListener('pointerup', endLightboxPan);
+lightboxCanvasWrap?.addEventListener('pointercancel', endLightboxPan);
+lightboxCanvasWrap?.addEventListener('dblclick', resetLightboxZoom);
 lightbox?.addEventListener('click', (event) => {
     if (event.target === lightbox) closePassLightbox();
 });
@@ -103,6 +153,15 @@ window.addEventListener('keydown', (event) => {
     } else if (event.key === 'ArrowLeft') {
         event.preventDefault();
         showPassInLightbox(lightboxIndex - 1);
+    } else if (event.key === '+' || event.key === '=') {
+        event.preventDefault();
+        zoomLightboxAt(1.25);
+    } else if (event.key === '-') {
+        event.preventDefault();
+        zoomLightboxAt(1 / 1.25);
+    } else if (event.key === '0') {
+        event.preventDefault();
+        resetLightboxZoom();
     }
 });
 
@@ -202,6 +261,7 @@ async function loadRandomAndCacheSource() {
 async function runSourceWithSettings(source, settings) {
     renderSourceShell(source);
     setStatus(`Preparing ${source.file} at ${settings.sizePresetLabel} (${settings.longEdgeRequest === 'source' ? 'source dims' : `${settings.longEdgeRequest} px`})...`);
+    dbgLog('Progressive ordering', `${settings.groupOrderLabel} (groupOrder=${settings.groupOrder}) · progressiveDc=${settings.progressiveDc}`, 'info');
     const target = resolveTarget(source, settings.longEdgeRequest);
     const targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
 
@@ -215,6 +275,7 @@ async function runSourceWithSettings(source, settings) {
         quality: settings.qualityNumber,
         lossless: settings.lossless,
         progressiveDc: settings.progressiveDc,
+        groupOrder: settings.groupOrder,
     });
     const encodeTotalMs = performance.now() - encodeStart;
     const selected = {
@@ -256,6 +317,9 @@ async function runSourceWithSettings(source, settings) {
         finalPsnr,
         sizePreset: settings.sizePreset,
         qualityPreset: settings.qualityPreset,
+        progressiveDc: settings.progressiveDc,
+        groupOrder: settings.groupOrder,
+        groupOrderLabel: settings.groupOrderLabel,
     });
     runMeasurements.push(metrics);
     renderMetrics(metrics);
@@ -269,8 +333,10 @@ function readSettings() {
     const qualityKey = document.getElementById('quality-preset')?.value ?? DEFAULT_QUALITY_PRESET;
     const sizePreset = SIZE_PRESETS[sizeKey] ?? SIZE_PRESETS[DEFAULT_SIZE_PRESET];
     const qualityPreset = QUALITY_PRESETS[qualityKey] ?? QUALITY_PRESETS[DEFAULT_QUALITY_PRESET];
-    const dcRaw = document.getElementById('progressive-dc')?.value ?? '1';
+    const dcRaw = document.getElementById('progressive-dc')?.value ?? '0';
     const progressiveDc = Math.max(0, Math.min(2, Number(dcRaw) || 0));
+    const groupOrderRaw = document.getElementById('group-order')?.value ?? '1';
+    const groupOrder = Number(groupOrderRaw) === 0 ? 0 : 1;
     return {
         sizePreset: sizeKey,
         sizePresetLabel: sizePreset.label,
@@ -281,6 +347,8 @@ function readSettings() {
         lossless: qualityPreset.distance === 0,
         throttleKbPerSec: Math.max(0, Number(document.getElementById('throttle-rate')?.value) || 0),
         progressiveDc,
+        groupOrder,
+        groupOrderLabel: GROUP_ORDER_LABELS[groupOrder],
         progressiveDetail: PROGRESSIVE_DETAIL,
     };
 }
@@ -345,7 +413,7 @@ function resizeRgba(rgba, width, height, targetWidth, targetHeight) {
     return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
-async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc }) {
+async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc, groupOrder }) {
     const preset = createSneyersPreset({
         width,
         height,
@@ -364,6 +432,7 @@ async function encodeSneyersDirect({ rgba, width, height, quality, lossless, pro
         // Override Sneyers preset's progressiveDc=2 with user choice. 1 = single 1:8 DC
         // (earlier first paint than 2). 0 = no DC progressive.
         ...(progressiveDc != null ? { progressiveDc } : {}),
+        ...(groupOrder != null ? { groupOrder } : {}),
         progressiveDetail: undefined,
         buffering: { strategy: 0 },
         chunked: false,
@@ -404,18 +473,25 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                 const bytesFed = Math.min(feedState.totalBytes, feedState.bytesFed);
                 const percentFed = feedState.totalBytes ? (bytesFed / feedState.totalBytes) * 100 : 100;
                 const transferKbPerSec = computeTransferKbPerSec(bytesFed, t);
+                const previousPass = passes.at(-1);
+                const deltaMs = previousPass ? t - previousPass.t_ms : t;
+                const deltaBytes = Math.max(0, bytesFed - (previousPass?.bytesFed ?? 0));
+                const deltaKbPerSec = computeTransferKbPerSec(deltaBytes, deltaMs);
                 const pass = makePassRecord(event, passes.length, t, width, height);
                 pass.bytesFed = bytesFed;
                 pass.percentFed = Number(percentFed.toFixed(2));
                 pass.transferKbPerSec = transferKbPerSec;
+                pass.deltaMs = Number(deltaMs.toFixed(2));
+                pass.deltaBytes = deltaBytes;
+                pass.deltaKbPerSec = deltaKbPerSec;
                 passes.push(pass);
                 feedState.passCount = passes.length;
                 currentPasses = passes;
                 renderProgressivePass(pass);
-                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · ${formatTransferSpeed(transferKbPerSec)} current · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
+                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · ${formatTransferSpeed(deltaKbPerSec)} delta · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
                 dbgLog(
                     `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`,
-                    `${pass.t_ms} ms · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · ${formatTransferSpeed(transferKbPerSec)} | ${formatFrameStatsLog(pass.stats)}`,
+                    `${pass.t_ms} ms (+${pass.deltaMs} ms) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta | ${formatFrameStatsLog(pass.stats)}`,
                     'info'
                 );
                 console.log('[Single progressive] frame stats', {
@@ -425,6 +501,9 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                     bytesFed: pass.bytesFed,
                     percentFed: pass.percentFed,
                     transferKbPerSec: pass.transferKbPerSec,
+                    delta_ms: pass.deltaMs,
+                    delta_bytes: pass.deltaBytes,
+                    delta_kb_per_sec: pass.deltaKbPerSec,
                     ...pass.stats,
                 });
                 await nextPaint();
@@ -508,17 +587,18 @@ async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
 }
 
 function renderProgressivePass(pass) {
-    drawPixels(canvas, pass.pixels, pass.width, pass.height);
-    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${pass.t_ms} ms | hash ${pass.stats.frameHash}`;
+    const previousPass = currentPasses[pass.pass - 2] ?? null;
+    drawPassWithOverlay(canvas, pass, previousPass);
+    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms | hash ${pass.stats.frameHash}`;
     const tile = document.createElement('button');
     tile.className = 'pass-tile';
     tile.type = 'button';
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = pass.width;
     tileCanvas.height = pass.height;
-    drawPixels(tileCanvas, pass.pixels, pass.width, pass.height);
+    drawPassWithOverlay(tileCanvas, pass, previousPass);
     const label = document.createElement('span');
-    label.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} | ${pass.t_ms} ms`;
+    label.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} | +${pass.deltaMs ?? '--'} ms`;
     tile.append(tileCanvas, label);
     tile.addEventListener('click', () => {
         showPassInLightbox(pass.pass - 1);
@@ -530,8 +610,10 @@ function showPassInLightbox(index) {
     if (!currentPasses.length || !lightbox || !lightboxCanvas || !lightboxStats) return;
     lightboxIndex = ((index % currentPasses.length) + currentPasses.length) % currentPasses.length;
     const pass = currentPasses[lightboxIndex];
-    drawPixels(lightboxCanvas, pass.pixels, pass.width, pass.height);
-    drawPixels(canvas, pass.pixels, pass.width, pass.height);
+    const previousPass = currentPasses[lightboxIndex - 1] ?? null;
+    drawPassWithOverlay(lightboxCanvas, pass, previousPass);
+    applyLightboxZoom();
+    drawPassWithOverlay(canvas, pass, previousPass);
     viewerMeta.textContent = `pinned pass ${pass.pass} | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${formatFrameStatsCompact(pass.stats)}`;
     if (lightboxTitle) lightboxTitle.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`;
     if (lightboxSubtitle) {
@@ -548,6 +630,7 @@ function showPassInLightbox(index) {
         lightboxStats.append(row);
     }
     lightbox.hidden = false;
+    applyLightboxZoom();
 }
 
 function closePassLightbox() {
@@ -555,11 +638,100 @@ function closePassLightbox() {
     lightboxIndex = -1;
 }
 
+function zoomLightboxAt(factor, event = null) {
+    if (!lightboxCanvas) return;
+    const oldScale = lightboxZoomState.scale;
+    const nextScale = clamp(oldScale * factor, 1, 16);
+    if (nextScale === oldScale) return;
+
+    if (event && lightboxCanvasWrap) {
+        const rect = lightboxCanvasWrap.getBoundingClientRect();
+        const anchorX = event.clientX - rect.left;
+        const anchorY = event.clientY - rect.top;
+        lightboxZoomState.x = anchorX - ((anchorX - lightboxZoomState.x) * nextScale / oldScale);
+        lightboxZoomState.y = anchorY - ((anchorY - lightboxZoomState.y) * nextScale / oldScale);
+    }
+    lightboxZoomState.scale = nextScale;
+    clampLightboxPan();
+    applyLightboxZoom();
+}
+
+function panLightboxBy(x, y, absolute = false) {
+    if (absolute) {
+        lightboxZoomState.x = x;
+        lightboxZoomState.y = y;
+    } else {
+        lightboxZoomState.x += x;
+        lightboxZoomState.y += y;
+    }
+    clampLightboxPan();
+    applyLightboxZoom();
+}
+
+function resetLightboxZoom() {
+    lightboxZoomState.scale = 1;
+    lightboxZoomState.x = 0;
+    lightboxZoomState.y = 0;
+    applyLightboxZoom();
+}
+
+function endLightboxPan(event) {
+    if (!lightboxPanStart || event.pointerId !== lightboxPanStart.pointerId) return;
+    lightboxCanvasWrap?.releasePointerCapture?.(event.pointerId);
+    lightboxCanvasWrap?.classList.remove('is-panning');
+    lightboxPanStart = null;
+}
+
+function applyLightboxZoom() {
+    if (!lightboxCanvas) return;
+    clampLightboxPan();
+    lightboxCanvas.style.transform = `translate(${lightboxZoomState.x}px, ${lightboxZoomState.y}px) scale(${lightboxZoomState.scale})`;
+    if (lightboxZoomLevel) {
+        const label = `${Math.round(lightboxZoomState.scale * 100)}%`;
+        lightboxZoomLevel.value = label;
+        lightboxZoomLevel.textContent = label;
+    }
+}
+
+function clampLightboxPan() {
+    if (!lightboxCanvasWrap || !lightboxCanvas) return;
+    if (lightboxZoomState.scale <= 1) {
+        lightboxZoomState.x = 0;
+        lightboxZoomState.y = 0;
+        return;
+    }
+    const wrapRect = lightboxCanvasWrap.getBoundingClientRect();
+    const canvasRect = lightboxCanvas.getBoundingClientRect();
+    const baseWidth = canvasRect.width / lightboxZoomState.scale;
+    const baseHeight = canvasRect.height / lightboxZoomState.scale;
+    const maxX = Math.max(0, (baseWidth * lightboxZoomState.scale - wrapRect.width) / 2);
+    const maxY = Math.max(0, (baseHeight * lightboxZoomState.scale - wrapRect.height) / 2);
+    lightboxZoomState.x = clamp(lightboxZoomState.x, -maxX, maxX);
+    lightboxZoomState.y = clamp(lightboxZoomState.y, -maxY, maxY);
+}
+
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
+
+function redrawCurrentPassView() {
+    if (!currentPasses.length) return;
+    if (lightbox && !lightbox.hidden && lightboxIndex >= 0) {
+        showPassInLightbox(lightboxIndex);
+        return;
+    }
+    const pass = currentPasses.at(-1);
+    const previousPass = currentPasses.at(-2) ?? null;
+    drawPassWithOverlay(canvas, pass, previousPass);
+}
+
 function passLightboxStats(pass) {
     return [
         ['Pass', `${pass.pass}${pass.isFinal ? ' final' : ''}`],
         ['Streamed', `${formatBytes(pass.bytesFed ?? 0)} (${pass.percentFed ?? 0}%)`],
         ['Time', `${pass.t_ms} ms`],
+        ['Delta', `${pass.deltaMs ?? '--'} ms, ${formatBytes(pass.deltaBytes ?? 0)}`],
+        ['Delta transfer', formatTransferSpeed(pass.deltaKbPerSec)],
         ['Dimensions', `${pass.width}x${pass.height}`],
         ['Hash', pass.stats.frameHash],
         ['Alpha', `${pass.stats.alphaMin}-${pass.stats.alphaMax}, zero ${pass.stats.alphaZeroPct.toFixed(2)}%`],
@@ -576,7 +748,83 @@ function drawPixels(targetCanvas, pixels, width, height) {
     ctx.putImageData(new ImageData(data, width, height), 0, 0);
 }
 
-function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset }) {
+function drawPassWithOverlay(targetCanvas, pass, previousPass) {
+    drawPixels(targetCanvas, pass.pixels, pass.width, pass.height);
+    if (!shouldShowBlockBorders()) return;
+    const blocks = computeChangedBlocks(pass, previousPass);
+    drawBlockBorders(targetCanvas, blocks);
+}
+
+function shouldShowBlockBorders() {
+    return showBlockBordersEl ? showBlockBordersEl.checked : true;
+}
+
+function computeChangedBlocks(pass, previousPass) {
+    if (!pass?.pixels?.length) return [];
+    if (!previousPass?.pixels?.length || previousPass.width !== pass.width || previousPass.height !== pass.height) {
+        return [{ x: 0, y: 0, width: pass.width, height: pass.height }];
+    }
+
+    const tileSize = BLOCK_BORDER_TILE_SIZE;
+    const cols = Math.ceil(pass.width / tileSize);
+    const rows = Math.ceil(pass.height / tileSize);
+    const changed = new Uint8Array(cols * rows);
+    const current = pass.pixels;
+    const previous = previousPass.pixels;
+    const length = Math.min(current.length, previous.length);
+    for (let i = 0; i < length; i += 4) {
+        if (
+            current[i] !== previous[i]
+            || current[i + 1] !== previous[i + 1]
+            || current[i + 2] !== previous[i + 2]
+            || current[i + 3] !== previous[i + 3]
+        ) {
+            const pixel = i >> 2;
+            const x = pixel % pass.width;
+            const y = Math.floor(pixel / pass.width);
+            const col = Math.floor(x / tileSize);
+            const row = Math.floor(y / tileSize);
+            changed[row * cols + col] = 1;
+        }
+    }
+
+    const blocks = [];
+    for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+            if (!changed[row * cols + col]) continue;
+            const x = col * tileSize;
+            const y = row * tileSize;
+            blocks.push({
+                x,
+                y,
+                width: Math.min(tileSize, pass.width - x),
+                height: Math.min(tileSize, pass.height - y),
+            });
+        }
+    }
+    return blocks;
+}
+
+function drawBlockBorders(targetCanvas, blocks) {
+    if (!blocks.length) return;
+    const ctx = targetCanvas.getContext('2d');
+    ctx.save();
+    ctx.strokeStyle = BLOCK_BORDER_COLOR;
+    ctx.lineWidth = BLOCK_BORDER_SIZE;
+    ctx.setLineDash([]);
+    const inset = BLOCK_BORDER_SIZE / 2;
+    for (const block of blocks) {
+        ctx.strokeRect(
+            block.x + inset,
+            block.y + inset,
+            Math.max(0, block.width - BLOCK_BORDER_SIZE),
+            Math.max(0, block.height - BLOCK_BORDER_SIZE)
+        );
+    }
+    ctx.restore();
+}
+
+function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset, progressiveDc, groupOrder, groupOrderLabel }) {
     const perPass = decode.passes.map(pass => ({
         pass: pass.pass,
         t_ms: pass.t_ms,
@@ -584,6 +832,10 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
         bytesFed: pass.bytesFed ?? null,
         percentFed: pass.percentFed ?? null,
         transferKbPerSec: pass.transferKbPerSec ?? null,
+        delta_ms: pass.deltaMs ?? null,
+        delta_bytes: pass.deltaBytes ?? null,
+        delta_kb_per_sec: pass.deltaKbPerSec ?? null,
+        deltaKbPerSec: pass.deltaKbPerSec ?? null,
         stats: normalizeFrameStatsForExport(pass.stats),
     }));
     const visibleProgressFrames = perPass
@@ -618,6 +870,12 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
             errorPct: Number(a.errorPct.toFixed(2)),
         })),
         throttleKbPerSec,
+        progressiveDc,
+        progressive_dc: progressiveDc,
+        groupOrder,
+        group_order: groupOrder,
+        groupOrderLabel: groupOrderLabel ?? GROUP_ORDER_LABELS[groupOrder] ?? null,
+        group_order_label: groupOrderLabel ?? GROUP_ORDER_LABELS[groupOrder] ?? null,
         progressiveDetail: PROGRESSIVE_DETAIL,
         passCount: perPass.length,
         visibleProgressFrames,
@@ -677,6 +935,8 @@ function renderMetrics(m) {
     setMetric('m-psnr', m.final_psnr_vs_source === Infinity ? 'Infinity' : `${m.final_psnr_vs_source ?? '--'} dB`);
     setMetric('m-throttle', formatThrottle(m.throttleKbPerSec));
     setMetric('m-transfer', formatTransferSpeed(m.avgTransferKbPerSec));
+    setMetric('m-group-order', `${m.groupOrderLabel ?? '--'}${m.groupOrder == null ? '' : ` (${m.groupOrder})`}`);
+    setMetric('m-progressive-dc', m.progressiveDc == null ? '--' : String(m.progressiveDc));
     const attemptsEl = document.getElementById('encode-attempts');
     if (attemptsEl) {
         attemptsEl.textContent = `Encode attempts: ${m.encodeAttempts.map(a => `q${a.quality}=${a.kb}KB (${a.errorPct}%)`).join(' | ')}`;
@@ -702,10 +962,10 @@ function exportMeasurementsCSV() {
     if (!runMeasurements.length) return;
     const headers = [
         'ts', 'source', 'source_width', 'source_height', 'target_width', 'target_height',
-        'size_preset', 'quality_preset', 'estimate_kb', 'actual_kb', 'size_error_pct',
+        'size_preset', 'quality_preset', 'progressive_dc', 'group_order', 'group_order_label', 'estimate_kb', 'actual_kb', 'size_error_pct',
         'quality', 'encode_ms', 'encode_total_ms',
         'throttle_kb_per_sec', 'avg_transfer_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
-        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_stats'
+        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_stats'
     ];
     const rows = runMeasurements.map(m => [
         m.ts,
@@ -716,6 +976,9 @@ function exportMeasurementsCSV() {
         m.targetHeight,
         m.sizePreset,
         m.qualityPreset,
+        m.progressiveDc ?? '',
+        m.groupOrder ?? '',
+        m.groupOrderLabel ?? '',
         m.estimateKb,
         m.actualKb,
         m.sizeErrorPct,
@@ -733,6 +996,9 @@ function exportMeasurementsCSV() {
         m.speedup ?? '',
         m.final_psnr_vs_source ?? '',
         (m.perPass || []).map(p => `${p.pass}:${p.bytesFed ?? ''}:${p.percentFed ?? ''}%`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.delta_ms ?? ''}`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.delta_bytes ?? ''}`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.delta_kb_per_sec ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${formatFrameStatsCompact(p.stats)}`).join(';')
     ].map(csvCell).join(','));
     downloadText(`single-progressive-${timestamp()}.csv`, [headers.join(','), ...rows].join('\n'), 'text/csv');
@@ -754,6 +1020,9 @@ function exportMeasurementsTOON() {
         out += `  target: ${m.targetWidth}x${m.targetHeight}\n`;
         if (m.sizePreset) out += `  sizePreset: ${m.sizePreset}\n`;
         if (m.qualityPreset) out += `  qualityPreset: ${m.qualityPreset}\n`;
+        if (m.progressiveDc != null) out += `  progressive_dc: ${m.progressiveDc}\n`;
+        if (m.groupOrder != null) out += `  group_order: ${m.groupOrder}\n`;
+        if (m.groupOrderLabel) out += `  group_order_label: ${m.groupOrderLabel}\n`;
         out += `  estimateKb: ${m.estimateKb}\n`;
         out += `  actualKb: ${m.actualKb}\n`;
         if (m.sizeErrorPct != null) out += `  sizeErrorPct: ${m.sizeErrorPct}\n`;
@@ -769,7 +1038,7 @@ function exportMeasurementsTOON() {
         if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
         if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
         if (m.final_psnr_vs_source != null) out += `  final_psnr_vs_source: ${m.final_psnr_vs_source}\n`;
-        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
+        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,delta_ms,delta_bytes,delta_kb_per_sec,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
         for (const p of m.perPass) {
             out += [
                 `    ${p.pass}`,
@@ -778,6 +1047,9 @@ function exportMeasurementsTOON() {
                 p.bytesFed ?? '',
                 p.percentFed ?? '',
                 p.transferKbPerSec ?? '',
+                p.delta_ms ?? '',
+                p.delta_bytes ?? '',
+                p.delta_kb_per_sec ?? '',
                 p.stats.alphaMin,
                 p.stats.alphaMax,
                 p.stats.alphaZeroPct,
@@ -806,14 +1078,16 @@ async function copyMeasurementsMarkdown() {
 
 function buildMeasurementsMarkdown() {
     let out = '# Single progressive measurements\n\n';
-    out += '| Source | Target | Size preset | Quality preset | Estimate KB | Actual KB | Quality | Passes | Visible progress | Avg transfer | First ms | Final ms | One-shot ms | Speedup | PSNR |\n';
-    out += '|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+    out += '| Source | Target | Size preset | Quality preset | Progressive DC | Group order | Estimate KB | Actual KB | Quality | Passes | Visible progress | Avg transfer | First ms | Final ms | One-shot ms | Speedup | PSNR |\n';
+    out += '|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
     for (const m of runMeasurements) {
         out += [
             mdCell(m.source),
             `${m.targetWidth}x${m.targetHeight}`,
             m.sizePreset ?? '',
             m.qualityPreset ?? '',
+            m.progressiveDc ?? '',
+            m.groupOrderLabel ?? m.groupOrder ?? '',
             m.estimateKb,
             m.actualKb,
             m.quality,
@@ -829,14 +1103,17 @@ function buildMeasurementsMarkdown() {
     }
     for (const m of runMeasurements) {
         out += `\n## ${mdCell(m.source)}\n\n`;
-        out += '| Pass | KB streamed | Streamed % | Transfer KB/s | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
-        out += '|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
+        out += '| Pass | KB streamed | Streamed % | Transfer KB/s | Delta ms | Delta KB | Delta KB/s | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
         for (const p of m.perPass) {
             out += [
                 p.pass,
                 p.bytesFed == null ? '' : Number((p.bytesFed / 1024).toFixed(1)),
                 p.percentFed ?? '',
                 p.transferKbPerSec ?? '',
+                p.delta_ms ?? '',
+                p.delta_bytes == null ? '' : Number((p.delta_bytes / 1024).toFixed(1)),
+                p.delta_kb_per_sec ?? '',
                 p.t_ms,
                 p.isFinal ? 'true' : 'false',
                 p.stats.alphaMin,
