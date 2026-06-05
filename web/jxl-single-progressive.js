@@ -513,6 +513,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
     const finalMs = passes.find(pass => pass.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
     const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
     dbgLog('Decode transfer summary', `${formatBytes(jxlBytes.byteLength)} in ${finalMs ?? '--'} ms · avg ${formatTransferSpeed(avgTransferKbPerSec)} · requested ${formatThrottle(throttleKbPerSec)}`, 'info');
+    thinRetainedPassPixels(passes);
     return { passes, avgTransferKbPerSec };
 }
 
@@ -572,6 +573,28 @@ function computeAndCachePassStats(pass) {
     return pass.stats;
 }
 
+const RETAINED_PASS_BYTES_BUDGET = 64 * 1024 * 1024;
+
+function thinRetainedPassPixels(passes) {
+    if (passes.length <= 3) return;
+    let totalBytes = 0;
+    for (const p of passes) totalBytes += p.pixels?.byteLength ?? 0;
+    if (totalBytes <= RETAINED_PASS_BYTES_BUDGET) return;
+
+    const lastIdx = passes.length - 1;
+    const intermediateCount = passes.length - 2;
+    const keepEveryN = Math.max(1, Math.ceil(intermediateCount / 6));
+    for (let i = 1; i < lastIdx; i++) {
+        if ((i - 1) % keepEveryN !== 0) {
+            // Materialize stats before releasing pixels so that buildMeasurement (visibleProgressFrames, uniqueFrameHashes)
+            // and exports (CSV/JSON/TOON/MD) retain correct per-pass frameHash/stats for dropped intermediates.
+            // This ensures "tuning sessions still get all passes via the CSV/JSON exports" as stated in the plan.
+            computeAndCachePassStats(passes[i]);
+            passes[i].pixels = null;
+        }
+    }
+}
+
 async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
     let offset = 0;
     let preFirstPaintChunkIndex = 0;
@@ -627,6 +650,10 @@ function showPassInLightbox(index) {
     lightboxIndex = ((index % currentPasses.length) + currentPasses.length) % currentPasses.length;
     const pass = currentPasses[lightboxIndex];
     const previousPass = currentPasses[lightboxIndex - 1] ?? null;
+    if (!pass.pixels) {
+        lightboxStats.innerHTML = '<div><span>Status</span><strong>pixels released to free memory</strong></div>';
+        return;
+    }
     drawPassWithOverlay(lightboxCanvas, pass, previousPass);
     applyLightboxZoom();
     drawPassWithOverlay(canvas, pass, previousPass);
