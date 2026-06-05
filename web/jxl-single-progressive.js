@@ -346,9 +346,9 @@ async function runSourceWithSettings(source, settings) {
             quality: settings.qualityNumber,
             lossless: settings.lossless,
             progressiveDc: settings.progressiveDc,
-            progressiveAc: 1,
-            qProgressiveAc: 1,
-            decodingSpeed: 0,
+            progressiveAc: settings.progressiveAc,
+            qProgressiveAc: settings.qProgressiveAc,
+            decodingSpeed: settings.decodingSpeed,
             groupOrder: settings.groupOrder,
         });
         encodeBytes = result.full;
@@ -361,9 +361,9 @@ async function runSourceWithSettings(source, settings) {
             quality: settings.qualityNumber,
             lossless: settings.lossless,
             progressiveDc: settings.progressiveDc,
-            progressiveAc: 1,
-            qProgressiveAc: 1,
-            decodingSpeed: 0,
+            progressiveAc: settings.progressiveAc,
+            qProgressiveAc: settings.qProgressiveAc,
+            decodingSpeed: settings.decodingSpeed,
             groupOrder: settings.groupOrder,
         });
     }
@@ -422,6 +422,9 @@ async function runSourceWithSettings(source, settings) {
         sizePreset: settings.sizePreset,
         qualityPreset: settings.qualityPreset,
         progressiveDc: settings.progressiveDc,
+        progressiveAc: settings.progressiveAc,
+        qProgressiveAc: settings.qProgressiveAc,
+        decodingSpeed: settings.decodingSpeed,
         groupOrder: settings.groupOrder,
         groupOrderLabel: settings.groupOrderLabel,
     });
@@ -450,6 +453,12 @@ function readSettings() {
     const progressiveDc = Math.max(0, Math.min(2, Number(dcRaw) || 0));
     const groupOrderRaw = document.getElementById('group-order')?.value ?? '1';
     const groupOrder = Number(groupOrderRaw) === 0 ? 0 : 1;
+    const acRaw = document.getElementById('progressive-ac')?.value ?? '1';
+    const progressiveAc = Math.max(0, Math.min(2, Number(acRaw) || 0));
+    const qacRaw = document.getElementById('qprogressive-ac')?.value ?? '1';
+    const qProgressiveAc = Math.max(0, Math.min(2, Number(qacRaw) || 0));
+    const dsRaw = document.getElementById('decoding-speed')?.value ?? '0';
+    const decodingSpeed = Math.max(0, Math.min(4, Number(dsRaw) || 0));
     return {
         sizePreset: sizeKey,
         sizePresetLabel: sizePreset.label,
@@ -463,6 +472,9 @@ function readSettings() {
         groupOrder,
         groupOrderLabel: GROUP_ORDER_LABELS[groupOrder],
         progressiveDetail: PROGRESSIVE_DETAIL,
+        progressiveAc,
+        qProgressiveAc,
+        decodingSpeed,
     };
 }
 
@@ -583,7 +595,6 @@ async function encodeWithSidecarThumbnail({ rgba, width, height, quality, lossle
     }
     return { full, thumb };
 }
-
 async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder }) {
     const preset = createSneyersPreset({
         width,
@@ -1227,7 +1238,7 @@ function drawBlockBorders(targetCanvas, blocks) {
     ctx.restore();
 }
 
-function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset, progressiveDc, groupOrder, groupOrderLabel }) {
+function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder, groupOrderLabel }) {
     const perPass = decode.passes.map(pass => {
         const stats = computeAndCachePassStats(pass);
         return {
@@ -1282,6 +1293,12 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
         throttleKbPerSec,
         progressiveDc,
         progressive_dc: progressiveDc,
+        progressiveAc,
+        qProgressiveAc,
+        decodingSpeed,
+        progressive_ac: progressiveAc,
+        qprogressive_ac: qProgressiveAc,
+        decoding_speed: decodingSpeed,
         groupOrder,
         group_order: groupOrder,
         groupOrderLabel: groupOrderLabel ?? GROUP_ORDER_LABELS[groupOrder] ?? null,
@@ -1465,7 +1482,7 @@ function exportMeasurementsCSV() {
     if (!runMeasurements.length) return;
     const headers = [
         'ts', 'source', 'source_width', 'source_height', 'target_width', 'target_height',
-        'size_preset', 'quality_preset', 'progressive_dc', 'group_order', 'group_order_label', 'estimate_kb', 'actual_kb', 'size_error_pct',
+        'size_preset', 'quality_preset', 'progressive_dc', 'progressive_ac', 'qprogressive_ac', 'decoding_speed', 'group_order', 'group_order_label', 'estimate_kb', 'actual_kb', 'size_error_pct',
         'quality', 'encode_ms', 'encode_total_ms',
         'throttle_kb_per_sec', 'avg_transfer_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
         'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_paint_ms', 'pass_decode_ms', 'pass_intended_ratio', 'pass_ratio_label', 'pass_stats'
@@ -1480,6 +1497,9 @@ function exportMeasurementsCSV() {
         m.sizePreset,
         m.qualityPreset,
         m.progressiveDc ?? '',
+        m.progressiveAc ?? '',
+        m.qProgressiveAc ?? '',
+        m.decodingSpeed ?? '',
         m.groupOrder ?? '',
         m.groupOrderLabel ?? '',
         m.estimateKb,
@@ -1528,6 +1548,9 @@ function exportMeasurementsTOON() {
         if (m.sizePreset) out += `  sizePreset: ${m.sizePreset}\n`;
         if (m.qualityPreset) out += `  qualityPreset: ${m.qualityPreset}\n`;
         if (m.progressiveDc != null) out += `  progressive_dc: ${m.progressiveDc}\n`;
+        if (m.progressiveAc != null) out += `  progressive_ac: ${m.progressiveAc}\n`;
+        if (m.qProgressiveAc != null) out += `  qprogressive_ac: ${m.qProgressiveAc}\n`;
+        if (m.decodingSpeed != null) out += `  decoding_speed: ${m.decodingSpeed}\n`;
         if (m.groupOrder != null) out += `  group_order: ${m.groupOrder}\n`;
         if (m.groupOrderLabel) out += `  group_order_label: ${m.groupOrderLabel}\n`;
         out += `  estimateKb: ${m.estimateKb}\n`;
@@ -1589,8 +1612,8 @@ async function copyMeasurementsMarkdown() {
 
 function buildMeasurementsMarkdown() {
     let out = '# Single progressive measurements\n\n';
-    out += '| Source | Target | Size preset | Quality preset | Progressive DC | Group order | Estimate KB | Actual KB | Quality | Passes | Visible progress | Avg transfer | First ms | Final ms | One-shot ms | Speedup | PSNR |\n';
-    out += '|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+    out += '| Source | Target | Size preset | Quality preset | Progressive DC | Progressive AC | qProgressive AC | Decoding speed | Group order | Estimate KB | Actual KB | Quality | Passes | Visible progress | Avg transfer | First ms | Final ms | One-shot ms | Speedup | PSNR |\n';
+    out += '|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
     for (const m of runMeasurements) {
         out += [
             mdCell(m.source),
@@ -1598,6 +1621,9 @@ function buildMeasurementsMarkdown() {
             m.sizePreset ?? '',
             m.qualityPreset ?? '',
             m.progressiveDc ?? '',
+            m.progressiveAc ?? '',
+            m.qProgressiveAc ?? '',
+            m.decodingSpeed ?? '',
             m.groupOrderLabel ?? m.groupOrder ?? '',
             m.estimateKb,
             m.actualKb,

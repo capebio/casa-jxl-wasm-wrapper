@@ -145,9 +145,9 @@ export interface EncoderOptions {
    */
   progressiveDc?: 0 | 1 | 2;
   /** Explicit VarDCT spectral AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
-  progressiveAc?: 0 | 1;
+  progressiveAc?: 0 | 1 | 2;
   /** Explicit VarDCT quantized AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
-  qProgressiveAc?: 0 | 1;
+  qProgressiveAc?: 0 | 1 | 2;
   /**
    * Group order for scan vs center-out (ROI + progressive friendly).
    * 0 = scanline (default), 1 = center-out (recommended for progressive and thumbnails; makes early bytes look better).
@@ -994,8 +994,8 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
     const dc = options.progressiveDc != null
       ? Math.max(0, Math.min(2, options.progressiveDc | 0))
       : 2;
-    const ac = options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : 1;
-    const qac = options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : 1;
+    const ac = options.progressiveAc != null ? Math.max(0, Math.min(2, options.progressiveAc | 0)) : 1;
+    const qac = options.qProgressiveAc != null ? Math.max(0, Math.min(2, options.qProgressiveAc | 0)) : 1;
     groupOrder = options.groupOrder != null ? (options.groupOrder ? 1 : 0) : 1;
     centerX = options.centerX != null ? Math.floor(options.centerX) : -1;
     centerY = options.centerY != null ? Math.floor(options.centerY) : -1;
@@ -1059,8 +1059,8 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
   }
   return {
     progressiveDc,
-    progressiveAc: options.progressiveAc != null ? (options.progressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
-    qProgressiveAc: options.qProgressiveAc != null ? (options.qProgressiveAc ? 1 : 0) : (acEnabled ? 1 : 0),
+    progressiveAc: options.progressiveAc != null ? Math.max(0, Math.min(2, options.progressiveAc | 0)) : (acEnabled ? 1 : 0),
+    qProgressiveAc: options.qProgressiveAc != null ? Math.max(0, Math.min(2, options.qProgressiveAc | 0)) : (acEnabled ? 1 : 0),
     buffering,
     modular,
     brotliEffort,

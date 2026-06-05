@@ -58,6 +58,16 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain('groupOrder: settings.groupOrder');
     expect(source).toContain('groupOrderLabel');
     expect(source).toContain('...(groupOrder != null ? { groupOrder } : {})');
+    // Phase C encoder knobs
+    expect(html).toContain('id="progressive-ac"');
+    expect(html).toContain('id="qprogressive-ac"');
+    expect(html).toContain('id="decoding-speed"');
+    expect(source).toContain('progressiveAc');
+    expect(source).toContain('qProgressiveAc');
+    expect(source).toContain('decodingSpeed');
+    expect(source).toContain('progressive_ac');
+    expect(source).toContain('qprogressive_ac');
+    expect(source).toContain('decoding_speed');
     expect(html).toContain('id="show-block-borders"');
     expect(source).toContain('drawPassWithOverlay');
     expect(source).toContain('computeChangedBlocks');

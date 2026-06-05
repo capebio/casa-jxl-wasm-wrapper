@@ -170,6 +170,32 @@
         </select>
       </label>
       <label>
+        Progressive AC
+        <select id="progressive-ac">
+          <option value="0">0 · single AC pass</option>
+          <option value="1" selected>1 · two-band split (Sneyers default)</option>
+          <option value="2">2 · multi-band finer split</option>
+        </select>
+      </label>
+      <label>
+        qProgressive AC
+        <select id="qprogressive-ac">
+          <option value="0">0 · single quantization tier</option>
+          <option value="1" selected>1 · two-tier (Sneyers default)</option>
+          <option value="2">2 · multi-tier finer quantization</option>
+        </select>
+      </label>
+      <label>
+        Decoding speed
+        <select id="decoding-speed">
+          <option value="0" selected>0 · slowest decode / highest quality</option>
+          <option value="1">1</option>
+          <option value="2">2 · balanced</option>
+          <option value="3">3</option>
+          <option value="4">4 · fastest decode / lower quality</option>
+        </select>
+      </label>
+      <label>
         Group order
         <select id="group-order">
           <option value="1" selected>Center-out</option>

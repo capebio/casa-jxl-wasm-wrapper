@@ -91,14 +91,14 @@ test('encoder exposes explicit VarDCT AC/Q-progressive overrides for progressive
   const distFacade = readFileSync(new URL('../dist/facade.js', import.meta.url), 'utf8');
   const distTypes = readFileSync(new URL('../dist/facade.d.ts', import.meta.url), 'utf8');
 
-  expect(facade).toContain('progressiveAc?: 0 | 1');
-  expect(facade).toContain('qProgressiveAc?: 0 | 1');
+  expect(facade).toContain('progressiveAc?: 0 | 1 | 2');
+  expect(facade).toContain('qProgressiveAc?: 0 | 1 | 2');
   expect(facade).toContain('options.progressiveAc != null');
   expect(facade).toContain('options.qProgressiveAc != null');
   expect(distFacade).toContain('options.progressiveAc != null');
   expect(distFacade).toContain('options.qProgressiveAc != null');
-  expect(distTypes).toContain('progressiveAc?: 0 | 1');
-  expect(distTypes).toContain('qProgressiveAc?: 0 | 1');
+  expect(distTypes).toContain('progressiveAc?: 0 | 1 | 2');
+  expect(distTypes).toContain('qProgressiveAc?: 0 | 1 | 2');
 });
 
 test('stateful progressive decoder releases prior input before appending stream chunks', () => {

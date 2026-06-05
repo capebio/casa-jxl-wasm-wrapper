@@ -166,9 +166,9 @@ export interface EncodeOptions {
    */
   progressiveDc?: 0 | 1 | 2;
   /** Explicit VarDCT spectral AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
-  progressiveAc?: 0 | 1;
+  progressiveAc?: 0 | 1 | 2;
   /** Explicit VarDCT quantized AC progression override. Omit to use progressiveFlavor/previewFirst defaults. */
-  qProgressiveAc?: 0 | 1;
+  qProgressiveAc?: 0 | 1 | 2;
   /**
    * 0=scanline, 1=center-out group order. Strongly recommended for useful early progressive bytes.
    * Matches cjxl --group_order.
