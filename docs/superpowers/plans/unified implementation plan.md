@@ -948,3 +948,348 @@ git commit -m "feat(single-progressive): add PSNR-vs-pass chart in metrics panel
 ```
 
 ---
+
+## Phase E — Bridge rebuild: `IntendedDownsamplingRatio` + `is_last`
+
+**Goal:** expose libjxl's own progressive-frame telemetry. Gives semantically stable pass labels (DC / coarse AC / final) instead of inferring from JS-side flush count.
+
+**Reference:** investigations doc §7.10 + §7.11.
+
+**This phase is the only one in this plan that requires a WASM rebuild.** Bundle in any other small bridge changes you want to land at the same time.
+
+**Pre-flight check.** Confirm Docker + emscripten available:
+
+```powershell
+docker --version
+$env:LIBJXL_COMMIT
+```
+
+Per `packages/jxl-wasm/scripts/build.mjs:18-24` the build pins libjxl commit `332feb17d17311c748445f7ee75c4fb55cc38530` (v0.11.2). Build runs in Docker by default; pass `--host-toolchain` to use the local emscripten install (`C:\Users\User\emsdk`).
+
+### Task E1 — Add bridge function
+
+**Files:** `packages/jxl-wasm/src/bridge.cpp` (add C++ function), `packages/jxl-wasm/dist/exports.txt` if such a file exists (search before assuming).
+
+- [ ] **Step 1: Locate the symbol export list.**
+
+```powershell
+rtk proxy grep -rn "_jxl_wasm_dec_take_flushed" packages/jxl-wasm
+```
+
+The build emits an exports list (per `docs/Completed plans/casabio-jxl-wrapper-construction-spec-v2.md:316`). Find which file or build-script section it lives in. If `scripts/build.mjs` constructs the list dynamically (via `-sEXPORTED_FUNCTIONS=...`), edit there. Otherwise edit the explicit text file. **Record the file path in the commit message.**
+
+- [ ] **Step 2: Add the C++ function** near the other `dec_*` getters in `bridge.cpp` (around line 2230, after `jxl_wasm_dec_height`):
+
+```cpp
+// libjxl v0.11.2 only exposes downsampling ratio as a getter — there is no setter to
+// request smaller output. This returns libjxl's own answer to "what is the natural
+// resolution of the current progressive snapshot?" — 8 for DC, 2-4 for coarse AC,
+// 1 for final. Use as a label, not a downscale factor (output buffer is always full).
+uint32_t jxl_wasm_dec_intended_downsampling_ratio(const JxlWasmDecState* s) {
+    if (s == nullptr || s->dec == nullptr) return 0;
+    const size_t ratio = JxlDecoderGetIntendedDownsamplingRatio(s->dec);
+    return static_cast<uint32_t>(ratio);
+}
+
+// Surface JxlFrameHeader.is_last so the JS facade can distinguish the truly-final
+// frame from a coincidental late progress emit.
+uint32_t jxl_wasm_dec_frame_is_last(const JxlWasmDecState* s) {
+    return (s != nullptr) ? s->is_last_frame : 0u;
+}
+```
+
+- [ ] **Step 3: Add to exports list.** Append `_jxl_wasm_dec_intended_downsampling_ratio` and `_jxl_wasm_dec_frame_is_last` to wherever the explicit exports live (from Step 1).
+
+- [ ] **Step 4: Rebuild WASM.** Use whichever path matches your environment (see CLAUDE.md):
+
+Docker path (preferred for reproducibility):
+
+```powershell
+rtk bun --cwd packages/jxl-wasm run build
+```
+
+Host toolchain path:
+
+```powershell
+cmd /c "call C:\Users\User\emsdk\emsdk_env.bat >nul && node packages/jxl-wasm/scripts/build.mjs --host-toolchain"
+```
+
+Expected: `packages/jxl-wasm/dist/*.wasm` files updated. Build takes 10-40 minutes depending on toolchain.
+
+- [ ] **Step 5: Verify symbols exported.**
+
+```powershell
+rtk proxy node -e "import('./packages/jxl-wasm/dist/index.js').then(m => m.loadLibjxlModule()).then(mod => console.log(typeof mod._jxl_wasm_dec_intended_downsampling_ratio, typeof mod._jxl_wasm_dec_frame_is_last))"
+```
+
+Expect: `function function`. If either is `undefined`, the exports list edit didn't take — revisit Step 3.
+
+- [ ] **Step 6: Commit bridge + dist together.**
+
+```powershell
+git add packages/jxl-wasm/src/bridge.cpp packages/jxl-wasm/dist
+git commit -m "feat(bridge): expose IntendedDownsamplingRatio and frame_is_last for progressive telemetry"
+```
+
+### Task E2 — Wire through facade
+
+**Files:** `packages/jxl-wasm/src/facade.ts` (event type extension + progressive loop call), `packages/jxl-wasm/dist/index.js` (rebuild).
+
+- [ ] **Step 1: Extend the `DecodeEvent` progress/final variants** in facade.ts. Find the `Extract<DecodeEvent, { type: "progress" }>` shape (around line 1873) and add optional fields:
+
+```ts
+intendedDownsamplingRatio?: number;
+isLastFrame?: boolean;
+```
+
+(Add to both `progress` and `final` event types. Search for "type: \"progress\"" and "type: \"final\"" in the file and locate the type definitions to extend.)
+
+- [ ] **Step 2: Cache the new function references** in `eventsProgressive` near the existing `decTakeFlushed` cache (around facade.ts:1707):
+
+```ts
+const decIntendedRatio = module._jxl_wasm_dec_intended_downsampling_ratio;
+const decIsLast = module._jxl_wasm_dec_frame_is_last;
+```
+
+- [ ] **Step 3: Populate the fields on emit** at the progress event construction (around facade.ts:1873):
+
+```ts
+const ratio = decIntendedRatio?.(dec) ?? 1;
+const isLast = (decIsLast?.(dec) ?? 0) !== 0;
+const ev: Extract<DecodeEvent, { type: "progress" }> = {
+    type: "progress",
+    stage,
+    info: outInfo,
+    pixels: outPixels.data,
+    format: fmt,
+    pixelStride,
+    sourceScale: ratio,  // ← was `this.options.downsample ?? 1`; now reflects libjxl truth
+    progressiveRegion: false,
+    intendedDownsamplingRatio: ratio,
+    isLastFrame: isLast,
+    ...(hasRegion ? { regionFallback: "full-frame-then-crop" as const } : {}),
+    ...(outPixels.region !== undefined ? { region: outPixels.region } : {}),
+};
+```
+
+Repeat for the final event (around facade.ts:1956). Add `intendedDownsamplingRatio` and `isLastFrame` similarly.
+
+- [ ] **Step 4: Build the package.**
+
+```powershell
+rtk bun --cwd packages/jxl-wasm run build:ts
+```
+
+(Or whatever the existing facade build script is. Check `packages/jxl-wasm/package.json` scripts.)
+
+- [ ] **Step 5: Test.**
+
+```powershell
+rtk bun test packages/jxl-wasm/test/progressive-detail.test.ts
+```
+
+- [ ] **Step 6: Commit.**
+
+```powershell
+git add packages/jxl-wasm/src/facade.ts packages/jxl-wasm/dist
+git commit -m "feat(facade): surface IntendedDownsamplingRatio and isLastFrame in progress events"
+```
+
+### Task E3 — Display in single-progressive page
+
+**Files:** `web/jxl-single-progressive.js`, `web/jxl-single-progressive-page.test.js`.
+
+- [ ] **Step 1: Capture and label in the event handler** (around line 480):
+
+```js
+const ratio = event.intendedDownsamplingRatio ?? 1;
+const ratioLabel = ratio >= 8 ? '1:8 DC'
+    : ratio >= 4 ? '1:4 coarse-AC'
+    : ratio >= 2 ? '1:2 mid-AC'
+    : 'full AC';
+const isLastFlag = event.isLastFrame === true;
+const pass = makePassRecord(event, passes.length, t, width, height);
+pass.bytesFed = bytesFed;
+pass.percentFed = Number(percentFed.toFixed(2));
+pass.transferKbPerSec = transferKbPerSec;
+pass.deltaMs = Number(deltaMs.toFixed(2));
+pass.deltaBytes = deltaBytes;
+pass.deltaKbPerSec = deltaKbPerSec;
+pass.intendedRatio = ratio;
+pass.ratioLabel = ratioLabel;
+pass.isLastFlag = isLastFlag;
+```
+
+- [ ] **Step 2: Show in `viewerMeta` + tile label.**
+
+In `renderProgressivePass`, change the viewerMeta line to include the ratio:
+
+```js
+viewerMeta.textContent = `pass ${pass.pass} (${pass.ratioLabel ?? '--'})${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms`;
+```
+
+And the tile label:
+
+```js
+label.textContent = `Pass ${pass.pass} ${pass.ratioLabel ?? ''} | ${formatBytes(pass.bytesFed ?? 0)} | +${pass.deltaMs ?? '--'} ms`;
+```
+
+- [ ] **Step 3: Surface in measurement record.** In `buildMeasurement` perPass map:
+
+```js
+intended_ratio: pass.intendedRatio ?? null,
+ratio_label: pass.ratioLabel ?? null,
+```
+
+Add to CSV header / row, Markdown table, TOON.
+
+- [ ] **Step 4: Add lightbox row.** In `passLightboxStats`, after the `['Pass', ...]` entry:
+
+```js
+['Stage', `${pass.ratioLabel ?? '--'} · ratio ${pass.intendedRatio ?? '--'}`],
+```
+
+- [ ] **Step 5: Update page test.**
+
+```js
+expect(source).toContain('intendedDownsamplingRatio');
+expect(source).toContain('ratioLabel');
+expect(source).toContain('intended_ratio');
+```
+
+- [ ] **Step 6: Test + commit.**
+
+```powershell
+rtk bun test web/jxl-single-progressive-page.test.js
+git add web/jxl-single-progressive.js web/jxl-single-progressive-page.test.js
+git commit -m "feat(single-progressive): display IntendedDownsamplingRatio per pass"
+```
+
+---
+
+## Phase F — Worker-side frame stats offload
+
+**Goal:** move `analyzeProgressiveFrame` (~30-50 ms per pass) off main thread entirely. Phase A2 deferred it; this phase parallelises it.
+
+**Reference:** investigations doc §7.5.
+
+**Depends on Phase A2** (lazy stats — without it the worker pattern races with paint).
+
+**Trade:** transferring the pixel buffer to the worker detaches it from main thread. Only do this for passes whose pixels we've finished painting AND don't need synchronously for compare/diff. Phase A2's lazy-stats pattern fits this exactly — stats only get computed when the lightbox opens or measurements export, by which point paint is done.
+
+### Task F1 — Create the stats worker
+
+**Files:** `web/jxl-frame-stats-worker.js` (new).
+
+- [ ] **Step 1: Write the worker entry.**
+
+```js
+// web/jxl-frame-stats-worker.js
+// Dedicated worker for off-main-thread analyzeProgressiveFrame.
+// Receives transferred ArrayBuffers; computes stats; returns the buffer + stats.
+
+import { analyzeProgressiveFrame } from './jxl-progressive-frame-stats.js';
+
+self.onmessage = (e) => {
+    const { id, pixels, width, height } = e.data;
+    try {
+        const view = new Uint8Array(pixels);
+        const stats = analyzeProgressiveFrame(view, width, height);
+        // Transfer the buffer back so the caller can keep using it.
+        self.postMessage({ id, ok: true, stats, pixels }, [pixels]);
+    } catch (err) {
+        self.postMessage({ id, ok: false, error: String(err?.message ?? err), pixels }, [pixels]);
+    }
+};
+```
+
+- [ ] **Step 2: Add a caller wrapper** in `web/jxl-single-progressive.js`:
+
+```js
+let _statsWorker = null;
+let _statsId = 0;
+const _statsPending = new Map();
+
+function getStatsWorker() {
+    if (_statsWorker === null) {
+        _statsWorker = new Worker(new URL('./jxl-frame-stats-worker.js', import.meta.url), { type: 'module' });
+        _statsWorker.onmessage = (e) => {
+            const { id, ok, stats, pixels, error } = e.data;
+            const pending = _statsPending.get(id);
+            if (pending === undefined) return;
+            _statsPending.delete(id);
+            const returnedPixels = pixels ? new Uint8Array(pixels) : null;
+            if (ok) pending.resolve({ stats, pixels: returnedPixels });
+            else pending.reject(new Error(error ?? 'stats worker error'));
+        };
+        _statsWorker.onerror = (e) => {
+            console.error('[stats-worker] error', e);
+        };
+    }
+    return _statsWorker;
+}
+
+async function analyzeFrameInWorker(pixels, width, height) {
+    const id = ++_statsId;
+    const w = getStatsWorker();
+    // Detach the buffer; worker will transfer it back.
+    const buffer = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+    return new Promise((resolve, reject) => {
+        _statsPending.set(id, { resolve, reject });
+        w.postMessage({ id, pixels: buffer, width, height }, [buffer]);
+    });
+}
+```
+
+- [ ] **Step 3: Replace the sync `analyzeProgressiveFrame` call in `computeAndCachePassStats`** with an async-aware variant. This is the tricky bit — `passLightboxStats` is synchronous. Two options:
+
+  **Option A (preferred):** compute stats async when the run ends (just before `thinRetainedPassPixels`), populate `pass.stats` for every retained pass. By the time the lightbox opens, all stats are already there.
+
+  ```js
+  async function precomputePassStatsInWorker(passes) {
+      for (const pass of passes) {
+          if (pass.stats || !pass.pixels) continue;
+          try {
+              const { stats, pixels } = await analyzeFrameInWorker(pass.pixels, pass.width, pass.height);
+              pass.stats = stats;
+              pass.pixels = pixels;  // re-attach the transferred-back buffer
+          } catch (err) {
+              console.warn('[stats] worker failed; falling back to main thread', err);
+              pass.stats = analyzeProgressiveFrame(pass.pixels, pass.width, pass.height);
+          }
+      }
+  }
+  ```
+
+  Call before `thinRetainedPassPixels(passes); return { passes, ... };` in `decodeProgressively` and `decodeProgressivelyViaWorker`.
+
+  **Option B (fallback):** make `passLightboxStats` async and adjust the lightbox open flow. More invasive.
+
+  **Recommendation:** use Option A.
+
+- [ ] **Step 4: Keep `computeAndCachePassStats` as the sync fallback** for export paths (CSV/JSON/MD) that don't tolerate async. If a pass somehow reaches export without stats, fall back to the existing main-thread compute.
+
+- [ ] **Step 5: Update page test.**
+
+```js
+expect(source).toContain('analyzeFrameInWorker');
+expect(source).toContain('precomputePassStatsInWorker');
+expect(source).toContain('jxl-frame-stats-worker.js');
+```
+
+- [ ] **Step 6: Test + measure.**
+
+```powershell
+rtk bun test web/jxl-single-progressive-page.test.js
+```
+
+A/B: measure total decode time with worker stats vs without. Expected: ~100-500 ms total saving on the run because the main thread no longer spends time on stats. The lightbox open latency stays the same (stats are pre-computed).
+
+- [ ] **Step 7: Commit.**
+
+```powershell
+git add web/jxl-single-progressive.js web/jxl-frame-stats-worker.js web/jxl-single-progressive-page.test.js
+git commit -m "perf(single-progressive): offload frame stats to dedicated worker"
+```
+
+---
