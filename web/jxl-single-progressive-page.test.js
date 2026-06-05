@@ -68,6 +68,9 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain('STEADY_DECODE_CHUNK_BYTES');
     expect(source).toContain('bytesFed');
     expect(source).toContain('percentFed');
+    expect(html).toContain('id="decode-in-worker"');
+    expect(source).toContain('decodeProgressivelyViaWorker');
+    expect(source).toContain('createBrowserContext');
 });
 
 test('single progressive page exposes console and measurement exports', () => {

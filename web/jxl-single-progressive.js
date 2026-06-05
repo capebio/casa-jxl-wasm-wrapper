@@ -1,5 +1,6 @@
 import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { createBrowserContext } from '@casabio/jxl-session';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
 import { computePsnrVsFinal } from './jxl-progressive-quality.js';
@@ -23,6 +24,13 @@ const SIZE_PRESETS = {
     'very-large': { label: 'Very Large', longEdge: 2160 },
     'original':   { label: 'Original',   longEdge: 'source' },
 };
+
+let _sessionCtx = null;
+
+function getSessionCtx() {
+    if (_sessionCtx === null) _sessionCtx = createBrowserContext();
+    return _sessionCtx;
+}
 const DEFAULT_SIZE_PRESET = 'display';
 
 // Quality presets define libjxl distance (and quality number for display). kbPerMp is a
@@ -291,13 +299,17 @@ async function runSourceWithSettings(source, settings) {
     };
     dbgLog('Encoded', `q=${selected.quality} size=${formatBytes(encodeBytes.byteLength)} estimate=${estimateKb} KB`, 'success');
 
-    setStatus(`Decoding ${formatBytes(encodeBytes.byteLength)} JXL with ${formatThrottle(settings.throttleKbPerSec)} throttle...`);
-    const decode = await decodeProgressively({
+    const useWorker = document.getElementById('decode-in-worker')?.checked === true;
+    setStatus(`${useWorker ? 'Worker d' : 'D'}ecoding ${formatBytes(encodeBytes.byteLength)} JXL with ${formatThrottle(settings.throttleKbPerSec)} throttle...`);
+    const decodeArgs = {
         jxlBytes: encodeBytes,
         width: target.width,
         height: target.height,
         throttleKbPerSec: settings.throttleKbPerSec,
-    });
+    };
+    const decode = await (useWorker
+        ? decodeProgressivelyViaWorker(decodeArgs)
+        : decodeProgressively(decodeArgs));
     setStatus('Running one-shot decode comparison...');
     const oneShotMs = await decodeOneShotFinal(encodeBytes);
 
@@ -513,6 +525,71 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
     const finalMs = passes.find(pass => pass.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
     const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
     dbgLog('Decode transfer summary', `${formatBytes(jxlBytes.byteLength)} in ${finalMs ?? '--'} ms · avg ${formatTransferSpeed(avgTransferKbPerSec)} · requested ${formatThrottle(throttleKbPerSec)}`, 'info');
+    thinRetainedPassPixels(passes);
+    return { passes, avgTransferKbPerSec };
+}
+
+async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleKbPerSec }) {
+    const ctx = getSessionCtx();
+    const session = ctx.decode({
+        format: 'rgba8',
+        region: null,
+        downsample: 1,
+        progressionTarget: 'final',
+        emitEveryPass: true,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+        preserveIcc: false,
+        preserveMetadata: false,
+        priority: 'visible',
+    });
+    const passes = [];
+    const decStart = performance.now();
+    const feedState = { bytesFed: 0, totalBytes: jxlBytes.byteLength, passCount: 0 };
+
+    const frameTask = (async () => {
+        for await (const frame of session.frames()) {
+            const t = performance.now() - decStart;
+            const bytesFed = Math.min(feedState.totalBytes, feedState.bytesFed);
+            const percentFed = feedState.totalBytes ? (bytesFed / feedState.totalBytes) * 100 : 100;
+            const transferKbPerSec = computeTransferKbPerSec(bytesFed, t);
+            const previousPass = passes.at(-1);
+            const deltaMs = previousPass ? t - previousPass.t_ms : t;
+            const deltaBytes = Math.max(0, bytesFed - (previousPass?.bytesFed ?? 0));
+            const deltaKbPerSec = computeTransferKbPerSec(deltaBytes, deltaMs);
+            const pseudoEvent = {
+                type: frame.stage === 'final' || frame.isFinal ? 'final' : 'progress',
+                info: frame.info,
+                pixels: frame.pixels instanceof Uint8Array ? frame.pixels : new Uint8Array(frame.pixels),
+            };
+            const pass = makePassRecord(pseudoEvent, passes.length, t, width, height);
+            pass.bytesFed = bytesFed;
+            pass.percentFed = Number(percentFed.toFixed(2));
+            pass.transferKbPerSec = transferKbPerSec;
+            pass.deltaMs = Number(deltaMs.toFixed(2));
+            pass.deltaBytes = deltaBytes;
+            pass.deltaKbPerSec = deltaKbPerSec;
+            passes.push(pass);
+            feedState.passCount = passes.length;
+            currentPasses = passes;
+            const paintStart = performance.now();
+            renderProgressivePass(pass);
+            pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
+            pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
+            setStatus(`[worker] ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
+            await sleep(0);
+        }
+    })();
+
+    try {
+        await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState);
+        await frameTask;
+        await session.done();
+    } finally {
+        await session.close();
+    }
+    const finalMs = passes.find(pass => pass.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
+    const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
+    dbgLog('Worker decode transfer summary', `${formatBytes(jxlBytes.byteLength)} in ${finalMs ?? '--'} ms · avg ${formatTransferSpeed(avgTransferKbPerSec)} · requested ${formatThrottle(throttleKbPerSec)}`, 'info');
     thinRetainedPassPixels(passes);
     return { passes, avgTransferKbPerSec };
 }

@@ -11,7 +11,15 @@
   <script type="importmap">
   {
     "imports": {
-      "@casabio/jxl-wasm": "../packages/jxl-wasm/dist/index.js"
+      "@casabio/jxl-core": "../packages/jxl-core/dist/index.js",
+      "@casabio/jxl-core/errors": "../packages/jxl-core/dist/errors.js",
+      "@casabio/jxl-core/protocol": "../packages/jxl-core/dist/protocol.js",
+      "@casabio/jxl-core/types": "../packages/jxl-core/dist/types.js",
+      "@casabio/jxl-wasm": "../packages/jxl-wasm/dist/index.js",
+      "@casabio/jxl-worker-browser": "../packages/jxl-worker-browser/dist/index.js",
+      "@casabio/jxl-session": "../packages/jxl-session/dist/index.js",
+      "@casabio/jxl-scheduler": "../packages/jxl-scheduler/dist/index.js",
+      "@casabio/jxl-capabilities": "../packages/jxl-capabilities/dist/index.js"
     }
   }
   </script>
@@ -164,6 +172,10 @@
           <option value="1" selected>Center-out</option>
           <option value="0">Scanline</option>
         </select>
+      </label>
+      <label class="inline-toggle" title="Decode in a Web Worker via jxl-session (frees main thread for paint)">
+        <input id="decode-in-worker" type="checkbox" />
+        Worker decode
       </label>
       <label class="inline-toggle" title="Draw inferred changed 256px block outlines over each pass">
         <input id="show-block-borders" type="checkbox" />
