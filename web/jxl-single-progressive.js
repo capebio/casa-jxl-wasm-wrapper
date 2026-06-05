@@ -586,17 +586,23 @@ async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
     await decoder.close();
 }
 
+const TILE_LONG_EDGE_PX = 192; // 2x typical CSS render size for crisp HiDPI tiles
+
 function renderProgressivePass(pass) {
     const previousPass = currentPasses[pass.pass - 2] ?? null;
     drawPassWithOverlay(canvas, pass, previousPass);
-    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms | hash ${pass.stats.frameHash}`;
+    viewerMeta.textContent = `pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms | hash ${pass.stats?.frameHash ?? '--'}`;
     const tile = document.createElement('button');
     tile.className = 'pass-tile';
     tile.type = 'button';
     const tileCanvas = document.createElement('canvas');
-    tileCanvas.width = pass.width;
-    tileCanvas.height = pass.height;
-    drawPassWithOverlay(tileCanvas, pass, previousPass);
+    const tileScale = Math.min(1, TILE_LONG_EDGE_PX / Math.max(pass.width, pass.height));
+    tileCanvas.width = Math.max(1, Math.round(pass.width * tileScale));
+    tileCanvas.height = Math.max(1, Math.round(pass.height * tileScale));
+    const tileCtx = tileCanvas.getContext('2d');
+    tileCtx.imageSmoothingEnabled = true;
+    tileCtx.imageSmoothingQuality = 'medium';
+    tileCtx.drawImage(canvas, 0, 0, tileCanvas.width, tileCanvas.height);
     const label = document.createElement('span');
     label.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} | +${pass.deltaMs ?? '--'} ms`;
     tile.append(tileCanvas, label);
