@@ -747,8 +747,8 @@ function passLightboxStats(pass) {
 }
 
 function drawPixels(targetCanvas, pixels, width, height) {
-    targetCanvas.width = width;
-    targetCanvas.height = height;
+    if (targetCanvas.width !== width) targetCanvas.width = width;
+    if (targetCanvas.height !== height) targetCanvas.height = height;
     const ctx = targetCanvas.getContext('2d');
     const data = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength);
     ctx.putImageData(new ImageData(data, width, height), 0, 0);
