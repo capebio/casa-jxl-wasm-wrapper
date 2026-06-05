@@ -1293,3 +1293,463 @@ git commit -m "perf(single-progressive): offload frame stats to dedicated worker
 ```
 
 ---
+
+## Phase G — Perceptual cutoff stopping rule
+
+**Goal:** stop the progressive decode when subsequent passes add no perceptual value. Saves CPU + paint cost on the late-pass refinements the user described as "almost identical".
+
+**Reference:** investigations doc Chapter 3.
+
+**Depends on Phase E** (`intendedDownsamplingRatio` gives a stable signal for "we're at the final-AC level"). Without E, the heuristic must use frame-hash equality, which is noisier.
+
+**Design:** content-adaptive rule with three triggers, OR-combined:
+
+1. **Hash equality:** two consecutive passes have identical `frameHash`. Strong signal of no perceptual delta.
+2. **Low byte rate:** `deltaKbPerSec < 1 KB/s` for two consecutive passes. Encoder appending mostly entropy.
+3. **PSNR plateau:** PSNR delta < 0.5 dB for two consecutive passes (only after at least one ratio-1 pass has landed).
+
+Rule is opt-in via UI; default OFF for diagnostic accuracy.
+
+### Task G1 — Add UI toggle + helper
+
+**Files:** `web/jxl-single-progressive.html`, `web/jxl-single-progressive.js`, `web/jxl-single-progressive-page.test.js`.
+
+- [ ] **Step 1: Add HTML control** in the controls section (near the block-borders toggle, around HTML line 167):
+
+```html
+<label class="inline-toggle" title="Stop decode when consecutive passes add no perceptual delta">
+  <input id="perceptual-cutoff" type="checkbox" />
+  Perceptual cutoff
+</label>
+```
+
+- [ ] **Step 2: Add `shouldStopAtPass`** helper in `web/jxl-single-progressive.js`:
+
+```js
+const PERCEPTUAL_CUTOFF_PSNR_DELTA_DB = 0.5;
+const PERCEPTUAL_CUTOFF_LOW_KBPS = 1.0;
+
+function shouldStopAtPass(passes, targetRgba) {
+    if (passes.length < 3) return false;
+    const last = passes.at(-1);
+    const prev = passes.at(-2);
+    if (!last || !prev) return false;
+
+    // Trigger 1: hash equality.
+    if (last.stats && prev.stats && last.stats.frameHash === prev.stats.frameHash && last.stats.frameHash !== '--') {
+        return { reason: 'hash-equal', last: last.pass };
+    }
+
+    // Trigger 2: low byte rate two passes running.
+    if (Number.isFinite(last.deltaKbPerSec) && Number.isFinite(prev.deltaKbPerSec)
+        && last.deltaKbPerSec < PERCEPTUAL_CUTOFF_LOW_KBPS
+        && prev.deltaKbPerSec < PERCEPTUAL_CUTOFF_LOW_KBPS) {
+        return { reason: 'low-byterate', last: last.pass };
+    }
+
+    // Trigger 3: PSNR plateau, but only once we've reached full-resolution AC.
+    if ((last.intendedRatio ?? 8) <= 1 && (prev.intendedRatio ?? 8) <= 1 && targetRgba) {
+        if (last.pixels?.byteLength === targetRgba.byteLength && prev.pixels?.byteLength === targetRgba.byteLength) {
+            const psnrLast = computePsnrVsFinal(targetRgba, last.pixels);
+            const psnrPrev = computePsnrVsFinal(targetRgba, prev.pixels);
+            if (Number.isFinite(psnrLast) && Number.isFinite(psnrPrev)
+                && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB) {
+                return { reason: 'psnr-plateau', last: last.pass, deltaDb: Math.abs(psnrLast - psnrPrev) };
+            }
+        }
+    }
+
+    return false;
+}
+```
+
+- [ ] **Step 3: Wire into the decode event loop.** In `decodeProgressively` (and `decodeProgressivelyViaWorker`), after a non-final pass is recorded, check the cutoff:
+
+```js
+const cutoffEnabled = document.getElementById('perceptual-cutoff')?.checked === true;
+if (cutoffEnabled && !pass.isFinal) {
+    const verdict = shouldStopAtPass(passes, /* targetRgba */ null);
+    if (verdict) {
+        setStatus(`Perceptual cutoff: ${verdict.reason} after pass ${pass.pass}. Cancelling.`);
+        dbgLog('Perceptual cutoff', JSON.stringify(verdict), 'info');
+        await decoder.cancel?.();  // main-thread path
+        break;  // exit the for-await loop
+    }
+}
+```
+
+For the worker path, replace `await decoder.cancel?.()` with `await session.close()`.
+
+- [ ] **Step 4: Wire `targetRgba` into the cutoff check.** Plumb the `targetRgba` from `runSourceWithSettings` into `decodeProgressively`. This requires passing it as an additional argument — small refactor:
+
+```js
+const decode = await decodeProgressively({
+    jxlBytes: encodeBytes,
+    width: target.width,
+    height: target.height,
+    throttleKbPerSec: settings.throttleKbPerSec,
+    targetRgba,  // ← new
+});
+```
+
+And accept it in the function signature. Pass through to `shouldStopAtPass`.
+
+- [ ] **Step 5: Add UX feedback.** When cutoff fires, the status panel should clearly distinguish "done early" from "actually finished":
+
+```js
+const cutoffFired = !passes.some(p => p.isFinal);
+const finalLine = cutoffFired
+    ? `Stopped early at pass ${passes.length} (perceptual cutoff)`
+    : `Done. ${metrics.passCount} passes, final ${metrics.final_ms ?? '--'} ms`;
+setStatus(finalLine);
+```
+
+- [ ] **Step 6: Update page test.**
+
+```js
+expect(html).toContain('id="perceptual-cutoff"');
+expect(source).toContain('shouldStopAtPass');
+expect(source).toContain('PERCEPTUAL_CUTOFF_PSNR_DELTA_DB');
+```
+
+- [ ] **Step 7: A/B verify.** Run with cutoff OFF, record passes + final_ms. Run with cutoff ON, record passes + final_ms + cutoff reason. Confirm visual quality at cutoff is acceptable — the PSNR chart from D2 should show the cutoff point on the curve plateau.
+
+- [ ] **Step 8: Commit.**
+
+```powershell
+git add web/jxl-single-progressive.html web/jxl-single-progressive.js web/jxl-single-progressive-page.test.js
+git commit -m "feat(single-progressive): perceptual cutoff stopping rule (opt-in)"
+```
+
+---
+
+## Phase H — Round-robin gallery orchestrator
+
+**Goal:** make the gallery feed all open files at the same byte-fraction per tick, so all files reach pass-1 around the same wall time. Current behaviour races each file to completion in parallel, then defers display via coordinator.
+
+**Reference:** investigations doc Chapter 1.
+
+**Files:** `web/jxl-progressive-gallery.js`, possibly `web/jxl-progressive-gallery-coordinator.js`.
+
+**Risk:** the scheduler's preemption logic is built for visible-vs-background priority; the orchestrator must drive all sessions in the same priority lane to avoid scheduler thrash. Use `priority: 'visible'` for all round-robin sessions.
+
+**Design:** introduce `BYTES_PER_TICK = 16384`. Per tick, for each open session, push up to `BYTES_PER_TICK` bytes of its source. After each tick yield via `sleep(0)`. Continue until every source is closed.
+
+### Task H1 — Add round-robin feed mode
+
+**Files:** `web/jxl-progressive-gallery.js`, `web/jxl-progressive-gallery.test.js`, `web/jxl-progressive-gallery.html`.
+
+- [ ] **Step 1: Add HTML toggle** in the gallery controls section (find the section with `concurrent`, `wasm-tier`, etc.):
+
+```html
+<label class="inline-toggle" title="Feed all files at equal byte-fraction per tick instead of racing each to completion">
+  <input id="round-robin-feed" type="checkbox" />
+  Round-robin feed
+</label>
+```
+
+- [ ] **Step 2: Add an orchestrator helper** in `web/jxl-progressive-gallery.js`:
+
+```js
+const ROUND_ROBIN_BYTES_PER_TICK = 16 * 1024;
+
+async function feedRoundRobin(sessions /* array of { session, bytes } */) {
+    const cursors = sessions.map(() => 0);
+    let openCount = sessions.length;
+    while (openCount > 0) {
+        for (let i = 0; i < sessions.length; i++) {
+            const { session, bytes } = sessions[i];
+            if (cursors[i] >= bytes.byteLength) continue;
+            const start = cursors[i];
+            const end = Math.min(bytes.byteLength, start + ROUND_ROBIN_BYTES_PER_TICK);
+            const chunk = bytes.subarray(start, end);
+            await session.push(chunk);
+            cursors[i] = end;
+            if (cursors[i] >= bytes.byteLength) {
+                await session.close();
+                openCount--;
+            }
+        }
+        await sleep(0);
+    }
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+```
+
+- [ ] **Step 3: Locate the current per-file feed loop** in `startGallery` (around line 358+). It currently iterates `selectedFiles` and runs each through its own decode pipeline. Modify so that when the round-robin toggle is ON, it creates ALL sessions first, then drives them through `feedRoundRobin` once.
+
+Sketch (the exact integration depends on how `startGallery` is currently structured — read lines 358-700 carefully and adapt):
+
+```js
+const roundRobin = document.getElementById('round-robin-feed')?.checked === true;
+if (roundRobin) {
+    const allSessions = await Promise.all(selectedFiles.map(async f => {
+        const bytes = await loadJxlBytesForFile(f, encodeOnTheFly, encodeOpts);
+        const session = ctx.decode({ ...decodeOpts, priority: 'visible' });
+        wireSessionToGallery(session, f, framesByFile, coordinator);
+        return { session, bytes };
+    }));
+    await feedRoundRobin(allSessions);
+    await Promise.all(allSessions.map(s => s.session.done()));
+} else {
+    // Existing per-file racing behaviour.
+    // ...current code unchanged...
+}
+```
+
+- [ ] **Step 4: Memory guard.** Round-robin opens N decoders at once, each with `info.xsize * info.ysize * 4` output buffer. Cap `selectedFiles.length` at `min(maxWorkers, 4)` to avoid the 1.5 GB-at-8000px scenario noted in investigations §7.7:
+
+```js
+if (roundRobin && selectedFiles.length > 4) {
+    log('Round-robin capped at 4 concurrent decoders for memory safety. Splitting into batches.', 'warn');
+    // Split into batches of 4 and run sequentially.
+}
+```
+
+- [ ] **Step 5: Update gallery test.** Add source-string assertions:
+
+```js
+expect(html).toContain('id="round-robin-feed"');
+expect(source).toContain('feedRoundRobin');
+expect(source).toContain('ROUND_ROBIN_BYTES_PER_TICK');
+```
+
+- [ ] **Step 6: Manual verification.** Open the gallery with 3 files of different sizes (small, medium, large). With round-robin OFF, observe: small file finishes all passes before large file shows pass 3. With round-robin ON: all three files reach pass 1 within ~100 ms of each other, then pass 2 together, etc.
+
+- [ ] **Step 7: Commit.**
+
+```powershell
+git add web/jxl-progressive-gallery.html web/jxl-progressive-gallery.js web/jxl-progressive-gallery.test.js
+git commit -m "feat(gallery): round-robin byte-fraction feeder for synchronized progressive paint"
+```
+
+---
+
+## Phase I — Sidecar thumbnail encode pipeline
+
+**Goal:** generate a small thumbnail JXL alongside the full JXL so future galleries can decode thumbs in ~10-15 ms instead of ~250 ms+. Works around libjxl 0.11.2's missing partial-decode API.
+
+**Reference:** investigations doc Chapter 2 + §7.3.
+
+**Files:** `web/jxl-single-progressive.js` (for measurement), `packages/jxl-cache/src/browser.ts` (to store both keys — already content-agnostic, may just need a key convention).
+
+**Design:** when the encode pipeline produces a full-size JXL, also produce a 320-px-long-edge JXL at lower quality and store both. Cache key convention: `${sourceHash}` for full, `${sourceHash}:thumb` for sidecar.
+
+### Task I1 — Add sidecar encode helper
+
+**Files:** `web/jxl-single-progressive.js` (for the prototype), then promote to a shared module if it lands elsewhere.
+
+- [ ] **Step 1: Add `encodeWithSidecarThumbnail` helper** near `encodeSneyersDirect`:
+
+```js
+const SIDECAR_THUMB_LONG_EDGE = 320;
+const SIDECAR_THUMB_QUALITY = 75;
+
+async function encodeWithSidecarThumbnail({ rgba, width, height, quality, lossless, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder }) {
+    const full = await encodeSneyersDirect({
+        rgba, width, height, quality, lossless,
+        progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder,
+    });
+
+    const longEdge = Math.max(width, height);
+    if (longEdge <= SIDECAR_THUMB_LONG_EDGE) {
+        return { full, thumb: null };  // source is already thumbnail-sized
+    }
+    const scale = SIDECAR_THUMB_LONG_EDGE / longEdge;
+    const tw = Math.max(1, Math.round(width * scale));
+    const th = Math.max(1, Math.round(height * scale));
+    const thumbRgba = resizeRgba(rgba, width, height, tw, th);
+    const thumb = await encodeSneyersDirect({
+        rgba: thumbRgba,
+        width: tw,
+        height: th,
+        quality: SIDECAR_THUMB_QUALITY,
+        lossless: false,
+        progressiveDc: 0,
+        progressiveAc: 0,
+        qProgressiveAc: 0,
+        decodingSpeed: 2,
+        groupOrder: 0,
+    });
+    return { full, thumb };
+}
+```
+
+- [ ] **Step 2: Add a UI toggle** (`web/jxl-single-progressive.html`):
+
+```html
+<label class="inline-toggle" title="Also encode a 320px sidecar thumbnail for fast preview decode">
+  <input id="emit-sidecar-thumb" type="checkbox" />
+  Sidecar thumb
+</label>
+```
+
+- [ ] **Step 3: Dispatch from `runSourceWithSettings`.** When the toggle is ON, call `encodeWithSidecarThumbnail` and surface both byte sizes in the metrics panel:
+
+```js
+const useSidecar = document.getElementById('emit-sidecar-thumb')?.checked === true;
+let encodeBytes;
+let thumbBytes = null;
+if (useSidecar) {
+    const result = await encodeWithSidecarThumbnail({ /* ...same args as encodeSneyersDirect... */ });
+    encodeBytes = result.full;
+    thumbBytes = result.thumb;
+} else {
+    encodeBytes = await encodeSneyersDirect({ /* ... */ });
+}
+```
+
+- [ ] **Step 4: Add a "decode thumbnail" measurement.** When `thumbBytes != null`, decode it one-shot and record the time:
+
+```js
+let thumbDecodeMs = null;
+if (thumbBytes) {
+    const thumbStart = performance.now();
+    await decodeOneShotFinal(thumbBytes);
+    thumbDecodeMs = Number((performance.now() - thumbStart).toFixed(2));
+}
+```
+
+Add a metric tile:
+
+```html
+<div class="metric"><span>Sidecar thumb decode</span><strong id="m-thumb-decode">--</strong></div>
+<div class="metric"><span>Sidecar thumb size</span><strong id="m-thumb-size">--</strong></div>
+```
+
+And populate in `renderMetrics`:
+
+```js
+setMetric('m-thumb-decode', m.thumbDecodeMs == null ? '--' : `${m.thumbDecodeMs} ms`);
+setMetric('m-thumb-size', m.thumbBytes == null ? '--' : formatBytes(m.thumbBytes));
+```
+
+- [ ] **Step 5: Update page test.**
+
+```js
+expect(html).toContain('id="emit-sidecar-thumb"');
+expect(source).toContain('encodeWithSidecarThumbnail');
+expect(source).toContain('SIDECAR_THUMB_LONG_EDGE');
+```
+
+- [ ] **Step 6: Verify the win.** Run a 5240×3912 source with sidecar ON. Expect: thumb size ~3-5 KB, thumb decode time ~10-15 ms. Compare with the full file's one-shot decode time (~250-300 ms).
+
+- [ ] **Step 7: Commit.**
+
+```powershell
+git add web/jxl-single-progressive.html web/jxl-single-progressive.js web/jxl-single-progressive-page.test.js
+git commit -m "feat(single-progressive): emit sidecar 320px thumbnail JXL for fast preview"
+```
+
+### Task I2 — Plumb sidecar into the cache (optional follow-up)
+
+**Files:** `packages/jxl-cache/src/browser.ts`.
+
+The cache is content-agnostic and already stores `ArrayBuffer` keyed by string. To store sidecars alongside their source:
+
+```js
+await cache.set(sourceHash, fullBytes);
+if (thumbBytes) await cache.set(`${sourceHash}:thumb`, thumbBytes);
+
+// Lookup:
+const thumb = await cache.get(`${sourceHash}:thumb`);
+const full = thumb ?? await cache.get(sourceHash);
+```
+
+No code change required in the cache layer itself — only the key convention. Add a comment to `packages/jxl-cache/README.md` documenting the `:thumb` convention so other call sites pick it up consistently.
+
+- [ ] **Step 1: Document key convention** in `packages/jxl-cache/README.md`:
+
+```markdown
+## Key conventions
+
+Callers SHOULD use these prefixes/suffixes to avoid collisions:
+
+- `${sourceHash}` — the full-resolution encoded JXL.
+- `${sourceHash}:thumb` — a 320 px long-edge sidecar thumbnail JXL, if available.
+- `${sourceHash}:dc-prefix-${kb}kb` — a byte-truncated DC-only prefix (Chapter 2 of investigations).
+
+The cache itself is content-agnostic and does not enforce these — it is purely a convention for cross-page reuse.
+```
+
+- [ ] **Step 2: Commit.**
+
+```powershell
+git add packages/jxl-cache/README.md
+git commit -m "docs(cache): document key prefix convention for sidecar thumbnails"
+```
+
+---
+
+## Final commit / post-rollout
+
+### Verification checklist
+
+After all phases land:
+
+- [ ] Single-progressive page: first paint ≈ 50-80 ms, final paint ≈ 400-600 ms, one-shot ≈ 250 ms, progressive/one-shot ratio ≈ 2× on display preset.
+- [ ] Single-progressive page: with `dc=2 ac=2 qac=2`, observe ~18-22 passes with smooth PSNR-vs-pass curve.
+- [ ] Single-progressive page: perceptual-cutoff toggle stops decode 1-3 passes before final; visual quality acceptable.
+- [ ] Single-progressive page: pass labels show `1:8 DC`, `1:4 coarse-AC`, etc., reflecting libjxl's intended downsampling.
+- [ ] Single-progressive page: worker-decode toggle produces same pass count + similar timing as main-thread; main thread `paintMs` lower per pass.
+- [ ] Single-progressive page: sidecar thumb decodes in 10-15 ms.
+- [ ] Gallery: round-robin toggle synchronises pass-N arrival across files.
+- [ ] All tests pass: `rtk bun test web/jxl-single-progressive-page.test.js web/jxl-progressive-gallery.test.js packages/jxl-wasm/test/progressive-detail.test.ts`.
+- [ ] No two-frame regression on any default A/B run.
+
+### Update sibling docs
+
+- [ ] In `docs/HANDOFF-single-progressive-progressive-tuning-2026-06-05.md`, append a "Status as of 2026-06-XX" section noting which phases landed.
+- [ ] In `docs/superpowers/plans/2026-06-05-single-progressive-perf-investigation.md`, mark as "superseded by `docs/superpowers/plans/unified implementation plan.md`" — leave intact for context but link forward.
+- [ ] In `docs/Research/2026-06-05-progressive-jxl-five-investigations.md`, the verdict matrix at the top of Chapter 7 can be updated with land dates per item.
+
+### Self-review against original spec
+
+This plan covers:
+
+- **Sibling plan Tasks 1-8** → Phase A (verbatim).
+- **Chapter 1** (round-robin gallery) → Phase H.
+- **Chapter 2** (thumbnail-sized decode) → Phase I (sidecar workaround).
+- **Chapter 3** (stop after 2 passes) → Phase G (perceptual cutoff).
+- **Chapter 4** (more, smaller passes) → Phase C (encoder AC knobs).
+- **Chapter 5** (whole-image vs block-by-block) → Phase D (default `dc=2`).
+- **§7.1 worker decode** → Phase B.
+- **§7.2 SetDownsamplingFactor** → SKIPPED (confirmed blocked at libjxl API).
+- **§7.3 preview frames** → SKIPPED in favour of Phase I sidecar.
+- **§7.4 AC knobs** → Phase C.
+- **§7.5 worker stats** → Phase F.
+- **§7.6 cross-page cache** → SKIPPED (low value).
+- **§7.7 smaller output buffer** → SKIPPED (libjxl-blocked).
+- **§7.8 smart pacing** → DEFERRED (per investigation recommendation).
+- **§7.9 decoding_speed** → Phase C.
+- **§7.10 IntendedDownsamplingRatio** → Phase E.
+- **§7.11 SkipCurrentFrame** → DEFERRED to animation milestone.
+
+Everything in the SHOULD-DO column of the deep dive has a phase. Everything BLOCKED or DEFERRED is documented as such.
+
+---
+
+## Execution Handoff
+
+Plan complete at `docs/superpowers/plans/unified implementation plan.md`. Two execution options:
+
+**1. Subagent-Driven (recommended)** — dispatch a fresh subagent per phase, review between phases, fast iteration. Best because Phase A's 8 tasks are independently measurable and Phases B-I are largely independent.
+
+**2. Inline Execution** — execute tasks in this session using executing-plans, batch with checkpoints.
+
+**Suggested agent allocation:**
+
+- Agent 1: Phase A (sequential, 8 tasks).
+- Agent 2: Phase B (after A1-A2 done).
+- Agent 3: Phase C (after A done).
+- Agent 4: Phase D (after A done).
+- Agent 5: Phase E (independent; WASM rebuild required).
+- Agent 6: Phase F (after A2 + E done).
+- Agent 7: Phase G (after E done).
+- Agent 8: Phase H (independent).
+- Agent 9: Phase I (independent).
+
+Phases B-D + H + I can run in parallel once A lands. Phase E gates F and G. Phase F gates nothing downstream but should not start before A2's lazy-stats pattern is in place.
+
+If the budget runs out mid-plan, the most valuable phases to land in order are: **A → C → D → E → G**. Together these deliver the user's five-investigation goals; B, F, H, I are quality-of-life follow-ups.
