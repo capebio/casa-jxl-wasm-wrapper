@@ -3,7 +3,7 @@ import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
 import { computePsnrVsFinal } from './jxl-progressive-quality.js';
-import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog } from './jxl-progressive-frame-stats.js';
+import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 const PROGRESSIVE_DETAIL = 'passes';
@@ -491,21 +491,9 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                 setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · ${formatTransferSpeed(deltaKbPerSec)} delta · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
                 dbgLog(
                     `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`,
-                    `${pass.t_ms} ms (+${pass.deltaMs} ms) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta | ${formatFrameStatsLog(pass.stats)}`,
+                    `${pass.t_ms} ms (+${pass.deltaMs} ms) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta`,
                     'info'
                 );
-                console.log('[Single progressive] frame stats', {
-                    pass: pass.pass,
-                    isFinal: pass.isFinal,
-                    t_ms: pass.t_ms,
-                    bytesFed: pass.bytesFed,
-                    percentFed: pass.percentFed,
-                    transferKbPerSec: pass.transferKbPerSec,
-                    delta_ms: pass.deltaMs,
-                    delta_bytes: pass.deltaBytes,
-                    delta_kb_per_sec: pass.deltaKbPerSec,
-                    ...pass.stats,
-                });
                 await nextPaint();
             } else if (event.type === 'error') {
                 throw new Error(`${event.code}: ${event.message}`);
@@ -557,8 +545,9 @@ async function decodeOneShotFinal(jxlBytes) {
 }
 
 function makePassRecord(event, index, t, width, height) {
-    const pixels = event.pixels instanceof Uint8Array ? new Uint8Array(event.pixels) : new Uint8Array(event.pixels);
-    const stats = analyzeProgressiveFrame(pixels, event.info?.width ?? width, event.info?.height ?? height);
+    const pixels = event.pixels instanceof Uint8Array
+        ? event.pixels
+        : new Uint8Array(event.pixels);
     return {
         pass: index + 1,
         t_ms: Number(t.toFixed(2)),
@@ -566,8 +555,18 @@ function makePassRecord(event, index, t, width, height) {
         width: event.info?.width ?? width,
         height: event.info?.height ?? height,
         pixels,
-        stats,
+        stats: null,
     };
+}
+
+function computeAndCachePassStats(pass) {
+    if (pass.stats) return pass.stats;
+    if (!pass.pixels) {
+        pass.stats = { alphaMin: 0, alphaMax: 0, alphaZeroPct: 0, rgbNonzeroCount: 0, lumaVariance: 0, frameHash: '--', pixelCount: 0, byteLength: 0 };
+        return pass.stats;
+    }
+    pass.stats = analyzeProgressiveFrame(pass.pixels, pass.width, pass.height);
+    return pass.stats;
 }
 
 async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
@@ -620,7 +619,7 @@ function showPassInLightbox(index) {
     drawPassWithOverlay(lightboxCanvas, pass, previousPass);
     applyLightboxZoom();
     drawPassWithOverlay(canvas, pass, previousPass);
-    viewerMeta.textContent = `pinned pass ${pass.pass} | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${formatFrameStatsCompact(pass.stats)}`;
+    viewerMeta.textContent = `pinned pass ${pass.pass} | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${formatFrameStatsCompact(computeAndCachePassStats(pass))}`;
     if (lightboxTitle) lightboxTitle.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`;
     if (lightboxSubtitle) {
         lightboxSubtitle.textContent = `${lightboxIndex + 1}/${currentPasses.length} | ArrowLeft/ArrowRight to compare passes`;
@@ -732,6 +731,7 @@ function redrawCurrentPassView() {
 }
 
 function passLightboxStats(pass) {
+    const s = computeAndCachePassStats(pass);
     return [
         ['Pass', `${pass.pass}${pass.isFinal ? ' final' : ''}`],
         ['Streamed', `${formatBytes(pass.bytesFed ?? 0)} (${pass.percentFed ?? 0}%)`],
@@ -739,10 +739,10 @@ function passLightboxStats(pass) {
         ['Delta', `${pass.deltaMs ?? '--'} ms, ${formatBytes(pass.deltaBytes ?? 0)}`],
         ['Delta transfer', formatTransferSpeed(pass.deltaKbPerSec)],
         ['Dimensions', `${pass.width}x${pass.height}`],
-        ['Hash', pass.stats.frameHash],
-        ['Alpha', `${pass.stats.alphaMin}-${pass.stats.alphaMax}, zero ${pass.stats.alphaZeroPct.toFixed(2)}%`],
-        ['RGB nonzero', String(pass.stats.rgbNonzeroCount)],
-        ['Luma variance', pass.stats.lumaVariance.toFixed(2)],
+        ['Hash', s.frameHash],
+        ['Alpha', `${s.alphaMin}-${s.alphaMax}, zero ${s.alphaZeroPct.toFixed(2)}%`],
+        ['RGB nonzero', String(s.rgbNonzeroCount)],
+        ['Luma variance', s.lumaVariance.toFixed(2)],
     ];
 }
 
@@ -831,19 +831,22 @@ function drawBlockBorders(targetCanvas, blocks) {
 }
 
 function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset, progressiveDc, groupOrder, groupOrderLabel }) {
-    const perPass = decode.passes.map(pass => ({
-        pass: pass.pass,
-        t_ms: pass.t_ms,
-        isFinal: pass.isFinal,
-        bytesFed: pass.bytesFed ?? null,
-        percentFed: pass.percentFed ?? null,
-        transferKbPerSec: pass.transferKbPerSec ?? null,
-        delta_ms: pass.deltaMs ?? null,
-        delta_bytes: pass.deltaBytes ?? null,
-        delta_kb_per_sec: pass.deltaKbPerSec ?? null,
-        deltaKbPerSec: pass.deltaKbPerSec ?? null,
-        stats: normalizeFrameStatsForExport(pass.stats),
-    }));
+    const perPass = decode.passes.map(pass => {
+        const stats = computeAndCachePassStats(pass);
+        return {
+            pass: pass.pass,
+            t_ms: pass.t_ms,
+            isFinal: pass.isFinal,
+            bytesFed: pass.bytesFed ?? null,
+            percentFed: pass.percentFed ?? null,
+            transferKbPerSec: pass.transferKbPerSec ?? null,
+            delta_ms: pass.deltaMs ?? null,
+            delta_bytes: pass.deltaBytes ?? null,
+            delta_kb_per_sec: pass.deltaKbPerSec ?? null,
+            deltaKbPerSec: pass.deltaKbPerSec ?? null,
+            stats: normalizeFrameStatsForExport(stats),
+        };
+    });
     const visibleProgressFrames = perPass
         .filter(p => !p.isFinal && isVisibleFrame(p.stats))
         .map(p => p.stats.frameHash)
@@ -904,6 +907,7 @@ function isVisibleFrame(stats) {
 }
 
 function normalizeFrameStatsForExport(stats) {
+    if (!stats) return { alphaMin: 0, alphaMax: 0, alphaZeroPct: 0, rgbNonzeroCount: 0, lumaVariance: 0, frameHash: '--', pixelCount: 0, byteLength: 0 };
     return {
         alphaMin: stats.alphaMin,
         alphaMax: stats.alphaMax,
