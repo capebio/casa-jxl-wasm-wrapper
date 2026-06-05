@@ -569,6 +569,11 @@ class WorkerPool {
             progressive: next.options?.progressive === true,
             cachePolicy: next.options?.cachePolicy,
             progressiveDetail: next.options?.progressiveDetail,
+            previewFirst: next.options?.previewFirst === true,
+            region: next.options?.region ?? null,
+            downsample: next.options?.downsample ?? null,
+            frameIndex: next.options?.frameIndex ?? null,
+            jpegReconstructionAvailable: next.options?.jpegReconstructionAvailable === true,
         });
     }
     _onJxlDecodeResponse(data) {
