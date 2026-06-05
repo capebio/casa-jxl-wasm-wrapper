@@ -488,3 +488,463 @@ After A1-A8 land:
 If any of these regress, halt and diagnose before advancing to Phase B.
 
 ---
+
+## Phase B — Off-main-thread decode toggle for single-progressive
+
+**Goal:** allow single-progressive page to A/B between main-thread decode (current) and worker decode (via jxl-session). Lets future encoder A/Bs reflect encoder behaviour, not main-thread paint cost.
+
+**Reference:** investigations doc §7.1.
+
+**Architecture:** add a checkbox to the page. When ON, route the decode through `createBrowserContext` from `@casabio/jxl-session` instead of `createDecoder` from `@casabio/jxl-wasm`. The frame stream API differs slightly; wrap behind a single `decodeProgressively` dispatch.
+
+**Pre-flight check:** confirm session API surface.
+
+```powershell
+rtk proxy node -e "import('./packages/jxl-session/dist/index.js').then(m => console.log(Object.keys(m)))"
+```
+
+Expect `createBrowserContext` in the output. If missing, the package may need a build (`rtk bun --cwd packages/jxl-session run build`). Halt this phase if the dist isn't shipped.
+
+### Task B1 — Add UI toggle + dispatch
+
+**Files:** `web/jxl-single-progressive.html` (add control), `web/jxl-single-progressive.js` (dispatch).
+
+- [ ] **Step 1: Add HTML control** after the `Group order` `<label>` block (around HTML line 167):
+
+```html
+<label class="inline-toggle" title="Decode in a Web Worker via jxl-session (frees main thread for paint)">
+  <input id="decode-in-worker" type="checkbox" />
+  Worker decode
+</label>
+```
+
+- [ ] **Step 2: Add import + getter at the top of `web/jxl-single-progressive.js`** (after the existing `createDecoder` import):
+
+```js
+import { createBrowserContext } from '../packages/jxl-session/dist/index.js';
+
+let _sessionCtx = null;
+function getSessionCtx() {
+    if (_sessionCtx === null) _sessionCtx = createBrowserContext();
+    return _sessionCtx;
+}
+```
+
+- [ ] **Step 3: Add `decodeProgressivelyViaWorker`** alongside the existing `decodeProgressively`. Keep both. The dispatch:
+
+```js
+async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleKbPerSec }) {
+    const ctx = getSessionCtx();
+    const session = ctx.decode({
+        format: 'rgba8',
+        region: null,
+        downsample: 1,
+        progressionTarget: 'final',
+        emitEveryPass: true,
+        progressiveDetail: PROGRESSIVE_DETAIL,
+        preserveIcc: false,
+        preserveMetadata: false,
+        priority: 'visible',
+    });
+    const passes = [];
+    const decStart = performance.now();
+    const feedState = { bytesFed: 0, totalBytes: jxlBytes.byteLength, passCount: 0 };
+
+    const frameTask = (async () => {
+        for await (const frame of session.frames()) {
+            const t = performance.now() - decStart;
+            const bytesFed = Math.min(feedState.totalBytes, feedState.bytesFed);
+            const percentFed = feedState.totalBytes ? (bytesFed / feedState.totalBytes) * 100 : 100;
+            const transferKbPerSec = computeTransferKbPerSec(bytesFed, t);
+            const previousPass = passes.at(-1);
+            const deltaMs = previousPass ? t - previousPass.t_ms : t;
+            const deltaBytes = Math.max(0, bytesFed - (previousPass?.bytesFed ?? 0));
+            const deltaKbPerSec = computeTransferKbPerSec(deltaBytes, deltaMs);
+            // session.frames() events have shape { stage, info, pixels, ... }.
+            // Map to the same record shape as the main-thread path.
+            const pseudoEvent = {
+                type: frame.stage === 'final' || frame.isFinal ? 'final' : 'progress',
+                info: frame.info,
+                pixels: frame.pixels instanceof Uint8Array ? frame.pixels : new Uint8Array(frame.pixels),
+            };
+            const pass = makePassRecord(pseudoEvent, passes.length, t, width, height);
+            pass.bytesFed = bytesFed;
+            pass.percentFed = Number(percentFed.toFixed(2));
+            pass.transferKbPerSec = transferKbPerSec;
+            pass.deltaMs = Number(deltaMs.toFixed(2));
+            pass.deltaBytes = deltaBytes;
+            pass.deltaKbPerSec = deltaKbPerSec;
+            passes.push(pass);
+            feedState.passCount = passes.length;
+            currentPasses = passes;
+            const paintStart = performance.now();
+            renderProgressivePass(pass);
+            pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
+            pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
+            setStatus(`[worker] ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass}${pass.isFinal ? ' final' : ''}`);
+            await sleep(0);
+        }
+    })();
+
+    try {
+        await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState);
+        await frameTask;
+        await session.done();
+    } finally {
+        await session.close();
+    }
+    const finalMs = passes.find(p => p.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
+    const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
+    thinRetainedPassPixels(passes);
+    return { passes, avgTransferKbPerSec };
+}
+```
+
+- [ ] **Step 4: Dispatch at the call site in `runSourceWithSettings`** (around line 295):
+
+```js
+const useWorker = document.getElementById('decode-in-worker')?.checked === true;
+const decode = await (useWorker
+    ? decodeProgressivelyViaWorker({ jxlBytes: encodeBytes, width: target.width, height: target.height, throttleKbPerSec: settings.throttleKbPerSec })
+    : decodeProgressively({ jxlBytes: encodeBytes, width: target.width, height: target.height, throttleKbPerSec: settings.throttleKbPerSec }));
+```
+
+- [ ] **Step 5: Update page test** — add:
+
+```js
+expect(html).toContain('id="decode-in-worker"');
+expect(source).toContain('decodeProgressivelyViaWorker');
+expect(source).toContain('createBrowserContext');
+```
+
+- [ ] **Step 6: Test + measure.** A/B both modes on the same source. Expectation: worker mode shows lower `paintMs` per pass (paint no longer blocks decode) and similar or slightly higher `decodeMs` (postMessage overhead). Net: similar or slightly better total. Most important: pass count stays ≥ 8 in worker mode (the scheduler's adaptive HWM must not coalesce too aggressively).
+
+- [ ] **Step 7: If worker mode collapses passes**, the scheduler's chunk coalescing is too aggressive. Mitigation: call `session.push` with smaller chunks than `STEADY_DECODE_CHUNK_BYTES` (try `8 KiB`) or insert `await new Promise(r => setTimeout(r, 1))` between pushes. Document the workaround if needed.
+
+- [ ] **Step 8: Commit.**
+
+```powershell
+git add web/jxl-single-progressive.html web/jxl-single-progressive.js web/jxl-single-progressive-page.test.js
+git commit -m "feat(single-progressive): add Worker decode toggle via jxl-session"
+```
+
+---
+
+## Phase C — Encoder UI knobs: AC layers + decoding_speed
+
+**Goal:** surface bridge-exposed encoder knobs the page currently hides. Unlocks the chapter-4 recommendation: more, smaller pass deltas via `progressive_ac=2`, `qprogressive_ac=2`.
+
+**Reference:** investigations doc §7.4, §7.9.
+
+**Files:** `web/jxl-single-progressive.html`, `web/jxl-single-progressive.js`, `web/jxl-single-progressive-page.test.js`.
+
+### Task C1 — Add `progressive_ac` / `qprogressive_ac` / `decoding_speed` controls
+
+- [ ] **Step 1: Add HTML controls** after the `progressive-dc` label (around HTML line 160):
+
+```html
+<label>
+  Progressive AC
+  <select id="progressive-ac">
+    <option value="0">0 · single AC pass</option>
+    <option value="1" selected>1 · two-band split (Sneyers default)</option>
+    <option value="2">2 · multi-band finer split</option>
+  </select>
+</label>
+<label>
+  qProgressive AC
+  <select id="qprogressive-ac">
+    <option value="0">0 · single quantization tier</option>
+    <option value="1" selected>1 · two-tier (Sneyers default)</option>
+    <option value="2">2 · multi-tier finer quantization</option>
+  </select>
+</label>
+<label>
+  Decoding speed
+  <select id="decoding-speed">
+    <option value="0" selected>0 · slowest decode / highest quality</option>
+    <option value="1">1</option>
+    <option value="2">2 · balanced</option>
+    <option value="3">3</option>
+    <option value="4">4 · fastest decode / lower quality</option>
+  </select>
+</label>
+```
+
+- [ ] **Step 2: Extend `readSettings`** (around line 331):
+
+```js
+const acRaw = document.getElementById('progressive-ac')?.value ?? '1';
+const progressiveAc = Math.max(0, Math.min(2, Number(acRaw) || 0));
+const qacRaw = document.getElementById('qprogressive-ac')?.value ?? '1';
+const qProgressiveAc = Math.max(0, Math.min(2, Number(qacRaw) || 0));
+const dsRaw = document.getElementById('decoding-speed')?.value ?? '0';
+const decodingSpeed = Math.max(0, Math.min(4, Number(dsRaw) || 0));
+return {
+    // ...existing fields...
+    progressiveAc,
+    qProgressiveAc,
+    decodingSpeed,
+};
+```
+
+- [ ] **Step 3: Thread into `encodeSneyersDirect`** (around line 416):
+
+```js
+async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder }) {
+    // ...existing preset wiring...
+    const encoder = createEncoder({
+        ...preset.encode,
+        width,
+        height,
+        quality,
+        ...(lossless ? { distance: 0 } : {}),
+        ...(progressiveDc != null ? { progressiveDc } : {}),
+        ...(progressiveAc != null ? { progressiveAc } : {}),
+        ...(qProgressiveAc != null ? { qProgressiveAc } : {}),
+        ...(decodingSpeed != null ? { decodingSpeed } : {}),
+        ...(groupOrder != null ? { groupOrder } : {}),
+        progressiveDetail: undefined,
+        buffering: { strategy: 0 },
+        chunked: false,
+    });
+    // ...rest unchanged...
+}
+```
+
+And update the call site in `runSourceWithSettings`:
+
+```js
+const encodeBytes = await encodeSneyersDirect({
+    rgba: targetRgba,
+    width: target.width,
+    height: target.height,
+    quality: settings.qualityNumber,
+    lossless: settings.lossless,
+    progressiveDc: settings.progressiveDc,
+    progressiveAc: settings.progressiveAc,
+    qProgressiveAc: settings.qProgressiveAc,
+    decodingSpeed: settings.decodingSpeed,
+    groupOrder: settings.groupOrder,
+});
+```
+
+- [ ] **Step 4: Surface in measurement** (`buildMeasurement` around line 870):
+
+```js
+progressiveAc: settings.progressiveAc,
+qProgressiveAc: settings.qProgressiveAc,
+decodingSpeed: settings.decodingSpeed,
+progressive_ac: settings.progressiveAc,
+qprogressive_ac: settings.qProgressiveAc,
+decoding_speed: settings.decodingSpeed,
+```
+
+Add to CSV header + row, Markdown table, TOON export. Pattern matches existing `progressive_dc` handling.
+
+- [ ] **Step 5: Update page test.**
+
+```js
+expect(html).toContain('id="progressive-ac"');
+expect(html).toContain('id="qprogressive-ac"');
+expect(html).toContain('id="decoding-speed"');
+expect(source).toContain('progressiveAc');
+expect(source).toContain('qProgressiveAc');
+expect(source).toContain('decodingSpeed');
+expect(source).toContain('progressive_ac');
+expect(source).toContain('qprogressive_ac');
+expect(source).toContain('decoding_speed');
+```
+
+- [ ] **Step 6: Verify encoder option names match facade.** Open `packages/jxl-wasm/src/facade.ts` and grep for `progressiveAc` and `qProgressiveAc` in `EncoderOptions`. If facade expects different casing (`progressive_ac` snake_case), adjust the option names at the call site. **This is a verification step — if the facade does not expose these as TS options, the bridge call will silently ignore them.**
+
+```powershell
+rtk proxy grep -n "progressiveAc\|qProgressiveAc\|decodingSpeed" packages/jxl-wasm/src/facade.ts
+```
+
+If the facade doesn't expose them, file a follow-up to extend the facade `EncoderOptions` type — small TS change. Document the result in the commit message.
+
+- [ ] **Step 7: Run sweep.** Manual A/B on the same source: `(ac, qac) ∈ {(0,0), (1,1), (2,1), (2,2)}` with `dc=2`. Record pass count + first/final paint per combination. The (2,2) combination should produce ~18-22 passes.
+
+- [ ] **Step 8: Commit.**
+
+```powershell
+git add web/jxl-single-progressive.html web/jxl-single-progressive.js web/jxl-single-progressive-page.test.js
+git commit -m "feat(single-progressive): expose progressive_ac, qprogressive_ac, decoding_speed knobs"
+```
+
+---
+
+## Phase D — Default `dc=2` + PSNR-vs-pass chart
+
+**Goal:** make the canonical Sneyers truly-progressive layout the page default. Surface PSNR-vs-pass so the chapter-3 perceptual cutoff has visual evidence.
+
+**Reference:** investigations doc Chapter 5 + Chapter 3.
+
+### Task D1 — Flip the `progressive_dc` default
+
+**Files:** `web/jxl-single-progressive.html:155-159`.
+
+**Why:** current default `value="0" selected` produces block-by-block AC group landing, not Sneyers's whole-image refinement. `dc=2` gives 1:32 then 1:8 DC preview before AC — the canonical truly-progressive look.
+
+- [ ] **Step 1: Edit the `progressive-dc` select.**
+
+```html
+<label>
+  Progressive DC
+  <select id="progressive-dc">
+    <option value="2" selected>2 · 1:32 then 1:8 preview (Sneyers default)</option>
+    <option value="1">1 · single 1:8 DC</option>
+    <option value="0">0 · no DC progressive</option>
+  </select>
+</label>
+```
+
+- [ ] **Step 2: Update page test** if it asserts on the previous default:
+
+```js
+// Was: expect(html).toContain('value="0" selected>0 · no DC progressive');
+expect(html).toContain('value="2" selected>2 · 1:32 then 1:8 preview');
+```
+
+- [ ] **Step 3: A/B verify.** Re-run the standard A/B protocol. First paint will be **blurrier** (1:32 DC is whole-image at very low res) but should now look like the Sneyers paper — fuzzy whole image → less-fuzzy whole image → AC refinement.
+
+- [ ] **Step 4: Commit.**
+
+```powershell
+git add web/jxl-single-progressive.html web/jxl-single-progressive-page.test.js
+git commit -m "feat(single-progressive): default progressive_dc to 2 (Sneyers canonical layout)"
+```
+
+### Task D2 — Add PSNR-vs-pass chart in the metrics panel
+
+**Files:** `web/jxl-single-progressive.html` (new chart container), `web/jxl-single-progressive.js` (chart logic), `web/jxl-progressive-quality.js` (already exports `computePsnrVsFinal`).
+
+**Why:** the perceptual-cutoff discussion (chapter 3 + phase G) needs PSNR data. Already collected; just not plotted.
+
+- [ ] **Step 1: Add HTML container** in the metrics panel (after the existing `.metric-list`, around HTML line 225):
+
+```html
+<div class="psnr-chart-wrap">
+  <div class="psnr-chart-head">
+    <span>PSNR vs pass</span>
+    <span id="psnr-chart-legend" class="viewer-meta">--</span>
+  </div>
+  <canvas id="psnr-chart" width="380" height="120"></canvas>
+</div>
+```
+
+Add minimal CSS in the same file (in the existing `<style>` block):
+
+```css
+.psnr-chart-wrap { padding: 10px; border-top: 1px solid #263940; }
+.psnr-chart-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--sp-muted); margin-bottom: 6px; }
+#psnr-chart { width: 100%; height: 120px; background: #0a0f11; border: 1px solid #2c4249; border-radius: 6px; }
+```
+
+- [ ] **Step 2: Add `drawPsnrChart`** helper in `web/jxl-single-progressive.js`:
+
+```js
+function drawPsnrChart(passes, targetRgba) {
+    const chartCanvas = document.getElementById('psnr-chart');
+    const legend = document.getElementById('psnr-chart-legend');
+    if (!chartCanvas || !passes.length) return;
+    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
+    if (!finalPass?.pixels) {
+        if (legend) legend.textContent = 'final pixels released';
+        return;
+    }
+    const ctx = chartCanvas.getContext('2d');
+    const w = chartCanvas.width;
+    const h = chartCanvas.height;
+    ctx.fillStyle = '#0a0f11';
+    ctx.fillRect(0, 0, w, h);
+    const padL = 30, padR = 8, padT = 8, padB = 18;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+
+    // Compute PSNR per pass against the final pixels (or against targetRgba if available).
+    const reference = targetRgba ?? finalPass.pixels;
+    const psnrs = passes.map(p => {
+        if (!p.pixels || p.pixels.byteLength !== reference.byteLength) return null;
+        return computePsnrVsFinal(reference, p.pixels);
+    });
+    const finite = psnrs.filter(v => Number.isFinite(v));
+    if (!finite.length) {
+        if (legend) legend.textContent = 'no comparable passes';
+        return;
+    }
+    const minY = Math.max(10, Math.min(...finite) - 2);
+    const maxY = Math.min(80, Math.max(...finite) + 2);
+
+    // Axes.
+    ctx.strokeStyle = '#2c4249';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT);
+    ctx.lineTo(padL, padT + plotH);
+    ctx.lineTo(padL + plotW, padT + plotH);
+    ctx.stroke();
+
+    // Y-axis labels.
+    ctx.fillStyle = '#9fb6b0';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${maxY.toFixed(0)}`, padL - 4, padT + 8);
+    ctx.fillText(`${minY.toFixed(0)}`, padL - 4, padT + plotH);
+    ctx.textAlign = 'left';
+    ctx.fillText('dB', 2, padT + 8);
+
+    // Plot.
+    ctx.strokeStyle = '#7de0b0';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let drewFirst = false;
+    psnrs.forEach((p, i) => {
+        if (!Number.isFinite(p)) return;
+        const x = padL + (i / Math.max(1, passes.length - 1)) * plotW;
+        const y = padT + plotH - ((p - minY) / Math.max(0.01, maxY - minY)) * plotH;
+        if (!drewFirst) { ctx.moveTo(x, y); drewFirst = true; } else { ctx.lineTo(x, y); }
+    });
+    ctx.stroke();
+
+    // Final marker.
+    psnrs.forEach((p, i) => {
+        if (!Number.isFinite(p)) return;
+        const x = padL + (i / Math.max(1, passes.length - 1)) * plotW;
+        const y = padT + plotH - ((p - minY) / Math.max(0.01, maxY - minY)) * plotH;
+        ctx.fillStyle = passes[i].isFinal ? '#f0c86a' : '#7de0b0';
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    if (legend) legend.textContent = `${finite.length} of ${passes.length} passes plotted · ${finite.at(-1).toFixed(1)} dB final`;
+}
+```
+
+- [ ] **Step 3: Wire to `renderMetrics` or end of `runSourceWithSettings`** (after the run completes):
+
+```js
+drawPsnrChart(decode.passes, targetRgba);
+```
+
+(Make `targetRgba` reachable at that scope — either store on the result object or recompute from `loadedSource`.)
+
+- [ ] **Step 4: Update page test.**
+
+```js
+expect(html).toContain('id="psnr-chart"');
+expect(source).toContain('drawPsnrChart');
+expect(source).toContain('computePsnrVsFinal');
+```
+
+- [ ] **Step 5: Test + commit.**
+
+```powershell
+rtk bun test web/jxl-single-progressive-page.test.js
+git add web/jxl-single-progressive.html web/jxl-single-progressive.js web/jxl-single-progressive-page.test.js
+git commit -m "feat(single-progressive): add PSNR-vs-pass chart in metrics panel"
+```
+
+---
