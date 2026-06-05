@@ -494,7 +494,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec }
                     `${pass.t_ms} ms (+${pass.deltaMs} ms) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta`,
                     'info'
                 );
-                await nextPaint();
+                await sleep(0);
             } else if (event.type === 'error') {
                 throw new Error(`${event.code}: ${event.message}`);
             }
