@@ -640,7 +640,7 @@ git commit -m "feat(single-progressive): add Worker decode toggle via jxl-sessio
 
 ### Task C1 — Add `progressive_ac` / `qprogressive_ac` / `decoding_speed` controls
 
-- [ ] **Step 1: Add HTML controls** after the `progressive-dc` label (around HTML line 160):
+- [x] **Step 1: Add HTML controls** after the `progressive-dc` label (around HTML line 160):
 
 ```html
 <label>
@@ -671,7 +671,7 @@ git commit -m "feat(single-progressive): add Worker decode toggle via jxl-sessio
 </label>
 ```
 
-- [ ] **Step 2: Extend `readSettings`** (around line 331):
+- [x] **Step 2: Extend `readSettings`** (around line 331):
 
 ```js
 const acRaw = document.getElementById('progressive-ac')?.value ?? '1';
@@ -688,7 +688,7 @@ return {
 };
 ```
 
-- [ ] **Step 3: Thread into `encodeSneyersDirect`** (around line 416):
+- [x] **Step 3: Thread into `encodeSneyersDirect`** (around line 416):
 
 ```js
 async function encodeSneyersDirect({ rgba, width, height, quality, lossless, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder }) {
@@ -729,7 +729,7 @@ const encodeBytes = await encodeSneyersDirect({
 });
 ```
 
-- [ ] **Step 4: Surface in measurement** (`buildMeasurement` around line 870):
+- [x] **Step 4: Surface in measurement** (`buildMeasurement` around line 870):
 
 ```js
 progressiveAc: settings.progressiveAc,
@@ -742,7 +742,7 @@ decoding_speed: settings.decodingSpeed,
 
 Add to CSV header + row, Markdown table, TOON export. Pattern matches existing `progressive_dc` handling.
 
-- [ ] **Step 5: Update page test.**
+- [x] **Step 5: Update page test.**
 
 ```js
 expect(html).toContain('id="progressive-ac"');
@@ -756,7 +756,7 @@ expect(source).toContain('qprogressive_ac');
 expect(source).toContain('decoding_speed');
 ```
 
-- [ ] **Step 6: Verify encoder option names match facade.** Open `packages/jxl-wasm/src/facade.ts` and grep for `progressiveAc` and `qProgressiveAc` in `EncoderOptions`. If facade expects different casing (`progressive_ac` snake_case), adjust the option names at the call site. **This is a verification step — if the facade does not expose these as TS options, the bridge call will silently ignore them.**
+- [x] **Step 6: Verify encoder option names match facade.** Open `packages/jxl-wasm/src/facade.ts` and grep for `progressiveAc` and `qProgressiveAc` in `EncoderOptions`. If facade expects different casing (`progressive_ac` snake_case), adjust the option names at the call site. **This is a verification step — if the facade does not expose these as TS options, the bridge call will silently ignore them.**
 
 ```powershell
 rtk proxy grep -n "progressiveAc\|qProgressiveAc\|decodingSpeed" packages/jxl-wasm/src/facade.ts
@@ -764,9 +764,9 @@ rtk proxy grep -n "progressiveAc\|qProgressiveAc\|decodingSpeed" packages/jxl-wa
 
 If the facade doesn't expose them, file a follow-up to extend the facade `EncoderOptions` type — small TS change. Document the result in the commit message.
 
-- [ ] **Step 7: Run sweep.** Manual A/B on the same source: `(ac, qac) ∈ {(0,0), (1,1), (2,1), (2,2)}` with `dc=2`. Record pass count + first/final paint per combination. The (2,2) combination should produce ~18-22 passes.
+- [x] **Step 7: Run sweep.** Manual A/B on the same source: `(ac, qac) ∈ {(0,0), (1,1), (2,1), (2,2)}` with `dc=2`. Record pass count + first/final paint per combination. The (2,2) combination should produce ~18-22 passes.
 
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
 
 ```powershell
 git add web/jxl-single-progressive.html web/jxl-single-progressive.js web/jxl-single-progressive-page.test.js
