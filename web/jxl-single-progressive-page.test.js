@@ -64,7 +64,7 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain("BLOCK_BORDER_COLOR = '#ff2d2d'");
     // Bytes-fed tracking per pass
     expect(source).toContain('feedState');
-    expect(source).toContain('FIRST_PAINT_DECODE_CHUNK_BYTES');
+    expect(source).toContain('FIRST_PAINT_CHUNK_RAMP');
     expect(source).toContain('STEADY_DECODE_CHUNK_BYTES');
     expect(source).toContain('bytesFed');
     expect(source).toContain('percentFed');

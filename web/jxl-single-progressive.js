@@ -7,8 +7,8 @@ import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progress
 
 const { process_orf, rgb_to_rgba } = rawWasm;
 const PROGRESSIVE_DETAIL = 'passes';
-const FIRST_PAINT_DECODE_CHUNK_BYTES = 2 * 1024;
-const STEADY_DECODE_CHUNK_BYTES = 16 * 1024;
+const FIRST_PAINT_CHUNK_RAMP = [1 * 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024];
+const STEADY_DECODE_CHUNK_BYTES = 32 * 1024;
 const BLOCK_BORDER_TILE_SIZE = 256;
 const BLOCK_BORDER_SIZE = 2;
 const BLOCK_BORDER_COLOR = '#ff2d2d';
@@ -571,8 +571,16 @@ function computeAndCachePassStats(pass) {
 
 async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
     let offset = 0;
+    let preFirstPaintChunkIndex = 0;
     while (offset < jxlBytes.byteLength) {
-        const chunkBytes = feedState?.passCount > 0 ? STEADY_DECODE_CHUNK_BYTES : FIRST_PAINT_DECODE_CHUNK_BYTES;
+        let chunkBytes;
+        if ((feedState?.passCount ?? 0) > 0) {
+            chunkBytes = STEADY_DECODE_CHUNK_BYTES;
+        } else {
+            const rampIdx = Math.min(preFirstPaintChunkIndex, FIRST_PAINT_CHUNK_RAMP.length - 1);
+            chunkBytes = FIRST_PAINT_CHUNK_RAMP[rampIdx];
+            preFirstPaintChunkIndex++;
+        }
         const start = offset;
         const end = Math.min(jxlBytes.byteLength, offset + chunkBytes);
         await decoder.push(exactBuffer(jxlBytes.subarray(offset, end)));
