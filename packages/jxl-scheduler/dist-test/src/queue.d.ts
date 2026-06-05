@@ -8,14 +8,18 @@ export declare class PriorityQueue<T> {
     private readonly visible;
     private readonly near;
     private readonly background;
+    private _visibleHead;
+    private _nearHead;
+    private _backgroundHead;
+    private _size;
     enqueue(entry: QueueEntry<T>): void;
     peek(): QueueEntry<T> | null;
     dequeue(): QueueEntry<T> | null;
     remove(sessionId: string): boolean;
+    private swapDelete;
     get size(): number;
     get isEmpty(): boolean;
     backgroundIds(): string[];
-    findBySessionId(sessionId: string): QueueEntry<T> | null;
     private lane;
 }
 //# sourceMappingURL=queue.d.ts.map

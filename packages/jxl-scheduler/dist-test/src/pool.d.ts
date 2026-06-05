@@ -73,6 +73,7 @@ export declare class WorkerPool {
         }[];
     };
     acquire(): Promise<PoolWorker | null>;
+    tryAcquireIdle(): PoolWorker | null;
     bind(worker: PoolWorker, sessionId: string): void;
     release(worker: PoolWorker): void;
     /** Destroy and remove a poisoned or crashed worker. */

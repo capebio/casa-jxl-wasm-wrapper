@@ -85,6 +85,7 @@ export class DedupeRegistry {
             this.sessionToSubscribers.delete(sessionId);
         }
     }
+    /** @internal — prefer forEachSubscriber for zero-allocation iteration */
     // Returns all subscriber IDs for a primary (including itself).
     subscribers(primaryId) {
         return [...(this.sessionToSubscribers.get(primaryId) ?? [])];

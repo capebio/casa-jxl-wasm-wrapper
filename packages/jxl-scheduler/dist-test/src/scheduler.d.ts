@@ -35,6 +35,11 @@ export declare class Scheduler {
     private drainingQueue;
     private preemptionCount;
     private totalSessionCount;
+    private _runningCount;
+    private _queuedCount;
+    private _pausedCount;
+    private readonly _metricInner;
+    private readonly _metricMsg;
     private readonly PREEMPT_PROGRESS_W;
     private readonly PREEMPT_AGE_W;
     private readonly PREEMPT_AGE_NORM_MS;

@@ -96,7 +96,7 @@ export class WorkerPool {
             spawning: this.spawning,
             spawnPromises: this.spawnPromises.size,
             capacityRemaining: this.capacityRemaining,
-            workers: [...this.workers.values()].map((w) => ({
+            workers: Array.from(this.workers.values(), (w) => ({
                 id: w.id,
                 activeSessionId: w.activeSessionId,
                 cancelling: w.cancelling,
@@ -140,6 +140,20 @@ export class WorkerPool {
         }
         this.assertInvariants();
         return worker;
+    }
+    // Synchronous fast path: returns an idle worker immediately without any Promise
+    // allocation. Returns null if no idle worker is available (caller must fall
+    // back to the async acquire() path to spawn a new worker).
+    tryAcquireIdle() {
+        if (this.destroyed)
+            return null;
+        const worker = this.takeIdleWorker();
+        if (worker !== null && this.reserve(worker)) {
+            this.metrics.acquiredIdle++;
+            this.assertInvariants();
+            return worker;
+        }
+        return null;
     }
     bind(worker, sessionId) {
         if (this.destroyed) {
@@ -185,7 +199,7 @@ export class WorkerPool {
     /** Manually evict idle workers, e.g. on memory pressure. Returns count reaped. */
     reapIdle({ preserveMinIdle = true } = {}) {
         let count = 0;
-        for (const worker of [...this.idle]) {
+        for (const worker of this.idle) {
             if (preserveMinIdle && this.idle.size <= this.minIdle)
                 break;
             this.recycle(worker);
@@ -207,7 +221,7 @@ export class WorkerPool {
         this.generation++;
         // Wait for in-flight spawns so no worker escapes cleanup.
         await Promise.allSettled([...this.spawnPromises]);
-        const shutdownPromises = [...this.workers.values()].map((worker) => this.cleanupAndRemove(worker, true, POOL_SHUTDOWN_TIMEOUT_MS));
+        const shutdownPromises = Array.from(this.workers.values(), (worker) => this.cleanupAndRemove(worker, true, POOL_SHUTDOWN_TIMEOUT_MS));
         await Promise.allSettled(shutdownPromises);
         this.idle.clear();
         this.active.clear();
@@ -312,13 +326,17 @@ export class WorkerPool {
     }
     takeIdleWorker() {
         for (const worker of this.idle) {
-            this.idle.delete(worker);
             if (this.workers.has(worker.id) &&
                 worker.activeSessionId === null &&
                 !worker.cancelling &&
                 !worker.handle.terminated) {
+                // Remove before returning; reserve() will also call idle.delete
+                // (no-op), but that is safe and cheaper than the previous pattern
+                // of always deleting first then calling recycle/reserve.
+                this.idle.delete(worker);
                 return worker;
             }
+            // Stale: recycle() → cleanupAndRemove() handles idle.delete.
             this.recycle(worker);
         }
         return null;
