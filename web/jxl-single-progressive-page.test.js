@@ -42,10 +42,10 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html).toContain('value="display" selected');
     expect(html).toContain('Display · 1920 px');
     expect(html).toContain('value="very-large"');
-    expect(html).toContain('value="very-high" selected');
+    expect(html).toContain('value="medium" selected');
     expect(html).toContain('value="0" selected>Unthrottled');
     expect(source).toContain("DEFAULT_SIZE_PRESET = 'display'");
-    expect(source).toContain("DEFAULT_QUALITY_PRESET = 'very-high'");
+    expect(source).toContain("DEFAULT_QUALITY_PRESET = 'medium'");
     // Lossless maps to distance=0
     expect(source).toContain("...(lossless ? { distance: 0 } : {})");
     // Progressive DC and group order are explicit tuning controls.

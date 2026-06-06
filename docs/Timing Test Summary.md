@@ -96,3 +96,5 @@ This batch extended the earlier benchmark set with full TOON timing rows for qua
   - Lossy VarDCT/default is the web path; lossless Modular was 6,569,529B and slower, reserved for archival/local workflows.
 
 **Updated setting summary:** use `target=400, quality=80` for thumbnails; `target=800, quality=85` for fast previews; `target=1600, quality=85, effort=3, progressive=true` for web streaming/lightbox; `target=2400, quality=85-90` only for local detail views; lossless Modular only for archival exactness.
+**Timing harness note:** the single-progressive page now defaults to `quality=85` instead of `q95`, which removes the expensive default path that made larger manual runs appear frozen. Keep `q95` as an explicit opt-in only.
+

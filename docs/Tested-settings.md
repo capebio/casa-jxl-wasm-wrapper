@@ -60,6 +60,9 @@ If executing benchmarks that require environmental variables or overrides, agent
   - progressive toggle
   - effort shipping window
   - target size ladder
+- [ ] Tests 18 + 20 validation batch (planned 2026-06-06):
+  - progressive toggle
+  - target size ladder
   - source format sweep
   - modular plus lossless matrix
 

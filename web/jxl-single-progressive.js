@@ -99,7 +99,7 @@ const QUALITY_PRESETS = {
     'very-high': { label: 'Very High', quality: 95,  kbPerMp: 400 },
     'lossless':  { label: 'Lossless',  quality: 100, distance: 0, kbPerMp: 3000 },
 };
-const DEFAULT_QUALITY_PRESET = 'very-high';
+const DEFAULT_QUALITY_PRESET = 'medium';
 const GROUP_ORDER_LABELS = {
     0: 'scanline',
     1: 'center-out',
