@@ -39,6 +39,8 @@ export class JxlCacheBrowser {
   private missCount = 0;
   private manifestDirty = false;
   private manifestPendingWrite: Promise<void> | null = null;
+  // Incremented on every clear(). Guards async operations that straddle a clear boundary.
+  private _generation = 0;
 
   constructor(private readonly opts: CacheOptions) {
     this.memoryCache = new LRUCache(opts.memoryLimit);
@@ -115,6 +117,7 @@ export class JxlCacheBrowser {
   }
 
   async clear(): Promise<void> {
+    this._generation++;
     this.memoryCache.clear();
     this.persistentTracker.clear();
     this.inflightGets.clear();
@@ -161,6 +164,8 @@ export class JxlCacheBrowser {
   private async getPersistent(key: string): Promise<ArrayBuffer | undefined> {
     if (!this.opfsRoot) return undefined;
 
+    const gen = this._generation;
+
     try {
       const entry = this.persistentTracker.get(key);
       const name = entry?.name ?? safeCacheName(key);
@@ -173,10 +178,9 @@ export class JxlCacheBrowser {
       const buffer = await file.arrayBuffer();
 
       // Guard against a clear() that ran while we were awaiting OPFS I/O.
-      // If opfsRoot was nulled out or the persistentTracker no longer knows
-      // this key (both happen during clear()), skip the promotion so we don't
-      // inject a stale entry into the freshly-cleared memory cache.
-      if (this.opfsRoot === null) return undefined;
+      // clear() increments _generation, so any mismatch means the cache was
+      // wiped and we must not re-promote stale data.
+      if (this._generation !== gen) return undefined;
 
       this.memoryCache.set(key, buffer, buffer.byteLength);
 
@@ -196,20 +200,27 @@ export class JxlCacheBrowser {
   private async setPersistent(key: string, buffer: ArrayBuffer): Promise<void> {
     if (!this.opfsRoot) return;
 
+    const gen = this._generation;
     const size = buffer.byteLength;
     const name = safeCacheName(key);
 
     await this.evictPersistentUntilFits(size);
 
+    // Abort if clear() ran while we were evicting or waiting in the inflight chain.
+    if (this._generation !== gen) return;
+
     try {
       await this.writePersistentFile(name, buffer);
+      if (this._generation !== gen) return;
       this.persistentTracker.set(key, { name }, size);
     } catch (e) {
       if (e instanceof Error && e.name === 'QuotaExceededError') {
         console.info(`[JxlCacheBrowser] Quota exceeded for "${key}", evicting aggressively`);
         await this.evictPersistentFraction(0.75);
+        if (this._generation !== gen) return;
         try {
           await this.writePersistentFile(name, buffer);
+          if (this._generation !== gen) return;
           this.persistentTracker.set(key, { name }, size);
         } catch (retryErr) {
           // Persistent store is full even after aggressive eviction — treat as

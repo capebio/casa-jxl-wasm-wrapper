@@ -1628,7 +1628,10 @@ class LibjxlEncoder implements JxlEncoder {
           (this as any)._advIdsPtr = advIdsPtr;
           (this as any)._advValuesPtr = advValuesPtr;
         } else {
-          advCount = 0; // allocation failed
+          // Partial allocation: free whichever succeeded to avoid WASM heap leak.
+          if (advIdsPtr) module._free(advIdsPtr);
+          if (advValuesPtr) module._free(advValuesPtr);
+          advCount = 0;
         }
       }
 

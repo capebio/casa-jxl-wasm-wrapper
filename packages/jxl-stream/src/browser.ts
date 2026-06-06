@@ -127,11 +127,13 @@ export function toReadableStream(
     async cancel(reason) {
       removeAbortHandler();
 
-      if (typeof iterator.return === 'function') {
-        await iterator.return();
+      try {
+        if (typeof iterator.return === 'function') {
+          await iterator.return();
+        }
+      } finally {
+        await session.cancel(reason);
       }
-
-      await session.cancel(reason);
     },
   });
 }
