@@ -45,15 +45,17 @@ function resolveDecoderProgressiveDetail(options) {
     }
 }
 function resolveEncoderBridgeSettings(options) {
+    const groupOrder = options.groupOrder ?? 0;
     if (!options.progressive) {
-        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0 };
+        return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, groupOrder };
     }
     const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
     return {
         progressiveDc: 1,
-        progressiveAc: acEnabled ? 1 : 0,
-        qProgressiveAc: acEnabled ? 1 : 0,
+        progressiveAc: options.progressiveAc != null ? options.progressiveAc : (acEnabled ? 1 : 0),
+        qProgressiveAc: options.qProgressiveAc != null ? options.qProgressiveAc : (acEnabled ? 1 : 0),
         buffering: options.chunked ? 2 : 0,
+        groupOrder,
     };
 }
 export class CapabilityMissing extends Error {
@@ -1123,7 +1125,7 @@ class LibjxlEncoder {
         if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
             const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
             const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-            const { progressiveDc, progressiveAc, qProgressiveAc, buffering } = resolveEncoderBridgeSettings(this.options);
+            const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder } = resolveEncoderBridgeSettings(this.options);
             const adv = this.options.advancedFrameSettings;
             let advIdsPtr = 0;
             let advValuesPtr = 0;
@@ -1152,7 +1154,7 @@ class LibjxlEncoder {
                 this.wasmEncState = createFn(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, advIdsPtr, advValuesPtr, advCount);
             }
             else {
-                this.wasmEncState = module._jxl_wasm_enc_create_image(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering);
+                this.wasmEncState = module._jxl_wasm_enc_create_image(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, 0);
             }
             if (this.wasmEncState === 0)
                 throw new Error("JXL streaming encoder: pixel buffer allocation failed");

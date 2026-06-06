@@ -111,6 +111,9 @@ export interface EncoderOptions {
   effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   progressive: boolean;
   progressiveFlavor?: "dc" | "ac";
+  progressiveAc?: 0 | 1 | 2;
+  qProgressiveAc?: 0 | 1 | 2;
+  groupOrder?: 0 | 1;
   previewFirst: boolean;
   chunked: boolean;
   /** Max dimensions (px) of sidecar thumbnails to yield before the full image. Sorted ascending. */
@@ -290,7 +293,7 @@ interface LibjxlWasmModule {
   // #15: Lossless JPEG → JXL transcode
   _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
   // #16: Streaming input encoder — pre-allocate pixel buffer in WASM, push chunks, finish
-  _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+  _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
   // Advanced escape hatch variants
   _jxl_wasm_enc_create_image_adv?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, idsPtr: number, valuesPtr: number, count: number): number;
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
@@ -352,15 +355,17 @@ function resolveDecoderProgressiveDetail(options: DecoderOptions): 0 | 1 | 2 | 3
 }
 
 function resolveEncoderBridgeSettings(options: EncoderOptions) {
+  const groupOrder = options.groupOrder ?? 0;
   if (!options.progressive) {
-    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0 };
+    return { progressiveDc: 0, progressiveAc: 0, qProgressiveAc: 0, buffering: options.chunked ? 2 : 0, groupOrder };
   }
   const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
   return {
     progressiveDc: 1,
-    progressiveAc: acEnabled ? 1 : 0,
-    qProgressiveAc: acEnabled ? 1 : 0,
+    progressiveAc: options.progressiveAc != null ? options.progressiveAc : (acEnabled ? 1 : 0),
+    qProgressiveAc: options.qProgressiveAc != null ? options.qProgressiveAc : (acEnabled ? 1 : 0),
     buffering: options.chunked ? 2 : 0,
+    groupOrder,
   };
 }
 
@@ -1551,7 +1556,7 @@ class LibjxlEncoder implements JxlEncoder {
     if (!wantSidecars && !hasMetadataOpts && caps.streamingInput) {
       const distance = this.options.distance ?? distanceFromQuality(this.options.quality);
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
-      const { progressiveDc, progressiveAc, qProgressiveAc, buffering } = resolveEncoderBridgeSettings(this.options);
+      const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder } = resolveEncoderBridgeSettings(this.options);
 
       const adv = this.options.advancedFrameSettings;
       let advIdsPtr = 0;
@@ -1593,6 +1598,7 @@ class LibjxlEncoder implements JxlEncoder {
           distance, this.options.effort,
           fmtIndex, this.options.hasAlpha ? 1 : 0,
           progressiveDc, progressiveAc, qProgressiveAc, buffering,
+          groupOrder, 0
         );
       }
 

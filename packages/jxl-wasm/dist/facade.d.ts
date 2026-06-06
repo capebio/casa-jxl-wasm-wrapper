@@ -108,6 +108,9 @@ export interface EncoderOptions {
     effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
     progressive: boolean;
     progressiveFlavor?: "dc" | "ac";
+    progressiveAc?: 0 | 1 | 2;
+    qProgressiveAc?: 0 | 1 | 2;
+    groupOrder?: 0 | 1;
     previewFirst: boolean;
     chunked: boolean;
     /** Max dimensions (px) of sidecar thumbnails to yield before the full image. Sorted ascending. */
@@ -253,7 +256,7 @@ interface LibjxlWasmModule {
     _jxl_wasm_enc_error?(state: number): number;
     _jxl_wasm_enc_free?(state: number): void;
     _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
-    _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+    _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
     _jxl_wasm_enc_create_image_adv?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, idsPtr: number, valuesPtr: number, count: number): number;
     _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
     _jxl_wasm_enc_advance_written?(state: number, size: number): number;
