@@ -1,6 +1,87 @@
 # Optimal Settings Strategy
 
-Central reference for recording encode/decode timings and choosing settings for different scenarios.
+Central reference for recording encode/decode timings and choosing settings for different scenarios. See the **TOON Output Structure** chapter below for the required file layout.
+
+## TOON Output Structure
+
+Use TOON as a line-oriented, indentation-based encoding of the run ledger. For timing work, the important constraint is that uniform records stay compact and parseable:
+
+- One benchmark run equals one `.toon` file.
+- The file starts with a run header, then one or more tabular sections.
+- Shared values belong in the header.
+- Only values that vary per measurement belong in the table body.
+- Each run must record the agent that executed it.
+- Use a table-like layout for the repeated timing rows.
+- Declare the row fields once in the table header, then emit one row per measurement.
+- Keep the row values in a consistent order so the file can be parsed mechanically.
+
+Recommended structure:
+
+```toon
+TestName: timing-tests
+RunTimestamp: 2026-06-06T02:23:35.184Z
+Agent: codex
+Tier: simd
+Source: mixed
+Target: 1600
+Quality: 85
+Efforts: 3
+Modes: std, std+chunked
+TimeBase: 2026-06-06T02:
+
+---
+runs[4]{t|mode|effort|file|raw_ms|rgba_ms|encode_ms|total_ms|size}:
+  23:^49.581@ | std           | 3 | P22004^07@.ORF | 4080.830 | 330.705 | 9842.922 | 14254.457 | 1715365B
+  &56.927@    | std^+chunked@ | ~ | ~               | ~        | ~       | 7345.449 | 11756.984 | 1744648B
+  24:^01.637@ | &@            | ~ | P22004^77@.jpg | 0        | 0       | 2591.928 | 2591.928  | 560163B
+  &04.280@    | &+chunked@    | ~ | ~              | ~        | ~       | 2643.071 | 2643.071  | 574390B
+```
+
+Rules for this document:
+
+- Use a single TOON file per run.
+- Put all measurements for that run in that file.
+- Preserve each measurement timestamp inside the table rows.
+- Preserve the agent identity in the run header.
+- Do not emit one file per permutation.
+- Do not repeat constants in every row.
+- Do not use ad hoc nested key trees when the data is a uniform row set.
+- Use shorthand for repeated fields:
+  - If a field stays unchanged across consecutive rows, omit it until it changes.
+  - Use `~` to mean "same as the previous row in this column".
+  - Use `prefix^value@suffix` to define a reusable template for the current column. The expanded value is `prefix + value + suffix`.
+  - Use `&value@` to reuse the current column template. The expanded value is the previous template's `prefix + value + suffix`.
+  - A new `prefix^value@suffix` definition replaces the active template for that column only.
+  - Use `TimeBase` for the shared date/hour prefix when useful, then use template shorthand for repeated minute/second prefixes.
+  - Use dictionaries only when the repeated values are labels or non-patterned strings; for numbered file series and timestamps, prefer column templates.
+  - In numeric timing columns, `0` is canonical shorthand for `0.000`.
+  - Always write filesize with a unit suffix such as `B` or `KB`; use that as the final field in the row.
+  - The row body should only spell out the delta from the previous row when that is unambiguous.
+
+Template shorthand is column-scoped and must be mechanically expandable. Reserved characters in unquoted cells are `|`, `~`, `^`, `@`, and `&`. If a literal cell needs one, quote the whole cell with double quotes; quoted cells do not expand shorthand.
+
+## Benchmark Recording Rules
+
+- Keep benchmark runs short. Prefer narrowly scoped sweeps over long all-file passes.
+- Write every timing result to `docs/outputs/timing tests/`.
+- Record each benchmark test run in a single TOON file containing all its measurements.
+- Each measurement written should include a datetimestamp.
+- Record the agent that ran the benchmark.
+- File naming must include the test name and a datetime stamp so interrupted runs can resume cleanly.
+- Use TOON (`text/toon`) for the per-run output files, not JSON. For format details, see [ToonInstructions.md](./ToonInstructions.md).
+- Treat this document as the human-readable source of truth. The TOON files are the durable timing ledger.
+
+Suggested filename shape:
+
+`<datetime>-<test-name>.toon`
+
+Suggested record contents:
+
+- input files
+- permutation settings
+- per-file timings
+- aggregate timings
+- notes on failures or interruption state
 
 ## Current Findings (2026-06-05)
 
@@ -19,6 +100,62 @@ Central reference for recording encode/decode timings and choosing settings for 
 - Feature fires only for container JXLs with explicit JPEG bitstream (v2 or encode-with-recon pathway)
 
 ---
+
+## Benchmark Test Options
+
+Detailed configuration and usage options for backend CLI benchmark scripts (excluding browser-based tests).
+
+### Effort Sweep Benchmark
+- **Description:** Encodes ORFs at varying effort levels (default: 3, 5, 7) to compare encode time, file size, decode pass arrival time, and visual quality.
+- **Usage:**
+  ```bash
+  EFFORT_LIMIT=2 EFFORT_TARGET=1600 EFFORT_QUALITY=85 node benchmark/effort-sweep-benchmark.mjs
+  ```
+
+### Progressive Byte Benchmark
+- **Description:** Encodes JXL using progressive web presets and streams decode at specific cumulative byte cutoffs, recording detailed timing and frame data.
+- **Usage:**
+  ```bash
+  PBB_LIMIT=3 PBB_TARGET=800 PBB_QUALITY=85 PBB_DETAIL=passes node benchmark/progressive-byte-benchmark.mjs
+  ```
+
+### Streaming SSIM Benchmark
+- **Description:** Evaluates progressive decode visual quality by measuring SSIM/PSNR against full reference decodes at byte cutoffs, identifying the earliest "acceptable frame" threshold.
+- **Usage:**
+  ```bash
+  SSIM_LIMIT=2 SSIM_TARGET=1600 SSIM_EFFORT=3 SSIM_QUALITY=85 SSIM_THRESHOLD=0.9 node benchmark/streaming-ssim-benchmark.mjs
+  ```
+
+### P3.1 Feature Benchmark
+- **Description:** Benchmarks specific progressive decoding features, comparing timings for `previewFirst` (DC-only ds=2 vs first AC pass), `downsample=2`, and region-of-interest extraction vs full decode.
+- **Usage:**
+  ```bash
+  P3_LIMIT=5 P3_TARGET=1600 P3_EFFORT=3 P3_QUALITY=85 node benchmark/p3-features-benchmark.mjs
+  ```
+
+### Progressive Timing Benchmark (Test_1)
+- **Description:** Compares progressive JXL (first-frame arrival) vs 1-shot JXL (final decode) across a size ladder, quantifying whether progressive gives faster first paint. Also tests chunked stream delivery (PT_STEPS equal slices) to simulate byte-by-byte streaming.
+- **Usage:**
+  ```bash
+  PT_LIMIT=3 PT_SIZES=300,800,1600 PT_QUALITY=85 PT_EFFORT=3 PT_STEPS=1,4,8 node benchmark/progressive-timing-benchmark.mjs
+  ```
+- **Output:** TOON file at `docs/outputs/timing tests/<datetime>-progressive-timing.toon`
+- **Key metrics:** `prog_first_ms` vs `shot_final_ms`, speedup multiplier, pass count
+
+### Policy Matrix Sweep
+- **Description:** A targeted matrix sweep for tuning the `jxl-policy` preset by testing combinations of effort, quality, lossless, progressive, modular, and resampling options.
+- **Usage:**
+  ```bash
+  PM_FILE=<path_to_raw> PM_REPS=2 PM_TIMEOUT=60000 node benchmark/policy-matrix.mjs
+  ```
+
+## Desirable Tests
+
+Future or desirable backend benchmarks that would be beneficial to implement or formalize. Metrics below can be filled with ticks (✓) for capability or average timings/findings for continuous measurements.
+
+| TestID | TestName | Brief_descr | Option_A_name vs Option_B_name | .ORF | .RAW | .CR2 | .JPG | small (320px) | medium (800px) | High (1920px) | Original size |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Test_1 | progressive vs 1-shot | Assess total decode time | 430ms vs 230ms | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## Test Scenarios
 

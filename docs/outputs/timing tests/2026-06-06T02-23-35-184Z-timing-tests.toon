@@ -1,0 +1,22 @@
+TestName: timing-tests
+RunTimestamp: 2026-06-06T02-23-35-184Z
+Agent: codex
+Tier: relaxed-simd-mt
+Source: mixed
+Target: 1600
+Quality: 85
+Efforts: 3
+Modes: std, std+chunked
+TimeBase: 2026-06-06T02:
+
+---
+runs[4]{t|mode|effort|file|raw_ms|rgba_ms|encode_ms|total_ms|size}:
+  23:^49.581@ | std^@        | 3 | P22004^07@.ORF | 4080.830 | 330.705 | 9842.922 | 14254.457 | 1715365B
+  &56.927@    | &+chunked@   | ~ | ~               | ~        | ~       | 7345.449 | 11756.984 | 1744648B
+  23:^59.701@ | &@           | ~ | P22004^77@.jpg | 0        | 0       | 2649.010 | 2649.010  | 560163B
+  24:^02.417@ | &+chunked@   | ~ | ~              | ~        | ~       | 2715.441 | 2715.441  | 574390B
+
+# Aggregates
+TotalRecords: 4
+TotalEncodeMs: 22552.822
+TotalWallMs: 31375.892
