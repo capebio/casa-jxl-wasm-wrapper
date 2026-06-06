@@ -1,0 +1,17 @@
+TestName: First-Paint Optimization - Streaming (Test_5)
+RunTimestamp: 2026-06-06T04:59:01.107Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Effort: 3
+Notes: Decode progressive JXL at cumulative byte cutoffs; compare full, downsample=2, and center ROI.
+TimeBase: 2026-06-06T04:
+
+---
+runs[4]{t|file|cutoff|bytes|raw_ms|rgba_ms|encode_ms|ref_ms|first_ms|full_ms|ds2_ms|roi_ms|passes|psnr|size}:
+  58:55.968 | P2200571.ORF | 25% | 116378 | 2909.648 | 331.699 | 775.672 | 308.421 | 198.341 | 388.517 | 388.321 | 377.547 | 2 | 21.86 | 465511B
+  58:57.629 | ~ | 50% | 232756 | ~ | ~ | ~ | ~ | 196.482 | 547.782 | 542.631 | 541.817 | 3 | 28.67 | 465511B
+  58:59.310 | ~ | 75% | 349133 | ~ | ~ | ~ | ~ | 197.989 | 547.500 | 548.667 | 561.217 | ~ | 31.57 | 465511B
+  59:01.086 | ~ | 100% | 465511 | ~ | ~ | ~ | ~ | 192.834 | 573.449 | 603.343 | 576.708 | ~ | 99.99 | 465511B
+
