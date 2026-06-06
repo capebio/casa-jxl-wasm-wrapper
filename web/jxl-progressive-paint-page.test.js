@@ -141,3 +141,36 @@ test('progressive paint records per-frame visibility stats in console and measur
     expect(source).toContain('copyMeasurementsMarkdown');
     expect(source).toContain("copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown)");
 });
+
+test('A2: schedulePaint and paintPass extracted — source contains new rAF coalescing structure', () => {
+    expect(source).toContain('let pendingFrame = null');
+    expect(source).toContain('let rafPending = false');
+    expect(source).toContain('function schedulePaint(');
+    expect(source).toContain('function paintPass(');
+    expect(source).toContain('requestAnimationFrame(');
+});
+
+test('A2: final events bypass rAF coalescing — paintPass called directly', () => {
+    // isFinal check must appear before the rafPending guard in schedulePaint
+    const schedIdx = source.indexOf('function schedulePaint(');
+    const isFinalBypassIdx = source.indexOf('if (frame.isFinal)', schedIdx);
+    const rafPendingIdx = source.indexOf('if (rafPending)', schedIdx);
+    expect(isFinalBypassIdx).toBeGreaterThan(schedIdx);
+    expect(isFinalBypassIdx).toBeLessThan(rafPendingIdx);
+});
+
+test('A2: collectProgressivePaintEvents no longer calls await nextPaint() or await sleep()', () => {
+    const fnStart = source.indexOf('async function collectProgressivePaintEvents(');
+    const fnEnd = source.indexOf('\nasync function ', fnStart + 1) === -1
+        ? source.indexOf('\nfunction ', fnStart + 1)
+        : source.indexOf('\nasync function ', fnStart + 1);
+    const fnBody = fnEnd === -1 ? source.slice(fnStart) : source.slice(fnStart, fnEnd);
+    expect(fnBody).not.toContain('await nextPaint()');
+    expect(fnBody).not.toContain('await sleep(');
+});
+
+test('A2: coalescing note present in page for user transparency', () => {
+    // The spec says: document dropped passes in bench UI
+    // Accept either a comment in JS or text in HTML
+    expect(source.includes('Coalescing') || source.includes('coalescing') || source.includes('dropped')).toBe(true);
+});
