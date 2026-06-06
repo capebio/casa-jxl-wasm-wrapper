@@ -1,0 +1,18 @@
+TestName: Dots + ColorTransform Sweep (Test_16)
+RunTimestamp: 2026-06-06T10:19:16.379Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Effort: 3
+Notes: dots(0,1) x colorTransform(0,1,2); advanced coding tool impact at locked lightbox settings
+TimeBase: 2026-06-06T10:
+
+---
+runs[6]{t|file|dots|color_transform|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "19:^08.065@" | "P^2200571@.ORF" | 0 | 0 | 6055.638 | 682.118 | 1232.593 | 1076.135 | 9046.484 | 465559B
+  "&09.842@" | ~ | ~ | 1 | ~ | ~ | 897.118 | 869.645 | 8504.520 | ~
+  "&11.927@" | ~ | ~ | 2 | ~ | ~ | 1192.050 | 891.788 | 8821.594 | ~
+  "&13.710@" | ~ | 1 | 0 | ~ | ~ | 1093.891 | 686.509 | 8518.156 | ~
+  "&15.128@" | ~ | ~ | 1 | ~ | ~ | 794.514 | 622.646 | 8154.917 | ~
+  "&16.378@" | ~ | ~ | 2 | ~ | ~ | 730.695 | 515.961 | 7984.412 | ~

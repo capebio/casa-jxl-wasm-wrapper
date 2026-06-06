@@ -69,3 +69,30 @@ Based on these results, we can definitively establish the locked-in settings for
 5. **Modular:** Rely on default (VarDCT), do not force.
 
 These settings will be codified into `docs/Tested-settings.md`.
+
+## 2026-06-06 Correlation-Derived Timing Batch (Tests 13-22)
+
+This batch extended the earlier benchmark set with full TOON timing rows for quality, modular, lossless, advanced matrix knobs, streaming-vs-local proxy, effort, target size, source format, and archival output. Each row records `raw_ms`, `rgba_ms`, `encode_ms`, `decode_ms`, `total_ms`, and `size`.
+
+- [x] **Test 13: Quality Ladder (`test_13_quality_ladder_sweep.mjs`)**
+  - At 1600px effort=3, `q85` produced 465,511B and remains the best web-lightbox balance. `q90` grew to 613,886B; `q95` grew to 1,042,090B.
+- [x] **Test 14: Modular Mode (`test_14_modular_mode_sweep.mjs`)**
+  - Forced Modular produced 2,216,104B and much slower encode/decode. VarDCT/default remains the right photographic path.
+- [x] **Test 15: Lossless Ladder (`test_15_lossless_ladder_sweep.mjs`)**
+  - Lossless output was 6,026,422B at 1600px, ~13x the q85 lossy output. Use only for archival/local exactness.
+- [x] **Test 16: Dots + ColorTransform (`test_16_dots_color_transform_sweep.mjs`)**
+  - No size change across settings. Timing varied, but no visual validation was collected, so do not lock these advanced knobs.
+- [x] **Test 17: PhotonNoiseIso (`test_17_photon_noise_iso_sweep.mjs`)**
+  - No size change across ISO settings in this run. Keep disabled unless visual quality tests justify it.
+- [x] **Test 18: Progressive Toggle (`test_18_progressive_toggle_sweep.mjs`)**
+  - Progressive output was slightly larger (465,511B vs 444,862B) but faster to encode/decode in this run. Keep progressive for streaming and as the default local output.
+- [x] **Test 19: Effort Shipping Window (`test_19_effort_shipping_window_sweep.mjs`)**
+  - Effort 3 retained the smaller 465,511B output with encode+decode near effort 2. Effort 4 did not improve size enough to matter.
+- [x] **Test 20: Target Size Ladder (`test_20_target_size_ladder_sweep.mjs`)**
+  - Recommended size presets: 400px q80 (~27KB), 800px q85 (~128KB), 1600px q85 (~466KB), 2400px q85 (~942KB).
+- [x] **Test 21: Source Format Sweep (`test_21_source_format_sweep.mjs`)**
+  - RAW decode dominates source-format variance: CR2 ~7167ms, DNG ~2354ms, ORF ~3831ms in this run.
+- [x] **Test 22: Modular + Lossless Matrix (`test_22_modular_lossless_matrix.mjs`)**
+  - Lossy VarDCT/default is the web path; lossless Modular was 6,569,529B and slower, reserved for archival/local workflows.
+
+**Updated setting summary:** use `target=400, quality=80` for thumbnails; `target=800, quality=85` for fast previews; `target=1600, quality=85, effort=3, progressive=true` for web streaming/lightbox; `target=2400, quality=85-90` only for local detail views; lossless Modular only for archival exactness.

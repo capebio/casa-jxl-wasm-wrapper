@@ -99,6 +99,34 @@ Suggested record contents:
 - Extraction scan (pure JS) would be <1ms if bytes were present
 - Feature fires only for container JXLs with explicit JPEG bitstream (v2 or encode-with-recon pathway)
 
+## Current Findings (2026-06-06)
+
+### Correlation-Derived Timing Batch (Tests 13-22, 1 representative file unless format sweep)
+
+All rows were written as TOON ledgers in `docs/outputs/timing tests/` with `raw_ms`, `rgba_ms`, `encode_ms`, `decode_ms`, `total_ms`, and `size`. The repeated RAW decode stage is noisy, so decisions below weight encode/decode/size deltas more heavily than total wall time when the same source file is reused.
+
+| Decision Area | Finding | Recommended Setting |
+|---|---:|---|
+| Quality ladder | `q80` = 382KB, `q85` = 466KB, `q90` = 614KB, `q95` = 1042KB at 1600px. `q85` is the best lightbox balance; `q90+` grows quickly. | `quality=80` for medium previews, `quality=85` for web lightbox, `quality=90` only for local/detail inspection |
+| Modular | Forced VarDCT (`modular=0`) was faster than auto in this run with same bytes; forced Modular was 2.2MB and much slower. | Keep lossy photo output VarDCT/default; avoid forced Modular except lossless/line art |
+| Lossless | Lossless Modular was 6.0-6.6MB at 1600px, ~13-14x the lossy bytes, with slower decode. | Use lossless only for archival/local-original workflows |
+| Progressive vs local one-shot | Progressive was 466KB vs one-shot 445KB, but final decode and encode were faster in this run. | Keep `progressive=true` for streaming/web; acceptable for local default too |
+| Effort window | Effort 3 kept the smaller 466KB output while matching effort 2 timing; effort 4 gave no meaningful size win. | Keep `effort=3`; do not raise to 4 for web |
+| Target ladder | 400px q80 = 27KB, 800px q85 = 128KB, 1600px q85 = 466KB, 2400px q85 = 942KB. JXL encode+decode rises from ~0.8s at 400px to ~2.9s at 2400px. | 400px thumbnails, 800px fast preview, 1600px web lightbox, 2400px local/detail only |
+| Source format | CR2 RAW decode was slowest (7167ms), DNG fastest (2354ms), ORF middle (3831ms). | Treat RAW decode as source-format bottleneck; JXL settings cannot hide CR2 cost |
+| Dots/colorTransform | No byte-size change in this run; some timing variation, likely build/settings noise without visual validation. | Do not lock advanced dots/color transform yet |
+| Photon noise ISO | No byte-size change; timing varied without quality/visual validation. | Keep `photonNoiseIso` disabled by default |
+
+### Size/Use Presets
+
+| Use Case | Target | Quality | Effort | Progressive | Expected File From Test_20 | Notes |
+|---|---:|---:|---:|---|---:|---|
+| Gallery thumbnail | 400 | 80 | 3 | true | 27KB | Small enough for fast lists; decode ~134ms in this run |
+| Fast preview / constrained web | 800 | 85 | 3 | true | 128KB | Best total JXL encode+decode timing in target ladder |
+| Web lightbox / streaming | 1600 | 85 | 3 | true | 466KB | Current locked default remains right |
+| Local detail / high-DPI inspection | 2400 | 85-90 | 3 | true | 942KB at q85 | Use when local CPU/storage matters less than detail |
+| Archival / exact RGB | 1600+ | lossless | 3 | true | 6.0-6.6MB at 1600px | Use only when exactness beats latency/bytes |
+
 ---
 
 ## Benchmark Test Options

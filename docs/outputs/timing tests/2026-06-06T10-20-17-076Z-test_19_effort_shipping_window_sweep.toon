@@ -1,0 +1,15 @@
+TestName: Effort Shipping Window Sweep (Test_19)
+RunTimestamp: 2026-06-06T10:20:17.076Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Notes: effort(1,2,3,4); narrow shipping window around current effort=3 default
+TimeBase: 2026-06-06T10:
+
+---
+runs[4]{t|file|effort|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "20:^14.273@" | "P^2200571@.ORF" | 1 | 4635.824 | 424.606 | 1039.181 | 457.293 | 6556.904 | 583310B
+  "&15.202@" | ~ | 2 | ~ | ~ | 524.868 | 399.459 | 5984.758 | ~
+  "&16.116@" | ~ | 3 | ~ | ~ | 515.685 | 398.140 | 5974.256 | 465511B
+  "&17.076@" | ~ | 4 | ~ | ~ | 550.985 | 407.776 | 6019.191 | 465446B

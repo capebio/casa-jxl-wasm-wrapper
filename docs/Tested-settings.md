@@ -48,3 +48,27 @@ If executing benchmarks that require environmental variables or overrides, agent
 - `EFFORT=3`
 - `QUALITY=85` (or `80` for small targets)
 - `TARGET=1600` (or `400` for thumbnails)
+
+## Completed Timing Batches
+
+- [x] Tests 13-22 correlation-derived timing sweep (completed 2026-06-06):
+  - quality ladder
+  - modular mode
+  - lossless ladder
+  - dots plus color transform
+  - photon noise ISO
+  - progressive toggle
+  - effort shipping window
+  - target size ladder
+  - source format sweep
+  - modular plus lossless matrix
+
+## Updated Presets From Tests 13-22
+
+| Scenario | Target | Quality | Effort | Progressive | Notes |
+|---|---:|---:|---:|---|---|
+| Gallery thumbnails | 400 | 80 | 3 | true | ~27KB in Test_20 |
+| Fast preview | 800 | 85 | 3 | true | ~128KB in Test_20 |
+| Web lightbox / streaming | 1600 | 85 | 3 | true | ~466KB in Tests 13/20 |
+| Local detail inspection | 2400 | 85-90 | 3 | true | ~942KB at q85 in Test_20 |
+| Archival exactness | 1600+ | lossless | 3 | true | 6MB+ at 1600px; use only when exactness wins |

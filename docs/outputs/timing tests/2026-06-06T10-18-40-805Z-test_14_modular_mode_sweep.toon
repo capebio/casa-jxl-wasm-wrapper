@@ -1,0 +1,15 @@
+TestName: Modular Mode Sweep (Test_14)
+RunTimestamp: 2026-06-06T10:18:40.806Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Effort: 3
+Notes: modular(-1 auto,0 VarDCT,1 Modular) at locked lightbox settings
+TimeBase: 2026-06-06T10:
+
+---
+runs[3]{t|file|modular|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "18:^36.013@" | "P^2200571@.ORF" | -1 | 5482.025 | 507.401 | 1134.564 | 916.217 | 8040.208 | 465559B
+  "&37.128@" | ~ | 0 | ~ | ~ | 650.706 | 459.922 | 7100.054 | ~
+  "&40.805@" | ~ | 1 | ~ | ~ | 1836.733 | 1838.856 | 9665.015 | 2216104B
