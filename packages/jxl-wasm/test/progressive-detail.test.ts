@@ -108,14 +108,9 @@ test('stateful progressive decoder releases prior input before appending stream 
   expect(bridge).toContain('JxlDecoderSetInput(s->dec, s->input_buf, s->input_size)');
 });
 
-test('stateful progressive decoder opportunistically flushes once per input chunk without deduping snapshots', () => {
-  // FRAME_PROGRESSION fires only for the libjxl-supported set (kDC, kLastPasses, kPasses,
-  // kFrames). VarDCT at low/medium effort often emits only DC + final, so the opportunistic
-  // NEED_MORE_INPUT flush is needed for chunked-feed progressive paint and for byte-truncated
-  // (Sneyers) decode. Gated on JXL_DEC_FRAME having fired (libjxl precondition for FlushImage)
-  // and on the all-zero buffer guard inside TryFlushProgressiveImage to suppress pre-DC empties.
-  // Keep the generation gate so the facade cannot drain the same snapshot forever, but do
-  // not checksum-dedup snapshots. The paint lab intentionally surfaces byte-stream checkpoints.
+test('stateful progressive decoder flushes on JXL_DEC_FRAME_PROGRESSION and input_closed; open-stream per-chunk opportunistic flush removed', () => {
+  // Open streams rely on libjxl FRAME_PROGRESSION events for real pass boundaries (~5 per frame).
+  // The input_closed path retains one opportunistic flush for byte-truncated (Sneyers) streams.
   expect(bridge).toContain('TryFlushProgressiveImage');
   expect(bridge).toContain('status == JXL_DEC_FRAME_PROGRESSION');
   expect(bridge).toContain('status == JXL_DEC_NEED_MORE_INPUT');
@@ -123,6 +118,11 @@ test('stateful progressive decoder opportunistically flushes once per input chun
   expect(bridge).toContain('opportunistic_flush_generation != s->input_generation');
   expect(bridge).toContain('s->opportunistic_flush_generation = s->input_generation');
   expect(bridge).not.toContain('prev_flush_checksum');
+  // All-zero scan skipped after first flush via flush_count guard.
+  expect(bridge).toContain('flush_count');
+  expect(bridge).toContain('s->flush_count > 0');
+  // Open-stream opportunistic flush removed: the conditional that fired on !input_closed is gone.
+  expect(bridge).not.toContain('!s->input_closed && s->frame_started');
 });
 
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {

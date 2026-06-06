@@ -104,6 +104,7 @@ struct JxlWasmDecState {
   size_t   flushed_size;
   size_t   flushed_capacity;
   bool flushed_ready;
+  uint32_t flush_count;     // number of successful TryFlushProgressiveImage calls
   bool final_ready;
   bool input_closed;
   bool input_set;
@@ -1943,24 +1944,26 @@ static bool TryFlushProgressiveImage(JxlWasmDecState* s) {
   if (s->flushed == nullptr) return false;
   memcpy(s->flushed, s->pixels, s->pixels_size);
 
-  // All-zero guard: libjxl can return SUCCESS from FlushImage before any group has been
-  // decoded into the buffer (e.g. truncated pre-DC stream). Emitting that would paint a
-  // transparent/black frame for the consumer.
-  const uint64_t* w = reinterpret_cast<const uint64_t*>(s->flushed);
-  const size_t nwords = s->pixels_size / sizeof(uint64_t);
-  bool any_nonzero = false;
-  for (size_t i = 0; i < nwords; ++i) {
-    if (w[i] != 0) { any_nonzero = true; break; }
-  }
-  if (!any_nonzero) {
-    for (size_t i = nwords * sizeof(uint64_t); i < s->pixels_size; ++i) {
-      if (s->flushed[i] != 0) { any_nonzero = true; break; }
+  // All-zero guard: skip after first successful flush — once real pixels have been emitted
+  // the buffer cannot regress to all-zero. Avoids scanning 82+ MB per pass on every flush.
+  if (s->flush_count == 0) {
+    const uint64_t* w = reinterpret_cast<const uint64_t*>(s->flushed);
+    const size_t nwords = s->pixels_size / sizeof(uint64_t);
+    bool any_nonzero = false;
+    for (size_t i = 0; i < nwords; ++i) {
+      if (w[i] != 0) { any_nonzero = true; break; }
     }
+    if (!any_nonzero) {
+      for (size_t i = nwords * sizeof(uint64_t); i < s->pixels_size; ++i) {
+        if (s->flushed[i] != 0) { any_nonzero = true; break; }
+      }
+    }
+    if (!any_nonzero) return false;
   }
-  if (!any_nonzero) return false;
 
   s->flushed_size = s->pixels_size;
   s->flushed_ready = true;
+  s->flush_count++;
   return true;
 }
 
@@ -2029,24 +2032,12 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
     status = JxlDecoderProcessInput(s->dec);
 
     if (status == JXL_DEC_NEED_MORE_INPUT) {
-      // Opportunistic JxlDecoderFlushImage: surfaces partial decode progress between input
-      // chunks AND for byte-truncated streams (Sneyers truly-progressive demo). libjxl docs
-      // (decode.h §FlushImage) explicitly permit this on NEED_MORE_INPUT once JXL_DEC_FRAME
-      // has fired and before JXL_DEC_FULL_IMAGE. With the encoder buffering=0 contract, the
-      // partial flush returns clean DC-upsampled content. The all-zero guard inside
-      // TryFlushProgressiveImage suppresses pre-DC empty flushes (otherwise the consumer
-      // would see a black/transparent frame as the first paint).
-      // One flush per input generation. The JS feeder yields between chunks when it wants
-      // many visible checkpoints; without this gate the facade can drain the same snapshot forever.
-      if (!s->input_closed && s->frame_started && !s->final_ready &&
-          s->opportunistic_flush_generation != s->input_generation &&
-          TryFlushProgressiveImage(s)) {
-        s->opportunistic_flush_generation = s->input_generation;
-        return JXL_DEC_RESULT_PROGRESS;
-      }
+      // Open streams: return NEED_MORE so the caller feeds more chunks.
+      // Intermediate progress comes from JXL_DEC_FRAME_PROGRESSION (real pass boundaries,
+      // ~5 events per frame) not per-chunk snapshots.
+      // Byte-truncated streams (Sneyers demo): attempt one final flush so the consumer
+      // gets the best partial image decoded from the available prefix.
       if (s->input_closed) {
-        // On byte-truncated streams, attempt one final flush of any decoded prefix so the
-        // consumer gets the best partial image (Sneyers truly-progressive byte-cutoff demo).
         if (s->frame_started && !s->final_ready &&
             s->opportunistic_flush_generation != s->input_generation &&
             TryFlushProgressiveImage(s)) {
