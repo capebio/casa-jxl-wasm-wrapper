@@ -8,7 +8,7 @@
 `computeButteraugli(pixels1, pixels2, width, height): Promise<number>` — exported from `packages/jxl-wasm/dist/index.js`.
 
 - C++ bridge: `jxl_wasm_butteraugli_compare()` in `bridge.cpp` using `jxl::ButteraugliInterfaceInPlace`
-- WASM tiers rebuilt: `simd` + `scalar` (host-toolchain build, ~3 hrs Emscripten compile)
+- WASM tiers rebuilt: `simd` + `scalar` (host-toolchain build)
 - Return type: float packed as int32 bits; JS unpacks via `Int32Array`/`Float32Array` view alias
 
 ## Smoke Test Results
@@ -20,41 +20,53 @@
 
 Scale reference: 0 = identical, ~1.0 = imperceptible difference, >2.0 = noticeable.
 
-## Key Implementation Fix
+## Key Implementation Fix (bridge)
 
 **Problem:** `jxl::Image3F::Create(nullptr, w, h)` crashes in WASM — `AlignedMemory::Create` fails when `memory_manager=nullptr`.
 
 **Fix:** Call `jxl::MemoryManagerInit(&mem, nullptr)` to populate `mem.alloc = malloc` / `mem.free = free`, then pass `&mem` to all `Create()` calls.
 
-## Benchmark Integration
+## Key Fix for Benchmark (progressive decode)
 
-`USE_BUTTERAUGLI=1 BUTTERAUGLI_THRESHOLD=1.5 node benchmark/streaming-ssim-benchmark.mjs`
+**Problem:** All byte-cutoff decodes errored with `JXL decode error: 1`.  
+**Root cause:** `emitEveryPass: false` means `progressive_detail=0` → `JXL_DEC_FRAME_PROGRESSION` not subscribed → no intermediate flush events. Closing decoder with incomplete data immediately fails.
 
-Added to `streaming-ssim-benchmark.mjs`:
-- `USE_BUTTERAUGLI` env var (default off)
-- `BUTTERAUGLI_THRESHOLD` env var (default 1.5)
-- Per-cutoff `BA=X.XXX` in console output
-- `butteraugli` field in JSON cutoff records
+**Fix:** Changed `streamDecodeCutoffs` to use `emitEveryPass: true`. This subscribes to `JXL_DEC_FRAME_PROGRESSION`, so completed passes are flushed as `progress` events before the truncation error. The event handler now captures `progress` pixels as fallback when `final` never fires.
 
-## Byte-Cutoff Limitation (Pre-existing)
+## Calibration Results (2 ORFs, 1600px, effort=3, quality=85)
 
-All cutoffs below 100% produce `DecodeFailed: JXL decode error: 1`. This is a pre-existing issue (confirmed in June 5 benchmark results) unrelated to butteraugli.
+| Cutoff | File size | SSIM | PSNR | Butteraugli | Pass |
+|--------|-----------|------|------|-------------|------|
+| 10% | ~40KB | error | — | — | DC incomplete |
+| 20% | ~80KB | 0.889–0.893 | 21–23 | 70–74 | DC pass |
+| 30% | ~120KB | 0.928–0.937 | 23–24 | 62 | DC+some AC |
+| 40% | ~160KB | 0.972–0.974 | 25–27 | 62 | DC+some AC |
+| **50%** | ~200KB | **0.997–0.998** | **29–30** | **4.6–5.0** | **AC pass 1** |
+| 80% | ~320KB | 0.999 | 33–34 | 4.5–5.0 | AC pass 1 (plateau) |
+| 90% | ~360KB | 0.999–1.000 | 35–37 | 4.5–5.0 | AC pass 1 (plateau) |
+| 100% | ~400–455KB | 1.000 | ∞ | 0.000 | Complete |
 
-**Root cause:** `progressionTarget: 'final'` + truncated byte stream → decoder requires complete data to emit a final event. Partial JXL data fails to decode.
+**Key finding:** Butteraugli drops sharply from ~62 to ~5 at 50% — this is when the first complete AC refinement pass fits in the stream. The large plateau (80-90% have same BA as 50%) means further bytes add no completed pass until 100%.
 
-**Consequence:** Butteraugli distance is only measurable at 100% cutoff, where it's trivially 0 (full decode = reference).
+## Threshold Calibration
 
-**To fix for progressive quality measurement:** Switch to `emitEveryPass: true` and capture intermediate pass events, or use `progressionTarget: 'preview'` for first-available decode. Out of scope for this task.
+| Threshold | What it finds | Bytes needed |
+|-----------|--------------|--------------|
+| BA ≤ 1.5 (original default) | Only at 100% (full decode) | 100% |
+| **BA ≤ 5.0 (recommended)** | **First AC pass complete** | **~50%** |
+| SSIM ≥ 0.9 (original) | DC pass only (blocky) | ~30% |
 
-## SSIM Threshold vs Butteraugli Threshold
+**SSIM is too optimistic** at 30%: BA=62 means the image is severely degraded even though SSIM says "acceptable". Butteraugli correctly identifies that the DC-pass-only image is not perceptually good.
 
-SSIM is not sensitive enough at early byte cutoffs (all error anyway). Butteraugli would be more perceptually meaningful if partial decodes were available. Recommended thresholds when partial decodes work:
+**Updated default:** `BUTTERAUGLI_THRESHOLD=5.0` for streaming preview use case.
 
-| Butteraugli distance | Perceptual quality |
-|---------------------|-------------------|
-| 0–0.5 | Excellent, nearly identical |
-| 0.5–1.5 | Good, minor artifacts |
-| 1.5–3.0 | Acceptable, visible but minor |
-| >3.0 | Noticeable degradation |
+## Usage
 
-Default `BUTTERAUGLI_THRESHOLD=1.5` is a reasonable "acceptable quality" boundary.
+```bash
+# Standard run with SSIM
+SSIM_LIMIT=5 SSIM_TARGET=1600 node benchmark/streaming-ssim-benchmark.mjs
+
+# With Butteraugli (recommended threshold)
+SSIM_LIMIT=5 SSIM_TARGET=1600 USE_BUTTERAUGLI=1 BUTTERAUGLI_THRESHOLD=5.0 \
+  node benchmark/streaming-ssim-benchmark.mjs
+```

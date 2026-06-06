@@ -37,7 +37,7 @@ const EFFORT = Number(process.env.SSIM_EFFORT ?? "3");
 const QUALITY = Number(process.env.SSIM_QUALITY ?? "85");
 const SSIM_THRESHOLD = Number(process.env.SSIM_THRESHOLD ?? "0.9");
 const USE_BUTTERAUGLI = process.env.USE_BUTTERAUGLI === "1" || process.env.USE_BUTTERAUGLI === "true";
-const BUTTERAUGLI_THRESHOLD = Number(process.env.BUTTERAUGLI_THRESHOLD ?? "1.5");
+const BUTTERAUGLI_THRESHOLD = Number(process.env.BUTTERAUGLI_THRESHOLD ?? "5.0");
 
 const tier = getForcedTier() ?? "auto";
 console.log(`[streaming-ssim] tier=${tier} limit=${LIMIT} target=${TARGET}px effort=${EFFORT} quality=${QUALITY} ssim-threshold=${SSIM_THRESHOLD}${USE_BUTTERAUGLI ? ` butteraugli-threshold=${BUTTERAUGLI_THRESHOLD}` : ""}`);
@@ -219,20 +219,36 @@ async function timedDecodeWithPixels(jxl, options) {
 async function streamDecodeCutoffs(jxlBytes, plan, refPixels, refW, refH, options) {
     const cutoffs = [];
 
+    // emitEveryPass: true enables JXL_DEC_FRAME_PROGRESSION subscription so the decoder
+    // yields 'progress' events for each completed pass — critical for getting pixels from
+    // truncated streams where 'final' never fires due to incomplete data.
+    const decodeOpts = { ...options, emitEveryPass: true };
+
     for (const entry of plan) {
         const cutoff = { bytes: entry.bytes, percent: entry.percent, ssim: null, psnr: null, butteraugli: null, error: null };
-        const decoder = createDecoder(options);
+        const decoder = createDecoder(decodeOpts);
 
         try {
             let finalPixels = null, finalW = 0, finalH = 0;
+            let progressPixels = null, progressW = 0, progressH = 0;
+
             const eventTask = (async () => {
                 for await (const event of decoder.events()) {
                     if (event.type === 'final') {
                         finalPixels = event.pixels ? new Uint8ClampedArray(event.pixels) : null;
                         finalW = event.info?.width > 0 ? event.info.width : 0;
                         finalH = event.info?.height > 0 ? event.info.height : 0;
+                    } else if (event.type === 'progress') {
+                        // Progressive pass completed — keep latest as fallback for truncated streams.
+                        // pixels is already a .slice() copy (progressionTarget:'final' path in facade).
+                        if (event.pixels && event.info?.width > 0 && event.info?.height > 0) {
+                            progressPixels = new Uint8ClampedArray(event.pixels);
+                            progressW = event.info.width;
+                            progressH = event.info.height;
+                        }
                     } else if (event.type === 'error') {
-                        throw new Error(`${event.code}: ${event.message}`);
+                        // Record but don't throw — progress pixels may already be captured.
+                        cutoff.error = `${event.code}: ${event.message}`;
                     }
                 }
             })();
@@ -242,10 +258,15 @@ async function streamDecodeCutoffs(jxlBytes, plan, refPixels, refW, refH, option
             await decoder.close();
             await eventTask;
 
-            // Compute SSIM/PSNR and optionally Butteraugli if we got pixels
-            if (finalPixels && refPixels && finalW > 0 && finalH > 0 && finalW === refW && finalH === refH) {
+            // Use final pixels if complete, otherwise fall back to last flushed progressive frame.
+            const usePixels = finalPixels ?? progressPixels;
+            const useW = finalW || progressW;
+            const useH = finalH || progressH;
+
+            if (usePixels && refPixels && useW > 0 && useH > 0 && useW === refW && useH === refH) {
+                if (finalPixels) cutoff.error = null; // full decode succeeded — clear any stale error
                 try {
-                    const result = computeSsimPsnr(finalPixels, refPixels, finalW, finalH);
+                    const result = computeSsimPsnr(usePixels, refPixels, useW, useH);
                     cutoff.ssim = result.ssim;
                     cutoff.psnr = result.psnr;
                 } catch (e) {
@@ -253,7 +274,7 @@ async function streamDecodeCutoffs(jxlBytes, plan, refPixels, refW, refH, option
                 }
                 if (USE_BUTTERAUGLI) {
                     try {
-                        cutoff.butteraugli = await computeButteraugli(finalPixels.buffer, refPixels.buffer, finalW, finalH);
+                        cutoff.butteraugli = await computeButteraugli(usePixels.buffer, refPixels.buffer, useW, useH);
                     } catch (e) {
                         cutoff.error = (cutoff.error ? cutoff.error + "; " : "") + `butteraugli: ${e instanceof Error ? e.message : String(e)}`;
                     }
