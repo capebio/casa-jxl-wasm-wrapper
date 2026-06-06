@@ -3,15 +3,15 @@
   "libjxlCommit": "332feb17d17311c748445f7ee75c4fb55cc38530",
   "emscriptenTag": "4.0.13",
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
-  "emsdkImage": "docker.io/emscripten/emsdk:4.0.13",
-  "buildMode": "docker",
-  "generatedAt": "2026-06-05T07:53:19.181Z",
+  "emsdkImage": null,
+  "buildMode": "host-toolchain",
+  "generatedAt": "2026-06-06T02:00:22.438Z",
   "tiers": {
     "simd": {
-      "jsBytes": 18545,
-      "wasmBytes": 2707080,
-      "jsSha256": "877dc95ff7f2b6f46ed84cabf03fae692853d729b477b89ce77fc08d4ea7ec41",
-      "wasmSha256": "2f7a860995ad938be4357072f7dded721e744296ebf1df2e4b4e0700abe81fd6",
+      "jsBytes": 18665,
+      "wasmBytes": 2722594,
+      "jsSha256": "fac238ace9ba9fc0b957ab40e9a873b71a275990733ae0df1969d628cb795538",
+      "wasmSha256": "598cc2a8b72d517b5954fc6807c9697f19f50d21dcd0523608c6a3bd174dbf09",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -32,10 +32,10 @@
       ]
     },
     "scalar": {
-      "jsBytes": 18549,
-      "wasmBytes": 2624632,
-      "jsSha256": "89243ef58c5516ac3526dda43938dc409f5aca4accc43c6ff9854f911fc4015b",
-      "wasmSha256": "0b235592b77280b825c56ca497a1c9f837a95f7957d073f2c943036eefb35ba6",
+      "jsBytes": 18669,
+      "wasmBytes": 2639348,
+      "jsSha256": "d556e4c2d08b8805e22e563e654cafa0929158f66ba1f75a4eae2ba3e8f02365",
+      "wasmSha256": "0b71c393a407b4b1082d58c83864351f2e63c48e56e98a08852b87328f84ab4c",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -111,5 +111,8 @@
       ]
     }
   },
-  "skippedTiers": []
+  "skippedTiers": [
+    "relaxed-simd-mt",
+    "simd-mt"
+  ]
 }

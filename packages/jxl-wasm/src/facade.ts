@@ -313,6 +313,9 @@ interface LibjxlWasmModule {
   _jxl_wasm_encode_rgba8_with_extra_channels?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, ecDescPtr: number, numEc: number): number;
   // Decode helper (test verification only): returns packed extra channel descriptors from codestream header (same 72B layout)
   _jxl_wasm_get_extra_channels?(inputPtr: number, inputSize: number): number;
+  // Butteraugli perceptual distance between two RGBA8 images (same dimensions).
+  // Returns bit-cast float as int32 (>=0 = valid distance; -1 = error).
+  _jxl_wasm_butteraugli_compare?(ptr1: number, ptr2: number, width: number, height: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -550,6 +553,44 @@ export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promis
     return takeBuffer(module, handle, "transcode").data;
   } finally {
     module._free(ptr);
+  }
+}
+
+/**
+ * Compute Butteraugli perceptual distance between two RGBA8 images.
+ * Both pixel buffers must represent the same width×height image in RGBA8 format.
+ * Returns the p3 Butteraugli distance (0 = identical, ~1.0 = imperceptible, >2.0 = noticeable).
+ * Requires a WASM build with the butteraugli bridge (jxl_wasm_butteraugli_compare).
+ */
+export async function computeButteraugli(
+  pixels1: ArrayBuffer | Uint8Array,
+  pixels2: ArrayBuffer | Uint8Array,
+  width: number,
+  height: number,
+): Promise<number> {
+  const module = await loadLibjxlModule();
+  if (!module._jxl_wasm_butteraugli_compare) {
+    throw new CapabilityMissing("Butteraugli requires a rebuilt WASM with butteraugli bridge");
+  }
+  const pixelSize = width * height * 4;
+  const view1 = copyOrBorrowInput(pixels1, false);
+  const view2 = copyOrBorrowInput(pixels2, false);
+  if (view1.byteLength < pixelSize || view2.byteLength < pixelSize) {
+    throw new Error(`computeButteraugli: expected ${pixelSize} bytes for ${width}×${height} RGBA8, got ${view1.byteLength}/${view2.byteLength}`);
+  }
+  const ptr1 = module._malloc(pixelSize);
+  const ptr2 = module._malloc(pixelSize);
+  try {
+    module.HEAPU8.set(view1.subarray(0, pixelSize), ptr1);
+    module.HEAPU8.set(view2.subarray(0, pixelSize), ptr2);
+    const bits = module._jxl_wasm_butteraugli_compare(ptr1, ptr2, width, height);
+    if (bits < 0) throw new Error("Butteraugli WASM compare failed");
+    const floatBuf = new ArrayBuffer(4);
+    new Int32Array(floatBuf)[0] = bits;
+    return new Float32Array(floatBuf)[0] as number;
+  } finally {
+    module._free(ptr1);
+    module._free(ptr2);
   }
 }
 

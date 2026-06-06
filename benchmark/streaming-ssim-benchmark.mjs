@@ -3,10 +3,11 @@
  *
  * Usage:
  *   SSIM_LIMIT=2 SSIM_TARGET=1600 node benchmark/streaming-ssim-benchmark.mjs
+ *   USE_BUTTERAUGLI=1 BUTTERAUGLI_THRESHOLD=1.5 node benchmark/streaming-ssim-benchmark.mjs
  *
  * Encodes ORFs as progressive JXL (effort=3), streams decode at byte cutoffs,
- * and measures visual quality (SSIM + PSNR) vs. full reference decode.
- * Identifies "acceptable frame" threshold (e.g., SSIM > 0.9).
+ * and measures visual quality (SSIM + PSNR + optional Butteraugli) vs. full reference decode.
+ * Identifies "acceptable frame" threshold (SSIM > threshold or Butteraugli < threshold).
  *
  * Results written to docs/Benchmark results/streaming-ssim-benchmark-TIMESTAMP.json
  */
@@ -17,11 +18,11 @@ import SSIM from "ssim.js";
 
 import initRaw, { downscale_rgb, process_orf_with_flags, rgb_to_rgba } from "../pkg/raw_converter_wasm.js";
 import { buildByteCutoffPlan } from "../web/jxl-byte-cutoff-probe.js";
+import { computeButteraugli, createDecoder, createEncoder, getForcedTier, setForcedTier } from "../packages/jxl-wasm/dist/index.js";
 
-if (typeof globalThis.Worker === "undefined" && !process.env.JXL_WASM_FORCE_TIER) {
-    process.env.JXL_WASM_FORCE_TIER = "simd";
-}
-const { createDecoder, createEncoder, detectTier } = await import("../packages/jxl-wasm/dist/index.js");
+// Force simd tier — Node has SharedArrayBuffer so detectTier() picks MT by default,
+// but MT tiers require COOP/COEP headers which aren't available in Node benchmark context.
+setForcedTier("simd");
 
 await initRaw({ module_or_path: readFileSync(new URL("../pkg/raw_converter_wasm_bg.wasm", import.meta.url)) });
 
@@ -35,9 +36,11 @@ const TARGET = Number(process.env.SSIM_TARGET ?? "1600");
 const EFFORT = Number(process.env.SSIM_EFFORT ?? "3");
 const QUALITY = Number(process.env.SSIM_QUALITY ?? "85");
 const SSIM_THRESHOLD = Number(process.env.SSIM_THRESHOLD ?? "0.9");
+const USE_BUTTERAUGLI = process.env.USE_BUTTERAUGLI === "1" || process.env.USE_BUTTERAUGLI === "true";
+const BUTTERAUGLI_THRESHOLD = Number(process.env.BUTTERAUGLI_THRESHOLD ?? "1.5");
 
-const tier = detectTier();
-console.log(`[streaming-ssim] tier=${tier} limit=${LIMIT} target=${TARGET}px effort=${EFFORT} quality=${QUALITY} ssim-threshold=${SSIM_THRESHOLD}`);
+const tier = getForcedTier() ?? "auto";
+console.log(`[streaming-ssim] tier=${tier} limit=${LIMIT} target=${TARGET}px effort=${EFFORT} quality=${QUALITY} ssim-threshold=${SSIM_THRESHOLD}${USE_BUTTERAUGLI ? ` butteraugli-threshold=${BUTTERAUGLI_THRESHOLD}` : ""}`);
 
 const files = readdirSync(GOBABEB_DIR, { withFileTypes: true })
     .filter(e => e.isFile() && extname(e.name).toLowerCase() === ".orf")
@@ -93,33 +96,34 @@ for (const file of files) {
         const percentCutoffs = [10, 20, 30, 40, 50, 60, 70, 80, 90];
         const plan = buildByteCutoffPlan(jxlBytes.byteLength, [], percentCutoffs);
         console.log(`  streaming at ${plan.length} cutoff points...`);
-        const cutoffs = await streamDecodeCutoffs(jxlBytes, plan, refPixels, {
+        const cutoffs = await streamDecodeCutoffs(jxlBytes, plan, refPixels, refDecode.w, refDecode.h, {
             format: 'rgba8', progressionTarget: 'final', emitEveryPass: false,
             progressiveDetail: 'passes', downsample: 1,
             preserveIcc: false, preserveMetadata: false,
         });
 
         // Find acceptable frame threshold
-        const acceptableFrame = cutoffs.find(c => c.ssim !== null && c.ssim >= SSIM_THRESHOLD);
+        const isAcceptable = USE_BUTTERAUGLI
+            ? c => c.butteraugli !== null && c.butteraugli <= BUTTERAUGLI_THRESHOLD
+            : c => c.ssim !== null && c.ssim >= SSIM_THRESHOLD;
+        const acceptableFrame = cutoffs.find(isAcceptable);
         const acceptableBytes = acceptableFrame?.bytes ?? null;
         const acceptablePercent = acceptableFrame ? (acceptableBytes / jxlBytes.byteLength * 100).toFixed(1) : null;
 
         console.log(`  cutoff results:`);
-        for (const cutoff of cutoffs.slice(0, 5)) {
+        const logCutoff = (cutoff) => {
             if (cutoff.ssim !== null) {
-                const mark = cutoff.ssim >= SSIM_THRESHOLD ? "✓" : "✗";
-                console.log(`    ${(cutoff.bytes / 1024).toFixed(0)}KB (${cutoff.percent.toFixed(1)}%) → SSIM=${cutoff.ssim.toFixed(3)} PSNR=${cutoff.psnr.toFixed(1)} ${mark}`);
+                const ok = isAcceptable(cutoff);
+                const mark = ok ? "✓" : "✗";
+                const ba = cutoff.butteraugli !== null ? ` BA=${cutoff.butteraugli.toFixed(3)}` : "";
+                console.log(`    ${(cutoff.bytes / 1024).toFixed(0)}KB (${cutoff.percent.toFixed(1)}%) → SSIM=${cutoff.ssim.toFixed(3)} PSNR=${cutoff.psnr.toFixed(1)}${ba} ${mark}`);
             } else {
                 console.log(`    ${(cutoff.bytes / 1024).toFixed(0)}KB (${cutoff.percent.toFixed(1)}%) → error`);
             }
-        }
+        };
+        for (const cutoff of cutoffs.slice(0, 5)) logCutoff(cutoff);
         if (cutoffs.length > 5) {
-            for (const cutoff of cutoffs.slice(-3)) {
-                if (cutoff.ssim !== null) {
-                    const mark = cutoff.ssim >= SSIM_THRESHOLD ? "✓" : "✗";
-                    console.log(`    ${(cutoff.bytes / 1024).toFixed(0)}KB (${cutoff.percent.toFixed(1)}%) → SSIM=${cutoff.ssim.toFixed(3)} PSNR=${cutoff.psnr.toFixed(1)} ${mark}`);
-                }
-            }
+            for (const cutoff of cutoffs.slice(-3)) logCutoff(cutoff);
         }
 
         if (acceptableBytes !== null) {
@@ -140,11 +144,14 @@ for (const file of files) {
                 percent: +c.percent.toFixed(1),
                 ssim: c.ssim !== null ? +c.ssim.toFixed(4) : null,
                 psnr: c.psnr !== null ? +c.psnr.toFixed(1) : null,
+                butteraugli: c.butteraugli !== null ? +c.butteraugli.toFixed(4) : null,
                 error: c.error,
             })),
             acceptableBytes: acceptableBytes,
             acceptablePercent: acceptablePercent ? +acceptablePercent : null,
             ssimThreshold: SSIM_THRESHOLD,
+            useButteraugli: USE_BUTTERAUGLI,
+            butteraugliThreshold: USE_BUTTERAUGLI ? BUTTERAUGLI_THRESHOLD : null,
         });
     } finally {
         decoded.free();
@@ -155,7 +162,9 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const outPath = join(OUT_DIR, `streaming-ssim-benchmark-${stamp}.json`);
 writeFileSync(outPath, JSON.stringify({
     exportedAt: new Date().toISOString(),
-    tier, target: TARGET, effort: EFFORT, quality: QUALITY, results,
+    tier, target: TARGET, effort: EFFORT, quality: QUALITY,
+    useButteraugli: USE_BUTTERAUGLI, butteraugliThreshold: USE_BUTTERAUGLI ? BUTTERAUGLI_THRESHOLD : null,
+    results,
 }, null, 2));
 console.log(`\n[streaming-ssim] wrote ${outPath}`);
 
@@ -207,11 +216,11 @@ async function timedDecodeWithPixels(jxl, options) {
     return { finalMs: finalMs ?? performance.now() - tStart, w, h, pixels };
 }
 
-async function streamDecodeCutoffs(jxlBytes, plan, refPixels, options) {
+async function streamDecodeCutoffs(jxlBytes, plan, refPixels, refW, refH, options) {
     const cutoffs = [];
 
     for (const entry of plan) {
-        const cutoff = { bytes: entry.bytes, percent: entry.percent, ssim: null, psnr: null, error: null };
+        const cutoff = { bytes: entry.bytes, percent: entry.percent, ssim: null, psnr: null, butteraugli: null, error: null };
         const decoder = createDecoder(options);
 
         try {
@@ -233,14 +242,21 @@ async function streamDecodeCutoffs(jxlBytes, plan, refPixels, options) {
             await decoder.close();
             await eventTask;
 
-            // Compute SSIM/PSNR if we got pixels
-            if (finalPixels && refPixels && finalW > 0 && finalH > 0) {
+            // Compute SSIM/PSNR and optionally Butteraugli if we got pixels
+            if (finalPixels && refPixels && finalW > 0 && finalH > 0 && finalW === refW && finalH === refH) {
                 try {
                     const result = computeSsimPsnr(finalPixels, refPixels, finalW, finalH);
                     cutoff.ssim = result.ssim;
                     cutoff.psnr = result.psnr;
                 } catch (e) {
                     cutoff.error = e instanceof Error ? e.message : String(e);
+                }
+                if (USE_BUTTERAUGLI) {
+                    try {
+                        cutoff.butteraugli = await computeButteraugli(finalPixels.buffer, refPixels.buffer, finalW, finalH);
+                    } catch (e) {
+                        cutoff.error = (cutoff.error ? cutoff.error + "; " : "") + `butteraugli: ${e instanceof Error ? e.message : String(e)}`;
+                    }
                 }
             }
         } catch (e) {

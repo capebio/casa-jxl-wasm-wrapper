@@ -73,3 +73,4 @@ _jxl_wasm_dec_anim_loop_count
 _jxl_wasm_dec_seek_to_frame
 _jxl_wasm_enc_create_image_z
 _jxl_wasm_encode_rgba8_with_metadata_v3
+_jxl_wasm_butteraugli_compare
