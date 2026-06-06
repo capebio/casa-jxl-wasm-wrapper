@@ -61,7 +61,7 @@ export async function fromReadableStream(
     throw e;
   } finally {
     signal?.removeEventListener('abort', onAbort);
-    reader.releaseLock();
+    try { reader.releaseLock(); } catch { /* already released by cancel() on some platforms */ }
   }
 }
 

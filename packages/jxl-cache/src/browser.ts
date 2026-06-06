@@ -333,6 +333,11 @@ export class JxlCacheBrowser {
   private async writeManifest(): Promise<void> {
     if (!this.opfsRoot) return;
 
+    // Snapshot generation before building entries. clear() deletes the manifest
+    // file and increments _generation. If we write after that deletion, we'd
+    // re-create a stale manifest — skip the write instead.
+    const gen = this._generation;
+
     try {
       const entries: Array<{ key: string; name: string; size: number }> = [];
 
@@ -348,6 +353,7 @@ export class JxlCacheBrowser {
       // does not extend to the end of its backing ArrayBuffer.
       const manifestBuffer = encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
 
+      if (this._generation !== gen) return;
       await this.writePersistentFile(MANIFEST_NAME, manifestBuffer);
     } catch (e) {
       console.warn('[JxlCacheBrowser] Failed to write manifest (non-fatal)', e);
