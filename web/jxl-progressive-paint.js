@@ -34,6 +34,13 @@ function updateWorkflowState() {}
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Progressive Paint] jxl-progressive-paint.js loaded — progressive paint / live decode UI', 'color:#ec4899;font-weight:600', { page: 'Progressive Paint', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
+// A4: gate O(W×H) frame analysis behind ?stats=1
+const STATS_ENABLED = new URLSearchParams(location.search).has('stats');
+// A3: persistent thumb canvases (80×50) keyed by passIdx; cleared on timeline reset
+let thumbCanvases = new Map();
+// A3: persistent full-res source canvases keyed by slot index; reused across passes
+const slotSrcCanvases = new Map();
+
 // ─── WASM init ────────────────────────────────────────────────────────────────
 
 initRaw().then(() => {
@@ -582,11 +589,13 @@ function clearCompareSlots() {
         slot.currentPass = null;
         slot.currentSrc = null;
     }
+    slotSrcCanvases.clear();
 }
 
 function clearPassTimeline() {
     const el = document.getElementById('pass-timeline');
     if (el) el.innerHTML = '';
+    thumbCanvases.clear();
 }
 
 function clearByteCutoffLadder() {
@@ -634,21 +643,6 @@ function paintSourcePreview() {
     const dw = Math.max(1, Math.round(selectedSource.width * scale));
     const dh = Math.max(1, Math.round(selectedSource.height * scale));
     ctx.drawImage(srcC, Math.round((c.width - dw) / 2), Math.round((c.height - dh) / 2), dw, dh);
-}
-
-function makePassCanvas(pixels, width, height) {
-    const arr = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
-    const len = arr.length;
-    const want = width * height * 4;
-    if (len !== want) {
-        dbgLog(`[fidelity] pass pixels len ${len} != 4*${width}*${height} (ImageData will fail or corrupt)`, '', 'error');
-    }
-    const imgData = new ImageData(new Uint8ClampedArray(arr.buffer, arr.byteOffset, arr.byteLength), width, height);
-    const srcCanvas = document.createElement('canvas');
-    srcCanvas.width = width;
-    srcCanvas.height = height;
-    srcCanvas.getContext('2d').putImageData(imgData, 0, 0);
-    return srcCanvas;
 }
 
 async function runByteCutoffProbe(jxlBytes, progressiveDetail) {
@@ -717,7 +711,13 @@ function renderByteCutoffTile(ladder, result) {
     tile.className = 'byte-cutoff-tile' + (result.entry.kind === 'final' ? ' is-final' : '');
 
     if (result.frame) {
-        const canvas = makePassCanvas(result.frame.pixels, result.frame.info.width, result.frame.info.height);
+        const rArr = result.frame.pixels instanceof Uint8Array ? result.frame.pixels : new Uint8Array(result.frame.pixels);
+        const rW = result.frame.info.width, rH = result.frame.info.height;
+        const rImgData = new ImageData(new Uint8ClampedArray(rArr.buffer, rArr.byteOffset, rArr.byteLength), rW, rH);
+        const canvas = document.createElement('canvas');
+        canvas.width = rW;
+        canvas.height = rH;
+        canvas.getContext('2d').putImageData(rImgData, 0, 0);
         const meta = document.createElement('div');
         meta.className = 'byte-cutoff-meta';
         meta.textContent = `${formatByteCutoffLabel(result.entry)} | ${result.frame.type} | ${result.elapsedMs.toFixed(1)} ms`;
@@ -798,13 +798,20 @@ function addPassToTimeline(passRecord) {
     const timeline = document.getElementById('pass-timeline');
     if (!timeline) return;
     const TW = 80, TH = 50;
-    const thumb = document.createElement('canvas');
-    thumb.width = TW;
-    thumb.height = TH;
+    let thumb = thumbCanvases.get(passRecord.passIdx);
+    if (!thumb) {
+        thumb = document.createElement('canvas');
+        thumb.width = TW;
+        thumb.height = TH;
+        thumbCanvases.set(passRecord.passIdx, thumb);
+    }
     const ctx = thumb.getContext('2d');
-    const scale = Math.min(TW / passRecord.srcCanvas.width, TH / passRecord.srcCanvas.height);
-    const dw = Math.round(passRecord.srcCanvas.width * scale), dh = Math.round(passRecord.srcCanvas.height * scale);
-    ctx.drawImage(passRecord.srcCanvas, Math.round((TW - dw) / 2), Math.round((TH - dh) / 2), dw, dh);
+    ctx.clearRect(0, 0, TW, TH);
+    if (passRecord.srcCanvas) {
+        const scale = Math.min(TW / passRecord.srcCanvas.width, TH / passRecord.srcCanvas.height);
+        const dw = Math.round(passRecord.srcCanvas.width * scale), dh = Math.round(passRecord.srcCanvas.height * scale);
+        ctx.drawImage(passRecord.srcCanvas, Math.round((TW - dw) / 2), Math.round((TH - dh) / 2), dw, dh);
+    }
     const wrap = document.createElement('button');
     wrap.type = 'button';
     wrap.className = 'pass-thumb' + (passRecord.isFinal ? ' is-final' : '');
@@ -836,27 +843,49 @@ function addPassToTimeline(passRecord) {
 // Intermediate frames coalesced by rAF will be dropped (never reach here).
 // Dropped frames do not appear in passes[] and skip all canvas/analysis work.
 function paintPass(ev) {
-    const frameStats = analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height);
+    const frameStats = STATS_ENABLED
+        ? analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height)
+        : null;
     const passPixels = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
+    const { width, height } = ev.info;
+    const want = width * height * 4;
+    if (passPixels.length !== want) {
+        dbgLog(`[fidelity] pass pixels len ${passPixels.length} != 4*${width}*${height} (ImageData will fail or corrupt)`, '', 'error');
+    }
+    const imgData = new ImageData(new Uint8ClampedArray(passPixels.buffer, passPixels.byteOffset, passPixels.byteLength), width, height);
+    const slotIndex = Math.min(ev.passIdx, compareSlots.length - 1);
+    let srcCanvas = slotSrcCanvases.get(slotIndex);
+    if (!srcCanvas || srcCanvas.width !== width || srcCanvas.height !== height) {
+        srcCanvas = document.createElement('canvas');
+        srcCanvas.width = width;
+        srcCanvas.height = height;
+        slotSrcCanvases.set(slotIndex, srcCanvas);
+    }
+    srcCanvas.getContext('2d').putImageData(imgData, 0, 0);
     const passRecord = {
         passIdx: ev.passIdx,
         t: ev.t,
         isFinal: ev.isFinal,
         stats: frameStats,
-        srcCanvas: makePassCanvas(passPixels, ev.info.width, ev.info.height),
+        srcCanvas,
         pixels: passPixels,
     };
     addPassToTimeline(passRecord);
     ev._passes.push(passRecord);
     autoAssignPass(passRecord);
-    const statsLine = formatFrameStatsLog(frameStats);
-    dbgLog(`  pass ${ev.passIdx + 1}${ev.isFinal ? ' (final)' : ''}`, `${ev.t.toFixed(1)} ms | ${statsLine}`, 'info');
-    console.log('[Progressive Paint] frame stats', {
-        pass: ev.passIdx + 1,
-        isFinal: ev.isFinal,
-        t_ms: Number(ev.t.toFixed(2)),
-        ...frameStats,
-    });
+    if (STATS_ENABLED) {
+        const statsLine = formatFrameStatsLog(frameStats);
+        dbgLog(`  pass ${ev.passIdx + 1}${ev.isFinal ? ' (final)' : ''}`, `${ev.t.toFixed(1)} ms | ${statsLine}`, 'info');
+        console.log('[Progressive Paint] frame stats', {
+            pass: ev.passIdx + 1,
+            isFinal: ev.isFinal,
+            t_ms: Number(ev.t.toFixed(2)),
+            ...frameStats,
+        });
+    } else {
+        const stage = ev.isFinal ? 'final' : 'partial';
+        dbgLog(`  pass ${ev.passIdx + 1} · ${stage}`, `${ev.t.toFixed(1)} ms`, 'info');
+    }
 }
 
 // schedulePaint — rAF coalescing. Final events bypass coalescing and paint immediately.
