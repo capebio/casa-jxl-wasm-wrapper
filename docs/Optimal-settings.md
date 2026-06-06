@@ -184,6 +184,76 @@ Detailed configuration and usage options for backend CLI benchmark scripts (excl
   TEST12_LIMIT=3 TEST12_TARGET=1600 TEST12_EFFORT=3 TEST12_QUALITIES=75,85,90 TEST12_RESAMPLINGS=-1,1,2 node benchmark/test_12_resampling_quality_sweep.mjs
   ```
 
+### Quality Ladder Sweep (Test_13)
+- **Description:** Sweeps `quality` (70, 80, 85, 90, 95) at locked lightbox defaults to measure the file-size and timing slope around the current `quality=85` recommendation.
+- **Usage:**
+  ```bash
+  TEST13_LIMIT=3 TEST13_TARGET=1600 TEST13_EFFORT=3 TEST13_QUALITIES=70,80,85,90,95 node benchmark/test_13_quality_ladder_sweep.mjs
+  ```
+
+### Modular Mode Sweep (Test_14)
+- **Description:** Sweeps `modular` (−1=auto, 0=VarDCT, 1=Modular) at `quality=85`, effort=3 to isolate codec-mode cost without the broader policy matrix.
+- **Usage:**
+  ```bash
+  TEST14_LIMIT=3 TEST14_TARGET=1600 TEST14_QUALITY=85 TEST14_EFFORT=3 TEST14_MODULAR=-1,0,1 node benchmark/test_14_modular_mode_sweep.mjs
+  ```
+
+### Lossless Ladder Sweep (Test_15)
+- **Description:** Sweeps `lossless` (0, 1) × quality anchors (85, 95) to compare archival output cost against high-quality lossy lightbox output.
+- **Usage:**
+  ```bash
+  TEST15_LIMIT=2 TEST15_TARGET=1600 TEST15_EFFORT=3 TEST15_QUALITIES=85,95 TEST15_LOSSLESS=0,1 node benchmark/test_15_lossless_ladder_sweep.mjs
+  ```
+
+### Dots + ColorTransform Sweep (Test_16)
+- **Description:** Sweeps `dots` (0, 1) × `colorTransform` (0, 1, 2) at locked lightbox defaults to measure advanced coding-tool impact.
+- **Usage:**
+  ```bash
+  TEST16_LIMIT=2 TEST16_TARGET=1600 TEST16_QUALITY=85 TEST16_EFFORT=3 TEST16_DOTS=0,1 TEST16_COLOR_TRANSFORMS=0,1,2 node benchmark/test_16_dots_color_transform_sweep.mjs
+  ```
+
+### PhotonNoiseIso Sweep (Test_17)
+- **Description:** Sweeps `photonNoiseIso` (0, 200, 800, 1600) at locked lightbox defaults to measure synthetic-noise size and timing overhead.
+- **Usage:**
+  ```bash
+  TEST17_LIMIT=3 TEST17_TARGET=1600 TEST17_QUALITY=85 TEST17_EFFORT=3 TEST17_PHOTON_NOISE_ISO=0,200,800,1600 node benchmark/test_17_photon_noise_iso_sweep.mjs
+  ```
+
+### Progressive Toggle Sweep (Test_18)
+- **Description:** Sweeps `progressive` (0, 1) at locked lightbox defaults to compare local/on-computer final decode cost against streaming-ready output.
+- **Usage:**
+  ```bash
+  TEST18_LIMIT=2 TEST18_TARGET=1600 TEST18_QUALITY=85 TEST18_EFFORT=3 TEST18_PROGRESSIVE=0,1 node benchmark/test_18_progressive_toggle_sweep.mjs
+  ```
+
+### Effort Shipping Window Sweep (Test_19)
+- **Description:** Sweeps `effort` (1, 2, 3, 4) near the current shipping default to find whether effort=3 remains the best speed/size compromise.
+- **Usage:**
+  ```bash
+  TEST19_LIMIT=2 TEST19_TARGET=1600 TEST19_QUALITY=85 TEST19_EFFORTS=1,2,3,4 node benchmark/test_19_effort_shipping_window_sweep.mjs
+  ```
+
+### Target Size Ladder Sweep (Test_20)
+- **Description:** Sweeps `target` (400, 800, 1600, 2400) to size presets for thumbnails, medium previews, web lightbox, and local/detail viewing. Uses quality 80 for 400px and quality 85 above that.
+- **Usage:**
+  ```bash
+  TEST20_LIMIT=1 TEST20_TARGETS=400,800,1600,2400 TEST20_EFFORT=3 TEST20_THUMB_QUALITY=80 TEST20_QUALITY=85 node benchmark/test_20_target_size_ladder_sweep.mjs
+  ```
+
+### Source Format Sweep (Test_21)
+- **Description:** Sweeps available RAW-family `source_type` values (ORF/RAW/DNG/CR2) at locked lightbox defaults to separate local raw pipeline cost from JXL encode/decode cost.
+- **Usage:**
+  ```bash
+  TEST21_PER_TYPE=1 TEST21_TARGET=1600 TEST21_QUALITY=85 TEST21_EFFORT=3 node benchmark/test_21_source_format_sweep.mjs
+  ```
+
+### Modular + Lossless Matrix (Test_22)
+- **Description:** Compares lossy auto, lossy VarDCT, and lossless Modular at locked lightbox target to quantify archival/local-computer cost against web settings.
+- **Usage:**
+  ```bash
+  TEST22_LIMIT=2 TEST22_TARGET=1600 TEST22_QUALITY=85 TEST22_EFFORT=3 node benchmark/test_22_modular_lossless_matrix.mjs
+  ```
+
 ## Desirable Tests
 
 Future or desirable backend benchmarks that would be beneficial to implement or formalize. Metrics below can be filled with ticks (✓) for capability or average timings/findings for continuous measurements.

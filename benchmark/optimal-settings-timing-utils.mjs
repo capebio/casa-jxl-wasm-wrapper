@@ -225,6 +225,37 @@ export function stampForFile(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, "-");
 }
 
+function renderTemplateCell(value, previousValue, state, splitter) {
+  if (previousValue === value) return '~';
+  if (state.active) {
+    const expectedPrefix = value.startsWith(state.active.prefix);
+    const expectedSuffix = value.endsWith(state.active.suffix);
+    if (expectedPrefix && expectedSuffix) {
+      const middle = value.slice(state.active.prefix.length, value.length - state.active.suffix.length);
+      return `&${middle}@`;
+    }
+  }
+  const template = splitter(value);
+  if (template) {
+    state.active = template;
+    return `${template.prefix}^${template.middle}@${template.suffix}`;
+  }
+  state.active = null;
+  return value;
+}
+
+function splitTimeCell(value) {
+  const index = value.indexOf(':');
+  if (index < 0) return null;
+  return { prefix: value.slice(0, index + 1), middle: value.slice(index + 1), suffix: '' };
+}
+
+function splitFileCell(value) {
+  const match = value.match(/^(.*?)(\d[^.]*)(\.[^.]+)$/);
+  if (!match) return null;
+  return { prefix: match[1], middle: match[2], suffix: match[3] };
+}
+
 export function formatToon({ testName, timestamp, tier, target, quality, effort, notes, columns, records, row }) {
   const timeBase = records.length ? records[0].timestamp.slice(0, 14) : timestamp.slice(0, 14);
   const lines = [
@@ -241,11 +272,19 @@ export function formatToon({ testName, timestamp, tier, target, quality, effort,
   lines.push(`runs[${records.length}]{${columns.join("|")}}:`);
 
   let previous = null;
+  const templateState = {};
+  for (const col of columns) templateState[col] = { active: null };
+
   for (const record of records) {
     const values = row(record, timeBase);
     const rendered = values.map((value, index) => {
       const text = String(value);
-      if (previous && text === previous[index] && columns[index] !== "size") return "~";
+      if (previous && text === previous[index]) return "~";
+      
+      const colName = columns[index];
+      if (colName === 't') return quoteCell(renderTemplateCell(text, previous?.[index], templateState[colName], splitTimeCell));
+      if (colName === 'file') return quoteCell(renderTemplateCell(text, previous?.[index], templateState[colName], splitFileCell));
+      
       return quoteCell(text);
     });
     lines.push(`  ${rendered.join(" | ")}`);
