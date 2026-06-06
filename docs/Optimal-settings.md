@@ -149,6 +149,41 @@ Detailed configuration and usage options for backend CLI benchmark scripts (excl
   PM_FILE=<path_to_raw> PM_REPS=2 PM_TIMEOUT=60000 node benchmark/policy-matrix.mjs
   ```
 
+### DecodingSpeed Sweep (Test_8)
+- **Description:** Sweeps `decodingSpeed` (0–3) × effort (3, 5). `decodingSpeed` trades encode work for faster decode; measures encode time, decode time, and file size to find the cheapest setting that keeps decode fast.
+- **Usage:**
+  ```bash
+  TEST8_LIMIT=2 TEST8_TARGET=1600 TEST8_QUALITY=85 TEST8_EFFORTS=3,5 TEST8_DEC_SPEEDS=0,1,2,3 node benchmark/test_8_decoding_speed_sweep.mjs
+  ```
+
+### GroupOrder + ProgressiveDc First-Frame (Test_9)
+- **Description:** Sweeps `groupOrder` (0=raster scan, 1=center-out) × `progressiveDc` (1, 2). Captures first-frame arrival time to quantify whether center-out ordering accelerates early visual during streaming.
+- **Usage:**
+  ```bash
+  TEST9_LIMIT=3 TEST9_TARGET=1600 TEST9_QUALITY=85 TEST9_EFFORT=3 TEST9_GROUP_ORDERS=0,1 TEST9_PROG_DCS=1,2 node benchmark/test_9_group_order_progressive_dc.mjs
+  ```
+
+### EPF + Gaborish Quality Sweep (Test_10)
+- **Description:** Sweeps `epf` (0–3) × `gaborish` (0, 1) at effort=3. Measures encode time, decode time, and file size to find the filtering configuration with the best visual quality per byte.
+- **Usage:**
+  ```bash
+  TEST10_LIMIT=3 TEST10_TARGET=1600 TEST10_QUALITY=85 TEST10_EFFORT=3 TEST10_EPF=0,1,2,3 TEST10_GABORISH=0,1 node benchmark/test_10_epf_gaborish_sweep.mjs
+  ```
+
+### BrotliEffort vs Encode Time (Test_11)
+- **Description:** Sweeps `brotliEffort` (−1=auto, 0, 4, 9, 11) × effort (3, 5). Quantifies whether higher Brotli compression levels meaningfully reduce file size and at what encode-time cost.
+- **Usage:**
+  ```bash
+  TEST11_LIMIT=2 TEST11_TARGET=1600 TEST11_QUALITY=85 TEST11_EFFORTS=3,5 TEST11_BROTLI_LEVELS=-1,0,4,9,11 node benchmark/test_11_brotli_effort_sweep.mjs
+  ```
+
+### Resampling × Quality Sweep (Test_12)
+- **Description:** Sweeps `resampling` (−1=auto, 1=full, 2=half) × quality (75, 85, 90) at effort=3, 1600px. Maps the size–quality–speed surface to find the sweet spot for web delivery.
+- **Usage:**
+  ```bash
+  TEST12_LIMIT=3 TEST12_TARGET=1600 TEST12_EFFORT=3 TEST12_QUALITIES=75,85,90 TEST12_RESAMPLINGS=-1,1,2 node benchmark/test_12_resampling_quality_sweep.mjs
+  ```
+
 ## Desirable Tests
 
 Future or desirable backend benchmarks that would be beneficial to implement or formalize. Metrics below can be filled with ticks (✓) for capability or average timings/findings for continuous measurements.
@@ -156,6 +191,12 @@ Future or desirable backend benchmarks that would be beneficial to implement or 
 | TestID | TestName | Brief_descr | Option_A_name vs Option_B_name | .ORF | .RAW | .CR2 | .JPG | small (320px) | medium (800px) | High (1920px) | Original size |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | Test_1 | progressive vs 1-shot | Assess total decode time | 430ms vs 230ms | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Test_2 | Thumbnail Generation | Encode and decode low-res thumbs | 400px progressive vs oneshot | ✓ | ✓ | ✓ | ✓ | ✓ |   |   |   |
+| Test_3 | Lightbox Detail View | Full-res encoding and ROI paint | Full progressive vs ROI ds=1 | ✓ | ✓ | ✓ | ✓ |   | ✓ | ✓ | ✓ |
+| Test_4 | Bulk Image Testing | Batch/Gallery sequential encode | Encode vs decode ms/peak mem | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |   |   |
+| Test_5 | First-Paint Streaming | Streaming decode byte cutoffs | 25% vs 50% byte PSNR | ✓ |   | ✓ |   |   | ✓ | ✓ |   |
+| Test_6 | Policy Matrix Sweep | Find optimal JXL settings | VarDCT vs Modular / Resampling | ✓ |   | ✓ | ✓ |   | ✓ | ✓ |   |
+| Test_7 | P3.1 Feature Benchmark| Progressive decode features | previewFirst vs ds2 vs ROI | ✓ |   | ✓ |   |   | ✓ | ✓ |   |
 
 ## Test Scenarios
 

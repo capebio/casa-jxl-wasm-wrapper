@@ -4,6 +4,8 @@ The `text/toon` format is used to maintain a durable ledger of benchmark permuta
 
 **Crucially: One benchmark test run equals one `.toon` file.** A single file should contain all the timings and permutations for that specific test run.
 
+**Note for Agents:** When executing benchmark runs, you MUST refer to `docs/Tested-settings.md` and use the optimal, "locked-in" settings defined there (e.g., target resolutions, effort levels, quality) to ensure consistency and continuous progression towards the fastest setup.
+
 ## File Structure Example
 
 A `.toon` file should consist of a global metadata header followed by one or more compact tabular sections. Shared values stay in the header. Only values that vary per measurement belong in the rows.
