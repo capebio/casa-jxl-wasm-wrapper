@@ -120,7 +120,7 @@ test('stateful progressive decoder flushes on JXL_DEC_FRAME_PROGRESSION and inpu
   expect(bridge).not.toContain('prev_flush_checksum');
   // All-zero scan skipped after first flush via flush_count guard.
   expect(bridge).toContain('flush_count');
-  expect(bridge).toContain('s->flush_count > 0');
+  expect(bridge).toContain('s->flush_count == 0');
   // Open-stream opportunistic flush removed: the conditional that fired on !input_closed is gone.
   expect(bridge).not.toContain('!s->input_closed && s->frame_started');
 });
