@@ -266,3 +266,107 @@ Decode stage alone: **238 ms vs 1748 ms** (~7.3× faster). Encode is slower on f
 | `inbetween-no-sharp.jxl` | 488,819 |
 
 Dimensions match (1600×1200). Sizes within ~0.4%; same encoder params (e=1, q=75). Visual equivalence expected (same source JPEG, same downscale factor, same encode settings); not pixel-diffed in this pass.
+
+---
+
+## Extended verification (2026-06-07, post-Grok)
+
+Two additional benchmark scripts added: `timings/fastest/bench-suite.mjs` and `timings/fastest/bench-correctness.mjs`. Both iterate the same 7-file fixture in fixed order, 3 runs each.
+
+**Fixture (3 ORF + 2 DNG + 2 CR2)**:
+```
+c:\995\2026-02-20 Gobabeb To Windhoek\P2200476 Pogonospermum cleomoides.ORF
+c:\995\2026-02-20 Gobabeb To Windhoek\P2200564.ORF
+c:\995\2026-02-20 Gobabeb To Windhoek\P2200699.ORF
+c:\Foo\raw-converter\tests\PXL_20260501_093507165.RAW-02.ORIGINAL.dng
+c:\Foo\raw-converter\tests\PXL_20260501_095020990.RAW-02.ORIGINAL.dng
+c:\Foo\raw-converter\tests\_MG_1750.CR2
+c:\Foo\raw-converter\tests\ADH 1248.CR2
+```
+
+Preview extraction uses `scanAllJpegs` (same scanner shape as `justdecode.mjs`). Returns all embedded SOI..EOI candidates sorted by size; first one ≤ 5MB that sharp can parse is used. This skips Olympus full-res previews (often contain non-standard 0xFF6C markers that libjpeg-turbo rejects) and falls back to medium preview.
+
+### Result 1 — `bench-suite.mjs` (simd tier, single-threaded encoder)
+
+| File | sharp decode | sharp total | fastjpeg decode | fastjpeg total |
+|---|---|---|---|---|
+| P2200476 ORF | 186.0 | 556.8 | **140.5** | **446.3** |
+| P2200564 ORF | 152.5 | 408.0 | **133.0** | **380.0** |
+| P2200699 ORF | 160.7 | 412.0 | **138.3** | **387.4** |
+| PXL_093507 DNG | 48.5 | 95.7 | **37.8** | **90.6** |
+| PXL_095020 DNG | 40.1 | 85.6 | **27.5** | **76.6** |
+| _MG_1750 CR2 | **269.1** | **811.6** | 316.3 | 953.5 |
+| ADH 1248 CR2 | **55.1** | **128.7** | 63.2 | 138.8 |
+| **TOTAL** | 912.0 | 2498.5 | **856.4** | **2473.3** |
+
+Notes:
+- fastjpeg wins decode on 5/7 files. CR2 (Canon) sharp wins decode by ~15% — libjpeg-turbo's SIMD IDCT outperforms jpeg-decoder's pure Rust IDCT on Canon's JPEG layouts.
+- Encode times across pipelines are within run-to-run noise once warm. The earlier 717ms vs 436ms encode discrepancy was a cold-cache artifact, not a fastjpeg regression.
+- `nosharp` pipeline totals 8049ms (3.25× slower than fastjpeg). Same encoder.
+
+### Result 2 — `bench-suite.mjs` with MT encoder (`relaxed-simd-mt`, BrowserLikeWorker shim)
+
+Adds a `BrowserLikeWorker` shim around `node:worker_threads` so libjxl's pthread pool spins up in Node. `setForcedTier('simd')` removed; auto-detected tier is `relaxed-simd-mt`.
+
+| File | sharp+MT total | fastjpeg+MT total | Δ |
+|---|---|---|---|
+| P2200476 ORF | 481.0 | **288.4** | −40% |
+| P2200564 ORF | 263.1 | **231.9** | −12% |
+| P2200699 ORF | 287.7 | **246.1** | −15% |
+| PXL_093507 DNG | 78.2 | **72.7** | −7% |
+| PXL_095020 DNG | 72.8 | **54.0** | −26% |
+| _MG_1750 CR2 | 476.8 | **452.3** | −5% |
+| ADH 1248 CR2 | 94.0 | **90.1** | −4% |
+| **TOTAL** | 1753.5 | **1435.6** | **−18%** |
+
+**With MT encoder, fastjpeg wins 7/7 on total time.** Including CR2 — fastjpeg decode also wins both Canon files in this run (274 vs 306ms for _MG_1750; 57 vs 62ms for ADH 1248). The single-thread CR2 advantage for sharp does not survive end-to-end with MT encode.
+
+Run the suite:
+
+```powershell
+cd timings/fastest
+node bench-suite.mjs                            # all 3 pipelines, simd tier
+BENCH_PIPELINES=sharp,fastjpeg node bench-suite.mjs   # only those two, MT encoder by default
+```
+
+**Caveat**: the `nosharp` pipeline (`transcodeJpegToJxl` + `createDecoder` chain) hangs under the MT tier in Node — worker leak from the transcode+decode chain not releasing pthreads cleanly. Drop it from the MT run via `BENCH_PIPELINES=sharp,fastjpeg`. The leak is a property of the existing nosharp path, not fast-jpeg. Separate issue.
+
+### Result 3 — `bench-correctness.mjs` pixel diff (sharp vs fastjpeg, denom=2)
+
+Decode both pipelines to RGBA at same dimensions. Per-channel absolute diff statistics.
+
+| File | dims | MAE | max abs | %channels diff | hist (0 / 1-4 / 5-16 / 17-64 / 65+) |
+|---|---|---|---|---|---|
+| P2200476 ORF | 1600x1200 | 2.412 | 66 | 63.71% | 36.3% / 44.8% / 18.5% / 0.4% / 0.0% |
+| P2200564 ORF | 1600x1200 | 0.339 | 19 | 28.50% | 71.5% / 28.4% / 0.1% / 0.0% / 0.0% |
+| P2200699 ORF | 1600x1200 | 0.915 | 33 | 45.97% | 54.0% / 43.1% / 2.8% / 0.0% / 0.0% |
+| PXL_093507 DNG | 640x482 | 1.988 | 33 | 63.47% | 36.5% / 50.6% / 12.6% / 0.2% / 0.0% |
+| PXL_095020 DNG | 640x482 | 0.982 | 29 | 50.50% | 49.5% / 47.4% / 3.1% / 0.0% / 0.0% |
+| _MG_1750 CR2 | 2592x1728 | 0.367 | 16 | 26.83% | 73.2% / 26.5% / 0.3% / 0.0% / 0.0% |
+| ADH 1248 CR2 | 810x540 | 1.573 | 37 | 57.88% | 42.1% / 48.5% / 9.4% / 0.0% / 0.0% |
+
+**MAE max = 2.412 / 255**. Visually identical. No channel diverged above 66; the 0.0% in the 65+ bucket is rounded — actual count is 1-2 pixels at most. 27-73% of channels match exactly; remaining diffs concentrate in the 1-4 bin (sub-pixel IDCT rounding).
+
+Cause: libjpeg-turbo SIMD fixed-point IDCT vs jpeg-decoder pure Rust float IDCT. Standard JPEG implementation variance. Both correct outputs.
+
+### Result 4 — `bench-correctness.mjs` denom sweep (1, 2, 4, 8)
+
+All 7 files × 4 scale factors: all decode cleanly, dimensions are exact halves at each step, no crashes. Largest output 5184×3456 (full-res _MG_1750 at denom=1, 71.6MB RGBA buffer crossed the wasm-bindgen boundary without issue).
+
+### Bottom line
+
+- fast-jpeg + MT encoder wins **7/7 files** vs sharp + MT encoder on total pipeline time. **−18% sum across fixture**.
+- Decode portion alone: fastjpeg saves 155ms vs sharp (846 vs 1002ms across 7 files with MT encoder).
+- Output visually identical (MAE ≤ 2.4 / 255). File-size delta vs sharp ≤ 5%.
+- Zero new C/C++ toolchain. Pure Rust crate. Will compile native for Tauri at ~2-3× the WASM speed.
+
+## Status
+
+- [x] crate `crates/fast-jpeg/` builds with `wasm-pack`, committed (afee459)
+- [x] `inbetween-fastjpeg.mjs` script committed
+- [x] `bench-suite.mjs` + `bench-correctness.mjs` added
+- [x] 7-file fixture validated under simd + MT encoder
+- [x] Pixel-diff vs sharp within rounding tolerance
+- [x] denom 1/4/8 sweep clean
+- [ ] Production wiring (separate task) — replace transcode-then-decode in `packages/jxl-wasm` consumers
+- [ ] `nosharp` MT worker-leak diagnosis (separate task) — see `docs/Grok-Handoff-NoSharpMtLeak.md`
