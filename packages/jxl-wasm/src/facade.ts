@@ -138,8 +138,8 @@ export interface EncoderOptions {
   groupOrder?: 0 | 1;
   /** Encoder-side downsampling factor. -1/1 = no downsampling; 2/4/8 = halve/quarter/eighth the frame before entropy coding. */
   resampling?: -1 | 1 | 2 | 4 | 8;
-  /** Number of DC layers to include (1 = one DC layer, 2 = two). Only meaningful when progressive=true. */
-  progressiveDc?: 1 | 2;
+  /** Number of DC layers to include (0 = none, 1 = one DC layer, 2 = two). Only meaningful when progressive=true. */
+  progressiveDc?: 0 | 1 | 2;
   /** Modular encoding mode. -1=auto, 0=VarDCT, 1=Modular. */
   modular?: -1 | 0 | 1;
   /** Brotli compression effort for entropy coding (0–11). -1 = encoder default. */
@@ -416,7 +416,7 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
     progressiveDc: options.progressiveDc ?? 1,
     progressiveAc: options.progressiveAc != null ? options.progressiveAc : (acEnabled ? 1 : 0),
     qProgressiveAc: options.qProgressiveAc != null ? options.qProgressiveAc : (acEnabled ? 1 : 0),
-    buffering: options.chunked ? 2 : 0,
+    buffering: 2,
     groupOrder,
   };
 }

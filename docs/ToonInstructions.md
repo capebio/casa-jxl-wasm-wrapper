@@ -51,5 +51,9 @@ TotalWallMs: 38892.966
   - Template shorthand is column-scoped. It must not cross columns.
   - Reserved characters in unquoted cells are `|`, `~`, `^`, `@`, and `&`.
   - If a literal cell needs a reserved character, quote the whole cell with double quotes. Quoted cells do not expand shorthand.
+- Dictionary / Aliasing:
+  - You can declare a dictionary map in the header using `Dict: key1=value1, key2=value2`.
+  - In header values or tabular rows, use the short key (e.g. `ti` for `tiny`, `wk` for `worker`). The parser will expand these short keys to their full values.
+  - This is highly recommended for repeatedly used enum-like values (e.g., sizes, modes) to further reduce file size and improve readability.
 - In numeric timing columns, `0` is canonical shorthand for `0.000`.
-- Always end each timing row with a filesize field that includes a unit suffix such as `B` or `KB`.
+- Always end each timing row with a filesize field that includes a unit suffix such as `B` or `KB`. If the filesize is unchanged from the previous row, use `~` shorthand instead of repeating the value.

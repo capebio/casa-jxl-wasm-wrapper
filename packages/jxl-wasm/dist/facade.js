@@ -51,10 +51,10 @@ function resolveEncoderBridgeSettings(options) {
     }
     const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
     return {
-        progressiveDc: 1,
+        progressiveDc: options.progressiveDc ?? 1,
         progressiveAc: options.progressiveAc != null ? options.progressiveAc : (acEnabled ? 1 : 0),
         qProgressiveAc: options.qProgressiveAc != null ? options.qProgressiveAc : (acEnabled ? 1 : 0),
-        buffering: options.chunked ? 2 : 0,
+        buffering: 2,
         groupOrder,
     };
 }

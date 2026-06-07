@@ -452,13 +452,13 @@ Future or desirable backend benchmarks that would be beneficial to implement or 
 | 50        |           |      |                  |         |
 | 75        |           |      |                  |         |
 | 100       |           |      |                  |         |
+```
+
 ### 6. Timing Harness Default Alignment
 
 - The `web/jxl-single-progressive` timing surface was starting new runs from `q95` (`very-high`), which made the larger presets look "stuck" because the encode work ballooned before the first useful decode milestone.
 - The page default now matches the locked web-facing preset from `docs/Tested-settings.md`: `quality=85` (`medium`) for timing runs.
 - Keep `q95` available only as an explicit inspection choice. Do not use it as the default for timing work.
-
-```
 
 ---
 

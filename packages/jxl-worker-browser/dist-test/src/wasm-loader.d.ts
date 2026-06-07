@@ -1,6 +1,6 @@
 import type { DecodeStage, ImageInfo, PixelFormat, Region } from "@casabio/jxl-core/types";
-export type { Tier } from "@casabio/jxl-wasm";
-export { detectTier } from "@casabio/jxl-wasm";
+export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
+export declare function detectTier(): Tier;
 export type BrowserDecodeEvent = {
     type: "header";
     info: ImageInfo;

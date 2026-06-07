@@ -96,5 +96,95 @@ This batch extended the earlier benchmark set with full TOON timing rows for qua
   - Lossy VarDCT/default is the web path; lossless Modular was 6,569,529B and slower, reserved for archival/local workflows.
 
 **Updated setting summary:** use `target=400, quality=80` for thumbnails; `target=800, quality=85` for fast previews; `target=1600, quality=85, effort=3, progressive=true` for web streaming/lightbox; `target=2400, quality=85-90` only for local detail views; lossless Modular only for archival exactness.
+
 **Timing harness note:** the single-progressive page now defaults to `quality=85` instead of `q95`, which removes the expensive default path that made larger manual runs appear frozen. Keep `q95` as an explicit opt-in only.
 
+## 2026-06-06 Single Progressive Worker Investigation
+
+This section summarizes the focused debugging and timing work on `web/jxl-single-progressive.html`. This area is still actively changing; expect this conclusion to be superseded by later timing batches while progressive speed work continues.
+
+### Stability Outcome
+
+- Worker progressive no longer freezes under the tested browser setup after locking the worker path to:
+  - `poolSize=1`
+  - `pushHwm=64`
+  - 25s per-run timeout/fail-fast
+  - default worker tier restored to `auto` after validation
+- `workerTier=auto` proved safe in the tested environment and did not reintroduce the old stall.
+- `workerPool=4` showed no benefit for this page's single active decode path and remains inferior to `poolSize=1`.
+
+### Best Stable Worker Default
+
+The current best stable worker-progressive settings are:
+
+- `progressiveDc=2`
+- `progressiveAc=1`
+- `qProgressiveAc=1`
+- `decodingSpeed=2`
+- `groupOrder=1` (`center-out`)
+
+This combination is not the fastest absolute decode mode. It is the best currently observed balance between stability and visible progressive refinement.
+
+### Core Timing Findings
+
+- Worker progressive is usually slower than one-shot total decode time.
+- Small outputs derive little practical benefit from progressive decode.
+- Larger outputs naturally expose more visible passes, but total decode cost rises sharply.
+- Under the stable default worker settings, visible pass count scaled with output size:
+  - `tiny`: 2 passes
+  - `small`: 2 passes
+  - `medium`: 2 passes
+  - `large`: 3 passes
+  - `display`: 4 passes
+  - `very-large`: 5 passes
+
+Representative same-setting size sweep for one ORF source:
+
+- `tiny` (`160x119`): `254.57 ms` progressive vs `12.2 ms` one-shot
+- `small` (`320x239`): `62.57 ms` progressive vs `26.47 ms` one-shot
+- `medium` (`640x478`): `140.2 ms` progressive vs `89.57 ms` one-shot
+- `large` (`1080x806`): `565.25 ms` progressive vs `264.51 ms` one-shot
+- `display` (`1920x1433`): `1923.13 ms` progressive vs `725.65 ms` one-shot
+- `very-large` (`2160x1613`): `2658.98 ms` progressive vs `850.71 ms` one-shot
+
+### High-Value Anomalies
+
+#### 1. `decodingSpeed` is not monotonic for progressive visibility
+
+On the same encoded `display` image (`progressiveDc=0`, `progressiveAc=2`, `qProgressiveAc=2`, `groupOrder=1`, same `453.2 KB` file), changing only `decodingSpeed` radically changed visible-pass behavior:
+
+- `decodingSpeed=0`: 2 passes, `2122.11 ms`
+- `decodingSpeed=1`: 2 passes, `3788.79 ms`
+- `decodingSpeed=2`: 26 passes, `13119.89 ms`
+- `decodingSpeed=3`: 26 passes, `12729.66 ms`
+- `decodingSpeed=4`: 2 passes, `1676.7 ms`
+
+This is the strongest anomaly found in the current investigation. Intermediate values `2/3` unlock deep progressive refinement, but at extreme total-cost penalty. Values `0/1/4` collapse back to near one-shot visible behavior.
+
+#### 2. Many-pass runs are not transfer-limited
+
+In the 26-pass runs above, `bytesFed` reached `100%` at pass 1 and remained there for the rest of the decode. The long tail is therefore not network/stream pacing. It is decoder-side progressive refinement work after full-file arrival.
+
+#### 3. Extra progressive passes are decode-dominated, not paint-dominated
+
+For deep progressive runs, each additional pass typically cost about `0.4-0.65 s`. Paint time was usually `35-85 ms`; the remainder was decode/refinement work. This means frontend paint optimization alone will not recover most of the lost time.
+
+#### 4. Some aggressive progressive settings produce many passes, but at unacceptable cost
+
+Observed examples:
+
+- `qProgressiveAc=2` on a `display` image pushed worker progressive to about `5.18 s`
+- `progressiveAc=2`, `qProgressiveAc=2` reduced that to about `3.56 s`, still far slower than the conservative default
+- `progressiveDc=0`, `progressiveAc=2`, `qProgressiveAc=2`, `decodingSpeed=2/3` produced `26` passes but took about `12.7-13.1 s`
+
+#### 5. Same-source reruns still show material variance
+
+Even with stable worker settings and the same loaded source, repeated worker-progressive runs on `display` size produced totals around `1138.69 ms` and `1531.31 ms`. This variance is not catastrophic, but it is large enough to make cross-image comparisons noisy and should be treated as real measurement uncertainty.
+
+### Working Conclusion
+
+- Worker progressive is now stable.
+- The main remaining issue is not freezing; it is poor timing efficiency when progressive refinement is made more aggressive.
+- Conservative worker defaults (`progressiveDc=2`, `progressiveAc=1`, `qProgressiveAc=1`) remain the best practical shipping profile observed so far.
+- Progressive decode appears most justified for larger outputs (`large` and above). For smaller outputs, one-shot decode is likely the better user-facing choice because progressive overhead dominates.
+- Future speed work should focus on decoder-side progressive refinement behavior, especially the interaction between `decodingSpeed` and visible flush cadence.

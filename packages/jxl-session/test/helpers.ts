@@ -35,7 +35,7 @@ export class FakeWorker implements WorkerHandle {
 
 // Build a Scheduler backed by FakeWorkers; the returned store collects every
 // worker the scheduler spawns so tests can drive them.
-export function makeScheduler(maxWorkers = 2): { scheduler: Scheduler; workers: FakeWorker[] } {
+export function makeScheduler(maxWorkers = 2, pushHwm?: number): { scheduler: Scheduler; workers: FakeWorker[] } {
   const workers: FakeWorker[] = [];
   const scheduler = new Scheduler({
     factory: async () => {
@@ -44,6 +44,7 @@ export function makeScheduler(maxWorkers = 2): { scheduler: Scheduler; workers: 
       return w;
     },
     maxWorkers,
+    ...(pushHwm !== undefined ? { pushHwm } : {}),
     // Short idle timeout so a leaked timer (e.g. from a failing test that
     // skips shutdown()) cannot hold the process open.
     idleTimeoutMs: 100,

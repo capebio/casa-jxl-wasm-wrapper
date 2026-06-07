@@ -49,6 +49,8 @@ If executing benchmarks that require environmental variables or overrides, agent
 - `QUALITY=85` (or `80` for small targets)
 - `TARGET=1600` (or `400` for thumbnails)
 
+Single Progressive timing baselines must state block-border overlay state. Use `?borders=0` for timing sweeps so inspection-only block borders do not inflate paint timing; leave the default checked state for interactive pass inspection.
+
 ## Completed Timing Batches
 
 - [x] Tests 13-22 correlation-derived timing sweep (completed 2026-06-06):
@@ -60,11 +62,11 @@ If executing benchmarks that require environmental variables or overrides, agent
   - progressive toggle
   - effort shipping window
   - target size ladder
+  - source format sweep
+  - modular plus lossless matrix
 - [ ] Tests 18 + 20 validation batch (planned 2026-06-06):
   - progressive toggle
   - target size ladder
-  - source format sweep
-  - modular plus lossless matrix
 
 ## Updated Presets From Tests 13-22
 
