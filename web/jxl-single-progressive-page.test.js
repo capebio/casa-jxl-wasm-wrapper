@@ -27,7 +27,8 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(html).toContain('id="throttle-rate"');
     expect(html).toContain('id="progressive-detail"');
     expect(html).toContain('value="lastPasses" selected');
-    expect(html).toContain('value="passes">All passes diagnostic');
+    expect(html).toContain('value="passes"');
+    expect(html).toContain('All passes diagnostic');
     expect(html).toContain('id="retrieve-run"');
     expect(html).toContain('id="run-rerun"');
     expect(html).toContain('Retrieve raw file');
@@ -43,9 +44,9 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(source).toContain('encodeSneyersDirect');
     expect(source).toContain('runBtn');
     expect(source).toContain('rerunLoadedSource');
-    expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState)');
+    expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState, { progressiveDetail })');
     expect(source).toContain('pushDecodeChunk');
-    expect(source).toContain("feedThrottled(session, jxlBytes, throttleKbPerSec, feedState, { copyChunks: true })");
+    expect(source).toContain("feedThrottled(session, jxlBytes, throttleKbPerSec, feedState, { copyChunks: true, progressiveDetail })");
     // Default targets display-scale tuning while keeping larger/source-size runs available.
     expect(html).toContain('value="display" selected');
     expect(html).toContain('Display · 1920 px');
@@ -58,6 +59,12 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(source).toContain("...(lossless ? { distance: 0 } : {})");
     // Progressive DC and group order are explicit tuning controls.
     expect(html).toContain('id="progressive-dc"');
+    expect(html).toContain('setting-impact-mild');
+    expect(html).toContain('setting-impact-slow');
+    expect(html).toContain('setting-impact-severe');
+    expect(source).toContain('refreshSettingImpactHints');
+    expect(source).toContain('initSettingImpactHints');
+    expect(source).toContain('SETTING_IMPACT_BASE_HINTS');
     expect(html).toContain('value="2" selected>2 · 1:32 then 1:8 preview');
     expect(source).toContain('progressiveDc: settings.progressiveDc');
     expect(source).toContain('...(progressiveDc != null ? { progressiveDc } : {})');
@@ -90,6 +97,9 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(source).toContain('bytesFed');
     expect(source).toContain('percentFed');
     expect(source).toContain("progressiveDetail === 'passes'");
+    expect(source).toContain('DONOTCHANGE(progressive-checkpoints)');
+    expect(source).toContain('DONOTCHANGE(worker-transfer)');
+    expect(source).toContain('web/README.md');
     expect(source).toContain('await pushDecodeChunk(decoder, jxlBytes, copyChunks)');
     expect(source).toContain('else await sleep(0)');
     expect(source).toContain('pushDecodeChunk(decoder, jxlBytes.subarray(offset, end), copyChunks)');

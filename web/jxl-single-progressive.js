@@ -18,6 +18,168 @@ const PROGRESSIVE_DETAILS = new Set(['dc', 'lastPasses', 'passes']);
 function emitEveryPassForDetail(progressiveDetail) {
     return progressiveDetail !== 'dc';
 }
+
+const SETTING_IMPACT_CLASS = {
+    mild: 'setting-impact-mild',
+    slow: 'setting-impact-slow',
+    severe: 'setting-impact-severe',
+};
+
+const SETTING_IMPACT_RANK = { mild: 1, slow: 2, severe: 3 };
+
+const SETTING_IMPACT_BASE_HINTS = {
+    'size-preset': 'Output long edge. Original / very large multiply decode + paint cost.',
+    'quality-preset': 'Encode quality. Lossless is much slower and larger.',
+    'throttle-rate': 'Simulated network throughput. Lower = longer wall time.',
+    'progressive-dc': 'DC layers in encode. 0 skips early coarse previews — fewer visible passes before full AC (default 2).',
+    'progressive-ac': 'AC band split. Higher values add encode/decode passes.',
+    'qprogressive-ac': 'AC quantization tiers. Higher values add refinement passes.',
+    'progressive-detail': 'Decode granularity. All passes chunk-feeds every flush — lab mode only at large sizes.',
+    'decoding-speed': 'Decoder effort in the bitstream. 0 = slowest decode.',
+    'group-order': 'Coefficient group order in encode (center-out vs scanline).',
+    'decode-in-worker': 'Worker decode frees the main thread for paint. Off blocks UI during decode.',
+    'show-block-borders': 'Tile diff overlay per pass. Costly above ~4 MP — turn off for timing sweeps.',
+    'perceptual-cutoff': 'Stop decode early when passes plateau (opt-in).',
+    'charts-enabled': 'PSNR / SSIM / Butteraugli charts in a stats worker (diagnostic).',
+    'suppress-dup-progress': 'Experimental hash dedup — can hide intermediate flushes.',
+    'emit-sidecar-thumb': 'Extra 320px sidecar encode + decode measurement.',
+};
+
+const SETTING_IMPACT_WATCH_IDS = [
+    'size-preset',
+    'quality-preset',
+    'throttle-rate',
+    'progressive-dc',
+    'progressive-ac',
+    'qprogressive-ac',
+    'progressive-detail',
+    'decoding-speed',
+    'group-order',
+    'decode-in-worker',
+    'show-block-borders',
+    'perceptual-cutoff',
+    'charts-enabled',
+    'suppress-dup-progress',
+    'emit-sidecar-thumb',
+];
+
+function resolveSettingImpact(id, snapshot) {
+    switch (id) {
+        case 'size-preset':
+            if (snapshot.sizePreset === 'original') return { level: 'slow', note: 'Source resolution — heaviest decode and paint.' };
+            if (snapshot.sizePreset === 'very-large') return { level: 'mild', note: '2160 px long edge — moderately heavy.' };
+            return null;
+        case 'quality-preset':
+            if (snapshot.lossless) return { level: 'slow', note: 'Lossless encode/decode is much slower.' };
+            if (snapshot.qualityPreset === 'high') return { level: 'mild', note: 'Higher quality — slightly slower encode.' };
+            return null;
+        case 'throttle-rate':
+            if (snapshot.throttleKbPerSec > 0 && snapshot.throttleKbPerSec <= 100) {
+                return { level: 'slow', note: 'Very slow simulated download.' };
+            }
+            if (snapshot.throttleKbPerSec > 0 && snapshot.throttleKbPerSec <= 500) {
+                return { level: 'mild', note: 'Throttled byte feed stretches wall time.' };
+            }
+            return null;
+        case 'progressive-dc':
+            if (snapshot.progressiveDc === 0) {
+                return { level: 'slow', note: 'No DC progressive — fewer early preview passes.' };
+            }
+            return null;
+        case 'progressive-ac':
+            if (snapshot.progressiveAc === 2) return { level: 'mild', note: 'Multi-band AC — more refinement passes.' };
+            return null;
+        case 'qprogressive-ac':
+            if (snapshot.qProgressiveAc === 2) return { level: 'mild', note: 'Multi-tier AC quantization — more passes.' };
+            return null;
+        case 'progressive-detail':
+            if (snapshot.progressiveDetail === 'passes') {
+                return { level: 'severe', note: 'Diagnostic chunk-feed — many passes; very slow at large sizes.' };
+            }
+            if (snapshot.progressiveDetail === 'dc') return { level: 'mild', note: 'DC preview + final only.' };
+            return null;
+        case 'decoding-speed':
+            if (snapshot.decodingSpeed === 0) return { level: 'mild', note: 'Slowest decoder effort in bitstream.' };
+            if (snapshot.decodingSpeed === 4) return { level: 'mild', note: 'Fastest decode — lower decoder quality.' };
+            return null;
+        case 'group-order':
+            return null;
+        case 'decode-in-worker':
+            if (!snapshot.decodeInWorker) return { level: 'slow', note: 'Main-thread decode competes with paint.' };
+            return null;
+        case 'show-block-borders':
+            if (snapshot.showBlockBorders && (snapshot.sizePreset === 'original' || snapshot.sizePreset === 'very-large')) {
+                return { level: 'slow', note: 'Block borders on a large frame — expensive tile diff each pass.' };
+            }
+            if (snapshot.showBlockBorders) return { level: 'mild', note: 'Per-pass tile diff overlay.' };
+            return null;
+        case 'perceptual-cutoff':
+            return null;
+        case 'charts-enabled':
+            if (snapshot.chartsEnabled) return { level: 'mild', note: 'Extra stats-worker work after decode.' };
+            return null;
+        case 'suppress-dup-progress':
+            if (snapshot.suppressDuplicateProgress) {
+                return { level: 'severe', note: 'May suppress visible intermediate flushes.' };
+            }
+            return null;
+        case 'emit-sidecar-thumb':
+            if (snapshot.emitSidecarThumb) return { level: 'mild', note: 'Extra sidecar encode + one-shot decode.' };
+            return null;
+        default:
+            return null;
+    }
+}
+
+function labelForSettingControl(id) {
+    const el = document.getElementById(id);
+    return el?.closest('label') ?? null;
+}
+
+function applySettingImpactClass(label, level) {
+    if (!label) return;
+    label.classList.remove(SETTING_IMPACT_CLASS.mild, SETTING_IMPACT_CLASS.slow, SETTING_IMPACT_CLASS.severe);
+    if (level) label.classList.add(SETTING_IMPACT_CLASS[level]);
+}
+
+function composeSettingTitle(id, impact) {
+    const base = SETTING_IMPACT_BASE_HINTS[id] ?? '';
+    if (!impact?.note) return base || null;
+    return base ? `${base} ${impact.note}` : impact.note;
+}
+
+function readSettingImpactSnapshot() {
+    const settings = readSettings();
+    return {
+        ...settings,
+        decodeInWorker: document.getElementById('decode-in-worker')?.checked === true,
+        showBlockBorders: document.getElementById('show-block-borders')?.checked === true,
+        chartsEnabled: document.getElementById('charts-enabled')?.checked === true,
+        suppressDuplicateProgress: document.getElementById('suppress-dup-progress')?.checked === true,
+        emitSidecarThumb: document.getElementById('emit-sidecar-thumb')?.checked === true,
+    };
+}
+
+function refreshSettingImpactHints() {
+    const snapshot = readSettingImpactSnapshot();
+    for (const id of SETTING_IMPACT_WATCH_IDS) {
+        const label = labelForSettingControl(id);
+        const impact = resolveSettingImpact(id, snapshot);
+        applySettingImpactClass(label, impact?.level ?? null);
+        const title = composeSettingTitle(id, impact);
+        if (label && title) label.title = title;
+    }
+}
+
+function initSettingImpactHints() {
+    refreshSettingImpactHints();
+    for (const id of SETTING_IMPACT_WATCH_IDS) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener('change', refreshSettingImpactHints);
+    }
+}
+
 const FIRST_PAINT_CHUNK_RAMP = [1 * 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024];
 const STEADY_DECODE_CHUNK_BYTES = 32 * 1024;
 const BLOCK_BORDER_TILE_SIZE = 256;
@@ -444,6 +606,7 @@ let lastLoadedSourceDims = null;
 if (sizePresetEl) sizePresetEl.addEventListener('change', updateSizeEstimateDisplay);
 if (qualityPresetEl) qualityPresetEl.addEventListener('change', updateSizeEstimateDisplay);
 updateSizeEstimateDisplay();
+initSettingImpactHints();
 
 function updateSizeEstimateDisplay() {
     if (!sizeEstimateEl) return;
@@ -1210,6 +1373,8 @@ function thinRetainedPassPixels(passes) {
 }
 
 function pushDecodeChunk(decoder, chunk, copyChunk) {
+    // DONOTCHANGE(worker-transfer): jxl-session push() transfers the underlying ArrayBuffer.
+    // copyChunk=true copies before push so encodeBytes/jxlBytes stay valid for one-shot compare + exports.
     if (copyChunk) {
         const view = exactView(chunk);
         return decoder.push(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
@@ -1218,8 +1383,11 @@ function pushDecodeChunk(decoder, chunk, copyChunk) {
 }
 
 async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState, { copyChunks = false, progressiveDetail = DEFAULT_PROGRESSIVE_DETAIL } = {}) {
-    // Product path (lastPasses/dc): one push for local bytes — libjxl surfaces real last-pass boundaries.
-    // Diagnostic "passes" + throttle sim: chunk-feed with yields so the lab reproduces multi-checkpoint decode.
+    // DONOTCHANGE(progressive-checkpoints): When progressiveDetail === 'passes' (diagnostic) or throttle > 0,
+    // we MUST chunk-feed and yield (sleep(0) when unthrottled). A single push gives the WASM bridge only one
+    // input_generation, so opportunistic flush (bridge.cpp NEED_MORE_INPUT gate) surfaces at most one non-final
+    // checkpoint → two frames total. See web/README.md § Single progressive feed invariants.
+    // Product path (lastPasses/dc) at throttle 0 may use one push — libjxl last-pass boundaries are enough there.
     const chunkFeed = throttleKbPerSec > 0 || progressiveDetail === 'passes';
     if (!chunkFeed) {
         await pushDecodeChunk(decoder, jxlBytes, copyChunks);
