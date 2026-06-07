@@ -43,9 +43,12 @@ It must happen once at ingest and be cached forever; per-view must never touch t
 - **RAW decode ≈ 2.5 s/image** (`process_dng`); JXL decode of prebuilt full ≈ 302 ms;
   prebuilt L0 256px ≈ 19 ms. Warm JXL decode is ~linear in requested pixels
   (~19 / 56 / 217 / 302 ms for 256 / 1024 / 2048 / full).
-- **Sidecar encoder floors quality.** `encode_rgba8_with_sidecars` clamps every
-  sidecar to distance ≥ 1.5 (≈ q87 ceiling) at `bridge.cpp:2658`. It CANNOT give the
-  2048 level q90/95. → Ingest uses **standalone per-level encode**, not the sidecar call.
+- **Sidecar encoder floors small-level quality only.** `encode_rgba8_with_sidecars`
+  clamps each sidecar to distance ≥ 1.5 (≈ q87) at `bridge.cpp:2658`; the full image
+  (`2668`) is un-floored. The floor bites only levels we want above ~q87 — i.e. the 2048
+  sidecar at q95. Small levels {256,512,1024}=q85 ≈ distance 1.5 sit AT the floor,
+  unharmed. → Parameterize the floor to **per-level distances**; then ONE sidecar call
+  (cascade downscale + per-level encode, already in C++ at `2630-2681`) builds the ladder.
 - **2D canvas is 8-bit sRGB.** True >8-bit display requires a WebGL float texture.
   16→8 downconvert for the 2D path uses Floyd-Steinberg dithering.
 - **Native browser JXL is unreliable in 2026** (Chrome behind flag, Safari renders but
@@ -61,24 +64,32 @@ It must happen once at ingest and be cached forever; per-view must never touch t
 
 Batch CLI, run on-device. Pure-WASM (no `sharp` native dependency).
 
-**Inputs:** ORF, DNG, CR2 (`process_orf` / `process_dng` / `process_cr2`), and JPG
-(`transcodeJpegToJxl` → `_jxl_wasm_decode_rgba8` to get RGBA, then encode pyramid).
+**Inputs:** ORF, DNG, CR2 (`process_orf` / `process_dng` / `process_cr2`), and JPG.
+- RAW → decode to RGBA (16-bit; see Bit depth).
+- JPG → lossless `transcodeJpegToJxl` (`bridge.cpp:3082`) IS the full level: no re-encode
+  loss, native JXL, smaller. Decode that JXL once → RGBA for the smaller levels. No direct
+  JPEG decoder needed (none exists — `1140` routes JPEG to transcode), no wasted step.
 
 **Pyramid levels:** sizes `[256, 512, 1024, 2048]` + full. Each size = long-edge target.
 Skip any level whose long edge ≥ the master's long edge (no upscaling).
 
-**Downscale:** area-average box filter via `downscale_rgba` (Rust) / `BoxDownscaleRgba8`.
-Cascade smallest-from-previous: full → 2048 → 1024 → 512 → 256. Integer fast path on
-exact 2× steps; ceiling-division full-coverage path otherwise. (512/640 intermediate is
-cheap because it is one more cascade step, not a re-downscale from source.)
+**Downscale (internal to the encode call):** area-average box filter `BoxDownscaleRgba8`
+(`bridge.cpp:2647`), cascaded smallest-from-previous inside `encode_rgba8_with_sidecars`
+(full → 2048 → 1024 → 512 → 256). Integer fast path on exact 2× steps; ceiling-division
+full-coverage path otherwise. Downscale work ∝ output pixels, not N×full. No JS-side
+cascade. (16-bit big levels downscale separately — see Build Deps.)
 
 **Per-level quality** (distance set per level, NOT uniform):
 - `{256, 512, 1024}` → q85
 - `{2048, full}` → q95 (user prefers 90–95 on big images)
 - effort = 3 (user's prior measurements: effort 3 best on speed + filesize)
 
-**Encode:** standalone per-level `_jxl_wasm_encode_rgba{8,16}` (exact per-level
-quality + bit depth). NOT the sidecar call.
+**Encode (one call):** `encode_rgba8_with_sidecars` with **per-level distances** (floor
+parameterized) → cascade downscale + per-level encode in C++, one JS↔WASM crossing
+(replaces JS cascade + N standalone encodes). Per-level quality below. JPG keeps its
+lossless-transcode full and uses the sidecar call only for smaller levels. RAW
+additionally encodes 16-bit {2048, full} via `_jxl_wasm_encode_rgba16` (sidecars are
+rgba8).
 
 **Bit depth:**
 - JPG inputs → all levels 8-bit (source is 8-bit; no recovery headroom exists).
@@ -100,11 +111,17 @@ per-image budget (2× bytes). Per-file isolation — one bad file never aborts t
 
 **Resumability:** skip an image if its manifest exists and the master mtime is unchanged.
 
+**Proxy mode (`--proxy <256|512|1024>`, default 512):** verification-only. Emit a SINGLE
+small level (q85, 8-bit) + minimal manifest (`proxy: true`); skip the full pyramid and the
+push. For cheap presence / locality checks at scale. 256 = recognize subject; 512 = +
+coarse detail (habitat, large labels); 1024 = read fine text.
+
 ## 5. Storage & Transport (Option A)
 
 - One `{contenthash}.jxl` file **per level** (content-addressed → dedupe + immutable).
 - Per-image `manifest.json`: levels array, each `{ size, w, h, bytes, bitsPerSample,
-  contenthash, tiled? }`, plus orientation-baked dimensions and aspect.
+  contenthash, tiled? }`, plus orientation-baked dimensions and aspect. Proxy-mode
+  manifest is minimal and flagged `proxy: true`.
 - Gallery `index.json`: per-image aspect + L0 reference inlined (one round-trip seeds the
   whole grid layout without N manifest fetches).
 - `Cache-Control: public, max-age=31536000, immutable` (content-hashed names).
@@ -176,8 +193,10 @@ features needing their own identification.
 
 ## 10. Optimization Levers
 
-1. Standalone per-level encode → exact per-level quality (beats sidecar floor).
-2. Cascade downscale (each level from the previous) → no repeated source re-sampling.
+1. One-call sidecar pyramid w/ per-level distances → cascade downscale + per-level encode
+   in C++, one JS↔WASM crossing (was a JS cascade + N encodes).
+2. Cascade downscale internal (each level from previous) → downscale work ∝ output
+   pixels, not N×full.
 3. Content-addressed level files → cross-image dedupe + immutable caching.
 4. `index.json` inlines aspect + L0 → one round-trip seeds the grid.
 5. One-shot decode per tile → skip ~15–20 ms streaming overhead.
@@ -201,9 +220,13 @@ features needing their own identification.
 
 ## 12. Build Dependencies
 
-- `web/pkg` may need a rebuild if stale, to export `process_cr2` + `downscale_rgba`.
+- `web/pkg` may need a rebuild if stale, to export `process_cr2`.
+- Bridge edit (rides the rebuild): parameterize the sidecar distance floor
+  (`bridge.cpp:2658`) to accept per-level distances.
+- 16-bit big levels need a 16-bit box downscale (`BoxDownscaleRgba16` + a
+  `_jxl_wasm_downscale_rgba16` export) — only `BoxDownscaleRgba8` exists today.
 - Node ingest loads two WASM modules: `web/pkg` (RAW pipeline) + `jxl-wasm` dist
-  (encode/decode/downscale/tile).
+  (encode/decode/sidecar/tile).
 - 16-bit JXTC needs a WASM rebuild (rgba16 tile-container export missing) — deferred.
 - Production host must send COOP/COEP for MT.
 - Build chain (per CLAUDE.md): clang/lld/cmake, `wasm32-unknown-unknown`,
@@ -226,7 +249,9 @@ features needing their own identification.
   depth mapping (JPG→8, RAW→16 big / 8 grid), orientation baking, resumability skip.
 - **Downscale:** area-box correctness (integer fast path vs ceiling-division path parity
   on known images), aspect preservation.
-- **Encode:** standalone per-level distance honored (NOT floored to 1.5).
+- **Encode:** per-level-distance sidecar call honors each distance — 2048 at q95, NOT
+  clamped to 1.5. JPG full = lossless transcode (bit-exact vs decode of source). Proxy
+  mode emits one level + `proxy` manifest, no pyramid/push.
 - **Manifest/index:** schema, contenthash stability, aspect/L0 inlining.
 - **Client:** monotonic upgrade (no downgrade), right-size level pick by DPR, crossfade,
   prefetch-ring cancel on scroll.
@@ -247,7 +272,9 @@ features needing their own identification.
 
 - Ingest produces correct per-level pyramid + manifest for all 5 formats (ORF/DNG/CR2/JPG)
   with per-level quality and RAW 16-bit big levels.
-- Per-level encoded distance matches the spec (2048/full NOT floored to 1.5).
+- Per-level encoded distance matches the spec — 2048 at q95 via the per-level-distance
+  sidecar call, NOT clamped to 1.5; JPG full is a lossless transcode.
+- Proxy mode produces a single verification level at the chosen size (default 512).
 - Gallery seeds from L0 in one round-trip and upgrades to a DPR-right-sized level with a
   monotonic crossfade, decoding only near-viewport.
 - Lightbox: zoom ladder + pan + full FilterEngine adjustment parity; 16-bit toggle gives
