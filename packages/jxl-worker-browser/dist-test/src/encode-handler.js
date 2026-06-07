@@ -22,11 +22,27 @@ export class EncodeHandler {
     wakeResolve = null;
     lastDrainPostedMs = 0;
     lastDrainAllowed = false;
+    // Pre-allocated message objects — mutated in-place before postMessage (safe: structured clone is synchronous).
+    _drainMsg = {
+        type: "worker_drain",
+        sessionId: "",
+        latencyMs: 0,
+        queueDepth: 0,
+        queuedBytes: 0,
+        adaptiveHwm: CHUNK_HWM,
+    };
+    _chunkMsg = {
+        type: "encode_chunk",
+        sessionId: "",
+        chunk: new ArrayBuffer(0),
+    };
     constructor(opts, wasm, callbacks) {
         this.sessionId = opts.sessionId;
         this.opts = opts;
         this.wasm = wasm;
         this.callbacks = callbacks;
+        this._drainMsg.sessionId = this.sessionId;
+        this._chunkMsg.sessionId = this.sessionId;
         this.run().catch((err) => {
             const message = err instanceof Error ? err.message : String(err);
             this.failSession("Internal", message);
@@ -38,9 +54,7 @@ export class EncodeHandler {
     onPixels(chunk, region) {
         if (this.cancelled || this.state === "done")
             return;
-        const entry = { chunk };
-        if (region !== undefined)
-            entry.region = region;
+        const entry = region !== undefined ? { chunk, region } : { chunk };
         this.pixelQueue.push(entry);
         this.queueDepth++;
         this.wakeResolve?.();
@@ -87,8 +101,22 @@ export class EncodeHandler {
             // node_modules copy of jxl-core — cast to access it safely.
             progressiveFlavor: this.opts.progressiveFlavor,
             previewFirst: this.opts.previewFirst,
+            // progressiveDc + groupOrder (predator progressive layers + Tauri parity): forwarded so high-level session.encode
+            // can produce files with >1 DC layer and center-out for the gallery/paint benchmarks and Tauri parity.
+            progressiveDc: this.opts.progressiveDc,
+            progressiveAc: this.opts.progressiveAc,
+            qProgressiveAc: this.opts.qProgressiveAc,
+            groupOrder: this.opts.groupOrder,
             chunked: this.opts.chunked,
             sidecarSizes: this.opts.sidecarSizes,
+            // EXIF orientation (1..8). When set, JXL records rotation as metadata instead of rotating pixels.
+            orientation: this.opts.orientation,
+            centerX: this.opts.centerX,
+            centerY: this.opts.centerY,
+            intrinsicSize: this.opts.intrinsicSize,
+            disablePerceptualHeuristics: this.opts.disablePerceptualHeuristics,
+            codestreamLevel: this.opts.codestreamLevel,
+            copyInput: false,
         };
         const encoder = this.wasm.createEncoder(encoderOpts);
         this.state = "configured";
@@ -166,14 +194,8 @@ export class EncodeHandler {
         if (!crossedIntoDrain && !intervalElapsed)
             return;
         this.lastDrainPostedMs = now;
-        self.postMessage({
-            type: "worker_drain",
-            sessionId: this.sessionId,
-            latencyMs: 0,
-            queueDepth: this.queueDepth,
-            queuedBytes: 0,
-            adaptiveHwm: CHUNK_HWM,
-        });
+        this._drainMsg.queueDepth = this.queueDepth;
+        self.postMessage(this._drainMsg);
     }
     async readEncoderChunks(encoder) {
         let totalBytes = 0;
@@ -199,13 +221,9 @@ export class EncodeHandler {
                 sidecarOffsets.push(totalBytes);
             }
             chunkIndex++;
-            const msg = {
-                type: "encode_chunk",
-                sessionId: this.sessionId,
-                chunk: buffer,
-            };
+            this._chunkMsg.chunk = buffer;
             this.state = "streaming";
-            self.postMessage(msg, [buffer]);
+            self.postMessage(this._chunkMsg, [buffer]);
         }
         if (this.cancelled || this.state === "done" || this.state === "error")
             return;

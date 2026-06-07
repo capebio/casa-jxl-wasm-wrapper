@@ -1,0 +1,16 @@
+TestName: Progressive Testing - Effort Sweep (Test_3)
+RunTimestamp: 2026-06-06T04:58:02.449Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Effort: 3,5,7
+Notes: Measure effort vs encode time, first pass arrival, final decode, pass count.
+TimeBase: 2026-06-06T04:
+
+---
+runs[3]{t|file|effort|raw_ms|rgba_ms|encode_ms|first_ms|final_ms|passes|size}:
+  57:55.827 | P2200571.ORF | 3 | 2978.518 | 276.967 | 808.289 | 277.633 | 786.343 | 3 | 465511B
+  57:58.340 | ~ | 5 | ~ | ~ | 1829.092 | 223.221 | 680.184 | ~ | 309732B
+  58:02.449 | ~ | 7 | ~ | ~ | 3513.457 | 201.185 | 594.900 | ~ | 311892B
+

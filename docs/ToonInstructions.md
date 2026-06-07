@@ -4,6 +4,8 @@ The `text/toon` format is used to maintain a durable ledger of benchmark permuta
 
 **Crucially: One benchmark test run equals one `.toon` file.** A single file should contain all the timings and permutations for that specific test run.
 
+**Note for Agents:** When executing benchmark runs, you MUST refer to `docs/Tested-settings.md` and use the optimal, "locked-in" settings defined there (e.g., target resolutions, effort levels, quality) to ensure consistency and continuous progression towards the fastest setup.
+
 ## File Structure Example
 
 A `.toon` file should consist of a global metadata header followed by one or more compact tabular sections. Shared values stay in the header. Only values that vary per measurement belong in the rows.
@@ -49,5 +51,9 @@ TotalWallMs: 38892.966
   - Template shorthand is column-scoped. It must not cross columns.
   - Reserved characters in unquoted cells are `|`, `~`, `^`, `@`, and `&`.
   - If a literal cell needs a reserved character, quote the whole cell with double quotes. Quoted cells do not expand shorthand.
+- Dictionary / Aliasing:
+  - You can declare a dictionary map in the header using `Dict: key1=value1, key2=value2`.
+  - In header values or tabular rows, use the short key (e.g. `ti` for `tiny`, `wk` for `worker`). The parser will expand these short keys to their full values.
+  - This is highly recommended for repeatedly used enum-like values (e.g., sizes, modes) to further reduce file size and improve readability.
 - In numeric timing columns, `0` is canonical shorthand for `0.000`.
-- Always end each timing row with a filesize field that includes a unit suffix such as `B` or `KB`.
+- Always end each timing row with a filesize field that includes a unit suffix such as `B` or `KB`. If the filesize is unchanged from the previous row, use `~` shorthand instead of repeating the value.

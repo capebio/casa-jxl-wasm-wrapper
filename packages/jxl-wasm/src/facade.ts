@@ -82,13 +82,35 @@ export interface DecoderOptions {
   progressionTarget: "header" | "dc" | "pass" | "final";
   emitEveryPass: boolean;
   progressiveDetail?: ProgressiveDetail;
+  /**
+   * Strip ICC profile from decoded output.
+   * @note **WASM no-op.** `_jxl_wasm_dec_create` has no ICC-strip parameter.
+   * ICC is always preserved in the WASM decoder path. Honoured by jxl-native.
+   */
   preserveIcc: boolean;
+  /**
+   * Extract and emit EXIF/XMP metadata alongside decoded frames.
+   * @note **WASM no-op.** `_jxl_wasm_dec_create` has no metadata parameter.
+   * Metadata is never extracted in the WASM decoder path. Honoured by jxl-native.
+   */
   preserveMetadata: boolean;
-  /** Zero-based frame index for multi-frame JXL animations. Default 0 (first frame). */
+  /**
+   * Zero-based frame index for multi-frame JXL animations. Default 0 (first frame).
+   * @note **WASM no-op.** The WASM decoder always decodes the full stream; frame
+   * selection is not supported. Honoured by jxl-native.
+   */
   frameIndex?: number;
-  /** Emit early DC-only preview before full progressive decode. Default false. */
+  /**
+   * Emit early DC-only preview before full progressive decode.
+   * @note **WASM no-op** in the decoder path — preview emission is controlled by
+   * `progressiveDetail` and the encode-side `previewFirst` option. This field is
+   * read by higher-level layers only.
+   */
   previewFirst?: boolean;
-  /** Cache policy: when to store decoded frames. Default "onFinal". */
+  /**
+   * Cache policy: when to store decoded frames. Default "onFinal".
+   * @note Handled at the jxl-cache / jxl-session layer. The WASM facade ignores it.
+   */
   cachePolicy?: CachePolicy;
   /** When false, skip the defensive .slice() copy on push() — caller must not mutate the buffer after push returns. Default true. */
   copyInput?: boolean;
@@ -114,6 +136,26 @@ export interface EncoderOptions {
   progressiveAc?: 0 | 1 | 2;
   qProgressiveAc?: 0 | 1 | 2;
   groupOrder?: 0 | 1;
+  /** Encoder-side downsampling factor. -1/1 = no downsampling; 2/4/8 = halve/quarter/eighth the frame before entropy coding. */
+  resampling?: -1 | 1 | 2 | 4 | 8;
+  /** Number of DC layers to include (0 = none, 1 = one DC layer, 2 = two). Only meaningful when progressive=true. */
+  progressiveDc?: 0 | 1 | 2;
+  /** Modular encoding mode. -1=auto, 0=VarDCT, 1=Modular. */
+  modular?: -1 | 0 | 1;
+  /** Brotli compression effort for entropy coding (0–11). -1 = encoder default. */
+  brotliEffort?: -1 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
+  /** Trade encode work for faster decode (0–4). Higher = faster decode, larger file. */
+  decodingSpeed?: 0 | 1 | 2 | 3 | 4;
+  /** Simulate photon noise at this ISO equivalent. 0 = disabled. */
+  photonNoiseIso?: number;
+  /** Edge-preserving filter strength (0=off, 1–3=increasing). -1=encoder default. */
+  epf?: -1 | 0 | 1 | 2 | 3;
+  /** Gabor-like unsharpening pre-pass (0=off, 1=on). -1=encoder default. */
+  gaborish?: -1 | 0 | 1;
+  /** Dots/grain detection and preservation (0=off, 1=on). -1=encoder default. */
+  dots?: -1 | 0 | 1;
+  /** Color transform (0=XYB, 1=None, 2=YCbCr). -1=encoder default. */
+  colorTransform?: -1 | 0 | 1 | 2;
   previewFirst: boolean;
   chunked: boolean;
   /** Max dimensions (px) of sidecar thumbnails to yield before the full image. Sorted ascending. */
@@ -125,6 +167,12 @@ export interface EncoderOptions {
    * Escape hatch for advanced/experimental libjxl frame settings (patches, future tools, etc.).
    *
    * Use the named constants in `JxlFrameSetting`.
+   *
+   * @note **WASM no-op.** `_jxl_wasm_enc_create_image_adv` is not implemented in
+   * `bridge.cpp` and is not present in the compiled WASM binary. All entries are
+   * silently dropped in the WASM path. Use first-class options (`epf`, `gaborish`,
+   * `dots`, `decodingSpeed`, etc.) for settings that have named equivalents.
+   * Honoured by jxl-native (which calls `JxlEncoderFrameSettingsSetOption` directly).
    *
    * @example
    * createEncoder({
@@ -294,6 +342,10 @@ interface LibjxlWasmModule {
   _jxl_wasm_transcode_jpeg_to_jxl?(jpegPtr: number, jpegSize: number): number;
   // #16: Streaming input encoder — pre-allocate pixel buffer in WASM, push chunks, finish
   _jxl_wasm_enc_create_image?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
+  // _x: adds modular, brotliEffort, decodingSpeed, photonNoiseIso
+  _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, jpegKeepExif: number, jpegKeepXmp: number, jpegKeepJumbf: number, alreadyDownsampled: number, upsamplingMode: number, ecResampling: number): number;
+  // _y: adds epf, gaborish, dots, colorTransform
+  _jxl_wasm_enc_create_image_y?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, patches: number, colorTransform: number, centerX: number, centerY: number, jpegKeepExif: number, jpegKeepXmp: number, jpegKeepJumbf: number, alreadyDownsampled: number, upsamplingMode: number, ecResampling: number): number;
   // Advanced escape hatch variants
   _jxl_wasm_enc_create_image_adv?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, idsPtr: number, valuesPtr: number, count: number): number;
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
@@ -361,10 +413,10 @@ function resolveEncoderBridgeSettings(options: EncoderOptions) {
   }
   const acEnabled = options.progressiveFlavor === "ac" || (options.progressiveFlavor !== "dc" && options.previewFirst);
   return {
-    progressiveDc: 1,
+    progressiveDc: options.progressiveDc ?? 1,
     progressiveAc: options.progressiveAc != null ? options.progressiveAc : (acEnabled ? 1 : 0),
     qProgressiveAc: options.qProgressiveAc != null ? options.qProgressiveAc : (acEnabled ? 1 : 0),
-    buffering: options.chunked ? 2 : 0,
+    buffering: 2,
     groupOrder,
   };
 }
@@ -1576,29 +1628,48 @@ class LibjxlEncoder implements JxlEncoder {
           (this as any)._advIdsPtr = advIdsPtr;
           (this as any)._advValuesPtr = advValuesPtr;
         } else {
-          advCount = 0; // allocation failed
+          // Partial allocation: free whichever succeeded to avoid WASM heap leak.
+          if (advIdsPtr) module._free(advIdsPtr);
+          if (advValuesPtr) module._free(advValuesPtr);
+          advCount = 0;
         }
       }
 
-      const createFn = (advCount > 0 && module._jxl_wasm_enc_create_image_adv)
-        ? module._jxl_wasm_enc_create_image_adv!
-        : module._jxl_wasm_enc_create_image!;
+      const o = this.options;
+      const resampling = o.resampling ?? 1;
+      const needsY = caps.streamingInputY && (o.epf != null || o.gaborish != null || o.dots != null || o.colorTransform != null);
+      const needsX = !needsY && caps.streamingInputX && (o.modular != null || o.brotliEffort != null || o.decodingSpeed != null || o.photonNoiseIso != null);
 
-      if (advCount > 0 && createFn === module._jxl_wasm_enc_create_image_adv) {
-        this.wasmEncState = createFn(
-          this.options.width, this.options.height,
-          distance, this.options.effort,
-          fmtIndex, this.options.hasAlpha ? 1 : 0,
+      if (needsY) {
+        this.wasmEncState = module._jxl_wasm_enc_create_image_y!(
+          o.width, o.height, distance, o.effort,
+          fmtIndex, o.hasAlpha ? 1 : 0,
+          progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder,
+          o.modular ?? -1, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
+          o.epf ?? -1, o.gaborish ?? -1, o.dots ?? -1, 0, o.colorTransform ?? -1,
+          0, 0, 0, 0, 0, 0, 0, -1
+        );
+      } else if (needsX) {
+        this.wasmEncState = module._jxl_wasm_enc_create_image_x!(
+          o.width, o.height, distance, o.effort,
+          fmtIndex, o.hasAlpha ? 1 : 0,
+          progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder,
+          o.modular ?? -1, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
+          0, 0, 0, 0, 0, -1
+        );
+      } else if (advCount > 0 && module._jxl_wasm_enc_create_image_adv) {
+        this.wasmEncState = module._jxl_wasm_enc_create_image_adv!(
+          o.width, o.height, distance, o.effort,
+          fmtIndex, o.hasAlpha ? 1 : 0,
           progressiveDc, progressiveAc, qProgressiveAc, buffering,
           advIdsPtr, advValuesPtr, advCount
         );
       } else {
         this.wasmEncState = module._jxl_wasm_enc_create_image!(
-          this.options.width, this.options.height,
-          distance, this.options.effort,
-          fmtIndex, this.options.hasAlpha ? 1 : 0,
+          o.width, o.height, distance, o.effort,
+          fmtIndex, o.hasAlpha ? 1 : 0,
           progressiveDc, progressiveAc, qProgressiveAc, buffering,
-          groupOrder, 0
+          groupOrder, resampling
         );
       }
 
@@ -1923,6 +1994,8 @@ interface JxlCapabilities {
   progressiveDecode: boolean;
   streamingEncode: boolean;
   streamingInput: boolean;
+  streamingInputX: boolean;
+  streamingInputY: boolean;
   sidecars: boolean;
   jpegTranscode: boolean;
 }
@@ -1945,6 +2018,8 @@ function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
       typeof module._jxl_wasm_enc_finish === "function" &&
       typeof module._jxl_wasm_enc_take_chunk === "function" &&
       typeof module._jxl_wasm_enc_free === "function",
+    streamingInputX: typeof module._jxl_wasm_enc_create_image_x === "function",
+    streamingInputY: typeof module._jxl_wasm_enc_create_image_y === "function",
     sidecars:
       typeof module._jxl_wasm_encode_rgba8_with_sidecars === "function" &&
       typeof module._jxl_wasm_buffer_next === "function",

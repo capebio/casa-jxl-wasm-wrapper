@@ -2269,7 +2269,24 @@ function buildExportText(rows, format = 'json') {
         return metaLines.join('\n') + '\n' + lines.join('\n');
     }
     if (format === 'toon') {
-        let out = `meta:\n`;
+        const dict = {
+            'ti': 'tiny',
+            'sm': 'small',
+            'me': 'medium',
+            'la': 'large',
+            'di': 'display',
+            'vl': 'very-large',
+            'or': 'original',
+            'co': 'center-out',
+            'tb': 'top-bottom',
+            'T': 'true',
+            'F': 'false'
+        };
+        const reverseDict = Object.fromEntries(Object.entries(dict).map(([k,v]) => [v,k]));
+        const mapVal = (v) => reverseDict[v] || v;
+
+        let out = `Dict: ${Object.entries(dict).map(([k,v]) => `${k}=${v}`).join(', ')}\n`;
+        out += `meta:\n`;
         out += `  exportedAt: ${meta.exportedAt}\n`;
         out += `  generator: ${quoteIfNeeded(meta.generator)}\n`;
         out += `  rowCount: ${meta.rowCount}\n`;
@@ -2281,11 +2298,43 @@ function buildExportText(rows, format = 'json') {
             out += `      ext: ${f.ext}\n`;
         }
         out += `  selectedEfforts: ${meta.selected.efforts.join(',')}\n`;
-        out += `  selectedSizes: ${meta.selected.sizes.join(',')}\n`;
+        out += `  selectedSizes: ${meta.selected.sizes.map(mapVal).join(',')}\n`;
         const n = enriched.length;
-        out += `rows[${n}]{file,format,sizePx,tier,phase,effort,encMs,decMs,sizeKB,score}:\n`;
+        
+        out += `\n---\n`;
+        out += `rows[${n}]{file|format|sizePx|tier|phase|effort|encMs|decMs|sizeKB|score}:\n`;
+        
+        let lastFile = '';
+        let lastFormat = '';
+        let lastSize = '';
+        let lastTier = '';
+        let lastPhase = '';
+        
         for (const r of enriched) {
-            out += `  ${r.file},${r.format},${r.sizePx},${r.tier},${r.phase},${r.effort},${r.encMs.toFixed(1)},${r.decMs.toFixed(1)},${(r.sizeBytes/1024).toFixed(1)},${r.score}\n`;
+            const file = r.file;
+            const format = r.format;
+            const size = mapVal(r.sizePx);
+            const tier = r.tier;
+            const phase = r.phase;
+            const effort = r.effort;
+            const encMs = r.encMs.toFixed(1);
+            const decMs = r.decMs.toFixed(1);
+            const sizeKB = (r.sizeBytes/1024).toFixed(1);
+            const score = r.score;
+            
+            const fileOut = file === lastFile ? '~' : file;
+            const formatOut = format === lastFormat ? '~' : format;
+            const sizeOut = size === lastSize ? '~' : size;
+            const tierOut = tier === lastTier ? '~' : tier;
+            const phaseOut = phase === lastPhase ? '~' : phase;
+            
+            out += `  ${fileOut} | ${formatOut} | ${sizeOut} | ${tierOut} | ${phaseOut} | ${effort} | ${encMs} | ${decMs} | ${sizeKB}KB | ${score}\n`;
+            
+            lastFile = file;
+            lastFormat = format;
+            lastSize = size;
+            lastTier = tier;
+            lastPhase = phase;
         }
         return out;
     }

@@ -131,7 +131,7 @@ test('progressive paint sends generated JXL and settings directly to gallery wit
 
 test('progressive paint records per-frame visibility stats in console and measurement exports', () => {
     expect(source).toContain("import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog } from './jxl-progressive-frame-stats.js';");
-    expect(source).toContain('const frameStats = analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height);');
+    expect(source).toContain('analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height)');
     expect(source).toContain('formatFrameStatsLog(frameStats)');
     expect(source).toContain("console.log('[Progressive Paint] frame stats'");
     expect(source).toContain('stats: p.stats');
@@ -140,4 +140,65 @@ test('progressive paint records per-frame visibility stats in console and measur
     expect(source).toContain('perPassStats');
     expect(source).toContain('copyMeasurementsMarkdown');
     expect(source).toContain("copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown)");
+});
+
+test('A2: schedulePaint and paintPass extracted — source contains new rAF coalescing structure', () => {
+    expect(source).toContain('let pendingFrame = null');
+    expect(source).toContain('let rafPending = false');
+    expect(source).toContain('function schedulePaint(');
+    expect(source).toContain('function paintPass(');
+    expect(source).toContain('requestAnimationFrame(');
+});
+
+test('A2: final events bypass rAF coalescing — paintPass called directly', () => {
+    // isFinal check must appear before the rafPending guard in schedulePaint
+    const schedIdx = source.indexOf('function schedulePaint(');
+    const isFinalBypassIdx = source.indexOf('if (frame.isFinal)', schedIdx);
+    const rafPendingIdx = source.indexOf('if (rafPending)', schedIdx);
+    expect(isFinalBypassIdx).toBeGreaterThan(schedIdx);
+    expect(isFinalBypassIdx).toBeLessThan(rafPendingIdx);
+});
+
+test('A2: collectProgressivePaintEvents no longer calls await nextPaint() or await sleep()', () => {
+    const fnStart = source.indexOf('async function collectProgressivePaintEvents(');
+    const fnEnd = source.indexOf('\nasync function ', fnStart + 1) === -1
+        ? source.indexOf('\nfunction ', fnStart + 1)
+        : source.indexOf('\nasync function ', fnStart + 1);
+    const fnBody = fnEnd === -1 ? source.slice(fnStart) : source.slice(fnStart, fnEnd);
+    expect(fnBody).not.toContain('await nextPaint()');
+    expect(fnBody).not.toContain('await sleep(');
+});
+
+test('A2: coalescing note present in page for user transparency', () => {
+    // The spec says: document dropped passes in bench UI
+    // Accept either a comment in JS or text in HTML
+    expect(source.includes('Coalescing') || source.includes('coalescing') || source.includes('dropped')).toBe(true);
+});
+
+test('A3: makePassCanvas removed — persistent canvas strategy used', () => {
+    expect(source).not.toContain('function makePassCanvas(');
+    expect(source).toContain('thumbCanvases');
+    expect(source).toContain('putImageData');
+});
+
+test('A3: thumbCanvases cleared on timeline reset', () => {
+    const clearFn = source.indexOf('function clearPassTimeline(');
+    const clearEnd = source.indexOf('\nfunction ', clearFn + 1);
+    const clearBody = clearEnd === -1 ? source.slice(clearFn) : source.slice(clearFn, clearEnd);
+    expect(clearBody).toContain('thumbCanvases.clear()');
+});
+
+test('A4: stats gated behind STATS_ENABLED — analyzeProgressiveFrame not called unconditionally', () => {
+    expect(source).toContain('STATS_ENABLED');
+    const paintPassIdx = source.indexOf('function paintPass(');
+    const paintPassEnd = source.indexOf('\nfunction ', paintPassIdx + 1);
+    const paintPassBody = paintPassEnd === -1 ? source.slice(paintPassIdx) : source.slice(paintPassIdx, paintPassEnd);
+    expect(paintPassBody).toContain('STATS_ENABLED');
+    expect(paintPassBody).toContain('analyzeProgressiveFrame');
+});
+
+test('A4: per-pass dbgLog shows pass N · partial|final when stats off', () => {
+    expect(source).toContain('partial');
+    expect(source).toContain('final');
+    expect(source).toContain('STATS_ENABLED');
 });

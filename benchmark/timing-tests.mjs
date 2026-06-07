@@ -172,7 +172,7 @@ function toonRunString(run) {
       size: full.size,
     };
     const values = ['t', 'mode', 'effort', 'file', 'raw_ms', 'rgba_ms', 'encode_ms', 'total_ms', 'size']
-      .map((key) => previous && full[key] === previous[key] && key !== 'size' ? '~' : row[key]);
+      .map((key) => previous && full[key] === previous[key] ? '~' : row[key]);
     lines.push(`  ${values.join(' | ')}`);
     previous = full;
   }

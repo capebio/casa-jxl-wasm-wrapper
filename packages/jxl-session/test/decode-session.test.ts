@@ -170,6 +170,22 @@ describe("DecodeSessionImpl cancel paths", () => {
     await scheduler.shutdown();
   });
 
+  it("custom pushHwm allows five pre-first-paint decode chunks before drain", async () => {
+    const { scheduler, workers } = makeScheduler(2, 64);
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8" });
+    const worker = await waitForWorker(workers);
+
+    for (let i = 0; i < 5; i++) {
+      await session.push(new Uint8Array([i]));
+    }
+
+    const chunkCount = worker.messages.filter((m) => m.type === "decode_chunk").length;
+    assert.equal(chunkCount, 5);
+
+    await session.cancel();
+    await scheduler.shutdown();
+  });
+
   it("push() after close throws ConfigError", async () => {
     const { scheduler, workers } = makeScheduler();
     const session = new DecodeSessionImpl(scheduler, { format: "rgba8" });

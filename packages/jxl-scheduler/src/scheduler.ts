@@ -527,9 +527,12 @@ export class Scheduler {
     backgroundWorker.cancelling = false;
 
     if (!ackResolved) {
-      // Timed out: worker recycled. Victim session will receive decode_cancelled
-      // from the worker's shutdown sequence; clean up our side now.
-      this.releaseSession(victimSessionId);
+      // Timed out: worker recycled (pool.recycle terminates it). The terminal
+      // decode_cancelled from the worker may never arrive (activeSessionId is
+      // cleared during teardown, so handleWorkerMessage silently drops it).
+      // Use cleanupSession — not releaseSession — to ensure _runningCount is
+      // decremented and the session record is removed from the map now.
+      this.cleanupSession(victimSessionId);
       const newWorker = await this.pool.acquire();
       if (newWorker !== null) {
         this.assignWorker(newWorker, params.sessionId, params.startMsg);

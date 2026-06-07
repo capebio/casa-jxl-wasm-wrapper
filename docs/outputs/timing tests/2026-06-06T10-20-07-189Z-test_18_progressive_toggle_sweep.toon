@@ -1,0 +1,14 @@
+TestName: Progressive Toggle Sweep (Test_18)
+RunTimestamp: 2026-06-06T10:20:07.189Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Effort: 3
+Notes: progressive(0,1); local/on-computer final decode proxy vs streaming-ready asset cost
+TimeBase: 2026-06-06T10:
+
+---
+runs[2]{t|file|progressive|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "20:^06.146@" | "P^2200571@.ORF" | 0 | 4548.248 | 458.187 | 852.695 | 458.531 | 6317.662 | 444862B
+  "&07.189@" | ~ | 1 | ~ | ~ | 632.445 | 406.375 | 6045.256 | 465511B

@@ -1,0 +1,53 @@
+{
+  "exportedAt": "2026-06-05T21:35:10.753Z",
+  "tier": "simd",
+  "target": 1200,
+  "quality": 85,
+  "efforts": [
+    3,
+    5,
+    7
+  ],
+  "results": [
+    {
+      "file": "P2200571.ORF",
+      "src": "5240×3912",
+      "encoded": "1200×896",
+      "efforts": [
+        {
+          "effort": 3,
+          "encodeMs": 560,
+          "jxlBytes": 274782,
+          "jxlKb": 268,
+          "passes": 3,
+          "decodeFirstMs": 159,
+          "decodeFinalMs": 452,
+          "encodeSpeedupVsEffort3": "n/a",
+          "decodeSpeedupVsEffort3": "n/a"
+        },
+        {
+          "effort": 5,
+          "encodeMs": 1166,
+          "jxlBytes": 183931,
+          "jxlKb": 180,
+          "passes": 3,
+          "decodeFirstMs": 156,
+          "decodeFinalMs": 466,
+          "encodeSpeedupVsEffort3": "0.48",
+          "decodeSpeedupVsEffort3": "0.97"
+        },
+        {
+          "effort": 7,
+          "encodeMs": 2058,
+          "jxlBytes": 185510,
+          "jxlKb": 181,
+          "passes": 3,
+          "decodeFirstMs": 123,
+          "decodeFinalMs": 334,
+          "encodeSpeedupVsEffort3": "0.27",
+          "decodeSpeedupVsEffort3": "1.35"
+        }
+      ]
+    }
+  ]
+}

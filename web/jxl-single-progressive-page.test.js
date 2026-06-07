@@ -5,6 +5,7 @@ const html = readFileSync(new URL('./jxl-single-progressive.html', import.meta.u
 const source = readFileSync(new URL('./jxl-single-progressive.js', import.meta.url), 'utf8');
 const indexHtml = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const statsWorkerSource = readFileSync(new URL('./jxl-frame-stats-worker.js', import.meta.url), 'utf8');
+const sessionPackageJson = JSON.parse(readFileSync(new URL('../packages/jxl-session/package.json', import.meta.url), 'utf8'));
 
 test('single progressive page is discoverable and named', () => {
     expect(html).toContain('<title>Single progressive</title>');
@@ -42,10 +43,10 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html).toContain('value="display" selected');
     expect(html).toContain('Display · 1920 px');
     expect(html).toContain('value="very-large"');
-    expect(html).toContain('value="very-high" selected');
+    expect(html).toContain('value="medium" selected');
     expect(html).toContain('value="0" selected>Unthrottled');
     expect(source).toContain("DEFAULT_SIZE_PRESET = 'display'");
-    expect(source).toContain("DEFAULT_QUALITY_PRESET = 'very-high'");
+    expect(source).toContain("DEFAULT_QUALITY_PRESET = 'medium'");
     // Lossless maps to distance=0
     expect(source).toContain("...(lossless ? { distance: 0 } : {})");
     // Progressive DC and group order are explicit tuning controls.
@@ -62,6 +63,8 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html).toContain('id="progressive-ac"');
     expect(html).toContain('id="qprogressive-ac"');
     expect(html).toContain('id="decoding-speed"');
+    expect(html).toContain('value="1" selected>1 · two-band split (Sneyers default)');
+    expect(html).toContain('value="1" selected>1 · two-tier (Sneyers default)');
     expect(source).toContain('progressiveAc');
     expect(source).toContain('qProgressiveAc');
     expect(source).toContain('decodingSpeed');
@@ -82,6 +85,14 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html).toContain('id="decode-in-worker"');
     expect(source).toContain('decodeProgressivelyViaWorker');
     expect(source).toContain('createBrowserContext');
+    expect(source).toContain('DEFAULT_WORKER_PUSH_HWM = 64');
+    expect(source).toContain('readWorkerExperimentConfig');
+    expect(source).toContain('workerPushHwm');
+    expect(source).toContain('workerPool');
+    expect(source).toContain('workerTier');
+    expect(source).toContain("DEFAULT_WORKER_TIER = 'auto'");
+    expect(source).toContain('WORKER_DECODE_TIMEOUT_MS = 90_000');
+    expect(source).toContain('withTimeout(');
     // Phase I: sidecar thumb toggle for fast preview decode measurement (uses unified sidecarSizes path)
     expect(html).toContain('id="emit-sidecar-thumb"');
     expect(source).toContain('encodeWithSidecarThumbnail');
@@ -141,7 +152,7 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(html).toContain('PSNR vs pass');
     expect(source).toContain('drawPsnrChart');
     expect(source).toContain('computePsnrVsFinal');
-    expect(source).toContain('drawPsnrChart(decode.passes, targetRgba)');
+    expect(source).toContain('computeAndDrawChartsAsync(decode.passes, targetRgba)');
     expect(source).toContain('intendedDownsamplingRatio');
     expect(source).toContain('ratioLabel');
     expect(source).toContain('intended_ratio');
@@ -155,4 +166,24 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(html).toContain('id="perceptual-cutoff"');
     expect(source).toContain('shouldStopAtPass');
     expect(source).toContain('PERCEPTUAL_CUTOFF_PSNR_DELTA_DB');
+});
+
+test('single progressive block-border overlay uses fast cached tile diff', () => {
+    expect(source).toContain("new URLSearchParams(location.search).get('bordersStrict') === '1'");
+    expect(source).toContain('const BLOCK_BORDER_SAMPLE_STRIDE = 10;');
+    expect(source).toContain('new Uint32Array(current.buffer, current.byteOffset, pixelCount)');
+    expect(source).toContain('scanChangedTileGrid');
+    expect(source).toContain('readChangedBlocksCacheKey(pass, previousPass)');
+    expect(source).toContain('pass._changedBlocks');
+});
+
+test('single progressive timing mode can force block borders off', () => {
+    expect(source).toContain("readBoolParam('borders', null)");
+    expect(source).toContain('withTimingBlockBordersOverride');
+    expect(source).toContain('timingBordersOverride');
+    expect(source).toContain('showBlockBordersEl.checked = false');
+});
+
+test('jxl-session has browser-only export for browser bundles', () => {
+    expect(sessionPackageJson.exports['.'].browser).toBe('./dist/browser.js');
 });

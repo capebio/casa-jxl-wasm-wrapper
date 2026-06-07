@@ -1,0 +1,201 @@
+{
+  "exportedAt": "2026-06-06T02:28:42.389Z",
+  "tier": "simd",
+  "target": 1600,
+  "effort": 3,
+  "quality": 85,
+  "useButteraugli": true,
+  "butteraugliThreshold": 1.5,
+  "results": [
+    {
+      "file": "P2200571.ORF",
+      "src": "5240×3912",
+      "encoded": "1600×1195",
+      "jxlKb": 455,
+      "encodeMs": 989,
+      "referenceDecodeMs": 509,
+      "cutoffs": [
+        {
+          "bytes": 46551,
+          "percent": 10,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 93102,
+          "percent": 20,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 139653,
+          "percent": 30,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 186204,
+          "percent": 40,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 232756,
+          "percent": 50,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 279307,
+          "percent": 60,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 325858,
+          "percent": 70,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 372409,
+          "percent": 80,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 418960,
+          "percent": 90,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 465511,
+          "percent": 100,
+          "ssim": 1,
+          "psnr": null,
+          "butteraugli": 0,
+          "error": null
+        }
+      ],
+      "acceptableBytes": 465511,
+      "acceptablePercent": 100,
+      "ssimThreshold": 0.9,
+      "useButteraugli": true,
+      "butteraugliThreshold": 1.5
+    },
+    {
+      "file": "P2200570.ORF",
+      "src": "5240×3912",
+      "encoded": "1600×1195",
+      "jxlKb": 394,
+      "encodeMs": 537,
+      "referenceDecodeMs": 405,
+      "cutoffs": [
+        {
+          "bytes": 40361,
+          "percent": 10,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 80723,
+          "percent": 20,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 121084,
+          "percent": 30,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 161446,
+          "percent": 40,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 201807,
+          "percent": 50,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 242168,
+          "percent": 60,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 282530,
+          "percent": 70,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 322891,
+          "percent": 80,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 363253,
+          "percent": 90,
+          "ssim": null,
+          "psnr": null,
+          "butteraugli": null,
+          "error": "DecodeFailed: JXL decode error: 1"
+        },
+        {
+          "bytes": 403614,
+          "percent": 100,
+          "ssim": 1,
+          "psnr": null,
+          "butteraugli": 0,
+          "error": null
+        }
+      ],
+      "acceptableBytes": 403614,
+      "acceptablePercent": 100,
+      "ssimThreshold": 0.9,
+      "useButteraugli": true,
+      "butteraugliThreshold": 1.5
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+TestName: Quality Ladder Sweep (Test_13)
+RunTimestamp: 2026-06-06T10:18:26.873Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Effort: 3
+Notes: quality ladder at locked lightbox settings; measures size and timing slope
+TimeBase: 2026-06-06T10:
+
+---
+runs[5]{t|file|quality|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "18:^21.118@" | "P^2200571@.ORF" | 70 | 5974.498 | 512.739 | 1301.535 | 949.944 | 8738.716 | 257684B
+  "&22.326@" | ~ | 80 | ~ | ~ | 674.476 | 528.886 | 7690.598 | 382362B
+  "&23.612@" | ~ | 85 | ~ | ~ | 762.758 | 522.641 | 7772.636 | 465511B
+  "&25.168@" | ~ | 90 | ~ | ~ | 923.923 | 629.978 | 8041.138 | 613886B
+  "&26.865@" | ~ | 95 | ~ | ~ | 1063.309 | 633.606 | 8184.152 | 1042090B

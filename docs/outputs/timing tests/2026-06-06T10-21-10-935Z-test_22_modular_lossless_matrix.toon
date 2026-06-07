@@ -1,0 +1,14 @@
+TestName: Modular + Lossless Matrix (Test_22)
+RunTimestamp: 2026-06-06T10:21:10.935Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Effort: 3
+Notes: lossy auto/VarDCT vs lossless Modular; archival/local-computer cost against web settings
+TimeBase: 2026-06-06T10:
+
+---
+runs[3]{t|file|mode|quality|lossless|modular|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "21:^06.691@" | "P^2200571@.ORF" | lossy_auto | 85 | 0 | -1 | 4351.289 | 367.280 | 743.093 | 600.550 | 6062.212 | 465559B
+  "&07.700@" | ~ | lossy_vardct | ~ | ~ | 0 | ~ | ~ | 527.991 | 477.895 | 5724.455 | ~
+  "&10.934@" | ~ | lossless_modular | 100 | 1 | 1 | ~ | ~ | 1799.343 | 1433.027 | 7950.940 | 6569529B

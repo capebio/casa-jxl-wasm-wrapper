@@ -1,0 +1,16 @@
+TestName: PhotonNoiseIso Sweep (Test_17)
+RunTimestamp: 2026-06-06T10:19:30.960Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Effort: 3
+Notes: photonNoiseIso(0,200,800,1600); synthetic noise impact on size and timing
+TimeBase: 2026-06-06T10:
+
+---
+runs[4]{t|file|photon_noise_iso|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "19:^27.341@" | "P^2200571@.ORF" | 0 | 7149.681 | 512.694 | 1133.355 | 875.641 | 9671.372 | 465559B
+  "&28.525@" | ~ | 200 | ~ | ~ | 686.695 | 491.505 | 8840.575 | ~
+  "&29.700@" | ~ | 800 | ~ | ~ | 681.067 | 492.781 | 8836.223 | ~
+  "&30.959@" | ~ | 1600 | ~ | ~ | 676.258 | 582.155 | 8920.788 | ~

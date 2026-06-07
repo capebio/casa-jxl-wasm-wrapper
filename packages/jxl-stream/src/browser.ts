@@ -61,7 +61,7 @@ export async function fromReadableStream(
     throw e;
   } finally {
     signal?.removeEventListener('abort', onAbort);
-    reader.releaseLock();
+    try { reader.releaseLock(); } catch { /* already released by cancel() on some platforms */ }
   }
 }
 
@@ -127,11 +127,13 @@ export function toReadableStream(
     async cancel(reason) {
       removeAbortHandler();
 
-      if (typeof iterator.return === 'function') {
-        await iterator.return();
+      try {
+        if (typeof iterator.return === 'function') {
+          await iterator.return();
+        }
+      } finally {
+        await session.cancel(reason);
       }
-
-      await session.cancel(reason);
     },
   });
 }

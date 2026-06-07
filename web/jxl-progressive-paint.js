@@ -24,11 +24,22 @@ let lastExportedJxls = []; // [{name, bytes: Uint8Array, settings}]
 // Structured measurement history (one entry per "Run Progressive Paint")
 const runMeasurements = [];
 
+// rAF coalescing state — one-slot pending frame queue; newer replaces older
+let pendingFrame = null;   // { pixels, info, t, passIdx, isFinal, _passes } — one-slot queue; newer replaces older
+let rafPending = false;
+
 // No-op: this page has no workflow state UI (unlike wrapper-lab / crop-benchmark)
 function updateWorkflowState() {}
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Progressive Paint] jxl-progressive-paint.js loaded — progressive paint / live decode UI', 'color:#ec4899;font-weight:600', { page: 'Progressive Paint', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
+
+// A4: gate O(W×H) frame analysis behind ?stats=1
+const STATS_ENABLED = new URLSearchParams(location.search).has('stats');
+// A3: persistent thumb canvases (80×50) keyed by passIdx; cleared on timeline reset
+let thumbCanvases = new Map();
+// A3: persistent full-res source canvases keyed by slot index; reused across passes
+const slotSrcCanvases = new Map();
 
 // ─── WASM init ────────────────────────────────────────────────────────────────
 
@@ -578,11 +589,13 @@ function clearCompareSlots() {
         slot.currentPass = null;
         slot.currentSrc = null;
     }
+    slotSrcCanvases.clear();
 }
 
 function clearPassTimeline() {
     const el = document.getElementById('pass-timeline');
     if (el) el.innerHTML = '';
+    thumbCanvases.clear();
 }
 
 function clearByteCutoffLadder() {
@@ -630,21 +643,6 @@ function paintSourcePreview() {
     const dw = Math.max(1, Math.round(selectedSource.width * scale));
     const dh = Math.max(1, Math.round(selectedSource.height * scale));
     ctx.drawImage(srcC, Math.round((c.width - dw) / 2), Math.round((c.height - dh) / 2), dw, dh);
-}
-
-function makePassCanvas(pixels, width, height) {
-    const arr = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
-    const len = arr.length;
-    const want = width * height * 4;
-    if (len !== want) {
-        dbgLog(`[fidelity] pass pixels len ${len} != 4*${width}*${height} (ImageData will fail or corrupt)`, '', 'error');
-    }
-    const imgData = new ImageData(new Uint8ClampedArray(arr.buffer, arr.byteOffset, arr.byteLength), width, height);
-    const srcCanvas = document.createElement('canvas');
-    srcCanvas.width = width;
-    srcCanvas.height = height;
-    srcCanvas.getContext('2d').putImageData(imgData, 0, 0);
-    return srcCanvas;
 }
 
 async function runByteCutoffProbe(jxlBytes, progressiveDetail) {
@@ -713,7 +711,13 @@ function renderByteCutoffTile(ladder, result) {
     tile.className = 'byte-cutoff-tile' + (result.entry.kind === 'final' ? ' is-final' : '');
 
     if (result.frame) {
-        const canvas = makePassCanvas(result.frame.pixels, result.frame.info.width, result.frame.info.height);
+        const rArr = result.frame.pixels instanceof Uint8Array ? result.frame.pixels : new Uint8Array(result.frame.pixels);
+        const rW = result.frame.info.width, rH = result.frame.info.height;
+        const rImgData = new ImageData(new Uint8ClampedArray(rArr.buffer, rArr.byteOffset, rArr.byteLength), rW, rH);
+        const canvas = document.createElement('canvas');
+        canvas.width = rW;
+        canvas.height = rH;
+        canvas.getContext('2d').putImageData(rImgData, 0, 0);
         const meta = document.createElement('div');
         meta.className = 'byte-cutoff-meta';
         meta.textContent = `${formatByteCutoffLabel(result.entry)} | ${result.frame.type} | ${result.elapsedMs.toFixed(1)} ms`;
@@ -794,13 +798,20 @@ function addPassToTimeline(passRecord) {
     const timeline = document.getElementById('pass-timeline');
     if (!timeline) return;
     const TW = 80, TH = 50;
-    const thumb = document.createElement('canvas');
-    thumb.width = TW;
-    thumb.height = TH;
+    let thumb = thumbCanvases.get(passRecord.passIdx);
+    if (!thumb) {
+        thumb = document.createElement('canvas');
+        thumb.width = TW;
+        thumb.height = TH;
+        thumbCanvases.set(passRecord.passIdx, thumb);
+    }
     const ctx = thumb.getContext('2d');
-    const scale = Math.min(TW / passRecord.srcCanvas.width, TH / passRecord.srcCanvas.height);
-    const dw = Math.round(passRecord.srcCanvas.width * scale), dh = Math.round(passRecord.srcCanvas.height * scale);
-    ctx.drawImage(passRecord.srcCanvas, Math.round((TW - dw) / 2), Math.round((TH - dh) / 2), dw, dh);
+    ctx.clearRect(0, 0, TW, TH);
+    if (passRecord.srcCanvas) {
+        const scale = Math.min(TW / passRecord.srcCanvas.width, TH / passRecord.srcCanvas.height);
+        const dw = Math.round(passRecord.srcCanvas.width * scale), dh = Math.round(passRecord.srcCanvas.height * scale);
+        ctx.drawImage(passRecord.srcCanvas, Math.round((TW - dw) / 2), Math.round((TH - dh) / 2), dw, dh);
+    }
     const wrap = document.createElement('button');
     wrap.type = 'button';
     wrap.className = 'pass-thumb' + (passRecord.isFinal ? ' is-final' : '');
@@ -828,6 +839,76 @@ function addPassToTimeline(passRecord) {
     timeline.appendChild(wrap);
 }
 
+// paintPass — extracts canvas + timeline work for a single frame.
+// Intermediate frames coalesced by rAF will be dropped (never reach here).
+// Dropped frames do not appear in passes[] and skip all canvas/analysis work.
+function paintPass(ev) {
+    const frameStats = STATS_ENABLED
+        ? analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height)
+        : null;
+    const passPixels = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
+    const { width, height } = ev.info;
+    const want = width * height * 4;
+    if (passPixels.length !== want) {
+        dbgLog(`[fidelity] pass pixels len ${passPixels.length} != 4*${width}*${height} (ImageData will fail or corrupt)`, '', 'error');
+    }
+    const imgData = new ImageData(new Uint8ClampedArray(passPixels.buffer, passPixels.byteOffset, passPixels.byteLength), width, height);
+    const slotIndex = Math.min(ev.passIdx, compareSlots.length - 1);
+    let srcCanvas = slotSrcCanvases.get(slotIndex);
+    if (!srcCanvas || srcCanvas.width !== width || srcCanvas.height !== height) {
+        srcCanvas = document.createElement('canvas');
+        srcCanvas.width = width;
+        srcCanvas.height = height;
+        slotSrcCanvases.set(slotIndex, srcCanvas);
+    }
+    srcCanvas.getContext('2d').putImageData(imgData, 0, 0);
+    const passRecord = {
+        passIdx: ev.passIdx,
+        t: ev.t,
+        isFinal: ev.isFinal,
+        stats: frameStats,
+        srcCanvas,
+        pixels: passPixels,
+    };
+    addPassToTimeline(passRecord);
+    ev._passes.push(passRecord);
+    autoAssignPass(passRecord);
+    if (STATS_ENABLED) {
+        const statsLine = formatFrameStatsLog(frameStats);
+        dbgLog(`  pass ${ev.passIdx + 1}${ev.isFinal ? ' (final)' : ''}`, `${ev.t.toFixed(1)} ms | ${statsLine}`, 'info');
+        console.log('[Progressive Paint] frame stats', {
+            pass: ev.passIdx + 1,
+            isFinal: ev.isFinal,
+            t_ms: Number(ev.t.toFixed(2)),
+            ...frameStats,
+        });
+    } else {
+        const stage = ev.isFinal ? 'final' : 'partial';
+        dbgLog(`  pass ${ev.passIdx + 1} · ${stage}`, `${ev.t.toFixed(1)} ms`, 'info');
+    }
+}
+
+// schedulePaint — rAF coalescing. Final events bypass coalescing and paint immediately.
+// Intermediate frames arriving faster than display refresh are dropped; only the most-recent
+// pending frame survives to paint per display tick. Coalescing reduces redundant canvas work and GC pressure.
+function schedulePaint(frame) {
+    if (frame.isFinal) {
+        pendingFrame = null;  // cancel any queued intermediate so the rAF no-ops
+        paintPass(frame);
+        return;
+    }
+    pendingFrame = frame;
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+        rafPending = false;
+        const pending = pendingFrame;
+        pendingFrame = null;
+        if (!pending) return;
+        paintPass(pending);
+    });
+}
+
 async function collectProgressivePaintEvents(decoder, decStart, passes, passIndexState) {
     dbgLog('Event loop started', 'Awaiting decoder.events()…', 'info');
     try {
@@ -839,29 +920,8 @@ async function collectProgressivePaintEvents(decoder, decStart, passes, passInde
                 const t = performance.now() - decStart;
                 const isFinal = ev.type === 'final';
                 const passIdx = passIndexState.value;
-                const frameStats = analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height);
-                const passPixels = ev.pixels instanceof Uint8Array ? new Uint8Array(ev.pixels) : new Uint8Array(ev.pixels);
-                const passRecord = {
-                    passIdx,
-                    t,
-                    isFinal,
-                    stats: frameStats,
-                    srcCanvas: makePassCanvas(passPixels, ev.info.width, ev.info.height),
-                    pixels: passPixels,
-                };
-                addPassToTimeline(passRecord);
-                autoAssignPass(passRecord);
-                passes.push(passRecord);
-                const statsLine = formatFrameStatsLog(frameStats);
-                dbgLog(`  pass ${passIdx + 1}${isFinal ? ' (final)' : ''}`, `${t.toFixed(1)} ms | ${statsLine}`, 'info');
-                console.log('[Progressive Paint] frame stats', {
-                    pass: passIdx + 1,
-                    isFinal,
-                    t_ms: Number(t.toFixed(2)),
-                    ...frameStats,
-                });
                 passIndexState.value++;
-                await nextPaint();
+                schedulePaint({ pixels: ev.pixels, info: ev.info, t, passIdx, isFinal, _passes: passes });
             } else if (ev.type === 'error') {
                 dbgLog('Decoder error event', `code=${ev.code}, msg=${ev.message}`, 'error');
                 throw new Error(`Decoder error (${ev.code}): ${ev.message}`);
@@ -896,8 +956,6 @@ async function streamIntoDecoder(decoder, jxlBytes, stepCount) {
         await decoder.push(exactBuffer(stepChunk));
         if (i < streamSteps.length - 1) {
             setProgStatus(`Streaming step ${i + 1}/${streamSteps.length}… waiting for next progressive paint.`);
-            await nextPaint();
-            await sleep(32);
         }
     }
     await decoder.close();
@@ -1099,6 +1157,8 @@ async function runProgressivePaintTest() {
             const decStart = performance.now();
             const passes = [];
             const passIndexState = { value: 0 };
+            pendingFrame = null;
+            rafPending = false;
             const eventTask = collectProgressivePaintEvents(decoder, decStart, passes, passIndexState);
             dbgLog('Streaming bytes…', `${jxlBytes.length} bytes total · throttle=${throttleKbPerSec > 0 ? throttleKbPerSec + ' KB/s' : 'off'} · steps=${requestedPassCount}`, 'info');
             let streamError = null;
@@ -1122,6 +1182,8 @@ async function runProgressivePaintTest() {
                 clearPassTimeline();
                 passes.length = 0;
                 passIndexState.value = 0;
+                pendingFrame = null;
+                rafPending = false;
 
                 const fallbackDecoder = createDecoder({
                     format: 'rgba8',
@@ -1511,62 +1573,141 @@ function exportMeasurementsJSON() {
     dbgLog('Exported measurements', `${runMeasurements.length} runs → JSON`, 'success');
 }
 
-function exportMeasurementsTOON() {
+async function exportMeasurementsTOON() {
     if (!runMeasurements.length) return;
 
     const now = new Date().toISOString();
+    
+    const dict = {
+        'ti': 'tiny',
+        'sm': 'small',
+        'me': 'medium',
+        'la': 'large',
+        'di': 'display',
+        'vl': 'very-large',
+        'or': 'original',
+        'co': 'center-out',
+        'tb': 'top-bottom'
+    };
+    const reverseDict = Object.fromEntries(Object.entries(dict).map(([k,v]) => [v,k]));
+    const mapVal = (v) => reverseDict[v] || v;
 
-    // Richer shape: measurements array + meta object at root
-    let out = `measurements[${runMeasurements.length}]:\n`;
-
-    for (const m of runMeasurements) {
-        const s = m.settings || {};
-        out += `- ts: ${m.ts}\n`;
-        out += `  source: ${quoteIfNeeded(m.source)}\n`;
-        out += `  settings:\n`;
-        out += `    size: ${s.size ?? ''}\n`;
-        out += `    quality: ${s.quality ?? ''}\n`;
-        out += `    streamStepsRequested: ${m.streamStepsRequested ?? m.passesRequested}\n`;
-        out += `    detail: ${quoteIfNeeded(s.progressiveDetail ?? '')}\n`;
-        out += `  paintsReceived: ${m.paintsReceived ?? m.passesReceived}\n`;
-        if (m.first_ms != null) out += `  first_ms: ${m.first_ms}\n`;
-        if (m.final_ms != null) out += `  final_ms: ${m.final_ms}\n`;
-        if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
-        if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
-        out += `  encode_ms: ${m.encode_ms}\n`;
-        out += `  fileSizeKB: ${m.fileSizeKB}\n`;
-
-        // perPass as compact tabular array (TOON strength)
-        if (m.perPass && m.perPass.length) {
-            out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
-            for (const p of m.perPass) {
-                const isFinal = p.isFinal ? 'true' : 'false';
-                const stats = p.stats || {};
-                out += [
-                    `    ${p.pass}`,
-                    p.t_ms,
-                    isFinal,
-                    stats.alphaMin ?? '',
-                    stats.alphaMax ?? '',
-                    stats.alphaZeroPct ?? '',
-                    stats.rgbNonzeroCount ?? '',
-                    stats.lumaVariance ?? '',
-                    stats.frameHash ?? ''
-                ].join(',') + '\n';
-            }
-        }
-    }
-
-    // Richer metadata at root level
+    let out = `Dict: ${Object.entries(dict).map(([k,v]) => `${k}=${v}`).join(', ')}\n`;
     out += `meta:\n`;
     out += `  exportedAt: ${now}\n`;
     out += `  generator: jxl-progressive-paint\n`;
     out += `  count: ${runMeasurements.length}\n`;
     out += `  format: progressive-paint-measurements-v1\n`;
 
-    const ts = now.replace(/[:.]/g, '-');
-    downloadText(`progressive-paint-measurements-${ts}.toon`, out, 'text/toon');
-    dbgLog('Exported measurements', `${runMeasurements.length} runs → TOON`, 'success');
+    let rowCount = 0;
+    for (const m of runMeasurements) {
+        if (m.perPass && m.perPass.length) rowCount += m.perPass.length;
+        else rowCount += 1;
+    }
+
+    out += `\n---\n`;
+    out += `runs[${rowCount}]{source|size|qual|streamReq|detail|paintsRcv|firstMs|finalMs|oneshotMs|speedup|encMs|sizeKB|pass|t_ms|isFinal|aMin|aMax|aZeroPct|rgbNz|lumaVar|hash}:\n`;
+
+    let lastSource = '';
+    let lastSize = '';
+    let lastQual = '';
+    let lastStreamReq = '';
+    let lastDetail = '';
+    let lastPaintsRcv = '';
+    let lastFirstMs = '';
+    let lastFinalMs = '';
+    let lastOneshot = '';
+    let lastSpeedup = '';
+    let lastEncMs = '';
+    let lastSizeKB = '';
+
+    for (const m of runMeasurements) {
+        const s = m.settings || {};
+        const source = quoteIfNeeded(m.source);
+        const size = mapVal(s.size ?? '');
+        const qual = s.quality ?? '';
+        const streamReq = m.streamStepsRequested ?? m.passesRequested ?? '';
+        const detail = quoteIfNeeded(s.progressiveDetail ?? '');
+        const paintsRcv = m.paintsReceived ?? m.passesReceived ?? '';
+        const firstMs = m.first_ms != null ? m.first_ms.toFixed(1) : '';
+        const finalMs = m.final_ms != null ? m.final_ms.toFixed(1) : '';
+        const oneshotMs = m.oneShot_ms != null ? m.oneShot_ms.toFixed(1) : '';
+        const speedup = m.speedup != null ? m.speedup.toFixed(2) : '';
+        const encMs = m.encode_ms != null ? m.encode_ms.toFixed(1) : '';
+        const sizeKB = m.fileSizeKB != null ? m.fileSizeKB.toFixed(1) : '';
+
+        if (!m.perPass || !m.perPass.length) {
+            const outSource = source === lastSource ? '~' : source;
+            const outSize = size === lastSize ? '~' : size;
+            const outQual = String(qual) === String(lastQual) ? '~' : qual;
+            const outStream = String(streamReq) === String(lastStreamReq) ? '~' : streamReq;
+            const outDetail = detail === lastDetail ? '~' : detail;
+            const outPaints = String(paintsRcv) === String(lastPaintsRcv) ? '~' : paintsRcv;
+            const outFirst = firstMs === lastFirstMs ? '~' : firstMs;
+            const outFinal = finalMs === lastFinalMs ? '~' : finalMs;
+            const outOneshot = oneshotMs === lastOneshot ? '~' : oneshotMs;
+            const outSpeedup = speedup === lastSpeedup ? '~' : speedup;
+            const outEnc = encMs === lastEncMs ? '~' : encMs;
+            const outKB = sizeKB === lastSizeKB ? '~' : sizeKB;
+
+            out += `  ${outSource} | ${outSize} | ${outQual} | ${outStream} | ${outDetail} | ${outPaints} | ${outFirst} | ${outFinal} | ${outOneshot} | ${outSpeedup} | ${outEnc} | ${outKB}KB | - | - | - | - | - | - | - | - | -\n`;
+
+            lastSource = source; lastSize = size; lastQual = qual; lastStreamReq = streamReq;
+            lastDetail = detail; lastPaintsRcv = paintsRcv; lastFirstMs = firstMs; lastFinalMs = finalMs;
+            lastOneshot = oneshotMs; lastSpeedup = speedup; lastEncMs = encMs; lastSizeKB = sizeKB;
+        } else {
+            for (const p of m.perPass) {
+                const pass = p.pass;
+                const t_ms = p.t_ms != null ? p.t_ms.toFixed(1) : '';
+                const isFinal = p.isFinal ? 'T' : 'F';
+                const st = p.stats || {};
+                const aMin = st.alphaMin ?? '';
+                const aMax = st.alphaMax ?? '';
+                const aZero = st.alphaZeroPct != null ? st.alphaZeroPct.toFixed(1) : '';
+                const rgbNz = st.rgbNonzeroCount ?? '';
+                const lumaVar = st.lumaVariance != null ? st.lumaVariance.toFixed(1) : '';
+                const hash = st.frameHash ?? '';
+
+                const outSource = source === lastSource ? '~' : source;
+                const outSize = size === lastSize ? '~' : size;
+                const outQual = String(qual) === String(lastQual) ? '~' : qual;
+                const outStream = String(streamReq) === String(lastStreamReq) ? '~' : streamReq;
+                const outDetail = detail === lastDetail ? '~' : detail;
+                const outPaints = String(paintsRcv) === String(lastPaintsRcv) ? '~' : paintsRcv;
+                const outFirst = firstMs === lastFirstMs ? '~' : firstMs;
+                const outFinal = finalMs === lastFinalMs ? '~' : finalMs;
+                const outOneshot = oneshotMs === lastOneshot ? '~' : oneshotMs;
+                const outSpeedup = speedup === lastSpeedup ? '~' : speedup;
+                const outEnc = encMs === lastEncMs ? '~' : encMs;
+                const outKB = sizeKB === lastSizeKB ? '~' : sizeKB;
+
+                out += `  ${outSource} | ${outSize} | ${outQual} | ${outStream} | ${outDetail} | ${outPaints} | ${outFirst} | ${outFinal} | ${outOneshot} | ${outSpeedup} | ${outEnc} | ${outKB}KB | ${pass} | ${t_ms} | ${isFinal} | ${aMin} | ${aMax} | ${aZero} | ${rgbNz} | ${lumaVar} | ${hash}\n`;
+
+                lastSource = source; lastSize = size; lastQual = qual; lastStreamReq = streamReq;
+                lastDetail = detail; lastPaintsRcv = paintsRcv; lastFirstMs = firstMs; lastFinalMs = finalMs;
+                lastOneshot = oneshotMs; lastSpeedup = speedup; lastEncMs = encMs; lastSizeKB = sizeKB;
+            }
+        }
+    }
+
+    let userChoice = prompt("Type 'C' to Copy Only, 'S' to Copy & Save, or hit Cancel.", "S");
+    
+    if (userChoice !== null) {
+        userChoice = userChoice.toUpperCase().trim();
+        if (userChoice === 'C' || userChoice === 'S') {
+            try {
+                await navigator.clipboard.writeText(out);
+                dbgLog('Copied TOON to clipboard', `${runMeasurements.length} runs`);
+            } catch (err) {
+                dbgLog('Clipboard blocked', String(err), 'warn');
+            }
+        }
+        if (userChoice === 'S') {
+            const ts = now.replace(/[:.]/g, '-');
+            downloadText(`progressive-paint-measurements-${ts}.toon`, out, 'text/toon');
+            dbgLog('Exported measurements', `${runMeasurements.length} runs → TOON`, 'success');
+        }
+    }
 }
 
 function markdownCell(value) {

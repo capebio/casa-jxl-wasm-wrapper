@@ -3,7 +3,8 @@ import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { createBrowserContext } from '@casabio/jxl-session';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
-import { computePsnrVsFinal } from './jxl-progressive-quality.js';
+import { computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
+import { pixelsToXyb, computeButteraugliVsFinal } from './jxl-butteraugli.js';
 import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
@@ -11,11 +12,44 @@ const PROGRESSIVE_DETAIL = 'passes';
 const FIRST_PAINT_CHUNK_RAMP = [1 * 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024];
 const STEADY_DECODE_CHUNK_BYTES = 32 * 1024;
 const BLOCK_BORDER_TILE_SIZE = 256;
+const BLOCK_BORDER_SAMPLE_STRIDE = 10;
 const BLOCK_BORDER_SIZE = 2;
 const BLOCK_BORDER_COLOR = '#ff2d2d';
+const BLOCK_BORDERS_STRICT = new URLSearchParams(location.search).get('bordersStrict') === '1';
+const WORKER_DECODE_TIMEOUT_MS = 90_000;
+const DEFAULT_WORKER_PUSH_HWM = 64;
+const DEFAULT_WORKER_POOL_SIZE = 1;
+const DEFAULT_WORKER_TIER = 'auto';
+const WORKER_TIERS = new Set(['auto', 'relaxed-simd-mt', 'simd-mt', 'simd', 'scalar']);
 
 const PERCEPTUAL_CUTOFF_PSNR_DELTA_DB = 0.5;
 const PERCEPTUAL_CUTOFF_LOW_KBPS = 1.0;
+const CHART_MAX_PIXELS = 2_000_000;    // cap quality-metric computation at ~2 MP; 10× speedup at Original res
+const PASS_BORDER_RES_MAX = 4_000_000; // skip block-border overlay above this pixel count (meaningless at hi-res)
+
+function downsamplePixelsForChart(pixels, width, height) {
+    const n = width * height;
+    if (n <= CHART_MAX_PIXELS) return { pixels, width, height };
+    const scale = Math.sqrt(CHART_MAX_PIXELS / n);
+    const dw = Math.max(1, Math.round(width * scale));
+    const dh = Math.max(1, Math.round(height * scale));
+    const src = document.createElement('canvas');
+    src.width = width;
+    src.height = height;
+    src.getContext('2d').putImageData(
+        new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength), width, height),
+        0, 0
+    );
+    const dst = document.createElement('canvas');
+    dst.width = dw;
+    dst.height = dh;
+    const dstCtx = dst.getContext('2d');
+    dstCtx.imageSmoothingEnabled = true;
+    dstCtx.imageSmoothingQuality = 'high';
+    dstCtx.drawImage(src, 0, 0, dw, dh);
+    const out = dstCtx.getImageData(0, 0, dw, dh).data;
+    return { pixels: new Uint8Array(out.buffer, out.byteOffset, out.byteLength), width: dw, height: dh };
+}
 
 // Size presets define output long-edge in pixels. "original" preserves source dims.
 const SIZE_PRESETS = {
@@ -35,8 +69,51 @@ let _statsId = 0;
 const _statsPending = new Map();
 
 function getSessionCtx() {
-    if (_sessionCtx === null) _sessionCtx = createBrowserContext();
+    if (_sessionCtx === null) {
+        const workerConfig = readWorkerExperimentConfig();
+        const contextOptions = {
+            pushHwm: workerConfig.pushHwm,
+            wasmUrl: workerConfig.workerUrl,
+            ...(workerConfig.poolSize === null ? {} : { poolSize: workerConfig.poolSize }),
+        };
+        _sessionCtx = createBrowserContext(contextOptions);
+        dbgLog('Worker decode config', JSON.stringify({
+            poolSize: workerConfig.poolSize ?? 'default',
+            pushHwm: workerConfig.pushHwm,
+            workerTier: workerConfig.workerTier,
+        }), 'info');
+    }
     return _sessionCtx;
+}
+
+function readWorkerExperimentConfig() {
+    const params = new URLSearchParams(location.search);
+    const pushHwm = readBoundedIntParam(params, 'workerPushHwm', DEFAULT_WORKER_PUSH_HWM, 1, 256);
+    const poolRaw = params.get('workerPool');
+    const poolSize = poolRaw === 'default'
+        ? null
+        : readBoundedIntParam(params, 'workerPool', DEFAULT_WORKER_POOL_SIZE, 1, 4);
+    const tierRaw = params.get('workerTier');
+    const workerTier = WORKER_TIERS.has(tierRaw) ? tierRaw : DEFAULT_WORKER_TIER;
+    const workerUrl = new URL('../packages/jxl-worker-browser/dist/worker.js', import.meta.url);
+    workerUrl.searchParams.set('jxlWorkerTier', workerTier);
+    return { pushHwm, poolSize, workerTier, workerUrl: workerUrl.href };
+}
+
+function readBoundedIntParam(params, name, fallback, min, max) {
+    const raw = params.get(name);
+    if (raw === null || raw === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+function readBoolParam(name, fallback) {
+    const raw = new URLSearchParams(location.search).get(name);
+    if (raw === null || raw === '') return fallback;
+    if (raw === '1' || raw === 'true') return true;
+    if (raw === '0' || raw === 'false') return false;
+    return fallback;
 }
 
 function rejectPendingStats(error) {
@@ -62,13 +139,19 @@ function getStatsWorker() {
     if (_statsWorker === null) {
         _statsWorker = new Worker(new URL('./jxl-frame-stats-worker.js', import.meta.url), { type: 'module' });
         _statsWorker.onmessage = (event) => {
-            const { id, ok, stats, pixels, error } = event.data ?? {};
+            const { id, ok, type, stats, pixels, values, error } = event.data ?? {};
             const pending = _statsPending.get(id);
             if (pending === undefined) return;
             _statsPending.delete(id);
-            const returnedPixels = pixels ? new Uint8Array(pixels) : null;
-            if (ok) pending.resolve({ stats, pixels: returnedPixels });
-            else pending.reject(new Error(error ?? 'stats worker error'));
+            if (ok) {
+                if (type === 'chart') pending.resolve({ values });
+                else {
+                    const returnedPixels = pixels ? new Uint8Array(pixels) : null;
+                    pending.resolve({ stats, pixels: returnedPixels });
+                }
+            } else {
+                pending.reject(new Error(error ?? 'stats worker error'));
+            }
         };
         _statsWorker.onerror = (event) => {
             console.warn('[stats-worker] disabling after error', event);
@@ -87,6 +170,59 @@ async function analyzeFrameInWorker(pixels, width, height) {
         worker.postMessage({ id, pixels: buffer, width, height }, [buffer]);
     });
 }
+
+async function computeChartsInWorker(passes, reference, pw, ph) {
+    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
+    const needsDs = dsW !== pw;
+    const refBuf = refDs.buffer.slice(refDs.byteOffset, refDs.byteOffset + refDs.byteLength);
+    const passEntries = passes.map((pass, i) => {
+        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
+        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
+        return { index: i, buf: px.buffer.slice(px.byteOffset, px.byteOffset + px.byteLength) };
+    });
+    const id = ++_statsId;
+    const worker = getStatsWorker();
+    const transfers = [refBuf, ...passEntries.filter(Boolean).map(e => e.buf)];
+    return new Promise((resolve, reject) => {
+        _statsPending.set(id, { resolve, reject });
+        worker.postMessage({ type: 'chart', id, ref: refBuf, refWidth: dsW, refHeight: dsH, passes: passEntries }, transfers);
+    });
+}
+
+async function computeAndDrawChartsAsync(passes, targetRgba) {
+    if (!passes?.length) return;
+    const pw = passes[0]?.width ?? 1;
+    const ph = passes[0]?.height ?? 1;
+    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
+    const reference = targetRgba ?? finalPass?.pixels ?? null;
+    if (!reference) return;
+    try {
+        const { values } = await computeChartsInWorker(passes, reference, pw, ph);
+        const psnrVals = values.map(v => v?.psnr ?? null);
+        const ssimVals = values.map(v => v?.ssim ?? null);
+        const buttVals = values.map(v => v?.butt ?? null);
+        drawQualityChart('psnr-chart', 'psnr-chart-legend', passes, psnrVals, {
+            yPad: 2, yClampMin: 10, yClampMax: 80,
+            yLabel: 'dB', yFormat: v => v.toFixed(1),
+        });
+        drawQualityChart('ssim-chart', 'ssim-chart-legend', passes, ssimVals, {
+            yPad: 0.002, yClampMin: 0, yClampMax: 1,
+            yLabel: 'SSIM', yFormat: v => v.toFixed(3),
+            lineColor: '#f0c86a', finalColor: '#7de0b0',
+        });
+        drawQualityChart('butt-chart', 'butt-chart-legend', passes, buttVals, {
+            yPad: 0.05, yClampMin: 0,
+            yLabel: 'Butt', yFormat: v => v.toFixed(3),
+            lineColor: '#ff8c7d', finalColor: '#7de0b0',
+        });
+    } catch (error) {
+        console.warn('[charts] worker failed; falling back to sync', error);
+        drawPsnrChart(passes, targetRgba);
+        drawSsimChart(passes, targetRgba);
+        drawButtChart(passes, targetRgba);
+    }
+}
+
 const DEFAULT_SIZE_PRESET = 'display';
 
 // Quality presets define libjxl distance (and quality number for display). kbPerMp is a
@@ -99,7 +235,7 @@ const QUALITY_PRESETS = {
     'very-high': { label: 'Very High', quality: 95,  kbPerMp: 400 },
     'lossless':  { label: 'Lossless',  quality: 100, distance: 0, kbPerMp: 3000 },
 };
-const DEFAULT_QUALITY_PRESET = 'very-high';
+const DEFAULT_QUALITY_PRESET = 'medium';
 const GROUP_ORDER_LABELS = {
     0: 'scanline',
     1: 'center-out',
@@ -131,6 +267,7 @@ const exportToonBtn = document.getElementById('export-toon-btn');
 const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
 const showBlockBordersEl = document.getElementById('show-block-borders');
+const timingBordersOverride = readBoolParam('borders', null);
 
 const runMeasurements = [];
 let rawReady = false;
@@ -278,8 +415,10 @@ async function retrieveAndRun() {
     try {
         dbgLog('Run start', JSON.stringify(settings), 'info');
         setStatus('Retrieving random Gobabeb RAW...');
-        const source = await loadRandomAndCacheSource();
-        await runSourceWithSettings(source, settings);
+        await withTimingBlockBordersOverride(async () => {
+            const source = await loadRandomAndCacheSource();
+            await runSourceWithSettings(source, settings);
+        });
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setStatus(`Run failed: ${message}`);
@@ -304,7 +443,7 @@ async function rerunLoadedSource() {
     try {
         const settings = readSettings();
         dbgLog('Run start', JSON.stringify(settings), 'info');
-        await runSourceWithSettings(loadedSource, settings);
+        await withTimingBlockBordersOverride(() => runSourceWithSettings(loadedSource, settings));
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setStatus(`Run failed: ${message}`);
@@ -314,6 +453,20 @@ async function rerunLoadedSource() {
         running = false;
         retrieveBtn.disabled = false;
         updateRunButtonState();
+    }
+}
+
+async function withTimingBlockBordersOverride(task) {
+    if (timingBordersOverride !== false || !showBlockBordersEl) {
+        return task();
+    }
+    const previousChecked = showBlockBordersEl.checked;
+    showBlockBordersEl.checked = false;
+    try {
+        return await task();
+    } finally {
+        showBlockBordersEl.checked = previousChecked;
+        redrawCurrentPassView();
     }
 }
 
@@ -405,6 +558,8 @@ async function runSourceWithSettings(source, settings) {
         thumbSize = thumbBytes.byteLength;
     }
 
+    const uiStartMs = performance.now();
+
     const finalFrame = decode.passes.find(p => p.isFinal) ?? decode.passes.at(-1);
     const finalPsnr = finalFrame?.pixels?.byteLength === targetRgba.byteLength
         ? computePsnrVsFinal(targetRgba, finalFrame.pixels)
@@ -434,14 +589,17 @@ async function runSourceWithSettings(source, settings) {
     }
     runMeasurements.push(metrics);
     renderMetrics(metrics);
-    drawPsnrChart(decode.passes, targetRgba);
+    void computeAndDrawChartsAsync(decode.passes, targetRgba);
+    metrics.uiDelayMs = Number((performance.now() - uiStartMs).toFixed(2));
+    
     updateExportButtons();
     const cutoffFired = !decode.passes.some(p => p.isFinal);
     const finalLine = cutoffFired
         ? `Stopped early at pass ${decode.passes.length} (perceptual cutoff) · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)}.`
-        : `Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)}.`;
+        : `Done. ${metrics.passCount} passes, ${metrics.visibleProgressFrames} visible progress frames, final ${metrics.final_ms ?? '--'} ms · avg ${formatTransferSpeed(metrics.avgTransferKbPerSec)} · UI delay ${metrics.uiDelayMs} ms.`;
     setStatus(finalLine);
     dbgLog('Run transfer average', `${formatTransferSpeed(metrics.avgTransferKbPerSec)} over ${formatBytes(selected.bytes.byteLength)} · final ${metrics.final_ms ?? '--'} ms${cutoffFired ? ' (cutoff)' : ''}`, 'info');
+    dbgLog('UI rendering delay', `${metrics.uiDelayMs} ms`, 'warn');
 }
 
 function readSettings() {
@@ -674,7 +832,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
                 feedState.passCount = passes.length;
                 currentPasses = passes;
                 const paintStart = performance.now();
-                renderProgressivePass(pass);
+                await renderProgressivePass(pass);
                 pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
                 pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
                 setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
@@ -766,7 +924,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
             feedState.passCount = passes.length;
             currentPasses = passes;
             const paintStart = performance.now();
-            renderProgressivePass(pass);
+            await renderProgressivePass(pass);
             pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
             pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
             setStatus(`[worker] ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
@@ -793,28 +951,37 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
         }
     })();
 
-    try {
-        await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState).catch((e) => {
-            if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
-                return; // expected: cutoff caused cancel mid-feed; subsequent pushes after cancel would throw, we swallow
-            }
-            throw e;
-        });
-        await frameTask.catch((e) => {
-            if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
-                return;
-            }
-            throw e;
-        });
-        if (!stoppedEarlyReason) {
-            await session.done().catch((e) => {
-                if (/cancel|Cancel|closed/i.test(String(e && (e.message || e)))) return;
+    const decodeTask = (async () => {
+        try {
+            await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState).catch((e) => {
+                if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
+                    return; // expected: cutoff/timeout caused cancel mid-feed; subsequent pushes after cancel would throw, we swallow
+                }
                 throw e;
             });
+            await frameTask.catch((e) => {
+                if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
+                    return;
+                }
+                throw e;
+            });
+            if (!stoppedEarlyReason) {
+                await session.done().catch((e) => {
+                    if (/cancel|Cancel|closed/i.test(String(e && (e.message || e)))) return;
+                    throw e;
+                });
+            }
+        } finally {
+            await session.close().catch(() => {});
         }
-    } finally {
-        await session.close().catch(() => {});
-    }
+    })();
+
+    await withTimeout(decodeTask, WORKER_DECODE_TIMEOUT_MS, 'Worker decode', () => {
+        stoppedEarlyReason = 'timeout';
+        dbgLog('Worker decode timeout', `No completion within ${Math.round(WORKER_DECODE_TIMEOUT_MS / 1000)}s; cancelling session`, 'error');
+        void session.cancel?.('timeout');
+    });
+
     const finalMs = passes.find(pass => pass.isFinal)?.t_ms ?? passes.at(-1)?.t_ms ?? null;
     const avgTransferKbPerSec = computeTransferKbPerSec(jxlBytes.byteLength, finalMs);
     dbgLog('Worker decode transfer summary', `${formatBytes(jxlBytes.byteLength)} in ${finalMs ?? '--'} ms · avg ${formatTransferSpeed(avgTransferKbPerSec)} · requested ${formatThrottle(throttleKbPerSec)}`, 'info');
@@ -990,9 +1157,9 @@ async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
 
 const TILE_LONG_EDGE_PX = 192; // 2x typical CSS render size for crisp HiDPI tiles
 
-function renderProgressivePass(pass) {
+async function renderProgressivePass(pass) {
     const previousPass = currentPasses[pass.pass - 2] ?? null;
-    drawPassWithOverlay(canvas, pass, previousPass);
+    await drawPassWithOverlay(canvas, pass, previousPass);
     viewerMeta.textContent = `pass ${pass.pass} (${pass.ratioLabel ?? '--'})${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms`;
     const tile = document.createElement('button');
     tile.className = 'pass-tile';
@@ -1014,7 +1181,7 @@ function renderProgressivePass(pass) {
     passStrip.append(tile);
 }
 
-function showPassInLightbox(index) {
+async function showPassInLightbox(index) {
     if (!currentPasses.length || !lightbox || !lightboxCanvas || !lightboxStats) return;
     lightboxIndex = ((index % currentPasses.length) + currentPasses.length) % currentPasses.length;
     const pass = currentPasses[lightboxIndex];
@@ -1023,9 +1190,9 @@ function showPassInLightbox(index) {
         lightboxStats.innerHTML = '<div><span>Status</span><strong>pixels released to free memory</strong></div>';
         return;
     }
-    drawPassWithOverlay(lightboxCanvas, pass, previousPass);
+    await drawPassWithOverlay(lightboxCanvas, pass, previousPass);
     applyLightboxZoom();
-    drawPassWithOverlay(canvas, pass, previousPass);
+    await drawPassWithOverlay(canvas, pass, previousPass);
     viewerMeta.textContent = `pinned pass ${pass.pass} (${pass.ratioLabel ?? '--'}) | ${formatBytes(pass.bytesFed ?? 0)} streamed | ${formatFrameStatsCompact(computeAndCachePassStats(pass))}`;
     if (lightboxTitle) lightboxTitle.textContent = `Pass ${pass.pass}${pass.isFinal ? ' final' : ''}`;
     if (lightboxSubtitle) {
@@ -1126,15 +1293,15 @@ function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
 }
 
-function redrawCurrentPassView() {
+async function redrawCurrentPassView() {
     if (!currentPasses.length) return;
     if (lightbox && !lightbox.hidden && lightboxIndex >= 0) {
-        showPassInLightbox(lightboxIndex);
+        void showPassInLightbox(lightboxIndex);
         return;
     }
     const pass = currentPasses.at(-1);
     const previousPass = currentPasses.at(-2) ?? null;
-    drawPassWithOverlay(canvas, pass, previousPass);
+    await drawPassWithOverlay(canvas, pass, previousPass);
 }
 
 function passLightboxStats(pass) {
@@ -1154,17 +1321,19 @@ function passLightboxStats(pass) {
     ];
 }
 
-function drawPixels(targetCanvas, pixels, width, height) {
+async function drawPixels(targetCanvas, pixels, width, height) {
     if (targetCanvas.width !== width) targetCanvas.width = width;
     if (targetCanvas.height !== height) targetCanvas.height = height;
-    const ctx = targetCanvas.getContext('2d');
     const data = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-    ctx.putImageData(new ImageData(data, width, height), 0, 0);
+    const bitmap = await createImageBitmap(new ImageData(data, width, height));
+    targetCanvas.getContext('2d').drawImage(bitmap, 0, 0);
+    bitmap.close();
 }
 
-function drawPassWithOverlay(targetCanvas, pass, previousPass) {
-    drawPixels(targetCanvas, pass.pixels, pass.width, pass.height);
+async function drawPassWithOverlay(targetCanvas, pass, previousPass) {
+    await drawPixels(targetCanvas, pass.pixels, pass.width, pass.height);
     if (!shouldShowBlockBorders()) return;
+    if (pass.width * pass.height > PASS_BORDER_RES_MAX) return;
     const blocks = computeChangedBlocks(pass, previousPass);
     drawBlockBorders(targetCanvas, blocks);
 }
@@ -1179,28 +1348,20 @@ function computeChangedBlocks(pass, previousPass) {
         return [{ x: 0, y: 0, width: pass.width, height: pass.height }];
     }
 
+    const cacheKey = readChangedBlocksCacheKey(pass, previousPass);
+    if (pass._changedBlocksKey === cacheKey && Array.isArray(pass._changedBlocks)) {
+        return pass._changedBlocks;
+    }
+
     const tileSize = BLOCK_BORDER_TILE_SIZE;
     const cols = Math.ceil(pass.width / tileSize);
     const rows = Math.ceil(pass.height / tileSize);
-    const changed = new Uint8Array(cols * rows);
     const current = pass.pixels;
     const previous = previousPass.pixels;
-    const length = Math.min(current.length, previous.length);
-    for (let i = 0; i < length; i += 4) {
-        if (
-            current[i] !== previous[i]
-            || current[i + 1] !== previous[i + 1]
-            || current[i + 2] !== previous[i + 2]
-            || current[i + 3] !== previous[i + 3]
-        ) {
-            const pixel = i >> 2;
-            const x = pixel % pass.width;
-            const y = Math.floor(pixel / pass.width);
-            const col = Math.floor(x / tileSize);
-            const row = Math.floor(y / tileSize);
-            changed[row * cols + col] = 1;
-        }
-    }
+    const pixelCount = pass.width * pass.height;
+    const current32 = new Uint32Array(current.buffer, current.byteOffset, pixelCount);
+    const previous32 = new Uint32Array(previous.buffer, previous.byteOffset, pixelCount);
+    const changed = scanChangedTileGrid(current32, previous32, pass.width, pass.height, cols, rows);
 
     const blocks = [];
     for (let row = 0; row < rows; row++) {
@@ -1216,7 +1377,70 @@ function computeChangedBlocks(pass, previousPass) {
             });
         }
     }
+    pass._changedBlocksKey = cacheKey;
+    pass._changedBlocks = blocks;
     return blocks;
+}
+
+function readChangedBlocksCacheKey(pass, previousPass) {
+    const currentId = pass.stats?.frameHash && pass.stats.frameHash !== '--'
+        ? pass.stats.frameHash
+        : `pass:${pass.pass ?? ''}`;
+    const previousId = previousPass?.stats?.frameHash && previousPass.stats.frameHash !== '--'
+        ? previousPass.stats.frameHash
+        : `pass:${previousPass?.pass ?? ''}`;
+    return `${pass.width}x${pass.height}:${currentId}:${previousId}`;
+}
+
+function scanChangedTileGrid(current32, previous32, width, height, cols, rows) {
+    const changed = new Uint8Array(cols * rows);
+    const tileSize = BLOCK_BORDER_TILE_SIZE;
+    let rowStart = 0;
+    let rowEnd = rows - 1;
+    let colStart = 0;
+    let colEnd = cols - 1;
+
+    if (!BLOCK_BORDERS_STRICT) {
+        rowStart = rows;
+        rowEnd = -1;
+        colStart = cols;
+        colEnd = -1;
+        for (let y = 0; y < height; y += BLOCK_BORDER_SAMPLE_STRIDE) {
+            const rowBase = y * width;
+            for (let x = 0; x < width; x += BLOCK_BORDER_SAMPLE_STRIDE) {
+                if (current32[rowBase + x] === previous32[rowBase + x]) continue;
+                const row = Math.floor(y / tileSize);
+                const col = Math.floor(x / tileSize);
+                rowStart = Math.min(rowStart, row);
+                rowEnd = Math.max(rowEnd, row);
+                colStart = Math.min(colStart, col);
+                colEnd = Math.max(colEnd, col);
+            }
+        }
+        if (rowEnd < rowStart || colEnd < colStart) return changed;
+    }
+
+    for (let row = rowStart; row <= rowEnd; row++) {
+        const y0 = row * tileSize;
+        const y1 = Math.min(height, y0 + tileSize);
+        for (let col = colStart; col <= colEnd; col++) {
+            const tileIndex = row * cols + col;
+            if (changed[tileIndex]) continue;
+            const x0 = col * tileSize;
+            const x1 = Math.min(width, x0 + tileSize);
+            scanTile:
+            for (let y = y0; y < y1; y++) {
+                const rowBase = y * width;
+                for (let x = x0; x < x1; x++) {
+                    if (current32[rowBase + x] === previous32[rowBase + x]) continue;
+                    changed[tileIndex] = 1;
+                    break scanTile;
+                }
+            }
+        }
+    }
+
+    return changed;
 }
 
 function drawBlockBorders(targetCanvas, blocks) {
@@ -1373,9 +1597,13 @@ function renderMetrics(m) {
     }
 }
 
-function drawPsnrChart(passes, targetRgba) {
-    const chartCanvas = document.getElementById('psnr-chart');
-    const legend = document.getElementById('psnr-chart-legend');
+function drawQualityChart(canvasId, legendId, passes, values, {
+    yPad = 2, yClampMin = null, yClampMax = null,
+    yLabel = '', yFormat = v => v.toFixed(2),
+    lineColor = '#7de0b0', finalColor = '#f0c86a',
+} = {}) {
+    const chartCanvas = document.getElementById(canvasId);
+    const legend = legendId ? document.getElementById(legendId) : null;
     if (!chartCanvas) return;
 
     const ctx = chartCanvas.getContext('2d');
@@ -1384,25 +1612,9 @@ function drawPsnrChart(passes, targetRgba) {
     ctx.fillStyle = '#0a0f11';
     ctx.fillRect(0, 0, w, h);
 
-    if (!passes?.length) {
-        if (legend) legend.textContent = '--';
-        return;
-    }
-
-    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
-    const reference = targetRgba ?? finalPass?.pixels ?? null;
-    if (!reference) {
-        if (legend) legend.textContent = 'final pixels released';
-        return;
-    }
-
-    const psnrs = passes.map(pass => {
-        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        return computePsnrVsFinal(reference, pass.pixels);
-    });
-    const finite = psnrs.filter(value => Number.isFinite(value));
-    if (!finite.length) {
-        if (legend) legend.textContent = 'no comparable passes';
+    const finite = (values ?? []).filter(v => Number.isFinite(v));
+    if (!passes?.length || !finite.length) {
+        if (legend) legend.textContent = passes?.length ? 'no comparable passes' : '--';
         return;
     }
 
@@ -1412,9 +1624,16 @@ function drawPsnrChart(passes, targetRgba) {
     const padB = 18;
     const plotW = w - padL - padR;
     const plotH = h - padT - padB;
-    const minY = Math.max(10, Math.min(...finite) - 2);
-    const maxY = Math.min(80, Math.max(...finite) + 2);
-    const rangeY = Math.max(0.01, maxY - minY);
+
+    let minY = Math.min(...finite) - yPad;
+    let maxY = Math.max(...finite) + yPad;
+    if (yClampMin !== null) minY = Math.max(yClampMin, minY);
+    if (yClampMax !== null) maxY = Math.min(yClampMax, maxY);
+    const rangeY = Math.max(0.001, maxY - minY);
+
+    const maxTime = Math.max(1, passes.at(-1)?.t_ms ?? 1);
+    const toX = t => padL + (t / maxTime) * plotW;
+    const toY = v => padT + plotH - ((v - minY) / rangeY) * plotH;
 
     ctx.strokeStyle = '#2c4249';
     ctx.lineWidth = 1;
@@ -1427,39 +1646,116 @@ function drawPsnrChart(passes, targetRgba) {
     ctx.fillStyle = '#9fb6b0';
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'right';
-    ctx.fillText(`${maxY.toFixed(0)}`, padL - 4, padT + 8);
-    ctx.fillText(`${minY.toFixed(0)}`, padL - 4, padT + plotH);
+    ctx.fillText(yFormat(maxY), padL - 4, padT + 8);
+    ctx.fillText(yFormat(minY), padL - 4, padT + plotH);
     ctx.textAlign = 'left';
-    ctx.fillText('dB', 2, padT + 8);
+    ctx.fillText(yLabel, 2, padT + 8);
+    ctx.fillText('0', padL, padT + plotH + 12);
+    ctx.textAlign = 'right';
+    const maxLabel = maxTime < 1000 ? `${maxTime.toFixed(0)}ms` : `${(maxTime / 1000).toFixed(1)}s`;
+    ctx.fillText(maxLabel, padL + plotW, padT + plotH + 12);
 
-    ctx.strokeStyle = '#7de0b0';
+    ctx.strokeStyle = lineColor;
     ctx.lineWidth = 2;
     ctx.beginPath();
     let drewFirst = false;
-    psnrs.forEach((psnr, index) => {
-        if (!Number.isFinite(psnr)) return;
-        const x = padL + (index / Math.max(1, passes.length - 1)) * plotW;
-        const y = padT + plotH - ((psnr - minY) / rangeY) * plotH;
+    values.forEach((v, i) => {
+        if (!Number.isFinite(v)) return;
+        const x = toX(passes[i].t_ms);
+        const y = toY(v);
         if (drewFirst) ctx.lineTo(x, y);
-        else {
-            ctx.moveTo(x, y);
-            drewFirst = true;
-        }
+        else { ctx.moveTo(x, y); drewFirst = true; }
     });
     ctx.stroke();
 
-    psnrs.forEach((psnr, index) => {
-        if (!Number.isFinite(psnr)) return;
-        const x = padL + (index / Math.max(1, passes.length - 1)) * plotW;
-        const y = padT + plotH - ((psnr - minY) / rangeY) * plotH;
-        ctx.fillStyle = passes[index].isFinal ? '#f0c86a' : '#7de0b0';
+    values.forEach((v, i) => {
+        if (!Number.isFinite(v)) return;
+        const x = toX(passes[i].t_ms);
+        const y = toY(v);
+        ctx.fillStyle = passes[i].isFinal ? finalColor : lineColor;
         ctx.beginPath();
         ctx.arc(x, y, 3, 0, Math.PI * 2);
         ctx.fill();
     });
 
-    const lastFinite = finite.at(-1);
-    if (legend) legend.textContent = `${finite.length} of ${passes.length} passes plotted · ${lastFinite.toFixed(1)} dB final`;
+    if (legend) legend.textContent = `${finite.length} of ${passes.length} passes · ${yFormat(finite.at(-1))} final`;
+}
+
+function drawPsnrChart(passes, targetRgba) {
+    if (!passes?.length) {
+        drawQualityChart('psnr-chart', 'psnr-chart-legend', [], [], { yLabel: 'dB', yFormat: v => v.toFixed(1) });
+        return;
+    }
+    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
+    const reference = targetRgba ?? finalPass?.pixels ?? null;
+    if (!reference) {
+        const legend = document.getElementById('psnr-chart-legend');
+        if (legend) legend.textContent = 'final pixels released';
+        return;
+    }
+    const pw = passes[0]?.width ?? 1;
+    const ph = passes[0]?.height ?? 1;
+    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
+    const needsDs = dsW !== pw;
+    const values = passes.map(pass => {
+        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
+        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
+        return computePsnrVsFinal(refDs, px);
+    });
+    drawQualityChart('psnr-chart', 'psnr-chart-legend', passes, values, {
+        yPad: 2, yClampMin: 10, yClampMax: 80,
+        yLabel: 'dB', yFormat: v => v.toFixed(1),
+    });
+}
+
+function drawSsimChart(passes, targetRgba) {
+    if (!passes?.length) {
+        drawQualityChart('ssim-chart', 'ssim-chart-legend', [], [], { yLabel: 'SSIM', yFormat: v => v.toFixed(3) });
+        return;
+    }
+    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
+    const reference = targetRgba ?? finalPass?.pixels ?? null;
+    if (!reference) return;
+    const pw = passes[0]?.width ?? 1;
+    const ph = passes[0]?.height ?? 1;
+    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
+    const needsDs = dsW !== pw;
+    const values = passes.map(pass => {
+        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
+        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
+        return computeSsimVsFinal(refDs, px, dsW, dsH);
+    });
+    drawQualityChart('ssim-chart', 'ssim-chart-legend', passes, values, {
+        yPad: 0.002, yClampMin: 0, yClampMax: 1,
+        yLabel: 'SSIM', yFormat: v => v.toFixed(3),
+        lineColor: '#f0c86a', finalColor: '#7de0b0',
+    });
+}
+
+function drawButtChart(passes, targetRgba) {
+    if (!passes?.length) {
+        drawQualityChart('butt-chart', 'butt-chart-legend', [], [], { yLabel: 'Butt', yFormat: v => v.toFixed(3) });
+        return;
+    }
+    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
+    const reference = targetRgba ?? finalPass?.pixels ?? null;
+    if (!reference) return;
+    const pw = passes[0]?.width ?? 1;
+    const ph = passes[0]?.height ?? 1;
+    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
+    const needsDs = dsW !== pw;
+    const n = dsW * dsH;
+    const refXyb = pixelsToXyb(refDs, n);  // precompute once on downsampled reference
+    const values = passes.map(pass => {
+        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
+        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
+        return computeButteraugliVsFinal(refXyb, px, dsW, dsH);
+    });
+    drawQualityChart('butt-chart', 'butt-chart-legend', passes, values, {
+        yPad: 0.05, yClampMin: 0,
+        yLabel: 'Butt', yFormat: v => v.toFixed(3),
+        lineColor: '#ff8c7d', finalColor: '#7de0b0',
+    });
 }
 
 function setMetric(id, text) {
@@ -1476,6 +1772,8 @@ function clearRunView() {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     drawPsnrChart([], null);
+    drawSsimChart([], null);
+    drawButtChart([], null);
 }
 
 function exportMeasurementsCSV() {
@@ -1538,64 +1836,153 @@ function exportMeasurementsJSON() {
     dbgLog('Exported JSON', `${runMeasurements.length} measurement(s)`, 'success');
 }
 
-function exportMeasurementsTOON() {
+async function exportMeasurementsTOON() {
     if (!runMeasurements.length) return;
-    let out = `measurements[${runMeasurements.length}]:\n`;
+
+    const dict = {
+        'ti': 'tiny',
+        'sm': 'small',
+        'me': 'medium',
+        'la': 'large',
+        'di': 'display',
+        'vl': 'very-large',
+        'or': 'original',
+        'co': 'center-out',
+        'tb': 'top-bottom'
+    };
+    const reverseDict = Object.fromEntries(Object.entries(dict).map(([k,v]) => [v,k]));
+    const mapVal = (v) => reverseDict[v] || v;
+
+    let out = `Dict: ${Object.entries(dict).map(([k,v]) => `${k}=${v}`).join(', ')}\n`;
+    out += `meta:\n`;
+    out += `  exportedAt: ${new Date().toISOString()}\n`;
+    out += `  generator: single-progressive\n`;
+    out += `  rowCount: ${runMeasurements.length}\n`;
+    out += `  sources[${[...new Set(runMeasurements.map(m => m.source))].length}]:\n`;
+    for (const src of [...new Set(runMeasurements.map(m => m.source))]) {
+        out += `    - name: ${quoteIfNeeded(src)}\n`;
+    }
+
+    // Create the runs array and flatten perPass rows into it, identical to how parse_log2.py works
+    let rowCount = 0;
     for (const m of runMeasurements) {
-        out += `- ts: ${m.ts}\n`;
-        out += `  source: ${quoteIfNeeded(m.source)}\n`;
-        out += `  target: ${m.targetWidth}x${m.targetHeight}\n`;
-        if (m.sizePreset) out += `  sizePreset: ${m.sizePreset}\n`;
-        if (m.qualityPreset) out += `  qualityPreset: ${m.qualityPreset}\n`;
-        if (m.progressiveDc != null) out += `  progressive_dc: ${m.progressiveDc}\n`;
-        if (m.progressiveAc != null) out += `  progressive_ac: ${m.progressiveAc}\n`;
-        if (m.qProgressiveAc != null) out += `  qprogressive_ac: ${m.qProgressiveAc}\n`;
-        if (m.decodingSpeed != null) out += `  decoding_speed: ${m.decodingSpeed}\n`;
-        if (m.groupOrder != null) out += `  group_order: ${m.groupOrder}\n`;
-        if (m.groupOrderLabel) out += `  group_order_label: ${m.groupOrderLabel}\n`;
-        out += `  estimateKb: ${m.estimateKb}\n`;
-        out += `  actualKb: ${m.actualKb}\n`;
-        if (m.sizeErrorPct != null) out += `  sizeErrorPct: ${m.sizeErrorPct}\n`;
-        out += `  quality: ${m.quality}\n`;
-        out += `  encodeTotalMs: ${m.encode_total_ms}\n`;
-        out += `  throttleKbPerSec: ${m.throttleKbPerSec}\n`;
-        if (m.avgTransferKbPerSec != null) out += `  avgTransferKbPerSec: ${m.avgTransferKbPerSec}\n`;
-        out += `  passCount: ${m.passCount}\n`;
-        out += `  visibleProgressFrames: ${m.visibleProgressFrames}\n`;
-        out += `  uniqueFrameHashes: ${m.uniqueFrameHashes}\n`;
-        if (m.first_ms != null) out += `  first_ms: ${m.first_ms}\n`;
-        if (m.final_ms != null) out += `  final_ms: ${m.final_ms}\n`;
-        if (m.oneShot_ms != null) out += `  oneShot_ms: ${m.oneShot_ms}\n`;
-        if (m.speedup != null) out += `  speedup: ${m.speedup}\n`;
-        if (m.final_psnr_vs_source != null) out += `  final_psnr_vs_source: ${m.final_psnr_vs_source}\n`;
-        out += `  perPass[${m.perPass.length}]{pass,t_ms,isFinal,bytesFed,percentFed,transferKbPerSec,delta_ms,delta_bytes,delta_kb_per_sec,paint_ms,decode_ms,intended_ratio,ratio_label,alphaMin,alphaMax,alphaZeroPct,rgbNonzeroCount,lumaVariance,frameHash}:\n`;
-        for (const p of m.perPass) {
-            out += [
-                `    ${p.pass}`,
-                p.t_ms,
-                p.isFinal ? 'true' : 'false',
-                p.bytesFed ?? '',
-                p.percentFed ?? '',
-                p.transferKbPerSec ?? '',
-                p.delta_ms ?? '',
-                p.delta_bytes ?? '',
-                p.delta_kb_per_sec ?? '',
-                p.paint_ms ?? '',
-                p.decode_ms ?? '',
-                p.intended_ratio ?? '',
-                quoteIfNeeded(p.ratio_label ?? ''),
-                p.stats.alphaMin,
-                p.stats.alphaMax,
-                p.stats.alphaZeroPct,
-                p.stats.rgbNonzeroCount,
-                p.stats.lumaVariance,
-                p.stats.frameHash
-            ].join(',') + '\n';
+        if (m.perPass && m.perPass.length) rowCount += m.perPass.length;
+        else rowCount += 1;
+    }
+
+    out += `\n---\n`;
+    out += `runs[${rowCount}]{source|target|size|qual|pdc|pac|qpac|ds|go|encMs|throttle|totalKB|uiDelay|pass|t_ms|isFinal|paintMs|decMs|delta|oneshotMs}:\n`;
+
+    let lastSource = '';
+    let lastTarget = '';
+    let lastSize = '';
+    let lastQual = '';
+    let lastPdc = '';
+    let lastPac = '';
+    let lastQpac = '';
+    let lastDs = '';
+    let lastGo = '';
+    let lastEncMs = '';
+    let lastThrottle = '';
+    let lastTotalKB = '';
+    let lastOneshot = '';
+    let lastUiDelay = '';
+    let lastDelta = '';
+
+    for (const m of runMeasurements) {
+        const source = quoteIfNeeded(m.source);
+        const target = `${m.targetWidth}x${m.targetHeight}`;
+        const sizePreset = mapVal(m.sizePreset ?? '');
+        const qual = m.qualityPreset ?? '';
+        const pdc = m.progressiveDc ?? '';
+        const pac = m.progressiveAc ?? '';
+        const qpac = m.qProgressiveAc ?? '';
+        const ds = m.decodingSpeed ?? '';
+        const go = mapVal(m.groupOrderLabel ?? m.groupOrder ?? '');
+        const encMs = m.encode_total_ms != null ? m.encode_total_ms.toFixed(1) : '';
+        const throttle = m.throttleKbPerSec || 0;
+        const totalKB = m.actualKb != null ? m.actualKb.toFixed(1) : '';
+        const oneshotMs = m.oneShot_ms != null ? m.oneShot_ms.toFixed(1) : '';
+        const uiDelay = m.uiDelayMs != null ? m.uiDelayMs.toFixed(1) : '';
+
+        if (!m.perPass || !m.perPass.length) {
+            const outSource = source === lastSource ? '~' : source;
+            const outTarget = target === lastTarget ? '~' : target;
+            const outSize = sizePreset === lastSize ? '~' : sizePreset;
+            const outQual = qual === lastQual ? '~' : qual;
+            const outPdc = String(pdc) === String(lastPdc) ? '~' : pdc;
+            const outPac = String(pac) === String(lastPac) ? '~' : pac;
+            const outQpac = String(qpac) === String(lastQpac) ? '~' : qpac;
+            const outDs = String(ds) === String(lastDs) ? '~' : ds;
+            const outGo = String(go) === String(lastGo) ? '~' : go;
+            const outEnc = String(encMs) === String(lastEncMs) ? '~' : encMs;
+            const outThrot = String(throttle) === String(lastThrottle) ? '~' : throttle;
+            const outTotKB = String(totalKB) === String(lastTotalKB) ? '~' : totalKB;
+            const outUiDelay = String(uiDelay) === String(lastUiDelay) ? '~' : uiDelay;
+            const outOneShot = String(oneshotMs) === String(lastOneshot) ? '~' : oneshotMs;
+
+            out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outEnc} | ${outThrot} | ${outTotKB} | ${outUiDelay} | - | - | - | - | - | - | ${outOneShot}\n`;
+
+            lastSource = source; lastTarget = target; lastSize = sizePreset; lastQual = qual;
+            lastPdc = pdc; lastPac = pac; lastQpac = qpac; lastDs = ds; lastGo = go;
+            lastEncMs = encMs; lastThrottle = throttle; lastTotalKB = totalKB; lastOneshot = oneshotMs; lastUiDelay = uiDelay;
+            lastDelta = '';
+        } else {
+            for (const p of m.perPass) {
+                const pass = p.pass;
+                const t_ms = p.t_ms != null ? p.t_ms.toFixed(1) : '';
+                const isFinal = p.isFinal ? 'T' : 'F';
+                const paintMs = p.paint_ms != null ? p.paint_ms.toFixed(1) : '';
+                const decMs = p.decode_ms != null ? p.decode_ms.toFixed(1) : '';
+                const deltaBytes = p.delta_bytes != null ? (p.delta_bytes / 1024).toFixed(1) + 'KB' : '';
+                const delta = deltaBytes ? '+' + deltaBytes : '';
+
+                const outSource = source === lastSource ? '~' : source;
+                const outTarget = target === lastTarget ? '~' : target;
+                const outSize = sizePreset === lastSize ? '~' : sizePreset;
+                const outQual = qual === lastQual ? '~' : qual;
+                const outPdc = String(pdc) === String(lastPdc) ? '~' : pdc;
+                const outPac = String(pac) === String(lastPac) ? '~' : pac;
+                const outQpac = String(qpac) === String(lastQpac) ? '~' : qpac;
+                const outDs = String(ds) === String(lastDs) ? '~' : ds;
+                const outGo = String(go) === String(lastGo) ? '~' : go;
+                const outEnc = String(encMs) === String(lastEncMs) ? '~' : encMs;
+                const outThrot = String(throttle) === String(lastThrottle) ? '~' : throttle;
+                const outTotKB = String(totalKB) === String(lastTotalKB) ? '~' : totalKB;
+                const outUiDelay = String(uiDelay) === String(lastUiDelay) ? '~' : uiDelay;
+                const outOneShot = String(oneshotMs) === String(lastOneshot) ? '~' : oneshotMs;
+                const outDelta = delta === lastDelta && lastDelta !== '' ? '~' : delta;
+
+                out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outEnc} | ${outThrot} | ${outTotKB} | ${outUiDelay} | ${pass} | ${t_ms} | ${isFinal} | ${paintMs} | ${decMs} | ${outDelta} | ${outOneShot}\n`;
+
+                lastSource = source; lastTarget = target; lastSize = sizePreset; lastQual = qual;
+                lastPdc = pdc; lastPac = pac; lastQpac = qpac; lastDs = ds; lastGo = go;
+                lastEncMs = encMs; lastThrottle = throttle; lastTotalKB = totalKB; lastOneshot = oneshotMs; lastUiDelay = uiDelay;
+                lastDelta = delta;
+            }
         }
     }
-    out += `meta:\n  exportedAt: ${new Date().toISOString()}\n  generator: single-progressive\n`;
-    downloadText(`single-progressive-${timestamp()}.toon`, out, 'text/toon');
-    dbgLog('Exported TOON', `${runMeasurements.length} measurement(s)`, 'success');
+
+    // Custom prompt logic for "Copy Only"
+    // Using simple browser confirm and prompt since it's hard to build a whole DOM dialog inline cleanly, 
+    // but a prompt allows 3 choices by checking string.
+    let userChoice = prompt("Type 'C' to Copy Only, 'S' to Copy & Save, or hit Cancel.", "S");
+
+    if (userChoice !== null) {
+        userChoice = userChoice.toUpperCase().trim();
+        if (userChoice === 'C' || userChoice === 'S') {
+            try {
+                await navigator.clipboard.writeText(out);
+                dbgLog('Copied TOON to clipboard', `${rowCount} rows`);
+            } catch (err) {
+                dbgLog('Clipboard blocked', String(err), 'warn');
+            }
+        }
+        if (userChoice === 'S') {
+            downloadText(`single-progressive-${timestamp()}.toon`, out, 'text/toon');
+            dbgLog('Exported TOON', `${rowCount} rows`, 'success');
+        }
+    }
 }
 
 async function copyMeasurementsMarkdown() {
@@ -1765,6 +2152,19 @@ function formatTransferSpeed(kbPerSec) {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, ms, label, onTimeout) {
+    let timeoutId = null;
+    const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            try { onTimeout?.(); } catch {}
+            reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`));
+        }, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timeoutId !== null) clearTimeout(timeoutId);
+    });
 }
 
 function nextPaint() {

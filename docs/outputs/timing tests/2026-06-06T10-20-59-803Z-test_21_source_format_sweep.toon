@@ -1,0 +1,15 @@
+TestName: Source Format Sweep (Test_21)
+RunTimestamp: 2026-06-06T10:20:59.803Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Quality: 85
+Effort: 3
+Notes: source_type sweep across available RAW-family fixtures; compares local pipeline costs by file format
+TimeBase: 2026-06-06T10:
+
+---
+runs[3]{t|file|source_type|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "20:^51.283@" | "ADH ^1248@.CR2" | cr2 | 7166.762 | 586.050 | 1141.724 | 445.642 | 9340.178 | 241414B
+  "&54.878@" | PXL_20260501_093507165.RAW-02.ORIGINAL.dng | dng | 2354.208 | 201.861 | 602.392 | 393.511 | 3551.972 | 360841B
+  "&59.802@" | "P^1110226@.ORF" | orf | 3831.007 | 235.342 | 475.254 | 354.137 | 4895.741 | 179051B

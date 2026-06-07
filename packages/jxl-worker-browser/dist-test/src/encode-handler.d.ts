@@ -1,3 +1,4 @@
+/// <reference lib="webworker" />
 import type { JxlModule } from "./wasm-loader.js";
 import type { MsgEncodeStart } from "@casabio/jxl-core/protocol";
 import type { Region } from "@casabio/jxl-core/types";
@@ -20,6 +21,8 @@ export declare class EncodeHandler {
     private wakeResolve;
     private lastDrainPostedMs;
     private lastDrainAllowed;
+    private readonly _drainMsg;
+    private readonly _chunkMsg;
     constructor(opts: MsgEncodeStart, wasm: JxlModule, callbacks: EncodeHandlerCallbacks);
     onPixels(chunk: ArrayBuffer, region?: Region): void;
     onFinish(): void;

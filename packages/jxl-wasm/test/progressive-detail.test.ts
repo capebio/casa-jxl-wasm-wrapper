@@ -108,9 +108,9 @@ test('stateful progressive decoder releases prior input before appending stream 
   expect(bridge).toContain('JxlDecoderSetInput(s->dec, s->input_buf, s->input_size)');
 });
 
-test('stateful progressive decoder flushes on JXL_DEC_FRAME_PROGRESSION and input_closed; open-stream per-chunk opportunistic flush removed', () => {
-  // Open streams rely on libjxl FRAME_PROGRESSION events for real pass boundaries (~5 per frame).
-  // The input_closed path retains one opportunistic flush for byte-truncated (Sneyers) streams.
+test('stateful progressive decoder flushes on JXL_DEC_FRAME_PROGRESSION and one open-stream snapshot per input generation', () => {
+  // Real pass boundaries come from FRAME_PROGRESSION; the generation gate adds chunk-visible
+  // paint checkpoints for streams where libjxl exposes only coarse progression events.
   expect(bridge).toContain('TryFlushProgressiveImage');
   expect(bridge).toContain('status == JXL_DEC_FRAME_PROGRESSION');
   expect(bridge).toContain('status == JXL_DEC_NEED_MORE_INPUT');
@@ -121,8 +121,7 @@ test('stateful progressive decoder flushes on JXL_DEC_FRAME_PROGRESSION and inpu
   // All-zero scan skipped after first flush via flush_count guard.
   expect(bridge).toContain('flush_count');
   expect(bridge).toContain('s->flush_count == 0');
-  // Open-stream opportunistic flush removed: the conditional that fired on !input_closed is gone.
-  expect(bridge).not.toContain('!s->input_closed && s->frame_started');
+  expect(bridge).toContain('progressive UI');
 });
 
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {

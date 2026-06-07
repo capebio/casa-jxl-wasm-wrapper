@@ -324,6 +324,7 @@ export interface ContextOptions {
     poolSize?: number;
     memoryCapBytes?: number;
     idleTimeoutMs?: number;
+    pushHwm?: number;
     wasmUrl?: string;
     cache?: CacheOptions;
 }

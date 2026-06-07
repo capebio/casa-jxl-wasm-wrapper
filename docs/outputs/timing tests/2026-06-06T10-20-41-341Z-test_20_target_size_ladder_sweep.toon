@@ -1,0 +1,15 @@
+TestName: Target Size Ladder Sweep (Test_20)
+RunTimestamp: 2026-06-06T10:20:41.341Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 400,800,1600,2400
+Effort: 3
+Notes: target ladder; q80 for 400px thumbnails, q85 for larger local/lightbox sizes
+TimeBase: 2026-06-06T10:
+
+---
+runs[4]{t|file|target|w|h|quality|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "20:^24.266@" | "P^2200571@.ORF" | 400 | 400 | 299 | 80 | 5561.899 | 332.200 | 692.506 | 134.247 | 6720.852 | 27115B
+  "&28.949@" | ~ | 800 | 800 | 597 | 85 | 3951.973 | 282.557 | 231.968 | 149.953 | 4616.452 | 128245B
+  "&34.298@" | ~ | 1600 | 1600 | 1195 | ~ | 3915.891 | 285.774 | 667.332 | 436.192 | 5305.189 | 465511B
+  "&41.340@" | ~ | 2400 | 2400 | 1792 | ~ | 3583.764 | 525.417 | 1812.559 | 1081.170 | 7002.910 | 942403B

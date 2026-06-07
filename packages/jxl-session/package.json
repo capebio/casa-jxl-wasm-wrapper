@@ -6,6 +6,7 @@
   "sideEffects": false,
   "exports": {
     ".": {
+      "browser": "./dist/browser.js",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }

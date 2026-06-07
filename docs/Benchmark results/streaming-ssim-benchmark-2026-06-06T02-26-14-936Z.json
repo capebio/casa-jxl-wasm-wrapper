@@ -1,0 +1,34 @@
+{
+  "exportedAt": "2026-06-06T02:26:14.939Z",
+  "tier": "relaxed-simd-mt",
+  "target": 800,
+  "effort": 3,
+  "quality": 85,
+  "useButteraugli": false,
+  "butteraugliThreshold": null,
+  "results": [
+    {
+      "file": "P2200571.ORF",
+      "src": "5240×3912",
+      "encoded": "800×597",
+      "jxlKb": 125,
+      "encodeMs": 506,
+      "referenceDecodeMs": 183,
+      "cutoffs": [
+        {
+          "bytes": 128245,
+          "percent": 100,
+          "ssim": 1,
+          "psnr": null,
+          "butteraugli": null,
+          "error": null
+        }
+      ],
+      "acceptableBytes": 128245,
+      "acceptablePercent": 100,
+      "ssimThreshold": 0.9,
+      "useButteraugli": false,
+      "butteraugliThreshold": null
+    }
+  ]
+}

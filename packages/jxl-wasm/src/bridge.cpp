@@ -193,7 +193,13 @@ static void FreeBufferNoChain(JxlWasmBuffer* buf) {
 static void* g_parallel_runner = nullptr;
 static void* GetSharedRunner() {
   if (g_parallel_runner == nullptr) {
-    g_parallel_runner = JxlThreadParallelRunnerCreate(nullptr, 0);
+    // Pre-warmed Emscripten pool is sized to navigator.hardwareConcurrency
+    // (-sPTHREAD_POOL_SIZE in build.mjs); request the matching default worker
+    // count so libjxl uses those warm threads instead of running serially.
+    // Creating threads beyond the pool would deadlock: the worker thread is
+    // blocked synchronously in decode and cannot service new pthread spawns.
+    size_t workers = JxlThreadParallelRunnerDefaultNumWorkerThreads();
+    g_parallel_runner = JxlThreadParallelRunnerCreate(nullptr, workers);
   }
   return g_parallel_runner;
 }
@@ -2032,18 +2038,19 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
     status = JxlDecoderProcessInput(s->dec);
 
     if (status == JXL_DEC_NEED_MORE_INPUT) {
-      // Open streams: return NEED_MORE so the caller feeds more chunks.
-      // Intermediate progress comes from JXL_DEC_FRAME_PROGRESSION (real pass boundaries,
-      // ~5 events per frame) not per-chunk snapshots.
-      // Byte-truncated streams (Sneyers demo): attempt one final flush so the consumer
-      // gets the best partial image decoded from the available prefix.
+      // DONOTCHANGE(progressive-checkpoints): Surface one snapshot per input
+      // generation. libjxl may emit only one true FRAME_PROGRESSION event for
+      // small/medium images; progressive UI needs this open-stream
+      // opportunistic flush path. Removing it collapses Single Progressive back
+      // to one non-final stage plus final.
+      // Keep the generation gate so callers cannot drain the same snapshot forever.
+      if (s->frame_started && !s->final_ready &&
+          s->opportunistic_flush_generation != s->input_generation &&
+          TryFlushProgressiveImage(s)) {
+        s->opportunistic_flush_generation = s->input_generation;
+        return JXL_DEC_RESULT_PROGRESS;
+      }
       if (s->input_closed) {
-        if (s->frame_started && !s->final_ready &&
-            s->opportunistic_flush_generation != s->input_generation &&
-            TryFlushProgressiveImage(s)) {
-          s->opportunistic_flush_generation = s->input_generation;
-          return JXL_DEC_RESULT_PROGRESS;
-        }
         s->error_code = static_cast<int>(status);
         return JXL_DEC_RESULT_ERROR;
       }

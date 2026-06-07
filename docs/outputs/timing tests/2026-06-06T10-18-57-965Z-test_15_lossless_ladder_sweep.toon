@@ -1,0 +1,15 @@
+TestName: Lossless Ladder Sweep (Test_15)
+RunTimestamp: 2026-06-06T10:18:57.966Z
+Agent: codex
+Tier: relaxed-simd-mt
+Target: 1600
+Effort: 3
+Notes: lossless(0,1) x quality(85,95); compares archival path cost against high-quality lossy
+TimeBase: 2026-06-06T10:
+
+---
+runs[4]{t|file|quality|lossless|raw_ms|rgba_ms|encode_ms|decode_ms|total_ms|size}:
+  "18:^49.699@" | "P^2200571@.ORF" | 85 | 0 | 5149.337 | 583.415 | 1789.376 | 567.772 | 8089.900 | 465511B
+  "&53.306@" | ~ | ~ | 1 | ~ | ~ | 2113.122 | 1489.837 | 9335.711 | 6026422B
+  "&54.920@" | ~ | 95 | 0 | ~ | ~ | 1091.815 | 521.284 | 7345.850 | 1042090B
+  "&57.964@" | ~ | ~ | 1 | ~ | ~ | 1950.348 | 1082.599 | 8765.699 | 6026422B

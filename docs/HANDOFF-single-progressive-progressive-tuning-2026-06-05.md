@@ -35,6 +35,25 @@ Actual root cause had two parts:
 1. `27b0403` added checksum dedup in `packages/jxl-wasm/src/bridge.cpp` for progressive flush snapshots. That removed many chunk-visible pseudo-progress frames, leaving mostly true libjxl boundaries.
 2. In Single progressive, when throttle `0` had no yield between chunks, the facade batched queued chunks into one large WASM push. Decoder then saw one big input step and emitted only coarse progress plus final.
 
+## DONOTCHANGE: Progressive Checkpoint Contract
+
+Do not remove open-stream opportunistic progressive flushes in `packages/jxl-wasm/src/bridge.cpp`.
+
+The required bridge behavior is:
+
+- On `JXL_DEC_NEED_MORE_INPUT`, after a frame has started and before final, attempt one `TryFlushProgressiveImage` per `input_generation`.
+- Keep `opportunistic_flush_generation != input_generation`; it prevents draining the same snapshot forever.
+- Do not reintroduce checksum/frame-hash dedup (`prev_flush_checksum` style) on this path unless it is behind a deliberate runtime experiment flag.
+- Rebuild `packages/jxl-wasm/dist/*` after changing this C++ path; source changes alone do not affect runtime tests or browser demos.
+
+Why this is locked: libjxl often surfaces only coarse real `JXL_DEC_FRAME_PROGRESSION` boundaries for small/medium images. Without this chunk-visible checkpoint path, Single Progressive collapses to one non-final progress event plus final even with `progressiveDc=2`, `progressiveAc=1`, `qProgressiveAc=1`, `emitEveryPass=true`, and `progressiveDetail='passes'`.
+
+Guard test:
+
+```powershell
+rtk proxy bun test packages/jxl-wasm/test/progressive-visible-passes.test.ts
+```
+
 ## What Restored It
 
 Commit `4764a67 fix(progressive): restore chunk-visible paint checkpoints`:
