@@ -153,6 +153,13 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain('drawPsnrChart');
     expect(source).toContain('computePsnrVsFinal');
     expect(source).toContain('computeAndDrawChartsAsync(decode.passes, targetRgba)');
+    // Charts gated behind the Graphs toggle (default off); metrics computed on downsampled pixels.
+    expect(html).toContain('id="charts-enabled"');
+    expect(source).toContain('function chartsEnabled');
+    expect(source).toContain('function refreshCharts');
+    expect(source).toContain("chartsEnabledEl?.addEventListener('change', refreshCharts)");
+    expect(source).toContain('if (chartsEnabled()) void computeAndDrawChartsAsync');
+    expect(source).toContain('downsamplePixelsForChart');
     expect(source).toContain('intendedDownsamplingRatio');
     expect(source).toContain('ratioLabel');
     expect(source).toContain('intended_ratio');
@@ -166,6 +173,24 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(html).toContain('id="perceptual-cutoff"');
     expect(source).toContain('shouldStopAtPass');
     expect(source).toContain('PERCEPTUAL_CUTOFF_PSNR_DELTA_DB');
+});
+
+test('single progressive stats worker recovers from a transient error (no permanent latch)', () => {
+    // R9: one worker error must not poison the rest of the session — charts AND frame-stats
+    // (perceptual cutoff) share this worker, so a permanent latch would freeze later runs.
+    expect(source).not.toContain('_statsWorkerDisabled');
+    expect(source).not.toContain('stats worker disabled');
+    expect(source).toContain('function resetStatsWorker');
+    expect(source).toContain('resetStatsWorker(new Error');
+});
+
+test('single progressive chart-worker failure draws empty charts, no main-thread fallback', () => {
+    // R9: drop the sync SSIM/Butteraugli batch that froze the UI when the chart worker failed.
+    expect(source).not.toContain('falling back to sync');
+    expect(source).toContain('function drawEmptyCharts');
+    expect(source).toContain("drawEmptyCharts('charts unavailable')");
+    // Call form (trailing ';') — the function *definition* uses ' {', so this targets only the catch call.
+    expect(source).not.toContain('drawPsnrChart(passes, targetRgba);');
 });
 
 test('single progressive block-border overlay uses fast cached tile diff', () => {

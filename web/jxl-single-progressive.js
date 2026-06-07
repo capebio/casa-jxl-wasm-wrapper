@@ -24,7 +24,7 @@ const WORKER_TIERS = new Set(['auto', 'relaxed-simd-mt', 'simd-mt', 'simd', 'sca
 
 const PERCEPTUAL_CUTOFF_PSNR_DELTA_DB = 0.5;
 const PERCEPTUAL_CUTOFF_LOW_KBPS = 1.0;
-const CHART_MAX_PIXELS = 2_000_000;    // cap quality-metric computation at ~2 MP; 10× speedup at Original res
+const CHART_MAX_PIXELS = 1_000_000;    // cap quality-metric computation at ~1 MP; keeps Butteraugli sub-second/pass even at Display/Original res
 const PASS_BORDER_RES_MAX = 4_000_000; // skip block-border overlay above this pixel count (meaningless at hi-res)
 
 function downsamplePixelsForChart(pixels, width, height) {
@@ -64,7 +64,6 @@ const SIZE_PRESETS = {
 
 let _sessionCtx = null;
 let _statsWorker = null;
-let _statsWorkerDisabled = false;
 let _statsId = 0;
 const _statsPending = new Map();
 
@@ -123,8 +122,11 @@ function rejectPendingStats(error) {
     _statsPending.clear();
 }
 
-function disableStatsWorker(error) {
-    _statsWorkerDisabled = true;
+// Tear down the current worker and reject in-flight requests, but do NOT permanently
+// disable. The next getStatsWorker() spins up a fresh worker, so one transient failure
+// can't poison the rest of the session — neither charts nor the frame-stats (cutoff) path,
+// which share this worker.
+function resetStatsWorker(error) {
     if (_statsWorker) {
         _statsWorker.terminate();
         _statsWorker = null;
@@ -133,9 +135,6 @@ function disableStatsWorker(error) {
 }
 
 function getStatsWorker() {
-    if (_statsWorkerDisabled) {
-        throw new Error('stats worker disabled');
-    }
     if (_statsWorker === null) {
         _statsWorker = new Worker(new URL('./jxl-frame-stats-worker.js', import.meta.url), { type: 'module' });
         _statsWorker.onmessage = (event) => {
@@ -154,8 +153,8 @@ function getStatsWorker() {
             }
         };
         _statsWorker.onerror = (event) => {
-            console.warn('[stats-worker] disabling after error', event);
-            disableStatsWorker(new Error(event?.message ?? 'stats worker error'));
+            console.warn('[stats-worker] resetting after error', event);
+            resetStatsWorker(new Error(event?.message ?? 'stats worker error'));
         };
     }
     return _statsWorker;
@@ -216,10 +215,44 @@ async function computeAndDrawChartsAsync(passes, targetRgba) {
             lineColor: '#ff8c7d', finalColor: '#7de0b0',
         });
     } catch (error) {
-        console.warn('[charts] worker failed; falling back to sync', error);
-        drawPsnrChart(passes, targetRgba);
-        drawSsimChart(passes, targetRgba);
-        drawButtChart(passes, targetRgba);
+        // No main-thread SSIM/Butteraugli fallback — that synchronous batch is the UI freeze.
+        // Draw empty charts instead. The per-pass frame-stats path keeps its own fallback
+        // (one pass at a time, needed for the perceptual cutoff).
+        console.warn('[charts] worker failed; charts skipped (no main-thread fallback)', error);
+        drawEmptyCharts('charts unavailable');
+    }
+}
+
+// Charts (PSNR/SSIM/Butteraugli) are a diagnostic surface gated behind the Graphs toggle.
+// Off (default): the per-pass perceptual pathway is skipped entirely — no worker round-trip,
+// no metric compute. The last run's passes + reference are stashed so toggling on recomputes
+// without a re-decode. Frame-stats (hash/luma for cutoff) are separate and always run.
+function chartsEnabled() {
+    return chartsEnabledEl?.checked === true;
+}
+
+function drawEmptyCharts(legendText) {
+    drawPsnrChart([], null);
+    drawSsimChart([], null);
+    drawButtChart([], null);
+    if (!legendText) return;
+    for (const id of ['psnr-chart-legend', 'ssim-chart-legend', 'butt-chart-legend']) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = legendText;
+    }
+}
+
+function setChartsDisabledLabels() {
+    drawEmptyCharts('graphs off');
+}
+
+function refreshCharts() {
+    if (!chartsEnabled()) {
+        setChartsDisabledLabels();
+        return;
+    }
+    if (lastChartPasses?.length) {
+        void computeAndDrawChartsAsync(lastChartPasses, lastChartReference);
     }
 }
 
@@ -267,6 +300,7 @@ const exportToonBtn = document.getElementById('export-toon-btn');
 const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
 const showBlockBordersEl = document.getElementById('show-block-borders');
+const chartsEnabledEl = document.getElementById('charts-enabled');
 const timingBordersOverride = readBoolParam('borders', null);
 const bordersOverride = new URLSearchParams(location.search).get('borders') === '0';
 
@@ -274,6 +308,8 @@ const runMeasurements = [];
 let rawReady = false;
 let running = false;
 let currentPasses = [];
+let lastChartPasses = null;
+let lastChartReference = null;
 let lightboxIndex = -1;
 let loadedSource = null;
 const lightboxZoomState = { scale: 1, x: 0, y: 0 };
@@ -308,6 +344,8 @@ if (copyMeasurementsMdBtn) copyMeasurementsMdBtn.addEventListener('click', copyM
 if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
 if (bordersOverride && showBlockBordersEl) showBlockBordersEl.checked = false;
 showBlockBordersEl?.addEventListener('change', redrawCurrentPassView);
+chartsEnabledEl?.addEventListener('change', refreshCharts);
+refreshCharts();
 lightboxClose?.addEventListener('click', closePassLightbox);
 lightboxZoomOut?.addEventListener('click', () => zoomLightboxAt(1 / 1.25));
 lightboxZoomIn?.addEventListener('click', () => zoomLightboxAt(1.25));
@@ -591,7 +629,10 @@ async function runSourceWithSettings(source, settings) {
     }
     runMeasurements.push(metrics);
     renderMetrics(metrics);
-    void computeAndDrawChartsAsync(decode.passes, targetRgba);
+    lastChartPasses = decode.passes;
+    lastChartReference = targetRgba;
+    if (chartsEnabled()) void computeAndDrawChartsAsync(decode.passes, targetRgba);
+    else setChartsDisabledLabels();
     metrics.uiDelayMs = Number((performance.now() - uiStartMs).toFixed(2));
     
     updateExportButtons();
