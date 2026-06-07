@@ -15,7 +15,7 @@ test('single progressive page is discoverable and named', () => {
     expect(html).toContain('./jxl-single-progressive.js');
 });
 
-test('single progressive page settings put Sneyers all-pass decode behind retrieve action', () => {
+test('single progressive page settings put Sneyers product decode behind retrieve action', () => {
     // Size + Quality preset selects replace the prior raw-KB bisection UX.
     expect(html).toContain('id="size-preset"');
     expect(html).toContain('id="quality-preset"');
@@ -25,7 +25,9 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html).toContain('Lossless');
     expect(html).toContain('id="size-estimate"');
     expect(html).toContain('id="throttle-rate"');
-    expect(html).toContain('All passes');
+    expect(html).toContain('id="progressive-detail"');
+    expect(html).toContain('value="lastPasses" selected');
+    expect(html).toContain('value="passes">All passes diagnostic');
     expect(html).toContain('id="retrieve-run"');
     expect(html).toContain('id="run-rerun"');
     expect(html).toContain('Retrieve raw file');
@@ -33,7 +35,8 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(html.indexOf('id="retrieve-run"')).toBeLessThan(html.indexOf('id="run-rerun"'));
     expect(html.indexOf('id="run-rerun"')).toBeLessThan(html.indexOf('id="dbg-console-btn"'));
     expect(source).toContain("fetch('/api/random-gobabeb'");
-    expect(source).toContain("const PROGRESSIVE_DETAIL = 'passes';");
+    expect(source).toContain("const DEFAULT_PROGRESSIVE_DETAIL = 'lastPasses';");
+    expect(source).toContain("emitEveryPass: progressiveDetail === 'passes'");
     expect(source).toContain("createSneyersPreset");
     expect(source).toContain('encodeSneyersDirect');
     expect(source).toContain('runBtn');
@@ -82,7 +85,11 @@ test('single progressive page settings put Sneyers all-pass decode behind retrie
     expect(source).toContain('STEADY_DECODE_CHUNK_BYTES');
     expect(source).toContain('bytesFed');
     expect(source).toContain('percentFed');
+    expect(source).toContain('if (throttleKbPerSec === 0)');
+    expect(source).toContain('await decoder.push(exactBuffer(jxlBytes));');
+    expect(source).not.toContain('else if (offset < jxlBytes.byteLength) await sleep(0);');
     expect(html).toContain('id="decode-in-worker"');
+    expect(html).toContain('id="decode-in-worker" type="checkbox" checked');
     expect(source).toContain('decodeProgressivelyViaWorker');
     expect(source).toContain('createBrowserContext');
     expect(source).toContain('DEFAULT_WORKER_PUSH_HWM = 64');
@@ -145,7 +152,8 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(source).toContain('group_order');
     expect(source).toContain('progressive_dc');
     expect(source).toContain('paint_ms');
-    expect(source).toContain('decode_ms');
+    expect(source).toContain('gap_minus_paint_ms');
+    expect(source).not.toContain('pass_decode_ms');
     expect(source).toContain('paintMs');
     expect(html).toContain('id="psnr-chart"');
     expect(html).toContain('id="psnr-chart-legend"');
@@ -173,6 +181,17 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(html).toContain('id="perceptual-cutoff"');
     expect(source).toContain('shouldStopAtPass');
     expect(source).toContain('PERCEPTUAL_CUTOFF_PSNR_DELTA_DB');
+});
+
+test('single progressive dedup-flushes toggle gates suppressDuplicateProgress (experimental)', () => {
+    // Opt-in toggle: off by default so one transient identical flush doesn't silently vanish.
+    // When on, passes with a pixel-hash match to the previous flush are suppressed at the bridge.
+    expect(html).toContain('id="suppress-dup-progress"');
+    expect(source).toContain('suppressDuplicateProgress');
+    expect(source).toContain("document.getElementById('suppress-dup-progress')?.checked === true");
+    // Must flow through decodeArgs and into both decode paths.
+    expect(source).toContain('suppressDuplicateProgress: settings.suppressDuplicateProgress');
+    expect(source).toContain('suppressDuplicateProgress = false, targetRgba');
 });
 
 test('single progressive stats worker recovers from a transient error (no permanent latch)', () => {

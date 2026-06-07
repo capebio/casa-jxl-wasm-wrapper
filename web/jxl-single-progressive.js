@@ -1,6 +1,7 @@
 import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { createBrowserContext } from '@casabio/jxl-session';
+import { getCapabilities } from '@casabio/jxl-capabilities';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
 import { computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
@@ -8,7 +9,9 @@ import { pixelsToXyb, computeButteraugliVsFinal } from './jxl-butteraugli.js';
 import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
-const PROGRESSIVE_DETAIL = 'passes';
+const DEFAULT_PROGRESSIVE_DETAIL = 'lastPasses';
+const SNEYERS_PROGRESSIVE_DETAIL = 'passes';
+const PROGRESSIVE_DETAILS = new Set(['dc', 'lastPasses', 'passes']);
 const FIRST_PAINT_CHUNK_RAMP = [1 * 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024];
 const STEADY_DECODE_CHUNK_BYTES = 32 * 1024;
 const BLOCK_BORDER_TILE_SIZE = 256;
@@ -322,6 +325,8 @@ console.log('%c[Single progressive] loaded', 'color:#7de0b0;font-weight:600', {
     t: new Date().toISOString(),
 });
 
+logWasmBaseline();
+
 initRaw().then(() => {
     rawReady = true;
     setStatus('Ready. Settings first, then retrieve raw file.');
@@ -330,6 +335,22 @@ initRaw().then(() => {
     setStatus(`RAW WASM failed: ${error?.message ?? error}`);
     dbgLog('RAW WASM failed', error?.message ?? String(error), 'error');
 });
+
+async function logWasmBaseline() {
+    try {
+        const caps = await getCapabilities();
+        const summary = {
+            crossOriginIsolated: caps.crossOriginIsolated,
+            sharedArrayBuffer: caps.sharedArrayBuffer,
+            wasmThreads: caps.wasmThreads,
+            selectedWasmBuild: caps.selectedWasmBuild,
+        };
+        dbgLog('WASM baseline', JSON.stringify(summary), caps.selectedWasmBuild?.endsWith('-mt') ? 'success' : 'warn');
+        console.log('[Single progressive] WASM baseline', summary);
+    } catch (error) {
+        dbgLog('WASM baseline probe failed', error?.message ?? String(error), 'warn');
+    }
+}
 
 retrieveBtn?.addEventListener('click', () => {
     void retrieveAndRun();
@@ -581,6 +602,8 @@ async function runSourceWithSettings(source, settings) {
         width: target.width,
         height: target.height,
         throttleKbPerSec: settings.throttleKbPerSec,
+        progressiveDetail: settings.progressiveDetail,
+        suppressDuplicateProgress: settings.suppressDuplicateProgress,
         targetRgba,  // for perceptual cutoff PSNR trigger (only after full AC per E)
     };
     const decode = await (useWorker
@@ -622,6 +645,7 @@ async function runSourceWithSettings(source, settings) {
         decodingSpeed: settings.decodingSpeed,
         groupOrder: settings.groupOrder,
         groupOrderLabel: settings.groupOrderLabel,
+        progressiveDetail: settings.progressiveDetail,
     });
     if (thumbDecodeMs != null) {
         metrics.thumbDecodeMs = thumbDecodeMs;
@@ -660,6 +684,8 @@ function readSettings() {
     const qProgressiveAc = Math.max(0, Math.min(2, Number(qacRaw) || 0));
     const dsRaw = document.getElementById('decoding-speed')?.value ?? '0';
     const decodingSpeed = Math.max(0, Math.min(4, Number(dsRaw) || 0));
+    const detailRaw = document.getElementById('progressive-detail')?.value ?? DEFAULT_PROGRESSIVE_DETAIL;
+    const progressiveDetail = PROGRESSIVE_DETAILS.has(detailRaw) ? detailRaw : DEFAULT_PROGRESSIVE_DETAIL;
     return {
         sizePreset: sizeKey,
         sizePresetLabel: sizePreset.label,
@@ -672,10 +698,11 @@ function readSettings() {
         progressiveDc,
         groupOrder,
         groupOrderLabel: GROUP_ORDER_LABELS[groupOrder],
-        progressiveDetail: PROGRESSIVE_DETAIL,
+        progressiveDetail,
         progressiveAc,
         qProgressiveAc,
         decodingSpeed,
+        suppressDuplicateProgress: document.getElementById('suppress-dup-progress')?.checked === true,
     };
 }
 
@@ -757,7 +784,7 @@ async function encodeWithSidecarThumbnail({ rgba, width, height, quality, lossle
         targetLongEdge: 'full',
         quality,
         hasAlpha: true,
-        progressiveDetail: PROGRESSIVE_DETAIL,
+        progressiveDetail: SNEYERS_PROGRESSIVE_DETAIL,
     });
     const encoder = createEncoder({
         ...preset.encode,
@@ -803,7 +830,7 @@ async function encodeSneyersDirect({ rgba, width, height, quality, lossless, pro
         targetLongEdge: 'full',
         quality,
         hasAlpha: true,
-        progressiveDetail: PROGRESSIVE_DETAIL,
+        progressiveDetail: SNEYERS_PROGRESSIVE_DETAIL,
     });
     const encoder = createEncoder({
         ...preset.encode,
@@ -836,14 +863,15 @@ async function encodeSneyersDirect({ rgba, width, height, quality, lossless, pro
     return concatChunks(chunks);
 }
 
-async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, targetRgba = null }) {
+async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, progressiveDetail, suppressDuplicateProgress = false, targetRgba = null }) {
     const decoder = createDecoder({
         format: 'rgba8',
         region: null,
         downsample: 1,
         progressionTarget: 'final',
-        emitEveryPass: true,
-        progressiveDetail: PROGRESSIVE_DETAIL,
+        emitEveryPass: progressiveDetail === 'passes',
+        progressiveDetail,
+        suppressDuplicateProgress,
         preserveIcc: false,
         preserveMetadata: false,
     });
@@ -877,11 +905,11 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
                 const paintStart = performance.now();
                 await renderProgressivePass(pass);
                 pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
-                pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
-                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
+                pass.gapMinusPaintMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
+                setStatus(`Decoding ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (${pass.percentFed}%) · paint ${pass.paintMs} ms · gap-paint ${pass.gapMinusPaintMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
                 dbgLog(
                     `Pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`,
-                    `${pass.t_ms} ms (+${pass.deltaMs} ms = ${pass.decodeMs} decode + ${pass.paintMs} paint) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta`,
+                    `${pass.t_ms} ms (+${pass.deltaMs} ms = ${pass.gapMinusPaintMs} gap-paint + ${pass.paintMs} paint) · ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} (+${formatBytes(deltaBytes)}) · ${formatTransferSpeed(deltaKbPerSec)} delta`,
                     'info'
                 );
                 await sleep(0);
@@ -922,15 +950,16 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
     return { passes, avgTransferKbPerSec };
 }
 
-async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleKbPerSec, targetRgba = null }) {
+async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleKbPerSec, progressiveDetail, suppressDuplicateProgress = false, targetRgba = null }) {
     const ctx = getSessionCtx();
     const session = ctx.decode({
         format: 'rgba8',
         region: null,
         downsample: 1,
         progressionTarget: 'final',
-        emitEveryPass: true,
-        progressiveDetail: PROGRESSIVE_DETAIL,
+        emitEveryPass: progressiveDetail === 'passes',
+        progressiveDetail,
+        suppressDuplicateProgress,
         preserveIcc: false,
         preserveMetadata: false,
         priority: 'visible',
@@ -969,8 +998,8 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
             const paintStart = performance.now();
             await renderProgressivePass(pass);
             pass.paintMs = Number((performance.now() - paintStart).toFixed(2));
-            pass.decodeMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
-            setStatus(`[worker] ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} · paint ${pass.paintMs} ms · decode ${pass.decodeMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
+            pass.gapMinusPaintMs = Number(Math.max(0, deltaMs - pass.paintMs).toFixed(2));
+            setStatus(`[worker] ${formatBytes(bytesFed)}/${formatBytes(feedState.totalBytes)} · paint ${pass.paintMs} ms · gap-paint ${pass.gapMinusPaintMs} ms · pass ${pass.pass} ${pass.ratioLabel ?? '--'}${pass.isFinal ? ' final' : ''}`);
             await sleep(0);
 
             // Perceptual cutoff check (opt-in). After non-final pass recorded.
@@ -1040,7 +1069,7 @@ async function decodeOneShotFinal(jxlBytes) {
         downsample: 1,
         progressionTarget: 'final',
         emitEveryPass: false,
-        progressiveDetail: PROGRESSIVE_DETAIL,
+        progressiveDetail: DEFAULT_PROGRESSIVE_DETAIL,
         preserveIcc: false,
         preserveMetadata: false,
     });
@@ -1175,6 +1204,12 @@ function thinRetainedPassPixels(passes) {
 }
 
 async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
+    if (throttleKbPerSec === 0) {
+        await decoder.push(exactBuffer(jxlBytes));
+        if (feedState) feedState.bytesFed = jxlBytes.byteLength;
+        await decoder.close();
+        return;
+    }
     let offset = 0;
     let preFirstPaintChunkIndex = 0;
     while (offset < jxlBytes.byteLength) {
@@ -1191,9 +1226,8 @@ async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
         await decoder.push(exactBuffer(jxlBytes.subarray(offset, end)));
         offset = end;
         if (feedState) feedState.bytesFed = offset;
-        const delayMs = throttleKbPerSec > 0 ? ((end - start) / 1024) * (1000 / throttleKbPerSec) : 0;
+        const delayMs = ((end - start) / 1024) * (1000 / throttleKbPerSec);
         if (delayMs > 0 && offset < jxlBytes.byteLength) await sleep(delayMs);
-        else if (offset < jxlBytes.byteLength) await sleep(0);
     }
     await decoder.close();
 }
@@ -1202,7 +1236,7 @@ const TILE_LONG_EDGE_PX = 192; // 2x typical CSS render size for crisp HiDPI til
 
 async function renderProgressivePass(pass) {
     const previousPass = currentPasses[pass.pass - 2] ?? null;
-    await drawPassWithOverlay(canvas, pass, previousPass);
+    await drawPassWithOverlay(canvas, pass, previousPass, { displayScaleIntermediate: !pass.isFinal });
     viewerMeta.textContent = `pass ${pass.pass} (${pass.ratioLabel ?? '--'})${pass.isFinal ? ' final' : ''} | ${formatBytes(pass.bytesFed ?? 0)} streamed | +${pass.deltaMs ?? '--'} ms`;
     const tile = document.createElement('button');
     tile.className = 'pass-tile';
@@ -1344,7 +1378,7 @@ async function redrawCurrentPassView() {
     }
     const pass = currentPasses.at(-1);
     const previousPass = currentPasses.at(-2) ?? null;
-    await drawPassWithOverlay(canvas, pass, previousPass);
+    await drawPassWithOverlay(canvas, pass, previousPass, { displayScaleIntermediate: !pass.isFinal });
 }
 
 function passLightboxStats(pass) {
@@ -1364,21 +1398,62 @@ function passLightboxStats(pass) {
     ];
 }
 
-async function drawPixels(targetCanvas, pixels, width, height) {
-    if (targetCanvas.width !== width) targetCanvas.width = width;
-    if (targetCanvas.height !== height) targetCanvas.height = height;
-    const data = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-    const bitmap = await createImageBitmap(new ImageData(data, width, height));
+async function drawPixels(targetCanvas, pixels, width, height, options = {}) {
+    const paintSize = options.displayScaleIntermediate
+        ? displayPaintSize(targetCanvas, width, height)
+        : { width, height };
+    if (targetCanvas.width !== paintSize.width) targetCanvas.width = paintSize.width;
+    if (targetCanvas.height !== paintSize.height) targetCanvas.height = paintSize.height;
+    const source = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+    const data = (paintSize.width === width && paintSize.height === height)
+        ? source
+        : downsampleRgbaNearest(source, width, height, paintSize.width, paintSize.height);
+    const bitmap = await createImageBitmap(new ImageData(data, paintSize.width, paintSize.height));
     targetCanvas.getContext('2d').drawImage(bitmap, 0, 0);
     bitmap.close();
+    return { scaleX: paintSize.width / width, scaleY: paintSize.height / height };
 }
 
-async function drawPassWithOverlay(targetCanvas, pass, previousPass) {
-    await drawPixels(targetCanvas, pass.pixels, pass.width, pass.height);
+async function drawPassWithOverlay(targetCanvas, pass, previousPass, options = {}) {
+    const scale = await drawPixels(targetCanvas, pass.pixels, pass.width, pass.height, options);
     if (!shouldShowBlockBorders()) return;
     if (pass.width * pass.height > PASS_BORDER_RES_MAX) return;
     const blocks = computeChangedBlocks(pass, previousPass);
-    drawBlockBorders(targetCanvas, blocks);
+    drawBlockBorders(targetCanvas, blocks, scale);
+}
+
+function displayPaintSize(targetCanvas, width, height) {
+    const wrap = targetCanvas.parentElement;
+    const maxWidth = Math.max(1, Math.floor(wrap?.clientWidth || targetCanvas.clientWidth || width));
+    const maxHeightFromWrap = Math.max(1, Math.floor(wrap?.clientHeight || targetCanvas.clientHeight || height));
+    const viewportMaxHeight = Math.max(1, Math.floor((window.innerHeight || maxHeightFromWrap) * 0.78));
+    const maxHeight = Math.min(maxHeightFromWrap, viewportMaxHeight);
+    const scale = Math.min(1, maxWidth / width, maxHeight / height);
+    return {
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale)),
+    };
+}
+
+function downsampleRgbaNearest(source, width, height, targetWidth, targetHeight) {
+    const out = new Uint8ClampedArray(targetWidth * targetHeight * 4);
+    const xScale = width / targetWidth;
+    const yScale = height / targetHeight;
+    for (let y = 0; y < targetHeight; y++) {
+        const sy = Math.min(height - 1, Math.floor((y + 0.5) * yScale));
+        const srcRow = sy * width * 4;
+        const dstRow = y * targetWidth * 4;
+        for (let x = 0; x < targetWidth; x++) {
+            const sx = Math.min(width - 1, Math.floor((x + 0.5) * xScale));
+            const srcIdx = srcRow + sx * 4;
+            const dstIdx = dstRow + x * 4;
+            out[dstIdx] = source[srcIdx];
+            out[dstIdx + 1] = source[srcIdx + 1];
+            out[dstIdx + 2] = source[srcIdx + 2];
+            out[dstIdx + 3] = source[srcIdx + 3];
+        }
+    }
+    return out;
 }
 
 function shouldShowBlockBorders() {
@@ -1493,7 +1568,7 @@ function scanChangedTileGrid(current32, previous32, width, height, cols, rows) {
     return changed;
 }
 
-function drawBlockBorders(targetCanvas, blocks) {
+function drawBlockBorders(targetCanvas, blocks, scale = { scaleX: 1, scaleY: 1 }) {
     if (!blocks.length) return;
     const ctx = targetCanvas.getContext('2d');
     ctx.save();
@@ -1503,16 +1578,16 @@ function drawBlockBorders(targetCanvas, blocks) {
     const inset = BLOCK_BORDER_SIZE / 2;
     for (const block of blocks) {
         ctx.strokeRect(
-            block.x + inset,
-            block.y + inset,
-            Math.max(0, block.width - BLOCK_BORDER_SIZE),
-            Math.max(0, block.height - BLOCK_BORDER_SIZE)
+            block.x * scale.scaleX + inset,
+            block.y * scale.scaleY + inset,
+            Math.max(0, block.width * scale.scaleX - BLOCK_BORDER_SIZE),
+            Math.max(0, block.height * scale.scaleY - BLOCK_BORDER_SIZE)
         );
     }
     ctx.restore();
 }
 
-function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder, groupOrderLabel }) {
+function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected, encodeTotalMs, decode, oneShotMs, finalPsnr, sizePreset, qualityPreset, progressiveDc, progressiveAc, qProgressiveAc, decodingSpeed, groupOrder, groupOrderLabel, progressiveDetail }) {
     const perPass = decode.passes.map(pass => {
         const stats = computeAndCachePassStats(pass);
         return {
@@ -1527,7 +1602,7 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
             delta_kb_per_sec: pass.deltaKbPerSec ?? null,
             deltaKbPerSec: pass.deltaKbPerSec ?? null,
             paint_ms: pass.paintMs ?? null,
-            decode_ms: pass.decodeMs ?? null,
+            gap_minus_paint_ms: pass.gapMinusPaintMs ?? null,
             intended_ratio: pass.intendedRatio ?? null,
             ratio_label: pass.ratioLabel ?? null,
             stats: normalizeFrameStatsForExport(stats),
@@ -1577,7 +1652,7 @@ function buildMeasurement({ source, target, targetKb, throttleKbPerSec, selected
         group_order: groupOrder,
         groupOrderLabel: groupOrderLabel ?? GROUP_ORDER_LABELS[groupOrder] ?? null,
         group_order_label: groupOrderLabel ?? GROUP_ORDER_LABELS[groupOrder] ?? null,
-        progressiveDetail: PROGRESSIVE_DETAIL,
+        progressiveDetail,
         passCount: perPass.length,
         visibleProgressFrames,
         uniqueFrameHashes,
@@ -1833,7 +1908,7 @@ function exportMeasurementsCSV() {
         'size_preset', 'quality_preset', 'progressive_dc', 'progressive_ac', 'qprogressive_ac', 'decoding_speed', 'group_order', 'group_order_label', 'estimate_kb', 'actual_kb', 'size_error_pct',
         'quality', 'encode_ms', 'encode_total_ms',
         'throttle_kb_per_sec', 'avg_transfer_kb_per_sec', 'passes', 'visible_progress_frames', 'unique_frame_hashes',
-        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_paint_ms', 'pass_decode_ms', 'pass_intended_ratio', 'pass_ratio_label', 'pass_stats'
+        'first_ms', 'final_ms', 'oneShot_ms', 'speedup_x', 'final_psnr_vs_source', 'pass_bytes', 'pass_delta_ms', 'pass_delta_bytes', 'pass_delta_kb_per_sec', 'pass_paint_ms', 'pass_gap_minus_paint_ms', 'pass_intended_ratio', 'pass_ratio_label', 'pass_stats'
     ];
     const rows = runMeasurements.map(m => [
         m.ts,
@@ -1871,7 +1946,7 @@ function exportMeasurementsCSV() {
         (m.perPass || []).map(p => `${p.pass}:${p.delta_bytes ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.delta_kb_per_sec ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.paint_ms ?? ''}`).join(';'),
-        (m.perPass || []).map(p => `${p.pass}:${p.decode_ms ?? ''}`).join(';'),
+        (m.perPass || []).map(p => `${p.pass}:${p.gap_minus_paint_ms ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.intended_ratio ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${p.ratio_label ?? ''}`).join(';'),
         (m.perPass || []).map(p => `${p.pass}:${formatFrameStatsCompact(p.stats)}`).join(';')
@@ -1921,7 +1996,7 @@ async function exportMeasurementsTOON() {
     }
 
     out += `\n---\n`;
-    out += `runs[${rowCount}]{source|target|size|qual|pdc|pac|qpac|ds|go|encMs|throttle|totalKB|uiDelay|pass|t_ms|isFinal|paintMs|decMs|delta|oneshotMs}:\n`;
+    out += `runs[${rowCount}]{source|target|size|qual|pdc|pac|qpac|ds|go|encMs|throttle|totalKB|uiDelay|pass|t_ms|isFinal|paintMs|gapMinusPaintMs|delta|oneshotMs}:\n`;
 
     let lastSource = '';
     let lastTarget = '';
@@ -1983,7 +2058,7 @@ async function exportMeasurementsTOON() {
                 const t_ms = p.t_ms != null ? p.t_ms.toFixed(1) : '';
                 const isFinal = p.isFinal ? 'T' : 'F';
                 const paintMs = p.paint_ms != null ? p.paint_ms.toFixed(1) : '';
-                const decMs = p.decode_ms != null ? p.decode_ms.toFixed(1) : '';
+                const gapMinusPaintMs = p.gap_minus_paint_ms != null ? p.gap_minus_paint_ms.toFixed(1) : '';
                 const deltaBytes = p.delta_bytes != null ? (p.delta_bytes / 1024).toFixed(1) + 'KB' : '';
                 const delta = deltaBytes ? '+' + deltaBytes : '';
 
@@ -2003,7 +2078,7 @@ async function exportMeasurementsTOON() {
                 const outOneShot = String(oneshotMs) === String(lastOneshot) ? '~' : oneshotMs;
                 const outDelta = delta === lastDelta && lastDelta !== '' ? '~' : delta;
 
-                out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outEnc} | ${outThrot} | ${outTotKB} | ${outUiDelay} | ${pass} | ${t_ms} | ${isFinal} | ${paintMs} | ${decMs} | ${outDelta} | ${outOneShot}\n`;
+                out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outEnc} | ${outThrot} | ${outTotKB} | ${outUiDelay} | ${pass} | ${t_ms} | ${isFinal} | ${paintMs} | ${gapMinusPaintMs} | ${outDelta} | ${outOneShot}\n`;
 
                 lastSource = source; lastTarget = target; lastSize = sizePreset; lastQual = qual;
                 lastPdc = pdc; lastPac = pac; lastQpac = qpac; lastDs = ds; lastGo = go;
@@ -2077,7 +2152,7 @@ function buildMeasurementsMarkdown() {
     }
     for (const m of runMeasurements) {
         out += `\n## ${mdCell(m.source)}\n\n`;
-        out += '| Pass | Stage | Ratio | KB streamed | Streamed % | Transfer KB/s | Delta ms | Delta KB | Delta KB/s | Paint ms | Decode ms | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
+        out += '| Pass | Stage | Ratio | KB streamed | Streamed % | Transfer KB/s | Delta ms | Delta KB | Delta KB/s | Paint ms | Gap minus paint ms | t ms | Final | alphaMin | alphaMax | alphaZeroPct | rgbNonzeroCount | lumaVariance | frameHash |\n';
         out += '|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---|\n';
         for (const p of m.perPass) {
             out += [
@@ -2091,7 +2166,7 @@ function buildMeasurementsMarkdown() {
                 p.delta_bytes == null ? '' : Number((p.delta_bytes / 1024).toFixed(1)),
                 p.delta_kb_per_sec ?? '',
                 p.paint_ms ?? '',
-                p.decode_ms ?? '',
+                p.gap_minus_paint_ms ?? '',
                 p.t_ms,
                 p.isFinal ? 'true' : 'false',
                 p.stats.alphaMin,

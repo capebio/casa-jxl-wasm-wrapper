@@ -186,6 +186,14 @@
         </select>
       </label>
       <label>
+        Decode detail
+        <select id="progressive-detail">
+          <option value="lastPasses" selected>Last passes</option>
+          <option value="passes">All passes diagnostic</option>
+          <option value="dc">DC preview + final</option>
+        </select>
+      </label>
+      <label>
         Decoding speed
         <select id="decoding-speed">
           <option value="0">0 · slowest decode / highest quality</option>
@@ -203,7 +211,7 @@
         </select>
       </label>
       <label class="inline-toggle" title="Decode in a Web Worker via jxl-session (frees main thread for paint)">
-        <input id="decode-in-worker" type="checkbox" />
+        <input id="decode-in-worker" type="checkbox" checked />
         Worker decode
       </label>
       <label class="inline-toggle" title="Draw inferred changed 256px block outlines over each pass">
@@ -218,6 +226,10 @@
         <input id="charts-enabled" type="checkbox" />
         Graphs
       </label>
+      <label class="inline-toggle" title="Suppress identical progressive flushes by sampled pixel hash. Experimental — may hide a pass that appears identical mid-decode but differs later.">
+        <input id="suppress-dup-progress" type="checkbox" />
+        Dedup flushes
+      </label>
       <label class="inline-toggle" title="Also encode a 320px sidecar thumbnail (via unified pipeline sidecarSizes) for fast preview decode measurement">
         <input id="emit-sidecar-thumb" type="checkbox" />
         Sidecar thumb
@@ -228,7 +240,7 @@
       </div>
       <div class="setting-lock">
         Detail
-        <strong>All passes</strong>
+        <strong>Selectable</strong>
       </div>
       <div class="setting-lock">
         Preset

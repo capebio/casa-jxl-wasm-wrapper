@@ -5,13 +5,13 @@
   "emscriptenCommit": "404dc1ec13f64fce1af1eaf5c007e18212f63527",
   "emsdkImage": null,
   "buildMode": "host-toolchain",
-  "generatedAt": "2026-06-06T18:32:44.716Z",
+  "generatedAt": "2026-06-07T11:05:38.221Z",
   "tiers": {
     "simd": {
-      "jsBytes": 18663,
-      "wasmBytes": 2722434,
-      "jsSha256": "c9c6a4794c9bebeea7aed2309165b38669f08686cf38b412a6ad7a3d7d8018d7",
-      "wasmSha256": "1de7ca76d2894002619d46899ac6970b939014c4ea212a5bfc2332f511b8bba6",
+      "jsBytes": 18762,
+      "wasmBytes": 2723113,
+      "jsSha256": "1ca009cfeb7630922c748049c0ace02cbb3de883d59c0a70f6efcb812b9f4678",
+      "wasmSha256": "97cc502a5c6723092e6108f417fe9662466bf862a4eda42a5a6c3ab75a8e4b79",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -32,10 +32,10 @@
       ]
     },
     "scalar": {
-      "jsBytes": 18667,
-      "wasmBytes": 2639182,
-      "jsSha256": "7d0081d6ab2e086daad6cb9203bb64272847d16e88d7c0cb1c1137694c7eed42",
-      "wasmSha256": "98f4923a66e75bd6adc46af5b766a7ec5316b2dc1261660c9a86c570c36c7732",
+      "jsBytes": 18766,
+      "wasmBytes": 2639867,
+      "jsSha256": "ec609136cbfcccddb28a5fc372e90e68db10e6eec4d5177b9f484e2bfd8c4d5b",
+      "wasmSha256": "ef131f98e3f209e7dff357c2c5070d0d3af96b10d039a3dccb1029d3cb0fdbe4",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -55,10 +55,10 @@
       ]
     },
     "relaxed-simd-mt": {
-      "jsBytes": 31458,
-      "wasmBytes": 2771754,
-      "jsSha256": "47d97af75a8a7932d09c9330a94f25335fb495204ad651e38d9974da662a049f",
-      "wasmSha256": "9d422aca58ba47fc07d7984069735722b976b56fd2aabece940f5508e3a40ca7",
+      "jsBytes": 31553,
+      "wasmBytes": 2772225,
+      "jsSha256": "0df07f652201517daa814303d52a477d7da6f72cac33c25642ad6329c17a7e40",
+      "wasmSha256": "12614b5f90ab86f1c72f7d7b5e832e16828caa7f14538395a2b501700d68022d",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -84,10 +84,10 @@
       ]
     },
     "simd-mt": {
-      "jsBytes": 31434,
-      "wasmBytes": 2788466,
-      "jsSha256": "681f6505a3fec20edeae9cad3c10bb077471767db158596850802b10fdf72987",
-      "wasmSha256": "f28f21f379b67887670bed294a09a41a5c59db6f298f4091c7aa94bd057536e3",
+      "jsBytes": 31529,
+      "wasmBytes": 2788921,
+      "jsSha256": "745ccc5d69b5deb8e3752b0462ed03086d90ca0065f21d98ec3d0ebbbb7c4c71",
+      "wasmSha256": "83c5a6033bda4e7d5caf77fec92c36f572a76c7bea031d9f5363aa02c9201aba",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -111,5 +111,8 @@
       ]
     }
   },
-  "skippedTiers": []
+  "skippedTiers": [
+    "relaxed-simd-mt",
+    "simd-mt"
+  ]
 }
