@@ -12,6 +12,12 @@ const { process_orf, rgb_to_rgba } = rawWasm;
 const DEFAULT_PROGRESSIVE_DETAIL = 'lastPasses';
 const SNEYERS_PROGRESSIVE_DETAIL = 'passes';
 const PROGRESSIVE_DETAILS = new Set(['dc', 'lastPasses', 'passes']);
+
+// Match jxl-decode-worker.js: emit flushed progressive frames for lastPasses/passes;
+// DC-only mode suppresses intermediate AC passes (preview + final only).
+function emitEveryPassForDetail(progressiveDetail) {
+    return progressiveDetail !== 'dc';
+}
 const FIRST_PAINT_CHUNK_RAMP = [1 * 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024];
 const STEADY_DECODE_CHUNK_BYTES = 32 * 1024;
 const BLOCK_BORDER_TILE_SIZE = 256;
@@ -869,7 +875,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
         region: null,
         downsample: 1,
         progressionTarget: 'final',
-        emitEveryPass: progressiveDetail === 'passes',
+        emitEveryPass: emitEveryPassForDetail(progressiveDetail),
         progressiveDetail,
         suppressDuplicateProgress,
         preserveIcc: false,
@@ -937,7 +943,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
     })();
 
     try {
-        await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState);
+        await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState, { progressiveDetail });
         await eventTask;
     } finally {
         await decoder.dispose();
@@ -957,7 +963,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
         region: null,
         downsample: 1,
         progressionTarget: 'final',
-        emitEveryPass: progressiveDetail === 'passes',
+        emitEveryPass: emitEveryPassForDetail(progressiveDetail),
         progressiveDetail,
         suppressDuplicateProgress,
         preserveIcc: false,
@@ -1025,7 +1031,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
 
     const decodeTask = (async () => {
         try {
-            await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState, { copyChunks: true }).catch((e) => {
+            await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState, { copyChunks: true, progressiveDetail }).catch((e) => {
                 if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
                     return; // expected: cutoff/timeout caused cancel mid-feed; subsequent pushes after cancel would throw, we swallow
                 }
@@ -1211,8 +1217,11 @@ function pushDecodeChunk(decoder, chunk, copyChunk) {
     return decoder.push(exactBuffer(chunk));
 }
 
-async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState, { copyChunks = false } = {}) {
-    if (throttleKbPerSec === 0) {
+async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState, { copyChunks = false, progressiveDetail = DEFAULT_PROGRESSIVE_DETAIL } = {}) {
+    // Product path (lastPasses/dc): one push for local bytes — libjxl surfaces real last-pass boundaries.
+    // Diagnostic "passes" + throttle sim: chunk-feed with yields so the lab reproduces multi-checkpoint decode.
+    const chunkFeed = throttleKbPerSec > 0 || progressiveDetail === 'passes';
+    if (!chunkFeed) {
         await pushDecodeChunk(decoder, jxlBytes, copyChunks);
         if (feedState) feedState.bytesFed = jxlBytes.byteLength;
         await decoder.close();
@@ -1234,8 +1243,13 @@ async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState, { c
         await pushDecodeChunk(decoder, jxlBytes.subarray(offset, end), copyChunks);
         offset = end;
         if (feedState) feedState.bytesFed = offset;
-        const delayMs = ((end - start) / 1024) * (1000 / throttleKbPerSec);
-        if (delayMs > 0 && offset < jxlBytes.byteLength) await sleep(delayMs);
+        if (offset < jxlBytes.byteLength) {
+            const delayMs = throttleKbPerSec > 0
+                ? ((end - start) / 1024) * (1000 / throttleKbPerSec)
+                : 0;
+            if (delayMs > 0) await sleep(delayMs);
+            else await sleep(0);
+        }
     }
     await decoder.close();
 }

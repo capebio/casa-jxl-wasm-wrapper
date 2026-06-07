@@ -36,7 +36,9 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(html.indexOf('id="run-rerun"')).toBeLessThan(html.indexOf('id="dbg-console-btn"'));
     expect(source).toContain("fetch('/api/random-gobabeb'");
     expect(source).toContain("const DEFAULT_PROGRESSIVE_DETAIL = 'lastPasses';");
-    expect(source).toContain("emitEveryPass: progressiveDetail === 'passes'");
+    expect(source).toContain('function emitEveryPassForDetail(progressiveDetail)');
+    expect(source).toContain('emitEveryPass: emitEveryPassForDetail(progressiveDetail)');
+    expect(source).toContain("return progressiveDetail !== 'dc'");
     expect(source).toContain("createSneyersPreset");
     expect(source).toContain('encodeSneyersDirect');
     expect(source).toContain('runBtn');
@@ -87,9 +89,10 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(source).toContain('STEADY_DECODE_CHUNK_BYTES');
     expect(source).toContain('bytesFed');
     expect(source).toContain('percentFed');
-    expect(source).toContain('if (throttleKbPerSec === 0)');
-    expect(source).toContain('await decoder.push(exactBuffer(jxlBytes));');
-    expect(source).not.toContain('else if (offset < jxlBytes.byteLength) await sleep(0);');
+    expect(source).toContain("progressiveDetail === 'passes'");
+    expect(source).toContain('await pushDecodeChunk(decoder, jxlBytes, copyChunks)');
+    expect(source).toContain('else await sleep(0)');
+    expect(source).toContain('pushDecodeChunk(decoder, jxlBytes.subarray(offset, end), copyChunks)');
     expect(html).toContain('id="decode-in-worker"');
     expect(html).toContain('id="decode-in-worker" type="checkbox" checked');
     expect(source).toContain('decodeProgressivelyViaWorker');
