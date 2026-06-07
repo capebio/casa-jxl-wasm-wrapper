@@ -35,7 +35,8 @@ function updateWorkflowState() {}
 console.log('%c[Progressive Paint] jxl-progressive-paint.js loaded — progressive paint / live decode UI', 'color:#ec4899;font-weight:600', { page: 'Progressive Paint', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
 // A4: gate O(W×H) frame analysis behind ?stats=1
-const STATS_ENABLED = new URLSearchParams(location.search).has('stats');
+const statsEnabled = new URLSearchParams(location.search).get('stats') === '1';
+const STATS_ENABLED = statsEnabled;
 // A3: persistent thumb canvases (80×50) keyed by passIdx; cleared on timeline reset
 let thumbCanvases = new Map();
 // A3: persistent full-res source canvases keyed by slot index; reused across passes
@@ -843,10 +844,10 @@ function addPassToTimeline(passRecord) {
 // Intermediate frames coalesced by rAF will be dropped (never reach here).
 // Dropped frames do not appear in passes[] and skip all canvas/analysis work.
 function paintPass(ev) {
-    const frameStats = STATS_ENABLED
-        ? analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height)
-        : null;
     const passPixels = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
+    const frameStats = statsEnabled
+        ? analyzeProgressiveFrame(passPixels, ev.info.width, ev.info.height)
+        : null;
     const { width, height } = ev.info;
     const want = width * height * 4;
     if (passPixels.length !== want) {
@@ -873,7 +874,7 @@ function paintPass(ev) {
     addPassToTimeline(passRecord);
     ev._passes.push(passRecord);
     autoAssignPass(passRecord);
-    if (STATS_ENABLED) {
+    if (statsEnabled) {
         const statsLine = formatFrameStatsLog(frameStats);
         dbgLog(`  pass ${ev.passIdx + 1}${ev.isFinal ? ' (final)' : ''}`, `${ev.t.toFixed(1)} ms | ${statsLine}`, 'info');
         console.log('[Progressive Paint] frame stats', {
@@ -893,7 +894,11 @@ function paintPass(ev) {
 // pending frame survives to paint per display tick. Coalescing reduces redundant canvas work and GC pressure.
 function schedulePaint(frame) {
     if (frame.isFinal) {
-        pendingFrame = null;  // cancel any queued intermediate so the rAF no-ops
+        if (rafPending && pendingFrame) {
+            paintPass(pendingFrame);
+            pendingFrame = null;
+        }
+        rafPending = false;
         paintPass(frame);
         return;
     }
@@ -955,7 +960,7 @@ async function streamIntoDecoder(decoder, jxlBytes, stepCount) {
         dbgLog(`  stream ${i + 1}/${streamSteps.length}`, `${(stepChunk.byteLength / 1024).toFixed(1)} KB`, 'info');
         await decoder.push(exactBuffer(stepChunk));
         if (i < streamSteps.length - 1) {
-            setProgStatus(`Streaming step ${i + 1}/${streamSteps.length}… waiting for next progressive paint.`);
+            setProgStatus(`Streaming step ${i + 1}/${streamSteps.length}…`);
         }
     }
     await decoder.close();

@@ -131,7 +131,9 @@ test('progressive paint sends generated JXL and settings directly to gallery wit
 
 test('progressive paint records per-frame visibility stats in console and measurement exports', () => {
     expect(source).toContain("import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog } from './jxl-progressive-frame-stats.js';");
-    expect(source).toContain('analyzeProgressiveFrame(ev.pixels, ev.info.width, ev.info.height)');
+    expect(source).toContain("const statsEnabled = new URLSearchParams(location.search).get('stats') === '1';");
+    expect(source).toContain('analyzeProgressiveFrame(passPixels, ev.info.width, ev.info.height)');
+    expect(source).toContain('statsEnabled');
     expect(source).toContain('formatFrameStatsLog(frameStats)');
     expect(source).toContain("console.log('[Progressive Paint] frame stats'");
     expect(source).toContain('stats: p.stats');
@@ -157,6 +159,8 @@ test('A2: final events bypass rAF coalescing — paintPass called directly', () 
     const rafPendingIdx = source.indexOf('if (rafPending)', schedIdx);
     expect(isFinalBypassIdx).toBeGreaterThan(schedIdx);
     expect(isFinalBypassIdx).toBeLessThan(rafPendingIdx);
+    expect(source.slice(isFinalBypassIdx, rafPendingIdx)).toContain('paintPass(pendingFrame)');
+    expect(source.slice(isFinalBypassIdx, rafPendingIdx)).toContain('paintPass(frame)');
 });
 
 test('A2: collectProgressivePaintEvents no longer calls await nextPaint() or await sleep()', () => {
@@ -193,7 +197,7 @@ test('A4: stats gated behind STATS_ENABLED — analyzeProgressiveFrame not calle
     const paintPassIdx = source.indexOf('function paintPass(');
     const paintPassEnd = source.indexOf('\nfunction ', paintPassIdx + 1);
     const paintPassBody = paintPassEnd === -1 ? source.slice(paintPassIdx) : source.slice(paintPassIdx, paintPassEnd);
-    expect(paintPassBody).toContain('STATS_ENABLED');
+    expect(paintPassBody).toContain('statsEnabled');
     expect(paintPassBody).toContain('analyzeProgressiveFrame');
 });
 
