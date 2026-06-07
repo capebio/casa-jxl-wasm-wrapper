@@ -202,6 +202,21 @@ The 254 ms cold-start pass-1 (above) is module instantiation, not decode. `prelo
 - **Risk:** none.
 - **Expected:** faster lab iteration; cleaner single-decode timing.
 
+### R9 — Quality charts: kill the redundant second pixel round-trip and the fallback freeze *(JS-only; Single Progressive)*
+
+At run end, `jxl-single-progressive.js:592` fires `void computeAndDrawChartsAsync(decode.passes, targetRgba)` to draw the PSNR / SSIM / Butteraugli charts. The genuinely heavy math (SSIM + Butteraugli + XYB conversion) is **already off the main thread** — `computeChartsInWorker` (`:174`) posts to `jxl-frame-stats-worker.js`, whose `'chart'` handler (`worker:26-46`) computes all three metrics in one pass. The synchronous `drawPsnrChart` / `drawSsimChart` / `drawButtChart` trio (`:1684-1759`) is only the **`catch` fallback** (`:218-222`). So the common claim "the charts compute metrics synchronously on the main thread and freeze the UI" describes the fallback path, not the live one.
+
+Two real costs remain:
+
+1. **Latched-disable fallback can hard-freeze every subsequent run.** A single worker error routes through `onerror` → `disableStatsWorker`, which sets `_statsWorkerDisabled = true` **permanently** (`:126-133`). After one trip, *every* later run takes the fully-synchronous fallback (SSIM + Butteraugli on the main thread, back-to-back, no yield) — the massive freeze. Diagnose via console: `[charts] worker failed; falling back to sync` / `[stats-worker] disabling after error`.
+2. **Redundant second pixel round-trip + main-thread downsample.** Every run *already* round-trips all pass pixels through the same worker once, unconditionally, via `precomputePassStatsInWorker` (`:877`, `:988`) for the frame-stats (hash/luma/alpha) used by the perceptual-cutoff logic. The charts then transfer every pass's pixels a **second** time (`:185`), and `computeChartsInWorker` downsamples the reference + **every pass** on the main thread first (canvas `putImageData`→`drawImage`→`getImageData`, `:36-51`, `:175`/`:180`) before transferring — an O(passes) main-thread image loop at Display/Very-Large sizes.
+
+- **Change (ideal — option C):** fold `psnr`/`ssim`/`butt` into the existing per-pass frame-stats worker message (`precomputePassStatsInWorker`), eliminating the second round-trip entirely. Compute incrementally as passes land (reference `targetRgba` is usually known up front); fall back to an end-of-run batch only when the reference is the final-pass pixels. Move the downsample into the worker (OffscreenCanvas) so the main thread does ~zero metric work.
+- **Gate it.** Charting is test-only, so put the metric computation behind a `chartsEnabled` flag: **off → zero penalty** (worker skips the branch; identical to today's non-graphing cost). **on → cheaper than today** (one round-trip + one transfer instead of two). Decode timing is unaffected either way — pass `t_ms` / `first_ms` / `final_ms` are stamped at pass creation (`:1030`), before any stats/chart work.
+- **Robustness:** don't latch `_statsWorkerDisabled` permanently on a single transient error; and if the sync fallback is kept, yield (`await sleep(0)`) between passes so even it degrades gracefully instead of freezing.
+- **Risk:** low–medium. The worker + `'chart'` handler already exist; this is mostly rewiring plus a gate. The incremental-vs-final reference split needs care.
+- **Expected:** removes the second per-pass pixel transfer and the main-thread downsample loop on the graphing path; removes the latched full-freeze entirely; no penalty when charts are off.
+
 ---
 
 ## Priority
@@ -212,7 +227,8 @@ The 254 ms cold-start pass-1 (above) is module instantiation, not decode. `prelo
 4. **R2** — verify MT engagement; potentially free 2–4× if the page isn't cross-origin-isolated.
 5. **R3 / T3** — off-main-thread decode + non-`setTimeout` yield; smooths cadence. JS-only.
 6. **R4 / R6** — bridge-side (need a WASM rebuild): kill redundant identical flushes, then drop COPY 1.
-7. **R7 / R8** — prewarm, bench gating; low-risk cleanups.
+7. **R9** — charts: stop latch-disabling the worker (fixes the full-freeze), fold metrics into the existing per-pass round-trip, gate behind `chartsEnabled`. JS-only.
+8. **R7 / R8** — prewarm, bench gating; low-risk cleanups.
 
 ## Notes / non-issues
 
