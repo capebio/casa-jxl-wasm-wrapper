@@ -34,6 +34,9 @@
       --sp-accent: #7de0b0;
       --sp-warn: #f0c86a;
       --sp-bad: #ff8c7d;
+      --sp-impact-mild: #e6d06a;
+      --sp-impact-slow: #e89a4a;
+      --sp-impact-severe: #f07060;
     }
     body { margin: 0; background: var(--sp-bg); color: var(--sp-text); font-family: "Segoe UI", Verdana, sans-serif; }
     .single-shell { max-width: 1560px; margin: 0 auto; padding: 22px; }
@@ -41,8 +44,17 @@
     .single-head h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
     .single-head p { margin: 7px 0 0; color: var(--sp-muted); max-width: 860px; line-height: 1.45; }
     .single-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; padding: 12px; background: var(--sp-panel); border: 1px solid var(--sp-line); border-radius: 8px; }
-    .single-controls label { display: grid; gap: 5px; min-width: 132px; color: var(--sp-muted); font-size: 12px; }
-    .single-controls input, .single-controls select { background: #090e10; color: var(--sp-text); border: 1px solid #40565d; border-radius: 6px; padding: 8px; }
+    .single-controls label { display: grid; gap: 5px; min-width: 132px; color: var(--sp-muted); font-size: 12px; transition: color .15s ease; }
+    .single-controls input, .single-controls select { background: #090e10; color: var(--sp-text); border: 1px solid #40565d; border-radius: 6px; padding: 8px; transition: border-color .15s ease, box-shadow .15s ease; }
+    .single-controls label.setting-impact-mild { color: var(--sp-impact-mild); }
+    .single-controls label.setting-impact-mild select,
+    .single-controls label.setting-impact-mild.inline-toggle { border-color: #a89030; box-shadow: inset 0 0 0 1px rgba(230, 208, 106, .12); }
+    .single-controls label.setting-impact-slow { color: var(--sp-impact-slow); }
+    .single-controls label.setting-impact-slow select,
+    .single-controls label.setting-impact-slow.inline-toggle { border-color: #b86a28; box-shadow: inset 0 0 0 1px rgba(232, 154, 74, .14); }
+    .single-controls label.setting-impact-severe { color: var(--sp-impact-severe); }
+    .single-controls label.setting-impact-severe select,
+    .single-controls label.setting-impact-severe.inline-toggle { border-color: #c04838; box-shadow: inset 0 0 0 1px rgba(240, 112, 96, .16); }
     .inline-toggle { min-width: 120px; align-self: stretch; display: flex !important; align-items: center; justify-content: center; grid-template-columns: none !important; gap: 8px !important; padding: 8px 10px; background: #090e10; border: 1px solid #40565d; border-radius: 6px; color: var(--sp-text) !important; }
     .inline-toggle input { width: 16px; height: 16px; accent-color: var(--sp-bad); }
     .single-controls button, .metric-actions button, .lightbox-close { background: var(--sp-accent); color: #04100c; border: 0; border-radius: 6px; padding: 9px 12px; font-weight: 700; cursor: pointer; }
@@ -161,12 +173,12 @@
           <option value="50">50 KB/s</option>
         </select>
       </label>
-      <label>
+      <label title="DC layers in the encoded JXL. 0 skips early coarse previews — fewer visible passes before full AC (Sneyers default is 2).">
         Progressive DC
         <select id="progressive-dc">
           <option value="2" selected>2 · 1:32 then 1:8 preview</option>
           <option value="1">1 · single 1:8 DC</option>
-          <option value="0">0 · no DC progressive</option>
+          <option value="0" title="No DC progressive — fewer early preview passes">0 · no DC progressive</option>
         </select>
       </label>
       <label>
@@ -185,11 +197,11 @@
           <option value="2">2 · multi-tier finer quantization</option>
         </select>
       </label>
-      <label>
+      <label title="Product decode granularity. All passes is a slow lab mode that chunk-feeds every flush.">
         Decode detail
         <select id="progressive-detail">
           <option value="lastPasses" selected>Last passes</option>
-          <option value="passes">All passes diagnostic</option>
+          <option value="passes" title="Many progressive checkpoints — slow at large sizes">All passes diagnostic</option>
           <option value="dc">DC preview + final</option>
         </select>
       </label>
