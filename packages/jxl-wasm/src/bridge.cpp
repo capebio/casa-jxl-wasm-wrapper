@@ -34,8 +34,9 @@ struct JxlWasmBuffer {
   uint32_t has_alpha;
   int error;
   JxlWasmBuffer* next;  // sidecar chain (null = last); caller walks and frees individually
+  uint32_t owned_data;   // 1 = free external data on buffer_free; 0 = inline or borrowed
 };
-// WASM32 layout: 8 × 4 bytes = 32 bytes, all 4-byte aligned — safe for HEAPU32 direct reads.
+// WASM32 layout: first 7 fields are unchanged and all 4-byte aligned — safe for HEAPU32 direct reads.
 
 // #11: Streaming encoder state — encode once, yield output in 64 KB chunks.
 // #16: Extended with streaming input fields: pre-allocate pixel buffer in WASM,
@@ -100,11 +101,15 @@ struct JxlWasmDecState {
   JxlPixelFormat pixel_format;
   uint8_t* pixels;       // working pixel buffer (raw malloc; null until first NEED_IMAGE_OUT_BUFFER)
   size_t   pixels_size;
-  uint8_t* flushed;      // most recent flushed progressive frame (raw malloc; transferred on take)
+  uint8_t* flushed;      // legacy owned progress buffer; progress now borrows pixels
   size_t   flushed_size;
   size_t   flushed_capacity;
   bool flushed_ready;
   uint32_t flush_count;     // number of successful TryFlushProgressiveImage calls
+  bool suppress_duplicate_progress;
+  bool last_progress_hash_valid;
+  uint64_t last_progress_hash;
+  size_t last_progress_size;
   bool final_ready;
   bool input_closed;
   bool input_set;
@@ -161,6 +166,7 @@ static JxlWasmBuffer* MakeBuffer(const uint8_t* data, size_t size, uint32_t widt
   out->has_alpha = alpha;
   out->error = 0;
   out->next = nullptr;
+  out->owned_data = 0;
   return out;
 }
 
@@ -175,12 +181,28 @@ static JxlWasmBuffer* MakeBufferFromOwned(uint8_t* data, size_t size, uint32_t w
   out->height = height;
   out->bits_per_sample = bits;
   out->has_alpha = alpha;
+  out->owned_data = 1;
+  return out;
+}
+
+// Borrowed buffer — metadata handle only. Caller must synchronously copy the bytes
+// before the producer mutates/frees `data`; buffer_free must not free `data`.
+static JxlWasmBuffer* MakeBufferBorrowed(uint8_t* data, size_t size, uint32_t width, uint32_t height, uint32_t bits, uint32_t alpha) {
+  JxlWasmBuffer* out = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+  if (out == nullptr) return nullptr;
+  out->data = data;
+  out->size = size;
+  out->width = width;
+  out->height = height;
+  out->bits_per_sample = bits;
+  out->has_alpha = alpha;
+  out->owned_data = 0;
   return out;
 }
 
 static void FreeBufferNoChain(JxlWasmBuffer* buf) {
   if (buf == nullptr) return;
-  if (buf->data != nullptr && buf->data != reinterpret_cast<uint8_t*>(buf + 1)) {
+  if (buf->owned_data && buf->data != nullptr && buf->data != reinterpret_cast<uint8_t*>(buf + 1)) {
     free(buf->data);
   }
   free(buf);
@@ -1919,6 +1941,21 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_s
 
 // --- Stateful progressive decoder ---
 
+static uint64_t HashProgressiveSample(const uint8_t* data, size_t size) {
+  uint64_t h = 1469598103934665603ull;
+  const size_t stride = 4096;
+  for (size_t i = 0; i < size; i += stride) {
+    h ^= data[i];
+    h *= 1099511628211ull;
+  }
+  const size_t tail_start = size > 256 ? size - 256 : 0;
+  for (size_t i = tail_start; i < size; ++i) {
+    h ^= data[i];
+    h *= 1099511628211ull;
+  }
+  return h ^ static_cast<uint64_t>(size);
+}
+
 static bool TryFlushProgressiveImage(JxlWasmDecState* s) {
   if (s == nullptr || s->dec == nullptr || !s->info_known || s->final_ready || s->pixels == nullptr) return false;
   if (s->pixels_size == 0) return false;
@@ -1930,30 +1967,16 @@ static bool TryFlushProgressiveImage(JxlWasmDecState* s) {
   //
   // libjxl writes partial decode INTO whatever buffer was set at NEED_IMAGE_OUT_BUFFER
   // (= s->pixels here, zeroed once on init so unfilled regions are transparent black).
-  // FlushImage just commits any pending groups into that buffer. We then memcpy a snapshot
-  // into s->flushed for ownership-transferring delivery to JS. The main s->pixels buffer
-  // keeps accumulating groups across subsequent FlushImage + ProcessInput calls, with
-  // libjxl free to overwrite earlier-decoded pixels at higher quality per its contract.
+  // FlushImage just commits any pending groups into that buffer. JS immediately copies a
+  // borrowed snapshot from s->pixels before the next ProcessInput call. The main s->pixels
+  // buffer keeps accumulating groups across subsequent FlushImage + ProcessInput calls,
+  // with libjxl free to overwrite earlier-decoded pixels at higher quality per its contract.
   if (JxlDecoderFlushImage(s->dec) != JXL_DEC_SUCCESS) return false;
-
-  if (s->pixels_size > s->flushed_capacity) {
-    size_t new_capacity = s->pixels_size;
-    if (s->flushed_capacity > 0) {
-      size_t grown_capacity = s->flushed_capacity + (s->flushed_capacity / 2);
-      if (grown_capacity > new_capacity) new_capacity = grown_capacity;
-    }
-    uint8_t* grown = static_cast<uint8_t*>(realloc(s->flushed, new_capacity));
-    if (grown == nullptr) return false;
-    s->flushed = grown;
-    s->flushed_capacity = new_capacity;
-  }
-  if (s->flushed == nullptr) return false;
-  memcpy(s->flushed, s->pixels, s->pixels_size);
 
   // All-zero guard: skip after first successful flush — once real pixels have been emitted
   // the buffer cannot regress to all-zero. Avoids scanning 82+ MB per pass on every flush.
   if (s->flush_count == 0) {
-    const uint64_t* w = reinterpret_cast<const uint64_t*>(s->flushed);
+    const uint64_t* w = reinterpret_cast<const uint64_t*>(s->pixels);
     const size_t nwords = s->pixels_size / sizeof(uint64_t);
     bool any_nonzero = false;
     for (size_t i = 0; i < nwords; ++i) {
@@ -1961,10 +1984,22 @@ static bool TryFlushProgressiveImage(JxlWasmDecState* s) {
     }
     if (!any_nonzero) {
       for (size_t i = nwords * sizeof(uint64_t); i < s->pixels_size; ++i) {
-        if (s->flushed[i] != 0) { any_nonzero = true; break; }
+        if (s->pixels[i] != 0) { any_nonzero = true; break; }
       }
     }
     if (!any_nonzero) return false;
+  }
+
+  if (s->suppress_duplicate_progress) {
+    const uint64_t h = HashProgressiveSample(s->pixels, s->pixels_size);
+    if (s->last_progress_hash_valid &&
+        s->last_progress_size == s->pixels_size &&
+        s->last_progress_hash == h) {
+      return false;
+    }
+    s->last_progress_hash = h;
+    s->last_progress_size = s->pixels_size;
+    s->last_progress_hash_valid = true;
   }
 
   s->flushed_size = s->pixels_size;
@@ -1973,7 +2008,7 @@ static bool TryFlushProgressiveImage(JxlWasmDecState* s) {
   return true;
 }
 
-JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t progressive_detail) {
+static JxlWasmDecState* DecCreateInternal(uint32_t format, uint32_t progressive_detail, uint32_t flags) {
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return nullptr;
   JXL_SETUP_DEC_RUNNER(dec, nullptr);
@@ -2002,7 +2037,16 @@ JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t progressive_detai
   if (s == nullptr) { JxlDecoderDestroy(dec); return nullptr; }
   s->dec = dec;
   s->pixel_format = { 4, FormatToDataType(format), JXL_NATIVE_ENDIAN, 0 };
+  s->suppress_duplicate_progress = (flags & 1u) != 0;
   return s;
+}
+
+JxlWasmDecState* jxl_wasm_dec_create(uint32_t format, uint32_t progressive_detail) {
+  return DecCreateInternal(format, progressive_detail, 0);
+}
+
+JxlWasmDecState* jxl_wasm_dec_create_x(uint32_t format, uint32_t progressive_detail, uint32_t flags) {
+  return DecCreateInternal(format, progressive_detail, flags);
 }
 
 int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
@@ -2241,16 +2285,13 @@ int jxl_wasm_dec_error(const JxlWasmDecState* s) {
   return s != nullptr ? s->error_code : -1;
 }
 
-// IMPROVEMENT-4: Ownership transfer — zero-copy take_flushed/take_final.
-// After transfer, s->flushed/pixels are null; jxl_wasm_dec_free won't double-free.
+// Progress returns a borrowed pixels handle; final transfers pixel ownership.
 JxlWasmBuffer* jxl_wasm_dec_take_flushed(JxlWasmDecState* s) {
-  if (s == nullptr || !s->flushed_ready || !s->info_known || s->flushed == nullptr) return nullptr;
+  if (s == nullptr || !s->flushed_ready || !s->info_known || s->pixels == nullptr) return nullptr;
   s->flushed_ready = false;
   const uint32_t bits = (s->pixel_format.data_type == JXL_TYPE_UINT16) ? 16u : (s->pixel_format.data_type == JXL_TYPE_FLOAT) ? 32u : 8u;
-  JxlWasmBuffer* buf = MakeBufferFromOwned(s->flushed, s->flushed_size, s->info.xsize, s->info.ysize, bits, 1);
-  s->flushed = nullptr;
+  JxlWasmBuffer* buf = MakeBufferBorrowed(s->pixels, s->flushed_size, s->info.xsize, s->info.ysize, bits, 1);
   s->flushed_size = 0;
-  s->flushed_capacity = 0;
   return buf;
 }
 
@@ -2693,7 +2734,7 @@ void jxl_wasm_buffer_free(JxlWasmBuffer* buffer) {
   // Inline data (MakeBuffer): lives in the same allocation — free once.
   // External data (MakeBufferFromOwned / encoder no-copy): separate allocation — free both.
   // Does NOT recurse through ->next; caller walks and frees the sidecar chain individually.
-  if (buffer->data != nullptr && buffer->data != reinterpret_cast<uint8_t*>(buffer + 1)) {
+  if (buffer->owned_data && buffer->data != nullptr && buffer->data != reinterpret_cast<uint8_t*>(buffer + 1)) {
     free(buffer->data);
   }
   free(buffer);

@@ -124,6 +124,24 @@ test('stateful progressive decoder flushes on JXL_DEC_FRAME_PROGRESSION and one 
   expect(bridge).toContain('progressive UI');
 });
 
+test('stateful progressive decoder exposes progress snapshots as borrowed buffers', () => {
+  expect(bridge).toContain('MakeBufferBorrowed');
+  expect(bridge).toContain('JxlWasmBuffer* buf = MakeBufferBorrowed(s->pixels');
+  expect(bridge).not.toContain('memcpy(s->flushed, s->pixels, s->pixels_size)');
+  expect(bridge).toContain('owned_data');
+  expect(bridge).toContain('if (buffer->owned_data && buffer->data != nullptr');
+});
+
+test('duplicate progressive flush suppression is opt-in experiment only', () => {
+  expect(facade).toContain('suppressDuplicateProgress?: boolean');
+  expect(facade).toContain('DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS');
+  expect(facade).toContain('options.suppressDuplicateProgress ? DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS : 0');
+  expect(facade).toContain('_jxl_wasm_dec_create_x');
+  expect(bridge).toContain('jxl_wasm_dec_create_x');
+  expect(bridge).toContain('suppress_duplicate_progress');
+  expect(bridge).toContain('last_progress_hash');
+});
+
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {
   // Synthetic noise image: enough entropy that the encoder cannot collapse to a
   // single trivial pass under VarDCT progressive_ac.

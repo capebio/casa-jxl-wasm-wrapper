@@ -2,6 +2,7 @@ export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32";
 export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = { x: number; y: number; w: number; h: number };
 export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";
+const DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS = 1;
 export type CachePolicy = "onFirst" | "onFinal" | "onProgress" | "disabled";
 
 export const DOWNSAMPLE_THUMBNAILS = 2;
@@ -107,6 +108,8 @@ export interface DecoderOptions {
    * read by higher-level layers only.
    */
   previewFirst?: boolean;
+  /** Experimental: suppress duplicate progressive snapshots by sampled hash. Default false. */
+  suppressDuplicateProgress?: boolean;
   /**
    * Cache policy: when to store decoded frames. Default "onFinal".
    * @note Handled at the jxl-cache / jxl-session layer. The WASM facade ignores it.
@@ -296,6 +299,7 @@ interface LibjxlBuffer {
 
 interface LibjxlWasmModule {
   HEAPU8: Uint8Array;
+  HEAP32: Int32Array;
   HEAPU32?: Uint32Array;
   _malloc(size: number): number;
   _free(ptr: number): void;
@@ -317,6 +321,7 @@ interface LibjxlWasmModule {
   _jxl_wasm_buffer_free(handle: number): void;
   // Stateful progressive decoder (present after WASM rebuild with new bridge)
   _jxl_wasm_dec_create?(format: number, progressiveDetail: number): number;
+  _jxl_wasm_dec_create_x?(format: number, progressiveDetail: number, flags: number): number;
   _jxl_wasm_dec_push?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_dec_close_input?(state: number): void;
   _jxl_wasm_dec_width?(state: number): number;
@@ -581,7 +586,7 @@ export function serializeExtraChannelsForWasm(channels: ExtraChannel[]): { buffe
     const nameBytes = new TextEncoder().encode(nameStr);
     const nameLen = Math.min(nameBytes.length, 31);
     dv.setUint8(off + 40, nameLen);
-    for (let k = 0; k < nameLen; k++) dv.setUint8(off + 41 + k, nameBytes[k]);
+    for (let k = 0; k < nameLen; k++) dv.setUint8(off + 41 + k, nameBytes[k] ?? 0);
     // remainder already zeroed (pad)
     off += EC_BYTES;
   }
@@ -1154,7 +1159,10 @@ class LibjxlDecoder implements JxlDecoder {
   private async *eventsProgressive(module: LibjxlWasmModule): AsyncIterable<DecodeEvent> {
     const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
     const progressiveDetail = resolveDecoderProgressiveDetail(this.options);
-    const dec = module._jxl_wasm_dec_create!(fmtIndex, progressiveDetail);
+    const decFlags = this.options.suppressDuplicateProgress ? DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS : 0;
+    const dec = module._jxl_wasm_dec_create_x
+      ? module._jxl_wasm_dec_create_x(fmtIndex, progressiveDetail, decFlags)
+      : module._jxl_wasm_dec_create!(fmtIndex, progressiveDetail);
     if (dec === 0) throw new Error("JXL progressive decoder creation failed");
     // Cache bridge fn refs once — avoids repeated property lookup on module per iteration.
     const decPush         = module._jxl_wasm_dec_push!;

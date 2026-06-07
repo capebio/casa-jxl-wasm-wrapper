@@ -17,6 +17,7 @@ _jxl_wasm_buffer_has_alpha
 _jxl_wasm_buffer_error
 _jxl_wasm_buffer_free
 _jxl_wasm_dec_create
+_jxl_wasm_dec_create_x
 _jxl_wasm_dec_push
 _jxl_wasm_dec_close_input
 _jxl_wasm_dec_width
