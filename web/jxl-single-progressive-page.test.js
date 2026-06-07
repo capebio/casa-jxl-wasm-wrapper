@@ -170,8 +170,9 @@ test('single progressive page exposes console and measurement exports', () => {
 
 test('single progressive block-border overlay uses fast cached tile diff', () => {
     expect(source).toContain("new URLSearchParams(location.search).get('bordersStrict') === '1'");
-    expect(source).toContain('const BLOCK_BORDER_SAMPLE_STRIDE = 10;');
-    expect(source).toContain('new Uint32Array(current.buffer, current.byteOffset, pixelCount)');
+    expect(source).toContain('const BBOX_STRIDE = 10;');
+    expect(source).toContain('function toUint32View(u8arr)');
+    expect(source).toContain('toUint32View(pass.pixels)');
     expect(source).toContain('scanChangedTileGrid');
     expect(source).toContain('readChangedBlocksCacheKey(pass, previousPass)');
     expect(source).toContain('pass._changedBlocks');

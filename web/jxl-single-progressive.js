@@ -12,7 +12,7 @@ const PROGRESSIVE_DETAIL = 'passes';
 const FIRST_PAINT_CHUNK_RAMP = [1 * 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024];
 const STEADY_DECODE_CHUNK_BYTES = 32 * 1024;
 const BLOCK_BORDER_TILE_SIZE = 256;
-const BLOCK_BORDER_SAMPLE_STRIDE = 10;
+const BBOX_STRIDE = 10;
 const BLOCK_BORDER_SIZE = 2;
 const BLOCK_BORDER_COLOR = '#ff2d2d';
 const BLOCK_BORDERS_STRICT = new URLSearchParams(location.search).get('bordersStrict') === '1';
@@ -1356,11 +1356,8 @@ function computeChangedBlocks(pass, previousPass) {
     const tileSize = BLOCK_BORDER_TILE_SIZE;
     const cols = Math.ceil(pass.width / tileSize);
     const rows = Math.ceil(pass.height / tileSize);
-    const current = pass.pixels;
-    const previous = previousPass.pixels;
-    const pixelCount = pass.width * pass.height;
-    const current32 = new Uint32Array(current.buffer, current.byteOffset, pixelCount);
-    const previous32 = new Uint32Array(previous.buffer, previous.byteOffset, pixelCount);
+    const current32 = toUint32View(pass.pixels);
+    const previous32 = toUint32View(previousPass.pixels);
     const changed = scanChangedTileGrid(current32, previous32, pass.width, pass.height, cols, rows);
 
     const blocks = [];
@@ -1380,6 +1377,15 @@ function computeChangedBlocks(pass, previousPass) {
     pass._changedBlocksKey = cacheKey;
     pass._changedBlocks = blocks;
     return blocks;
+}
+
+function toUint32View(u8arr) {
+    if (u8arr.byteOffset % 4 === 0) {
+        return new Uint32Array(u8arr.buffer, u8arr.byteOffset, u8arr.byteLength >>> 2);
+    }
+    const copy = new Uint8Array(u8arr.byteLength);
+    copy.set(u8arr);
+    return new Uint32Array(copy.buffer);
 }
 
 function readChangedBlocksCacheKey(pass, previousPass) {
@@ -1405,9 +1411,9 @@ function scanChangedTileGrid(current32, previous32, width, height, cols, rows) {
         rowEnd = -1;
         colStart = cols;
         colEnd = -1;
-        for (let y = 0; y < height; y += BLOCK_BORDER_SAMPLE_STRIDE) {
+        for (let y = 0; y < height; y += BBOX_STRIDE) {
             const rowBase = y * width;
-            for (let x = 0; x < width; x += BLOCK_BORDER_SAMPLE_STRIDE) {
+            for (let x = 0; x < width; x += BBOX_STRIDE) {
                 if (current32[rowBase + x] === previous32[rowBase + x]) continue;
                 const row = Math.floor(y / tileSize);
                 const col = Math.floor(x / tileSize);
