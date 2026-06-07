@@ -268,6 +268,7 @@ const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
 const showBlockBordersEl = document.getElementById('show-block-borders');
 const timingBordersOverride = readBoolParam('borders', null);
+const bordersOverride = new URLSearchParams(location.search).get('borders') === '0';
 
 const runMeasurements = [];
 let rawReady = false;
@@ -305,6 +306,7 @@ if (exportJsonBtn) exportJsonBtn.addEventListener('click', exportMeasurementsJSO
 if (exportToonBtn) exportToonBtn.addEventListener('click', exportMeasurementsTOON);
 if (copyMeasurementsMdBtn) copyMeasurementsMdBtn.addEventListener('click', copyMeasurementsMarkdown);
 if (clearMeasurementsBtn) clearMeasurementsBtn.addEventListener('click', clearMeasurements);
+if (bordersOverride && showBlockBordersEl) showBlockBordersEl.checked = false;
 showBlockBordersEl?.addEventListener('change', redrawCurrentPassView);
 lightboxClose?.addEventListener('click', closePassLightbox);
 lightboxZoomOut?.addEventListener('click', () => zoomLightboxAt(1 / 1.25));
@@ -1339,6 +1341,7 @@ async function drawPassWithOverlay(targetCanvas, pass, previousPass) {
 }
 
 function shouldShowBlockBorders() {
+    if (bordersOverride) return false;
     return showBlockBordersEl ? showBlockBordersEl.checked : true;
 }
 

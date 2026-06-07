@@ -49,7 +49,17 @@ If executing benchmarks that require environmental variables or overrides, agent
 - `QUALITY=85` (or `80` for small targets)
 - `TARGET=1600` (or `400` for thumbnails)
 
-Single Progressive timing baselines must state block-border overlay state. Use `?borders=0` for timing sweeps so inspection-only block borders do not inflate paint timing; leave the default checked state for interactive pass inspection.
+## Block-borders state in timing baselines
+
+`jxl-single-progressive.html` has a "Block borders" checkbox (default: on).
+Block-border computation scans RGBA pixels per pass and can dominate paintMs at large sizes.
+
+**Rule:** all baseline timing measurements MUST be taken with borders OFF.
+Two methods:
+- Append `?borders=0` to the URL. This forces borders off for the entire session.
+- Uncheck "Block borders" in the UI before running.
+
+Record the borders state alongside every timing result (borders=off / borders=on).
 
 ## Completed Timing Batches
 

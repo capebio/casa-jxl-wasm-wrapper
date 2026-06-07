@@ -185,6 +185,12 @@ test('single progressive timing mode can force block borders off', () => {
     expect(source).toContain('showBlockBordersEl.checked = false');
 });
 
+test('single progressive page respects ?borders=0 query param to force borders off', () => {
+    expect(source).toContain("new URLSearchParams(location.search).get('borders') === '0'");
+    expect(source).toContain('bordersOverride');
+    expect(source).toContain('if (bordersOverride) return false;');
+});
+
 test('jxl-session has browser-only export for browser bundles', () => {
     expect(sessionPackageJson.exports['.'].browser).toBe('./dist/browser.js');
 });
