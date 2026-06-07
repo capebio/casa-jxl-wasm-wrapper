@@ -60,7 +60,9 @@ export function detectTier() {
         else {
             const hasSab = typeof SharedArrayBuffer !== "undefined";
             const crossOriginIsolated = typeof self !== "undefined" && !!self.crossOriginIsolated;
-            const canDoMT = canUseThreadedWasm(_probeWasmThreads(), hasSab, crossOriginIsolated);
+            // Match jxl-wasm / worker tier pick: COI + SAB enable threaded builds; do not
+            // require the wasm-threads validate probe (false on some Chrome builds that still run MT WASM).
+            const canDoMT = hasSab && crossOriginIsolated;
             const hasRelaxedSimd = _probeRelaxedSimd();
             if (canDoMT && hasRelaxedSimd)
                 tier = "relaxed-simd-mt";
@@ -81,34 +83,11 @@ export function recommendedEffort() {
         return 6;
     return 7;
 }
-/**
- * Probe for Relaxed SIMD support via a small runtime instruction.
- */
 async function probeRelaxedSimd() {
-    try {
-        // Relaxed SIMD instruction: i8x16.relaxed_swizzle (0xfd 0x100)
-        // Minimal module that uses it.
-        const bytes = new Uint8Array([
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
-            0x03, 0x02, 0x01, 0x00,
-            0x0a, 0x0f, 0x01, 0x0d, 0x00, 0x41, 0x00, 0xfd, 0x0c, 0x41, 0x00, 0xfd, 0x0c, 0xfd, 0x80, 0x02, 0x0b
-        ]);
-        await WebAssembly.instantiate(bytes);
-        return true;
-    }
-    catch {
-        return false;
-    }
+    return _probeRelaxedSimd();
 }
 async function probeWasmSimd() {
-    try {
-        await WebAssembly.instantiate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 11]));
-        return true;
-    }
-    catch {
-        return false;
-    }
+    return _probeSimd();
 }
 async function probeWasmThreads() {
     return _probeWasmThreads();
@@ -116,7 +95,7 @@ async function probeWasmThreads() {
 function selectWasmBuild(wasm, wasmSimd, wasmThreads, sharedArrayBuffer, crossOriginIsolated, wasmRelaxedSimd) {
     if (!wasm)
         return "none";
-    const canDoMT = canUseThreadedWasm(wasmThreads, sharedArrayBuffer, crossOriginIsolated);
+    const canDoMT = sharedArrayBuffer && crossOriginIsolated;
     if (canDoMT && wasmRelaxedSimd)
         return "relaxed-simd-mt";
     if (canDoMT && wasmSimd)
