@@ -332,6 +332,10 @@ interface LibjxlWasmModule {
   _jxl_wasm_dec_free?(state: number): void;
   // Sidecar thumbnail encode (present after WASM rebuild with sidecar bridge)
   _jxl_wasm_encode_rgba8_with_sidecars?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number): number;
+  // Per-level-distance pyramid encode (present after WASM rebuild with sidecars_v2 bridge)
+  _jxl_wasm_encode_rgba8_with_sidecars_v2?(pixelsPtr: number, width: number, height: number, fullDistance: number, sidecarDistancesPtr: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, resampling: number): number;
+  // 16-bit area-box downscale (present after WASM rebuild with downscale_rgba16 bridge)
+  _jxl_wasm_downscale_rgba16?(srcPtr: number, sw: number, sh: number, dstPtr: number, dw: number, dh: number): void;
   _jxl_wasm_buffer_next?(handle: number): number;
   // #10: C++ region crop decode — avoids shipping full-image pixels to JS
   _jxl_wasm_decode_rgba8_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
@@ -902,6 +906,138 @@ async function encodeTileContainer(
     return takeBuffer(module, handle, "tile container encode").data;
   } finally {
     module._free(ptr);
+  }
+}
+
+/** One pyramid level produced by encodeRgba8Pyramid. Ordered smallest-first, full image last. */
+export interface PyramidLevel {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  /** Always 8 — this is the RGBA8 pyramid encoder. 16-bit RAW big levels are a separate path. */
+  bitsPerSample: 8;
+}
+
+/**
+ * Encode an RGBA8 image into a JXL pyramid in one WASM call: each sidecar level is
+ * area-box downscaled (cascaded, smallest from previous) and encoded at its OWN distance
+ * (no 1.5 floor); the full image is encoded at `fullDistance`. `sidecarSizes[i]` is a
+ * long-edge target and pairs with `sidecarDistances[i]` BY INDEX. Pass parallel,
+ * equal-length arrays — do NOT pre-filter. Sizes >= the image long edge are skipped by the
+ * bridge (the matching distance slot is ignored too). Returns levels smallest-first, full
+ * image last; every level is 8-bit.
+ */
+export async function encodeRgba8Pyramid(
+  pixels: ArrayBuffer | Uint8Array,
+  width: number,
+  height: number,
+  options: {
+    fullDistance: number;
+    sidecarSizes: readonly number[];
+    sidecarDistances: readonly number[];
+    effort?: number;
+    hasAlpha?: boolean;
+    resampling?: number;
+  },
+): Promise<PyramidLevel[]> {
+  const module = await loadLibjxlModule();
+  const encodeFn = module._jxl_wasm_encode_rgba8_with_sidecars_v2;
+  const nextFn = module._jxl_wasm_buffer_next;
+  if (!encodeFn || !nextFn) {
+    throw new CapabilityMissing("Pyramid encode requires a rebuilt WASM with the sidecars_v2 bridge");
+  }
+  const sizes = [...options.sidecarSizes];
+  const dists = [...options.sidecarDistances];
+  if (sizes.length !== dists.length) {
+    throw new Error(`sidecarSizes (${sizes.length}) and sidecarDistances (${dists.length}) must be the same length`);
+  }
+  const effort = options.effort ?? 3;
+  const hasAlpha = options.hasAlpha !== false;
+  const resampling = options.resampling ?? 1;
+
+  const view = copyOrBorrowInput(pixels, false);
+  const expectedBytes = width * height * 4;
+  if (view.byteLength < expectedBytes) {
+    throw new Error(`Pixel buffer too small: ${view.byteLength} < ${expectedBytes}`);
+  }
+
+  const ptr = module._malloc(view.byteLength);
+  if (ptr === 0) throw new Error("WASM malloc failed for pyramid encode");
+  const dimsPtr = module._malloc(Math.max(4, sizes.length * 4));
+  const distPtr = module._malloc(Math.max(4, dists.length * 4));
+  if (dimsPtr === 0 || distPtr === 0) {
+    module._free(ptr);
+    if (dimsPtr !== 0) module._free(dimsPtr);
+    if (distPtr !== 0) module._free(distPtr);
+    throw new Error("WASM malloc failed for pyramid encode params");
+  }
+  try {
+    module.HEAPU8.set(view, ptr);
+    // Write params as little-endian byte images (no HEAPU32/HEAPF32 dependency — not
+    // exported on every tier). WASM is little-endian, matching TypedArray byte order.
+    module.HEAPU8.set(new Uint8Array(new Uint32Array(sizes).buffer), dimsPtr);
+    module.HEAPU8.set(new Uint8Array(new Float32Array(dists).buffer), distPtr);
+
+    const levels: PyramidLevel[] = [];
+    let handle = encodeFn(ptr, width, height, options.fullDistance, distPtr, effort, hasAlpha ? 1 : 0, dimsPtr, sizes.length, resampling);
+    while (handle !== 0) {
+      const next = nextFn(handle);
+      try {
+        const buf = takeBuffer(module, handle, "pyramid encode");
+        // v2 encoder is RGBA8 → every level is 8-bit; do not surface buf.bitsPerSample's wider union.
+        levels.push({ data: buf.data, width: buf.width, height: buf.height, bitsPerSample: 8 });
+      } catch (err) {
+        let cur = next;
+        while (cur !== 0) { const nxt = nextFn(cur); module._jxl_wasm_buffer_free(cur); cur = nxt; }
+        throw err;
+      }
+      handle = next;
+    }
+    return levels;
+  } finally {
+    module._free(ptr);
+    module._free(dimsPtr);
+    module._free(distPtr);
+  }
+}
+
+/**
+ * Area-box downscale an RGBA16 buffer (4 channels x uint16, interleaved) inside WASM.
+ * Used to build 16-bit RAW pyramid levels (e.g. full -> 2048) with no 8-bit roundtrip.
+ */
+export async function downscaleRgba16(
+  src: Uint16Array,
+  srcWidth: number,
+  srcHeight: number,
+  dstWidth: number,
+  dstHeight: number,
+): Promise<Uint16Array> {
+  const module = await loadLibjxlModule();
+  const fn = module._jxl_wasm_downscale_rgba16;
+  if (!fn) {
+    throw new CapabilityMissing("16-bit downscale requires a rebuilt WASM with the downscale_rgba16 bridge");
+  }
+  if (src.length < srcWidth * srcHeight * 4) {
+    throw new Error(`Source buffer too small: ${src.length} < ${srcWidth * srcHeight * 4}`);
+  }
+  const srcBytes = srcWidth * srcHeight * 4 * 2;
+  const dstBytes = dstWidth * dstHeight * 4 * 2;
+  const srcPtr = module._malloc(srcBytes);
+  const dstPtr = module._malloc(dstBytes);
+  if (srcPtr === 0 || dstPtr === 0) {
+    if (srcPtr !== 0) module._free(srcPtr);
+    if (dstPtr !== 0) module._free(dstPtr);
+    throw new Error("WASM malloc failed for 16-bit downscale");
+  }
+  try {
+    module.HEAPU8.set(new Uint8Array(src.buffer, src.byteOffset, srcBytes), srcPtr);
+    fn(srcPtr, srcWidth, srcHeight, dstPtr, dstWidth, dstHeight);
+    const out = new Uint16Array(dstWidth * dstHeight * 4);
+    out.set(new Uint16Array(module.HEAPU8.buffer, dstPtr, out.length));
+    return out;
+  } finally {
+    module._free(srcPtr);
+    module._free(dstPtr);
   }
 }
 
@@ -2075,6 +2211,8 @@ interface JxlCapabilities {
   streamingInputX: boolean;
   streamingInputY: boolean;
   sidecars: boolean;
+  sidecarsV2: boolean;
+  downscaleRgba16: boolean;
   jpegTranscode: boolean;
 }
 
@@ -2101,6 +2239,10 @@ function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
     sidecars:
       typeof module._jxl_wasm_encode_rgba8_with_sidecars === "function" &&
       typeof module._jxl_wasm_buffer_next === "function",
+    sidecarsV2:
+      typeof module._jxl_wasm_encode_rgba8_with_sidecars_v2 === "function" &&
+      typeof module._jxl_wasm_buffer_next === "function",
+    downscaleRgba16: typeof module._jxl_wasm_downscale_rgba16 === "function",
     jpegTranscode: typeof module._jxl_wasm_transcode_jpeg_to_jxl === "function",
   };
   capabilityCache.set(module, caps);

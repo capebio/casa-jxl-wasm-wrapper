@@ -1137,6 +1137,64 @@ static void BoxDownscaleRgba8(const uint8_t* src, uint32_t sw, uint32_t sh,
   }
 }
 
+// 16-bit sibling of BoxDownscaleRgba8 for RAW pyramid levels (4 channels x uint16,
+// interleaved). uint64 accumulators keep large downscale factors overflow-safe; the
+// boundary math below also widens to uint64 so (dy+1)*sh cannot wrap on gigapixel
+// sources. Guard zero/null inputs so an empty block never divides by zero (count == 0).
+static void BoxDownscaleRgba16(const uint16_t* src, uint32_t sw, uint32_t sh,
+                               uint16_t* dst, uint32_t dw, uint32_t dh) {
+  if (sw == 0 || sh == 0 || dw == 0 || dh == 0 || src == nullptr || dst == nullptr) return;
+
+  if ((sw % dw == 0) && (sh % dh == 0)) {
+    const uint32_t xstep = sw / dw;
+    const uint32_t ystep = sh / dh;
+    for (uint32_t dy = 0; dy < dh; ++dy) {
+      for (uint32_t dx = 0; dx < dw; ++dx) {
+        uint64_t r = 0, g = 0, b = 0, a = 0, count = 0;
+        for (uint32_t yy = 0; yy < ystep; ++yy) {
+          const uint32_t y = dy * ystep + yy;
+          const uint16_t* row = src + static_cast<size_t>(y) * sw * 4;
+          for (uint32_t xx = 0; xx < xstep; ++xx) {
+            const uint32_t x = dx * xstep + xx;
+            const uint16_t* px = row + static_cast<size_t>(x) * 4;
+            r += px[0]; g += px[1]; b += px[2]; a += px[3];
+            ++count;
+          }
+        }
+        uint16_t* out = dst + (static_cast<size_t>(dy) * dw + dx) * 4;
+        out[0] = static_cast<uint16_t>(r / count);
+        out[1] = static_cast<uint16_t>(g / count);
+        out[2] = static_cast<uint16_t>(b / count);
+        out[3] = static_cast<uint16_t>(a / count);
+      }
+    }
+    return;
+  }
+
+  for (uint32_t dy = 0; dy < dh; ++dy) {
+    const uint32_t y0 = (dy * sh) / dh;
+    const uint32_t y1 = static_cast<uint32_t>((static_cast<uint64_t>(dy + 1u) * sh + dh - 1u) / dh);  // ceiling division (uint64 to avoid wrap)
+    for (uint32_t dx = 0; dx < dw; ++dx) {
+      const uint32_t x0 = (dx * sw) / dw;
+      const uint32_t x1 = static_cast<uint32_t>((static_cast<uint64_t>(dx + 1u) * sw + dw - 1u) / dw);
+      uint64_t r = 0, g = 0, b = 0, a = 0, count = 0;
+      for (uint32_t sy = y0; sy < y1; ++sy) {
+        const uint16_t* row = src + static_cast<size_t>(sy) * sw * 4;
+        for (uint32_t sx = x0; sx < x1; ++sx) {
+          const uint16_t* px = row + static_cast<size_t>(sx) * 4;
+          r += px[0]; g += px[1]; b += px[2]; a += px[3];
+          ++count;
+        }
+      }
+      uint16_t* out = dst + (static_cast<size_t>(dy) * dw + dx) * 4;
+      out[0] = static_cast<uint16_t>(r / count);
+      out[1] = static_cast<uint16_t>(g / count);
+      out[2] = static_cast<uint16_t>(b / count);
+      out[3] = static_cast<uint16_t>(a / count);
+    }
+  }
+}
+
 static bool LooksLikeJpeg(const uint8_t* p, size_t n) {
   return n >= 4 && p[0] == 0xFF && p[1] == 0xD8 && p[n - 2] == 0xFF && p[n - 1] == 0xD9;
 }
@@ -2601,13 +2659,13 @@ JxlWasmBuffer* jxl_wasm_encode_auto_x(
 // rather than (num_sidecars × full-image pixels).
 static JxlWasmBuffer* EncodeRgba8WithSidecars(
     const uint8_t* pixels, uint32_t width, uint32_t height,
-    float distance, uint32_t effort, uint32_t has_alpha,
+    float full_distance, const float* sidecar_distances, uint32_t effort, uint32_t has_alpha,
     const uint32_t* sidecar_max_dims, uint32_t num_sidecars,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
   if (pixels == nullptr || width == 0 || height == 0) return MakeError(20);
 
-  // Pass 1: collect valid (tw, th) pairs in ascending order.
-  struct SidecarDim { uint32_t tw, th; };
+  // Pass 1: collect valid (tw, th, dist) in ascending order.
+  struct SidecarDim { uint32_t tw, th; float dist; };
   const uint32_t MAX_SC = 16u;
   SidecarDim sc_dims[MAX_SC];
   uint32_t sc_count = 0;
@@ -2624,7 +2682,10 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
       th = max_dim;
       tw = std::max(1u, (max_dim * width + height / 2u) / height);
     }
-    sc_dims[sc_count++] = { tw, th };
+    // Per-level distance when the caller supplies one (no floor); else legacy v1 floor.
+    const float d = (sidecar_distances != nullptr) ? sidecar_distances[i]
+                                                   : std::max(full_distance, 1.5f);
+    sc_dims[sc_count++] = { tw, th, d };
   }
 
   // Pass 2: cascade descending (largest first), prepend to chain.
@@ -2653,9 +2714,9 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
     cascade_sw    = tw;
     cascade_sh    = th;
 
-    // Thumbnails tolerate more loss; cap effort at 5 to keep encode fast.
+    // Per-level distance (v2) or legacy floor (v1); cap effort at 5 to keep encode fast.
     JxlWasmBuffer* sidecar = EncodeRgba(thumb, tw, th,
-        std::max(distance, 1.5f), std::min(effort, 5u), 0, 1u, 0, 0, 0, 0, 0,
+        sc_dims[i].dist, std::min(effort, 5u), 0, 1u, 0, 0, 0, 0, 0,
         modular, brotli_effort, decoding_speed, photon_noise_iso);
     if (sidecar == nullptr) continue;
 
@@ -2665,7 +2726,7 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
   }
   free(cascade_owned);
 
-  JxlWasmBuffer* full = EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, 0, 0, 0, 0, 0,
+  JxlWasmBuffer* full = EncodeRgba(pixels, width, height, full_distance, effort, 0, has_alpha, 0, 0, 0, 0, 0,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
   if (full == nullptr) {
     JxlWasmBuffer* cur = sc_chain;
@@ -2685,7 +2746,8 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_sidecars(
     const uint8_t* pixels, uint32_t width, uint32_t height,
     float distance, uint32_t effort, uint32_t has_alpha,
     const uint32_t* sidecar_max_dims, uint32_t num_sidecars, uint32_t resampling) {
-  return EncodeRgba8WithSidecars(pixels, width, height, distance, effort, has_alpha, sidecar_max_dims, num_sidecars, -1, -1, -1, 0, resampling);
+  // v1: null distances -> legacy max(distance, 1.5f) floor on sidecars.
+  return EncodeRgba8WithSidecars(pixels, width, height, distance, nullptr, effort, has_alpha, sidecar_max_dims, num_sidecars, -1, -1, -1, 0, resampling);
 }
 
 JxlWasmBuffer* jxl_wasm_encode_rgba8_with_sidecars_x(
@@ -2693,7 +2755,21 @@ JxlWasmBuffer* jxl_wasm_encode_rgba8_with_sidecars_x(
     float distance, uint32_t effort, uint32_t has_alpha,
     const uint32_t* sidecar_max_dims, uint32_t num_sidecars,
     int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso, uint32_t resampling) {
-  return EncodeRgba8WithSidecars(pixels, width, height, distance, effort, has_alpha, sidecar_max_dims, num_sidecars, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+  return EncodeRgba8WithSidecars(pixels, width, height, distance, nullptr, effort, has_alpha, sidecar_max_dims, num_sidecars, modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
+}
+
+JxlWasmBuffer* jxl_wasm_encode_rgba8_with_sidecars_v2(
+    const uint8_t* pixels, uint32_t width, uint32_t height,
+    float full_distance, const float* sidecar_distances, uint32_t effort, uint32_t has_alpha,
+    const uint32_t* sidecar_max_dims, uint32_t num_sidecars, uint32_t resampling) {
+  // v2: per-level distances, no floor.
+  return EncodeRgba8WithSidecars(pixels, width, height, full_distance, sidecar_distances,
+      effort, has_alpha, sidecar_max_dims, num_sidecars, -1, -1, -1, 0, resampling);
+}
+
+void jxl_wasm_downscale_rgba16(const uint16_t* src, uint32_t sw, uint32_t sh,
+                               uint16_t* dst, uint32_t dw, uint32_t dh) {
+  BoxDownscaleRgba16(src, sw, sh, dst, dw, dh);
 }
 
 uint8_t* jxl_wasm_buffer_data(JxlWasmBuffer* buffer) {
