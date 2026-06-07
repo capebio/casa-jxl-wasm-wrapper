@@ -178,12 +178,23 @@
                 <div class="prog-option-group">
                     <span class="prog-setting-label">Throttle:</span>
                     <select id="throttle-rate" class="prog-select">
-                        <option value="0">Unthrottled</option>
+                        <option value="0" selected>Unthrottled</option>
                         <option value="2048">2 MB/s</option>
                         <option value="500">500 KB/s</option>
-                        <option value="100" selected>100 KB/s</option>
+                        <option value="100">100 KB/s</option>
                         <option value="50">50 KB/s</option>
                     </select>
+                </div>
+
+                <div class="prog-option-group">
+                    <label class="toggle-opt" title="Run an extra one-shot final decode after progressive decode for timing comparison. Off by default for faster interactive runs.">
+                        <input type="checkbox" id="run-one-shot-comparison" />
+                        <span class="opt-label">One-shot comparison</span>
+                    </label>
+                    <label class="toggle-opt" title="Run fixed byte-prefix decodes after the main run. Network/probe diagnostic; off by default.">
+                        <input type="checkbox" id="run-byte-cutoff-probe" />
+                        <span class="opt-label">Byte cutoff probe</span>
+                    </label>
                 </div>
 
                 <!-- 3. Run (on its own line, enabled only when file present) -->

@@ -1,5 +1,5 @@
 import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
-import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { createDecoder, createEncoder, detectTier, preloadJxlModule } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createFilePicker } from './jxl-file-picker.js';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
@@ -33,6 +33,23 @@ function updateWorkflowState() {}
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Progressive Paint] jxl-progressive-paint.js loaded — progressive paint / live decode UI', 'color:#ec4899;font-weight:600', { page: 'Progressive Paint', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
+
+try {
+    preloadJxlModule();
+} catch (err) {
+    console.warn('[Progressive Paint] JXL preload failed', err);
+}
+
+function logBrowserDecodeTier() {
+    let tier = 'unknown';
+    try {
+        tier = detectTier();
+    } catch (err) {
+        console.warn('[Progressive Paint] detectTier failed', err);
+    }
+    console.log('[Progressive Paint] decode tier', { tier, crossOriginIsolated });
+}
+logBrowserDecodeTier();
 
 // A4: gate O(W×H) frame analysis behind ?stats=1
 const statsEnabled = new URLSearchParams(location.search).get('stats') === '1';
@@ -564,6 +581,14 @@ function readThrottleKbPerSec() {
     return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+function shouldRunOneShotComparison() {
+    return document.getElementById('run-one-shot-comparison')?.checked === true;
+}
+
+function shouldRunByteCutoffProbe() {
+    return document.getElementById('run-byte-cutoff-probe')?.checked === true;
+}
+
 async function feedThrottled(decoder, bytes, kbPerSec) {
     const chunkBytes = 16 * 1024;
     const msPerChunk = kbPerSec > 0 ? (chunkBytes / 1024) * (1000 / kbPerSec) : 0;
@@ -954,17 +979,10 @@ function splitEncodedBytesIntoSteps(bytes, stepCount) {
 }
 
 async function streamIntoDecoder(decoder, jxlBytes, stepCount) {
-    const streamSteps = splitEncodedBytesIntoSteps(jxlBytes, stepCount);
-    for (let i = 0; i < streamSteps.length; i++) {
-        const stepChunk = streamSteps[i];
-        dbgLog(`  stream ${i + 1}/${streamSteps.length}`, `${(stepChunk.byteLength / 1024).toFixed(1)} KB`, 'info');
-        await decoder.push(exactBuffer(stepChunk));
-        if (i < streamSteps.length - 1) {
-            setProgStatus(`Streaming step ${i + 1}/${streamSteps.length}…`);
-        }
-    }
+    dbgLog('  local stream', `${(jxlBytes.byteLength / 1024).toFixed(1)} KB in one push; requested steps=${stepCount}`, 'info');
+    await decoder.push(exactBuffer(jxlBytes));
     await decoder.close();
-    return streamSteps.length;
+    return 1;
 }
 
 function renderProgressiveComparison({ requestedPassCount, passCount, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB, encodeMs, previewFirst, progressiveDetail, progressiveDc, groupOrder }) {
@@ -1037,7 +1055,6 @@ async function runProgressivePaintTest() {
         let progressiveDetail = detailChoice === 'auto'
             ? getRequestedProgressiveDetail(requestedPassCount)
             : detailChoice;
-        if (presetName === 'sneyers') progressiveDetail = 'passes';
         const previewFirst = presetName === 'sneyers' ? true : !!(document.getElementById('prog-preview-first')?.checked);
         const progressiveFlavor = presetName === 'sneyers' ? 'ac'
             : (detailChoice !== 'auto' && detailChoice !== 'dc')
@@ -1226,27 +1243,29 @@ async function runProgressivePaintTest() {
                 }
             }
 
-            if (isLast) {
-                setProgStatus(`${statusPrefix}Running one-shot decode for comparison…`);
-            }
-            const decoder2 = createDecoder({
-                format: 'rgba8',
-                region: null,
-                downsample: 1,
-                progressionTarget: 'final',
-                emitEveryPass: false,
-                preserveIcc: false,
-                preserveMetadata: false,
-            });
-            const oneShotStart = performance.now();
-            await decoder2.push(jxlBytes);
-            await decoder2.close();
             let oneShotFinalMs = null;
-            for await (const ev of decoder2.events()) {
-                if (ev.type === 'final') oneShotFinalMs = performance.now() - oneShotStart;
-                else if (ev.type === 'error') throw new Error(ev.message);
+            if (isLast) {
+                if (shouldRunOneShotComparison()) {
+                    setProgStatus(`${statusPrefix}Running one-shot decode for comparison…`);
+                    const decoder2 = createDecoder({
+                        format: 'rgba8',
+                        region: null,
+                        downsample: 1,
+                        progressionTarget: 'final',
+                        emitEveryPass: false,
+                        preserveIcc: false,
+                        preserveMetadata: false,
+                    });
+                    const oneShotStart = performance.now();
+                    await decoder2.push(jxlBytes);
+                    await decoder2.close();
+                    for await (const ev of decoder2.events()) {
+                        if (ev.type === 'final') oneShotFinalMs = performance.now() - oneShotStart;
+                        else if (ev.type === 'error') throw new Error(ev.message);
+                    }
+                    decoder2.dispose();
+                }
             }
-            decoder2.dispose();
 
             // Capture structured measurement for CSV/JSON export (now that oneShotFinalMs is known)
             const measurement = {
@@ -1290,7 +1309,8 @@ async function runProgressivePaintTest() {
                     groupOrder,
                 });
 
-                const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms · one-shot ${oneShotFinalMs?.toFixed(1)} ms${finalPsnrVsSource != null ? ` · final PSNR ${finalPsnrVsSource.toFixed(1)} dB vs source` : ''}`;
+                const oneShotSummary = oneShotFinalMs != null ? ` · one-shot ${oneShotFinalMs.toFixed(1)} ms` : '';
+                const summary = `${passes.length} paints · first ${progressiveFirstMs?.toFixed(1)} ms · final ${progressiveFinalMs?.toFixed(1)} ms${oneShotSummary}${finalPsnrVsSource != null ? ` · final PSNR ${finalPsnrVsSource.toFixed(1)} dB vs source` : ''}`;
                 const doneText = `Done. ${summary}`;
 
                 // Put the prominent "Done..." summary in the results area (left side of the new status line).
@@ -1303,7 +1323,7 @@ async function runProgressivePaintTest() {
                 setProgStatus(doneText);
                 dbgLog('Progressive paint done', summary, 'success');
 
-                await runByteCutoffProbe(jxlBytes, progressiveDetail);
+                if (shouldRunByteCutoffProbe()) await runByteCutoffProbe(jxlBytes, progressiveDetail);
 
                 // Only show the strip of small thumbnails if we actually got >1 pass for this photo
                 updateTimelineVisibility(passes.length);
@@ -1812,8 +1832,6 @@ syncGroupOrderDefault(); // run once at init (corrects html 'checked' for the in
 const presetEl = document.getElementById('preset-name');
 function syncSneyersDefaults() {
     if (!presetEl || presetEl.value !== 'sneyers') return;
-    const detailPasses = document.querySelector('input[name="prog-detail"][value="passes"]');
-    if (detailPasses) detailPasses.checked = true;
     // Prefer 6 steps for good demo of truly-progressive layers (DC=2 + groupOrder gives several early paints)
     const steps6 = document.querySelector('input[name="prog-passes"][value="6"]');
     if (steps6) steps6.checked = true;

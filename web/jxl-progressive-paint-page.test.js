@@ -35,10 +35,9 @@ test('progressive paint page streams encoder chunks into decoder instead of push
     expect(source).toContain('for await (const chunk of encoder.chunks())');
     expect(source).toContain('await streamIntoDecoder(decoder, jxlBytes, requestedPassCount);');
     expect(source).toContain('Streaming bytes…');
-    expect(source).toContain('await decoder.push(exactBuffer(stepChunk));');
+    expect(source).toContain('await decoder.push(exactBuffer(jxlBytes));');
     expect(source).toContain('await decoder.close();');
     expect(source).not.toContain('Pushing all bytes…');
-    expect(source).not.toContain('decoder.push(jxlBytes);');
     expect(source).toContain('rebuild jxl-wasm to enable true chunk streaming');
     expect(source).not.toContain('decoder.close();\n\n        const decStart = performance.now();');
 });
@@ -87,25 +86,27 @@ test('Sneyers preset + throttle controls present and wired', () => {
     expect(html).toContain('id="preset-name"');
     expect(html).toContain('value="sneyers" selected');
     expect(html).toContain('id="throttle-rate"');
-    expect(html).toContain('value="100" selected');
+    expect(html).toContain('value="0" selected>Unthrottled');
+    expect(html).not.toContain('value="100" selected');
     expect(html).toContain('Sneyers (truly-progressive)');
     expect(html).toContain('100 KB/s');
     // optional source preview canvas for fidelity visual comparison (original pre-encode vs passes)
     expect(html).toContain('id="source-preview"');
     expect(source).toContain('function paintSourcePreview');
-    // JS has helper functions and wires throttle into streaming path
+    // JS has helper functions and only chunk-feeds when explicit throttle/network simulation is selected
     expect(source).toContain('function readPresetName()');
     expect(source).toContain('function readThrottleKbPerSec()');
     expect(source).toContain('function feedThrottled(');
     expect(source).toContain("import { createSneyersPreset } from './jxl-progressive-best-preset.js'");
     expect(source).toContain('throttleKbPerSec > 0');
     expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec)');
+    expect(source).toContain('await streamIntoDecoder(decoder, jxlBytes, requestedPassCount)');
     // Sneyers preset forces previewFirst + Sneyers flags
     expect(source).toContain("presetName === 'sneyers' ? true");
     expect(source).toContain("presetName === 'sneyers' ? 2");
     expect(source).toContain("presetName === 'sneyers' ? 0");
-    // Sneyers preset forces progressiveDetail='passes' so gallery decode surfaces all progressive layers
-    expect(source).toContain("if (presetName === 'sneyers') progressiveDetail = 'passes'");
+    // Sneyers preset no longer forces all-pass decode; all passes remain an explicit Detail toggle.
+    expect(source).not.toContain("if (presetName === 'sneyers') progressiveDetail = 'passes'");
     // Sneyers preset uses buffering=0 (non-streamed encode). libjxl 0.11 encode.h says 2/3 are
     // streaming mode and "might not be progressively decodeable" — defeats progressive paint.
     expect(source).toContain("presetName === 'sneyers' ? { strategy: 0 } : undefined");
@@ -205,4 +206,27 @@ test('A4: per-pass dbgLog shows pass N · partial|final when stats off', () => {
     expect(source).toContain('partial');
     expect(source).toContain('final');
     expect(source).toContain('STATS_ENABLED');
+});
+
+test('progressive paint prewarms and reports browser decode tier', () => {
+    expect(source).toContain("import { createDecoder, createEncoder, detectTier, preloadJxlModule } from '@casabio/jxl-wasm';");
+    expect(source).toContain('preloadJxlModule();');
+    expect(source).toContain('crossOriginIsolated');
+    expect(source).toContain('detectTier()');
+});
+
+test('progressive paint local decode pushes bytes once and gates probes behind toggles', () => {
+    const streamIdx = source.indexOf('async function streamIntoDecoder(');
+    const streamEnd = source.indexOf('\nfunction renderProgressiveComparison', streamIdx);
+    const streamBody = source.slice(streamIdx, streamEnd);
+    expect(streamBody).toContain('await decoder.push(exactBuffer(jxlBytes));');
+    expect(streamBody).not.toContain('splitEncodedBytesIntoSteps');
+    expect(streamBody).not.toContain('for (let i = 0; i < streamSteps.length; i++)');
+
+    expect(html).toContain('id="run-one-shot-comparison"');
+    expect(html).toContain('id="run-byte-cutoff-probe"');
+    expect(source).toContain('function shouldRunOneShotComparison');
+    expect(source).toContain('function shouldRunByteCutoffProbe');
+    expect(source).toContain('if (shouldRunOneShotComparison())');
+    expect(source).toContain('if (shouldRunByteCutoffProbe()) await runByteCutoffProbe(jxlBytes, progressiveDetail)');
 });
