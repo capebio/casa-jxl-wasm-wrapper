@@ -63,6 +63,9 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(html).toContain('setting-impact-slow');
     expect(html).toContain('setting-impact-severe');
     expect(source).toContain('refreshSettingImpactHints');
+    expect(source).toContain('applySettingImpactClass(label, control');
+    expect(source).toContain('control.dataset.impact');
+    expect(html).toContain('--sp-impact-mild-text');
     expect(source).toContain('initSettingImpactHints');
     expect(source).toContain('SETTING_IMPACT_BASE_HINTS');
     expect(html).toContain('value="2" selected>2 · 1:32 then 1:8 preview');

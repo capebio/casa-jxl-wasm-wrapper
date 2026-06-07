@@ -40,7 +40,7 @@ For diagnostic **All passes**, never replace the chunk loop with a single `push(
 
 ### Setting impact hints (UI)
 
-`jxl-single-progressive.html` colors controls that slow runs or risk breaking progressive visibility:
+`jxl-single-progressive.html` colors control labels **and** the text inside selects/toggles that slow runs or risk breaking progressive visibility:
 
 | Class | Meaning |
 |---|---|
