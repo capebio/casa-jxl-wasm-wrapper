@@ -1,5 +1,5 @@
 import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
-import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
+import { createDecoder, createEncoder, detectTier } from '@casabio/jxl-wasm';
 import { createBrowserContext } from '@casabio/jxl-session';
 import { getCapabilities } from '@casabio/jxl-capabilities';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
@@ -507,13 +507,15 @@ initRaw().then(() => {
 async function logWasmBaseline() {
     try {
         const caps = await getCapabilities();
+        const workerTier = detectTier();
         const summary = {
             crossOriginIsolated: caps.crossOriginIsolated,
             sharedArrayBuffer: caps.sharedArrayBuffer,
             wasmThreads: caps.wasmThreads,
             selectedWasmBuild: caps.selectedWasmBuild,
+            workerTier,
         };
-        dbgLog('WASM baseline', JSON.stringify(summary), caps.selectedWasmBuild?.endsWith('-mt') ? 'success' : 'warn');
+        dbgLog('WASM baseline', JSON.stringify(summary), workerTier?.includes('-mt') ? 'success' : 'warn');
         console.log('[Single progressive] WASM baseline', summary);
     } catch (error) {
         dbgLog('WASM baseline probe failed', error?.message ?? String(error), 'warn');
