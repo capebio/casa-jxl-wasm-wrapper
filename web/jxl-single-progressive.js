@@ -1025,7 +1025,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
 
     const decodeTask = (async () => {
         try {
-            await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState).catch((e) => {
+            await feedThrottled(session, jxlBytes, throttleKbPerSec, feedState, { copyChunks: true }).catch((e) => {
                 if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
                     return; // expected: cutoff/timeout caused cancel mid-feed; subsequent pushes after cancel would throw, we swallow
                 }
@@ -1203,9 +1203,17 @@ function thinRetainedPassPixels(passes) {
     }
 }
 
-async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
+function pushDecodeChunk(decoder, chunk, copyChunk) {
+    if (copyChunk) {
+        const view = exactView(chunk);
+        return decoder.push(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+    }
+    return decoder.push(exactBuffer(chunk));
+}
+
+async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState, { copyChunks = false } = {}) {
     if (throttleKbPerSec === 0) {
-        await decoder.push(exactBuffer(jxlBytes));
+        await pushDecodeChunk(decoder, jxlBytes, copyChunks);
         if (feedState) feedState.bytesFed = jxlBytes.byteLength;
         await decoder.close();
         return;
@@ -1223,7 +1231,7 @@ async function feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState) {
         }
         const start = offset;
         const end = Math.min(jxlBytes.byteLength, offset + chunkBytes);
-        await decoder.push(exactBuffer(jxlBytes.subarray(offset, end)));
+        await pushDecodeChunk(decoder, jxlBytes.subarray(offset, end), copyChunks);
         offset = end;
         if (feedState) feedState.bytesFed = offset;
         const delayMs = ((end - start) / 1024) * (1000 / throttleKbPerSec);

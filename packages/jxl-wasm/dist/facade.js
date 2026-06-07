@@ -1,3 +1,4 @@
+const DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS = 1;
 export const DOWNSAMPLE_THUMBNAILS = 2;
 export const DOWNSAMPLE_GRID = 4;
 /**
@@ -27,7 +28,11 @@ function normalizeDecoderOptions(options) {
 function resolveDecoderProgressiveDetail(options) {
     if (options.progressionTarget === "header")
         return 0;
-    if (!(options.progressionTarget !== "final" || options.emitEveryPass))
+    // Disable progressive only when the caller did not request a detail level and wants
+    // a plain final decode (progressionTarget=final, emitEveryPass=false). An explicit
+    // progressiveDetail such as lastPasses must still subscribe to libjxl progressive
+    // events even when emitEveryPass is false (Single Progressive default).
+    if (options.progressiveDetail === undefined && !(options.progressionTarget !== "final" || options.emitEveryPass))
         return 0;
     const detail = options.progressiveDetail
         ?? (options.emitEveryPass || options.progressionTarget === "pass" ? "passes" : "dc");
@@ -198,7 +203,7 @@ export function serializeExtraChannelsForWasm(channels) {
         const nameLen = Math.min(nameBytes.length, 31);
         dv.setUint8(off + 40, nameLen);
         for (let k = 0; k < nameLen; k++)
-            dv.setUint8(off + 41 + k, nameBytes[k]);
+            dv.setUint8(off + 41 + k, nameBytes[k] ?? 0);
         // remainder already zeroed (pad)
         off += EC_BYTES;
     }
@@ -670,7 +675,10 @@ class LibjxlDecoder {
     async *eventsProgressive(module) {
         const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
         const progressiveDetail = resolveDecoderProgressiveDetail(this.options);
-        const dec = module._jxl_wasm_dec_create(fmtIndex, progressiveDetail);
+        const decFlags = this.options.suppressDuplicateProgress ? DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS : 0;
+        const dec = module._jxl_wasm_dec_create_x
+            ? module._jxl_wasm_dec_create_x(fmtIndex, progressiveDetail, decFlags)
+            : module._jxl_wasm_dec_create(fmtIndex, progressiveDetail);
         if (dec === 0)
             throw new Error("JXL progressive decoder creation failed");
         // Cache bridge fn refs once — avoids repeated property lookup on module per iteration.
@@ -1144,17 +1152,29 @@ class LibjxlEncoder {
                     this._advValuesPtr = advValuesPtr;
                 }
                 else {
-                    advCount = 0; // allocation failed
+                    // Partial allocation: free whichever succeeded to avoid WASM heap leak.
+                    if (advIdsPtr)
+                        module._free(advIdsPtr);
+                    if (advValuesPtr)
+                        module._free(advValuesPtr);
+                    advCount = 0;
                 }
             }
-            const createFn = (advCount > 0 && module._jxl_wasm_enc_create_image_adv)
-                ? module._jxl_wasm_enc_create_image_adv
-                : module._jxl_wasm_enc_create_image;
-            if (advCount > 0 && createFn === module._jxl_wasm_enc_create_image_adv) {
-                this.wasmEncState = createFn(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, advIdsPtr, advValuesPtr, advCount);
+            const o = this.options;
+            const resampling = o.resampling ?? 1;
+            const needsY = caps.streamingInputY && (o.epf != null || o.gaborish != null || o.dots != null || o.colorTransform != null);
+            const needsX = !needsY && caps.streamingInputX && (o.modular != null || o.brotliEffort != null || o.decodingSpeed != null || o.photonNoiseIso != null);
+            if (needsY) {
+                this.wasmEncState = module._jxl_wasm_enc_create_image_y(o.width, o.height, distance, o.effort, fmtIndex, o.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, o.modular ?? -1, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling, o.epf ?? -1, o.gaborish ?? -1, o.dots ?? -1, 0, o.colorTransform ?? -1, 0, 0, 0, 0, 0, 0, 0, -1);
+            }
+            else if (needsX) {
+                this.wasmEncState = module._jxl_wasm_enc_create_image_x(o.width, o.height, distance, o.effort, fmtIndex, o.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, o.modular ?? -1, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling, 0, 0, 0, 0, 0, -1);
+            }
+            else if (advCount > 0 && module._jxl_wasm_enc_create_image_adv) {
+                this.wasmEncState = module._jxl_wasm_enc_create_image_adv(o.width, o.height, distance, o.effort, fmtIndex, o.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, advIdsPtr, advValuesPtr, advCount);
             }
             else {
-                this.wasmEncState = module._jxl_wasm_enc_create_image(this.options.width, this.options.height, distance, this.options.effort, fmtIndex, this.options.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, 0);
+                this.wasmEncState = module._jxl_wasm_enc_create_image(o.width, o.height, distance, o.effort, fmtIndex, o.hasAlpha ? 1 : 0, progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder, resampling);
             }
             if (this.wasmEncState === 0)
                 throw new Error("JXL streaming encoder: pixel buffer allocation failed");
@@ -1471,6 +1491,8 @@ function getCapabilities(module) {
             typeof module._jxl_wasm_enc_finish === "function" &&
             typeof module._jxl_wasm_enc_take_chunk === "function" &&
             typeof module._jxl_wasm_enc_free === "function",
+        streamingInputX: typeof module._jxl_wasm_enc_create_image_x === "function",
+        streamingInputY: typeof module._jxl_wasm_enc_create_image_y === "function",
         sidecars: typeof module._jxl_wasm_encode_rgba8_with_sidecars === "function" &&
             typeof module._jxl_wasm_buffer_next === "function",
         jpegTranscode: typeof module._jxl_wasm_transcode_jpeg_to_jxl === "function",

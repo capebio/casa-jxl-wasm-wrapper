@@ -9,6 +9,8 @@ test('decoder facade exposes finer progressive detail than DC-only', () => {
   expect(facade).toContain('export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";');
   expect(facade).toContain('progressiveDetail?: ProgressiveDetail;');
   expect(facade).toContain('resolveDecoderProgressiveDetail');
+  // Explicit progressiveDetail must enable libjxl progressive even when emitEveryPass is false.
+  expect(facade).toContain('options.progressiveDetail === undefined');
   expect(bridge).toContain('kLastPasses');
   expect(bridge).toContain('kPasses');
   expect(bridge).not.toContain('JxlDecoderSetProgressiveDetail(dec, kDC)');
