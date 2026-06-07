@@ -42,6 +42,8 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(source).toContain('runBtn');
     expect(source).toContain('rerunLoadedSource');
     expect(source).toContain('await feedThrottled(decoder, jxlBytes, throttleKbPerSec, feedState)');
+    expect(source).toContain('pushDecodeChunk');
+    expect(source).toContain("feedThrottled(session, jxlBytes, throttleKbPerSec, feedState, { copyChunks: true })");
     // Default targets display-scale tuning while keeping larger/source-size runs available.
     expect(html).toContain('value="display" selected');
     expect(html).toContain('Display · 1920 px');

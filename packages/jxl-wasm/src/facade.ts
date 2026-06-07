@@ -394,7 +394,11 @@ function normalizeDecoderOptions(options: DecoderOptions): DecoderOptions {
 
 function resolveDecoderProgressiveDetail(options: DecoderOptions): 0 | 1 | 2 | 3 | 4 {
   if (options.progressionTarget === "header") return 0;
-  if (!(options.progressionTarget !== "final" || options.emitEveryPass)) return 0;
+  // Disable progressive only when the caller did not request a detail level and wants
+  // a plain final decode (progressionTarget=final, emitEveryPass=false). An explicit
+  // progressiveDetail such as lastPasses must still subscribe to libjxl progressive
+  // events even when emitEveryPass is false (Single Progressive default).
+  if (options.progressiveDetail === undefined && !(options.progressionTarget !== "final" || options.emitEveryPass)) return 0;
   const detail = options.progressiveDetail
     ?? (options.emitEveryPass || options.progressionTarget === "pass" ? "passes" : "dc");
   switch (detail) {
