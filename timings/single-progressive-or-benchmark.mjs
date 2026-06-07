@@ -9,6 +9,24 @@ const BROWSER_PATH = process.env.BROWSER_PATH
   ?? String.raw`C:\Users\User\AppData\Local\ms-playwright\chromium_headless_shell-1217\chrome-headless-shell-win64\chrome-headless-shell.exe`;
 const BASE = process.env.BENCH_BASE ?? 'http://localhost:9000';
 const PAGE = `${BASE}/web/jxl-single-progressive.html?borders=0`;
+const USE_CHROME = process.env.BENCH_CHROME === '1';
+const BENCH_MODES = (process.env.BENCH_MODES ?? 'lastPasses,passes').split(',').map((s) => s.trim()).filter(Boolean);
+
+async function launchBrowser() {
+  if (USE_CHROME) {
+    console.log(`Launching Chrome channel (headless=${process.env.BENCH_HEADFUL !== '1'})`);
+    return chromium.launch({
+      channel: 'chrome',
+      headless: process.env.BENCH_HEADFUL !== '1',
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    });
+  }
+  return chromium.launch({
+    executablePath: BROWSER_PATH,
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+}
 
 async function readMetrics(page) {
   return page.evaluate(() => {
@@ -61,11 +79,7 @@ async function runOnce(page, { progressiveDetail, useWorker = true }) {
 }
 
 async function main() {
-  const browser = await chromium.launch({
-    executablePath: BROWSER_PATH,
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  const browser = await launchBrowser();
 
   try {
     const page = await browser.newPage();
@@ -85,19 +99,26 @@ async function main() {
       { timeout: 180_000 },
     );
 
-    const wasmBaseline = await page.evaluate(() => {
-      const logs = [];
+    const wasmBaseline = await page.evaluate(async () => {
+      const { getCapabilities } = await import('@casabio/jxl-capabilities');
+      const caps = await getCapabilities();
       return {
-        crossOriginIsolated: window.crossOriginIsolated,
-        sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
+        crossOriginIsolated: caps.crossOriginIsolated,
+        sharedArrayBuffer: caps.sharedArrayBuffer,
+        wasmThreads: caps.wasmThreads,
+        wasmSimd: caps.wasmSimd,
+        wasmRelaxedSimd: caps.wasmRelaxedSimd,
+        selectedWasmBuild: caps.selectedWasmBuild,
       };
     });
-    console.log('WASM baseline (page):', wasmBaseline);
+    console.log('WASM baseline:', wasmBaseline);
 
-    const modes = [
-      { progressiveDetail: 'lastPasses', useWorker: true, label: 'lastPasses/worker' },
-      { progressiveDetail: 'passes', useWorker: true, label: 'passes/worker (diagnostic)' },
-    ];
+    const modeDefs = {
+      lastPasses: { progressiveDetail: 'lastPasses', useWorker: true, label: 'lastPasses/worker' },
+      passes: { progressiveDetail: 'passes', useWorker: true, label: 'passes/worker (diagnostic)' },
+    };
+    const modes = BENCH_MODES.map((key) => modeDefs[key]).filter(Boolean);
+    if (!modes.length) throw new Error(`No valid BENCH_MODES: ${BENCH_MODES.join(',')}`);
     const results = [];
     for (const mode of modes) {
       console.log(`\n=== Running ${mode.label} ===`);
