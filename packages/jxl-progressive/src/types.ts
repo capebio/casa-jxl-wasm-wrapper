@@ -260,6 +260,156 @@ export interface ChannelDescriptor {
   meta?: Record<string, unknown>;
 }
 
+// --- Phase 8: Bursts, Capture Geometries & 3D Twins (ST1, BD2, PG2, PG5, ST8, BD5, RC2, BD4, BD6, BD7, PG4) ---
+// Schema lives primarily here per handoff (types.ts) + progressive-manifest.ts for ProgressiveManifest reserves.
+// FrameSet generalizes single progressive JXLs into coordinate-transformable multi-frame sets.
+// Heavy CV (SfM, SIFT, MVS) remains in pyramid-ingest. This package owns only progressive schema + decode interfaces.
+
+// Relation between coordinated capture members (bursts use I/P delta coding; transects are pushbroom).
+export type Relation = "Burst" | "Timelapse" | "Panorama" | "Transect" | "Photogrammetry";
+
+// Role flag for delta relations (BD-trap): deltas predict only from one designated base keyframe. No delta chains.
+export type FrameRole = "key" | "delta";
+
+export interface CameraPose {
+  lat: number;
+  lon: number;
+  alt: number;
+  yaw: number;
+  pitch: number;
+  roll: number;
+  timestamp: number; // epoch ms
+}
+
+export interface FrameSetMember {
+  id: string;
+  jxlUrl: string;
+  pose?: CameraPose;
+  role?: FrameRole;
+  /** baseId designates the key member for residual reconstruction (delta only predicts from this base). */
+  baseId?: string;
+  /** DC tier sha256 override. When identical across burst members, enables single fetch + shared render (BD4/BD6 via Phase 5 cache). */
+  dcSha256?: string;
+  /** Reserved: pinhole intrinsics (PG2). */
+  intrinsics?: {
+    fx: number;
+    fy: number;
+    cx: number;
+    cy: number;
+    skew?: number;
+    dist?: number[]; // k1,k2,p1,p2,k3...
+  };
+  /** Reserved: extrinsics / pose matrix components (PG2). */
+  extrinsics?: {
+    r: number[]; // quat [w,x,y,z] or 9-elem rotmat row-major
+    t: [number, number, number];
+  };
+  /** Reserved: depth layer descriptor for multi-layer / transect (ST8, PG4). */
+  depthLayer?: {
+    url?: string;
+    sha256?: string;
+    units?: "meters" | "normalized" | string;
+    scale?: number;
+    offset?: number;
+  };
+  /** Reserved: content-addressed SHA256 for scale-invariant feature sidecar (SIFT etc, PG5). */
+  featureSidecar?: string;
+}
+
+export interface FrameSet {
+  id: string;
+  relation: Relation;
+  members: FrameSetMember[];
+  /** Shared DC tier sha enables burst thumbnail dedupe at manifest.jxl level for lowest tier. */
+  sharedDcSha256?: string;
+}
+
+// --- Keyframe + Residual Decode Semantics (BD5, RC2) ---
+// BurstGroup controller reuses Phase 5 unified cache for base keyframe buffer (1/N cost for burst).
+// compose is the delta reconstruction: residual (decoded delta JXL) + base (keyframe pixels) -> final.
+// Impl of cache lookup + scheduling is outside this module (scheduler/decode-handler boundary).
+
+export interface BurstGroup {
+  readonly baseId: string;
+  readonly deltaIds: readonly string[];
+  /** Fetch decoded base (ArrayBuffer of pixels) via cache key (manifest sha or jxlUrl of the key member). */
+  getBaseBuffer(): Promise<ArrayBuffer | null>;
+  /** Reconstruct one delta frame. */
+  compose(base: ArrayBuffer, residual: ArrayBuffer): ArrayBuffer;
+}
+
+export type ComposeBurstFrame = (base: ArrayBuffer, residual: ArrayBuffer) => ArrayBuffer;
+
+// Default compose: simple per-byte add with clamp (for intensity residual or canvas delta draw prep).
+// Real pipelines may do YCbCr add, optical flow warp, or canvas putImageData diff.
+export function defaultComposeBurstFrame(base: ArrayBuffer, residual: ArrayBuffer): ArrayBuffer {
+  const b = new Uint8Array(base);
+  const r = new Uint8Array(residual);
+  const out = new Uint8Array(Math.max(b.length, r.length));
+  const len = Math.min(b.length, r.length);
+  for (let i = 0; i < len; i++) {
+    const v = b[i]! + r[i]!;
+    out[i] = v > 255 ? 255 : (v < 0 ? 0 : v);
+  }
+  if (b.length > len) out.set(b.subarray(len), len);
+  else if (r.length > len) out.set(r.subarray(len), len);
+  return out.buffer;
+}
+
+// --- Laplacian Sharpness Auto-Ranking (BD7) ---
+// Variance-of-Laplacian proxy on luma for auto cover selection (argmax for burst card keyframe).
+// Placed here (shared types) rather than saliency-policy.ts to obey mandatory commit scope (only edit manifest+types).
+// See Deferred.md for rationale. Consumers / future saliency can call this on DC luma.
+
+export function getSharpnessRank(lumaArray: Uint8Array, width: number, height: number): number {
+  if (!lumaArray || width < 3 || height < 3) return 0;
+  let sum = 0;
+  let sumSq = 0;
+  let count = 0;
+  // 4-neighbor Laplace (fast proxy, no extra allocs). Matches "variance-of-Laplacian convolution".
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      const lap = (lumaArray[i]! << 2) - lumaArray[i - 1]! - lumaArray[i + 1]! - lumaArray[i - width]! - lumaArray[i + width]!;
+      sum += lap;
+      sumSq += lap * lap;
+      count++;
+    }
+  }
+  if (count === 0) return 0;
+  const mean = sum / count;
+  return (sumSq / count) - (mean * mean);
+}
+
+/** argmax(sharpness) helper: returns index of sharpest member (for appointing burst cover). */
+export function argmaxSharpness<T extends { luma?: Uint8Array; width?: number; height?: number; sharpness?: number }>(
+  candidates: readonly T[],
+): number {
+  if (!candidates || candidates.length === 0) return -1;
+  let bestIdx = 0;
+  let best = -Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i]!;
+    let s = c.sharpness;
+    if (s === undefined && c.luma && c.width && c.height) s = getSharpnessRank(c.luma, c.width, c.height);
+    if ((s ?? -Infinity) > best) {
+      best = s ?? -Infinity;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+// --- Depth, Normal & Confidence Channel Semantics (PG4) ---
+// Extra channels load concurrently with RGB in progressive asset stream.
+export type AssetChannel = "rgb" | "depth" | "normal" | "confidence";
+
+export interface ChannelDescriptor {
+  channel: AssetChannel;
+  /** Optional per-channel metadata (scale, bias, confidence threshold, normal encoding). */
+  meta?: Record<string, unknown>;
+}
+
 // --- Streaming AI helpers (surface only; full pipeline integration deferred per layer rules) ---
 
 /**

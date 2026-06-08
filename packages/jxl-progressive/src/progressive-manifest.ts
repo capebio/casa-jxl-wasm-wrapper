@@ -2,6 +2,19 @@
 
 export type TierName = "dc" | "preview" | "full";
 
+// --- Phase 8 type imports (schema re-exports for FrameSet + capture geometry) ---
+// Data model defined in types.ts per handoff spec; re-exported here so progressive-manifest remains the schema surface.
+import type {
+  CameraPose,
+  Relation,
+  FrameSetMember,
+  FrameSet,
+  AssetChannel,
+  ChannelDescriptor,
+} from "./types.js";
+
+export type { CameraPose, Relation, FrameSetMember, FrameSet, AssetChannel, ChannelDescriptor };
+
 export interface ManifestTier {
   name: TierName;
   byteStart: number;
@@ -35,6 +48,20 @@ export interface ProgressiveManifest {
     method: string;
   };
   tiers: ManifestTier[];
+
+  // Phase 8: reserved ingest CV fields + channel semantics (PG2/PG4/PG5/ST8).
+  // Populated for photogrammetry/transect assets; FrameSet groups multiple such manifests.
+  // These are optional and forward-compat; validateManifest passes through unknown optionals.
+  capture?: {
+    pose?: CameraPose;
+    intrinsics?: FrameSetMember["intrinsics"];
+    extrinsics?: FrameSetMember["extrinsics"];
+    depthLayer?: FrameSetMember["depthLayer"];
+    featureSidecar?: FrameSetMember["featureSidecar"];
+  };
+  /** Concurrent loadable channels alongside rgb (PG4). */
+  channels?: AssetChannel[];
+  channelDescriptors?: ChannelDescriptor[];
 }
 
 export class ManifestValidationError extends Error {
