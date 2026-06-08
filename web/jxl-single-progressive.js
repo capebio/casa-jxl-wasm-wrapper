@@ -2196,7 +2196,7 @@ async function exportMeasurementsTOON() {
     }
 
     out += `\n---\n`;
-    out += `runs[${rowCount}]{source|target|size|qual|pdc|pac|qpac|ds|go|encMs|throttle|totalKB|uiDelay|pass|t_ms|isFinal|paintMs|gapMinusPaintMs|delta|oneshotMs}:\n`;
+    out += `runs[${rowCount}]{source|target|size|qual|pdc|pac|qpac|ds|go|det|encMs|encRatio|throttle|totalKB|uiDelay|pass|t_ms|isFinal|paintMs|gapMinusPaintMs|delta|oneshotMs}:\n`;
 
     let lastSource = '';
     let lastTarget = '';
@@ -2207,7 +2207,9 @@ async function exportMeasurementsTOON() {
     let lastQpac = '';
     let lastDs = '';
     let lastGo = '';
+    let lastDet = '';
     let lastEncMs = '';
+    let lastEncRatio = '';
     let lastThrottle = '';
     let lastTotalKB = '';
     let lastOneshot = '';
@@ -2224,7 +2226,10 @@ async function exportMeasurementsTOON() {
         const qpac = m.qProgressiveAc ?? '';
         const ds = m.decodingSpeed ?? '';
         const go = mapVal(m.groupOrderLabel ?? m.groupOrder ?? '');
+        const det = m.progressiveDetail ?? '';
         const encMs = m.encode_total_ms != null ? m.encode_total_ms.toFixed(1) : '';
+        const encRatio = (m.encode_total_ms != null && m.oneShot_ms != null && m.oneShot_ms > 0)
+            ? (m.encode_total_ms / m.oneShot_ms).toFixed(2) : '';
         const throttle = m.throttleKbPerSec || 0;
         const totalKB = m.actualKb != null ? m.actualKb.toFixed(1) : '';
         const oneshotMs = m.oneShot_ms != null ? m.oneShot_ms.toFixed(1) : '';
@@ -2240,17 +2245,19 @@ async function exportMeasurementsTOON() {
             const outQpac = String(qpac) === String(lastQpac) ? '~' : qpac;
             const outDs = String(ds) === String(lastDs) ? '~' : ds;
             const outGo = String(go) === String(lastGo) ? '~' : go;
+            const outDet = det === lastDet ? '~' : det;
             const outEnc = String(encMs) === String(lastEncMs) ? '~' : encMs;
+            const outEncRatio = String(encRatio) === String(lastEncRatio) ? '~' : encRatio;
             const outThrot = String(throttle) === String(lastThrottle) ? '~' : throttle;
             const outTotKB = String(totalKB) === String(lastTotalKB) ? '~' : totalKB;
             const outUiDelay = String(uiDelay) === String(lastUiDelay) ? '~' : uiDelay;
             const outOneShot = String(oneshotMs) === String(lastOneshot) ? '~' : oneshotMs;
 
-            out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outEnc} | ${outThrot} | ${outTotKB} | ${outUiDelay} | - | - | - | - | - | - | ${outOneShot}\n`;
+            out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outDet} | ${outEnc} | ${outEncRatio} | ${outThrot} | ${outTotKB} | ${outUiDelay} | - | - | - | - | - | - | ${outOneShot}\n`;
 
             lastSource = source; lastTarget = target; lastSize = sizePreset; lastQual = qual;
-            lastPdc = pdc; lastPac = pac; lastQpac = qpac; lastDs = ds; lastGo = go;
-            lastEncMs = encMs; lastThrottle = throttle; lastTotalKB = totalKB; lastOneshot = oneshotMs; lastUiDelay = uiDelay;
+            lastPdc = pdc; lastPac = pac; lastQpac = qpac; lastDs = ds; lastGo = go; lastDet = det;
+            lastEncMs = encMs; lastEncRatio = encRatio; lastThrottle = throttle; lastTotalKB = totalKB; lastOneshot = oneshotMs; lastUiDelay = uiDelay;
             lastDelta = '';
         } else {
             for (const p of m.perPass) {
@@ -2271,18 +2278,20 @@ async function exportMeasurementsTOON() {
                 const outQpac = String(qpac) === String(lastQpac) ? '~' : qpac;
                 const outDs = String(ds) === String(lastDs) ? '~' : ds;
                 const outGo = String(go) === String(lastGo) ? '~' : go;
+                const outDet = det === lastDet ? '~' : det;
                 const outEnc = String(encMs) === String(lastEncMs) ? '~' : encMs;
+                const outEncRatio = String(encRatio) === String(lastEncRatio) ? '~' : encRatio;
                 const outThrot = String(throttle) === String(lastThrottle) ? '~' : throttle;
                 const outTotKB = String(totalKB) === String(lastTotalKB) ? '~' : totalKB;
                 const outUiDelay = String(uiDelay) === String(lastUiDelay) ? '~' : uiDelay;
                 const outOneShot = String(oneshotMs) === String(lastOneshot) ? '~' : oneshotMs;
                 const outDelta = delta === lastDelta && lastDelta !== '' ? '~' : delta;
 
-                out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outEnc} | ${outThrot} | ${outTotKB} | ${outUiDelay} | ${pass} | ${t_ms} | ${isFinal} | ${paintMs} | ${gapMinusPaintMs} | ${outDelta} | ${outOneShot}\n`;
+                out += `  ${outSource} | ${outTarget} | ${outSize} | ${outQual} | ${outPdc} | ${outPac} | ${outQpac} | ${outDs} | ${outGo} | ${outDet} | ${outEnc} | ${outEncRatio} | ${outThrot} | ${outTotKB} | ${outUiDelay} | ${pass} | ${t_ms} | ${isFinal} | ${paintMs} | ${gapMinusPaintMs} | ${outDelta} | ${outOneShot}\n`;
 
                 lastSource = source; lastTarget = target; lastSize = sizePreset; lastQual = qual;
-                lastPdc = pdc; lastPac = pac; lastQpac = qpac; lastDs = ds; lastGo = go;
-                lastEncMs = encMs; lastThrottle = throttle; lastTotalKB = totalKB; lastOneshot = oneshotMs; lastUiDelay = uiDelay;
+                lastPdc = pdc; lastPac = pac; lastQpac = qpac; lastDs = ds; lastGo = go; lastDet = det;
+                lastEncMs = encMs; lastEncRatio = encRatio; lastThrottle = throttle; lastTotalKB = totalKB; lastOneshot = oneshotMs; lastUiDelay = uiDelay;
                 lastDelta = delta;
             }
         }
