@@ -8,6 +8,7 @@
 
 import { getContext } from './jxl-browser-context.js';
 import { createTauriPyramidClient } from './tauri-pyramid-client.js';
+import { createTauriParityLightbox } from './tauri-parity-lightbox.js';
 
 const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
 window.IS_TAURI = IS_TAURI;
@@ -22,6 +23,9 @@ const tauriPyramidClient = IS_TAURI
         devicePixelRatio: window.devicePixelRatio || 1,
     })
     : null;
+
+/** M2/M3: FilterEngine + 16-bit WebGL HDR on Tauri lightbox (pyramid + resident rgb16). */
+let tauriParityLb = null;
 
 const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
@@ -97,6 +101,32 @@ const lbSourceLabelEl = document.getElementById('lb-source-label');
 const lbStraighten = document.getElementById('lb-straighten');
 const lbStraightenVal = document.getElementById('lb-straighten-val');
 const lbStraightenAuto = document.getElementById('lb-straighten-auto');
+
+if (IS_TAURI) {
+    const m2Panel = document.querySelector('[data-tauri-m2-panel]');
+    const exportRoiBtn = document.querySelector('[data-export-roi]');
+    if (m2Panel) m2Panel.hidden = false;
+    if (exportRoiBtn) exportRoiBtn.hidden = false;
+    tauriParityLb = createTauriParityLightbox({
+        rootEl: lightbox,
+        canvas: lightboxCanvas,
+        histCanvas: document.getElementById('lb-hist-canvas'),
+        invoke,
+        pyramidClient: tauriPyramidClient,
+        getActiveCard: () => (lightboxIndex >= 0 ? cards[lightboxIndex] : null),
+        onRepaintRequest: () => {
+            if (lightboxIndex >= 0) drawLightboxForCard(cards[lightboxIndex]);
+        },
+        getViewportRegion: (imgW, imgH) => {
+            const vp = lbViewport.getBoundingClientRect();
+            const x = Math.max(0, Math.floor(-lbPanX / lbZoom));
+            const y = Math.max(0, Math.floor(-lbPanY / lbZoom));
+            const w = Math.min(imgW, Math.max(1, Math.floor(vp.width / lbZoom)));
+            const h = Math.min(imgH, Math.max(1, Math.floor(vp.height / lbZoom)));
+            return { x, y, w, h };
+        },
+    });
+}
 
 initFilmstrip();
 
@@ -2339,6 +2369,11 @@ function drawLightboxForCard(card) {
     if (card && card._crop && card._crop.angle) {
         applyStraightenToLightboxCanvas(card);
     }
+    if (tauriParityLb && mode === 'raw' && lightboxCanvas.width > 1 && lightboxCanvas.height > 1) {
+        const ctx = lightboxCanvas.getContext('2d');
+        const img = ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height);
+        tauriParityLb.onBaseFramePainted(card, img.data, lightboxCanvas.width, lightboxCanvas.height);
+    }
 }
 
 function updateToggleButtonState(card) {
@@ -2638,6 +2673,8 @@ function openLightbox(card) {
     lightboxIndex = cards.indexOf(card);
     lbRotation = card._file?.name ? (userRotations[card._file.name] ?? 0) : 0;
     card._sourceMode = 'raw';
+    tauriParityLb?.clearCache();
+    void tauriParityLb?.sync16ToggleVisibility(card);
     resetLookSliders();
     // Auto-load sidecar if present
     if (typeof loadSidecar === 'function' && (card._tauriPath || card._file?.name)) {
@@ -2731,6 +2768,8 @@ function nextInLightbox(dir) {
     lightboxIndex = (lightboxIndex + dir + cards.length) % cards.length;
     const card = cards[lightboxIndex];
     if (card) card._sourceMode = 'raw';
+    tauriParityLb?.clearCache();
+    void tauriParityLb?.sync16ToggleVisibility(card);
     liveInFlight = false;
     livePendingLook = null;
     resetLookSliders();
@@ -4956,17 +4995,22 @@ let tauriLookChannel = null;
 function paintTauriLookFrame(card, buf) {
     const { w, h, rgb } = parseRgbResponse(buf);
     const dimsChanged = (lightboxCanvas.width !== w || lightboxCanvas.height !== h);
-    if (dimsChanged) {
-        lightboxCanvas.width = w;
-        lightboxCanvas.height = h;
-        if (!card._lightbox) card._lightbox = {};
-        card._lightbox.w = w;
-        card._lightbox.h = h;
-    }
-    const ctx = lightboxCanvas.getContext('2d');
-    ctx.putImageData(new ImageData(rgbToRgbaArr(rgb), w, h), 0, 0);
-    if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-        setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+    if (!card._lightbox) card._lightbox = {};
+    card._lightbox.w = w;
+    card._lightbox.h = h;
+    const rgba = rgbToRgbaArr(rgb);
+    if (tauriParityLb) {
+        tauriParityLb.onBaseFramePainted(card, new Uint8ClampedArray(rgba), w, h);
+    } else {
+        if (dimsChanged) {
+            lightboxCanvas.width = w;
+            lightboxCanvas.height = h;
+        }
+        const ctx = lightboxCanvas.getContext('2d');
+        ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        }
     }
     setPaintedSourceBadge('raw');
     if (dimsChanged) syncZoomToDisplayLong();

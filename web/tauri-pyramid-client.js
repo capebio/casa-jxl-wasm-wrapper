@@ -56,8 +56,12 @@ export function createTauriPyramidClient({ invoke, devicePixelRatio = 1 }) {
     return bytes;
   }
 
-  async function decodeLevel(id, contenthash) {
-    const buf = await invoke('decode_jxl_level_for_id', { id, contenthash });
+  async function decodeLevel(id, contenthash, format = 'rgba8') {
+    const buf = await invoke('decode_jxl_level_for_id', {
+      id,
+      contenthash,
+      format: format === 'rgba16' ? 'rgba16' : undefined,
+    });
     return parseRgbResponse(buf);
   }
 

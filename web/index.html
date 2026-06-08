@@ -319,6 +319,7 @@
             <button class="lb-btn lb-crop-cancel" id="lb-crop-cancel" hidden title="Discard (Esc)">Cancel</button>
             <span class="lb-sep"></span>
             <button class="lb-download-btn" aria-label="Download full-res JPEG">⬇ JPEG</button>
+            <button class="lb-btn" type="button" data-export-roi hidden title="16-bit HDR: exports .jxl + preview .png">Export crop</button>
             <span class="lb-sep"></span>
             <!-- Straighten control (Phase 2) - sets corrective angle + triggers largest-rect crop -->
             <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;margin-left:4px">
@@ -386,6 +387,33 @@
                       <div style="margin-top:8px;font-size:11px;color:#666">
                         Ctrl+Shift+S save &nbsp;·&nbsp; Ctrl+Shift+L open panel &nbsp;·&nbsp; Ctrl+Shift+1–0 quick-load
                       </div>
+                    </div>
+                </div>
+                <div id="lb-panel-m2" class="lb-panel" data-tauri-m2-panel hidden>
+                    <button class="lb-panel-btn" data-panel="m2" title="M2 Adjustments">
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
+                            <circle cx="5" cy="9" r="2"/><circle cx="13" cy="5" r="2"/><circle cx="13" cy="13" r="2"/>
+                            <path d="M7 9h4M11 6l2 2M11 12l2-2" stroke="currentColor" stroke-width="1.2" fill="none"/>
+                        </svg>
+                    </button>
+                    <div class="lb-panel-body" hidden>
+                      <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">M2 Preset</div>
+                      <select data-m2-preset style="width:100%;margin-bottom:8px;background:#1a1a1a;color:#eee;border:1px solid #444;padding:4px">
+                        <option value="NONE">None</option>
+                      </select>
+                      <label class="toggle-16" style="display:block;margin-bottom:8px;font-size:11px">
+                        <input type="checkbox" data-toggle-16bit /> 16-bit HDR (RAW)
+                      </label>
+                      <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin:8px 0">Adjustments</div>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Brightness <input type="range" data-m2="brightness" min="-100" max="100" value="0" style="width:100%"/></label>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Contrast <input type="range" data-m2="contrast" min="-100" max="100" value="0" style="width:100%"/></label>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Saturation <input type="range" data-m2="saturation" min="-100" max="100" value="0" style="width:100%"/></label>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Shadows <input type="range" data-m2="shadows" min="0" max="100" value="0" style="width:100%"/></label>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Highlights <input type="range" data-m2="highlights" min="-100" max="0" value="0" style="width:100%"/></label>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Clarity <input type="range" data-m2="clarity" min="0" max="100" value="0" style="width:100%"/></label>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Dehaze <input type="range" data-m2="dehaze" min="0" max="100" value="0" style="width:100%"/></label>
+                      <label class="lr" style="display:block;font-size:11px;margin-bottom:4px">Sharpness <input type="range" data-m2="sharpness" min="0" max="100" value="0" style="width:100%"/></label>
+                      <button type="button" data-m2-reset class="lb-chip" style="margin-top:8px;font-size:11px">Reset M2</button>
                     </div>
                 </div>
                 <div id="lb-panel-f" class="lb-panel">

@@ -4,6 +4,7 @@
  * M2 matrix/tone transforms and optional M3 float-texture rendering.
  */
 import { APPROVED_LIGHTBOX_PRESETS } from '../packages/jxl-pyramid/dist/constants.js';
+import { chooseLevelForTarget } from '../packages/jxl-pyramid/dist/choose-level.js';
 import {
   applyColorMatrixInPlace,
   applyToneMapInPlace,
@@ -12,6 +13,7 @@ import {
   computeHistogram,
 } from './lightbox/filter-engine.js';
 import {
+  adjustedRgba16ForExport,
   canUseWebGL16,
   renderRgba16AdjustedToCanvas,
 } from './lightbox/webgl-pipeline.js';
@@ -27,6 +29,25 @@ const M2_RANGES = {
   sharpness: [0, 100],
 };
 
+const M2_SLIDERS = [
+  'brightness', 'contrast', 'saturation', 'shadows', 'highlights', 'clarity', 'dehaze', 'sharpness',
+];
+
+function parsePackedResponse(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const w = u8[0] | (u8[1] << 8);
+  const h = u8[2] | (u8[3] << 8);
+  return { w, h, body: u8.subarray(4) };
+}
+
+function downloadBlob(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 /**
  * @param {{
  *   rootEl: HTMLElement;
@@ -35,13 +56,25 @@ const M2_RANGES = {
  *   invoke: (cmd: string, args?: object) => Promise<unknown>;
  *   getActiveCard: () => object | null;
  *   onRepaintRequest?: () => void;
+ *   pyramidClient?: { getManifestForId: (id: number) => Promise<object> } | null;
+ *   getViewportRegion?: (imgW: number, imgH: number) => { x: number, y: number, w: number, h: number };
  * }} opts
  */
 export function createTauriParityLightbox(opts) {
-  const { rootEl, canvas, histCanvas, invoke, getActiveCard, onRepaintRequest } = opts;
+  const {
+    rootEl,
+    canvas,
+    histCanvas,
+    invoke,
+    getActiveCard,
+    onRepaintRequest,
+    pyramidClient = null,
+    getViewportRegion,
+  } = opts;
   const panel = rootEl.querySelector('[data-tauri-m2-panel]');
   const presetSelect = rootEl.querySelector('[data-m2-preset]');
   const toggle16 = rootEl.querySelector('[data-toggle-16bit]');
+  const exportBtn = rootEl.querySelector('[data-export-roi]');
   const m2Inputs = [...rootEl.querySelectorAll('[data-m2]')];
 
   const state = {
@@ -49,7 +82,7 @@ export function createTauriParityLightbox(opts) {
     adjustments: clampAdjustments(),
     use16Bit: false,
     rgb16Cache: null,
-    pending16: null,
+    manifest16: null,
   };
 
   function currentM2Adjustments() {
@@ -105,20 +138,76 @@ export function createTauriParityLightbox(opts) {
     return true;
   }
 
+  async function manifestHas16(id) {
+    if (!pyramidClient) return false;
+    try {
+      const manifest = await pyramidClient.getManifestForId(id);
+      return manifest.levels.some((l) => l.bitsPerSample === 16);
+    } catch {
+      return false;
+    }
+  }
+
+  async function pick16Level(id) {
+    if (!pyramidClient) return null;
+    const manifest = await pyramidClient.getManifestForId(id);
+    const pool16 = manifest.levels.filter((l) => l.bitsPerSample === 16);
+    if (!pool16.length) return null;
+    const screenLong = Math.max(window.innerWidth, window.innerHeight);
+    const target = Math.ceil(screenLong * (window.devicePixelRatio || 1));
+    return chooseLevelForTarget(pool16, target);
+  }
+
+  function cropRgba16Packed(body, srcW, srcH, x, y, w, h) {
+    const stride = srcW * 8;
+    const rowBytes = w * 8;
+    const out = new Uint8Array(w * h * 8);
+    for (let row = 0; row < h; row++) {
+      const srcOff = (y + row) * stride + x * 8;
+      const dstOff = row * rowBytes;
+      out.set(body.subarray(srcOff, srcOff + rowBytes), dstOff);
+    }
+    return out;
+  }
+
+  async function fetchRgb16(card) {
+    const id = card?._tauriResult?.id;
+    if (id == null) return null;
+
+    if (card?._tauriResult?.pyramid_cached && pyramidClient) {
+      const level = await pick16Level(id);
+      if (!level) return null;
+      const cacheKey = `${id}:${level.contenthash}`;
+      if (state.rgb16Cache?.key === cacheKey) return state.rgb16Cache;
+      const buf = await invoke('decode_jxl_level_for_id', {
+        id,
+        contenthash: level.contenthash,
+        format: 'rgba16',
+      });
+      const { w, h, body } = parsePackedResponse(buf);
+      state.rgb16Cache = { key: cacheKey, id, w, h, body, level };
+      return state.rgb16Cache;
+    }
+
+    if (!state.rgb16Cache || state.rgb16Cache.id !== id) {
+      const buf = await invoke('get_rgb16_for_id', { id });
+      const view = new DataView(buf instanceof ArrayBuffer ? buf : buf);
+      const w = view.getUint16(0, true);
+      const h = view.getUint16(2, true);
+      const body = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf, 4);
+      state.rgb16Cache = { key: String(id), id, w, h, body, level: null };
+    }
+    return state.rgb16Cache;
+  }
+
   async function paint16Bit(card) {
     const id = card?._tauriResult?.id;
     if (id == null) return false;
     state.adjustments = currentM2Adjustments();
     try {
-      if (!state.rgb16Cache || state.rgb16Cache.id !== id) {
-        const buf = await invoke('get_rgb16_for_id', { id });
-        const view = new DataView(buf instanceof ArrayBuffer ? buf : buf);
-        const w = view.getUint16(0, true);
-        const h = view.getUint16(2, true);
-        const body = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf, 4);
-        state.rgb16Cache = { id, w, h, body };
-      }
-      const { w, h, body } = state.rgb16Cache;
+      const cached = await fetchRgb16(card);
+      if (!cached) return paintFromBaseline(card);
+      const { w, h, body } = cached;
       canvas.width = w;
       canvas.height = h;
       renderRgba16AdjustedToCanvas(body, w, h, canvas, state.preset, state.adjustments);
@@ -127,7 +216,7 @@ export function createTauriParityLightbox(opts) {
       paintHistogram(img.data, w, h);
       return true;
     } catch (e) {
-      console.warn('get_rgb16_for_id failed:', e);
+      console.warn('16-bit HDR paint failed:', e);
       state.use16Bit = false;
       if (toggle16) toggle16.checked = false;
       return paintFromBaseline(card);
@@ -138,7 +227,7 @@ export function createTauriParityLightbox(opts) {
   function onBaseFramePainted(card, rgba, width, height) {
     storeBaseline(card, rgba, width, height);
     if (state.use16Bit && card?._sourceMode !== 'jxl' && canUseWebGL16()) {
-      paint16Bit(card);
+      void paint16Bit(card);
       return;
     }
     paintFromBaseline(card);
@@ -149,7 +238,7 @@ export function createTauriParityLightbox(opts) {
     if (!card) return;
     state.adjustments = currentM2Adjustments();
     if (state.use16Bit && card._sourceMode !== 'jxl' && canUseWebGL16()) {
-      paint16Bit(card);
+      void paint16Bit(card);
       return;
     }
     if (paintFromBaseline(card)) return;
@@ -164,15 +253,97 @@ export function createTauriParityLightbox(opts) {
     repaint();
   }
 
-  function sync16ToggleVisibility(card) {
+  async function sync16ToggleVisibility(card) {
     if (!toggle16) return;
     const rawOnly = card && card._sourceMode !== 'jxl';
-    toggle16.closest('label')?.toggleAttribute('hidden', !rawOnly);
-    if (!rawOnly && state.use16Bit) {
-      state.use16Bit = false;
-      toggle16.checked = false;
-      state.rgb16Cache = null;
+    let has16 = false;
+    if (rawOnly) {
+      if (card?._tauriResult?.pyramid_cached) {
+        has16 = await manifestHas16(card._tauriResult.id);
+      } else if (card?._tauriResult?.id != null) {
+        has16 = true;
+      }
     }
+    const label = toggle16.closest('label');
+    if (label) label.hidden = !rawOnly || !has16;
+    if (!rawOnly || !has16) {
+      if (state.use16Bit) {
+        state.use16Bit = false;
+        toggle16.checked = false;
+        state.rgb16Cache = null;
+      }
+    }
+  }
+
+  async function exportRoi() {
+    const card = getActiveCard();
+    const id = card?._tauriResult?.id;
+    if (id == null) return;
+
+    state.adjustments = currentM2Adjustments();
+    const use16 = state.use16Bit && card._sourceMode !== 'jxl' && canUseWebGL16();
+
+    if (use16) {
+      try {
+        const cached = await fetchRgb16(card);
+        if (!cached) return;
+        let { w, h, body, level } = cached;
+        let region = { x: 0, y: 0, w, h };
+        if (getViewportRegion) {
+          region = getViewportRegion(w, h);
+        }
+
+        if (level && pyramidClient) {
+          const buf = await invoke('decode_pyramid_roi_for_id', {
+            id,
+            contenthash: level.contenthash,
+            x: region.x,
+            y: region.y,
+            w: region.w,
+            h: region.h,
+            format: 'rgba16',
+          });
+          const roi = parsePackedResponse(buf);
+          w = roi.w;
+          h = roi.h;
+          body = roi.body;
+        } else if (
+          region.x !== 0 || region.y !== 0 || region.w !== w || region.h !== h
+        ) {
+          body = cropRgba16Packed(body, cached.w, cached.h, region.x, region.y, region.w, region.h);
+          w = region.w;
+          h = region.h;
+        }
+
+        const adjusted = adjustedRgba16ForExport(body, w, h, state.preset, state.adjustments);
+        const enc = await invoke('encode_rgba16_jxl', {
+          pixels: Array.from(adjusted),
+          width: w,
+          height: h,
+          distance: 0.55,
+        });
+        const jxlBytes = enc instanceof Uint8Array ? enc : new Uint8Array(enc);
+        const stem = (card._file?.name || String(id)).replace(/\.[^.]+$/, '');
+        downloadBlob(new Blob([jxlBytes], { type: 'application/octet-stream' }), `${stem}-roi.jxl`);
+
+        const preview = document.createElement('canvas');
+        preview.width = w;
+        preview.height = h;
+        renderRgba16AdjustedToCanvas(body, w, h, preview, state.preset, state.adjustments);
+        const png = await new Promise((resolve) => preview.toBlob(resolve, 'image/png'));
+        if (png) downloadBlob(png, `${stem}-roi-preview.png`);
+        return;
+      } catch (e) {
+        console.warn('16-bit ROI export failed:', e);
+      }
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!canvas.width || !canvas.height) return;
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) return;
+    const stem = (card._file?.name || String(id)).replace(/\.[^.]+$/, '');
+    downloadBlob(blob, `${stem}-roi.png`);
   }
 
   if (presetSelect) {
@@ -205,6 +376,8 @@ export function createTauriParityLightbox(opts) {
     repaint();
   });
 
+  exportBtn?.addEventListener('click', () => { void exportRoi(); });
+
   if (panel) panel.hidden = false;
 
   return {
@@ -212,8 +385,10 @@ export function createTauriParityLightbox(opts) {
     repaint,
     resetM2,
     sync16ToggleVisibility,
+    exportRoi,
     clearCache() {
       state.rgb16Cache = null;
+      state.manifest16 = null;
     },
     get state() {
       return state;
@@ -221,4 +396,4 @@ export function createTauriParityLightbox(opts) {
   };
 }
 
-export { M2_RANGES };
+export { M2_RANGES, M2_SLIDERS };
