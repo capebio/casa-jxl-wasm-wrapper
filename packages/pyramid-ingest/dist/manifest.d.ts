@@ -5,7 +5,7 @@ export interface LevelEntry {
     w: number;
     h: number;
     bytes: number;
-    bitsPerSample: 8;
+    bitsPerSample: 8 | 16;
     contenthash: string;
     tiled: boolean;
 }

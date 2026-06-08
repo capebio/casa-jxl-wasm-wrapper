@@ -13,7 +13,7 @@ export function toEntry(level, masterW, masterH) {
         w: level.width,
         h: level.height,
         bytes: level.data.length,
-        bitsPerSample: 8,
+        bitsPerSample: level.bitsPerSample ?? 8,
         contenthash: contentHash16(level.data),
         tiled: level.tiled === true,
     };

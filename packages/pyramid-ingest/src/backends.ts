@@ -1,4 +1,4 @@
-import { createDecoder, encodeRgba8Pyramid, encodeTileContainerRgba8, transcodeJpegToJxl } from "@casabio/jxl-wasm";
+import { createDecoder, encodeRgba8Pyramid, encodeTileContainerRgba8, encodeTileContainerRgba16, transcodeJpegToJxl } from "@casabio/jxl-wasm";
 
 export type MasterFormat = "orf" | "dng" | "cr2" | "jpg";
 export type RawFormat = "orf" | "dng" | "cr2";
@@ -51,6 +51,13 @@ export interface JxlBackend {
     height: number,
     opts: TileContainerEncodeOptions,
   ): Promise<Uint8Array>;
+  /** 16-bit JXTC path (available after JXTC-16 WASM rebuild; v1 tiled top uses 8-bit). */
+  encodeTileContainer16?(
+    rgba16: Uint8Array,
+    width: number,
+    height: number,
+    opts: TileContainerEncodeOptions,
+  ): Promise<Uint8Array>;
   transcodeJpeg(jpeg: Uint8Array): Promise<Uint8Array>;
   decodeToRgba8(jxl: Uint8Array): Promise<{ rgba: Uint8Array; width: number; height: number }>;
 }
@@ -71,6 +78,15 @@ export function createJxlBackend(): JxlBackend {
 
     async encodeTileContainer(rgba, width, height, opts) {
       return encodeTileContainerRgba8(rgba, width, height, {
+        tileSize: opts.tileSize,
+        distance: opts.distance,
+        effort: opts.effort,
+        hasAlpha: false,
+      });
+    },
+
+    async encodeTileContainer16(rgba16, width, height, opts) {
+      return encodeTileContainerRgba16(rgba16, width, height, {
         tileSize: opts.tileSize,
         distance: opts.distance,
         effort: opts.effort,

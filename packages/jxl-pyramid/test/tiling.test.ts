@@ -35,7 +35,24 @@ test("parseJxtcHeader reads the 32-byte container header", () => {
     tilesX: 18,
     tilesY: 12,
     hasAlpha: true,
+    bitsPerSample: 8,
   });
+});
+
+test("parseJxtcHeader detects 16-bit via flags bit1 (JXTC-16)", () => {
+  const buf = new Uint8Array(32);
+  const view = new DataView(buf.buffer);
+  view.setUint32(0, JXTC_MAGIC, true);
+  view.setUint32(4, 1, true);
+  view.setUint32(8, 100, true);
+  view.setUint32(12, 50, true);
+  view.setUint32(16, 32, true);
+  view.setUint32(20, 4, true);
+  view.setUint32(24, 2, true);
+  view.setUint32(28, 2 | 1, true); // bit1=16b, bit0=hasAlpha
+  const h = parseJxtcHeader(buf);
+  expect(h.bitsPerSample).toBe(16);
+  expect(h.hasAlpha).toBe(true);
 });
 
 test("tilesOverlappingRegion returns tile-aligned intersections", () => {

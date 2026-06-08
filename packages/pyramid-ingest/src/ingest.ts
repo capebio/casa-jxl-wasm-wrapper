@@ -50,6 +50,12 @@ async function fileExists(p: string): Promise<boolean> {
 }
 
 async function decodeMaster(b: Backends, format: MasterFormat, bytes: Uint8Array): Promise<DecodedMaster> {
+  // v1 design boundary (pyramid-gallery-design §8, §11; PyramidAgentHandoff §3, §8):
+  // - Full master is decoded into RAM to drive the downscale cascade for grid levels.
+  // - Target: masters that fit RAM once (rough ~150-200 MP practical).
+  // - Long-edge >~8000 px or >~40 MP → "massive scan": top-level full becomes JXTC tiled container (rgba8 in v1).
+  // - True gigapixel source-tiled ingest (streaming decode of master without full buffer) is deferred (Phase 4/5).
+  // - No attempt to implement sliding-window / block RAW decode here.
   if (format === "jpg") {
     const fullJxl = await b.jxl.transcodeJpeg(bytes);
     const d = await b.jxl.decodeToRgba8(fullJxl);

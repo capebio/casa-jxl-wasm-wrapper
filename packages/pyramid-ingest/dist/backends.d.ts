@@ -3,6 +3,8 @@ export type RawFormat = "orf" | "dng" | "cr2";
 export type Orientation = "baked" | "source";
 export interface DecodedMaster {
     rgba: Uint8Array;
+    /** M3: packed LE RGB u16 (6 bytes/pixel) from ProcessResult.take_rgb16_full. */
+    rgb16?: Uint8Array;
     width: number;
     height: number;
     orientation: Orientation;
@@ -11,6 +13,7 @@ export interface PyramidLevelBytes {
     data: Uint8Array;
     width: number;
     height: number;
+    bitsPerSample?: 8 | 16;
     tiled?: boolean;
 }
 export interface TileContainerEncodeOptions {

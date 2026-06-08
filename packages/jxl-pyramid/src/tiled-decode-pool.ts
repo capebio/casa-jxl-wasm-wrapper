@@ -1,4 +1,4 @@
-import { decodeTileContainerRegionRgba8 } from "@casabio/jxl-wasm";
+import { decodeTileContainerRegionRgba8, decodeTileContainerRegionRgba16 } from "@casabio/jxl-wasm";
 import {
   canUseParallelTileWorkers,
   parseJxtcHeader,
@@ -24,15 +24,17 @@ export type TileRegionDecoder = (
   region: ImageRegion,
 ) => Promise<DecodedLevel>;
 
-function stitch(viewport: ImageRegion, parts: { region: ImageRegion; decoded: DecodedLevel }[]): DecodedLevel {
-  const pixels = new Uint8Array(viewport.w * viewport.h * 4);
+function stitch(viewport: ImageRegion, parts: { region: ImageRegion; decoded: DecodedLevel }[], bytesPerPixel: 4 | 8 = 4): DecodedLevel {
+  const pixels = new Uint8Array(viewport.w * viewport.h * bytesPerPixel);
   for (const { region, decoded } of parts) {
     const dx = region.x - viewport.x;
     const dy = region.y - viewport.y;
+    const srcStride = decoded.width * bytesPerPixel;
+    const dstStride = viewport.w * bytesPerPixel;
     for (let row = 0; row < decoded.height; row++) {
       pixels.set(
-        decoded.pixels.subarray(row * decoded.width * 4, (row + 1) * decoded.width * 4),
-        ((dy + row) * viewport.w + dx) * 4,
+        decoded.pixels.subarray(row * srcStride, (row + 1) * srcStride),
+        ((dy + row) * viewport.w + dx) * bytesPerPixel,
       );
     }
   }
@@ -99,6 +101,8 @@ async function decodeTilesParallel(
   }
 }
 
+function bppFor(bits: 8 | 16): 4 | 8 { return bits === 16 ? 8 : 4; }
+
 /**
  * Decode a tiled viewport with optional parallel per-tile workers.
  * Falls back to a single WASM ROI decode when workers unavailable.
@@ -120,8 +124,11 @@ export async function decodeTiledViewportPooled(
   if (rw <= 0 || rh <= 0) throw new Error("empty tiled viewport");
   const viewport: ImageRegion = { x: rx, y: ry, w: rw, h: rh };
 
+  const bits = header.bitsPerSample ?? 8; // header from parseJxtcHeader above
   const decodeRegion = options?.decodeRegion ?? (async (bytes, r) => {
-    const out = await decodeTileContainerRegionRgba8(bytes, r);
+    const out = bits === 16
+      ? await decodeTileContainerRegionRgba16(bytes, r)
+      : await decodeTileContainerRegionRgba8(bytes, r);
     return { pixels: out.pixels, width: out.width, height: out.height };
   });
 
@@ -136,5 +143,5 @@ export async function decodeTiledViewportPooled(
   }
 
   const parts = await decodeTilesParallel(containerBytes, tiles, options!.workerFactory!);
-  return stitch(viewport, parts);
+  return stitch(viewport, parts, bppFor(bits));
 }

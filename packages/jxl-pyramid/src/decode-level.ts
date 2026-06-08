@@ -1,4 +1,4 @@
-import { createDecoder, decodeTileContainerRegionRgba8 } from "@casabio/jxl-wasm";
+import { createDecoder, decodeTileContainerRegionRgba8, decodeTileContainerRegionRgba16 } from "@casabio/jxl-wasm";
 import {
   canUseParallelTileWorkers,
   tilesOverlappingRegion,
@@ -44,18 +44,34 @@ async function decodeWhole(bytes: Uint8Array): Promise<DecodedLevel> {
   return result;
 }
 
+function pickRegionDecoder(bits: 8 | 16): RegionDecoder {
+  if (bits === 16) {
+    return async (bytes, r) => {
+      const out = await decodeTileContainerRegionRgba16(bytes, r);
+      return { pixels: out.pixels, width: out.width, height: out.height };
+    };
+  }
+  return async (bytes, r) => {
+    const out = await decodeTileContainerRegionRgba8(bytes, r);
+    return { pixels: out.pixels, width: out.width, height: out.height };
+  };
+}
+
 function stitchTileDecodes(
   viewport: ImageRegion,
   parts: { region: ImageRegion; decoded: DecodedLevel }[],
+  bytesPerPixel: 4 | 8 = 4,
 ): DecodedLevel {
-  const pixels = new Uint8Array(viewport.w * viewport.h * 4);
+  const pixels = new Uint8Array(viewport.w * viewport.h * bytesPerPixel);
   for (const { region, decoded } of parts) {
     const dx = region.x - viewport.x;
     const dy = region.y - viewport.y;
+    const srcStride = decoded.width * bytesPerPixel;
+    const dstStride = viewport.w * bytesPerPixel;
     for (let row = 0; row < decoded.height; row++) {
-      const srcOff = row * decoded.width * 4;
-      const dstOff = ((dy + row) * viewport.w + dx) * 4;
-      pixels.set(decoded.pixels.subarray(srcOff, srcOff + decoded.width * 4), dstOff);
+      const srcOff = row * srcStride;
+      const dstOff = ((dy + row) * viewport.w + dx) * bytesPerPixel;
+      pixels.set(decoded.pixels.subarray(srcOff, srcOff + srcStride), dstOff);
     }
   }
   return { pixels, width: viewport.w, height: viewport.h };
@@ -73,10 +89,8 @@ export async function decodeTiledViewport(
     decodeRegion?: RegionDecoder;
   },
 ): Promise<DecodedLevel> {
-  const decodeRegion = options?.decodeRegion ?? (async (bytes, r) => {
-    const out = await decodeTileContainerRegionRgba8(bytes, r);
-    return { pixels: out.pixels, width: out.width, height: out.height };
-  });
+  const bits = source.bitsPerSample ?? 8;
+  const decodeRegion = options?.decodeRegion ?? pickRegionDecoder(bits);
 
   const rx = Math.min(Math.max(0, region.x), source.width);
   const ry = Math.min(Math.max(0, region.y), source.height);
@@ -98,7 +112,8 @@ export async function decodeTiledViewport(
       decoded: await decodeRegion(source.bytes, tileRegion),
     })),
   );
-  return stitchTileDecodes(viewport, parts);
+  const bpp: 4 | 8 = bits === 16 ? 8 : 4;
+  return stitchTileDecodes(viewport, parts, bpp);
 }
 
 /** Decode a pyramid level: whole-frame in one shot, or a viewport slice from JXTC. */

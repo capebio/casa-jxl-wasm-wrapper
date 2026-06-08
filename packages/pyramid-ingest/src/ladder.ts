@@ -19,6 +19,8 @@ async function maybeTileTopLevel(
   width: number,
   height: number,
 ): Promise<PyramidLevelBytes[]> {
+  // Massive scan gate (spec M4): only the *top* (full) level is replaced by JXTC container.
+  // Master was already fully decoded; this does not implement source-tiled streaming ingest.
   if (!shouldTileTopLevel(width, height)) return levels;
   const tiled = await jxl.encodeTileContainer(rgba, width, height, {
     tileSize: JXTC_TILE_SIZE,
@@ -42,6 +44,8 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster): P
 
     let bigLevels = await encodeBigLevelsRgba16(rgb16, width, height, plan);
     if (shouldTileTopLevel(width, height)) {
+      // v1: massive RAW still emits 16-bit 2048 sidecar (bigLevels keeps it), but top full is rgba8 JXTC.
+      // 16-bit JXTC for the tiled top level is deferred (requires bridge + ingest path change post-rebuild).
       bigLevels = bigLevels.slice(0, -1);
       const tiled = await jxl.encodeTileContainer(rgba, width, height, {
         tileSize: JXTC_TILE_SIZE,

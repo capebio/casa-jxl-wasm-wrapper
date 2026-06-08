@@ -16,6 +16,8 @@ export interface JxtcHeader {
   tilesX: number;
   tilesY: number;
   hasAlpha: boolean;
+  /** 8 or 16. v1 tiled containers are 8-bit; 16-bit available after JXTC-16 rebuild. */
+  bitsPerSample: 8 | 16;
 }
 
 /** True when ingest should replace the whole-frame top level with a JXTC container. */
@@ -43,7 +45,9 @@ export function parseJxtcHeader(bytes: Uint8Array): JxtcHeader {
   const tilesX = view.getUint32(20, true);
   const tilesY = view.getUint32(24, true);
   const flags = view.getUint32(28, true);
-  return { imageW, imageH, tileSize, tilesX, tilesY, hasAlpha: (flags & 1) !== 0 };
+  const hasAlpha = (flags & 1) !== 0;
+  const bitsPerSample: 8 | 16 = (flags & 2) !== 0 ? 16 : 8;
+  return { imageW, imageH, tileSize, tilesX, tilesY, hasAlpha, bitsPerSample };
 }
 
 export interface ImageRegion {
