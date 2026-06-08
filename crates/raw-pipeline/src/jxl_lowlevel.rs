@@ -95,41 +95,49 @@ pub fn decode_full(jxl_bytes: &[u8]) -> Option<Duration> {
     }
 }
 
-/// Low-level progressive decode using FRAME_PROGRESSION events + FlushImage.
-/// Returns (time_to_first_usable_pixel_ms, total_wall_ms).
-/// The first time is captured on the *first* FrameProgression after a successful FlushImage.
-/// For tiny codestreams (pre-crop assets) this typically collapses first ≈ total (expected; not enough
-/// passes/layers to separate). For progressively-encoded full loads (Dc/groupOrder) this surfaces
-/// the early DC/center pass usable for first paint.
-///
-/// In real Tauri usage:
-/// - On FrameProgression + successful flush: copy (or map) the current out_buf (respecting any crop
-///   that was set) and upload to your texture / egui image immediately.
-/// - Continue the loop for refinement passes until FullImage.
-/// - No worker/thread hop required if you call this from a Tauri command that can block briefly or
-///   you feed incrementally from a streaming source.
+/// One progressive decode pass surfaced after `JxlDecoderFlushImage`.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn decode_progressive_first_total(jxl_bytes: &[u8]) -> Option<(f64, f64)> {
+#[derive(Clone, Debug)]
+pub struct ProgressiveFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub is_final: bool,
+}
+
+/// Low-level progressive decode using FRAME_PROGRESSION events + FlushImage.
+/// Invokes `on_frame` after each successful flush (partial passes + final).
+/// Returns (time_to_first_usable_pixel_ms, total_wall_ms).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn decode_progressive_frames<F>(jxl_bytes: &[u8], mut on_frame: F) -> Option<(f64, f64)>
+where
+    F: FnMut(ProgressiveFrame),
+{
     use std::mem::MaybeUninit;
     use jpegxl_sys::decode::*;
     use jpegxl_sys::codestream_header::JxlBasicInfo;
 
     unsafe {
         let dec = JxlDecoderCreate(std::ptr::null());
-        if dec.is_null() { return None; }
+        if dec.is_null() {
+            return None;
+        }
         let events = (JxlDecoderStatus::BasicInfo as std::os::raw::c_int)
             | (JxlDecoderStatus::FrameProgression as std::os::raw::c_int)
             | (JxlDecoderStatus::FullImage as std::os::raw::c_int);
         if JxlDecoderSubscribeEvents(dec, events) != JxlDecoderStatus::Success {
-            JxlDecoderDestroy(dec); return None;
+            JxlDecoderDestroy(dec);
+            return None;
         }
-        // kPasses gives per-pass progression (more events for "predator" style). kDC is coarser.
         let _ = JxlDecoderSetProgressiveDetail(dec, JxlProgressiveDetail::Passes);
         if JxlDecoderSetInput(dec, jxl_bytes.as_ptr(), jxl_bytes.len()) != JxlDecoderStatus::Success {
-            JxlDecoderDestroy(dec); return None;
+            JxlDecoderDestroy(dec);
+            return None;
         }
 
         let mut info: MaybeUninit<JxlBasicInfo> = MaybeUninit::uninit();
+        let mut image_w: u32 = 0;
+        let mut image_h: u32 = 0;
         let mut pf = make_rgba8_pixel_format(4);
         let mut out_buf: Vec<u8> = Vec::new();
         let mut first_ms: Option<f64> = None;
@@ -139,7 +147,12 @@ pub fn decode_progressive_first_total(jxl_bytes: &[u8]) -> Option<(f64, f64)> {
             status = JxlDecoderProcessInput(dec);
             match status {
                 JxlDecoderStatus::BasicInfo => {
-                    if JxlDecoderGetBasicInfo(dec, info.as_mut_ptr()) == JxlDecoderStatus::Success {
+                    if image_w == 0
+                        && JxlDecoderGetBasicInfo(dec, info.as_mut_ptr()) == JxlDecoderStatus::Success
+                    {
+                        let basic = unsafe { std::ptr::read(info.as_mut_ptr()) };
+                        image_w = basic.xsize;
+                        image_h = basic.ysize;
                         pf = make_rgba8_pixel_format(4);
                     }
                 }
@@ -151,14 +164,17 @@ pub fn decode_progressive_first_total(jxl_bytes: &[u8]) -> Option<(f64, f64)> {
                     }
                 }
                 JxlDecoderStatus::FrameProgression => {
-                    if JxlDecoderFlushImage(dec) == JxlDecoderStatus::Success {
+                    if JxlDecoderFlushImage(dec) == JxlDecoderStatus::Success && image_w > 0 && image_h > 0 {
                         if first_ms.is_none() {
                             first_ms = Some(ms(t_start.elapsed()));
                         }
-                        // Tauri: here you would emit/copy the (partial) out_buf to your surface.
-                        // Size of out_buf is for the (possibly cropped) image dimensions at this point.
+                        on_frame(ProgressiveFrame {
+                            width: image_w,
+                            height: image_h,
+                            rgba: out_buf.clone(),
+                            is_final: false,
+                        });
                     }
-                    // Keep feeding to get subsequent passes / refinement.
                 }
                 JxlDecoderStatus::FullImage | JxlDecoderStatus::Success => break,
                 JxlDecoderStatus::Error | JxlDecoderStatus::NeedMoreInput => break,
@@ -167,12 +183,28 @@ pub fn decode_progressive_first_total(jxl_bytes: &[u8]) -> Option<(f64, f64)> {
         }
         let total = t_start.elapsed();
         JxlDecoderDestroy(dec);
-        if (status == JxlDecoderStatus::FullImage || status == JxlDecoderStatus::Success) && !out_buf.is_empty() {
+        if (status == JxlDecoderStatus::FullImage || status == JxlDecoderStatus::Success)
+            && !out_buf.is_empty()
+            && image_w > 0
+            && image_h > 0
+        {
+            on_frame(ProgressiveFrame {
+                width: image_w,
+                height: image_h,
+                rgba: out_buf,
+                is_final: true,
+            });
             Some((first_ms.unwrap_or(0.0), ms(total)))
         } else {
             None
         }
     }
+}
+
+/// Timing-only wrapper around [`decode_progressive_frames`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn decode_progressive_first_total(jxl_bytes: &[u8]) -> Option<(f64, f64)> {
+    decode_progressive_frames(jxl_bytes, |_| {})
 }
 
 // For backwards compatibility inside this workspace bench (can be removed later).

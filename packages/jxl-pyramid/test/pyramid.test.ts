@@ -11,6 +11,9 @@ import {
   ORIENTATION_VALUES,
   QUALITY_DISTANCES,
   QUALITY_TO_DISTANCE_MAP,
+  MASSIVE_LONG_EDGE_THRESHOLD,
+  MASSIVE_PIXEL_THRESHOLD,
+  JXTC_TILE_SIZE,
   APPROVED_LIGHTBOX_PRESETS,
   LightboxPreset,
 } from "../src/constants.js";
@@ -37,6 +40,10 @@ test("Pyramid Constants Verification", () => {
   expect(QUALITY_TO_DISTANCE_MAP[85]).toBe(1.45);
   expect(QUALITY_TO_DISTANCE_MAP[95]).toBe(0.55);
   expect(QUALITY_TO_DISTANCE_MAP[100]).toBe(0.0);
+
+  expect(MASSIVE_LONG_EDGE_THRESHOLD).toBe(8000);
+  expect(MASSIVE_PIXEL_THRESHOLD).toBe(40_000_000);
+  expect(JXTC_TILE_SIZE).toBe(512);
 });
 
 test("Lightbox Presets Verification", () => {

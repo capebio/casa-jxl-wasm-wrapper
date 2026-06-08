@@ -29,7 +29,7 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 
 **Legend:** ☑ parity or N/A by design · ☐ open Tauri port · 🟡 partial · — no further port action
 
-**Implementation log (2026-06-08, Tauri parity continuation):** Phase −1 boundary surgery largely complete in `raw-converter-tauri` — B-T5..B-T8, H31/H32/H22 encode-tier, PR-6b native pyramid encoder synced, `jxl_lowlevel` vendor synced. `web/main.js` updated for `get_fast_thumb` binary path. Open: H29 slider Channel, PR-3 progressive lightbox wire, PR-7b pyramid ingest at `process_file`.
+**Implementation log (2026-06-08, Tauri parity continuation):** Phase −1 boundary surgery complete in `raw-converter-tauri` — B-T5..B-T8, H31/H32/H22 encode-tier, PR-6b native pyramid encoder synced, `jxl_lowlevel` vendor synced. **H29** `apply_look_stream` Channel slider path + **PR-3** `decode_progressive_frames` wired into bg lightbox (`jxl_progressive_pass` events). `web/main.js` updated for Channel slider + progressive JXL repaint. Open: PR-7b pyramid ingest at `process_file`.
 **Implementation log (2026-06-08, updated post-M3 foundation):** Phase −1 partial in `raw-converter-tauri`. `web/main.js` wired as before. 
 - **M0 (Grok Build core, Gemini clerical):** Plan A WASM **complete** (feat/pyramid-m0-wasm-primitives @93afee7) — `sidecars_v2` (per-level distances, no 2048 floor clamp), `downscaleRgba16`, `encodeRgba8Pyramid` + wrappers/caps/tests (source 6/6 + runtime gradient/floor proof). 
 - **M1 (Grok core + Gemini matrices/fixtures/docs):** Plan B WASM **complete** (feat/pyramid-m1-ingest-cli @08f9d0e + feat/pyramid-m1-gallery-grid) — `@casabio/pyramid-ingest` (quality/ladder/hash/shard/manifest/backends/ladder/raw/ingest/cli; 8-bit only, JPG lossless transcode once, proxy single-level, resumable mtime, contenthash, shard isolation, atomic); gallery grid (index.json seed, aspect no-shift, L0 first, DPR upgrade, scheduler one-shot _jxl_wasm_decode_rgba8 keyed by contenthash, monotonic, crossfade, viewport+prefetch ring, cancel-before-start, LRU/OPFS reuse). 34/34+ guard tests, tsc green.
@@ -49,7 +49,7 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 | ☑ | Subject crop RGBA→RGB strip on encode | §3.2 | ✅ | ☑ | **B-T7**, **H11**, **PR-5** — `crop_rgba8` + `encode_jxl_with_channels` ch=4 |
 | ☑ | `pack_rgb_response` always allocates | §7.3 | N/A | ☑ | **B-T8**, **H26**, **PR-0c** — `pack_rgb_response_arc` / `rgb_to_response_from_frame` |
 | ☑ | Binary IPC hot paths (`apply_look`, `decode_jxl_*`) | §7.3 | N/A | ☑ | **H3**, **H19** — extended to thumb via `get_thumb` |
-| ☐ | `Channel` streaming `apply_look` (slider UX) | §7.3 | N/A | ❌ | **H29**, Phase 3 polish, §6.6 |
+| ☑ | `Channel` streaming `apply_look` (slider UX) | §7.3 | N/A | ☑ | **H29**, Phase 3 polish, §6.6 — `apply_look_stream` + `look_render_gens` cancel; `web/main.js` Channel paint |
 
 ### 0.2 Format ingest & RAW pipeline
 
@@ -93,7 +93,7 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 | ☑ | First-class advanced encoder controls | §2.11b | ✅ | ✅ | — maintain |
 | ☑ | Resampling factors | §2.12 | ✅ | ✅ | — maintain |
 | 🟡 | `encode_variants_with_progressive` at desktop ingest | §2.13 | ✅ | 🟡 | Phase 1, §4.3 **P2** |
-| 🟡 | `jxl_lowlevel` progressive decode in lightbox | §2.14 | ✅ | 🟡 | **PR-1** vendor synced (`jxl_lowlevel.rs`); **PR-3** wire `decode_progressive_first_total` into bg lightbox still open |
+| ☑ | `jxl_lowlevel` progressive decode in lightbox | §2.14 | ✅ | ☑ | **PR-1** vendor synced; **PR-3** `decode_progressive_frames` in `prefill_jxl_lightbox_progressive` + `jxl_progressive_pass` / `jxl_lightbox_ready` |
 | ☑ | Per-level pyramid sidecar encode (v2 distances) | §3.7 | ✅ | ✅ | **H12**, **H40** — WASM `sidecars_v2` verified; **PR-6b** native (Falcon=3 effort, box cascade, from_rgb16 helper) done |
 | ☑ | `encodeRgba8Pyramid` + `downscaleRgba16` | *(parity only)* | ✅ | ✅ | Plan A WASM done; Tauri native port (**PR-6b**) done (raw-pipeline + encode_rgba8_pyramid_from_rgb16 for PR-7b) |
 

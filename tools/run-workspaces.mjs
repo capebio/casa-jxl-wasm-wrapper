@@ -13,6 +13,7 @@ const workspaceOrder = [
   "@casabio/jxl-cache",
   "@casabio/jxl-scheduler",
   "@casabio/jxl-wasm",
+  "@casabio/pyramid-ingest",
   "@casabio/jxl-worker-browser",
   "@casabio/jxl-worker-node",
   "@casabio/jxl-stream",

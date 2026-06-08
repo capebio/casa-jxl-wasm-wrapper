@@ -7,6 +7,12 @@ import type { MasterFormat, Orientation } from "./manifest.js";
 /** Resolution level ladder target sizes (long-edge in pixels) */
 export const PYRAMID_LEVEL_SIZES = [256, 512, 1024, 2048] as const;
 
+export {
+  MASSIVE_LONG_EDGE_THRESHOLD,
+  MASSIVE_PIXEL_THRESHOLD,
+  JXTC_TILE_SIZE,
+} from "./tiling.js";
+
 /** Allowed proxy target sizes (long-edge in pixels) */
 export const PROXY_SIZES = [256, 512, 1024] as const;
 

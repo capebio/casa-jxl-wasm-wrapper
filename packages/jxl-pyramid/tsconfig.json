@@ -15,7 +15,7 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "verbatimModuleSyntax": true,
-    "skipLibCheck": false
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"]

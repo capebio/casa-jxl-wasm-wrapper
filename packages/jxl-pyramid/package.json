@@ -13,9 +13,12 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@casabio/jxl-wasm": "^0.1.0"
+  },
   "devDependencies": {
     "typescript": "5.5.4"
   }

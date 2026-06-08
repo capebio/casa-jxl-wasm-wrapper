@@ -56,7 +56,7 @@ export class DecodeSessionImpl {
             sessionId: this.id,
             priority: startMsg.priority,
             startMsg,
-            sourceKey: null,
+            sourceKey: opts.sourceKey ?? null,
             signal: opts.signal ?? null,
         })
             .catch((err) => {

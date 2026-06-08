@@ -71,6 +71,8 @@ export interface DecodeOptions {
   progressiveDetail?: "dc" | "lastPasses" | "passes" | "dcProgressive";
   // Scheduling
   priority?: "visible" | "near" | "background";
+  /** Content-addressed dedupe key (e.g. pyramid level contenthash). Passed to scheduler. */
+  sourceKey?: string | null;
   budgetMs?: number;
   signal?: AbortSignal;
   // Telemetry

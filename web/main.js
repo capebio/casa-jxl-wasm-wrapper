@@ -12,6 +12,7 @@ const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
 window.IS_TAURI = IS_TAURI;
 const { invoke } = IS_TAURI ? window.__TAURI__.core : {};
 const { listen } = IS_TAURI ? window.__TAURI__.event : {};
+const TauriChannel = IS_TAURI ? window.__TAURI__?.core?.Channel : null;
 
 const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
@@ -3600,6 +3601,31 @@ async function startBatchTauri(paths) {
         repaintThumbFromJxl(card);
     });
 
+    const unlistenJxlProgressive = await listen('jxl_progressive_pass', ({ payload }) => {
+        const card = findTauriCard(payload.path);
+        if (!card || !card._tauriResult?.jxl_cached) return;
+        if (lightboxIndex >= 0 && cards[lightboxIndex] === card && card._sourceMode === 'jxl') {
+            card._jxlDecoded = null;
+            fetchTauriJxlLightbox(card._tauriResult.id).then(({ w, h, rgb }) => {
+                if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
+                const rgba = rgbToRgbaArr(rgb);
+                card._jxlDecoded = { rgba, w, h };
+                lightboxCanvas.width = w;
+                lightboxCanvas.height = h;
+                const ctx = lightboxCanvas.getContext('2d');
+                ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+                if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                    setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                }
+                setPaintedSourceBadge('jxl');
+                lbLoadingBadge.hidden = true;
+                applyStraightenToLightboxCanvas(card);
+                syncZoomToDisplayLong();
+            }).catch(() => {});
+        }
+        if (payload.is_final) repaintThumbFromJxl(card);
+    });
+
     const unlistenFastThumb = await listen('file_thumb_fast', async ({ payload }) => {
         const card = findTauriCard(payload.path);
         if (!card) return;
@@ -4886,51 +4912,75 @@ if (jxlDiskBtn) {
 }
 
 // Tauri live-look: invoked from triggerLiveUpdate when IS_TAURI
-let tauriLiveInFlight = false;
 let tauriLivePending = null;
+let tauriLookChannel = null;
+
+function paintTauriLookFrame(card, buf) {
+    const { w, h, rgb } = parseRgbResponse(buf);
+    const dimsChanged = (lightboxCanvas.width !== w || lightboxCanvas.height !== h);
+    if (dimsChanged) {
+        lightboxCanvas.width = w;
+        lightboxCanvas.height = h;
+        if (!card._lightbox) card._lightbox = {};
+        card._lightbox.w = w;
+        card._lightbox.h = h;
+    }
+    const ctx = lightboxCanvas.getContext('2d');
+    ctx.putImageData(new ImageData(rgbToRgbaArr(rgb), w, h), 0, 0);
+    if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+        setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+    }
+    setPaintedSourceBadge('raw');
+    if (dimsChanged) syncZoomToDisplayLong();
+}
+
+function ensureTauriLookChannel(card) {
+    if (!TauriChannel) return null;
+    const id = card?._tauriResult?.id;
+    if (id == null) return null;
+    if (!tauriLookChannel || tauriLookChannel._id !== id) {
+        tauriLookChannel = new TauriChannel();
+        tauriLookChannel._id = id;
+        tauriLookChannel.onmessage = (buf) => {
+            const active = cards[lightboxIndex];
+            if (!active || active._tauriResult?.id !== tauriLookChannel._id) return;
+            paintTauriLookFrame(active, buf);
+        };
+    }
+    return tauriLookChannel;
+}
 
 async function triggerLiveUpdateTauri(look) {
     const card = cards[lightboxIndex];
     if (!card || !card._tauriResult) return;
-    if (tauriLiveInFlight) { tauriLivePending = look; return; }
-    tauriLiveInFlight = true;
+    tauriLivePending = look;
+    const pending = tauriLivePending;
+    tauriLivePending = null;
+
+    const channel = ensureTauriLookChannel(card);
     try {
-        const buf = await invoke('apply_look', {
-            id: card._tauriResult.id,
-            look: lookToSnake(look),
-        });
-        const view = new DataView(buf);
-        const w = view.getUint16(0, true);
-        const h = view.getUint16(2, true);
-        const rgb = new Uint8Array(buf, 4);
-        // First slider edit on a card flips the lightbox from embedded JPEG
-        // preview (potentially 3:2 ~1620×1080) to the RAW pipeline output
-        // (4:3 1800×1350 for Olympus).  Resize the canvas to the RAW dims so
-        // putImageData paints the full frame, not just the overlapping rect.
-        const dimsChanged = (lightboxCanvas.width !== w || lightboxCanvas.height !== h);
-        if (dimsChanged) {
-            lightboxCanvas.width = w;
-            lightboxCanvas.height = h;
-            // Also cache on card so subsequent draws know the RAW dims and
-            // the embedded fallback branch matches.
-            if (!card._lightbox) card._lightbox = {};
-            card._lightbox.w = w;
-            card._lightbox.h = h;
+        if (channel) {
+            // H29: fire-and-forget invoke; pixels stream via Channel (no large Response round-trip).
+            await invoke('apply_look_stream', {
+                id: card._tauriResult.id,
+                look: lookToSnake(pending),
+                onFrame: channel,
+            });
+        } else {
+            const buf = await invoke('apply_look', {
+                id: card._tauriResult.id,
+                look: lookToSnake(pending),
+            });
+            paintTauriLookFrame(card, buf);
         }
-        const ctx = lightboxCanvas.getContext('2d');
-        ctx.putImageData(new ImageData(rgbToRgbaArr(rgb), w, h), 0, 0);
-        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
-        }
-        // Real RAW pixels now on screen → update colour-coded badge accordingly,
-        // and preserve displayed size if the canvas just got resized.
-        setPaintedSourceBadge('raw');
-        if (dimsChanged) syncZoomToDisplayLong();
     } catch (e) {
         console.warn('apply_look error:', e);
     }
-    tauriLiveInFlight = false;
-    if (tauriLivePending) { const p = tauriLivePending; tauriLivePending = null; triggerLiveUpdateTauri(p); }
+    if (tauriLivePending) {
+        const p = tauriLivePending;
+        tauriLivePending = null;
+        triggerLiveUpdateTauri(p);
+    }
 }
 
 // Settings modal (Tauri only)
