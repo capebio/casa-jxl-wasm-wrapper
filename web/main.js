@@ -7,12 +7,21 @@
 // `navigator.hardwareConcurrency` so a batch saturates all cores.
 
 import { getContext } from './jxl-browser-context.js';
+import { createTauriPyramidClient } from './tauri-pyramid-client.js';
 
 const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
 window.IS_TAURI = IS_TAURI;
 const { invoke } = IS_TAURI ? window.__TAURI__.core : {};
 const { listen } = IS_TAURI ? window.__TAURI__.event : {};
 const TauriChannel = IS_TAURI ? window.__TAURI__?.core?.Channel : null;
+
+/** PR-8b: pyramid L0 seed + DPR-aware level upgrades for Tauri gallery grid. */
+const tauriPyramidClient = IS_TAURI
+    ? createTauriPyramidClient({
+        invoke,
+        devicePixelRatio: window.devicePixelRatio || 1,
+    })
+    : null;
 
 const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
@@ -1880,6 +1889,15 @@ function makeResizable(handle, panel, minW, maxW) {
 }
 
 if (IS_TAURI) {
+    let pyramidDprTimer = null;
+    window.addEventListener('resize', () => {
+        if (!tauriPyramidClient) return;
+        clearTimeout(pyramidDprTimer);
+        pyramidDprTimer = setTimeout(() => {
+            tauriPyramidClient.upgradeVisibleCards(cards).catch(() => {});
+        }, 150);
+    });
+
     pick.addEventListener('click', async () => {
         const paths = await invoke('pick_files');
         if (paths.length > 0) {
@@ -1973,6 +1991,12 @@ function classifyJpegThumbSource(w, h) {
 // shows what the JXL roundtrip actually looks like (replacing whatever embedded
 // or RAW-pipeline thumb was there). Best-effort — failures stay silent.
 function repaintThumbFromJxl(card) {
+    if (IS_TAURI && card?._tauriResult?.pyramid_cached && card?._tauriResult?.pyramid_l0) {
+        tauriPyramidClient?.paintThumb(card, card._tauriResult).catch((e) => {
+            console.warn('JXL pyramid thumb failed:', e);
+        });
+        return;
+    }
     if (IS_TAURI && card?._tauriResult?.jxl_cached && !card._blobUrl) {
         repaintThumbFromJxlTauri(card);
         return;
@@ -3370,7 +3394,11 @@ async function fetchTauriJxlFull(id) {
 }
 
 async function repaintThumbFromJxlTauri(card) {
-    const id = card?._tauriResult?.id;
+    const result = card?._tauriResult;
+    if (result?.pyramid_cached && result?.pyramid_l0) {
+        return tauriPyramidClient?.paintThumb(card, result);
+    }
+    const id = result?.id;
     if (id == null) return;
     try {
         const { w, h, rgb } = await fetchTauriJxlLightbox(id);
@@ -3422,6 +3450,7 @@ function resetBatchCounters() {
     lastEncodeT  = null;
     encodeMsSum = 0;
     tauriStatSeq = 0;
+    tauriPyramidClient?.clearCache();
 }
 function updateBatchRollups(encodeMs) {
     const now = performance.now();
@@ -3454,8 +3483,15 @@ function onFileDoneTauri(filename, result) {
     card._tauriResult = result;
     card._jxlDecoded = null;
 
-    // Thumb dims in ProcessResult; pixels via get_thumb(id) binary Response.
-    if (result?.id != null) {
+    // Pyramid path: L0 seed + DPR upgrade (PR-8b). Legacy: pipeline thumb via get_thumb.
+    if (result?.pyramid_cached && result?.pyramid_l0 && result?.id != null) {
+        tauriPyramidClient?.paintThumb(card, result).catch((e) => {
+            console.error('[tauri-pyramid] paint failed for', filename, e);
+            card.classList.add('error');
+            const tEl = card.querySelector('.time');
+            if (tEl) tEl.textContent = 'pyramid: ' + (e.message || e);
+        });
+    } else if (result?.id != null) {
         fetchTauriThumb(card, result.id).catch((e) => {
             console.error('[tauri-thumb] paint failed for', filename, e);
             card.classList.add('error');
@@ -3482,12 +3518,13 @@ function onFileDoneTauri(filename, result) {
     }
 
     // JXL: default id-cache (jxl_cached); inline jxl only when include_jxl set.
+    // Pyramid path already painted L0+upgrade above — skip full lightbox decode.
     if (result?.jxl_cached) {
         const dlBtn = card.querySelector('.thumb-dl-btn');
         if (dlBtn) dlBtn.hidden = false;
         refreshThumbToggleButton(card);
         updateToggleButtonState(card);
-        repaintThumbFromJxl(card);
+        if (!result?.pyramid_cached) repaintThumbFromJxl(card);
         if (card._subjects?.length && typeof window.renderSubjectThumb === 'function') {
             window.renderSubjectThumb(card).catch(() => {});
         }
@@ -3533,7 +3570,8 @@ function onFileDoneTauri(filename, result) {
         `tone ${fmtMs(t.tone_ms)}  ` +
         `pipe ${fmtMs(pipeMs)}  ` +
         `enc ${fmtMs(t.encode_ms)}  ` +
-        `out ${result?.jxl_cached && !(result?.jxl?.length || result?.jxl?.byteLength) ? 'cache' : fmtKb(result?.jxl?.byteLength || result?.jxl?.length || 0)}`,
+        `pyr ${fmtMs(t.pyramid_ms)}  ` +
+        `out ${result?.pyramid_cached ? 'pyramid' : (result?.jxl_cached && !(result?.jxl?.length || result?.jxl?.byteLength) ? 'cache' : fmtKb(result?.jxl?.byteLength || result?.jxl?.length || 0))}`,
     );
 
     // Replace the stuck "encoding" label with the final timing.
