@@ -8,7 +8,7 @@ import {
   type ProgressiveManifest,
   type TierName,
 } from "./progressive-manifest.js";
-import { fetchTier, fetchFull, streamTierFrames } from "./progressive-stream.js";
+import { fetchTier, fetchFull, streamTierFrames, createTtffTimer } from "./progressive-stream.js";
 import type { ProgressiveCache } from "./progressive-cache.js";
 
 export type Tier = "none" | "dc" | "preview" | "full";
@@ -29,6 +29,11 @@ export interface ProgressiveImageJob {
   bytesLoaded: number;
   manifest: ProgressiveManifest | null;
   decoderAbort: AbortController | null;
+  /** DC tier size in bytes (from manifest), reported with TTFF for bytesToFirstFrame. */
+  dcByteSize?: number;
+  /** @internal TTFF start captured before decoder session (via createTtffTimer in stream). */
+  ttffStartMs?: number;
+  ttffReported?: boolean;
 }
 
 export interface GalleryOptions {
@@ -39,8 +44,16 @@ export interface GalleryOptions {
   onFrame?: (id: string, frame: DecodeFrameEvent) => void;
   onTier?: (id: string, tier: Tier) => void;
   onError?: (id: string, err: Error) => void;
+  /** Callback for Time-To-First-Frame (TTFF) metrics. Fires exactly once per job on first frame emission. */
+  onFirstFrame?: (id: string, elapsedMs: number, bytesToFirstFrame: number) => void;
   manifestSuffix?: string;
   autoProfile?: boolean;
+  /** Default true: signals that DC tier should be instantly blurred/upscaled at render (plumbed to callers). */
+  dcBlurUp?: boolean;
+  /** Explicit low-power/data-saver override; if unset, auto-detected from navigator.connection.saveData + battery. */
+  lowPowerMode?: boolean;
+  /** Injected for testing. Default: globalThis.fetch. Plumbed to manifest fetches and range tier fetches. */
+  fetchImpl?: typeof fetch;
   /** Injected for testing. Default: global IntersectionObserver constructor. */
   intersectionObserverFactory?: (
     callback: IntersectionObserverCallback,
@@ -88,6 +101,9 @@ export class ProgressiveGallery {
   private readonly opts: Required<
     Omit<GalleryOptions, "intersectionObserverFactory" | "rafScheduler" | "rafCanceller">
   >;
+  private readonly fetchImpl: typeof fetch;
+  private lowPowerMode: boolean;
+  private readonly preconnected = new Set<string>();
   private activeDecoders = 0;
   private rafHandle: number | null = null;
   private destroyed = false;
@@ -113,9 +129,14 @@ export class ProgressiveGallery {
       onFrame: opts.onFrame ?? (() => {}),
       onTier: opts.onTier ?? (() => {}),
       onError: opts.onError ?? (() => {}),
+      onFirstFrame: opts.onFirstFrame ?? (() => {}),
       manifestSuffix: opts.manifestSuffix ?? ".json",
       autoProfile: opts.autoProfile ?? true,
+      dcBlurUp: opts.dcBlurUp ?? true,
     };
+    this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+    this.lowPowerMode =
+      opts.lowPowerMode !== undefined ? opts.lowPowerMode : this.detectLowPower();
     const ioFactory =
       opts.intersectionObserverFactory ??
       ((cb, ioOpts) => new IntersectionObserver(cb, ioOpts));
@@ -147,6 +168,7 @@ export class ProgressiveGallery {
       decoderAbort: null,
     };
     this.jobs.set(id, job);
+    this.ensurePreconnect(jxlUrl);
     this.observer.observe(element);
   }
 
@@ -186,12 +208,54 @@ export class ProgressiveGallery {
 
   destroy(): void {
     this.destroyed = true;
-    if (this.rafHandle !== null) this.caf(this.rafHandle);
+    if (this.rafHandle !== null) {
+      try { this.caf(this.rafHandle); } catch {}
+      clearTimeout(this.rafHandle as any);
+    }
     this.observer.disconnect();
     for (const job of this.jobs.values()) {
       job.decoderAbort?.abort("destroyed");
     }
     this.jobs.clear();
+  }
+
+  private detectLowPower(): boolean {
+    if (typeof navigator === "undefined") return false;
+    const nav: any = navigator;
+    if (nav.connection?.saveData) return true;
+    // Battery check async; set flag later if low.
+    if (typeof nav.getBattery === "function") {
+      nav
+        .getBattery()
+        .then((bat: any) => {
+          if (bat && (bat.level <= 0.2 || (!bat.charging && bat.level <= 0.5))) {
+            this.lowPowerMode = true;
+          }
+        })
+        .catch(() => {});
+    }
+    return false;
+  }
+
+  private ensurePreconnect(url: string): void {
+    if (typeof document === "undefined") return;
+    try {
+      const origin = new URL(url).origin;
+      if (this.preconnected.has(origin)) return;
+      this.preconnected.add(origin);
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = origin;
+      link.crossOrigin = "anonymous";
+      document.head.appendChild(link);
+    } catch {}
+  }
+
+  private getEffectiveTarget(job: ProgressiveImageJob): Tier {
+    if (this.lowPowerMode && !job.selected) {
+      return tierRank(job.targetTier) > tierRank("dc") ? "dc" : job.targetTier;
+    }
+    return job.targetTier;
   }
 
   private handleIntersection = (entries: IntersectionObserverEntry[]): void => {
@@ -247,12 +311,15 @@ export class ProgressiveGallery {
       typeof performance !== "undefined" ? performance.now() : Date.now();
     const candidates = [...this.jobs.values()]
       .filter((j) => j.visible || j.nearViewport || j.selected)
-      .filter((j) => tierRank(j.currentTier) < tierRank(j.targetTier))
+      .filter((j) => tierRank(j.currentTier) < tierRank(this.getEffectiveTarget(j)))
       .filter((j) => j.decoderAbort === null)
       .sort((a, b) => fairnessScore(b, now) - fairnessScore(a, now));
 
+    const maxActive = this.lowPowerMode
+      ? Math.min(1, this.opts.maxActiveDecoders)
+      : this.opts.maxActiveDecoders;
     for (const job of candidates) {
-      if (this.activeDecoders >= this.opts.maxActiveDecoders) break;
+      if (this.activeDecoders >= maxActive) break;
       void this.startDecode(job);
     }
   }
@@ -273,22 +340,42 @@ export class ProgressiveGallery {
         job.manifest = await this.fetchAndCacheManifest(job);
       }
 
+      if (job.manifest && job.dcByteSize == null) {
+        const dcTier = lookupTier(job.manifest, "dc" as TierName);
+        if (dcTier) job.dcByteSize = dcTier.byteEnd;
+      }
+
       const target = nextTier(job.currentTier);
       if (target === null) return;
 
       const manifestTier =
         job.manifest !== null ? lookupTier(job.manifest, target as TierName) : undefined;
 
+      // Capture TTFF timer immediately before opening decoder session (per Phase 1).
+      const ttff = createTtffTimer();
+      job.ttffStartMs = ttff.start;
+
       const session = this.sessionFactory();
 
+      const fetchOpts: any = { signal: abort.signal, fetchImpl: this.fetchImpl };
+      const isFirstTierForJob = job.currentTier === "none";
+      const isHighPrio = job.visible || job.selected || job.priority <= 3;
+      fetchOpts.priority = isFirstTierForJob && isHighPrio ? "high" : "low";
+
       if (manifestTier !== undefined) {
-        void fetchTier(job.jxlUrl, manifestTier, session, { signal: abort.signal });
+        void fetchTier(job.jxlUrl, manifestTier, session, fetchOpts);
       } else {
-        void fetchFull(job.jxlUrl, session, { signal: abort.signal });
+        void fetchFull(job.jxlUrl, session, fetchOpts);
       }
 
       for await (const frame of streamTierFrames(session)) {
         if (abort.signal.aborted) break;
+        if (!job.ttffReported && job.ttffStartMs != null) {
+          const elapsed = ttff.getElapsed();
+          const bytes = job.dcByteSize ?? manifestTier?.byteEnd ?? 0;
+          this.opts.onFirstFrame(job.id, elapsed, bytes);
+          job.ttffReported = true;
+        }
         this.opts.onFrame(job.id, frame);
       }
 
@@ -313,7 +400,7 @@ export class ProgressiveGallery {
     job: ProgressiveImageJob,
   ): Promise<ProgressiveManifest | null> {
     try {
-      const resp = await fetch(job.manifestUrl);
+      const resp = await this.fetchImpl(job.manifestUrl);
       if (!resp.ok) return null;
       const json: unknown = await resp.json();
       const manifest = validateManifest(json);
