@@ -63,15 +63,20 @@ function stitchTileDecodes(
   bytesPerPixel: 4 | 8 = 4,
 ): DecodedLevel {
   const pixels = new Uint8Array(viewport.w * viewport.h * bytesPerPixel);
+  const dstStride = viewport.w * bytesPerPixel;
   for (const { region, decoded } of parts) {
     const dx = region.x - viewport.x;
     const dy = region.y - viewport.y;
     const srcStride = decoded.width * bytesPerPixel;
-    const dstStride = viewport.w * bytesPerPixel;
-    for (let row = 0; row < decoded.height; row++) {
-      const srcOff = row * srcStride;
-      const dstOff = ((dy + row) * viewport.w + dx) * bytesPerPixel;
-      pixels.set(decoded.pixels.subarray(srcOff, srcOff + srcStride), dstOff);
+    if (decoded.width === viewport.w && dx === 0) {
+      // Stride-aligned fast path (I4): full-width tile is contiguous block.
+      pixels.set(decoded.pixels, dy * dstStride);
+    } else {
+      for (let row = 0; row < decoded.height; row++) {
+        const srcOff = row * srcStride;
+        const dstOff = ((dy + row) * viewport.w + dx) * bytesPerPixel;
+        pixels.set(decoded.pixels.subarray(srcOff, srcOff + srcStride), dstOff);
+      }
     }
   }
   return { pixels, width: viewport.w, height: viewport.h };
