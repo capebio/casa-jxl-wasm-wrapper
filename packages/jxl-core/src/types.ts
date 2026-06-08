@@ -73,6 +73,7 @@ export interface DecodeOptions {
   priority?: "visible" | "near" | "background";
   budgetMs?: number;
   signal?: AbortSignal;
+  sourceKey?: string | null;  // for scheduler DedupeRegistry (pyramid gallery one-shots keyed by level contenthash; reuses existing acquireSlot/dedupe, no ad-hoc)
   // Telemetry
   onMetric?: (m: CodecMetric) => void;
 }
