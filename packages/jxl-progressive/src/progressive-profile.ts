@@ -200,7 +200,11 @@ export async function profileJxlFile(
 ): Promise<ProgressiveManifest> {
   const { readFile, writeFile } = await import("node:fs/promises");
   const buf = await readFile(path);
-  const manifest = await profileJxl(buf.buffer, sessionFactory, source, opts);
+  // Slice to exact bytes: node Buffer.buffer is often a larger slab from the fs pool.
+  // Passing the full backing ArrayBuffer causes sha256 + profile push to ingest garbage,
+  // leading to hash mismatches downstream (F8).
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const manifest = await profileJxl(ab, sessionFactory, source, opts);
   if (opts.writeManifest !== false) {
     await writeFile(`${path}.json`, JSON.stringify(manifest, null, 2), "utf-8");
   }

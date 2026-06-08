@@ -8,7 +8,7 @@ import {
   type ProgressiveManifest,
   type TierName,
 } from "./progressive-manifest.js";
-import { fetchTier, fetchFull, streamTierFrames, createTtffTimer } from "./progressive-stream.js";
+import { fetchTier, fetchFull, streamTierFrames, RefinementSession, fetchDelta } from "./progressive-stream.js";
 import type { ProgressiveCache } from "./progressive-cache.js";
 
 export type Tier = "none" | "dc" | "preview" | "full";
@@ -34,6 +34,8 @@ export interface ProgressiveImageJob {
   /** @internal TTFF start captured before decoder session (via createTtffTimer in stream). */
   ttffStartMs?: number;
   ttffReported?: boolean;
+  /** Retained across tier advances for delta-byte incremental decode (Phase 3). */
+  refinement?: RefinementSession | undefined;
 }
 
 export interface GalleryOptions {
@@ -99,7 +101,7 @@ export class ProgressiveGallery {
   private readonly raf: (fn: FrameRequestCallback) => number;
   private readonly caf: (id: number) => void;
   private readonly opts: Required<
-    Omit<GalleryOptions, "intersectionObserverFactory" | "rafScheduler" | "rafCanceller">
+    Omit<GalleryOptions, "intersectionObserverFactory" | "rafScheduler" | "rafCanceller" | "fetchImpl" | "lowPowerMode">
   >;
   private readonly fetchImpl: typeof fetch;
   private lowPowerMode: boolean;
@@ -166,6 +168,7 @@ export class ProgressiveGallery {
       bytesLoaded: 0,
       manifest: null,
       decoderAbort: null,
+      refinement: undefined,
     };
     this.jobs.set(id, job);
     this.ensurePreconnect(jxlUrl);
@@ -176,6 +179,10 @@ export class ProgressiveGallery {
     const job = this.jobs.get(id);
     if (!job) return;
     job.decoderAbort?.abort("unobserved");
+    if (job.refinement) {
+      void job.refinement.cancel("unobserved");
+      job.refinement = undefined;
+    }
     this.observer.unobserve(job.element);
     this.jobs.delete(id);
   }
@@ -215,6 +222,10 @@ export class ProgressiveGallery {
     this.observer.disconnect();
     for (const job of this.jobs.values()) {
       job.decoderAbort?.abort("destroyed");
+      if (job.refinement) {
+        void job.refinement.cancel("destroyed");
+        job.refinement = undefined;
+      }
     }
     this.jobs.clear();
   }
@@ -291,6 +302,10 @@ export class ProgressiveGallery {
     setTimeout(() => {
       if (!job.visible && !job.selected && job.decoderAbort !== null) {
         job.decoderAbort.abort("left-viewport");
+        if (job.refinement) {
+          void job.refinement.cancel("left-viewport");
+          job.refinement = undefined;
+        }
         job.decoderAbort = null;
         this.activeDecoders = Math.max(0, this.activeDecoders - 1);
       }
@@ -351,33 +366,25 @@ export class ProgressiveGallery {
       const manifestTier =
         job.manifest !== null ? lookupTier(job.manifest, target as TierName) : undefined;
 
-      // Capture TTFF timer immediately before opening decoder session (per Phase 1).
-      const ttff = createTtffTimer();
-      job.ttffStartMs = ttff.start;
-
-      const session = this.sessionFactory();
+      // Capture TTFF timer immediately before opening (or advancing) decoder (per Phase 1/3).
+      job.ttffStartMs =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
 
       const fetchOpts: any = { signal: abort.signal, fetchImpl: this.fetchImpl };
       const isFirstTierForJob = job.currentTier === "none";
       const isHighPrio = job.visible || job.selected || job.priority <= 3;
       fetchOpts.priority = isFirstTierForJob && isHighPrio ? "high" : "low";
 
-      if (manifestTier !== undefined) {
-        void fetchTier(job.jxlUrl, manifestTier, session, fetchOpts);
-      } else {
-        void fetchFull(job.jxlUrl, session, fetchOpts);
+      // Phase 3: use RefinementSession for delta pushes + retained decoder (no per-tier open/fetch-from-0).
+      if (!job.refinement) {
+        if (!job.manifest) return;
+        job.refinement = new RefinementSession(this.sessionFactory, job.jxlUrl, job.manifest, {
+          fetchImpl: this.fetchImpl,
+        });
+        this.launchFramePump(job);
       }
 
-      for await (const frame of streamTierFrames(session)) {
-        if (abort.signal.aborted) break;
-        if (!job.ttffReported && job.ttffStartMs != null) {
-          const elapsed = ttff.getElapsed();
-          const bytes = job.dcByteSize ?? manifestTier?.byteEnd ?? 0;
-          this.opts.onFirstFrame(job.id, elapsed, bytes);
-          job.ttffReported = true;
-        }
-        this.opts.onFrame(job.id, frame);
-      }
+      await job.refinement.advanceTo(target as TierName, fetchOpts);
 
       if (!abort.signal.aborted) {
         job.currentTier = target;
@@ -394,6 +401,35 @@ export class ProgressiveGallery {
       job.decoderAbort = null;
       this.activeDecoders = Math.max(0, this.activeDecoders - 1);
     }
+  }
+
+  /** Launch once per job: consumes frames() from the long-lived refinement DecodeSession. */
+  private launchFramePump(job: ProgressiveImageJob): void {
+    const ref = job.refinement;
+    if (!ref) return;
+    void (async () => {
+      try {
+        for await (const frame of ref.frames()) {
+          // Do not break on per-activation abort — aborts only cancel in-flight fetchDelta.
+          // Frames continue for the refinement lifetime (until final or explicit cancel on unobserve/destroy).
+          if (!job.ttffReported && job.ttffStartMs != null) {
+            const elapsed =
+              typeof performance !== "undefined" ? performance.now() - job.ttffStartMs : 0;
+            const bytes = job.dcByteSize ?? 0;
+            this.opts.onFirstFrame(job.id, elapsed, bytes);
+            job.ttffReported = true;
+          }
+          this.opts.onFrame(job.id, frame);
+        }
+      } catch (e) {
+        if (job.decoderAbort && !job.decoderAbort.signal.aborted) {
+          this.opts.onError(
+            job.id,
+            e instanceof Error ? e : new Error(String(e)),
+          );
+        }
+      }
+    })();
   }
 
   private async fetchAndCacheManifest(
