@@ -11,7 +11,7 @@ jxl-encode = ["dep:jpegxl-rs"]
 # Provides the reference implementation for Tauri native progressive + ROI decode (no high-level one-shot).
 # Native only; enable when depending from Tauri desktop crate or native bench.
 # Usage: raw-pipeline = { path = "...", default-features = false, features = ["jxl-lowlevel"] }
-jxl-lowlevel = ["dep:jpegxl-sys"]
+jxl-lowlevel = ["dep:jpegxl-sys", "dep:rayon"]  # PR-10b tiled decode uses rayon for parallel per-tile JXL decode + stitch (native M4)
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

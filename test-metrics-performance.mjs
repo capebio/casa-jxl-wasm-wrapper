@@ -163,17 +163,36 @@ async function main() {
 
     const finalPixels = targetRgba; 
 
-    // PSNR
+    // PSNR — progressive frames vs lossless master (pre-encode source)
+    const PSNR_PASS3_MIN_DB = 40;
     console.log("\\n--- PSNR ---");
     let totalPsnrTime = 0;
+    const psnrByPass = [];
     for (const p of passes) {
         const start = performance.now();
         const score = computePsnrVsFinal(finalPixels, p.pixels);
         const t = performance.now() - start;
         totalPsnrTime += t;
+        psnrByPass.push({ pass: p.pass, psnr: score });
         console.log(`Pass ${p.pass}${p.isFinal ? ' (final)' : ''}: ${t.toFixed(2)} ms (Score: ${score.toFixed(2)} dB)`);
     }
     console.log(`Total PSNR time: ${totalPsnrTime.toFixed(2)} ms`);
+
+    const pass3 = psnrByPass.find((entry) => entry.pass === 3);
+    if (!pass3) {
+        throw new Error(
+            `PSNR regression gate: expected pass 3 in progressive decode, got ${passes.length} pass(es)`
+        );
+    }
+    if (!Number.isFinite(pass3.psnr) || pass3.psnr < PSNR_PASS3_MIN_DB) {
+        throw new Error(
+            `PSNR regression gate: pass 3 ${pass3.psnr.toFixed(2)} dB < ${PSNR_PASS3_MIN_DB} dB vs lossless master`
+        );
+    }
+    console.log(
+        `\\n--- PSNR Regression Gate ---\\n` +
+        `Pass 3 vs lossless master: ${pass3.psnr.toFixed(2)} dB (>= ${PSNR_PASS3_MIN_DB} dB) OK`
+    );
 
     // SSIM
     console.log("\\n--- SSIM ---");

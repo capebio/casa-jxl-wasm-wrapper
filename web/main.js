@@ -1186,6 +1186,23 @@ for (const btn of viewBtns) {
 // Restore persisted mode (default: rect).
 setViewMode((() => { try { return localStorage.getItem(VIEW_MODE_KEY) || 'rect'; } catch { return 'rect'; } })());
 
+// A3: reuse scratch canvases for rotation/orientation draws — avoids per-pan GPU alloc churn.
+const SCRATCH_CANVAS_POOL_SIZE = 4;
+const scratchCanvasPool = Array.from({ length: SCRATCH_CANVAS_POOL_SIZE }, () => {
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:fixed;left:-99999px;top:0;visibility:hidden;pointer-events:none';
+    document.body.appendChild(canvas);
+    return canvas;
+});
+let scratchCanvasCursor = 0;
+
+function borrowScratchCanvas() {
+    const canvas = scratchCanvasPool[scratchCanvasCursor++ % SCRATCH_CANVAS_POOL_SIZE];
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return { canvas, ctx };
+}
+
 function rgbToRgba(rgb, w, h) {
     const n = w * h;
     const buf = new ArrayBuffer(n * 4);
@@ -1238,9 +1255,8 @@ function drawSensorWithOrientation(canvas, rgb, sw, sh, orientation) {
         ctx.putImageData(new ImageData(rgba, sw, sh), 0, 0);
         return;
     }
-    const tmp = document.createElement('canvas');
+    const { canvas: tmp, ctx: tctx } = borrowScratchCanvas();
     tmp.width = sw; tmp.height = sh;
-    const tctx = tmp.getContext('2d');
     if (tctx) tctx.putImageData(new ImageData(rgba, sw, sh), 0, 0);
     ctx.save();
     ctx.translate(dW / 2, dH / 2);
@@ -1261,9 +1277,8 @@ function drawRotatedCanvas(canvas, rgb, w, h, degrees) {
     if (!ctx) return;
     const rgba = rgbToRgba(rgb, w, h);
     if (d === 0) { ctx.putImageData(new ImageData(rgba, w, h), 0, 0); return; }
-    const tmp = document.createElement('canvas');
+    const { canvas: tmp, ctx: tctx } = borrowScratchCanvas();
     tmp.width = w; tmp.height = h;
-    const tctx = tmp.getContext('2d');
     if (tctx) tctx.putImageData(new ImageData(rgba, w, h), 0, 0);
     ctx.save();
     ctx.translate(dW / 2, dH / 2);
@@ -2803,9 +2818,8 @@ function applyStraightenToLightboxCanvas(card) {
     const srcW = lightboxCanvas.width;
     const srcH = lightboxCanvas.height;
 
-    // Work on a temp canvas with the rotated + cropped result
-    const tmp = document.createElement('canvas');
-    const ctx = tmp.getContext('2d', { willReadFrequently: false });
+    // Work on a pooled scratch canvas with the rotated + cropped result
+    const { canvas: tmp, ctx } = borrowScratchCanvas();
 
     // We want the final output to respect the crop rect aspect if possible.
     // For simplicity in v1: rotate the full current content, then extract a centered rect
