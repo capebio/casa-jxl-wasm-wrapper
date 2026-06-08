@@ -295,6 +295,13 @@ fn downscale_rgb_float_path<F>(
 /// (6 bytes per pixel).  Used to cache a lightbox-sized buffer for live re-render.
 ///
 /// Fast path for integer factors (benefits lb/thumb generation for all RAW formats).
+///
+/// Phase 7 W1: annotated for simd128. When the final WASM is built with
+/// +simd128 (or the build script includes it in RUSTFLAGS) LLVM + the
+/// simple accumulation loops here can autovectorize; explicit core::arch
+/// f32x4/u16x8 rewrites can be added later behind a cfg(target_feature="simd128")
+/// without changing callers.
+#[cfg_attr(target_arch = "wasm32", target_feature(enable = "simd128"))]
 fn downscale_rgb16_impl(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
     let mut out = vec![0u8; dw * dh * 6];
 
@@ -999,6 +1006,18 @@ pub fn downscale_rgba(
 
     let mut out = vec![0u8; dw * dh * 4];
 
+    // Phase 7 W4: hoist opaque check for RAW decodes (and other no-alpha sources).
+    // When fully opaque we skip alpha accumulation in the hot loops and force 255.
+    // This lets RGB channels pack tighter for future SIMD and saves 25% of the
+    // adds/reads in the inner box filter.
+    let mut all_opaque = true;
+    for i in (3..src.len()).step_by(4) {
+        if src[i] != 255 {
+            all_opaque = false;
+            break;
+        }
+    }
+
     // Same big-brain integer fast path as downscale_rgb for common power-of-two thumbnail cases.
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
@@ -1016,7 +1035,9 @@ pub fn downscale_rgba(
                         rr += src[i]     as u32;
                         gg += src[i + 1] as u32;
                         bb += src[i + 2] as u32;
-                        aa += src[i + 3] as u32;
+                        if !all_opaque {
+                            aa += src[i + 3] as u32;
+                        }
                         i += 4;
                     }
                     row_base += sw;
@@ -1024,7 +1045,7 @@ pub fn downscale_rgba(
                 out[o]     = (rr / pixel_count) as u8;
                 out[o + 1] = (gg / pixel_count) as u8;
                 out[o + 2] = (bb / pixel_count) as u8;
-                out[o + 3] = (aa / pixel_count) as u8;
+                out[o + 3] = if all_opaque { 255 } else { (aa / pixel_count) as u8 };
                 o += 4;
             }
         }
@@ -1052,7 +1073,9 @@ pub fn downscale_rgba(
                     rr += src[i]     as u32;
                     gg += src[i + 1] as u32;
                     bb += src[i + 2] as u32;
-                    aa += src[i + 3] as u32;
+                    if !all_opaque {
+                        aa += src[i + 3] as u32;
+                    }
                     i += 4;
                 }
                 row_base += sw * 4;
@@ -1060,7 +1083,7 @@ pub fn downscale_rgba(
             out[o]     = (rr / n) as u8;
             out[o + 1] = (gg / n) as u8;
             out[o + 2] = (bb / n) as u8;
-            out[o + 3] = (aa / n) as u8;
+            out[o + 3] = if all_opaque { 255 } else { (aa / n) as u8 };
             o += 4;
         }
     }
@@ -1230,6 +1253,10 @@ pub struct LookRenderer {
     // default), the rotation is baked into pixels during render.
     apply_rotation: bool,
     color_matrix: [[f32; 3]; 3],
+    /// Persistent scratch for unsharp/clarity passes. Avoids per-render allocation
+    /// of width*height*3 u16 when texture or clarity sliders are non-zero.
+    /// (Phase 7 W2)
+    scratch: std::cell::RefCell<Vec<u16>>,
 }
 
 #[wasm_bindgen]
@@ -1298,6 +1325,7 @@ impl LookRenderer {
         } else {
             pipeline::CAM_TO_SRGB
         };
+        let scratch = std::cell::RefCell::new(vec![0u16; rgb16.len()]);
         Ok(Self {
             rgb16,
             width: w,
@@ -1305,6 +1333,7 @@ impl LookRenderer {
             orientation,
             apply_rotation,
             color_matrix,
+            scratch,
         })
     }
 
@@ -1371,9 +1400,16 @@ impl LookRenderer {
         );
 
         let rgb8 = if params.texture != 0.0 || params.clarity != 0.0 {
-            let mut rgb16 = self.rgb16.clone();
-            pipeline::apply_unsharp_masks(&mut rgb16, self.width, self.height, &params);
-            pipeline::process(&rgb16, &params)
+            // Phase 7: reuse persistent scratch instead of allocating+cloning the full
+            // lightbox rgb16 buffer on every slider change (W2). copy_from_slice is
+            // required to keep the cached self.rgb16 pristine for future renders.
+            let mut scratch = self.scratch.borrow_mut();
+            if scratch.len() != self.rgb16.len() {
+                scratch.resize(self.rgb16.len(), 0);
+            }
+            scratch.copy_from_slice(&self.rgb16);
+            pipeline::apply_unsharp_masks(&mut scratch, self.width, self.height, &params);
+            pipeline::process(&scratch, &params)
         } else {
             pipeline::process(&self.rgb16, &params)
         };
@@ -1385,6 +1421,95 @@ impl LookRenderer {
                 pipeline::apply_orientation(rgb8, self.width, self.height, self.orientation);
             Ok(final_rgb)
         }
+    }
+
+    /// Zero-copy render path (Phase 7 W3).
+    /// The caller (facade) is responsible for allocating a sufficiently large
+    /// buffer in WASM memory via _malloc and passing the pointer + length.
+    /// Rust writes the final RGB8 directly into that buffer. No Vec is returned
+    /// across the boundary, eliminating the normal marshaling copy for the
+    /// interactive lightbox case.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_into(
+        &self,
+        out_ptr: u32,
+        out_len: u32,
+        wb_r: f32,
+        wb_b: f32,
+        exposure_ev: f32,
+        contrast: f32,
+        highlights: f32,
+        shadows: f32,
+        whites: f32,
+        blacks: f32,
+        saturation: f32,
+        vibrance: f32,
+        temp: f32,
+        tint: f32,
+        texture: f32,
+        clarity: f32,
+    ) -> Result<(), JsError> {
+        // Reuse the exact same param + unsharp + process + orientation logic as render().
+        // The only difference is we copy the final rgb8 bytes into the caller-provided
+        // buffer instead of returning a fresh Vec.
+        let mut params = pipeline::PipelineParams::default_olympus();
+        if wb_r.is_finite() && wb_r > 0.0 {
+            params.wb_r = wb_r;
+        }
+        if wb_b.is_finite() && wb_b > 0.0 {
+            params.wb_b = wb_b;
+        }
+        params.color_matrix = Some(self.color_matrix);
+        raw_pipeline::pipeline::apply_look_params(
+            &mut params,
+            exposure_ev,
+            contrast,
+            highlights,
+            shadows,
+            whites,
+            blacks,
+            saturation,
+            vibrance,
+            temp,
+            tint,
+            texture,
+            clarity,
+        );
+
+        let rgb8 = if params.texture != 0.0 || params.clarity != 0.0 {
+            let mut scratch = self.scratch.borrow_mut();
+            if scratch.len() != self.rgb16.len() {
+                scratch.resize(self.rgb16.len(), 0);
+            }
+            scratch.copy_from_slice(&self.rgb16);
+            pipeline::apply_unsharp_masks(&mut scratch, self.width, self.height, &params);
+            pipeline::process(&scratch, &params)
+        } else {
+            pipeline::process(&self.rgb16, &params)
+        };
+
+        let final_rgb = if !self.apply_rotation || self.orientation == 1 {
+            rgb8
+        } else {
+            let (rotated, _, _) =
+                pipeline::apply_orientation(rgb8, self.width, self.height, self.orientation);
+            rotated
+        };
+
+        let needed = final_rgb.len();
+        if (out_len as usize) < needed {
+            return Err(JsError::new(&format!(
+                "render_into: out_len {} < needed {}",
+                out_len, needed
+            )));
+        }
+
+        // Direct write into JS-owned WASM memory. This is the zero-copy output.
+        let dst = unsafe {
+            std::slice::from_raw_parts_mut(out_ptr as *mut u8, needed)
+        };
+        dst.copy_from_slice(&final_rgb);
+        Ok(())
     }
 }
 

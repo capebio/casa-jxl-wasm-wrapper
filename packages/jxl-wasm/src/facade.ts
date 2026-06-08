@@ -2536,7 +2536,35 @@ function bilinearResize(
         const bottomLeft = row10 + x0 * 4;
         const bottomRight = row10 + x1 * 4;
         const dstOff = (dy * dstW + dx) * 4;
-        for (let c = 0; c < 4; c++) {
+        // Phase 7 W5: manually unrolled 4-channel loop for the common rgba8 case.
+        // Removes per-pixel loop overhead in the bilinear hot path when JS resize
+        // is unavoidable (non power-of-2 or non-downsample path).
+        {
+          const c = 0;
+          const tl = src[topLeft + c]!;
+          const tr = src[topRight + c]!;
+          const bl = src[bottomLeft + c]!;
+          const br = src[bottomRight + c]!;
+          dst[dstOff + c] = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
+        }
+        {
+          const c = 1;
+          const tl = src[topLeft + c]!;
+          const tr = src[topRight + c]!;
+          const bl = src[bottomLeft + c]!;
+          const br = src[bottomRight + c]!;
+          dst[dstOff + c] = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
+        }
+        {
+          const c = 2;
+          const tl = src[topLeft + c]!;
+          const tr = src[topRight + c]!;
+          const bl = src[bottomLeft + c]!;
+          const br = src[bottomRight + c]!;
+          dst[dstOff + c] = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
+        }
+        {
+          const c = 3;
           const tl = src[topLeft + c]!;
           const tr = src[topRight + c]!;
           const bl = src[bottomLeft + c]!;
@@ -2699,6 +2727,47 @@ function pickDownsample(options: { region?: Region | null; targetWidth?: number 
     if (Math.ceil(sourceLongEdge / factor) >= targetLongEdge) return factor;
   }
   return 1;
+}
+
+// --- Phase 7 additions (W3 zero-copy + W5 bypass) ---
+// These live in facade.ts per the handoff contract. The raw LookRenderer + downscalers
+// are in the sibling raw pkg, but the JS-side malloc/view + policy live here so that
+// higher layers (gallery, lightbox) can stay zero-copy without touching other files.
+
+export interface RenderTarget {
+  ptr: number;
+  view: Uint8Array;
+  free(): void;
+}
+
+/** Allocate once (per LookRenderer lifetime or per render) in WASM memory. */
+export function allocateRenderTarget(
+  module: { _malloc(n: number): number; _free(p: number): void; HEAPU8: Uint8Array },
+  byteLength: number,
+): RenderTarget {
+  const ptr = module._malloc(byteLength);
+  const view = module.HEAPU8.subarray(ptr, ptr + byteLength);
+  return { ptr, view, free() { module._free(ptr); } };
+}
+
+/**
+ * Returns the exact power-of-two downsample factor if the target size is precisely
+ * 1/2, 1/4 or 1/8 of the source. In that case the caller should drive decode with
+ * the WASM downsample path (decodeRegionLod / decoder downsample option) instead
+ * of full-res + JS applyTargetResize/bilinearResize.
+ */
+export function shouldUseWasmDownsample(
+  srcW: number,
+  srcH: number,
+  targetW: number,
+  targetH: number,
+): 1 | 2 | 4 | 8 | null {
+  for (const f of [8, 4, 2] as const) {
+    if (Math.round(srcW / f) === targetW && Math.round(srcH / f) === targetH) {
+      return f;
+    }
+  }
+  return null;
 }
 
 function normalizeRegion(region: Region | null, width: number, height: number): Region {
