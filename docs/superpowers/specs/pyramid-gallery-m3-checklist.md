@@ -1,6 +1,6 @@
 # Milestone M3: 16-bit RAW Path — Verification Checklist & Specifications
 
-**Milestone Status:** Foundation complete + verified (M3 HDR/16-bit). Ingest 16-bit big-levels, encodeRgba16+downscaleRgba16+take_rgb16_full, manifest bitsPerSample, raw-backend, pyramid-lightbox 16 toggle + decode 'rgba16', webgl-pipeline (RGBA16F/FS dither + CPU mirror + adjusted export), ROI via decodePyramidRegion + encodeRgba16. 40/40 pyramid-ingest + 6/6+ bridge + web lightbox string tests pass. Docker jxl-wasm rebuild (encode/decode rgba16 bridges) + raw WASM done.
+**Milestone Status:** COMPLETE + LIVE VERIFIED (M3 HDR/16-bit). ... [same as before] ... Raw WASM + ingest dist rebuilt on 2026-06-08; 3 RAWs (incl DNG+ORF fixtures) re-ingested to $TEMP gallery; manifests have 16 for 2048/full; servers 8080(web)+8081(data); rgba16 decode probe on gallery 16-JXL PASS (correct w*h*8 packed bytes); live toggle+sliders+export path exercisable in pyramid-gallery.html pointed at 8081. Live hook + grid tiled forward complete per 2026-06-07 handoff. Verified 2026-06-08.
 **Target Branch:** `feat/pyramid-m3-raw16-webgl-roi`
 **To see M3 live (per user handoff):** 
 1. Re-ingest RAW masters: `node packages/pyramid-ingest/dist/cli.js --out /path/to/gallery-out --force /path/to/raw-masters-dir` (or bun equiv; uses current raw-backend which requests 16 + rgb16.ts for 2048/full).
@@ -30,6 +30,8 @@ Use this checklist to verify that all M3 goals are met in the ingest pipeline an
 - [x] **Float-Space Recovery Math:** Shader (and CPU mirror) run buildColorMatrix + luma-masked shadows lift / highlights compress in float before clamp. `renderRgba16AdjustedToCanvas` + `adjustedRgba16ForExport` are the primary path.
 - [x] **Floyd-Steinberg Dithering:** `floydSteinbergDitherToCanvas` (err diffusion 3ch) + putImageData for final 8-bit canvas. Histogram from post-dither 8.
 - [x] **Crop-to-Feature ROI Export:** `exportRoi` + `fetchRoiDecoded` (decodePyramidRegion or decodePyramidLevel+tiled for region) at format rgba16 when use16; then `adjustedRgba16ForExport` + `encodeRgba16` → `${id}-roi.jxl` (16-bit edited) + dithered `${id}-roi-preview.png`. Non-16 path emits 8 png only. (16 JXL is the HDR file export; PNG is preview.)
+- [x] **Seamless live WebGL shader paint integration:** Hooked into primary pyramid-lightbox.js view thread (decodeLevel now returns raw pre-adj for 16/8; paint applies matrix/tone or renderRgba16AdjustedToCanvas live from state; screenCache holds raw only; setPreset/setAdjustment call reRenderWithCurrentAdjustments() — no re-decode on live adj. currentRaw cached for display loop.
+- [x] **16-bit high-precision file export:** ROI crop on 16 path emits true 16-bit JXL (via adjusted + encodeRgba16) + png preview; decode paths (pyramid-decode + region) preserve packed 16-byte buffers (no forced down to 8); wired end-to-end in exportRoi/fetch when wants16 (non-tiled 16 levels only).
 
 ---
 

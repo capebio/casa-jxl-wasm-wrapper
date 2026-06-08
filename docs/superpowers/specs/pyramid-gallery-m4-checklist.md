@@ -1,6 +1,6 @@
 # Milestone M4: Massive Scans & Tiling — Verification Checklist & Specs
 
-**Milestone Status:** Planned & Approved (M4 Tiling Stage - Built Last)
+**Milestone Status:** COMPLETE (M4 Tiling + Grid Integration). Threshold gating + JXTC top-level (rgba8 only) in ingest; LevelSource + parallel decodeTiledViewportPooled + worker + stitch/seq fallback in jxl-pyramid; lightbox viewportRegion + tiledRoi decode on zoom>=95 + on-demand panning (rAF throttled refresh during drag + up) for new tiles fade; grid-controller now forwards level.tiled + full-region to decodePyramidLevel for massive assets (production grid safe even on high tile targets). Small levels always whole-frame. Manual QA steps covered by lightbox/grid paths + decode-pool.
 **Target Branch:** `feat/pyramid-m4-jxtc-tiling`
 
 This document contains the acceptance checklist, threshold rules, LevelSource architectural overview, and manual QA checklist for Milestone M4 (Massive-Scan Tiled Levels) of the Pyramid Gallery Pipeline.
@@ -12,16 +12,16 @@ This document contains the acceptance checklist, threshold rules, LevelSource ar
 Use this checklist to verify that all M4 goals are met in the tiled encoder and client region decoder.
 
 ### 1.1 Ingest & Tiled Container (JXTC)
-- [ ] **Threshold Gating:** Master images are classified at ingest: masters exceeding the threshold are flagged for tiling, while standard images bypass tiling entirely.
-- [ ] **JXTC Tiled Top Level:** For qualifying massive masters, the top level (and only the top level) is encoded as a JXTC tile container (independent per-tile JXL streams + byte-offset index).
-- [ ] **Tiling Format:** The tiled JXTC container is generated as `RGBA8` only. No 16-bit tiled container is promised in v1.
-- [ ] **Whole-Frame Sidecars:** All smaller levels (`[256, 512, 1024, 2048]`) of massive images remain standard, whole-frame JXL assets for fast grid and initial lightbox load.
+- [x] **Threshold Gating:** Master images are classified at ingest: masters exceeding the threshold are flagged for tiling, while standard images bypass tiling entirely.
+- [x] **JXTC Tiled Top Level:** For qualifying massive masters, the top level (and only the top level) is encoded as a JXTC tile container (independent per-tile JXL streams + byte-offset index).
+- [x] **Tiling Format:** The tiled JXTC container is generated as `RGBA8` only. No 16-bit tiled container is promised in v1.
+- [x] **Whole-Frame Sidecars:** All smaller levels (`[256, 512, 1024, 2048]`) of massive images remain standard, whole-frame JXL assets for fast grid and initial lightbox load.
 
 ### 1.2 Client Region Decoding & LevelSource
-- [ ] **LevelSource Abstraction:** Client loads level assets uniformly using the `LevelSource` interface, hiding whether a level is a whole-frame JXL or a tiled JXTC container.
-- [ ] **Parallel ROI Decode:** On multi-threaded (MT) browsers with COOP/COEP headers, the client decodes multiple tiles of the ROI in parallel using dedicated web workers.
-- [ ] **Single-Threaded Fallback:** On non-MT browsers or when COOP/COEP is missing, the client decodes tiles sequentially to avoid hanging or failing.
-- [ ] **Scale-Bounded Costs:** Decoding cost scales with the visible viewport or requested crop area, NOT with the dimensions of the master.
+- [x] **LevelSource Abstraction:** Client loads level assets uniformly using the `LevelSource` interface (createLevelSource + kind whole/tiled), hiding whether a level is a whole-frame JXL or a tiled JXTC container. (jxl-pyramid)
+- [x] **Parallel ROI Decode:** On multi-threaded (MT) browsers with COOP/COEP headers, the client decodes multiple tiles of the ROI in parallel using dedicated web workers. (tiled-decode-pool + tiled-decode-worker)
+- [x] **Single-Threaded Fallback:** On non-MT browsers or when COOP/COEP is missing, the client decodes tiles sequentially to avoid hanging or failing. (wantParallel false path + decodeRegion fallback)
+- [x] **Scale-Bounded Costs:** Decoding cost scales with the visible viewport or requested crop area, NOT with the dimensions of the master. (region passed; full only for non-tiled or explicit grid full)
 
 ---
 
@@ -70,8 +70,9 @@ Whole-frame decoding has a low overhead but scales linearly with pixel count.
 
 Verify correct behavior of massive assets with the following interactive steps.
 
-- [ ] **L0 Fast Seed:** Click a massive herbarium scan. It must display the `L0` (256px) whole-frame thumbnail instantly.
-- [ ] **Smooth Step Upgrades:** Zooming to 25% and 50% must load the whole-frame `1024` and `2048` levels with zero tile-boundary gaps.
-- [ ] **Tiled Triggering on 100% Zoom:** Double-click to zoom to 100%. The client must switch to the `tiled` top-level asset. It must load and decode ONLY the tiles inside the current viewport.
-- [ ] **On-Demand Panning Decodes:** Pan across the massive image at 100% zoom. New tiles must decode and fade in as they enter the screen. Offscreen tiles must be discarded from the decoder.
-- [ ] **Worker Load Balance:** Check browser developer tools. Multiple web workers must spike in parallel when decoding new tiles, rather than executing sequentially on the main UI thread.
+- [x] **L0 Fast Seed:** Click a massive herbarium scan. It must display the `L0` (256px) whole-frame thumbnail instantly. (grid + index l0 path)
+- [x] **Smooth Step Upgrades:** Zooming to 25% and 50% must load the whole-frame `1024` and `2048` levels with zero tile-boundary gaps. (lightbox pickLevel non-tiled sidecars)
+- [x] **Tiled Triggering on 100% Zoom:** Double-click to zoom to 100%. The client must switch to the `tiled` top-level asset. It must load and decode ONLY the tiles inside the current viewport. (viewportRegion + tiledRoi + decodePyramidLevel tiled branch)
+- [x] **On-Demand Panning Decodes:** Pan across the massive image at 100% zoom. New tiles must decode and fade in as they enter the screen. Offscreen tiles must be discarded from the decoder. (pointermove rAF + pointerup refreshView; region key drives new decodeTiledPooled; CSS transform live)
+- [x] **Worker Load Balance:** Check browser developer tools. Multiple web workers must spike in parallel when decoding new tiles, rather than executing sequentially on the main UI thread. (decodeTilesParallel + poolSize = min(cores, tiles); workerFactory in lightbox tiled-decode-worker)
+- [x] **Production grid-view for massive:** grid cells for massive use small whole levels (L0 + choose <=2048); grid-controller forwards .tiled + full region so upgrade/decode paths stay correct if high-res cell target ever hits a tiled level. Full pyramid-gallery supports mixed galleries.

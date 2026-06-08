@@ -36,8 +36,9 @@ function decodeWith(fn: ProcessFn, bytes: Uint8Array): DecodedMaster {
   const flags = OUT_FULL_RGB8 | OUT_FULL_16;
   const pr = fn(bytes, flags, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
   try {
-    const rgba = pr.take_rgba();
+    // Take 16 first (before rgba) to ensure rgb16_full is populated in current wasm bindings.
     const rgb16 = pr.take_rgb16_full();
+    const rgba = pr.take_rgba();
     const master: DecodedMaster = {
       rgba,
       width: pr.width,

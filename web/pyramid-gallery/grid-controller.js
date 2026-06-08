@@ -45,10 +45,14 @@ export function createGridController({
     const p = (async () => {
       if (!store) throw new Error('grid-controller requires imageStore (or cache+galleryBase)');
       const bytes = await store.getLevelBytes(level.contenthash);
+      const isTiled = level.tiled === true;
       return decodePyramidLevel(ctx, bytes, {
         contenthash: level.contenthash,
         priority,
         signal,
+        tiled: isTiled,
+        // Supply full region for tiled so decodeTiledPooled can parallel all tiles (grid targets stay <=2048 whole, but protects if large tileSize or full picked).
+        region: isTiled ? { x: 0, y: 0, w: level.w, h: level.h } : undefined,
       });
     })().finally(() => inflight.delete(jobKey));
 

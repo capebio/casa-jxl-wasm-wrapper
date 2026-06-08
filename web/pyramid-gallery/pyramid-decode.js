@@ -1,6 +1,7 @@
 /**
  * One-shot pyramid level decode through jxl-session + scheduler.
  * sourceKey = contenthash for dedupe. Skips streaming progressive overhead.
+ * format rgba16 returns packed Uint8Array (byteLength = w*h*8) for webgl float + export.
  */
 
 /**
@@ -45,6 +46,7 @@ export async function decodePyramidLevel(ctx, bytes, opts) {
   let height = 0;
   for await (const ev of session.frames()) {
     if (ev.type === 'final') {
+      // Preserve packed bytes for rgba16 (len = w*h*8); Uint8Array container passed through to webgl-pipeline / export.
       rgba = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
       width = ev.info.width;
       height = ev.info.height;
@@ -89,6 +91,7 @@ export async function decodePyramidRegion(bytes, opts) {
   const drain = (async () => {
     for await (const ev of decoder.events()) {
       if (ev.type === 'final') {
+        // Preserve packed byte buffer (Uint8Array stride-8 for rgba16); callers (webgl/export) consume via format.
         pixels = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
         width = ev.info.width;
         height = ev.info.height;

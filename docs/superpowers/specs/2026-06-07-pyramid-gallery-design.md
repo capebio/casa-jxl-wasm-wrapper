@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-07
 **Branch:** feat/fast-jpeg
-**Status:** Approved design. Plans: A (WASM primitives) + B (ingest) written; C (gallery grid) + D (lightbox) to follow. See Milestones & Plan Map below.
+**Status:** M0-M4 COMPLETE in browser/WASM (feat/fast-jpeg). M3 live WebGL integration + 16 export; M4 grid massive + panning decodes + tiled client done. See checklists. Core pipeline + ingest + lightbox + grid integrated. (2026-06 handoff closed)
 
 ---
 

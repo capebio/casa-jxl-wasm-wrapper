@@ -35,6 +35,7 @@ export function createPyramidLightbox({
     paintedLevel: null,
     use16Bit: false,
     screenCache: new Map(),
+    currentRaw: null,
   };
 
   const canvas = rootEl.querySelector('[data-lightbox-canvas]');
@@ -78,15 +79,9 @@ export function createPyramidLightbox({
       region,
     });
 
-    let result;
-    if (use16) {
-      result = { ...decoded, pixels: new Uint8Array(decoded.pixels), is16: true };
-    } else {
-      const copy = new Uint8Array(decoded.pixels);
-      applyColorMatrixInPlace(copy, decoded.width, decoded.height, buildColorMatrix(state.preset, state.adjustments));
-      applyToneMapInPlace(copy, decoded.width, decoded.height, state.adjustments.shadows, state.adjustments.highlights);
-      result = { ...decoded, pixels: copy, is16: false };
-    }
+    // Always cache RAW source pixels (packed bytes for 16; rgba8 for 8). Adj applied live at paint.
+    const rawPixels = new Uint8Array(decoded.pixels);
+    const result = { ...decoded, pixels: rawPixels, is16: use16 };
 
     if (state.screenCache.size > 8) state.screenCache.clear();
     state.screenCache.set(cacheKey, result);
@@ -118,9 +113,12 @@ export function createPyramidLightbox({
       const img = ctx2d.getImageData(0, 0, decoded.width, decoded.height);
       paintHistogramFromRgba8(img.data, decoded.width, decoded.height);
     } else {
+      const copy = new Uint8Array(decoded.pixels);
+      applyColorMatrixInPlace(copy, decoded.width, decoded.height, buildColorMatrix(state.preset, state.adjustments));
+      applyToneMapInPlace(copy, decoded.width, decoded.height, state.adjustments.shadows, state.adjustments.highlights);
       const ctx2d = canvas.getContext('2d');
-      ctx2d.putImageData(new ImageData(new Uint8ClampedArray(decoded.pixels), decoded.width, decoded.height), 0, 0);
-      paintHistogramFromRgba8(decoded.pixels, decoded.width, decoded.height);
+      ctx2d.putImageData(new ImageData(new Uint8ClampedArray(copy), decoded.width, decoded.height), 0, 0);
+      paintHistogramFromRgba8(copy, decoded.width, decoded.height);
     }
     if (crossfade) {
       canvas.style.opacity = '0';
@@ -130,6 +128,13 @@ export function createPyramidLightbox({
       });
     }
     canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+    // Cache raw source for seamless live re-render on adj without re-decode (M3 hook).
+    state.currentRaw = { pixels: decoded.pixels, width: decoded.width, height: decoded.height, is16: decoded.is16 };
+  }
+
+  function reRenderWithCurrentAdjustments() {
+    if (!state.currentRaw) return;
+    paint(state.currentRaw, { crossfade: false });
   }
 
   function viewportRegion(level) {
@@ -238,14 +243,13 @@ export function createPyramidLightbox({
 
   function setPreset(name) {
     state.preset = name;
-    state.screenCache.clear();
-    void refreshView();
+    // Live re-render from cached raw source (no re-decode). M3 seamless WebGL/8 paint.
+    reRenderWithCurrentAdjustments();
   }
 
   function setAdjustment(key, value) {
     state.adjustments = clampAdjustments({ ...state.adjustments, [key]: value });
-    state.screenCache.clear();
-    void refreshView();
+    reRenderWithCurrentAdjustments();
   }
 
   async function open(imageId, seedLevel = null) {
@@ -263,6 +267,7 @@ export function createPyramidLightbox({
     state.panX = 0;
     state.panY = 0;
     state.paintedLevel = null;
+    state.currentRaw = null;
     state.screenCache.clear();
     if (seedLevel) {
       const bytes = await store.getLevelBytes(seedLevel.contenthash);
@@ -288,8 +293,14 @@ export function createPyramidLightbox({
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
+  let panRaf = null;
   canvas?.addEventListener('pointerdown', (ev) => { dragging = true; lastX = ev.clientX; lastY = ev.clientY; });
-  window.addEventListener('pointerup', () => { dragging = false; });
+  window.addEventListener('pointerup', () => {
+    dragging = false;
+    if (state.paintedLevel && state.paintedLevel.tiled && Math.round(state.zoom * 100) >= 95) {
+      void refreshView(); // ensure final region after pan
+    }
+  });
   window.addEventListener('pointermove', (ev) => {
     if (!dragging) return;
     state.panX += ev.clientX - lastX;
@@ -297,11 +308,21 @@ export function createPyramidLightbox({
     lastX = ev.clientX;
     lastY = ev.clientY;
     canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+    // M4 on-demand panning decodes for massive tiled at 100%: rAF throttle to avoid decode spam on every px.
+    const zoomPct = Math.round(state.zoom * 100);
+    if (state.paintedLevel && state.paintedLevel.tiled && zoomPct >= 95) {
+      if (panRaf) cancelAnimationFrame(panRaf);
+      panRaf = requestAnimationFrame(() => {
+        panRaf = null;
+        void refreshView();
+      });
+    }
   });
 
   toggle16?.addEventListener('change', () => {
     state.use16Bit = toggle16.checked && canUseWebGL16();
     state.paintedLevel = null;
+    state.currentRaw = null;
     state.screenCache.clear();
     void refreshView();
   });
