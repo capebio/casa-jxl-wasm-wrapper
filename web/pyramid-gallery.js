@@ -77,8 +77,12 @@ function paint(tile, pixels, info, levelSize, fadeMs = 120) {
   const disp = resizeCanvasToDisplay(canvas, dpr);
   // simple monotonic guard (caller should check before calling)
   if (levelSize && levelSize <= (tile.currentSize || 0)) return;
-  const src = new Uint8ClampedArray(pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels));
+  let src = new Uint8ClampedArray(pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels));
   const iw = info.width, ih = info.height;
+  // M3 16-bit dither for display if source is 16 (simple shift or FS if high bit)
+  if (info.bitsPerSample === 16 || src.length === iw * ih * 6) {
+    src = dither16To8(src, iw, ih); // Floyd-Steinberg or simple
+  }
   // draw with crossfade: save current, draw new with alpha ramp
   const prev = c2d.getImageData(0, 0, canvas.width, canvas.height);
   // scale source to disp
@@ -95,6 +99,35 @@ function paint(tile, pixels, info, levelSize, fadeMs = 120) {
   const lvlEl = tile.el.querySelector('.level');
   if (lvlEl) lvlEl.textContent = (levelSize === 'full' || levelSize > 1024) ? 'full' : `${levelSize || ''}`;
   // crossfade is approximated by the paint swap; for smoother a second layer + raf alpha can be added
+}
+
+function dither16To8(src16, w, h) {
+  // Simple 16->8 (high byte) + basic Floyd-Steinberg dither on luminance error for demo.
+  // Real M3: WebGL float + shader dither or FS on full.
+  const out = new Uint8ClampedArray(w * h * 4);
+  const errR = new Float32Array(w * h);
+  const errG = new Float32Array(w * h);
+  const errB = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const o16 = i * 6;
+    let r = ((src16[o16 + 1] || 0) << 8) | (src16[o16] || 0);
+    let g = ((src16[o16 + 3] || 0) << 8) | (src16[o16 + 2] || 0);
+    let b = ((src16[o16 + 5] || 0) << 8) | (src16[o16 + 4] || 0);
+    r = Math.max(0, Math.min(65535, r + errR[i]));
+    g = Math.max(0, Math.min(65535, g + errG[i]));
+    b = Math.max(0, Math.min(65535, b + errB[i]));
+    const o8 = i * 4;
+    out[o8] = r >> 8;
+    out[o8 + 1] = g >> 8;
+    out[o8 + 2] = b >> 8;
+    out[o8 + 3] = 255;
+    // simple error diffusion (no full FS for brevity)
+    const er = (r & 0xff) - 128;
+    const eg = (g & 0xff) - 128;
+    const eb = (b & 0xff) - 128;
+    if (i + 1 < w * h) { errR[i+1] += er * 0.4375; errG[i+1] += eg * 0.4375; errB[i+1] += eb * 0.4375; }
+  }
+  return out;
 }
 
 async function decodeOneShot(bytes, opts = {}) {
@@ -275,6 +308,7 @@ lbModal.innerHTML = `
     <span id="lb-title" style="font-weight:600"></span>
     <span id="lb-zoom" style="margin-left:8px;color:#6b9;font-variant-numeric:tabular-nums">100%</span>
     <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+      <label style="font-size:10px"><input id="lb-16bit" type="checkbox"> 16-bit (RAW only)</label>
       <button id="lb-reset" style="padding:2px 8px">Reset</button>
       <button id="lb-close" style="padding:2px 8px">Close</button>
     </div>

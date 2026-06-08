@@ -3,13 +3,13 @@ import type { MasterFormat, Orientation, PyramidLevelBytes } from "./backends.js
 
 export type LevelSize = number | "full";
 
-/** A single level recorded in a manifest. M1: every level is 8-bit and untiled. */
+/** A single level recorded in a manifest. M1: 8-bit; M3: bitsPerSample varies per level (RAW big=16, grid/JPG=8), no schema bump. */
 export interface LevelEntry {
   size: LevelSize;
   w: number;
   h: number;
   bytes: number;
-  bitsPerSample: 8;
+  bitsPerSample: 8 | 16;
   contenthash: string;
   tiled: boolean;
 }
@@ -53,14 +53,14 @@ export function levelSize(w: number, h: number, masterW: number, masterH: number
   return Math.max(w, h);
 }
 
-/** Map level bytes -> a manifest entry (computes the content hash + long-edge size). */
-export function toEntry(level: PyramidLevelBytes, masterW: number, masterH: number): LevelEntry {
+/** Map level bytes -> a manifest entry (computes the content hash + long-edge size). bitsPerSample from level or default 8 (M3 allows 16 for RAW big levels). */
+export function toEntry(level: PyramidLevelBytes & { bitsPerSample?: 8 | 16 }, masterW: number, masterH: number): LevelEntry {
   return {
     size: levelSize(level.width, level.height, masterW, masterH),
     w: level.width,
     h: level.height,
     bytes: level.data.length,
-    bitsPerSample: 8,
+    bitsPerSample: level.bitsPerSample ?? 8,
     contenthash: contentHash16(level.data),
     tiled: false,
   };

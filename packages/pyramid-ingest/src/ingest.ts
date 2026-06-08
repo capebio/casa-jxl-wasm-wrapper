@@ -97,7 +97,8 @@ export async function ingestImage(
       orientation = "source";
     } else {
       const dec = await raw.decode(bytes, format as any);
-      levels = await buildRawLadder(jxl, dec.rgba, dec.width, dec.height, plan);
+      // M3: pass full decoded (may have rgb16 for big levels)
+      levels = await buildRawLadder(jxl, dec as any, dec.width, dec.height, plan);
       w = dec.width; h = dec.height; orientation = "baked";
     }
   }

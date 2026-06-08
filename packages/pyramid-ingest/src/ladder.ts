@@ -1,14 +1,39 @@
 import type { JxlBackend, PyramidEncodeOptions, PyramidLevelBytes, RawBackend } from "./backends.js";
 
-/** Build the full 8-bit ladder for a RAW master (use the one encode call for the grid + 2048; full re-encode at q95). */
+/** Build the ladder for RAW. M3: grid levels 8-bit, {2048, full} use 16-bit data (from raw rgb16) if available. Separate encodes since bit depth differs. */
 export async function buildRawLadder(
   jxl: JxlBackend,
-  rgba: Uint8Array,
+  decoded: { rgba: Uint8Array; rgb16?: Uint8Array; width: number; height: number },
   width: number,
   height: number,
   plan: PyramidEncodeOptions,
 ): Promise<PyramidLevelBytes[]> {
-  // RAW: decode once done upstream; here just encode the RGBA8 pyramid (grid + 2048 at higher q, full at q95).
+  const { rgba, rgb16 } = decoded;
+  const is16 = !!rgb16 && plan.sidecarSizes.some(s => s >= 2048 || s === 'full' as any); // rough
+
+  if (rgb16 && (plan.sidecarSizes.includes(2048) || plan.sidecarSizes.some(s => typeof s === 'number' && s >= 2048))) {
+    // M3: split: grid sizes (256/512/1024) use 8-bit encode, big use 16-bit encode.
+    const gridSizes = plan.sidecarSizes.filter(s => (typeof s === 'number' && s < 2048) || s === 2048 /* wait, 2048 is big */);
+    // Simpler: grid <2048 use 8, 2048+full use 16.
+    const smallSizes = plan.sidecarSizes.filter((s) => typeof s === 'number' && s <= 1024);
+    const bigSizes = plan.sidecarSizes.filter((s) => s === 2048 || s === 'full' as any);
+
+    let levels: PyramidLevelBytes[] = [];
+    if (smallSizes.length > 0) {
+      const smallPlan = { ...plan, sidecarSizes: smallSizes, sidecarDistances: plan.sidecarDistances.slice(0, smallSizes.length) };
+      const small = await jxl.encodePyramid(rgba, width, height, smallPlan);
+      levels = levels.concat(small);
+    }
+    if (bigSizes.length > 0 && rgb16) {
+      const bigPlan = { ...plan, sidecarSizes: bigSizes, sidecarDistances: plan.sidecarDistances.slice(smallSizes.length) };
+      const big = await jxl.encodePyramid16(rgb16, width, height, bigPlan);
+      levels = levels.concat(big);
+    }
+    // full may be included in big.
+    return levels;
+  }
+
+  // Fallback / M1 8-bit only
   return jxl.encodePyramid(rgba, width, height, plan);
 }
 
