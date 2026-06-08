@@ -259,3 +259,356 @@ if (qs.get('autostart') != null) setTimeout(loadIndexAndSeed, 60);
 
 console.log('%c[Pyramid M1 Grid] loaded — L0 seed + scheduler one-shot upgrades (contenthash discipline via level URLs)', 'color:#6b9');
 logStatus('set base + Load (or ?base=...&autostart=1)');
+
+// === M2 Lightbox integration (8-bit) ===
+// Click tile -> open lightbox with zoom/pan/adjustments using pyramid levels for that imageId.
+// Reuses existing decodeOneShot (scheduler path), adds FilterEngine, LRU, priority notes, live histo.
+
+import createFilterEngine, { LightboxPreset, APPROVED_LIGHTBOX_PRESETS } from './pyramid-filter-engine.js';
+
+let lightboxEng = null;
+let lbState = null; // { imageId, levels: [{size,hash,w,h}], currentLevelIdx, sourceBitmap: Uint8ClampedArray | null, view: {scale, tx, ty}, params, preset }
+const lbModal = document.createElement('div');
+lbModal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:9999;display:none;flex-direction:column';
+lbModal.innerHTML = `
+  <div style="display:flex;gap:12px;align-items:center;padding:8px 12px;background:#1a1a1a;border-bottom:1px solid #333">
+    <span id="lb-title" style="font-weight:600"></span>
+    <span id="lb-zoom" style="margin-left:8px;color:#6b9;font-variant-numeric:tabular-nums">100%</span>
+    <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+      <button id="lb-reset" style="padding:2px 8px">Reset</button>
+      <button id="lb-close" style="padding:2px 8px">Close</button>
+    </div>
+  </div>
+  <div style="flex:1;display:flex;min-height:0">
+    <div style="flex:1;position:relative;overflow:hidden;background:#111" id="lb-viewport">
+      <canvas id="lb-canvas" style="position:absolute;inset:0;margin:auto;display:block;touch-action:none"></canvas>
+    </div>
+    <div style="width:280px;border-left:1px solid #333;padding:8px 10px;overflow:auto;background:#181818;font-size:12px">
+      <div style="margin-bottom:6px;font-weight:600">Presets</div>
+      <div id="lb-presets" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px"></div>
+      <div style="margin-bottom:6px;font-weight:600">Adjustments</div>
+      <div id="lb-sliders"></div>
+      <div style="margin:10px 0 4px;font-weight:600">Histogram</div>
+      <canvas id="lb-histo" width="256" height="80" style="width:100%;background:#111;border:1px solid #333"></canvas>
+      <div style="font-size:10px;color:#888;margin-top:6px">Click grid image to open. Wheel/drag on canvas. Sliders live. No Android dep.</div>
+    </div>
+  </div>
+`;
+document.body.appendChild(lbModal);
+
+const lbCanvas = lbModal.querySelector('#lb-canvas');
+const lbCtx = lbCanvas.getContext('2d');
+const lbViewport = lbModal.querySelector('#lb-viewport');
+const lbZoomEl = lbModal.querySelector('#lb-zoom');
+const lbTitleEl = lbModal.querySelector('#lb-title');
+const lbHisto = lbModal.querySelector('#lb-histo');
+const lbHistoCtx = lbHisto.getContext('2d');
+const lbClose = lbModal.querySelector('#lb-close');
+const lbReset = lbModal.querySelector('#lb-reset');
+const lbPresetsEl = lbModal.querySelector('#lb-presets');
+const lbSlidersEl = lbModal.querySelector('#lb-sliders');
+
+lbClose.onclick = closeLightbox;
+lbReset.onclick = resetAdjustments;
+
+function ensureEngine() {
+  if (!lightboxEng) lightboxEng = createFilterEngine();
+  return lightboxEng;
+}
+
+function buildPresetButtons() {
+  lbPresetsEl.innerHTML = '';
+  for (const p of APPROVED_LIGHTBOX_PRESETS) {
+    const b = document.createElement('button');
+    b.textContent = p;
+    b.style.cssText = 'font-size:10px;padding:1px 5px;border:1px solid #444;background:#222;color:#ddd';
+    b.onclick = () => { ensureEngine().setPreset(p); renderLightboxAdjusted(); };
+    lbPresetsEl.appendChild(b);
+  }
+}
+
+function buildSliders() {
+  lbSlidersEl.innerHTML = '';
+  const eng = ensureEngine();
+  const labels = {
+    brightness: 'Brightness',
+    contrast: 'Contrast',
+    saturation: 'Saturation',
+    shadows: 'Shadows',
+    highlights: 'Highlights',
+    clarity: 'Clarity',
+    dehaze: 'Dehaze',
+    sharpness: 'Sharpness',
+  };
+  for (const key of eng.APPROVED_SLIDERS) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;margin:3px 0;gap:6px';
+    const lab = document.createElement('label');
+    lab.style.width = '70px';
+    lab.textContent = labels[key] || key;
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = key === 'highlights' ? '-1' : '0';
+    range.max = (key === 'brightness' || key === 'contrast' || key === 'saturation') ? '1' : '1';
+    range.step = '0.01';
+    range.value = '0';
+    range.style.flex = '1';
+    const val = document.createElement('span');
+    val.style.width = '38px';
+    val.style.textAlign = 'right';
+    val.textContent = '0';
+    range.oninput = () => {
+      eng.setParam(key, parseFloat(range.value));
+      val.textContent = parseFloat(range.value).toFixed(2);
+      renderLightboxAdjusted();
+    };
+    row.append(lab, range, val);
+    lbSlidersEl.appendChild(row);
+  }
+}
+
+function updateZoomReadout(scale) {
+  lbZoomEl.textContent = Math.round(scale * 100) + '%';
+}
+
+let lbRaf = 0;
+function renderLightboxAdjusted() {
+  if (!lbState || !lbState.sourceBitmap) return;
+  const eng = ensureEngine();
+  const src = lbState.sourceBitmap;
+  const w = lbState.srcW, h = lbState.srcH;
+  const adjusted = eng.apply(src, w, h);
+
+  // draw to canvas with current view transform
+  const v = lbState.view;
+  lbCanvas.width = lbViewport.clientWidth;
+  lbCanvas.height = lbViewport.clientHeight;
+  lbCtx.save();
+  lbCtx.fillStyle = '#111';
+  lbCtx.fillRect(0, 0, lbCanvas.width, lbCanvas.height);
+  lbCtx.translate(lbCanvas.width / 2 + v.tx, lbCanvas.height / 2 + v.ty);
+  lbCtx.scale(v.scale, v.scale);
+  lbCtx.translate(-w / 2, -h / 2);
+
+  const id = new ImageData(adjusted, w, h);
+  // create temp for drawImage
+  const tmp = document.createElement('canvas');
+  tmp.width = w; tmp.height = h;
+  tmp.getContext('2d').putImageData(id, 0, 0);
+  lbCtx.drawImage(tmp, 0, 0);
+  lbCtx.restore();
+
+  // histogram from adjusted (live)
+  const hist = eng.computeHistogram(adjusted);
+  drawHisto(hist);
+
+  updateZoomReadout(v.scale);
+}
+
+function drawHisto(hist) {
+  const c = lbHistoCtx;
+  c.fillStyle = '#111';
+  c.fillRect(0, 0, 256, 80);
+  const max = hist.max || 1;
+  const scaleY = 78 / max;
+  const colors = { r: '#f44', g: '#4f4', b: '#44f', lum: '#ddd' };
+  for (const ch of ['r', 'g', 'b', 'lum']) {
+    c.strokeStyle = colors[ch];
+    c.beginPath();
+    for (let x = 0; x < 256; x++) {
+      const y = 79 - Math.round(hist[ch][x] * scaleY);
+      if (x === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    }
+    c.stroke();
+  }
+}
+
+function pickLevelForScreen(levels, screenLong) {
+  const target = Math.ceil(screenLong * (window.devicePixelRatio || 1));
+  let best = levels[0];
+  for (const lv of levels) {
+    const long = Math.max(lv.w, lv.h);
+    if (long >= target && long < Math.max(best.w, best.h)) best = lv;
+  }
+  return best || levels[levels.length - 1];
+}
+
+async function openLightbox(imageId, seedLevel /* optional from grid */) {
+  const eng = ensureEngine();
+  eng.reset();
+  lbModal.style.display = 'flex';
+  lbTitleEl.textContent = imageId;
+  buildPresetButtons();
+  buildSliders();
+
+  // fetch manifest for full ladder (M1 output)
+  let manifest = null;
+  try {
+    const manUrl = urlFor(`images/${imageId}/manifest.json`);
+    const r = await fetch(manUrl);
+    if (r.ok) manifest = await r.json();
+  } catch {}
+
+  const levels = (manifest && manifest.levels) ? manifest.levels.map(l => ({
+    size: l.size, hash: l.contenthash, w: l.w, h: l.h
+  })) : (seedLevel ? [seedLevel] : []);
+
+  if (levels.length === 0) {
+    logStatus('no levels for ' + imageId);
+    closeLightbox();
+    return;
+  }
+
+  // initial level by screen (adaptive)
+  const screenLong = Math.max(lbViewport.clientWidth || 600, lbViewport.clientHeight || 400);
+  const startLv = pickLevelForScreen(levels, screenLong);
+
+  lbState = {
+    imageId,
+    levels: levels.sort((a,b) => (a.w*a.h) - (b.w*b.h)),
+    currentLevelIdx: levels.findIndex(l => l.hash === startLv.hash),
+    sourceBitmap: null,
+    srcW: startLv.w,
+    srcH: startLv.h,
+    view: { scale: 1, tx: 0, ty: 0 },
+  };
+
+  // seed decode (reuse scheduler one-shot path, note visible priority for current lightbox image)
+  // In full integration the decode would be dispatched with priority:"visible" via scheduler.
+  try {
+    const buf = await fetchLevel(startLv.hash);
+    const { session, run } = await decodeOneShot(buf); // existing, goes through ctx/scheduler
+    lbState.sessions = (lbState.sessions || new Set()).add(session);
+    const ev = await run();
+    if (ev && ev.pixels) {
+      lbState.sourceBitmap = new Uint8ClampedArray(ev.pixels);
+      lbState.srcW = ev.info.width;
+      lbState.srcH = ev.info.height;
+      renderLightboxAdjusted();
+    }
+  } catch (e) {
+    logStatus('lightbox decode fail: ' + e.message);
+  }
+
+  // wire canvas pan/zoom (transform only; re-decode only on level change)
+  wireLightboxCanvas();
+}
+
+function fetchLevel(hash) {
+  return fetch(urlFor(`levels/${hash}.jxl`)).then(r => r.arrayBuffer()).then(b => new Uint8Array(b));
+}
+
+function wireLightboxCanvas() {
+  let dragging = false;
+  let lastX = 0, lastY = 0;
+
+  lbCanvas.onmousedown = (e) => {
+    dragging = true;
+    lastX = e.clientX; lastY = e.clientY;
+  };
+  window.onmouseup = () => { dragging = false; };
+  lbCanvas.onmousemove = (e) => {
+    if (!dragging || !lbState) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lbState.view.tx += dx;
+    lbState.view.ty += dy;
+    lastX = e.clientX; lastY = e.clientY;
+    renderLightboxAdjusted();
+  };
+
+  lbCanvas.onwheel = (e) => {
+    if (!lbState) return;
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+    const oldScale = lbState.view.scale;
+    let newScale = clamp(oldScale * factor, 0.2, 8);
+
+    // if scale crossed to need bigger level, upgrade
+    const neededLong = Math.max(lbState.srcW, lbState.srcH) * newScale;
+    const better = lbState.levels.find(l => Math.max(l.w, l.h) >= neededLong * 0.9);
+    if (better && better.hash !== lbState.levels[lbState.currentLevelIdx]?.hash) {
+      // upgrade level (crossfade approx by immediate switch + re-render)
+      upgradeLightboxLevel(better);
+      return;
+    }
+    // otherwise just transform pan/zoom (no re-decode)
+    lbState.view.scale = newScale;
+    renderLightboxAdjusted();
+  };
+
+  // double-click: jump to next ladder level or 100%
+  lbCanvas.ondblclick = () => {
+    if (!lbState) return;
+    const idx = lbState.currentLevelIdx;
+    if (idx < lbState.levels.length - 1) {
+      upgradeLightboxLevel(lbState.levels[idx + 1]);
+    } else {
+      lbState.view.scale = 1;
+      renderLightboxAdjusted();
+    }
+  };
+}
+
+async function upgradeLightboxLevel(targetLevel) {
+  if (!lbState) return;
+  const idx = lbState.levels.findIndex(l => l.hash === targetLevel.hash);
+  if (idx < 0) return;
+
+  // crossfade note: for M2 we switch source then re-render (instant for cached LRU later)
+  try {
+    const buf = await fetchLevel(targetLevel.hash);
+    const { session, run } = await decodeOneShot(buf);
+    const ev = await run();
+    if (ev && ev.pixels) {
+      // monotonic: only accept if larger or same
+      const newLong = Math.max(ev.info.width, ev.info.height);
+      const oldLong = Math.max(lbState.srcW, lbState.srcH);
+      if (newLong >= oldLong * 0.95) {
+        lbState.sourceBitmap = new Uint8ClampedArray(ev.pixels);
+        lbState.srcW = ev.info.width;
+        lbState.srcH = ev.info.height;
+        lbState.currentLevelIdx = idx;
+        // keep view scale reasonable
+        lbState.view.scale = Math.min(lbState.view.scale, 1.0);
+        renderLightboxAdjusted();
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function resetAdjustments() {
+  if (!lbState) return;
+  ensureEngine().reset();
+  // reset slider UI values
+  lbSlidersEl.querySelectorAll('input').forEach(inp => { inp.value = '0'; });
+  renderLightboxAdjusted();
+}
+
+function closeLightbox() {
+  lbModal.style.display = 'none';
+  if (lbState && lbState.sessions) lbState.sessions.forEach(s => { try { s.cancel?.('lightbox close'); } catch {} });
+  lbState = null;
+}
+
+// expose for grid tiles
+window.openPyramidLightbox = openLightbox;
+
+// wire existing tiles (after grid is built) - monkey patch a bit for demo
+const origMakeTile = window.makeTileForPyramid || null; // if refactored later
+// For now, after load, add click handlers to .tile
+function wireGridClicksForLightbox() {
+  gridEl.addEventListener('click', async (ev) => {
+    const tile = ev.target.closest('.tile');
+    if (!tile || !lbModal) return;
+    const id = tile.dataset.imageId || tile.querySelector('.label')?.textContent?.replace('…','');
+    if (!id) return;
+    // try to find manifest or use L0 from tile data (simplified)
+    await openLightbox(id.replace('…',''), { w: 256, h: 192, hash: '' }); // will fetch manifest inside
+  }, { capture: true });
+}
+
+// call after grid render
+setTimeout(wireGridClicksForLightbox, 800);
