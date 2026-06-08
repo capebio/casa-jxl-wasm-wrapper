@@ -58,6 +58,7 @@ function downloadBlob(blob, filename) {
  *   onRepaintRequest?: () => void;
  *   pyramidClient?: { getManifestForId: (id: number) => Promise<object> } | null;
  *   getViewportRegion?: (imgW: number, imgH: number) => { x: number, y: number, w: number, h: number };
+ *   getZoom?: () => number;
  * }} opts
  */
 export function createTauriParityLightbox(opts) {
@@ -70,6 +71,7 @@ export function createTauriParityLightbox(opts) {
     onRepaintRequest,
     pyramidClient = null,
     getViewportRegion,
+    getZoom = null,
   } = opts;
   const panel = rootEl.querySelector('[data-tauri-m2-panel]');
   const presetSelect = rootEl.querySelector('[data-m2-preset]');
@@ -81,9 +83,32 @@ export function createTauriParityLightbox(opts) {
     preset: 'NONE',
     adjustments: clampAdjustments(),
     use16Bit: false,
-    rgb16Cache: null,
+    rgb16Lru: createLru(8),
     manifest16: null,
   };
+
+  function createLru(max = 8) {
+    const m = new Map();
+    return {
+      get(k) {
+        if (!m.has(k)) return undefined;
+        const v = m.get(k);
+        m.delete(k);
+        m.set(k, v);
+        return v;
+      },
+      set(k, v) {
+        if (m.has(k)) m.delete(k);
+        m.set(k, v);
+        while (m.size > max) {
+          const old = m.keys().next().value;
+          m.delete(old);
+        }
+      },
+      clear() { m.clear(); },
+      get size() { return m.size; },
+    };
+  }
 
   function currentM2Adjustments() {
     const raw = {};
@@ -153,8 +178,9 @@ export function createTauriParityLightbox(opts) {
     const manifest = await pyramidClient.getManifestForId(id);
     const pool16 = manifest.levels.filter((l) => l.bitsPerSample === 16);
     if (!pool16.length) return null;
+    const z = (getZoom && typeof getZoom === 'function' ? getZoom() : 1) || 1;
     const screenLong = Math.max(window.innerWidth, window.innerHeight);
-    const target = Math.ceil(screenLong * (window.devicePixelRatio || 1));
+    const target = Math.ceil(screenLong * (window.devicePixelRatio || 1) * z);
     return chooseLevelForTarget(pool16, target);
   }
 
@@ -177,27 +203,31 @@ export function createTauriParityLightbox(opts) {
     if (card?._tauriResult?.pyramid_cached && pyramidClient) {
       const level = await pick16Level(id);
       if (!level) return null;
-      const cacheKey = `${id}:${level.contenthash}`;
-      if (state.rgb16Cache?.key === cacheKey) return state.rgb16Cache;
+      const ch = level.contenthash;
+      const cached = state.rgb16Lru.get(ch);
+      if (cached) return cached;
       const buf = await invoke('decode_jxl_level_for_id', {
         id,
-        contenthash: level.contenthash,
+        contenthash: ch,
         format: 'rgba16',
       });
       const { w, h, body } = parsePackedResponse(buf);
-      state.rgb16Cache = { key: cacheKey, id, w, h, body, level };
-      return state.rgb16Cache;
+      const rec = { key: `${id}:${ch}`, id, w, h, body, level };
+      state.rgb16Lru.set(ch, rec);
+      return rec;
     }
 
-    if (!state.rgb16Cache || state.rgb16Cache.id !== id) {
-      const buf = await invoke('get_rgb16_for_id', { id });
-      const view = new DataView(buf instanceof ArrayBuffer ? buf : buf);
-      const w = view.getUint16(0, true);
-      const h = view.getUint16(2, true);
-      const body = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf, 4);
-      state.rgb16Cache = { key: String(id), id, w, h, body, level: null };
-    }
-    return state.rgb16Cache;
+    const idKey = String(id);
+    let cached = state.rgb16Lru.get(idKey);
+    if (cached && cached.id === id) return cached;
+    const buf = await invoke('get_rgb16_for_id', { id });
+    const view = new DataView(buf instanceof ArrayBuffer ? buf : buf);
+    const w = view.getUint16(0, true);
+    const h = view.getUint16(2, true);
+    const body = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf, 4);
+    const rec = { key: idKey, id, w, h, body, level: null };
+    state.rgb16Lru.set(idKey, rec);
+    return rec;
   }
 
   async function paint16Bit(card) {
@@ -270,7 +300,7 @@ export function createTauriParityLightbox(opts) {
       if (state.use16Bit) {
         state.use16Bit = false;
         toggle16.checked = false;
-        state.rgb16Cache = null;
+        state.rgb16Lru.clear();
       }
     }
   }
@@ -372,7 +402,7 @@ export function createTauriParityLightbox(opts) {
 
   toggle16?.addEventListener('change', () => {
     state.use16Bit = !!toggle16.checked;
-    state.rgb16Cache = null;
+    state.rgb16Lru.clear();
     repaint();
   });
 
@@ -387,7 +417,7 @@ export function createTauriParityLightbox(opts) {
     sync16ToggleVisibility,
     exportRoi,
     clearCache() {
-      state.rgb16Cache = null;
+      state.rgb16Lru.clear();
       state.manifest16 = null;
     },
     get state() {

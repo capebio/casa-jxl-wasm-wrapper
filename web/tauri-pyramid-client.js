@@ -1,6 +1,8 @@
 /**
  * PR-8b: Tauri WebView pyramid gallery client — manifest + level bytes via invoke,
  * level picker aligned with @casabio/jxl-pyramid chooseLevelForTarget.
+ * (M2: tauri-parity-lightbox.js owns the zoom-aware 16bit ladder + contenthash LRU for lightbox decodes;
+ *  this client keeps thumb path + upgradeVisibleCards.)
  */
 
 import { chooseLevelForTarget, shouldUpgrade, levelRank } from '../packages/jxl-pyramid/dist/choose-level.js';

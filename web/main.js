@@ -102,6 +102,15 @@ const lbStraighten = document.getElementById('lb-straighten');
 const lbStraightenVal = document.getElementById('lb-straighten-val');
 const lbStraightenAuto = document.getElementById('lb-straighten-auto');
 
+// Zoom/pan/rot/display state hoisted early so Tauri parity lightbox getter + zoom ladder
+// (M2 1A) can close over lbZoom at createTauriParityLightbox time. Pan stays CSS-only.
+let lightboxIndex = -1;
+let lbZoom = 1;
+let lbPanX = 0;
+let lbPanY = 0;
+let lbRotation = 0; // 0 | 90 | 180 | 270
+let lbDisplayLongPx = null;
+
 if (IS_TAURI) {
     const m2Panel = document.querySelector('[data-tauri-m2-panel]');
     const exportRoiBtn = document.querySelector('[data-export-roi]');
@@ -125,6 +134,7 @@ if (IS_TAURI) {
             const h = Math.min(imgH, Math.max(1, Math.floor(vp.height / lbZoom)));
             return { x, y, w, h };
         },
+        getZoom: () => lbZoom,
     });
 }
 
@@ -435,6 +445,7 @@ function focusOnRegion(x, y, w, h) {
     lbPanY = (canvas.height / 2 - cy) * lbZoom;
     lbDisplayLongPx = Math.max(canvas.width, canvas.height) * lbZoom;
     applyLbTransform();
+    notifyParityZoomMaybe();
 }
 window.focusOnRegion = focusOnRegion;
 
@@ -1983,7 +1994,7 @@ if (IS_TAURI) {
 // ---------------------------------------------------------------------------
 // Lightbox — zoom / pan / download
 // ---------------------------------------------------------------------------
-let lightboxIndex = -1;
+/* lightboxIndex / lbZoom / lbPan* / lbRotation / lbDisplayLongPx hoisted early for parity wiring (M2) */
 
 // Zoom / pan / rotation state
 const LB_ZOOM_MIN = 0.05;
@@ -1992,14 +2003,7 @@ const LB_ZOOM_STEP = 1.25;
 // Cap fit-to-viewport at 2× so tiny placeholders don't stretch absurdly while
 // still filling the viewport rather than sitting at 100% pixel size.
 const LB_FIT_CAP = 2.0;
-let lbZoom = 1;
-let lbPanX = 0;
-let lbPanY = 0;
-let lbRotation = 0; // 0 | 90 | 180 | 270
-// Tracks the desired displayed long-edge in CSS pixels so a source swap
-// (RAW ↔ JXL ↔ JPEG) keeps the image at the same visible size even though the
-// underlying canvas pixel dimensions differ. null = "fit on next paint".
-let lbDisplayLongPx = null;
+// (no redecl — hoisted lets above)
 
 const USER_ROT_KEY    = 'orf-user-rotations';
 const LB_ROTATION_KEY = 'orf-lb-rotations'; // legacy — migrated on load
@@ -2087,6 +2091,22 @@ function applyLbTransform() {
     lbZoomLabel.textContent = Math.round(lbZoom * 100) + '%';
 }
 
+// M2 Tauri: after lbZoom changes (not pure pan), poke parity repaint so pick16Level
+// can select higher pyramid tier if zoom crossed threshold. LRU by contenthash skips
+// decode_jxl_level_for_id when tier unchanged. Pan drag stays pure CSS (apply only).
+function notifyParityZoomMaybe() {
+  if (!IS_TAURI || !tauriParityLb) return;
+  try {
+    if (lightboxIndex >= 0) {
+      const card = cards[lightboxIndex];
+      // repaint() inside will only FFI if use16Bit && new ch; safe on every zoom tick
+      if (card) tauriParityLb.repaint();
+      // Re-sync after possible canvasLong change from higher-res level (keeps visual size, updates %)
+      if (typeof syncZoomToDisplayLong === 'function') syncZoomToDisplayLong();
+    }
+  } catch {}
+}
+
 // Returns {fitW, fitH, vp} accounting for rotation, or null if canvas invalid.
 function _lbFitDims() {
     const vp = lbViewport.getBoundingClientRect();
@@ -2146,6 +2166,7 @@ function resetLbZoom() {
     lbPanY = 0;
     lbDisplayLongPx = canvasLong * lbZoom;
     applyLbTransform();
+    notifyParityZoomMaybe();
 }
 
 function rotateBy(delta) {
@@ -2172,6 +2193,7 @@ function zoomAtPoint(clientX, clientY, factor) {
     const canvasLong = _lbCanvasLongPx();
     if (canvasLong != null) lbDisplayLongPx = canvasLong * lbZoom;
     applyLbTransform();
+    notifyParityZoomMaybe();
     if (pixelPeepActive) updatePeepBadges();
 }
 
