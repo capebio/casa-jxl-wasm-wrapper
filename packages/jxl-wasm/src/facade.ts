@@ -1827,7 +1827,7 @@ class LibjxlEncoder implements JxlEncoder {
       let advValuesPtr = 0;
       let advCount = 0;
 
-      if (adv && adv.length > 0 && module._malloc) {
+      if (adv && adv.length > 0 && module._malloc && module.HEAP32) {
         advCount = adv.length;
         const ids = new Int32Array(adv.map(s => s.id));
         const values = new Int32Array(adv.map(s => s.value));

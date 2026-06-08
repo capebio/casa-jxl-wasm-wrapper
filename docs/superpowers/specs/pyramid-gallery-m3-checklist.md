@@ -1,7 +1,13 @@
 # Milestone M3: 16-bit RAW Path — Verification Checklist & Specifications
 
-**Milestone Status:** Planned & Approved (M3 HDR/16-bit Stage)
+**Milestone Status:** Foundation complete + verified (M3 HDR/16-bit). Ingest 16-bit big-levels, encodeRgba16+downscaleRgba16+take_rgb16_full, manifest bitsPerSample, raw-backend, pyramid-lightbox 16 toggle + decode 'rgba16', webgl-pipeline (RGBA16F/FS dither + CPU mirror + adjusted export), ROI via decodePyramidRegion + encodeRgba16. 40/40 pyramid-ingest + 6/6+ bridge + web lightbox string tests pass. Docker jxl-wasm rebuild (encode/decode rgba16 bridges) + raw WASM done.
 **Target Branch:** `feat/pyramid-m3-raw16-webgl-roi`
+**To see M3 live (per user handoff):** 
+1. Re-ingest RAW masters: `node packages/pyramid-ingest/dist/cli.js --out /path/to/gallery-out --force /path/to/raw-masters-dir` (or bun equiv; uses current raw-backend which requests 16 + rgb16.ts for 2048/full).
+2. Serve the out dir (e.g. via tools/dev-server or static).
+3. Open web/pyramid-gallery/pyramid-gallery.html → enter gallery root URL → Load → click a re-ingested RAW thumbnail → lightbox → enable "16-bit HDR (RAW)" toggle (only visible for RAW with 16 levels) → WebGL (or CPU) shader paint + live adjustments in float + dither.
+4. Zoom/ pan / Export crop: for 16 gets -roi.jxl (16-bit) + -roi-preview.png (8 dither).
+Old manifests are 8-only; grid + JPG paths untouched.
 
 This document contains the acceptance checklist, bit-depth behavior specifications, 16-bit toggle user guide, and highlight/shadow recovery comparisons for Milestone M3 (16-bit RAW and WebGL) of the Pyramid Gallery Pipeline.
 
@@ -12,18 +18,18 @@ This document contains the acceptance checklist, bit-depth behavior specificatio
 Use this checklist to verify that all M3 goals are met in the ingest pipeline and the WebGL-enabled lightbox.
 
 ### 1.1 Ingest & Bit Depth
-- [ ] **16-bit Bridge Integration:** `src/lib.rs` and WASM are compiled to expose the internal full-resolution `RGB16` RAW buffers.
-- [ ] **Adaptive Bit Depths:** Ingest produces 16-bit JXL for RAW `{2048, full}` levels, while RAW grid levels `{256, 512, 1024}` and ALL JPEG levels remain 8-bit.
-- [ ] **Schema Compatibility:** Varying bit depths across levels of the same image do not trigger a schema version bump or break existing clients. Manifest records `bitsPerSample: 16` on RAW `{2048, full}`.
-- [ ] **JPEG Guard:** Ingest never emits 16-bit levels for JPEG master inputs; they are clamped to 8-bit since no extra bit-depth headroom exists.
+- [x] **16-bit Bridge Integration:** `src/lib.rs` and WASM compiled (OUT_FULL_16=8, rgb16_full/take_rgb16_full/pack in orf/dng/cr2, web/pkg). jxl-wasm Docker rebuild supplies encode/decode rgba16.
+- [x] **Adaptive Bit Depths:** `packages/pyramid-ingest/src/ladder.ts` + `rgb16.ts` (encodeBigLevelsRgba16 via downscaleRgba16+encodeRgba16) produce 16 for RAW 2048/full when rgb16 present; grid <=1024 and all JPG =8. (40/40 ingest tests incl "emits 16-bit big levels").
+- [x] **Schema Compatibility:** `manifest.ts` writes per-level `bitsPerSample: 8|16`; no schema bump. Clients (levelPool, wants16) filter dynamically.
+- [x] **JPEG Guard:** Only RAW decode path requests OUT_FULL_16 + feeds rgb16 to buildRawLadder; JPG path never produces 16 levels.
 
 ### 1.2 WebGL Pipeline & Dithering
-- [ ] **16-bit Capability Detection:** Client checks the manifest to detect if a level has `bitsPerSample === 16` before allocating high-precision resources.
-- [ ] **RAW-only 16-bit Toggle:** A user-facing "16-bit HDR" toggle is added to the lightbox, defaulting to OFF (displaying the fast 8-bit JXL).
-- [ ] **WebGL Float Textures:** When enabled, the 16-bit JXL level is decoded into a WebGL floating-point texture (`gl.RGBA16F` or `gl.RGBA32F`), avoiding CPU clipping.
-- [ ] **Float-Space Recovery Math:** Highlights compression and shadows lift are computed in high-precision float space, unlocking real highlights recovery (no clipping).
-- [ ] **Floyd-Steinberg Dithering:** Before rendering to the 8-bit sRGB canvas, WebGL downconverts the precision using a Floyd-Steinberg dither pass to prevent visual banding in gradients.
-- [ ] **Crop-to-Feature ROI Export:** Clicking "Export Crop" decodes only the requested region of interest (ROI) bounding box using `decodeRegionLod` at high precision and outputs the crop.
+- [x] **16-bit Capability Detection:** `pyramid-lightbox.js` levelPool() + wants16() filter manifest.levels by bitsPerSample===16; canUseWebGL16() probe.
+- [x] **RAW-only 16-bit Toggle:** html: `<input data-toggle-16bit /> 16-bit HDR (RAW)`; js: default false, hidden for jpg or !has16, on change sets use16Bit + clear cache + refreshView. (Spec default OFF preserved.)
+- [x] **WebGL Float Textures:** `webgl-pipeline.js` createHdrRenderer: webgl2 RGBA16F (or RGBA32F FBO) or OES_texture_float + WEBGL_color_buffer_float fallback; uploadSource converts u16 bytes to float tex.
+- [x] **Float-Space Recovery Math:** Shader (and CPU mirror) run buildColorMatrix + luma-masked shadows lift / highlights compress in float before clamp. `renderRgba16AdjustedToCanvas` + `adjustedRgba16ForExport` are the primary path.
+- [x] **Floyd-Steinberg Dithering:** `floydSteinbergDitherToCanvas` (err diffusion 3ch) + putImageData for final 8-bit canvas. Histogram from post-dither 8.
+- [x] **Crop-to-Feature ROI Export:** `exportRoi` + `fetchRoiDecoded` (decodePyramidRegion or decodePyramidLevel+tiled for region) at format rgba16 when use16; then `adjustedRgba16ForExport` + `encodeRgba16` → `${id}-roi.jxl` (16-bit edited) + dithered `${id}-roi-preview.png`. Non-16 path emits 8 png only. (16 JXL is the HDR file export; PNG is preview.)
 
 ---
 

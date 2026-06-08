@@ -923,7 +923,7 @@ describe('ExtraChannel full infrastructure (Phase 2)', () => {
   });
 
   it('encodes and roundtrips full ExtraChannel descriptors (synthetic planes: spot 8-bit + depth 16-bit + named thermal) via packed 72B bridge', async () => {
-    const mod = await loadLibjxlModule();
+    const mod = await loadPreferredLibjxlModule();
     if (typeof mod._jxl_wasm_encode_rgba8_with_extra_channels !== 'function' ||
         typeof mod._jxl_wasm_get_extra_channels !== 'function' ||
         typeof mod._malloc !== 'function') {
