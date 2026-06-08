@@ -1,4 +1,5 @@
 import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
+import initFastJpeg, { decode_scaled as decodeScaledJpeg } from './pkg-fastjpeg/fast_jpeg.js';
 import { createDecoder, createEncoder, detectTier } from '@casabio/jxl-wasm';
 import { createBrowserContext } from '@casabio/jxl-session';
 import { getCapabilities } from '@casabio/jxl-capabilities';
@@ -485,6 +486,7 @@ const bordersOverride = new URLSearchParams(location.search).get('borders') === 
 
 const runMeasurements = [];
 let rawReady = false;
+let fastJpegReady = false;
 let running = false;
 let currentPasses = [];
 let lastChartPasses = null;
@@ -510,6 +512,13 @@ initRaw().then(() => {
 }).catch((error) => {
     setStatus(`RAW WASM failed: ${error?.message ?? error}`);
     dbgLog('RAW WASM failed', error?.message ?? String(error), 'error');
+});
+
+initFastJpeg().then(() => {
+    fastJpegReady = true;
+    dbgLog('fast-jpeg WASM initialized', '', 'success');
+}).catch((err) => {
+    dbgLog('fast-jpeg WASM unavailable (embedded JPEG path disabled)', err?.message ?? String(err), 'warn');
 });
 
 async function logWasmBaseline() {
@@ -718,12 +727,76 @@ async function loadRandomAndCacheSource() {
     return source;
 }
 
+// Scan ORF bytes for the second embedded JPEG (medium preview). Returns a subarray view.
+function extractEmbeddedJpeg(orfBytes) {
+    let start = -1;
+    let next = -1;
+    for (let i = 0; i < orfBytes.length - 2; i++) {
+        if (orfBytes[i] === 0xFF && orfBytes[i + 1] === 0xD8 && orfBytes[i + 2] === 0xFF) {
+            if (start < 0) { start = i; i += 2; }
+            else { next = i; break; }
+        }
+    }
+    if (next < 0) return null;
+    for (let i = next + 2; i < orfBytes.length - 1; i++) {
+        if (orfBytes[i] === 0xFF && orfBytes[i + 1] === 0xD9) {
+            return orfBytes.subarray(next, i + 2);
+        }
+    }
+    return null;
+}
+
+// Auto-cap pac/qpac to 1 when quality<90 and longEdge≤1920 to avoid 5× encode overhead.
+function applyPacHeuristic(settings, target) {
+    if (settings.progressiveAc < 2 && settings.qProgressiveAc < 2) return;
+    if (settings.qualityNumber >= 90) return;
+    if (typeof target.longEdge !== 'number' || target.longEdge > 1920) return;
+    const origPac = settings.progressiveAc;
+    const origQpac = settings.qProgressiveAc;
+    settings.progressiveAc = Math.min(settings.progressiveAc, 1);
+    settings.qProgressiveAc = Math.min(settings.qProgressiveAc, 1);
+    dbgLog(
+        'pac/qpac auto-capped',
+        `q${settings.qualityNumber}≤85 + ${target.longEdge}px≤1920: pac ${origPac}→${settings.progressiveAc}, qpac ${origQpac}→${settings.qProgressiveAc} (set pac≥2 only at q≥90 or full-res)`,
+        'warn',
+    );
+}
+
 async function runSourceWithSettings(source, settings) {
     renderSourceShell(source);
     setStatus(`Preparing ${source.file} at ${settings.sizePresetLabel} (${settings.longEdgeRequest === 'source' ? 'source dims' : `${settings.longEdgeRequest} px`})...`);
     dbgLog('Progressive ordering', `${settings.groupOrderLabel} (groupOrder=${settings.groupOrder}) · progressiveDc=${settings.progressiveDc}`, 'info');
     const target = resolveTarget(source, settings.longEdgeRequest);
-    const targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
+    applyPacHeuristic(settings, target);
+
+    let targetRgba;
+    if (fastJpegReady && source.orfBytes != null && typeof target.longEdge === 'number' && target.longEdge <= 640) {
+        const embeddedJpeg = extractEmbeddedJpeg(source.orfBytes);
+        if (embeddedJpeg != null) {
+            try {
+                const denom = target.longEdge <= 160 ? 8 : target.longEdge <= 320 ? 4 : 2;
+                const fjResult = decodeScaledJpeg(embeddedJpeg, denom);
+                const fjData = fjResult.data;
+                const fjW = fjResult.width;
+                const fjH = fjResult.height;
+                fjResult.free();
+                if (fjW >= target.width && fjH >= target.height) {
+                    targetRgba = resizeRgba(fjData, fjW, fjH, target.width, target.height);
+                    dbgLog('fast-jpeg source', `denom=${denom} → ${fjW}×${fjH} → ${target.width}×${target.height}`, 'info');
+                } else {
+                    dbgLog('fast-jpeg too small, using RAW', `${fjW}×${fjH} < ${target.width}×${target.height}`, 'warn');
+                    targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
+                }
+            } catch (e) {
+                dbgLog('fast-jpeg decode failed, using RAW', e?.message ?? String(e), 'warn');
+                targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
+            }
+        } else {
+            targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
+        }
+    } else {
+        targetRgba = resizeRgba(source.rgba, source.width, source.height, target.width, target.height);
+    }
 
     const estimateKb = estimateTargetKb(target.width, target.height, settings.qualityPreset);
     setStatus(`Encoding Sneyers at ${settings.qualityPresetLabel} (q=${settings.qualityNumber}${settings.lossless ? ', lossless' : ''})... estimate ${estimateKb} KB`);
@@ -904,6 +977,7 @@ async function loadRandomRaw() {
         return {
             file,
             rawBytes: rawBytes.byteLength,
+            orfBytes: rawBytes,
             rgba,
             width: result.width,
             height: result.height,
