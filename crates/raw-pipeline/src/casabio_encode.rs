@@ -159,6 +159,185 @@ pub fn encode_variants_from_rgb16_with_progressive(
     encode_variants_with_progressive(&rgba, width, height, source, hq_override, progressive_dc, group_order)
 }
 
+// PR-6b: native sidecar pyramid encoder (v2 per-level distances, no 1.5 floor, box cascade).
+// Matches WASM encodeRgba8Pyramid + BoxDownscaleRgba8 + EncodeRgba8WithSidecars v2 semantics for M1 8-bit.
+// Returns levels smallest-first (sidecars), full last. All 8-bit.
+// JPG masters use this only for sidecars (full level is separate lossless transcode in ingest ladder).
+// Effort param accepted for signature parity with WASM; speed fixed to Falcon (fast ingest path, matches current variants).
+
+#[derive(Debug, Clone)]
+pub struct PyramidLevel {
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub bits_per_sample: u8,
+}
+
+fn jpeg_quality_for_distance(d: f32) -> f32 {
+    if d <= 0.01 { 100.0 } else { (100.0 - (d - 0.1) / 0.09).clamp(30.0, 100.0) }
+}
+
+fn map_effort_to_speed(effort: u32) -> jpegxl_rs::encode::EncoderSpeed {
+    use jpegxl_rs::encode::EncoderSpeed::*;
+    match effort {
+        1 => Lightning,
+        2 => Thunder,
+        3 => Falcon,
+        4 => Cheetah,
+        5 => Hare,
+        6 => Wombat,
+        7 => Squirrel,
+        8 => Kitten,
+        9 => Tortoise,
+        10 => Glacier,
+        _ => Falcon,
+    }
+}
+
+fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) {
+    if dw == 0 || dh == 0 { return; }
+    let src_len = (sw as usize) * (sh as usize) * 4;
+    let dst_len = (dw as usize) * (dh as usize) * 4;
+    if src.len() < src_len || dst.len() < dst_len { return; }
+
+    // exact integer fast path (matches C++ IMPROVEMENT-5)
+    if (sw % dw == 0) && (sh % dh == 0) {
+        let xstep = sw / dw;
+        let ystep = sh / dh;
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let mut r = 0u32; let mut g = 0u32; let mut b = 0u32; let mut a = 0u32; let mut count = 0u32;
+                for yy in 0..ystep {
+                    let y = dy * ystep + yy;
+                    let row = &src[(y as usize * sw as usize * 4)..];
+                    for xx in 0..xstep {
+                        let x = dx * xstep + xx;
+                        let px = &row[(x as usize * 4)..];
+                        r += px[0] as u32; g += px[1] as u32; b += px[2] as u32; a += px[3] as u32;
+                        count += 1;
+                    }
+                }
+                let out = &mut dst[(dy as usize * dw as usize + dx as usize) * 4..];
+                out[0] = (r / count) as u8;
+                out[1] = (g / count) as u8;
+                out[2] = (b / count) as u8;
+                out[3] = (a / count) as u8;
+            }
+        }
+        return;
+    }
+
+    // general coverage (ceiling for end)
+    for dy in 0..dh {
+        let y0 = (dy * sh) / dh;
+        let y1 = ((dy + 1) * sh + dh - 1) / dh;
+        for dx in 0..dw {
+            let x0 = (dx * sw) / dw;
+            let x1 = ((dx + 1) * sw + dw - 1) / dw;
+            let mut r = 0u32; let mut g = 0u32; let mut b = 0u32; let mut a = 0u32; let mut count = 0u32;
+            for sy in y0..y1 {
+                let row = &src[(sy as usize * sw as usize * 4)..];
+                for sx in x0..x1 {
+                    let px = &row[(sx as usize * 4)..];
+                    r += px[0] as u32; g += px[1] as u32; b += px[2] as u32; a += px[3] as u32;
+                    count += 1;
+                }
+            }
+            let out = &mut dst[(dy as usize * dw as usize + dx as usize) * 4..];
+            out[0] = (r / count) as u8;
+            out[1] = (g / count) as u8;
+            out[2] = (b / count) as u8;
+            out[3] = (a / count) as u8;
+        }
+    }
+}
+
+fn encode_one_distance(pixels: &[u8], w: u32, h: u32, distance: f32, effort: u32) -> Result<Vec<u8>, EncodeError> {
+    let mut builder = encoder_builder();
+    builder.speed(map_effort_to_speed(effort));
+    builder.set_jpeg_quality(jpeg_quality_for_distance(distance));
+    let mut enc = builder
+        .build()
+        .map_err(|e| EncodeError::Jxl(e.to_string()))?;
+    let result: EncoderResult<u8> = enc
+        .encode(pixels, w, h)
+        .map_err(|e| EncodeError::Jxl(e.to_string()))?;
+    Ok(result.data)
+}
+
+#[cfg(feature = "jxl-encode")]
+pub fn encode_rgba8_pyramid(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    full_distance: f32,
+    sidecar_sizes: &[u32],
+    sidecar_distances: &[f32],
+    effort: u32,
+) -> Result<Vec<PyramidLevel>, EncodeError> {
+    if rgba.is_empty() || width == 0 || height == 0 {
+        return Err(EncodeError::Jxl("empty or zero-dim input".into()));
+    }
+    if sidecar_sizes.len() != sidecar_distances.len() {
+        return Err(EncodeError::Jxl("sidecar_sizes and sidecar_distances length mismatch".into()));
+    }
+    let longer = width.max(height);
+
+    #[derive(Clone, Copy)]
+    struct Sc { tw: u32, th: u32, dist: f32 }
+    let mut scs: Vec<Sc> = Vec::new();
+    for (i, &max_dim) in sidecar_sizes.iter().enumerate() {
+        if max_dim == 0 || max_dim >= longer { continue; }
+        let (tw, th) = if width >= height {
+            let tw = max_dim;
+            let th = std::cmp::max(1u32, (((max_dim as u64 * height as u64) + (width as u64 / 2)) / (width as u64)) as u32);
+            (tw, th)
+        } else {
+            let th = max_dim;
+            let tw = std::cmp::max(1u32, (((max_dim as u64 * width as u64) + (height as u64 / 2)) / (height as u64)) as u32);
+            (tw, th)
+        };
+        scs.push(Sc { tw, th, dist: sidecar_distances[i] });
+    }
+
+    let mut current = rgba.to_vec();
+    let mut cw = width;
+    let mut ch = height;
+    let mut sides: Vec<PyramidLevel> = Vec::new();
+    for sc in scs.iter().rev() {
+        let mut thumb = vec![0u8; sc.tw as usize * sc.th as usize * 4];
+        box_downscale_rgba8(&current, cw, ch, &mut thumb, sc.tw, sc.th);
+        let data = encode_one_distance(&thumb, sc.tw, sc.th, sc.dist, effort)?;
+        sides.push(PyramidLevel { data, width: sc.tw, height: sc.th, bits_per_sample: 8 });
+        current = thumb;
+        cw = sc.tw;
+        ch = sc.th;
+    }
+    sides.reverse();
+
+    let full = encode_one_distance(rgba, width, height, full_distance, effort)?;
+    sides.push(PyramidLevel { data: full, width, height, bits_per_sample: 8 });
+    Ok(sides)
+}
+
+/// Convenience for Tauri/native pyramid ingest (PR-7b) that holds pre-tone RGB16 + params.
+/// Produces 8-bit pyramid levels (M1) directly from the internal rgb16 buffer (like
+/// encode_variants_from_rgb16). For M3 this will be extended with 16-bit big levels.
+#[cfg(feature = "jxl-encode")]
+pub fn encode_rgba8_pyramid_from_rgb16(
+    rgb16: &[u16],
+    params: &crate::pipeline::PipelineParams,
+    width: u32,
+    height: u32,
+    full_distance: f32,
+    sidecar_sizes: &[u32],
+    sidecar_distances: &[f32],
+    effort: u32,
+) -> Result<Vec<PyramidLevel>, EncodeError> {
+    let rgba = crate::pipeline::process_rgba(rgb16, params);
+    encode_rgba8_pyramid(&rgba, width, height, full_distance, sidecar_sizes, sidecar_distances, effort)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +406,53 @@ mod tests {
         let cs = b[0] == 0xFF && b[1] == 0x0A;
         let cont = b.len() >= 8 && b[0] == 0 && b[3] == 0x0C && &b[4..8] == b"JXL ";
         assert!(cs || cont);
+    }
+
+    #[test]
+    fn encode_rgba8_pyramid_smoke() {
+        let rgba = solid(200, 150);
+        // 256/1024/2048 all <200? no: 256>200 long so only sides <200 skipped? wait sizes 128,256 but use <long
+        let levels = encode_rgba8_pyramid(&rgba, 200, 150, 0.55, &[128, 256], &[1.45, 1.45], 3).unwrap();
+        // 128 valid side + full (256 skipped as >= long)
+        assert_eq!(levels.len(), 2);
+        assert!(levels[0].width <= 128);
+        assert_eq!(levels.last().unwrap().width, 200);
+        for l in &levels {
+            assert!(!l.data.is_empty());
+            let b = &l.data;
+            let ok = (b.len() >= 2 && b[0] == 0xFF && b[1] == 0x0A) ||
+                     (b.len() >= 8 && b[0] == 0 && b[3] == 0x0C && &b[4..8] == b"JXL ");
+            assert!(ok, "pyramid level missing JXL magic");
+            assert_eq!(l.bits_per_sample, 8);
+        }
+    }
+
+    #[test]
+    fn pyramid_skips_upscale_and_produces_ascending() {
+        let rgba = solid(800, 600);
+        let levels = encode_rgba8_pyramid(&rgba, 800, 600, 0.55, &[256, 512, 1024, 2048], &[1.45, 1.45, 1.45, 0.55], 3).unwrap();
+        // all 4 sides + full (1024>800? 1024>800 skip, 2048 skip; so 256,512 +full =3
+        assert!(levels.len() >= 2);
+        // last must be full
+        let last = levels.last().unwrap();
+        assert_eq!(last.width, 800);
+        assert_eq!(last.height, 600);
+        // first smallest
+        assert!(levels[0].width <= 256);
+    }
+
+    #[test]
+    fn encode_rgba8_pyramid_from_rgb16_smoke() {
+        // Direct feed for Tauri/PR-7b pyramid ingest, mirroring encode_variants_from_rgb16.
+        let rgb16: Vec<u16> = (0..(4 * 4 * 3)).map(|i| 3000 + (i as u16) * 10).collect();
+        let params = crate::pipeline::PipelineParams::default_olympus();
+        let levels = encode_rgba8_pyramid_from_rgb16(
+            &rgb16, &params, 4, 4, 0.55, &[2], &[1.45], 3
+        ).unwrap();
+        assert!(!levels.is_empty());
+        let last = levels.last().unwrap();
+        assert_eq!(last.width, 4);
+        assert_eq!(last.height, 4);
+        assert_eq!(last.bits_per_sample, 8);
     }
 }

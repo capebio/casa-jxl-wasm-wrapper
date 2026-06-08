@@ -1,8 +1,10 @@
 # WASM ↔ Tauri Feature Parity Matrix (Master)
 
 **Single Source of Truth for Feature Completeness**  
-**Date:** 2026-06-03 (post-Predator progressive optimizations)  
+**Date:** 2026-06-08 (parity program implementation started)  
 **Purpose:** Complete inventory of *all* features across the stack (raw-pipeline + CasaWASM JXL wrapper + scheduling + benchmark harness + Tauri desktop), with implementation status for the browser WASM pathway vs. the native Tauri/desktop pathway, plus exposure in the web Benchmark UIs. Extends the earlier partial "new features" comparison (WASM_Tauri_feature_comparison.md) to full coverage.
+
+**Parity program:** Implementation sequencing, boundary hacks, pyramid gallery, and PR stack live in [`TauriWasmParity.md`](TauriWasmParity.md) (rev 5). The checklist below maps every matrix feature to that doc.
 
 This matrix supersedes and consolidates:
 - WASM_Tauri_feature_comparison.md (raw transpose gaps + 3 JXL)
@@ -17,7 +19,193 @@ This matrix supersedes and consolidates:
 
 **Benchmark Exposure column:** Names the specific web/ page(s) or "N/A". "all" = exercised across the main lab + dedicated pages. "wrapper-lab" = jxl-wrapper-lab.html (primary option surface). Other pages: jxl-crop-benchmark.html, animation-lab.html, jxl-progressive-paint.html, jxl-benchmark.html, jxl-progressive-gallery.html, jxl-progressive-byte-benchmark.html.
 
-**Maintenance:** Update this matrix + PROGRESS_LOG.md on every feature landing or audit. Link from HANDOFF, DESIGNS_INDEX, REFERENCE_INDEX, and the two legacy comparison docs (now thin redirects).
+**Maintenance:** Update this matrix + PROGRESS_LOG.md on every feature landing or audit. Link from HANDOFF, DESIGNS_INDEX, REFERENCE_INDEX, and the two legacy comparison docs (now thin redirects). When a row's Tauri port status changes, update both this checklist and the detail table in the matching section below.
+
+---
+
+## 0. Parity Program Checklist → [`TauriWasmParity.md`](TauriWasmParity.md)
+
+Master checklist for Tauri port / parity work. **Matrix** = detail section below. **Parity** = section in `TauriWasmParity.md` (hack IDs `H*`, boundary taxes `B-T*`, decisions `K*`, phases, PRs).
+
+**Legend:** ☑ parity or N/A by design · ☐ open Tauri port · 🟡 partial · — no further port action
+
+**Implementation log (2026-06-08, updated post-M3 foundation):** Phase −1 partial in `raw-converter-tauri`. `web/main.js` wired as before. 
+- **M0 (Grok Build core, Gemini clerical):** Plan A WASM **complete** (feat/pyramid-m0-wasm-primitives @93afee7) — `sidecars_v2` (per-level distances, no 2048 floor clamp), `downscaleRgba16`, `encodeRgba8Pyramid` + wrappers/caps/tests (source 6/6 + runtime gradient/floor proof). 
+- **M1 (Grok core + Gemini matrices/fixtures/docs):** Plan B WASM **complete** (feat/pyramid-m1-ingest-cli @08f9d0e + feat/pyramid-m1-gallery-grid) — `@casabio/pyramid-ingest` (quality/ladder/hash/shard/manifest/backends/ladder/raw/ingest/cli; 8-bit only, JPG lossless transcode once, proxy single-level, resumable mtime, contenthash, shard isolation, atomic); gallery grid (index.json seed, aspect no-shift, L0 first, DPR upgrade, scheduler one-shot _jxl_wasm_decode_rgba8 keyed by contenthash, monotonic, crossfade, viewport+prefetch ring, cancel-before-start, LRU/OPFS reuse). 34/34+ guard tests, tsc green.
+- **M2 (Grok Build core, Gemini presets scaffolding):** 8-bit lightbox **complete** (Implementing_Pyramid branch / M2 worktree) — FilterEngine (12 CasaBio presets + 8 sliders per m2-checklist; per-pixel non-linear shadows lift (luma-masked) + highlights compress on top of matrix for better 8-bit preview while 16-bit pyramid data remains untouched/integral); live visible-screen hist (viewport readback); zoom ladder (DPR-adaptive + crossfade from grid cached L0/L1 seed); canvas pan (transform only); monotonic LRU; scheduler one-shot (contenthash key, visible/near prio); extracted pyramid-lightbox.js module; RAW-only 16-bit toggle stub (M3 path, off default — M2 lightbox always works with 8-bit decoded for UI/screens, preserving full 16-bit headroom for shadows/highlights in M3 toggle). Unit tests + QA items. (See pyramid table for full details.)
+- **M3 (Grok high-effort foundation, in progress):** 16-bit RAW path started (feat/pyramid-m3-raw16-webgl-roi) — Rust `src/lib.rs` exposes full-res RGB16 buffer (OUT_FULL_16=8 flag, rgb16_full/take_rgb16_full/pack in orf/dng/cr2 paths, no schema bump); pyramid-ingest updated (manifest dynamic bitsPerSample 8|16, ladder RAW big-levels 16-bit data + encodePyramid16 path, raw-backend requests 1|8 + surfaces packed 16, backends extended); client lightbox dither16To8 + 16-bit toggle UI (RAW only, off default, basic JS dither + structure for WebGL float + FS dither + ROI via region). Placeholder encode16 (real needs facade M0 16-primitive wiring). Grid/JPG remain 8-bit. Full rebuild + tests pending.
+
+### 0.1 Boundary surgery & IPC (highest ROI — do first)
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity (`TauriWasmParity.md`) |
+|---|---------|--------|------|-------|-------------------------------|
+| ☑ | Thumb via JSON u8 integer array in `ProcessResult` | §7.3 | N/A | ☑ | **B-T1**, **H5**, Phase −1, **PR-0a** — `thumb_cache` + `get_thumb(id)` binary Response; dims-only in `ProcessResult` |
+| ☑ | Redundant `jxl` base64 when `jxl_cache` has bytes | §7.2 | N/A | ☑ | **B-T2**, **H4**, Phase −1, **PR-0b** — default id-only; `jxl_cached: true`; optional `include_jxl` |
+| ☑ | `(*jxl_arc).clone()` on bg JXL prefill | §7.3 | N/A | ☑ | **B-T3**, **H2**, Phase −1, **PR-0c** — `decode_jxl_full_inner(&Arc)` |
+| ☑ | `jxl_dc_preview` base64 RGB events | §3.1 | ✅ | ☑ | **B-T4**, **H7**, Phase −1, **PR-0e** — event `{id,w,h}` only; pixels via `get_jxl_lightbox` |
+| ☐ | `file_thumb_fast` JPEG base64 relay | §6.3 | N/A | 🟡 | **B-T5**, **H6**, Phase −1, **PR-0d**, §6.2 |
+| ☐ | Full JXL decode → downscale lightbox prefill | §3.2, §7.3 | ✅ | ❌ | **B-T6**, **H9**, **H21**, Phase 2 **M1**, **PR-8b**, §11 |
+| ☐ | Subject crop RGBA→RGB strip on encode | §3.2 | ✅ | 🟡 | **B-T7**, **H11**, Phase 1, **PR-5** |
+| ☐ | `pack_rgb_response` always allocates | §7.3 | N/A | 🟡 | **B-T8**, **H26**, Phase −1, **PR-0c** |
+| ☑ | Binary IPC hot paths (`apply_look`, `decode_jxl_*`) | §7.3 | N/A | ☑ | **H3**, **H19** — extended to thumb via `get_thumb` |
+| ☐ | `Channel` streaming `apply_look` (slider UX) | §7.3 | N/A | ❌ | **H29**, Phase 3 polish, §6.6 |
+
+### 0.2 Format ingest & RAW pipeline
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| ☑ | LookRenderer / `Rgb16State` resident render | §1.1 | ✅ | ✅ | §5.1 — maintain |
+| ☑ | `process_orf_with_flags` selective outputs | §1.2 | ✅ | ✅ | §5.1 — maintain |
+| ☑ | `parse_orf_metadata` / `get_orf_metadata` | §1.3 | ✅ | ✅ | — maintain |
+| ☑ | `bench_decode_orf` | §1.4 | ✅ | ✅ | **PR-11** harness unify, §9 |
+| ☑ | Thumb from pre-computed lightbox buffer | §1.5 | ✅ | ✅ | — maintain |
+| ☑ | Orientation==1 zero-copy fast path | §1.6 | ✅ | ✅ | — maintain |
+| ☑ | Unified `apply_look_params` | §1.7 | ✅ | ✅ | — maintain |
+| — | `apply_look` native `&[u16]` (WASM-only API) | §1.8 | ✅ | N/A | §4.4 — no port |
+| — | Pre-allocated rgb_to_rgba buffers | §1.9 | ✅ | N/A | **H24** / **H38** optional `SlabPool`, §12 Tier 2 |
+| ☑ | `process_post_demosaic_for_mode` separation | §1.10 | ✅ | ✅ | — maintain |
+| ☑ | Preemptive priority + in-flight cancel | §1.11 | ✅ | ✅ | **H30**, **K8** — maintain |
+| 🟡 | DNG decode + camera matrices | §1.12 | ✅ | 🟡 | **H31**, **PR-0f** — `process_file` ORF-only today |
+| 🟡 | CR2 decode (`process_cr2`) | *(parity only)* | ✅ | ❌ | **H31**, **PR-0f**, pyramid §15 five-format gate |
+| ☑ | 16/32-bit HDR + alpha round-trip | §1.13 | ✅ | ✅ | Pyramid **M3** 16-bit lightbox, §11 |
+| ☑ | EXIF/XMP/ICC metadata fidelity | §1.14 | ✅ | ✅ | — maintain |
+| ☐ | Multi-format ingest router (ORF/DNG/CR2/JPG) | *(parity only)* | ✅ | ❌ | **H31**, **H32**, **K16**, Phase 0b, **PR-0f** |
+| 🟡 | JPG lossless `transcodeJpegToJxl` ingest | §9.2 | ✅ | ❌ | **H32**, pyramid §4, Plan B — WASM CLI via `buildJpgLadder`; Tauri port open |
+| ☑ | Direct `process_rgba` encode path | §7.2 | ✅ | ✅ | **H1**, **K1** — maintain |
+| ☐ | Native `fast-jpeg` DCT embedded preview | §6.2 | ✅ | ❌ | **H6**, **H20**, **H27**, **PR-0d**, **PR-2**, §6.2 |
+
+### 0.3 JXL encode / decode controls
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| ☑ | Basic encode (effort, distance, lossless) | §2.1 | ✅ | ✅ | — maintain |
+| 🟡 | Progressive encode (Dc, Ac, groupOrder, previewFirst) | §2.2, §2.13 | ✅ | 🟡 | **H34**, Phase 1, **PR-4**; §11 Predator |
+| ☑ | Modular advanced controls | §2.3 | ✅ | ✅ | — maintain (rebuild WASM to activate) |
+| ☑ | Extra channel infrastructure | §2.4 | ✅ | ✅ | — maintain |
+| ☑ | Photon noise ISO | §2.5 | ✅ | ✅ | — maintain |
+| 🟡 | `decodingSpeed` tier (0–4) on product paths | §2.6 | ✅ | ❌ | **H22**, **P0**, Phase 1, **PR-4** |
+| ☑ | Brotli effort | §2.7 | ✅ | ✅ | — maintain |
+| ☑ | Animation / multi-frame + blend modes | §2.8, §10.1 | ✅ | ✅ | **H44** seek C++ skip optional |
+| ☑ | Metadata boxes + JPEG recon (v3 transcode) | §2.9, §9.2 | ✅ | ✅ | **H32** for ingest transcode |
+| ☑ | Gain maps | §2.10 | ✅ | ✅ | — maintain |
+| ☑ | Patches & splines escape hatch | §2.11 | ✅ | ✅ | — maintain |
+| ☑ | First-class advanced encoder controls | §2.11b | ✅ | ✅ | — maintain |
+| ☑ | Resampling factors | §2.12 | ✅ | ✅ | — maintain |
+| 🟡 | `encode_variants_with_progressive` at desktop ingest | §2.13 | ✅ | 🟡 | Phase 1, §4.3 **P2** |
+| ☐ | `jxl_lowlevel` progressive decode in lightbox | §2.14 | ✅ | ❌ | **P0**, **PR-1**, **PR-3**, Phase 3, §5.4 |
+| ☑ | Per-level pyramid sidecar encode (v2 distances) | §3.7 | ✅ | ✅ | **H12**, **H40** — WASM `sidecars_v2` verified; **PR-6b** native (Falcon=3 effort, box cascade, from_rgb16 helper) done |
+| ☑ | `encodeRgba8Pyramid` + `downscaleRgba16` | *(parity only)* | ✅ | ✅ | Plan A WASM done; Tauri native port (**PR-6b**) done (raw-pipeline + encode_rgba8_pyramid_from_rgb16 for PR-7b) |
+
+### 0.4 Progressive UX, ROI, streaming
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| 🟡 | Within-image progressive decode + paint policy | §3.1 | ✅ | 🟡 | §1, **K6**, **H42**, Phase 3 **K15** — not gallery primary (**K2**) |
+| ☑ | ROI / region decode (`decodeViewport`, LOD) | §3.2 | ✅ | 🟡 | **H35**, **H39**, `decode_jxl_region_for_id` |
+| — | JXTC tile-container encode + ROI | §3.3 | ✅ | N/A | **H10**, **K4**; Tauri **TJLX**; Plan **E** |
+| — | Tile-based multi-frame fallback ROI | §3.4 | ✅ | N/A | §4.4 — WASM-only |
+| ☑ | `progressiveDetail` end-to-end | §3.5 | ✅ | ✅ | §1.2 diagnostic vs product table |
+| 🟡 | Preview-first + container JPEG recon decode | §3.6 | ✅ | ❌ | **H33**, **H27** — legacy until pyramid L0 |
+| — | Sidecar thumb UI feedback | §3.7 | ✅ | N/A | Superseded by pyramid levels **H12** |
+| ☑ | Capability probing (tiers, native JXL, region) | §3.8 | ✅ | ✅ | — maintain |
+| ☐ | Canvas ImageData slack-safe buffers | §11 (Predator) | ✅ | ☐ | §1.1, **H3**, **H26** |
+| ☐ | Opportunistic flush + chunk-yield contracts | §3.1 | ✅ | 🟡 | §1.2, `Agents.md`; native **H43** UI dedup |
+| ☑ | Progressive paint speedups A3/A4 | §6.3, §11 | ✅ | 🟡 | §1.3 — Tauri: texture reuse + stats gate |
+| 🟡 | RAW "nice preview" tone (viewer QA only) | §11 | ✅ | ❌ | §1.4 — paint lab only; not ingest (**K1**) |
+| ☐ | PSNR ≥ 40 dB progressive regression gate | §6.3 | ✅ | ❌ | §1.5, §9.5 — Phase 3 QA |
+| ☐ | Subject pre-crop JXL cache + ROI decode | §3.2 | ✅ | ☑ | **H11** ✅; maintain |
+| ☐ | TJLX tiled container (native) | §3.3 | N/A | ☑ | **H10** ✅; Plan **E** threshold align |
+
+### 0.5 Scheduling, caching, workers
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| 🟡 | 3-lane scheduler + dedupe | §4.1 | ✅ | 🟡 | **H15**, **K8** — contenthash dedupe with pyramid |
+| ☑ | Adaptive drain HWM + budget | §4.2 | ✅ | ✅ | Shared web frontend — maintain |
+| — | OPFS + fs persistent cache | §4.3 | ✅ | N/A | Tauri FS faster; pyramid `levels/` **H28** |
+| ☑ | Worker prewarm + lifecycle hardening | §4.4 | ✅ | ✅ | — maintain |
+| ☑ | `priority_sem` + promote (desktop) | §4.5 | N/A | ✅ | **H30** — maintain |
+| ☑ | Lightbox cache + `AppState` | §4.6, §7.3 | N/A | ✅ | Extend for pyramid manifest **PR-7b** |
+
+### 0.6 WASM build architecture (mostly N/A — principles only)
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| — | Multi-tier WASM matrix (simd-mt, PGO) | §5.1 | ✅ | N/A | §4.4; native LTO per Opus 4.7 §10 |
+| — | Zero-copy WASM heap + grow-only alloc | §5.2 | ✅ | N/A | **H24**, **H8** principle → **H38** `SlabPool` |
+| — | Streaming pixel encoder | §5.3 | ✅ | N/A | **H25** arena principle for TJLX tiles |
+| — | WASM `downscale_rgba` | §5.4 | ✅ | N/A | Native box downscale synced §5.1 |
+| — | Module caching / compileStreaming | §5.5 | ✅ | N/A | — |
+| — | Safe pixel alloc guard (>1 GiB) | §5.6 | ✅ | N/A | — |
+| — | Native browser JXL `<img>` fast path | §5.7 | ✅ | N/A | §4.4 — desktop uses in-process decode |
+
+### 0.7 Benchmark, telemetry, dev tools
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| — | Wrapper lab (advanced controls) | §6.1 | ✅ | N/A | **P5** dev tooling |
+| — | Crop / JXTC benchmark | §6.2 | ✅ | N/A | **H10**; native `strategy_bench` |
+| 🟡 | Progressive paint + gallery labs | §6.3 | ✅ | 🟡 | §1, Phase 3; gallery → pyramid Plan C |
+| ☑ | Animation lab | §6.4 | ✅ | ✅ | — maintain |
+| — | Drag-race / tier sweep lab | §6.5 | ✅ | N/A | — |
+| 🟡 | Canonical metrics (`onMetric`, `jxl_metrics`) | §6.6 | ✅ | 🟡 | **PR-11**, §9.2 metric contract |
+| ☑ | Facade / JXTC unit tests | §6.7 | ✅ | ✅ | — maintain |
+| — | Progressive byte benchmark | §6.8 | ✅ | N/A | **H41** prefix-probe port optional |
+| — | Butteraugli bridge | *(parity §5)* | ✅ | N/A | **P5**, `computeButteraugli` — dev only |
+
+### 0.8 Tauri desktop shell (native-only features)
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| — | Desktop picker + Casabio push | §7.1 | N/A | ✅ | **K12**, **Q2** push-compatible pyramid layout |
+| ☑ | Native encode variants (thumb/preview/full) | §7.2 | N/A | ✅ | Pyramid replaces single-JXL strategy Phase 2 |
+| ☑ | Lightbox + `apply_look` commands | §7.3 | N/A | ✅ | Phase −1 IPC fixes; Plan D FilterEngine |
+| ☑ | Priority semaphore ingest | §7.4 | N/A | ✅ | — maintain |
+| ☑ | Full Tauri command surface | §7.5 | N/A | ✅ | Add `decode_jxl_level_for_id` **PR-8b** |
+| ☑ | MSVC / GNU toolchain | §7.6 | N/A | ✅ | — maintain |
+
+### 0.9 Platform & Phase 3 micro-features
+
+| ☐ | Feature | Matrix | WASM | Tauri | Parity |
+|---|---------|--------|------|-------|--------|
+| ☑ | Unified TS API (jxl-wasm + jxl-native) | §8.1 | ✅ | ✅ | — maintain |
+| ☑ | Color management / DNG matrices | §8.2 | ✅ | ✅ | **H31** ingest router still required |
+| ☑ | 16/32-bit scientific fidelity | §8.3 | ✅ | ✅ | Pyramid **M3** |
+| ☑ | Cross-platform build hygiene | §8.4 | ✅ | ✅ | — maintain |
+| — | Docker/Emscripten WASM gate | §8.5 | ✅ | N/A | — |
+| ☑ | HDR signaling & color priority | §9.1 | ✅ | ✅ | Ingest doesn't need all knobs |
+| ☑ | JPEG recompression polish (CFL, v3 transcode) | §9.2 | ✅ | ✅ | **H32** ingest path |
+| ☑ | Pixel-art downsampling modes | §9.3 | ✅ | ✅ | — maintain |
+| ☑ | Low-memory chunked encode paths | §9.4 | ✅ | ✅ | — maintain |
+| 🟡 | Animation `seekToFrame` C++ skip | §10.1 | 🟡 | 🟡 | **H44** — software fallback today |
+| ☑ | Remaining frame settings audit | §10.2 | ✅ | ✅ | — maintain |
+| 🟡 | CasaSneyers paper gap closure | §12 | ✅ | 🟡 | §11 Predator + matrix §12 — rebuild WASM for some |
+
+### 0.10 Pyramid gallery program (authoritative — not in matrix tables below)
+
+North star: [`2026-06-07-pyramid-gallery-design.md`](superpowers/specs/2026-06-07-pyramid-gallery-design.md). Full map: `TauriWasmParity.md` **§11**, **§12**, Phase 2.
+**Agents (per 2026-06-08-PyramidAgentHandoff.md):** Grok Build — core correctness (M0 bridge/facade/tests, M1 ingest+grid, M2 FilterEngine+lightbox+WebGL stub, M3 Rust 16-bit+ingest+client dither). Gemini — low-risk clerical (checklists, constants, fixtures, test matrices, README drafts, m*-checklist.md scaffolding). High-risk M0/M1/M3 owned by Grok exclusively.
+
+| ☐ | Milestone | WASM | Tauri | Parity |
+|---|-----------|------|-------|--------|
+| ✅ | **M0** Plan A — `sidecars_v2`, `downscaleRgba16`, `encodeRgba8Pyramid` (Grok + Gemini) | ✅ (feat/pyramid-m0 @93afee7; 2048@0.55 un-clamped, runtime+source tests) | ✅ | **PR-6** WASM done; **PR-6b** native done (effort-mapped Falcon=3) |
+| ✅ | **M1** Plan B — ingest CLI + gallery grid (index/L0/DPR/scheduler one-shot by contenthash/monotonic) (Grok core + Gemini) | ✅ (feat/pyramid-m1-ingest @08f9d0e + m1-grid; pure WASM, 8-bit only, JPG lossless transcode, proxy, resumable, atomic, shard) | 🟡 | **PR-7** WASM done; **PR-7b** Tauri ingest/grid unblocked (raw-pipeline encode_rgba8_pyramid_from_rgb16 + effort=3) |
+| ✅ | **M2** 8-bit lightbox + FilterEngine (Grok + Gemini) | ✅ (M2 worktree / Implementing_Pyramid branch) — FilterEngine (12 CasaBio presets: BW/BW_HIGH/BW_SOFT/SEPIA/INVERT/BOTANICAL/WARM/COOL/DEHAZE/BLUEPRINT/CHLOROPHYLL/NONE + 8 sliders with exact ranges/labels per m2-checklist; improved per-pixel non-linear shadows (lift darks via luma-masked) + highlights (compress brights) on top of matrix for better 8-bit preview; live visible-screen hist via viewport readback after transform + adjust); zoom ladder (adaptive screenLongEdge × DPR + current zoom, crossfade on upgrade from grid L0/L1 seed); canvas pan (2D transform only, no re-decode until level change) + bounds + wheel; live zoom% readout; monotonic screen-bitmap LRU (contenthash keyed, 8-entry); scheduler one-shot decode _jxl_wasm_decode_rgba8 keyed by contenthash (visible/near prio for current/prefetch neighbors, dual-dispatcher feel); extracted to web/lightbox/pyramid-lightbox.js (clean deps: ctx/getLevelBytes/chooseLevelForTarget/getManifest + module API for open(list,idx)); grid seeds from already-cached painted tile pixels (zero extra decode) then crossfade; 8-bit levels preferred (bitsPerSample filter); RAW-only 16-bit toggle stub (disabled + tooltip: "M2 lightbox always 8-bit decoded for UI/preview + adjustments to match typical 8-bit screens; 16-bit pyramid levels (full headroom for shadows/highlights) + WebGL float + FS dither is M3, off by default per design — M2 never touches 16-bit data, integrity preserved"); unit 3/3 + QA checklist items; no annotations/video per spec. | ❌ | **PR-8/PR-8b** WASM done (extraction + improvements); Tauri port pending (FilterEngine parity + WebGL stub for M3 toggle) |
+| 🟡 | **M3** 16-bit RAW (big levels), WebGL float + FS dither, RAW-only toggle, basic ROI (Grok foundation) | 🟡 (M3 worktree; Rust full-res RGB16 expose + take/pack + OUT_FULL_16; ingest manifest/ladder/raw-backend 16 support + bitsPerSample; client dither16To8 + toggle UI + 16 decode structure; encode16 placeholder) | ❌ | **PR-9** WASM foundation; full rebuild + tests + WebGL parity next; **PR-9b** Tauri |
+| ☐ | **M4** Plan E — JXTC/TJLX massive-scan threshold | 🟡 | 🟡 | **PR-10**, **H10** |
+| ✅ | Content-addressed `levels/{hash16}.jxl` + manifest v1 (per-level bitsPerSample) | ✅ | ❌ | **H28**, **K12**, §11.2 — WASM CLI; Tauri storage open |
+| 🟡 | Scheduler dedupe by `contenthash` + one-shot | ✅ (grid + lightbox reuse) | ❌ | **H15**, **K13**, §6.8 lever #8 |
+
+### 0.11 Recommended execution order (from parity program)
+
+1. Phase −1 — §0.1 boundary surgery (**PR-0a…0e**)
+2. Phase 0 — sync `jxl_lowlevel`, unified bench (**PR-1**, **PR-11**)
+3. Phase 0b — §0.2 format router (**PR-0f**, **H31**, **H32**)
+4. Phase 1 — fast-jpeg, `decodingSpeed`, Sneyers full, crop encode fix (**PR-2…5**)
+5. Phase 2 — pyramid **M0–M4** (**PR-6…10**)
+6. Phase 3 — legacy within-image progressive only (**§1**, **K15** — not gallery)
+
+**Key decisions to read first:** `TauriWasmParity.md` §8 (**K1**–**K18**). **Open questions:** §10 (**Q1**–**Q9**).
 
 ---
 
@@ -192,6 +380,7 @@ Most former 🟡/❌ entries have been resolved to ✅ or N/A (by design or comp
 4. The matrix is the only place that tracks "is it in both builds + can a user exercise it in a lab right now?"
 
 **Cross-References**
+- **Tauri port program (checklist, phases, PRs):** [`TauriWasmParity.md`](TauriWasmParity.md) — §0 above maps every matrix row to this doc
 - Full JXL feature mapping + reference code: `references/REFERENCE_INDEX.md`
 - **Deep audit against actual (not just notes) reference sources:** `references/historical/DEEP_REFERENCE_CODE_AUDIT_HANDOFF.md` + `references/REFERENCE_CODE_AUDIT.md` (new 2026-06 effort using Red/Orange for gaps vs real cjxl/jpegxl-rs/etc. code)
 - Design notes: `references/designs/DESIGNS_INDEX.md`
