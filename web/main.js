@@ -333,6 +333,15 @@ window.allCards = () => cards;
 // cached. Used by crop.js to render focal-subject thumbnails from the JXL
 // roundtrip. Returns a promise that resolves when the buffer is in place.
 window.decodeFullJxlFor = function decodeFullJxlFor(card) {
+    if (IS_TAURI && card?._tauriResult?.jxl_cached && !card._blobUrl) {
+        if (card._jxlDecoded) return Promise.resolve(card._jxlDecoded);
+        const id = card._tauriResult.id;
+        return fetchTauriJxlFull(id).then(({ w, h, rgb }) => {
+            const decoded = { rgba: rgbToRgbaArr(rgb), w, h };
+            card._jxlDecoded = decoded;
+            return decoded;
+        }).catch(() => null);
+    }
     return new Promise((resolve) => {
         if (!card?._blobUrl) { resolve(null); return; }
         if (card._jxlDecoded) { resolve(card._jxlDecoded); return; }
@@ -1040,8 +1049,16 @@ function makeCard(name) {
             uploadBtn.disabled = true; uploadBtn.textContent = '…';
             try {
                 const [settings, token] = await Promise.all([invoke('get_settings'), invoke('get_token')]);
-                const { jxl, exif } = card._tauriResult;
-                const _jb = new Uint8Array(jxl); let _js = ''; for (let _i = 0; _i < _jb.length; _i++) _js += String.fromCharCode(_jb[_i]);
+                const { exif, id, jxl_cached } = card._tauriResult;
+                let jxlBytes;
+                if (jxl_cached && id != null) {
+                    const buf = await invoke('get_jxl_for_id', { id });
+                    jxlBytes = new Uint8Array(buf);
+                } else {
+                    jxlBytes = new Uint8Array(card._tauriResult.jxl || []);
+                }
+                if (!jxlBytes.length) throw new Error('no JXL bytes in cache');
+                let _js = ''; for (let _i = 0; _i < jxlBytes.length; _i++) _js += String.fromCharCode(jxlBytes[_i]);
                 const jxl_b64 = btoa(_js);
                 const result = await invoke('push_to_planner', {
                     payload: { filename: name, jxl_b64, exif, planner_url: settings.planner_url, token: token ?? '' },
@@ -1064,7 +1081,7 @@ function cycleSourceForCard(card, dir = 1) {
     const order = ['raw', 'jxl', 'jpeg'];
     const available = order.filter(m => {
         if (m === 'raw')  return !!card._lightbox;
-        if (m === 'jxl')  return !!card._blobUrl;
+        if (m === 'jxl')  return cardHasJxlSource(card);
         if (m === 'jpeg') return !!card._embeddedPreview;
         return false;
     });
@@ -1090,7 +1107,7 @@ function refreshThumbToggleButton(card) {
     if (!btn) return;
     const available = ['raw', 'jxl', 'jpeg'].filter(m => {
         if (m === 'raw')  return !!card._lightbox;
-        if (m === 'jxl')  return !!card._blobUrl;
+        if (m === 'jxl')  return cardHasJxlSource(card);
         if (m === 'jpeg') return !!card._embeddedPreview;
     });
     btn.hidden = available.length < 2;
@@ -1955,6 +1972,10 @@ function classifyJpegThumbSource(w, h) {
 // shows what the JXL roundtrip actually looks like (replacing whatever embedded
 // or RAW-pipeline thumb was there). Best-effort — failures stay silent.
 function repaintThumbFromJxl(card) {
+    if (IS_TAURI && card?._tauriResult?.jxl_cached && !card._blobUrl) {
+        repaintThumbFromJxlTauri(card);
+        return;
+    }
     if (!card?._blobUrl) return;
     pool.decodeJxl(card._blobUrl, (msg) => {
         if (msg.type === 'decode_error') {
@@ -2107,8 +2128,8 @@ function drawLightboxForCard(card) {
     }
 
     if (mode === 'jxl') {
-        if (!card._blobUrl) {
-            // JXL not ready yet — fall back to raw.
+        const tauriJxl = IS_TAURI && card._tauriResult?.jxl_cached && !card._blobUrl;
+        if (!card._blobUrl && !tauriJxl) {
             card._sourceMode = 'raw';
         } else if (card._jxlDecoded) {
             // Cached from prefetch — instant paint.
@@ -2126,8 +2147,30 @@ function drawLightboxForCard(card) {
             updateToggleButtonState(card);
             syncZoomToDisplayLong();
             return;
+        } else if (tauriJxl) {
+            lbLoadingBadge.hidden = false;
+            updateToggleButtonState(card);
+            fetchTauriJxlLightbox(card._tauriResult.id).then(({ w, h, rgb }) => {
+                if (lightboxIndex < 0 || cards[lightboxIndex] !== card) return;
+                const rgba = rgbToRgbaArr(rgb);
+                card._jxlDecoded = { rgba, w, h };
+                lightboxCanvas.width = w;
+                lightboxCanvas.height = h;
+                const ctx = lightboxCanvas.getContext('2d');
+                ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+                if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+                    setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                }
+                setPaintedSourceBadge('jxl');
+                lbLoadingBadge.hidden = true;
+                applyStraightenToLightboxCanvas(card);
+                syncZoomToDisplayLong();
+            }).catch((e) => {
+                console.warn('JXL lightbox (native) failed:', e);
+                lbLoadingBadge.hidden = true;
+            });
+            return;
         } else {
-            // Decode in flight — keep whatever pixels are on screen, show loader.
             lbLoadingBadge.hidden = false;
             updateToggleButtonState(card);
             pool.decodeJxl(card._blobUrl, (msg) => {
@@ -2276,7 +2319,7 @@ function drawLightboxForCard(card) {
 function updateToggleButtonState(card) {
     const mode   = card?._sourceMode ?? 'raw';
     const labels = { raw: 'RAW', jxl: 'JXL', jpeg: 'JPEG' };
-    const havePair = !!(card && (card._lightbox || card._embeddedPreview || card._blobUrl));
+    const havePair = !!(card && (card._lightbox || card._embeddedPreview || cardHasJxlSource(card)));
     if (lbToggleJpegBtn) {
         lbToggleJpegBtn.disabled = !havePair;
         lbToggleJpegBtn.textContent = labels[mode] ?? 'RAW';
@@ -3287,6 +3330,75 @@ function rgbToRgbaArr(rgb) {
     return rgba;
 }
 
+function parseRgbResponse(buf) {
+    const view = new DataView(buf);
+    const w = view.getUint16(0, true);
+    const h = view.getUint16(2, true);
+    return { w, h, rgb: new Uint8Array(buf, 4) };
+}
+
+function cardHasJxlSource(card) {
+    return !!(card?._blobUrl || (IS_TAURI && card?._tauriResult?.jxl_cached));
+}
+
+function paintRgbThumbToCanvas(card, rgb, width, height) {
+    const canvas = card?.querySelector('canvas');
+    if (!canvas || !width || !height) return;
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').putImageData(
+        new ImageData(rgbToRgbaArr(rgb), width, height), 0, 0);
+}
+
+async function fetchTauriThumb(card, id) {
+    const buf = await invoke('get_thumb', { id });
+    const { w, h, rgb } = parseRgbResponse(buf);
+    paintRgbThumbToCanvas(card, rgb, w, h);
+    card.classList.remove('embedded-thumb');
+    setThumbSource(card, null);
+}
+
+async function fetchTauriJxlLightbox(id) {
+    const buf = await invoke('get_jxl_lightbox', { id });
+    return parseRgbResponse(buf);
+}
+
+async function fetchTauriJxlFull(id) {
+    const buf = await invoke('decode_jxl_to_rgb_for_id', { id });
+    return parseRgbResponse(buf);
+}
+
+async function repaintThumbFromJxlTauri(card) {
+    const id = card?._tauriResult?.id;
+    if (id == null) return;
+    try {
+        const { w, h, rgb } = await fetchTauriJxlLightbox(id);
+        const LONG_EDGE = 360;
+        const long = Math.max(w, h);
+        const targetW = long > LONG_EDGE ? Math.max(1, Math.round(w * LONG_EDGE / long)) : w;
+        const targetH = long > LONG_EDGE ? Math.max(1, Math.round(h * LONG_EDGE / long)) : h;
+        const bmp = await createImageBitmap(
+            new ImageData(rgbToRgbaArr(rgb), w, h),
+            { resizeWidth: targetW, resizeHeight: targetH, resizeQuality: 'high' },
+        );
+        const canvas = card.querySelector('canvas');
+        if (!canvas) return;
+        canvas.width = targetW;
+        canvas.height = targetH;
+        canvas.getContext('2d').drawImage(bmp, 0, 0);
+        if (card._jxlThumbBmp && card._jxlThumbBmp !== bmp) {
+            try { card._jxlThumbBmp.close(); } catch {}
+        }
+        card._jxlThumbBmp = bmp;
+        card._jxlThumbW = targetW;
+        card._jxlThumbH = targetH;
+        card.classList.remove('embedded-thumb');
+        setThumbSource(card, 'jxl');
+    } catch (e) {
+        console.warn('JXL thumb (native) failed:', e);
+    }
+}
+
 const cardByFilename = new Map();
 
 function findTauriCard(path) {
@@ -3334,37 +3446,25 @@ function onFileDoneTauri(filename, result) {
     if (!card) return;
     card.classList.remove('busy');
 
-    // Drop any stale JXL bitmap from a prior process so the new RAW thumb
-    // doesn't get masked by a redrawThumbRotated call that prefers the cache.
     if (card._jxlThumbBmp) {
         try { card._jxlThumbBmp.close(); } catch {}
         card._jxlThumbBmp = null;
     }
-    // Defensive paint — surface failures instead of leaving a black canvas.
-    try {
-        if (!result || !result.thumb) {
-            throw new Error('result.thumb missing — IPC returned ' + JSON.stringify(Object.keys(result || {})));
-        }
-        const { data, width, height } = result.thumb;
-        if (!data || !width || !height) {
-            throw new Error(`thumb fields invalid: w=${width} h=${height} dataLen=${data?.length}`);
-        }
-        const canvas = card.querySelector('canvas');
-        if (canvas) {
-            canvas.width = width; canvas.height = height;
-            canvas.getContext('2d').putImageData(
-                new ImageData(rgbToRgbaArr(data), width, height), 0, 0);
-        }
-        // RAW-pipeline thumb is in place; clear the embedded-source label.
-        card.classList.remove('embedded-thumb');
-        setThumbSource(card, null);
-    } catch (e) {
-        console.error('[tauri-thumb] paint failed for', filename, e);
-        card.classList.add('error');
-        const tEl = card.querySelector('.time');
-        if (tEl) tEl.textContent = 'paint: ' + (e.message || e);
-    }
     card._tauriResult = result;
+    card._jxlDecoded = null;
+
+    // Thumb dims in ProcessResult; pixels via get_thumb(id) binary Response.
+    if (result?.id != null) {
+        fetchTauriThumb(card, result.id).catch((e) => {
+            console.error('[tauri-thumb] paint failed for', filename, e);
+            card.classList.add('error');
+            const tEl = card.querySelector('.time');
+            if (tEl) tEl.textContent = 'paint: ' + (e.message || e);
+        });
+    } else {
+        console.error('[tauri-thumb] missing id for', filename);
+        card.classList.add('error');
+    }
 
     // Tauri-only: ship dims now, fetch pixels lazily via get_lightbox(id) on
     // first lightbox open.  Cuts per-file IPC payload by ~30 MB JSON, which
@@ -3380,22 +3480,28 @@ function onFileDoneTauri(filename, result) {
         };
     }
 
-    // Wire JXL blob URL so toggle/decode pipeline works in Tauri mode too.
-    if (result?.jxl && (result.jxl.length || result.jxl.byteLength)) {
+    // JXL: default id-cache (jxl_cached); inline jxl only when include_jxl set.
+    if (result?.jxl_cached) {
+        const dlBtn = card.querySelector('.thumb-dl-btn');
+        if (dlBtn) dlBtn.hidden = false;
+        refreshThumbToggleButton(card);
+        updateToggleButtonState(card);
+        repaintThumbFromJxl(card);
+        if (card._subjects?.length && typeof window.renderSubjectThumb === 'function') {
+            window.renderSubjectThumb(card).catch(() => {});
+        }
+    } else if (result?.jxl && (result.jxl.length || result.jxl.byteLength)) {
         const jxlBytes = typeof result.jxl === 'string'
             ? Uint8Array.from(atob(result.jxl), c => c.charCodeAt(0))
             : (result.jxl instanceof Uint8Array ? result.jxl : new Uint8Array(result.jxl));
         const blob = new Blob([jxlBytes], { type: 'image/jxl' });
         if (card._blobUrl) URL.revokeObjectURL(card._blobUrl);
         card._blobUrl = URL.createObjectURL(blob);
-        card._jxlDecoded = null;
         const dlBtn = card.querySelector('.thumb-dl-btn');
         if (dlBtn) dlBtn.hidden = false;
         refreshThumbToggleButton(card);
         updateToggleButtonState(card);
-        // Repaint thumb from the JXL roundtrip so the grid shows JXL output.
         repaintThumbFromJxl(card);
-        // Subject sibling cards: render their thumbs now that JXL is ready.
         if (card._subjects?.length && typeof window.renderSubjectThumb === 'function') {
             window.renderSubjectThumb(card).catch(() => {});
         }
@@ -3426,7 +3532,7 @@ function onFileDoneTauri(filename, result) {
         `tone ${fmtMs(t.tone_ms)}  ` +
         `pipe ${fmtMs(pipeMs)}  ` +
         `enc ${fmtMs(t.encode_ms)}  ` +
-        `out ${fmtKb(result?.jxl?.byteLength || result?.jxl?.length || 0)}`,
+        `out ${result?.jxl_cached && !(result?.jxl?.length || result?.jxl?.byteLength) ? 'cache' : fmtKb(result?.jxl?.byteLength || result?.jxl?.length || 0)}`,
     );
 
     // Replace the stuck "encoding" label with the final timing.
@@ -3484,12 +3590,42 @@ async function startBatchTauri(paths) {
     // file_thumb_fast: backend emits embedded JPEG bytes immediately after parse,
     // before the ~500ms pipeline. Show camera-embedded preview so the grid fills
     // instantly, then onFileDoneTauri replaces it with the pipeline thumbnail.
-    const unlistenFastThumb = await listen('file_thumb_fast', ({ payload }) => {
+    const unlistenDcPreview = await listen('jxl_dc_preview', ({ payload }) => {
         const card = findTauriCard(payload.path);
-        if (!card || !payload.jpeg_b64) return;
-        const jpeg = Uint8Array.from(atob(payload.jpeg_b64), c => c.charCodeAt(0));
-        const blob = new Blob([jpeg], { type: 'image/jpeg' });
-        createImageBitmap(blob).then(bmp => {
+        if (!card || !card._tauriResult?.jxl_cached) return;
+        if (lightboxIndex >= 0 && cards[lightboxIndex] === card && card._sourceMode === 'jxl') {
+            card._jxlDecoded = null;
+            drawLightboxForCard(card);
+        }
+        repaintThumbFromJxl(card);
+    });
+
+    const unlistenFastThumb = await listen('file_thumb_fast', async ({ payload }) => {
+        const card = findTauriCard(payload.path);
+        if (!card) return;
+        let bmp;
+        if (payload.width && payload.height) {
+            try {
+                const resp = await invoke('get_fast_thumb', { path: payload.path });
+                const buf = resp instanceof ArrayBuffer ? resp : resp?.data ?? resp;
+                if (!buf || buf.byteLength < 4) return;
+                const view = new Uint8Array(buf);
+                const w = view[0] | (view[1] << 8);
+                const h = view[2] | (view[3] << 8);
+                const pixels = view.subarray(4);
+                const imageData = new ImageData(new Uint8ClampedArray(pixels), w, h);
+                bmp = await createImageBitmap(imageData);
+            } catch (_) {
+                return;
+            }
+        } else if (payload.jpeg_b64) {
+            const jpeg = Uint8Array.from(atob(payload.jpeg_b64), c => c.charCodeAt(0));
+            const blob = new Blob([jpeg], { type: 'image/jpeg' });
+            bmp = await createImageBitmap(blob);
+        } else {
+            return;
+        }
+        {
             const orientation = payload.orientation || 1;
             // Compute the RAW-pipeline thumb dims from sensor dims so the
             // canvas is sized correctly from the FIRST draw.  Pipeline uses
@@ -3535,7 +3671,7 @@ async function startBatchTauri(paths) {
             if (lightboxIndex >= 0 && cards[lightboxIndex] === card && !card._lightbox) {
                 drawLightboxForCard(card);
             }
-        }).catch(() => {});
+        }
     });
 
     await Promise.allSettled(paths.map(async (path) => {
@@ -3561,6 +3697,7 @@ async function startBatchTauri(paths) {
     }));
 
     unlisten();
+    unlistenDcPreview();
     unlistenFastThumb();
 
     const batchT3 = performance.now();
@@ -4257,11 +4394,12 @@ function kickPeepEncode(idx, q) {
             wb_r: null,
             wb_b: null,
             encoder_threads: PEEP_ENCODER_THREADS,
+            include_jxl: true,
         },
     }).then((result) => {
         if (!pixelPeepActive || !peepCache.has(idx)) return;
         const e = peepCache.get(idx);
-        const bytes = new Uint8Array(result.jxl);
+        const bytes = new Uint8Array(result.jxl || []);
         e.jxlBytes[q] = bytes;
         e.encodeMs[q] = performance.now() - t0;
         e.sizeBytes[q] = bytes.byteLength;

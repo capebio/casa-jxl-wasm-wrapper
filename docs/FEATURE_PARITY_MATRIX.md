@@ -29,6 +29,7 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 
 **Legend:** ☑ parity or N/A by design · ☐ open Tauri port · 🟡 partial · — no further port action
 
+**Implementation log (2026-06-08, Tauri parity continuation):** Phase −1 boundary surgery largely complete in `raw-converter-tauri` — B-T5..B-T8, H31/H32/H22 encode-tier, PR-6b native pyramid encoder synced, `jxl_lowlevel` vendor synced. `web/main.js` updated for `get_fast_thumb` binary path. Open: H29 slider Channel, PR-3 progressive lightbox wire, PR-7b pyramid ingest at `process_file`.
 **Implementation log (2026-06-08, updated post-M3 foundation):** Phase −1 partial in `raw-converter-tauri`. `web/main.js` wired as before. 
 - **M0 (Grok Build core, Gemini clerical):** Plan A WASM **complete** (feat/pyramid-m0-wasm-primitives @93afee7) — `sidecars_v2` (per-level distances, no 2048 floor clamp), `downscaleRgba16`, `encodeRgba8Pyramid` + wrappers/caps/tests (source 6/6 + runtime gradient/floor proof). 
 - **M1 (Grok core + Gemini matrices/fixtures/docs):** Plan B WASM **complete** (feat/pyramid-m1-ingest-cli @08f9d0e + feat/pyramid-m1-gallery-grid) — `@casabio/pyramid-ingest` (quality/ladder/hash/shard/manifest/backends/ladder/raw/ingest/cli; 8-bit only, JPG lossless transcode once, proxy single-level, resumable mtime, contenthash, shard isolation, atomic); gallery grid (index.json seed, aspect no-shift, L0 first, DPR upgrade, scheduler one-shot _jxl_wasm_decode_rgba8 keyed by contenthash, monotonic, crossfade, viewport+prefetch ring, cancel-before-start, LRU/OPFS reuse). 34/34+ guard tests, tsc green.
@@ -43,10 +44,10 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 | ☑ | Redundant `jxl` base64 when `jxl_cache` has bytes | §7.2 | N/A | ☑ | **B-T2**, **H4**, Phase −1, **PR-0b** — default id-only; `jxl_cached: true`; optional `include_jxl` |
 | ☑ | `(*jxl_arc).clone()` on bg JXL prefill | §7.3 | N/A | ☑ | **B-T3**, **H2**, Phase −1, **PR-0c** — `decode_jxl_full_inner(&Arc)` |
 | ☑ | `jxl_dc_preview` base64 RGB events | §3.1 | ✅ | ☑ | **B-T4**, **H7**, Phase −1, **PR-0e** — event `{id,w,h}` only; pixels via `get_jxl_lightbox` |
-| ☐ | `file_thumb_fast` JPEG base64 relay | §6.3 | N/A | 🟡 | **B-T5**, **H6**, Phase −1, **PR-0d**, §6.2 |
-| ☐ | Full JXL decode → downscale lightbox prefill | §3.2, §7.3 | ✅ | ❌ | **B-T6**, **H9**, **H21**, Phase 2 **M1**, **PR-8b**, §11 |
-| ☐ | Subject crop RGBA→RGB strip on encode | §3.2 | ✅ | 🟡 | **B-T7**, **H11**, Phase 1, **PR-5** |
-| ☐ | `pack_rgb_response` always allocates | §7.3 | N/A | 🟡 | **B-T8**, **H26**, Phase −1, **PR-0c** |
+| ☑ | `file_thumb_fast` JPEG base64 relay | §6.3 | N/A | ☑ | **B-T5**, **H6**, Phase −1, **PR-0d** — DCT decode + `get_fast_thumb(path)` binary Response; event `{path,w,h,orientation,sensor_*}` only |
+| ☑ | Full JXL decode → downscale lightbox prefill | §3.2, §7.3 | ✅ | ☑ | **B-T6**, **H9** — `jxl_lb_cache` (~1800 long-edge tier) + `decode_jxl_level_for_id`; bg prefill prefers lb tier |
+| ☑ | Subject crop RGBA→RGB strip on encode | §3.2 | ✅ | ☑ | **B-T7**, **H11**, **PR-5** — `crop_rgba8` + `encode_jxl_with_channels` ch=4 |
+| ☑ | `pack_rgb_response` always allocates | §7.3 | N/A | ☑ | **B-T8**, **H26**, **PR-0c** — `pack_rgb_response_arc` / `rgb_to_response_from_frame` |
 | ☑ | Binary IPC hot paths (`apply_look`, `decode_jxl_*`) | §7.3 | N/A | ☑ | **H3**, **H19** — extended to thumb via `get_thumb` |
 | ☐ | `Channel` streaming `apply_look` (slider UX) | §7.3 | N/A | ❌ | **H29**, Phase 3 polish, §6.6 |
 
@@ -65,14 +66,14 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 | — | Pre-allocated rgb_to_rgba buffers | §1.9 | ✅ | N/A | **H24** / **H38** optional `SlabPool`, §12 Tier 2 |
 | ☑ | `process_post_demosaic_for_mode` separation | §1.10 | ✅ | ✅ | — maintain |
 | ☑ | Preemptive priority + in-flight cancel | §1.11 | ✅ | ✅ | **H30**, **K8** — maintain |
-| 🟡 | DNG decode + camera matrices | §1.12 | ✅ | 🟡 | **H31**, **PR-0f** — `process_file` ORF-only today |
-| 🟡 | CR2 decode (`process_cr2`) | *(parity only)* | ✅ | ❌ | **H31**, **PR-0f**, pyramid §15 five-format gate |
+| ☑ | DNG decode + camera matrices | §1.12 | ✅ | ☑ | **H31**, **PR-0f** — `decode_source_file` → `dng::decode_bytes` in `process_file` |
+| ☑ | CR2 decode (`process_cr2`) | *(parity only)* | ✅ | ☑ | **H31**, **PR-0f** — `cr2::decode_bytes` router in `process_file` |
 | ☑ | 16/32-bit HDR + alpha round-trip | §1.13 | ✅ | ✅ | Pyramid **M3** 16-bit lightbox, §11 |
 | ☑ | EXIF/XMP/ICC metadata fidelity | §1.14 | ✅ | ✅ | — maintain |
-| ☐ | Multi-format ingest router (ORF/DNG/CR2/JPG) | *(parity only)* | ✅ | ❌ | **H31**, **H32**, **K16**, Phase 0b, **PR-0f** |
-| 🟡 | JPG lossless `transcodeJpegToJxl` ingest | §9.2 | ✅ | ❌ | **H32**, pyramid §4, Plan B — WASM CLI via `buildJpgLadder`; Tauri port open |
+| ☑ | Multi-format ingest router (ORF/DNG/CR2/JPG) | *(parity only)* | ✅ | ☑ | **H31**, **H32**, **K16**, **PR-0f** — `classify_source_format` + dedicated JPG path in `process_file` |
+| ☑ | JPG lossless `transcodeJpegToJxl` ingest | §9.2 | ✅ | ☑ | **H32** — `jxl_native::transcode_jpeg_to_jxl` on JPG `process_file` ingest |
 | ☑ | Direct `process_rgba` encode path | §7.2 | ✅ | ✅ | **H1**, **K1** — maintain |
-| ☐ | Native `fast-jpeg` DCT embedded preview | §6.2 | ✅ | ❌ | **H6**, **H20**, **H27**, **PR-0d**, **PR-2**, §6.2 |
+| ☑ | Native `fast-jpeg` DCT embedded preview | §6.2 | ✅ | ☑ | **H6**, **H20**, **H27**, **PR-0d** — `fast_jpeg::decode_scaled_rgb8` + `get_fast_thumb` |
 
 ### 0.3 JXL encode / decode controls
 
@@ -83,7 +84,7 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 | ☑ | Modular advanced controls | §2.3 | ✅ | ✅ | — maintain (rebuild WASM to activate) |
 | ☑ | Extra channel infrastructure | §2.4 | ✅ | ✅ | — maintain |
 | ☑ | Photon noise ISO | §2.5 | ✅ | ✅ | — maintain |
-| 🟡 | `decodingSpeed` tier (0–4) on product paths | §2.6 | ✅ | ❌ | **H22**, **P0**, Phase 1, **PR-4** |
+| ☑ | `decodingSpeed` tier (0–4) on product paths | §2.6 | ✅ | ☑ | **H22**, **PR-4** — `ProcessOptions.decoding_speed` (default 2) wired at encode via `JXL_ENC_FRAME_SETTING_DECODING_SPEED` |
 | ☑ | Brotli effort | §2.7 | ✅ | ✅ | — maintain |
 | ☑ | Animation / multi-frame + blend modes | §2.8, §10.1 | ✅ | ✅ | **H44** seek C++ skip optional |
 | ☑ | Metadata boxes + JPEG recon (v3 transcode) | §2.9, §9.2 | ✅ | ✅ | **H32** for ingest transcode |
@@ -92,7 +93,7 @@ Master checklist for Tauri port / parity work. **Matrix** = detail section below
 | ☑ | First-class advanced encoder controls | §2.11b | ✅ | ✅ | — maintain |
 | ☑ | Resampling factors | §2.12 | ✅ | ✅ | — maintain |
 | 🟡 | `encode_variants_with_progressive` at desktop ingest | §2.13 | ✅ | 🟡 | Phase 1, §4.3 **P2** |
-| ☐ | `jxl_lowlevel` progressive decode in lightbox | §2.14 | ✅ | ❌ | **P0**, **PR-1**, **PR-3**, Phase 3, §5.4 |
+| 🟡 | `jxl_lowlevel` progressive decode in lightbox | §2.14 | ✅ | 🟡 | **PR-1** vendor synced (`jxl_lowlevel.rs`); **PR-3** wire `decode_progressive_first_total` into bg lightbox still open |
 | ☑ | Per-level pyramid sidecar encode (v2 distances) | §3.7 | ✅ | ✅ | **H12**, **H40** — WASM `sidecars_v2` verified; **PR-6b** native (Falcon=3 effort, box cascade, from_rgb16 helper) done |
 | ☑ | `encodeRgba8Pyramid` + `downscaleRgba16` | *(parity only)* | ✅ | ✅ | Plan A WASM done; Tauri native port (**PR-6b**) done (raw-pipeline + encode_rgba8_pyramid_from_rgb16 for PR-7b) |
 
