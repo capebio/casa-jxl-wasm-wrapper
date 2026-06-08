@@ -1,5 +1,6 @@
 import { chooseLevelForTarget, shouldUpgrade } from '../../packages/jxl-pyramid/dist/choose-level.js';
 import { decodePyramidLevel, decodePyramidRegion } from '../pyramid-gallery/pyramid-decode.js';
+import { createImageStore } from '../pyramid-gallery/image-store.js'; // type only; passed in
 import {
   applyColorMatrixInPlace,
   applyToneMapInPlace,
@@ -15,11 +16,14 @@ import {
 
 export function createPyramidLightbox({
   ctx,
+  imageStore,
   cache,
   galleryBase,
   rootEl,
   onClose,
 }) {
+  // S3: imageStore provides getManifest/getLevelBytes (preferred); fallbacks for transitional callers
+  const store = imageStore || (cache && galleryBase ? createImageStore({ cache, galleryBase }) : null);
   const state = {
     manifest: null,
     imageId: null,
@@ -39,23 +43,7 @@ export function createPyramidLightbox({
   const toggle16 = rootEl.querySelector('[data-toggle-16bit]');
   const exportBtn = rootEl.querySelector('[data-export-roi]');
 
-  async function fetchLevelBytes(contenthash) {
-    const key = `level:${contenthash}`;
-    const cached = await cache.get(key);
-    if (cached) return new Uint8Array(cached);
-    const url = new URL(`levels/${contenthash}.jxl`, galleryBase).href;
-    const res = await fetch(url);
-    const buf = await res.arrayBuffer();
-    void cache.set(key, buf);
-    return new Uint8Array(buf);
-  }
-
-  async function loadManifest(imageId) {
-    const url = new URL(`images/${imageId}/manifest.json`, galleryBase).href;
-    const res = await fetch(url);
-    state.manifest = await res.json();
-    state.imageId = imageId;
-  }
+  // S3: fetchLevelBytes + loadManifest replaced by imageStore (see S1 image-store.js)
 
   function levelPool() {
     if (!state.manifest) return [];
@@ -81,7 +69,7 @@ export function createPyramidLightbox({
     const cacheKey = `${level.contenthash}:${use16 ? '16' : '8'}:${region ? JSON.stringify(region) : 'full'}`;
     if (state.screenCache.has(cacheKey)) return state.screenCache.get(cacheKey);
 
-    const bytes = await fetchLevelBytes(level.contenthash);
+    const bytes = await store.getLevelBytes(level.contenthash);
     const decoded = await decodePyramidLevel(ctx, bytes, {
       contenthash: level.contenthash,
       format: use16 ? 'rgba16' : 'rgba8',
@@ -177,7 +165,7 @@ export function createPyramidLightbox({
   }
 
   async function fetchRoiDecoded(level, region, use16) {
-    const bytes = await fetchLevelBytes(level.contenthash);
+    const bytes = await store.getLevelBytes(level.contenthash);
     if (level.tiled && region) {
       return decodePyramidLevel(ctx, bytes, {
         contenthash: level.contenthash,
@@ -262,7 +250,9 @@ export function createPyramidLightbox({
 
   async function open(imageId, seedLevel = null) {
     rootEl.hidden = false;
-    await loadManifest(imageId);
+    if (!store) throw new Error('pyramid-lightbox requires imageStore (or cache+galleryBase)');
+    state.manifest = await store.getManifest(imageId);
+    state.imageId = imageId;
     state.use16Bit = false;
     if (toggle16) {
       const has16 = state.manifest.levels.some((l) => l.bitsPerSample === 16);
@@ -275,7 +265,7 @@ export function createPyramidLightbox({
     state.paintedLevel = null;
     state.screenCache.clear();
     if (seedLevel) {
-      const bytes = await fetchLevelBytes(seedLevel.contenthash);
+      const bytes = await store.getLevelBytes(seedLevel.contenthash);
       const decoded = await decodePyramidLevel(ctx, bytes, { contenthash: seedLevel.contenthash, priority: 'visible' });
       state.paintedLevel = seedLevel;
       paint({ ...decoded, pixels: new Uint8Array(decoded.pixels), is16: false });

@@ -3,6 +3,7 @@ import { JxlCacheBrowser } from '@casabio/jxl-cache';
 import { APPROVED_LIGHTBOX_PRESETS, ADJUSTMENT_PARAMS } from '@casabio/jxl-pyramid';
 import { createGridController } from './grid-controller.js';
 import { createPyramidLightbox } from '../lightbox/pyramid-lightbox.js';
+import { createImageStore } from './image-store.js'; // S1 wired S2/S3
 
 const gridEl = document.getElementById('pyramid-grid');
 const urlInput = document.getElementById('gallery-url');
@@ -64,17 +65,19 @@ async function loadGallery(baseUrl) {
   }
 
   const indexByImageId = new Map(index.images.map((entry) => [entry.imageId, entry]));
+  const imageStore = createImageStore({ cache, galleryBase });
   grid = createGridController({
     ctx,
     cache,
     galleryBase,
+    imageStore,
     tileSizePx: 220,
     devicePixelRatio: window.devicePixelRatio || 1,
     indexByImageId,
   });
   grid.observeGrid(gridEl);
 
-  lightbox = createPyramidLightbox({ ctx, cache, galleryBase, rootEl: lightboxRoot });
+  lightbox = createPyramidLightbox({ ctx, cache, galleryBase, imageStore, rootEl: lightboxRoot });
   buildSliders(lightbox);
   presetSelect.onchange = () => lightbox.setPreset(presetSelect.value);
   resetBtn.onclick = () => {

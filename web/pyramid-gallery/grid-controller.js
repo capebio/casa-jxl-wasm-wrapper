@@ -1,5 +1,6 @@
 import { chooseLevelForTarget, shouldUpgrade } from '../../packages/jxl-pyramid/dist/choose-level.js';
 import { decodePyramidLevel } from './pyramid-decode.js';
+import { createImageStore } from './image-store.js'; // S2; passed in or fallback
 
 const PREFETCH_RING = 1;
 
@@ -9,8 +10,9 @@ const PREFETCH_RING = 1;
 /**
  * @param {object} opts
  * @param {import('@casabio/jxl-session').JxlContext} opts.ctx
- * @param {import('@casabio/jxl-cache').JxlCacheBrowser} opts.cache
- * @param {URL} opts.galleryBase
+ * @param {import('@casabio/jxl-cache').JxlCacheBrowser} [opts.cache]
+ * @param {URL} [opts.galleryBase]
+ * @param {object} [opts.imageStore] // preferred; from createImageStore S1
  * @param {number} opts.tileSizePx
  * @param {number} [opts.devicePixelRatio]
  * @param {Map<string, IndexEntry>} [opts.indexByImageId]
@@ -20,37 +22,17 @@ export function createGridController({
   ctx,
   cache,
   galleryBase,
+  imageStore,
   tileSizePx,
   devicePixelRatio,
   indexByImageId,
   onTilePainted,
 }) {
+  const store = imageStore || (cache && galleryBase ? createImageStore({ cache, galleryBase }) : null);
   const dpr = devicePixelRatio ?? 1;
-  const manifests = new Map();
   const paintedRank = new Map();
   const inflight = new Map();
-
-  async function fetchManifest(imageId) {
-    if (manifests.has(imageId)) return manifests.get(imageId);
-    const url = new URL(`images/${imageId}/manifest.json`, galleryBase).href;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`manifest ${imageId}: ${res.status}`);
-    const manifest = await res.json();
-    manifests.set(imageId, manifest);
-    return manifest;
-  }
-
-  async function fetchLevelBytes(contenthash) {
-    const key = `level:${contenthash}`;
-    const cached = await cache.get(key);
-    if (cached) return new Uint8Array(cached);
-    const url = new URL(`levels/${contenthash}.jxl`, galleryBase).href;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`level ${contenthash}: ${res.status}`);
-    const buf = await res.arrayBuffer();
-    void cache.set(key, buf);
-    return new Uint8Array(buf);
-  }
+  // S2: manifests map + fetchManifest/fetchLevelBytes replaced by imageStore (S1)
 
   function targetLongEdge() {
     return Math.ceil(tileSizePx * dpr);
@@ -61,7 +43,8 @@ export function createGridController({
     if (inflight.has(jobKey)) return inflight.get(jobKey);
 
     const p = (async () => {
-      const bytes = await fetchLevelBytes(level.contenthash);
+      if (!store) throw new Error('grid-controller requires imageStore (or cache+galleryBase)');
+      const bytes = await store.getLevelBytes(level.contenthash);
       return decodePyramidLevel(ctx, bytes, {
         contenthash: level.contenthash,
         priority,
@@ -112,7 +95,8 @@ export function createGridController({
       if (signal?.aborted) return;
     }
 
-    const manifest = await fetchManifest(imageId);
+    if (!store) throw new Error('grid-controller requires imageStore (or cache+galleryBase)');
+    const manifest = await store.getManifest(imageId);
     const target = targetLongEdge();
     const level = chooseLevelForTarget(manifest.levels, target);
     if (!level) return;
@@ -145,5 +129,10 @@ export function createGridController({
     return () => io.disconnect();
   }
 
-  return { fetchManifest, paintCell, observeGrid, targetLongEdge };
+  return {
+    fetchManifest: (id) => store ? store.getManifest(id) : Promise.reject(new Error('no store')),
+    paintCell,
+    observeGrid,
+    targetLongEdge,
+  };
 }
