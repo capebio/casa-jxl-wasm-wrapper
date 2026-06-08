@@ -55,6 +55,13 @@ pub struct ProcessResult {
     pub thumb_w: u32,
     #[wasm_bindgen(readonly)]
     pub thumb_h: u32,
+    // M3: full master-size 16-bit (packed LE u16, 6 bytes/pixel) for pyramid big levels + 16-bit lightbox path.
+    // Only populated when OUT_FULL_16 requested (memory opt; current callers that pass 7 stay 8-bit + lb/thumb only).
+    rgb16_full: Vec<u8>,
+    #[wasm_bindgen(readonly)]
+    pub full16_w: u32,
+    #[wasm_bindgen(readonly)]
+    pub full16_h: u32,
     color_matrix_flat: [f32; 9],
     // EXIF / metadata exposed for the lightbox info panel.
     lens: String,
@@ -140,6 +147,12 @@ impl ProcessResult {
         std::mem::take(&mut self.rgb16_thumb)
     }
 
+    /// Move the full-resolution packed u16 LE buffer out (M3 16-bit path). Caller owns the bytes.
+    /// Packed 6 bytes per pixel LE (r g b u16). Only non-empty if OUT_FULL_16 was requested.
+    pub fn take_rgb16_full(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.rgb16_full)
+    }
+
     /// Move the RGBA8 buffer out. Caller owns the bytes.
     /// Performs RGB→RGBA conversion inside WASM using the same tight loop as the
     /// JS-facing rgb_to_rgba, then transfers ownership. This still avoids the
@@ -196,6 +209,20 @@ fn write_rgb16_le(out: &mut [u8], o: usize, r: u16, g: u16, b: u16) {
     out[o + 3] = (g >> 8) as u8;
     out[o + 4] = (b & 0xff) as u8;
     out[o + 5] = (b >> 8) as u8;
+}
+
+/// Pack full-res rgb16 (Vec<u16>, 3 per pixel) to the packed LE 6-byte form used by take_*16.
+#[inline]
+fn pack_rgb16_full(src: &[u16], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 6];
+    for i in 0..(w * h) {
+        let o = i * 6;
+        let r = src[i * 3];
+        let g = src[i * 3 + 1];
+        let b = src[i * 3 + 2];
+        write_rgb16_le(&mut out, o, r, g, b);
+    }
+    out
 }
 
 fn downscale_rgb_float_path<F>(
@@ -386,6 +413,7 @@ fn target_dims(w: usize, h: usize, long_edge: usize) -> (usize, usize) {
 const OUT_FULL_RGB8: u32 = 1; // full-resolution RGB8 for JXL encoding
 const OUT_LIGHTBOX: u32 = 2; // 1800 px RGB16 for LookRenderer
 const OUT_THUMB: u32 = 4; // 360 px RGB16 for thumb LookRenderer
+const OUT_FULL_16: u32 = 8; // full-resolution RGB16 (M3: RAW {2048,full} pyramid levels; 16-bit lightbox/ROI/export). Grid levels and JPG stay 8-bit.
 // Skip apply_orientation on the OUT_FULL_RGB8 output. Pixels and width/height
 // stay in sensor orientation; consumer reads `orientation` to know how to display
 // (or to pass to JXL encoder via basic info). Saves the 60–200 MB intermediate
@@ -532,6 +560,15 @@ fn process_orf_impl(
         color_matrix_flat,
     } = decoded;
 
+    // M3 full-res 16-bit packed (for pyramid RAW 2048/full levels). Packed here from the internal
+    // pre-tonemap rgb16 buffer (the one the handoff says "computes then drops"). Only when flag set.
+    let (rgb16_full, out_full16_w, out_full16_h) = if output_flags & OUT_FULL_16 != 0 {
+        let packed = pack_rgb16_full(&rgb16, w, h);
+        (packed, w as u32, h as u32)
+    } else {
+        (vec![], 0, 0)
+    };
+
     let (lb_w, lb_h) = target_dims(w, h, 1800);
     let (rgb16_lb, out_lb_w, out_lb_h) = if output_flags & OUT_LIGHTBOX != 0 {
         let lb = downscale_rgb16_impl(&rgb16, w, h, lb_w, lb_h);
@@ -621,6 +658,9 @@ fn process_orf_impl(
         rgb16_thumb,
         thumb_w: out_thumb_w as u32,
         thumb_h: out_thumb_h as u32,
+        rgb16_full,
+        full16_w: out_full16_w,
+        full16_h: out_full16_h,
         color_matrix_flat,
         lens: info.lens,
         datetime: info.datetime,
@@ -736,7 +776,7 @@ pub fn process_orf(
 /// - `4`: 360 px thumbnail RGB16 cache (needed to construct a thumb `LookRenderer`)
 ///
 /// Absent outputs have empty buffers and zero dims in `ProcessResult`.
-/// Pass `7` to match the behaviour of `process_orf`.
+/// Pass `7` for classic (no full16). For M3 16-bit big levels pass e.g. 15 (7|8).
 #[wasm_bindgen]
 pub fn process_orf_with_flags(
     data: &[u8],
@@ -1567,6 +1607,14 @@ fn process_dng_impl(
         iso,
     } = decoded;
 
+    // M3 full-res 16-bit (DNG path).
+    let (rgb16_full, out_full16_w, out_full16_h) = if output_flags & OUT_FULL_16 != 0 {
+        let packed = pack_rgb16_full(&rgb16, aw, ah);
+        (packed, aw as u32, ah as u32)
+    } else {
+        (vec![], 0, 0)
+    };
+
     // Compute lightbox + thumb caches (pre-tonemap, pre-orientation)
     let (lb_w, lb_h) = target_dims(aw, ah, 1800);
     let (rgb16_lb, out_lb_w, out_lb_h) = if output_flags & OUT_LIGHTBOX != 0 {
@@ -1654,6 +1702,9 @@ fn process_dng_impl(
         rgb16_thumb,
         thumb_w: out_thumb_w as u32,
         thumb_h: out_thumb_h as u32,
+        rgb16_full,
+        full16_w: out_full16_w,
+        full16_h: out_full16_h,
         color_matrix_flat,
         lens: String::new(),
         datetime: String::new(),
@@ -1935,8 +1986,8 @@ pub fn process_cr2(
 
 /// Variant of `process_cr2` with explicit output flags.
 ///
-/// `output_flags` bitmask: 1 = full RGB8, 2 = 1800 px lightbox RGB16, 4 = 360 px thumb RGB16.
-/// Pass `7` to match `process_cr2`.
+/// `output_flags` bitmask: 1 = full RGB8, 2 = 1800 px lightbox RGB16, 4 = 360 px thumb RGB16, 8 = full RGB16 (M3).
+/// Pass `7` for classic; 15 for M3 full16 too.
 #[wasm_bindgen]
 pub fn process_cr2_with_flags(
     data: &[u8],

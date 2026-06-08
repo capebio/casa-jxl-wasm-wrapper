@@ -32,23 +32,41 @@ export function createRawBackend(): RawBackend {
       if (typeof fn !== "function") {
         throw new Error(`raw pipeline missing export ${fnName} (web/pkg not built or flags mismatch)`);
       }
-      // Use default flags (0) for orientation bake etc. Matches existing callers in repo.
-      const handle = fn(bytes, 0);
+      // M3: request full RGB8 (1) + full RGB16 (8) so pyramid can emit 16-bit for RAW {2048,full} levels.
+      // Grid levels continue to use the 8-bit data. JPG path unchanged.
+      // Default 0 kept for compatibility in non-M3 callers; M3 ladder will use 9.
+      const flags = 1 | 8;
+      const handle = fn(bytes, flags);
       if (!handle) throw new Error(`raw decode failed for ${format}`);
-      // take_rgba returns the owned buffer + info.
       const take = (mod as any).ProcessResult.take_rgba;
       if (typeof take !== "function") {
         throw new Error("ProcessResult.take_rgba missing from raw pipeline");
       }
       const res = take(handle);
-      // res: { data: Uint8Array | Uint8ClampedArray, width, height, ... }
       const rgba = res.data instanceof Uint8Array ? res.data : new Uint8Array(res.data);
+
+      // M3: also expose full 16-bit packed if present (for big levels encode + client 16-bit path).
+      let rgb16: Uint8Array | null = null;
+      const take16 = (mod as any).ProcessResult.take_rgb16_full;
+      if (typeof take16 === "function") {
+        const r16 = take16(handle);
+        if (r16 && r16.length > 0) {
+          rgb16 = r16 instanceof Uint8Array ? r16 : new Uint8Array(r16);
+        }
+      }
+
       return {
         rgba,
         width: res.width,
         height: res.height,
-        orientation: "baked", // Rust pipeline always bakes for RAW
-      };
+        orientation: "baked",
+        // M3 extension (optional for 8-bit callers)
+        rgb16: rgb16 || undefined,
+        bitsPerSample: rgb16 ? 16 : 8,
+      } as any; // extended for M3; 8-bit path unchanged
+    },
+  };
+}
     },
   };
 }
