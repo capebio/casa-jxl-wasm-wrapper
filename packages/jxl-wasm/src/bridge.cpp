@@ -27,7 +27,8 @@ typedef int JxlBool;
 // IMPROVEMENT-1: `next` pointer enables sidecar linked-list without extra allocation.
 struct JxlWasmBuffer {
   uint8_t* data;
-  size_t size;
+  uint32_t size;         // explicit uint32 (A6): byte count independent of size_t/MEMORY64.
+                         // High word not required for realistic image buffers.
   uint32_t width;
   uint32_t height;
   uint32_t bits_per_sample;
@@ -36,7 +37,13 @@ struct JxlWasmBuffer {
   JxlWasmBuffer* next;  // sidecar chain (null = last); caller walks and frees individually
   uint32_t owned_data;   // 1 = free external data on buffer_free; 0 = inline or borrowed
 };
-// WASM32 layout: first 7 fields are unchanged and all 4-byte aligned — safe for HEAPU32 direct reads.
+// WASM32 layout: data* + size (u32) + 5x u32 + int + next* + u32. First 7 u32-equivalent
+// fields are 4-byte aligned for HEAPU32 direct reads in facade. Pointer width still
+// follows target (guard below + TS load assert protect against WASM64 drift).
+
+// A6: compile-time guard. size_t (used for other internal sizes) must be 32-bit or the
+// overall FFI assumptions (and any remaining size_t in other structs) drift on MEMORY64.
+static_assert(sizeof(size_t) == 4, "JxlWasmBuffer / bridge FFI requires 32-bit size_t; do not build with -sMEMORY64=1");
 
 // #11: Streaming encoder state — encode once, yield output in 64 KB chunks.
 // #16: Extended with streaming input fields: pre-allocate pixel buffer in WASM,
@@ -1719,7 +1726,7 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
   const uint32_t ty_max = (ry + rh - 1u) / tile_size;
 
   const size_t out_size = static_cast<size_t>(rw) * rh * 4u;
-  uint8_t* out_pixels = static_cast<uint8_t*>(malloc(out_size));
+  uint8_t* out_pixels = static_cast<uint8_t*>(calloc(out_size, 1u));
   if (out_pixels == nullptr) return MakeError(106);
 
   for (uint32_t ty = ty_min; ty <= ty_max; ++ty) {
@@ -1753,6 +1760,51 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
         }
       }
       free(tile_pixels);
+    }
+  }
+
+  // A3: 1px seam blending at internal JXTC tile boundaries using Q8 fixed-point.
+  // Source buffer now calloc (no uninit garbage into blends). Bulk is memcpy; seams only.
+  // Formula: (l*179 + r*77 + 128)>>8 per channel (8-bit). Vert then horiz for deterministic corners.
+  // Lightweight — only touches O(perimeter) pixels.
+  {
+    // Vertical seams (between tx and tx+1)
+    for (uint32_t txx = tx_min + 1; txx <= tx_max; ++txx) {
+      const uint32_t abs_seam = txx * tile_size;
+      if (abs_seam <= rx || abs_seam >= (rx + rw)) continue;
+      const uint32_t localL = (abs_seam - 1) - rx; // right col of left tile
+      const uint32_t localR = abs_seam - rx;       // left col of right tile
+      if (localL >= rw || localR >= rw) continue;
+      for (uint32_t yy = 0; yy < rh; ++yy) {
+        uint8_t* pL = out_pixels + ((yy * rw + localL) * 4u);
+        uint8_t* pR = out_pixels + ((yy * rw + localR) * 4u);
+        for (int c = 0; c < 4; ++c) {
+          int l = pL[c];
+          int r = pR[c];
+          int b = (l * 179 + r * 77 + 128) >> 8;
+          pL[c] = static_cast<uint8_t>(b);
+          pR[c] = static_cast<uint8_t>(b);
+        }
+      }
+    }
+    // Horizontal seams (between ty and ty+1)
+    for (uint32_t tyy = ty_min + 1; tyy <= ty_max; ++tyy) {
+      const uint32_t abs_seam = tyy * tile_size;
+      if (abs_seam <= ry || abs_seam >= (ry + rh)) continue;
+      const uint32_t localT = (abs_seam - 1) - ry;
+      const uint32_t localB = abs_seam - ry;
+      if (localT >= rh || localB >= rh) continue;
+      for (uint32_t xx = 0; xx < rw; ++xx) {
+        uint8_t* pT = out_pixels + ((localT * rw + xx) * 4u);
+        uint8_t* pB = out_pixels + ((localB * rw + xx) * 4u);
+        for (int c = 0; c < 4; ++c) {
+          int t = pT[c];
+          int b = pB[c];
+          int blended = (t * 179 + b * 77 + 128) >> 8;
+          pT[c] = static_cast<uint8_t>(blended);
+          pB[c] = static_cast<uint8_t>(blended);
+        }
+      }
     }
   }
 
@@ -2665,7 +2717,7 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
     JxlWasmBuffer* sidecar = EncodeRgba(thumb, tw, th,
         std::max(distance, 1.5f), std::min(effort, 5u), 0, 1u, 0, 0, 0, 0, 0,
         modular, brotli_effort, decoding_speed, photon_noise_iso);
-    if (sidecar == nullptr) continue;
+    if (sidecar == nullptr || sidecar->error != 0) continue;
 
     // Prepend: descending iteration + prepend = ascending chain.
     sidecar->next = sc_chain;
@@ -2675,10 +2727,11 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
 
   JxlWasmBuffer* full = EncodeRgba(pixels, width, height, distance, effort, 0, has_alpha, 0, 0, 0, 0, 0,
       modular, brotli_effort, decoding_speed, photon_noise_iso, resampling);
-  if (full == nullptr) {
+  if (full == nullptr || full->error != 0) {
     JxlWasmBuffer* cur = sc_chain;
     while (cur != nullptr) { JxlWasmBuffer* nxt = cur->next; FreeBufferNoChain(cur); cur = nxt; }
-    return MakeError(28);
+    if (full) FreeBufferNoChain(full);
+    return MakeError(full && full->error ? full->error : 28);
   }
   if (sc_chain == nullptr) return full;
 
@@ -2735,6 +2788,11 @@ int jxl_wasm_buffer_error(JxlWasmBuffer* buffer) {
 // Returns the `next` sidecar pointer for chain traversal (0 = last node).
 JxlWasmBuffer* jxl_wasm_buffer_next(JxlWasmBuffer* buffer) {
   return (buffer == nullptr) ? nullptr : buffer->next;
+}
+
+// A6: runtime word-size query for TS load assert (defensive; static_assert above is primary).
+uint32_t jxl_wasm_pointer_size(void) {
+  return sizeof(void*);
 }
 
 void jxl_wasm_buffer_free(JxlWasmBuffer* buffer) {

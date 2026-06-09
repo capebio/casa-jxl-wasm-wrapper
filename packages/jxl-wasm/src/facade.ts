@@ -1731,12 +1731,12 @@ class LibjxlEncoder implements JxlEncoder {
         if (rc !== 0) throw new Error(`JXL streaming encode finish failed (${rc})`);
         let chunkHandle: number;
         while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(this.wasmEncState)) !== 0) {
-          const chunk = takeBuffer(module, chunkHandle, "encode");
+          const chunk = takeBufferView(module, chunkHandle, "encode");
           compressedBytes += chunk.data.byteLength;
           yield chunk.data;
         }
-        // C++ now uses MakeBufferBorrowed for enc_take_chunk (zero-copy into outbuf);
-        // the HEAPU8.slice in readBufferView is the single materializing copy to JS.
+        // C++ uses MakeBufferBorrowed (zero-copy into outbuf). takeBufferView (A4) returns
+        // subarray view eliminating the JS HEAPU8 materializing copy for same-tick chunk drains.
       } finally {
         this.freeWasmState(); // handles advanced pointers + enc_free
       }
@@ -1815,7 +1815,7 @@ class LibjxlEncoder implements JxlEncoder {
             if (rc !== 0) throw new Error(`JXL streaming encode failed (${rc})`);
             let chunkHandle: number;
             while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(encState)) !== 0) {
-              const chunk = takeBuffer(module, chunkHandle, "encode");
+              const chunk = takeBufferView(module, chunkHandle, "encode");
               compressedBytes += chunk.data.byteLength;
               yield chunk.data;
             }
@@ -2081,8 +2081,10 @@ function callDecodeNoRegion(module: LibjxlWasmModule, ptr: number, size: number,
 function readBufferView(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
   if (handle === 0) throw new Error(`JXL ${operation} failed`);
 
-  // JxlWasmBuffer (WASM32): all fields are 4 bytes — data*, size_t, width, height, bits, has_alpha, error.
-  // Read the entire struct in one contiguous HEAPU32 window instead of 6 separate FFI calls.
+  assertA6WordSize(module);
+
+  // JxlWasmBuffer: data* (ptr), size (uint32 A6, not size_t), width, height, bits, has_alpha, error.
+  // Read first 7 fields via contiguous HEAPU32 (WASM32 layout). Pointer fields are 4B on supported builds.
   let dataPtr: number, size: number, width: number, height: number, bitsVal: number, alphaVal: number, errorCode: number;
   const h32 = module.HEAPU32;
   // Only use the HEAPU32 direct-read fast path when `handle` looks like a real WASM heap
@@ -2120,10 +2122,73 @@ function readBufferView(module: LibjxlWasmModule, handle: number, operation: str
   };
 }
 
+// A6: called from buffer view paths to assert 32-bit pointers at first use (after module load).
+let _a6Checked = false;
+function assertA6WordSize(module: LibjxlWasmModule) {
+  if (_a6Checked) return;
+  _a6Checked = true;
+  const fn = (module as any)._jxl_wasm_pointer_size;
+  if (typeof fn === 'function') {
+    const ps = fn();
+    if (ps !== 4) {
+      throw new Error(`JxlWasm A6: pointer size ${ps} != 4 — WASM64 drift for JxlWasmBuffer FFI`);
+    }
+  }
+}
+
 // Read buffer and always free handle (in finally), whether success or failure.
 function takeBuffer(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
   try {
     return readBufferView(module, handle, operation);
+  } finally {
+    if (handle !== 0) module._jxl_wasm_buffer_free(handle);
+  }
+}
+
+// Same-tick zero-copy take (A4). Uses HEAPU8.subarray (no copy) instead of .slice.
+// Returned .data view is only valid for synchronous use in the same tick before any
+// further WASM malloc/grow/realloc (which can invalidate subarray views into the heap).
+// Callers must not retain the view across awaits, yields, or additional bridge calls.
+// Intended for enc chunk drains (small, immediate yield) and progress snapshots where
+// consumer draws/hashes/posts immediately. Long-lived pixel retention should copy.
+function takeBufferView(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
+  try {
+    if (handle === 0) throw new Error(`JXL ${operation} failed`);
+
+    assertA6WordSize(module);
+
+    let dataPtr: number, size: number, width: number, height: number, bitsVal: number, alphaVal: number, errorCode: number;
+    const h32 = module.HEAPU32;
+    if (h32 && (handle & 3) === 0 && handle >= 16) {
+      const b = handle >>> 2;
+      dataPtr   = h32[b] ?? 0;
+      size      = h32[b + 1] ?? 0;
+      width     = h32[b + 2] ?? 0;
+      height    = h32[b + 3] ?? 0;
+      bitsVal   = h32[b + 4] ?? 0;
+      alphaVal  = h32[b + 5] ?? 0;
+      errorCode = h32[b + 6] ?? 0;
+    } else {
+      dataPtr   = module._jxl_wasm_buffer_data(handle);
+      size      = module._jxl_wasm_buffer_size(handle);
+      width     = module._jxl_wasm_buffer_width(handle);
+      height    = module._jxl_wasm_buffer_height(handle);
+      bitsVal   = module._jxl_wasm_buffer_bits_per_sample(handle);
+      alphaVal  = module._jxl_wasm_buffer_has_alpha(handle);
+      errorCode = module._jxl_wasm_buffer_error?.(handle) ?? 0;
+    }
+
+    if (dataPtr === 0 || size === 0) {
+      throw new Error(`JXL ${operation} failed${errorCode === 0 ? "" : ` (${errorCode})`}`);
+    }
+    return {
+      handle,
+      data: module.HEAPU8.subarray(dataPtr, dataPtr + size),
+      width,
+      height,
+      bitsPerSample: normalizeBitsPerSample(bitsVal),
+      hasAlpha: alphaVal !== 0,
+    };
   } finally {
     if (handle !== 0) module._jxl_wasm_buffer_free(handle);
   }
@@ -2277,6 +2342,10 @@ function bilinearResize(
         const x0 = xAxis.i0[dx]!;
         const x1 = xAxis.i1[dx]!;
         const xt = xAxis.t[dx]!;
+        const w00 = (1 - xt) * (1 - yt);
+        const w01 = xt * (1 - yt);
+        const w10 = (1 - xt) * yt;
+        const w11 = xt * yt;
         const topLeft = row00 + x0 * 4;
         const topRight = row00 + x1 * 4;
         const bottomLeft = row10 + x0 * 4;
@@ -2287,7 +2356,7 @@ function bilinearResize(
           const tr = src[topRight + c]!;
           const bl = src[bottomLeft + c]!;
           const br = src[bottomRight + c]!;
-          dst[dstOff + c] = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
+          dst[dstOff + c] = Math.round(tl * w00 + tr * w01 + bl * w10 + br * w11);
         }
       }
     }
@@ -2305,6 +2374,10 @@ function bilinearResize(
           const x0 = xAxis.i0[dx]!;
           const x1 = xAxis.i1[dx]!;
           const xt = xAxis.t[dx]!;
+          const w00 = (1 - xt) * (1 - yt);
+          const w01 = xt * (1 - yt);
+          const w10 = (1 - xt) * yt;
+          const w11 = xt * yt;
           const topLeft = row00 + x0 * 4;
           const topRight = row00 + x1 * 4;
           const bottomLeft = row10 + x0 * 4;
@@ -2315,34 +2388,13 @@ function bilinearResize(
             const tr = srcView[topRight + c]!;
             const bl = srcView[bottomLeft + c]!;
             const br = srcView[bottomRight + c]!;
-            dstView[dstOff + c] = Math.max(0, Math.min(65535, Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt)));
-          }
-        }
-      }
-    } else {
-      const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
-      const dstView = new DataView(dst.buffer);
-      for (let dy = 0; dy < dstH; dy++) {
-        const y0 = yAxis.i0[dy]!;
-        const y1 = yAxis.i1[dy]!;
-        const yt = yAxis.t[dy]!;
-        for (let dx = 0; dx < dstW; dx++) {
-          const x0 = xAxis.i0[dx]!;
-          const x1 = xAxis.i1[dx]!;
-          const xt = xAxis.t[dx]!;
-          const dstOff = (dy * dstW + dx) * 8;
-          for (let c = 0; c < 4; c++) {
-            const bo = c * 2;
-            const tl = srcView.getUint16((y0 * srcW + x0) * 8 + bo, true);
-            const tr = srcView.getUint16((y0 * srcW + x1) * 8 + bo, true);
-            const bl = srcView.getUint16((y1 * srcW + x0) * 8 + bo, true);
-            const br = srcView.getUint16((y1 * srcW + x1) * 8 + bo, true);
-            const val = Math.round(tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt);
-            dstView.setUint16(dstOff + bo, Math.max(0, Math.min(65535, val)), true);
+            dstView[dstOff + c] = Math.max(0, Math.min(65535, Math.round(tl * w00 + tr * w01 + bl * w10 + br * w11)));
           }
         }
       }
     }
+    // Big-endian DataView branches removed (A5): WASM/JS runtime is always little-endian;
+    // the old else paths forced LE via get/set(..., true) anyway and were unreachable dead code.
   } else {
     if (IS_LITTLE_ENDIAN) {
       const srcView = new Float32Array(src.buffer, src.byteOffset, src.byteLength >> 2);
@@ -2357,6 +2409,10 @@ function bilinearResize(
           const x0 = xAxis.i0[dx]!;
           const x1 = xAxis.i1[dx]!;
           const xt = xAxis.t[dx]!;
+          const w00 = (1 - xt) * (1 - yt);
+          const w01 = xt * (1 - yt);
+          const w10 = (1 - xt) * yt;
+          const w11 = xt * yt;
           const topLeft = row00 + x0 * 4;
           const topRight = row00 + x1 * 4;
           const bottomLeft = row10 + x0 * 4;
@@ -2367,33 +2423,13 @@ function bilinearResize(
             const tr = srcView[topRight + c]!;
             const bl = srcView[bottomLeft + c]!;
             const br = srcView[bottomRight + c]!;
-            dstView[dstOff + c] = tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt;
-          }
-        }
-      }
-    } else {
-      const srcView = new DataView(src.buffer, src.byteOffset, src.byteLength);
-      const dstView = new DataView(dst.buffer);
-      for (let dy = 0; dy < dstH; dy++) {
-        const y0 = yAxis.i0[dy]!;
-        const y1 = yAxis.i1[dy]!;
-        const yt = yAxis.t[dy]!;
-        for (let dx = 0; dx < dstW; dx++) {
-          const x0 = xAxis.i0[dx]!;
-          const x1 = xAxis.i1[dx]!;
-          const xt = xAxis.t[dx]!;
-          const dstOff = (dy * dstW + dx) * 16;
-          for (let c = 0; c < 4; c++) {
-            const bo = c * 4;
-            const tl = srcView.getFloat32((y0 * srcW + x0) * 16 + bo, true);
-            const tr = srcView.getFloat32((y0 * srcW + x1) * 16 + bo, true);
-            const bl = srcView.getFloat32((y1 * srcW + x0) * 16 + bo, true);
-            const br = srcView.getFloat32((y1 * srcW + x1) * 16 + bo, true);
-            dstView.setFloat32(dstOff + bo, tl * (1 - xt) * (1 - yt) + tr * xt * (1 - yt) + bl * (1 - xt) * yt + br * xt * yt, true);
+            dstView[dstOff + c] = tl * w00 + tr * w01 + bl * w10 + br * w11;
           }
         }
       }
     }
+    // Big-endian DataView branches removed (A5): unreachable on WASM/JS targets (always LE);
+    // explicit get/set(..., true) was forcing LE anyway.
   }
   return dst;
 }
