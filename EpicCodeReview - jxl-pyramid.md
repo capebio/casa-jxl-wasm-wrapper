@@ -680,3 +680,69 @@ Scope: every throw, reject, catch, and silent fallback across the three files. C
 - **Issue:** decode-level.ts L130-137: `kind='whole'` + region -> throw `'region decode requires a tiled level source'`. `kind='tiled'` + no region -> silently defaults to `{x:0, y:0, w:source.width, h:source.height}`. The two kinds have opposite tolerances for the same argument absence/presence. Cite contracts-013.
 - **Fix:** Symmetrize: `kind='whole'` + region -> ignore region (default to full image, log via L5-11 logger) OR throw both directions. Picking one: if region is undefined OR full-image, accept; if a strict sub-region with kind=whole, throw. Document in JSDoc.
 
+
+---
+
+# Lens 6 - Memory + GC pressure
+
+Scope: large allocations on hot path, persistent retention (pool handles, workers, WASM heap), structured-clone amplification across worker boundary, and detached-buffer semantics. CLAUDE.md rule respected: transferred output buffers cannot be pooled - only caller-owned (untransferred) buffers can.
+
+### L6-1. Stitch output buffer = `viewport.w * viewport.h * bpp` per ROI
+- **Category:** perf + efficiency
+- **Issue:** decode-level.ts L65 and tiled-decode-pool.ts L41: a fresh Uint8Array is allocated per stitch. For a 2048x1024 viewport at rgba8 that is 8 MB; rgba16 is 16 MB. At 30 fps pan, that is ~240 MB/s churn of large buffers, putting heavy pressure on the GC's old-generation promotion.
+- **Fix:** Caller-owned buffer (cite L2-11). decodeTiledViewport(Pooled) gains optional `outBuffer?: Uint8Array` arg sized to the largest viewport the caller intends to use. Caller maintains a single buffer per gallery, recycles across pan/zoom. Safe because the buffer is NOT transferred to a Worker (CLAUDE.md rejection applies only to transferred pools).
+
+### L6-2. Worker-side memory spike from N-cloned container bytes
+- **Category:** perf
+- **Issue:** Per-tile `postMessage({bytes, region})` (L122) structured-clones the full JXTC container into the receiving worker's heap. For 4 workers x 16 tiles = up to 64 clones held simultaneously across worker heaps (each tile completes asynchronously). At 64 MB container that is up to 256 MB peak across worker process memory before tiles drain. Browser memory pressure events trigger before this happens, but pan latency spikes.
+- **Fix:** L3-4 load/decode split eliminates this entirely - each worker receives the container ONCE and reuses across all its tiles. Memory becomes (workers x container) = 4 x 64 MB = 256 MB STEADY-STATE (vs same peak but spike). Better characteristic; bounded. Combined with worker LRU cap of 1 hot bytesId, can drop to 4 x 64 MB across pan. Worker can also cache only a region-of-interest slice when crop is small.
+
+### L6-3. `parts[]` retains decoded tile pixels until stitch
+- **Category:** perf
+- **Issue:** tiled-decode-pool.ts L333 + L347: each `{region, decoded}` entry holds a per-tile Uint8Array (tile_w x tile_h x bpp bytes). Held in main-thread memory until decodeTilesParallel returns and stitch consumes. Peak = (viewport pixels) + (sum of tile pixels) = ~2x viewport memory.
+- **Fix:** Stream-stitch: pass a `stitchSink(tile, region)` callback into decodeTilesParallel. As each tile resolves, write into outBuffer at the right offset and immediately drop the tile reference (`results[idx] = null` or skip storing entirely). Eliminates parts[] retention. Peak drops to (viewport pixels) + (1 tile at a time per worker) = viewport + few-MB.
+
+### L6-4. `worker.terminate()` is async - spawn/destroy churn under pan can spike RSS
+- **Category:** perf
+- **Issue:** destroyHandle (L296) calls terminate(); the worker process/thread is reclaimed by the browser at an indeterminate time. Each worker carries ~10 MB WASM heap. Under pan-churn that triggers minIdle-floor violations + spawn-replacements (L4-8), resident memory can compound for hundreds of ms before terminated workers' memory is freed.
+- **Fix:** Conservative: lengthen idleTimeoutMs from 5s to 30s so under bursty pan the floor is more stable. Aggressive: replace terminate with reuse - keep a 'cooldown' pool of bad-but-not-yet-discarded workers; reset their internal state via a `{type:'reset'}` message. Skip if reset is unreliable - JXL WASM state machine is not trivially resettable.
+
+### L6-5. `new Uint8Array(typed)` is the copy constructor - silent memcpy per tile
+- **Category:** perf bug
+- **Issue:** L86: receiver does `new Uint8Array(ev.data.pixels)` where `ev.data.pixels` is a Uint8Array view (the worker posted the VIEW, transferred the BUFFER). Per ECMA spec, `new Uint8Array(typedArray)` allocates a new buffer and copies. ~1 MB extra per tile. The L80-83 comment explicitly claims zero-copy. Cite logic-004 / L3-3.
+- **Fix:** Already covered in L3-3: widen WorkerReply.pixels to `Uint8Array | ArrayBuffer`; receive-side: `const px = ev.data.pixels instanceof Uint8Array ? ev.data.pixels : new Uint8Array(ev.data.pixels);`. Uint8Array passthrough is zero-copy (just structurally cloned bookkeeping).
+
+### L6-6. `containerBytes` per-level retention is implicit
+- **Category:** info opportunity
+- **Issue:** Caller (pyramid-lightbox or similar) holds containerBytes for the active level. Multi-level prefetch can stack N levels' worth of containers in main heap. No coordination with the pool: pool does not know which containers are hot.
+- **Fix:** Out of scope for this file cluster (lives in level-source.ts / caller). Note: combined with L3-4 bytesId protocol, the pool could expose a hint - `pool.notifyContainerHot(bytesId)` so workers' load-cache prioritizes. Architectural; ADR-worthy.
+
+### L6-7. Sparse `new Array(N)` triggers V8 holey-array transitions
+- **Category:** perf (engine-dependent)
+- **Issue:** L333: `new Array(tiles.length)` creates a HOLEY array. Coroutines fill in arbitrary order (work-stealing) so the array stays holey throughout. V8 keeps holey arrays in a slower 'dictionary mode' representation for larger N. With tiles.length > 50 (mega-pano levels) this is observable.
+- **Fix:** Cite L2-7. Use `Array.from({length: tiles.length}, () => null)` - PACKED initial state. Or, with the L6-3 stream-stitch fix, parts[] disappears entirely and this becomes moot.
+
+### L6-8. Idle-timer closure retention is fine - confirm boundary
+- **Category:** info
+- **Issue:** L268: `setTimeout(() => {...}, idleTimeoutMs)` captures `h`. While timer is armed, h is reachable from the timer queue. On clearIdleTimer (called by acquire/destroyHandle/armIdleTimer itself), the timer is cancelled and the closure becomes unreachable. No leak. Confirm and move on.
+
+### L6-9. `recycle` listener strongly couples handle <-> worker
+- **Category:** info (intentional)
+- **Issue:** L242-248: `recycle = () => this.recycle(h)` captures `h`. Worker holds `recycle` via addEventListener. h holds worker via h.worker. Bidirectional strong refs - but BOTH become unreachable simultaneously when destroyHandle removes h from all/idle/active sets AND terminates worker. No leak. Intentional. Worth a comment in the file so future-self does not 'fix' it.
+- **Fix:** Annotate L234-249 with `// h <-> worker is a deliberate cycle, broken atomically by destroyHandle`. Defensive doc, no code change.
+
+### L6-10. FEATURE: explicit pool memory budget
+- **Category:** feature
+- **Issue:** Pool sizes itself by hardwareConcurrency capped at 8 (L310). Independent of available RAM. On a 64-core machine with 4 GB RAM and 10 MB-per-worker WASM heap, 8 workers + idle ~80 MB; OK. But future tier-2 pool variants (denoise, color, etc.) compound. No mechanism for pool to throttle.
+- **Fix:** Config: `opts.estimatedWorkerHeapBytes?: number`. Optional `opts.maxTotalHeapBytes?: number`. spawnOne checks budget before factory(). Falls back to single-thread WASM if over. Caller can wire to `navigator.deviceMemory` heuristic.
+
+### L6-11. FEATURE: FinalizationRegistry for orphan in-flight detection
+- **Category:** feature (low priority)
+- **Issue:** If a caller's `decodeTiledViewportPooled(...)` Promise is dropped (await skipped, caller forgot, top-level throw), the in-flight decode finishes invisibly and the result is GC'd. Pool slot is held the whole time.
+- **Fix:** Wrap returned Promise in a `FinalizationRegistry` that calls AbortController.abort() if the Promise's resolution box is GC'd. Niche - solves a usage error, not a library bug. Cost: one FR per call. Skip unless customer reports the antipattern.
+
+### L6-12. FEATURE: explicit `containerBytes` reference release on AbortError
+- **Category:** feature
+- **Issue:** When a viewport decode is aborted (per L4-3), the in-flight `decodeTileWithWorker` Promises reject, but the `containerBytes` reference held inside the closure (worker.postMessage arg) is only released when each promise's closure is GC'd. Under high pan rate the abort path may have hundreds of zombie closures temporarily holding the buffer.
+- **Fix:** On abort, explicitly null-out the captured `bytes` reference inside `decodeTileWithWorker` before reject. Setting closure-captured variable to null does drop the ref. Saves GC roundtrips during pan. Minor.
+
