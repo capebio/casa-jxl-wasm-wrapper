@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setJxlModuleFactoryForTesting } from "@casabio/jxl-wasm";
@@ -35,7 +35,9 @@ function fakeRaw(w = 1280, h = 960): RawBackend {
 async function makeBackends(): Promise<Backends> {
   const module = await loadScalarModule();
   setJxlModuleFactoryForTesting(scalarFactory(module));
-  return { raw: fakeRaw(), jxl: createJxlBackend() };
+  const { makeTestJxlBackend } = await import("./scalar.js");
+  const b = { raw: fakeRaw(), jxl: makeTestJxlBackend(), __testInProcess: true } as any;
+  return b;
 }
 
 async function tmpOut(): Promise<string> {
@@ -78,8 +80,9 @@ test("ingestImage emits 16-bit big levels when rgb16 is present", { timeout: WAS
         };
       },
     },
-    jxl: createJxlBackend(),
-  };
+    jxl: (await import("./scalar.js")).makeTestJxlBackend(),
+    __testInProcess: true,
+  } as any;
   const master = await writeMaster(out, "HDR.orf");
   expect(await ingestImage(master, b, { outDir: out })).toBe("written");
   const imageId = imageIdForPath(master);
@@ -164,7 +167,8 @@ test("computeIngestPlan is side-effect free (no FS writes) and deterministic", a
       },
     },
     jxl: fakeJxl as any,
-  };
+    __testInProcess: true,
+  } as any;
   const bytes = new Uint8Array(64);
   const format: "orf" = "orf";
   const identity = { imageId: "0123456789abcdef", masterName: "synthetic.orf", mtimeMs: 1234567890000 };

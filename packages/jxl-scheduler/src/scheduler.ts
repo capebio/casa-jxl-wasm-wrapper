@@ -355,8 +355,39 @@ export class Scheduler {
     }
 
     // Subscriber (not primary): remove its record; other subscribers continue.
-    const shouldCancelPrimary = this.dedupe.cancelSubscriber(sessionId);
-    if (!shouldCancelPrimary) {
+    const { cancelWorker, promotedTo } = this.dedupe.cancelSubscriber(sessionId);
+    
+    if (promotedTo !== undefined) {
+      // Primary was cancelled, but a subscriber was promoted.
+      // We must clean up the primary's record and rebind the worker to the new primary.
+      const promotedRecord = this.sessions.get(promotedTo);
+      if (record?.worker !== undefined && promotedRecord !== undefined) {
+        // Transfer the worker to the promoted subscriber.
+        promotedRecord.worker = record.worker;
+        record.worker.activeSessionId = promotedTo;
+      } else if (record?.pausedOnWorker !== undefined && promotedRecord !== undefined) {
+        // Transfer paused state.
+        promotedRecord.state = "paused";
+        promotedRecord.pausedOnWorker = record.pausedOnWorker;
+        this.workerPausedSession.set(record.pausedOnWorker.id, promotedTo);
+      } else if (record?.pending !== undefined && promotedRecord !== undefined) {
+        // Transfer queue position if still pending.
+        promotedRecord.state = "queued";
+        promotedRecord.pending = record.pending;
+        promotedRecord.pending.sessionId = promotedTo;
+        // Update the queue entry
+        this.queue.remove(sessionId);
+        this.queue.enqueue({ priority: promotedRecord.priority, sessionId: promotedTo, payload: promotedRecord.pending });
+      }
+
+      if (record?.state === "running" || record?.state === "cancelling") this._runningCount--;
+      else if (record?.state === "queued") this._queuedCount--;
+      else if (record?.state === "paused") this._pausedCount--;
+      this.sessions.delete(sessionId);
+      return true;
+    }
+
+    if (!cancelWorker) {
       if (record?.state === "running" || record?.state === "cancelling") this._runningCount--;
       else if (record?.state === "queued") this._queuedCount--;
       else if (record?.state === "paused") this._pausedCount--;
@@ -723,7 +754,12 @@ export class Scheduler {
     final: 0.95,
   };
 
-  private handleWorkerMessage(sessionId: string, worker: PoolWorker, msg: WorkerToMainMessage): void {
+  private handleWorkerMessage(sessionId: string, worker: PoolWorker, rawMsg: WorkerToMainMessage): void {
+    // Re-stamp the message with the scheduler's current active session ID.
+    // This is critical if the worker was promoted to a new primary, as the worker
+    // itself is unaware of the JS-side session ID change.
+    const msg = { ...rawMsg, sessionId } as WorkerToMainMessage & { sessionId: string };
+
     const record = this.sessions.get(sessionId);
     const handlers = record?.handlers ?? EMPTY_HANDLERS;
     for (const h of handlers) h(msg);
@@ -733,7 +769,8 @@ export class Scheduler {
       if (subId === sessionId) return;
       const subRecord = this.sessions.get(subId);
       const subHandlers = subRecord?.handlers ?? EMPTY_HANDLERS;
-      for (const h of subHandlers) h(msg);
+      const stampedMsg = { ...msg, sessionId: subId };
+      for (const h of subHandlers) h(stampedMsg);
     });
 
     // Track decode progress for victim scoring. The stage is used as a proxy for

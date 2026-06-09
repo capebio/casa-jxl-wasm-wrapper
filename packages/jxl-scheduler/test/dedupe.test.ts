@@ -28,8 +28,8 @@ describe("DedupeRegistry", () => {
     reg.subscribe("s2", "s1");
     reg.subscribe("s3", "s1");
 
-    const shouldCancelPrimary = reg.cancelSubscriber("s2");
-    assert.equal(shouldCancelPrimary, false, "primary survives when other subscribers exist");
+    const result = reg.cancelSubscriber("s2");
+    assert.equal(result.cancelWorker, false, "primary survives when other subscribers exist");
     assert.deepEqual(reg.subscribers("s1").sort(), ["s1", "s3"]);
   });
 
@@ -39,8 +39,8 @@ describe("DedupeRegistry", () => {
     reg.subscribe("s2", "s1");
 
     reg.cancelSubscriber("s2");
-    const shouldCancelPrimary = reg.cancelSubscriber("s1");
-    assert.equal(shouldCancelPrimary, true, "primary should be cancelled when all subscribers gone");
+    const result = reg.cancelSubscriber("s1");
+    assert.equal(result.cancelWorker, true, "primary should be cancelled when all subscribers gone");
     assert.equal(reg.findPrimary("key-a"), null, "key removed after all cancel");
   });
 

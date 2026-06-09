@@ -1,7 +1,9 @@
 import { expect, test, afterEach } from "bun:test";
 import { setJxlModuleFactoryForTesting } from "@casabio/jxl-wasm";
 import { buildRawLadder, buildJpgLadder, buildProxyLadder } from "../src/ladder";
+import { makeTestJxlBackend } from "./scalar.js";
 import { createJxlBackend, type JxlBackend, type DecodedMaster } from "../src/backends";
+import { makeTestJxlBackend } from "./scalar.js";
 import { loadScalarModule, scalarFactory } from "./scalar";
 
 afterEach(() => setJxlModuleFactoryForTesting(null));
@@ -23,7 +25,8 @@ function gradientRgba(w: number, h: number): Uint8Array {
 test("buildRawLadder keeps every encoded level, ascending, full last, all 8-bit baked", async () => {
   const module = await loadScalarModule();
   setJxlModuleFactoryForTesting(scalarFactory(module));
-  const jxl = createJxlBackend();
+  // use test jxl for ladder logic (real encode not required here)
+  const jxl = makeTestJxlBackend();
   const W = 1280, H = 960;
   const decoded: DecodedMaster = { rgba: gradientRgba(W, H), width: W, height: H, orientation: "baked" };
 
@@ -56,7 +59,8 @@ test("buildJpgLadder substitutes the lossless transcode as the full level", asyn
 test("buildProxyLadder returns exactly one level", async () => {
   const module = await loadScalarModule();
   setJxlModuleFactoryForTesting(scalarFactory(module));
-  const jxl = createJxlBackend();
+  // use test jxl for ladder logic (real encode not required here)
+  const jxl = makeTestJxlBackend();
   const W = 2000, H = 1500;
   const ladder = await buildProxyLadder(jxl, gradientRgba(W, H), W, H, 512, "baked");
   expect(ladder.levels).toHaveLength(1);

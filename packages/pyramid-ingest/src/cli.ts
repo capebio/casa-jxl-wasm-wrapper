@@ -74,6 +74,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       "dry-run": { type: "boolean", default: false },
       explain: { type: "string" },
       "timeout-ms": { type: "string" },
+      "accept-unsupported": { type: "boolean", default: true },
     },
   });
 
@@ -199,6 +200,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
     ...(proxy !== undefined ? { proxy } : {}),
     force: parsed.force,
     concurrency,
+    acceptUnsupported: parsed["accept-unsupported"],
     ...(dryRun ? { dryRun: true } : {}),
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   };

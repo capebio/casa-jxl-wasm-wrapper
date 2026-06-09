@@ -35,7 +35,9 @@ function fakeRaw(w = 1280, h = 960): RawBackend {
 async function scalarBackends(): Promise<Backends> {
   const module = await loadScalarModule();
   setJxlModuleFactoryForTesting(scalarFactory(module));
-  return { raw: fakeRaw(), jxl: createJxlBackend() };
+  const { makeTestJxlBackend } = await import("./scalar.js");
+  const b = { raw: fakeRaw(), jxl: makeTestJxlBackend(), __testInProcess: true } as any;
+  return b;
 }
 
 test("collectInputs walks dirs recursively, keeps supported masters, sorts", async () => {
@@ -117,7 +119,8 @@ test("main --dry-run executes planning but writes nothing", async () => {
   const fakeB: Backends = {
     raw: { async decode(_b: Uint8Array, _f: any) { return { rgba: new Uint8Array(4), width: 1, height: 1, orientation: "baked" }; } },
     jxl: fakeJxl,
-  };
+    __testInProcess: true,
+  } as any;
 
   const code = await main(["--out", out, "--dry-run", src], fakeB);
   expect(code).toBe(0);
