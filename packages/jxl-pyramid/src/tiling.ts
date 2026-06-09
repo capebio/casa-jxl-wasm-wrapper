@@ -47,6 +47,21 @@ export function parseJxtcHeader(bytes: Uint8Array): JxtcHeader {
   const flags = view.getUint32(28, true);
   const hasAlpha = (flags & 1) !== 0;
   const bitsPerSample: 8 | 16 = (flags & 2) !== 0 ? 16 : 8;
+
+  // G4-A: strict boundary validation for untrusted JXTC (adversarial dims/tileSize)
+  if (imageW <= 0 || imageH <= 0 || tileSize <= 0) {
+    throw new Error("JXTC header has non-positive imageW/H or tileSize");
+  }
+  if (bitsPerSample !== 8 && bitsPerSample !== 16) {
+    throw new Error("JXTC bitsPerSample must be 8 or 16");
+  }
+  const bytesPerPixel = bitsPerSample === 16 ? 8 : 4;
+  // safe total byte size cap ~1GB (2^30); prevent OOM on malicious header
+  const totalBytes = imageW * imageH * bytesPerPixel;
+  if (!Number.isFinite(totalBytes) || totalBytes > (1 << 30) || imageW > (1 << 24) || imageH > (1 << 24)) {
+    throw new Error("JXTC dimensions exceed safety cap (w*h*bpp > 2^30 or non-finite)");
+  }
+
   return { imageW, imageH, tileSize, tilesX, tilesY, hasAlpha, bitsPerSample };
 }
 
@@ -64,6 +79,15 @@ export function tilesOverlappingRegion(
   tileSize: number,
   region: ImageRegion,
 ): ImageRegion[] {
+  // G4-A: validate region inputs as finite non-negative before any clamping/math (for decodeLevel region param too)
+  if (
+    !Number.isFinite(region.x) || region.x < 0 ||
+    !Number.isFinite(region.y) || region.y < 0 ||
+    !Number.isFinite(region.w) || region.w < 0 ||
+    !Number.isFinite(region.h) || region.h < 0
+  ) {
+    throw new Error("region must have finite non-negative x, y, w, h");
+  }
   if (tileSize <= 0) throw new Error("tileSize must be positive");
   const rx = Math.min(Math.max(0, region.x), imageW);
   const ry = Math.min(Math.max(0, region.y), imageH);

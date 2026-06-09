@@ -1,4 +1,3 @@
-import { decodeTileContainerRegionRgba8, decodeTileContainerRegionRgba16 } from "@casabio/jxl-wasm";
 import {
   canUseParallelTileWorkers,
   parseJxtcHeader,
@@ -6,6 +5,7 @@ import {
   type ImageRegion,
 } from "./tiling.js";
 import type { DecodedLevel } from "./decode-level.js";
+import { stitchTileDecodes, pickRegionDecoder, bppFor } from "./decode-level.js";
 
 type WorkerLike = {
   addEventListener(
@@ -29,35 +29,6 @@ export type TileRegionDecoder = (
   bytes: Uint8Array,
   region: ImageRegion,
 ) => Promise<DecodedLevel>;
-
-/**
- * Fast-path stitch for stride-aligned tiles (I4 from level2 audit).
- * When a tile's decoded region is full viewport width and x-aligned (dx===0),
- * its pixels are a single contiguous block in the destination; one set() replaces
- * the per-row loop. This is common for vertical strips and full-width ROIs.
- * Falls back to row-by-row for partial-width tiles.
- */
-function stitch(viewport: ImageRegion, parts: { region: ImageRegion; decoded: DecodedLevel }[], bytesPerPixel: 4 | 8 = 4): DecodedLevel {
-  const pixels = new Uint8Array(viewport.w * viewport.h * bytesPerPixel);
-  const dstStride = viewport.w * bytesPerPixel;
-  for (const { region, decoded } of parts) {
-    const dx = region.x - viewport.x;
-    const dy = region.y - viewport.y;
-    const srcStride = decoded.width * bytesPerPixel;
-    if (decoded.width === viewport.w && dx === 0) {
-      // Contiguous full-stride block: single copy, no row loop overhead.
-      pixels.set(decoded.pixels, dy * dstStride);
-    } else {
-      for (let row = 0; row < decoded.height; row++) {
-        pixels.set(
-          decoded.pixels.subarray(row * srcStride, (row + 1) * srcStride),
-          ((dy + row) * viewport.w + dx) * bytesPerPixel,
-        );
-      }
-    }
-  }
-  return { pixels, width: viewport.w, height: viewport.h };
-}
 
 type WorkerReply =
   | { id: number; ok: true; pixels: ArrayBuffer; width: number; height: number }
@@ -147,7 +118,20 @@ function decodeTileWithWorker(
     }
 
     // INPUT NOTE: full container cloned per tile (see L6-A in review). bpp added for G2-A 16-bit.
-    h.worker.postMessage({ id, bytes, region, bpp });
+    // Guard postMessage (G2 subsequent): sync throws (DataCloneError on bad transfer, terminated worker, etc)
+    // must settle the promise; old code only guarded listeners.
+    try {
+      h.worker.postMessage({ id, bytes, region, bpp });
+    } catch (postErr) {
+      h.pending.delete(id);
+      if (job.timer != null) {
+        globalThis.clearTimeout(job.timer);
+        job.timer = null;
+      }
+      h.state = "dead";
+      try { h.worker.terminate(); } catch {}
+      doReject(postErr);
+    }
   });
 
   function cleanup() {
@@ -369,6 +353,11 @@ class PyramidWorkerPool {
     try {
       h.worker.terminate();
     } catch {}
+    // Minimal observability (subsequent G2, mirrors jxl-scheduler/pool.ts pattern).
+    // Low cost; aids diagnosis of hangs/deaths in prod without metrics.
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn(`[jxl-pyramid pool] worker killed: ${reason}`);
+    }
   }
 
   private armIdleTimer(h: WorkerHandle): void {
@@ -460,11 +449,22 @@ async function decodeTilesParallel(
           failed = true;
           firstErr = e;
         }
-        if (h.state !== "dead") {
-          h.state = "dead";
-          try {
-            h.worker.terminate();
-          } catch {}
+        // Subsequent G2 safety (REV-A / L286): on first failure kill+drain ALL handles in this batch.
+        // Prevents in-flight workers being released busy (polluting next acquire with mid-decode state).
+        // Other coros unblock via explicit pending reject; terminate stops WASM work.
+        for (const hh of handles) {
+          if (hh.state !== "dead") {
+            hh.state = "dead";
+            for (const [iid, job] of Array.from(hh.pending.entries())) {
+              hh.pending.delete(iid);
+              if (job.timer != null) {
+                globalThis.clearTimeout(job.timer);
+                job.timer = null;
+              }
+              try { job.reject(new Error(`batch tile failure: ${firstErr}`)); } catch {}
+            }
+            try { hh.worker.terminate(); } catch {}
+          }
         }
         break;
       }
@@ -480,8 +480,6 @@ async function decodeTilesParallel(
   }
   return results;
 }
-
-function bppFor(bits: 8 | 16): 4 | 8 { return bits === 16 ? 8 : 4; }
 
 /**
  * Decode a tiled viewport with optional parallel per-tile workers.
@@ -507,13 +505,7 @@ export async function decodeTiledViewportPooled(
   const viewport: ImageRegion = { x: rx, y: ry, w: rw, h: rh };
 
   const bits = header.bitsPerSample ?? 8;
-  const bpp = bppFor(bits);
-  const decodeRegion = options?.decodeRegion ?? (async (bytes, r) => {
-    const out = bits === 16
-      ? await decodeTileContainerRegionRgba16(bytes, r)
-      : await decodeTileContainerRegionRgba8(bytes, r);
-    return { pixels: out.pixels, width: out.width, height: out.height };
-  });
+  const decodeRegion = options?.decodeRegion ?? pickRegionDecoder(bits);
 
   const tiles = tilesOverlappingRegion(header.imageW, header.imageH, header.tileSize, viewport);
   const wantParallel = options?.parallel !== false
@@ -537,8 +529,8 @@ export async function decodeTiledViewportPooled(
   }
 
   try {
-    const parts = await decodeTilesParallel(containerBytes, tiles, liveHandles, bpp, options?.signal);
-    return stitch(viewport, parts, bpp);
+    const parts = await decodeTilesParallel(containerBytes, tiles, liveHandles, bppFor(bits), options?.signal);
+    return stitchTileDecodes(viewport, parts, bppFor(bits));
   } finally {
     p.release(liveHandles);
   }

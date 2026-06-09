@@ -3,11 +3,11 @@ import type { PyramidLevel } from "./manifest.js";
 
 /** Uniform handle for whole-frame JXL or tiled JXTC top levels. */
 export type LevelSource =
-  | { kind: "whole"; bytes: Uint8Array; width: number; height: number }
+  | { kind: "whole"; bytes: Uint8Array; width: number; height: number; bitsPerSample: 8 | 16 }
   | { kind: "tiled"; bytes: Uint8Array; width: number; height: number; tileSize: number; bitsPerSample: 8 | 16 };
 
 export function createLevelSource(
-  entry: Pick<PyramidLevel, "w" | "h" | "tiled">,
+  entry: Pick<PyramidLevel, "w" | "h" | "tiled"> & { bitsPerSample?: 8 | 16 },
   bytes: Uint8Array,
 ): LevelSource {
   if (entry.tiled) {
@@ -24,5 +24,11 @@ export function createLevelSource(
       bitsPerSample: header.bitsPerSample,
     };
   }
-  return { kind: "whole", bytes, width: entry.w, height: entry.h };
+  return {
+    kind: "whole",
+    bytes,
+    width: entry.w,
+    height: entry.h,
+    bitsPerSample: entry.bitsPerSample ?? 8,
+  };
 }

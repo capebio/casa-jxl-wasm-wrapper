@@ -79,14 +79,14 @@ test("Test Fixtures Validation", () => {
   expect(formats).toContain("cr2");
   expect(formats).toContain("jpg");
 
-  // Verify exact paths are preserved as strings
+  // Verify (now relative) paths are preserved as strings (G4-C removed absolutes)
   const cr2_1 = APPROVED_FIXTURES.find((f) => f.path.endsWith("_MG_1750.CR2"));
   expect(cr2_1).toBeDefined();
-  expect(cr2_1!.path).toBe("c:\\Foo\\raw-converter\\tests\\_MG_1750.CR2");
+  expect(cr2_1!.path).toBe("tests/_MG_1750.CR2");
 
   const dng_1 = APPROVED_FIXTURES.find((f) => f.path.endsWith("180319603.RAW-02.ORIGINAL.dng"));
   expect(dng_1).toBeDefined();
-  expect(dng_1!.path).toBe("c:\\Foo\\raw-converter\\tests\\PXL_20260527_180319603.RAW-02.ORIGINAL.dng");
+  expect(dng_1!.path).toBe("tests/PXL_20260527_180319603.RAW-02.ORIGINAL.dng");
 });
 
 test("Type Definition Structural Compilability", () => {

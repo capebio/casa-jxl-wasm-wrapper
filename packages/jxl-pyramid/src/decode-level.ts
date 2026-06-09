@@ -17,34 +17,47 @@ export type RegionDecoder = (
   region: ImageRegion,
 ) => Promise<DecodedLevel>;
 
-async function decodeWhole(bytes: Uint8Array): Promise<DecodedLevel> {
+async function decodeWhole(bytes: Uint8Array, bits: 8 | 16 = 8): Promise<DecodedLevel> {
+  const format = bits === 16 ? "rgba16" : "rgba8";
   const decoder = createDecoder({
-    format: "rgba8",
+    format,
     progressionTarget: "final",
     emitEveryPass: false,
     preserveIcc: false,
     preserveMetadata: false,
   });
   let result: DecodedLevel | null = null;
-  const drain = (async () => {
+  let drainError: unknown = null;
+  const drainPromise = (async () => {
     for await (const ev of decoder.events()) {
       if (ev.type === "final") {
         const px = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
         result = { pixels: px, width: ev.info.width, height: ev.info.height };
       } else if (ev.type === "error") {
-        throw new Error(`decode ${ev.code}: ${ev.message}`);
+        const err = new Error(`decode ${ev.code}: ${ev.message}`);
+        drainError = err;
+        throw err;
       }
     }
-  })();
-  await decoder.push(bytes);
-  await decoder.close();
-  await drain;
-  await decoder.dispose();
-  if (!result) throw new Error("whole-frame decode produced no final frame");
-  return result;
+  })().catch((e) => {
+    drainError = e; // prevent unhandled rejection on drain IIFE
+  });
+  try {
+    await decoder.push(bytes);
+    await decoder.close();
+    await drainPromise;
+    if (drainError) throw drainError;
+    if (!result) throw new Error("whole-frame decode produced no final frame");
+    return result;
+  } finally {
+    // G3-B: unconditional dispose even on errors in push/close/drain
+    await decoder.dispose().catch(() => {
+      /* best-effort, do not mask original error */
+    });
+  }
 }
 
-function pickRegionDecoder(bits: 8 | 16): RegionDecoder {
+export function pickRegionDecoder(bits: 8 | 16): RegionDecoder {
   if (bits === 16) {
     return async (bytes, r) => {
       const out = await decodeTileContainerRegionRgba16(bytes, r);
@@ -57,7 +70,11 @@ function pickRegionDecoder(bits: 8 | 16): RegionDecoder {
   };
 }
 
-function stitchTileDecodes(
+export function bppFor(bits: 8 | 16): 4 | 8 {
+  return bits === 16 ? 8 : 4;
+}
+
+export function stitchTileDecodes(
   viewport: ImageRegion,
   parts: { region: ImageRegion; decoded: DecodedLevel }[],
   bytesPerPixel: 4 | 8 = 4,
@@ -72,10 +89,13 @@ function stitchTileDecodes(
       // Stride-aligned fast path (I4): full-width tile is contiguous block.
       pixels.set(decoded.pixels, dy * dstStride);
     } else {
+      // Strength-reduced: additive strides instead of per-row multiplies (G3-C).
+      let srcOff = 0;
+      let dstOff = ((dy * viewport.w + dx) * bytesPerPixel);
       for (let row = 0; row < decoded.height; row++) {
-        const srcOff = row * srcStride;
-        const dstOff = ((dy + row) * viewport.w + dx) * bytesPerPixel;
         pixels.set(decoded.pixels.subarray(srcOff, srcOff + srcStride), dstOff);
+        srcOff += srcStride;
+        dstOff += dstStride;
       }
     }
   }
@@ -104,21 +124,9 @@ export async function decodeTiledViewport(
   if (rw <= 0 || rh <= 0) throw new Error("decode region is empty after clamping");
   const viewport: ImageRegion = { x: rx, y: ry, w: rw, h: rh };
 
-  const tiles = tilesOverlappingRegion(source.width, source.height, source.tileSize, viewport);
-  const wantParallel = options?.parallel !== false && canUseParallelTileWorkers() && tiles.length > 1;
-
-  if (!wantParallel) {
-    return decodeRegion(source.bytes, viewport);
-  }
-
-  const parts = await Promise.all(
-    tiles.map(async (tileRegion) => ({
-      region: tileRegion,
-      decoded: await decodeRegion(source.bytes, tileRegion),
-    })),
-  );
-  const bpp: 4 | 8 = bits === 16 ? 8 : 4;
-  return stitchTileDecodes(viewport, parts, bpp);
+  // G3-D: non-worker path (this decodeTiledViewport) always single-ROI whole-viewport decode.
+  // In-thread Promise.all fan-out removed entirely (was serial + overhead anyway; real parallel is in pooled worker path).
+  return decodeRegion(source.bytes, viewport);
 }
 
 /** Decode a pyramid level: whole-frame in one shot, or a viewport slice from JXTC. */
@@ -131,7 +139,7 @@ export async function decodeLevel(
     if (region !== undefined) {
       throw new Error("region decode requires a tiled level source");
     }
-    return decodeWhole(source.bytes);
+    return decodeWhole(source.bytes, source.bitsPerSample ?? 8);
   }
   const roi = region ?? { x: 0, y: 0, w: source.width, h: source.height };
   return decodeTiledViewport(source, roi, options);
