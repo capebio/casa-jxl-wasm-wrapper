@@ -2065,10 +2065,18 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
 
     const size_t needed = s->input_size + size;
     if (needed > s->input_capacity) {
-      uint8_t* grown = static_cast<uint8_t*>(realloc(s->input_buf, needed));
+      // Geometric growth eliminates O(n²) memcpy on every append (A1).
+      // Track capacity separately; realloc only on overflow, then double.
+      size_t new_cap = s->input_capacity ? s->input_capacity : 65536u;
+      while (new_cap < needed) {
+        size_t next = new_cap * 2;
+        if (next <= new_cap) { next = needed; } // overflow guard
+        new_cap = next;
+      }
+      uint8_t* grown = static_cast<uint8_t*>(realloc(s->input_buf, new_cap));
       if (grown == nullptr) { s->error_code = 15; return JXL_DEC_RESULT_ERROR; }
       s->input_buf = grown;
-      s->input_capacity = needed;
+      s->input_capacity = new_cap;
     }
     memcpy(s->input_buf + s->input_size, data, size);
     s->input_size = needed;
@@ -2802,18 +2810,14 @@ JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
   if (s == nullptr || s->outbuf == nullptr || s->taken >= s->outbuf_size) return nullptr;
   const size_t remaining = s->outbuf_size - s->taken;
   const size_t take = (remaining < CHUNK) ? remaining : CHUNK;
-  // MakeBuffer inlines data — no separate allocation to track; safe for buffer_free.
-  JxlWasmBuffer* chunk = MakeBuffer(s->outbuf + s->taken, take, 0, 0, 8, 0);
+  // MakeBufferBorrowed: zero-copy handle into live outbuf (eliminates per-chunk C++ memcpy / performance-1).
+  // JS takeBuffer + HEAPU8.slice materializes the owned copy for the yielded chunk.
+  // outbuf must stay alive for all borrows; enc_free (after chunks() drain) does the free.
+  JxlWasmBuffer* chunk = MakeBufferBorrowed(s->outbuf + s->taken, take, 0, 0, 8, 0);
   if (chunk != nullptr) {
     s->taken += take;
-    // Memory efficiency: once we've handed out the last byte, free the big output buffer early.
-    // This reduces peak WASM heap during large encodes (important on memory-constrained devices / mobile).
-    if (s->taken >= s->outbuf_size) {
-      free(s->outbuf);
-      s->outbuf = nullptr;
-      s->outbuf_size = 0;
-      s->taken = 0; // defensive
-    }
+    // No early free / null here. Borrowed views into outbuf remain valid only while
+    // the allocation lives; enc_free (post-drain in JS chunks() finally) releases it.
   }
   return chunk;
 }

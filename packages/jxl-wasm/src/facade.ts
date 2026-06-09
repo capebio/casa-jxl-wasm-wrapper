@@ -1735,6 +1735,8 @@ class LibjxlEncoder implements JxlEncoder {
           compressedBytes += chunk.data.byteLength;
           yield chunk.data;
         }
+        // C++ now uses MakeBufferBorrowed for enc_take_chunk (zero-copy into outbuf);
+        // the HEAPU8.slice in readBufferView is the single materializing copy to JS.
       } finally {
         this.freeWasmState(); // handles advanced pointers + enc_free
       }
