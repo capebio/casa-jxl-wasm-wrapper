@@ -75,6 +75,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       explain: { type: "string" },
       "timeout-ms": { type: "string" },
       "accept-unsupported": { type: "boolean", default: true },
+      "profile-convergence": { type: "boolean", default: false },
     },
   });
 
@@ -203,6 +204,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
     acceptUnsupported: parsed["accept-unsupported"],
     ...(dryRun ? { dryRun: true } : {}),
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(parsed["profile-convergence"] ? { profileConvergence: true } : {}),
   };
   const result = await ingestBatch(files, backends, batchOpts);
 

@@ -37,6 +37,7 @@ export const levelEntrySchema = z.object({
   bitsPerSample: z.union([z.literal(8), z.literal(16)]),
   contenthash: z.string().length(16),
   tiled: z.boolean(),
+  convergedByteEnd: z.number().int().positive().optional(),
 });
 
 export const masterInfoSchema = z.object({
@@ -152,6 +153,7 @@ export const cliArgsSchema = z.object({
     .optional()
     .transform((v) => (v === undefined ? undefined : strictPositiveInt("timeout-ms", v))),
   "accept-unsupported": z.boolean().optional().default(true),
+  "profile-convergence": z.boolean().optional().default(false),
 });
 
 function strictPositiveInt(name: string, raw: string): number {
