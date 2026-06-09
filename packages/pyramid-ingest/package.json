@@ -21,6 +21,7 @@
   "dependencies": {
     "@casabio/jxl-pyramid": "^0.1.0",
     "@casabio/jxl-wasm": "^0.1.0",
+    "exifr": "^7.1.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

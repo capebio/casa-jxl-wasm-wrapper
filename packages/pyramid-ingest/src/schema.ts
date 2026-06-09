@@ -41,7 +41,7 @@ export const levelEntrySchema = z.object({
 
 export const masterInfoSchema = z.object({
   name: z.string(),
-  format: z.enum(["orf", "dng", "cr2", "jpg"]),
+  format: z.enum(["orf", "dng", "cr2", "jpg", "nef", "arw", "raf", "rw2", "unknown"]),
   mtimeMs: z.number(),
 });
 
@@ -49,12 +49,14 @@ export const manifestSchemaV1 = z.object({
   schema: z.literal(1),
   imageId: z.string().regex(/^[0-9a-f]{16}$/),
   master: masterInfoSchema,
-  orientation: z.enum(["baked", "source"]),
-  width: z.number().int().positive(),
-  height: z.number().int().positive(),
-  aspect: z.number().finite().positive(),
-  levels: z.array(levelEntrySchema),
+  orientation: z.enum(["baked", "source"]).optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  aspect: z.number().finite().positive().optional(),
+  levels: z.array(levelEntrySchema).optional(),
   proxy: z.literal(true).optional(),
+  stub: z.literal(true).optional(),
+  metadata: z.record(z.unknown()).optional(),
   producedBy: producedBySchema
     .refine((p) => {
       const maj = (p.version || "").split(".")[0];
@@ -149,6 +151,7 @@ export const cliArgsSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v === undefined ? undefined : strictPositiveInt("timeout-ms", v))),
+  "accept-unsupported": z.boolean().optional().default(true),
 });
 
 function strictPositiveInt(name: string, raw: string): number {
@@ -160,3 +163,30 @@ function strictPositiveInt(name: string, raw: string): number {
 }
 
 export type CliArgs = z.infer<typeof cliArgsSchema>;
+
+/** Magic-byte signatures for adversarial unknown-RAW detection (colocated with Zod per Q6).
+ *  Used only for Tier-3/5 fallback when native Tier-1 decode fails or ext unknown.
+ *  Prefix matches (order: more specific first if needed).
+ */
+export const RAW_MAGIC_SIGNATURES: Array<{ format: string; bytes: number[]; offset: number }> = [
+  { format: "cr2", bytes: [0x49, 0x49, 0x2a, 0x00], offset: 0 }, // II*\0 (tiff) + CR2 maker later
+  { format: "orf", bytes: [0x49, 0x49, 0x52, 0x4f], offset: 0 }, // IIRO (Olympus)
+  { format: "dng", bytes: [0x49, 0x49, 0x2a, 0x00], offset: 0 },
+  { format: "nef", bytes: [0x4d, 0x4d, 0x00, 0x2a], offset: 0 }, // MM\0* or II variant + Nikon
+  { format: "arw", bytes: [0x49, 0x49, 0x2a, 0x00], offset: 0 }, // Sony (tiff base)
+  { format: "raf", bytes: [0x46, 0x55, 0x4a, 0x49], offset: 0 }, // FUJI start
+];
+
+export function detectFormatByMagic(bytes: Uint8Array): string | null {
+  for (const sig of RAW_MAGIC_SIGNATURES) {
+    const off = sig.offset | 0;
+    if (bytes.length >= off + sig.bytes.length) {
+      let ok = true;
+      for (let i = 0; i < sig.bytes.length; i++) {
+        if (bytes[off + i] !== sig.bytes[i]) { ok = false; break; }
+      }
+      if (ok) return sig.format;
+    }
+  }
+  return null;
+}
