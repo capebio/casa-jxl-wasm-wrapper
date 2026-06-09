@@ -5,6 +5,7 @@
 // WorkerPool owns only worker lifecycle hygiene:
 // spawn, reserve, bind, release, recycle, reap, shutdown.
 // Scheduling policy — priority, preemption, dedupe, fairness — belongs in Scheduler.
+import { CoreBudget } from "./budget.js";
 const DEV = typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
 const DEFAULT_SPAWN_TIMEOUT_MS = 15_000;
 const RECYCLE_SHUTDOWN_TIMEOUT_MS = 1_000;
@@ -19,6 +20,7 @@ export class WorkerPool {
     workers = new Map();
     idle = new Set();
     active = new Set();
+    parked = new Set(); // explicit parked for paused state (P2a/P2b)
     spawnPromises = new Set();
     destroyed = false;
     spawning = 0;
@@ -27,6 +29,10 @@ export class WorkerPool {
     shutdownPromise = null;
     lastSpawnFailureMs = 0;
     consecutiveSpawnFailures = 0;
+    coreBudget;
+    workerCost = 1;
+    static PREWARM_STAGGER_MS = 16;
+    budgetedWorkerIds = new Set();
     metrics = {
         spawned: 0,
         spawnFailed: 0,
@@ -45,6 +51,7 @@ export class WorkerPool {
         this.idleTimeoutMs = Math.max(0, opts.idleTimeoutMs);
         this.spawnTimeoutMs = opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
         this.minIdle = Math.max(0, Math.min(opts.minIdle ?? 0, this.maxSize));
+        this.coreBudget = opts.coreBudget ?? null;
     }
     get size() {
         return this.workers.size;
@@ -54,6 +61,9 @@ export class WorkerPool {
     }
     get activeCount() {
         return this.active.size;
+    }
+    get parkedCount() {
+        return this.parked.size;
     }
     get spawningCount() {
         return this.spawning;
@@ -80,11 +90,23 @@ export class WorkerPool {
     activeWorkerValues() {
         return this.active.values();
     }
+    parkedWorkerValues() {
+        return this.parked.values();
+    }
     get totalAllocatedOrSpawning() {
         return this.workers.size + this.spawning;
     }
+    /**
+     * Returns a shallow-cloned, frozen snapshot of pool metrics.
+     * Internal counters continue to be mutated in place for the active pool
+     * (spawned, acquired*, released, etc.), but every caller receives an
+     * independent frozen view captured at call time. Retained references do
+     * not observe future mutations; external code cannot mutate the live
+     * counters through the returned object. sched-4 Metric Object Copy Protection.
+     */
     getMetrics() {
-        return { ...this.metrics };
+        const snapshot = { ...this.metrics };
+        return Object.freeze(snapshot);
     }
     healthSnapshot() {
         return {
@@ -104,6 +126,7 @@ export class WorkerPool {
                 hasIdleTimer: w.idleTimer !== null,
                 indexedIdle: this.idle.has(w),
                 indexedActive: this.active.has(w),
+                indexedParked: this.parked.has(w),
             })),
         };
     }
@@ -176,6 +199,20 @@ export class WorkerPool {
         this.metrics.released++;
         this.assertInvariants();
     }
+    park(worker) {
+        if (!this.workers.has(worker.id))
+            return;
+        this.clearIdleTimer(worker);
+        this.active.delete(worker);
+        this.idle.delete(worker);
+        this.parked.add(worker);
+        worker.activeSessionId = null;
+        worker.cancelling = false;
+        this.assertInvariants();
+    }
+    unpark(worker) {
+        this.parked.delete(worker);
+    }
     /** Destroy and remove a poisoned or crashed worker. */
     recycle(worker) {
         if (!this.workers.has(worker.id))
@@ -185,21 +222,40 @@ export class WorkerPool {
     }
     // Spawn workers eagerly so the first acquire() hits an idle worker rather than
     // paying the factory boot cost.
+    // Staggered to avoid startup pthread pool spikes (sched-6).
     prewarm(count) {
         if (this.destroyed || count <= 0)
             return;
         const toSpawn = Math.min(count, this.maxSize - this.totalAllocatedOrSpawning);
-        for (let i = 0; i < toSpawn; i++) {
-            void this.spawn()
-                .then((worker) => this.handlePrewarmSuccess(worker))
-                .catch(() => undefined);
-        }
+        if (toSpawn <= 0)
+            return;
+        void this.spawnStaggered(toSpawn);
         this.assertInvariants();
+    }
+    async spawnStaggered(n) {
+        for (let i = 0; i < n; i++) {
+            if (this.destroyed)
+                break;
+            try {
+                const worker = await this.spawn();
+                this.handlePrewarmSuccess(worker);
+            }
+            catch {
+                // spawn already accounts failure; continue stagger
+            }
+            if (i < n - 1) {
+                await new Promise((r) => setTimeout(r, WorkerPool.PREWARM_STAGGER_MS));
+            }
+        }
     }
     /** Manually evict idle workers, e.g. on memory pressure. Returns count reaped. */
     reapIdle({ preserveMinIdle = true } = {}) {
         let count = 0;
         for (const worker of this.idle) {
+            if (this.parked.has(worker)) {
+                this.parked.delete(worker);
+                continue;
+            }
             if (preserveMinIdle && this.idle.size <= this.minIdle)
                 break;
             this.recycle(worker);
@@ -225,6 +281,7 @@ export class WorkerPool {
         await Promise.allSettled(shutdownPromises);
         this.idle.clear();
         this.active.clear();
+        this.parked.clear();
         this.workers.clear();
     }
     allocateWorkerId() {
@@ -268,12 +325,32 @@ export class WorkerPool {
         return worker;
     }
     async spawn() {
+        let acquiredBudget = false;
+        if (this.coreBudget) {
+            await this.coreBudget.acquire(this.workerCost);
+            acquiredBudget = true;
+        }
         this.spawning++;
         this.noteSize();
         const promise = this.spawnInner();
         this.spawnPromises.add(promise);
         try {
-            return await promise;
+            const worker = await promise;
+            if (acquiredBudget) {
+                if (this.workers.has(worker.id)) {
+                    this.budgetedWorkerIds.add(worker.id);
+                }
+                else {
+                    this.coreBudget.release(this.workerCost);
+                }
+            }
+            return worker;
+        }
+        catch (err) {
+            if (acquiredBudget) {
+                this.coreBudget.release(this.workerCost);
+            }
+            throw err;
         }
         finally {
             this.spawning--;
@@ -326,6 +403,10 @@ export class WorkerPool {
     }
     takeIdleWorker() {
         for (const worker of this.idle) {
+            if (this.parked.has(worker)) {
+                this.parked.delete(worker);
+                continue;
+            }
             if (this.workers.has(worker.id) &&
                 worker.activeSessionId === null &&
                 !worker.cancelling &&
@@ -422,9 +503,13 @@ export class WorkerPool {
         this.clearIdleTimer(worker);
         this.idle.delete(worker);
         this.active.delete(worker);
+        this.parked.delete(worker);
         this.workers.delete(worker.id);
         worker.activeSessionId = null;
         worker.cancelling = false;
+        if (this.budgetedWorkerIds.delete(worker.id) && this.coreBudget) {
+            this.coreBudget.release(this.workerCost);
+        }
         if (shouldShutdown && !worker.handle.terminated) {
             return worker.handle.shutdown(shutdownTimeoutMs).catch(() => undefined);
         }
@@ -461,8 +546,16 @@ export class WorkerPool {
                 throw new Error(`[jxl-scheduler] Active worker ${worker.id} is terminated`);
             }
         }
-        if (this.idle.size + this.active.size > this.workers.size) {
+        if (this.idle.size + this.active.size + this.parked.size > this.workers.size) {
             throw new Error("[jxl-scheduler] Worker index sizes exceed workers map size");
+        }
+        for (const worker of this.parked) {
+            if (!this.workers.has(worker.id)) {
+                throw new Error(`[jxl-scheduler] Parked worker ${worker.id} missing from workers map`);
+            }
+            if (this.idle.has(worker) || this.active.has(worker)) {
+                throw new Error(`[jxl-scheduler] Worker ${worker.id} is parked and also in idle/active`);
+            }
         }
         if (this.workers.size + this.spawning > this.maxSize) {
             throw new Error(`[jxl-scheduler] Pool exceeds maxSize: workers=${this.workers.size}, spawning=${this.spawning}, max=${this.maxSize}`);

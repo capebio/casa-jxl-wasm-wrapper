@@ -45,3 +45,7 @@ export interface WorkerHandle {
 
 // Factory function the scheduler uses to create workers.
 export type WorkerFactory = () => Promise<WorkerHandle>;
+
+export interface AdmissionGate {
+  admit(sessionId: string, priority: Priority): Promise<() => void>;
+}

@@ -36,39 +36,48 @@ export class DedupeRegistry {
         this.subscriberToPrimary.set(subscriberId, primarySessionId);
         return { subscriberId, primarySessionId };
     }
-    // Cancel a subscriber. Returns true if all subscribers are gone and
-    // the underlying primary session should be cancelled.
-    //
-    // When the PRIMARY session itself is cancelled (subscriberId === primaryId),
-    // the source-key mapping must be torn down immediately so that future
-    // register() calls for the same key do not fan-out to the dead primary,
-    // regardless of whether fan-out subscribers are still alive.
+    // Cancel a subscriber. Returns { cancelWorker, promotedTo }.
+    // If the primary itself is cancelled but subscribers remain, one subscriber
+    // is PROMOTED to be the new primary. The underlying worker is NOT cancelled.
     cancelSubscriber(subscriberId) {
         const primaryId = this.subscriberToPrimary.get(subscriberId) ?? subscriberId;
         const isPrimary = primaryId === subscriberId;
         const subs = this.sessionToSubscribers.get(primaryId);
         if (subs === undefined)
-            return true; // already cleaned up
+            return { cancelWorker: true }; // already cleaned up
         subs.delete(subscriberId);
         this.subscriberToPrimary.delete(subscriberId);
-        // If the primary itself is being cancelled, tear down the source-key index
-        // now so no future findPrimary() hit returns this dead session.
-        if (isPrimary) {
+        if (subs.size === 0) {
+            // All subscribers gone: finish cleanup and signal caller to cancel primary.
+            this.sessionToSubscribers.delete(primaryId);
             const key = this.sessionToKey.get(primaryId);
             if (key !== undefined)
                 this.keyToSession.delete(key);
             this.sessionToKey.delete(primaryId);
+            return { cancelWorker: true };
         }
-        if (subs.size === 0) {
-            // All subscribers gone: finish cleanup and signal caller to cancel primary.
+        if (isPrimary) {
+            // Fan-out subscribers still alive. Promote the first remaining subscriber.
+            const newPrimaryId = subs.values().next().value;
+            const key = this.sessionToKey.get(primaryId);
+            if (key !== undefined) {
+                this.keyToSession.set(key, newPrimaryId);
+                this.sessionToKey.set(newPrimaryId, key);
+            }
+            this.sessionToKey.delete(primaryId);
+            this.sessionToSubscribers.set(newPrimaryId, subs);
             this.sessionToSubscribers.delete(primaryId);
-            return true;
+            for (const sub of subs) {
+                if (sub !== newPrimaryId) {
+                    this.subscriberToPrimary.set(sub, newPrimaryId);
+                }
+                else {
+                    this.subscriberToPrimary.delete(sub);
+                }
+            }
+            return { cancelWorker: false, promotedTo: newPrimaryId };
         }
-        // Fan-out subscribers still alive. If the primary itself was cancelled,
-        // return true so the scheduler kills the underlying worker session.
-        // Surviving subscribers will receive the resulting terminal message via
-        // the existing fan-out path and must handle it (e.g. resubmit).
-        return isPrimary;
+        return { cancelWorker: false };
     }
     // Clean up a completed or errored primary session.
     complete(sessionId) {

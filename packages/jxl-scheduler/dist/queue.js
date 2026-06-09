@@ -111,6 +111,13 @@ export class PriorityQueue {
     get isEmpty() {
         return this._size === 0;
     }
+    backgroundIds() {
+        const ids = [];
+        for (let i = this._backgroundHead; i < this.background.length; i++) {
+            ids.push(this.background[i].sessionId);
+        }
+        return ids;
+    }
     lane(priority) {
         switch (priority) {
             case "visible": return this.visible;

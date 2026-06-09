@@ -24,4 +24,7 @@ export interface WorkerHandle {
     readonly terminated: boolean;
 }
 export type WorkerFactory = () => Promise<WorkerHandle>;
+export interface AdmissionGate {
+    admit(sessionId: string, priority: Priority): Promise<() => void>;
+}
 //# sourceMappingURL=types.d.ts.map

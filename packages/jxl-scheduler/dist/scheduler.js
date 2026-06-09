@@ -34,6 +34,8 @@ export class Scheduler {
     pool;
     queue;
     dedupe;
+    admissionGate;
+    gateReleases = new Map();
     // All active sessions: primaries (running or queued) and dedupe subscribers.
     sessions = new Map();
     pendingHandlers = new Map();
@@ -54,9 +56,6 @@ export class Scheduler {
     _runningCount = 0;
     _queuedCount = 0;
     _pausedCount = 0;
-    // Pre-allocated queue-wait metric objects — mutated in-place before fan-out (safe: synchronous).
-    _metricInner = { name: "scheduler_queue_wait_ms", value: 0 };
-    _metricMsg = { type: "metric", sessionId: "", metric: this._metricInner };
     // Preemption victim scoring weights.
     PREEMPT_PROGRESS_W = 3.0;
     PREEMPT_AGE_W = 1.0;
@@ -67,13 +66,21 @@ export class Scheduler {
     drainLatencyEma = 50;
     DRAIN_EMA_ALPHA = 0.2;
     constructor(opts) {
-        this.pool = new WorkerPool({
+        // Build pool options without relying on spread under exactOptionalPropertyTypes.
+        // Always supply the required fields; conditionally attach coreBudget only when
+        // provided (the value itself, never the |undefined form in the object shape).
+        const poolCtorOpts = {
             factory: opts.factory,
             maxSize: opts.maxWorkers,
             idleTimeoutMs: opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
-        });
+        };
+        if (opts.coreBudget !== undefined) {
+            poolCtorOpts.coreBudget = opts.coreBudget;
+        }
+        this.pool = new WorkerPool(poolCtorOpts);
         this.queue = new PriorityQueue();
         this.dedupe = new DedupeRegistry();
+        this.admissionGate = opts.admissionGate;
         this.pushHwm = opts.pushHwm ?? DEFAULT_PUSH_HWM;
         if (opts.prewarmSize && opts.prewarmSize > 0) {
             this.pool.prewarm(opts.prewarmSize);
@@ -106,6 +113,13 @@ export class Scheduler {
                 return { workerId: primaryRecord?.worker?.id ?? -1 };
             }
             this.dedupe.register(params.sessionId, params.sourceKey);
+        }
+        // Pre-acquisition admission gate (sched-2): await BEFORE any pool.acquire,
+        // tryAcquireIdle, or preemption. Controls concurrent active sessions
+        // before workers are touched. Only primaries (non-deduped) reach here.
+        if (this.admissionGate !== undefined) {
+            const release = await this.admissionGate.admit(params.sessionId, params.priority);
+            this.gateReleases.set(params.sessionId, release);
         }
         // Sync fast path: if an idle worker is available immediately, skip the
         // async hop (Promise + microtask) that pool.acquire() always incurs.
@@ -212,6 +226,7 @@ export class Scheduler {
             delete record.pausedOnWorker;
             for (const h of record.handlers)
                 h({ type: "decode_cancelled", sessionId });
+            this.releaseAdmission(sessionId);
             this.dedupe.cancelSubscriber(sessionId);
             this._pausedCount--;
             this.sessions.delete(sessionId);
@@ -223,6 +238,7 @@ export class Scheduler {
             if (removed) {
                 this.unblockBackpressure(record);
                 record.pending.reject(new Error("[jxl-scheduler] Session cancelled."));
+                this.releaseAdmission(sessionId);
                 this.dedupe.cancelSubscriber(sessionId);
                 this._queuedCount--;
                 this.sessions.delete(sessionId);
@@ -230,8 +246,48 @@ export class Scheduler {
             }
         }
         // Subscriber (not primary): remove its record; other subscribers continue.
-        const shouldCancelPrimary = this.dedupe.cancelSubscriber(sessionId);
-        if (!shouldCancelPrimary) {
+        const { cancelWorker, promotedTo } = this.dedupe.cancelSubscriber(sessionId);
+        if (promotedTo !== undefined) {
+            // Primary was cancelled, but a subscriber was promoted.
+            // We must clean up the primary's record and rebind the worker to the new primary.
+            const promotedRecord = this.sessions.get(promotedTo);
+            if (record?.worker !== undefined && promotedRecord !== undefined) {
+                // Transfer the worker to the promoted subscriber.
+                promotedRecord.worker = record.worker;
+                record.worker.activeSessionId = promotedTo;
+            }
+            else if (record?.pausedOnWorker !== undefined && promotedRecord !== undefined) {
+                // Transfer paused state.
+                promotedRecord.state = "paused";
+                promotedRecord.pausedOnWorker = record.pausedOnWorker;
+                this.workerPausedSession.set(record.pausedOnWorker.id, promotedTo);
+            }
+            else if (record?.pending !== undefined && promotedRecord !== undefined) {
+                // Transfer queue position if still pending.
+                promotedRecord.state = "queued";
+                promotedRecord.pending = record.pending;
+                promotedRecord.pending.sessionId = promotedTo;
+                // Update the queue entry
+                this.queue.remove(sessionId);
+                this.queue.enqueue({ priority: promotedRecord.priority, sessionId: promotedTo, payload: promotedRecord.pending });
+            }
+            // Transfer gate admission (if held) to promoted so it is released when promoted work ends.
+            const grel = this.gateReleases.get(sessionId);
+            if (grel !== undefined && promotedRecord !== undefined) {
+                this.gateReleases.delete(sessionId);
+                this.gateReleases.set(promotedTo, grel);
+            }
+            if (record?.state === "running" || record?.state === "cancelling")
+                this._runningCount--;
+            else if (record?.state === "queued")
+                this._queuedCount--;
+            else if (record?.state === "paused")
+                this._pausedCount--;
+            this.sessions.delete(sessionId);
+            return true;
+        }
+        if (!cancelWorker) {
+            this.releaseAdmission(sessionId);
             if (record?.state === "running" || record?.state === "cancelling")
                 this._runningCount--;
             else if (record?.state === "queued")
@@ -244,6 +300,7 @@ export class Scheduler {
         // Running primary: send cancel to worker. Keep record until worker acks
         // (terminal message arrives in handleWorkerMessage → cleanupSession).
         if (record?.worker !== undefined) {
+            this.releaseAdmission(sessionId);
             this.unblockBackpressure(record);
             // running → cancelling: no counter change (cancelling counts as running).
             record.state = "cancelling";
@@ -256,6 +313,7 @@ export class Scheduler {
         }
         else if (record !== undefined) {
             // No worker, no pending — orphaned. Clean up.
+            this.releaseAdmission(sessionId);
             if (record.state === "running" || record.state === "cancelling")
                 this._runningCount--;
             else if (record.state === "queued")
@@ -324,8 +382,16 @@ export class Scheduler {
     // ---------------------------------------------------------------------------
     // Metrics
     // ---------------------------------------------------------------------------
+    /**
+     * Returns a shallow-cloned, frozen snapshot of scheduler metrics counters.
+     * Decouples callers from internal mutable state. The returned object may be
+     * retained across async boundaries; later mutations to scheduler (counters,
+     * queue transitions, preemption counts) will not be visible to holders.
+     * Freezing prevents receivers from mutating the snapshot they received.
+     * Architectural guard for sched-4 (Metric Object Copy Protection).
+     */
     getMetrics() {
-        return {
+        const snapshot = {
             running: this._runningCount,
             queued: this._queuedCount,
             paused: this._pausedCount,
@@ -333,6 +399,26 @@ export class Scheduler {
             preemptions: this.preemptionCount,
             totalSessions: this.totalSessionCount,
         };
+        return Object.freeze(snapshot);
+    }
+    /**
+     * Ensures a metric message's payload is decoupled before dispatch to any
+     * onMessage handler (which ultimately feeds onMetric in jxl-session).
+     * - Always returns a fresh top-level object for the dispatch (existing spread
+     *   already did this for primary and per-subscriber copies).
+     * - For type:"metric", shallow-clones the CodecMetric sub-object and freezes
+     *   both wrapper and metric so that in-place mutation of "active" metric
+     *   objects by producers cannot produce torn views for async listeners.
+     *   Listeners holding the metric across ticks see the value at dispatch time.
+     * This is the central enforcement point for sched-4.
+     */
+    protectMetricForDispatch(msg) {
+        if (msg.type !== "metric") {
+            return msg;
+        }
+        const clonedMetric = Object.freeze({ ...msg.metric });
+        const protectedMsg = Object.freeze({ ...msg, metric: clonedMetric });
+        return protectedMsg;
     }
     // ---------------------------------------------------------------------------
     // Preemption (Section 12.2)
@@ -394,9 +480,12 @@ export class Scheduler {
         }
         backgroundWorker.cancelling = false;
         if (!ackResolved) {
-            // Timed out: worker recycled. Victim session will receive decode_cancelled
-            // from the worker's shutdown sequence; clean up our side now.
-            this.releaseSession(victimSessionId);
+            // Timed out: worker recycled (pool.recycle terminates it). The terminal
+            // decode_cancelled from the worker may never arrive (activeSessionId is
+            // cleared during teardown, so handleWorkerMessage silently drops it).
+            // Use cleanupSession — not releaseSession — to ensure _runningCount is
+            // decremented and the session record is removed from the map now.
+            this.cleanupSession(victimSessionId);
             const newWorker = await this.pool.acquire();
             if (newWorker !== null) {
                 this.assignWorker(newWorker, params.sessionId, params.startMsg);
@@ -419,15 +508,14 @@ export class Scheduler {
                 this.backgroundWorkers.delete(backgroundWorker);
             }
             this.workerPausedSession.set(backgroundWorker.id, victimSessionId);
-            this.pool.release(backgroundWorker);
-            const newWorker = await this.pool.acquire();
-            if (newWorker !== null) {
-                this.assignWorker(newWorker, params.sessionId, params.startMsg);
-                this.setupSignalAbort(params.sessionId, params.signal);
-                this.preemptionCount++;
-                return newWorker.id;
-            }
-            return null;
+            this.pool.park(backgroundWorker);
+            this.pool.unpark(backgroundWorker);
+            backgroundWorker.activeSessionId = RESERVED_SESSION_ID;
+            backgroundWorker.cancelling = false;
+            this.assignWorker(backgroundWorker, params.sessionId, params.startMsg);
+            this.setupSignalAbort(params.sessionId, params.signal);
+            this.preemptionCount++;
+            return backgroundWorker.id;
         }
         else {
             // Cancel: victim's caller receives the cancellation and handles resubmit.
@@ -532,11 +620,21 @@ export class Scheduler {
             // Only queued sessions have a meaningful wait; immediate/preempt paths
             // never entered the PendingSession queue.
             if (existing.queuedAt != null) {
-                this._metricInner.value = performance.now() - existing.queuedAt;
-                this._metricMsg.sessionId = sessionId;
+                const waitMs = performance.now() - existing.queuedAt;
+                // Construct *fresh* metric payload every time (no pre-allocated mutable).
+                // protectMetricForDispatch will shallow-clone the CodecMetric and freeze
+                // before the handler call. This guarantees that any onMetric consumer
+                // (or test that stashes the payload across a tick) sees a stable value
+                // even if more queue-waits or counter mutations happen later in the
+                // scheduler. Enforces sched-4: no torn async views of active metrics.
+                const metricMsg = {
+                    type: "metric",
+                    sessionId,
+                    metric: { name: "scheduler_queue_wait_ms", value: waitMs },
+                };
                 for (const h of existing.handlers) {
                     try {
-                        h(this._metricMsg);
+                        h(this.protectMetricForDispatch(metricMsg));
                     }
                     catch { /* handler must not throw */ }
                 }
@@ -584,19 +682,24 @@ export class Scheduler {
         pass: 0.6,
         final: 0.95,
     };
-    handleWorkerMessage(sessionId, worker, msg) {
+    handleWorkerMessage(sessionId, worker, rawMsg) {
+        // Re-stamp the message with the scheduler's current active session ID.
+        // This is critical if the worker was promoted to a new primary, as the worker
+        // itself is unaware of the JS-side session ID change.
+        const msg = { ...rawMsg, sessionId };
         const record = this.sessions.get(sessionId);
         const handlers = record?.handlers ?? EMPTY_HANDLERS;
         for (const h of handlers)
-            h(msg);
+            h(this.protectMetricForDispatch(msg));
         // Fan out to dedupe subscribers.
         this.dedupe.forEachSubscriber(sessionId, (subId) => {
             if (subId === sessionId)
                 return;
             const subRecord = this.sessions.get(subId);
             const subHandlers = subRecord?.handlers ?? EMPTY_HANDLERS;
+            const stampedMsg = { ...msg, sessionId: subId };
             for (const h of subHandlers)
-                h(msg);
+                h(this.protectMetricForDispatch(stampedMsg));
         });
         // Track decode progress for victim scoring. The stage is used as a proxy for
         // fractional completion so that nearly-done sessions are spared from preemption.
@@ -653,8 +756,29 @@ export class Scheduler {
         this.pendingHandlers.delete(sessionId);
         return handlers;
     }
+    // Release the AdmissionGate slot (if any) for this sessionId (sched-2).
+    releaseAdmission(sessionId) {
+        const rel = this.gateReleases.get(sessionId);
+        if (rel !== undefined) {
+            this.gateReleases.delete(sessionId);
+            try {
+                rel();
+            }
+            catch { /* releases must not propagate */ }
+        }
+    }
+    releaseAllAdmissions() {
+        for (const [, rel] of this.gateReleases) {
+            try {
+                rel();
+            }
+            catch { /* releases must not propagate */ }
+        }
+        this.gateReleases.clear();
+    }
     // Tears down session state without triggering a queue drain.
     cleanupSession(sessionId) {
+        this.releaseAdmission(sessionId);
         const record = this.sessions.get(sessionId);
         if (record !== undefined) {
             if (record.state === "running" || record.state === "cancelling")
@@ -759,6 +883,7 @@ export class Scheduler {
                     h({ type: "decode_cancelled", sessionId: record.sessionId });
             }
         }
+        this.releaseAllAdmissions();
         await this.pool.shutdown();
         this._runningCount = 0;
         this._queuedCount = 0;
@@ -766,6 +891,7 @@ export class Scheduler {
         this.sessions.clear();
         this.backgroundWorkers.clear();
         this.workerPausedSession.clear();
+        this.gateReleases.clear();
     }
 }
 //# sourceMappingURL=scheduler.js.map

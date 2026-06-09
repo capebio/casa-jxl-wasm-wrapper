@@ -1,11 +1,14 @@
 import type { MainToWorkerMessage, WorkerToMainMessage, MsgDecodeStart, MsgEncodeStart } from "@casabio/jxl-core/protocol";
-import type { Priority, WorkerFactory } from "./types.js";
+import type { AdmissionGate, Priority, WorkerFactory } from "./types.js";
+import type { CoreBudget } from "./budget.js";
 export interface SchedulerOptions {
     factory: WorkerFactory;
     maxWorkers: number;
     idleTimeoutMs?: number;
     pushHwm?: number;
     prewarmSize?: number;
+    coreBudget?: CoreBudget;
+    admissionGate?: AdmissionGate;
 }
 export interface SchedulerMetrics {
     /** Sessions currently assigned to a worker (includes cancelling). */
@@ -25,6 +28,8 @@ export declare class Scheduler {
     private readonly pool;
     private readonly queue;
     private readonly dedupe;
+    private readonly admissionGate;
+    private readonly gateReleases;
     private readonly sessions;
     private readonly pendingHandlers;
     private readonly backgroundWorkers;
@@ -38,8 +43,6 @@ export declare class Scheduler {
     private _runningCount;
     private _queuedCount;
     private _pausedCount;
-    private readonly _metricInner;
-    private readonly _metricMsg;
     private readonly PREEMPT_PROGRESS_W;
     private readonly PREEMPT_AGE_W;
     private readonly PREEMPT_AGE_NORM_MS;
@@ -64,7 +67,27 @@ export declare class Scheduler {
     private adaptiveHwm;
     private updateDrainEma;
     private unblockBackpressure;
+    /**
+     * Returns a shallow-cloned, frozen snapshot of scheduler metrics counters.
+     * Decouples callers from internal mutable state. The returned object may be
+     * retained across async boundaries; later mutations to scheduler (counters,
+     * queue transitions, preemption counts) will not be visible to holders.
+     * Freezing prevents receivers from mutating the snapshot they received.
+     * Architectural guard for sched-4 (Metric Object Copy Protection).
+     */
     getMetrics(): SchedulerMetrics;
+    /**
+     * Ensures a metric message's payload is decoupled before dispatch to any
+     * onMessage handler (which ultimately feeds onMetric in jxl-session).
+     * - Always returns a fresh top-level object for the dispatch (existing spread
+     *   already did this for primary and per-subscriber copies).
+     * - For type:"metric", shallow-clones the CodecMetric sub-object and freezes
+     *   both wrapper and metric so that in-place mutation of "active" metric
+     *   objects by producers cannot produce torn views for async listeners.
+     *   Listeners holding the metric across ticks see the value at dispatch time.
+     * This is the central enforcement point for sched-4.
+     */
+    private protectMetricForDispatch;
     private tryPreempt;
     private scoreVictim;
     private findBackgroundWorker;
@@ -76,6 +99,8 @@ export declare class Scheduler {
     private isTerminalMessage;
     private setupSignalAbort;
     private takePendingHandlers;
+    private releaseAdmission;
+    private releaseAllAdmissions;
     private cleanupSession;
     private releaseSession;
     private drainQueue;

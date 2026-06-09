@@ -7,6 +7,7 @@
 // Scheduling policy — priority, preemption, dedupe, fairness — belongs in Scheduler.
 
 import type { PoolWorker, WorkerFactory, WorkerHandle } from "./types.js";
+import { CoreBudget } from "./budget.js";
 
 const DEV =
   typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
@@ -52,6 +53,11 @@ export class WorkerPool {
   private lastSpawnFailureMs = 0;
   private consecutiveSpawnFailures = 0;
 
+  private readonly coreBudget: CoreBudget | null;
+  private readonly workerCost = 1;
+  private static readonly PREWARM_STAGGER_MS = 16;
+  private readonly budgetedWorkerIds = new Set<number>();
+
   private readonly metrics: WorkerPoolMetrics = {
     spawned: 0,
     spawnFailed: 0,
@@ -71,12 +77,14 @@ export class WorkerPool {
     idleTimeoutMs: number;
     spawnTimeoutMs?: number;
     minIdle?: number;
+    coreBudget?: CoreBudget;
   }) {
     this.factory = opts.factory;
     this.maxSize = Math.max(0, opts.maxSize);
     this.idleTimeoutMs = Math.max(0, opts.idleTimeoutMs);
     this.spawnTimeoutMs = opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
     this.minIdle = Math.max(0, Math.min(opts.minIdle ?? 0, this.maxSize));
+    this.coreBudget = opts.coreBudget ?? null;
   }
 
   get size(): number {
@@ -135,8 +143,17 @@ export class WorkerPool {
     return this.workers.size + this.spawning;
   }
 
+  /**
+   * Returns a shallow-cloned, frozen snapshot of pool metrics.
+   * Internal counters continue to be mutated in place for the active pool
+   * (spawned, acquired*, released, etc.), but every caller receives an
+   * independent frozen view captured at call time. Retained references do
+   * not observe future mutations; external code cannot mutate the live
+   * counters through the returned object. sched-4 Metric Object Copy Protection.
+   */
   getMetrics(): WorkerPoolMetrics {
-    return { ...this.metrics };
+    const snapshot = { ...this.metrics };
+    return Object.freeze(snapshot);
   }
 
   healthSnapshot() {
@@ -264,16 +281,29 @@ export class WorkerPool {
 
   // Spawn workers eagerly so the first acquire() hits an idle worker rather than
   // paying the factory boot cost.
+  // Staggered to avoid startup pthread pool spikes (sched-6).
   prewarm(count: number): void {
     if (this.destroyed || count <= 0) return;
 
     const toSpawn = Math.min(count, this.maxSize - this.totalAllocatedOrSpawning);
-    for (let i = 0; i < toSpawn; i++) {
-      void this.spawn()
-        .then((worker) => this.handlePrewarmSuccess(worker))
-        .catch(() => undefined);
-    }
+    if (toSpawn <= 0) return;
+    void this.spawnStaggered(toSpawn);
     this.assertInvariants();
+  }
+
+  private async spawnStaggered(n: number): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      if (this.destroyed) break;
+      try {
+        const worker = await this.spawn();
+        this.handlePrewarmSuccess(worker);
+      } catch {
+        // spawn already accounts failure; continue stagger
+      }
+      if (i < n - 1) {
+        await new Promise((r) => setTimeout(r, WorkerPool.PREWARM_STAGGER_MS));
+      }
+    }
   }
 
   /** Manually evict idle workers, e.g. on memory pressure. Returns count reaped. */
@@ -366,6 +396,12 @@ export class WorkerPool {
   }
 
   private async spawn(): Promise<PoolWorker> {
+    let acquiredBudget = false;
+    if (this.coreBudget) {
+      await this.coreBudget.acquire(this.workerCost);
+      acquiredBudget = true;
+    }
+
     this.spawning++;
     this.noteSize();
 
@@ -373,7 +409,20 @@ export class WorkerPool {
     this.spawnPromises.add(promise);
 
     try {
-      return await promise;
+      const worker = await promise;
+      if (acquiredBudget) {
+        if (this.workers.has(worker.id)) {
+          this.budgetedWorkerIds.add(worker.id);
+        } else {
+          this.coreBudget!.release(this.workerCost);
+        }
+      }
+      return worker;
+    } catch (err) {
+      if (acquiredBudget) {
+        this.coreBudget!.release(this.workerCost);
+      }
+      throw err;
     } finally {
       this.spawning--;
       this.spawnPromises.delete(promise);
@@ -568,6 +617,10 @@ export class WorkerPool {
 
     worker.activeSessionId = null;
     worker.cancelling = false;
+
+    if (this.budgetedWorkerIds.delete(worker.id) && this.coreBudget) {
+      this.coreBudget.release(this.workerCost);
+    }
 
     if (shouldShutdown && !worker.handle.terminated) {
       return worker.handle.shutdown(shutdownTimeoutMs).catch(() => undefined);

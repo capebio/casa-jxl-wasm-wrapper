@@ -89,5 +89,53 @@ describe("Scheduler dedupe", () => {
         assert.ok(cancelSent, "primary cancelled when all subscribers cancel");
         await sched.shutdown();
     });
+    it("primary cancel with 2 surviving subscribers: subs complete without hanging", async () => {
+        const workers = [];
+        const sched = new Scheduler({
+            factory: fakeWorkerFactory(workers),
+            maxWorkers: 2,
+            idleTimeoutMs: 60_000,
+        });
+        await sched.acquireSlot({
+            sessionId: "primary",
+            priority: "visible",
+            startMsg: makeDecodeStart("primary", "visible"),
+            sourceKey: "key-orphan",
+            signal: null,
+        });
+        await sched.acquireSlot({
+            sessionId: "sub1",
+            priority: "visible",
+            startMsg: makeDecodeStart("sub1", "visible"),
+            sourceKey: "key-orphan",
+            signal: null,
+        });
+        await sched.acquireSlot({
+            sessionId: "sub2",
+            priority: "visible",
+            startMsg: makeDecodeStart("sub2", "visible"),
+            sourceKey: "key-orphan",
+            signal: null,
+        });
+        const sub1Received = [];
+        const sub2Received = [];
+        sched.onMessage("sub1", (m) => sub1Received.push(m));
+        sched.onMessage("sub2", (m) => sub2Received.push(m));
+        sched.cancelSession("primary");
+        const worker = workers[0];
+        assert.ok(worker, "worker should be spawned");
+        const sawPrimaryCancel = worker.messages.some((m) => m.type === "decode_cancel" && m.sessionId === "primary");
+        assert.equal(sawPrimaryCancel, false, "no cancel sent to worker because subscriber was promoted");
+        // Worker continues to finish, now effectively under sub1 or sub2's identity
+        worker.emit({ type: "decode_cancelled", sessionId: "primary" }); // original worker might still send primary id
+        await new Promise((r) => setTimeout(r, 20));
+        const sub1GotOwn = sub1Received.some((m) => m.type === "decode_cancelled" && (m.sessionId === "sub1" || m.sessionId === "sub2"));
+        const sub2GotOwn = sub2Received.some((m) => m.type === "decode_cancelled" && (m.sessionId === "sub1" || m.sessionId === "sub2"));
+        assert.ok(sub1GotOwn, "sub1 received terminal message");
+        assert.ok(sub2GotOwn, "sub2 received terminal message");
+        sched.completeSession("sub1");
+        sched.completeSession("sub2");
+        await sched.shutdown();
+    });
 });
 //# sourceMappingURL=scheduler.dedupe.test.js.map

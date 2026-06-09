@@ -19,6 +19,7 @@ export declare class PriorityQueue<T> {
     private swapDelete;
     get size(): number;
     get isEmpty(): boolean;
+    backgroundIds(): string[];
     private lane;
 }
 //# sourceMappingURL=queue.d.ts.map
