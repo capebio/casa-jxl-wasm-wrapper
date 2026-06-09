@@ -37,6 +37,7 @@ export function toEntry(level: PyramidLevelBytes, masterW: number, masterH: numb
     bitsPerSample: level.bitsPerSample ?? 8,
     contenthash: contentHash16(level.data),
     tiled: level.tiled === true,
+    ...(level.convergedByteEnd != null ? { convergedByteEnd: level.convergedByteEnd } : {}),
   };
 }
 

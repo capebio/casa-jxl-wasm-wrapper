@@ -20,6 +20,8 @@ export interface PyramidLevelBytes {
   height: number;
   bitsPerSample?: 8 | 16;
   tiled?: boolean;
+  /** populated by profileConvergence when --profile-convergence and saturation met on a pass */
+  convergedByteEnd?: number;
 }
 
 export interface TileContainerEncodeOptions {
@@ -60,6 +62,8 @@ export interface JxlBackend {
   ): Promise<Uint8Array>;
   transcodeJpeg(jpeg: Uint8Array): Promise<Uint8Array>;
   decodeToRgba8(jxl: Uint8Array): Promise<{ rgba: Uint8Array; width: number; height: number }>;
+  /** incremental progressive decode + SSIM (or butter) to find first visual saturation byte offset for the level's own final. returns undef if single-pass or below threshold or small level. */
+  profileConvergence?(jxl: Uint8Array, w?: number, h?: number): Promise<number | undefined>;
 }
 
 export interface Telemetry {
@@ -142,6 +146,92 @@ export function createJxlBackend(): JxlBackend {
       }
       if (!result) throw new Error("decode produced no final frame");
       return result;
+    },
+
+    async profileConvergence(jxl, w, h) {
+      if (!jxl || jxl.length === 0) return undefined;
+      if (w != null && h != null && Math.max(w, h) < 1024) return undefined;
+      const createDecoder = JW.createDecoder;
+      if (typeof createDecoder !== "function") return undefined;
+      const decoder = createDecoder({
+        format: "rgba8",
+        progressionTarget: "final",
+        emitEveryPass: true,
+        preserveIcc: false,
+        preserveMetadata: false,
+      });
+      const passes: Array<{ bytes: number; pixels: Uint8Array }> = [];
+      let finalPixels: Uint8Array | null = null;
+      let infoW = w ?? 0, infoH = h ?? 0;
+      let bytesPushed = 0;
+      const drainP = (async () => {
+        for await (const ev of decoder.events()) {
+          if (ev.type === "header") {
+            infoW = ev.info?.width ?? infoW;
+            infoH = ev.info?.height ?? infoH;
+          } else if (ev.type === "progress") {
+            const raw = ev.pixels;
+            const px = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
+            passes.push({ bytes: bytesPushed, pixels: px });
+          } else if (ev.type === "final") {
+            const raw = ev.pixels;
+            finalPixels = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
+            infoW = ev.info?.width ?? infoW;
+            infoH = ev.info?.height ?? infoH;
+          } else if (ev.type === "error") {
+            throw new Error(`profile decode ${ev.code}: ${ev.message}`);
+          }
+        }
+      })();
+      try {
+        const CHUNK = 32768;
+        for (let off = 0; off < jxl.length; off += CHUNK) {
+          const end = Math.min(off + CHUNK, jxl.length);
+          const chunk = jxl.subarray(off, end);
+          bytesPushed += chunk.length;
+          await Promise.resolve(decoder.push(chunk));
+        }
+        await Promise.resolve(decoder.close());
+        await drainP;
+      } catch {
+        await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
+        return undefined;
+      } finally {
+        await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
+      }
+      if (!finalPixels || passes.length === 0) return undefined;
+      const useW = infoW || w || 0;
+      const useH = infoH || h || 0;
+      if (useW <= 0 || useH <= 0) return undefined;
+      if (Math.max(useW, useH) < 1024) return undefined;
+      try {
+        const ssimMod: any = await import("ssim.js").catch(() => null);
+        if (!ssimMod) return undefined;
+        const ssimFn = (ssimMod.default || ssimMod).ssim;
+        if (typeof ssimFn !== "function") return undefined;
+        const useButter = typeof JW.computeButteraugli === "function";
+        for (const p of passes) {
+          if (p.pixels.length !== finalPixels.length) continue;
+          const img1 = { data: Uint8ClampedArray.from(p.pixels), width: useW, height: useH };
+          const img2 = { data: Uint8ClampedArray.from(finalPixels), width: useW, height: useH };
+          const res = ssimFn(img1, img2);
+          const ssimVal = typeof res === "number" ? res : res && res.mssim;
+          let meets = typeof ssimVal === "number" && ssimVal >= 0.9995;
+          if (!meets && useButter) {
+            try {
+              const ba = await JW.computeButteraugli(p.pixels.buffer ?? p.pixels, finalPixels.buffer ?? finalPixels, useW, useH);
+              if (typeof ba === "number" && ba <= 1.1) meets = true;
+            } catch {}
+          }
+          if (meets) {
+            if (p.bytes > 0 && p.bytes < jxl.length) return p.bytes;
+            break;
+          }
+        }
+      } catch {
+        return undefined;
+      }
+      return undefined;
     },
   };
 }

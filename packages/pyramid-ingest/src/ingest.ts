@@ -24,6 +24,7 @@ export interface IngestOptions {
   force?: boolean;
   verifyHash?: boolean;
   acceptUnsupported?: boolean; // WU-5: default accept-degraded (Q2)
+  profileConvergence?: boolean;
 }
 
 export type IngestOutcome = "written" | "skipped";
@@ -40,7 +41,7 @@ export interface IngestPlan {
   orientation: Orientation;
   width: number;
   height: number;
-  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean }>;
+  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean; convergedByteEnd?: number }>;
   proxy: boolean;
   manifest: Manifest;
 }
@@ -235,14 +236,14 @@ export async function computeIngestPlan(
     const decoded = await decodeMaster(b, format, bytes);
     tel?.stage("decode-master", { w: decoded.width, h: decoded.height });
     ladder = await buildProxyLadder(
-      b.jxl, decoded.rgba, decoded.width, decoded.height, opts.proxy, decoded.orientation,
+      b.jxl, decoded.rgba, decoded.width, decoded.height, opts.proxy, decoded.orientation, !!opts.profileConvergence,
     );
   } else if (format === "jpg") {
-    ladder = await buildJpgLadder(b.jxl, bytes);
+    ladder = await buildJpgLadder(b.jxl, bytes, !!opts.profileConvergence);
   } else {
     const decoded = await b.raw.decode(bytes, format);
     tel?.stage("decode-master", { w: decoded.width, h: decoded.height });
-    ladder = await buildRawLadder(b.jxl, decoded);
+    ladder = await buildRawLadder(b.jxl, decoded, !!opts.profileConvergence);
   }
 
   tel?.stage("ladder-built", { levels: ladder.levels.length, w: ladder.width, h: ladder.height });
@@ -379,7 +380,7 @@ async function buildFallbackPlan(
   // Tier 3
   const jpeg = await tryExtractEmbeddedJpeg(bytes);
   if (jpeg && jpeg.length > 0) {
-    const ladder = await buildJpgLadder(b.jxl, jpeg); // reuse jpg path (transcode + pyramid, may tile)
+    const ladder = await buildJpgLadder(b.jxl, jpeg, !!opts.profileConvergence); // reuse jpg path (transcode + pyramid, may tile)
     const entries = ladder.levels.map((lv) => toEntry(lv, ladder.width, ladder.height));
     const manifest = buildManifest({
       imageId: identity.imageId,

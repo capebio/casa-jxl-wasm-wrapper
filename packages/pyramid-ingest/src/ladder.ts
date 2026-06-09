@@ -40,7 +40,7 @@ async function maybeTileTopLevel(
   return [...sidecars, { data: tiled, width, height, bitsPerSample: 8, tiled: true }];
 }
 
-export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster): Promise<LadderResult> {
+export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, profileConvergence = false): Promise<LadderResult> {
   const plan = planLadder();
   const { rgba, rgb16, width, height } = decoded;
 
@@ -62,21 +62,26 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster): P
         distance: qualityToDistance(BIG_QUALITY),
         effort: EFFORT,
       });
+      const outLevels = [...gridLevels, ...bigLevels, { data: tiled, width, height, bitsPerSample: 8, tiled: true }];
+      if (profileConvergence) await attachConverged(jxl, outLevels);
       return {
-        levels: [...gridLevels, ...bigLevels, { data: tiled, width, height, bitsPerSample: 8, tiled: true }],
+        levels: outLevels,
         orientation: decoded.orientation,
         width,
         height,
       };
     }
 
-    return { levels: [...gridLevels, ...bigLevels], orientation: decoded.orientation, width, height };
+    const outLevels = [...gridLevels, ...bigLevels];
+    if (profileConvergence) await attachConverged(jxl, outLevels);
+    return { levels: outLevels, orientation: decoded.orientation, width, height };
   }
 
   const levels = await jxl.encodePyramid(rgba, width, height, plan);
   const finalLevels = await maybeTileTopLevel(
     jxl, levels.map((l) => ({ ...l, bitsPerSample: 8 })), rgba, width, height,
   );
+  if (profileConvergence) await attachConverged(jxl, finalLevels);
   return {
     levels: finalLevels,
     orientation: decoded.orientation,
@@ -85,7 +90,21 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster): P
   };
 }
 
-export async function buildJpgLadder(jxl: JxlBackend, jpeg: Uint8Array): Promise<LadderResult> {
+async function attachConverged(jxl: JxlBackend, levels: PyramidLevelBytes[]): Promise<void> {
+  for (const lvl of levels) {
+    const mx = Math.max(lvl.width, lvl.height);
+    if (mx >= 1024 && typeof jxl.profileConvergence === "function") {
+      try {
+        const ce = await jxl.profileConvergence(lvl.data, lvl.width, lvl.height);
+        if (ce != null && ce > 0) lvl.convergedByteEnd = ce;
+      } catch {
+        // graceful: omit on error, single-pass JXL, or no ssim
+      }
+    }
+  }
+}
+
+export async function buildJpgLadder(jxl: JxlBackend, jpeg: Uint8Array, profileConvergence = false): Promise<LadderResult> {
   const fullJxl = await jxl.transcodeJpeg(jpeg);
   const decoded = await jxl.decodeToRgba8(fullJxl);
   const produced = await jxl.encodePyramid(decoded.rgba, decoded.width, decoded.height, planLadder());
@@ -104,8 +123,10 @@ export async function buildJpgLadder(jxl: JxlBackend, jpeg: Uint8Array): Promise
     fullLevel = { data: fullJxl, width: decoded.width, height: decoded.height, bitsPerSample: 8, tiled: false };
   }
 
+  const outLevels: PyramidLevelBytes[] = [...sidecars.map((l) => ({ ...l, bitsPerSample: 8 as const })), fullLevel];
+  if (profileConvergence) await attachConverged(jxl, outLevels);
   return {
-    levels: [...sidecars.map((l) => ({ ...l, bitsPerSample: 8 as const })), fullLevel],
+    levels: outLevels,
     orientation: "source",
     width: decoded.width,
     height: decoded.height,
@@ -119,9 +140,12 @@ export async function buildProxyLadder(
   height: number,
   size: number,
   orientation: Orientation,
+  profileConvergence = false,
 ): Promise<LadderResult> {
   const produced = await jxl.encodePyramid(rgba, width, height, planProxy(size));
   const level = produced[0];
   if (!level) throw new Error("proxy encode produced no level");
-  return { levels: [{ ...level, bitsPerSample: 8 }], orientation, width, height };
+  const outLevels: PyramidLevelBytes[] = [{ ...level, bitsPerSample: 8 }];
+  if (profileConvergence) await attachConverged(jxl, outLevels);
+  return { levels: outLevels, orientation, width, height };
 }
