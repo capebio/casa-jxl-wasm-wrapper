@@ -153,13 +153,37 @@ fn tone_curve(x: f32, p: &TonePost) -> f32 {
     linear_to_srgb(y.clamp(0.0, 1.0))
 }
 
+/// Highlight rolloff knee, in normalized linear (after WB + exposure gain).
+/// Values at or below the knee pass through unchanged; above it they roll off
+/// smoothly toward 1.0 instead of hard-clipping, so WB- or exposure-boosted
+/// highlights — notably skies, where the red/blue WB multipliers exceed 1.0 and
+/// drive those channels past the clip point before green — retain gradient
+/// detail instead of flattening to a featureless white.
+const HIGHLIGHT_KNEE: f32 = 0.80;
+
+/// Soft highlight shoulder: identity below `HIGHLIGHT_KNEE`, then a smooth
+/// asymptotic rolloff that maps `[knee, +inf)` into `[knee, 1.0)`. The rolloff
+/// is C1-continuous at the knee (slope 1 on both sides), so there is no visible
+/// kink where it engages. Replaces a hard clamp to 1.0, which discarded all
+/// detail above the clip point and made highlight recovery impossible.
+#[inline(always)]
+fn highlight_shoulder(x: f32) -> f32 {
+    if x <= HIGHLIGHT_KNEE {
+        x
+    } else {
+        let range = 1.0 - HIGHLIGHT_KNEE; // output headroom above the knee
+        let s = x - HIGHLIGHT_KNEE;       // input excess above the knee (may be >> range)
+        HIGHLIGHT_KNEE + range * (s / (s + range))
+    }
+}
+
 fn build_pre_lut(black: u16, white: u16, wb_eff: f32, exp_gain: f32) -> Vec<u16> {
     let mut lut = vec![0u16; 65536];
     let denom = (white.saturating_sub(black)).max(1) as f32;
     let gain = wb_eff * exp_gain;
     for i in 0..65536usize {
         let centered = (i as i32 - black as i32).max(0) as f32;
-        let n = (centered / denom * gain).clamp(0.0, 1.0);
+        let n = highlight_shoulder(centered / denom * gain);
         lut[i] = (n * 65535.0 + 0.5).min(65535.0) as u16;
     }
     lut
