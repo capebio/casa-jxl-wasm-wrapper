@@ -164,7 +164,8 @@ function strictPositiveInt(name: string, raw: string): number {
 
 export type CliArgs = z.infer<typeof cliArgsSchema>;
 
-/** Magic-byte signatures for adversarial unknown-RAW detection (colocated with Zod per Q6).
+/** Magic-byte signatures for adversarial unknown-RAW detection (colocated with Zod per Q6). // WU-5-8 handoff safe-concurrency
+
  *  Used only for Tier-3/5 fallback when native Tier-1 decode fails or ext unknown.
  *  Prefix matches (order: more specific first if needed).
  */
