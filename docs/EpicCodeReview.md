@@ -1695,9 +1695,216 @@ Full per-candidate JSON (candidates → verified → plan): `.epiccodereview/202
 
 Review halted at planning stage per user request. To resume:
 
-1. Re-enter worktree: `git worktree list` → `C:\Foo
-aw-converter-wasm\.worktrees\jxl-pyramid-warm-pool`
+1. Re-enter worktree: `git worktree list` → `C:\Foo\raw-converter-wasm\.worktrees\jxl-pyramid-warm-pool`
 2. Pick fix scope (recommend: critical + high + 16-bit propagation chain first)
 3. Skill resume not native — dispatch fixers manually from `fix_briefs/*.json`
 
 Stash carrying parked HANDOFF docs on the original branch: `stash@{0}: epiccodereview: park HANDOFF docs`
+
+---
+
+# Multi-Agent Implementation Plan (Grok 1-4)
+
+This implementation plan coordinates four specialized agents (**Grok 1, Grok 2, Grok 3, and Grok 4**) to systematically implement the code fixes, refactors, and performance enhancements outlined in this review. Tasks are grouped strictly by the files they touch to avoid overlapping modifications or concurrency merge conflicts. 
+
+Within files, responsibilities are distributed round-robin style to ensure efficient execution.
+
+## Global Mandates & Rejection Protocol
+
+Every agent must strictly adhere to the following rules:
+1. **Validation & Type Safety:** Maintain strict TypeScript typing. Never use `any` or cast types unless absolutely required by a third-party boundary. Never use bracket notation `obj["private_field"]` to bypass type accessibility constraints.
+2. **Rejection Clause / Posture:** If an assigned task or optimization would result in a net-negative impact (e.g., increased memory footprint, higher CPU overhead, API degradation, thread safety risks, or unnecessary complexity without empirical performance benefits), **reject the task immediately**. The agent must document the rejection by appending the proposal name, file, and concrete empirical/architectural reasons to:
+   `c:\Foo\raw-converter-wasm\docs\rejected optimizations.md`
+3. **No Direct Commits:** Implement the changes in the designated code workspace. Do not stage or commit files unless explicitly directed in a downstream agent prompt.
+4. **Validation Suite:** Run the active unit tests and compilation checks (`npm run build`, `npm run test` or package-specific runners) to verify correctness after every modification.
+
+---
+
+## Agent: Grok 1
+### Focus Files & Boundaries
+*   `packages/jxl-pyramid/src/tiled-decode-pool.ts` (Core Pool Infrastructure, Lifecycle, and Memory Transport)
+
+### Assigned Tasks (Round-Robin)
+
+#### Task G1-A: Pool Lifecycle & Public Teardown API (High / Lens 2-A / RESIL-D)
+*   **Context:** `PyramidWorkerPool` currently has no public teardown API, and its `destroyed` flag is dead code (never set to `true`). This leaks workers and active idle timers across SPA navigation, test suites, and hot module reloading.
+*   **Instructions:**
+    *   Export two clean, public lifecycle functions from `tiled-decode-pool.ts`: `prewarmPyramidPool(factory, opts?)` and `disposePyramidPool()`.
+    *   Implement a public `destroy()` / `dispose()` method in `PyramidWorkerPool` that flips the `destroyed` flag to `true`, terminates all active and idle workers, clears all pending `armIdleTimer` timeout handles, and clears/nulls the process-wide module singleton.
+    *   Update `acquire` and `prewarm` to immediately short-circuit with an error if the pool is in a destroyed state.
+    *   *Rejection Check:* If a public teardown increases overhead or disrupts the process-wide singleton model unnecessarily, reject to `docs\rejected optimizations.md`.
+
+#### Task G1-B: Encapsulation & Bracket-Access Cleanup (Low / Lens 2-A / Lens 2-B)
+*   **Context:** Sibling methods in `tiled-decode-pool.ts` access private fields of `PyramidWorkerPool` using bracket notation (e.g., `pool["destroyed"]` and `p["minIdle"]`), defeating TypeScript’s compiler access checks and introducing fragile points that break during code refactoring.
+*   **Instructions:**
+    *   Refactor the class and helpers to eliminate all string bracket access to private members.
+    *   Expose appropriate read-only public getters or package-internal access channels if these fields must be inspected by module-scoped factory functions.
+    *   *Rejection Check:* If this cleanup degrades performance of the hot lookup path, reject to `docs\rejected optimizations.md`.
+
+#### Task G1-C: Worker ID Routing & Collision Resolution (Medium / Lens 4-D)
+*   **Context:** The `nextWorkerId` is module-scoped, global, and monotonic. Under dual-bundle loads or HMR, the counter resets, risking ID collisions and message mis-routing across separate active pool sessions.
+*   **Instructions:**
+    *   Scope the transaction/worker ID counter directly to the `PyramidWorkerPool` instance (re-initialized to zero upon pool instantiation/re-creation).
+    *   Alternatively, manage routing by keeping a per-handle `Map<id, {resolve, reject}>` on each active worker handle, isolating the transaction space.
+    *   *Rejection Check:* If localizing IDs adds measurable microtask latency on the hot decode path, reject to `docs\rejected optimizations.md`.
+
+#### Task G1-D: Optimized Container Transport via Slicing or SAB (High / Lens 5-C / Lens 6-B / Lens 9-A / SEC2-B)
+*   **Context:** Currently, the entire JXTC container bytes array is structured-cloned once per tile via `postMessage` (N times per viewport), introducing an extremely heavy O(N · containerBytes) memory and copy cost that often causes Out-Of-Memory (OOM) failures.
+*   **Instructions:**
+    *   Inspect `canUseParallelTileWorkers()`: if `crossOriginIsolated` is available and SharedArrayBuffer is permitted, share the container buffer once in place across workers.
+    *   If SharedArrayBuffer is unavailable, slice the JXTC container per tile using `containerBytes.subarray(tileOffset, tileOffset + tileLength)` and include the slice in the `postMessage` transferable list. This reduces copy volume from N× full container to approximately 1× full container across the boundary.
+    *   *Rejection Check:* If buffer slicing degrades the synchronous slicing cost on the main thread more than it saves on cloning overhead, reject to `docs\rejected optimizations.md`.
+
+#### Task G1-E: Backpressure & Wait Queue on Acquire (Medium / Lens 2-A / TRUST-D)
+*   **Context:** The pool has no queue mechanism when acquiring workers. If the active workers count reaches `maxSize`, the pool returns fewer/no workers, causing the caller to silently degrade immediately to single-WASM decode on the main thread.
+*   **Instructions:**
+    *   Add a FIFO waiter queue (`Promise`-based deferrals) to the `acquire` path of `PyramidWorkerPool`.
+    *   Instead of immediate silent fallback to single-WASM main-thread decoding, allow callers to wait on available workers up to a configurable millisecond timeout.
+    *   *Rejection Check:* If wait-queues introduce deadlocks or increase interactive frame latency during fast scrolling, reject to `docs\rejected optimizations.md`.
+
+---
+
+## Agent: Grok 2
+### Focus Files & Boundaries
+*   `packages/jxl-pyramid/src/tiled-decode-pool.ts` (Worker Concurrency, Safety, and Control)
+*   `web/lightbox/tiled-decode-worker.js` (Worker Target Implementation)
+
+### Assigned Tasks (Round-Robin)
+
+#### Task G2-A: End-to-End 16-Bit Parallel Worker Decoding (Critical / Lens 1-C / Lens 6-C)
+*   **Context:** The parallel worker path silently corrupts 16-bit tiled containers. The worker (`tiled-decode-worker.js`) unconditionally calls 8-bit decoding (`decodeTileContainerRegionRgba8`), and the stitch path defaults to a hardcoded 4-bytes-per-pixel stitch buffer.
+*   **Instructions:**
+    *   Update `tiled-decode-worker.js` to inspect the incoming tiles’ required bit depth (`bitsPerSample` / 16-bit flag) and execute `decodeTileContainerRegionRgba16` when appropriate.
+    *   Update the worker message payload to carry a clear bit depth or bytes-per-pixel (`bpp`) indicator.
+    *   Update the receiving stitch buffer allocation in `tiled-decode-pool.ts` to dynamically calculate buffer size and offsets based on the actual bytes-per-pixel (8 bpp for 16-bit; 4 bpp for 8-bit).
+    *   *Rejection Check:* If 16-bit routing increases latency of the 8-bit happy path by more than 2%, reject to `docs\rejected optimizations.md`.
+
+#### Task G2-B: Single-State Liveness Mapping & TOCTOU Race Prevention (High / Lens 4-A / SEC2-C)
+*   **Context:** A worker handle's state is scattered across several booleans (`terminated`, `bad`) and three disjoint arrays (`all`, `idle`, `active`), which can lead to invalid states. Furthermore, an idle reaper timer can terminate a worker right as `acquire` is selecting it, causing messages to be posted to dead workers.
+*   **Instructions:**
+    *   Consolidate the liveness representation into a single, strongly-typed state field on the handle: `state: "idle" | "active" | "dead"`.
+    *   In `decodeTilesParallel` coroutines, track the worker **handle** instead of the raw `WorkerLike` object, and verify that `handle.state !== "dead"` before dispatching each tile task.
+    *   During `acquire()`, atomically pop the worker from the `idle` array and cancel its idle reaper timer immediately to prevent a Time-of-Check to Time-of-Use (TOCTOU) race.
+    *   *Rejection Check:* If state consolidation introduces synchronization overhead or memory churn, reject to `docs\rejected optimizations.md`.
+
+#### Task G2-C: Worker Death Rejection & watchdog Timeout (High / OWL-B / RESIL-B)
+*   **Context:** Currently, if a worker crashes or hangs in WASM mid-decode, its pending promise never settles, causing `Promise.all` in `decodeTilesParallel` to hang indefinitely with no console errors or user feedback.
+*   **Instructions:**
+    *   Add proper `onerror` and `onmessageerror` event listeners to every spawned worker.
+    *   Upon detecting worker death, error, or pool-enforced reaping, immediately locate and reject all pending tile promises associated with that worker.
+    *   Implement a robust per-tile watchdog timer (e.g., 5-second deadline) in `decodeTileWithWorker`. If the worker fails to reply within the deadline, reject the promise, mark the handle `dead` / `bad`, and terminate the worker.
+    *   *Rejection Check:* If watchdog timers introduce noticeable garbage collection pressure or overhead under rapid viewport updates, reject to `docs\rejected optimizations.md`.
+
+#### Task G2-D: Viewport Abort & Concurrency Preemption (High / Lens 4-B / SEC2-E)
+*   **Context:** Viewport decodes cannot be aborted. Fast panning or zooming causes older, superseded tile decodes to run to completion, clogging pool workers and degrading frame rates.
+*   **Instructions:**
+    *   Thread a standard `AbortSignal` parameter from `decodeTiledViewportPooled` through to `decodeTilesParallel` and `decodeTileWithWorker`.
+    *   On abort, immediately stop scheduling any new tiles, reject all active/in-flight tile promises with a distinct `AbortError`, and release pool workers.
+    *   Only return workers to `idle` once their active jobs have been confirmed as aborted or fully settled to prevent corrupted messages from bleeding into subsequent decodes.
+    *   *Rejection Check:* If AbortSignal listener management causes memory leaks or delays worker reuse, reject to `docs\rejected optimizations.md`.
+
+#### Task G2-E: Worker Message Verification (Medium / Lens 6-C / TRUST-B)
+*   **Context:** Worker replies are trusted blindly. A compromised, out-of-sync, or buggy worker returning dimensions that disagree with the requested region can trigger out-of-bounds writes or RangeErrors in the stitch loop.
+*   **Instructions:**
+    *   Upon receiving a worker message, explicitly validate its parameters: assert `ok === true`, check that `width` and `height` match the requested region's expected dimensions, and assert `pixels.byteLength === width * height * bpp`.
+    *   Reject the promise immediately if any boundary contract is violated.
+    *   *Rejection Check:* If message assertion adds measurable latency to fast tile decoding, reject to `docs\rejected optimizations.md`.
+
+---
+
+## Agent: Grok 3
+### Focus Files & Boundaries
+*   `packages/jxl-pyramid/src/decode-level.ts` (Decode Spine, Stitching, and Format Transport)
+*   `packages/jxl-pyramid/src/choose-level.ts` (Level Ranking and Zoom Selection)
+*   `packages/jxl-pyramid/src/level-source.ts` (Level Source Types)
+
+### Assigned Tasks (Round-Robin)
+
+#### Task G3-A: 16-Bit Whole-Frame Support (High / Lens 2-G / DARK1-A)
+*   **Context:** `decodeWhole` always hardcodes `format: "rgba8"` when creating the WASM decoder, which silently discards 16-bit detail and quantizes high-precision whole-level frames down to 8-bit.
+*   **Instructions:**
+    *   Carry `bitsPerSample` (or `bits: 8 | 16`) in the `"whole"` variant of `LevelSource` defined in `level-source.ts`.
+    *   Refactor `decodeWhole` to accept a `bits` parameter, dynamically requesting `"rgba16"` when bits=16.
+    *   Ensure the whole path in `decodeLevel` routes correct bit-depth options through to the WASM facade.
+    *   *Rejection Check:* If 16-bit whole-level decoding degrades performance of the dominant 8-bit thumbnail path, reject to `docs\rejected optimizations.md`.
+
+#### Task G3-B: Invariant try/finally Decoder Disposal (High / Lens 4-F / OWL-A / RESIL-A)
+*   **Context:** In `decodeWhole`, the awaits on `push`, `close`, and `drain` occur in a flat sequential chain. If any throw an error (e.g., malformed JXL input), the function rejects before reaching `decoder.dispose()`, permanently leaking the WASM session state and heap memory.
+*   **Instructions:**
+    *   Wrap the entire decoder lifecycle inside `decodeWhole` within a strict `try/finally` block.
+    *   Ensure that `await decoder.dispose()` is unconditionally invoked inside the `finally` block.
+    *   Ensure any async errors thrown during the IIFE `drain` are caught and handled safely without leaving active Promises in-flight.
+    *   *Rejection Check:* If try/finally structures introduce measurable microtask overhead on rapid, tiny thumbnail decodes, reject to `docs\rejected optimizations.md`.
+
+#### Task G3-C: Stitching Deduplication, Export & Strength-Reduction (Medium / Lens 1-D / Lens 5-A / Lens 12-B)
+*   **Context:** Sibling modules duplicate the entire stitching copy algorithm (`stitch` in `tiled-decode-pool.ts` vs `stitchTileDecodes` in `decode-level.ts`). Additionally, both loops perform expensive multiplications per row to calculate source and destination offsets.
+*   **Instructions:**
+    *   Deduplicate the logic. Export `stitchTileDecodes`, `pickRegionDecoder`, and `bppFor` from `decode-level.ts` (or place them in a small, shared internal `tile-geom.ts` module) and import them for reuse inside `tiled-decode-pool.ts`.
+    *   Optimize the inner stitch copy loop using strength reduction: accumulate offsets sequentially with additive strides (`dstOff += dstStride; srcOff += srcStride`) instead of running per-row multiplications (`row * stride`) inside the tight loop.
+    *   *Rejection Check:* If the shared geometry function adds call-stack overhead that slows down stitching, reject to `docs\rejected optimizations.md`.
+
+#### Task G3-D: In-Thread Parallel Fan-Out Elimination (High / Lens 1-B / Lens 6-E)
+*   **Context:** `decodeTiledViewport` implements an in-thread `Promise.all` parallel tile fan-out when workers are disabled. Because the synchronous WASM decoder is single-threaded, this parallel branch merely serializes the execution while adding heavy re-entry, allocation, and stitching overhead, making it strictly slower than a single-ROI decode.
+*   **Instructions:**
+    *   Remove the in-thread `Promise.all` fan-out branch entirely from `decodeTiledViewport`.
+    *   Ensure the non-worker path always executes a single-ROI whole-viewport decode.
+    *   *Rejection Check:* If removing in-thread tile slicing breaks backward-compatibility with custom region-decoder injectors, reject to `docs\rejected optimizations.md`.
+
+#### Task G3-E: Level Selection Ranking & Jitter Hysteresis (High / Lens 1-E / Lens 9-B / SRCH-A / Lens 12-C)
+*   **Context:** `chooseLevelForTarget` sorts the levels array by pixel area but queries by long edge, returning incorrect levels when area and long edge order disagree. It also copies, sorts, and linear-scans on every single pan/zoom frame, creating extreme GC churn.
+*   **Instructions:**
+    *   Align the sorting key with the query predicate: sort the levels array ascending by `longEdge` (and precompute/cache this sorted view instead of re-sorting on every call).
+    *   Implement binary search over the pre-sorted `longEdge` array to find the smallest level where long edge >= target in O(log N) time.
+    *   Add a simple `{ lastTarget, lastLevel }` memoization fast-path to immediately return the previously selected level if the target remains identical across frame ticks, bypassing the search entirely.
+    *   *Rejection Check:* If caching or binary searching slows down static, non-scrolling level queries, reject to `docs\rejected optimizations.md`.
+
+---
+
+## Agent: Grok 4
+### Focus Files & Boundaries
+*   `packages/jxl-pyramid/src/tiling.ts` (Tiling Arithmetic and Format Header Parsing)
+*   `packages/jxl-pyramid/src/manifest.ts` (Pyramid Manifest Structures)
+*   `packages/jxl-pyramid/src/grid-layout.ts` (CSS Grid Calculations)
+*   `packages/jxl-pyramid/src/fixtures.ts` (Fixtures and Package Exports)
+*   `web/pyramid-gallery/image-store.js` (Web Boundary and Gallery State Store)
+*   `packages/jxl-pyramid/test/...` (Pyramid Verification Test Suite)
+
+### Assigned Tasks (Round-Robin)
+
+#### Task G4-A: Boundary Hardening & Adversarial Header Parsing (Critical / Lens 37-51 / DARK2-A / DARK2-B / DARK2-C / SEC2-A / SEC2-D)
+*   **Context:** `parseJxtcHeader` accepts arbitrary `uint32` fields (tileSize, dimensions, offsets) from raw, untrusted container bytes. A crafted container claiming `tileSize === 0` triggers division-by-zero, infinite loops, or OOM-inducing allocations (`new Array(Infinity)` or massive buffers) upon region clamping.
+*   **Instructions:**
+    *   Implement strict validation checks immediately within `parseJxtcHeader` at the boundary.
+    *   Assert that `tileSize > 0`, image dimensions are positive, and total pixel count `w * h * bpp` is a safe, finite integer below a strict device-appropriate cap (e.g., 2^30).
+    *   Ensure `bitsPerSample` is strictly verified as `8` or `16`.
+    *   Ensure that all inputs to the `region` parameter of `decodeLevel` (`region.x`, `region.y`, `region.w`, `region.h`) are validated as finite, non-negative integers before clamping math is executed.
+    *   *Rejection Check:* If validation checks add more than 1ms of overhead to standard header parsing, reject to `docs\rejected optimizations.md`.
+
+#### Task G4-B: Grid Layout Aspect Ratio Guard & RowSpan Correction (Medium / Low / grid-layout.ts)
+*   **Context:** `layoutFromIndex` divides by aspect ratios without checking if they are positive, finite numbers, causing divisions by zero or NaN to propagate. Additionally, the CSS rowSpan calculation contains a bug where base column width cancels itself out, leading to broken gallery grid proportions.
+*   **Instructions:**
+    *   Add defensive guards in `grid-layout.ts` to assert that `entry.aspect` is a finite number greater than zero. Fall back gracefully to `1.0` if invalid.
+    *   Refactor the `rowSpan` formula so that base column width (`columnWidthPx`) is correctly factored into row dimensions rather than being mathematically canceled out.
+    *   *Rejection Check:* If layout checks cause measurable lag when loading extremely large galleries (10,000+ items), reject to `docs\rejected optimizations.md`.
+
+#### Task G4-C: Absolute Developer Path Removal (Medium / fixtures.ts)
+*   **Context:** `fixtures.ts` exports absolute Windows directories (`c:\Foo\...`), leaking local development machine file paths into the public package bundle and types.
+*   **Instructions:**
+    *   Remove all hardcoded absolute Windows machine paths from `fixtures.ts`.
+    *   Convert fixtures to use relative paths resolved dynamically at runtime, or feed paths through environment-aware configuration parameters.
+    *   *Rejection Check:* If removing these fixtures breaks internal testing configurations, reject to `docs\rejected optimizations.md`.
+
+#### Task G4-D: Web Gallery Manifest Schema Validation (High / web/... / image-store.js)
+*   **Context:** `image-store.js` executes raw `JSON.parse` or fetches responses at the boundaries, casting them directly to `PyramidManifest` without runtime verification, leaving the web client vulnerable to unvalidated data schemas.
+*   **Instructions:**
+    *   Incorporate Zod or a lightweight, zero-dependency schema validation check at the manifest loading boundary in `image-store.js`.
+    *   Assert structural integrity of the manifest properties (`levels`, `schema` version, image dimensions) before pushing the manifest into the active gallery state store.
+    *   *Rejection Check:* If schema checks increase manifest loading times by more than 5%, reject to `docs\rejected optimizations.md`.
+
+#### Task G4-E: Property-Based and Contract Verification (Medium / test/...)
+*   **Context:** The existing tests in `packages/jxl-pyramid/test` utilize hardcoded values and lack property-based test suites to verify edge-case tile geometry, coordinate ranges, or end-to-end manifest-to-decode workflows.
+*   **Instructions:**
+    *   Add fast-check or custom property-based test cases in the test files to assert correctness of `tilesOverlappingRegion` and `chooseLevelForTarget` across randomly generated viewports, aspect ratios, and tile sizes.
+    *   Write a robust, end-to-end contract test: generate a mock manifest via `pyramid-ingest`, read and parse it through `jxl-pyramid`, and execute a simulated tiled viewport decode using mock worker hooks, asserting pixel and alignment integrity.
+    *   *Rejection Check:* If property tests increase CI execution times by more than 10 seconds, reject to `docs\rejected optimizations.md`.
+
