@@ -446,6 +446,98 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(encoded.value.byteLength).toBeGreaterThan(0);
     await encoder.dispose();
   });
+
+  test("simulated metadata _malloc===0 fallback completes encode with missing metadata (no crash)", async () => {
+    // Use enhanced createFake (64k heap) + spy _malloc for aux OOM (exif 64B).
+    // This exercises the guard in facade (see prepare/encode path) that detects 0 for
+    // optional metadata, frees, warns, zeros sizes, and proceeds with pixels-only encode.
+    const base = createFakeLibjxlModule() as any;
+    const oomFor = new Set<number>([64]); // exif size triggers aux OOM
+    const origMalloc = base._malloc.bind(base);
+    base._malloc = (size: number) => {
+      if (oomFor.has(size)) return 0;
+      return origMalloc(size);
+    };
+
+    let sawMetadataFallback = false;
+    base._jxl_wasm_encode_rgba8_with_metadata = (
+      pixelsPtr: number, w: number, h: number,
+      _d: number, _e: number, _f: number, _a: number,
+      _pdc: number, _pac: number, _qp: number, _buf: number,
+      _iccPtr: number, _iccSz: number,
+      _exifPtr: number, exifSz: number,
+      _xmpPtr: number, _xmpSz: number
+    ) => {
+      if (exifSz === 0) sawMetadataFallback = true;
+      // Delegate to base rgba8 path (reuses its makeHandle + spied malloc for output handle data).
+      // Simulates: caller guard passed 0 sizes for OOMed aux; we still produce valid output.
+      return base._jxl_wasm_encode_rgba8(pixelsPtr, w, h, 0, 7);
+    };
+    base._jxl_wasm_buffer_error = (_h: number) => 0;
+
+    setJxlModuleFactoryForTesting(async () => base);
+
+    const rgba = new Uint8Array([9, 9, 9, 255]);
+    const exif = new Uint8Array(64).fill(7); // triggers the OOM size in spied malloc
+    const encoder = createEncoder({
+      ...encodeOptions,
+      width: 1,
+      height: 1,
+      quality: 90,
+      exif,
+    });
+    encoder.pushPixels(rgba);
+    encoder.finish();
+
+    // Explicit: aux OOM must not hard-fail the encode; fallback must be taken; output valid.
+    let thrown: unknown;
+    const chunks: ArrayBuffer[] = [];
+    try {
+      for await (const c of encoder.chunks()) chunks.push(c);
+      await encoder.dispose();
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeUndefined();
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks[0].byteLength).toBeGreaterThan(0);
+    expect(sawMetadataFallback).toBe(true);
+  });
+
+  test("simulated core staging _malloc===0 (progressive decode path) throws WASM Memory Allocation OOM (fail-fast)", async () => {
+    // Use progressive fake so decode events() takes the streaming path that guards the
+    // chunkBufPtr malloc (core input staging for decPush). Spy returns 0 for the batch size
+    // used by the 4-byte pushes in these tests. This hits the explicit OOM string without
+    // needing source changes for main pixel paths (which currently surface RangeError on
+    // HEAPU8.set when ptr===0, or "WASM malloc failed for..." in tile paths).
+    // Per task JXLWASM-TEST-002: critical OOM on core must fail fast (not produce valid output).
+    const module = createFakeProgressiveLibjxlModule() as any;
+    const batchThatGoesToChunkBuf = 4;
+    const origMalloc = module._malloc.bind(module);
+    module._malloc = (size: number) => {
+      if (size === batchThatGoesToChunkBuf) return 0;
+      return origMalloc(size);
+    };
+
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const decoder = createDecoder({ ...decodeOptions, emitEveryPass: true });
+    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
+
+    let thrown: unknown;
+    const events: any[] = [];
+    try {
+      for await (const ev of decoder.events()) events.push(ev);
+    } catch (e) {
+      thrown = e;
+    }
+    await decoder.dispose();
+
+    expect(thrown).toBeDefined();
+    const msg = String((thrown as any)?.message ?? thrown);
+    expect(msg).toContain("WASM Memory Allocation OOM");
+  });
 });
 
 describe("detectTier", () => {
@@ -601,7 +693,12 @@ describe("getDecodeGridInfo", () => {
 });
 
 function createFakeLibjxlModule() {
-  const memory = new ArrayBuffer(4096);
+  // 65536 (was 4096) to prevent RangeError (offset out of limits / double size) on
+  // HEAPU8.set/slice when structural tests allocate past tiny fixed heap under
+  // monotonic nextPtr (pixels + output handles + sidecars + temps). Matches the
+  // size already used in the aux OOM test. _malloc here never returns 0 by default;
+  // tests that need OOM simulation wrap/spy it explicitly (aux metadata/adv vs critical).
+  const memory = new ArrayBuffer(65536);
   const HEAPU8 = new Uint8Array(memory);
   const HEAPU32 = new Uint32Array(memory);
   let nextPtr = 64;

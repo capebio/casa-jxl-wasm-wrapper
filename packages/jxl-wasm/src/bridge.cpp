@@ -2717,7 +2717,7 @@ static JxlWasmBuffer* EncodeRgba8WithSidecars(
     JxlWasmBuffer* sidecar = EncodeRgba(thumb, tw, th,
         std::max(distance, 1.5f), std::min(effort, 5u), 0, 1u, 0, 0, 0, 0, 0,
         modular, brotli_effort, decoding_speed, photon_noise_iso);
-    if (sidecar == nullptr || sidecar->error != 0) continue;
+    if (sidecar == nullptr || sidecar->error != 0) continue;  // aux sidecar tier failed (OOM or encode err); skip, do not link, do not fail container encode. Cascade already safe (no wild next ptrs).
 
     // Prepend: descending iteration + prepend = ascending chain.
     sidecar->next = sc_chain;

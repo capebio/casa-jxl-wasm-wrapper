@@ -1246,6 +1246,9 @@ class LibjxlDecoder implements JxlDecoder {
           if (batchBytes > chunkBufCap) {
             if (chunkBufPtr !== 0) module._free(chunkBufPtr);
             chunkBufPtr = module._malloc(batchBytes);
+            if (chunkBufPtr === 0) {
+              throw new Error("WASM Memory Allocation OOM during progressive stream push");
+            }
             chunkBufCap = batchBytes;
           }
           let woff = 0;
@@ -1633,17 +1636,17 @@ class LibjxlEncoder implements JxlEncoder {
         const values = new Int32Array(adv.map(s => s.value));
         advIdsPtr = module._malloc(ids.byteLength);
         advValuesPtr = module._malloc(values.byteLength);
-        if (advIdsPtr && advValuesPtr) {
+        if (advIdsPtr === 0 || advValuesPtr === 0) {
+          if (advIdsPtr !== 0) module._free(advIdsPtr);
+          if (advValuesPtr !== 0) module._free(advValuesPtr);
+          console.warn("[jxl-wasm] OOM while allocating advanced settings. Bypassing advanced options.");
+          advCount = 0;
+        } else {
           module.HEAP32.set(ids, advIdsPtr >> 2);
           module.HEAP32.set(values, advValuesPtr >> 2);
           // remember to free in dispose / after use
           (this as any)._advIdsPtr = advIdsPtr;
           (this as any)._advValuesPtr = advValuesPtr;
-        } else {
-          // Partial allocation: free whichever succeeded to avoid WASM heap leak.
-          if (advIdsPtr) module._free(advIdsPtr);
-          if (advValuesPtr) module._free(advValuesPtr);
-          advCount = 0;
         }
       }
 
@@ -1835,9 +1838,26 @@ class LibjxlEncoder implements JxlEncoder {
             const exifView = this.options.exif ? copyOrBorrowInput(this.options.exif, false) : new Uint8Array(0);
             const xmpView = this.options.xmp ? copyOrBorrowInput(this.options.xmp, false) : new Uint8Array(0);
 
-            const iccPtr = iccView.byteLength > 0 ? module._malloc(iccView.byteLength) : 0;
-            const exifPtr = exifView.byteLength > 0 ? module._malloc(exifView.byteLength) : 0;
-            const xmpPtr = xmpView.byteLength > 0 ? module._malloc(xmpView.byteLength) : 0;
+            let iccPtr = iccView.byteLength > 0 ? module._malloc(iccView.byteLength) : 0;
+            let exifPtr = exifView.byteLength > 0 ? module._malloc(exifView.byteLength) : 0;
+            let xmpPtr = xmpView.byteLength > 0 ? module._malloc(xmpView.byteLength) : 0;
+
+            let iccSize = iccView.byteLength;
+            let exifSize = exifView.byteLength;
+            let xmpSize = xmpView.byteLength;
+
+            if ((iccSize > 0 && iccPtr === 0) || (exifSize > 0 && exifPtr === 0) || (xmpSize > 0 && xmpPtr === 0)) {
+              if (iccPtr !== 0) module._free(iccPtr);
+              if (exifPtr !== 0) module._free(exifPtr);
+              if (xmpPtr !== 0) module._free(xmpPtr);
+              console.warn("[jxl-wasm] OOM while allocating metadata boxes. Proceeding without metadata.");
+              iccPtr = 0;
+              exifPtr = 0;
+              xmpPtr = 0;
+              iccSize = 0;
+              exifSize = 0;
+              xmpSize = 0;
+            }
 
             const adv = this.prepareAdvancedSettings(module);
             const useAdv = adv.count > 0 && module._jxl_wasm_encode_rgba8_with_metadata_adv;
@@ -1852,9 +1872,9 @@ class LibjxlEncoder implements JxlEncoder {
                   ptr, this.options.width, this.options.height,
                   distance, this.options.effort, fmt, hasAlpha,
                   progressiveDc, progressiveAc, qProgressiveAc, buffering,
-                  iccPtr, iccView.byteLength,
-                  exifPtr, exifView.byteLength,
-                  xmpPtr, xmpView.byteLength,
+                  iccPtr, iccSize,
+                  exifPtr, exifSize,
+                  xmpPtr, xmpSize,
                   adv.idsPtr, adv.valuesPtr, adv.count
                 );
               } else {
@@ -1862,9 +1882,9 @@ class LibjxlEncoder implements JxlEncoder {
                   ptr, this.options.width, this.options.height,
                   distance, this.options.effort, fmt, hasAlpha,
                   progressiveDc, progressiveAc, qProgressiveAc, buffering,
-                  iccPtr, iccView.byteLength,
-                  exifPtr, exifView.byteLength,
-                  xmpPtr, xmpView.byteLength
+                  iccPtr, iccSize,
+                  exifPtr, exifSize,
+                  xmpPtr, xmpSize
                 );
               }
             } finally {
@@ -1949,10 +1969,10 @@ class LibjxlEncoder implements JxlEncoder {
 
     const idsPtr = module._malloc(ids.byteLength);
     const valuesPtr = module._malloc(values.byteLength);
-
-    if (!idsPtr || !valuesPtr) {
-      if (idsPtr) module._free(idsPtr);
-      if (valuesPtr) module._free(valuesPtr);
+    if (idsPtr === 0 || valuesPtr === 0) {
+      if (idsPtr !== 0) module._free(idsPtr);
+      if (valuesPtr !== 0) module._free(valuesPtr);
+      console.warn("[jxl-wasm] OOM while allocating advanced settings. Bypassing advanced options.");
       return { idsPtr: 0, valuesPtr: 0, count: 0, free: () => {} };
     }
 
