@@ -541,3 +541,70 @@ Scope: `WorkerReply` union (L62-64), `decodeTileWithWorker` (L68-124), spawn/rec
 - **Issue:** Pool has no liveness signal between request and reply. A worker stuck in libjxl (rare but possible - pathological JXTC) is indistinguishable from a worker doing legitimate slow work. Health monitor (concurrency-023) needs an input signal.
 - **Fix:** Optional `{type:'progress', id, percent}` from worker at coarse intervals (e.g., post-decode-before-encode). Pool's monitor (introduced separately) marks workers silent for >N seconds as suspect. Low priority but unlocks adaptive timeouts.
 
+
+---
+
+# Lens 4 - Lifecycle + cancellation
+
+Scope: `PyramidWorkerPool` class state machine (L141-302), module singleton (L304), `getOrCreatePool` (L306-321), `prewarm`/`acquire`/`release` (L171-230), `recycle`/`destroyHandle` (L252-301), and the end-to-end abort path (none currently exists).
+
+### L4-1. `destroyed` flag never set true - all four guards are dead branches
+- **Category:** bug
+- **Issue:** L152 `private destroyed = false;`. Read at L172, 187, 222, 235, 307 but never assigned `true` anywhere in the class. `getOrCreatePool` uses `pool['destroyed']` (L307) to detect torn-down pools but the condition can never fire. Cite logic-006, contracts-015.
+- **Fix:** Precondition for L4-2 destroy(). On its own: useless guard. Fix as part of the destroy() implementation.
+
+### L4-2. No public `destroy()` / `dispose()` - singleton leaks across tests + HMR
+- **Category:** bug + missing feature
+- **Issue:** Module-scope `let pool: PyramidWorkerPool | null = null` (L304). No exported teardown. Test reload, gallery dismount, route change all leave the pool with active workers. Combined with L4-1, even attempting `pool['destroyed'] = true` does not terminate workers.
+- **Fix:** Add `destroy(): Promise<void>` method: set destroyed=true, drain idle (call destroyHandle on each), abort active (per L4-3), wait for active set to drain or hard-terminate after grace period, then null the `handleByWorker` WeakMap entries. Export `disposePyramidWorkerPool()` that nulls the module singleton and awaits destroy().
+
+### L4-3. No AbortSignal threading viewport-end-to-end
+- **Category:** bug + missing feature
+- **Issue:** `decodeTiledViewportPooled` options (L376) has no `signal?: AbortSignal`. Likewise `decodeTilesParallel`, `decodeTileWithWorker`. Pan/zoom invalidates the viewport but in-flight worker tiles keep running, holding pool slots, racing to deliver pixels the UI will discard. Cite concurrency-009, L1-4.
+- **Fix:** Thread `signal: AbortSignal` through all three. `decodeTileWithWorker`: on `signal.aborted` reject immediately; on `abort` event during in-flight, call `worker.postMessage({type:'cancel', id})` (L3-5) and reject with `AbortError`. `decodeTilesParallel`: AbortController internal, aborted on first failure OR external signal -> sets `failed=true`. Pool slot released regardless.
+
+### L4-4. `armIdleTimer` only arms just-released handle - older idles never reaped
+- **Category:** bug
+- **Issue:** L261-273: when a worker is released, the timer is armed for THAT handle only, and the `idle.length > minIdle` check is evaluated at arm time. Earlier-enqueued idle handles, released when count was <= minIdle, never get a reaper armed. They stay warm forever (which is fine), but they also do not get reaped when later releases push count above minIdle. Cite logic-005.
+- **Fix:** Re-arm reaper for ALL idle handles above the floor when the floor is crossed. Or: track a single `excessReaperTimer` for the pool; cycle the oldest idle handle when fired. Simpler: on every release, scan `idle.slice(0, idle.length - minIdle)` and ensure each has a timer. With max=8, scan is trivially cheap.
+
+### L4-5. `getOrCreatePool` binds first-seen workerFactory forever
+- **Category:** bug
+- **Issue:** L306-321: subsequent calls with a different `workerFactory` are silently ignored - the existing singleton is returned. Tests inject mock factories that the first production call already overrode; second gallery using a different worker URL gets the wrong worker. Cite logic-003, L1-5.
+- **Fix:** Detect factory-identity change: store `boundFactory` on the pool instance; if `getOrCreatePool(factory)` sees a different factory function reference AND the pool has zero active decodes, transparently call `destroy()` and rebuild. If active > 0, throw `Error('cannot swap workerFactory while pool is busy')` so callers see the conflict.
+
+### L4-6. Worker terminated mid-decode hangs the in-flight promise
+- **Category:** bug
+- **Issue:** `recycle(h)` (L252-259) calls `destroyHandle(h)` which calls `worker.terminate()` (L296). If a tile decode is in flight and the worker has its `error` listener fire (recycling itself) OR another caller's `destroy()` runs, the in-flight `decodeTileWithWorker` Promise never settles - the message listener is removed by cleanup() but the worker is gone before the message ever arrived. Cite concurrency-002.
+- **Fix:** Track in-flight requests per handle: `WorkerHandle.inflight = Set<{id, reject}>`. On `destroyHandle`, before `terminate()`, reject every in-flight request with `Error('worker terminated during decode')`. Then `cleanup()` in decodeTileWithWorker is idempotent (already settled).
+
+### L4-7. Permanent recycle listener accumulation on long-lived workers
+- **Category:** bug (low)
+- **Issue:** L242-248 adds `error` + `messageerror` listeners at spawn but never removes them. `destroyHandle` calls `terminate()` which is a hard kill - listeners drop with the worker. So per-worker accumulation is OK. BUT: if `bad=true` is set externally and the handle is recycled in-place (some future change), listeners stack. Cite concurrency-011.
+- **Fix:** Store the bound `recycle` reference on the handle: `h.recycleListener = recycle`. On any path that detaches the worker without terminating (none exists today; would be needed if pool ever supports worker handoff), call `removeEventListener`. Defensive but cheap.
+
+### L4-8. `minIdle` floor not maintained after `destroyHandle` drop
+- **Category:** bug
+- **Issue:** If a worker errors and `recycle` -> `destroyHandle` removes it, idle count may fall below `minIdle`. Pool does not respawn to restore the floor. Next acquire spawns under cap (good) but the warm guarantee was silently broken between events.
+- **Fix:** After `destroyHandle`, if `!destroyed` and `idle.length < minIdle && all.size < maxSize`, spawn replacement and push to idle. Defer if spawn fails.
+
+### L4-9. No supersede semantics - newer ROI does not preempt older same-level
+- **Category:** missing feature
+- **Issue:** Pan generates a stream of ROI requests for the same level. Older request is still in flight when newer arrives. Pool has no notion of 'cancel all in-flight requests for level X'. UI must wait for the stale decode + the new one.
+- **Fix:** Optional: tag requests with a `streamId` (per-viewport). Pool exposes `cancelStream(streamId)` that aborts in-flight + drops queued for that id. Implementation rides on L4-3 AbortController per stream. Owner remains the caller (UI).
+
+### L4-10. FEATURE: per-context pool instead of module singleton
+- **Category:** feature
+- **Issue:** Module-scope singleton (L304) means: one pool per realm. Multiple galleries on one page share workers tied to whichever loaded first. Worker URL drift across galleries (L4-5) and no scoping to per-tab Worker quotas.
+- **Fix:** Expose `createPyramidWorkerPool(opts)` factory. Keep `getOrCreatePool` for backward-compat with default config. Galleries get isolated pools; tests get fresh pools; production keeps the convenience singleton.
+
+### L4-11. No worker liveness timeout - health monitor input gap
+- **Category:** bug
+- **Issue:** Pool has no notion of 'worker has not replied in N seconds'. Combined with L3-11 (no protocol deadline), the stuck-worker case is invisible to the pool. Cite concurrency-023.
+- **Fix:** Pool config: `requestTimeoutMs?: number`. On `decodeTileWithWorker` enter, schedule `setTimeout(timeout, ms)`; on settle, clearTimeout. On fire, reject + mark handle bad + recycle. Distinct from request-side `deadlineMs` (L3-11): this is pool's enforcement, that is worker's self-awareness.
+
+### L4-12. `spawnOne` partial-failure orphans handle in `all` set
+- **Category:** bug
+- **Issue:** L234-249: handle is added to `this.all` (L238) and `this.handleByWorker` (L239) BEFORE the lifecycle listener wiring at L243-248. If `worker.factory()` succeeded but `addEventListener` throws (some test doubles fail here), the try/catch swallows it and the handle is in `all` with no recycle listener - it cannot self-heal on error. Cite concurrency-018.
+- **Fix:** Register handle to `all`/`handleByWorker` AFTER lifecycle wiring succeeds. Move L238-239 to after L246. Or: on the addEventListener catch, `terminate()` the worker + skip the handle. Either is a 4-line change.
+
