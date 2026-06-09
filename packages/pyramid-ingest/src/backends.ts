@@ -60,6 +60,21 @@ export interface JxlBackend {
     height: number,
     opts: TileContainerEncodeOptions,
   ): Promise<Uint8Array>;
+  /** Downscale helpers for per-level tiled encoding (Phase 3 all-levels JXTC). */
+  downscaleRgba8(
+    rgba: Uint8Array,
+    srcW: number,
+    srcH: number,
+    dstW: number,
+    dstH: number,
+  ): Promise<Uint8Array>;
+  downscaleRgba16?(
+    rgba16: Uint16Array | Uint8Array,
+    srcW: number,
+    srcH: number,
+    dstW: number,
+    dstH: number,
+  ): Promise<Uint16Array | Uint8Array>;
   transcodeJpeg(jpeg: Uint8Array): Promise<Uint8Array>;
   decodeToRgba8(jxl: Uint8Array): Promise<{ rgba: Uint8Array; width: number; height: number }>;
   /** incremental progressive decode + SSIM (or butter) to find first visual saturation byte offset for the level's own final. returns undef if single-pass or below threshold or small level. */
@@ -110,6 +125,18 @@ export function createJxlBackend(): JxlBackend {
         effort: opts.effort,
         hasAlpha: false,
       });
+    },
+
+    async downscaleRgba8(rgba, srcW, srcH, dstW, dstH) {
+      const ds = JW.downscaleRgba8;
+      if (typeof ds !== "function") throw new Error("downscaleRgba8 missing on jxl-wasm module");
+      return ds(rgba, srcW, srcH, dstW, dstH);
+    },
+
+    async downscaleRgba16(rgba16, srcW, srcH, dstW, dstH) {
+      const ds = JW.downscaleRgba16;
+      if (typeof ds !== "function") throw new Error("downscaleRgba16 missing on jxl-wasm module");
+      return ds(rgba16, srcW, srcH, dstW, dstH);
     },
 
     async transcodeJpeg(jpeg) {

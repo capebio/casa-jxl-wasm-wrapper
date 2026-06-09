@@ -167,24 +167,24 @@ test("identical level content across masters is stored once (content-addressed d
 test("computeIngestPlan is side-effect free (no FS writes) and deterministic", async () => {
   const out = await tmpOut();
   // fully synthetic backends: no WASM, deterministic, exercises the pure plan path (decode + ladder + manifest build)
+  // Phase 3: ladder now routes via downscaleRgba8 + encodeTileContainer (no encodePyramid for raw/jpg ladders)
   const fakeJxl = {
-    async encodePyramid(_rgba: Uint8Array, w: number, h: number, _opts: any) {
-      // produce 2 tiny deterministic levels
-      const d1 = new Uint8Array([1, 2, 3]);
-      const d2 = new Uint8Array([4, 5, 6, 7]);
-      return [
-        { data: d1, width: 8, height: 6 },
-        { data: d2, width: w, height: h },
-      ];
+    async encodeTileContainer(_rgba: Uint8Array, w: number, h: number, _opts: any) {
+      return new Uint8Array([0xA0 + (w & 0x0f), w & 0xff, (w >> 8) & 0xff, h & 0xff, (h >> 8) & 0xff]);
     },
-    async encodeTileContainer() { return new Uint8Array([9]); },
+    async downscaleRgba8(_rgba: Uint8Array, _sw: number, _sh: number, dw: number, dh: number) {
+      return new Uint8Array(dw * dh * 4);
+    },
     async transcodeJpeg(b: Uint8Array) { return b; },
     async decodeToRgba8(b: Uint8Array) { return { rgba: b, width: 4, height: 3 }; },
+    // encodePyramid retained only for proxy path (unused here)
+    async encodePyramid() { return []; },
   };
   const b: Backends = {
     raw: {
       async decode(_bytes: Uint8Array, _fmt: any) {
-        return { rgba: new Uint8Array(16), width: 4, height: 4, orientation: "baked" };
+        // choose 300x200 so plan sidecars yields exactly one grid (256) + full => 2 levels (matches prior test shape)
+        return { rgba: new Uint8Array(300 * 200 * 4), width: 300, height: 200, orientation: "baked" };
       },
     },
     jxl: fakeJxl as any,

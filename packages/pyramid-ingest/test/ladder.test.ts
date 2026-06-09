@@ -34,25 +34,36 @@ test("buildRawLadder keeps every encoded level, ascending, full last, all 8-bit 
   expect(ladder.width).toBe(W);
   expect(ladder.height).toBe(H);
   expect(ladder.levels.map((l) => l.width)).toEqual([256, 512, 1024, 1280]);
+  // Phase 3: all levels are JXTC tiled
+  for (const lvl of ladder.levels) {
+    expect(lvl.tiled).toBe(true);
+  }
 });
 
-test("buildJpgLadder substitutes the lossless transcode as the full level", async () => {
+test("buildJpgLadder produces all levels (incl full) as tiled JXTC (no transcode substitution)", async () => {
   const transcodeBytes = new Uint8Array([0xff, 0x0a, 0x42, 0x13]);
   const fake: JxlBackend = {
     async transcodeJpeg() { return transcodeBytes; },
     async decodeToRgba8() { return { rgba: gradientRgba(1280, 960), width: 1280, height: 960 }; },
-    async encodePyramid(_rgba, _w, _h, opts) {
-      const sidecars = opts.sidecars.filter((sc) => sc.size < 1280).map((sc) => ({
-        data: new Uint8Array([sc.size & 0xff]), width: sc.size, height: Math.round((sc.size * 960) / 1280),
-      }));
-      return [...sidecars, { data: new Uint8Array([0xde, 0xad]), width: 1280, height: 960 }];
+    async encodeTileContainer(_rgba, w, h, _opts) {
+      return new Uint8Array([0xa0, w & 0xff, (w >> 8) & 0xff, h & 0xff, (h >> 8) & 0xff]);
     },
+    async downscaleRgba8(_rgba, _sw, _sh, dw, dh) {
+      return new Uint8Array(dw * dh * 4);
+    },
+    // encodePyramid no longer used by buildJpgLadder
+    async encodePyramid() { return []; },
   };
   const ladder = await buildJpgLadder(fake, new Uint8Array([1, 2, 3]));
   expect(ladder.orientation).toBe("source");
   expect(ladder.levels.map((l) => l.width)).toEqual([256, 512, 1024, 1280]);
   const full = ladder.levels[ladder.levels.length - 1]!;
-  expect(full.data).toEqual(transcodeBytes);
+  // full is now from encodeTileContainer (tiled), not raw transcode bytes
+  expect(full.tiled).toBe(true);
+  expect(full.data[0]).toBe(0xa0);
+  for (const lvl of ladder.levels) {
+    expect(lvl.tiled).toBe(true);
+  }
 });
 
 test("buildProxyLadder returns exactly one level", async () => {

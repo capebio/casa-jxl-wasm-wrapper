@@ -58,6 +58,10 @@ export function makeTestJxlBackend(): JxlBackend {
     async encodeTileContainer(rgba: Uint8Array, width: number, height: number, opts: any): Promise<Uint8Array> {
       return new Uint8Array([9, 10, 11, 12, width & 0xff, (width >> 8) & 0xff, height & 0xff, (height >> 8) & 0xff]);
     },
+    async downscaleRgba8(_rgba: Uint8Array, _srcW: number, _srcH: number, dstW: number, dstH: number): Promise<Uint8Array> {
+      // content ignored by ladder tests; size must be correct for encodeTileContainer marker
+      return new Uint8Array(dstW * dstH * 4);
+    },
     async transcodeJpeg(jpeg: Uint8Array): Promise<Uint8Array> {
       return new Uint8Array([13, 14, 15, 16, jpeg.length & 0xff, (jpeg.length >> 8) & 0xff]);
     },
