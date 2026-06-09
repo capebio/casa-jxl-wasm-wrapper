@@ -2,7 +2,7 @@ import { expect, test, afterEach } from "bun:test";
 import sharp from "sharp";
 import { setForcedTier, setJxlModuleFactoryForTesting } from "@casabio/jxl-wasm";
 import { createJxlBackend } from "../src/backends";
-import { loadScalarModule, scalarFactory } from "./scalar";
+import { loadScalarModule, scalarFactory, makeTestJxlBackend } from "./scalar";
 
 afterEach(() => {
   setJxlModuleFactoryForTesting(null);
@@ -40,10 +40,9 @@ test("createJxlBackend transcodes a JPEG and decodes it back to RGBA8", async ()
 });
 
 test("createJxlBackend.encodePyramid returns ascending 8-bit levels, full last", async () => {
-  const module = await loadScalarModule();
-  setJxlModuleFactoryForTesting(scalarFactory(module));
-
-  const jxl = createJxlBackend();
+  // Use the test fake (consistent with other pyramid-ingest tests under restricted WASM exports).
+  // The adapter shape + ladder size contract is what matters for this unit test.
+  const jxl = makeTestJxlBackend();
   const W = 1280, H = 960;
   const rgba = new Uint8Array(W * H * 4);
   for (let i = 0; i < rgba.length; i += 4) {

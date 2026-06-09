@@ -3,7 +3,6 @@ import { setJxlModuleFactoryForTesting } from "@casabio/jxl-wasm";
 import { buildRawLadder, buildJpgLadder, buildProxyLadder } from "../src/ladder";
 import { makeTestJxlBackend } from "./scalar.js";
 import { createJxlBackend, type JxlBackend, type DecodedMaster } from "../src/backends";
-import { makeTestJxlBackend } from "./scalar.js";
 import { loadScalarModule, scalarFactory } from "./scalar";
 
 afterEach(() => setJxlModuleFactoryForTesting(null));
