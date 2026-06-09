@@ -474,3 +474,70 @@ Pan/zoom UI fires `chooseLevelForTarget` + `decodeTiledViewportPooled`/`decodeTi
 - **Category:** info
 - **Issue:** L74: per tile allocates new Promise + onMessage + onError + cleanup closures + `settled` flag. Inevitable for the request-response promise pattern. Mention only — bytes payload dwarfs this.
 
+
+---
+
+# Lens 3 - Worker protocol
+
+Scope: `WorkerReply` union (L62-64), `decodeTileWithWorker` (L68-124), spawn/recycle wiring (L234-250), `decodeTilesParallel` driver (L323-364), implicit `web/lightbox/tiled-decode-worker.js` contract.
+
+### L3-1. Request shape carries no `format` - worker hardcoded rgba8
+- **Category:** critical bug
+- **Issue:** Pool's `postMessage({id, bytes, region})` (L122) has no bits field. Worker calls only `decodeTileContainerRegionRgba8` regardless of source format. 16-bit tiled levels silently corrupt (cite logic-001 critical + L1-6).
+- **Fix:** Extend request to `{id, bytes, region, format: 'rgba8'|'rgba16'}`. Worker switches on `format`. Pool passes `format: bits===16 ? 'rgba16' : 'rgba8'` derived once per level (see L2-1). Worker.js needs the parallel rgba16 decode wired.
+
+### L3-2. No runtime validation of `WorkerReply` shape
+- **Category:** bug
+- **Issue:** L76-92 trusts `ev.data` as the typed union. A buggy worker sending `{id, ok:true}` (no pixels) crashes at `new Uint8Array(undefined)`. Untrusted-worker case (per security-d4e5f6a7) is plausible: extension-injected workers, dev-mode hot-swaps.
+- **Fix:** Validate inside `onMessage`: check `typeof ev.data.id === 'number'`, `typeof ev.data.ok === 'boolean'`, then ok-branch requires pixels (ArrayBuffer or Uint8Array) + numeric width/height. Reject with `Error('malformed worker reply')` instead of crashing.
+
+### L3-3. `pixels: ArrayBuffer` declared but `Uint8Array` posted - silent copy
+- **Category:** perf bug
+- **Issue:** L62-64 types `pixels: ArrayBuffer` but `web/lightbox/tiled-decode-worker.js:10` posts `out.pixels` (a `Uint8Array` view) with transfer of `out.pixels.buffer`. L86: `new Uint8Array(ab)` interprets the view as a length, copying contents. ~1 MB memcpy per tile. Comment at L80-83 lies about zero-copy (cite logic-004 + verified evidence).
+- **Fix:** Either: (a) widen reply type to `pixels: ArrayBuffer | Uint8Array` and branch at receive - `ev.data.pixels instanceof Uint8Array ? ev.data.pixels : new Uint8Array(ev.data.pixels)`. (b) change worker to post `out.pixels.buffer` directly. (a) is safer - touches one file.
+
+### L3-4. Container bytes structured-cloned per tile (no load/decode split)
+- **Category:** perf
+- **Issue:** L122 postMessage sends full `bytes` (multi-MB JXTC container) per tile. With 16 tiles x 4 workers, browser performs up to 64 structured clones of the same buffer. Code comment L117-121 acknowledges. SAB is the only zero-copy answer for fan-out and is out of scope per file.
+- **Fix:** Protocol bump: `{type:'load', bytesId, bytes}` ONCE per worker (sent at pool.acquire time or first decode). Worker caches `Map<bytesId, Uint8Array>` (LRU, cap=4). Subsequent `{type:'decode', id, bytesId, region, format}` carries only ~24 bytes. Pool tracks `bytesId to workers warmed with it`. Worker pool gains a hot/cold acquire distinction.
+
+### L3-5. No `cancel` message - in-flight worker tiles cannot be stopped
+- **Category:** bug + missing feature
+- **Issue:** Once worker has the request, it runs to completion. UI pan/zoom invalidates the viewport but worker keeps decoding the now-discarded tile. Caller-side reject is cosmetic.
+- **Fix:** Protocol `{type:'cancel', id}`. Worker checks before posting reply (libjxl tile decode is non-interruptible mid-call per CLAUDE.md, so this is best-effort: skip the postMessage if cancelled, freeing main from receiving + memcpy). Pairs with L1-4 AbortSignal.
+
+### L3-6. No worker readiness signal - prewarm cold-start invisible
+- **Category:** bug
+- **Issue:** L171-179 `prewarm()` synchronously creates workers and arms idle timer. Worker top-level `preloadJxlModule()` is async; first decode after prewarm still pays compile cost. Pool acquires the worker as if warm. (cite concurrency-014.)
+- **Fix:** Worker posts `{type:'ready'}` once `preloadJxlModule()` resolves. `WorkerHandle` gains `ready: boolean`. Pool's `acquire()` skips not-ready handles (or returns a promise that resolves on ready). Idle-timer arms only after ready.
+
+### L3-7. `onMessage` missing `settled` guard - late reply re-settles
+- **Category:** bug
+- **Issue:** L76-92 resolves/rejects without checking `settled`. `onError` (L94-99) does check. Asymmetric. Late message after error -> `cleanup()` runs twice + already-settled Promise gets a no-op resolve. Benign now, fragile if state expands.
+- **Fix:** Add `if (settled) return;` at the top of `onMessage`. Hoist `settled` into closure (already is). One-line fix.
+
+### L3-8. Poisoned worker stays in pool after silent fail
+- **Category:** bug
+- **Issue:** If a worker mis-reports (e.g., wrong-id reply, malformed shape) and `decodeTileWithWorker` rejects (after L3-2 fix), pool.release returns the handle to idle (L222 - only destroys if `terminated|bad`). Next caller gets the same bad worker.
+- **Fix:** On reject in `decodeTileWithWorker`, mark handle as bad via callback into pool (`pool.markBad(worker)`). Or: `decodeTilesParallel` catches per-tile error and calls a pool-exposed `recycle(worker)` before the worker re-enters idle. Pool already has `recycle()` internal - promote to method or thread through error callback.
+
+### L3-9. Worker error is opaque string - no taxonomy for recycle vs retry
+- **Category:** feature
+- **Issue:** L91 / L97 wrap `error: string` into `new Error(string)`. Caller cannot distinguish 'malformed bytes (worker is fine)' from 'OOM/crash (worker is poisoned)'. Caller in `decodeTilesParallel` (L349-355) bails out the whole slice regardless.
+- **Fix:** Reply gains `error: { code: 'JXTC_PARSE'|'OOM'|'BAD_REGION'|'INTERNAL', message }`. Pool gets a `shouldRecycleOnCode(code)` policy. JXTC_PARSE -> caller bug, keep worker. OOM/INTERNAL -> recycle. BAD_REGION -> caller bug, keep worker.
+
+### L3-10. Module-scope `nextWorkerId` not reset on dispose
+- **Category:** bug (low)
+- **Issue:** L66 monotonic across all pools. If pool is rebuilt (after L1-5 destroy/recreate), ids continue from the old counter. Late messages from the destroyed pool's workers - if not terminated yet - could collide with new-pool tile ids.
+- **Fix:** Pool-instance counter: move `nextWorkerId` to `class PyramidWorkerPool` field, initialize 0 per instance. Combined with `destroy()` ensuring worker `terminate()` runs before new ids issued, late-message routing is impossible.
+
+### L3-11. No reply timeout in protocol; only host-side timeout possible
+- **Category:** bug
+- **Issue:** Protocol gives the worker no deadline. Host-side timeout (per L1-4) rejects the Promise but the worker keeps churning, blocking pool slot until completion or termination. Cite concurrency-003.
+- **Fix:** Include `deadlineMs?: number` in request. Worker tracks via `Date.now()` and self-aborts at next libjxl call boundary (best-effort, libjxl ROI decode is one call - so a timeout primarily benefits the cleanup case: worker observes deadline expired BEFORE running, replies `{ok:false, error:{code:'TIMEOUT'}}` instantly when host re-uses it).
+
+### L3-12. FEATURE: progress / heartbeat for worker liveness
+- **Category:** feature
+- **Issue:** Pool has no liveness signal between request and reply. A worker stuck in libjxl (rare but possible - pathological JXTC) is indistinguishable from a worker doing legitimate slow work. Health monitor (concurrency-023) needs an input signal.
+- **Fix:** Optional `{type:'progress', id, percent}` from worker at coarse intervals (e.g., post-decode-before-encode). Pool's monitor (introduced separately) marks workers silent for >N seconds as suspect. Low priority but unlocks adaptive timeouts.
+
