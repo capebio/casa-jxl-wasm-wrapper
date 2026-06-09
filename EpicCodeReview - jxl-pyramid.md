@@ -608,3 +608,75 @@ Scope: `PyramidWorkerPool` class state machine (L141-302), module singleton (L30
 - **Issue:** L234-249: handle is added to `this.all` (L238) and `this.handleByWorker` (L239) BEFORE the lifecycle listener wiring at L243-248. If `worker.factory()` succeeded but `addEventListener` throws (some test doubles fail here), the try/catch swallows it and the handle is in `all` with no recycle listener - it cannot self-heal on error. Cite concurrency-018.
 - **Fix:** Register handle to `all`/`handleByWorker` AFTER lifecycle wiring succeeds. Move L238-239 to after L246. Or: on the addEventListener catch, `terminate()` the worker + skip the handle. Either is a 4-line change.
 
+
+---
+
+# Lens 5 - Error propagation
+
+Scope: every throw, reject, catch, and silent fallback across the three files. Cross-cutting: error taxonomy + observability are zero.
+
+### L5-1. `decodeWhole` leaks WASM decoder on push/close/drain throw
+- **Category:** high bug
+- **Issue:** decode-level.ts L20-45: `decoder.dispose()` at L42 only runs after L39-41 (`push`, `close`, drain) all succeed. Any throw skips dispose; the WASM heap stays allocated and the JS-side decoder reference is GC'd without releasing libjxl state. Cite errors-dl-dispose-leak.
+- **Fix:** Wrap in try/finally: `try { await decoder.push(bytes); await decoder.close(); await drain; } finally { await decoder.dispose().catch(() => {}); }`. dispose is idempotent per existing decoder contract.
+
+### L5-2. `decodeWhole` drain IIFE rejection becomes unhandled
+- **Category:** high bug
+- **Issue:** decode-level.ts L29-37: the `(async () => { for await ... })()` IIFE is started but not awaited until L41. If push() throws synchronously OR close() throws BEFORE drain settles, the drain promise rejects independently with no observer - browser logs `Unhandled Promise Rejection`. Cite errors-dl-drain-unhandled-rejection.
+- **Fix:** Capture the drain promise once: `const drainPromise = (async () => {...})();`. After try/finally on push+close, ALWAYS await drainPromise inside a `.catch()` or `Promise.allSettled([drainPromise, ...])` to consume the rejection.
+
+### L5-3. NaN region dimensions bypass empty-check + over-allocate
+- **Category:** low bug + security adjacent
+- **Issue:** decode-level.ts L100-105 (and pool L382-385): `Math.min/Math.max` propagate NaN. `rw <= 0` is false when rw is NaN (NaN comparisons return false). Code proceeds with NaN-sized viewport. `new Uint8Array(NaN * NaN * 4)` is `new Uint8Array(0)` per ECMA spec (NaN ToInteger -> 0) which then silently produces a zero-pixel result. Cite errors-dl-nan-region-bypasses-clamp.
+- **Fix:** Guard region inputs at entry: `if (!Number.isFinite(region.x) || !Number.isFinite(region.y) || !Number.isFinite(region.w) || !Number.isFinite(region.h)) throw new Error('region values must be finite numbers');`. Single-line check at the top of decodeTiledViewport + decodeTiledViewportPooled.
+
+### L5-4. `chooseLevelForTarget` silently accepts NaN/zero/negative target
+- **Category:** low bug
+- **Issue:** choose-level.ts L8-16: no validation of `targetLongEdge`. Negative or NaN -> `longEdge(l.w,l.h) >= targetLongEdge` is true for all l (or vacuously false for NaN); zero -> always picks smallest. Caller mis-passes a viewport metric and the picker silently delivers garbage. Cite errors-cl-divbyzero-zero-targetedge.
+- **Fix:** `if (!Number.isFinite(targetLongEdge) || targetLongEdge <= 0) throw new RangeError('targetLongEdge must be a positive finite number');` at the top. Pair with L5-13 taxonomy if introduced.
+
+### L5-5. `Promise.all` leaks in-flight tile decodes on first reject
+- **Category:** high bug
+- **Issue:** decode-level.ts L114-119: first rejecting tile aborts Promise.all but the other in-flight tile decodes continue racing to completion, consuming WASM heap until their final frame or dispose. No AbortSignal threading (cite L1-4, L4-3, concurrency-001).
+- **Fix:** Replace Promise.all with the same coroutine pattern as pool's `decodeTilesParallel` (L323-364) and pre-wire AbortController. On first reject: signal.abort() -> subsequent iterations check signal.aborted before allocating + skip. Pairs with L4-3.
+
+### L5-6. Four silent `catch {}` blocks in pool - failures invisible in prod
+- **Category:** medium bug cluster
+- **Issue:** tiled-decode-pool.ts L106-108, L114-116 (decodeTileWithWorker listener removal/attach), L246-248 (spawnOne listener attach), L209-211 (spawnOne factory call), L297-300 (terminate). All swallow without logging. Spawn-fail (logic-007, errors-tdp-spawn-fail-silent) is the most dangerous - pool silently degrades to fewer workers and caller hits the fallback path with no telemetry.
+- **Fix:** Introduce a single `onError(scope: string, err: unknown)` hook on the pool, default = `console.warn`. Replace all 4 silent catches with `catch (e) { this.opts.onError?.('spawn-failed', e); }` etc. Caller can wire to Sentry / structured logger. Pairs with L5-12.
+
+### L5-7. Worker error wraps a string - root cause discarded
+- **Category:** medium bug
+- **Issue:** tiled-decode-pool.ts L91: `reject(new Error(ev.data.error))`. The worker likely had a real Error with stack + name; serializing to string strips both. Caller's catch sees only the message; no programmatic discrimination possible. L97 has similar pattern (`ev?.message || ev || 'unknown'`).
+- **Fix:** Worker should post `{ok:false, error:{code, message, stack?}}` (cite L3-9). Receiver constructs `Error` from message, attaches `code` + `cause`: `const err = new Error(ev.data.error.message); (err as any).code = ev.data.error.code; reject(err);`. Modern JS Error supports `cause` option: `new Error(msg, { cause: { code } })`.
+
+### L5-8. `decodeTilesParallel` keeps only firstErr - others lost
+- **Category:** low bug
+- **Issue:** tiled-decode-pool.ts L335-355: `let firstErr: unknown = null;` records only the first failure. Other workers see `failed` flag and exit their slice without their errors propagating. If two workers fail near-simultaneously (e.g., cascading OOM), only one is reported.
+- **Fix:** Aggregate via `AggregateError`: collect errors per-coroutine into `const errors: Error[] = []`. On Promise.all completion, if errors.length > 0 throw `new AggregateError(errors, 'tile decode failed')`. Match Node + modern browser API. Caller can inspect `.errors`.
+
+### L5-9. `release()` in `finally` masks decode error
+- **Category:** low bug
+- **Issue:** tiled-decode-pool.ts L420-425: `try { ... await decodeTilesParallel(...); return stitch(...); } finally { p.release(liveWorkers); }`. If release() throws (synchronous mutation on this.idle/this.active - normally cannot, but could after future destroyed mutation), the thrown release error replaces the in-flight decode error. Cite errors-tdp-finally-release-mask-error.
+- **Fix:** Wrap release in try/catch and surface via onError hook (L5-6): `} finally { try { p.release(liveWorkers); } catch (e) { p.opts.onError?.('release-failed', e); } }`. Decode error propagates cleanly.
+
+### L5-10. Generic Error everywhere - no taxonomy
+- **Category:** info opportunity (cross-file)
+- **Issue:** Across all three files, every throw is `new Error(string)`. Callers cannot distinguish 'budget exceeded' from 'malformed bytes' from 'pool destroyed' from 'AbortError'. UI cannot decide retry vs surface vs ignore. Cite errors-opp-no-error-taxonomy.
+- **Fix:** Introduce a tiny `errors.ts` with `class PyramidError extends Error { constructor(code: PyramidErrorCode, msg: string, cause?: unknown) { ... } }` + `type PyramidErrorCode = 'EMPTY_REGION'|'BAD_REGION'|'NO_FINAL_FRAME'|'WORKER_FAILED'|'POOL_DESTROYED'|'ABORTED'`. Replace all `new Error(...)` with `new PyramidError(code, msg)`. Caller switches on `err instanceof PyramidError && err.code === ...`.
+
+### L5-11. Zero logging - pool degradation invisible
+- **Category:** info opportunity
+- **Issue:** tiled-decode-pool.ts has no `console.*` or logger anywhere. Spawn failure, factory rebind ignore, listener-attach failure, terminate failure all silent. In a customer report `pyramid feels slow' there is no trace evidence to triage. Cite errors-opp-no-structured-logging.
+- **Fix:** Inject a logger interface at pool construction: `opts.logger?: { warn(msg, ctx), info(msg, ctx) }`. Default = no-op (no console noise). Wire to events: spawn-failed, recycled, prewarm-completed, fallback-to-single. Production wires to structured logger; tests assert on calls.
+
+### L5-12. No retry on transient worker failures
+- **Category:** info opportunity
+- **Issue:** First tile failure aborts the whole viewport decode (L5-8). Some failures (transient WASM heap fragmentation, momentary OOM at large tile) succeed on retry with a fresh worker. Cite errors-opp-no-retry-utility.
+- **Fix:** After L5-7 error taxonomy: `decodeTilesParallel` could re-queue tiles whose error code is `RETRYABLE` (OOM, INTERNAL) onto a fresh worker, up to N attempts per tile. Stop on `BAD_REGION` or `JXTC_PARSE` (caller-cause errors don't retry). Caller opt-in via `opts.retryPolicy?: {maxAttempts}`. Conservative default = no retry.
+
+### L5-13. Asymmetric region contract in `decodeLevel`
+- **Category:** low bug
+- **Issue:** decode-level.ts L130-137: `kind='whole'` + region -> throw `'region decode requires a tiled level source'`. `kind='tiled'` + no region -> silently defaults to `{x:0, y:0, w:source.width, h:source.height}`. The two kinds have opposite tolerances for the same argument absence/presence. Cite contracts-013.
+- **Fix:** Symmetrize: `kind='whole'` + region -> ignore region (default to full image, log via L5-11 logger) OR throw both directions. Picking one: if region is undefined OR full-image, accept; if a strict sub-region with kind=whole, throw. Document in JSDoc.
+
