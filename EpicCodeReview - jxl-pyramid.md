@@ -746,3 +746,65 @@ Scope: large allocations on hot path, persistent retention (pool handles, worker
 - **Issue:** When a viewport decode is aborted (per L4-3), the in-flight `decodeTileWithWorker` Promises reject, but the `containerBytes` reference held inside the closure (worker.postMessage arg) is only released when each promise's closure is GC'd. Under high pan rate the abort path may have hundreds of zombie closures temporarily holding the buffer.
 - **Fix:** On abort, explicitly null-out the captured `bytes` reference inside `decodeTileWithWorker` before reject. Setting closure-captured variable to null does drop the ref. Saves GC roundtrips during pan. Minor.
 
+
+---
+
+# Lens 6r - SharedArrayBuffer + browser-cooperation (second pass on memory/perf)
+
+Premise: `canUseParallelTileWorkers()` already gates COOP/COEP (`crossOriginIsolated === true` per tiling.ts). That is the SAME gate SAB requires. The pool's parallel path runs ONLY when SAB is available. The L117-121 comment dismissing SAB as 'out of scope' is leaving the single largest perf win on the table. Browser-cooperation APIs (visibility, idle callback, scheduler) are likewise unused.
+
+### L6r-1. SAB-backed container bytes - zero-copy fan-out to all workers
+- **Category:** perf (large)
+- **Issue:** Today: per-tile postMessage structured-clones full container into each worker's heap (cite L3-4, L6-2). After L3-4 fix: each worker receives the container once via structured clone. With SAB: container is allocated as SharedArrayBuffer once on main; workers receive a `Uint8Array` view over it on first acquire; ZERO copies ever. Single 64 MB container shared across 4 workers = 64 MB total (vs 64-256 MB with current/clone-once).
+- **Fix:** 1) Caller allocates container as `new SharedArrayBuffer(jxtcSize)` and copies fetched bytes in once (one-time mandatory copy from non-shared fetch buffer). 2) Pool protocol gains `{type:'load', bytesId, sab: SharedArrayBuffer, byteLength}`. 3) Worker side: `const view = new Uint8Array(msg.sab, 0, msg.byteLength)`. libjxl WASM tile decoder reads from any Uint8Array; SAB-backed view works identically. 4) Fall back to regular ArrayBuffer when `canUseParallelTileWorkers()` returns false. The fallback path already exists for parallel = false.
+
+### L6r-2. Pool prewarm at `requestIdleCallback` instead of synchronous
+- **Category:** perf
+- **Issue:** L171-179 prewarm() spawns workers synchronously inside `getOrCreatePool`. First call to `decodeTiledViewportPooled` blocks on N x `new Worker(url)` invocations. For minIdle=2 that is ~5-20 ms on cold cache - paid on the user's FIRST pan, the worst possible moment.
+- **Fix:** Wrap spawn in `globalThis.requestIdleCallback?.(() => this.spawnOne())` with a setTimeout fallback. Caller-visible `prewarmAsync(): Promise<void>` resolves when workers have posted `{type:'ready'}` (cite L3-6). UI shell calls prewarmAsync on app mount, not on first viewport decode.
+
+### L6r-3. Page visibility integration - drop idle workers when tab hidden
+- **Category:** efficiency
+- **Issue:** Singleton pool keeps minIdle=2 workers alive forever. When the gallery tab is backgrounded, those workers' WASM heaps (~10 MB each) remain resident for nothing - Chrome's background-tab throttling does not reclaim them.
+- **Fix:** On pool construction: `document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') this.reapAllIdle(); else this.prewarm(this.minIdle); })`. `reapAllIdle()` is a one-shot that destroys every idle handle ignoring the minIdle floor. Returns workers + their WASM heaps to the browser. On visible: re-prewarm at idle. Net memory win in multi-tab usage; cost is 5-20 ms re-warm when user returns. Acceptable trade.
+
+### L6r-4. `freeze`/`resume` Page Lifecycle events - abort + terminate in-flight on freeze
+- **Category:** bug (mobile/PWA)
+- **Issue:** Chrome/Edge fire `freeze` event when tab is going to bf-cache / mobile background. Worker execution may be paused indefinitely. Currently, an in-flight `decodeTileWithWorker` Promise on a frozen worker hangs forever; on resume the worker may continue, but the reply arrives long after viewport has moved. Pool has no awareness.
+- **Fix:** Listen for `freeze` on document (Chrome ships, behind feature). On fire: AbortController.abort() any in-flight requests (per L4-3), terminate workers (full destroy), set `frozen = true`. On `resume`: prewarm fresh. Implementations of the freeze contract: store no permanent state in pool that can't be reconstructed.
+
+### L6r-5. Adaptive `maxSize` based on `navigator.deviceMemory`
+- **Category:** efficiency
+- **Issue:** L309-310: `const hwc = rt.navigator?.hardwareConcurrency ?? 4; const maxSize = Math.min(hwc, 8);`. 8 workers x 10 MB WASM heap = 80 MB. On a 4 GB Chromebook with hwc=8 that is ~2% of device memory just for the pool; on an 8-core/64 GB workstation it is invisible. Workers are not free.
+- **Fix:** If `navigator.deviceMemory` is available (Chrome, mostly): `const memHint = navigator.deviceMemory ?? 4; const maxSize = Math.min(hwc, 8, Math.max(2, Math.floor(memHint)))`. devicMemory is bucketed (0.25, 0.5, 1, 2, 4, 8) so this scales pool size by device class. Low end: 2 workers; high end: full 8.
+
+### L6r-6. `scheduler.postTask` for tile-decode ordering (centroid-first)
+- **Category:** perf
+- **Issue:** `decodeTilesParallel` (L323-364) dispatches tiles in `tiles` array order = scan order. User attention is centered on the viewport's middle. Decoding center tiles first = perceived snap-in is faster even if total time identical.
+- **Fix:** Caller reorders `tiles` by distance to viewport center before passing in. OR pool exposes `decodeOrder?: 'scan'|'centroid'` option that sorts internally. Bonus: `scheduler.postTask(fn, {priority:'user-visible'})` (Chrome native scheduler) for the coroutine bodies would let Chrome prioritize over background tasks.
+
+### L6r-7. Worker `terminate()` ack via FinalizationRegistry
+- **Category:** bug (low) + observability
+- **Issue:** L296: `worker.terminate()` is fire-and-forget. Pool decrements `all.size` immediately; assumes worker is gone. Chrome may delay process kill; under spawn-storm the actual process count exceeds `maxSize` briefly. Hard to diagnose without explicit signal.
+- **Fix:** On spawn: `const cleanup = (info) => this.opts.onWorkerGc?.(info); FINALIZATION_REGISTRY.register(worker, {handleId: h.id});`. Pool's onWorkerGc callback (default no-op) lets tests assert true reclaim. In production, attach to telemetry to detect 'workers terminated > workers GC'd' divergence (= memory leak warning).
+
+### L6r-8. Document the SAB precondition path + reject non-isolated parallel
+- **Category:** contract
+- **Issue:** Today `canUseParallelTileWorkers()` returns true on both crossOriginIsolated AND structured-clone-only worlds. After L6r-1 SAB integration, the `parallel:true` codepath must FAIL CLOSED when SAB is unavailable - otherwise the worker waits for a SAB view it will not receive.
+- **Fix:** Split the capability check: `canUseTileWorkers()` (basic Worker + COOP/COEP) and `canShareContainerBytes()` (SAB + crossOriginIsolated). Pool's `decodeTiledViewportPooled` consults both; falls back to single-WASM if SAB missing AND parallel was requested. Comment the precondition in `tiling.ts`.
+
+### L6r-9. Refuse spawn when `navigator.userAgentData.mobile === true` and large minIdle
+- **Category:** efficiency
+- **Issue:** Mobile devices have stricter background-process budgets and aggressive worker throttling. Keeping 2 workers warm at 10 MB each is a much larger fraction of mobile RAM than desktop, and OS may kill the tab when backgrounded.
+- **Fix:** Detect mobile via `navigator.userAgentData?.mobile` (standardized, Chrome/Edge). On mobile: cap minIdle = 0 (no permanent warm pool; spawn on demand). Acceptable cost is one cold-start per pan session. Pairs with L6r-3.
+
+### L6r-10. OpenInputStream / ReadableStream input - drop bytes after dispatch
+- **Category:** efficiency (architectural)
+- **Issue:** Caller currently holds full `containerBytes` Uint8Array in main heap for the lifetime of the level. After L6r-1 SAB integration, the SAB is the canonical buffer and the original ArrayBuffer can be released. But if caller fetched via `await response.arrayBuffer()`, both buffers transiently coexist (~2x peak).
+- **Fix:** Out of scope for the three files but architecturally: caller should `fetch().then(r => r.body)` (ReadableStream), allocate SAB sized via Content-Length header, and pipe stream into SAB without intermediate buffer. Document for the caller in ADR. (No code change here.)
+
+### L6r-11. Cooperative back-off via `performance.measureUserAgentSpecificMemory()` heuristic
+- **Category:** feature
+- **Issue:** Pool has no signal that the host page is hitting heap pressure from OTHER consumers (e.g., huge gallery thumbnails, video). It will happily warm 8 workers regardless. `performance.measureUserAgentSpecificMemory()` (Chrome, behind CORS) gives a periodic snapshot.
+- **Fix:** Pool config: `opts.memoryProbe?: () => Promise<{bytes:number, limit:number}>`. Called every prewarm decision. If `bytes/limit > 0.7`: drop minIdle to 0 and refuse new spawn. Caller wires the probe to whichever browser API is available; pool stays browser-agnostic.
+
