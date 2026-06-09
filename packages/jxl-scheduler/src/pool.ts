@@ -40,6 +40,7 @@ export class WorkerPool {
   private readonly workers = new Map<number, PoolWorker>();
   private readonly idle = new Set<PoolWorker>();
   private readonly active = new Set<PoolWorker>();
+  private readonly parked = new Set<PoolWorker>(); // explicit parked for paused state (P2a/P2b)
   private readonly spawnPromises = new Set<Promise<PoolWorker>>();
 
   private destroyed = false;
@@ -90,6 +91,10 @@ export class WorkerPool {
     return this.active.size;
   }
 
+  get parkedCount(): number {
+    return this.parked.size;
+  }
+
   get spawningCount(): number {
     return this.spawning;
   }
@@ -122,6 +127,10 @@ export class WorkerPool {
     return this.active.values();
   }
 
+  parkedWorkerValues(): IterableIterator<PoolWorker> {
+    return this.parked.values();
+  }
+
   private get totalAllocatedOrSpawning(): number {
     return this.workers.size + this.spawning;
   }
@@ -148,6 +157,7 @@ export class WorkerPool {
         hasIdleTimer: w.idleTimer !== null,
         indexedIdle: this.idle.has(w),
         indexedActive: this.active.has(w),
+        indexedParked: this.parked.has(w),
       })),
     };
   }
@@ -230,6 +240,21 @@ export class WorkerPool {
     this.assertInvariants();
   }
 
+  park(worker: PoolWorker): void {
+    if (!this.workers.has(worker.id)) return;
+    this.clearIdleTimer(worker);
+    this.active.delete(worker);
+    this.idle.delete(worker);
+    this.parked.add(worker);
+    worker.activeSessionId = null;
+    worker.cancelling = false;
+    this.assertInvariants();
+  }
+
+  unpark(worker: PoolWorker): void {
+    this.parked.delete(worker);
+  }
+
   /** Destroy and remove a poisoned or crashed worker. */
   recycle(worker: PoolWorker): void {
     if (!this.workers.has(worker.id)) return;
@@ -255,6 +280,10 @@ export class WorkerPool {
   reapIdle({ preserveMinIdle = true } = {}): number {
     let count = 0;
     for (const worker of this.idle) {
+      if (this.parked.has(worker)) {
+        this.parked.delete(worker);
+        continue;
+      }
       if (preserveMinIdle && this.idle.size <= this.minIdle) break;
       this.recycle(worker);
       count++;
@@ -287,6 +316,7 @@ export class WorkerPool {
 
     this.idle.clear();
     this.active.clear();
+    this.parked.clear();
     this.workers.clear();
   }
 
@@ -413,6 +443,10 @@ export class WorkerPool {
 
   private takeIdleWorker(): PoolWorker | null {
     for (const worker of this.idle) {
+      if (this.parked.has(worker)) {
+        this.parked.delete(worker);
+        continue;
+      }
       if (
         this.workers.has(worker.id) &&
         worker.activeSessionId === null &&
@@ -529,6 +563,7 @@ export class WorkerPool {
     this.clearIdleTimer(worker);
     this.idle.delete(worker);
     this.active.delete(worker);
+    this.parked.delete(worker);
     this.workers.delete(worker.id);
 
     worker.activeSessionId = null;
@@ -576,8 +611,17 @@ export class WorkerPool {
       }
     }
 
-    if (this.idle.size + this.active.size > this.workers.size) {
+    if (this.idle.size + this.active.size + this.parked.size > this.workers.size) {
       throw new Error("[jxl-scheduler] Worker index sizes exceed workers map size");
+    }
+
+    for (const worker of this.parked) {
+      if (!this.workers.has(worker.id)) {
+        throw new Error(`[jxl-scheduler] Parked worker ${worker.id} missing from workers map`);
+      }
+      if (this.idle.has(worker) || this.active.has(worker)) {
+        throw new Error(`[jxl-scheduler] Worker ${worker.id} is parked and also in idle/active`);
+      }
     }
 
     if (this.workers.size + this.spawning > this.maxSize) {

@@ -556,15 +556,14 @@ export class Scheduler {
         this.backgroundWorkers.delete(backgroundWorker);
       }
       this.workerPausedSession.set(backgroundWorker.id, victimSessionId);
-      this.pool.release(backgroundWorker);
-      const newWorker = await this.pool.acquire();
-      if (newWorker !== null) {
-        this.assignWorker(newWorker, params.sessionId, params.startMsg);
-        this.setupSignalAbort(params.sessionId, params.signal);
-        this.preemptionCount++;
-        return newWorker.id;
-      }
-      return null;
+      this.pool.park(backgroundWorker);
+      this.pool.unpark(backgroundWorker);
+      backgroundWorker.activeSessionId = RESERVED_SESSION_ID;
+      backgroundWorker.cancelling = false;
+      this.assignWorker(backgroundWorker, params.sessionId, params.startMsg);
+      this.setupSignalAbort(params.sessionId, params.signal);
+      this.preemptionCount++;
+      return backgroundWorker.id;
     } else {
       // Cancel: victim's caller receives the cancellation and handles resubmit.
       this.releaseSession(victimSessionId);
