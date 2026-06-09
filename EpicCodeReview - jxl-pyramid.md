@@ -408,3 +408,69 @@ Both return: DecodedLevel { pixels: Uint8Array, width, height }
 - **Category:** info
 - **Issue:** None of L1-1…L1-10 conflict with the rejected-claims list. Transferable + SAB constraints respected. Worker-input bytes pool is read-only — distinct from rejected pixel-buffer pool.
 
+
+---
+
+# Lens 2 — Hot-path allocations
+
+Pan/zoom UI fires `chooseLevelForTarget` + `decodeTiledViewportPooled`/`decodeTiledViewport` at frame rate. Each per-call allocation is multiplied by FPS × tile-count.
+
+### L2-1. `decodeRegion` arrow allocated per call (pool)
+- **Category:** perf
+- **Issue:** `tiled-decode-pool.ts` L390-395: when `options?.decodeRegion` absent, a fresh `async (bytes, r) => {...}` closure + branch object is allocated on every `decodeTiledViewportPooled` invocation. Same closure for the entire lifetime of a given level.
+- **Fix:** Hoist to module scope: `const _decode8 = async (b,r) => ...; const _decode16 = async (b,r) => ...; const decodeRegion = options?.decodeRegion ?? (bits===16 ? _decode16 : _decode8);` — zero per-call alloc.
+
+### L2-2. `[...levels].sort` per UI frame (choose-level)
+- **Category:** efficiency + speed
+- **Issue:** L13 allocates new array + comparator call per UI frame; cite L1-3 / perf-a1b2c3d4.
+- **Fix:** Drop the sort (manifest pre-sorted). Final code: `return levels.find(l => longEdge(l.w, l.h) >= targetLongEdge) ?? levels[levels.length - 1] ?? null;` — zero alloc per call.
+
+### L2-3. `Promise.all(tiles.map(async ...))` per ROI (decode-level)
+- **Category:** perf
+- **Issue:** L114-119 `tiles.map` allocates intermediate array of Promises + closure per tile + `{region, decoded}` object literal per tile. For 16-tile viewport: 16 closures + 16 promises + 16 literals + 1 intermediate array per ROI.
+- **Fix:** Restructure as preallocated `parts = new Array(tiles.length)` with a coroutine-style for-await loop (same shape as pool's `decodeTilesParallel`). Eliminates the intermediate Promise array and `.map`'s allocator chain.
+
+### L2-4. Per-row `subarray` view in stitch fallback path
+- **Category:** perf (low)
+- **Issue:** Both files: partial-width tiles take `decoded.pixels.subarray(srcOff, srcOff+srcStride)` per row → 24-byte view object per row. For 1024-tall viewport with mixed-width tiles: ~1k view allocs per stitch.
+- **Fix:** Two options. (a) Compute `srcOff` and `dstOff` and call `pixels.set(decoded.pixels.subarray(srcOff, srcOff+srcStride), dstOff)` — same as now; can't avoid subarray for cross-buffer offset+offset copy. (b) Use a worker-side packer that writes directly into a shared output offset (out of scope here). Accept; mark info. The current fast-path branch already wins for the common case.
+
+### L2-5. `setTimeout(() => ..., ms)` closure per `armIdleTimer`
+- **Category:** perf (low)
+- **Issue:** L268: each release into idle arms a fresh arrow closure capturing `h`. Bounded by `maxSize` (≤8) but every release triggers it.
+- **Fix:** Use `setTimeout`'s 3rd-arg passthrough: `globalThis.setTimeout(this._reapBound, idleTimeoutMs, h)` with a pre-bound `_reapBound = (h) => { if (this.idle.includes(h) && ...) this.reap(h); }` on the instance. Single closure for the pool lifetime.
+
+### L2-6. `idle.includes(h)` linear scan per release
+- **Category:** perf
+- **Issue:** L227: `if (!this.idle.includes(h)) this.idle.push(h)` — O(idle) per worker returned. Already perf-c3d4e5f6. With minIdle=2 + bursty release: O(maxSize) per call.
+- **Fix:** Track idle membership on the handle itself: `h.inIdle: boolean`. Set true on push, false on shift/reap. `if (!h.inIdle) { h.inIdle = true; this.idle.push(h); }`. O(1).
+
+### L2-7. `new Array(tiles.length)` sparse pre-size (pool)
+- **Category:** perf (engine-dependent)
+- **Issue:** L333: `new Array(N)` creates HOLEY array. V8 transitions to dictionary mode for large holey arrays. Coroutines fill in random order (work-stealing) → never becomes PACKED.
+- **Fix:** Use `[]` then `results.length = tiles.length`? Worse. Best: `Array.from({length: tiles.length}, () => null)` — PACKED, all slots `null` initially. Per-tile write replaces null with `{region, decoded}`. Marginal but real for large tile counts.
+
+### L2-8. `parseJxtcHeader(containerBytes)` repeated per ROI
+- **Category:** perf
+- **Issue:** L381: cite L1-10 / perf-b2c3d4e5. 32-byte parse per ROI. Same bytes across pan/zoom on same level.
+- **Fix:** WeakMap-cache (see L1-10). For Lens-2 purposes: same root cause as L1-2 (pool ignores manifest-known dims). Either fix removes the alloc.
+
+### L2-9. `decodeWhole` IIFE async drain (decode-level)
+- **Category:** perf
+- **Issue:** L20-45: `createDecoder({...})` per call (mandatory — stream decoder), plus `(async () => { for await ...})()` IIFE allocates Generator + Promise. Three sequential awaits.
+- **Fix:** Use the streaming API the same way but reuse a module-level `createDecoder` config object literal (saves one alloc per call): hoist `const WHOLE_DECODER_OPTS = Object.freeze({ format: 'rgba8', ... })`. Minor but free.
+
+### L2-10. FEATURE: per-level `DecodePlan` cache
+- **Category:** feature opportunity
+- **Issue:** Every pan/zoom recomputes: clamped viewport, tile list, header parse, decodeRegion selection. All deterministic on `(LevelSource, region)`.
+- **Fix:** Introduce `prepareDecodePlan(source, region) → { viewport, tiles, header, decodeRegion }` cached on the LevelSource (WeakMap). decode-level + pool both consume the same plan. Eliminates ~5 distinct hot-path allocs in one shot. Pairs with L1-1 extract-helpers refactor.
+
+### L2-11. FEATURE: stitch buffer reuse across pan
+- **Category:** feature opportunity (constrained)
+- **Issue:** Output `pixels` alloc dominates byte cost: `viewport.w * viewport.h * bpp`. For 2048×1024×4 = 8 MB per stitch. Pan throws old pixels away.
+- **Fix:** Caller-owned buffer: `decodeTiledViewportPooled(bytes, region, { outBuffer?: Uint8Array, ... })`. Caller maintains a single recyclable Uint8Array sized to viewport max. CLAUDE.md rejects pixel-buffer pool because *transferred* buffers detach — this is caller-owned, not transferred. Safe if caller commits to ownership semantics. Document the contract.
+
+### L2-12. INFO: `decodeTileWithWorker` per-tile closure cost
+- **Category:** info
+- **Issue:** L74: per tile allocates new Promise + onMessage + onError + cleanup closures + `settled` flag. Inevitable for the request-response promise pattern. Mention only — bytes payload dwarfs this.
+
