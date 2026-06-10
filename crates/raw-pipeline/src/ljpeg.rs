@@ -262,7 +262,8 @@ pub fn decode_tile(
             }
             0xC4 => {
                 let seg_len = read_u16_be(src, &mut pos)? as usize;
-                let end = pos + seg_len - 2;
+                if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
+                let end = (pos + seg_len - 2).min(src.len());
                 while pos < end {
                     let tcth = read_u8(src, &mut pos)?;
                     let tc = tcth >> 4;
@@ -313,16 +314,30 @@ pub fn decode_tile(
                 have_sos = true;
             }
             0xD9 => bail!("ljpeg: EOI before SOS"),
+            0xDD => {
+                let seg_len = read_u16_be(src, &mut pos)? as usize;
+                if seg_len != 4 { bail!("ljpeg: bad DRI length {}", seg_len); }
+                let interval = read_u16_be(src, &mut pos)?;
+                if interval != 0 { bail!("ljpeg: restart markers unsupported (DRI={})", interval); }
+            }
             _ => {
                 // Skip unknown segment.
-                let seg_len = read_u16_be(src, &mut pos)?;
-                pos += seg_len as usize - 2;
+                let seg_len = read_u16_be(src, &mut pos)? as usize;
+                if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
+                pos += seg_len - 2;
             }
         }
     }
 
     if sos.predictor != 1 {
         bail!("ljpeg: predictor {} not supported", sos.predictor);
+    }
+
+    if sof.precision < 2 || sof.precision > 16 {
+        bail!("ljpeg: precision {} unsupported", sof.precision);
+    }
+    if sos.point_transform >= sof.precision {
+        bail!("ljpeg: point transform {} >= precision {}", sos.point_transform, sof.precision);
     }
 
     let cps = sof.cps as usize;
@@ -400,11 +415,89 @@ pub fn decode_tile(
                 let raw_col = col * cps + comp;
                 if row < out_rows && raw_col < out_pixel_cols {
                     let off = base + row * stride_pixels + raw_col;
-                    out[off] = (val & 0xFFFF) as u16;
+                    out[off] = ((val << sos.point_transform) & 0xFFFF) as u16;
                 }
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hand-built minimal SOF3: SOI + SOF3(1comp,2x2,prec=8) + DHT (codes for t=0,1,2,5 at len3) + SOS(Pt=0,pred=1) + entropy for pixels [100,101,102,103] around base=128.
+    fn make_minimal_sof3() -> Vec<u8> {
+        vec![
+            0xFF, 0xD8,
+            // SOF3
+            0xFF, 0xC3, 0x00, 0x0B,
+            0x08, 0x00, 0x02, 0x00, 0x02, 0x01,
+            0x01, 0x11, 0x00,
+            // DHT: len=0x17, tcTh=0, bits with 4 at [2], values [0,1,2,5]
+            0xFF, 0xC4, 0x00, 0x17,
+            0x00,
+            0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,
+            0,1,2,5,
+            // SOS
+            0xFF, 0xDA, 0x00, 0x08,
+            0x01, 0x01, 0x00,
+            0x01, 0x00, 0x00,
+            // entropy: 21 bits packed (see construction in thinking trace)
+            0x63, 0x35, 0x18,
+        ]
+    }
+
+    #[test]
+    fn l15_a_minimal_sof3_decodes_to_known() {
+        let src = make_minimal_sof3();
+        let mut out = vec![0u16; 4];
+        decode_tile(&src, &mut out, 0, 2, 2, 2).expect("decode ok");
+        assert_eq!(&out[..], &[100u16, 101, 102, 103]);
+    }
+
+    #[test]
+    fn l15_b_seg_len_lt_2_errors_not_panic() {
+        // Hit DHT arm with seg_len=1
+        let src = vec![0xFF, 0xD8, 0xFF, 0xC4, 0x00, 0x01, 0x00];
+        let mut out = vec![0u16; 1];
+        let e = decode_tile(&src, &mut out, 0, 1, 1, 1).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("ljpeg: segment length 1 < 2"), "got: {}", msg);
+    }
+
+    #[test]
+    fn l15_c_point_transform_ge_precision_errors() {
+        // SOI + SOF3(prec=8) + SOS(Pt=8) — bail after SOS before base_pred; no DHT/entropy needed
+        let src = vec![
+            0xFF, 0xD8,
+            0xFF, 0xC3, 0x00, 0x0B,
+            0x08, 0x00, 0x02, 0x00, 0x02, 0x01,
+            0x01, 0x11, 0x00,
+            // SOS with Pt=8
+            0xFF, 0xDA, 0x00, 0x08,
+            0x01, 0x01, 0x00,
+            0x01, 0x00, 0x08,
+        ];
+        let mut out = vec![0u16; 1];
+        let e = decode_tile(&src, &mut out, 0, 1, 1, 1).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("ljpeg: point transform 8 >= precision 8"), "got: {}", msg);
+    }
+
+    #[test]
+    fn l15_d_dri_nonzero_errors() {
+        // Insert DRI (len=4, interval=1) after SOF, before DHT; parser hits 0xDD arm before SOS
+        let mut src = make_minimal_sof3();
+        // insert after SOF (at index ~2+2+11=15? but easier splice after known SOF prefix
+        // SOF ends at byte offset 2(SOI)+2+11=15, insert at 15 (before DHT FF)
+        let dri = vec![0xFF, 0xDD, 0x00, 0x04, 0x00, 0x01];
+        src.splice(15..15, dri);
+        let mut out = vec![0u16; 4];
+        let e = decode_tile(&src, &mut out, 0, 2, 2, 2).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("ljpeg: restart markers unsupported (DRI=1)"), "got: {}", msg);
+    }
 }
