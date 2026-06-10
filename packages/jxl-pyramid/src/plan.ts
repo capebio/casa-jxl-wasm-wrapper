@@ -92,6 +92,7 @@ export function prepareDecodePlan(source: LevelSource, region: ImageRegion): Dec
   const header: JxtcHeader = { ...headerRaw };
   const bits = header.bitsPerSample;
   const format: 'rgba8' | 'rgba16' = bits === 16 ? 'rgba16' : 'rgba8';
+  // F6: format token derived once from header (manifest bits) and carried on DecodePlan/LevelSource.
   // Inline choice at site where format/bits known (Grok4); pickRegionDecoder kept for overrides/callers.
   const decodeRegion: RegionDecoder = bits === 16 ? REGION_DECODER_RGBA16 : REGION_DECODER_RGBA8;
   const bpp: 4 | 8 = bits === 16 ? 8 : 4;

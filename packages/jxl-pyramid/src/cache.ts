@@ -1,4 +1,5 @@
 import type { LevelSource } from "./level-source.js";
+import { tileKey, type TileId } from "./decode-core.js";
 
 export interface PyramidCache {
   get(key: string): Uint8Array | undefined;
@@ -82,3 +83,12 @@ export function createInMemoryPyramidCache(opts: { maxBytes?: number } = {}): Py
   const max = opts.maxBytes ?? 32 * 1024 * 1024;
   return new InMemoryPyramidCache(max);
 }
+
+/** F7: canonical key for per-tile cache entries using stable TileId (no ad-hoc coord strings). */
+export function makeTileCacheKey(sourceId: string, tile: TileId): string {
+  return `${sourceId}:${tileKey(tile)}`;
+}
+
+// Re-export for consumers who import cache entrypoint for tile addressing.
+export type { TileId };
+export { tileKey };

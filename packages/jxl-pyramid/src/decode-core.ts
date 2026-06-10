@@ -105,6 +105,7 @@ export type PyramidErrorCode =
   | 'JXTC_PARSE'
   | 'OOM'
   | 'INTERNAL'
+  | 'INVALID_BUFFER_SIZE'
   | string;
 
 export class PyramidError extends Error {
@@ -112,6 +113,18 @@ export class PyramidError extends Error {
     super(message);
     this.name = 'PyramidError';
   }
+}
+
+/** F7: stable, immutable tile coordinate for cache keys, telemetry, multi-pass coordination. */
+export interface TileId {
+  level: number;
+  col: number;
+  row: number;
+}
+
+/** High-perf stable string key for a tile (used for LRU cache keys and logs). */
+export function tileKey(tile: TileId): string {
+  return `L${tile.level}-C${tile.col}-R${tile.row}`;
 }
 
 export interface DecodeOptions {
@@ -126,4 +139,16 @@ export interface DecodeOptions {
   outBuffer?: Uint8Array;
   /** Called after each tile write (parallel) or once for direct (completedCount = tiles done). */
   onTile?: (region: ImageRegion, completedCount: number) => void;
+  // F2 note: outBuffer + onTile together enable Grok 4 stream-stitch (on-arrival writes into caller buffer,
+  // no results[] retention, paint as tiles land, reuse buffer across pans for 60fps). See decodeTiledViewport + decodeTilesParallel.
+  /**
+   * Progressive DC-then-final first-paint (F1, cites L3m-2 L21m-2 L8pm-3).
+   * When set, per-tile (or viewport) uses createDecoder({ progressionTarget: 'dc' }) for fast coarse paint,
+   * then a second pass to final at the same level/region. Caller's onTile fires twice per tile.
+   * Wired to stream-stitch (Grok 4): caller paints DC tiles first, then refines.
+   * Undefined (default) = existing one-shot final behavior (no behavior change for happy path).
+   */
+  progressive?: 'dc-then-final';
 }
+
+export type ProgressiveMode = 'dc-then-final' | undefined;

@@ -141,3 +141,41 @@ export function canShareContainerBytes(): boolean {
     return false;
   }
 }
+
+/**
+ * Extract the standalone JXL bitstream bytes for one tile from a JXTC container.
+ * Pure TS (no WASM). Zero-copy subarray view. Used for progressive DC-then-final (F1)
+ * and future per-tile createDecoder paths. Index layout per bridge.cpp + parseJxtcHeader.
+ */
+export function extractTileBitstream(
+  container: Uint8Array,
+  tile: ImageRegion,
+  header: JxtcHeader,
+): Uint8Array {
+  if (container.byteLength < 32) throw new Error('JXTC container too small');
+  const view = new DataView(container.buffer, container.byteOffset, container.byteLength);
+  if (view.getUint32(0, true) !== JXTC_MAGIC) throw new Error('not a JXTC container');
+  const tilesX = header.tilesX;
+  const tilesY = header.tilesY;
+  const tileSize = header.tileSize;
+  if (tilesX <= 0 || tilesY <= 0 || tileSize <= 0) throw new Error('bad JXTC header dims');
+
+  const tx = Math.floor(tile.x / tileSize);
+  const ty = Math.floor(tile.y / tileSize);
+  if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) throw new Error('tile out of JXTC grid');
+
+  const idx = ty * tilesX + tx;
+  const headerBytes = 32;
+  const indexEntrySize = 8;
+  const numTiles = tilesX * tilesY;
+  const indexBytes = numTiles * indexEntrySize;
+  const indexOff = headerBytes + idx * indexEntrySize;
+  if (indexOff + 8 > container.byteLength) throw new Error('tile index OOB');
+
+  const off = view.getUint32(indexOff, true);
+  const len = view.getUint32(indexOff + 4, true);
+  const dataBase = headerBytes + indexBytes + off;
+  if (dataBase + len > container.byteLength || len === 0) throw new Error('tile data OOB or empty');
+
+  return container.subarray(dataBase, dataBase + len);
+}

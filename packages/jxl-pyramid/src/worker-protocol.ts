@@ -10,7 +10,7 @@ export type { ImageRegion } from "./tiling.js";
 
 export type WorkerRequest =
   | { v: 1; type: 'load'; bytesId: number; bytes: Uint8Array }
-  | { v: 1; type: 'decode'; id: number; bytesId: number; region: ImageRegion; format: 'rgba8' | 'rgba16'; deadlineMs?: number }
+  | { v: 1; type: 'decode'; id: number; bytesId: number; region: ImageRegion; format: 'rgba8' | 'rgba16'; deadlineMs?: number; progressiveStage?: 'dc' | 'final' }
   | { v: 1; type: 'cancel'; id: number };
 
 export type WorkerReply =

@@ -5,8 +5,8 @@ import type { PyramidLevel } from "./manifest.js";
  * bytesId is attached lazily by the pool (Grok 2) for the load/decode protocol to avoid N-clones.
  */
 export type LevelSource =
-  | { kind: "whole"; bytes: Uint8Array; width: number; height: number; bitsPerSample: 8 | 16; bytesId?: number }
-  | { kind: "tiled"; bytes: Uint8Array; width: number; height: number; tileSize: number; bitsPerSample: 8 | 16; bytesId?: number };
+  | { kind: "whole"; bytes: Uint8Array; width: number; height: number; bitsPerSample: 8 | 16; format: 'rgba8' | 'rgba16'; bytesId?: number }
+  | { kind: "tiled"; bytes: Uint8Array; width: number; height: number; tileSize: number; bitsPerSample: 8 | 16; format: 'rgba8' | 'rgba16'; bytesId?: number };
 
 export function createLevelSource(
   entry: Pick<PyramidLevel, "w" | "h" | "tiled"> & { bitsPerSample?: 8 | 16 },
@@ -17,6 +17,7 @@ export function createLevelSource(
       throw new Error("manifest level is tiled but bytes are not a JXTC container");
     }
     const header = parseJxtcHeader(bytes);
+    const fmt: 'rgba8' | 'rgba16' = header.bitsPerSample === 16 ? 'rgba16' : 'rgba8';
     return {
       kind: "tiled",
       bytes,
@@ -24,15 +25,19 @@ export function createLevelSource(
       height: header.imageH,
       tileSize: header.tileSize,
       bitsPerSample: header.bitsPerSample,
+      format: fmt,
     };
   }
+  const bits = entry.bitsPerSample ?? 8;
+  const fmt: 'rgba8' | 'rgba16' = bits === 16 ? 'rgba16' : 'rgba8';
   // whole branch now carries bitsPerSample (Grok1 fix for contracts-003)
   return {
     kind: "whole",
     bytes,
     width: entry.w,
     height: entry.h,
-    bitsPerSample: entry.bitsPerSample ?? 8,
+    bitsPerSample: bits,
+    format: fmt,
   };
 }
 

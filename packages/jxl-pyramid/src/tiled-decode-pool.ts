@@ -15,6 +15,7 @@ import {
   PyramidError,
   type DecodeOptions,
   longEdge,
+  type TileId,
 } from "./decode-core.js";
 import { getLevelId } from "./cache.js";
 import { prepareDecodePlan } from "./plan.js";
@@ -89,6 +90,7 @@ function decodeTileWithWorker(
   deadlineMs?: number,
   signal?: AbortSignal,
   requestTimeoutMs?: number,
+  progressiveStage?: 'dc' | 'final',
 ): Promise<DecodedLevel> {
   setHandleState(h, HandleState.Active);
   const id = ++h.nextId;
@@ -179,6 +181,7 @@ function decodeTileWithWorker(
       region,
       format,
       ...(deadlineMs != null ? { deadlineMs } : {}),
+      ...(progressiveStage ? { progressiveStage } : {}),
     } as WorkerRequest;
     try {
       h.worker.postMessage(req);
@@ -715,9 +718,11 @@ async function decodeTilesParallel(
   outBuffer: Uint8Array,
   viewport: ImageRegion,
   bpp: 4 | 8,
-  opts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number) => void } = {},
+  opts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number) => void; progressiveStage?: 'dc' | 'final' } = {},
   deadlineMs?: number,
   requestTimeoutMs?: number,
+  tileSize?: number,
+  tileLevel?: number,
 ): Promise<void> {
   if (handles.length === 0) return;
   if (opts.signal?.aborted) {
@@ -748,12 +753,15 @@ async function decodeTilesParallel(
       if (idx >= tiles.length) break;
       const region = tiles[idx]!;
       try {
-        const decoded = await decodeTileWithWorker(h, bytesId, region, format, deadlineMs, effectiveSignal, requestTimeoutMs);
+        const decoded = await decodeTileWithWorker(h, bytesId, region, format, deadlineMs, effectiveSignal, requestTimeoutMs, (opts as any).progressiveStage);
         if (!failed) {
           stitch(outBuffer, viewport, region, decoded, bpp);
           // Drop ref after write (stream-stitch; aids GC of per-tile buffers).
           (decoded as any).pixels = null as any;
           completedCount += 1;
+          // F7: stable TileId for this tile (level/col/row); onTile passes region (compat) + caller can map via tileKey
+          const tId: TileId | undefined = (tileSize != null) ? { level: tileLevel ?? 0, col: Math.floor(region.x / tileSize), row: Math.floor(region.y / tileSize) } : undefined;
+          void tId; // surfaced for telemetry / multi-pass (dc/final) coordination; onTile(region, count) unchanged for API compat
           opts.onTile?.(region, completedCount);
         }
       } catch (e) {
@@ -821,6 +829,7 @@ export async function decodeTiledViewportPooled(
   let source: Extract<LevelSource, { kind: "tiled" }>;
   if (arg1 instanceof Uint8Array) {
     const header = parseJxtcHeader(arg1);
+    const fmt: 'rgba8' | 'rgba16' = header.bitsPerSample === 16 ? 'rgba16' : 'rgba8';
     source = {
       kind: "tiled",
       bytes: arg1,
@@ -828,6 +837,7 @@ export async function decodeTiledViewportPooled(
       height: header.imageH,
       tileSize: header.tileSize,
       bitsPerSample: header.bitsPerSample,
+      format: fmt,
     };
   } else {
     source = arg1;
@@ -854,7 +864,7 @@ export async function decodeTiledViewportPooled(
     if (cached) {
       if (options?.outBuffer) {
         const ob = options.outBuffer;
-        if (ob.length < need) throw new RangeError(`outBuffer too small (${ob.length} < ${need})`);
+        if (ob.byteLength < need) throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${ob.byteLength} < ${need})`);
         ob.set(cached);
         return { pixels: ob, width: vp.w, height: vp.h };
       }
@@ -865,8 +875,8 @@ export async function decodeTiledViewportPooled(
   // Allocate or validate caller outBuffer once (stream-stitch / direct paths reuse it).
   let outBuffer: Uint8Array;
   if (options?.outBuffer) {
-    if (options.outBuffer.length < need) {
-      throw new RangeError(`outBuffer too small (${options.outBuffer.length} < ${need})`);
+    if (options.outBuffer.byteLength < need) {
+      throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${options.outBuffer.byteLength} < ${need})`);
     }
     outBuffer = options.outBuffer;
   } else {
@@ -945,21 +955,34 @@ export async function decodeTiledViewportPooled(
   }
 
   try {
-    const tileOpts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number) => void } = {};
-    if (signal != null) tileOpts.signal = signal;
-    if (onTile) tileOpts.onTile = onTile;
-    await decodeTilesParallel(
-      bytesId,
-      plan.format,
-      plan.tiles,
-      liveHandles,
-      outBuffer,
-      vp,
-      bpp,
-      tileOpts,
-      undefined,
-      p.requestTimeout,
-    );
+    const prog = options?.progressive;
+    const baseTileOpts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number) => void; progressiveStage?: 'dc' | 'final' } = {};
+    if (signal != null) baseTileOpts.signal = signal;
+    if (onTile) baseTileOpts.onTile = onTile;
+
+    if (prog === 'dc-then-final') {
+      // DC pass first (fast first paint for all tiles), then final refine pass. onTile fires per stage.
+      const dcOpts = { ...baseTileOpts, progressiveStage: 'dc' as const };
+      await decodeTilesParallel(bytesId, plan.format, plan.tiles, liveHandles, outBuffer, vp, bpp, dcOpts, undefined, p.requestTimeout, source.tileSize, 0);
+      const finOpts = { ...baseTileOpts, progressiveStage: 'final' as const };
+      await decodeTilesParallel(bytesId, plan.format, plan.tiles, liveHandles, outBuffer, vp, bpp, finOpts, undefined, p.requestTimeout, source.tileSize, 0);
+    } else {
+      const tileOpts = { ...baseTileOpts };
+      await decodeTilesParallel(
+        bytesId,
+        plan.format,
+        plan.tiles,
+        liveHandles,
+        outBuffer,
+        vp,
+        bpp,
+        tileOpts,
+        undefined,
+        p.requestTimeout,
+        source.tileSize,
+        0,
+      );
+    }
     const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h };
     cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
     return result;
