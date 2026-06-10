@@ -783,6 +783,8 @@ export async function ingestBatch(
         }
       }
     });
+    // Respawn (original B1 optional) not done: would require re-creating Worker, re-attaching all handlers, replacing slot, + once-guard to avoid loops.
+    // Current dead+pending-reject+dispatcher-break + resume/--retry-failed already gives correct isolation + recovery without extra lifecycle in the dumb pool.
     workers.push(w);
   }
 
