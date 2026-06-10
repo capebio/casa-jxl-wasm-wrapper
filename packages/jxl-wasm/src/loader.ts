@@ -13,6 +13,10 @@ export interface LoaderOptions {
 }
 
 const nodeCache = new Map<string, Promise<WebAssembly.Module>>();
+// P5-1: browser-side module-scope promise memo (per buildId:wasmSha).
+// Avoids repeated IDB open+get per call (e.g. worker spawn, multiple handlers).
+// IDB remains the persistence/cold-start layer; this is hot-path memo only.
+const browserModuleCache = new Map<string, Promise<WebAssembly.Module>>();
 
 export async function loadJxlModule(manifest: JxlWasmManifest, options: LoaderOptions = {}): Promise<WebAssembly.Module> {
   const cacheKey = `${manifest.buildId}:${manifest.wasmSha}`;
@@ -22,7 +26,10 @@ export async function loadJxlModule(manifest: JxlWasmManifest, options: LoaderOp
     }
     return nodeCache.get(cacheKey)!;
   }
-  return loadBrowserModule(manifest, options);
+  if (!browserModuleCache.has(cacheKey)) {
+    browserModuleCache.set(cacheKey, loadBrowserModule(manifest, options));
+  }
+  return browserModuleCache.get(cacheKey)!;
 }
 
 async function loadNodeModule(manifest: JxlWasmManifest, options: LoaderOptions): Promise<WebAssembly.Module> {
@@ -45,17 +52,24 @@ async function loadBrowserModule(manifest: JxlWasmManifest, options: LoaderOptio
     throw new Error("jxl-wasm loader needs wasmUrl in browser");
   }
   const response = await fetchImpl(wasmUrl);
-  const module = await compileFromResponse(response);
+  // P5-2: pass a refetcher so compile can re-fetch on rare streaming fallback instead of .clone() (avoids doubling 2.7 MB peak mem).
+  const module = await compileFromResponse(response, () => fetchImpl(wasmUrl));
   await writeIndexedDbModule(key, module, options);
   return module;
 }
 
-async function compileFromResponse(response: Response): Promise<WebAssembly.Module> {
+async function compileFromResponse(response: Response, getFreshResponse?: () => Promise<Response>): Promise<WebAssembly.Module> {
   if ("compileStreaming" in WebAssembly && response.body) {
     try {
-      return await WebAssembly.compileStreaming(response.clone());
+      // Direct use (no .clone() tee). On failure the body is spent; caller-provided refetcher gets a fresh one.
+      return await WebAssembly.compileStreaming(response);
     } catch {
-      // Fall back to bytes for platforms that advertise streaming but reject the response shape.
+      // Rare fallback (platform rejected streaming shape): re-fetch instead of paying clone memory for the common case.
+      if (getFreshResponse) {
+        const fresh = await getFreshResponse();
+        return WebAssembly.compile(await fresh.arrayBuffer());
+      }
+      // Last-ditch: original response may be partially consumed.
     }
   }
   return WebAssembly.compile(await response.arrayBuffer());

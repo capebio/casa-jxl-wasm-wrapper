@@ -6,9 +6,13 @@
 // wasm-bindgen-rayon later — harmless if not.
 
 import { serve } from "bun";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile, stat } from "node:fs/promises";
 import { basename, extname, join, normalize, sep } from "node:path";
 import { createDecoder, createEncoder } from "./packages/jxl-wasm/dist/facade.js";
+
+async function statSafe(p: string): Promise<boolean> {
+  try { await stat(p); return true; } catch { return false; }
+}
 
 const ROOT = import.meta.dir;
 const PORT = Number(process.env.PORT ?? 9000);
@@ -28,6 +32,19 @@ const MIME: Record<string, string> = {
     ".svg":  "image/svg+xml",
     ".ts":   "application/typescript",
 };
+
+// P5-3: support precompressed .wasm.br (and .js.br) with Content-Encoding: br.
+// First-load only (IDB module cache covers subsequent), but first impression matters.
+// Usage: drop jxl-core.simd.wasm.br next to the .wasm; clients sending Accept-Encoding: br get the smaller transfer.
+function negotiateCompressed(fsPath: string, acceptEncoding: string | null): { path: string; encoding: string | null } {
+  const wantsBr = !!acceptEncoding && /\bbr\b/i.test(acceptEncoding);
+  if (wantsBr) {
+    const br = fsPath + ".br";
+    // existence checked by caller before read, but we return candidate
+    return { path: br, encoding: "br" };
+  }
+  return { path: fsPath, encoding: null };
+}
 
 // --- /api/jxl-crop cache ---
 // Key: "file:x:y:w:h:distance:effort" → encoded crop JXL bytes.
@@ -250,18 +267,23 @@ serve({
         }
         // Worker falls back to this URL when import maps aren't available (pre-Chrome 114).
         // Serve the scalar WASM so the worker can bootstrap without T-WASM-BUILD.
+        // P5-3: honor .br sibling for first-load transfer win.
         if (path === "/packages/jxl-worker-browser/dist/jxl-core.wasm") {
-            const wasmPath = join(ROOT, "packages", "jxl-wasm", "dist", "jxl-core.scalar.wasm");
+            const baseWasmPath = join(ROOT, "packages", "jxl-wasm", "dist", "jxl-core.scalar.wasm");
+            const accept = req.headers.get("accept-encoding");
+            const neg = negotiateCompressed(baseWasmPath, accept);
+            const targetPath = neg.encoding === "br" && (await statSafe(neg.path)) ? neg.path : baseWasmPath;
             try {
-                const data = await readFile(wasmPath);
-                return new Response(data, {
-                    headers: {
-                        "Content-Type": "application/wasm",
-                        "Cache-Control": "no-cache",
-                        "Cross-Origin-Opener-Policy":   "same-origin",
-                        "Cross-Origin-Embedder-Policy": "require-corp",
-                    },
-                });
+                const data = await readFile(targetPath);
+                const headers: Record<string, string> = {
+                    "Content-Type": "application/wasm",
+                    "Cache-Control": "no-cache",
+                    "Cross-Origin-Opener-Policy":   "same-origin",
+                    "Cross-Origin-Embedder-Policy": "require-corp",
+                    "Vary": "Accept-Encoding",
+                };
+                if (neg.encoding === "br" && targetPath.endsWith(".br")) headers["Content-Encoding"] = "br";
+                return new Response(data, { headers });
             } catch {
                 return new Response("jxl-core.scalar.wasm not found", { status: 404 });
             }
@@ -283,19 +305,31 @@ serve({
             return new Response("forbidden", { status: 403 });
         }
         try {
-            const data = await readFile(fsPath);
+            const accept = req.headers.get("accept-encoding");
+            let targetPath = fsPath;
+            let encoding: string | null = null;
             const ext = extname(fsPath).toLowerCase();
+            if (ext === ".wasm" || ext === ".js") {
+                // P5-3: Brotli precompressed for first-load wasm (and js) transfer win.
+                const neg = negotiateCompressed(fsPath, accept);
+                if (neg.encoding === "br" && await statSafe(neg.path)) {
+                    targetPath = neg.path;
+                    encoding = "br";
+                }
+            }
+            const data = await readFile(targetPath);
             // COOP + COEP enable SharedArrayBuffer for jxl-worker.js, which runs
             // the Pthread-based libjxl MT codec.  All resources are same-origin
             // (no CDN), so require-corp is safe.
-            return new Response(data, {
-                headers: {
-                    "Content-Type": MIME[ext] ?? "application/octet-stream",
-                    "Cache-Control": "no-cache",
-                    "Cross-Origin-Opener-Policy":   "same-origin",
-                    "Cross-Origin-Embedder-Policy": "require-corp",
-                },
-            });
+            const headers: Record<string, string> = {
+                "Content-Type": MIME[ext] ?? "application/octet-stream",
+                "Cache-Control": "no-cache",
+                "Cross-Origin-Opener-Policy":   "same-origin",
+                "Cross-Origin-Embedder-Policy": "require-corp",
+                "Vary": "Accept-Encoding",
+            };
+            if (encoding === "br") headers["Content-Encoding"] = "br";
+            return new Response(data, { headers });
         } catch (err) {
             const code = (err as NodeJS.ErrnoException).code;
             if (code === "ENOENT") return new Response("not found: " + parts.join("/"), { status: 404 });

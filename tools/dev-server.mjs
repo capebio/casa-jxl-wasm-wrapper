@@ -36,6 +36,19 @@ const SECURITY_HEADERS = {
   'Cross-Origin-Resource-Policy': 'cross-origin',
 };
 
+// P5-3: Brotli serving micro-win for first-load .wasm (and .js). Serve .br sibling with
+// Content-Encoding: br when client advertises it. IDB cache covers repeats; this wins the initial viewer's impression.
+// Drop foo.wasm.br next to foo.wasm; ~2.7 MB -> ~700 KB.
+function pickWasmPath(filePath, acceptEncoding) {
+  if (!/\.wasm$|\.js$/i.test(filePath)) return { path: filePath, encoding: null };
+  const wantsBr = acceptEncoding && /\bbr\b/i.test(acceptEncoding);
+  if (wantsBr) {
+    const br = filePath + '.br';
+    if (fs.existsSync(br)) return { path: br, encoding: 'br' };
+  }
+  return { path: filePath, encoding: null };
+}
+
 http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://localhost:${port}`);
   let filePath = path.join(root, url.pathname);
@@ -57,9 +70,15 @@ http.createServer((req, res) => {
   const ext = path.extname(filePath).toLowerCase();
   const contentType = MIME[ext] ?? 'application/octet-stream';
 
-  res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': contentType });
+  // P5-3: apply brotli negotiation (only affects .wasm/.js; transparent to client URL)
+  const accept = req.headers['accept-encoding'] || '';
+  const picked = pickWasmPath(filePath, accept);
+  const headers = { ...SECURITY_HEADERS, 'Content-Type': contentType, 'Vary': 'Accept-Encoding' };
+  if (picked.encoding === 'br') headers['Content-Encoding'] = 'br';
 
-  fs.createReadStream(filePath).pipe(res);
+  res.writeHead(200, headers);
+
+  fs.createReadStream(picked.path).pipe(res);
 }).listen(port, () => {
   console.log(`Dev server: http://localhost:${port}  (root: ${root})`);
   console.log('COOP/COEP active → SharedArrayBuffer available → simd-mt WASM tier');
