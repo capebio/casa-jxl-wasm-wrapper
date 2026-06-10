@@ -108,9 +108,7 @@ struct JxlWasmDecState {
   JxlPixelFormat pixel_format;
   uint8_t* pixels;       // working pixel buffer (raw malloc; null until first NEED_IMAGE_OUT_BUFFER)
   size_t   pixels_size;
-  uint8_t* flushed;      // legacy owned progress buffer; progress now borrows pixels
-  size_t   flushed_size;
-  size_t   flushed_capacity;
+  size_t   flushed_size; // bytes for last successful progressive snapshot (borrowed view of pixels)
   bool flushed_ready;
   uint32_t flush_count;     // number of successful TryFlushProgressiveImage calls
   bool suppress_duplicate_progress;
@@ -151,6 +149,7 @@ struct JxlWasmDecState {
 #define JXL_DEC_RESULT_NEED_MORE  0
 #define JXL_DEC_RESULT_PROGRESS   1
 #define JXL_DEC_RESULT_DONE       2
+#define JXL_DEC_RESULT_FRAME_DONE 3
 #define JXL_DEC_RESULT_ERROR     -1
 
 static JxlWasmBuffer* MakeError(int error) {
@@ -366,6 +365,90 @@ static JxlEncoderStatus AddCustomBoxes(JxlEncoder* enc, const WasmBoxOpts* opts)
     }
   }
   return JXL_ENC_SUCCESS;
+}
+
+// Estimate initial output buffer cap (extracted from the triplicated heuristic in
+// EncodeRgbaWithMetadata / WithGainMap / WithExtraChannels).
+static size_t EstimateOutputCap(uint32_t w, uint32_t h, uint32_t fmt, float distance, uint32_t effort) {
+  const size_t raw = static_cast<size_t>(w) * h * 4u *
+      ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u);
+  if (distance == 0.0f) return std::max(size_t(65536), raw / 2);
+  if (effort <= 3)      return std::max(size_t(65536), raw / 12);
+  return std::max(size_t(65536), raw / 10);
+}
+
+// PumpEncoderOutput: consolidates the 7 duplicated JxlEncoderProcessOutput loops
+// (EncodeRgbaWithMetadata, WithGainMap, WithExtra, EncodeRgba8Tiled, EncodeStandaloneJxlTileRgba8,
+// EncodeAnimation, and the two JPEG transcodes).
+// initial_cap: starting malloc size (use EstimateOutputCap or specific).
+// max_cap: 0 = uncapped (double until OOM); >0 caps growth (EncodeAnimation uses 128 MiB).
+// On success: returns caller-owned malloc buffer, writes *out_size, destroys enc.
+// On failure: frees buffer+enc, writes err code to *err, returns nullptr.
+static uint8_t* PumpEncoderOutput(JxlEncoder* enc, size_t initial_cap, size_t max_cap,
+                                  size_t* out_size, int* err) {
+  if (enc == nullptr) { *err = 21; return nullptr; }
+  if (initial_cap < 65536u) initial_cap = 65536u;
+  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_cap));
+  if (outbuf == nullptr) { JxlEncoderDestroy(enc); *err = 25; return nullptr; }
+  size_t cap = initial_cap;
+  uint8_t* next_out = outbuf;
+  size_t avail_out = cap;
+  for (;;) {
+    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
+    if (status == JXL_ENC_SUCCESS) {
+      *out_size = static_cast<size_t>(next_out - outbuf);
+      JxlEncoderDestroy(enc);
+      return outbuf;
+    }
+    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
+      const size_t offset = static_cast<size_t>(next_out - outbuf);
+      if (max_cap != 0 && cap >= max_cap) {
+        free(outbuf);
+        JxlEncoderDestroy(enc);
+        *err = 216;
+        return nullptr;
+      }
+      size_t next_cap = cap * 2u;
+      if (max_cap != 0 && next_cap > max_cap) next_cap = max_cap;
+      if (next_cap <= cap) next_cap = cap + 65536u; // safety
+      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, next_cap));
+      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); *err = 27; return nullptr; }
+      outbuf = grown;
+      next_out = outbuf + offset;
+      avail_out = next_cap - offset;
+      cap = next_cap;
+      continue;
+    }
+    free(outbuf);
+    JxlEncoderDestroy(enc);
+    *err = static_cast<int>(status);
+    return nullptr;
+  }
+}
+
+// Common frame settings applicator (parity for gain-map path + dedupe from the 3 main encoders).
+static void ApplyCommonFrameOptions(JxlEncoderFrameSettings* frame,
+    float distance, uint32_t effort,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac,
+    uint32_t buffering, uint32_t group_order,
+    int32_t modular, int32_t brotli_effort, int32_t decoding_speed, int32_t photon_noise_iso,
+    uint32_t resampling, int32_t ec_resampling,
+    int32_t epf, int32_t gaborish, int32_t dots, int32_t color_transform,
+    int32_t disable_perceptual) {
+  JxlEncoderSetFrameDistance(frame, distance);
+  if (distance == 0.0f) JxlEncoderSetFrameLossless(frame, JXL_TRUE);
+  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
+  ApplyProgressiveFrameSettings(frame, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order);
+  if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
+  if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
+  if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
+  if (photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(photon_noise_iso));
+  ApplyResamplingFrameSettings(frame, resampling, ec_resampling);
+  if (epf >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EPF, static_cast<int64_t>(std::clamp(epf, 0, 3)));
+  if (gaborish >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_GABORISH, static_cast<int64_t>(gaborish & 1));
+  if (dots >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DOTS, static_cast<int64_t>(dots & 1));
+  if (color_transform >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_COLOR_TRANSFORM, static_cast<int64_t>(std::clamp(color_transform, 0, 2)));
+  if (disable_perceptual > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS, 1LL);
 }
 
 // Forward declarations — defined later in file, used here first.
@@ -698,43 +781,20 @@ static JxlWasmBuffer* EncodeRgbaWithMetadata(
 
   JxlEncoderCloseInput(enc);
 
-  const size_t initial_size = std::max(size_t(65536),
-      distance == 0.0f ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 2
-                       : effort <= 3 ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 12
-                       : (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 10);
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_size));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(25); }
-  size_t outbuf_cap = initial_size;
-  uint8_t* next_out = outbuf;
-  size_t avail_out = outbuf_cap;
-  for (;;) {
-    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (status == JXL_ENC_SUCCESS) {
-      const size_t final_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
-      if (result == nullptr) { free(outbuf); return MakeError(26); }
-      result->data = outbuf;
-      result->size = final_size;
-      result->width = width;
-      result->height = height;
-      result->bits_per_sample = bits;
-      result->has_alpha = has_alpha;
-      return result;
-    }
-    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t offset = static_cast<size_t>(next_out - outbuf);
-      outbuf_cap *= 2u;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(27); }
-      outbuf = grown;
-      next_out = outbuf + offset;
-      avail_out = outbuf_cap - offset;
-      continue;
-    }
-    free(outbuf);
-    JxlEncoderDestroy(enc); return MakeError(static_cast<int>(status));
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  const size_t init_cap = EstimateOutputCap(width, height, fmt, distance, effort);
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, 0, &out_sz, &perr);
+  if (outbuf == nullptr) return MakeError(perr ? perr : 25);
+  JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+  if (result == nullptr) { free(outbuf); return MakeError(26); }
+  result->data = outbuf;
+  result->size = out_sz;
+  result->width = width;
+  result->height = height;
+  result->bits_per_sample = bits;
+  result->has_alpha = has_alpha;
+  return result;
 }
 
 static JxlWasmBuffer* EncodeRgba(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t fmt, uint32_t has_alpha,
@@ -791,15 +851,12 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
   }
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
-  JxlEncoderSetFrameDistance(frame, distance);
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(effort));
-  ApplyProgressiveFrameSettings(frame, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order);
-  if (modular >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_MODULAR, static_cast<int64_t>(modular));
-  if (brotli_effort >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_BROTLI_EFFORT, static_cast<int64_t>(brotli_effort));
-  if (decoding_speed >= 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_DECODING_SPEED, static_cast<int64_t>(std::clamp(decoding_speed, 0, 4)));
-  if (photon_noise_iso > 0) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PHOTON_NOISE, static_cast<int64_t>(photon_noise_iso));
-  const uint32_t normalized_resampling = NormalizeResampling(resampling);
-  if (normalized_resampling > 1u) JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_RESAMPLING, static_cast<int64_t>(normalized_resampling));
+  // 2.6: route gain-map through common applicator (parity for epf/gaborish/dots/ct + the rest).
+  ApplyCommonFrameOptions(frame, distance, effort,
+      progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order,
+      modular, brotli_effort, decoding_speed, photon_noise_iso,
+      resampling, -1,
+      -1, -1, -1, -1, -1);
 
   const size_t bytes_per_channel = (fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u;
   const bool input_is_rgb = (fmt == 3u);
@@ -861,43 +918,20 @@ static JxlWasmBuffer* EncodeRgbaWithGainMap(
 
   JxlEncoderCloseInput(enc);
 
-  const size_t initial_size = std::max(size_t(65536),
-      distance == 0.0f ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 2
-                       : effort <= 3 ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 12
-                       : (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 10);
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_size));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(25); }
-  size_t outbuf_cap = initial_size;
-  uint8_t* next_out = outbuf;
-  size_t avail_out = outbuf_cap;
-  for (;;) {
-    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (status == JXL_ENC_SUCCESS) {
-      const size_t final_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
-      if (result == nullptr) { free(outbuf); return MakeError(26); }
-      result->data           = outbuf;
-      result->size           = final_size;
-      result->width          = width;
-      result->height         = height;
-      result->bits_per_sample = bits;
-      result->has_alpha      = has_alpha;
-      return result;
-    }
-    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t offset = static_cast<size_t>(next_out - outbuf);
-      outbuf_cap *= 2u;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(27); }
-      outbuf    = grown;
-      next_out  = outbuf + offset;
-      avail_out = outbuf_cap - offset;
-      continue;
-    }
-    free(outbuf);
-    JxlEncoderDestroy(enc); return MakeError(static_cast<int>(status));
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  const size_t init_cap = EstimateOutputCap(width, height, fmt, distance, effort);
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, 0, &out_sz, &perr);
+  if (outbuf == nullptr) return MakeError(perr ? perr : 25);
+  JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+  if (result == nullptr) { free(outbuf); return MakeError(26); }
+  result->data            = outbuf;
+  result->size            = out_sz;
+  result->width           = width;
+  result->height          = height;
+  result->bits_per_sample = bits;
+  result->has_alpha       = has_alpha;
+  return result;
 }
 
 // Encode with per-extra-channel distance and optional separate channel planes.
@@ -1046,43 +1080,20 @@ static JxlWasmBuffer* EncodeRgbaWithExtraChannels(
 
   JxlEncoderCloseInput(enc);
 
-  const size_t initial_size = std::max(size_t(65536),
-      distance == 0.0f ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 2
-                       : effort <= 3 ? (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 12
-                       : (static_cast<size_t>(width) * height * 4u * ((fmt == 2) ? 4u : (fmt == 1) ? 2u : 1u)) / 10);
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_size));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(125); }
-  size_t outbuf_cap = initial_size;
-  uint8_t* next_out = outbuf;
-  size_t avail_out = outbuf_cap;
-  for (;;) {
-    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (status == JXL_ENC_SUCCESS) {
-      const size_t final_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
-      if (result == nullptr) { free(outbuf); return MakeError(126); }
-      result->data = outbuf;
-      result->size = final_size;
-      result->width = width;
-      result->height = height;
-      result->bits_per_sample = bits;
-      result->has_alpha = has_alpha;
-      return result;
-    }
-    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t offset = static_cast<size_t>(next_out - outbuf);
-      outbuf_cap *= 2u;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(127); }
-      outbuf = grown;
-      next_out = outbuf + offset;
-      avail_out = outbuf_cap - offset;
-      continue;
-    }
-    free(outbuf);
-    JxlEncoderDestroy(enc); return MakeError(static_cast<int>(status));
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  const size_t init_cap = EstimateOutputCap(width, height, fmt, distance, effort);
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, 0, &out_sz, &perr);
+  if (outbuf == nullptr) return MakeError(perr ? perr : 125);
+  JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+  if (result == nullptr) { free(outbuf); return MakeError(126); }
+  result->data = outbuf;
+  result->size = out_sz;
+  result->width = width;
+  result->height = height;
+  result->bits_per_sample = bits;
+  result->has_alpha = has_alpha;
+  return result;
 }
 
 
@@ -1097,9 +1108,10 @@ static void BoxDownscaleRgba8(const uint8_t* src, uint32_t sw, uint32_t sh,
   if ((sw % dw == 0) && (sh % dh == 0)) {
     const uint32_t xstep = sw / dw;
     const uint32_t ystep = sh / dh;
+    const uint32_t count = xstep * ystep;  // constant; hoist for divide and autovectorizer
     for (uint32_t dy = 0; dy < dh; ++dy) {
       for (uint32_t dx = 0; dx < dw; ++dx) {
-        uint32_t r = 0, g = 0, b = 0, a = 0, count = 0;
+        uint32_t r = 0, g = 0, b = 0, a = 0;
         for (uint32_t yy = 0; yy < ystep; ++yy) {
           const uint32_t y = dy * ystep + yy;
           const uint8_t* row = src + y * sw * 4;
@@ -1107,7 +1119,6 @@ static void BoxDownscaleRgba8(const uint8_t* src, uint32_t sw, uint32_t sh,
             const uint32_t x = dx * xstep + xx;
             const uint8_t* px = row + x * 4;
             r += px[0]; g += px[1]; b += px[2]; a += px[3];
-            ++count;
           }
         }
         uint8_t* out = dst + (dy * dw + dx) * 4;
@@ -1145,7 +1156,30 @@ static void BoxDownscaleRgba8(const uint8_t* src, uint32_t sw, uint32_t sh,
 }
 
 static bool LooksLikeJpeg(const uint8_t* p, size_t n) {
-  return n >= 4 && p[0] == 0xFF && p[1] == 0xD8 && p[n - 2] == 0xFF && p[n - 1] == 0xD9;
+  if (n < 4 || p[0] != 0xFF || p[1] != 0xD8) return false;
+  const size_t scan = n < 4096 ? n : 4096;
+  for (size_t i = n - 2; i + 2 > n - scan; --i) {
+    if (p[i] == 0xFF && p[i + 1] == 0xD9) return true;
+    if (i == 0) break;
+  }
+  return false;
+}
+
+// Standard CRC-32 (ISO 3309 / ITU-T V.42) for JXTC tile integrity (bit2).
+static uint32_t Crc32(const uint8_t* data, size_t len) {
+  static uint32_t table[256];
+  static bool inited = false;
+  if (!inited) {
+    for (uint32_t i = 0; i < 256; ++i) {
+      uint32_t c = i;
+      for (int j = 0; j < 8; ++j) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+      table[i] = c;
+    }
+    inited = true;
+  }
+  uint32_t c = 0xFFFFFFFFu;
+  for (size_t i = 0; i < len; ++i) c = table[(c ^ data[i]) & 0xFF] ^ (c >> 8);
+  return c ^ 0xFFFFFFFFu;
 }
 
 // Fast per-pixel copy for decoder downsample paths (power-of-2 and general).
@@ -1169,6 +1203,13 @@ static void StripAlphaToRgb(const uint8_t* src, uint8_t* dst, size_t n_pixels, s
     for (size_t i = 0; i < n_pixels; ++i) {
       const uint8_t* s = src + i * 4;
       uint8_t* d = dst + i * 3;
+      d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
+    }
+  } else if (bytes_per_channel == 2) {
+    // 16-bit: direct three uint16_t copies (mirrors the 8-bit fast path)
+    for (size_t i = 0; i < n_pixels; ++i) {
+      const uint16_t* s = reinterpret_cast<const uint16_t*>(src + i * src_stride);
+      uint16_t* d = reinterpret_cast<uint16_t*>(dst + i * dst_stride);
       d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
     }
   } else {
@@ -1282,34 +1323,13 @@ static JxlWasmBuffer* EncodeRgba8Tiled(const uint8_t* pixels,
 
   JxlEncoderCloseInput(enc);
 
-  // Output capacity heuristic: a quarter of raw RGBA size (lossy compresses well).
-  size_t outbuf_cap = std::max(static_cast<size_t>(65536),
-      static_cast<size_t>(width) * height);
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(outbuf_cap));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(68); }
-  uint8_t* next_out = outbuf;
-  size_t   avail_out = outbuf_cap;
-  for (;;) {
-    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (status == JXL_ENC_SUCCESS) {
-      const size_t final_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      return MakeBufferFromOwned(outbuf, final_size, width, height, 8, has_alpha);
-    }
-    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t offset = static_cast<size_t>(next_out - outbuf);
-      outbuf_cap *= 2u;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(69); }
-      outbuf    = grown;
-      next_out  = outbuf + offset;
-      avail_out = outbuf_cap - offset;
-      continue;
-    }
-    free(outbuf);
-    JxlEncoderDestroy(enc);
-    return MakeError(static_cast<int>(status));
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  // Tiled uses simpler cap (not the Estimate which assumes full rgba4); keep prior heuristic for byte-id.
+  const size_t init_cap = std::max(static_cast<size_t>(65536), static_cast<size_t>(width) * height);
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, 0, &out_sz, &perr);
+  if (outbuf == nullptr) return MakeError(perr ? perr : 68);
+  return MakeBufferFromOwned(outbuf, out_sz, width, height, 8, has_alpha);
 }
 
 // --- Tiled region decode (ROI support) ---
@@ -1391,9 +1411,7 @@ static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_
 
       uint32_t tile_x0 = 0, tile_y0 = 0, tile_w = 0, tile_h = 0;
       bool got_image = false;
-      int process_input_calls = 0;
       while (!got_image) {
-        process_input_calls++;
         JxlDecoderStatus st = JxlDecoderProcessInput(dec);
         if (st == JXL_DEC_FRAME) {
           JxlFrameHeader fh{};
@@ -1458,15 +1476,17 @@ static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_
 // Decode seeks directly to needed tiles — zero frame-walk overhead.
 // Works on any libjxl version.
 //
-// Layout:
-//   [Header 32B] magic 'JXTC' | version=1 | image_w | image_h |
-//                tile_size | tiles_x | tiles_y | flags (bit0=has_alpha)
-//   [Index 8B × N] per tile: offset (4B), length (4B)
+// Layout (v2 + backward v1 read):
+//   [Header 32B] magic 'JXTC' | version (1 or 2) | image_w | image_h |
+//                tile_size | tiles_x | tiles_y | flags (bit0=has_alpha, bit1=rgba16, bit2=crc32)
+//   [Index] per tile: v1=8B (off+len u32), v2+bit2=12B (off+len+crc32 u32)
 //   [N standalone JXL bitstreams]
+// v1 readers in this module accept ver==1||2 for flat (num_levels=0) layouts. External v1-strict
+// sidecars (jxl-pyramid etc) are deferred per 2.9.
 #define JXTC_MAGIC          0x4354584Au  // 'JXTC' little-endian
-#define JXTC_VERSION        1u
+#define JXTC_VERSION        2u
 #define JXTC_HEADER_BYTES   32u
-#define JXTC_INDEX_BYTES    8u
+#define JXTC_INDEX_BYTES    8u   // base (overridden by flags&4 for crc)
 
 // Encode a single RGBA8 tile as a standalone JXL bitstream.
 // Strips alpha channel inline if !has_alpha. Returns malloc'd buffer; caller frees.
@@ -1523,36 +1543,18 @@ static uint8_t* EncodeStandaloneJxlTileRgba8(const uint8_t* rgba_pixels,
 
   JxlEncoderCloseInput(enc);
 
-  size_t cap = std::max(static_cast<size_t>(4096), pixel_size / 4u);
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(cap));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return nullptr; }
-  uint8_t* next_out  = outbuf;
-  size_t   avail_out = cap;
-  for (;;) {
-    JxlEncoderStatus s = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (s == JXL_ENC_SUCCESS) {
-      *out_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      return outbuf;
-    }
-    if (s == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t off = static_cast<size_t>(next_out - outbuf);
-      cap *= 2u;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return nullptr; }
-      outbuf    = grown;
-      next_out  = outbuf + off;
-      avail_out = cap - off;
-      continue;
-    }
-    free(outbuf);
-    JxlEncoderDestroy(enc);
-    return nullptr;
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  const size_t init_cap = std::max(static_cast<size_t>(4096), pixel_size / 4u);
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, 0, &out_sz, &perr);
+  if (outbuf == nullptr) { *out_size = 0; return nullptr; }
+  *out_size = out_sz;
+  return outbuf;
 }
 
 // Decode a standalone JXL bitstream to RGBA8. Returns malloc'd pixel buffer; caller frees.
 // Writes decoded dimensions to *out_w, *out_h. On failure returns nullptr.
+// (Kept for direct callers / symmetry; the hot path for JXTC regions uses the reusing variant.)
 static uint8_t* DecodeStandaloneJxlTileRgba8(const uint8_t* input, size_t input_size,
     uint32_t* out_w, uint32_t* out_h) {
   *out_w = 0; *out_h = 0;
@@ -1605,6 +1607,59 @@ static uint8_t* DecodeStandaloneJxlTileRgba8(const uint8_t* input, size_t input_
   return pixels;
 }
 
+// Reusable-decoder + grow-only scratch variant for DecodeRgba8TileContainerRegion.
+// Caller owns the JxlDecoder (create once, JXL_SETUP once, destroy after), and the scratch buffer.
+// JxlDecoderReset is used between tiles; runner attached once by caller.
+// Returns pointer into *scratch (do not free it); caller copies needed rect then reuses scratch for next tile.
+static uint8_t* DecodeJxlTileRgba8Reusing(JxlDecoder* dec,
+    uint8_t** scratch, size_t* scratch_cap,
+    const uint8_t* input, size_t input_size,
+    uint32_t* out_w, uint32_t* out_h) {
+  *out_w = 0; *out_h = 0;
+  if (dec == nullptr) return nullptr;
+
+  JxlDecoderReset(dec);
+  // Re-apply runner after reset (defensive; the shared runner is cheap to set).
+  // Only under pthreads build (matches JXL_SETUP_DEC_RUNNER).
+#ifdef __EMSCRIPTEN_PTHREADS__
+  ApplyRunnerDec(dec);
+#endif
+
+  JxlDecoderSetInput(dec, input, input_size);
+  JxlDecoderCloseInput(dec);
+
+  JxlBasicInfo info{};
+  JxlPixelFormat pf = {4, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
+
+  for (;;) {
+    JxlDecoderStatus st = JxlDecoderProcessInput(dec);
+    if (st == JXL_DEC_SUCCESS) break;
+    if (st == JXL_DEC_ERROR || st == JXL_DEC_NEED_MORE_INPUT) {
+      return nullptr;
+    }
+    if (st == JXL_DEC_BASIC_INFO) {
+      if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) return nullptr;
+      continue;
+    }
+    if (st == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
+      size_t buf_size = 0;
+      if (JxlDecoderImageOutBufferSize(dec, &pf, &buf_size) != JXL_DEC_SUCCESS) return nullptr;
+      if (buf_size > *scratch_cap) {
+        uint8_t* grown = static_cast<uint8_t*>(realloc(*scratch, buf_size));
+        if (grown == nullptr) return nullptr;
+        *scratch = grown;
+        *scratch_cap = buf_size;
+      }
+      if (JxlDecoderSetImageOutBuffer(dec, &pf, *scratch, buf_size) != JXL_DEC_SUCCESS) return nullptr;
+      continue;
+    }
+  }
+
+  *out_w = info.xsize;
+  *out_h = info.ysize;
+  return *scratch;
+}
+
 // Encode RGBA8 image into JXTC tile container.
 static JxlWasmBuffer* EncodeRgba8TileContainer(const uint8_t* pixels,
     uint32_t width, uint32_t height, uint32_t tile_size,
@@ -1628,7 +1683,7 @@ static JxlWasmBuffer* EncodeRgba8TileContainer(const uint8_t* pixels,
     free(tile_bytes); free(tile_lengths); return MakeError(93);
   }
 
-  size_t total_tile_bytes = 0;
+  uint64_t total_tile_bytes = 0;
   for (uint32_t ty = 0; ty < tiles_y; ++ty) {
     for (uint32_t tx = 0; tx < tiles_x; ++tx) {
       const uint32_t x0 = tx * tile_size;
@@ -1657,9 +1712,17 @@ static JxlWasmBuffer* EncodeRgba8TileContainer(const uint8_t* pixels,
   }
   free(tile_stage);
 
-  const size_t header_bytes = JXTC_HEADER_BYTES;
-  const size_t index_bytes  = static_cast<size_t>(tile_count) * JXTC_INDEX_BYTES;
-  const size_t total_size   = header_bytes + index_bytes + total_tile_bytes;
+  const uint64_t header_bytes = JXTC_HEADER_BYTES;
+  const bool emit_crc = true; // v2 path always includes crc32 for integrity (2.9)
+  const uint64_t per_entry = emit_crc ? 12u : 8u;
+  const uint64_t index_bytes = static_cast<uint64_t>(tile_count) * per_entry;
+  const uint64_t total64     = header_bytes + index_bytes + total_tile_bytes;
+  if (total64 > 0xFFFFFFFFull) {
+    for (uint32_t i = 0; i < tile_count; ++i) free(tile_bytes[i]);
+    free(tile_bytes); free(tile_lengths);
+    return MakeError(96);
+  }
+  const size_t total_size = static_cast<size_t>(total64);
   uint8_t* output = static_cast<uint8_t*>(malloc(total_size));
   if (output == nullptr) {
     for (uint32_t i = 0; i < tile_count; ++i) free(tile_bytes[i]);
@@ -1675,15 +1738,31 @@ static JxlWasmBuffer* EncodeRgba8TileContainer(const uint8_t* pixels,
   h32[4] = tile_size;
   h32[5] = tiles_x;
   h32[6] = tiles_y;
-  h32[7] = has_alpha ? 1u : 0u;
+  // v2: set bit2 (crc) so index is 12B and integrity is recorded. bit1 (16) remains 0 for this path.
+  const uint32_t flags = (has_alpha ? 1u : 0u) | 4u /*crc32*/;
+  h32[7] = flags;
 
-  uint32_t cursor = static_cast<uint32_t>(header_bytes + index_bytes);
-  uint32_t* index = reinterpret_cast<uint32_t*>(output + header_bytes);
+  const size_t hb = static_cast<size_t>(header_bytes);
+  // v2+bit2 => 12B entries (3x u32); keep index_bytes var as base but stride computed.
+  const bool has_crc = (flags & 4u) != 0;
+  const size_t per_entry = has_crc ? 12u : 8u;
+  const size_t actual_index_bytes = static_cast<size_t>(tile_count) * per_entry;
+  uint32_t cursor = static_cast<uint32_t>(hb + actual_index_bytes);
+  uint32_t* index = reinterpret_cast<uint32_t*>(output + hb);
   for (uint32_t i = 0; i < tile_count; ++i) {
-    index[i * 2 + 0] = cursor;
-    index[i * 2 + 1] = static_cast<uint32_t>(tile_lengths[i]);
+    const uint32_t off = cursor;
+    const uint32_t len = static_cast<uint32_t>(tile_lengths[i]);
+    const uint32_t crc = Crc32(tile_bytes[i], tile_lengths[i]);
+    if (has_crc) {
+      index[i * 3 + 0] = off;
+      index[i * 3 + 1] = len;
+      index[i * 3 + 2] = crc;
+    } else {
+      index[i * 2 + 0] = off;
+      index[i * 2 + 1] = len;
+    }
     memcpy(output + cursor, tile_bytes[i], tile_lengths[i]);
-    cursor += static_cast<uint32_t>(tile_lengths[i]);
+    cursor += len;
     free(tile_bytes[i]);
   }
   free(tile_bytes);
@@ -1700,7 +1779,8 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
 
   const uint32_t* h32 = reinterpret_cast<const uint32_t*>(input);
   if (h32[0] != JXTC_MAGIC)   return MakeError(101);
-  if (h32[1] != JXTC_VERSION) return MakeError(102);
+  const uint32_t ver = h32[1];
+  if (ver != 1u && ver != 2u) return MakeError(102);
   const uint32_t image_w   = h32[2];
   const uint32_t image_h   = h32[3];
   const uint32_t tile_size = h32[4];
@@ -1710,7 +1790,12 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
 
   const uint32_t tile_count = tiles_x * tiles_y;
   const size_t header_bytes = JXTC_HEADER_BYTES;
-  const size_t index_bytes  = static_cast<size_t>(tile_count) * JXTC_INDEX_BYTES;
+  const uint32_t flags = h32[7];
+  const bool is_16bit  = (flags & 2u) != 0;
+  const bool has_crc   = (ver == 2u) && ((flags & 4u) != 0);
+  if (is_16bit) return MakeError(110); // 16bit JXTC decode not yet wired to 16-bit composite (deferred)
+  const size_t per_entry   = has_crc ? 12u : 8u;
+  const size_t index_bytes = static_cast<size_t>(tile_count) * per_entry;
   if (input_size < header_bytes + index_bytes) return MakeError(104);
   const uint32_t* index = reinterpret_cast<const uint32_t*>(input + header_bytes);
 
@@ -1729,19 +1814,37 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
   uint8_t* out_pixels = static_cast<uint8_t*>(calloc(out_size, 1u));
   if (out_pixels == nullptr) return MakeError(106);
 
-  for (uint32_t ty = ty_min; ty <= ty_max; ++ty) {
-    for (uint32_t tx = tx_min; tx <= tx_max; ++tx) {
+  // 1.5: one decoder + runner attachment for the whole region. JxlDecoderReset between
+  // independent tile bitstreams. Grow-only scratch replaces per-tile malloc+free of full
+  // tile buffers (~16 large allocs avoided for a 4x4 viewport pan).
+  JxlDecoder* dec = JxlDecoderCreate(nullptr);
+  if (dec == nullptr) { free(out_pixels); return MakeError(110); }
+  JXL_SETUP_DEC_RUNNER(dec, (free(out_pixels), MakeError(58)));
+  if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
+    JxlDecoderDestroy(dec); free(out_pixels); return MakeError(111);
+  }
+
+  uint8_t* scratch = nullptr;
+  size_t scratch_cap = 0;
+
+  bool region_ok = true;
+  for (uint32_t ty = ty_min; ty <= ty_max && region_ok; ++ty) {
+    for (uint32_t tx = tx_min; tx <= tx_max && region_ok; ++tx) {
       const uint32_t idx = ty * tiles_x + tx;
-      if (idx >= tile_count) { free(out_pixels); return MakeError(107); }
-      const uint32_t offset = index[idx * 2 + 0];
-      const uint32_t length = index[idx * 2 + 1];
+      if (idx >= tile_count) { region_ok = false; break; }
+      const uint32_t* e = index + idx * (per_entry / 4u);
+      const uint32_t offset = e[0];
+      const uint32_t length = e[1];
+      const uint32_t crc    = has_crc ? e[2] : 0u;
       if (offset < header_bytes + index_bytes || static_cast<size_t>(offset) + length > input_size) {
-        free(out_pixels); return MakeError(108);
+        region_ok = false; break;
       }
+      if (has_crc && Crc32(input + offset, length) != crc) { region_ok = false; break; }
 
       uint32_t tile_w = 0, tile_h = 0;
-      uint8_t* tile_pixels = DecodeStandaloneJxlTileRgba8(input + offset, length, &tile_w, &tile_h);
-      if (tile_pixels == nullptr) { free(out_pixels); return MakeError(109); }
+      uint8_t* tile_pixels = DecodeJxlTileRgba8Reusing(dec, &scratch, &scratch_cap,
+          input + offset, length, &tile_w, &tile_h);
+      if (tile_pixels == nullptr) { region_ok = false; break; }
 
       const uint32_t tile_x0 = tx * tile_size;
       const uint32_t tile_y0 = ty * tile_size;
@@ -1759,13 +1862,20 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
           memcpy(dst, src, ow * 4u);
         }
       }
-      free(tile_pixels);
+      // No free(tile_pixels): it is the scratch; reused for next tile.
     }
+  }
+
+  if (!region_ok) {
+    free(scratch);
+    JxlDecoderDestroy(dec);
+    free(out_pixels);
+    return MakeError(109);
   }
 
   // A3: 1px seam blending at internal JXTC tile boundaries using Q8 fixed-point.
   // Source buffer now calloc (no uninit garbage into blends). Bulk is memcpy; seams only.
-  // Formula: (l*179 + r*77 + 128)>>8 per channel (8-bit). Vert then horiz for deterministic corners.
+  // Directional: 0.70/0.30 crossfade (l*179+r*77 vs swapped). Vert then horiz for corners.
   // Lightweight — only touches O(perimeter) pixels.
   {
     // Vertical seams (between tx and tx+1)
@@ -1781,9 +1891,10 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
         for (int c = 0; c < 4; ++c) {
           int l = pL[c];
           int r = pR[c];
-          int b = (l * 179 + r * 77 + 128) >> 8;
-          pL[c] = static_cast<uint8_t>(b);
-          pR[c] = static_cast<uint8_t>(b);
+          int bL = (l * 179 + r * 77 + 128) >> 8;
+          int bR = (l * 77 + r * 179 + 128) >> 8;
+          pL[c] = static_cast<uint8_t>(bL);
+          pR[c] = static_cast<uint8_t>(bR);
         }
       }
     }
@@ -1800,14 +1911,18 @@ static JxlWasmBuffer* DecodeRgba8TileContainerRegion(const uint8_t* input, size_
         for (int c = 0; c < 4; ++c) {
           int t = pT[c];
           int b = pB[c];
-          int blended = (t * 179 + b * 77 + 128) >> 8;
-          pT[c] = static_cast<uint8_t>(blended);
-          pB[c] = static_cast<uint8_t>(blended);
+          int bT = (t * 179 + b * 77 + 128) >> 8;
+          int bB = (t * 77 + b * 179 + 128) >> 8;
+          pT[c] = static_cast<uint8_t>(bT);
+          pB[c] = static_cast<uint8_t>(bB);
         }
       }
     }
   }
 
+  // Success path for region: release the per-region scratch and the reused decoder.
+  free(scratch);
+  JxlDecoderDestroy(dec);
   return MakeBufferFromOwned(out_pixels, out_size, rw, rh, 8, 1);
 }
 
@@ -1823,6 +1938,12 @@ static JxlWasmBuffer* EncodeAnimation(
     const WasmBoxOpts* box_opts,
     const WasmAnimationOpts* anim_opts) {
   if (frames == nullptr || num_frames == 0) return MakeError(200);
+
+  const uint32_t ref_w = frames[0].width;
+  const uint32_t ref_h = frames[0].height;
+  for (uint32_t i = 1; i < num_frames; ++i) {
+    if (frames[i].width != ref_w || frames[i].height != ref_h) return MakeError(219);
+  }
 
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return MakeError(201);
@@ -1948,40 +2069,21 @@ static JxlWasmBuffer* EncodeAnimation(
   }
   JxlEncoderCloseInput(enc);
 
-  const size_t initial_size = 65536u;
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_size));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(214); }
-  size_t outbuf_cap = initial_size;
-  uint8_t* next_out = outbuf;
-  size_t avail_out = outbuf_cap;
-  for (;;) {
-    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (status == JXL_ENC_SUCCESS) {
-      const size_t final_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
-      if (result == nullptr) { free(outbuf); return MakeError(215); }
-      result->data           = outbuf;
-      result->size           = final_size;
-      result->width          = frames[0].width;
-      result->height         = frames[0].height;
-      result->bits_per_sample = bits;
-      result->has_alpha      = has_alpha;
-      return result;
-    }
-    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t offset = static_cast<size_t>(next_out - outbuf);
-      if (outbuf_cap >= 128 * 1024 * 1024u) { JxlEncoderDestroy(enc); free(outbuf); return MakeError(216); }
-      outbuf_cap *= 2;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(217); }
-      outbuf = grown;
-      next_out = outbuf + offset;
-      avail_out = outbuf_cap - offset;
-      continue;
-    }
-    free(outbuf); JxlEncoderDestroy(enc); return MakeError(218);
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  const size_t init_cap = 65536u;
+  const size_t max_cap  = 128u * 1024u * 1024u;
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, max_cap, &out_sz, &perr);
+  if (outbuf == nullptr) return MakeError(perr ? perr : 214);
+  JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+  if (result == nullptr) { free(outbuf); return MakeError(215); }
+  result->data            = outbuf;
+  result->size            = out_sz;
+  result->width           = frames[0].width;
+  result->height          = frames[0].height;
+  result->bits_per_sample = bits;
+  result->has_alpha       = has_alpha;
+  return result;
 }
 
 extern "C" {
@@ -2188,6 +2290,13 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
         s->gm_capacity = 0;
         s->gm_size     = 0;
       }
+      // 1.7: input_buf is dead weight after full decode (tens of MB). Free early;
+      // dec_free will see null. Safe: no code path re-reads input after DONE.
+      free(s->input_buf);
+      s->input_buf = nullptr;
+      s->input_size = 0;
+      s->input_capacity = 0;
+      s->input_set = false;
       return JXL_DEC_RESULT_DONE;
     }
     if (status == JXL_DEC_ERROR) { s->error_code = static_cast<int>(status); return JXL_DEC_RESULT_ERROR; }
@@ -2242,11 +2351,17 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
         s->pixels = grown;
         s->pixels_size = buf_size;
       }
-      // Zero the buffer so opportunistic FlushImage snapshots show transparent black for
-      // groups libjxl hasn't decoded yet (instead of uninitialized realloc garbage that
-      // surfaces as solid red — R-byte garbage with alpha-byte garbage at 255 — in the
-      // consumer canvas).
-      memset(s->pixels, 0, s->pixels_size);
+      // Zero only on the first frame (frame_index==0). This buffer is (re)established
+      // before any writes for that image. For frame 0 (still images, first anim frame,
+      // and all truncated-stream progressive cases) this guarantees transparent black
+      // for unfilled groups in opportunistic snapshots — the red-garbage regression
+      // case. For animation frames >0 we intentionally leave prior frame pixels as
+      // background; libjxl will overwrite by FULL_IMAGE and partial progressive
+      // checkpoints for later frames benefit from not flashing to black.
+      // The zero is still unconditional for frame 0 even on growth reallocs.
+      if (s->frame_index == 0) {
+        memset(s->pixels, 0, s->pixels_size);
+      }
       if (JxlDecoderSetImageOutBuffer(s->dec, &s->pixel_format, s->pixels, s->pixels_size) != JXL_DEC_SUCCESS) {
         s->error_code = 12; return JXL_DEC_RESULT_ERROR;
       }
@@ -2259,6 +2374,7 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
     if (status == JXL_DEC_FULL_IMAGE) {
       s->final_ready = true;
       s->frame_index++;
+      if (s->info.have_animation && !s->is_last_frame) return JXL_DEC_RESULT_FRAME_DONE;
       continue;
     }
     if (status == JXL_DEC_BOX) {
@@ -2369,7 +2485,6 @@ void jxl_wasm_dec_free(JxlWasmDecState* s) {
   if (s == nullptr) return;
   if (s->dec != nullptr) JxlDecoderDestroy(s->dec);
   free(s->pixels);       // no-op if ownership was transferred via dec_take_final
-  free(s->flushed);      // no-op if ownership was transferred via dec_take_flushed
   free(s->input_buf);
   free(s->gm_buf);       // no-op if box was fully consumed or never started
   free(s->gain_map_jxl); // no-op if ownership was transferred via dec_take_gain_map
@@ -2620,6 +2735,7 @@ int32_t jxl_wasm_dec_seek_to_frame(uint32_t state_ptr, uint32_t target_frame) {
   // target_frame < s->frame_index means we are already past it; == means it is the next to decode.
   if (target_frame < s->frame_index) return -1;
   uint32_t skip = target_frame - s->frame_index;
+  if (skip == 0) return 0;
   JxlDecoderSkipFrames(s->dec, static_cast<size_t>(skip));
   return 0;
 }
@@ -3160,38 +3276,16 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl(const uint8_t* jpeg, size_t jpeg_s
   }
   JxlEncoderCloseInput(enc);
 
-  const size_t initial_cap = std::max(size_t(65536), jpeg_size / 2);
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_cap));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(45); }
-  size_t outbuf_cap = initial_cap;
-  uint8_t* next_out = outbuf;
-  size_t avail_out = outbuf_cap;
-
-  for (;;) {
-    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (status == JXL_ENC_SUCCESS) {
-      const size_t final_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
-      if (result == nullptr) { free(outbuf); return MakeError(46); }
-      result->data = outbuf;
-      result->size = final_size;
-      return result;
-    }
-    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t offset = static_cast<size_t>(next_out - outbuf);
-      outbuf_cap *= 2;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(47); }
-      outbuf = grown;
-      next_out = outbuf + offset;
-      avail_out = outbuf_cap - offset;
-      continue;
-    }
-    free(outbuf);
-    JxlEncoderDestroy(enc);
-    return MakeError(static_cast<int>(status));
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  const size_t init_cap = std::max(size_t(65536), jpeg_size / 2);
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, 0, &out_sz, &perr);
+  if (outbuf == nullptr) return MakeError(perr ? perr : 45);
+  JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+  if (result == nullptr) { free(outbuf); return MakeError(46); }
+  result->data = outbuf;
+  result->size = out_sz;
+  return result;
 }
 
 // --- #15b: JPEG → JXL transcode with additional metadata boxes ---
@@ -3239,37 +3333,16 @@ JxlWasmBuffer* jxl_wasm_transcode_jpeg_to_jxl_v2(
 
   JxlEncoderCloseInput(enc);
 
-  const size_t initial_cap = std::max(size_t(65536), jpeg_size / 2);
-  uint8_t* outbuf = static_cast<uint8_t*>(malloc(initial_cap));
-  if (outbuf == nullptr) { JxlEncoderDestroy(enc); return MakeError(45); }
-  size_t outbuf_cap = initial_cap;
-  uint8_t* next_out = outbuf;
-  size_t avail_out = outbuf_cap;
-  for (;;) {
-    JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
-    if (status == JXL_ENC_SUCCESS) {
-      const size_t final_size = static_cast<size_t>(next_out - outbuf);
-      JxlEncoderDestroy(enc);
-      JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
-      if (result == nullptr) { free(outbuf); return MakeError(46); }
-      result->data = outbuf;
-      result->size = final_size;
-      return result;
-    }
-    if (status == JXL_ENC_NEED_MORE_OUTPUT) {
-      const size_t offset = static_cast<size_t>(next_out - outbuf);
-      outbuf_cap *= 2;
-      uint8_t* grown = static_cast<uint8_t*>(realloc(outbuf, outbuf_cap));
-      if (grown == nullptr) { free(outbuf); JxlEncoderDestroy(enc); return MakeError(47); }
-      outbuf = grown;
-      next_out = outbuf + offset;
-      avail_out = outbuf_cap - offset;
-      continue;
-    }
-    free(outbuf);
-    JxlEncoderDestroy(enc);
-    return MakeError(static_cast<int>(status));
-  }
+  size_t out_sz = 0;
+  int perr = 0;
+  const size_t init_cap = std::max(size_t(65536), jpeg_size / 2);
+  uint8_t* outbuf = PumpEncoderOutput(enc, init_cap, 0, &out_sz, &perr);
+  if (outbuf == nullptr) return MakeError(perr ? perr : 45);
+  JxlWasmBuffer* result = static_cast<JxlWasmBuffer*>(calloc(1, sizeof(JxlWasmBuffer)));
+  if (result == nullptr) { free(outbuf); return MakeError(46); }
+  result->data = outbuf;
+  result->size = out_sz;
+  return result;
 }
 
 // --- Tiled ROI exports ---
@@ -3310,6 +3383,20 @@ JxlWasmBuffer* jxl_wasm_decode_tile_container_region_rgba8(const uint8_t* input,
   return DecodeRgba8TileContainerRegion(input, input_size, region_x, region_y, region_w, region_h);
 }
 
+// 256-entry sRGB->linear LUT (gamma 2.2 approx) for Butteraugli input.
+// 8-bit source only; built once, zero accuracy change vs per-pixel pow.
+static const float* SrgbToLinearLut() {
+  static float lut[256];
+  static bool init = false;
+  if (!init) {
+    for (int i = 0; i < 256; ++i) {
+      lut[i] = std::pow(i * (1.0f / 255.0f), 2.2f);
+    }
+    init = true;
+  }
+  return lut;
+}
+
 // Butteraugli perceptual distance between two RGBA8 images.
 // img1_data, img2_data: RGBA8 buffers, width*height*4 bytes each.
 // Returns: float distance bits packed in int32 (0=identical, ~1.0=imperceptible,
@@ -3323,6 +3410,8 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
   JxlMemoryManager mem;
   if (!jxl::MemoryManagerInit(&mem, nullptr)) return -1;
 
+  const float* lut = SrgbToLinearLut();
+
   // Build linear-light float Image3F (planar RGB, sRGB gamma decoded)
   auto build_image = [&](const uint8_t* data) -> jxl::StatusOr<jxl::Image3F> {
     JXL_ASSIGN_OR_RETURN(jxl::Image3F img,
@@ -3333,10 +3422,10 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
       float* JXL_RESTRICT br = img.PlaneRow(2, y);
       const uint8_t* src = data + y * width * 4u;
       for (size_t x = 0; x < width; ++x) {
-        // sRGB approximate gamma decode: linearise before butteraugli
-        rr[x] = std::pow(src[x * 4u + 0u] * (1.0f / 255.0f), 2.2f);
-        gr[x] = std::pow(src[x * 4u + 1u] * (1.0f / 255.0f), 2.2f);
-        br[x] = std::pow(src[x * 4u + 2u] * (1.0f / 255.0f), 2.2f);
+        // sRGB approximate gamma decode via LUT (replaces 3x pow per pixel)
+        rr[x] = lut[src[x * 4u + 0u]];
+        gr[x] = lut[src[x * 4u + 1u]];
+        br[x] = lut[src[x * 4u + 2u]];
       }
     }
     return img;
@@ -3365,6 +3454,41 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
   int32_t bits;
   memcpy(&bits, &dist, 4);
   return bits;
+}
+
+// Butteraugli with optional downsample for fast screening (P2/Lens15).
+// downsample ∈ {2,4}: BoxDownscale both inputs first, compare at reduced res.
+// Scores are *not* comparable across different downsample factors (different pixel counts).
+// downsample=1 or other: full-res (delegates to non-ds path).
+extern "C" int32_t jxl_wasm_butteraugli_compare_ds(
+    const uint8_t* img1_data, const uint8_t* img2_data,
+    uint32_t width, uint32_t height, uint32_t downsample) {
+  if (downsample != 2 && downsample != 4) {
+    return jxl_wasm_butteraugli_compare(img1_data, img2_data, width, height);
+  }
+
+  const uint32_t dw = (width + downsample - 1u) / downsample;
+  const uint32_t dh = (height + downsample - 1u) / downsample;
+  if (dw == 0 || dh == 0) {
+    return jxl_wasm_butteraugli_compare(img1_data, img2_data, width, height);
+  }
+
+  const size_t ds_bytes = static_cast<size_t>(dw) * dh * 4u;
+  uint8_t* ds1 = static_cast<uint8_t*>(malloc(ds_bytes));
+  uint8_t* ds2 = static_cast<uint8_t*>(malloc(ds_bytes));
+  if (!ds1 || !ds2) {
+    free(ds1); free(ds2);
+    return jxl_wasm_butteraugli_compare(img1_data, img2_data, width, height);
+  }
+
+  BoxDownscaleRgba8(img1_data, width, height, ds1, dw, dh);
+  BoxDownscaleRgba8(img2_data, width, height, ds2, dw, dh);
+
+  const int32_t res = jxl_wasm_butteraugli_compare(ds1, ds2, dw, dh);
+
+  free(ds1);
+  free(ds2);
+  return res;
 }
 
 }

@@ -376,6 +376,9 @@ interface LibjxlWasmModule {
   // Butteraugli perceptual distance between two RGBA8 images (same dimensions).
   // Returns bit-cast float as int32 (>=0 = valid distance; -1 = error).
   _jxl_wasm_butteraugli_compare?(ptr1: number, ptr2: number, width: number, height: number): number;
+  // Downsampled variant (downsample 2 or 4): faster screening at cost of score drift.
+  // Scores from different downsample factors are not comparable.
+  _jxl_wasm_butteraugli_compare_ds?(ptr1: number, ptr2: number, width: number, height: number, downsample: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -650,6 +653,52 @@ export async function computeButteraugli(
     module.HEAPU8.set(view1.subarray(0, pixelSize), ptr1);
     module.HEAPU8.set(view2.subarray(0, pixelSize), ptr2);
     const bits = module._jxl_wasm_butteraugli_compare(ptr1, ptr2, width, height);
+    if (bits < 0) throw new Error("Butteraugli WASM compare failed");
+    const floatBuf = new ArrayBuffer(4);
+    new Int32Array(floatBuf)[0] = bits;
+    return new Float32Array(floatBuf)[0] as number;
+  } finally {
+    module._free(ptr1);
+    module._free(ptr2);
+  }
+}
+
+/**
+ * Compute Butteraugli at reduced resolution for fast screening / early reject.
+ * downsample must be 2 or 4 (other values fall back to full-res inside WASM).
+ * WARNING: returned distance is for the downsampled images — not numerically
+ * comparable to a full-res computeButteraugli on the same pair.
+ */
+export async function computeButteraugliDownsampled(
+  pixels1: ArrayBuffer | Uint8Array,
+  pixels2: ArrayBuffer | Uint8Array,
+  width: number,
+  height: number,
+  downsample: 2 | 4,
+): Promise<number> {
+  const module = await loadLibjxlModule();
+  const fn = module._jxl_wasm_butteraugli_compare_ds || module._jxl_wasm_butteraugli_compare;
+  if (!fn) {
+    throw new CapabilityMissing("Butteraugli requires a rebuilt WASM with butteraugli bridge");
+  }
+  const ds = (downsample === 2 || downsample === 4) ? downsample : 1;
+  const pw = Math.ceil(width / ds);
+  const ph = Math.ceil(height / ds);
+  const pixelSize = pw * ph * 4;  // size after downsample in the compare call
+  // We still allocate full original for the downscale step inside WASM; pass original w/h + factor.
+  // The WASM ds path will downscale internally using the provided factor.
+  const view1 = copyOrBorrowInput(pixels1, false);
+  const view2 = copyOrBorrowInput(pixels2, false);
+  const origSize = width * height * 4;
+  if (view1.byteLength < origSize || view2.byteLength < origSize) {
+    throw new Error(`computeButteraugliDownsampled: expected ${origSize} bytes for ${width}×${height} RGBA8`);
+  }
+  const ptr1 = module._malloc(origSize);
+  const ptr2 = module._malloc(origSize);
+  try {
+    module.HEAPU8.set(view1.subarray(0, origSize), ptr1);
+    module.HEAPU8.set(view2.subarray(0, origSize), ptr2);
+    const bits = fn(ptr1, ptr2, width, height, ds);
     if (bits < 0) throw new Error("Butteraugli WASM compare failed");
     const floatBuf = new ArrayBuffer(4);
     new Int32Array(floatBuf)[0] = bits;
