@@ -254,3 +254,21 @@ All 4 proposals are re-submissions of previously rejected items. No code changes
     - 5240×3912 full round-trip: clarity-8 **10037ms** vs tiled-128 **8362ms** (20% slower)
     The fixed LANE=8 hypothesis was wrong — LLVM vectorises the larger `[[f32;3]; TILE]` accumulator in `v_pass_tiled::<64/128>` more efficiently. The "8-12% gain" claim was opposite to reality.
     **Production recommendation for `../raw-converter-tauri/raw-pipeline`:** use `v_pass_tiled::<128>` for `separable_blur` (full round-trip winner at both scales: 420ms at 1 MP, 8362ms at 20.5 MP).
+
+## `packages/pyramid-ingest/src/ingest.ts` (Agent 3 — fallback tiers, metadata, domain features)
+
+Handoff evaluated per spec in user query + CLAUDE.md invariants (surgical, one-file scope, defer outside edits+approval, verify first, metadata under open `metadata` record no schema edit, F7 note-only).
+
+All contributions evaluated for pipeline fit (layering, cheap exifr, no backpressure in facade, no rejected patterns from this doc, domain value for biodiversity georef, observability for accept-degraded default).
+
+*   **F1 (implemented):** Reordered tryExtractEmbeddedJpeg: large previews (JpgFromRaw/JpegFromRaw/PreviewImage) first, thumbnail() last resort; collect all >4kB cands, return max by length. Positive (BUG, quality): prevents postage-stamp pyramid from tiny IFD1 thumb.
+*   **F2 (implemented):** Added getJpegDimensions (pure SOF 0xFFC0/C2 scan, no dep). In Tier3: if longEdge <1024 proceed but set metadata.degraded=true (attached post-buildManifest). Positive (quality guard): small preview >4kB no longer silent bad Tier3.
+*   **F3 (implemented):** In buildFallbackPlan: if (opts.proxy !== undefined) do transcodeJpeg + decodeToRgba8 + buildProxyLadder (honors proxy flag + size). Positive (BUG, edge): native-fail + --proxy now produces proxy ladder not full jpg one.
+*   **F4 (implemented):** extractBasicMetadata now supports gps flag + emits datetime (DateTimeOriginal/CreateDate). Called on master bytes for *every* path (compute + fallback + native success + jpg). gps gated by !opts.stripGps. Attached to all manifests under `metadata` (z.record tolerates; no schema.ts/manifest.ts edit). Positive (feature, high value): GPS + eventDate for Darwin Core / biodiversity occurrence records. stripGps for sensitive spp privacy.
+*   **F5 (implemented):** tel?.event("fallback-tier", {path, tier:3|5, detected, reason}) emitted at each fallback branch (and inside buildFallback). IngestResult carries degraded?:boolean; BatchResult gets degraded?:number (incremented on written fallbacks in both in-proc and worker-reply paths). Positive (observability): Tier3/5 no longer invisible (acceptUnsupported defaults true).
+*   **F6 (implemented core + deferred note):** Verified first (verify-f6-orient.mjs + source audit + run): transcodeJpeg + decodeToRgba8 does NOT bake EXIF rotation (lossless JPEG re-container + stored-layout decode; "source" pixels for orient!=1 => sideways render). Added exifr.orientation read + map (1/absent => "baked", else "source") in decodeMaster (proxy jpg), computeIngestPlan jpg branch, buildFallback tier3 jpg branch. Override ladder return obj (plain data) to plumb without editing ladder.ts. Manifest gets correct flag. "Ladder returns orientation" + full sig change deferred (request approval, coordinate Agent 4 / L9). Positive (BUG, user-visible): upright jpgs now "baked"; non-1 get explicit "source".
+*   **F7 (deferred, not implemented):** fullLossless?:boolean (dist0 full), ML size hints in manifest (224/..), colorSpace:"srgb" tag. Per handoff: "note-only — do not implement without approval". Recorded; no code. (No silent drop.)
+
+No items rejected. Changes limited to ingest.ts (helpers, decodeMaster, computeIngestPlan, buildFallbackPlan, ingestImage, batch accum, interfaces). Tests (ingest.test.ts + manifest + ladder) all pass post-edit. No schema changes (used metadata record + post-build attach). 
+
+(Hand-off outcome per query: F1-6 implemented, F7 deferred; positive contributions accepted and landed.)

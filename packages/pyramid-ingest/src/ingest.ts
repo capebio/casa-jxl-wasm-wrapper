@@ -771,6 +771,18 @@ export async function ingestBatch(
         }
       }
     });
+    // Follow-up to B1: catch native/thread exits (terminate, OOM kill, etc.) that may not surface as 'error'.
+    w.on("exit", (code) => {
+      if (code !== 0) {
+        dead.add(wi);
+        for (const [id, p] of pending) {
+          if (p.worker === wi) {
+            pending.delete(id);
+            p.reject(new Error(`worker ${wi} exited with code ${code}`));
+          }
+        }
+      }
+    });
     workers.push(w);
   }
 
