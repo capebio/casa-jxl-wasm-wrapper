@@ -235,7 +235,7 @@ describe("DecodeSessionImpl error normalization", () => {
     worker.emit({
       type: "decode_error", sessionId: session.id,
       code: "TruncatedStream", message: "cut short",
-      partialPixels: new ArrayBuffer(32), partialInfo: imageInfo(),
+      partialPixels: new ArrayBuffer(32), partialInfo: imageInfo(), partialPixelStride: 4,
     });
     await assert.rejects(session.done(), (err: unknown) => {
       assert.ok(err instanceof JxlError);

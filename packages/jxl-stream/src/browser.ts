@@ -296,7 +296,7 @@ export async function fromRangePrefix(
       }
 
       // Pipeline next read with current push (matches fromReadableStream pattern).
-      pending = remaining > value.byteLength ? reader.read() : Promise.resolve({ done: true, value: undefined as unknown as Uint8Array });
+      pending = remaining > value.byteLength ? reader.read() : Promise.resolve({ done: true, value: undefined as unknown as Uint8Array<ArrayBuffer> });
 
       const chunk = value.byteLength <= remaining ? value : value.subarray(0, remaining);
       delivered += chunk.byteLength;

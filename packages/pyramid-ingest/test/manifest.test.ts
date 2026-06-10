@@ -43,7 +43,7 @@ test("buildManifest sorts levels ascending by pixel count and rounds aspect to 4
     height: 3468,
     levels: [big, small],
   });
-  expect(m.schema).toBe(1);
+  expect(m.schema).toBe(2);
   expect(m.levels.map((l) => l.size)).toEqual([256, "full"]);
   expect(m.aspect).toBeCloseTo(1.3333, 4);
   expect(m.proxy).toBeUndefined();

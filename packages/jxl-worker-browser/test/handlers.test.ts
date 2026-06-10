@@ -290,7 +290,10 @@ function installWorkerPostMessage(messages: WorkerToMainMessage[]): void {
     configurable: true,
     value: {
       postMessage(message: WorkerToMainMessage) {
-        messages.push(message);
+        // structuredClone to simulate real postMessage (which clones).
+        // Required because DecodeHandler reuses prealloc _metricMsg/_metricInner;
+        // without clone, later metric posts mutate earlier entries in the captured array.
+        messages.push(structuredClone(message));
       },
     },
   });

@@ -200,7 +200,7 @@ test("computeIngestPlan is side-effect free (no FS writes) and deterministic", a
   expect(plan1.imageId).toBe(identity.imageId);
   expect(plan1.levels.length).toBe(2);
   expect(plan1.manifest.imageId).toBe(identity.imageId);
-  expect(plan1.manifest.schema).toBe(1);
+  expect(plan1.manifest.schema).toBe(2);
   expect(plan1.manifest.levels.length).toBe(2);
 
   // second compute identical inputs -> identical output (deterministic, including content hashes from bytes)
@@ -224,7 +224,7 @@ test("proxy mode writes exactly one level and flags the manifest", { timeout: WA
   const out = await tmpOut();
   const b = await makeBackends();
   const master = await writeMaster(out, "P3.orf");
-  expect(await ingestImage(master, b, { outDir: out, proxy: 512 })).toBe("written");
+  expect((await ingestImage(master, b, { outDir: out, proxy: 512 })).outcome).toBe("written");
 
   const manifest = JSON.parse(
     await readFile(join(out, "images", await imageIdForPath(master), "manifest.json"), "utf8"),
@@ -255,7 +255,8 @@ test("ingestBatch isolates failures; rebuildIndex inlines L0 for non-proxy image
   expect(ids).toContain(await imageIdForPath(good1));
   expect(ids).toContain(await imageIdForPath(good2));
   expect(ids).not.toContain(await imageIdForPath(proxyMaster));
-  const g1 = index.images.find((e) => e.imageId === await imageIdForPath(good1))!;
+  const good1Id = await imageIdForPath(good1);
+  const g1 = index.images.find((e) => e.imageId === good1Id)!;
   expect(g1.l0.w).toBe(256);
   expect([...ids].sort()).toEqual(ids);
 
@@ -333,7 +334,7 @@ test("B5 high-atomic-writes: write failure mid-execution leaves no partial dest 
 
   // re-attempt succeeds (B5)
   const b2 = await makeBackends();
-  expect(await ingestImage(master, b2, { outDir: out })).toBe("written");
+  expect((await ingestImage(master, b2, { outDir: out })).outcome).toBe("written");
   const levelsDir = join(out, "levels");
   const files = await readdir(levelsDir);
   expect(files.some((f) => f.endsWith(".jxl"))).toBe(true);
