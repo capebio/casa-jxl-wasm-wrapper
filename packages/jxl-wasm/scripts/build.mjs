@@ -20,9 +20,9 @@ const config = {
   libjxlRepo: process.env.LIBJXL_REPO ?? "https://github.com/libjxl/libjxl.git",
   libjxlCommit: process.env.LIBJXL_COMMIT ?? "332feb17d17311c748445f7ee75c4fb55cc38530",
   libjxlTag: "v0.11.2",
-  emscriptenTag: "4.0.13",
-  emscriptenCommit: "404dc1ec13f64fce1af1eaf5c007e18212f63527",
-  emsdkImages: resolveEmsdkImages(),
+  emscriptenTag: "4.0.14",
+  emscriptenCommit: "refresh-after-first-4.0.14-host-build",
+  emsdkImages: resolveEmsdkImages(), // 4.0.14+ for P2-3 LTO re-enable attempt
   tiers: [
     { name: "relaxed-simd-mt", threads: true, simd: true, relaxedSimd: true },
     { name: "simd-mt", threads: true, simd: true, relaxedSimd: false },
@@ -37,10 +37,10 @@ const config = {
   }
 };
 
+const exportedRuntimeMethods = "['HEAPU8','HEAPU32']";
+
 const baseFlags = [
   "-O3",
-  "-sUSE_PTHREADS=1",
-  "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency",
   "-sENVIRONMENT=web,worker",
   "-sMODULARIZE=1",
   "-sEXPORT_ES6=1",
@@ -51,11 +51,14 @@ const baseFlags = [
   "-sFILESYSTEM=0",
   "-sASSERTIONS=0",
   "-sINVOKE_RUN=0",
-  "-sEXPORTED_RUNTIME_METHODS=['cwrap','HEAPU8','HEAP16','HEAPU16','HEAPF32']",
+  `-sEXPORTED_RUNTIME_METHODS=${exportedRuntimeMethods}`,
   "-sWASM_BIGINT=1",
-  // -flto removed: emscripten 4.0.13 + libjxl emits LTO metadata that breaks
-  // binaryen's wasm-metadce parser ("invalid UTF-8 at offset 0:N"). Bridge
-  // still links cleanly without LTO; wasm grows ~3-5 % but builds reliably.
+  "-flto",
+  // -flto (compile) re-enabled for P2-3 with emscripten 4.0.14 bump.
+  // Recovers cross-TU inlining + ~3-5% size. If binaryen wasm-metadce on
+  // this libjxl still says "invalid UTF-8 at offset 0:N", remove -flto here
+  // and in linkBridge, pin tag back, and document.
+  "-mnontrapping-fptoint",
   "-fno-rtti",
   "-fno-exceptions"
 ];
@@ -103,7 +106,7 @@ async function main() {
     await mkdir(buildDir, { recursive: true });
 
     const tierFlags = [
-      ...baseFlags.filter((flag) => flag !== "-sUSE_PTHREADS=1" && flag !== "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency"),
+      ...baseFlags,
       ...(tier.threads ? ["-pthread", "-sUSE_PTHREADS=1", "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency"] : []),
       ...(tier.simd ? ["-msimd128"] : []),
       ...(tier.relaxedSimd ? relaxedSimdHighwayFlags : [])
@@ -118,6 +121,10 @@ async function main() {
       "Ninja",
       "-DCMAKE_BUILD_TYPE=Release",
       "-DBUILD_TESTING=OFF",
+      "-DJPEGXL_ENABLE_TOOLS=OFF",
+      "-DJPEGXL_ENABLE_EXAMPLES=OFF",
+      "-DJPEGXL_ENABLE_BENCHMARK=OFF",
+      "-DJPEGXL_ENABLE_JPEGLI=OFF",
       "-DTHREADS_PREFER_PTHREAD_FLAG=ON",
       "-DCMAKE_HAVE_LIBC_PTHREAD=1",
       "-DCMAKE_USE_PTHREADS_INIT=1",
@@ -146,7 +153,7 @@ async function main() {
       wasmBytes: wasmStats.size,
       jsSha256: await sha256File(outJs),
       wasmSha256: await sha256File(outWasm),
-      flags: tierFlags
+      flags: [...tierFlags, "--closure", "1", "-sEVAL_CTORS=2"]
     };
 
     if (wasmStats.size > config.sizeBudgets[tier.name]) {
@@ -251,10 +258,12 @@ async function linkBridge(buildDir, outJs, tierFlags, env) {
     "-sFILESYSTEM=0",
     "-sASSERTIONS=0",
     "-sINVOKE_RUN=0",
-    "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
+    `-sEXPORTED_RUNTIME_METHODS=${exportedRuntimeMethods}`,
     `-sEXPORTED_FUNCTIONS=@${toCmakePath(join(packageRoot, "exports.txt"))}`,
     "-sWASM_BIGINT=1",
     "-flto",
+    "--closure", "1",
+    "-sEVAL_CTORS=2",
     "-fno-rtti",
     "-fno-exceptions"
   ], { cwd: packageRoot, env });
@@ -448,8 +457,8 @@ function resolveEmsdkImages() {
     return [process.env.EMSDK_IMAGE];
   }
   return [
-    "docker.io/emscripten/emsdk:4.0.13",
-    "ghcr.io/emscripten-core/emsdk:4.0.13"
+    "docker.io/emscripten/emsdk:4.0.14",
+    "ghcr.io/emscripten-core/emsdk:4.0.14"
   ];
 }
 

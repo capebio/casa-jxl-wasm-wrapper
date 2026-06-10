@@ -6,9 +6,9 @@ It tracks Section 6 of `casabio-jxl-wrapper-construction-spec-v2.md`.
 ## Pins
 
 - libjxl commit: `332feb17d17311c748445f7ee75c4fb55cc38530`
-- Emscripten SDK tag: `4.0.13`
-- Docker base image: `ghcr.io/emscripten-core/emsdk:4.0.13`
-- Docker fallback image: `docker.io/emscripten/emsdk:4.0.13`
+- Emscripten SDK tag: `4.0.14` (P2-3 LTO bump)
+- Docker base image: `ghcr.io/emscripten-core/emsdk:4.0.14`
+- Docker fallback image: `docker.io/emscripten/emsdk:4.0.14`
 
 ## Outputs
 

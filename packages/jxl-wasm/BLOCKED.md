@@ -11,6 +11,7 @@
 
 ## 2026-06-02
 - WASM rebuild (jxl-bridge) succeeded using `--host-toolchain` (local emsdk at C:\Users\User\emsdk, emcc 4.0.13) with no Docker daemon required.
+- Phase 2 bump targets 4.0.14 images; prior 4.0.13 host success is the baseline for bisecting flag effects.
 - Command: `cmd /c "call C:\Users\User\emsdk\emsdk_env.bat >nul && set EMSDK_QUIET=1 && cd /d C:\Foo\raw-converter-wasm && node packages\jxl-wasm\scripts\build.mjs --host-toolchain"`
 - Produced updated `dist/jxl-core.simd.{js,wasm}` + `scalar` (non-MT tiers only, as designed for host-toolchain); MT tiers left from prior docker build.
 - `build-manifest.json` now records `"buildMode": "host-toolchain"`, `skippedTiers: ["relaxed-simd-mt", "simd-mt"]`.

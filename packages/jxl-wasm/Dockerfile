@@ -1,4 +1,4 @@
-ARG EMSDK_IMAGE=ghcr.io/emscripten-core/emsdk:4.0.13
+ARG EMSDK_IMAGE=ghcr.io/emscripten-core/emsdk:4.0.14
 FROM ${EMSDK_IMAGE}
 
 SHELL ["/bin/bash", "-lc"]
