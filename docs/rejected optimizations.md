@@ -157,6 +157,37 @@ All 7 proposals rejected. No code changes.
 *   **Abort handler via async cancel() fire-and-forget (Grok-ES-1a):** REJECTED. `decode-session.ts` calls `fail()` directly in the abort handler; async `cancel()` with `.catch(() => {})` adds scheduler cancellation in a fire-and-forget that cannot be awaited by the abort event. Diverges from the reference pattern without correctness benefit. The abort handler is synchronous by contract.
 *   **cancel() post-await recheck + signal-aware error message (Grok-ES-1b):** REJECTED. The updated `cancel()` has a JS operator-precedence bug: `reason ?? this.abortSignal?.aborted ? "Encode aborted by signal" : "Encode cancelled"` parses as `(reason ?? this.abortSignal?.aborted) ? "..." : "..."`, not the intended conditional on `.aborted`. `decode-session.cancel()` does not have the extra post-await recheck either; `scheduler.cancelSession()` on an already-terminated session is a no-op and `terminate()` has its own guard.
 *   **onChunk callback option (Grok-ES-2):** REJECTED. New public API requiring `EncodeOptions` type change in the `@casabio/jxl-core` package. `chunks()` already provides the same data as an `AsyncIterable`. YAGNI; no caller demonstrates the need.
+
+## `packages/jxl-pyramid` (Grok 5 handoff — observability, validation, API surface)
+
+**Full proposal REJECTED.** The handoff asked to implement logger + PyramidEvent + onEvent callback + ring buffer, PoolStats (p50/p99 + counts), recentErrors ring, new errors.ts with closed PyramidErrorCode list, Zod schemas + parsePyramidManifest (with caching), devAssert sprinkles in stitch/decode paths, unified `decode(source, region, opts)` entry with 'auto'|'single'|'parallel' strategy (removing the tri-state parallel? boolean), @deprecated wrappers, branded `tiledLevelSource`/`wholeLevelSource`, fixtures.ts move to test/ + CI grep blocker for absolute paths in src, nested pool ctor shape (capacity/timing/observability/lifecycle groups) with overload compat, "stop silent clamping" + RangeError on bad inputs, massive new exports (PyramidWorkerPool class, createPyramidWorkerPool, prewarmDefaultPool, dispose..., canUseParallel..., JxtcHeader, PyramidCache, parse..., PyramidError), and 8 new tests exercising the new surface.
+
+**Rationale (grounded in project record + current tree state):**
+
+- Directly repeats multiple **rejected patterns**:
+  - Callbacks + event taxonomies + rings for observability: "onMetrics callback (18)", "Metrics expansion (DH-7, DH6-3)", "Dev-mode decode telemetry", "onMetric callback" — all rejected because "callbacks add overhead at hot points", "protocol churn for marginal debug value", "replaced by polling (getMetrics())".
+  - Pool ctor restructuring + grouped opts + "validate and throw": same class as rejected "Option normalisation into constructor", "Pooled WASM input buffer" risk/complexity, and "abstraction for cheap derivations".
+  - New public surface (unified decode + strategy, branded ctors, onEvent, getStats, recentErrors, many new exports + deprecations): "Breaking API change", "New API and proof that ... is a bottleneck", "bloats public API".
+  - Adding Zod + manifest validation at runtime in the decode package: "Cache is content-agnostic. Leave format validation to libjxl", "Persistent Cache Buffer Validation", "G2-9". Manifests come from controlled pyramid-ingest; this is not the hot decode path.
+
+- **Scope and timing**: Pyramid layer already received massive scrutiny (EpicCodeReview - jxl-pyramid.md, HANDOFF docs, Grok3 state machine + Abort work, Grok4 cache/stream-stitch). It is *not* a finished stable surface ready for "make the package shippable as a library, not a function bag." Adding nested ctors, event emission, stats windows, devAsserts, Zod, deprecation shims, and two new .ts files (types + errors) while the primary consumers are still internal web/ gallery code is opportunistic refactor, not surgical.
+
+- Current tree already has partial good parts from prior work (PyramidError + codes live in decode-core.ts and are thrown in pool/decode-level; DecodeOptions comment from Grok4 already anticipated logger; parseWorkerReply is wired; chooseLevelForTarget and plan already do some validation; silent catches exist in exactly the places cited). The proposal wants to *expand* this into full telemetry surface + API unification without demonstrated need or numbers.
+
+- No benchmark data or consumer usage in the handoff for p99 stats, event counts, or the value of the logger/onEvent surface (violates "Adaptive/heuristic changes require benchmark data. Do not add tunables without evidence").
+
+- fixtures.ts move + path grep is pure hygiene and could be a 5-line isolated change. Bundling it with the rest makes the whole delta net-negative.
+
+**What would have been minimal positive deltas (if isolated, evidence-backed PRs later):**
+- Wire an optional `logger?: PyramidLogger` (no-op default) into the 5-6 most critical bare `catch {}` sites in tiled-decode-pool (the wiring cost is low; the full event taxonomy + rings + stats is the rejected part).
+- Centralize the existing PyramidError into errors.ts (minor).
+- If/when pyramid-ingest changes the manifest shape, add a tiny hand-written validator or keep validation in the ingest tool — do not pull Zod into the runtime package for this.
+- Export PyramidWorkerPool + a couple of already-used factories if real callers outside the package appear.
+- Keep the existing entry points; a `decode()` convenience can be added later if three call sites actually suffer.
+
+The package's job is fast tiled JXTC viewport decode + worker pooling for large images under pan/zoom. Library-ification (branded everything, unified facade, full observability contract, Zod at the boundary) is future work after the mechanics have more bake time and external pressure. Rejected as written.
+
+(Hand-off evaluated on current post-Grok4 tree: PyramidError exists, fixtures still exported from src, pool ctor flat, many bare catches, no Zod/logger/onEvent/stats, manifest is hand interfaces, createLevelSource is the entry.)
 *   **Throw on both distance+quality provided (Grok-ES-3):** REJECTED. Breaking behavioral change to existing callers. Current silent-precedence (distance wins) is explicit logic, not ambiguity. Requires a spec and explicit user decision.
 *   **state / totalBytes read-only getters (Grok-ES-4):** REJECTED. New public API surface with no current consumer. YAGNI.
 *   **pushPixels fast path via !acquirePromise (Grok-ES-5):** REJECTED. `acquirePromise` is assigned in the constructor and is always a `Promise<unknown>` — never `null` or `undefined`. `if (!this.acquirePromise)` is always `false`; the proposed fast path never executes. Logic bug. Also speculative; no profiling evidence that `acquirePromise` resolution is hot.

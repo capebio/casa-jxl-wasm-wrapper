@@ -1,0 +1,26 @@
+{
+  "name": "@casabio/jxl-pyramid",
+  "version": "0.1.0",
+  "description": "Schemas, constants, and fixtures for the Pyramid Gallery Pipeline",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@casabio/jxl-wasm": "^0.1.0"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.2",
+    "typescript": "5.5.4"
+  }
+}
