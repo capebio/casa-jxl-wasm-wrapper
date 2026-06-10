@@ -1,4 +1,4 @@
-import { BIG_QUALITY, EFFORT, planLadder, planProxy, qualityToDistance } from "./quality.js";
+import { EFFORT, planLadder, planProxy } from "./quality.js";
 import { encodeBigLevelsRgba16, packedRgb16ToRgba16, targetDimsForLongEdge } from "./rgb16.js";
 import type { DecodedMaster, JxlBackend, Orientation, PyramidLevelBytes } from "./backends.js";
 
@@ -11,10 +11,8 @@ export interface LadderResult {
 
 const GRID_MAX_LONG = 1024;
 const TILE_SIZE = 256;
-const NEAR_FULL_RATIO = 1.15;
 
 export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, profileConvergence = false): Promise<LadderResult> {
-  const plan = planLadder();
   const { rgba, rgb16, width, height } = decoded;
   const masterLong = Math.max(width, height);
 
@@ -25,11 +23,11 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, pr
     const gridLevels: PyramidLevelBytes[] = [];
     let cur8 = rgba;
     let cw = width, ch = height;
-    const masterLong = Math.max(width, height);
     let lastW = -1, lastH = -1;
-    const gridTargets = plan.sidecars
-      .filter((sc) => sc.size < masterLong && sc.size <= GRID_MAX_LONG)
-      .sort((a, b) => b.size - a.size); // L1: descend for correct mip cascade (full first)
+    // consume Agent5 master-aware plan (filters <master + near-ratio); subfilter grid bucket
+    const gridTargets = planLadder(masterLong).sidecars
+      .filter((sc) => sc.size <= GRID_MAX_LONG)
+      .sort((a, b) => b.size - a.size); // L1: descend
     for (const sc of gridTargets) {
       const dst = targetDimsForLongEdge(width, height, sc.size);
       if (dst.w === lastW && dst.h === lastH) continue; // L2: dedup exact dims (e.g. small master)
@@ -55,11 +53,11 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, pr
     let cw16 = width, ch16 = height;
     // grid loop finished; release rgba too (grid used it; 16-bit path uses cur16)
     (decoded as any).rgba = undefined;
-    const bigSidecars = plan.sidecars
-      .filter((sc) => sc.size >= 2048 && sc.size < masterLong && (masterLong / sc.size >= NEAR_FULL_RATIO))
-      .sort((a, b) => b.size - a.size);
+    // consume Agent5 master-aware plan (already ratio + <master filtered)
+    const pBig = planLadder(masterLong);
+    const bigSidecars = pBig.sidecars.filter((sc) => sc.size >= 2048);
     const bigTargets = [
-      { longEdge: masterLong, distance: plan.fullDistance },
+      { longEdge: masterLong, distance: pBig.fullDistance },
       ...bigSidecars.map((sc) => ({ longEdge: sc.size, distance: sc.distance })),
     ];
     const bigLevels: PyramidLevelBytes[] = [];
@@ -96,10 +94,9 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, pr
   const levels: PyramidLevelBytes[] = [];
   let cur = rgba;
   let cw = width, ch = height;
-  const sideTargets = plan.sidecars.filter(
-    (sc) => sc.size < masterLong && masterLong / sc.size >= NEAR_FULL_RATIO,
-  );
-  const targets = [...sideTargets, { size: masterLong, distance: qualityToDistance(BIG_QUALITY) }];
+  // consume Agent5: planLadder(master) already applies <master + ratio guard
+  const p = planLadder(masterLong);
+  const targets = [...p.sidecars, { size: masterLong, distance: p.fullDistance }];
   targets.sort((a, b) => b.size - a.size); // L1: descend for correct cascade (full first)
   let lastW = -1, lastH = -1;
   for (const t of targets) {
@@ -160,11 +157,9 @@ export async function buildJpgLadder(
   const w = decoded.width, h = decoded.height;
   const masterLong = Math.max(w, h);
 
-  const plan = planLadder();
-  const sideTargets = plan.sidecars.filter(
-    (sc) => sc.size < masterLong && masterLong / sc.size >= NEAR_FULL_RATIO,
-  );
-  const targets = [...sideTargets, { size: masterLong, distance: qualityToDistance(BIG_QUALITY) }];
+  // consume Agent5: planLadder(master) gives ratio-guarded sides; use its fullDistance for the explicit full
+  const p = planLadder(masterLong);
+  const targets = [...p.sidecars, { size: masterLong, distance: p.fullDistance }];
   targets.sort((a, b) => b.size - a.size); // L1: descend
 
   const levels: PyramidLevelBytes[] = [];
