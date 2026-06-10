@@ -105,8 +105,8 @@ test("ingestImage emits 16-bit big levels when rgb16 is present", { timeout: WAS
     __testInProcess: true,
   } as any;
   const master = await writeMaster(out, "HDR.orf");
-  expect(await ingestImage(master, b, { outDir: out })).toBe("written");
-  const imageId = imageIdForPath(master);
+  expect((await ingestImage(master, b, { outDir: out })).outcome).toBe("written");
+  const imageId = await await imageIdForPath(master);
   const manifest = JSON.parse(await readFile(join(out, "images", imageId, "manifest.json"), "utf8")) as Manifest;
   const grid = manifest.levels.filter((l) => l.size === 256 || l.size === 512 || l.size === 1024);
   const big = manifest.levels.filter((l) => l.size === 2048 || l.size === "full");
@@ -119,12 +119,12 @@ test("ingestImage writes a full RAW pyramid + manifest, then skips on re-run", {
   const b = await makeBackends();
   const master = await writeMaster(out, "P1.orf");
 
-  expect(await ingestImage(master, b, { outDir: out })).toBe("written");
+  expect((await ingestImage(master, b, { outDir: out })).outcome).toBe("written");
 
-  const imageId = imageIdForPath(master);
+  const imageId = await await imageIdForPath(master);
   const manifestPath = join(out, "images", imageId, "manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Manifest;
-  expect(manifest.schema).toBe(1);
+  expect(manifest.schema).toBe(2);
   expect(manifest.orientation).toBe("baked");
   expect(manifest.proxy).toBeUndefined();
   expect(manifest.levels.map((l) => l.size)).toEqual([256, 512, 1024, "full"]);
@@ -137,15 +137,15 @@ test("ingestImage writes a full RAW pyramid + manifest, then skips on re-run", {
     expect((await stat(lf)).size).toBe(l.bytes);
   }
 
-  expect(await ingestImage(master, b, { outDir: out })).toBe("skipped");
+  expect((await ingestImage(master, b, { outDir: out })).outcome).toBe("skipped");
 });
 
 test("force re-ingests even when the manifest is up to date", { timeout: WASM_TIMEOUT }, async () => {
   const out = await tmpOut();
   const b = await makeBackends();
   const master = await writeMaster(out, "P2.orf");
-  expect(await ingestImage(master, b, { outDir: out })).toBe("written");
-  expect(await ingestImage(master, b, { outDir: out, force: true })).toBe("written");
+  expect((await ingestImage(master, b, { outDir: out })).outcome).toBe("written");
+  expect((await ingestImage(master, b, { outDir: out, force: true })).outcome).toBe("written");
 });
 
 test("identical level content across masters is stored once (content-addressed dedupe)", { timeout: WASM_TIMEOUT }, async () => {
@@ -156,8 +156,8 @@ test("identical level content across masters is stored once (content-addressed d
   await ingestImage(m1, b, { outDir: out });
   await ingestImage(m2, b, { outDir: out });
 
-  const man1 = JSON.parse(await readFile(join(out, "images", imageIdForPath(m1), "manifest.json"), "utf8")) as Manifest;
-  const man2 = JSON.parse(await readFile(join(out, "images", imageIdForPath(m2), "manifest.json"), "utf8")) as Manifest;
+  const man1 = JSON.parse(await readFile(join(out, "images", await imageIdForPath(m1), "manifest.json"), "utf8")) as Manifest;
+  const man2 = JSON.parse(await readFile(join(out, "images", await imageIdForPath(m2), "manifest.json"), "utf8")) as Manifest;
   expect(man1.levels.map((l) => l.contenthash)).toEqual(man2.levels.map((l) => l.contenthash));
 
   const levelFiles = await readdir(join(out, "levels"));
@@ -227,7 +227,7 @@ test("proxy mode writes exactly one level and flags the manifest", { timeout: WA
   expect(await ingestImage(master, b, { outDir: out, proxy: 512 })).toBe("written");
 
   const manifest = JSON.parse(
-    await readFile(join(out, "images", imageIdForPath(master), "manifest.json"), "utf8"),
+    await readFile(join(out, "images", await imageIdForPath(master), "manifest.json"), "utf8"),
   ) as Manifest;
   expect(manifest.proxy).toBe(true);
   expect(manifest.levels).toHaveLength(1);
@@ -252,10 +252,10 @@ test("ingestBatch isolates failures; rebuildIndex inlines L0 for non-proxy image
 
   const index = await rebuildIndex(out);
   const ids = index.images.map((e) => e.imageId);
-  expect(ids).toContain(imageIdForPath(good1));
-  expect(ids).toContain(imageIdForPath(good2));
-  expect(ids).not.toContain(imageIdForPath(proxyMaster));
-  const g1 = index.images.find((e) => e.imageId === imageIdForPath(good1))!;
+  expect(ids).toContain(await imageIdForPath(good1));
+  expect(ids).toContain(await imageIdForPath(good2));
+  expect(ids).not.toContain(await imageIdForPath(proxyMaster));
+  const g1 = index.images.find((e) => e.imageId === await imageIdForPath(good1))!;
   expect(g1.l0.w).toBe(256);
   expect([...ids].sort()).toEqual(ids);
 
@@ -270,13 +270,13 @@ test("rebuildIndex skips a corrupt manifest instead of throwing", { timeout: WAS
   const broken = await writeMaster(out, "BROKEN.orf");
   await ingestBatch([good, broken], b, { outDir: out, concurrency: 1 });
 
-  const brokenManifest = join(out, "images", imageIdForPath(broken), "manifest.json");
+  const brokenManifest = join(out, "images", await imageIdForPath(broken), "manifest.json");
   await writeFile(brokenManifest, "{ not valid json");
 
   const index = await rebuildIndex(out);
   const ids = index.images.map((e) => e.imageId);
-  expect(ids).toContain(imageIdForPath(good));
-  expect(ids).not.toContain(imageIdForPath(broken));
+  expect(ids).toContain(await imageIdForPath(good));
+  expect(ids).not.toContain(await imageIdForPath(broken));
 });
 
 // === WU-4 durability tests (high-atomic-writes, F10, low-no-retry-on-ebusy, B5/B8/B9) ===
@@ -345,7 +345,7 @@ test("F10 --verify-hash: corrupt level is overwritten on re-ingest with flag; wi
   const master = await writeMaster(out, "CORRUPT.orf");
   await ingestImage(master, b, { outDir: out });
 
-  const imageId = imageIdForPath(master);
+  const imageId = await await imageIdForPath(master);
   const man = JSON.parse(await readFile(join(out, "images", imageId, "manifest.json"), "utf8")) as Manifest;
   const full = man.levels.find((l) => l.size === "full") || man.levels[man.levels.length - 1];
   const dest = join(out, "levels", `${full.contenthash}.jxl`);
@@ -390,7 +390,7 @@ test("low-no-retry-on-ebusy: EBUSY on rename is retried (succeeds on 2nd attempt
     return origRename(src, dst);
   };
   try {
-    expect(await ingestImage(master, b, { outDir: out })).toBe("written");
+    expect((await ingestImage(master, b, { outDir: out })).outcome).toBe("written");
     expect(renameCalls).toBeGreaterThanOrEqual(2); // at least one retry happened
   } finally {
     renameImpl = origRename;

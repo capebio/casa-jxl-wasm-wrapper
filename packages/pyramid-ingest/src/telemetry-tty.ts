@@ -3,6 +3,7 @@ import type { Telemetry } from "./backends.js";
 export const noOpTelemetry: Telemetry = {
   stage() {},
   progress() {},
+  event() {},
 };
 
 export function createTtyTelemetry(): Telemetry {
@@ -27,5 +28,6 @@ export function createTtyTelemetry(): Telemetry {
         last = "";
       }
     },
+    event() {}, // events go to json/runlog in CLI wrapper; tty silent
   };
 }

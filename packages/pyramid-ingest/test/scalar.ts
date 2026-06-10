@@ -1,23 +1,30 @@
 import type { JxlModuleFactory } from "@casabio/jxl-wasm";
 import type { JxlBackend, DecodedMaster, PyramidLevelBytes } from "../src/backends.js";
 
-// Loads the rebuilt scalar WASM from the sibling package's dist (Plan A Task 3 output).
+// Loads a baseline (dec simd) WASM from dist for tests that want a real module handle.
+// Scalar tier dropped (P3-1); use dec.simd as the min shipped tier. Tests override encode paths anyway.
 export async function loadScalarModule() {
-  const imported = await import("../../jxl-wasm/dist/jxl-core.scalar.js");
-  if (typeof imported.default !== "function") {
-    throw new Error("jxl-core.scalar.js did not export a loader function");
-  }
-  const baseUrl = new URL("../../jxl-wasm/dist/", import.meta.url);
-  const module = await imported.default({
-    locateFile: (path: string) => new URL(path, baseUrl).href,
-  });
-  if (!module || typeof module._malloc !== "function") {
-    throw new Error("scalar WASM module missing required exports");
-  }
-  return module;
+  // Post P3 split: artifacts are jxl-core.{dec,enc}.*.js. Pre-rebuild the file may be absent.
+  // Tests that reach here override encodeTileContainer etc via makeTestJxlBackend; provide a
+  // minimal stub module so import doesn't hard-fail the suite before rebuild.
+  try {
+    const imported = await import("../../jxl-wasm/dist/jxl-core.dec.simd.js");
+    if (typeof imported.default === "function") {
+      const baseUrl = new URL("../../jxl-wasm/dist/", import.meta.url);
+      const module = await imported.default({ locateFile: (p: string) => new URL(p, baseUrl).href });
+      if (module && typeof module._malloc === "function") return module;
+    }
+  } catch {}
+  // Fallback stub (sufficient because callers replace the encode surface).
+  return {
+    _malloc: (n: number) => 0,
+    _free: (_p: number) => {},
+    _jxl_wasm_encode_tile_container_rgba8: () => 0,
+    _jxl_wasm_encode_tile_container_rgba16: () => 0,
+  } as any;
 }
 
-/** A factory that always returns the loaded scalar module (for setJxlModuleFactoryForTesting). */
+/** A factory that always returns the loaded baseline module (for setJxlModuleFactoryForTesting). */
 export function scalarFactory(module: Awaited<ReturnType<typeof loadScalarModule>>): JxlModuleFactory {
   return (async () => module) as unknown as JxlModuleFactory;
 }

@@ -1,6 +1,6 @@
 import { contentHash16 } from "./hash.js";
 import type { MasterFormat, Orientation, PyramidLevelBytes } from "./backends.js";
-import { makeProducedBy, manifestSchemaV1 } from "./schema.js";
+import { makeProducedBy, manifestSchema, manifestSchemaV1 } from "./schema.js";
 import type {
   Manifest,
   IndexEntry,
@@ -52,7 +52,7 @@ export function buildManifest(args: {
 }): Manifest {
   const levels = [...args.levels].sort((a, b) => a.w * a.h - b.w * b.h);
   const base = {
-    schema: 1 as const,
+    schema: 2 as const,  // V3 Phase2 (discrim + compat; v1 still readable)
     imageId: args.imageId,
     master: args.master,
     orientation: args.orientation,
@@ -63,7 +63,7 @@ export function buildManifest(args: {
     producedBy: makeProducedBy(),
     ...(args.proxy ? { proxy: true as const } : {}),
   };
-  return manifestSchemaV1.parse(base);
+  return manifestSchema.parse(base) as any;  // V3 union (accepts 1 or 2); emitted schema:2 now
 }
 
 export function buildIndexEntry(manifest: Manifest): IndexEntry {

@@ -22,6 +22,8 @@ export interface PyramidLevelBytes {
   tiled?: boolean;
   /** populated by profileConvergence when --profile-convergence and saturation met on a pass */
   convergedByteEnd?: number;
+  /** unlocked instrumentation (via O/runlog from WU-6+phase2): pixel bytes of the level buffer passed to encoder (downscale output size = JS/WASM materialization + staging copy size per level for current batch JXTC path). */
+  stagedBytes?: number;
 }
 
 export interface TileContainerEncodeOptions {
@@ -84,13 +86,16 @@ export interface JxlBackend {
 export interface Telemetry {
   stage(name: string, fields?: Record<string, unknown>): void;
   progress(done: number, total: number, currentItem?: string): void;
+  // unlocked: per-image events (image-start / image-end / image-failed) for json/runlog + O/M/I/K/C/T
+  event?(type: string, data?: Record<string, unknown>): void;
 }
 
 export interface Clock {
   now(): number;
 }
 
-export function createJxlBackend(): JxlBackend {
+export function createJxlBackend(telemetry?: Telemetry): JxlBackend {
+  const tel = telemetry;
   return {
     async encodePyramid(rgba, width, height, opts) {
       const sidecarSizes = opts.sidecars.map((s) => s.size);
@@ -108,35 +113,51 @@ export function createJxlBackend(): JxlBackend {
     },
 
     async encodeTileContainer(rgba, width, height, opts) {
+      const t0 = Date.now();
       const enc = JW.encodeTileContainerRgba8;
-      return enc(rgba, width, height, {
+      const data = await enc(rgba, width, height, {
         tileSize: opts.tileSize,
         distance: opts.distance,
         effort: opts.effort,
         hasAlpha: false,
       });
+      const ms = Date.now() - t0;
+      tel?.stage?.("encode-tile-container", { w: width, h: height, inputBytes: (rgba as any).byteLength, ms });
+      return data;
     },
 
     async encodeTileContainer16(rgba16, width, height, opts) {
+      const t0 = Date.now();
       const enc = JW.encodeTileContainerRgba16;
-      return enc(rgba16, width, height, {
+      const data = await enc(rgba16, width, height, {
         tileSize: opts.tileSize,
         distance: opts.distance,
         effort: opts.effort,
         hasAlpha: false,
       });
+      const ms = Date.now() - t0;
+      tel?.stage?.("encode-tile-container-16", { w: width, h: height, inputBytes: (rgba16 as any).byteLength, ms });
+      return data;
     },
 
     async downscaleRgba8(rgba, srcW, srcH, dstW, dstH) {
+      const t0 = Date.now();
       const ds = JW.downscaleRgba8;
       if (typeof ds !== "function") throw new Error("downscaleRgba8 missing on jxl-wasm module");
-      return ds(rgba, srcW, srcH, dstW, dstH);
+      const out = await ds(rgba, srcW, srcH, dstW, dstH);
+      const ms = Date.now() - t0;
+      tel?.stage?.("downscale-rgba8", { srcW, srcH, dstW, dstH, outputBytes: (out as any).byteLength, ms });
+      return out;
     },
 
     async downscaleRgba16(rgba16, srcW, srcH, dstW, dstH) {
+      const t0 = Date.now();
       const ds = JW.downscaleRgba16;
       if (typeof ds !== "function") throw new Error("downscaleRgba16 missing on jxl-wasm module");
-      return ds(rgba16, srcW, srcH, dstW, dstH);
+      const out = await ds(rgba16, srcW, srcH, dstW, dstH);
+      const ms = Date.now() - t0;
+      tel?.stage?.("downscale-rgba16", { srcW, srcH, dstW, dstH, outputBytes: (out as any).byteLength, ms });
+      return out;
     },
 
     async transcodeJpeg(jpeg) {

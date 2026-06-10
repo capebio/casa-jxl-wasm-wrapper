@@ -1,5 +1,5 @@
 import { createDecoder } from "@casabio/jxl-wasm";
-import type { ImageRegion } from "./tiling.js";
+import type { ImageRegion, JxtcHeader as TilingJxtcHeader } from "./tiling.js";
 import { extractTileBitstream } from "./tiling.js";
 import type { LevelSource } from "./level-source.js";
 import {
@@ -9,11 +9,43 @@ import {
   type DecodedLevel,
   PyramidError,
   type DecodeOptions,
+  stitchCropped,
+  assertFiniteRegion,
+  snapRegionToIntegers,
 } from "./decode-core.js";
 import { prepareDecodePlan } from "./plan.js";
 import { getLevelId } from "./cache.js";
 
 export type { DecodedLevel, RegionDecoder, DecodeOptions, PyramidError, ProgressiveMode } from "./decode-core.js";
+
+function stitchTileIntoViewport(
+  outBuffer: Uint8Array,
+  viewport: ImageRegion,
+  tile: ImageRegion,
+  decodedPixels: Uint8Array,
+  source: Extract<LevelSource, { kind: "tiled" }>,
+  bpp: 4 | 8,
+): void {
+  const tileSize = source.tileSize;
+  const tx = Math.floor(tile.x / tileSize);
+  const ty = Math.floor(tile.y / tileSize);
+  const srcOriginX = tx * tileSize;
+  const srcOriginY = ty * tileSize;
+  const decodedW = Math.min(tileSize, source.width - srcOriginX);
+  const decodedH = Math.min(tileSize, source.height - srcOriginY);
+
+  stitchCropped(
+    outBuffer,
+    viewport,
+    tile,
+    decodedPixels,
+    decodedW,
+    decodedH,
+    srcOriginX,
+    srcOriginY,
+    bpp,
+  );
+}
 
 /**
  * Decode a rectangular viewport from a tiled JXTC level.
@@ -26,10 +58,9 @@ export async function decodeTiledViewport(
 ): Promise<DecodedLevel> {
   const signal = options?.signal;
   if (signal?.aborted) throw new PyramidError('ABORTED', 'decode aborted before start');
-  if (!Number.isFinite(region.x) || !Number.isFinite(region.y) || !Number.isFinite(region.w) || !Number.isFinite(region.h)) {
-    throw new RangeError("region must have finite x,y,w,h");
-  }
-  const plan = prepareDecodePlan(source, region);
+  assertFiniteRegion(region);
+  const snappedRegion = snapRegionToIntegers(region);
+  const plan = prepareDecodePlan(source, snappedRegion);
   const decodeRegion = options?.decodeRegion ?? plan.decodeRegion;
   const vp = plan.viewport;
   const bpp = plan.bpp;
@@ -66,19 +97,28 @@ export async function decodeTiledViewport(
   // Only when no custom decodeRegion (tests use mocks for the one-shot path).
   if (progressive === 'dc-then-final' && !options?.decodeRegion) {
     let completed = 0;
+    const tilesX = Math.ceil(source.width / source.tileSize);
+    const tilesY = Math.ceil(source.height / source.tileSize);
+    const exHeader: TilingJxtcHeader = {
+      imageW: source.width,
+      imageH: source.height,
+      tileSize: source.tileSize,
+      tilesX,
+      tilesY,
+      hasAlpha: true,
+      bitsPerSample: source.bitsPerSample,
+    };
     for (const t of plan.tiles) {
       if (signal?.aborted) throw new PyramidError('ABORTED', 'decode aborted');
-      const tileBytes = extractTileBitstream(source.bytes, t, plan.header as any);
+      const tileBytes = extractTileBitstream(source.bytes, t, exHeader);
       // DC stage (first paint)
       const dcPixels = await decodeTileBytesProgressive(tileBytes, plan.format, 'dc');
-      const dcLevel: DecodedLevel = { pixels: dcPixels, width: t.w, height: t.h };
-      stitch(target, vp, t, dcLevel, plan.bpp);
+      stitchTileIntoViewport(target, vp, t, dcPixels, source, plan.bpp);
       completed += 1;
       onTile?.(t, completed);
       // Final stage (refine)
       const finalPixels = await decodeTileBytesProgressive(tileBytes, plan.format, 'final');
-      const finLevel: DecodedLevel = { pixels: finalPixels, width: t.w, height: t.h };
-      stitch(target, vp, t, finLevel, plan.bpp);
+      stitchTileIntoViewport(target, vp, t, finalPixels, source, plan.bpp);
       completed += 1;
       onTile?.(t, completed);
     }
@@ -179,9 +219,6 @@ export async function decodeLevel(
   }
   if (region === undefined) {
     throw new Error("tiled level decode requires explicit region (use decodeLevel(source, region) or full viewport region)");
-  }
-  if (!Number.isFinite(region.x) || !Number.isFinite(region.y) || !Number.isFinite(region.w) || !Number.isFinite(region.h)) {
-    throw new RangeError("region must have finite x,y,w,h");
   }
   return decodeTiledViewport(source, region, options);
 }

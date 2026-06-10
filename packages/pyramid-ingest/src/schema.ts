@@ -66,6 +66,14 @@ export const manifestSchemaV1 = z.object({
     .optional(),
 });
 
+// V3 (Phase2): v2 stub (additive for now; layout etc in M). discriminated for safe bumps.
+// V4/M: index norm etc (additive optional for future, e.g. more index fields; norm in rebuild for consistency)
+export const manifestSchemaV2Base = manifestSchemaV1.extend({ schema: z.literal(2) });
+export const manifestSchemaV4Base = manifestSchemaV2Base.extend({ schema: z.literal(4) }); // v4 additive
+export const manifestSchema = z.discriminatedUnion("schema", [manifestSchemaV1, manifestSchemaV2Base, manifestSchemaV4Base]);
+export type ManifestV2 = z.infer<typeof manifestSchemaV2Base>;
+export type ManifestV4 = z.infer<typeof manifestSchemaV4Base>;
+
 export const indexEntrySchema = z.object({
   imageId: z.string().regex(/^[0-9a-f]{16}$/),
   aspect: z.number().finite().positive(),
@@ -74,14 +82,16 @@ export const indexEntrySchema = z.object({
     w: z.number().int().positive(),
     h: z.number().int().positive(),
   }),
+  // V4: optional for v2+ manifests (decoder etc not needed in index)
+  schema: z.number().optional(),
 });
 
 export const galleryIndexSchema = z.object({
-  schema: z.literal(1),
+  schema: z.literal(1),  // index stays v1 for compat; entries tolerate v2 manifests
   images: z.array(indexEntrySchema),
 });
 
-export type Manifest = z.infer<typeof manifestSchemaV1>;
+export type Manifest = z.infer<typeof manifestSchemaV1> | ManifestV2 | ManifestV4;
 export type IndexEntry = z.infer<typeof indexEntrySchema>;
 export type GalleryIndex = z.infer<typeof galleryIndexSchema>;
 export type LevelEntry = z.infer<typeof levelEntrySchema>;
@@ -89,8 +99,48 @@ export type LevelSize = z.infer<typeof levelSizeSchema>;
 export type MasterInfo = z.infer<typeof masterInfoSchema>;
 export type ProducedBy = z.infer<typeof producedBySchema>;
 
+// O/M/I/K/C/T per-image events + runlog (unlocked by WU-6 + V3 + locks + checkpoint)
+export const imageRecordSchema = z.object({
+  path: z.string(),
+  imageId: z.string().regex(/^[0-9a-f]{16}$/).optional(),
+  outcome: z.enum(["written", "skipped", "failed"]),
+  error: z.string().optional(),
+  durationMs: z.number().optional(),
+});
+export type ImageRecord = z.infer<typeof imageRecordSchema>;
+
+export const runRecordSchema = z.object({
+  runId: z.string(),
+  startedAt: z.number(),
+  endedAt: z.number(),
+  producedBy: producedBySchema,
+  args: z.array(z.string()),
+  summary: z.object({
+    written: z.number(),
+    skipped: z.number(),
+    failed: z.number(),
+    stagedBytes: z.number().optional(),
+  }),
+  images: z.array(imageRecordSchema).optional(),
+  failures: z.array(z.object({ path: z.string(), error: z.string() })).optional(),
+  // complete for O: stages etc if -vv
+  stages: z.array(z.object({ name: z.string(), ts: z.number(), fields: z.record(z.unknown()).optional() })).optional(),
+});
+export type RunRecord = z.infer<typeof runRecordSchema>;
+
+// Exact Event per plan O1 for --json (batch + per-image + stages for -vv)
+export type CliEvent =
+  | { type: "batch-start"; runId: string; totalFiles: number; concurrency: number }
+  | { type: "image-start"; runId: string; path: string; imageId: string }
+  | { type: "image-done"; runId: string; path: string; outcome: "written" | "skipped"; durationMs: number }
+  | { type: "image-failed"; runId: string; path: string; error: { message: string; stack?: string; code?: string } }
+  | { type: "batch-end"; runId: string; written: number; skipped: number; failed: number; durationMs: number }
+  | { type: "stage"; runId: string; name: string; ts: number; fields?: Record<string, unknown> }
+  | { type: "gc-result" | "validate-result" | "rm-result" | "migrate-result"; [k: string]: unknown };
+
 export function parseManifest(text: string): Manifest {
-  return manifestSchemaV1.parse(JSON.parse(text));
+  // V3: accepts v1 or v2 (additive fields tolerated)
+  return manifestSchema.parse(JSON.parse(text)) as Manifest;
 }
 
 export function parseGalleryIndex(text: string): GalleryIndex {
@@ -154,6 +204,25 @@ export const cliArgsSchema = z.object({
     .transform((v) => (v === undefined ? undefined : strictPositiveInt("timeout-ms", v))),
   "accept-unsupported": z.boolean().optional().default(true),
   "profile-convergence": z.boolean().optional().default(false),
+  // WU-6 prereqs (F1/F5/F6/F2) + L locks: flag + subcmd support (gc/validate/rm/resume).
+  // rm as string (like explain) for --rm <imageId|path> or subcmd positional.
+  gc: z.boolean().optional().default(false),
+  validate: z.boolean().optional().default(false),
+  rm: z.string().optional(),
+  resume: z.boolean().optional().default(false),
+  migrate: z.boolean().optional().default(false),
+  "migrate-layout": z.string().optional(),
+  "migrate-schema": z.string().optional(),
+  "suggest-migrations": z.boolean().optional().default(false),
+  // K2: chaos injection for testing resume/GC under failure (unlocked by surface + locks + checkpoint)
+  "chaos-test": z.boolean().optional().default(false),
+  config: z.string().optional(),
+  // O1/O6 Phase2: structured output + bounded runlog
+  json: z.boolean().optional().default(false),
+  "runlog-keep": z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? 100 : strictPositiveInt("runlog-keep", v))),
 });
 
 function strictPositiveInt(name: string, raw: string): number {

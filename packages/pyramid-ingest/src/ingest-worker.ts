@@ -6,7 +6,7 @@ import { parentPort } from "node:worker_threads";
 import { setForcedTier } from "@casabio/jxl-wasm";
 import { createJxlBackend } from "./backends.js";
 import { createRawBackend } from "./raw-backend.js";
-import { ingestImage, type IngestOptions, type IngestOutcome } from "./ingest.js";
+import { ingestImage, type IngestOptions, type IngestResult } from "./ingest.js";
 
 if (!parentPort) {
   throw new Error("ingest-worker must be run as worker_threads child");
@@ -21,11 +21,16 @@ const backends = {
 };
 
 parentPort.on("message", async (msg: { id: number; path: string; opts: IngestOptions & { dryRun?: boolean; timeoutMs?: number } }) => {
+  const t0 = Date.now();
   try {
-    const outcome: IngestOutcome = await ingestImage(msg.path, backends, msg.opts);
-    parentPort!.postMessage({ id: msg.id, ok: true, outcome });
+    if (msg.opts.chaosTest && Math.random() < 0.25) {
+      throw new Error("chaos-test injected failure (for K2 resume/GC recovery test) [worker]");
+    }
+    const res: IngestResult = await ingestImage(msg.path, backends, msg.opts);
+    const dur = Date.now() - t0;
+    parentPort!.postMessage({ id: msg.id, ok: true, outcome: res.outcome, stagedBytes: res.stagedBytes, durationMs: dur });
   } catch (err: unknown) {
     const e = err instanceof Error ? { message: err.message, stack: err.stack } : { message: String(err) };
-    parentPort!.postMessage({ id: msg.id, ok: false, error: e });
+    parentPort!.postMessage({ id: msg.id, ok: false, error: e, durationMs: Date.now() - t0 });
   }
 });

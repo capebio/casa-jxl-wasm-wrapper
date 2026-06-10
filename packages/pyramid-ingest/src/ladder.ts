@@ -29,12 +29,13 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, pr
         cur8 = await jxl.downscaleRgba8(cur8, cw, ch, dst.w, dst.h);
         cw = dst.w; ch = dst.h;
       }
+      const stagedBytes = cur8.byteLength;
       const data = await jxl.encodeTileContainer(cur8, cw, ch, {
         tileSize: TILE_SIZE,
         distance: sc.distance,
         effort: EFFORT,
       });
-      gridLevels.push({ data, width: cw, height: ch, bitsPerSample: 8, tiled: true });
+      gridLevels.push({ data, width: cw, height: ch, bitsPerSample: 8, tiled: true, stagedBytes });
     }
 
     // 16-bit levels (2048+) via rgb16 downscale + encodeTileContainer16
@@ -58,12 +59,13 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, pr
         cur16 = (await jxl.downscaleRgba16!(cur16, cw16, ch16, dst.w, dst.h)) as Uint16Array;
         cw16 = dst.w; ch16 = dst.h;
       }
+      const stagedBytes = (cur16 as any).byteLength;
       const data = await enc16(cur16 as any, cw16, ch16, {
         tileSize: TILE_SIZE,
         distance: t.distance,
         effort: EFFORT,
       });
-      bigLevels.push({ data, width: cw16, height: ch16, bitsPerSample: 16, tiled: true });
+      bigLevels.push({ data, width: cw16, height: ch16, bitsPerSample: 16, tiled: true, stagedBytes });
     }
 
     const outLevels = [...gridLevels, ...bigLevels];
@@ -84,12 +86,13 @@ export async function buildRawLadder(jxl: JxlBackend, decoded: DecodedMaster, pr
       cur = await jxl.downscaleRgba8(cur, cw, ch, dst.w, dst.h);
       cw = dst.w; ch = dst.h;
     }
+    const stagedBytes = cur.byteLength;
     const data = await jxl.encodeTileContainer(cur, cw, ch, {
       tileSize: TILE_SIZE,
       distance: t.distance,
       effort: EFFORT,
     });
-    levels.push({ data, width: cw, height: ch, bitsPerSample: 8, tiled: true });
+    levels.push({ data, width: cw, height: ch, bitsPerSample: 8, tiled: true, stagedBytes });
   }
   if (profileConvergence) await attachConverged(jxl, levels);
   return {
@@ -136,12 +139,13 @@ export async function buildJpgLadder(jxl: JxlBackend, jpeg: Uint8Array, profileC
       cur = await jxl.downscaleRgba8(cur, cw, ch, dst.w, dst.h);
       cw = dst.w; ch = dst.h;
     }
+    const stagedBytes = cur.byteLength;
     const data = await jxl.encodeTileContainer(cur, cw, ch, {
       tileSize: TILE_SIZE,
       distance: t.distance,
       effort: EFFORT,
     });
-    levels.push({ data, width: cw, height: ch, bitsPerSample: 8, tiled: true });
+    levels.push({ data, width: cw, height: ch, bitsPerSample: 8, tiled: true, stagedBytes });
   }
   if (profileConvergence) await attachConverged(jxl, levels);
   return {
@@ -164,7 +168,7 @@ export async function buildProxyLadder(
   const produced = await jxl.encodePyramid(rgba, width, height, planProxy(size));
   const level = produced[0];
   if (!level) throw new Error("proxy encode produced no level");
-  const outLevels: PyramidLevelBytes[] = [{ ...level, bitsPerSample: 8 }];
+  const outLevels: PyramidLevelBytes[] = [{ ...level, bitsPerSample: 8, stagedBytes: rgba.byteLength }];
   if (profileConvergence) await attachConverged(jxl, outLevels);
   return { levels: outLevels, orientation, width, height };
 }

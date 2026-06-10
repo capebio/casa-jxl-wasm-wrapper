@@ -1,5 +1,6 @@
 import { access, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { contentHash16, imageIdForPath } from "./hash.js";
 import { buildJpgLadder, buildProxyLadder, buildRawLadder, type LadderResult } from "./ladder.js";
 import {
@@ -9,6 +10,8 @@ import {
 
 import { detectFormatByMagic, makeProducedBy, parseManifest } from "./schema.js";
 import type { Clock, DecodedMaster, JxlBackend, MasterFormat, Orientation, RawBackend, RawFormat, Telemetry } from "./backends.js";
+import { clearCheckpoint, readCheckpoint, writeCheckpoint, type CheckpointState } from "./checkpoint.js";
+import { acquireImageWriteLock, type AdvisoryLock } from "./lock.js";
 
 export interface Backends {
   raw: RawBackend;
@@ -25,14 +28,27 @@ export interface IngestOptions {
   verifyHash?: boolean;
   acceptUnsupported?: boolean; // WU-5: default accept-degraded (Q2)
   profileConvergence?: boolean;
+  resume?: boolean;  // F2 WU-6: --resume uses checkpoint to skip completed
+  chaosTest?: boolean;  // K2: random failure injection for recovery tests
+  statMap?: Record<string, { size: number; mtimeMs: number }>;  // C1: from upfront collect to avoid re-stat
 }
 
 export type IngestOutcome = "written" | "skipped";
+
+export interface IngestResult {
+  outcome: IngestOutcome;
+  /** sum of stagedBytes across levels for this image (unlocked copy instrumentation; 0/undef for skipped) */
+  stagedBytes?: number;
+}
 
 export interface BatchResult {
   written: number;
   skipped: number;
   failed: { path: string; error: Error | string }[];
+  // unlocked per-image for runlog / O/M/I/K/C/T events (populated from cp)
+  perImage?: Array<{ path: string; outcome: "written" | "skipped" | "failed"; error?: string; stagedBytes?: number }>;
+  /** total pixel bytes staged into encoders across all written levels in this batch (unlocked copy instrumentation) */
+  totalStagedBytes?: number;
 }
 
 export interface IngestPlan {
@@ -41,7 +57,7 @@ export interface IngestPlan {
   orientation: Orientation;
   width: number;
   height: number;
-  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean; convergedByteEnd?: number }>;
+  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean; convergedByteEnd?: number; stagedBytes?: number }>;
   proxy: boolean;
   manifest: Manifest;
 }
@@ -105,7 +121,7 @@ export function formatFromPath(p: string): string | null {
   return null;
 }
 
-async function fileExists(p: string): Promise<boolean> {
+export async function fileExists(p: string): Promise<boolean> {
   try {
     await access(p);
     return true;
@@ -305,12 +321,18 @@ export async function ingestImage(
   masterPath: string,
   backends: Backends,
   opts: IngestOptions & { dryRun?: boolean; timeoutMs?: number },
-): Promise<IngestOutcome> {
+): Promise<IngestResult> {
   const format = formatFromPath(masterPath);
   const accept = opts.acceptUnsupported !== false; // Q2 default accept-degraded
 
-  const imageId = imageIdForPath(masterPath);
-  const info = await stat(masterPath);
+  const imageId = await imageIdForPath(masterPath);
+  let info: { size: number; mtimeMs: number };
+  if (opts.statMap && opts.statMap[masterPath]) {
+    info = opts.statMap[masterPath];
+  } else {
+    const s = await stat(masterPath);
+    info = { size: s.size, mtimeMs: s.mtimeMs };
+  }
   if (info.size > MAX_MASTER_BYTES) {
     throw new Error(`master too large: ${info.size} bytes (>${MAX_MASTER_BYTES})`);
   }
@@ -323,7 +345,7 @@ export async function ingestImage(
   if (!opts.force && opts.proxy === undefined && (await fileExists(manifestPath))) {
     const existing = parseManifest(await readFile(manifestPath, "utf8"));
     const uptodate = isUpToDate(existing, info.mtimeMs) || (existing as any).stub === true && existing.master.mtimeMs === info.mtimeMs;
-    if (uptodate) return "skipped";
+    if (uptodate) return { outcome: "skipped" };
   }
 
   const bytes = await readFile(masterPath); // Buffer satisfies Uint8Array; avoids copy (low-readfile)
@@ -352,7 +374,7 @@ export async function ingestImage(
 
   if (opts.dryRun) {
     // F7: bypass apply; caller (CLI) prints plan
-    return "written";
+    return { outcome: "written" };
   }
 
   const execP = applyIngestPlan(plan, backends, opts);
@@ -363,7 +385,20 @@ export async function ingestImage(
   } else {
     await execP;
   }
-  return "written";
+  const stagedBytes = (plan.levels || []).reduce((s: number, lv: any) => s + (lv.stagedBytes || 0), 0);
+
+  // C2: persistent mtime/status cache update on write (for fast future resume/validate without re-stat)
+  try {
+    const cachePath = join(opts.outDir, ".pyramid-ingest.mtimecache.json");
+    let c: Record<string, number> = {};
+    try { c = JSON.parse(await readFile(cachePath, "utf8") || "{}"); } catch {}
+    c[masterPath] = info.mtimeMs;
+    const tmp = `${cachePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    await writeFile(tmp, JSON.stringify(c));
+    await rename(tmp, cachePath).catch(async (e: any) => { if (e && e.code === "EEXIST") await unlink(tmp).catch(()=>{}); else throw e; });
+  } catch {}
+
+  return { outcome: "written", stagedBytes: stagedBytes || undefined };
 }
 
 // WU-5: Tier 3 (embedded JPEG via exifr) or Tier 5 (structured stub manifest, no index entry).
@@ -434,12 +469,33 @@ async function buildFallbackPlan(
 export async function ingestBatch(
   files: readonly string[],
   backends: Backends,
-  opts: IngestOptions & { concurrency?: number; dryRun?: boolean; timeoutMs?: number },
+  opts: IngestOptions & { concurrency?: number; dryRun?: boolean; timeoutMs?: number; resume?: boolean },
 ): Promise<BatchResult> {
   const result: BatchResult = { written: 0, skipped: 0, failed: [] };
   const tel = backends.telemetry;
-  const total = files.length;
-  const conc = Math.max(1, Math.min(opts.concurrency ?? 1, files.length || 1));
+  let activeFiles = [...files];
+  const total = activeFiles.length;
+  const conc = Math.max(1, Math.min(opts.concurrency ?? 1, activeFiles.length || 1));
+
+  // F2 resume: filter using checkpoint (completed + failed skipped; inFlight will be retried)
+  let checkpoint: CheckpointState | null = null;
+  if (opts.resume) {
+    checkpoint = await readCheckpoint(opts.outDir);
+    if (checkpoint) {
+      const skip = new Set([...checkpoint.completed.map(c => c.path), ...checkpoint.failed.map(f => f.path)]);
+      activeFiles = activeFiles.filter(p => !skip.has(p));
+      // note: inFlight from prior will be retried by re-entering the loops
+    }
+  }
+  const batchId = checkpoint?.batchId || randomUUID();
+  const startedAt = checkpoint?.startedAt || Date.now();
+  // local working state (merged with loaded on persist)
+  const cpState: CheckpointState = checkpoint || { batchId, startedAt, inFlight: [], completed: [], failed: [] };
+
+  async function persistCheckpoint() {
+    // simple persist (plan suggests debounce ~1s; for correctness always write here)
+    await writeCheckpoint(opts.outDir, cpState).catch(() => {});
+  }
 
   // Test fakes (synthetic small bytes + patched jxl) must stay in-process; real workers create own backends + force simd.
   const useThreadPool = !(backends as any).__testInProcess;
@@ -451,19 +507,59 @@ export async function ingestBatch(
       for (;;) {
         if (backends.signal?.aborted) return;
         const idx = next++;
-        if (idx >= files.length) return;
-        const path = files[idx]!;
+        if (idx >= activeFiles.length) return;
+        const path = activeFiles[idx]!;
+        const imageId = await imageIdForPath(path);
+        // full L3: acquire per-image write lock only for real mutate (skip in dry-run to avoid side-effect dirs; cross-proc for live runs)
+        let imgLock: AdvisoryLock | null = null;
+        if (!opts.dryRun) {
+          try { imgLock = await acquireImageWriteLock(opts.outDir, imageId); } catch {}
+        }
+        // F2: track inFlight + persist before work
+        if (!cpState.inFlight.includes(path)) cpState.inFlight.push(path);
+        await persistCheckpoint();
         tel?.progress(idx + 1, total, path);
+        if (opts.chaosTest && Math.random() < 0.25) {
+          throw new Error("chaos-test injected failure (for K2 resume/GC recovery test)");
+        }
+        tel?.event?.("image-start", { path, imageId, idx: idx + 1, total });
+        const t0 = Date.now();
         try {
-          const outcome = await ingestImage(path, backends, opts);
-          if (outcome === "written") result.written++;
-          else result.skipped++;
+          const res = await ingestImage(path, backends, opts);
+          const outcome = res.outcome;
+          const dur = Date.now() - t0;
+          // move out of inFlight
+          cpState.inFlight = cpState.inFlight.filter(p => p !== path);
+          if (outcome === "written") {
+            result.written++;
+            cpState.completed.push({ path, outcome: "written", stagedBytes: res.stagedBytes, durationMs: dur });
+          } else {
+            result.skipped++;
+            cpState.completed.push({ path, outcome: "skipped" });
+          }
+          tel?.event?.("image-end", { path, imageId, outcome, durationMs: dur });
+          await persistCheckpoint();
         } catch (err) {
+          const dur = Date.now() - t0;
+          cpState.inFlight = cpState.inFlight.filter(p => p !== path);
+          const msg = err instanceof Error ? err.message : String(err);
+          cpState.failed.push({ path, error: msg });
+          tel?.event?.("image-failed", { path, imageId, error: msg, durationMs: dur });
+          await persistCheckpoint();
           result.failed.push({ path, error: err instanceof Error ? err : String(err) });
+        } finally {
+          await imgLock?.release().catch(() => {});
         }
       }
     };
     await Promise.all(Array.from({ length: conc }, () => run()));
+    if (!opts.dryRun) await clearCheckpoint(opts.outDir).catch(() => {});
+    result.perImage = [
+      ...cpState.completed,
+      ...cpState.failed.map(f => ({ path: f.path, outcome: "failed" as const, error: f.error })),
+    ];
+    const s = cpState.completed.reduce((sum: number, c: any) => sum + (c.stagedBytes || 0), 0);
+    if (s > 0) (result as any).totalStagedBytes = s;
     return result;
   }
 
@@ -471,7 +567,7 @@ export async function ingestBatch(
   // Workers are created with forced 'simd' (see ingest-worker.ts). Exactly 1 core per active worker.
   const { Worker } = await import("node:worker_threads");
   const workers: InstanceType<typeof Worker>[] = [];
-  const pending = new Map<number, { resolve: (o: IngestOutcome) => void; reject: (e: any) => void }>();
+  const pending = new Map<number, { resolve: (o: any) => void; reject: (e: any) => void }>();
   let jobId = 0;
   let nextFile = 0;
 
@@ -481,7 +577,11 @@ export async function ingestBatch(
       const p = pending.get(m.id);
       if (p) {
         pending.delete(m.id);
-        m.ok ? p.resolve(m.outcome) : p.reject(m.error);
+        if (m.ok) {
+          p.resolve(m.stagedBytes !== undefined ? { outcome: m.outcome, stagedBytes: m.stagedBytes, durationMs: m.durationMs } : m.outcome);
+        } else {
+          p.reject(m.error);
+        }
       }
     });
     w.on("error", (e) => {
@@ -499,18 +599,51 @@ export async function ingestBatch(
       for (;;) {
         if (backends.signal?.aborted) break;
         const idx = nextFile++;
-        if (idx >= files.length) break;
-        const path = files[idx]!;
+        if (idx >= activeFiles.length) break;
+        const path = activeFiles[idx]!;
+        const imageId = await imageIdForPath(path);
+        // full L3: per-image write lock held for worker job duration only for real runs (dry-run avoids mkdir side effects)
+        let imgLock: AdvisoryLock | null = null;
+        if (!opts.dryRun) {
+          try { imgLock = await acquireImageWriteLock(opts.outDir, imageId); } catch {}
+        }
+        // F2: inFlight + persist (main coordinator side for worker dispatch)
+        if (!cpState.inFlight.includes(path)) cpState.inFlight.push(path);
+        await persistCheckpoint();
         tel?.progress(idx + 1, total, path);
+        if (opts.chaosTest && Math.random() < 0.25) {
+          throw new Error("chaos-test injected failure (for K2 resume/GC recovery test)");
+        }
+        tel?.event?.("image-start", { path, imageId, idx: idx + 1, total });
         const id = ++jobId;
         const p = new Promise<IngestOutcome>((resolve, reject) => pending.set(id, { resolve, reject }));
         w.postMessage({ id, path, opts });
+        const tJob = Date.now();
         try {
-          const outcome = await p;
-          if (outcome === "written") result.written++;
-          else result.skipped++;
+          const outcomeOrRes: any = await p;  // may be string (old) or IngestResult (new) with duration from inside worker (C/T)
+          const outcome = typeof outcomeOrRes === "string" ? outcomeOrRes : outcomeOrRes.outcome;
+          const staged = typeof outcomeOrRes === "string" ? undefined : outcomeOrRes.stagedBytes;
+          const dur = typeof outcomeOrRes === "string" ? (Date.now() - tJob) : (outcomeOrRes.durationMs ?? (Date.now() - tJob));
+          cpState.inFlight = cpState.inFlight.filter(pth => pth !== path);
+          if (outcome === "written") {
+            result.written++;
+            cpState.completed.push({ path, outcome: "written", ...(staged ? {stagedBytes: staged} : {}), durationMs: dur });
+          } else {
+            result.skipped++;
+            cpState.completed.push({ path, outcome: "skipped" });
+          }
+          tel?.event?.(outcome === "written" || outcome === "skipped" ? "image-end" : "image-failed", { path, imageId, outcome, durationMs: dur });
+          await persistCheckpoint();
         } catch (err) {
+          const dur = Date.now() - tJob;
+          cpState.inFlight = cpState.inFlight.filter(pth => pth !== path);
+          const msg = err instanceof Error ? err.message : String(err);
+          cpState.failed.push({ path, error: msg });
+          tel?.event?.("image-failed", { path, imageId, error: msg, durationMs: dur });
+          await persistCheckpoint();
           result.failed.push({ path, error: err instanceof Error ? err : String(err) });
+        } finally {
+          await imgLock?.release().catch(() => {});
         }
       }
     };
@@ -521,6 +654,13 @@ export async function ingestBatch(
 
   // cleanup
   await Promise.all(workers.map((w) => w.terminate().catch(() => {})));
+  if (!opts.dryRun) await clearCheckpoint(opts.outDir).catch(() => {});
+  result.perImage = [
+    ...cpState.completed,
+    ...cpState.failed.map(f => ({ path: f.path, outcome: "failed" as const, error: f.error })),
+  ];
+  const s = cpState.completed.reduce((sum: number, c: any) => sum + (c.stagedBytes || 0), 0);
+  if (s > 0) (result as any).totalStagedBytes = s;
   return result;
 }
 
@@ -557,4 +697,70 @@ export async function rebuildIndex(outDir: string): Promise<GalleryIndex> {
   await withEbusyRetry(() => writeFile(tmp, JSON.stringify(index, null, 2)), "write-index-tmp");
   await withEbusyRetry(() => rename(tmp, indexPath), "rename-index");
   return index;
+}
+
+// F1/B1 (WU-6): remove unreferenced level files + empty image dirs.
+// Called by --gc. Conservative (scan manifests for refs). Returns what was removed.
+// Dry-run reports without delete. Uses atomic unlinks where possible (best-effort).
+export interface GcResult {
+  removedLevelFiles: string[];
+  removedImageDirs: string[];
+}
+
+export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } = {}): Promise<GcResult> {
+  const levelsDir = join(outDir, "levels");
+  const imagesDir = join(outDir, "images");
+  const removedLevelFiles: string[] = [];
+  const removedImageDirs: string[] = [];
+
+  // 1. collect all referenced contenthashes from manifests
+  const referenced = new Set<string>();
+  let ids: string[] = [];
+  try { ids = await readdir(imagesDir); } catch { ids = []; }
+  for (const id of ids) {
+    const mp = join(imagesDir, id, "manifest.json");
+    if (!(await fileExists(mp))) continue;
+    try {
+      const m = parseManifest(await readFile(mp, "utf8"));
+      for (const lv of (m.levels || [])) {
+        if (lv && lv.contenthash) referenced.add(lv.contenthash);
+      }
+    } catch { /* skip bad */ }
+  }
+
+  // 2. scan levels/ for orphans
+  let levelFiles: string[] = [];
+  try { levelFiles = await readdir(levelsDir); } catch { levelFiles = []; }
+  for (const f of levelFiles) {
+    if (!f.endsWith(".jxl")) continue;
+    const h = f.replace(/\.jxl$/, "");
+    if (!referenced.has(h)) {
+      const full = join(levelsDir, f);
+      if (!opts.dryRun) {
+        await unlink(full).catch(() => {});
+      }
+      removedLevelFiles.push(f);
+    }
+  }
+
+  // 3. empty image dirs (no manifest or empty)
+  for (const id of ids) {
+    const idDir = join(imagesDir, id);
+    const mp = join(idDir, "manifest.json");
+    const hasManifest = await fileExists(mp);
+    if (!hasManifest) {
+      // try remove dir (may have partials)
+      try {
+        if (!opts.dryRun) {
+          // best effort recursive clean
+          const entries = await readdir(idDir).catch(() => [] as string[]);
+          for (const e of entries) await unlink(join(idDir, e)).catch(() => {});
+          await (require("node:fs/promises").rmdir || unlink)(idDir).catch(() => {}); // node 14+ rmdir deprecated but simple
+        }
+        removedImageDirs.push(id);
+      } catch {}
+    }
+  }
+
+  return { removedLevelFiles, removedImageDirs };
 }

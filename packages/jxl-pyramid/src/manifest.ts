@@ -32,9 +32,9 @@ export interface PyramidLevel {
   tiled: boolean;
 }
 
-/** The schema definition of `manifest.json` per image. */
+/** The schema definition of `manifest.json` per image. (V3 minimal compat) */
 export interface PyramidManifest {
-  schema: 1;
+  schema: 1 | 2;
   imageId: string;
   master: MasterMetadata;
   orientation: Orientation;
@@ -43,6 +43,11 @@ export interface PyramidManifest {
   aspect: number;
   levels: PyramidLevel[];
   proxy?: boolean;
+  // V2+ additive (from pyramid-ingest Phase2 V3/M)
+  producedBy?: any;
+  stub?: boolean;
+  metadata?: Record<string, unknown>;
+  convergedByteEnd?: number; // on levels too in some
 }
 
 /** Information about the smallest level (L0 seed) inlined in the gallery index. */

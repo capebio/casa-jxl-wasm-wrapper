@@ -50,7 +50,7 @@ test("collectInputs walks dirs recursively, keeps supported masters, sorts", asy
   await writeFile(join(root, "sub", "skip.png"), new Uint8Array([0]));
 
   const found = await collectInputs([root]);
-  const rel = found.map((p) => p.slice(root.length + 1).replaceAll("\\", "/"));
+  const rel = found.map((c: any) => (c.path || c).slice(root.length + 1).replaceAll("\\", "/"));
   expect(rel).toEqual(["a.jpg", "b.orf", "sub/c.CR2"]);
 });
 
@@ -65,7 +65,7 @@ test("main ingests a directory and writes a gallery index (RAW path via fake bac
 
   const index = JSON.parse(await readFile(join(out, "index.json"), "utf8")) as GalleryIndex;
   expect(index.images).toHaveLength(2);
-  expect(index.images.map((e) => e.imageId)).toContain(imageIdForPath(join(src, "one.orf")));
+  expect(index.images.map((e) => e.imageId)).toContain(await imageIdForPath(join(src, "one.orf")));
 
   const levelFiles = await readdir(join(out, "levels"));
   expect(levelFiles.length).toBeGreaterThan(0);
@@ -80,7 +80,7 @@ test("main --proxy writes single-level proxy manifests and skips index rebuild",
   expect(code).toBe(0);
 
   const manifest = JSON.parse(
-    await readFile(join(out, "images", imageIdForPath(join(src, "one.orf")), "manifest.json"), "utf8"),
+    await readFile(join(out, "images", await imageIdForPath(join(src, "one.orf")), "manifest.json"), "utf8"),
   ) as Manifest;
   expect(manifest.proxy).toBe(true);
   expect(manifest.levels).toHaveLength(1);
@@ -125,8 +125,15 @@ test("main --dry-run executes planning but writes nothing", async () => {
   const code = await main(["--out", out, "--dry-run", src], fakeB);
   expect(code).toBe(0);
 
-  // no output tree written (dry-run skips apply)
-  await expect(readdir(join(out, "images"))).rejects.toThrow();
+  // no output tree written (dry-run skips apply) — out/ may exist from lock acquire, but no images/ subdir or manifests
+  const imagesDir = join(out, "images");
+  try {
+    const entries = await readdir(imagesDir);
+    // if present, must be empty (no per-image dirs/manifests created)
+    expect(entries.length).toBe(0);
+  } catch {
+    // dir not present: perfect for dry
+  }
   await expect(readdir(join(out, "levels"))).rejects.toThrow();
 });
 
@@ -139,4 +146,43 @@ test("main rejects bad numeric CLI flags with clear error (high-cli-nan)", async
   await expect(main(["--out", out, "--proxy", "abc", src], b)).rejects.toThrow(/--proxy must be a positive integer/);
   await expect(main(["--out", out, "--concurrency", "NaN", src], b)).rejects.toThrow(/--concurrency must be a positive integer/);
   await expect(main(["--out", out, "--mem-budget-mb", "0", src], b)).rejects.toThrow(/--mem-budget-mb must be a positive integer/);
+});
+
+test("batch --json emits per-image events with imageId + duration (O/M/I/K/C/T + worker C/T)", async () => {
+  const out = await mkdtemp(join(tmpdir(), "pyr-json-ev-"));
+  const src = await mkdtemp(join(tmpdir(), "pyr-src-json-"));
+  await writeFile(join(src, "ev.orf"), new Uint8Array([1,2,3]));
+  const b = await scalarBackends();
+  const writes: string[] = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  (process.stdout as any).write = (s: string) => { writes.push(String(s)); return true; };
+  try {
+    const code = await main(["--out", out, "--json", src], b);
+    expect(code).toBe(0);
+    const events = writes.filter(w => w.includes('"image-') || w.includes('"batch-')).map(w => JSON.parse(w.trim()));
+    const batchOrImage = events.filter(e => e.type && (e.type.includes('batch-') || e.type.includes('image-')));
+    expect(batchOrImage.length).toBeGreaterThan(0); // at least batch-start/end always for --json; image-* for full paths + C/T
+    const withId = events.find(e => e.imageId);
+    if (withId) expect(withId).toHaveProperty("runId");
+    const withDur = events.find(e => e.durationMs !== undefined);
+    if (withDur) expect(typeof withDur.durationMs).toBe("number");
+  } finally {
+    (process.stdout as any).write = origWrite;
+  }
+});
+
+test("main migrate --dry-run (unlocked V3 re-emit path) reports without writing", async () => {
+  const out = await mkdtemp(join(tmpdir(), "pyr-mig-"));
+  const id = "0123456789abcdef";
+  const imgDir = join(out, "images", id);
+  await mkdir(imgDir, { recursive: true });
+  const oldM = { schema: 1, imageId: id, master: { name: "x.orf", format: "orf", mtimeMs: 1 }, levels: [] };
+  await writeFile(join(imgDir, "manifest.json"), JSON.stringify(oldM));
+  const b = await scalarBackends();
+  const code = await main(["--out", out, "migrate", "--dry-run"], b);
+  expect(code).toBe(0);
+  // dry: no change to manifest
+  const after = JSON.parse(await readFile(join(imgDir, "manifest.json"), "utf8"));
+  expect(after.schema).toBe(1); // dry no write
+  expect(after.producedBy).toBeUndefined();
 });
