@@ -108,6 +108,15 @@ This document records optimization proposals that were evaluated and rejected.
 
   Chunk strategies: tiny(512 B), small(4 KiB), medium(16 KiB), large(64 KiB), original (single full-file chunk).
 
+## `packages/jxl-capabilities/src/index.ts` (Agent 2 — platform features)
+*   **C-8 `recommendedQualitySearch` heuristic:** Proposed export of tier → "full"|"fast"|"none" mapping to control "quality search" (perceptual/encode search effort) for downstream encode-handler / Butteraugli paths. Explicitly marked as untuned heuristic in its own JSDoc and defers consumers.
+  - No benchmark data, deltas, or tuning evidence supplied for the policy (scalar→none, simd→fast, mt→full).
+  - Violates core rule (CLAUDE.md + multiple prior rejections): "Adaptive/heuristic changes require benchmark data. Do not add tunables without evidence."
+  - Precedents recorded here: worker warmup/adaptive concurrency (11/12), pyramid ladder overlap, various recommended*/adaptive effort tunables.
+  - Duplicates pattern already present via `recommendedEffort()` (tier-derived encode guidance); new axis adds API surface and attractive nuisance without demonstrated win.
+  - "Export alone is harmless" rejected: capabilities is a depended-on registry; emitting policy hints here signals support and risks adoption before the required measurement.
+  - C-6/C-7 accepted (additive zero-cost fields + honest version); C-8 rejected on evidence bar. Do not re-propose without large-corpus before/after numbers on real encode quality search cost/quality.
+
   **Results (5 samples/state, interleaved, count-only mock session):**
 
   CR2 (28 MB):
@@ -208,6 +217,9 @@ This document records optimization proposals that were evaluated and rejected.
 *   **`cleanupSessionForAll()` for shutdown (Facade-R1-4):** Extracts 6 already-clear `.clear()` calls into a named function. No semantic gain; the existing inline block is self-evident.
 *   **`queuedDecodeMessages`/`queuedEncodeMessages` checks in `hasAnySession` (Facade-R1-5):** Queued message entries only exist while a pending start entry for the same session is present — they are created and deleted together. Adding checks for this impossible orphan state adds noise without enforcing the invariant at the write site. If the invariant can be violated, the fix belongs at the point of mutation.
 *   **Parameterized `errorType` in `queueDecodeMessage`/`queueEncodeMessage` (Facade-R1-6):** These are separate, type-specific functions; the hardcoded strings are correct by construction. Adding an `errorType` parameter adds indirection with no benefit unless the functions are merged into a generic — which was itself rejected.
+
+## `packages/jxl-worker-browser/src/wasm-loader.ts` (W-2/W-3)
+*   **Dep edge on @casabio/jxl-capabilities:** Adding the package to dependencies + `export { detectTier, type Tier } from "@casabio/jxl-capabilities"` (W-2/W-3) would place a top-level bare specifier in the worker module graph (wasm-loader is statically imported by worker.ts, the DedicatedWorker entrypoint). Worker module loads do not reliably inherit page import maps (explicit comment in defaultImportWasm; the package already has a source+dist guard test "has no top-level bare jxl-wasm import"). The May 28 refactor commit ("remove jxl-capabilities dep, fix wasm module resolution") removed the exact same dep for this reason and switched to URL-relative dynamic for the sibling. Resolution via tsc "bundler" works for typecheck but not for runtime Worker(type:module) bare spec. Implemented as local copy of detectTier (with COI) + "// keep in sync with jxl-capabilities" marker instead. Dep edge rejected to preserve worker load semantics.
 
 ## `packages/jxl-session/src/decode-session.ts` (ChatGPT batch — decode-session lifecycle)
 
