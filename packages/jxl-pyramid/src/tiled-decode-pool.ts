@@ -16,6 +16,9 @@ import {
   type DecodeOptions,
   longEdge,
   type TileId,
+  viewportCacheKey,
+  type PixelFormat,
+  bppOfFormat,
 } from "./decode-core.js";
 import { getLevelId } from "./cache.js";
 import { prepareDecodePlan } from "./plan.js";
@@ -718,7 +721,7 @@ async function decodeTilesParallel(
   outBuffer: Uint8Array,
   viewport: ImageRegion,
   bpp: 4 | 8,
-  opts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number) => void; progressiveStage?: 'dc' | 'final' } = {},
+  opts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number, progress?: any) => void; progressiveStage?: 'dc' | 'final' } = {},
   deadlineMs?: number,
   requestTimeoutMs?: number,
   tileSize?: number,
@@ -829,7 +832,7 @@ export async function decodeTiledViewportPooled(
   let source: Extract<LevelSource, { kind: "tiled" }>;
   if (arg1 instanceof Uint8Array) {
     const header = parseJxtcHeader(arg1);
-    const fmt: 'rgba8' | 'rgba16' = header.bitsPerSample === 16 ? 'rgba16' : 'rgba8';
+    const fmt: PixelFormat = header.bitsPerSample === 16 ? 'rgba16' : 'rgba8';
     source = {
       kind: "tiled",
       bytes: arg1,
@@ -838,6 +841,7 @@ export async function decodeTiledViewportPooled(
       tileSize: header.tileSize,
       bitsPerSample: header.bitsPerSample,
       format: fmt,
+      bpp: bppOfFormat(fmt),
     };
   } else {
     source = arg1;
@@ -857,18 +861,17 @@ export async function decodeTiledViewportPooled(
 
   // Cache check at decode entry (viewport rect granularity for this levelId).
   const cache = options?.cache;
-  if (cache) {
-    const levelId = getLevelId(source);
-    const key = `${levelId}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`;
-    const cached = cache.get(key);
+  const cacheKeyFinal = cache ? viewportCacheKey(getLevelId(source), vp, plan.format as PixelFormat, 'final') : undefined;
+  if (cache && cacheKeyFinal) {
+    const cached = cache.get(cacheKeyFinal);
     if (cached) {
       if (options?.outBuffer) {
         const ob = options.outBuffer;
         if (ob.byteLength < need) throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${ob.byteLength} < ${need})`);
         ob.set(cached);
-        return { pixels: ob, width: vp.w, height: vp.h };
+        return { pixels: ob, width: vp.w, height: vp.h, format: plan.format as PixelFormat };
       }
-      return { pixels: cached, width: vp.w, height: vp.h };
+      return { pixels: cached, width: vp.w, height: vp.h, format: plan.format as PixelFormat };
     }
   }
 
@@ -898,8 +901,8 @@ export async function decodeTiledViewportPooled(
       direct = await p;
     }
     outBuffer.set(direct.pixels);
-    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h };
-    cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
+    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h, format: plan.format as PixelFormat };
+    if (cache && cacheKeyFinal) cache.set(cacheKeyFinal, new Uint8Array(outBuffer));
     onTile?.(vp, 1);
     return result;
   }
@@ -914,8 +917,8 @@ export async function decodeTiledViewportPooled(
     // fallback direct into outBuffer
     const direct = await decodeRegion(source.bytes, vp);
     outBuffer.set(direct.pixels);
-    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h };
-    cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
+    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h, format: plan.format as PixelFormat };
+    if (cache && cacheKeyFinal) cache.set(cacheKeyFinal, new Uint8Array(outBuffer));
     onTile?.(vp, 1);
     return result;
   }
@@ -930,8 +933,8 @@ export async function decodeTiledViewportPooled(
   if (liveHandles.length === 0) {
     const direct = await decodeRegion(source.bytes, vp);
     outBuffer.set(direct.pixels);
-    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h };
-    cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
+    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h, format: plan.format as PixelFormat };
+    if (cache && cacheKeyFinal) cache.set(cacheKeyFinal, new Uint8Array(outBuffer));
     onTile?.(vp, 1);
     return result;
   }
@@ -956,7 +959,7 @@ export async function decodeTiledViewportPooled(
 
   try {
     const prog = options?.progressive;
-    const baseTileOpts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number) => void; progressiveStage?: 'dc' | 'final' } = {};
+    const baseTileOpts: { signal?: AbortSignal; onTile?: (region: ImageRegion, completedCount: number, progress?: any) => void; progressiveStage?: 'dc' | 'final' } = {};
     if (signal != null) baseTileOpts.signal = signal;
     if (onTile) baseTileOpts.onTile = onTile;
 
@@ -983,8 +986,8 @@ export async function decodeTiledViewportPooled(
         0,
       );
     }
-    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h };
-    cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
+    const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h, format: plan.format as PixelFormat };
+    if (cache && cacheKeyFinal) cache.set(cacheKeyFinal, new Uint8Array(outBuffer));
     return result;
   } finally {
     p.release(liveHandles);

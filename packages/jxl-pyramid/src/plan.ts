@@ -2,7 +2,7 @@ import type { ImageRegion } from "./tiling.js";
 import type { LevelSource } from "./level-source.js";
 import { clampRegion } from "./decode-core.js";
 import { parseJxtcHeader, tilesOverlappingRegion, type JxtcHeader as TilingJxtcHeader } from "./tiling.js";
-import { pickRegionDecoder, REGION_DECODER_RGBA8, REGION_DECODER_RGBA16, type RegionDecoder } from "./decode-core.js";
+import { pickRegionDecoder, REGION_DECODER_RGBA8, REGION_DECODER_RGBA16, type RegionDecoder, formatFromBits, bppOfFormat, type PixelFormat } from "./decode-core.js";
 
 export interface JxtcHeader {
   imageW: number;
@@ -18,7 +18,7 @@ export interface DecodePlan {
   header: JxtcHeader;
   bits: 8 | 16;
   bpp: 4 | 8;
-  format: 'rgba8' | 'rgba16';
+  format: PixelFormat;
   decodeRegion: RegionDecoder;
 }
 
@@ -91,11 +91,10 @@ export function prepareDecodePlan(source: LevelSource, region: ImageRegion): Dec
   const headerRaw = memoParseHeader(source.bytes);
   const header: JxtcHeader = { ...headerRaw };
   const bits = header.bitsPerSample;
-  const format: 'rgba8' | 'rgba16' = bits === 16 ? 'rgba16' : 'rgba8';
+  const format = formatFromBits(bits);
   // F6: format token derived once from header (manifest bits) and carried on DecodePlan/LevelSource.
-  // Inline choice at site where format/bits known (Grok4); pickRegionDecoder kept for overrides/callers.
   const decodeRegion: RegionDecoder = bits === 16 ? REGION_DECODER_RGBA16 : REGION_DECODER_RGBA8;
-  const bpp: 4 | 8 = bits === 16 ? 8 : 4;
+  const bpp: 4 | 8 = bppOfFormat(format);
 
   const viewport = clampRegion(region, source.width, source.height);
   if (viewport.w <= 0 || viewport.h <= 0) {

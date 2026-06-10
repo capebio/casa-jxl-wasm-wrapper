@@ -2,11 +2,19 @@ import { createDecoder, decodeTileContainerRegionRgba8, decodeTileContainerRegio
 import type { ImageRegion } from "./tiling.js";
 import type { PyramidCache } from "./cache.js";
 
+export type PixelFormat = 'rgba8' | 'rgba16';
+
 export interface DecodedLevel {
   pixels: Uint8Array;
   width: number;
   height: number;
+  format?: PixelFormat;
+  /** When errorPolicy='skip-tile' and tile decodes failed, lists the grid tiles that were zero-filled (L20-1). */
+  failedTiles?: TileId[];
 }
+
+export const formatFromBits = (bits: 8 | 16): PixelFormat => (bits === 16 ? 'rgba16' : 'rgba8');
+export const bppOfFormat = (f: PixelFormat): 4 | 8 => (f === 'rgba16' ? 8 : 4);
 
 export type RegionDecoder = (
   bytes: Uint8Array,
@@ -87,6 +95,7 @@ export function stitch(
   decoded: DecodedLevel,
   bytesPerPixel: 4 | 8,
 ): void {
+  // Bounds + exact byte length checks (as implemented for the crop case in stitchCropped).
   const expected = decoded.width * decoded.height * bytesPerPixel;
   if (decoded.pixels.byteLength !== expected) {
     throw new PyramidError('DECODER_OUTPUT_MISMATCH',
@@ -108,7 +117,7 @@ export function stitch(
   const dstStride = vw * bytesPerPixel;
   const srcStride = decoded.width * bytesPerPixel;
   if (decoded.width === vw && dx === 0 && decoded.height + dy <= viewport.h) {
-    // Stride-aligned fast path (full-width tile block at this y).
+    // Fast path requires decoded.height + dy <= viewport.h (L6-2); stride-aligned full-width tile block at this y.
     outBuffer.set(decoded.pixels, dy * dstStride);
   } else {
     let srcOff = 0;
@@ -168,6 +177,21 @@ export function stitchCropped(
   }
 }
 
+/** L10-R4: reverse-trust validation that decoder delivered the exact region/size/bpp requested.
+ * Throws DECODER_OUTPUT_MISMATCH on dim or byteLength mismatch.
+ */
+export function validateDecodedOutput(decoded: DecodedLevel, expectedRegion: ImageRegion, bpp: 4 | 8): void {
+  if (decoded.width !== expectedRegion.w || decoded.height !== expectedRegion.h) {
+    throw new PyramidError('DECODER_OUTPUT_MISMATCH',
+      `decoded size ${decoded.width}x${decoded.height} != expected ${expectedRegion.w}x${expectedRegion.h}`);
+  }
+  const expectedBytes = expectedRegion.w * expectedRegion.h * bpp;
+  if (decoded.pixels.byteLength !== expectedBytes) {
+    throw new PyramidError('DECODER_OUTPUT_MISMATCH',
+      `decoded bytes ${decoded.pixels.byteLength} != ${expectedBytes} for region ${expectedRegion.w}x${expectedRegion.h}x${bpp}`);
+  }
+}
+
 // Grok 3: minimal error taxonomy (full in Grok 5 errors.ts). Extended here per spec for lifecycle/cancellation.
 export type PyramidErrorCode =
   | 'ABORTED'
@@ -181,13 +205,60 @@ export type PyramidErrorCode =
   | 'OOM'
   | 'INTERNAL'
   | 'INVALID_BUFFER_SIZE'
-  | string;
+  | 'BUFFER_IN_USE'
+  | 'BAD_MANIFEST'
+  | 'INVALID_BUFFER_ALIGNMENT'
+  | 'DECODER_OUTPUT_MISMATCH'
+  | 'DIM_MISMATCH'
+  | (string & {});
 
 export class PyramidError extends Error {
   constructor(public code: PyramidErrorCode, message: string, public cause?: unknown) {
-    super(message);
+    super(message, { cause });
     this.name = 'PyramidError';
   }
+}
+
+/**
+ * Race a promise against an AbortSignal.
+ * - Cleans up listeners on either settlement.
+ * - If abort wins, swallows rejection from p to prevent orphaned unhandled rejection.
+ * - Pre-aborted signal: swallows p and rejects immediately.
+ */
+export function raceWithAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) {
+    p.catch(() => {});
+    return Promise.reject(new PyramidError('ABORTED', 'decode aborted before start'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      p.catch(() => {}); // prevent orphaned rejection from the raced promise
+      reject(new PyramidError('ABORTED', 'decode aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (val) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(val);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      },
+    );
+  });
 }
 
 /** F7: stable, immutable tile coordinate for cache keys, telemetry, multi-pass coordination. */
@@ -202,20 +273,57 @@ export function tileKey(tile: TileId): string {
   return `L${tile.level}-C${tile.col}-R${tile.row}`;
 }
 
+/** F7: canonical TileId for a (clipped) tile rect — col/row from grid origin. */
+export function tileIdOf(rect: ImageRegion, tileSize: number, level: number): TileId {
+  return { level, col: Math.floor(rect.x / tileSize), row: Math.floor(rect.y / tileSize) };
+}
+
+/** Packed numeric tile key for hot maps: level<8192, col/row<2^20; safe int. */
+export function tileKeyPacked(tile: TileId): number {
+  return tile.level * 0x10000000000 + tile.row * 0x100000 + tile.col;
+}
+
+/** L1-3: stable viewport cache key (quality distinguishes dc/final for progressive). */
+export function viewportCacheKey(
+  levelId: string,
+  vp: ImageRegion,
+  format: PixelFormat,
+  quality: 'dc' | 'final',
+): string {
+  return `${levelId}:${vp.x},${vp.y},${vp.w},${vp.h}:${format}:q${quality}`;
+}
+
+export interface TileProgress {
+  id: TileId;
+  key: string;
+  stage: 'dc' | 'final';
+  completed: number;
+  total: number;
+}
+
 export interface DecodeOptions {
   parallel?: boolean;
   decodeRegion?: RegionDecoder;
   signal?: AbortSignal;
-  workerFactory?: () => any; // WorkerLike
+  workerFactory?: () => WorkerLike;
   pool?: any; // PyramidWorkerPool for explicit
   /** Opt-in decoded viewport cache (keyed by level+region+format; no auto persistence). */
   cache?: PyramidCache;
   /** Caller-owned recyclable buffer for stitched result (must be >= w*h*bpp). Returned .pixels will be this buffer on use. */
   outBuffer?: Uint8Array;
-  /** Called after each tile write (parallel) or once for direct (completedCount = tiles done). */
-  onTile?: (region: ImageRegion, completedCount: number) => void;
+  /** If true, cache hits may return the cached Uint8Array directly (zero-copy). Default false (copies for safety). */
+  zeroCopyCacheHits?: boolean;
+  /** Called after each tile write (parallel) or once for direct (completedCount = tiles done).
+   *  Third arg (TileProgress) supplied on new calls for F7 telemetry/identity; two-arg callers remain compatible. */
+  onTile?: (region: ImageRegion, completedCount: number, progress?: TileProgress) => void;
   // F2 note: outBuffer + onTile together enable Grok 4 stream-stitch (on-arrival writes into caller buffer,
   // no results[] retention, paint as tiles land, reuse buffer across pans for 60fps). See decodeTiledViewport + decodeTilesParallel.
+  /** L20-1: when 'skip-tile', per-tile errors in progressive direct path zero the tile rect and continue; failedTiles populated on result. */
+  errorPolicy?: 'fail-fast' | 'skip-tile';
+  /** L20-2: wall-clock budget for the decodeLevel call (checked in progressive per-tile loops for direct path). */
+  budgetMs?: number;
+  /** L4-4: resume-after-abort support; skip these tile keys (tileKey format) during progressive per-tile decode. */
+  skipTiles?: ReadonlySet<string>;
   /**
    * Progressive DC-then-final first-paint (F1, cites L3m-2 L21m-2 L8pm-3).
    * When set, per-tile (or viewport) uses createDecoder({ progressionTarget: 'dc' }) for fast coarse paint,
@@ -223,7 +331,30 @@ export interface DecodeOptions {
    * Wired to stream-stitch (Grok 4): caller paints DC tiles first, then refines.
    * Undefined (default) = existing one-shot final behavior (no behavior change for happy path).
    */
-  progressive?: 'dc-then-final';
+  progressive?: Exclude<ProgressiveMode, undefined>;
 }
 
 export type ProgressiveMode = 'dc-then-final' | undefined;
+
+/** Worker-like handle accepted by the pyramid pool (duck-typed; matches browser Worker + test doubles). */
+export interface WorkerLike {
+  addEventListener(
+    type: "message" | "error" | "messageerror",
+    listener: (ev: { data?: any }) => void,
+  ): void;
+  removeEventListener(
+    type: "message" | "error" | "messageerror",
+    listener: (ev: { data?: any }) => void,
+  ): void;
+  postMessage(data: any, transfer?: any[]): void;
+  terminate(): void;
+}
+
+/** Init/options bag passed to jxl-wasm createDecoder (local name for cast sites; structural). */
+export interface DecoderInit {
+  format: PixelFormat;
+  progressionTarget: 'header' | 'dc' | 'pass' | 'final';
+  emitEveryPass: boolean;
+  preserveIcc: boolean;
+  preserveMetadata: boolean;
+}

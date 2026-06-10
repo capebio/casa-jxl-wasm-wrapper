@@ -89,8 +89,8 @@ test("NaN region guard on decodeLevel/decodeTiledViewport (Grok1)", async () => 
   const container = await encodeTileContainerRgba8(src, W, H, { tileSize: 128, distance: 0, effort: 1 });
   const source = createLevelSource({ w: W, h: H, tiled: true }, container);
   const badRegion = { x: 0, y: 0, w: NaN, h: 10 };
-  await expect(decodeLevel(source, badRegion as any)).rejects.toThrow(RangeError);
-  await expect(decodeTiledViewport(source, badRegion as any)).rejects.toThrow(RangeError);
+  await expect(decodeLevel(source, badRegion as any)).rejects.toMatchObject({ name: 'PyramidError', code: 'BAD_REGION' });
+  await expect(decodeTiledViewport(source, badRegion as any)).rejects.toMatchObject({ name: 'PyramidError', code: 'BAD_REGION' });
 });
 
 // Grok4 tests: cache, stream-stitch onTile, outBuffer reuse, pan bench sketch.
