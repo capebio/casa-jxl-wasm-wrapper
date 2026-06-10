@@ -2,44 +2,51 @@ export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
 
 let _cachedTier: Tier | undefined;
 
-export function canUseThreadedWasm(wasmThreads: boolean, sharedArrayBuffer: boolean, crossOriginIsolated: boolean): boolean {
-  return wasmThreads && sharedArrayBuffer && crossOriginIsolated;
+export function canUseThreadedWasm(sharedArrayBuffer: boolean, crossOriginIsolated: boolean): boolean {
+  return sharedArrayBuffer && crossOriginIsolated;
 }
+
+// Hoisted probe byte arrays (C-5): avoid re-allocation on repeated calls (even though now memoized at getCapabilities).
+const PROBE_SIMD_BYTES = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
+  0x03, 0x02, 0x01, 0x00,
+  0x0a, 0x08, 0x01, 0x06, 0x00,
+  0x41, 0x00, 0xfd, 0x0f, 0x0b,
+]);
+
+const PROBE_THREADS_BYTES = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+  0x03, 0x02, 0x01, 0x00,
+  0x05, 0x03, 0x01, 0x03, 0x01,
+  0x0a, 0x0b, 0x01, 0x09, 0x00,
+  0x41, 0x00, 0xfe, 0x10, 0x02, 0x00, 0x1a, 0x0b,
+]);
+
+const PROBE_RELAXED_BYTES = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x01, 0x07, 0x01, 0x60, 0x02, 0x7b, 0x7b, 0x01, 0x7b,
+  0x03, 0x02, 0x01, 0x00,
+  0x0a, 0x0b, 0x01, 0x09, 0x00,
+  0x20, 0x00, 0x20, 0x01, 0xfd, 0x80, 0x02, 0x0b,
+]);
 
 function _probeSimd(): boolean {
   try {
-    return WebAssembly.validate(new Uint8Array([
-      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-      0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
-      0x03, 0x02, 0x01, 0x00,
-      0x0a, 0x08, 0x01, 0x06, 0x00,
-      0x41, 0x00, 0xfd, 0x0f, 0x0b,
-    ]));
+    return WebAssembly.validate(PROBE_SIMD_BYTES);
   } catch { return false; }
 }
 
 function _probeWasmThreads(): boolean {
   try {
-    return WebAssembly.validate(new Uint8Array([
-      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-      0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
-      0x03, 0x02, 0x01, 0x00,
-      0x05, 0x03, 0x01, 0x03, 0x01,
-      0x0a, 0x0b, 0x01, 0x09, 0x00,
-      0x41, 0x00, 0xfe, 0x10, 0x02, 0x00, 0x1a, 0x0b,
-    ]));
+    return WebAssembly.validate(PROBE_THREADS_BYTES);
   } catch { return false; }
 }
 
 function _probeRelaxedSimd(): boolean {
   try {
-    return WebAssembly.validate(new Uint8Array([
-      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-      0x01, 0x07, 0x01, 0x60, 0x02, 0x7b, 0x7b, 0x01, 0x7b,
-      0x03, 0x02, 0x01, 0x00,
-      0x0a, 0x0b, 0x01, 0x09, 0x00,
-      0x20, 0x00, 0x20, 0x01, 0xfd, 0x80, 0x02, 0x0b,
-    ]));
+    return WebAssembly.validate(PROBE_RELAXED_BYTES);
   } catch { return false; }
 }
 
@@ -75,7 +82,19 @@ export function recommendedEffort(): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 {
   return 7;
 }
 
+/** Heuristic; thresholds untuned — benchmark before relying on it (CLAUDE.md rule). */
+export function recommendedQualitySearch(): "full" | "fast" | "none" {
+  const t = detectTier();
+  return t === "scalar" ? "none" : t === "simd" ? "fast" : "full";
+}
+
 export interface Capabilities {
+  /**
+   * WebAssembly support (WebAssembly.compile present).
+   * Note (C-9): under a strict CSP without 'wasm-unsafe-eval', validate/compile may succeed
+   * while instantiate still fails at runtime. We document the limitation rather than add
+   * a costly async instantiate probe (cost > benefit).
+   */
   wasm: boolean;
   wasmSimd: boolean;
   wasmRelaxedSimd: boolean;
@@ -87,34 +106,11 @@ export interface Capabilities {
   nativeJxlDecoder: boolean;
   selectedWasmBuild: "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar" | "none";
   libjxlVersion: string;
-}
-
-async function probeRelaxedSimd(): Promise<boolean> {
-  return _probeRelaxedSimd();
-}
-
-async function probeWasmSimd(): Promise<boolean> {
-  return _probeSimd();
-}
-
-async function probeWasmThreads(): Promise<boolean> {
-  return _probeWasmThreads();
-}
-
-function selectWasmBuild(
-  wasm: boolean,
-  wasmSimd: boolean,
-  wasmThreads: boolean,
-  sharedArrayBuffer: boolean,
-  crossOriginIsolated: boolean,
-  wasmRelaxedSimd: boolean,
-): Capabilities["selectedWasmBuild"] {
-  if (!wasm) return "none";
-  const canDoMT = sharedArrayBuffer && crossOriginIsolated;
-  if (canDoMT && wasmRelaxedSimd) return "relaxed-simd-mt";
-  if (canDoMT && wasmSimd) return "simd-mt";
-  if (wasmSimd) return "simd";
-  return "scalar";
+  // Additive platform features (C-7)
+  webgpu: boolean;
+  webnn: boolean;
+  hardwareConcurrency: number;
+  deviceMemory: number | null;
 }
 
 /**
@@ -146,7 +142,13 @@ async function probeNativeJxl(): Promise<boolean> {
   return false;
 }
 
-export async function getCapabilities(): Promise<Capabilities> {
+let _capsPromise: Promise<Capabilities> | undefined;
+
+export function getCapabilities(): Promise<Capabilities> {
+  return (_capsPromise ??= computeCapabilities());
+}
+
+async function computeCapabilities(): Promise<Capabilities> {
   const isBrowser = typeof window !== 'undefined' || typeof self !== 'undefined';
   const proc = (globalThis as { process?: { versions?: { node?: string } } }).process;
   const isNode = !!proc?.versions?.node;
@@ -156,31 +158,48 @@ export async function getCapabilities(): Promise<Capabilities> {
     wasm = typeof WebAssembly !== 'undefined' && !!WebAssembly.compile;
   } catch {}
 
-  const [wasmSimd, wasmThreads] = wasm
-    ? await Promise.all([probeWasmSimd(), probeWasmThreads()])
-    : [false, false] as const;
-
-  const wasmRelaxedSimd = wasmSimd && await probeRelaxedSimd();
+  let wasmSimd = false;
+  let wasmThreads = false;
+  let wasmRelaxedSimd = false;
+  if (wasm) {
+    // C-5: call the direct _probe* sync functions (wrappers deleted).
+    wasmSimd = _probeSimd();
+    wasmThreads = _probeWasmThreads();
+    wasmRelaxedSimd = wasmSimd && _probeRelaxedSimd();
+  }
 
   const crossOriginIsolated = typeof self !== 'undefined' && !!(self as any).crossOriginIsolated;
   const sharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
   const offscreenCanvas = typeof OffscreenCanvas !== 'undefined';
   const imageBitmap = typeof createImageBitmap !== 'undefined';
 
+  // C-7: cheap additive platform probes; every navigator access guarded
+  const webgpu = typeof navigator !== "undefined" && !!(navigator as any)?.gpu;
+  const webnn = typeof navigator !== "undefined" && !!(navigator as any)?.ml;
+  const hardwareConcurrency = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency ?? 0) : 0;
+  const deviceMemory = typeof navigator !== "undefined" ? ((navigator as any).deviceMemory ?? null) : null;
+
   let nativeJxlDecoder = false;
   if (isBrowser) {
     nativeJxlDecoder = await probeNativeJxl();
   } else if (isNode) {
     try {
+      // C-1: use real name from packages/jxl-native/package.json
       // @ts-ignore
-      await import('jxl-native');
+      await import('@casabio/jxl-native');
       nativeJxlDecoder = true;
     } catch {
       nativeJxlDecoder = false;
     }
   }
 
-  const selectedWasmBuild = selectWasmBuild(wasm, wasmSimd, wasmThreads, sharedArrayBuffer, crossOriginIsolated, wasmRelaxedSimd);
+  // C-3: derive selectedWasmBuild from detectTier (central policy).
+  // detectTier() uses identical COI+SAB predicate for MT tiers:
+  //   const canDoMT = hasSab && crossOriginIsolated;
+  // (deliberately does not condition on wasmThreads probe result, per inline comment
+  // and Chrome false-negative history). Matches old selectWasmBuild behavior for
+  // all combos when wasm=true. "none" only when !wasm.
+  const selectedWasmBuild: Capabilities["selectedWasmBuild"] = wasm ? detectTier() : "none";
 
   return {
     wasm,
@@ -193,6 +212,10 @@ export async function getCapabilities(): Promise<Capabilities> {
     imageBitmap,
     nativeJxlDecoder,
     selectedWasmBuild,
-    libjxlVersion: "0.10.2" // Placeholder, should be provided by build manifest ideally
+    libjxlVersion: "unknown", // TODO(packages/jxl-wasm/scripts/build.mjs): emit consumable libjxl version const (build-manifest has commit/tag but no generated version.ts / export; C-6 requires build-script edit + approval)
+    webgpu,
+    webnn,
+    hardwareConcurrency,
+    deviceMemory
   };
 }
