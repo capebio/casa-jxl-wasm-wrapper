@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Scheduler } from "../src/scheduler.js";
 import { WorkerPool } from "../src/pool.js";
-import { CoreBudget, defaultCoreBudgetCapacity } from "../src/budget.js";
+import { CoreBudget, defaultCoreBudgetCapacity, globalCoreBudget } from "../src/budget.js";
 import { FakeWorker, fakeWorkerFactory, makeDecodeStart } from "./helpers.js";
 import type { WorkerToMainMessage } from "@casabio/jxl-core/protocol";
 
@@ -296,5 +296,106 @@ describe("CoreBudget semaphore (sched-1, sched-6)", () => {
 
     await pool.shutdown();
     assert.equal(budget.available, 1);
+  });
+
+  it("workerCost=N deducts N tokens per MT worker (pool)", async () => {
+    const workers: FakeWorker[] = [];
+    const N = 4;
+    const budget = new CoreBudget(N);
+    const pool = new WorkerPool({
+      factory: fakeWorkerFactory(workers),
+      maxSize: 2,
+      idleTimeoutMs: 60_000,
+      coreBudget: budget,
+      workerCost: N,
+    });
+
+    const w1 = await pool.acquire();
+    assert.ok(w1);
+    assert.equal(workers.length, 1);
+    assert.equal(budget.available, 0, "MT worker consumed full N");
+
+    const p2 = pool.acquire();
+    let got2 = false;
+    p2.then(() => { got2 = true; });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(got2, false, "second MT blocked on budget (no tokens for N)");
+    assert.equal(budget.available, 0);
+
+    pool.recycle(w1!);
+    const w2 = await p2;
+    assert.ok(w2);
+    assert.equal(got2, true);
+    assert.equal(budget.available, 0);
+
+    await pool.shutdown();
+    assert.equal(budget.available, N);
+  });
+
+  it("CoreBudget acquireWithFallback grants N when available, else 1 (dynamic ST fallback)", async () => {
+    const N = 4;
+    const b = new CoreBudget(N);
+    const c1 = await b.acquireWithFallback(N);
+    assert.equal(c1, N);
+    assert.equal(b.available, 0);
+
+    // next MT request cannot take N -> fallback to 1 (immediate since? 0, will queue)
+    const p2 = b.acquireWithFallback(N);
+    let granted2: number | null = null;
+    p2.then((c) => { granted2 = c; });
+
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(granted2, null, "queued for fallback 1");
+    assert.equal(b.available, 0);
+
+    b.release(N); // release the MT
+    const c2 = await p2;
+    assert.equal(c2, 1, "fell back to ST cost=1");
+    assert.equal(b.available, N - 1);
+
+    b.release(1);
+    assert.equal(b.available, N);
+  });
+
+  it("globalCoreBudget is exported and sized reasonably", () => {
+    // import is side-effect free; value constructed at module load with default fn
+    // We cannot reassign, just check shape/cap
+    assert.ok(globalCoreBudget.capacity >= 1);
+    assert.equal(globalCoreBudget.available, globalCoreBudget.capacity);
+  });
+
+  it("FIFO preserved under mixed direct acquire + fallback waiters", async () => {
+    const N = 3;
+    const b = new CoreBudget(N);
+    const order: string[] = [];
+
+    // exhaust
+    await b.acquire(N);
+    assert.equal(b.available, 0);
+
+    // queue direct high-cost MT
+    const pMt = b.acquire(N).then(() => { order.push("mt"); });
+
+    // queue fallback MT request -> since 0 < N, internally does acquire(1) which queues needed=1
+    const pFb = b.acquireWithFallback(N).then((c) => { order.push(`fb${c}`); return c; });
+
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(order, [], "both waiters queued");
+
+    // release the owned N -> tokens=N, drain serves head (pMt needing N)
+    b.release(N);
+    await pMt;
+    assert.equal(order[0], "mt");
+    assert.equal(b.available, 0);
+
+    // now serve the fb waiter (next, needed=1)
+    b.release(N);
+    const cfb = await pFb;
+    assert.equal(cfb, 1);
+    assert.deepEqual(order, ["mt", "fb1"]);
+
+    // fb holds 1; release it
+    b.release(1);
+    assert.equal(b.available, N);
   });
 });

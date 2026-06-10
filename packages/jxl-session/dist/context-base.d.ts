@@ -14,6 +14,7 @@ export declare class JxlContextImpl implements JxlContext {
     private shuttingDown;
     private probeSettled;
     constructor(factory: WorkerFactory, opts: ContextOptions | undefined, maxWorkers: number);
+    private computeWorkerCost;
     probeCapabilities(): void;
     decode(opts: DecodeOptions): DecodeSession;
     encode(opts: EncodeOptions): EncodeSession;

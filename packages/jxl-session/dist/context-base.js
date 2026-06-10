@@ -1,6 +1,6 @@
 // Shared JxlContext implementation. Environment-specific entry points live in
 // context.ts and browser.ts so browser bundlers never see node worker imports.
-import { Scheduler } from "@casabio/jxl-scheduler";
+import { Scheduler, globalCoreBudget, defaultCoreBudgetCapacity } from "@casabio/jxl-scheduler";
 import { DecodeSessionImpl } from "./decode-session.js";
 import { EncodeSessionImpl } from "./encode-session.js";
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
@@ -63,12 +63,32 @@ export class JxlContextImpl {
     // (task 007-concurrency-a5b6c7d8).
     probeSettled = false;
     constructor(factory, opts, maxWorkers) {
+        const workerCost = this.computeWorkerCost(opts);
         this.scheduler = new Scheduler({
             factory,
             maxWorkers,
             idleTimeoutMs: opts?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
             ...(opts?.pushHwm !== undefined ? { pushHwm: opts.pushHwm } : {}),
+            coreBudget: globalCoreBudget,
+            workerCost,
         });
+    }
+    computeWorkerCost(opts) {
+        const url = opts?.wasmUrl;
+        if (!url)
+            return 1;
+        try {
+            // Supports relative or absolute worker script URLs carrying ?jxlWorkerTier=...
+            const u = new URL(url, "https://dummy.invalid");
+            const tier = u.searchParams.get("jxlWorkerTier");
+            if (tier === "relaxed-simd-mt" || tier === "simd-mt") {
+                return defaultCoreBudgetCapacity();
+            }
+        }
+        catch {
+            // malformed url -> conservative ST cost
+        }
+        return 1;
     }
     // Kick off the async capability probe; capabilities() returns the cached
     // value, which updates once the probe resolves.

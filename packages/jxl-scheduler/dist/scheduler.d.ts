@@ -8,6 +8,12 @@ export interface SchedulerOptions {
     pushHwm?: number;
     prewarmSize?: number;
     coreBudget?: CoreBudget;
+    /**
+     * Declared core cost per worker from this pool (sched-1).
+     * 1 for single-threaded workers (simd/scalar); N=hardwareConcurrency for MT workers
+     * (relaxed-simd-mt / simd-mt). When used with coreBudget, bounds concurrent MT to ~1.
+     */
+    workerCost?: number;
     admissionGate?: AdmissionGate;
 }
 export interface SchedulerMetrics {

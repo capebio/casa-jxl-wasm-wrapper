@@ -77,6 +77,9 @@ export class Scheduler {
         if (opts.coreBudget !== undefined) {
             poolCtorOpts.coreBudget = opts.coreBudget;
         }
+        if (opts.workerCost !== undefined) {
+            poolCtorOpts.workerCost = opts.workerCost;
+        }
         this.pool = new WorkerPool(poolCtorOpts);
         this.queue = new PriorityQueue();
         this.dedupe = new DedupeRegistry();
