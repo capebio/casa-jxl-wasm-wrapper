@@ -57,6 +57,14 @@ describe("shouldUseSaliency", () => {
   it("returns true for landscape with confidence above threshold (neutral, allowed)", () => {
     assert.equal(shouldUseSaliency({ imageType: "landscape", confidence: 0.75, centerCount: 1 }), true);
   });
+
+  it("returns false for NaN confidence (fails closed, NaN < th is false)", () => {
+    assert.equal(shouldUseSaliency({ imageType: "portrait", confidence: NaN, centerCount: 1 }), false);
+    assert.equal(
+      shouldUseSaliency({ imageType: "portrait", confidence: NaN, centerCount: 1, confidenceThreshold: 0.1 }),
+      false,
+    );
+  });
 });
 
 describe("normaliseCenter", () => {
@@ -82,6 +90,21 @@ describe("normaliseCenter", () => {
     const result = normaliseCenter(100, 200, 400, 800);
     assert.equal(result.x, 0.25);
     assert.equal(result.y, 0.25);
+  });
+
+  it("throws RangeError for non-positive imageWidth/imageHeight (0, negative, NaN)", () => {
+    assert.throws(() => normaliseCenter(10, 20, 0, 100), RangeError);
+    assert.throws(() => normaliseCenter(10, 20, 100, 0), RangeError);
+    assert.throws(() => normaliseCenter(10, 20, -5, 100), RangeError);
+    assert.throws(() => normaliseCenter(10, 20, 100, NaN), RangeError);
+    assert.throws(() => normaliseCenter(10, 20, NaN, 100), RangeError);
+  });
+
+  it("includes the invalid dimensions in the RangeError message", () => {
+    assert.throws(
+      () => normaliseCenter(1, 2, 0, 600),
+      /\[saliency-policy\] invalid image dimensions 0x600/,
+    );
   });
 });
 
@@ -112,5 +135,13 @@ describe("selectBestCenter", () => {
       { threshold: 0.4 },
     );
     assert.deepEqual(result, { x: 0.5, y: 0.5, confidence: 0.5 });
+  });
+
+  it("returns null for NaN confidence (fails closed)", () => {
+    assert.equal(selectBestCenter([{ x: 0.5, y: 0.5, confidence: NaN }]), null);
+    assert.equal(
+      selectBestCenter([{ x: 0.1, y: 0.1, confidence: NaN }], { threshold: 0.0 }),
+      null,
+    );
   });
 });

@@ -1,4 +1,5 @@
 // packages/jxl-progressive/src/saliency-policy.ts
+/** Outputs (when selected) populate ProgressiveManifest.saliency — the encode-side field that reaches clients. */
 
 export type ImageType =
   | "portrait"
@@ -37,7 +38,7 @@ export function shouldUseSaliency(opts: ShouldUseSaliencyOpts): boolean {
   const { imageType, confidence, centerCount, confidenceThreshold = 0.6 } = opts;
   if (SALIENCY_DISABLED_TYPES.has(imageType)) return false;
   if (centerCount === 0) return false;
-  if (confidence < confidenceThreshold) return false;
+  if (!(confidence >= confidenceThreshold)) return false;
   return true;
 }
 
@@ -48,6 +49,9 @@ export function normaliseCenter(
   imageWidth: number,
   imageHeight: number,
 ): { x: number; y: number } {
+  if (!(imageWidth > 0) || !(imageHeight > 0)) {
+    throw new RangeError(`[saliency-policy] invalid image dimensions ${imageWidth}x${imageHeight}`);
+  }
   return { x: cx / imageWidth, y: cy / imageHeight };
 }
 
@@ -63,6 +67,6 @@ export function selectBestCenter(
   if (centers.length === 0) return null;
   const sorted = [...centers].sort((a, b) => b.confidence - a.confidence);
   const best = sorted[0];
-  if (best === undefined || best.confidence < threshold) return null;
+  if (best === undefined || !(best.confidence >= threshold)) return null;
   return best;
 }
