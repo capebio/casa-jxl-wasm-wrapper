@@ -194,7 +194,7 @@ pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16
     };
 
     #[cfg(feature = "parallel")]
-    rgb.par_chunks_mut(width * 3).with_min_len(8).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    rgb.par_chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
     #[cfg(not(feature = "parallel"))]
     rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
 
@@ -261,7 +261,7 @@ pub fn demosaic_bayer(raw: &[u16], width: usize, height: usize, phase: (u8, u8))
     };
 
     #[cfg(feature = "parallel")]
-    rgb.par_chunks_mut(width * 3).with_min_len(8).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    rgb.par_chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
     #[cfg(not(feature = "parallel"))]
     rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
 
@@ -506,7 +506,7 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
     };
 
     #[cfg(feature = "parallel")]
-    rgb.par_chunks_mut(width * 3).with_min_len(8).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    rgb.par_chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
     #[cfg(not(feature = "parallel"))]
     rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
 
@@ -771,7 +771,7 @@ pub fn demosaic_rggb_mhc_matrix(raw: &[u16], width: usize, height: usize, m: &[i
     };
 
     #[cfg(feature = "parallel")]
-    rgb.par_chunks_mut(width * 3).with_min_len(8).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    rgb.par_chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
     #[cfg(not(feature = "parallel"))]
     rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
 
@@ -969,6 +969,7 @@ mod tests {
     /// Run example:
     ///   .\build-msvc.ps1 test --manifest-path crates/raw-pipeline/Cargo.toml --release -- --ignored m8_rayon_granularity_bench --nocapture --test-threads=1
     #[test]
+    #[ignore]
     fn m8_rayon_granularity_bench() {
         fn run_bench(name: &str, w: usize, h: usize, iters: usize) {
             let raw: Vec<u16> = vec![0x1234u16; w * h];
