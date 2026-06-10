@@ -41,6 +41,13 @@ struct ImageInfo {
   std::vector<DecodedExtra> extra_channels;
 };
 
+struct Region {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t w = 0;
+  uint32_t h = 0;
+};
+
 struct DecoderData {
   std::vector<uint8_t> input;
   std::vector<napi_ref> events;
@@ -74,10 +81,17 @@ struct EncoderData {
   bool finished = false;
   bool cancelled = false;
 
+  // N-17: metadata/ICC (populated in CreateEncoder; consumed in EncodeAll)
+  std::vector<uint8_t> icc;
+  std::vector<uint8_t> exif;
+  std::vector<uint8_t> xmp;
+
+  // N-18: progressive encode (enables decoder progression events on self-encoded codestreams)
+  bool progressive = false;
+
   // Escape hatch support (advancedFrameSettings)
-  const int32_t* advanced_setting_ids = nullptr;
-  const int32_t* advanced_setting_values = nullptr;
-  int32_t advanced_setting_count = 0;
+  std::vector<int32_t> advanced_setting_ids;
+  std::vector<int32_t> advanced_setting_values;
 
   // Task 5: extra channels (additive; 0-EC path unchanged)
   std::vector<ExtraChannelDesc> extra_channels;
@@ -96,6 +110,11 @@ static napi_value Undefined(napi_env env) {
 
 static napi_value Throw(napi_env env, const char* message) {
   napi_throw_error(env, nullptr, message);
+  return nullptr;
+}
+
+static napi_value ThrowCode(napi_env env, const char* code, const char* message) {
+  napi_throw_error(env, code, message);
   return nullptr;
 }
 
@@ -203,6 +222,16 @@ static size_t BytesPerChannel(PixelFormatKind format) {
   }
 }
 
+// N-18/N-22: parsed once at DecoderClose; avoids per-site strcmp
+enum class ProgressionTarget { Header, Dc, Pass, Final };
+
+static ProgressionTarget ParseProgressionTarget(const std::string& s) {
+  if (s == "header") return ProgressionTarget::Header;
+  if (s == "dc") return ProgressionTarget::Dc;
+  if (s == "pass") return ProgressionTarget::Pass;
+  return ProgressionTarget::Final;
+}
+
 #if CASABIO_HAVE_LIBJXL
 static JxlDataType DataTypeForFormat(PixelFormatKind format) {
   switch (format) {
@@ -227,14 +256,24 @@ static JxlExtraChannelType JxlExtraTypeFromString(const std::string& s) {
   return JXL_CHANNEL_UNKNOWN;
 }
 
-static const char* JxlExtraTypeName(JxlExtraChannelType t) {
+// N-22: single source of truth for extra channel type strings (decode descriptors + reservedN).
+// Replaces duplicated if/else in DecodeAll and the previous const-char switch.
+static std::string JxlExtraTypeName(JxlExtraChannelType t) {
   switch (t) {
     case JXL_CHANNEL_ALPHA: return "alpha";
     case JXL_CHANNEL_DEPTH: return "depth";
     case JXL_CHANNEL_SPOT_COLOR: return "spot";
     case JXL_CHANNEL_SELECTION_MASK: return "selection";
     case JXL_CHANNEL_THERMAL: return "thermal";
-    default: return "unknown";
+    default: {
+      int v = static_cast<int>(t);
+      if (v >= 7 && v <= 14) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "reserved%d", v - 7);
+        return std::string(buf);
+      }
+      return "unknown";
+    }
   }
 }
 #endif
@@ -349,14 +388,34 @@ static napi_value MakeHeaderEvent(napi_env env, const ImageInfo& info) {
   return event;
 }
 
-static napi_value MakeImageEvent(napi_env env, const char* type, const ImageInfo& info, PixelFormatKind format, const std::vector<uint8_t>& pixels) {
+static napi_value MakeImageEvent(napi_env env, const char* evtType, const char* stage, const ImageInfo& info, PixelFormatKind format, const std::vector<uint8_t>& pixels) {
   napi_value event;
   napi_create_object(env, &event);
-  napi_set_named_property(env, event, "type", MakeString(env, type));
-  napi_set_named_property(env, event, "stage", MakeString(env, type));
+  napi_set_named_property(env, event, "type", MakeString(env, evtType));
+  napi_set_named_property(env, event, "stage", MakeString(env, stage));
   napi_value infoObj = MakeImageInfo(env, info);
   napi_set_named_property(env, event, "info", infoObj);
   napi_set_named_property(env, event, "pixels", MakeArrayBuffer(env, pixels.data(), pixels.size()));
+  napi_set_named_property(env, event, "format", MakeString(env, PixelFormatName(format)));
+  napi_set_named_property(env, event, "pixelStride", MakeUint32(env, 4));
+  if (!info.extra_channels.empty()) {
+    napi_value extras;
+    napi_get_named_property(env, infoObj, "extraChannels", &extras);
+    napi_set_named_property(env, event, "extraChannels", extras);
+  }
+  return event;
+}
+
+// N-13: zero-copy path for progress/final when we let libjxl write (or flush) straight into a napi ArrayBuffer.
+// Regular (non-external) ABs remain detachable for transferList downstream.
+static napi_value MakeImageEventWithAB(napi_env env, const char* evtType, const char* stage, const ImageInfo& info, PixelFormatKind format, napi_value pixelsAb) {
+  napi_value event;
+  napi_create_object(env, &event);
+  napi_set_named_property(env, event, "type", MakeString(env, evtType));
+  napi_set_named_property(env, event, "stage", MakeString(env, stage));
+  napi_value infoObj = MakeImageInfo(env, info);
+  napi_set_named_property(env, event, "info", infoObj);
+  napi_set_named_property(env, event, "pixels", pixelsAb);
   napi_set_named_property(env, event, "format", MakeString(env, PixelFormatName(format)));
   napi_set_named_property(env, event, "pixelStride", MakeUint32(env, 4));
   if (!info.extra_channels.empty()) {
@@ -446,12 +505,135 @@ static napi_value MakeIterator(napi_env env, const std::vector<napi_ref>& refs) 
 }
 
 #if CASABIO_HAVE_LIBJXL
-static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, const char* progression_target, bool emit_every_pass) {
+// N-12 helpers (post-decode crop + box). Declared early so DecodeAll can call them.
+static void crop_to_region(std::vector<uint8_t>& buf, ImageInfo& info, const Region& r, uint32_t bpp);
+static void box_downsample_inplace(std::vector<uint8_t>& buf, ImageInfo& info, uint32_t ds, PixelFormatKind fmt);
+
+// Full definitions for the N-12 helpers (must appear before DecodeAll use in this TU).
+static void crop_to_region(std::vector<uint8_t>& buf, ImageInfo& info, const Region& r, uint32_t bpp) {
+  uint32_t sx = r.x, sy = r.y, sw = r.w, sh = r.h;
+  if (sx >= info.width || sy >= info.height || sw == 0 || sh == 0) {
+    buf.clear();
+    info.width = 0;
+    info.height = 0;
+    return;
+  }
+  sw = std::min(sw, info.width - sx);
+  sh = std::min(sh, info.height - sy);
+  if (sw == 0 || sh == 0) {
+    buf.clear();
+    info.width = 0;
+    info.height = 0;
+    return;
+  }
+  const size_t src_row = static_cast<size_t>(info.width) * bpp;
+  std::vector<uint8_t> out(static_cast<size_t>(sw) * sh * bpp);
+  for (uint32_t y = 0; y < sh; ++y) {
+    const uint8_t* src = buf.data() + (sy + y) * src_row + sx * bpp;
+    std::memcpy(out.data() + y * static_cast<size_t>(sw) * bpp, src, sw * bpp);
+  }
+  buf = std::move(out);
+  info.width = sw;
+  info.height = sh;
+}
+
+static void box_downsample_inplace(std::vector<uint8_t>& buf, ImageInfo& info, uint32_t ds, PixelFormatKind fmt) {
+  if (ds <= 1u) return;
+  const uint32_t bpc = BytesPerChannel(fmt);
+  const uint32_t bpp = 4u * bpc;
+  const uint32_t sw = info.width;
+  const uint32_t sh = info.height;
+  const uint32_t dw = std::max(1u, (sw + ds - 1u) / ds);
+  const uint32_t dh = std::max(1u, (sh + ds - 1u) / ds);
+  std::vector<uint8_t> out(static_cast<size_t>(dw) * dh * bpp, 0);
+  if (fmt == PixelFormatKind::Rgba8) {
+    for (uint32_t y = 0; y < dh; ++y) {
+      for (uint32_t x = 0; x < dw; ++x) {
+        uint32_t sum[4] = {0};
+        uint32_t cnt = 0;
+        for (uint32_t yy = 0; yy < ds; ++yy) {
+          uint32_t sy = y * ds + yy; if (sy >= sh) break;
+          for (uint32_t xx = 0; xx < ds; ++xx) {
+            uint32_t sx = x * ds + xx; if (sx >= sw) break;
+            const uint8_t* p = buf.data() + (sy * sw + sx) * 4;
+            sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
+            ++cnt;
+          }
+        }
+        uint8_t* d = out.data() + (y * dw + x) * 4;
+        if (cnt > 0) {
+          d[0] = static_cast<uint8_t>(sum[0] / cnt);
+          d[1] = static_cast<uint8_t>(sum[1] / cnt);
+          d[2] = static_cast<uint8_t>(sum[2] / cnt);
+          d[3] = static_cast<uint8_t>(sum[3] / cnt);
+        }
+      }
+    }
+  } else if (fmt == PixelFormatKind::Rgba16) {
+    for (uint32_t y = 0; y < dh; ++y) {
+      for (uint32_t x = 0; x < dw; ++x) {
+        uint32_t sum[4] = {0};
+        uint32_t cnt = 0;
+        for (uint32_t yy = 0; yy < ds; ++yy) {
+          uint32_t sy = y * ds + yy; if (sy >= sh) break;
+          for (uint32_t xx = 0; xx < ds; ++xx) {
+            uint32_t sx = x * ds + xx; if (sx >= sw) break;
+            const uint16_t* p = reinterpret_cast<const uint16_t*>(buf.data() + (sy * sw + sx) * 8);
+            sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
+            ++cnt;
+          }
+        }
+        uint16_t* d = reinterpret_cast<uint16_t*>(out.data() + (y * dw + x) * 8);
+        if (cnt > 0) {
+          d[0] = static_cast<uint16_t>(sum[0] / cnt);
+          d[1] = static_cast<uint16_t>(sum[1] / cnt);
+          d[2] = static_cast<uint16_t>(sum[2] / cnt);
+          d[3] = static_cast<uint16_t>(sum[3] / cnt);
+        }
+      }
+    }
+  } else { // rgbaf32
+    for (uint32_t y = 0; y < dh; ++y) {
+      for (uint32_t x = 0; x < dw; ++x) {
+        float sum[4] = {0.f};
+        uint32_t cnt = 0;
+        for (uint32_t yy = 0; yy < ds; ++yy) {
+          uint32_t sy = y * ds + yy; if (sy >= sh) break;
+          for (uint32_t xx = 0; xx < ds; ++xx) {
+            uint32_t sx = x * ds + xx; if (sx >= sw) break;
+            const float* p = reinterpret_cast<const float*>(buf.data() + (sy * sw + sx) * 16);
+            sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
+            ++cnt;
+          }
+        }
+        float* d = reinterpret_cast<float*>(out.data() + (y * dw + x) * 16);
+        if (cnt > 0) {
+          d[0] = sum[0] / cnt;
+          d[1] = sum[1] / cnt;
+          d[2] = sum[2] / cnt;
+          d[3] = sum[3] / cnt;
+        }
+      }
+    }
+  }
+  buf = std::move(out);
+  info.width = dw;
+  info.height = dh;
+}
+
+// N-20: gate extra channel plane extraction behind opt-in so common RGBA path pays zero.
+// N-15 design note (batch mode constraint): DecodeAll materializes *all* requested events (header + 0..N progress + final)
+// with their pixel ArrayBuffers into DecoderData::events before returning. Each strong napi_ref keeps the AB alive
+// until DecoderDispose (or GC finalize). With emitEveryPass + progressiveDetail:"passes" this is N*frame_bytes peak
+// (intentional for the iterator snapshot model; streaming/live iterator with incremental ProcessInput + release between
+// yields is the long-term fix but explicitly out of scope per Agent 2 constraints — do not build a push()-time decode loop here).
+// Future agents: batching is a known deliberate tradeoff for simple napi iterator surface + transferList compatibility.
+static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, ProgressionTarget target, bool emit_every_pass, bool decode_extra_channels, const std::string& progressive_detail, const Region* region, uint32_t downsample) {
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return false;
 
   int events = JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE;
-  if (emit_every_pass || strcmp(progression_target, "dc") == 0 || strcmp(progression_target, "pass") == 0) {
+  if (emit_every_pass || target == ProgressionTarget::Dc || target == ProgressionTarget::Pass) {
     events |= JXL_DEC_FRAME_PROGRESSION;
   }
   if (JxlDecoderSubscribeEvents(dec, events) != JXL_DEC_SUCCESS) {
@@ -459,8 +641,16 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
     return false;
   }
 
+  // N-11: map progressiveDetail (or fallback from emit/target) to the correct JxlProgressiveDetail.
+  // Verified against jxl/decode.h + WASM bridge.cpp mapping + jxl-core types comments.
+  JxlProgressiveDetail jd = kDC;
+  if (progressive_detail == "lastPasses") jd = kLastPasses;
+  else if (progressive_detail == "passes") jd = kPasses;
+  else if (progressive_detail == "dcProgressive") jd = kDCProgressive;
+  else if (emit_every_pass || target == ProgressionTarget::Pass) jd = kLastPasses;
+  // else dc / default -> kDC
   if (events & JXL_DEC_FRAME_PROGRESSION) {
-    JxlDecoderSetProgressiveDetail(dec, kDC);
+    JxlDecoderSetProgressiveDetail(dec, jd);
   }
 
   JxlDecoderSetInput(dec, data->input.data(), data->input.size());
@@ -470,13 +660,30 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
   memset(&basic, 0, sizeof(basic));
   ImageInfo info;
   bool info_known = false;
-  std::vector<uint8_t> pixels;
   JxlPixelFormat pf = {4, DataTypeForFormat(format), JXL_NATIVE_ENDIAN, 0};
+
+  // N-20: per-EC plane storage (populated at NEED_IMAGE_OUT_BUFFER when gated)
+  std::vector<std::vector<uint8_t>> ec_planes;
+
+  // N-12/N-13: main decode target as napi AB (direct write for final when no xform)
+  napi_value main_ab = nullptr;
+  void* main_data = nullptr;
+  size_t main_size = 0;
+  bool had_region = (region != nullptr);
+  uint32_t ds = (downsample >= 1 && downsample <= 8) ? downsample : 1u;
+  uint32_t bytes_per_pixel = 4u * BytesPerChannel(format);
 
   for (;;) {
     JxlDecoderStatus status = JxlDecoderProcessInput(dec);
-    if (status == JXL_DEC_ERROR || status == JXL_DEC_NEED_MORE_INPUT) {
+    if (status == JXL_DEC_ERROR) {
       JxlDecoderDestroy(dec);
+      ThrowCode(env, "InvalidJXL", "libjxl decode error (DEC_ERROR)");
+      return false;
+    }
+    if (status == JXL_DEC_NEED_MORE_INPUT) {
+      JxlDecoderDestroy(dec);
+      // After CloseInput this means truncated input (N-19)
+      ThrowCode(env, "TruncatedInput", "libjxl decode truncated (NEED_MORE_INPUT after close)");
       return false;
     }
     if (status == JXL_DEC_SUCCESS) break;
@@ -487,10 +694,15 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
       }
       info.width = basic.xsize;
       info.height = basic.ysize;
+      // N-16: report output depth (via format + BitsForFormat) to match WASM facade + jxl-core ImageInfo
+      // expectations on DecodeFrameEvent.info. Source depth (basic.bits_per_sample) would mismatch buffer
+      // when downcasting (e.g. 16-bit source -> rgba8 decode). Parity wins; format describes the buffer.
       info.bits_per_sample = BitsForFormat(format);
       info.has_alpha = basic.alpha_bits > 0;
       info.has_animation = basic.have_animation;
-      info.jpeg_reconstruction_available = basic.uses_original_profile == JXL_FALSE ? false : false;
+      // JPEG reconstruction (extracting original JPEG bytes) is out of scope for this pixel decoder binding.
+      // No JXL_DEC_JPEG_RECONSTRUCTION subscription; consumers that need embedded JPEG should use WASM bridge or cjxl.
+      info.jpeg_reconstruction_available = false;
 
       // Task 5: collect extra channel descriptors (symmetric to WASM bridge; only metadata, no plane data here)
       uint32_t n_ec = basic.num_extra_channels;
@@ -498,17 +710,11 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
         JxlExtraChannelInfo ei{};
         if (JxlDecoderGetExtraChannelInfo(dec, i, &ei) == JXL_DEC_SUCCESS) {
           ImageInfo::DecodedExtra d{};
-          int t = static_cast<int>(ei.type);
-          if (t == 0) d.type = "alpha";
-          else if (t == 1) d.type = "depth";
-          else if (t == 2) d.type = "spot";
-          else if (t == 3) d.type = "selection";
-          else if (t == 6) d.type = "thermal";
-          else if (t >= 7 && t <= 14) d.type = std::string("reserved") + std::string(1, char('0' + (t - 7)));
-          else d.type = "unknown";
+          // N-22: unified via JxlExtraTypeName table (no duplicate if/else)
+          d.type = JxlExtraTypeName(ei.type);
           d.bits_per_sample = ei.bits_per_sample;
           d.dim_shift = ei.dim_shift;
-          if (t == 2) {  // SPOT_COLOR
+          if (ei.type == JXL_CHANNEL_SPOT_COLOR) {
             d.has_spot = true;
             d.spot_r = ei.spot_color[0];
             d.spot_g = ei.spot_color[1];
@@ -516,20 +722,23 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
             d.spot_solidity = ei.spot_color[3];
           }
           if (ei.name_length > 0) {
-            char nm[32] = {0};
-            if (JxlDecoderGetExtraChannelName(dec, i, nm, 32) == JXL_DEC_SUCCESS) {
-              size_t nl = ei.name_length > 31 ? 31 : ei.name_length;
-              d.name.assign(nm, nl);
+            std::vector<char> nm(ei.name_length + 1, '\0');
+            if (JxlDecoderGetExtraChannelName(dec, i, nm.data(), nm.size()) == JXL_DEC_SUCCESS) {
+              d.name.assign(nm.data(), ei.name_length);
             }
           }
           info.extra_channels.push_back(d);
         }
       }
 
+      if (decode_extra_channels && n_ec > 0) {
+        ec_planes.assign(n_ec, std::vector<uint8_t>());
+      }
+
       info_known = true;
       napi_value header = MakeHeaderEvent(env, info);
       data->events.push_back(RefValue(env, header));
-      if (strcmp(progression_target, "header") == 0) {
+      if (target == ProgressionTarget::Header) {
         JxlDecoderDestroy(dec);
         return true;
       }
@@ -541,20 +750,85 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
         JxlDecoderDestroy(dec);
         return false;
       }
-      pixels.resize(buffer_size);
-      if (JxlDecoderSetImageOutBuffer(dec, &pf, pixels.data(), pixels.size()) != JXL_DEC_SUCCESS) {
+      // N-13: allocate AB up front; libjxl writes final directly here (saves final copy when no region/ds).
+      // Progress snapshots still use temp flush ABs (or direct when no xform).
+      napi_create_arraybuffer(env, buffer_size, &main_data, &main_ab);
+      main_size = buffer_size;
+      if (JxlDecoderSetImageOutBuffer(dec, &pf, main_data, main_size) != JXL_DEC_SUCCESS) {
         JxlDecoderDestroy(dec);
         return false;
       }
+      // N-20: extract extra channel planes (1ch each) when opt-in. pf_ec per channel bps.
+      if (decode_extra_channels && !ec_planes.empty()) {
+        for (uint32_t i = 0; i < ec_planes.size(); ++i) {
+          uint32_t bps = (i < info.extra_channels.size() && info.extra_channels[i].bits_per_sample)
+                             ? info.extra_channels[i].bits_per_sample : 8u;
+          JxlDataType dt = (bps == 16) ? JXL_TYPE_UINT16 : (bps > 16 ? JXL_TYPE_FLOAT : JXL_TYPE_UINT8);
+          JxlPixelFormat pf_ec = {1, dt, JXL_NATIVE_ENDIAN, 0};
+          size_t ec_size = 0;
+          if (JxlDecoderExtraChannelBufferSize(dec, &pf_ec, &ec_size, i) == JXL_DEC_SUCCESS && ec_size > 0) {
+            ec_planes[i].resize(ec_size);
+            JxlDecoderSetExtraChannelBuffer(dec, &pf_ec, ec_planes[i].data(), ec_size, i);
+          }
+        }
+      }
       continue;
     }
-    if (status == JXL_DEC_FRAME_PROGRESSION && info_known && !pixels.empty()) {
-      std::vector<uint8_t> flushed(pixels.size());
-      if (JxlDecoderSetImageOutBuffer(dec, &pf, flushed.data(), flushed.size()) == JXL_DEC_SUCCESS &&
-          JxlDecoderFlushImage(dec) == JXL_DEC_SUCCESS) {
-        napi_value progress = MakeImageEvent(env, "progress", info, format, flushed);
+    if (status == JXL_DEC_FRAME_PROGRESSION && info_known && main_ab != nullptr) {
+      // N-10: early exit for dc (and pass) targets when !emitEveryPass — stops wasted full decode work for
+      // thumbnail/embedding/AR-preview (Lenses) and pyramid tile paths. Matches browser facade semantics:
+      // low-level events() yields [header, progress-with-stage] then ends; no "final" event for non-final targets.
+      // Handler finally + decode-session frames() contract treat the target progress as terminal (no decode_final posted).
+      const char* prog_stage = (target == ProgressionTarget::Dc) ? "dc" : "pass";
+      napi_value prog_ev_ab = nullptr;
+      ImageInfo ev_info = info;
+      bool needs_xform = had_region || (ds > 1u);
+      if (needs_xform) {
+        // Flush to a full-size snap, then post-xform copy into event-sized AB (post-decode crop/ds cost is accepted for native).
+        void* snap = nullptr;
+        napi_value snap_ab;
+        napi_create_arraybuffer(env, main_size, &snap, &snap_ab);
+        if (JxlDecoderSetImageOutBuffer(dec, &pf, snap, main_size) == JXL_DEC_SUCCESS &&
+            JxlDecoderFlushImage(dec) == JXL_DEC_SUCCESS) {
+          std::vector<uint8_t> work(static_cast<uint8_t*>(snap), static_cast<uint8_t*>(snap) + main_size);
+          if (had_region && region) crop_to_region(work, ev_info, *region, bytes_per_pixel);
+          if (ds > 1u) box_downsample_inplace(work, ev_info, ds, format);
+          void* outd = nullptr;
+          napi_value out_ab;
+          napi_create_arraybuffer(env, work.size(), &outd, &out_ab);
+          if (!work.empty() && outd) memcpy(outd, work.data(), work.size());
+          prog_ev_ab = out_ab;
+          // restore main target for any continued decode (emitEvery case)
+          JxlDecoderSetImageOutBuffer(dec, &pf, main_data, main_size);
+        }
+      } else {
+        // N-13: direct flush into event AB (eliminates the flushed-vec + MakeArrayBuffer memcpy per progress)
+        void* snap = nullptr;
+        napi_value snap_ab;
+        napi_create_arraybuffer(env, main_size, &snap, &snap_ab);
+        if (JxlDecoderSetImageOutBuffer(dec, &pf, snap, main_size) == JXL_DEC_SUCCESS &&
+            JxlDecoderFlushImage(dec) == JXL_DEC_SUCCESS) {
+          prog_ev_ab = snap_ab;
+          JxlDecoderSetImageOutBuffer(dec, &pf, main_data, main_size);
+        }
+      }
+      if (prog_ev_ab != nullptr) {
+        napi_value progress = MakeImageEventWithAB(env, "progress", prog_stage, ev_info, format, prog_ev_ab);
+        if (had_region) {
+          napi_value rgn;
+          napi_create_object(env, &rgn);
+          napi_set_named_property(env, rgn, "x", MakeUint32(env, 0));
+          napi_set_named_property(env, rgn, "y", MakeUint32(env, 0));
+          napi_set_named_property(env, rgn, "w", MakeUint32(env, ev_info.width));
+          napi_set_named_property(env, rgn, "h", MakeUint32(env, ev_info.height));
+          napi_set_named_property(env, progress, "region", rgn);
+        }
         data->events.push_back(RefValue(env, progress));
-        JxlDecoderSetImageOutBuffer(dec, &pf, pixels.data(), pixels.size());
+      }
+      // N-10 early terminal for dc/pass when not emitting every pass (matches WASM facade early return after target progress)
+      if (!emit_every_pass && target != ProgressionTarget::Final) {
+        JxlDecoderDestroy(dec);
+        return true;
       }
       continue;
     }
@@ -562,8 +836,44 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, c
   }
 
   JxlDecoderDestroy(dec);
-  if (!info_known || pixels.empty()) return false;
-  napi_value final = MakeImageEvent(env, "final", info, format, pixels);
+  if (!info_known || main_ab == nullptr) return false;
+
+  // Final emission (N-13 direct path when possible; N-12 xform applied post)
+  ImageInfo ev_info = info;
+  napi_value final_pixels_ab = main_ab;
+  size_t final_bytes = main_size;
+  bool needs_xform = had_region || (ds > 1u);
+  if (needs_xform) {
+    std::vector<uint8_t> work(static_cast<uint8_t*>(main_data), static_cast<uint8_t*>(main_data) + main_size);
+    if (had_region && region) crop_to_region(work, ev_info, *region, bytes_per_pixel);
+    if (ds > 1u) box_downsample_inplace(work, ev_info, ds, format);
+    void* outd = nullptr;
+    napi_value out_ab;
+    napi_create_arraybuffer(env, work.size(), &outd, &out_ab);
+    if (!work.empty() && outd) memcpy(outd, work.data(), work.size());
+    final_pixels_ab = out_ab;
+    final_bytes = work.size();
+  }
+  napi_value final = MakeImageEventWithAB(env, "final", "final", ev_info, format, final_pixels_ab);
+  if (had_region) {
+    napi_value rgn;
+    napi_create_object(env, &rgn);
+    napi_set_named_property(env, rgn, "x", MakeUint32(env, 0));
+    napi_set_named_property(env, rgn, "y", MakeUint32(env, 0));
+    napi_set_named_property(env, rgn, "w", MakeUint32(env, ev_info.width));
+    napi_set_named_property(env, rgn, "h", MakeUint32(env, ev_info.height));
+    napi_set_named_property(env, final, "region", rgn);
+  }
+  // N-20: attach extraPlanes on final (gated; depth/thermal etc for photogrammetry/ecology)
+  if (decode_extra_channels && !ec_planes.empty()) {
+    napi_value arr;
+    napi_create_array_with_length(env, ec_planes.size(), &arr);
+    for (size_t i = 0; i < ec_planes.size(); ++i) {
+      napi_value ab = MakeArrayBuffer(env, ec_planes[i].data(), ec_planes[i].size());
+      napi_set_element(env, arr, static_cast<uint32_t>(i), ab);
+    }
+    napi_set_named_property(env, final, "extraPlanes", arr);
+  }
   data->events.push_back(RefValue(env, final));
   return true;
 }
@@ -586,17 +896,26 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
   info.num_extra_channels = alpha_ec_count + extra_ec_count;
   info.alpha_bits = data->has_alpha ? bits : 0;
   info.alpha_exponent_bits = data->has_alpha ? exp_bits : 0;
+  if (data->distance == 0.0) info.uses_original_profile = JXL_TRUE;
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc);
     return false;
   }
 
-  JxlColorEncoding color;
-  JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
-  if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc);
-    return false;
+  // N-17: ICC profile if supplied (wide-gamut masters); else sRGB. Prerequisite for perceptual colour / herbarium fidelity.
+  if (!data->icc.empty()) {
+    if (JxlEncoderSetICCProfile(enc, data->icc.data(), data->icc.size()) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
+  } else {
+    JxlColorEncoding color;
+    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) {
+      JxlEncoderDestroy(enc);
+      return false;
+    }
   }
 
   JxlEncoderFrameSettings* frame = JxlEncoderFrameSettingsCreate(enc, nullptr);
@@ -604,16 +923,30 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
     JxlEncoderSetFrameLossless(frame, JXL_TRUE);
   }
   JxlEncoderSetFrameDistance(frame, static_cast<float>(data->distance));
-  JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(data->effort));
+  if (JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(data->effort)) != JXL_ENC_SUCCESS) {
+    JxlEncoderDestroy(enc);
+    return false;
+  }
+
+  // N-18: map progressive:true to frame settings so that decoder can emit progression events for our own encodes.
+  if (data->progressive) {
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC, 1);
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC, 1);
+    JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC, 1);
+  }
+  // previewFirst / chunked remain unimplemented (one-line comments per N-18; silent ignore is the documented gap, not a drop)
 
   // Escape hatch for advancedFrameSettings (patches etc.)
-  if (data->advanced_setting_count > 0 && data->advanced_setting_ids && data->advanced_setting_values) {
-    for (int32_t i = 0; i < data->advanced_setting_count; ++i) {
-      JxlEncoderFrameSettingsSetOption(
-        frame,
-        static_cast<JxlEncoderFrameSettingId>(data->advanced_setting_ids[i]),
-        static_cast<int64_t>(data->advanced_setting_values[i])
-      );
+  if (!data->advanced_setting_ids.empty() &&
+      data->advanced_setting_ids.size() == data->advanced_setting_values.size()) {
+    for (size_t i = 0; i < data->advanced_setting_ids.size(); ++i) {
+      if (JxlEncoderFrameSettingsSetOption(
+            frame,
+            static_cast<JxlEncoderFrameSettingId>(data->advanced_setting_ids[i]),
+            static_cast<int64_t>(data->advanced_setting_values[i])) != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return false;
+      }
     }
   }
 
@@ -622,13 +955,15 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
     const ExtraChannelDesc& ec = data->extra_channels[i];
     uint32_t ec_idx = alpha_ec_count + i;
 
+    // N-22: hoist type lookup (was called twice per EC for spot check)
+    JxlExtraChannelType ec_type = JxlExtraTypeFromString(ec.type);
     JxlExtraChannelInfo ec_info;
-    JxlEncoderInitExtraChannelInfo(JxlExtraTypeFromString(ec.type), &ec_info);
+    JxlEncoderInitExtraChannelInfo(ec_type, &ec_info);
     ec_info.bits_per_sample = ec.bits_per_sample;
     ec_info.exponent_bits_per_sample = (ec.bits_per_sample > 16) ? 8u : 0u;
     ec_info.dim_shift = ec.dim_shift;
 
-    if (ec.has_spot && JxlExtraTypeFromString(ec.type) == JXL_CHANNEL_SPOT_COLOR) {
+    if (ec.has_spot && ec_type == JXL_CHANNEL_SPOT_COLOR) {
       ec_info.spot_color[0] = ec.spot_r;
       ec_info.spot_color[1] = ec.spot_g;
       ec_info.spot_color[2] = ec.spot_b;
@@ -648,8 +983,9 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
     JxlEncoderSetExtraChannelDistance(frame, ec_idx, ch_dist);
   }
 
-  JxlPixelFormat pf = {4, DataTypeForFormat(data->format), JXL_NATIVE_ENDIAN, 0};
-  const size_t expected = static_cast<size_t>(data->width) * data->height * 4 * BytesPerChannel(data->format);
+  const uint32_t color_channels = 3u + (data->has_alpha ? 1u : 0u);
+  JxlPixelFormat pf = {color_channels, DataTypeForFormat(data->format), JXL_NATIVE_ENDIAN, 0};
+  const size_t expected = static_cast<size_t>(data->width) * data->height * color_channels * BytesPerChannel(data->format);
   if (data->pixels.size() < expected ||
       JxlEncoderAddImageFrame(frame, &pf, data->pixels.data(), expected) != JXL_ENC_SUCCESS) {
     JxlEncoderDestroy(enc);
@@ -671,9 +1007,41 @@ static bool EncodeAll(EncoderData* data, std::vector<uint8_t>* out) {
     }
   }
 
+  // N-17: EXIF (with 4-byte BE TIFF offset prefix if raw) + XMP boxes. GPS etc must survive for georeferenced / Lens 12/14.
+  if (!data->exif.empty() || !data->xmp.empty()) {
+    JxlEncoderUseBoxes(enc);
+    if (!data->exif.empty()) {
+      const auto& e = data->exif;
+      bool has_prefix = (e.size() >= 4 && e[0] == 0 && e[1] == 0 && e[2] == 0 && e[3] == 0);
+      if (has_prefix) {
+        JxlEncoderAddBox(enc, "Exif", e.data(), e.size(), JXL_FALSE);
+      } else {
+        std::vector<uint8_t> prefixed(4 + e.size());
+        prefixed[0] = prefixed[1] = prefixed[2] = prefixed[3] = 0;
+        if (!e.empty()) memcpy(prefixed.data() + 4, e.data(), e.size());
+        JxlEncoderAddBox(enc, "Exif", prefixed.data(), prefixed.size(), JXL_FALSE);
+      }
+    }
+    if (!data->xmp.empty()) {
+      JxlEncoderAddBox(enc, "xml ", data->xmp.data(), data->xmp.size(), JXL_FALSE);
+    }
+    JxlEncoderCloseBoxes(enc);
+  }
+
   JxlEncoderCloseInput(enc);
 
-  out->assign(65536, 0);
+  // N-21: seed output buffer from heuristic (pixels/10, >=64KiB) to skip most doublings on large encodes.
+  // Final MakeArrayBuffer still copies once; chunk-list avoided for simplicity (crosses port once).
+  {
+    size_t seed = 65536;
+    const size_t pixel_bytes = static_cast<size_t>(data->width) * data->height * 4 * BytesPerChannel(data->format);
+    if (pixel_bytes > 0) {
+      size_t h = pixel_bytes / 10;
+      if (h < 65536) h = 65536;
+      seed = h;
+    }
+    out->assign(seed, 0);
+  }
   uint8_t* next_out = out->data();
   size_t avail_out = out->size();
   for (;;) {
@@ -721,11 +1089,41 @@ static napi_value DecoderClose(napi_env env, napi_callback_info info) {
   napi_value options;
   napi_get_named_property(env, this_arg, "_options", &options);
   PixelFormatKind format = ParsePixelFormat(GetStringProp(env, options, "format", "rgba8"));
-  std::string target = GetStringProp(env, options, "progressionTarget", "final");
+  std::string target_str = GetStringProp(env, options, "progressionTarget", "final");
   bool emit_every_pass = GetBoolProp(env, options, "emitEveryPass", false);
-  if (!DecodeAll(env, data, format, target.c_str(), emit_every_pass)) {
-    return Throw(env, "libjxl decode failed");
+  bool decode_extra = GetBoolProp(env, options, "decodeExtraChannels", false);
+  std::string prog_detail = GetStringProp(env, options, "progressiveDetail", "");
+  ProgressionTarget target = ParseProgressionTarget(target_str);
+
+  // N-12: region/downsample (post-decode for native; libjxl direct ROI is in WASM bridge only)
+  Region reg{0, 0, 0, 0};
+  bool has_region = false;
+  napi_value regv;
+  if (GetProp(env, options, "region", &regv)) {
+    napi_valuetype rt;
+    napi_typeof(env, regv, &rt);
+    if (rt == napi_object) {
+      uint32_t x = GetUint32Prop(env, regv, "x", 0);
+      uint32_t y = GetUint32Prop(env, regv, "y", 0);
+      uint32_t w = GetUint32Prop(env, regv, "w", 0);
+      uint32_t h = GetUint32Prop(env, regv, "h", 0);
+      if (w > 0 && h > 0) {
+        reg = Region{x, y, w, h};
+        has_region = true;
+      }
+    }
   }
+  uint32_t downsample = GetUint32Prop(env, options, "downsample", 1);
+  if (downsample != 1 && downsample != 2 && downsample != 4 && downsample != 8) downsample = 1;
+
+  // N-19: ...
+  if (!DecodeAll(env, data, format, target, emit_every_pass, decode_extra, prog_detail, has_region ? &reg : nullptr, downsample)) {
+    return nullptr;
+  }
+  // N-14: drop (potentially hundreds of MB) input bytes promptly after successful decode.
+  // The vector would otherwise live until dispose()/GC. shrink_to_fit releases the reservation.
+  data->input.clear();
+  data->input.shrink_to_fit();
   return Undefined(env);
 #else
   return Throw(env, "jxl-native was built without libjxl headers");
@@ -782,7 +1180,7 @@ static napi_value EncoderFinish(napi_env env, napi_callback_info info) {
   data->finished = true;
 #if CASABIO_HAVE_LIBJXL
   std::vector<uint8_t> out;
-  if (!EncodeAll(data, &out)) return Throw(env, "libjxl encode failed");
+  if (!EncodeAll(data, &out)) return ThrowCode(env, "EncodeFailed", "libjxl encode failed");
   napi_value chunk = MakeArrayBuffer(env, out.data(), out.size());
   data->chunks.push_back(RefValue(env, chunk));
   return Undefined(env);
@@ -815,6 +1213,9 @@ static napi_value EncoderDispose(napi_env env, napi_callback_info info) {
     for (napi_ref ref : data->chunks) napi_delete_reference(env, ref);
     data->chunks.clear();
     data->pixels.clear();
+    data->icc.clear();
+    data->exif.clear();
+    data->xmp.clear();
     data->extra_channels.clear();  // release any EC plane data early (additive)
   }
   return Undefined(env);
@@ -841,6 +1242,15 @@ static void SetMethod(napi_env env, napi_value object, const char* name, napi_ca
 }
 
 static napi_value Version(napi_env env, napi_callback_info) {
+  // N-16: append runtime libjxl version (maj*1e6 + min*1e3 + patch) for diagnosability.
+  // Static prefix kept for semver of the binding itself.
+#if CASABIO_HAVE_LIBJXL
+  uint32_t v = JxlDecoderVersion();
+  char buf[64];
+  // snprintf is available; keep simple.
+  int n = snprintf(buf, sizeof(buf), "0.1.0-libjxl+%u.%u.%u", v / 1000000u, (v / 1000u) % 1000u, v % 1000u);
+  if (n > 0 && n < (int)sizeof(buf)) return MakeString(env, buf);
+#endif
   return MakeString(env, "0.1.0-libjxl");
 }
 
@@ -848,7 +1258,9 @@ static napi_value Probe(napi_env env, napi_callback_info) {
   napi_value result;
   napi_create_object(env, &result);
   napi_set_named_property(env, result, "loaded", MakeBool(env, CASABIO_HAVE_LIBJXL == 1));
-  napi_set_named_property(env, result, "path", MakeString(env, CASABIO_HAVE_LIBJXL ? "libjxl native" : "libjxl unavailable"));
+  // N-16: return a path-like identifier (not the literal phrase) so upper layers see a module-ish "path".
+  // Real fs path to the .node is resolved in index.ts loadNativeBinding (candidate that succeeded).
+  napi_set_named_property(env, result, "path", MakeString(env, CASABIO_HAVE_LIBJXL ? "jxl-native.node" : "libjxl unavailable"));
   return result;
 }
 
@@ -881,12 +1293,46 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
   data->width = GetUint32Prop(env, args[0], "width", 0);
   data->height = GetUint32Prop(env, args[0], "height", 0);
   data->has_alpha = GetBoolProp(env, args[0], "hasAlpha", true);
-  data->distance = GetNullableNumberProp(env, args[0], "distance", GetNullableNumberProp(env, args[0], "quality", 90.0) >= 100.0 ? 0.0 : 1.0);
+  double quality = GetNullableNumberProp(env, args[0], "quality", -1.0);
+#if CASABIO_HAVE_LIBJXL
+  double default_distance = (quality < 0.0) ? 1.0
+      : static_cast<double>(JxlEncoderDistanceFromQuality(static_cast<float>(quality)));
+#else
+  double default_distance = (quality >= 100.0) ? 0.0 : 1.0;
+#endif
+  data->distance = GetNullableNumberProp(env, args[0], "distance", default_distance);
   data->effort = GetUint32Prop(env, args[0], "effort", 7);
+
+  // N-17: read declared metadata/ICC buffers (nulls mean absent). Use GetProp to avoid MakeString temps (N-22).
+  napi_value iccv, exifv, xmpv;
+  if (GetProp(env, args[0], "iccProfile", &iccv)) {
+    napi_valuetype t; napi_typeof(env, iccv, &t);
+    if (t != napi_null && t != napi_undefined) {
+      std::vector<uint8_t> buf;
+      if (ReadBytes(env, iccv, &buf)) data->icc = std::move(buf);
+    }
+  }
+  if (GetProp(env, args[0], "exif", &exifv)) {
+    napi_valuetype t; napi_typeof(env, exifv, &t);
+    if (t != napi_null && t != napi_undefined) {
+      std::vector<uint8_t> buf;
+      if (ReadBytes(env, exifv, &buf)) data->exif = std::move(buf);
+    }
+  }
+  if (GetProp(env, args[0], "xmp", &xmpv)) {
+    napi_valuetype t; napi_typeof(env, xmpv, &t);
+    if (t != napi_null && t != napi_undefined) {
+      std::vector<uint8_t> buf;
+      if (ReadBytes(env, xmpv, &buf)) data->xmp = std::move(buf);
+    }
+  }
+
+  data->progressive = GetBoolProp(env, args[0], "progressive", false);
+  // previewFirst / chunked declared on EncoderOptions but remain unimplemented (N-18: document ignore, not a silent drop)
 
   // Parse advancedFrameSettings escape hatch (array of {id, value})
   napi_value adv;
-  if (napi_get_property(env, args[0], MakeString(env, "advancedFrameSettings"), &adv) == napi_ok) {
+  if (GetProp(env, args[0], "advancedFrameSettings", &adv)) {
     bool is_array = false;
     napi_is_array(env, adv, &is_array);
     if (is_array) {
@@ -901,19 +1347,15 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
           ids[i] = GetInt32Prop(env, item, "id", 0);
           values[i] = GetInt32Prop(env, item, "value", 0);
         }
-        // Store for later use in EncodeAll (ownership transferred via new arrays)
-        data->advanced_setting_count = static_cast<int32_t>(len);
-        data->advanced_setting_ids = new int32_t[len];
-        data->advanced_setting_values = new int32_t[len];
-        std::copy(ids.begin(), ids.end(), const_cast<int32_t*>(data->advanced_setting_ids));
-        std::copy(values.begin(), values.end(), const_cast<int32_t*>(data->advanced_setting_values));
+        data->advanced_setting_ids = std::move(ids);
+        data->advanced_setting_values = std::move(values);
       }
     }
   }
 
   // Task 5: parse extraChannels array (additive, 0-EC unchanged). Supports descriptors + optional 'pixels' for plane data (duck-type for native higher-level, preserves ExtraChannel TS shape for parity).
   napi_value ec_arr;
-  if (napi_get_property(env, args[0], MakeString(env, "extraChannels"), &ec_arr) == napi_ok) {
+  if (GetProp(env, args[0], "extraChannels", &ec_arr)) {
     bool is_array = false;
     napi_is_array(env, ec_arr, &is_array);
     if (is_array) {
@@ -931,7 +1373,7 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
         d.distance = GetNullableNumberProp(env, item, "distance", -1.0);
 
         napi_value spotv;
-        if (napi_get_property(env, item, MakeString(env, "spotColor"), &spotv) == napi_ok) {
+        if (GetProp(env, item, "spotColor", &spotv)) {
           napi_valuetype st;
           napi_typeof(env, spotv, &st);
           if (st == napi_object) {
@@ -945,8 +1387,7 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
 
         // Duck-type plane pixels for encode buffer (use 'pixels' per spec guidance; also try 'data' for flexibility)
         napi_value datav;
-        if ((napi_get_property(env, item, MakeString(env, "pixels"), &datav) == napi_ok ||
-             napi_get_property(env, item, MakeString(env, "data"), &datav) == napi_ok)) {
+        if (GetProp(env, item, "pixels", &datav) || GetProp(env, item, "data", &datav)) {
           napi_valuetype dt;
           napi_typeof(env, datav, &dt);
           if (dt != napi_null && dt != napi_undefined) {

@@ -26,6 +26,9 @@ interface DecodeHandlerCallbacks {
 
 // Adaptive drain HWM: EMA of decoder.push() latency scales the drain threshold.
 // Mirrors the browser decode-handler's coalescing strategy exactly.
+// Adaptive drain is meaningful for streaming backends (WASM); the batch native
+// backend decodes inside close(), so these gates (HWM, EMA, BYTE_DRAIN_HWM) are
+// inert there — push() is ~0 ms memcpy and full decode happens before any events flow.
 const HWM_BASE = 6;
 const HWM_EMA_ALPHA = 0.25;
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB safety cap — see browser handler
@@ -108,10 +111,11 @@ export class DecodeHandler {
       this.failSession("QueueOverflow", `Input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
       return;
     }
+    const isAB = chunk instanceof ArrayBuffer;
     const buf = Buffer.from(
-      chunk instanceof ArrayBuffer ? chunk : chunk.buffer,
-      chunk instanceof ArrayBuffer ? 0 : (chunk as Uint8Array).byteOffset,
-      chunk instanceof ArrayBuffer ? chunk.byteLength : (chunk as Uint8Array).byteLength,
+      isAB ? chunk : chunk.buffer,
+      isAB ? 0 : (chunk as Uint8Array).byteOffset,
+      isAB ? chunk.byteLength : (chunk as Uint8Array).byteLength,
     );
     this.chunkQueue.push(buf);
     this.queuedBytes += chunk.byteLength;
@@ -211,7 +215,7 @@ export class DecodeHandler {
       downsample: this.opts.downsample,
       progressionTarget: this.opts.progressionTarget,
       emitEveryPass: this.opts.emitEveryPass,
-      ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
+      ...(this.opts.progressiveDetail != null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
       preserveIcc: this.opts.preserveIcc,
       preserveMetadata: this.opts.preserveMetadata,
     });
@@ -224,7 +228,9 @@ export class DecodeHandler {
         this.failSession("Internal", err instanceof Error ? err.message : String(err));
       }
     } finally {
-      this.finishSession(this.state);
+      if (!this.ended) {
+        this.failSession("Internal", "decoder event stream ended without a terminal event");
+      }
       await this.disposeActiveDecoder();
     }
   }
@@ -356,9 +362,9 @@ export class DecodeHandler {
         case "progress": {
           this.state = "progressive";
           const pixels = toBuffer(event.pixels);
-          // Budget check BEFORE using pixels — mirrors the browser handler's
-          // detached-buffer fix (Node Buffers aren't transferred but the ordering
-          // is correct and symmetric).
+          // Budget check BEFORE posting pixels — mirrors browser. postWithPixels
+          // transfers the underlying ArrayBuffer when the Buffer owns it wholly
+          // (native binding case); small views fall back to clone. No reuse after post.
           if (this.checkBudget()) {
             this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride);
             return;
@@ -373,14 +379,14 @@ export class DecodeHandler {
             pixelStride: event.pixelStride,
           };
           if (event.region !== undefined) msg.region = event.region;
-          this.port.postMessage(msg);
+          this.postWithPixels(msg, pixels);
           this.postFirstPixelMetric();
           break;
         }
         case "final": {
           const pixels = toBuffer(event.pixels);
           // Budget check BEFORE posting pixels — mirrors browser handler's
-          // "final" budget check (browser decode-handler.ts lines 371-373).
+          // "final" budget check (browser decode-handler.ts lines 407-409).
           if (this.checkBudget()) {
             this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride);
             return;
@@ -394,7 +400,7 @@ export class DecodeHandler {
             pixelStride: event.pixelStride,
           };
           if (event.region !== undefined) msg.region = event.region;
-          this.port.postMessage(msg);
+          this.postWithPixels(msg, pixels);
           this.postFirstPixelMetric();
           this.postMetric("time_to_final_ms", performance.now() - this.stageStartMs);
           this.finishSession("final");
@@ -426,6 +432,12 @@ export class DecodeHandler {
     return performance.now() - this.stageStartMs > this.opts.budgetMs;
   }
 
+  private postWithPixels(msg: object, pixels: Buffer): void {
+    const ab = pixels.buffer;
+    const owns = pixels.byteOffset === 0 && pixels.byteLength === ab.byteLength;
+    this.port.postMessage(msg, owns ? [ab] : []);
+  }
+
   private postBudgetExceeded(stage: DecodeStage, info: ImageInfo, pixels: Buffer, format: PixelFormat, pixelStride: number): void {
     if (this.ended) return;
     const msg: MsgDecodeBudgetExceeded = {
@@ -437,7 +449,7 @@ export class DecodeHandler {
       format,
       pixelStride,
     };
-    this.port.postMessage(msg);
+    this.postWithPixels(msg, pixels);
     this.finishSession("budget_exceeded");
     // Best-effort unblock of decoder.events() iterator — mirrors browser handler.
     void this.disposeActiveDecoder();
