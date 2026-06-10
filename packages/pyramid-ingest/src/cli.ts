@@ -100,6 +100,8 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       "suggest-migrations": { type: "boolean", default: false },
       // K2
       "chaos-test": { type: "boolean", default: false },
+      // B6: surface for retrying checkpoint.failed (pairs with ingest.ts retryFailed)
+      "retry-failed": { type: "boolean", default: false },
       config: { type: "string" },
       // O1/O6
       json: { type: "boolean", default: false },
@@ -422,6 +424,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       ...(parsed["profile-convergence"] ? { profileConvergence: true } : {}),
       ...(parsed.resume ? { resume: true } : {}),
       ...(parsed["chaos-test"] ? { chaosTest: true } : {}),
+      ...(parsed["retry-failed"] ? { retryFailed: true } : {}),
       statMap,
     };
     const result = await ingestBatch(files, backends, batchOpts);
@@ -431,7 +434,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
 
     if (proxy === undefined && !parsed.shard && !dryRun) await rebuildIndex(parsed.out, tel);
 
-    const suffix = dryRun ? " (dry-run)" : (parsed.shard ? ` (shard ${parsed.shard})` : (parsed.resume ? " (resumed)" : ""));
+    const suffix = dryRun ? " (dry-run)" : (parsed.shard ? ` (shard ${parsed.shard})` : (parsed.resume ? (parsed["retry-failed"] ? " (resumed, retrying failed)" : " (resumed)") : ""));
     process.stdout.write(
       `pyramid-ingest: ${result.written} written, ${result.skipped} skipped, ${result.failed.length} failed${suffix}\n`,
     );

@@ -216,6 +216,8 @@ export const cliArgsSchema = z.object({
   "suggest-migrations": z.boolean().optional().default(false),
   // K2: chaos injection for testing resume/GC under failure (unlocked by surface + locks + checkpoint)
   "chaos-test": z.boolean().optional().default(false),
+  // B6: allow retrying prior failures recorded in checkpoint (transient errors like EBUSY/OOM during previous run)
+  "retry-failed": z.boolean().optional().default(false),
   config: z.string().optional(),
   // O1/O6 Phase2: structured output + bounded runlog
   json: z.boolean().optional().default(false),

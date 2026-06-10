@@ -9,7 +9,7 @@ export interface CheckpointState {
   batchId: string;            // UUID per invocation
   startedAt: number;
   inFlight: string[];         // master paths currently being processed
-  completed: { path: string; outcome: "written" | "skipped" }[];
+  completed: { path: string; outcome: "written" | "skipped"; stagedBytes?: number; durationMs?: number }[];
   failed: { path: string; error: string; code?: string }[];
 }
 
