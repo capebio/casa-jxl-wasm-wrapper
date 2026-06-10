@@ -24,6 +24,7 @@ import {
   validateDecodedOutput,
   type TileId,
   raceWithAbort,
+  ensureIccProfile,
 } from "./decode-core.js";
 import { prepareDecodePlan } from "./plan.js";
 import { getLevelId } from "./cache.js";
@@ -170,6 +171,7 @@ export async function decodeTiledViewport(
       tilesY,
       hasAlpha: true,
       bitsPerSample: source.bitsPerSample,
+      version: (source as any).version ?? 1,
     };
     const n = plan.tiles.length;
     const total = n * 2;
@@ -261,6 +263,11 @@ export async function decodeTiledViewport(
         cache.set(cacheKeyFinal, target!.slice(0, need));
       }
     }
+    // Agent6-4: attach ICC (shared ref) if requested. ensure is lazy + cached on source.
+    if (options?.preserveMetadata) {
+      const icc = await ensureIccProfile(source, options);
+      if (icc) result.iccProfile = icc;
+    }
     return result;
   }
 
@@ -292,6 +299,11 @@ export async function decodeTiledViewport(
   const dirKey = tileKey(dirId);
   const dirProg: TileProgress = { id: dirId, key: dirKey, stage: 'final', completed: 1, total: 1 };
   onTile?.(vp, 1, dirProg);
+  // Agent6-4
+  if (options?.preserveMetadata) {
+    const icc = await ensureIccProfile(source, options);
+    if (icc) (result as any).iccProfile = icc;
+  }
   return result;
 } finally {
   if (outBuf) buffersInFlight.delete(outBuf);
@@ -446,6 +458,12 @@ async function decodeWhole(
       if (cap === undefined || sz <= cap) {
         cache.set(key, res.pixels.byteLength >= sz ? res.pixels.slice(0, sz) : res.pixels.slice());
       }
+    }
+
+    // Agent6-4
+    if (options?.preserveMetadata) {
+      const icc = await ensureIccProfile(nominalSource || { kind: 'whole', bytes, width: res.width, height: res.height, bitsPerSample: format === 'rgba16' ? 16 : 8, format, bpp } as any, options);
+      if (icc) (res as any).iccProfile = icc;
     }
 
     return res;

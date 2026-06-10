@@ -22,7 +22,8 @@ const headerMemo = new WeakMap<Uint8Array, JxtcHeader>();
 function memoParseHeader(bytes: Uint8Array): JxtcHeader {
   const hit = headerMemo.get(bytes);
   if (hit) return hit;
-  const h: JxtcHeader = Object.freeze({ ...parseJxtcHeader(bytes), version: 1 });
+  const parsed = parseJxtcHeader(bytes);
+  const h: JxtcHeader = Object.freeze({ ...parsed, version: parsed.version });
   headerMemo.set(bytes, h);
   return h;
 }

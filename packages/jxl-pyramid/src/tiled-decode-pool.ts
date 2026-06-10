@@ -19,10 +19,12 @@ import {
   viewportCacheKey,
   type PixelFormat,
   bppOfFormat,
+  ensureIccProfile,
 } from "./decode-core.js";
 import { getLevelId } from "./cache.js";
 import { prepareDecodePlan } from "./plan.js";
 import type { WorkerRequest, WorkerReply, WorkerErrorCode } from "./worker-protocol.js";
+// CoreBudget shape (from jxl-scheduler) for opt-in cross-pool limiting (Agent6-1). Loose to avoid package dep in tsc.
 
 // Grok 3 state enums
 export enum PoolState {
@@ -235,6 +237,9 @@ class PyramidWorkerPool {
   private readonly minIdle: number;
   private readonly requestTimeoutMs: number | undefined;
   private readonly lifecycle: { hookVisibility?: boolean; hookFreeze?: boolean };
+  /** Optional CoreBudget for cross-pool core limiting (with scheduler). Acquire around handle batch (Agent6-1). */
+  private readonly coreBudget: { acquire(cost?: number): Promise<void>; release(cost?: number): void; tryAcquire(cost?: number): boolean; } | null = null;
+  private readonly workerCost: number = 1;
 
   private state: PoolState = PoolState.Created;
   private readonly all = new Set<WorkerHandle>();
@@ -262,6 +267,10 @@ class PyramidWorkerPool {
     requestTimeoutMs?: number;
     lifecycle?: { hookVisibility?: boolean; hookFreeze?: boolean };
     prewarm?: 'eager' | 'lazy' | 'on-demand';
+    /** Opt-in CoreBudget (e.g. globalCoreBudget) to bound total WASM workers across scheduler + pyramid. */
+    coreBudget?: { acquire(cost?: number): Promise<void>; release(cost?: number): void; tryAcquire(cost?: number): boolean; } | undefined;
+    /** Tokens per worker handle (default 1; tile work lighter than full MT session). */
+    workerCost?: number;
   }) {
     this.factory = opts.factory;
     this.maxSize = Math.max(1, opts.maxSize);
@@ -270,6 +279,8 @@ class PyramidWorkerPool {
     this.requestTimeoutMs = opts.requestTimeoutMs;
     this.lifecycle = { hookVisibility: true, hookFreeze: true, ...(opts.lifecycle || {}) };
     this.prewarmMode = opts.prewarm || 'eager';
+    this.coreBudget = opts.coreBudget ?? null;
+    this.workerCost = Math.max(1, opts.workerCost ?? 1);
 
     // browser cooperation hooks (Grok3 #30-33)
     const doc = (globalThis as any).document;
@@ -476,11 +487,28 @@ class PyramidWorkerPool {
         readyOrWait.push(h);
       }
     }
+
+    // Agent6-1 CoreBudget: acquire tokens for the handles we are granting (around the active window).
+    // tryAcquire first for hot path (pan); await only on contention. Cost per handle (default 1).
+    if (this.coreBudget && readyOrWait.length > 0) {
+      const c = this.workerCost;
+      const need = readyOrWait.length;
+      let granted = 0;
+      for (let i = 0; i < need; i++) {
+        if (this.coreBudget.tryAcquire(c)) granted++;
+        else break;
+      }
+      if (granted < need) {
+        await this.coreBudget.acquire(c * (need - granted));
+      }
+    }
+
     return readyOrWait;
   }
 
   /** Return to idle (LIFO), drain waiters, arm all excess (Grok3 #19, #28). */
   release(handles: WorkerHandle[]): void {
+    let budgetReleaseCount = 0;
     for (const h of handles) {
       this.active.delete(h);
       if (this.state === PoolState.Draining || this.state === PoolState.Destroyed || h.state === HandleState.Terminated || h.state === HandleState.Bad || !this.all.has(h) || h.pending.size > 0) {
@@ -489,6 +517,11 @@ class PyramidWorkerPool {
       }
       setHandleState(h, HandleState.WarmReapable);
       this.idle.push(h); // LIFO push
+      budgetReleaseCount++;
+    }
+
+    if (this.coreBudget && budgetReleaseCount > 0) {
+      this.coreBudget.release(this.workerCost * budgetReleaseCount);
     }
 
     // drain waiters before re-arm (Grok3)
@@ -655,7 +688,7 @@ export function shouldUseParallel(
 
 let pool: PyramidWorkerPool | null = null;
 
-function getOrCreatePool(factory: () => WorkerLike): PyramidWorkerPool {
+function getOrCreatePool(factory: () => WorkerLike, coreBudget?: { acquire(cost?: number): Promise<void>; release(cost?: number): void; tryAcquire(cost?: number): boolean; }): PyramidWorkerPool {
   if (pool && (pool.poolState === PoolState.Active || pool.poolState === PoolState.Prewarming || pool.poolState === PoolState.Created)) {
     // factory identity check per Grok3 #12
     return pool;
@@ -674,6 +707,7 @@ function getOrCreatePool(factory: () => WorkerLike): PyramidWorkerPool {
     maxSize,
     idleTimeoutMs: 5000,
     minIdle: 2,
+    coreBudget,
   });
   void p.prewarmAsync(2);
   pool = p;
@@ -842,6 +876,7 @@ export async function decodeTiledViewportPooled(
       bitsPerSample: header.bitsPerSample,
       format: fmt,
       bpp: bppOfFormat(fmt),
+      version: header.version,
     };
   } else {
     source = arg1;
@@ -912,7 +947,7 @@ export async function decodeTiledViewportPooled(
   if (options?.pool) {
     p = options.pool;
   } else if (options?.workerFactory) {
-    p = getOrCreatePool(options.workerFactory);
+    p = getOrCreatePool(options.workerFactory, (options as any).coreBudget);
   } else {
     // fallback direct into outBuffer
     const direct = await decodeRegion(source.bytes, vp);
@@ -988,6 +1023,11 @@ export async function decodeTiledViewportPooled(
     }
     const result: DecodedLevel = { pixels: outBuffer, width: vp.w, height: vp.h, format: plan.format as PixelFormat };
     if (cache && cacheKeyFinal) cache.set(cacheKeyFinal, new Uint8Array(outBuffer));
+    // Agent6-4: stamp shared ICC ref (once per source via ensure) for pooled path.
+    if (options?.preserveMetadata) {
+      const icc = await ensureIccProfile(source as any, options as any);
+      if (icc) result.iccProfile = icc;
+    }
     return result;
   } finally {
     p.release(liveHandles);

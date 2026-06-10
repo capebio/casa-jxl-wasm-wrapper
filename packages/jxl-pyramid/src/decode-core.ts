@@ -15,6 +15,8 @@ export interface DecodedLevel {
    * under a 'final' viewportCacheKey — later hits would return zero-filled holes as complete final pixels.
    */
   failedTiles?: TileId[];
+  /** ICC profile bytes from the container (pass-through; no transform applied). Populated when DecodeOptions.preserveMetadata (Agent 6 item 4). */
+  iccProfile?: Uint8Array;
 }
 
 export const formatFromBits = (bits: 8 | 16): PixelFormat => (bits === 16 ? 'rgba16' : 'rgba8');
@@ -358,6 +360,10 @@ export interface DecodeOptions {
   budgetMs?: number;
   /** L4-4: resume-after-abort support; skip these tile keys (tileKey format) during progressive per-tile decode. */
   skipTiles?: ReadonlySet<string>;
+  /** When true (opt-in for Agent6-4), attaches iccProfile (pass-through from container) to results. Uses once-per-LevelSource lazy capture. Default false keeps prior perf for common sRGB paths. */
+  preserveMetadata?: boolean;
+  /** Opt-in CoreBudget (e.g. global from jxl-scheduler) to bound concurrent WASM workers with the main scheduler pool (Agent6-1). Passed to internal PyramidWorkerPool if workerFactory used. */
+  coreBudget?: { acquire(cost?: number): Promise<void>; release(cost?: number): void; tryAcquire(cost?: number): boolean; } | null;
   /**
    * Progressive DC-then-final first-paint (F1, cites L3m-2 L21m-2 L8pm-3).
    * When set, per-tile (or viewport) uses createDecoder({ progressionTarget: 'dc' }) for fast coarse paint,
@@ -370,6 +376,42 @@ export interface DecodeOptions {
 
 export type ProgressiveMode = 'dc-then-final' | undefined;
 
+/** Agent6-4: once-per-LevelSource lazy capture of ICC (and future metadata) using minimal header decoder + facade.getIccProfile.
+ *  Caches on the source object (like bytesId). Shared reference stamped to results (no per-tile copies).
+ *  Only runs if options.preserveMetadata. For JXTC the profile lives in the codestream(s); header target is cheap.
+ */
+export async function ensureIccProfile(
+  source: { bytes: Uint8Array; [k: string]: any },
+  opts?: { preserveMetadata?: boolean },
+): Promise<Uint8Array | null> {
+  if (!opts?.preserveMetadata) return null;
+  const key = '_iccProfile';
+  if (key in (source as any)) return (source as any)[key] || null;
+  try {
+    // Dynamic import avoids any potential cycle; facade has the getIccProfile (added for decode states).
+    const wasm = await import("@casabio/jxl-wasm");
+    const dec = wasm.createDecoder({
+      format: 'rgba8',
+      progressionTarget: 'header',
+      emitEveryPass: false,
+      preserveIcc: true,
+      preserveMetadata: false,
+    } as any);
+    // Prefix is sufficient for header + color profile (libjxl emits early).
+    const prefixLen = Math.min(256 * 1024, source.bytes.length);
+    await dec.push(source.bytes.subarray(0, prefixLen));
+    await dec.close();
+    let icc = (dec as any).getIccProfile ? (dec as any).getIccProfile() : null;
+    if (icc) icc = new Uint8Array(icc); // own the bytes
+    (source as any)[key] = icc || null;
+    await Promise.resolve((dec as any).dispose()).catch(() => {});
+    return (source as any)[key];
+  } catch {
+    (source as any)[key] = null;
+    return null;
+  }
+}
+
 /**
  * Scheduler boundary documentation (P3, Lens 1/19).
  * decode-core's WorkerLike + PyramidPoolLike (and the tiled worker pool in tiled-decode-pool.ts) are for the
@@ -377,9 +419,11 @@ export type ProgressiveMode = 'dc-then-final' | undefined;
  * calls, stream-stitch writes, optional dc-then-final progressive. This is intentionally separate from the
  * jxl-scheduler / jxl-session streaming protocol (chunked progressive full-codestream sessions with preemption,
  * DedupeRegistry fan-out, adaptive HWM backpressure, and pause/resume). Both may create WASM-backed workers,
- * but they are different workloads (random viewport tiles vs sequential byte-stream decode). Cross-pool CPU/core
- * oversubscription is governed by CoreBudget (sched-1) on the scheduler side only. No unification of the two
- * pools is planned in the current architecture; they remain distinct by design.
+ * but they are different workloads (random viewport tiles vs sequential byte-stream decode).
+ *
+ * Cross-pool CPU/core oversubscription (Agent 6 item 1): Pyramid pool now supports optional CoreBudget
+ * (from @casabio/jxl-scheduler) for opt-in bounding alongside scheduler. Pools remain distinct by design
+ * (dumb tile ROI vs full session state). Acquire/release tokens around the batch handle window (not per-tile).
  */
 
 /** Worker-like handle accepted by the pyramid pool (duck-typed; matches browser Worker + test doubles). See module comment above for scheduler boundary. */

@@ -7,7 +7,7 @@ import { formatFromBits, bppOfFormat, type PixelFormat, PyramidError } from "./d
  */
 export type LevelSource =
   | { kind: "whole"; bytes: Uint8Array; width: number; height: number; bitsPerSample: 8 | 16; format: PixelFormat; bpp: 4 | 8; bytesId?: number }
-  | { kind: "tiled"; bytes: Uint8Array; width: number; height: number; tileSize: number; bitsPerSample: 8 | 16; format: PixelFormat; bpp: 4 | 8; bytesId?: number };
+  | { kind: "tiled"; bytes: Uint8Array; width: number; height: number; tileSize: number; bitsPerSample: 8 | 16; format: PixelFormat; bpp: 4 | 8; version: 1 | 2; bytesId?: number };
 
 export function createLevelSource(
   entry: Pick<PyramidLevel, "w" | "h" | "tiled"> & { bitsPerSample?: 8 | 16 },
@@ -29,6 +29,7 @@ export function createLevelSource(
       bitsPerSample: header.bitsPerSample,
       format: fmt,
       bpp: bp,
+      version: header.version,
     };
   }
   const bits = entry.bitsPerSample ?? 8;

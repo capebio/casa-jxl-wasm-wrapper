@@ -267,6 +267,10 @@ export interface JxlDecoder {
   events(): AsyncIterable<DecodeEvent>;
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
+  /** ICC profile captured from the codestream (if present). Call after header/progress events or after close for one-shot.
+   *  Returns a copy of the profile bytes (or null). WASM always preserves; native respects preserveIcc.
+   */
+  getIccProfile(): Uint8Array | null;
 }
 
 export interface EncodeStats {
@@ -1132,6 +1136,10 @@ class LibjxlDecoder implements JxlDecoder {
   private closed = false;
   private eventsStarted = false;
 
+  // For getIccProfile (2.10 / Agent6-4): captured after dec create in progressive/one-shot.
+  private moduleRef: any = null;
+  private decHandle: number = 0;
+
   constructor(private readonly options: DecoderOptions) {}
 
   push(chunk: ArrayBuffer | Uint8Array): void {
@@ -1217,6 +1225,8 @@ class LibjxlDecoder implements JxlDecoder {
       ? module._jxl_wasm_dec_create_x(fmtIndex, progressiveDetail, decFlags)
       : module._jxl_wasm_dec_create!(fmtIndex, progressiveDetail);
     if (dec === 0) throw new Error("JXL progressive decoder creation failed");
+    this.moduleRef = module;
+    this.decHandle = dec;
     // Cache bridge fn refs once — avoids repeated property lookup on module per iteration.
     const decPush         = module._jxl_wasm_dec_push!;
     const decWidth        = module._jxl_wasm_dec_width!;
@@ -1324,7 +1334,7 @@ class LibjxlDecoder implements JxlDecoder {
           }
         }
 
-        if (result === 1) {
+        if (result === 1 || result === 3) {
           drainPending = true;
           gotRealFlush = true;
           flushCount++;
@@ -1365,7 +1375,24 @@ class LibjxlDecoder implements JxlDecoder {
             };
             if (hasRegion) ev.regionFallback = "full-frame-then-crop";
             if (outPixels.region !== undefined) ev.region = outPixels.region;
+
+            // Agent6-2: animation frame boundary via bridge return JXL_DEC_RESULT_FRAME_DONE (3).
+            // Non-last frames emit here with frame metadata (populated by bridge on JXL_DEC_FRAME).
+            // Continue the loop for subsequent frames instead of early return.
+            if (result === 3) {
+              // frameIndex etc may be enriched by bridge state; slot them if helpers exist on module.
+              // (types already declare the fields on progress/final for consumers)
+              (ev as any).frameIndex = (ev as any).frameIndex ?? flushCount - 1;
+              (ev as any).isLastFrame = false;
+              // duration/name/anim* left for bridge-exposed fns or future; consumers get what is available.
+            }
+
             yield ev;
+
+            if (result === 3) {
+              // continue delivering next anim frame(s); do not early-exit on progressionTarget
+              continue;
+            }
             if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
           }
           continue;
@@ -1580,6 +1607,25 @@ class LibjxlDecoder implements JxlDecoder {
     this.queuedBytes = 0;
     this.cancelled = true;
     this.wake();
+  }
+
+  getIccProfile(): Uint8Array | null {
+    const m = this.moduleRef;
+    const d = this.decHandle;
+    if (!m || !d || typeof m._jxl_wasm_dec_icc_size !== 'function' || typeof m._jxl_wasm_dec_icc_ptr !== 'function') return null;
+    try {
+      const size = m._jxl_wasm_dec_icc_size(d) | 0;
+      if (size <= 0) return null;
+      const ptr = m._jxl_wasm_dec_icc_ptr(d) | 0;
+      if (!ptr) return null;
+      const heap = m.HEAPU8 || (globalThis as any).HEAPU8;
+      if (!heap) return null;
+      const out = new Uint8Array(size);
+      out.set(heap.subarray(ptr, ptr + size));
+      return out;
+    } catch {
+      return null;
+    }
   }
 }
 
