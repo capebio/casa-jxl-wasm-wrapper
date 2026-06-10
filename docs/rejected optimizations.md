@@ -98,6 +98,30 @@ This document records optimization proposals that were evaluated and rejected.
 
 ## `packages/jxl-stream/src/browser.ts`
 *   **Adaptive Prefetch Depth (G2-8):** Multi-ahead prefetch risks queueing beyond worker limits (128MiB cap). The current one-ahead prefetch is correct.
+*   **SB-9 small-chunk coalescing (Agent 5, re-explored with relaxed scope + bench):** 
+  Evidence collected via before/after speed test on synthetic many-tiny-chunk ReadableStream (exactly the fixture the spec required). Mock RecordedSession (isolates stream pipe + push cost; push count = 1:1 proxy for scheduler.send(decode_chunk) / postMessage count). 7 iterations, median. Same harness for both.
+
+  **Baseline (direct per-chunk push, EXPERIMENTAL_COALESCE=false):**
+  - 1MiB @ 512B chunks: wall_med=3.05ms, pushes=2048, avg=512B
+  - 4MiB @ 512B chunks: wall_med=7.28ms, pushes=8192, avg=512B
+  - 4MiB @ 4KiB: wall=2.84ms, pushes=1024
+  - 4MiB @ 16KiB: wall=2.15ms, pushes=256
+  - 4MiB @ 256KiB (control, already large): wall=1.63ms, pushes=16
+
+  **Coalesced (64KiB thresh, true):**
+  - 1MiB @ 512B: wall_med=2.59ms (-0.46ms / ~15%), pushes=16 (~128x reduction), avg~65KiB
+  - 4MiB @ 512B: wall_med=6.34ms (-0.94ms / ~13%), pushes=64 (~128x)
+  - 4MiB @ 4KiB: wall=3.23ms (slight regression vs baseline), pushes=64 (~16x)
+  - 4MiB @ 16KiB: wall=2.41ms (slight regression), pushes=64
+  - 4MiB @ 256KiB: ~same as baseline (16 pushes)
+
+  Clear win on the target metric (postMessage/push count) for very-tiny regime. Modest wall win in ingestion microbench for 512B case. For "small but not tiny" (4-16KiB) the message reduction is still large but concat/copy overhead produced flat-to-slight regression in this isolated test. Large-chunk control: no regression.
+
+  Decision: Still rejected for landing. Reasons: (1) R1-4 adjacency ("decodeBatch() on facade... Wrong layer. Batching, dedupe, and preemption belong in the scheduler") + similar "Adaptive chunk batching (DH6-4)" and "Latest-frame coalescing (14)" rejections; (2) CLAUDE.md "no-tunables-without-evidence" + "adaptive/heuristic changes require benchmark data" — the evidence shows the win is narrow (only extreme tiny chunks) and marginal on wall in the micro; (3) adds buffering + concat + flush logic to the already-non-trivial one-ahead + maxBytes + abort loop in the I/O adapter; (4) backpressure granularity may be affected (fewer but larger pushes). The numbers are now recorded for future re-evaluation if real end-to-end (with scheduler + WASM) shows larger savings or if a scheduler-side batcher is ever revisited. No permanent coalesce left in tree.
+
+*   **SB-10 resumable Range (Agent 5):** Not implemented. 
+  Future: resumable Range continuation for field/offline.
+  Brief exploration (allowed broader files): fromByteRange already does the Range header + 206/200 handling + skip for non-zero start. A resumable version would need: (a) way to report "bytes successfully delivered so far" (the RangeNegotiation.delivered or a new cursor), (b) persistence of the partial prefix (jxl-cache OPFS or direct filesystem; content-agnostic cache is a good fit), (c) on resume: fromByteRange(url, start=delivered, end, ...) possibly with If-Range/If-Match using ETag or Last-Modified from prior response for safety, (d) handling of server that doesn't support resume (fall back to full or error). For mid-codestream resume the decode session would need to tolerate appended bytes to a previous truncated push (or restart the DecodeSession). High value for flaky field links + offline gallery use, but non-trivial surface + interaction with cache + possible partial-EOF handling in session/worker. Correctly left as future note; would require its own spec + evidence of callers before implementing.
 
 ## `src/lib.rs` / `web/jxl-wrapper-lab.js` / `web/jxl-benchmark.js` (WASM Resizer)
 *   **`fast_image_resize` crate (Gemini spec):** Rejected. The crate's v2 API (`NonZeroU32`, `Image::from_slice_u8`, `Resizer::new(ResizeAlg::...)`) is outdated — v3 changed the interface. Introduces a new build dependency for no quality benefit over a box filter for thumbnails. Existing `downscale_rgb` pattern extended to 4 channels instead.

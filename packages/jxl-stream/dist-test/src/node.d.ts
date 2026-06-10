@@ -1,4 +1,3 @@
-/// <reference types="node" resolution-mode="require"/>
 import { Readable } from 'node:stream';
 import { DecodeSession, EncodeSession } from './browser.js';
 /**
