@@ -90,7 +90,7 @@ describe("Scheduler preemption", () => {
       startMsg: makeDecodeStart("nr-1", "near"),
       sourceKey: null,
       signal: null,
-    }).then(() => { nearResolved = true; });
+    }).then(() => { nearResolved = true; }).catch(() => {});
 
     await new Promise<void>((res) => setTimeout(res, 10));
     assert.equal(nearResolved, false, "near job is queued, not immediately assigned");

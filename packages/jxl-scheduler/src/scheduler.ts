@@ -71,6 +71,12 @@ export interface SchedulerMetrics {
   preemptions: number;
   /** Total sessions created since construction. */
   totalSessions: number;
+  /** Deduped subscriber sessions (fan-out listeners holding no worker). */
+  subscribers: number;
+  /** EMA of observed push drain latency (ms) driving adaptive backpressure. */
+  drainLatencyEmaMs: number;
+  /** Current effective backpressure HWM (adapts with drainLatencyEma). */
+  effectiveHwm: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +121,7 @@ interface SessionRecord {
   backpressure?: BackpressureState;
   // Worker holding the paused WASM decoder state. Set only for "paused" sessions.
   pausedOnWorker?: PoolWorker;
-  // Wall-clock time the session was created. Used for victim scoring.
+  // Monotonic time (performance.now()) the session was created. Used for victim scoring.
   createdAt: number;
   // Monotonic time we entered the scheduler queue (only meaningful while state==="queued").
   // Populated for benchmark observability (parity with Tauri queue_wait_ms and lightbox_bench).
@@ -123,6 +129,10 @@ interface SessionRecord {
   // Fractional decode progress [0, 1]. Updated from decode_progress stage messages.
   // Encode sessions stay at 0 (no protocol progress messages exist for encode).
   progress: number;
+  // Cleanup fn for AbortSignal listener (stored to allow removal on normal completion; prevents leak on page-lifespan signals).
+  abortCleanup?: () => void;
+  // True for dedupe fan-out subscribers (they never own a worker; counted separately in metrics).
+  isSubscriber?: boolean;
 }
 
 const DEFAULT_PUSH_HWM = 4;
@@ -152,6 +162,12 @@ export class Scheduler {
 
   // Maps worker id → paused session id. A worker holds at most one paused decode session
   // (the WASM decoder state is bound to that worker's heap and cannot migrate).
+  //
+  // Memory: each parked session pins a full WASM decoder (including its output pixel
+  // buffers) in the worker. Parked workers are removed from the active/idle sets.
+  // No cap exists; concurrent visible preemptions can pin multiple decoder heaps.
+  // Candidate future feature (not implemented): evict/cancel oldest parked when
+  // parked count exceeds a threshold to bound memory under pathological preemption.
   private readonly workerPausedSession = new Map<number, string>();
 
   // Workers whose onMessage handler has already been wired — prevents stale-closure
@@ -167,6 +183,7 @@ export class Scheduler {
   private _runningCount = 0;
   private _queuedCount = 0;
   private _pausedCount = 0;
+  private _subscriberCount = 0;
 
   // Preemption victim scoring weights.
   private readonly PREEMPT_PROGRESS_W = 3.0;
@@ -229,6 +246,18 @@ export class Scheduler {
       const primaryId = this.dedupe.findPrimary(params.sourceKey);
       if (primaryId !== null) {
         this.dedupe.subscribe(params.sessionId, primaryId);
+        // Dedupe priority invariant: visible subscriber on background primary escalates primary.
+        // Prevents visible view from inheriting background pacing or being preemptable.
+        const primaryRecord = this.sessions.get(primaryId);
+        if (primaryRecord !== undefined && params.priority === "visible" && primaryRecord.priority === "background") {
+          primaryRecord.priority = "visible";
+          if (primaryRecord.worker !== undefined) this.backgroundWorkers.delete(primaryRecord.worker);
+          if (primaryRecord.state === "queued" && primaryRecord.pending !== undefined) {
+            this.queue.remove(primaryId);
+            primaryRecord.pending.priority = "visible";
+            this.queue.enqueue({ priority: "visible", sessionId: primaryId, payload: primaryRecord.pending });
+          }
+        }
         // Subscriber gets a lightweight record — handlers only, no worker/pending.
         this.sessions.set(params.sessionId, {
           sessionId: params.sessionId,
@@ -238,10 +267,10 @@ export class Scheduler {
           handlers: this.takePendingHandlers(params.sessionId),
           createdAt: performance.now(),
           progress: 0,
+          isSubscriber: true,
         });
-        this._runningCount++;
+        this._subscriberCount++;
         this.totalSessionCount++;
-        const primaryRecord = this.sessions.get(primaryId);
         return { workerId: primaryRecord?.worker?.id ?? -1 };
       }
       this.dedupe.register(params.sessionId, params.sourceKey);
@@ -253,6 +282,10 @@ export class Scheduler {
     if (this.admissionGate !== undefined) {
       const release = await this.admissionGate.admit(params.sessionId, params.priority);
       this.gateReleases.set(params.sessionId, release);
+      if (this.destroyed) {
+        this.releaseAdmission(params.sessionId);
+        throw new Error("[jxl-scheduler] Scheduler is shut down.");
+      }
     }
 
     // Sync fast path: if an idle worker is available immediately, skip the
@@ -266,6 +299,10 @@ export class Scheduler {
 
     // No idle worker — try spawn (async path).
     const worker = await this.pool.acquire();
+    if (this.destroyed) {
+      this.releaseAdmission(params.sessionId);
+      throw new Error("[jxl-scheduler] Scheduler is shut down.");
+    }
     if (worker !== null) {
       this.assignWorker(worker, params.sessionId, params.startMsg);
       this.setupSignalAbort(params.sessionId, params.signal);
@@ -275,6 +312,10 @@ export class Scheduler {
     // No worker available — check for preemption opportunity.
     if (params.priority === "visible") {
       const preempted = await this.tryPreempt(params);
+      if (this.destroyed) {
+        this.releaseAdmission(params.sessionId);
+        throw new Error("[jxl-scheduler] Scheduler is shut down.");
+      }
       if (preempted !== null) return { workerId: preempted };
     }
 
@@ -402,6 +443,9 @@ export class Scheduler {
         // Transfer the worker to the promoted subscriber.
         promotedRecord.worker = record.worker;
         record.worker.activeSessionId = promotedTo;
+        // Dedupe promotion can change priority (bg <-> visible); keep backgroundWorkers set correct for preemption eligibility.
+        if (promotedRecord.priority === "background") this.backgroundWorkers.add(record.worker);
+        else this.backgroundWorkers.delete(record.worker);
       } else if (record?.pausedOnWorker !== undefined && promotedRecord !== undefined) {
         // Transfer paused state.
         promotedRecord.state = "paused";
@@ -424,18 +468,22 @@ export class Scheduler {
         this.gateReleases.set(promotedTo, grel);
       }
 
-      if (record?.state === "running" || record?.state === "cancelling") this._runningCount--;
-      else if (record?.state === "queued") this._queuedCount--;
-      else if (record?.state === "paused") this._pausedCount--;
+      // Old primary (record) leaves its bucket. Promoted former-sub leaves subscriber count and enters primary bucket.
+      this.adjustSessionCount(record, -1);
+      if (promotedRecord?.isSubscriber) {
+        this._subscriberCount = Math.max(0, this._subscriberCount - 1);
+        delete promotedRecord.isSubscriber;
+        if (promotedRecord.state === "running" || promotedRecord.state === "cancelling") this._runningCount++;
+        else if (promotedRecord.state === "queued") this._queuedCount++;
+        else if (promotedRecord.state === "paused") this._pausedCount++;
+      }
       this.sessions.delete(sessionId);
       return true;
     }
 
     if (!cancelWorker) {
       this.releaseAdmission(sessionId);
-      if (record?.state === "running" || record?.state === "cancelling") this._runningCount--;
-      else if (record?.state === "queued") this._queuedCount--;
-      else if (record?.state === "paused") this._pausedCount--;
+      this.adjustSessionCount(record, -1);
       this.sessions.delete(sessionId);
       return true;
     }
@@ -456,9 +504,7 @@ export class Scheduler {
     } else if (record !== undefined) {
       // No worker, no pending — orphaned. Clean up.
       this.releaseAdmission(sessionId);
-      if (record.state === "running" || record.state === "cancelling") this._runningCount--;
-      else if (record.state === "queued") this._queuedCount--;
-      else if (record.state === "paused") this._pausedCount--;
+      this.adjustSessionCount(record, -1);
       this.sessions.delete(sessionId);
     }
 
@@ -495,6 +541,13 @@ export class Scheduler {
       // Compact when head has consumed the whole array.
       if (bp.pendingHead >= bp.pendingPushes.length) {
         bp.pendingPushes.length = 0;
+        bp.pendingHead = 0;
+      } else if (bp.pendingHead >= 1024) {
+        // High-threshold head compaction under sustained partial backpressure.
+        // Mirrors the 64-entry pattern in PriorityQueue but at higher watermark
+        // (consistent with prior rejection of low thresholds in other structures).
+        bp.pendingPushes.copyWithin(0, bp.pendingHead);
+        bp.pendingPushes.length -= bp.pendingHead;
         bp.pendingHead = 0;
       }
       this.updateDrainEma(performance.now() - waiter!.waitedAt);
@@ -545,6 +598,9 @@ export class Scheduler {
       background: this.backgroundWorkers.size,
       preemptions: this.preemptionCount,
       totalSessions: this.totalSessionCount,
+      subscribers: this._subscriberCount,
+      drainLatencyEmaMs: this.drainLatencyEma,
+      effectiveHwm: this.adaptiveHwm(),
     };
     return Object.freeze(snapshot);
   }
@@ -567,6 +623,23 @@ export class Scheduler {
     const clonedMetric = Object.freeze({ ...(msg.metric as object) });
     const protectedMsg = Object.freeze({ ...msg, metric: clonedMetric }) as WorkerToMainMessage;
     return protectedMsg;
+  }
+
+  // Route count adjustment for a record. Subscribers are tracked separately from
+  // primary running/queued/paused so that "running" accurately reflects worker assignments.
+  private adjustSessionCount(record: SessionRecord | undefined, delta: number): void {
+    if (record === undefined) return;
+    if (record.isSubscriber) {
+      this._subscriberCount = Math.max(0, this._subscriberCount + delta);
+      return;
+    }
+    if (record.state === "running" || record.state === "cancelling") {
+      this._runningCount = Math.max(0, this._runningCount + delta);
+    } else if (record.state === "queued") {
+      this._queuedCount = Math.max(0, this._queuedCount + delta);
+    } else if (record.state === "paused") {
+      this._pausedCount = Math.max(0, this._pausedCount + delta);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -594,13 +667,18 @@ export class Scheduler {
     const prevHandlers = victimRecord?.handlers ?? [];
     let ackResolved = false;
 
+    let resolvedKind: "paused" | "cancelled" | "terminal" | null = null;
     const ack = new Promise<void>((resolve) => {
       const handler = (msg: WorkerToMainMessage) => {
         const matched = usePause
           ? (msg.type === "decode_paused" && msg.sessionId === victimSessionId)
-          : ((msg.type === "decode_cancelled" || msg.type === "encode_cancelled") && msg.sessionId === victimSessionId);
+          : ((msg.type === "decode_cancelled" || msg.type === "encode_cancelled") && msg.sessionId === victimSessionId)
+            || (this.isTerminalMessage(msg) && msg.sessionId === victimSessionId);
         if (matched) {
           ackResolved = true;
+          if (usePause && msg.type === "decode_paused") resolvedKind = "paused";
+          else if (!usePause && (msg.type === "decode_cancelled" || msg.type === "encode_cancelled")) resolvedKind = "cancelled";
+          else if (this.isTerminalMessage(msg)) resolvedKind = "terminal";
           resolve();
           if (victimRecord) prevHandlers.shift();
         }
@@ -633,12 +711,29 @@ export class Scheduler {
     }
     backgroundWorker.cancelling = false;
 
+    if (resolvedKind === "terminal") {
+      // Victim finished naturally (decode_final etc) in the window between selection and preemption signal.
+      // Normal handleWorkerMessage already cleaned the victim and released the worker to pool.
+      // Do not park/cancel or double-clean; acquire via fallback (may reclaim the just-released worker).
+      const newWorker = await this.pool.acquire();
+      if (newWorker !== null) {
+        this.assignWorker(newWorker, params.sessionId, params.startMsg);
+        this.setupSignalAbort(params.sessionId, params.signal);
+        this.preemptionCount++;
+        return newWorker.id;
+      }
+      return null;
+    }
+
     if (!ackResolved) {
       // Timed out: worker recycled (pool.recycle terminates it). The terminal
       // decode_cancelled from the worker may never arrive (activeSessionId is
       // cleared during teardown, so handleWorkerMessage silently drops it).
-      // Use cleanupSession — not releaseSession — to ensure _runningCount is
-      // decremented and the session record is removed from the map now.
+      // Synthesize terminal for victim's handlers so their done()/streams do not hang forever.
+      const victimHandlers = this.sessions.get(victimSessionId)?.handlers ?? [];
+      const cancelType = victimKind === "encode" ? "encode_cancelled" : "decode_cancelled";
+      const cancelMsg = { type: cancelType, sessionId: victimSessionId } as WorkerToMainMessage;
+      for (const h of victimHandlers) { try { h(cancelMsg); } catch { /* handler must not throw */ } }
       this.cleanupSession(victimSessionId);
       const newWorker = await this.pool.acquire();
       if (newWorker !== null) {
@@ -724,6 +819,16 @@ export class Scheduler {
       if (this.workerPausedSession.has(worker.id)) continue;
       const record = this.sessions.get(worker.activeSessionId);
       if (record === undefined) continue;
+      // Dedupe priority: if primary or any subscriber is visible, this worker is not a preemption victim.
+      // A visible consumer attached via fan-out "escalates" the session for preemption eligibility.
+      let hasVisible = record.priority === "visible";
+      if (!hasVisible) {
+        this.dedupe.forEachSubscriber(worker.activeSessionId, (sid) => {
+          const sr = this.sessions.get(sid);
+          if (sr?.priority === "visible") hasVisible = true;
+        });
+      }
+      if (hasVisible) continue;
       const score = this.scoreVictim(record);
       if (score < bestScore) {
         bestScore = score;
@@ -844,7 +949,10 @@ export class Scheduler {
     // Re-stamp the message with the scheduler's current active session ID.
     // This is critical if the worker was promoted to a new primary, as the worker
     // itself is unaware of the JS-side session ID change.
-    const msg = { ...rawMsg, sessionId } as WorkerToMainMessage & { sessionId: string };
+    // Guard the spread: only allocate when the embedded id differs (hot path optimisation).
+    const msg = (rawMsg as { sessionId?: string }).sessionId === sessionId
+      ? (rawMsg as WorkerToMainMessage & { sessionId: string })
+      : ({ ...rawMsg, sessionId } as WorkerToMainMessage & { sessionId: string });
 
     const record = this.sessions.get(sessionId);
     const handlers = record?.handlers ?? EMPTY_HANDLERS;
@@ -906,7 +1014,10 @@ export class Scheduler {
       this.cancelSession(sessionId);
       return;
     }
-    signal.addEventListener("abort", () => this.cancelSession(sessionId), { once: true });
+    const onAbort = () => this.cancelSession(sessionId);
+    signal.addEventListener("abort", onAbort, { once: true });
+    const rec = this.sessions.get(sessionId);
+    if (rec) rec.abortCleanup = () => signal.removeEventListener("abort", onAbort);
   }
 
   private takePendingHandlers(sessionId: string): Array<(msg: WorkerToMainMessage) => void> {
@@ -937,9 +1048,8 @@ export class Scheduler {
     this.releaseAdmission(sessionId);
     const record = this.sessions.get(sessionId);
     if (record !== undefined) {
-      if (record.state === "running" || record.state === "cancelling") this._runningCount--;
-      else if (record.state === "queued") this._queuedCount--;
-      else if (record.state === "paused") this._pausedCount--;
+      this.adjustSessionCount(record, -1);
+      record.abortCleanup?.();
     }
     this.releaseSession(sessionId);
     this.dedupe.complete(sessionId);
@@ -1033,6 +1143,10 @@ export class Scheduler {
       } else if (record.state === "paused") {
         // Notify paused-session callers with a synthetic cancelled message.
         for (const h of record.handlers) h({ type: "decode_cancelled", sessionId: record.sessionId });
+      } else if (record.state === "running" || record.state === "cancelling") {
+        // Running sessions lose their workers on pool.shutdown(); synthesize terminal so callers do not hang.
+        const t = record.kind === "encode" ? "encode_cancelled" : "decode_cancelled";
+        for (const h of record.handlers) { try { h({ type: t, sessionId: record.sessionId } as WorkerToMainMessage); } catch {} }
       }
     }
 
@@ -1042,6 +1156,7 @@ export class Scheduler {
     this._runningCount = 0;
     this._queuedCount = 0;
     this._pausedCount = 0;
+    this._subscriberCount = 0;
     this.sessions.clear();
     this.backgroundWorkers.clear();
     this.workerPausedSession.clear();

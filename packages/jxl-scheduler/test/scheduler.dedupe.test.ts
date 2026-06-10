@@ -180,4 +180,60 @@ describe("Scheduler dedupe", () => {
 
     await sched.shutdown();
   });
+
+  it("background primary + visible subscriber escalates primary; findBackgroundWorker excludes it", async () => {
+    const workers: FakeWorker[] = [];
+    const sched = new Scheduler({
+      factory: fakeWorkerFactory(workers),
+      maxWorkers: 1,
+      idleTimeoutMs: 60_000,
+    });
+
+    // Primary background for a sourceKey.
+    await sched.acquireSlot({
+      sessionId: "bg-primary",
+      priority: "background",
+      startMsg: makeDecodeStart("bg-primary", "background"),
+      sourceKey: "shared-key",
+      signal: null,
+    });
+
+    // Visible subscriber dedupes onto it.
+    await sched.acquireSlot({
+      sessionId: "vis-sub",
+      priority: "visible",
+      startMsg: makeDecodeStart("vis-sub", "visible"),
+      sourceKey: "shared-key",
+      signal: null,
+    });
+
+    // The primary must no longer be selectable for preemption (invariant: visible lane wins).
+    const bgWorker = (sched as any).findBackgroundWorker?.();
+    assert.equal(bgWorker, null, "escalated primary not selectable by findBackgroundWorker");
+
+    // A new distinct visible request cannot preempt the (now-visible) primary; it queues.
+    let thirdAcquired = false;
+    const thirdP = sched.acquireSlot({
+      sessionId: "vis-3",
+      priority: "visible",
+      startMsg: makeDecodeStart("vis-3", "visible"),
+      sourceKey: "other-key",
+      signal: null,
+    }).then(() => { thirdAcquired = true; }).catch(() => {});
+
+    await new Promise<void>((r) => setTimeout(r, 10));
+    assert.equal(thirdAcquired, false, "distinct visible queued (no preemption of escalated primary)");
+
+    // No pause was sent to the primary's worker (would have happened if still background).
+    const pauseSent = workers.some((w) =>
+      w.messages.some((m: any) => m.type === "decode_pause" && m.sessionId === "bg-primary"),
+    );
+    assert.equal(pauseSent, false, "no preemption pause sent to escalated primary");
+
+    // Cleanup.
+    sched.cancelSession("vis-3");
+    sched.cancelSession("vis-sub");
+    sched.cancelSession("bg-primary");
+    await sched.shutdown();
+  });
 });

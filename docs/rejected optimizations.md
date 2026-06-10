@@ -21,6 +21,7 @@ This document records optimization proposals that were evaluated and rejected.
 *   **Worker reuse hinting (22):** Requires new API and proof that WASM module re-initialization (not cache) is a bottleneck.
 *   **Preemption rate limiting (23):** Not a realistic steady state with typical `maxWorkers` (4-8). Needs benchmarks.
 *   **All-or-Nothing Preemption (10):** Addressed structurally; pause/resume is now handled without abandoning the decode state.
+*   **Agent 4 — dedupe priority, metrics, micro-perf (2026-06):** No concrete deltas supplied (query truncated at header). Title implies priority tweaks in dedupe promotion + metrics surface + micro-perf. "Dedupe priority" bookkeeping was a correctness gap (fixed under Agent 3 3.3). Metrics expansions / callbacks / onMetric tax already rejected multiple times ("onMetrics callback (18)", "Metrics expansion (DH-7, DH6-3)", "Dev-mode decode telemetry") because callbacks add overhead at hot points and getMetrics() polling is the contract. Micro-perf and "numeric priority lanes (4)" rejected for churn vs gain without benchmarks. Per CLAUDE.md: adaptive/heuristic or observability changes require benchmark data; do not add without evidence. Category rejected.
 
 ## `packages/jxl-scheduler/src/pool.ts`
 *   **Worker warmup / adaptive concurrency (11, 12):** Same reasoning as above.
