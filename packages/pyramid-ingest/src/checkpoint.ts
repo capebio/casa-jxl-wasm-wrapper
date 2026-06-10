@@ -10,7 +10,7 @@ export interface CheckpointState {
   startedAt: number;
   inFlight: string[];         // master paths currently being processed
   completed: { path: string; outcome: "written" | "skipped" }[];
-  failed: { path: string; error: string }[];
+  failed: { path: string; error: string; code?: string }[];
 }
 
 const CHECKPOINT_FILE = ".pyramid-ingest.checkpoint.json";

@@ -429,7 +429,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
     process.removeListener("SIGINT", onSig);
     process.removeListener("SIGTERM", onSig);
 
-    if (proxy === undefined && !parsed.shard && !dryRun) await rebuildIndex(parsed.out);
+    if (proxy === undefined && !parsed.shard && !dryRun) await rebuildIndex(parsed.out, tel);
 
     const suffix = dryRun ? " (dry-run)" : (parsed.shard ? ` (shard ${parsed.shard})` : (parsed.resume ? " (resumed)" : ""));
     process.stdout.write(

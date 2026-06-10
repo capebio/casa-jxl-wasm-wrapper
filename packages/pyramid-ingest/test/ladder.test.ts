@@ -56,6 +56,9 @@ test("buildJpgLadder produces all levels (incl full) as tiled JXTC (no transcode
   };
   const ladder = await buildJpgLadder(fake, new Uint8Array([1, 2, 3]));
   expect(ladder.orientation).toBe("source");
+  // L9 signature accepts explicit orientation (default "source" for back-compat)
+  const ladder2 = await buildJpgLadder(fake, new Uint8Array([1, 2, 3]), false, "source");
+  expect(ladder2.orientation).toBe("source");
   expect(ladder.levels.map((l) => l.width)).toEqual([256, 512, 1024, 1280]);
   const full = ladder.levels[ladder.levels.length - 1]!;
   // full is now from encodeTileContainer (tiled), not raw transcode bytes
@@ -75,4 +78,61 @@ test("buildProxyLadder returns exactly one level", async () => {
   const ladder = await buildProxyLadder(jxl, gradientRgba(W, H), W, H, 512, "baked");
   expect(ladder.levels).toHaveLength(1);
   expect(Math.max(ladder.levels[0]!.width, ladder.levels[0]!.height)).toBe(512);
+});
+
+test("L1/L2 regression: descending cascade (never upscales), grid bounded by master, dedup exact/near, final ascending", async () => {
+  // Spy downscales to assert L1: no call with dst > src (would have been upscales from 256 in old ascending)
+  const downscaleCalls: Array<{ srcW: number; dstW: number }> = [];
+  const fake: JxlBackend = {
+    async transcodeJpeg() { return new Uint8Array([1]); },
+    async decodeToRgba8() { return { rgba: gradientRgba(800, 600), width: 800, height: 600 }; },
+    async encodeTileContainer(_rgba, w, h, _opts) {
+      return new Uint8Array([0xa0, w & 0xff, (w >> 8) & 0xff, h & 0xff, (h >> 8) & 0xff]);
+    },
+    async downscaleRgba8(_rgba, sw, sh, dw, dh) {
+      downscaleCalls.push({ srcW: sw, dstW: dw });
+      return new Uint8Array(dw * dh * 4);
+    },
+    async encodePyramid() { return []; },
+  };
+  // 800px master: grid filter must drop 1024 ( > master and would dup full); 8bit path also
+  const ladder = await buildJpgLadder(fake, new Uint8Array([1, 2, 3]));
+  const widths = ladder.levels.map((l) => l.width);
+  expect(widths).toEqual([256, 512, 800]); // 1024 excluded by <masterLong; full (800) always emitted; ascending L7
+  // L1: every downscale src >= dst (cascade down only)
+  for (const c of downscaleCalls) {
+    expect(c.dstW).toBeLessThanOrEqual(c.srcW);
+  }
+  expect(downscaleCalls.length).toBeGreaterThan(0);
+
+  // raw 8bit-only path with near-full ratio: master 2100 should drop 2048 (ratio<1.15)
+  const down2: Array<{ srcW: number; dstW: number }> = [];
+  const fakeRaw: JxlBackend = {
+    async encodeTileContainer(_r, w, h) { return new Uint8Array([0xb0, w & 0xff, (w >> 8) & 0xff]); },
+    async downscaleRgba8(_r, sw, _sh, dw, _dh) { down2.push({ srcW: sw, dstW: dw }); return new Uint8Array(dw * 4); },
+    async encodePyramid() { return []; },
+  };
+  const decoded: DecodedMaster = { rgba: gradientRgba(2100, 1500), width: 2100, height: 1500, orientation: "baked" };
+  const ladderRaw = await buildRawLadder(fakeRaw, decoded);
+  const ws = ladderRaw.levels.map((l) => l.width);
+  // 256,512,1024,2100 (2048 skipped by ratio; no 2048)
+  expect(ws).toEqual([256, 512, 1024, 2100]);
+  for (const c of down2) expect(c.dstW).toBeLessThanOrEqual(c.srcW);
+});
+
+test("L1 rgb16 branch + L7 order: grid ascending + big ascending after combined sort", async () => {
+  const downCalls: Array<{ src: number; dst: number }> = [];
+  const fake: JxlBackend = {
+    async encodeTileContainer(_r, w, h) { return new Uint8Array([0xc0, w & 0xff]); },
+    async encodeTileContainer16(_r, w, h) { return new Uint8Array([0xd0, w & 0xff]); },
+    async downscaleRgba8(_r, sw, _sh, dw, _dh) { downCalls.push({ src: sw, dst: dw }); return new Uint8Array(dw * 4); },
+    async downscaleRgba16(_r, sw, _sh, dw, _dh) { downCalls.push({ src: sw, dst: dw }); return new Uint16Array(dw * 4); },
+  };
+  // provide rgb16 to hit the branch; master 3000 -> grid 256/512/1024 + big 2048 + full
+  const rgb16 = new Uint8Array(3000 * 2000 * 6); // dummy packed
+  const decoded: DecodedMaster = { rgba: gradientRgba(3000, 2000), rgb16, width: 3000, height: 2000, orientation: "baked" };
+  const ladder = await buildRawLadder(fake, decoded);
+  const longs = ladder.levels.map((l) => Math.max(l.width, l.height));
+  expect(longs).toEqual([256, 512, 1024, 2048, 3000]); // L7 ascending
+  for (const c of downCalls) expect(c.dst).toBeLessThanOrEqual(c.src);
 });

@@ -76,7 +76,9 @@ export function buildIndexEntry(manifest: Manifest): IndexEntry {
   };
 }
 
-export function isUpToDate(existing: Manifest, mtimeMs: number): boolean {
+export function isUpToDate(existing: Manifest, mtimeMs: number, proxy = false): boolean {
   // mtime exact match (low-mtime-rounding): drop rounding for determinism; fs mtimes are comparable at ms.
-  return existing.proxy !== true && existing.master.mtimeMs === mtimeMs;
+  // P7: proxy flag match for skip (when caller requests proxy, only proxy manifests count as uptodate)
+  const proxyOk = proxy ? existing.proxy === true : existing.proxy !== true;
+  return proxyOk && existing.master.mtimeMs === mtimeMs;
 }

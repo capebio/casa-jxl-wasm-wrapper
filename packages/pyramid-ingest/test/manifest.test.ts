@@ -63,17 +63,22 @@ test("buildManifest flags proxy and buildIndexEntry inlines L0", () => {
   expect(idx.l0).toEqual({ contenthash: "b".repeat(16), w: 512, h: 384 });
 });
 
-test("isUpToDate requires a matching mtime and a non-proxy manifest", () => {
+test("isUpToDate requires matching mtime and proxy flag alignment (non-proxy or proxy)", () => {
   const base = buildManifest({
     imageId: "b".repeat(16), master: { name: "x.orf", format: "orf", mtimeMs: 1000 },
     orientation: "baked", width: 10, height: 10,
     levels: [{ size: "full", w: 10, h: 10, bytes: 1, bitsPerSample: 8, contenthash: "c".repeat(16), tiled: false }],
   });
   expect(isUpToDate(base, 1000)).toBe(true);
+  expect(isUpToDate(base, 1000, false)).toBe(true);
   // low-mtime-rounding: exact match (dropped round); 1000.4 no longer matches
   expect(isUpToDate(base, 1000.4)).toBe(false);
   expect(isUpToDate(base, 2000)).toBe(false);
   expect(isUpToDate({ ...base, proxy: true }, 1000)).toBe(false);
+  // P7: proxy request matches proxy manifest
+  const pxy = { ...base, proxy: true as const };
+  expect(isUpToDate(pxy, 1000, true)).toBe(true);
+  expect(isUpToDate(pxy, 1000, false)).toBe(false);
 });
 
 test("buildManifest produces producedBy and manifestSchemaV1 roundtrips it", () => {
