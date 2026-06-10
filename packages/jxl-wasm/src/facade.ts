@@ -267,10 +267,6 @@ export interface JxlDecoder {
   events(): AsyncIterable<DecodeEvent>;
   cancel(reason?: string): void | Promise<void>;
   dispose(): void | Promise<void>;
-  /** ICC profile captured from the codestream (if present). Call after header/progress events or after close for one-shot.
-   *  Returns a copy of the profile bytes (or null). WASM always preserves; native respects preserveIcc.
-   */
-  getIccProfile(): Uint8Array | null;
 }
 
 export interface EncodeStats {
@@ -380,9 +376,6 @@ interface LibjxlWasmModule {
   // Butteraugli perceptual distance between two RGBA8 images (same dimensions).
   // Returns bit-cast float as int32 (>=0 = valid distance; -1 = error).
   _jxl_wasm_butteraugli_compare?(ptr1: number, ptr2: number, width: number, height: number): number;
-  // Downsampled variant (downsample 2 or 4): faster screening at cost of score drift.
-  // Scores from different downsample factors are not comparable.
-  _jxl_wasm_butteraugli_compare_ds?(ptr1: number, ptr2: number, width: number, height: number, downsample: number): number;
 }
 
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
@@ -668,52 +661,6 @@ export async function computeButteraugli(
 }
 
 /**
- * Compute Butteraugli at reduced resolution for fast screening / early reject.
- * downsample must be 2 or 4 (other values fall back to full-res inside WASM).
- * WARNING: returned distance is for the downsampled images — not numerically
- * comparable to a full-res computeButteraugli on the same pair.
- */
-export async function computeButteraugliDownsampled(
-  pixels1: ArrayBuffer | Uint8Array,
-  pixels2: ArrayBuffer | Uint8Array,
-  width: number,
-  height: number,
-  downsample: 2 | 4,
-): Promise<number> {
-  const module = await loadLibjxlModule();
-  const fn = module._jxl_wasm_butteraugli_compare_ds || module._jxl_wasm_butteraugli_compare;
-  if (!fn) {
-    throw new CapabilityMissing("Butteraugli requires a rebuilt WASM with butteraugli bridge");
-  }
-  const ds = (downsample === 2 || downsample === 4) ? downsample : 1;
-  const pw = Math.ceil(width / ds);
-  const ph = Math.ceil(height / ds);
-  const pixelSize = pw * ph * 4;  // size after downsample in the compare call
-  // We still allocate full original for the downscale step inside WASM; pass original w/h + factor.
-  // The WASM ds path will downscale internally using the provided factor.
-  const view1 = copyOrBorrowInput(pixels1, false);
-  const view2 = copyOrBorrowInput(pixels2, false);
-  const origSize = width * height * 4;
-  if (view1.byteLength < origSize || view2.byteLength < origSize) {
-    throw new Error(`computeButteraugliDownsampled: expected ${origSize} bytes for ${width}×${height} RGBA8`);
-  }
-  const ptr1 = module._malloc(origSize);
-  const ptr2 = module._malloc(origSize);
-  try {
-    module.HEAPU8.set(view1.subarray(0, origSize), ptr1);
-    module.HEAPU8.set(view2.subarray(0, origSize), ptr2);
-    const bits = fn(ptr1, ptr2, width, height, ds);
-    if (bits < 0) throw new Error("Butteraugli WASM compare failed");
-    const floatBuf = new ArrayBuffer(4);
-    new Int32Array(floatBuf)[0] = bits;
-    return new Float32Array(floatBuf)[0] as number;
-  } finally {
-    module._free(ptr1);
-    module._free(ptr2);
-  }
-}
-
-/**
  * Extract embedded JPEG reconstruction from JXL container (if present).
  * Container JXLs (created with encodeTileContainerRgba8/JXTC) may embed
  * the original JPEG bitstream for fast native preview. Scans container
@@ -886,7 +833,7 @@ export async function encodeTileContainerRgba8(
   pixels: ArrayBuffer | Uint8Array,
   width: number,
   height: number,
-  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean; onMetric?: (name: string, value: number) => void },
+  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean },
 ): Promise<Uint8Array> {
   return encodeTileContainer(pixels, width, height, options, "rgba8");
 }
@@ -900,7 +847,7 @@ export async function encodeTileContainerRgba16(
   pixels: ArrayBuffer | Uint8Array,
   width: number,
   height: number,
-  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean; onMetric?: (name: string, value: number) => void },
+  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean },
 ): Promise<Uint8Array> {
   return encodeTileContainer(pixels, width, height, options, "rgba16");
 }
@@ -909,10 +856,9 @@ async function encodeTileContainer(
   pixels: ArrayBuffer | Uint8Array,
   width: number,
   height: number,
-  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean; onMetric?: (name: string, value: number) => void },
+  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean },
   format: "rgba8" | "rgba16",
 ): Promise<Uint8Array> {
-  const tStart = performance.now();
   const module = await loadLibjxlModule();
   const encodeFn = format === "rgba16"
     ? module._jxl_wasm_encode_tile_container_rgba16
@@ -929,42 +875,19 @@ async function encodeTileContainer(
   const hasAlpha = options.hasAlpha !== false;
 
   const view = copyOrBorrowInput(pixels, false);
-  const t1 = performance.now();
-  options.onMetric?.("enc_input_prep", t1 - tStart);
-
   const expectedBytes = width * height * 4 * bytesPerChannelForFormat(format);
   if (view.byteLength < expectedBytes) {
     throw new Error(`Pixel buffer too small: ${view.byteLength} < ${expectedBytes}`);
   }
 
-  const t2 = performance.now();
   const ptr = module._malloc(view.byteLength);
   if (ptr === 0) throw new Error("WASM malloc failed for tile container encode");
-  const tMalloc = performance.now() - t2;
-  options.onMetric?.("enc_malloc", tMalloc);
-
   try {
-    const t3 = performance.now();
     module.HEAPU8.set(view, ptr);
-    const tHeapSet = performance.now() - t3;
-    options.onMetric?.("enc_heap_set", tHeapSet);
-
-    const t4 = performance.now();
     const handle = encodeFn(ptr, width, height, tileSize, distance, effort, hasAlpha ? 1 : 0);
-    const tWasmEncode = performance.now() - t4;
-    options.onMetric?.("enc_wasm_encode", tWasmEncode);
-
-    const t5 = performance.now();
-    const result = takeBuffer(module, handle, "tile container encode").data;
-    const tBufferRead = performance.now() - t5;
-    options.onMetric?.("enc_buffer_read", tBufferRead);
-
-    return result;
+    return takeBuffer(module, handle, "tile container encode").data;
   } finally {
-    const t6 = performance.now();
     module._free(ptr);
-    const tFree = performance.now() - t6;
-    options.onMetric?.("enc_free", tFree);
   }
 }
 
@@ -1160,10 +1083,6 @@ class LibjxlDecoder implements JxlDecoder {
   private closed = false;
   private eventsStarted = false;
 
-  // For getIccProfile (2.10 / Agent6-4): captured after dec create in progressive/one-shot.
-  private moduleRef: any = null;
-  private decHandle: number = 0;
-
   constructor(private readonly options: DecoderOptions) {}
 
   push(chunk: ArrayBuffer | Uint8Array): void {
@@ -1249,8 +1168,6 @@ class LibjxlDecoder implements JxlDecoder {
       ? module._jxl_wasm_dec_create_x(fmtIndex, progressiveDetail, decFlags)
       : module._jxl_wasm_dec_create!(fmtIndex, progressiveDetail);
     if (dec === 0) throw new Error("JXL progressive decoder creation failed");
-    this.moduleRef = module;
-    this.decHandle = dec;
     // Cache bridge fn refs once — avoids repeated property lookup on module per iteration.
     const decPush         = module._jxl_wasm_dec_push!;
     const decWidth        = module._jxl_wasm_dec_width!;
@@ -1358,7 +1275,7 @@ class LibjxlDecoder implements JxlDecoder {
           }
         }
 
-        if (result === 1 || result === 3) {
+        if (result === 1) {
           drainPending = true;
           gotRealFlush = true;
           flushCount++;
@@ -1399,24 +1316,7 @@ class LibjxlDecoder implements JxlDecoder {
             };
             if (hasRegion) ev.regionFallback = "full-frame-then-crop";
             if (outPixels.region !== undefined) ev.region = outPixels.region;
-
-            // Agent6-2: animation frame boundary via bridge return JXL_DEC_RESULT_FRAME_DONE (3).
-            // Non-last frames emit here with frame metadata (populated by bridge on JXL_DEC_FRAME).
-            // Continue the loop for subsequent frames instead of early return.
-            if (result === 3) {
-              // frameIndex etc may be enriched by bridge state; slot them if helpers exist on module.
-              // (types already declare the fields on progress/final for consumers)
-              (ev as any).frameIndex = (ev as any).frameIndex ?? flushCount - 1;
-              (ev as any).isLastFrame = false;
-              // duration/name/anim* left for bridge-exposed fns or future; consumers get what is available.
-            }
-
             yield ev;
-
-            if (result === 3) {
-              // continue delivering next anim frame(s); do not early-exit on progressionTarget
-              continue;
-            }
             if (this.options.progressionTarget !== "final" && !this.options.emitEveryPass) return;
           }
           continue;
@@ -1631,25 +1531,6 @@ class LibjxlDecoder implements JxlDecoder {
     this.queuedBytes = 0;
     this.cancelled = true;
     this.wake();
-  }
-
-  getIccProfile(): Uint8Array | null {
-    const m = this.moduleRef;
-    const d = this.decHandle;
-    if (!m || !d || typeof m._jxl_wasm_dec_icc_size !== 'function' || typeof m._jxl_wasm_dec_icc_ptr !== 'function') return null;
-    try {
-      const size = m._jxl_wasm_dec_icc_size(d) | 0;
-      if (size <= 0) return null;
-      const ptr = m._jxl_wasm_dec_icc_ptr(d) | 0;
-      if (!ptr) return null;
-      const heap = m.HEAPU8 || (globalThis as any).HEAPU8;
-      if (!heap) return null;
-      const out = new Uint8Array(size);
-      out.set(heap.subarray(ptr, ptr + size));
-      return out;
-    } catch {
-      return null;
-    }
   }
 }
 
