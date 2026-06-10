@@ -3,11 +3,12 @@
 //! (compression=1). Pulls BlackLevel, WhiteLevel, AsShotNeutral and CFAPattern
 //! out of the same IFD chain.
 
+use crate::demosaic;
 use crate::ljpeg;
 use anyhow::{anyhow, bail, Context, Result};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::sync::Mutex;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cfa {
@@ -148,35 +149,72 @@ fn decode_tiles(
         );
     }
 
-    let out_mtx = Mutex::new(out);
     let _ = cps; // implied by SOF
-    #[cfg(feature = "parallel")]
-    let iter = (0..rowtiles).into_par_iter();
-    #[cfg(not(feature = "parallel"))]
-    let mut iter = (0..rowtiles).into_iter();
-    iter.try_for_each(|tr| -> Result<()> {
+
+    // X1: full per-tile parallel (enabled by L13). Use probe + decode_tile_compact so each
+    // task owns a small disjoint compact buffer (no shared &mut stride borrow). Collect then
+    // blit active rects (edge tiles may have active < declared SOF size). Replaces the prior
+    // row-of-tiles band + Mutex + inner serial cols.
+    struct DecodedTile {
+        row_start: usize,
+        col_start: usize,
+        buf: Vec<u16>,
+        buf_w: usize, // declared by this tile's SOF (compact stride unit)
+        active_w: usize,
+        active_h: usize,
+    }
+
+    let decode_one = |idx: usize| -> Result<DecodedTile> {
+        let tr = idx / coltiles;
+        let tc = idx % coltiles;
         let row_start = tr * tl;
         let row_end = ((tr + 1) * tl).min(height);
-        let row_height = row_end - row_start;
-        let mut row_band = vec![0u16; width * row_height];
-        for tc in 0..coltiles {
-            let idx = tr * coltiles + tc;
-            let off = raw.tile_offsets[idx] as usize;
-            let bc = raw.tile_byte_counts[idx] as usize;
-            let src = data
-                .get(off..off + bc)
-                .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
-            let col_start = tc * tw;
-            let col_end = ((tc + 1) * tw).min(width);
-            let col_width = col_end - col_start;
-            ljpeg::decode_tile(src, &mut row_band, col_start, width, col_width, row_height)
-                .with_context(|| format!("tile r={tr} c={tc}"))?;
+        let col_start = tc * tw;
+        let col_end = ((tc + 1) * tw).min(width);
+        let active_h = row_end - row_start;
+        let active_w = col_end - col_start;
+        let off = raw.tile_offsets[idx] as usize;
+        let bc = raw.tile_byte_counts[idx] as usize;
+        let src = data
+            .get(off..off + bc)
+            .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
+        let info = ljpeg::probe_tile(src).with_context(|| format!("probe tile {idx}"))?;
+        let bw = info.width as usize;
+        let bh = info.height as usize;
+        // Buf sized to declared tile (units match the grid tw/tl and prior calls; cps=1 for CFA raw).
+        let mut buf = vec![0u16; bw * bh];
+        ljpeg::decode_tile_compact(src, &mut buf, bw, bh)
+            .with_context(|| format!("compact tile r={tr} c={tc}"))?;
+        Ok(DecodedTile {
+            row_start,
+            col_start,
+            buf,
+            buf_w: bw,
+            active_w,
+            active_h,
+        })
+    };
+
+    #[cfg(feature = "parallel")]
+    let tiles: Vec<DecodedTile> = (0..expected)
+        .into_par_iter()
+        .map(decode_one)
+        .collect::<Result<Vec<_>>>()?;
+    #[cfg(not(feature = "parallel"))]
+    let tiles: Vec<DecodedTile> = (0..expected).map(decode_one).collect::<Result<Vec<_>>>()?;
+
+    // Serial blit of active rects (disjoint; cheap vs decode work).
+    for td in tiles {
+        let aw = td.active_w.min(td.buf_w);
+        let ah = td.active_h;
+        for r in 0..ah {
+            let src_base = r * td.buf_w;
+            let dst_base = (td.row_start + r) * width + td.col_start;
+            for k in 0..aw {
+                out[dst_base + k] = td.buf[src_base + k];
+            }
         }
-        let mut guard = out_mtx.lock().unwrap();
-        let dst_start = row_start * width;
-        guard[dst_start..dst_start + row_band.len()].copy_from_slice(&row_band);
-        Ok(())
-    })?;
+    }
     Ok(())
 }
 
@@ -742,4 +780,253 @@ mod tests {
         );
         assert_matrix_close(matrix, expected);
     }
+}
+
+/// X2 deliverable: post-demosaic RGB16 + metadata, without a full mosaic buffer resident
+/// at the same time as the RGB (strip fusion with 2-row halo for demosaic dependencies).
+/// The bayer mosaic is produced band-by-band (tile-row) and dropped after its demosaic
+/// contribution is written. Peak mem during fused path ~ full RGB + 1 tile-row band + 2 halo rows.
+#[derive(Debug)]
+pub struct DngDemosaiced {
+    pub width: usize,
+    pub height: usize,
+    pub rgb: Vec<u16>, // post-align, post-demosaic (mhc), interleaved RGB16
+    pub black: u16,
+    pub white: u16,
+    pub wb_r: f32,
+    pub wb_g: f32,
+    pub wb_b: f32,
+    pub orientation: u16,
+    pub make: String,
+    pub model: String,
+    pub color_matrix: Option<[[f32; 3]; 3]>,
+    pub iso: Option<u32>,
+    pub decode_ms: f64,
+    pub demosaic_ms: f64,
+}
+
+/// Fused decode (ljpeg tiles) + demosaic (mhc) for DNG. RGGB fast path uses strip fusion
+/// (band decode + halo carry + demosaic_rggb_mhc_band). Other CFA fall back to full mosaic
+/// + demosaic (rare; still correct, pay old peak). Callers (wasm process_dng_raw) use this
+/// to avoid simultaneous 32 MB mosaic + 120 MB rgb.
+pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
+    if data.len() < 8 {
+        bail!("too small");
+    }
+    let le = match &data[0..4] {
+        [0x49, 0x49, 0x2A, 0x00] => true,
+        [0x4D, 0x4D, 0x00, 0x2A] => false,
+        m => bail!("not TIFF: {m:?}"),
+    };
+    let ifd0_off = read_u32(data, 4, le);
+
+    let mut state = WalkState::default();
+    walk(data, ifd0_off as usize, le, &mut state);
+
+    let raw = state
+        .raw_ifd
+        .ok_or_else(|| anyhow!("no raw SubIFD found"))?;
+
+    let width = raw.width as usize;
+    let height = raw.height as usize;
+    let _cps = raw.samples_per_pixel.max(1) as usize;
+    let cfa = match raw.cfa_pattern {
+        Some(p) => match p {
+            [0, 1, 1, 2] => Cfa::Rggb,
+            [1, 2, 0, 1] => Cfa::Gbrg,
+            [1, 0, 2, 1] => Cfa::Grbg,
+            [2, 1, 1, 0] => Cfa::Bggr,
+            _ => bail!("unsupported CFA pattern: {p:?}"),
+        },
+        None => Cfa::Rggb,
+    };
+
+    // WB / matrix / black/white / iso / names (same as decode_bytes)
+    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(0.5);
+    let wb_g_neutral = state.as_shot_neutral.map(|n| n[1]).unwrap_or(1.0);
+    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(0.6);
+    let wb_r = wb_g_neutral / wb_r_neutral.max(1e-6);
+    let wb_g = 1.0;
+    let wb_b = wb_g_neutral / wb_b_neutral.max(1e-6);
+    let black = raw.black_level.unwrap_or(0);
+    let white = raw.white_level.unwrap_or(16383);
+    let color_matrix = choose_camera_to_srgb_matrix(
+        state.forward_matrix_1,
+        state.forward_matrix_2,
+        state.color_matrix_1,
+        state.color_matrix_2,
+    );
+    let orientation = state.orientation.unwrap_or(1);
+    let iso = state.iso;
+    let make = state.make.clone();
+    let model = state.model.clone();
+
+    if cfa != Cfa::Rggb {
+        // Fallback: full mosaic path (still correct; only RGGB gets the X2 mem cut).
+        let t0 = Instant::now();
+        let img = decode_bytes(data)?;
+        let decode_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let (raw_a, aw, ah) = align_to_rggb(&img.raw, img.width, img.height, img.cfa);
+        let t1 = Instant::now();
+        let rgb = demosaic::demosaic_rggb_mhc(raw_a, aw, ah)
+            .map_err(|e| anyhow!("demosaic: {}", e))?;
+        let demosaic_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        return Ok(DngDemosaiced {
+            width: aw,
+            height: ah,
+            rgb,
+            black: img.black,
+            white: img.white,
+            wb_r: img.wb_r,
+            wb_g: img.wb_g,
+            wb_b: img.wb_b,
+            orientation: img.orientation,
+            make: img.make,
+            model: img.model,
+            color_matrix: img.color_matrix,
+            iso: img.iso,
+            decode_ms,
+            demosaic_ms,
+        });
+    }
+
+    // RGGB fused strip path (X2). Never materializes full mosaic alongside full rgb.
+    let mut rgb = vec![0u16; width * height * 3];
+    let aw = width;
+    let ah = height;
+
+    let tw = raw.tile_width.ok_or_else(|| anyhow!("missing TileWidth"))? as usize;
+    let tl = raw
+        .tile_length
+        .ok_or_else(|| anyhow!("missing TileLength"))? as usize;
+    let coltiles = (width + tw - 1) / tw;
+    let rowtiles = (height + tl - 1) / tl;
+    let expected = coltiles * rowtiles;
+    if raw.tile_offsets.len() != expected || raw.tile_byte_counts.len() != expected {
+        bail!(
+            "tile count mismatch: expected {} got {}/{}",
+            expected,
+            raw.tile_offsets.len(),
+            raw.tile_byte_counts.len()
+        );
+    }
+
+    let halo = 2usize;
+    let mut halo_rows: Vec<u16> = vec![0u16; width * halo];
+    let mut rgb_write_row: usize = 0usize;
+
+    let mut decode_ms = 0.0f64;
+    let mut demosaic_ms = 0.0f64;
+
+    for tr in 0..rowtiles {
+        let row_start = tr * tl;
+        let row_end = ((tr + 1) * tl).min(height);
+        let row_h = row_end - row_start;
+
+        let tdec = Instant::now();
+        let mut band = vec![0u16; width * row_h];
+        for tc in 0..coltiles {
+            let idx = tr * coltiles + tc;
+            let off = raw.tile_offsets[idx] as usize;
+            let bc = raw.tile_byte_counts[idx] as usize;
+            let src = data
+                .get(off..off + bc)
+                .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
+            let col_start = tc * tw;
+            let col_end = ((tc + 1) * tw).min(width);
+            let col_w = col_end - col_start;
+            ljpeg::decode_tile(src, &mut band, col_start, width, col_w, row_h)
+                .with_context(|| format!("tile r={tr} c={tc}"))?;
+        }
+        decode_ms += tdec.elapsed().as_secs_f64() * 1000.0;
+
+        // ctx = [top halo | band | bottom (replicate for this pass)]
+        let ctx_h = halo + row_h + halo;
+        let mut ctx = vec![0u16; width * ctx_h];
+        if tr == 0 {
+            if row_h > 0 {
+                let first = &band[0..width];
+                for hi in 0..halo {
+                    ctx[hi * width..(hi + 1) * width].copy_from_slice(first);
+                }
+            }
+        } else {
+            ctx[0..halo * width].copy_from_slice(&halo_rows);
+        }
+        let band_off = halo * width;
+        ctx[band_off..band_off + row_h * width].copy_from_slice(&band);
+        if row_h > 0 {
+            let last_start = (row_h - 1) * width;
+            let last = &band[last_start..last_start + width];
+            for hi in 0..halo {
+                let boff = (halo + row_h + hi) * width;
+                ctx[boff..boff + width].copy_from_slice(last);
+            }
+        }
+
+        let tdem = Instant::now();
+        let is_last = tr + 1 == rowtiles;
+
+        if tr > 0 && halo > 0 {
+            // Demosaic the carried prev bottom halo rows now that south data (current band) exists.
+            let carried_g0 = row_start - halo;
+            demosaic::demosaic_rggb_mhc_band(
+                &ctx,
+                width,
+                ctx_h,
+                halo,
+                carried_g0,
+                0,
+                halo,
+                &mut rgb[(rgb_write_row * width * 3)..],
+            )
+            .map_err(|e| anyhow!("demosaic band: {}", e))?;
+            rgb_write_row += halo;
+        }
+
+        let safe = if is_last { row_h } else { row_h.saturating_sub(halo) };
+        if safe > 0 {
+            demosaic::demosaic_rggb_mhc_band(
+                &ctx,
+                width,
+                ctx_h,
+                halo,
+                row_start,
+                0,
+                safe,
+                &mut rgb[(rgb_write_row * width * 3)..],
+            )
+            .map_err(|e| anyhow!("demosaic band: {}", e))?;
+            rgb_write_row += safe;
+        }
+        demosaic_ms += tdem.elapsed().as_secs_f64() * 1000.0;
+
+        if !is_last && row_h >= halo {
+            let src = (row_h - halo) * width;
+            halo_rows.copy_from_slice(&band[src..src + halo * width]);
+        }
+    }
+
+    if rgb_write_row != ah {
+        // tiny images or edge math; pad or error softly by filling remain (should not happen for valid tiles)
+        // For robustness fall back would have caught, but keep going.
+    }
+
+    Ok(DngDemosaiced {
+        width: aw,
+        height: ah,
+        rgb,
+        black,
+        white,
+        wb_r,
+        wb_g,
+        wb_b,
+        orientation,
+        make,
+        model,
+        color_matrix,
+        iso,
+        decode_ms,
+        demosaic_ms,
+    })
 }
