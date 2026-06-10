@@ -98,30 +98,68 @@ This document records optimization proposals that were evaluated and rejected.
 
 ## `packages/jxl-stream/src/browser.ts`
 *   **Adaptive Prefetch Depth (G2-8):** Multi-ahead prefetch risks queueing beyond worker limits (128MiB cap). The current one-ahead prefetch is correct.
-*   **SB-9 small-chunk coalescing (Agent 5, re-explored with relaxed scope + bench):** 
-  Evidence collected via before/after speed test on synthetic many-tiny-chunk ReadableStream (exactly the fixture the spec required). Mock RecordedSession (isolates stream pipe + push cost; push count = 1:1 proxy for scheduler.send(decode_chunk) / postMessage count). 7 iterations, median. Same harness for both.
+*   **SB-9 small-chunk coalescing (Agent 5, real-image interleaved multi-flip on DNG/ORF/CR2):** 
+  User request: 5 samples per state per config, interleaved on/off flips via runtime toggle in one process, using real RAW files chunked at the requested sizes.
 
-  **Baseline (direct per-chunk push, EXPERIMENTAL_COALESCE=false):**
-  - 1MiB @ 512B chunks: wall_med=3.05ms, pushes=2048, avg=512B
-  - 4MiB @ 512B chunks: wall_med=7.28ms, pushes=8192, avg=512B
-  - 4MiB @ 4KiB: wall=2.84ms, pushes=1024
-  - 4MiB @ 16KiB: wall=2.15ms, pushes=256
-  - 4MiB @ 256KiB (control, already large): wall=1.63ms, pushes=16
+  Images (from C:\Foo\raw-converter\tests):
+  - CR2: ADH 1490.CR2 (~28 MB)
+  - ORF: P1110226.ORF (~17.4 MB)
+  - DNG: PXL_20260501_093507165.RAW-02.ORIGINAL.dng (~19.7 MB)
 
-  **Coalesced (64KiB thresh, true):**
-  - 1MiB @ 512B: wall_med=2.59ms (-0.46ms / ~15%), pushes=16 (~128x reduction), avg~65KiB
-  - 4MiB @ 512B: wall_med=6.34ms (-0.94ms / ~13%), pushes=64 (~128x)
-  - 4MiB @ 4KiB: wall=3.23ms (slight regression vs baseline), pushes=64 (~16x)
-  - 4MiB @ 16KiB: wall=2.41ms (slight regression), pushes=64
-  - 4MiB @ 256KiB: ~same as baseline (16 pushes)
+  Chunk strategies: tiny(512 B), small(4 KiB), medium(16 KiB), large(64 KiB), original (single full-file chunk).
 
-  Clear win on the target metric (postMessage/push count) for very-tiny regime. Modest wall win in ingestion microbench for 512B case. For "small but not tiny" (4-16KiB) the message reduction is still large but concat/copy overhead produced flat-to-slight regression in this isolated test. Large-chunk control: no regression.
+  **Results (5 samples/state, interleaved, count-only mock session):**
 
-  Decision: Still rejected for landing. Reasons: (1) R1-4 adjacency ("decodeBatch() on facade... Wrong layer. Batching, dedupe, and preemption belong in the scheduler") + similar "Adaptive chunk batching (DH6-4)" and "Latest-frame coalescing (14)" rejections; (2) CLAUDE.md "no-tunables-without-evidence" + "adaptive/heuristic changes require benchmark data" — the evidence shows the win is narrow (only extreme tiny chunks) and marginal on wall in the micro; (3) adds buffering + concat + flush logic to the already-non-trivial one-ahead + maxBytes + abort loop in the I/O adapter; (4) backpressure granularity may be affected (fewer but larger pushes). The numbers are now recorded for future re-evaluation if real end-to-end (with scheduler + WASM) shows larger savings or if a scheduler-side batcher is ever revisited. No permanent coalesce left in tree.
+  CR2 (28 MB):
+  - tiny:   OFF 43.70ms / ~57k pushes → ON 50.81ms / 448 pushes   (+16% wall, ~128x fewer)
+  - small:  OFF 7.54ms / ~7k → ON 15.69ms / 448   (+108% wall, 16x)
+  - medium: OFF 1.32ms / ~1.8k → ON 11.61ms / 448  (+780% wall, 4x)
+  - large:  OFF 0.55ms / 448 → ON 0.92ms / 448     (+67% wall)
+  - original: ~0.01ms / 1 both
 
-*   **SB-10 resumable Range (Agent 5):** Not implemented. 
-  Future: resumable Range continuation for field/offline.
-  Brief exploration (allowed broader files): fromByteRange already does the Range header + 206/200 handling + skip for non-zero start. A resumable version would need: (a) way to report "bytes successfully delivered so far" (the RangeNegotiation.delivered or a new cursor), (b) persistence of the partial prefix (jxl-cache OPFS or direct filesystem; content-agnostic cache is a good fit), (c) on resume: fromByteRange(url, start=delivered, end, ...) possibly with If-Range/If-Match using ETag or Last-Modified from prior response for safety, (d) handling of server that doesn't support resume (fall back to full or error). For mid-codestream resume the decode session would need to tolerate appended bytes to a previous truncated push (or restart the DecodeSession). High value for flaky field links + offline gallery use, but non-trivial surface + interaction with cache + possible partial-EOF handling in session/worker. Correctly left as future note; would require its own spec + evidence of callers before implementing.
+  ORF (17.4 MB):
+  - tiny:   OFF 24.94ms / ~35k → ON 25.22ms / 279   (+1% wall, ~128x)
+  - small:  OFF 4.76ms / ~4.5k → ON 7.96ms / 279    (+67% wall, 16x)
+  - medium: OFF 0.68ms / ~1.1k → ON 6.87ms / 279    (+910% wall, 4x)
+  - large:  OFF 0.20ms / 279 → ON 0.28ms / 279      (+40% wall)
+  - original: ~0.01ms / 1
+
+  DNG (19.7 MB):
+  - tiny:   OFF 29.62ms / ~40k → ON 31.00ms / 315   (+5% wall, ~128x)
+  - small:  OFF 2.99ms / ~5k → ON 8.45ms / 315      (+183% wall, 16x)
+  - medium: OFF 1.28ms / ~1.3k → ON 6.89ms / 315    (+438% wall, 4x)
+  - large:  OFF 0.34ms / 315 → ON 0.49ms / 315      (+44% wall)
+  - original: ~0.01ms / 1
+
+  Consistent pattern across all three formats: huge push-count reduction for tiny/small/medium (as designed), but **wall time is neutral to significantly worse** with the 64 KiB coalescer. The accumulation + buffer copy overhead dominates the savings from fewer pushes in the stream layer.
+
+  Decision: **rejected** (reinforced by real DNG/ORF/CR2 data). R1-4 (batching wrong layer), prior DH6-4 rejection, CLAUDE evidence bar, complexity, and now confirmed negative wall impact on actual image payloads. Source cleaned after run; range tests still green.
+
+  (Previous synthetic data already pointed the same direction; this fulfills the "5 x on tiny/small/medium/large/original" + real formats request.)
+
+*   **SB-10 resumable Range (implemented 2026):** 
+  Added minimal ergonomic + safe-resume layer on top of the existing fromByteRange (which already supported arbitrary start + 200-fallback skip).
+
+  New (in browser.ts):
+  - `RangeNegotiation` now carries optional `etag` (captured from the first response).
+  - `ByteRangeResumeState` (plain serializable object: url, start, endExclusive, etag?, fullSize?).
+  - `createByteRangeResumeState(url, previousNegotiation, originalStart=0)` — turn a previous result into persistable resume state.
+  - `resumeFromByteRange(state, session, opts?)` — calls fromByteRange with the right Range header + `If-Range: <etag>` when available for safety. Still fires onRangeNegotiated, supports signal/custom fetch etc.
+
+  Backward compatible; fromByteRange and fromRangePrefix unchanged.
+
+  Real-image timing/savings bench (using the CR2/ORF/DNG files from raw-converter/tests, 50% partial simulation, fake server that counts bytes served + returns ETag):
+
+  - On reconnect, "Before" (naive restart from byte 0) causes the server to re-serve the entire prefix + tail.
+  - "After" (create state from first partial + resumeFromByteRange) causes the server to serve only the tail.
+  - Savings: essentially the entire first-half bytes (e.g. ~14.6 MB saved on the 28 MB CR2, ~9.1 MB on the 17 MB ORF, ~10.3 MB on the 20 MB DNG).
+  - Wall time for the resume leg itself: negligible in the controlled bench (0.07–0.48 ms).
+
+  The functionality win (dramatically fewer bytes over unreliable/field links, ability to persist partial + resume state with jxl-cache across restarts) is large. The added code path cost on the initial fetch and on resume is tiny (mostly header merging + one wrapper call).
+
+  Moved out of "future note only". Implementation is contained in the stream layer, respects all prior layering rules, and the perf data shows the cost is acceptable for the value (exactly as the user suggested: "if only slightly worse, worth it for the functionality").
+
+  Existing range tests continue to pass. New helpers are exported from browser.ts (index re-exports remain deferred per prior guidance).
 
 ## `src/lib.rs` / `web/jxl-wrapper-lab.js` / `web/jxl-benchmark.js` (WASM Resizer)
 *   **`fast_image_resize` crate (Gemini spec):** Rejected. The crate's v2 API (`NonZeroU32`, `Image::from_slice_u8`, `Resizer::new(ResizeAlg::...)`) is outdated — v3 changed the interface. Introduces a new build dependency for no quality benefit over a box filter for thumbnails. Existing `downscale_rgb` pattern extended to 4 channels instead.

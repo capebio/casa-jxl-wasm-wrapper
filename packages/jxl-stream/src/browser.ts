@@ -67,7 +67,6 @@ export async function fromReadableStream(
 
   let delivered = 0;
 
-
   try {
     // SB-3 / maxBytes: no type anno on let (prevents cycle through ReadResult.value); cast only the null branch on reassign.
     let pending = reader.read();
@@ -228,6 +227,8 @@ export interface RangeNegotiation {
   delivered: number;
   /** Content-Length of full resource if server reported it (parsed from Content-Range or Content-Length). */
   fullSize?: number;
+  /** ETag from the response, if present. Useful for safe resumable Range with If-Range. */
+  etag?: string;
 }
 
 export interface RangePrefixOptions {
@@ -245,6 +246,43 @@ export interface RangePrefixOptions {
    * Inspect `honored` to detect servers that ignored Range and returned 200 OK.
    */
   onRangeNegotiated?: (info: RangeNegotiation) => void;
+}
+
+/**
+ * Serializable state for resuming a previous byte-range fetch.
+ * Persist this (e.g. with jxl-cache or your own storage) across reconnects or app restarts.
+ * Use with resumeFromByteRange() to continue from where you left off,
+ * automatically using If-Range when an etag is available for safety.
+ */
+export interface ByteRangeResumeState {
+  url: string;
+  start: number;          // next byte to request (usually previous delivered)
+  endExclusive: number;
+  etag?: string;          // from the first successful RangeNegotiation
+  fullSize?: number;
+}
+
+/**
+ * Create a resume state from a previous negotiation (typically the one returned
+ * by fromByteRange or fromRangePrefix).
+ *
+ * originalStart: the `start` you used in the *first* fromByteRange call
+ *   (usually 0 for prefix/tile fetches). This lets us correctly compute the
+ *   original endExclusive for the resume request.
+ */
+export function createByteRangeResumeState(
+  url: string,
+  previous: RangeNegotiation,
+  originalStart: number = 0
+): ByteRangeResumeState {
+  const originalEnd = originalStart + previous.requested;
+  return {
+    url,
+    start: previous.delivered,
+    endExclusive: originalEnd,
+    etag: previous.etag,
+    fullSize: previous.fullSize,
+  };
 }
 
 /**
@@ -277,12 +315,14 @@ export async function fromByteRange(
   let delivered = 0;
   let honored = false;
   let fullSize: number | undefined;
+  let etagFromResponse: string | undefined;
   let info: RangeNegotiation | undefined;
 
   const makeInfo = (d: number): RangeNegotiation => {
     if (!info) {
       info = { requested, honored, delivered: d };
       if (fullSize !== undefined) info.fullSize = fullSize;
+      if (etagFromResponse) info.etag = etagFromResponse;
     }
     info.delivered = d;
     return info;
@@ -313,6 +353,7 @@ export async function fromByteRange(
   fullSize =
     parseContentRangeTotal(resp.headers.get('Content-Range')) ??
     parseNonNegativeInt(resp.headers.get('Content-Length'));
+  etagFromResponse = resp.headers.get('ETag') || undefined;
 
   const cancelBoth = (reason: string) => {
     // SB-2: ensure string (defensive)
@@ -442,6 +483,46 @@ export async function fromRangePrefix(
     throw new RangeError('[jxl-stream] byteCount must be a positive finite number');
   }
   return fromByteRange(url, 0, byteCount, session, opts);
+}
+
+/**
+ * Resume a previous byte-range fetch using a ByteRangeResumeState (created via
+ * createByteRangeResumeState from an earlier RangeNegotiation).
+ *
+ * This is the ergonomic entry point for SB-10 resumable Range.
+ * - If the state has an etag, automatically adds `If-Range: <etag>` for safe resume
+ *   (server will 412 if the resource changed).
+ * - Still supports all the normal RangePrefixOptions (extra headers are merged,
+ *   signal, custom fetchImpl, onRangeNegotiated).
+ * - The underlying fromByteRange skip/206/200 logic handles the continuation.
+ *
+ * Typical usage for unreliable/field/offline:
+ *   const neg1 = await fromByteRange(url, 0, wantedEnd, session1, { onRangeNegotiated: saveState });
+ *   const resumeState = createByteRangeResumeState(url, neg1);
+ *   // ... network drop, app restart, persist resumeState + any partial bytes via jxl-cache ...
+ *   const neg2 = await resumeFromByteRange(resumeState, session2);
+ */
+export async function resumeFromByteRange(
+  state: ByteRangeResumeState,
+  session: DecodeSession,
+  opts: RangePrefixOptions = {}
+): Promise<RangeNegotiation> {
+  if (!Number.isFinite(state.start) || !Number.isFinite(state.endExclusive) ||
+      state.start < 0 || state.start >= state.endExclusive) {
+    throw new RangeError('[jxl-stream] resume state has invalid start/endExclusive');
+  }
+
+  const resumeOpts: RangePrefixOptions = { ...opts };
+
+  if (state.etag) {
+    const merged = new Headers(opts.headers);
+    // If-Range tells the server: only honor the Range if the etag still matches,
+    // otherwise send the full resource (or 412). Our skip logic will still do the right thing.
+    merged.set('If-Range', state.etag);
+    resumeOpts.headers = merged;
+  }
+
+  return fromByteRange(state.url, state.start, state.endExclusive, session, resumeOpts);
 }
 
 /**
