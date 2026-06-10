@@ -3,4 +3,4 @@
 // to spawn and communicate with the worker.
 
 export { spawnWorker } from "./spawn.js";
-export type { WorkerHandle } from "./spawn.js";
+export type { SpawnOptions, WorkerHandle } from "./spawn.js";
