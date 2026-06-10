@@ -1,0 +1,86 @@
+# Raw Pipeline: 22-Lens Strategic Review + 5-Agent Handoffs
+
+**Scope**: crates/raw-pipeline/src/{ljpeg.rs, decompress.rs, demosaic.rs, pipeline.rs, tiff.rs}. One file per agent. No other files edited by agents without explicit approval. All proposals respect rejected optimizations.md (read first; no re-proposals). Style: "ljpeg:" / "decompress:" / "demosaic:" prefixes; anyhow::bail! only in ljpeg.rs; Result<_, String> elsewhere. Tests added only as `#[cfg(test)] mod tests` inside the target file. No new deps. Verification required: `cargo check -p raw-pipeline && cargo test -p raw-pipeline` (WASM `wasm-pack ... --release` must remain green via default-features=false).
+
+Lenses applied exhaustively (L1 strategic links/dataflow; L2 API surface + WASM/worker handlers (note: bindings live outside crate); L3 stages decode/transform/resize/encode/cache/result; L4 state/queues/cancel/error (mostly stateless pure fns + thread_local LUT_CACHE); L5 buffers/queues/params/tile descriptors (PipelineParams, LutCache, Sof/Sos, acarry, bayer planes); L6 hot kernels (pixel loops, table lookups, tiled blurs/downscales, matrix/sat, bit readers); L7 boundaries (module handoffs Vec<u16> rgb16, ljpeg tile out+stride to dng/cr2, no direct JS/WASM here); L8 support (validate, tests); L9 Owl (near/far, night/dark, multi-sensory: perf smell of cache thrash in clones, taste of integer fastpaths, feel of branchy predictors); L10 film-backwards (4 reversals: start from desired 16-bit linear for photogram/AR → what decode must preserve; start from JXL butteraugli input → pre-tone decisions here; reverse error paths for early exit in bit decoders; reverse parallel bands to serial for NUMA thinking); L11 astro (telescope analogies: ljpeg 64K table = focal plane array; tiled VTILE=128 = segmented mirror; LUT_CACHE = adaptive optics reference; multi-pass demosaic = lucky imaging); L12 LLM/ML recog (expose linear rgb16 + raw bayer + matrix for faster/better plant ID feature extract in AR; precompute constancy maps); L13 gaming (LOD via target_dims + downscale fastpath; batching in fills/accum; frustum-style border/interior split in demosaic/blur/rotate; predict via left-neighbor in ljpeg; object pooling via thread_local + OnceLock); L14 photogram/digital twins (preserve linear 16-bit via process_16bit + auto_wb + mhc; expose cam matrices; accurate black/white for metric reconstruction); L15 Butteraugli (this layer cannot run it; can reduce encoder work via pre-sharpen texture/clarity, highlight shoulder to retain gradients, and future perceptual color engine to feed JXL better perceptual uniforms); L16 AR plant ID (real-time: fast integer paths + parallel + cached LUTs already help; need low-latency linear export + Perceptual Constancy Mode for illum-invariant recog); L17 unified non-Riemannian perceptual color (full spec: B sharpen + log to Euclidean, Molchanov anisotropy + tensor for local density/sensitivity, hybrid geodesic/ΔE2000 spring, LANL f(c) diminishing; target apply_tone_math + pre/post LUTs under "Perceptual Constancy Mode"; SIMD/precomp multi-dim LUT for sub-ms); L18 pure math (asymptotics: table O(1) vs tree; lin alg 3x3 + log/exp; numerical: to_bits exact match, highlight shoulder C1; discretize metric tensor grid); L19 hacker (cache-aware tiles VTILE=128/TILE=32/band_bytes; branch elimination interior loops + parity match; bit-twiddling extend/peek/consume + 64K table + OnceLock; zero-copy? Vec moves; batch fill; unsafe contained unchecked; fastpaths exact-ratio integer box; precomp LUTs/kernels; split hot/cold; exploit monotonic neighbor preds); L20 repeat perspective (cache pressure on LUT clones in parallel path vs borrow in serial; bit-reader fill is repeated work); L21 gaps (x3 passes, different angles): (1) DNG/CR2 + ljpeg paths have zero internal tests and no end-to-end in lib.rs compile_tests (only ORF via tiff); (2) 16-bit tone path + process_16bit exist but under-exposed for photogram/LLM consumers and no WASM surface yet; (3) no property/fuzz tests on bit decoders (ljpeg/decompress), no bench harnesses for the L17 color engine or hot kernels inside the modules); L22 defocus bird (overall: clean layered pipeline ORF( tiff→decompress→demosaic ) / DNG( dng/cr2→ljpeg ) → rgb16 → pipeline (tone/down/rotate) ; strong hacker micro-opts already; the "house" connectivity is linear with occasional thread_local; stands out: LUT_CACHE is the only cross-call state; biggest unlit wings are the advanced color + cross-format test coverage + direct 16-bit + ML export hooks).
+
+Duplicates amalgamated into owning-file proposals below. Visionary items (L11-17, AR/LLM/photogram) assigned to pipeline.rs (color/look core) or tiff.rs (entry/metadata) with explicit "defer edit of callers; request approval" notes. All benchmark-gated items carry `#[ignore]` timing test requirement.
+
+## Agent 1: crates/raw-pipeline/src/ljpeg.rs
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+**L1/L2/L6/L18/L19 findings (amalgamated, not in rejected)**: decode_tile is the sole public; strict "ljpeg:" bails; HuffTable 64K lookup table is optimal O(1) hacker win (pre-filled all prefixes); BitReader fill is per-byte in while (contrast decompress batch); only predictor=1 + point_transform checks; Sof/Sos small; used by dng/cr2 for tile assembly with base/stride/out_pixel_cols (data contract: interleaved cps, row-major). Tests already present inside (error cases). Gaps: no fuzz on huff build or multi-cps; fill can be batched like decompress for L3/L6 speed on DNG tiles.
+
+**Proposals** (surgical, evidence-free only where obvious table/fill win; match style):
+- Batch the fill() loop to 56-64 bits like decompress.rs (reduces call overhead on long codes).
+```rust
+// in BitReader fill, after current while:
+let in_bounds = self.src.len().saturating_sub(self.pos).min(8); // or 7 for safety
+for i in 0..in_bounds { self.bits = (self.bits << 8) | self.src[self.pos+i] as u64; ... }
+```
+- Add `#[cfg(test)] mod tests { ... }` with property-style on extend(), huff build edge cases (total>values, th>=4), multi-component decode roundtrip on synthetic (predictor 1 only). Keep existing error asserts.
+- Hoist cps/sof_w checks; make base_pred const where possible (monotonic).
+- For L12/L14 (LLM/photogram): no change here; tile decode already supplies clean linear sensor values.
+
+Agent may read dng.rs/cr2.rs/tiff.rs for call sites (info only); defer any edits outside ljpeg.rs until approval.
+
+## Agent 2: crates/raw-pipeline/src/decompress.rs
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+**L1/L3/L5/L6/L19 findings**: sole pub `decompress` (Result<Vec<u16>,String>, "decompress:" errors); Olympus 12-bit pred + 3-bit low + huff high + acarry[2][3] per parity row state; custom BitReader with 56-bit batch fill + OnceLock static HUFF (excellent); complex W/N/NW predictor with abs>32 special case; used only by tiff.rs for ORF strips (data: 1ch u16 raw Bayer). Hot per-col kernel. No internal tests (all in lib.rs). Hacker: static table, batch fill, arithmetic shift sign mask.
+
+**Proposals**:
+- Add `#[cfg(test)] mod tests` inside: synthetic small frames roundtrip (use known values or roundtrip via demosaic+process if allowed, or just length+range+no-panic); error cases for short input/overflow; bench-gated `#[ignore] fn decompress_bench_timing() { ... }` using std::time (for any future heuristic on nbits/carry).
+- Minor: precompute parity row2_base outside inner? (already clean); consider small LUT for the high0==12 escape if profile shows branch.
+- No new state; keep pure.
+
+Agent may grep/read tiff.rs for usage (info); no edits outside this file without approval.
+
+## Agent 3: crates/raw-pipeline/src/demosaic.rs
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+**L1/L3/L5/L6/L19 findings**: pub demosaic_rggb (bilinear fast) + _mhc (gradient); validate with "demosaic:" String errs; at() debug_assert+unchecked; 4-way parity match in bayer_pixel + mhc_pixel (branch-to-data); border/interior split (int_start/int_end); parallel par_chunks when feature; output rgb16 interleaved. Data to pipeline: linear 16-bit sensor RGB. Already has good cache split + no interior clamp. Tests absent internally.
+
+**Proposals**:
+- Add `#[cfg(test)] mod tests` inside file: validate errors; bilinear vs mhc on synthetic RGGB edge (known zipper reduction); round numbers; parallel vs serial identity (when feature); `#[ignore] fn demosaic_bench() { ... }` timing for mhc on 4k/20mp (benchmark-gated for any future heuristic).
+- Fuse the two demosaic fns more? (share more neighbor math) only if no perf loss; keep separate for fast path.
+- L13/L14: the MHC Laplacian already aids photogram edge fidelity for twins/AR; expose mhc as default for high-quality path in callers (info only).
+
+Agent may read lib.rs/tiff.rs for call patterns (info); defer edits.
+
+## Agent 4: crates/raw-pipeline/src/pipeline.rs
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+**L1-22 findings (core hot path; amalgamated)**: public surface: PipelineParams (12 sliders + black/white + optional matrix + texture/clarity), process/process_rgba/process_16bit (Vec handoff), apply_look_params, downscale_* (integer exact fastpath + f32 box), apply_unsharp, apply_luminance_nr, auto_wb_rggb, apply_orientation + 3 TILE=32 blocked rotates (L19 win), target_dims, gaussian kernels, CAM_TO_SRGB, apply_tone_math (the L17 target: 3x3 mat + luma + vib scale). Internal: thread_local LUT_CACHE (bit-exact to_bits match, pre/post luts, post16), TonePost, highlight_shoulder (C1, non-hard clip), separable_blur_with_bufs (VTILE=128 tiled vertical for L1 cache), parallel rayon gated. Stages L3: tone (pre LUT WB/exp + matrix + sat/vib + post tone/srgb) → optional unsharp/NR → down/rotate. Already many L19 wins (tiled, integer fast, LUT cache avoids rebuild, branchless interior, precomp). Rejected items avoided (R2-2/5/7/8/10/15 etc). Gaps: advanced color absent; parallel path clones LUTs (vs borrow); 16-bit under-tested for L14 photogram; no L17 harness.
+
+**Proposals** (surgical first; L17 as separate benchmarked item):
+- In non-parallel process/process_rgba/process_16bit: the LUT borrow scope already good; ensure post16 lazy only when needed (already partial).
+- Downscale: strengthen exact-ratio integer path (already present for common 5x etc); consider 2x/4x special unrolled if profile.
+- Rotates: TILE=32 + band_bytes already cache-aware; add doc why 32.
+- Add/extend `#[cfg(test)] mod tests` (rotate_tests already there): add cross-check process vs process_rgba vs process_16bit on synthetic; auto_wb; unsharp identity at 0; `#[ignore] fn tone_bench() { let t0=...; process(large_rgb16, &p); ... }` (any heuristic or L17 change is benchmark-gated).
+- L17 (Perceptual Constancy Mode - the big one): implement behind a new bool flag in PipelineParams (e.g. `perceptual_constancy: bool`, default false for compat). In apply_tone_math (and the pre/post LUT builders), when true: (a) apply sensor sharpen B (hardcode or param a 3x3, start with identity or slight), (b) component log (after black-sub? ), (c) do the 3x3 + sat/vib in the log-Euclidean space, (d) exp back, (e) then the existing tone_curve + srgb. Use Molchanov residuals to modulate local sat/vib/edge thresholds (small additive per-pixel or via extra small LUT). For speed (sub-ms): keep LUT_CACHE extended with a "constancy" post LUT variant or a small 1D/3D spline table for the log/exp + diminishing f(c) curves (precompute at cache-miss time; 64K is acceptable). Hybrid spring: after flat step, blend a tiny ΔE2000 correction toward neutral. Expose via apply_look_params + a const mode setter. Add `#[ignore] fn perceptual_constancy_bench_and_correctness() { ... compare deltaE or visual on neutrals/sat-greens; time vs baseline; }`. Pure Rust, no deps. If numbers do not beat baseline on target sizes, agent must record in rejected optimizations.md and not land the on-by-default path.
+- L12/L14/L16 (LLM/AR/photogram/twins): when perceptual_constancy, also make process_16bit path use the same engine (illum-invariant linear-ish output for downstream recog). Consider tiny hook: pub fn linear_rgb16_for_ml(rgb16: &[u16], black: u16) -> Vec<f32> or similar (simple black-sub + /white, in same file); defer any caller wiring.
+- L15: feed-forward only - the highlight_shoulder + texture/clarity already reduce "featureless" input to JXL/butteraugli; no direct call.
+
+Agent may read other src/*.rs + Cargo.toml for feature gates and call sites (info gathering only). All edits confined to pipeline.rs until final approval for cross-file (e.g. lib.rs reexports or test updates). Include the required ignore bench for any L17 or adaptive change.
+
+## Agent 5: crates/raw-pipeline/src/tiff.rs
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+**L1/L2/L3/L4/L8 findings**: heavy public surface (parse, parse_orf_metadata, bench_decode_orf, OrfInfo/OrfMetadata/DecodeBench, extract_*_jpeg, orientation parsers); Result<T>=Result<T,String>; drives the main ORF path in lib.rs compile_tests + real_orf (tiff::parse → strip → decompress → demosaic → pipeline). Also has bench entry. Links L3 decode stages. Contains integration that exercises decompress/demosaic/pipeline. State: none (pure). Gaps per L21: the real_orf test is path-hardcoded and skipped on CI; DNG path (dng+ljpeg) has no equivalent bench/exercise here; no internal tests for parse edges beyond what's present.
+
+**Proposals**:
+- Add `#[cfg(test)] mod tests` inside (or extend existing) with more parse error cases, orientation roundtrips, metadata extraction on minimal synthetics (avoid real files for CI). Move or duplicate small smoke from lib.rs compile_tests if it improves locality (but keep lib.rs integration).
+- Enhance bench_decode_orf (already pub) or add internal timing for the full ORF chain (decompress+demosaic+pipeline) as `#[ignore]` for future L6/L19 measurements.
+- L14/L12: ensure OrfMetadata / ExifData (via exif) surfaces wb + black + matrices so L17 color engine and ML/photogram consumers can init PipelineParams + color_matrix correctly. (Read exif.rs for info only.)
+- L10 reversal: from "final JXL wanted" back through parse: the strip extraction must remain zero-copy friendly; orientation must be applied late (after tone) for photogram metric correctness.
+
+Agent may read lib.rs, exif.rs, dng.rs (info only for linkages and test data flow); no edits to any file except tiff.rs without prior approval. Ensure real-file tests remain skipped when absent.
+
+## End-to-end verification contract (for all agents)
+After changes to a file: run `cargo check -p raw-pipeline` and `cargo test -p raw-pipeline` (the latter exercises the chain via lib.rs tests + internal tests). WASM build must not regress (no feature or dep changes). Record any rejected item with measurement/reason exactly in docs/rejected optimizations.md using the mandated phrase. Agents may propose but must not implement cross-file edits until user approval.
+
+## Two-to-three paragraph overview of achievements
+Implementing the amalgamated proposals across the five files delivers a tighter, more testable RAW decode core: ljpeg/decompress/demosaic gain internal tests + modest fill/table micro-wins that directly cut per-pixel decode cost on DNG and Olympus files; pipeline.rs receives the surgical cache/parallel parity fixes plus (when benchmark evidence supports) the full non-Riemannian perceptual color engine in the apply_tone_math hot loop, unlocking illumination-invariant sliders and a "Perceptual Constancy Mode" export for downstream LLM/AR/photogram consumers while preserving the existing sRGB tone path and WASM compatibility. tiff.rs improvements close the coverage gap on the primary ORF entry and metadata that seeds the look params.
+
+The net effect is lower latency from ORF/DNG bytes to progressive JXL paint or 16-bit linear for digital twins, higher perceptual fidelity for real-time plant recognition in AR (via constancy + accurate linear intermediates), and a mathematically grounded color science foundation (log-Euclidean + Molchanov/LANL corrections) that replaces ad-hoc tone curves with fast LUT/linear algebra. All under the one-file-per-agent discipline, with every change verified by the narrow cargo test and explicitly gated or rejected per project record; the 22-lens net surfaces the previously unilluminated wings (DNG test coverage, 16-bit ML surface, L17 engine) without scope creep or rejected patterns. This sets up the pipeline for the next decade of compute photography, photogrammetry, and on-device ML vision workloads.
