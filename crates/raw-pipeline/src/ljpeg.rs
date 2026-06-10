@@ -7,15 +7,20 @@
 //! interleaved (raw[row * sof_w * cps + ljpeg_col * cps + comp]).
 
 use anyhow::{bail, Result};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const MAX_COMPONENTS: usize = 4;
+
+thread_local! {
+    static DHT_CACHE: RefCell<Vec<(Vec<u8>, Rc<HuffTable>)>> = RefCell::new(Vec::new());
+}
 
 struct HuffTable {
     // Decoded length per code → list of values, plus min/max code per length.
     // We use the canonical method: store (code_len, value) pairs sorted by code.
-    // For decode we maintain a 16-bit table of (code_len, value) for all
-    // possible 16-bit prefixes.
-    lookup: Vec<(u8, u8)>, // index = peek_16_bits, (consume_bits, value). 0 if invalid.
+    // For decode we maintain a max_bits-sized table (right-sized, not fixed 16).
+    lookup: Vec<(u8, u8)>, // index = peek(max_bits), (consume_bits, value). 0 if invalid.
     max_bits: u8,
 }
 
@@ -42,12 +47,12 @@ impl HuffTable {
             }
             code <<= 1;
         }
-        // Build 16-bit prefix lookup: for each code, all 16-bit values whose
-        // top `code_len` bits match the code get filled with (code_len, value).
-        let table_size = 1usize << 16;
+        // Build max_bits prefix lookup (L10): for each code, all values whose
+        // top `code_len` bits match get filled. Sized 1<<max_bits not 1<<16.
+        let table_size = if max_bits == 0 { 1 } else { 1usize << max_bits };
         let mut lookup = vec![(0u8, 0u8); table_size];
         for &(code_len, value, code) in &codes {
-            let shift = 16 - code_len as u32;
+            let shift = max_bits as u32 - code_len as u32;
             let lo = (code << shift) as usize;
             let hi = lo + (1 << shift);
             for slot in &mut lookup[lo..hi] {
@@ -57,9 +62,6 @@ impl HuffTable {
         Ok(HuffTable { lookup, max_bits })
     }
 
-    fn empty() -> Self {
-        HuffTable { lookup: vec![(0, 0); 1 << 16], max_bits: 0 }
-    }
 }
 
 struct BitReader<'a> {
@@ -108,16 +110,19 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    fn peek16(&mut self) -> u32 {
-        if self.nbits < 16 {
+    fn peek(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        if self.nbits < n {
             self.fill();
         }
-        if self.nbits >= 16 {
-            ((self.bits >> (self.nbits - 16)) & 0xFFFF) as u32
+        if self.nbits >= n {
+            ((self.bits >> (self.nbits - n)) & ((1u64 << n) - 1)) as u32
         } else {
             // Pad with zeros at end of stream.
-            let pad = 16 - self.nbits;
-            ((self.bits << pad) & 0xFFFF) as u32
+            let pad = n - self.nbits;
+            ((self.bits << pad) & ((1u64 << n) - 1)) as u32
         }
     }
 
@@ -236,8 +241,7 @@ pub fn decode_tile(
 
     let mut sof = Sof::default();
     let mut sos = Sos::default();
-    let mut dhts: [HuffTable; 4] =
-        [HuffTable::empty(), HuffTable::empty(), HuffTable::empty(), HuffTable::empty()];
+    let mut dhts: [Option<Rc<HuffTable>>; 4] = [None, None, None, None];
     let mut have_sof = false;
     let mut have_sos = false;
 
@@ -284,7 +288,26 @@ pub fn decode_tile(
                     }
                     let values = &src[pos..pos + total];
                     pos += total;
-                    dhts[th as usize] = HuffTable::build(&bits, values)?;
+                    // L11: thread-local exact-payload cache (Rc, WASM-safe). Key = bits[16]++values.
+                    let key: Vec<u8> = bits.iter().copied().chain(values.iter().copied()).collect();
+                    let cached = DHT_CACHE.with(|c| {
+                        let cache = c.borrow();
+                        cache.iter().find(|(k, _)| k == &key).map(|(_, t)| t.clone())
+                    });
+                    let tbl = if let Some(t) = cached {
+                        t
+                    } else {
+                        let t = Rc::new(HuffTable::build(&bits, values)?);
+                        DHT_CACHE.with(|c| {
+                            let mut cache = c.borrow_mut();
+                            cache.push((key, t.clone()));
+                            if cache.len() > 8 {
+                                cache.remove(0); // FIFO evict
+                            }
+                        });
+                        t
+                    };
+                    dhts[th as usize] = Some(tbl);
                 }
             }
             0xDA => {
@@ -385,11 +408,14 @@ pub fn decode_tile(
                     left[comp]
                 };
 
-                let table = &dhts[sos.dht_id[comp] as usize];
+                let table = match &dhts[sos.dht_id[comp] as usize] {
+                    Some(t) => t,
+                    None => bail!("ljpeg: missing huffman table {}", sos.dht_id[comp]),
+                };
                 if table.max_bits == 0 {
                     bail!("ljpeg: missing huffman table {}", sos.dht_id[comp]);
                 }
-                let peek = br.peek16();
+                let peek = br.peek(table.max_bits as u32);
                 let (consume, t) = table.lookup[peek as usize];
                 if consume == 0 {
                     bail!("ljpeg: invalid huffman code at row={row} col={col} comp={comp}");
@@ -422,6 +448,67 @@ pub fn decode_tile(
     }
 
     Ok(())
+}
+
+/// Decode into a caller-provided compact tile buffer (tile_w * tile_h * cps u16s).
+/// Callers blit tiles into the frame and may decode many tiles in parallel.
+pub fn decode_tile_compact(src: &[u8], out: &mut [u16], tile_w: usize, tile_h: usize) -> Result<()> {
+    decode_tile(src, out, 0, tile_w, tile_w, tile_h)
+}
+
+#[derive(Debug)]
+pub struct TileInfo {
+    pub width: u32,
+    pub height: u32,
+    pub components: u8,
+    pub precision: u8,
+}
+
+/// Parse markers up to SOF only — cheap planning probe, no entropy decode.
+pub fn probe_tile(src: &[u8]) -> Result<TileInfo> {
+    if src.len() < 4 || src[0] != 0xFF || src[1] != 0xD8 {
+        bail!("ljpeg: missing SOI");
+    }
+    let mut pos = 2usize;
+
+    let mut sof = Sof::default();
+    let mut have_sof = false;
+
+    while !have_sof {
+        let marker = read_marker(src, &mut pos)?;
+        match marker {
+            0xC3 => {
+                let _seg_len = read_u16_be(src, &mut pos)?;
+                sof.precision = read_u8(src, &mut pos)?;
+                sof.height = read_u16_be(src, &mut pos)? as u32;
+                sof.width = read_u16_be(src, &mut pos)? as u32;
+                sof.cps = read_u8(src, &mut pos)?;
+                if sof.cps as usize > MAX_COMPONENTS {
+                    bail!("ljpeg: too many components ({})", sof.cps);
+                }
+                for i in 0..sof.cps as usize {
+                    sof.comp_ids[i] = read_u8(src, &mut pos)?;
+                    let _h_v = read_u8(src, &mut pos)?;
+                    let _tq = read_u8(src, &mut pos)?;
+                }
+                have_sof = true;
+            }
+            0xD9 => bail!("ljpeg: EOI before SOF"),
+            _ => {
+                // Skip unknown segment.
+                let seg_len = read_u16_be(src, &mut pos)? as usize;
+                if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
+                pos += seg_len - 2;
+            }
+        }
+    }
+
+    Ok(TileInfo {
+        width: sof.width,
+        height: sof.height,
+        components: sof.cps,
+        precision: sof.precision,
+    })
 }
 
 #[cfg(test)]
@@ -499,5 +586,67 @@ mod tests {
         let e = decode_tile(&src, &mut out, 0, 2, 2, 2).unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("ljpeg: restart markers unsupported (DRI=1)"), "got: {}", msg);
+    }
+
+    #[test]
+    fn ljpeg_probe_and_compact_work_for_minimal() {
+        let src = make_minimal_sof3();
+        let info = probe_tile(&src).expect("probe ok");
+        assert_eq!(info.width, 2);
+        assert_eq!(info.height, 2);
+        assert_eq!(info.components, 1);
+        assert_eq!(info.precision, 8);
+        let sz = (info.width as usize) * (info.height as usize) * (info.components as usize);
+        let mut out = vec![0u16; sz];
+        // cps=1 path: pass tile_w as stride/out_pixel_cols
+        decode_tile_compact(&src, &mut out, info.width as usize, info.height as usize).expect("compact ok");
+        assert_eq!(&out[..], &[100u16, 101, 102, 103]);
+    }
+
+    #[test]
+    fn ljpeg_probe_errors_on_missing_soi() {
+        let src = vec![0x00, 0x01];
+        let e = probe_tile(&src).unwrap_err();
+        assert!(e.to_string().contains("ljpeg: missing SOI"), "got: {}", e);
+    }
+
+    #[test]
+    fn ljpeg_predictor_unsupported_still_bails() {
+        // L12 not implemented (unwarranted for Olympus-primary corpus; current bail is acceptable hygiene)
+        // Use a fresh src with predictor=7 (no mutation of shared helper needed)
+        let src_bad = vec![
+            0xFF, 0xD8,
+            0xFF, 0xC3, 0x00, 0x0B,
+            0x08, 0x00, 0x02, 0x00, 0x02, 0x01,
+            0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x08,
+            0x01, 0x01, 0x00,
+            0x07, 0x00, 0x00, // predictor=7
+        ];
+        let mut out = vec![0u16; 4];
+        let e = decode_tile(&src_bad, &mut out, 0, 2, 2, 2).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("ljpeg: predictor 7 not supported"), "got: {}", msg);
+    }
+
+    #[test]
+    fn ljpeg_huffman_lookup_right_sized() {
+        // L10: build yields 1<<max_bits not 1<<16
+        let bits = [0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0];
+        let values = [0u8,1,2,5];
+        let tbl = HuffTable::build(&bits, &values).unwrap();
+        assert_eq!(tbl.max_bits, 3);
+        assert_eq!(tbl.lookup.len(), 1 << 3, "L10 right-size: expected 8, got {}", tbl.lookup.len());
+    }
+
+    #[test]
+    fn ljpeg_dht_cache_functional_across_calls() {
+        // L11: cache hit path exercised (same DHT bytes) — still decodes correctly
+        let src = make_minimal_sof3();
+        let mut out1 = vec![0u16; 4];
+        decode_tile(&src, &mut out1, 0, 2, 2, 2).unwrap();
+        let mut out2 = vec![0u16; 4];
+        decode_tile(&src, &mut out2, 0, 2, 2, 2).unwrap();
+        assert_eq!(out1, out2);
     }
 }
