@@ -148,12 +148,16 @@ async function main() {
 
     const jsStats = await stat(outJs);
     const wasmStats = await stat(outWasm);
+    const linkExtras = ["--closure", "1"];
+    if (!tier.threads && !tierFlags.some((f) => /pthread|USE_PTHREADS/.test(f))) {
+      linkExtras.push("-sEVAL_CTORS=2");
+    }
     manifest.tiers[tier.name] = {
       jsBytes: jsStats.size,
       wasmBytes: wasmStats.size,
       jsSha256: await sha256File(outJs),
       wasmSha256: await sha256File(outWasm),
-      flags: [...tierFlags, "--closure", "1", "-sEVAL_CTORS=2"]
+      flags: [...tierFlags, ...linkExtras]
     };
 
     if (wasmStats.size > config.sizeBudgets[tier.name]) {
@@ -263,7 +267,9 @@ async function linkBridge(buildDir, outJs, tierFlags, env) {
     "-sWASM_BIGINT=1",
     "-flto",
     "--closure", "1",
-    "-sEVAL_CTORS=2",
+    // EVAL_CTORS shrinks .data/ctors but is incompatible with pthreads (passive segments error in libpthread.js).
+    // Apply only to non-MT tiers. MT glue still gets --closure 1 (P2-1) for the 31k->~20k win.
+    ...(!tierFlags.some((f) => /pthread|USE_PTHREADS/.test(f)) ? ["-sEVAL_CTORS=2"] : []),
     "-fno-rtti",
     "-fno-exceptions"
   ], { cwd: packageRoot, env });
