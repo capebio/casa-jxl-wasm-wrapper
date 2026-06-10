@@ -886,7 +886,7 @@ export async function encodeTileContainerRgba8(
   pixels: ArrayBuffer | Uint8Array,
   width: number,
   height: number,
-  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean },
+  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean; onMetric?: (name: string, value: number) => void },
 ): Promise<Uint8Array> {
   return encodeTileContainer(pixels, width, height, options, "rgba8");
 }
@@ -900,7 +900,7 @@ export async function encodeTileContainerRgba16(
   pixels: ArrayBuffer | Uint8Array,
   width: number,
   height: number,
-  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean },
+  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean; onMetric?: (name: string, value: number) => void },
 ): Promise<Uint8Array> {
   return encodeTileContainer(pixels, width, height, options, "rgba16");
 }
@@ -909,9 +909,10 @@ async function encodeTileContainer(
   pixels: ArrayBuffer | Uint8Array,
   width: number,
   height: number,
-  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean },
+  options: { tileSize: number; distance?: number; effort?: number; hasAlpha?: boolean; onMetric?: (name: string, value: number) => void },
   format: "rgba8" | "rgba16",
 ): Promise<Uint8Array> {
+  const tStart = performance.now();
   const module = await loadLibjxlModule();
   const encodeFn = format === "rgba16"
     ? module._jxl_wasm_encode_tile_container_rgba16
@@ -928,19 +929,42 @@ async function encodeTileContainer(
   const hasAlpha = options.hasAlpha !== false;
 
   const view = copyOrBorrowInput(pixels, false);
+  const t1 = performance.now();
+  options.onMetric?.("enc_input_prep", t1 - tStart);
+
   const expectedBytes = width * height * 4 * bytesPerChannelForFormat(format);
   if (view.byteLength < expectedBytes) {
     throw new Error(`Pixel buffer too small: ${view.byteLength} < ${expectedBytes}`);
   }
 
+  const t2 = performance.now();
   const ptr = module._malloc(view.byteLength);
   if (ptr === 0) throw new Error("WASM malloc failed for tile container encode");
+  const tMalloc = performance.now() - t2;
+  options.onMetric?.("enc_malloc", tMalloc);
+
   try {
+    const t3 = performance.now();
     module.HEAPU8.set(view, ptr);
+    const tHeapSet = performance.now() - t3;
+    options.onMetric?.("enc_heap_set", tHeapSet);
+
+    const t4 = performance.now();
     const handle = encodeFn(ptr, width, height, tileSize, distance, effort, hasAlpha ? 1 : 0);
-    return takeBuffer(module, handle, "tile container encode").data;
+    const tWasmEncode = performance.now() - t4;
+    options.onMetric?.("enc_wasm_encode", tWasmEncode);
+
+    const t5 = performance.now();
+    const result = takeBuffer(module, handle, "tile container encode").data;
+    const tBufferRead = performance.now() - t5;
+    options.onMetric?.("enc_buffer_read", tBufferRead);
+
+    return result;
   } finally {
+    const t6 = performance.now();
     module._free(ptr);
+    const tFree = performance.now() - t6;
+    options.onMetric?.("enc_free", tFree);
   }
 }
 
