@@ -144,6 +144,11 @@ struct JxlWasmDecState {
   // Animation header info (populated after JXL_DEC_BASIC_INFO when have_animation)
   double   anim_ticks_per_second;
   uint32_t anim_loop_count;
+  // 2.10: captured ICC profile (JXL_COLOR_PROFILE_TARGET_DATA) for wide-gamut/HDR sources.
+  // JS consumers (canvas, ImageData, future LookRenderer log-geodesic) can now see the true
+  // colour space instead of assuming sRGB. Full CMS transform in WASM is out of scope.
+  uint8_t* icc_profile;
+  size_t   icc_size;
 };
 
 #define JXL_DEC_RESULT_NEED_MORE  0
@@ -502,7 +507,8 @@ static JxlWasmBuffer* DecodeRgba(const uint8_t* input, size_t input_size, uint32
   if (dec == nullptr) return MakeError(2);
   JXL_SETUP_DEC_RUNNER(dec, MakeError(58));
 
-  if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
+  // 2.10: subscribe COLOR so profile is resolved (one-shot has no export path yet; event consumed below).
+  if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE | JXL_DEC_COLOR_ENCODING) != JXL_DEC_SUCCESS) {
     JxlDecoderDestroy(dec); return MakeError(3);
   }
   // JxlDecoderSetDownsamplingFactor was removed in libjxl 0.11.x; decode full-res and
@@ -523,6 +529,10 @@ static JxlWasmBuffer* DecodeRgba(const uint8_t* input, size_t input_size, uint32
     }
     if (status == JXL_DEC_BASIC_INFO) {
       if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) { free(pixels_raw); JxlDecoderDestroy(dec); return MakeError(10); }
+      continue;
+    }
+    if (status == JXL_DEC_COLOR_ENCODING) {
+      // Consumed (profile resolved internally by libjxl). One-shot has no sidecar return for ICC yet.
       continue;
     }
     if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
@@ -2167,7 +2177,8 @@ static JxlWasmDecState* DecCreateInternal(uint32_t format, uint32_t progressive_
   if (dec == nullptr) return nullptr;
   JXL_SETUP_DEC_RUNNER(dec, nullptr);
 
-  int events = JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE | JXL_DEC_BOX;
+  // 2.10: always subscribe COLOR_ENCODING so ICC can be captured (anchor for CMS + LookRenderer).
+  int events = JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE | JXL_DEC_BOX | JXL_DEC_COLOR_ENCODING;
   if (progressive_detail != 0) events |= JXL_DEC_FRAME_PROGRESSION;
   if (JxlDecoderSubscribeEvents(dec, events) != JXL_DEC_SUCCESS) {
     JxlDecoderDestroy(dec); return nullptr;
@@ -2338,6 +2349,22 @@ int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
       }
       continue;
     }
+    if (status == JXL_DEC_COLOR_ENCODING) {
+      // Capture once (codestream profile applies to all frames/animation).
+      if (s->icc_profile == nullptr) {
+        size_t sz = 0;
+        if (JxlDecoderGetICCProfileSize(s->dec, nullptr, JXL_COLOR_PROFILE_TARGET_DATA, &sz) == JXL_DEC_SUCCESS && sz > 0) {
+          uint8_t* buf = static_cast<uint8_t*>(malloc(sz));
+          if (buf && JxlDecoderGetColorAsICCProfile(s->dec, nullptr, JXL_COLOR_PROFILE_TARGET_DATA, buf, sz) == JXL_DEC_SUCCESS) {
+            s->icc_profile = buf;
+            s->icc_size = sz;
+          } else {
+            free(buf);
+          }
+        }
+      }
+      continue;
+    }
     if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
       size_t buf_size = 0;
       if (JxlDecoderImageOutBufferSize(s->dec, &s->pixel_format, &buf_size) != JXL_DEC_SUCCESS) {
@@ -2488,6 +2515,7 @@ void jxl_wasm_dec_free(JxlWasmDecState* s) {
   free(s->input_buf);
   free(s->gm_buf);       // no-op if box was fully consumed or never started
   free(s->gain_map_jxl); // no-op if ownership was transferred via dec_take_gain_map
+  free(s->icc_profile);  // 2.10
   free(s);
 }
 
@@ -2724,6 +2752,19 @@ double jxl_wasm_dec_anim_ticks_per_second(uint32_t state_ptr) {
 uint32_t jxl_wasm_dec_anim_loop_count(uint32_t state_ptr) {
   const JxlWasmDecState* s = reinterpret_cast<const JxlWasmDecState*>(static_cast<uintptr_t>(state_ptr));
   return s ? s->anim_loop_count : 0u;
+}
+
+// 2.10: ICC profile exposure (size + ptr as u32 for WASM/JS HEAP access).
+// Allows consumers to attach the true colour profile (wide-gamut/HDR) instead of assuming sRGB.
+// Full conversion inside WASM remains future work (no LCMS); this is the required anchor for
+// log-geodesic LookRenderer in Rust as well.
+size_t jxl_wasm_dec_icc_size(const JxlWasmDecState* s) {
+  return s ? s->icc_size : 0;
+}
+uint32_t jxl_wasm_dec_icc_ptr(uint32_t state_ptr) {
+  const JxlWasmDecState* s = reinterpret_cast<const JxlWasmDecState*>(static_cast<uintptr_t>(state_ptr));
+  if (s == nullptr || s->icc_profile == nullptr || s->icc_size == 0) return 0u;
+  return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(s->icc_profile));
 }
 
 // Forward-only seek: skip frames to reach target_frame (zero-based, as exposed by jxl_wasm_dec_frame_index).
