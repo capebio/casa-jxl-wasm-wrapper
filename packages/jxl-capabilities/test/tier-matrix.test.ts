@@ -67,19 +67,28 @@ function setNoWasm() {
 
 async function freshCapsAndTier() {
   const mod = await import(`../src/index.js?matrix=${Date.now()}`);
+  if (mod && typeof mod._resetCache === "function") {
+    mod._resetCache();
+  }
   const tier = mod.detectTier();
   const caps = await mod.getCapabilities();
   return { mod, tier, caps };
 }
 
 describe("@casabio/jxl-capabilities tier matrix (X-1)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     // ensure clean starting point
     restoreProbes();
     globalAny.self = originalSelf;
     if (originalSharedArrayBuffer) {
       (globalAny as any).SharedArrayBuffer = originalSharedArrayBuffer;
     }
+    try {
+      const mod = await import("../src/index.js");
+      if (mod && typeof mod._resetCache === "function") {
+        mod._resetCache();
+      }
+    } catch {}
   });
 
   afterEach(() => {

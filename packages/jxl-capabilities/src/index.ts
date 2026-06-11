@@ -2,6 +2,11 @@ export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
 
 let _cachedTier: Tier | undefined;
 
+export function _resetCache(): void {
+  _cachedTier = undefined;
+  _capsPromise = undefined;
+}
+
 export function canUseThreadedWasm(sharedArrayBuffer: boolean, crossOriginIsolated: boolean): boolean {
   return sharedArrayBuffer && crossOriginIsolated;
 }
