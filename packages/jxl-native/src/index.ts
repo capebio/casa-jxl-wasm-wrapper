@@ -129,6 +129,7 @@ export interface DecoderOptions {
   extraChannels?: readonly DecodedExtraChannel[];
   // decodeExtraChannels is native-only (opt-in for N-20 extra plane extraction); not part of core DecoderOptions.
   decodeExtraChannels?: boolean;
+  maxPixels?: number;
 }
 
 /**
@@ -141,7 +142,7 @@ export interface DecoderOptions {
  * future work; see design note at top of native.cc:DecodeAll.
  */
 
-export interface AnimationOptions { ticksPerSecond: number; loopCount: number; }
+export interface AnimationOptions { ticksPerSecond: number; loopCount?: number; }
 export interface AnimationFrame {
   data: ArrayBuffer | Uint8Array;
   width: number; height: number;
@@ -338,8 +339,9 @@ export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFaca
   ensureBindingLoaded(binding, "native binding");
   return {
     createDecoder(options) {
-      guardDecoderOptions(options);
-      const raw = binding.createDecoder!(options);
+      const merged = { maxPixels: 1 << 28, decodeExtraChannels: false, ...options };
+      guardDecoderOptions(merged);
+      const raw = binding.createDecoder!(merged);
       return wrapDecoder(raw);
     },
     createEncoder(options) {
@@ -416,8 +418,9 @@ function adaptBindingCreators(raw: NativeBinding): NativeBinding {
   };
   if (raw.createDecoder) {
     adapted.createDecoder = (options: DecoderOptions) => {
-      guardDecoderOptions(options);
-      const rawDec = raw.createDecoder!(options);
+      const merged = { maxPixels: 1 << 28, decodeExtraChannels: false, ...options };
+      guardDecoderOptions(merged);
+      const rawDec = raw.createDecoder!(merged);
       return wrapDecoder(rawDec);
     };
   }

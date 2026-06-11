@@ -73,7 +73,22 @@ struct DecoderData {
   std::vector<napi_ref> events;
   bool closed = false;
   bool cancelled = false;
+
+  // NV-14 zero-copy single-push fields (decoder side)
+  napi_ref pinned_input = nullptr;
+  void* pinned_data = nullptr;
+  size_t pinned_size = 0;
+  bool multi_push = false;
 };
+
+static void release_pinned_decoder(napi_env env, DecoderData* data) {
+  if (data->pinned_input != nullptr) {
+    napi_delete_reference(env, data->pinned_input);
+    data->pinned_input = nullptr;
+    data->pinned_data = nullptr;
+    data->pinned_size = 0;
+  }
+}
 
 struct ExtraChannelDesc {
   std::string type;
@@ -554,270 +569,340 @@ static napi_value MakeIterator(napi_env env, const std::vector<napi_ref>& refs) 
 }
 
 #if CASABIO_HAVE_LIBJXL
-// NV-13: Fused Crop + Downsample implementation
-static void transform_fused(const uint8_t* src, ImageInfo& info, const Region* region, uint32_t ds, PixelFormatKind fmt, std::vector<uint8_t>& dest) {
+struct EffectiveRegion {
+  uint32_t rx = 0;
+  uint32_t ry = 0;
+  uint32_t rw = 0;
+  uint32_t rh = 0;
+};
+
+static bool fused_dims(const ImageInfo& info, const Region* region, uint32_t ds, uint32_t* dw, uint32_t* dh, EffectiveRegion* eff) {
   uint32_t rx = region ? region->x : 0;
   uint32_t ry = region ? region->y : 0;
   uint32_t rw = region ? region->w : info.width;
   uint32_t rh = region ? region->h : info.height;
 
   if (rx >= info.width || ry >= info.height || rw == 0 || rh == 0) {
-    dest.clear();
-    info.width = 0;
-    info.height = 0;
-    return;
+    *dw = 0;
+    *dh = 0;
+    return false;
   }
   rw = std::min(rw, info.width - rx);
   rh = std::min(rh, info.height - ry);
 
   if (rw == 0 || rh == 0) {
-    dest.clear();
-    info.width = 0;
-    info.height = 0;
-    return;
+    *dw = 0;
+    *dh = 0;
+    return false;
   }
 
+  eff->rx = rx;
+  eff->ry = ry;
+  eff->rw = rw;
+  eff->rh = rh;
+
+  if (ds <= 1) {
+    *dw = rw;
+    *dh = rh;
+  } else {
+    *dw = std::max(1u, (rw + ds - 1u) / ds);
+    *dh = std::max(1u, (rh + ds - 1u) / ds);
+  }
+  return true;
+}
+
+static void transform_fused_into(const uint8_t* src, ImageInfo& info, const EffectiveRegion& eff, uint32_t ds, PixelFormatKind fmt, uint8_t* dest) {
   const uint32_t bpc = BytesPerChannel(fmt);
   const uint32_t bpp = 4u * bpc;
   const uint32_t sw = info.width;
 
   if (ds <= 1) {
-    // Fused crop-only path
-    dest.resize(static_cast<size_t>(rw) * rh * bpp);
     const size_t src_row_bytes = static_cast<size_t>(sw) * bpp;
-    const size_t dest_row_bytes = static_cast<size_t>(rw) * bpp;
-    for (uint32_t y = 0; y < rh; ++y) {
-      const uint8_t* src_row = src + (ry + y) * src_row_bytes + rx * bpp;
-      uint8_t* dest_row = dest.data() + y * dest_row_bytes;
+    const size_t dest_row_bytes = static_cast<size_t>(eff.rw) * bpp;
+    for (uint32_t y = 0; y < eff.rh; ++y) {
+      const uint8_t* src_row = src + (eff.ry + y) * src_row_bytes + eff.rx * bpp;
+      uint8_t* dest_row = dest + y * dest_row_bytes;
       std::memcpy(dest_row, src_row, dest_row_bytes);
     }
-    info.width = rw;
-    info.height = rh;
+    info.width = eff.rw;
+    info.height = eff.rh;
     return;
   }
 
-  // Fused crop + downsample path
-  const uint32_t dw = std::max(1u, (rw + ds - 1u) / ds);
-  const uint32_t dh = std::max(1u, (rh + ds - 1u) / ds);
-  dest.assign(static_cast<size_t>(dw) * dh * bpp, 0);
+  const uint32_t dw = std::max(1u, (eff.rw + ds - 1u) / ds);
+  const uint32_t dh = std::max(1u, (eff.rh + ds - 1u) / ds);
 
   const size_t src_row_bytes = static_cast<size_t>(sw) * bpp;
   const size_t dest_row_bytes = static_cast<size_t>(dw) * bpp;
 
   if (fmt == PixelFormatKind::Rgba8) {
     if (ds == 2) {
-      // Specialize ds == 2 (common pyramid case) with flat 2x2 kernel
-      for (uint32_t y = 0; y < dh; ++y) {
-        uint32_t sy0 = ry + y * 2;
+      uint32_t interior_h = eff.rh / 2;
+      uint32_t interior_w = eff.rw / 2;
+
+      for (uint32_t y = 0; y < interior_h; ++y) {
+        uint32_t sy0 = eff.ry + y * 2;
         uint32_t sy1 = sy0 + 1;
         const uint8_t* row0 = src + sy0 * src_row_bytes;
-        const uint8_t* row1 = (sy1 < ry + rh) ? (src + sy1 * src_row_bytes) : nullptr;
-        uint8_t* dest_row = dest.data() + y * dest_row_bytes;
+        const uint8_t* row1 = src + sy1 * src_row_bytes;
+        uint8_t* dest_row = dest + y * dest_row_bytes;
 
-        for (uint32_t x = 0; x < dw; ++x) {
-          uint32_t sx0 = rx + x * 2;
-          uint32_t sx1 = sx0 + 1;
-          bool has_x1 = (sx1 < rx + rw);
-
-          uint32_t sum[4] = {0};
-          uint32_t cnt = 0;
-
+        for (uint32_t x = 0; x < interior_w; ++x) {
+          uint32_t sx0 = eff.rx + x * 2;
           const uint8_t* p00 = row0 + sx0 * 4;
-          sum[0] += p00[0]; sum[1] += p00[1]; sum[2] += p00[2]; sum[3] += p00[3];
-          cnt++;
+          const uint8_t* p01 = p00 + 4;
+          const uint8_t* p10 = row1 + sx0 * 4;
+          const uint8_t* p11 = p10 + 4;
 
-          if (has_x1) {
-            const uint8_t* p01 = row0 + sx1 * 4;
-            sum[0] += p01[0]; sum[1] += p01[1]; sum[2] += p01[2]; sum[3] += p01[3];
-            cnt++;
-          }
+          dest_row[x * 4 + 0] = (p00[0] + p01[0] + p10[0] + p11[0] + 2) >> 2;
+          dest_row[x * 4 + 1] = (p00[1] + p01[1] + p10[1] + p11[1] + 2) >> 2;
+          dest_row[x * 4 + 2] = (p00[2] + p01[2] + p10[2] + p11[2] + 2) >> 2;
+          dest_row[x * 4 + 3] = (p00[3] + p01[3] + p10[3] + p11[3] + 2) >> 2;
+        }
 
-          if (row1) {
-            const uint8_t* p10 = row1 + sx0 * 4;
-            sum[0] += p10[0]; sum[1] += p10[1]; sum[2] += p10[2]; sum[3] += p10[3];
-            cnt++;
+        if (interior_w < dw) {
+          uint32_t x = interior_w;
+          uint32_t sx0 = eff.rx + x * 2;
+          const uint8_t* p00 = row0 + sx0 * 4;
+          const uint8_t* p10 = row1 + sx0 * 4;
+          dest_row[x * 4 + 0] = (p00[0] + p10[0] + 1) >> 1;
+          dest_row[x * 4 + 1] = (p00[1] + p10[1] + 1) >> 1;
+          dest_row[x * 4 + 2] = (p00[2] + p10[2] + 1) >> 1;
+          dest_row[x * 4 + 3] = (p00[3] + p10[3] + 1) >> 1;
+        }
+      }
 
-            if (has_x1) {
-              const uint8_t* p11 = row1 + sx1 * 4;
-              sum[0] += p11[0]; sum[1] += p11[1]; sum[2] += p11[2]; sum[3] += p11[3];
-              cnt++;
-            }
-          }
+      if (interior_h < dh) {
+        uint32_t y = interior_h;
+        uint32_t sy0 = eff.ry + y * 2;
+        const uint8_t* row0 = src + sy0 * src_row_bytes;
+        uint8_t* dest_row = dest + y * dest_row_bytes;
 
-          dest_row[x * 4 + 0] = sum[0] / cnt;
-          dest_row[x * 4 + 1] = sum[1] / cnt;
-          dest_row[x * 4 + 2] = sum[2] / cnt;
-          dest_row[x * 4 + 3] = sum[3] / cnt;
+        for (uint32_t x = 0; x < interior_w; ++x) {
+          uint32_t sx0 = eff.rx + x * 2;
+          const uint8_t* p00 = row0 + sx0 * 4;
+          const uint8_t* p01 = p00 + 4;
+          dest_row[x * 4 + 0] = (p00[0] + p01[0] + 1) >> 1;
+          dest_row[x * 4 + 1] = (p00[1] + p01[1] + 1) >> 1;
+          dest_row[x * 4 + 2] = (p00[2] + p01[2] + 1) >> 1;
+          dest_row[x * 4 + 3] = (p00[3] + p01[3] + 1) >> 1;
+        }
+
+        if (interior_w < dw) {
+          uint32_t x = interior_w;
+          uint32_t sx0 = eff.rx + x * 2;
+          const uint8_t* p00 = row0 + sx0 * 4;
+          dest_row[x * 4 + 0] = p00[0];
+          dest_row[x * 4 + 1] = p00[1];
+          dest_row[x * 4 + 2] = p00[2];
+          dest_row[x * 4 + 3] = p00[3];
         }
       }
     } else {
       // General downsample for Rgba8
       for (uint32_t y = 0; y < dh; ++y) {
-        uint8_t* dest_row = dest.data() + y * dest_row_bytes;
+        uint8_t* dest_row = dest + y * dest_row_bytes;
         for (uint32_t x = 0; x < dw; ++x) {
           uint32_t sum[4] = {0};
           uint32_t cnt = 0;
           for (uint32_t yy = 0; yy < ds; ++yy) {
-            uint32_t sy = ry + y * ds + yy;
-            if (sy >= ry + rh) break;
+            uint32_t sy = eff.ry + y * ds + yy;
+            if (sy >= eff.ry + eff.rh) break;
             const uint8_t* src_row = src + sy * src_row_bytes;
             for (uint32_t xx = 0; xx < ds; ++xx) {
-              uint32_t sx = rx + x * ds + xx;
-              if (sx >= rx + rw) break;
+              uint32_t sx = eff.rx + x * ds + xx;
+              if (sx >= eff.rx + eff.rw) break;
               const uint8_t* p = src_row + sx * 4;
               sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
               cnt++;
             }
           }
           if (cnt > 0) {
-            dest_row[x * 4 + 0] = sum[0] / cnt;
-            dest_row[x * 4 + 1] = sum[1] / cnt;
-            dest_row[x * 4 + 2] = sum[2] / cnt;
-            dest_row[x * 4 + 3] = sum[3] / cnt;
+            dest_row[x * 4 + 0] = (sum[0] + (cnt >> 1)) / cnt;
+            dest_row[x * 4 + 1] = (sum[1] + (cnt >> 1)) / cnt;
+            dest_row[x * 4 + 2] = (sum[2] + (cnt >> 1)) / cnt;
+            dest_row[x * 4 + 3] = (sum[3] + (cnt >> 1)) / cnt;
           }
         }
       }
     }
   } else if (fmt == PixelFormatKind::Rgba16) {
     if (ds == 2) {
-      for (uint32_t y = 0; y < dh; ++y) {
-        uint32_t sy0 = ry + y * 2;
+      uint32_t interior_h = eff.rh / 2;
+      uint32_t interior_w = eff.rw / 2;
+
+      for (uint32_t y = 0; y < interior_h; ++y) {
+        uint32_t sy0 = eff.ry + y * 2;
         uint32_t sy1 = sy0 + 1;
         const uint16_t* row0 = reinterpret_cast<const uint16_t*>(src + sy0 * src_row_bytes);
-        const uint16_t* row1 = (sy1 < ry + rh) ? reinterpret_cast<const uint16_t*>(src + sy1 * src_row_bytes) : nullptr;
-        uint16_t* dest_row = reinterpret_cast<uint16_t*>(dest.data() + y * dest_row_bytes);
+        const uint16_t* row1 = reinterpret_cast<const uint16_t*>(src + sy1 * src_row_bytes);
+        uint16_t* dest_row = reinterpret_cast<uint16_t*>(dest + y * dest_row_bytes);
 
-        for (uint32_t x = 0; x < dw; ++x) {
-          uint32_t sx0 = rx + x * 2;
-          uint32_t sx1 = sx0 + 1;
-          bool has_x1 = (sx1 < rx + rw);
-
-          uint32_t sum[4] = {0};
-          uint32_t cnt = 0;
-
+        for (uint32_t x = 0; x < interior_w; ++x) {
+          uint32_t sx0 = eff.rx + x * 2;
           const uint16_t* p00 = row0 + sx0 * 4;
-          sum[0] += p00[0]; sum[1] += p00[1]; sum[2] += p00[2]; sum[3] += p00[3];
-          cnt++;
+          const uint16_t* p01 = p00 + 4;
+          const uint16_t* p10 = row1 + sx0 * 4;
+          const uint16_t* p11 = p10 + 4;
 
-          if (has_x1) {
-            const uint16_t* p01 = row0 + sx1 * 4;
-            sum[0] += p01[0]; sum[1] += p01[1]; sum[2] += p01[2]; sum[3] += p01[3];
-            cnt++;
-          }
+          dest_row[x * 4 + 0] = (p00[0] + p01[0] + p10[0] + p11[0] + 2) >> 2;
+          dest_row[x * 4 + 1] = (p00[1] + p01[1] + p10[1] + p11[1] + 2) >> 2;
+          dest_row[x * 4 + 2] = (p00[2] + p01[2] + p10[2] + p11[2] + 2) >> 2;
+          dest_row[x * 4 + 3] = (p00[3] + p01[3] + p10[3] + p11[3] + 2) >> 2;
+        }
 
-          if (row1) {
-            const uint16_t* p10 = row1 + sx0 * 4;
-            sum[0] += p10[0]; sum[1] += p10[1]; sum[2] += p10[2]; sum[3] += p10[3];
-            cnt++;
+        if (interior_w < dw) {
+          uint32_t x = interior_w;
+          uint32_t sx0 = eff.rx + x * 2;
+          const uint16_t* p00 = row0 + sx0 * 4;
+          const uint16_t* p10 = row1 + sx0 * 4;
+          dest_row[x * 4 + 0] = (p00[0] + p10[0] + 1) >> 1;
+          dest_row[x * 4 + 1] = (p00[1] + p10[1] + 1) >> 1;
+          dest_row[x * 4 + 2] = (p00[2] + p10[2] + 1) >> 1;
+          dest_row[x * 4 + 3] = (p00[3] + p10[3] + 1) >> 1;
+        }
+      }
 
-            if (has_x1) {
-              const uint16_t* p11 = row1 + sx1 * 4;
-              sum[0] += p11[0]; sum[1] += p11[1]; sum[2] += p11[2]; sum[3] += p11[3];
-              cnt++;
-            }
-          }
+      if (interior_h < dh) {
+        uint32_t y = interior_h;
+        uint32_t sy0 = eff.ry + y * 2;
+        const uint16_t* row0 = reinterpret_cast<const uint16_t*>(src + sy0 * src_row_bytes);
+        uint16_t* dest_row = reinterpret_cast<uint16_t*>(dest + y * dest_row_bytes);
 
-          dest_row[x * 4 + 0] = sum[0] / cnt;
-          dest_row[x * 4 + 1] = sum[1] / cnt;
-          dest_row[x * 4 + 2] = sum[2] / cnt;
-          dest_row[x * 4 + 3] = sum[3] / cnt;
+        for (uint32_t x = 0; x < interior_w; ++x) {
+          uint32_t sx0 = eff.rx + x * 2;
+          const uint16_t* p00 = row0 + sx0 * 4;
+          const uint16_t* p01 = p00 + 4;
+          dest_row[x * 4 + 0] = (p00[0] + p01[0] + 1) >> 1;
+          dest_row[x * 4 + 1] = (p00[1] + p01[1] + 1) >> 1;
+          dest_row[x * 4 + 2] = (p00[2] + p01[2] + 1) >> 1;
+          dest_row[x * 4 + 3] = (p00[3] + p01[3] + 1) >> 1;
+        }
+
+        if (interior_w < dw) {
+          uint32_t x = interior_w;
+          uint32_t sx0 = eff.rx + x * 2;
+          const uint16_t* p00 = row0 + sx0 * 4;
+          dest_row[x * 4 + 0] = p00[0];
+          dest_row[x * 4 + 1] = p00[1];
+          dest_row[x * 4 + 2] = p00[2];
+          dest_row[x * 4 + 3] = p00[3];
         }
       }
     } else {
       for (uint32_t y = 0; y < dh; ++y) {
-        uint16_t* dest_row = reinterpret_cast<uint16_t*>(dest.data() + y * dest_row_bytes);
+        uint16_t* dest_row = reinterpret_cast<uint16_t*>(dest + y * dest_row_bytes);
         for (uint32_t x = 0; x < dw; ++x) {
           uint32_t sum[4] = {0};
           uint32_t cnt = 0;
           for (uint32_t yy = 0; yy < ds; ++yy) {
-            uint32_t sy = ry + y * ds + yy;
-            if (sy >= ry + rh) break;
+            uint32_t sy = eff.ry + y * ds + yy;
+            if (sy >= eff.ry + eff.rh) break;
             const uint16_t* src_row = reinterpret_cast<const uint16_t*>(src + sy * src_row_bytes);
             for (uint32_t xx = 0; xx < ds; ++xx) {
-              uint32_t sx = rx + x * ds + xx;
-              if (sx >= rx + rw) break;
+              uint32_t sx = eff.rx + x * ds + xx;
+              if (sx >= eff.rx + eff.rw) break;
               const uint16_t* p = src_row + sx * 4;
               sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
               cnt++;
             }
           }
           if (cnt > 0) {
-            dest_row[x * 4 + 0] = sum[0] / cnt;
-            dest_row[x * 4 + 1] = sum[1] / cnt;
-            dest_row[x * 4 + 2] = sum[2] / cnt;
-            dest_row[x * 4 + 3] = sum[3] / cnt;
+            dest_row[x * 4 + 0] = (sum[0] + (cnt >> 1)) / cnt;
+            dest_row[x * 4 + 1] = (sum[1] + (cnt >> 1)) / cnt;
+            dest_row[x * 4 + 2] = (sum[2] + (cnt >> 1)) / cnt;
+            dest_row[x * 4 + 3] = (sum[3] + (cnt >> 1)) / cnt;
           }
         }
       }
     }
   } else { // rgbaf32
     if (ds == 2) {
-      for (uint32_t y = 0; y < dh; ++y) {
-        uint32_t sy0 = ry + y * 2;
+      uint32_t interior_h = eff.rh / 2;
+      uint32_t interior_w = eff.rw / 2;
+
+      for (uint32_t y = 0; y < interior_h; ++y) {
+        uint32_t sy0 = eff.ry + y * 2;
         uint32_t sy1 = sy0 + 1;
         const float* row0 = reinterpret_cast<const float*>(src + sy0 * src_row_bytes);
-        const float* row1 = (sy1 < ry + rh) ? reinterpret_cast<const float*>(src + sy1 * src_row_bytes) : nullptr;
-        float* dest_row = reinterpret_cast<float*>(dest.data() + y * dest_row_bytes);
+        const float* row1 = reinterpret_cast<const float*>(src + sy1 * src_row_bytes);
+        float* dest_row = reinterpret_cast<float*>(dest + y * dest_row_bytes);
 
-        for (uint32_t x = 0; x < dw; ++x) {
-          uint32_t sx0 = rx + x * 2;
-          uint32_t sx1 = sx0 + 1;
-          bool has_x1 = (sx1 < rx + rw);
-
-          float sum[4] = {0.f};
-          uint32_t cnt = 0;
-
+        for (uint32_t x = 0; x < interior_w; ++x) {
+          uint32_t sx0 = eff.rx + x * 2;
           const float* p00 = row0 + sx0 * 4;
-          sum[0] += p00[0]; sum[1] += p00[1]; sum[2] += p00[2]; sum[3] += p00[3];
-          cnt++;
+          const float* p01 = p00 + 4;
+          const float* p10 = row1 + sx0 * 4;
+          const float* p11 = p10 + 4;
 
-          if (has_x1) {
-            const float* p01 = row0 + sx1 * 4;
-            sum[0] += p01[0]; sum[1] += p01[1]; sum[2] += p01[2]; sum[3] += p01[3];
-            cnt++;
-          }
+          dest_row[x * 4 + 0] = (p00[0] + p01[0] + p10[0] + p11[0]) * 0.25f;
+          dest_row[x * 4 + 1] = (p00[1] + p01[1] + p10[1] + p11[1]) * 0.25f;
+          dest_row[x * 4 + 2] = (p00[2] + p01[2] + p10[2] + p11[2]) * 0.25f;
+          dest_row[x * 4 + 3] = (p00[3] + p01[3] + p10[3] + p11[3]) * 0.25f;
+        }
 
-          if (row1) {
-            const float* p10 = row1 + sx0 * 4;
-            sum[0] += p10[0]; sum[1] += p10[1]; sum[2] += p10[2]; sum[3] += p10[3];
-            cnt++;
+        if (interior_w < dw) {
+          uint32_t x = interior_w;
+          uint32_t sx0 = eff.rx + x * 2;
+          const float* p00 = row0 + sx0 * 4;
+          const float* p10 = row1 + sx0 * 4;
+          dest_row[x * 4 + 0] = (p00[0] + p10[0]) * 0.5f;
+          dest_row[x * 4 + 1] = (p00[1] + p10[1]) * 0.5f;
+          dest_row[x * 4 + 2] = (p00[2] + p10[2]) * 0.5f;
+          dest_row[x * 4 + 3] = (p00[3] + p10[3]) * 0.5f;
+        }
+      }
 
-            if (has_x1) {
-              const float* p11 = row1 + sx1 * 4;
-              sum[0] += p11[0]; sum[1] += p11[1]; sum[2] += p11[2]; sum[3] += p11[3];
-              cnt++;
-            }
-          }
+      if (interior_h < dh) {
+        uint32_t y = interior_h;
+        uint32_t sy0 = eff.ry + y * 2;
+        const float* row0 = reinterpret_cast<const float*>(src + sy0 * src_row_bytes);
+        float* dest_row = reinterpret_cast<float*>(dest + y * dest_row_bytes);
 
-          dest_row[x * 4 + 0] = sum[0] / cnt;
-          dest_row[x * 4 + 1] = sum[1] / cnt;
-          dest_row[x * 4 + 2] = sum[2] / cnt;
-          dest_row[x * 4 + 3] = sum[3] / cnt;
+        for (uint32_t x = 0; x < interior_w; ++x) {
+          uint32_t sx0 = eff.rx + x * 2;
+          const float* p00 = row0 + sx0 * 4;
+          const float* p01 = p00 + 4;
+          dest_row[x * 4 + 0] = (p00[0] + p01[0]) * 0.5f;
+          dest_row[x * 4 + 1] = (p00[1] + p01[1]) * 0.5f;
+          dest_row[x * 4 + 2] = (p00[2] + p01[2]) * 0.5f;
+          dest_row[x * 4 + 3] = (p00[3] + p01[3]) * 0.5f;
+        }
+
+        if (interior_w < dw) {
+          uint32_t x = interior_w;
+          uint32_t sx0 = eff.rx + x * 2;
+          const float* p00 = row0 + sx0 * 4;
+          dest_row[x * 4 + 0] = p00[0];
+          dest_row[x * 4 + 1] = p00[1];
+          dest_row[x * 4 + 2] = p00[2];
+          dest_row[x * 4 + 3] = p00[3];
         }
       }
     } else {
       for (uint32_t y = 0; y < dh; ++y) {
-        float* dest_row = reinterpret_cast<float*>(dest.data() + y * dest_row_bytes);
+        float* dest_row = reinterpret_cast<float*>(dest + y * dest_row_bytes);
         for (uint32_t x = 0; x < dw; ++x) {
           float sum[4] = {0.f};
           uint32_t cnt = 0;
           for (uint32_t yy = 0; yy < ds; ++yy) {
-            uint32_t sy = ry + y * ds + yy;
-            if (sy >= ry + rh) break;
+            uint32_t sy = eff.ry + y * ds + yy;
+            if (sy >= eff.ry + eff.rh) break;
             const float* src_row = reinterpret_cast<const float*>(src + sy * src_row_bytes);
             for (uint32_t xx = 0; xx < ds; ++xx) {
-              uint32_t sx = rx + x * ds + xx;
-              if (sx >= rx + rw) break;
+              uint32_t sx = eff.rx + x * ds + xx;
+              if (sx >= eff.rx + eff.rw) break;
               const float* p = src_row + sx * 4;
               sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
               cnt++;
             }
           }
           if (cnt > 0) {
-            dest_row[x * 4 + 0] = sum[0] / cnt;
-            dest_row[x * 4 + 1] = sum[1] / cnt;
-            dest_row[x * 4 + 2] = sum[2] / cnt;
-            dest_row[x * 4 + 3] = sum[3] / cnt;
+            float f_cnt = static_cast<float>(cnt);
+            dest_row[x * 4 + 0] = sum[0] / f_cnt;
+            dest_row[x * 4 + 1] = sum[1] / f_cnt;
+            dest_row[x * 4 + 2] = sum[2] / f_cnt;
+            dest_row[x * 4 + 3] = sum[3] / f_cnt;
           }
         }
       }
@@ -835,9 +920,16 @@ static void transform_fused(const uint8_t* src, ImageInfo& info, const Region* r
 // (intentional for the iterator snapshot model; streaming/live iterator with incremental ProcessInput + release between
 // yields is the long-term fix but explicitly out of scope per Agent 2 constraints — do not build a push()-time decode loop here).
 // Future agents: batching is a known deliberate tradeoff for simple napi iterator surface + transferList compatibility.
-static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, ProgressionTarget target, bool emit_every_pass, bool decode_extra_channels, const std::string& progressive_detail, const Region* region, uint32_t downsample, bool preserve_icc) {
+// GAP NOTATION: extraPlanes only attaches to the non-animation final event; for animation the EC buffers are overwritten per frame and never emitted. Implementing per-frame planes is out of scope.
+static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, ProgressionTarget target, bool emit_every_pass, bool decode_extra_channels, const std::string& progressive_detail, const Region* region, uint32_t downsample, bool preserve_icc, uint64_t max_pixels) {
   JxlDecoder* dec = JxlDecoderCreate(nullptr);
   if (dec == nullptr) return false;
+
+  struct DecGuard {
+    JxlDecoder* d;
+    ~DecGuard() { if (d) JxlDecoderDestroy(d); }
+  };
+  DecGuard dec_guard{dec};
 
 #if CASABIO_HAVE_JXL_THREADS
   void* runner = JxlThreadParallelRunnerCreate(nullptr, JxlThreadParallelRunnerDefaultNumWorkerThreads());
@@ -857,7 +949,6 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
     events |= JXL_DEC_FRAME_PROGRESSION;
   }
   if (JxlDecoderSubscribeEvents(dec, events) != JXL_DEC_SUCCESS) {
-    JxlDecoderDestroy(dec);
     return false;
   }
 
@@ -871,7 +962,11 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
     JxlDecoderSetProgressiveDetail(dec, jd);
   }
 
-  JxlDecoderSetInput(dec, data->input.data(), data->input.size());
+  if (data->pinned_input != nullptr) {
+    JxlDecoderSetInput(dec, static_cast<const uint8_t*>(data->pinned_data), data->pinned_size);
+  } else {
+    JxlDecoderSetInput(dec, data->input.data(), data->input.size());
+  }
   JxlDecoderCloseInput(dec);
 
   JxlBasicInfo basic;
@@ -920,12 +1015,10 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
   for (;;) {
     JxlDecoderStatus status = JxlDecoderProcessInput(dec);
     if (status == JXL_DEC_ERROR) {
-      JxlDecoderDestroy(dec);
       ThrowCode(env, "InvalidJXL", "libjxl decode error (DEC_ERROR)");
       return false;
     }
     if (status == JXL_DEC_NEED_MORE_INPUT) {
-      JxlDecoderDestroy(dec);
       // After CloseInput this means truncated input (N-19)
       ThrowCode(env, "TruncatedInput", "libjxl decode truncated (NEED_MORE_INPUT after close)");
       return false;
@@ -934,9 +1027,16 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
     
     if (status == JXL_DEC_BASIC_INFO) {
       if (JxlDecoderGetBasicInfo(dec, &basic) != JXL_DEC_SUCCESS) {
-        JxlDecoderDestroy(dec);
         return false;
       }
+
+      // 1.6 Decompression-bomb guard
+      uint64_t px = static_cast<uint64_t>(basic.xsize) * basic.ysize;
+      if (px > max_pixels) {
+        ThrowCode(env, "ImageTooLarge", "image exceeds maxPixels");
+        return false;
+      }
+
       info.width = basic.xsize;
       info.height = basic.ysize;
       info.bits_per_sample = BitsForFormat(format);
@@ -977,7 +1077,6 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
       if (!preserve_icc) {
         emit_header();
         if (target == ProgressionTarget::Header) {
-          JxlDecoderDestroy(dec);
           return true;
         }
       }
@@ -994,7 +1093,6 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
       }
       emit_header();
       if (target == ProgressionTarget::Header) {
-        JxlDecoderDestroy(dec);
         return true;
       }
       continue;
@@ -1021,13 +1119,11 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
       emit_header();
       size_t buffer_size = 0;
       if (JxlDecoderImageOutBufferSize(dec, &pf, &buffer_size) != JXL_DEC_SUCCESS) {
-        JxlDecoderDestroy(dec);
         return false;
       }
       napi_create_arraybuffer(env, buffer_size, &main_data, &main_ab);
       main_size = buffer_size;
       if (JxlDecoderSetImageOutBuffer(dec, &pf, main_data, main_size) != JXL_DEC_SUCCESS) {
-        JxlDecoderDestroy(dec);
         return false;
       }
       if (decode_extra_channels && !ec_planes.empty()) {
@@ -1060,13 +1156,17 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
                        JxlDecoderFlushImage(dec) == JXL_DEC_SUCCESS;
         JxlDecoderSetImageOutBuffer(dec, &pf, main_data, main_size);
         if (flushed) {
-          std::vector<uint8_t> work;
-          transform_fused(static_cast<const uint8_t*>(snap), ev_info, region, ds, format, work);
-          void* outd = nullptr;
-          napi_value out_ab;
-          napi_create_arraybuffer(env, work.size(), &outd, &out_ab);
-          if (!work.empty() && outd) memcpy(outd, work.data(), work.size());
-          prog_ev_ab = out_ab;
+          uint32_t dw = 0, dh = 0;
+          EffectiveRegion eff;
+          if (fused_dims(ev_info, region, ds, &dw, &dh, &eff)) {
+            void* outd = nullptr;
+            napi_value out_ab;
+            napi_create_arraybuffer(env, static_cast<size_t>(dw) * dh * 4u * BytesPerChannel(format), &outd, &out_ab);
+            if (outd) {
+              transform_fused_into(static_cast<const uint8_t*>(snap), ev_info, eff, ds, format, static_cast<uint8_t*>(outd));
+            }
+            prog_ev_ab = out_ab;
+          }
         }
       } else {
         void* snap = nullptr;
@@ -1091,10 +1191,14 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
           napi_set_named_property(env, rgn, "h", MakeUint32(env, ev_info.height));
           napi_set_named_property(env, progress, "region", rgn);
         }
+        if (basic.have_animation) {
+          // Progression events during animation carry no frameIndex; stage is labeled "pass" even under progressiveDetail: "dcProgressive".
+          // Leave stage labeling as-is with this comment.
+          napi_set_named_property(env, progress, "frameIndex", MakeUint32(env, current_frame_index));
+        }
         data->events.push_back(RefValue(env, progress));
       }
       if (!emit_every_pass && target != ProgressionTarget::Final) {
-        JxlDecoderDestroy(dec);
         return true;
       }
       continue;
@@ -1106,19 +1210,21 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
         napi_value frame_pixels_ab = main_ab;
         bool needs_xform = had_region || (ds > 1u);
         if (needs_xform) {
-          std::vector<uint8_t> work;
-          transform_fused(static_cast<const uint8_t*>(main_data), ev_info, region, ds, format, work);
-          void* outd = nullptr;
-          napi_value out_ab;
-          napi_create_arraybuffer(env, work.size(), &outd, &out_ab);
-          if (!work.empty() && outd) memcpy(outd, work.data(), work.size());
-          frame_pixels_ab = out_ab;
+          uint32_t dw = 0, dh = 0;
+          EffectiveRegion eff;
+          if (fused_dims(ev_info, region, ds, &dw, &dh, &eff)) {
+            void* outd = nullptr;
+            napi_value out_ab;
+            napi_create_arraybuffer(env, static_cast<size_t>(dw) * dh * 4u * BytesPerChannel(format), &outd, &out_ab);
+            if (outd) {
+              transform_fused_into(static_cast<const uint8_t*>(main_data), ev_info, eff, ds, format, static_cast<uint8_t*>(outd));
+            }
+            frame_pixels_ab = out_ab;
+          }
         } else {
-          void* outd = nullptr;
-          napi_value out_ab;
-          napi_create_arraybuffer(env, main_size, &outd, &out_ab);
-          if (outd && main_data) memcpy(outd, main_data, main_size);
-          frame_pixels_ab = out_ab;
+          // 1.1: Eliminate redundant per-frame copy in animation path
+          // main_ab is already a unique per-frame AB (NEED_IMAGE_OUT_BUFFER reallocates each frame).
+          frame_pixels_ab = main_ab;
         }
 
         DecodedFrame df;
@@ -1135,7 +1241,6 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
     }
   }
 
-  JxlDecoderDestroy(dec);
   emit_header();
 
   if (basic.have_animation) {
@@ -1166,10 +1271,12 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
     if (!df.name.empty()) {
       napi_set_named_property(env, ev, "frameName", MakeString(env, df.name.c_str()));
     }
-    uint32_t tps_den = basic.animation.tps_denominator > 0 ? basic.animation.tps_denominator : 1u;
-    uint32_t tps = basic.animation.tps_numerator / tps_den;
-    if (tps == 0) tps = 1;
-    napi_set_named_property(env, ev, "animTicksPerSecond", MakeUint32(env, tps));
+    double tps_den = basic.animation.tps_denominator > 0 ? static_cast<double>(basic.animation.tps_denominator) : 1.0;
+    double tps = static_cast<double>(basic.animation.tps_numerator) / tps_den;
+    if (tps <= 0.0) tps = 1.0;
+    napi_value tps_val;
+    napi_create_double(env, tps, &tps_val);
+    napi_set_named_property(env, ev, "animTicksPerSecond", tps_val);
     if (had_region) {
       napi_value rgn;
       napi_create_object(env, &rgn);
@@ -1189,13 +1296,17 @@ static bool DecodeAll(napi_env env, DecoderData* data, PixelFormatKind format, P
   napi_value final_pixels_ab = main_ab;
   bool needs_xform = had_region || (ds > 1u);
   if (needs_xform) {
-    std::vector<uint8_t> work;
-    transform_fused(static_cast<const uint8_t*>(main_data), ev_info, region, ds, format, work);
-    void* outd = nullptr;
-    napi_value out_ab;
-    napi_create_arraybuffer(env, work.size(), &outd, &out_ab);
-    if (!work.empty() && outd) memcpy(outd, work.data(), work.size());
-    final_pixels_ab = out_ab;
+    uint32_t dw = 0, dh = 0;
+    EffectiveRegion eff;
+    if (fused_dims(ev_info, region, ds, &dw, &dh, &eff)) {
+      void* outd = nullptr;
+      napi_value out_ab;
+      napi_create_arraybuffer(env, static_cast<size_t>(dw) * dh * 4u * BytesPerChannel(format), &outd, &out_ab);
+      if (outd) {
+        transform_fused_into(static_cast<const uint8_t*>(main_data), ev_info, eff, ds, format, static_cast<uint8_t*>(outd));
+      }
+      final_pixels_ab = out_ab;
+    }
   }
   napi_value final = MakeImageEventWithAB(env, "final", "final", ev_info, format, final_pixels_ab);
   if (had_region) {
@@ -1224,6 +1335,12 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
   JxlEncoder* enc = JxlEncoderCreate(nullptr);
   if (enc == nullptr) return false;
 
+  struct EncGuard {
+    JxlEncoder* e;
+    ~EncGuard() { if (e) JxlEncoderDestroy(e); }
+  };
+  EncGuard enc_guard{enc};
+
 #if CASABIO_HAVE_JXL_THREADS
   void* runner = JxlThreadParallelRunnerCreate(nullptr, JxlThreadParallelRunnerDefaultNumWorkerThreads());
   ThreadRunnerGuard runner_guard(runner);
@@ -1250,7 +1367,9 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
   info.alpha_exponent_bits = data->has_alpha ? exp_bits : 0;
   
   // NV-12 / 3D uses_original_profile check
-  if (data->distance == 0.0 || !data->icc.empty()) info.uses_original_profile = JXL_TRUE;
+  if (data->distance == 0.0 || !data->icc.empty() || !data->exif.empty() || !data->xmp.empty() || !data->custom_boxes.empty()) {
+    info.uses_original_profile = JXL_TRUE;
+  }
 
   if (data->has_animation && !data->frames.empty()) {
     info.have_animation = JXL_TRUE;
@@ -1260,21 +1379,18 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
   }
 
   if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc);
     return false;
   }
 
   // N-17: ICC profile if supplied (wide-gamut masters); else sRGB. Prerequisite for perceptual colour / herbarium fidelity.
   if (!data->icc.empty()) {
     if (JxlEncoderSetICCProfile(enc, data->icc.data(), data->icc.size()) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc);
       return false;
     }
   } else {
     JxlColorEncoding color;
     JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
     if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc);
       return false;
     }
   }
@@ -1285,7 +1401,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
   }
   JxlEncoderSetFrameDistance(frame, static_cast<float>(data->distance));
   if (JxlEncoderFrameSettingsSetOption(frame, JXL_ENC_FRAME_SETTING_EFFORT, static_cast<int64_t>(data->effort)) != JXL_ENC_SUCCESS) {
-    JxlEncoderDestroy(enc);
     return false;
   }
 
@@ -1305,7 +1420,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
             frame,
             static_cast<JxlEncoderFrameSettingId>(data->advanced_setting_ids[i]),
             static_cast<int64_t>(data->advanced_setting_values[i])) != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc);
         return false;
       }
     }
@@ -1332,7 +1446,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
     }
 
     if (JxlEncoderSetExtraChannelInfo(enc, ec_idx, &ec_info) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc);
       return false;
     }
 
@@ -1340,14 +1453,19 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
       JxlEncoderSetExtraChannelName(enc, ec_idx, ec.name.c_str(), ec.name.size());
     }
 
-    // NV-8 extra channel distance check
-    float ch_dist = (ec.distance >= 0.0) ? static_cast<float>(ec.distance) : -1.0f;
+    // NV-8 extra channel distance check (clamped to [0.0, 25.0], fall back to main distance if absent/negative)
+    float ch_dist = (ec.distance >= 0.0) ? static_cast<float>(ec.distance) : static_cast<float>(data->distance);
+    if (ch_dist < 0.0f) ch_dist = 0.0f;
+    if (ch_dist > 25.0f) ch_dist = 25.0f;
     JxlEncoderSetExtraChannelDistance(frame, ec_idx, ch_dist);
   }
 
-  // NV-3 / 3C alpha extra channel distance setup
-  if (data->has_alpha && data->alpha_distance >= 0.0) {
-    JxlEncoderSetExtraChannelDistance(frame, 0, static_cast<float>(data->alpha_distance));
+  // NV-3 / 3C alpha extra channel distance setup (fall back to main distance if absent/negative)
+  if (data->has_alpha) {
+    float alpha_dist = (data->alpha_distance >= 0.0) ? static_cast<float>(data->alpha_distance) : static_cast<float>(data->distance);
+    if (alpha_dist < 0.0f) alpha_dist = 0.0f;
+    if (alpha_dist > 25.0f) alpha_dist = 25.0f;
+    JxlEncoderSetExtraChannelDistance(frame, 0, alpha_dist);
   }
 
   const uint32_t color_channels = 3u + (data->has_alpha ? 1u : 0u);
@@ -1368,7 +1486,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
         JxlEncoderSetFrameName(frame, data->frames[fi].name.c_str());
       }
       if (JxlEncoderAddImageFrame(frame, &pf, data->frames[fi].pixels.data(), frame_expected) != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc);
         return false;
       }
     }
@@ -1380,7 +1497,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
 
     if (pixels_size != expected ||
         JxlEncoderAddImageFrame(frame, &pf, pixels_ptr, expected) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc);
       return false;
     }
   }
@@ -1395,7 +1511,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
     JxlPixelFormat pf_ec = {1, dt, JXL_NATIVE_ENDIAN, 0};
 
     if (JxlEncoderSetExtraChannelBuffer(frame, &pf_ec, ec.pixels.data(), ec.pixels.size(), ec_idx) != JXL_ENC_SUCCESS) {
-      JxlEncoderDestroy(enc);
       return false;
     }
   }
@@ -1445,7 +1560,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
     JxlEncoderStatus status = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
     if (status == JXL_ENC_SUCCESS) {
       out->resize(static_cast<size_t>(next_out - out->data()));
-      JxlEncoderDestroy(enc);
       return true;
     }
     if (status == JXL_ENC_NEED_MORE_OUTPUT) {
@@ -1455,7 +1569,6 @@ static bool EncodeAll(napi_env env, EncoderData* data, std::vector<uint8_t>* out
       avail_out = out->size() - offset;
       continue;
     }
-    JxlEncoderDestroy(enc);
     return false;
   }
 }
@@ -1470,6 +1583,51 @@ static napi_value DecoderPush(napi_env env, napi_callback_info info) {
   if (data == nullptr || argc < 1) return Throw(env, "decoder.push requires bytes");
   if (data->closed) return Throw(env, "decoder is already closed");
   if (data->cancelled) return Throw(env, "decoder is cancelled");
+
+  // Mirror the encoder's pinned-input fast path
+  if (!data->multi_push && data->pinned_input == nullptr) {
+    void* input_buf_ptr = nullptr;
+    size_t input_buf_len = 0;
+    bool parsed = false;
+    bool is_ta = false;
+    napi_is_typedarray(env, args[0], &is_ta);
+    if (is_ta) {
+      napi_value ab;
+      size_t offset = 0;
+      size_t length = 0;
+      napi_typedarray_type type;
+      if (napi_get_typedarray_info(env, args[0], &type, &length, &input_buf_ptr, &ab, &offset) == napi_ok) {
+        size_t el_size = 1;
+        if (type == napi_int16_array || type == napi_uint16_array) el_size = 2;
+        else if (type == napi_int32_array || type == napi_uint32_array || type == napi_float32_array) el_size = 4;
+        else if (type == napi_float64_array) el_size = 8;
+        input_buf_len = length * el_size;
+        parsed = true;
+      }
+    } else {
+      if (napi_get_arraybuffer_info(env, args[0], &input_buf_ptr, &input_buf_len) == napi_ok) {
+        parsed = true;
+      }
+    }
+
+    if (parsed && input_buf_ptr != nullptr && input_buf_len > 0) {
+      napi_create_reference(env, args[0], 1, &data->pinned_input);
+      data->pinned_data = input_buf_ptr;
+      data->pinned_size = input_buf_len;
+      return Undefined(env);
+    }
+  }
+
+  // Fallback or second push:
+  data->multi_push = true;
+  if (data->pinned_input != nullptr) {
+    data->input.assign(static_cast<uint8_t*>(data->pinned_data), static_cast<uint8_t*>(data->pinned_data) + data->pinned_size);
+    napi_delete_reference(env, data->pinned_input);
+    data->pinned_input = nullptr;
+    data->pinned_data = nullptr;
+    data->pinned_size = 0;
+  }
+
   if (!ReadBytes(env, args[0], &data->input)) return Throw(env, "decoder.push expects ArrayBuffer or Uint8Array");
   return Undefined(env);
 }
@@ -1485,6 +1643,7 @@ static napi_value DecoderClose(napi_env env, napi_callback_info info) {
   // NV-11: Honor cancel at close
   if (data->cancelled) {
     std::vector<uint8_t>().swap(data->input);
+    release_pinned_decoder(env, data);
     data->closed = true;
     return Undefined(env);
   }
@@ -1500,6 +1659,7 @@ static napi_value DecoderClose(napi_env env, napi_callback_info info) {
   std::string prog_detail = GetStringProp(env, options, "progressiveDetail", "");
   ProgressionTarget target = ParseProgressionTarget(target_str);
   bool preserve_icc = GetBoolProp(env, options, "preserveIcc", false);
+  uint64_t max_pixels = static_cast<uint64_t>(GetNullableNumberProp(env, options, "maxPixels", static_cast<double>(1u << 28)));
 
   // N-12: region/downsample (post-decode for native; libjxl direct ROI is in WASM bridge only)
   Region reg{0, 0, 0, 0};
@@ -1523,15 +1683,17 @@ static napi_value DecoderClose(napi_env env, napi_callback_info info) {
   if (downsample != 1 && downsample != 2 && downsample != 4 && downsample != 8) downsample = 1;
 
   // NV-6: Clear+shrink on failure path / No silent false
-  if (!DecodeAll(env, data, format, target, emit_every_pass, decode_extra, prog_detail, has_region ? &reg : nullptr, downsample, preserve_icc)) {
+  if (!DecodeAll(env, data, format, target, emit_every_pass, decode_extra, prog_detail, has_region ? &reg : nullptr, downsample, preserve_icc, max_pixels)) {
     bool pending = false;
     napi_is_exception_pending(env, &pending);
     if (!pending) ThrowCode(env, "DecodeFailed", "libjxl decode failed (internal)");
     std::vector<uint8_t>().swap(data->input);
+    release_pinned_decoder(env, data);
     return nullptr;
   }
   // N-14: drop input bytes promptly after successful decode.
   std::vector<uint8_t>().swap(data->input);
+  release_pinned_decoder(env, data);
   return Undefined(env);
 #else
   return Throw(env, "jxl-native was built without libjxl headers");
@@ -1562,6 +1724,7 @@ static napi_value DecoderDispose(napi_env env, napi_callback_info info) {
     for (napi_ref ref : data->events) napi_delete_reference(env, ref);
     data->events.clear();
     std::vector<uint8_t>().swap(data->input); // NV-9 real release
+    release_pinned_decoder(env, data);
   }
   return Undefined(env);
 }
@@ -1940,6 +2103,9 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
 
   // NV-3 / 3C alphaDistance
   data->alpha_distance = GetNullableNumberProp(env, args[0], "alphaDistance", -1.0);
+  if (data->alpha_distance >= 0.0) {
+    if (data->alpha_distance > 25.0) data->alpha_distance = 25.0;
+  }
 
   // NV-3 / 3E animation encode options
   napi_value anim;
@@ -1950,9 +2116,12 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
       data->has_animation = true;
       double tps = GetNullableNumberProp(env, anim, "ticksPerSecond", 1.0);
       if (tps <= 0.0) tps = 1.0;
-      data->anim_tps_num = static_cast<uint32_t>(tps);
-      data->anim_tps_den = 1;
-      data->anim_loops = static_cast<int32_t>(GetNullableNumberProp(env, anim, "loopCount", 0.0));
+      data->anim_tps_num = static_cast<uint32_t>(tps * 1000.0 + 0.5);
+      data->anim_tps_den = 1000;
+      int32_t loops = static_cast<int32_t>(GetNullableNumberProp(env, anim, "loopCount", 0.0));
+      if (loops < 0) loops = 0;
+      if (loops > 65535) loops = 65535;
+      data->anim_loops = loops;
     }
   }
 
@@ -1969,7 +2138,9 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
         napi_value item;
         napi_get_element(env, frames_arr, i, &item);
         EncoderData::FrameDesc fd;
-        fd.duration = static_cast<uint32_t>(GetNullableNumberProp(env, item, "duration", 1.0));
+        int32_t dur = static_cast<int32_t>(GetNullableNumberProp(env, item, "duration", 1.0));
+        if (dur <= 0) dur = 1;
+        fd.duration = static_cast<uint32_t>(dur);
         fd.name = GetStringProp(env, item, "name", "");
         napi_value fdatav;
         if (GetProp(env, item, "data", &fdatav)) {
@@ -1996,6 +2167,7 @@ static napi_value CreateEncoder(napi_env env, napi_callback_info info) {
         cb.type = GetStringProp(env, item, "type", "");
         if (cb.type.size() != 4) {
           release_pinned(env, data);
+          delete data;
           return ThrowCode(env, "InvalidBoxType", "custom box type must be exactly 4 characters");
         }
         cb.compress = GetBoolProp(env, item, "compress", false);
