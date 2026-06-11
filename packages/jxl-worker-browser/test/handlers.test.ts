@@ -209,6 +209,51 @@ describe("browser codec handlers", () => {
     expect(finalMessage?.timeToFinalMs).toBeDefined();
   });
 
+  test("decode handler supplies partial stride when codec error omits it", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    const partialInfo = {
+      width: 1, height: 1, bitsPerSample: 16 as const,
+      hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+    };
+    const codec = {
+      createDecoder() {
+        return {
+          push() {},
+          close() {},
+          cancel() {},
+          dispose() {},
+          async *events() {
+            yield {
+              type: "error",
+              code: "TruncatedStream",
+              message: "cut short",
+              partialPixels: new Uint8Array(8),
+              partialInfo,
+            };
+          },
+        };
+      },
+    };
+
+    const handler = new DecodeHandler(
+      { ...baseDecodeStart, sessionId: "partial-stride", format: "rgba16" },
+      codec as never,
+      { onSessionEnd: (sessionId) => ended.push(sessionId) },
+    );
+    handler.onChunk(new Uint8Array([0xff]).buffer);
+
+    await waitFor(() => ended.length === 1);
+
+    const error = messages.find((msg) => msg.type === "decode_error") as
+      | { type: "decode_error"; partialPixelStride?: number; partialStage?: string }
+      | undefined;
+    expect(error?.partialPixelStride).toBe(8);
+    expect(error?.partialStage).toBe(undefined);
+  });
+
   test("encode handler streams codec output chunks and done", async () => {
     const messages: WorkerToMainMessage[] = [];
     const ended: string[] = [];

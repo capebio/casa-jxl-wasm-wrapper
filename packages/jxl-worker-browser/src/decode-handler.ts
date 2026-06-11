@@ -17,7 +17,7 @@ import type {
   MsgDecodePaused,
   MsgDecodeBudgetExceeded,
 } from "@casabio/jxl-core/protocol";
-import type { ImageInfo, DecodeStage, Region } from "@casabio/jxl-core/types";
+import type { ImageInfo, DecodeStage, PixelFormat, Region } from "@casabio/jxl-core/types";
 
 type DecodeState =
   | "created"
@@ -442,7 +442,7 @@ export class DecodeHandler {
             event.message,
             event.partialPixels !== undefined ? toArrayBuffer(event.partialPixels) : undefined,
             event.partialInfo,
-            event.partialPixelStride,
+            event.partialPixelStride ?? (event.partialPixels !== undefined ? pixelStrideForFormat(this.opts.format) : undefined),
             event.partialStage,
           );
           return;
@@ -538,4 +538,9 @@ function toArrayBuffer(value: ArrayBuffer | Uint8Array): ArrayBuffer {
   return value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
     ? value.buffer
     : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+}
+
+function pixelStrideForFormat(format: PixelFormat): number {
+  if (format === "rgb8") return 3;
+  return format === "rgbaf32" ? 16 : format === "rgba16" ? 8 : 4;
 }
