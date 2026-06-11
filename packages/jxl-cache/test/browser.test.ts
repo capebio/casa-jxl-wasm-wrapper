@@ -1,0 +1,146 @@
+import { describe, it, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import { JxlCacheBrowser } from "../src/browser.js";
+
+class NotFoundError extends Error {
+  name = "NotFoundError";
+}
+
+class MemoryWritable {
+  private chunks: Uint8Array[] = [];
+  private closed = false;
+
+  constructor(private readonly onClose: (data: Uint8Array) => void) {}
+
+  async write(buffer: ArrayBuffer | Uint8Array): Promise<void> {
+    const chunk = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    this.chunks.push(new Uint8Array(chunk));
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    const size = this.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const merged = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of this.chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    this.onClose(merged);
+  }
+
+  async abort(): Promise<void> {
+    this.closed = true;
+    this.chunks = [];
+  }
+
+  get wasClosed(): boolean {
+    return this.closed;
+  }
+}
+
+function makeStorage(estimateQuota: number | undefined) {
+  const files = new Map<string, Uint8Array>();
+
+  const root = {
+    async getFileHandle(name: string, opts?: { create?: boolean }) {
+      if (!files.has(name) && !opts?.create) {
+        throw new NotFoundError();
+      }
+
+      return {
+        async getFile() {
+          const data = files.get(name);
+          if (!data) throw new NotFoundError();
+          return {
+            size: data.byteLength,
+            async arrayBuffer() {
+              return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+            },
+            async text() {
+              return new TextDecoder().decode(data);
+            },
+          };
+        },
+        async createWritable() {
+          return new MemoryWritable((data) => files.set(name, data));
+        },
+      };
+    },
+    async removeEntry(name: string) {
+      files.delete(name);
+    },
+    async *keys() {
+      for (const name of files.keys()) yield name;
+    },
+  };
+
+  return {
+    files,
+    root,
+    storage: {
+      async getDirectory() {
+        return root;
+      },
+      async estimate() {
+        return estimateQuota === undefined ? {} : { quota: estimateQuota };
+      },
+    },
+  };
+}
+
+describe("JxlCacheBrowser quota sizing", () => {
+  beforeEach(() => {
+    delete (globalThis as { navigator?: Navigator }).navigator;
+  });
+
+  it("does not write files larger than effective quota-clamped limit", async () => {
+    const { files, storage } = makeStorage(100);
+    const locks = { async request(_name: string, cb: () => Promise<void>) { await cb(); } };
+    (globalThis as { navigator?: Navigator }).navigator = { storage, locks } as Navigator;
+
+    const cache = new JxlCacheBrowser({
+      memoryLimit: 1024,
+      persistent: true,
+      persistentLimit: 80,
+    });
+
+    await cache.init();
+    await cache.set("too-big-for-safe-limit", new Uint8Array(60).buffer);
+
+    assert.equal(cache.stats().persistent.limit, 50);
+    assert.equal(cache.stats().persistent.count, 0);
+    assert.deepEqual([...files.keys()], []);
+  });
+});
+
+describe("JxlCacheBrowser manifest lock", () => {
+  beforeEach(() => {
+    delete (globalThis as { navigator?: Navigator }).navigator;
+  });
+
+  it("routes manifest writes through navigator.locks when available", async () => {
+    const { files, storage } = makeStorage(undefined);
+    const calls: string[] = [];
+    const locks = {
+      async request(name: string, cb: () => Promise<void>) {
+        calls.push(name);
+        await cb();
+      },
+    };
+    (globalThis as { navigator?: Navigator }).navigator = { storage, locks } as Navigator;
+
+    const cache = new JxlCacheBrowser({
+      memoryLimit: 1024,
+      persistent: true,
+      persistentLimit: 1024,
+    });
+
+    await cache.init();
+    await cache.set("manifest-key", new Uint8Array([1, 2, 3]).buffer);
+    await (cache as any).writeManifest();
+
+    assert.deepEqual(calls, ["jxl-cache-manifest"]);
+    assert.ok(files.has("__jxl_cache_manifest.json"));
+  });
+});

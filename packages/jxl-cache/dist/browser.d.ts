@@ -4,7 +4,18 @@ export interface CacheOptions {
     persistent?: boolean;
     basePath?: string;
 }
-export declare class JxlCacheBrowser {
+export interface JxlCache {
+    init(): Promise<void>;
+    get(key: string): Promise<ArrayBuffer | undefined>;
+    set(key: string, buffer: ArrayBuffer): Promise<void>;
+    delete(key: string): Promise<void>;
+    has(key: string): Promise<boolean>;
+    clear(): Promise<void>;
+    stats(): any;
+}
+export declare function safeCacheName(key: string): string;
+export declare function cacheNameFor(key: string): Promise<string>;
+export declare class JxlCacheBrowser implements JxlCache {
     private readonly opts;
     private readonly memoryCache;
     private readonly persistentTracker;
@@ -14,12 +25,20 @@ export declare class JxlCacheBrowser {
     private opfsRoot;
     private hitCount;
     private missCount;
+    private evictionsCount;
+    private quotaEvictionsCount;
     private manifestDirty;
     private manifestPendingWrite;
+    private _generation;
+    private initPromise;
+    private persistentLimit;
     constructor(opts: CacheOptions);
     init(): Promise<void>;
+    private doInit;
     get(key: string): Promise<ArrayBuffer | undefined>;
+    has(key: string): Promise<boolean>;
     set(key: string, buffer: ArrayBuffer): Promise<void>;
+    delete(key: string): Promise<void>;
     clear(): Promise<void>;
     stats(): {
         memory: {
@@ -32,6 +51,8 @@ export declare class JxlCacheBrowser {
             size: number;
             limit: number;
             enabled: boolean;
+            evictions: number;
+            quotaEvictions: number;
         };
         inflight: {
             gets: number;
@@ -46,6 +67,7 @@ export declare class JxlCacheBrowser {
     private evictPersistentFraction;
     private removePersistentEntry;
     private loadManifest;
+    private reconcile;
     private scheduleManifestWrite;
     private drainManifest;
     private writeManifest;

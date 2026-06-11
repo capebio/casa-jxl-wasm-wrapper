@@ -7,6 +7,16 @@ export interface CacheOptions {
   basePath?: string;       // for Node.js
 }
 
+export interface JxlCache {
+  init(): Promise<void>;
+  get(key: string): Promise<ArrayBuffer | undefined>;
+  set(key: string, buffer: ArrayBuffer): Promise<void>;
+  delete(key: string): Promise<void>;
+  has(key: string): Promise<boolean>;
+  clear(): Promise<void>;
+  stats(): any;
+}
+
 interface PersistentEntry {
   name: string;
 }
@@ -21,13 +31,22 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
 
 const MANIFEST_NAME = '__jxl_cache_manifest.json';
 
-function safeCacheName(key: string): string {
+const MAX_NAME = 200;
+
+export function safeCacheName(key: string): string {
   return encodeURIComponent(key).replace(/[!'()*]/g, c =>
     `%${c.charCodeAt(0).toString(16).toUpperCase()}`
   );
 }
 
-export class JxlCacheBrowser {
+export async function cacheNameFor(key: string): Promise<string> {
+  const enc = safeCacheName(key);
+  if (enc.length <= MAX_NAME) return enc;
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
+  return 'sha256-' + [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export class JxlCacheBrowser implements JxlCache {
   private readonly memoryCache: LRUCache<ArrayBuffer>;
   private readonly persistentTracker: LRUCache<PersistentEntry>;
   private readonly inflightGets = new Map<string, Promise<ArrayBuffer | undefined>>();
@@ -37,23 +56,40 @@ export class JxlCacheBrowser {
   private opfsRoot: FileSystemDirectoryHandle | null = null;
   private hitCount = 0;
   private missCount = 0;
+  private evictionsCount = 0;
+  private quotaEvictionsCount = 0;
   private manifestDirty = false;
   private manifestPendingWrite: Promise<void> | null = null;
   // Incremented on every clear(). Guards async operations that straddle a clear boundary.
   private _generation = 0;
+  private initPromise: Promise<void> | null = null;
+  private persistentLimit: number;
 
   constructor(private readonly opts: CacheOptions) {
     this.memoryCache = new LRUCache(opts.memoryLimit);
     this.persistentTracker = new LRUCache(opts.persistentLimit);
+    this.persistentLimit = opts.persistentLimit;
   }
 
-  async init(): Promise<void> {
+  init(): Promise<void> {
+    return this.initPromise ??= this.doInit();
+  }
+
+  private async doInit(): Promise<void> {
     if (!this.opts.persistent || typeof navigator === 'undefined' || !navigator.storage) {
       return;
     }
 
     try {
       this.opfsRoot = await navigator.storage.getDirectory();
+      const estimate = await navigator.storage.estimate().catch(() => null);
+      if (estimate && typeof estimate.quota === 'number') {
+        const remaining = typeof estimate.usage === 'number'
+          ? Math.max(0, estimate.quota - estimate.usage)
+          : estimate.quota;
+        this.persistentLimit = Math.min(this.opts.persistentLimit, Math.floor(remaining * 0.5));
+        this.persistentTracker.setMaxSize(this.persistentLimit);
+      }
       await this.loadManifest();
     } catch (e) {
       console.warn('OPFS initialization failed', e);
@@ -62,8 +98,11 @@ export class JxlCacheBrowser {
   }
 
   async get(key: string): Promise<ArrayBuffer | undefined> {
+    if (this.initPromise) await this.initPromise.catch(() => undefined);
+
     const mem = this.memoryCache.get(key);
     if (mem !== undefined) {
+      this.persistentTracker.get(key);
       this.hitCount++;
       return mem;
     }
@@ -72,6 +111,9 @@ export class JxlCacheBrowser {
       this.missCount++;
       return undefined;
     }
+
+    const ps = this.inflightSets.get(key);
+    if (ps) await ps.catch(() => undefined);
 
     const existing = this.inflightGets.get(key);
     if (existing !== undefined) {
@@ -92,16 +134,40 @@ export class JxlCacheBrowser {
     }
   }
 
+  async has(key: string): Promise<boolean> {
+    if (this.initPromise) await this.initPromise.catch(() => undefined);
+    if (this.memoryCache.has(key)) return true;
+    if (this.persistentTracker.has(key)) return true;
+    return false;
+  }
+
   async set(key: string, buffer: ArrayBuffer): Promise<void> {
+    if (this.initPromise) await this.initPromise.catch(() => undefined);
     const size = buffer.byteLength;
     this.memoryCache.set(key, buffer, size);
 
-    if (!this.opfsRoot || size > this.opts.persistentLimit) return;
+    if (!this.opfsRoot || size > this.persistentLimit) {
+      if (this.opfsRoot) {
+        const previous = this.inflightSets.get(key) ?? Promise.resolve();
+        const pending = (async () => {
+          try { await previous; } catch { /* proceed */ }
+          await this.removePersistentEntry(key);
+          this.scheduleManifestWrite();
+        })();
+        this.inflightSets.set(key, pending);
+        try { await pending; } finally {
+          if (this.inflightSets.get(key) === pending) this.inflightSets.delete(key);
+        }
+      }
+      return;
+    }
 
+    const gen = this._generation;
     const previous = this.inflightSets.get(key) ?? Promise.resolve();
 
     const pending = (async () => {
-      try { await previous; } catch { /* previous set failed, proceed anyway */ }
+      try { await previous; } catch { /* proceed */ }
+      if (this._generation !== gen) return;
       await this.setPersistent(key, buffer);
     })();
 
@@ -116,7 +182,17 @@ export class JxlCacheBrowser {
     }
   }
 
+  async delete(key: string): Promise<void> {
+    if (this.initPromise) await this.initPromise.catch(() => undefined);
+    this.memoryCache.delete(key);
+    const ps = this.inflightSets.get(key);
+    if (ps) await ps.catch(() => undefined);
+    await this.removePersistentEntry(key);
+    this.scheduleManifestWrite();
+  }
+
   async clear(): Promise<void> {
+    if (this.initPromise) await this.initPromise.catch(() => undefined);
     this._generation++;
     this.memoryCache.clear();
     this.persistentTracker.clear();
@@ -150,8 +226,10 @@ export class JxlCacheBrowser {
       persistent: {
         count: this.persistentTracker.count,
         size: this.persistentTracker.size,
-        limit: this.opts.persistentLimit,
+        limit: this.persistentLimit,
         enabled: this.opfsRoot !== null,
+        evictions: this.evictionsCount,
+        quotaEvictions: this.quotaEvictionsCount,
       },
       inflight: {
         gets: this.inflightGets.size,
@@ -168,18 +246,19 @@ export class JxlCacheBrowser {
 
     try {
       const entry = this.persistentTracker.get(key);
-      const name = entry?.name ?? safeCacheName(key);
+      const name = entry?.name ?? await cacheNameFor(key);
 
       const fileHandle = await this.opfsRoot.getFileHandle(name);
       const file = await fileHandle.getFile();
 
-      if (file.size === 0) return undefined;
+      if (file.size === 0) {
+        this.persistentTracker.delete(key);
+        this.opfsRoot.removeEntry(name).catch(() => undefined);
+        return undefined;
+      }
 
       const buffer = await file.arrayBuffer();
 
-      // Guard against a clear() that ran while we were awaiting OPFS I/O.
-      // clear() increments _generation, so any mismatch means the cache was
-      // wiped and we must not re-promote stale data.
       if (this._generation !== gen) return undefined;
 
       this.memoryCache.set(key, buffer, buffer.byteLength);
@@ -190,7 +269,9 @@ export class JxlCacheBrowser {
 
       return buffer;
     } catch (e) {
-      if (e instanceof DOMException && e.name !== 'NotFoundError') {
+      if (e instanceof DOMException && e.name === 'NotFoundError') {
+        this.persistentTracker.delete(key);
+      } else if (e instanceof DOMException) {
         console.warn(`[JxlCacheBrowser] Failed to read persistent entry for "${key}"`, e);
       }
       return undefined;
@@ -202,11 +283,10 @@ export class JxlCacheBrowser {
 
     const gen = this._generation;
     const size = buffer.byteLength;
-    const name = safeCacheName(key);
+    const name = await cacheNameFor(key);
 
     await this.evictPersistentUntilFits(size);
 
-    // Abort if clear() ran while we were evicting or waiting in the inflight chain.
     if (this._generation !== gen) return;
 
     try {
@@ -214,7 +294,8 @@ export class JxlCacheBrowser {
       if (this._generation !== gen) return;
       this.persistentTracker.set(key, { name }, size);
     } catch (e) {
-      if (e instanceof Error && e.name === 'QuotaExceededError') {
+      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+        this.quotaEvictionsCount++;
         console.info(`[JxlCacheBrowser] Quota exceeded for "${key}", evicting aggressively`);
         await this.evictPersistentFraction(0.75);
         if (this._generation !== gen) return;
@@ -223,8 +304,6 @@ export class JxlCacheBrowser {
           if (this._generation !== gen) return;
           this.persistentTracker.set(key, { name }, size);
         } catch (retryErr) {
-          // Persistent store is full even after aggressive eviction — treat as
-          // a non-fatal miss; the entry remains in the memory cache only.
           console.warn(`[JxlCacheBrowser] Persistent store still full after eviction, skipping persist for "${key}"`, retryErr);
           return;
         }
@@ -237,7 +316,7 @@ export class JxlCacheBrowser {
     this.scheduleManifestWrite();
   }
 
-  private async writePersistentFile(name: string, buffer: ArrayBuffer): Promise<void> {
+  private async writePersistentFile(name: string, buffer: ArrayBuffer | Uint8Array): Promise<void> {
     if (!this.opfsRoot) return;
 
     const fileHandle = await this.opfsRoot.getFileHandle(name, { create: true });
@@ -247,8 +326,6 @@ export class JxlCacheBrowser {
       await writable.write(buffer);
       await writable.close();
     } catch (writeErr) {
-      // Abort the stream so the browser can release the lock; ignore abort
-      // errors so the original write error is always what propagates.
       try { await writable.abort(); } catch { /* intentionally ignored */ }
       throw writeErr;
     }
@@ -256,7 +333,7 @@ export class JxlCacheBrowser {
 
   private async evictPersistentUntilFits(incomingSize: number): Promise<void> {
     while (
-      this.persistentTracker.size + incomingSize > this.opts.persistentLimit &&
+      this.persistentTracker.size + incomingSize > this.persistentLimit &&
       this.persistentTracker.count > 0
     ) {
       const oldest = this.persistentTracker.getOldestKey();
@@ -278,10 +355,8 @@ export class JxlCacheBrowser {
   private async removePersistentEntry(key: string): Promise<void> {
     if (!this.opfsRoot) return;
 
-    // peek() instead of get() — we must not promote the eviction candidate to
-    // MRU position while we are in the middle of LRU eviction.
     const entry = this.persistentTracker.peek(key);
-    const name = entry?.name ?? safeCacheName(key);
+    const name = entry?.name ?? await cacheNameFor(key);
 
     try {
       await this.opfsRoot.removeEntry(name);
@@ -289,6 +364,7 @@ export class JxlCacheBrowser {
       // Stale tracker or already removed.
     } finally {
       this.persistentTracker.delete(key);
+      this.evictionsCount++;
     }
   }
 
@@ -306,11 +382,27 @@ export class JxlCacheBrowser {
       if (manifest.version !== 1) return;
 
       for (const entry of manifest.entries) {
-        this.persistentTracker.set(entry.key, { name: entry.name }, entry.size);
+        if (typeof entry.key === 'string' && typeof entry.name === 'string' && Number.isFinite(entry.size) && entry.size >= 0) {
+          this.persistentTracker.set(entry.key, { name: entry.name }, entry.size);
+        }
       }
     } catch {
       // No manifest yet.
     }
+
+    await this.reconcile();
+  }
+
+  private async reconcile(): Promise<void> {
+    if (!this.opfsRoot) return;
+    const onDisk = new Set<string>();
+    for await (const name of (this.opfsRoot as IterableDirectoryHandle).keys()) onDisk.add(name);
+    onDisk.delete(MANIFEST_NAME);
+    for (const [key, entry] of this.persistentTracker.entriesOldestFirst()) {
+      if (!onDisk.has(entry.name)) this.persistentTracker.delete(key);
+      else onDisk.delete(entry.name);
+    }
+    await Promise.allSettled([...onDisk].map(n => this.opfsRoot!.removeEntry(n).catch(() => undefined)));
   }
 
   private scheduleManifestWrite(): void {
@@ -318,7 +410,7 @@ export class JxlCacheBrowser {
 
     if (this.manifestPendingWrite !== null) return;
 
-    this.manifestPendingWrite = Promise.resolve()
+    this.manifestPendingWrite = new Promise(resolve => setTimeout(resolve, 250))
       .then(() => this.drainManifest())
       .finally(() => { this.manifestPendingWrite = null; });
   }
@@ -332,31 +424,36 @@ export class JxlCacheBrowser {
 
   private async writeManifest(): Promise<void> {
     if (!this.opfsRoot) return;
+    const performWrite = async () => {
+      const gen = this._generation;
+      const root = this.opfsRoot;
+      if (!root) return;
 
-    // Snapshot generation before building entries. clear() deletes the manifest
-    // file and increments _generation. If we write after that deletion, we'd
-    // re-create a stale manifest — skip the write instead.
-    const gen = this._generation;
+      try {
+        const entries: Array<{ key: string; name: string; size: number }> = [];
 
-    try {
-      const entries: Array<{ key: string; name: string; size: number }> = [];
+        for (const [key, entry, size] of this.persistentTracker.entriesOldestFirst()) {
+          entries.push({ key, name: entry.name, size });
+        }
 
-      for (const [key, entry, size] of this.persistentTracker.entriesOldestFirst()) {
-        entries.push({ key, name: entry.name, size });
+        const manifest = { version: 1 as const, entries };
+        const encoded = this._encoder.encode(JSON.stringify(manifest));
+
+        if (this._generation !== gen) return;
+        await this.writePersistentFile(MANIFEST_NAME, encoded);
+
+        if (this._generation !== gen) {
+          await root.removeEntry(MANIFEST_NAME).catch(() => undefined);
+        }
+      } catch (e) {
+        console.warn('[JxlCacheBrowser] Failed to write manifest (non-fatal)', e);
       }
+    };
 
-      const manifest = { version: 1 as const, entries };
-      const encoded = this._encoder.encode(JSON.stringify(manifest));
-
-      // Slice the backing buffer to the exact byte range of the encoded view —
-      // TextEncoder may return a Uint8Array that does not start at offset 0 or
-      // does not extend to the end of its backing ArrayBuffer.
-      const manifestBuffer = encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
-
-      if (this._generation !== gen) return;
-      await this.writePersistentFile(MANIFEST_NAME, manifestBuffer);
-    } catch (e) {
-      console.warn('[JxlCacheBrowser] Failed to write manifest (non-fatal)', e);
+    if (typeof navigator !== 'undefined' && navigator.locks) {
+      await navigator.locks.request('jxl-cache-manifest', async () => performWrite());
+    } else {
+      await performWrite();
     }
   }
 }
