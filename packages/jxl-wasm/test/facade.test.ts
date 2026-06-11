@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, it, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
   createDecoder,
   createEncoder,
+  ButteraugliComparator,
+  CapabilityMissing,
   detectTier,
   decodeTileContainerRegionRgba16,
   encodeTileContainerRgba16,
@@ -17,7 +19,7 @@ import {
 
 // Types under test for extra-channel Phase 2 live in the facade (not yet re-exported via index).
 import type { ExtraChannel, EncoderOptions } from "../src/facade";
-import { serializeExtraChannelsForWasm, EC_BYTES } from "../src/facade";
+import { computeButteraugli, extractJpegReconstructionFromJxl, serializeExtraChannelsForWasm, EC_BYTES } from "../src/facade";
 
 const decodeOptions = {
   format: "rgba8" as const,
@@ -112,6 +114,187 @@ describe("@casabio/jxl-wasm facade", () => {
     expect(encoded.done).toBe(false);
     expect(Array.from(new Uint8Array(encoded.value))).toEqual([255, 0, 0, 255]);
     await encoder.dispose();
+  });
+
+  test("streaming rgba16 encode does not require legacy rgba16 encode export", async () => {
+    const module = createFakeStreamingInputLibjxlModule() as any;
+    delete module._jxl_wasm_encode_rgba16;
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({ ...encodeOptions, format: "rgba16", quality: 90 });
+    await encoder.pushPixels(new Uint8Array([255, 0, 0, 0, 0, 0, 255, 255]));
+    encoder.finish();
+
+    const encoded = await encoder.chunks()[Symbol.asyncIterator]().next();
+    expect(encoded.done).toBe(false);
+    expect(Array.from(new Uint8Array(encoded.value))).toEqual([255, 0, 0, 0, 0, 0, 255, 255]);
+    await encoder.dispose();
+  });
+
+  test("buffered rgba16 encode still requires legacy rgba16 encode export", async () => {
+    const module = createFakeLibjxlModule() as any;
+    delete module._jxl_wasm_encode_rgba16;
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      format: "rgba16",
+      quality: 90,
+      iccProfile: null,
+      sidecarSizes: [1],
+    });
+    await encoder.pushPixels(new Uint8Array([255, 0, 0, 0, 0, 0, 255, 255]));
+    encoder.finish();
+
+    await expect(async () => {
+      for await (const _chunk of encoder.chunks()) {}
+    }).toThrow(CapabilityMissing);
+    await encoder.dispose();
+  });
+
+  test("ButteraugliComparator uploads reference once and frees it on dispose", async () => {
+    const module = createFakeLibjxlModule() as any;
+    const uploads: number[] = [];
+    const originalSet = module.HEAPU8.set.bind(module.HEAPU8);
+    module.HEAPU8.set = (source: ArrayLike<number>, offset?: number) => {
+      uploads.push(source.length);
+      originalSet(source, offset);
+    };
+    module._jxl_wasm_butteraugli_compare = () => {
+      const f = new ArrayBuffer(4);
+      new Float32Array(f)[0] = 1.5;
+      return new Int32Array(f)[0]!;
+    };
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const comparator = await ButteraugliComparator.create(new Uint8Array([1, 2, 3, 4]), 1, 1);
+    expect(comparator.compare(new Uint8Array([5, 6, 7, 8]))).toBe(1.5);
+    expect(comparator.compare(new Uint8Array([9, 10, 11, 12]))).toBe(1.5);
+    comparator.dispose();
+
+    expect(uploads).toEqual([4, 4, 4]);
+    expect(module.__allocations.size).toBe(0);
+  });
+
+  test("computeButteraugli still frees both temporary image buffers", async () => {
+    const module = createFakeLibjxlModule() as any;
+    module._jxl_wasm_butteraugli_compare = () => 0;
+    setJxlModuleFactoryForTesting(async () => module);
+
+    await computeButteraugli(new Uint8Array(4), new Uint8Array(4), 1, 1);
+
+    expect(module.__allocations.size).toBe(0);
+  });
+
+  test("JXTC JPEG extraction ignores SOI and EOI markers inside tile payloads", () => {
+    const tilePayload = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]);
+    const jxtc = new Uint8Array(32 + 8 + tilePayload.byteLength);
+    const dv = new DataView(jxtc.buffer);
+    dv.setUint32(0, 0x4354584a, true);
+    dv.setUint32(4, 1, true);
+    dv.setUint32(8, 1, true);
+    dv.setUint32(12, 1, true);
+    dv.setUint32(16, 1, true);
+    dv.setUint32(20, 1, true);
+    dv.setUint32(24, 1, true);
+    dv.setUint32(32, 40, true);
+    dv.setUint32(36, tilePayload.byteLength, true);
+    jxtc.set(tilePayload, 40);
+
+    expect(extractJpegReconstructionFromJxl(jxtc)).toBeNull();
+  });
+
+  test("JPEG extraction returns a copied view when a valid JPEG exists outside tile payloads", () => {
+    const jpeg = new Uint8Array([
+      0xff, 0xd8,
+      0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+      0xff, 0xdb, 0x00, 0x04, 0x00, 0x00,
+      0xff, 0xc0, 0x00, 0x04, 0x00, 0x00,
+      0xff, 0xd9,
+    ]);
+    const jxtc = new Uint8Array(32 + 8 + jpeg.byteLength + 4);
+    const dv = new DataView(jxtc.buffer);
+    dv.setUint32(0, 0x4354584a, true);
+    dv.setUint32(4, 1, true);
+    dv.setUint32(8, 1, true);
+    dv.setUint32(12, 1, true);
+    dv.setUint32(16, 1, true);
+    dv.setUint32(20, 1, true);
+    dv.setUint32(24, 1, true);
+    dv.setUint32(32, jxtc.byteLength - 4, true);
+    dv.setUint32(36, 4, true);
+    jxtc.set(jpeg, 40);
+
+    const extracted = extractJpegReconstructionFromJxl(jxtc);
+    expect(Array.from(extracted ?? [])).toEqual(Array.from(jpeg));
+    jxtc[40] = 0;
+    expect(extracted?.[0]).toBe(0xff);
+  });
+
+  test("streaming advanced settings allocate only when create_image_adv consumes them", async () => {
+    const module = createFakeStreamingInputLibjxlModule() as any;
+    let mallocsBeforeCreate = 0;
+    let createAdvCalled = false;
+    module._jxl_wasm_enc_create_image_adv = (
+      width: number,
+      height: number,
+      _distance: number,
+      _effort: number,
+      _fmt: number,
+      _hasAlpha: number,
+      _progressiveDc: number,
+      _progressiveAc: number,
+      _qProgressiveAc: number,
+      _buffering: number,
+      idsPtr: number,
+      valuesPtr: number,
+      count: number,
+    ) => {
+      mallocsBeforeCreate = module.__mallocCalls;
+      createAdvCalled = true;
+      expect(idsPtr).not.toBe(0);
+      expect(valuesPtr).not.toBe(0);
+      expect(count).toBe(1);
+      return module._jxl_wasm_enc_create_image(width, height);
+    };
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      advancedFrameSettings: [{ id: JxlFrameSetting.PATCHES, value: 1 }],
+      quality: 90,
+    });
+    await encoder.pushPixels(new Uint8Array([255, 0, 0, 255]));
+    encoder.finish();
+    for await (const _chunk of encoder.chunks()) {}
+
+    expect(createAdvCalled).toBe(true);
+    expect(mallocsBeforeCreate).toBe(2);
+    expect(module.__allocations.size).toBe(0);
+  });
+
+  test("streaming Y settings do not allocate unused advanced setting arrays", async () => {
+    const module = createFakeStreamingInputLibjxlModule() as any;
+    module._jxl_wasm_enc_create_image_y = module._jxl_wasm_enc_create_image;
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const encoder = createEncoder({
+      ...encodeOptions,
+      advancedFrameSettings: [{ id: JxlFrameSetting.PATCHES, value: 1 }],
+      epf: 1,
+      quality: 90,
+    });
+    await encoder.pushPixels(new Uint8Array([255, 0, 0, 255]));
+
+    expect(module.__mallocCalls).toBe(0);
+    encoder.cancel();
+  });
+
+  test("extra channel serialization reuses one TextEncoder instance", () => {
+    const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("const TEXT_ENCODER = new TextEncoder();");
+    expect(source).not.toContain("new TextEncoder().encode");
   });
 
   test("encodes and decodes rgba8 pixels through the WASM codec facade", async () => {
@@ -351,6 +534,81 @@ describe("@casabio/jxl-wasm facade", () => {
 
     expect(closeProgress.value).toMatchObject({ type: "progress", stage: "pass" });
     expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
+    await decoder.dispose();
+  });
+
+  test("progressive rgba16 reports 16 bits and works without legacy rgba16 decode export", async () => {
+    setJxlModuleFactoryForTesting(async () => {
+      const module = createFakeProgressiveLibjxlModule() as any;
+      delete module._jxl_wasm_decode_rgba16;
+      module._jxl_wasm_dec_create = (_fmt: number) => 1;
+      module._jxl_wasm_dec_take_flushed = () => module.__makeHandle(new Uint8Array(8), 1, 1, 16);
+      module._jxl_wasm_dec_take_final = () => module.__makeHandle(new Uint8Array(8), 1, 1, 16);
+      return module;
+    });
+
+    const decoder = createDecoder({ ...decodeOptions, format: "rgba16", emitEveryPass: true });
+    decoder.push(new Uint8Array([1, 2, 3, 4]));
+    decoder.close();
+
+    const events = [];
+    for await (const event of decoder.events()) events.push(event);
+
+    expect(events.map((event) => event.type)).not.toContain("error");
+    expect(events.find((event) => event.type === "header")).toMatchObject({ info: { bitsPerSample: 16 } });
+    expect(events.find((event) => event.type === "progress")).toMatchObject({ info: { bitsPerSample: 16 }, pixelStride: 8 });
+    expect(events.find((event) => event.type === "final")).toMatchObject({ info: { bitsPerSample: 16 }, pixelStride: 8 });
+    await decoder.dispose();
+  });
+
+  test("progressive transform reads decoded buffers without full-frame slice copy", async () => {
+    const module = createFakeProgressiveLibjxlModule() as any;
+    let sliceCalls = 0;
+    module.HEAPU8 = new Proxy(module.HEAPU8, {
+      get(target, prop, receiver) {
+        if (prop === "slice") {
+          return (...args: [number?, number?]) => {
+            sliceCalls++;
+            return Uint8Array.prototype.slice.apply(target, args);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    module._jxl_wasm_dec_width = () => 2;
+    module._jxl_wasm_dec_height = () => 1;
+    module._jxl_wasm_dec_take_flushed = () => module.__makeHandle(new Uint8Array(8), 2, 1);
+    module._jxl_wasm_dec_take_final = () => module.__makeHandle(new Uint8Array(8), 2, 1);
+    setJxlModuleFactoryForTesting(async () => module);
+
+    const decoder = createDecoder({ ...decodeOptions, region: { x: 0, y: 0, w: 1, h: 1 }, emitEveryPass: true });
+    decoder.push(new Uint8Array([1, 2, 3, 4]));
+    decoder.close();
+
+    const events = [];
+    for await (const event of decoder.events()) events.push(event);
+
+    expect(events.map((event) => event.type)).not.toContain("error");
+    expect(events.map((event) => event.type)).toContain("final");
+    expect(sliceCalls).toBe(0);
+    await decoder.dispose();
+  });
+
+  test("push after decoder events complete is ignored", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeProgressiveLibjxlModule());
+
+    const decoder = createDecoder({ ...decodeOptions, progressionTarget: "header" });
+    decoder.push(new Uint8Array([1, 2, 3, 4]));
+
+    const events = [];
+    for await (const event of decoder.events()) events.push(event);
+    decoder.push(new Uint8Array([5, 6, 7, 8]));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "header" });
+    expect((decoder as any).chunkQueue).toHaveLength(0);
+    expect((decoder as any).queuedBytes).toBe(0);
     await decoder.dispose();
   });
 
@@ -707,6 +965,7 @@ function createFakeLibjxlModule() {
   // tests that need OOM simulation wrap/spy it explicitly (aux metadata/adv vs critical).
   const memory = new ArrayBuffer(65536);
   const HEAPU8 = new Uint8Array(memory);
+  const HEAP32 = new Int32Array(memory);
   const HEAPU32 = new Uint32Array(memory);
   let nextPtr = 64;
   const allocations = new Map<number, number>();
@@ -720,17 +979,19 @@ function createFakeLibjxlModule() {
     return ptr;
   };
 
-  const makeHandle = (bytes: Uint8Array, width: number, height: number) => {
+  const makeHandle = (bytes: Uint8Array, width: number, height: number, bits = 8) => {
     const dataPtr = malloc(bytes.byteLength);
     HEAPU8.set(bytes, dataPtr);
     const handle = nextHandle++;
-    handles.set(handle, { dataPtr, size: bytes.byteLength, width, height, bits: 8, alpha: 1 });
+    handles.set(handle, { dataPtr, size: bytes.byteLength, width, height, bits, alpha: 1 });
     return handle;
   };
 
   return {
     HEAPU8,
+    HEAP32,
     HEAPU32,
+    __allocations: allocations,
     _malloc: malloc,
     _free: (ptr: number) => allocations.delete(ptr),
     _jxl_wasm_encode_rgba8: (pixelsPtr: number, width: number, height: number, _distance: number, _effort: number) => {
@@ -739,13 +1000,18 @@ function createFakeLibjxlModule() {
     _jxl_wasm_decode_rgba8: (inputPtr: number, inputSize: number, _downsample: number) => {
       return makeHandle(HEAPU8.slice(inputPtr, inputPtr + inputSize), 1, 1);
     },
+    __makeHandle: makeHandle,
     _jxl_wasm_buffer_data: (handle: number) => handles.get(handle)?.dataPtr ?? 0,
     _jxl_wasm_buffer_size: (handle: number) => handles.get(handle)?.size ?? 0,
     _jxl_wasm_buffer_width: (handle: number) => handles.get(handle)?.width ?? 0,
     _jxl_wasm_buffer_height: (handle: number) => handles.get(handle)?.height ?? 0,
     _jxl_wasm_buffer_bits_per_sample: (handle: number) => handles.get(handle)?.bits ?? 8,
     _jxl_wasm_buffer_has_alpha: (handle: number) => handles.get(handle)?.alpha ?? 1,
-    _jxl_wasm_buffer_free: (handle: number) => handles.delete(handle),
+    _jxl_wasm_buffer_free: (handle: number) => {
+      const entry = handles.get(handle);
+      if (entry) allocations.delete(entry.dataPtr);
+      handles.delete(handle);
+    },
     _jxl_wasm_encode_tile_container_rgba8: (pixelsPtr: number, width: number, height: number) => {
       return makeHandle(HEAPU8.slice(pixelsPtr, pixelsPtr + width * height * 4), width, height);
     },
@@ -915,9 +1181,10 @@ function createFakeStreamingInputLibjxlModule() {
   let nextState = 1;
   const states = new Map<number, { width: number; height: number; pixelsPtr: number; pixelsSize: number; pixelsWritten: number; nextHandle: number }>();
 
-  module._jxl_wasm_enc_create_image = (width: number, height: number) => {
+  module._jxl_wasm_enc_create_image = (width: number, height: number, _distance?: number, _effort?: number, fmt?: number) => {
     const state = nextState++;
-    const pixelsSize = width * height * 4;
+    const bytesPerPixel = fmt === 2 ? 16 : fmt === 1 ? 8 : 4;
+    const pixelsSize = width * height * bytesPerPixel;
     const pixelsPtr = baseMalloc(pixelsSize);
     states.set(state, { width, height, pixelsPtr, pixelsSize, pixelsWritten: 0, nextHandle: 0 });
     return state;
@@ -944,7 +1211,7 @@ function createFakeStreamingInputLibjxlModule() {
   module._jxl_wasm_enc_finish = (state: number) => {
     const entry = states.get(state);
     if (!entry) return 1;
-    entry.nextHandle = module._jxl_wasm_encode_rgba8(0, entry.width, entry.height, 0, 0);
+    entry.nextHandle = module.__makeHandle(module.HEAPU8.subarray(entry.pixelsPtr, entry.pixelsPtr + entry.pixelsWritten), entry.width, entry.height);
     const handle = entry.nextHandle;
     const dataPtr = module._jxl_wasm_buffer_data(handle);
     module.HEAPU8.set(module.HEAPU8.subarray(entry.pixelsPtr, entry.pixelsPtr + entry.pixelsWritten), dataPtr);
@@ -958,6 +1225,8 @@ function createFakeStreamingInputLibjxlModule() {
     return handle;
   };
   module._jxl_wasm_enc_free = (state: number) => {
+    const entry = states.get(state);
+    if (entry) module._free(entry.pixelsPtr);
     states.delete(state);
   };
 
@@ -1027,7 +1296,7 @@ describe('ExtraChannel full infrastructure (Phase 2)', () => {
   });
 
   it('encodes and roundtrips full ExtraChannel descriptors (synthetic planes: spot 8-bit + depth 16-bit + named thermal) via packed 72B bridge', async () => {
-    const mod = await loadLibjxlModule();
+    const mod = await loadPreferredLibjxlModule();
     if (typeof mod._jxl_wasm_encode_rgba8_with_extra_channels !== 'function' ||
         typeof mod._jxl_wasm_get_extra_channels !== 'function' ||
         typeof mod._malloc !== 'function') {

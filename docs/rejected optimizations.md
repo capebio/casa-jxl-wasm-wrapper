@@ -346,3 +346,11 @@ All contributions evaluated for pipeline fit (layering, cheap exifr, no backpres
 No items rejected. Changes limited to ingest.ts (helpers, decodeMaster, computeIngestPlan, buildFallbackPlan, ingestImage, batch accum, interfaces). Tests (ingest.test.ts + manifest + ladder) all pass post-edit. No schema changes (used metadata record + post-build attach). 
 
 (Hand-off outcome per query: F1-6 implemented, F7 deferred; positive contributions accepted and landed.)
+
+## `packages/jxl-worker-browser/src/decode-handler.ts` (R14-D1 early progression target finish)
+
+* **R14-D1 worker-only `finishSession("final")` after early `decode_progress`: REJECTED as written.** The bug is real, but the proposed local fix is incomplete for this pipeline. `packages/jxl-session/src/decode-session.ts` only treats `decode_final`, `decode_error`, `decode_budget_exceeded`, and `decode_cancelled` as terminal; `decode_progress` just pushes a frame. `packages/jxl-scheduler/src/scheduler.ts` likewise releases the worker only for terminal protocol messages. If the worker silently calls `finishSession("final")` after a `dc`/`pass` progress event, it removes the handler from the worker map but sends no terminal message to scheduler/session, leaving the scheduler slot active and `done()` unresolved. Fix needs an explicit protocol/session decision for early-target completion, not a worker-only local finish.
+
+## `packages/jxl-wasm/src/facade.ts` (R14-F10 computeButteraugliDownsampled)
+
+* **R14-F10 downsampled Butteraugli cleanup: REJECTED as inapplicable to current tree.** `computeButteraugliDownsampled` and `_jxl_wasm_butteraugli_compare_ds` are not present in `packages/jxl-wasm/src/facade.ts`; there is no fallback path to remove or dead `pw/ph/pixelSize` locals to delete. Keep as a no-op until that API exists.
