@@ -86,5 +86,14 @@ export interface WasmLoaderOptions {
     fetchImpl?: typeof fetch;
     importWasm?: () => Promise<unknown>;
 }
+/**
+ * Loads the codec facade from the sibling jxl-wasm package (via importWasm or
+ * defaultImportWasm URL-relative + bare fallback).
+ * `wasmUrl` is used only for failure diagnostics; the module itself is resolved via `importWasm`/sibling-package import.
+ *
+ * Note (W-7): loadWasmModule is invoked exactly once per worker under normal operation
+ * (see getWasm singleton + wasmLoadPromise in worker.ts; only reset on error for retry).
+ * Memoization deliberately omitted here.
+ */
 export declare function loadWasmModule(wasmUrl: string, options?: WasmLoaderOptions): Promise<JxlModule>;
 //# sourceMappingURL=wasm-loader.d.ts.map

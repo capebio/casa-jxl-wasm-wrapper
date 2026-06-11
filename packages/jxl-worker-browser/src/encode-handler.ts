@@ -33,6 +33,7 @@ interface EncodeHandlerCallbacks {
 const CHUNK_HWM = 4;
 const DRAIN_MIN_INTERVAL_MS = 8;
 const FINISH_TIMEOUT_MS = 30_000;
+const MAX_QUEUED_BYTES = 128 * 1024 * 1024;
 
 export class EncodeHandler {
   private readonly sessionId: string;
@@ -41,9 +42,10 @@ export class EncodeHandler {
   private readonly callbacks: EncodeHandlerCallbacks;
 
   private state: EncodeState = "created";
-  private pixelQueue: Array<{ chunk: ArrayBuffer; region?: Region }> = [];
+  private pixelQueue: Array<{ chunk: ArrayBuffer; region?: Region } | undefined> = [];
   private pixelReadIndex = 0;
   private queueDepth = 0;
+  private queuedBytes = 0;
   private cancelled = false;
   private finished = false;
   private sessionEnded = false;
@@ -51,6 +53,8 @@ export class EncodeHandler {
   private wakeResolve: (() => void) | null = null;
   private lastDrainPostedMs = 0;
   private lastDrainAllowed = false;
+  private encoder: BrowserEncoder | null = null;
+  private disposePromise: Promise<void> | null = null;
 
   // Pre-allocated message objects — mutated in-place before postMessage (safe: structured clone is synchronous).
   private readonly _drainMsg = {
@@ -91,33 +95,36 @@ export class EncodeHandler {
   // ---------------------------------------------------------------------------
 
   onPixels(chunk: ArrayBuffer, region?: Region): void {
-    if (this.cancelled || this.state === "done") return;
+    if (this.isTerminal() || this.finished) return;
+    if (this.queuedBytes + chunk.byteLength > MAX_QUEUED_BYTES) {
+      this.failSession("QueueOverflow", `Encode input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
+      return;
+    }
     const entry = region !== undefined ? { chunk, region } : { chunk };
     this.pixelQueue.push(entry);
     this.queueDepth++;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.queuedBytes += chunk.byteLength;
+    this.wake();
   }
 
   onFinish(): void {
+    if (this.isTerminal() || this.finished) return;
     this.finished = true;
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    this.wake();
   }
 
   async onCancel(reason?: string): Promise<void> {
-    if (this.cancelled || this.state === "done" || this.state === "error") return;
+    if (this.sessionEnded || this.cancelled) return;
     this.cancelled = true;
-    this.state = "cancelled";
-    this.wakeResolve?.();
-    this.wakeResolve = null;
-
-    const msg: MsgEncodeCancelled = {
-      type: "encode_cancelled",
-      sessionId: this.sessionId,
-    };
-    self.postMessage(msg);
-    // Do NOT call onSessionEnd here — run()'s finally block is responsible.
+    if (reason !== "release_state") {
+      const msg: MsgEncodeCancelled = {
+        type: "encode_cancelled",
+        sessionId: this.sessionId,
+      };
+      self.postMessage(msg);
+    }
+    this.finishSession("cancelled");
+    void this.disposeActiveEncoder(reason, true);
   }
 
   // ---------------------------------------------------------------------------
@@ -161,6 +168,7 @@ export class EncodeHandler {
       copyInput: false,
     } as Parameters<JxlModule["createEncoder"]>[0];
     const encoder = this.wasm.createEncoder(encoderOpts);
+    this.encoder = encoder;
     this.state = "configured";
     try {
       await Promise.all([this.feedEncoder(encoder), this.readEncoderChunks(encoder)]);
@@ -168,8 +176,8 @@ export class EncodeHandler {
       const message = err instanceof Error ? err.message : String(err);
       this.failSession("Internal", message);
     } finally {
-      await encoder.dispose();
-      this.endSession();
+      await this.disposeActiveEncoder();
+      this.finishSession(this.state);
     }
   }
 
@@ -177,43 +185,103 @@ export class EncodeHandler {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private endSession(): void {
-    if (this.sessionEnded) return;
+  private finishSession(state: EncodeState): boolean {
+    if (this.sessionEnded) return false;
+    this.state = state;
     this.sessionEnded = true;
+    this.clearPixelQueue();
+    this.wake();
     this.callbacks.onSessionEnd(this.sessionId);
+    return true;
+  }
+
+  private isTerminal(): boolean {
+    return this.sessionEnded;
+  }
+
+  private clearPixelQueue(): void {
+    this.pixelQueue.length = 0;
+    this.pixelReadIndex = 0;
+    this.queueDepth = 0;
+    this.queuedBytes = 0;
+  }
+
+  private wake(): void {
+    const resolve = this.wakeResolve;
+    if (resolve !== null) {
+      this.wakeResolve = null;
+      resolve();
+    }
+  }
+
+  private disposeActiveEncoder(reason?: string, cancelFirst = false): Promise<void> {
+    if (this.disposePromise !== null) return this.disposePromise;
+    const encoder = this.encoder;
+    if (encoder === null) return Promise.resolve();
+    this.encoder = null;
+    this.disposePromise = (async () => {
+      if (cancelFirst) {
+        try {
+          await encoder.cancel(reason);
+        } catch (e) {
+          console.error("[jxl-worker] encoder.cancel failed:", e);
+        }
+      }
+      try {
+        await encoder.dispose();
+      } catch (e) {
+        console.error("[jxl-worker] encoder.dispose failed:", e);
+      }
+    })();
+    return this.disposePromise;
   }
 
   private waitForPixels(): Promise<void> {
-    if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled
-        || this.state === "done" || this.state === "error") {
+    if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.isTerminal()) {
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
   }
 
+  private takeNextPixels(): { chunk: ArrayBuffer; region?: Region } | null {
+    const entry = this.pixelQueue[this.pixelReadIndex];
+    this.pixelQueue[this.pixelReadIndex++] = undefined;
+    if (entry === undefined) {
+      this.compactQueue();
+      return null;
+    }
+    this.queueDepth--;
+    this.queuedBytes -= entry.chunk.byteLength;
+    this.compactQueue();
+    return entry;
+  }
+
+  private compactQueue(): void {
+    if (this.pixelReadIndex >= this.pixelQueue.length) {
+      this.pixelQueue.length = 0;
+      this.pixelReadIndex = 0;
+    } else if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
+      this.pixelQueue.copyWithin(0, this.pixelReadIndex);
+      this.pixelQueue.length -= this.pixelReadIndex;
+      this.pixelReadIndex = 0;
+    }
+  }
+
   private async feedEncoder(encoder: BrowserEncoder): Promise<void> {
-    while (!this.cancelled && this.state !== "done" && this.state !== "error") {
+    while (!this.isTerminal()) {
       await this.waitForPixels();
       while (this.pixelQueue.length > this.pixelReadIndex) {
-        const entry = this.pixelQueue[this.pixelReadIndex++];
-        if (entry === undefined) break;
-        if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
-          this.pixelQueue.copyWithin(0, this.pixelReadIndex);
-          this.pixelQueue.length -= this.pixelReadIndex;
-          this.pixelReadIndex = 0;
-        }
-        this.queueDepth--;
+        const entry = this.takeNextPixels();
+        if (entry === null) break;
         await encoder.pushPixels(entry.chunk, entry.region);
         // Re-check state after async pushPixels — cancellation or error may have arrived.
         // Cast through string to defeat TypeScript's pre-await control-flow narrowing.
-        const stateAfterPush = this.state as string;
-        if (this.cancelled || stateAfterPush === "done" || stateAfterPush === "error") return;
+        if (this.isTerminal()) return;
         this.maybePostDrain();
       }
       if (this.finished) {
         // Re-check state before calling finish — guard against race with onCancel.
-        const stateAfterWait = this.state as string;
-        if (this.cancelled || stateAfterWait === "done" || stateAfterWait === "error") return;
+        if (this.isTerminal()) return;
         this.state = "finalising";
         await Promise.race([
           encoder.finish(),
@@ -241,6 +309,7 @@ export class EncodeHandler {
     this.lastDrainPostedMs = now;
 
     this._drainMsg.queueDepth = this.queueDepth;
+    this._drainMsg.queuedBytes = this.queuedBytes;
     self.postMessage(this._drainMsg);
   }
 
@@ -251,7 +320,7 @@ export class EncodeHandler {
     let chunkIndex = 0;
 
     for await (const chunk of encoder.chunks()) {
-      if (this.cancelled || this.state === "done" || this.state === "error") return;
+      if (this.isTerminal()) return;
       const buffer = toArrayBuffer(chunk);
       if (!this.firstByteEmitted) {
         this.firstByteEmitted = true;
@@ -273,7 +342,7 @@ export class EncodeHandler {
       self.postMessage(this._chunkMsg, [buffer]);
     }
 
-    if (this.cancelled || this.state === "done" || this.state === "error") return;
+    if (this.isTerminal()) return;
     this.state = "done";
     const doneMsg: MsgEncodeDone = {
       type: "encode_done",
@@ -282,15 +351,11 @@ export class EncodeHandler {
       ...(sidecarOffsets.length > 0 ? { sidecarOffsets } : {}),
     };
     self.postMessage(doneMsg);
-    // Do NOT call onSessionEnd here — run()'s finally block is responsible.
+    this.finishSession("done");
   }
 
   private failSession(code: string, message: string): void {
-    if (this.cancelled || this.state === "done" || this.state === "error") return;
-    this.state = "error";
-    // Unblock feedEncoder if it's sleeping in waitForPixels.
-    this.wakeResolve?.();
-    this.wakeResolve = null;
+    if (this.isTerminal()) return;
 
     const msg: MsgEncodeError = {
       type: "encode_error",
@@ -299,7 +364,8 @@ export class EncodeHandler {
       message,
     };
     self.postMessage(msg);
-    // Do NOT call onSessionEnd here — run()'s finally block is responsible.
+    this.finishSession("error");
+    void this.disposeActiveEncoder();
   }
 }
 

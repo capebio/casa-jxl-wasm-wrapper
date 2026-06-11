@@ -10,6 +10,9 @@ export function expect(value) {
         toBeDefined() {
             assert.notStrictEqual(value, undefined);
         },
+        toBeUndefined() {
+            assert.strictEqual(value, undefined);
+        },
         toBeGreaterThan(expected) {
             assert.ok(value > expected);
         },

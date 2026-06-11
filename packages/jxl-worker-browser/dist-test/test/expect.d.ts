@@ -2,6 +2,7 @@ export declare function expect<T>(value: T): {
     toBe(expected: T): void;
     toEqual(expected: unknown): void;
     toBeDefined(): void;
+    toBeUndefined(): void;
     toBeGreaterThan(expected: number): void;
     toContain(expected: unknown): void;
     toHaveLength(expected: number): void;

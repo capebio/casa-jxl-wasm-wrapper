@@ -11,6 +11,9 @@ export function expect<T>(value: T) {
     toBeDefined() {
       assert.notStrictEqual(value, undefined);
     },
+    toBeUndefined() {
+      assert.strictEqual(value, undefined);
+    },
     toBeGreaterThan(expected: number) {
       assert.ok((value as unknown as number) > expected);
     },

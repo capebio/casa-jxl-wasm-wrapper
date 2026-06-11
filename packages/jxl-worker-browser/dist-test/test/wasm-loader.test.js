@@ -16,7 +16,9 @@ describe("loadWasmModule", () => {
         expect(module).toBe(facade);
         expect(fetched).toBe(false);
     });
-    test("forces non-threaded simd tier for browser worker codec facade", async () => {
+    test("explicit simd query forces non-threaded tier (override honored)", async () => {
+        const globalWithSelf = globalThis;
+        const originalSelf = globalWithSelf.self;
         const forcedTiers = [];
         const facade = {
             ...fakeFacade(),
@@ -24,6 +26,30 @@ describe("loadWasmModule", () => {
                 forcedTiers.push(tier);
             },
         };
+        try {
+            globalWithSelf.self = { location: { search: "?jxlWorkerTier=simd" } };
+            const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
+                importWasm: async () => facade,
+                fetchImpl: async () => {
+                    throw new Error("not used");
+                },
+            });
+            expect(module).toBe(facade);
+            expect(forcedTiers).toEqual(["simd"]);
+        }
+        finally {
+            globalWithSelf.self = originalSelf;
+        }
+    });
+    test("no query string defaults to auto (no forceWorkerSafeTier) — locks W-1 default choice", async () => {
+        const forcedTiers = [];
+        const facade = {
+            ...fakeFacade(),
+            setForcedTier(tier) {
+                forcedTiers.push(tier);
+            },
+        };
+        // no self.location override — readWorkerLocationSearch returns "", readWorkerTierOverride now returns "auto"
         const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
             importWasm: async () => facade,
             fetchImpl: async () => {
@@ -31,7 +57,7 @@ describe("loadWasmModule", () => {
             },
         });
         expect(module).toBe(facade);
-        expect(forcedTiers).toEqual(["simd"]);
+        expect(forcedTiers).toEqual([]);
     });
     test("worker tier auto query leaves codec tier unforced", async () => {
         const globalWithSelf = globalThis;

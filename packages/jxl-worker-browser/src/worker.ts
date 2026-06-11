@@ -55,6 +55,9 @@ const pendingDecodeStarts = new Map<string, Promise<void>>();
 const pendingEncodeStarts = new Map<string, Promise<void>>();
 const queuedDecodeMessages = new Map<string, QueuedDecodeMessage[]>();
 const queuedEncodeMessages = new Map<string, QueuedEncodeMessage[]>();
+const queuedDecodeBytes = new Map<string, number>();
+const queuedEncodeBytes = new Map<string, number>();
+const abortedStarts = new Set<string>();
 
 let wasmModule: JxlModule | null = null;
 let wasmLoadPromise: Promise<JxlModule> | null = null;
@@ -63,6 +66,7 @@ let shutdownPromise: Promise<void> | null = null;
 
 // Cap per session to avoid unbounded cold-start buffering.
 const MAX_QUEUED_MESSAGES_PER_SESSION = 256;
+const MAX_QUEUED_BYTES_PER_SESSION = 128 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // WASM acquisition (lazy, singleton; resets on failure to allow retry)
@@ -105,6 +109,30 @@ function hasAnySession(sessionId: string): boolean {
   );
 }
 
+function clearQueuedDecode(sessionId: string): void {
+  queuedDecodeMessages.delete(sessionId);
+  queuedDecodeBytes.delete(sessionId);
+}
+
+function clearQueuedEncode(sessionId: string): void {
+  queuedEncodeMessages.delete(sessionId);
+  queuedEncodeBytes.delete(sessionId);
+}
+
+function failPendingDecode(sessionId: string, code: string, message: string): void {
+  abortedStarts.add(sessionId);
+  pendingDecodeStarts.delete(sessionId);
+  clearQueuedDecode(sessionId);
+  self.postMessage({ type: "decode_error", sessionId, code, message });
+}
+
+function failPendingEncode(sessionId: string, code: string, message: string): void {
+  abortedStarts.add(sessionId);
+  pendingEncodeStarts.delete(sessionId);
+  clearQueuedEncode(sessionId);
+  self.postMessage({ type: "encode_error", sessionId, code, message });
+}
+
 function queueDecodeMessage(sessionId: string, msg: QueuedDecodeMessage): void {
   let queue = queuedDecodeMessages.get(sessionId);
   if (queue === undefined) {
@@ -112,15 +140,18 @@ function queueDecodeMessage(sessionId: string, msg: QueuedDecodeMessage): void {
     queuedDecodeMessages.set(sessionId, queue);
   }
   if (queue.length >= MAX_QUEUED_MESSAGES_PER_SESSION) {
-    queuedDecodeMessages.delete(sessionId);
-    pendingDecodeStarts.delete(sessionId);
-    self.postMessage({
-      type: "decode_error",
-      sessionId,
-      code: "QueueOverflow",
-      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages for session ${sessionId}`,
-    });
+    failPendingDecode(sessionId, "QueueOverflow",
+      `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages for session ${sessionId}`);
     return;
+  }
+  if (msg.type === "decode_chunk") {
+    const nextBytes = (queuedDecodeBytes.get(sessionId) ?? 0) + msg.chunk.byteLength;
+    if (nextBytes > MAX_QUEUED_BYTES_PER_SESSION) {
+      failPendingDecode(sessionId, "QueueOverflow",
+        `Cold-start decode queue exceeded ${MAX_QUEUED_BYTES_PER_SESSION >> 20} MiB for session ${sessionId}`);
+      return;
+    }
+    queuedDecodeBytes.set(sessionId, nextBytes);
   }
   queue.push(msg);
 }
@@ -132,15 +163,18 @@ function queueEncodeMessage(sessionId: string, msg: QueuedEncodeMessage): void {
     queuedEncodeMessages.set(sessionId, queue);
   }
   if (queue.length >= MAX_QUEUED_MESSAGES_PER_SESSION) {
-    queuedEncodeMessages.delete(sessionId);
-    pendingEncodeStarts.delete(sessionId);
-    self.postMessage({
-      type: "encode_error",
-      sessionId,
-      code: "QueueOverflow",
-      message: `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages for session ${sessionId}`,
-    });
+    failPendingEncode(sessionId, "QueueOverflow",
+      `Cold-start message queue exceeded ${MAX_QUEUED_MESSAGES_PER_SESSION} messages for session ${sessionId}`);
     return;
+  }
+  if (msg.type === "encode_pixels") {
+    const nextBytes = (queuedEncodeBytes.get(sessionId) ?? 0) + msg.chunk.byteLength;
+    if (nextBytes > MAX_QUEUED_BYTES_PER_SESSION) {
+      failPendingEncode(sessionId, "QueueOverflow",
+        `Cold-start encode queue exceeded ${MAX_QUEUED_BYTES_PER_SESSION >> 20} MiB for session ${sessionId}`);
+      return;
+    }
+    queuedEncodeBytes.set(sessionId, nextBytes);
   }
   queue.push(msg);
 }
@@ -148,7 +182,7 @@ function queueEncodeMessage(sessionId: string, msg: QueuedEncodeMessage): void {
 function flushQueuedDecodeMessages(sessionId: string, handler: DecodeHandler): void {
   const queue = queuedDecodeMessages.get(sessionId);
   if (queue === undefined) return;
-  queuedDecodeMessages.delete(sessionId);
+  clearQueuedDecode(sessionId);
   for (const msg of queue) {
     routeToDecodeHandler(handler, msg);
   }
@@ -157,7 +191,7 @@ function flushQueuedDecodeMessages(sessionId: string, handler: DecodeHandler): v
 function flushQueuedEncodeMessages(sessionId: string, handler: EncodeHandler): void {
   const queue = queuedEncodeMessages.get(sessionId);
   if (queue === undefined) return;
-  queuedEncodeMessages.delete(sessionId);
+  clearQueuedEncode(sessionId);
   for (const msg of queue) {
     routeToEncodeHandler(handler, msg);
   }
@@ -204,6 +238,11 @@ function routeEncodeMessage(msg: QueuedEncodeMessage): void {
 }
 
 function handleReleaseState(sessionId: string): void {
+  if (pendingDecodeStarts.has(sessionId) || pendingEncodeStarts.has(sessionId)) {
+    abortedStarts.add(sessionId);
+  } else {
+    abortedStarts.delete(sessionId);
+  }
   const decode = decodeSessions.get(sessionId);
   if (decode !== undefined) {
     void decode.onCancel("release_state").catch(() => undefined);
@@ -216,8 +255,8 @@ function handleReleaseState(sessionId: string): void {
   }
   pendingDecodeStarts.delete(sessionId);
   pendingEncodeStarts.delete(sessionId);
-  queuedDecodeMessages.delete(sessionId);
-  queuedEncodeMessages.delete(sessionId);
+  clearQueuedDecode(sessionId);
+  clearQueuedEncode(sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -297,21 +336,23 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
       wasm = await getWasm();
     } catch (err) {
       pendingDecodeStarts.delete(msg.sessionId);
-      queuedDecodeMessages.delete(msg.sessionId);
+      clearQueuedDecode(msg.sessionId);
       resolveStartPromise();
-      self.postMessage({
-        type: "decode_error",
-        sessionId: msg.sessionId,
-        code: "CapabilityMissing",
-        message: `WASM module failed to load: ${String(err)}`,
-      });
+      if (!abortedStarts.delete(msg.sessionId)) {
+        self.postMessage({
+          type: "decode_error",
+          sessionId: msg.sessionId,
+          code: "CapabilityMissing",
+          message: `WASM module failed to load: ${String(err)}`,
+        });
+      }
       return;
     }
 
     pendingDecodeStarts.delete(msg.sessionId);
 
-    if (shuttingDown) {
-      queuedDecodeMessages.delete(msg.sessionId);
+    if (abortedStarts.delete(msg.sessionId) || shuttingDown) {
+      clearQueuedDecode(msg.sessionId);
       resolveStartPromise();
       return;
     }
@@ -324,14 +365,16 @@ async function handleDecodeStart(msg: MsgDecodeStart): Promise<void> {
     resolveStartPromise();
   })().catch((err: unknown) => {
     pendingDecodeStarts.delete(msg.sessionId);
-    queuedDecodeMessages.delete(msg.sessionId);
+    clearQueuedDecode(msg.sessionId);
     resolveStartPromise();
-    self.postMessage({
-      type: "decode_error",
-      sessionId: msg.sessionId,
-      code: "Internal",
-      message: `Unexpected error starting decode session: ${String(err)}`,
-    });
+    if (!abortedStarts.delete(msg.sessionId)) {
+      self.postMessage({
+        type: "decode_error",
+        sessionId: msg.sessionId,
+        code: "Internal",
+        message: `Unexpected error starting decode session: ${String(err)}`,
+      });
+    }
   });
 }
 
@@ -363,21 +406,23 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
       wasm = await getWasm();
     } catch (err) {
       pendingEncodeStarts.delete(msg.sessionId);
-      queuedEncodeMessages.delete(msg.sessionId);
+      clearQueuedEncode(msg.sessionId);
       resolveStartPromise();
-      self.postMessage({
-        type: "encode_error",
-        sessionId: msg.sessionId,
-        code: "CapabilityMissing",
-        message: `WASM module failed to load: ${String(err)}`,
-      });
+      if (!abortedStarts.delete(msg.sessionId)) {
+        self.postMessage({
+          type: "encode_error",
+          sessionId: msg.sessionId,
+          code: "CapabilityMissing",
+          message: `WASM module failed to load: ${String(err)}`,
+        });
+      }
       return;
     }
 
     pendingEncodeStarts.delete(msg.sessionId);
 
-    if (shuttingDown) {
-      queuedEncodeMessages.delete(msg.sessionId);
+    if (abortedStarts.delete(msg.sessionId) || shuttingDown) {
+      clearQueuedEncode(msg.sessionId);
       resolveStartPromise();
       return;
     }
@@ -390,14 +435,16 @@ async function handleEncodeStart(msg: MsgEncodeStart): Promise<void> {
     resolveStartPromise();
   })().catch((err: unknown) => {
     pendingEncodeStarts.delete(msg.sessionId);
-    queuedEncodeMessages.delete(msg.sessionId);
+    clearQueuedEncode(msg.sessionId);
     resolveStartPromise();
-    self.postMessage({
-      type: "encode_error",
-      sessionId: msg.sessionId,
-      code: "Internal",
-      message: `Unexpected error starting encode session: ${String(err)}`,
-    });
+    if (!abortedStarts.delete(msg.sessionId)) {
+      self.postMessage({
+        type: "encode_error",
+        sessionId: msg.sessionId,
+        code: "Internal",
+        message: `Unexpected error starting encode session: ${String(err)}`,
+      });
+    }
   });
 }
 
@@ -435,6 +482,9 @@ async function doShutdown(): Promise<void> {
   pendingEncodeStarts.clear();
   queuedDecodeMessages.clear();
   queuedEncodeMessages.clear();
+  queuedDecodeBytes.clear();
+  queuedEncodeBytes.clear();
+  abortedStarts.clear();
   wasmModule = null;
   wasmLoadPromise = null;
 
@@ -460,6 +510,14 @@ self.addEventListener("unhandledrejection", (event) => {
     type: "worker_error",
     code: "UnhandledRejection",
     message: event.reason instanceof Error ? event.reason.message : String(event.reason),
+  });
+});
+
+self.addEventListener("messageerror", () => {
+  self.postMessage({
+    type: "worker_error",
+    code: "MessageDeserializeError",
+    message: "Failed to deserialize incoming message",
   });
 });
 

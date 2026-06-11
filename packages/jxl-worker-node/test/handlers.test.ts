@@ -160,6 +160,50 @@ describe("node codec handlers", () => {
     ]);
     expect(messages.filter((msg) => msg.type.startsWith("encode_")).at(-1)).toEqual({ type: "encode_done", sessionId: "encode-node-1", totalBytes: 5 });
   });
+
+  test("encode handler suppresses release_state cancellation message", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    const backend: Backend = {
+      type: "native",
+      module: {
+        createEncoder() {
+          return {
+            pushPixels() {},
+            finish() {},
+            cancel() {},
+            dispose() {},
+            async *chunks() {
+              await new Promise(() => undefined);
+            },
+          };
+        },
+        createDecoder() {
+          return {
+            push() {},
+            close() {},
+            cancel() {},
+            dispose() {},
+            async *events() {},
+          };
+        },
+      },
+    };
+
+    const handler = new EncodeHandler(
+      { ...baseEncodeStart, sessionId: "encode-node-release-state" },
+      backend,
+      {
+        port: fakePort(messages),
+        onSessionEnd: (sessionId) => ended.push(sessionId),
+      },
+    );
+
+    await handler.onCancel("release_state");
+
+    expect(messages.some((msg) => msg.type === "encode_cancelled")).toBe(false);
+    expect(ended).toEqual(["encode-node-release-state"]);
+  });
 });
 
 function fakePort(messages: WorkerToMainMessage[]) {

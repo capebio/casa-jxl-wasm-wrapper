@@ -137,15 +137,17 @@ export class DecodeHandler {
     this.wake();
   }
 
-  async onCancel(_reason?: string): Promise<void> {
+  async onCancel(reason?: string): Promise<void> {
     if (this.ended || this.cancelled) return;
     this.cancelled = true;
     this.paused = false;
-    const msg: MsgDecodeCancelled = {
-      type: "decode_cancelled",
-      sessionId: this.sessionId,
-    };
-    self.postMessage(msg);
+    if (reason !== "release_state") {
+      const msg: MsgDecodeCancelled = {
+        type: "decode_cancelled",
+        sessionId: this.sessionId,
+      };
+      self.postMessage(msg);
+    }
     this.finishSession("cancelled");
 
     // Best-effort: dispose the active decoder so any blocked event iterator is unblocked.
@@ -313,6 +315,7 @@ export class DecodeHandler {
       }
 
       while (!this.ended && this.chunkQueue.length > this.chunkReadIndex) {
+        if (this.paused) break;
         const chunk = this.takeNextChunk();
         if (chunk === null) break;
 

@@ -13,6 +13,7 @@ export declare class EncodeHandler {
     private pixelQueue;
     private pixelReadIndex;
     private queueDepth;
+    private queuedBytes;
     private cancelled;
     private finished;
     private sessionEnded;
@@ -20,6 +21,8 @@ export declare class EncodeHandler {
     private wakeResolve;
     private lastDrainPostedMs;
     private lastDrainAllowed;
+    private encoder;
+    private disposePromise;
     private readonly _drainMsg;
     private readonly _chunkMsg;
     constructor(opts: MsgEncodeStart, wasm: JxlModule, callbacks: EncodeHandlerCallbacks);
@@ -27,8 +30,14 @@ export declare class EncodeHandler {
     onFinish(): void;
     onCancel(reason?: string): Promise<void>;
     private run;
-    private endSession;
+    private finishSession;
+    private isTerminal;
+    private clearPixelQueue;
+    private wake;
+    private disposeActiveEncoder;
     private waitForPixels;
+    private takeNextPixels;
+    private compactQueue;
     private feedEncoder;
     private maybePostDrain;
     private readEncoderChunks;

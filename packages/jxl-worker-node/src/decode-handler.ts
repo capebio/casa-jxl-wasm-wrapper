@@ -215,7 +215,7 @@ export class DecodeHandler {
       downsample: this.opts.downsample,
       progressionTarget: this.opts.progressionTarget,
       emitEveryPass: this.opts.emitEveryPass,
-      ...(this.opts.progressiveDetail != null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
+      ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
       preserveIcc: this.opts.preserveIcc,
       preserveMetadata: this.opts.preserveMetadata,
     });

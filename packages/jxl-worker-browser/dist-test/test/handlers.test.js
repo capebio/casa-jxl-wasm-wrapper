@@ -143,6 +143,44 @@ describe("browser codec handlers", () => {
             msg.type === "decode_cancelled");
         expect(terminalMessages.length).toBeGreaterThan(0);
     });
+    test("decode handler stops draining queued chunks when pause lands during async push", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        let resolveFirstPush;
+        const pushed = [];
+        const codec = {
+            createDecoder() {
+                return {
+                    async push(chunk) {
+                        pushed.push(new Uint8Array(chunk)[0] ?? -1);
+                        if (pushed.length === 1) {
+                            await new Promise((resolve) => { resolveFirstPush = resolve; });
+                        }
+                    },
+                    close() { },
+                    cancel() { },
+                    dispose() { },
+                    async *events() {
+                        await new Promise(() => undefined);
+                    },
+                };
+            },
+        };
+        const handler = new DecodeHandler({ ...baseDecodeStart, sessionId: "pause-mid-burst" }, codec, { onSessionEnd: (sessionId) => ended.push(sessionId) });
+        handler.onChunk(new Uint8Array([1]).buffer);
+        handler.onChunk(new Uint8Array([2]).buffer);
+        await waitFor(() => pushed.length === 1);
+        handler.onPause();
+        resolveFirstPush();
+        await tick();
+        expect(pushed).toEqual([1]);
+        expect(messages.some((msg) => msg.type === "decode_paused")).toBe(true);
+        handler.onResume();
+        await waitFor(() => pushed.length === 2);
+        await handler.onCancel("test cleanup");
+        await waitFor(() => ended.length === 1);
+    });
     test("posts time_to_first_pixel_ms for final-only decode (no progress events)", async () => {
         const messages = [];
         const ended = [];
@@ -176,6 +214,62 @@ describe("browser codec handlers", () => {
         expect(metricNames).toContain("time_to_header_ms");
         expect(finalMessage?.timeToFirstPixelMs).toBeDefined();
         expect(finalMessage?.timeToFinalMs).toBeDefined();
+    });
+    test("decode handler does not post decode_cancelled for release_state", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        const codec = {
+            createDecoder() {
+                return {
+                    push() { },
+                    close() { },
+                    cancel() { },
+                    dispose() { },
+                    async *events() {
+                        await new Promise(() => undefined);
+                    },
+                };
+            },
+        };
+        const handler = new DecodeHandler({ ...baseDecodeStart, sessionId: "release-state" }, codec, { onSessionEnd: (sessionId) => ended.push(sessionId) });
+        await handler.onCancel("release_state");
+        expect(messages.some((msg) => msg.type === "decode_cancelled")).toBe(false);
+        expect(ended).toEqual(["release-state"]);
+    });
+    test("decode handler supplies partial stride when codec error omits it", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        const partialInfo = {
+            width: 1, height: 1, bitsPerSample: 16,
+            hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+        };
+        const codec = {
+            createDecoder() {
+                return {
+                    push() { },
+                    close() { },
+                    cancel() { },
+                    dispose() { },
+                    async *events() {
+                        yield {
+                            type: "error",
+                            code: "TruncatedStream",
+                            message: "cut short",
+                            partialPixels: new Uint8Array(8),
+                            partialInfo,
+                        };
+                    },
+                };
+            },
+        };
+        const handler = new DecodeHandler({ ...baseDecodeStart, sessionId: "partial-stride", format: "rgba16" }, codec, { onSessionEnd: (sessionId) => ended.push(sessionId) });
+        handler.onChunk(new Uint8Array([0xff]).buffer);
+        await waitFor(() => ended.length === 1);
+        const error = messages.find((msg) => msg.type === "decode_error");
+        expect(error?.partialPixelStride).toBe(8);
+        expect(error?.partialStage).toBe(undefined);
     });
     test("encode handler streams codec output chunks and done", async () => {
         const messages = [];
@@ -241,13 +335,69 @@ describe("browser codec handlers", () => {
         restoreNow();
         expect(messages.filter((msg) => msg.type === "worker_drain")).toHaveLength(1);
     });
+    test("encode handler treats finish as closed input", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        const pushed = [];
+        const codec = {
+            createEncoder() {
+                return {
+                    pushPixels(chunk) {
+                        pushed.push(new Uint8Array(chunk)[0] ?? -1);
+                    },
+                    finish() { },
+                    cancel() { },
+                    dispose() { },
+                    async *chunks() { },
+                };
+            },
+        };
+        const handler = new EncodeHandler(baseEncodeStart, codec, {
+            onSessionEnd: (sessionId) => ended.push(sessionId),
+        });
+        handler.onFinish();
+        handler.onPixels(new Uint8Array([7, 0, 0, 255]).buffer);
+        await waitFor(() => ended.length === 1);
+        expect(pushed).toEqual([]);
+    });
+    test("encode handler cancel disposes blocked encoder and suppresses release_state message", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        let dispose;
+        const codec = {
+            createEncoder() {
+                return {
+                    pushPixels() { },
+                    finish() { },
+                    cancel() { },
+                    dispose() {
+                        dispose();
+                    },
+                    async *chunks() {
+                        await new Promise((resolve) => { dispose = resolve; });
+                    },
+                };
+            },
+        };
+        const handler = new EncodeHandler({ ...baseEncodeStart, sessionId: "encode-release-state" }, codec, { onSessionEnd: (sessionId) => ended.push(sessionId) });
+        await waitFor(() => dispose !== undefined);
+        await handler.onCancel("release_state");
+        await waitFor(() => ended.length === 1);
+        expect(messages.some((msg) => msg.type === "encode_cancelled")).toBe(false);
+        expect(ended).toEqual(["encode-release-state"]);
+    });
 });
 function installWorkerPostMessage(messages) {
     Object.defineProperty(globalThis, "self", {
         configurable: true,
         value: {
             postMessage(message) {
-                messages.push(message);
+                // structuredClone to simulate real postMessage (which clones).
+                // Required because DecodeHandler reuses prealloc _metricMsg/_metricInner;
+                // without clone, later metric posts mutate earlier entries in the captured array.
+                messages.push(structuredClone(message));
             },
         },
     });
@@ -273,5 +423,8 @@ function mockPerformanceNow(getNow) {
             value: original,
         });
     };
+}
+async function tick() {
+    await new Promise((resolve) => setTimeout(resolve, 0));
 }
 //# sourceMappingURL=handlers.test.js.map

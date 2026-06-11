@@ -92,16 +92,18 @@ export class DecodeHandler {
         this.inputClosed = true;
         this.wake();
     }
-    async onCancel(_reason) {
+    async onCancel(reason) {
         if (this.ended || this.cancelled)
             return;
         this.cancelled = true;
         this.paused = false;
-        const msg = {
-            type: "decode_cancelled",
-            sessionId: this.sessionId,
-        };
-        self.postMessage(msg);
+        if (reason !== "release_state") {
+            const msg = {
+                type: "decode_cancelled",
+                sessionId: this.sessionId,
+            };
+            self.postMessage(msg);
+        }
         this.finishSession("cancelled");
         // Best-effort: dispose the active decoder so any blocked event iterator is unblocked.
         void this.disposeActiveDecoder();
@@ -257,6 +259,8 @@ export class DecodeHandler {
                     continue;
             }
             while (!this.ended && this.chunkQueue.length > this.chunkReadIndex) {
+                if (this.paused)
+                    break;
                 const chunk = this.takeNextChunk();
                 if (chunk === null)
                     break;
@@ -374,7 +378,7 @@ export class DecodeHandler {
                     return;
                 }
                 case "error": {
-                    this.failSession(event.code, event.message, event.partialPixels !== undefined ? toArrayBuffer(event.partialPixels) : undefined, event.partialInfo, event.partialPixelStride, event.partialStage);
+                    this.failSession(event.code, event.message, event.partialPixels !== undefined ? toArrayBuffer(event.partialPixels) : undefined, event.partialInfo, event.partialPixelStride ?? (event.partialPixels !== undefined ? pixelStrideForFormat(this.opts.format) : undefined), event.partialStage);
                     return;
                 }
             }
@@ -456,5 +460,10 @@ function toArrayBuffer(value) {
     return value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
         ? value.buffer
         : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+}
+function pixelStrideForFormat(format) {
+    if (format === "rgb8")
+        return 3;
+    return format === "rgbaf32" ? 16 : format === "rgba16" ? 8 : 4;
 }
 //# sourceMappingURL=decode-handler.js.map

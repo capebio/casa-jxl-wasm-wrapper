@@ -52,6 +52,7 @@ export declare class DecodeHandler {
     private readDecoderEvents;
     private failSession;
     private checkBudget;
+    private postWithPixels;
     private postBudgetExceeded;
     private postFirstPixelMetric;
     private postMetric;

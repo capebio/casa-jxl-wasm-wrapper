@@ -1,4 +1,3 @@
-/// <reference lib="webworker" />
 import type { JxlModule } from "./wasm-loader.js";
 import type { MsgDecodeStart } from "@casabio/jxl-core/protocol";
 interface DecodeHandlerCallbacks {
@@ -35,7 +34,7 @@ export declare class DecodeHandler {
     constructor(opts: MsgDecodeStart, wasm: JxlModule, callbacks: DecodeHandlerCallbacks);
     onChunk(chunk: ArrayBuffer): void;
     onClose(): void;
-    onCancel(_reason?: string): Promise<void>;
+    onCancel(reason?: string): Promise<void>;
     onPause(): void;
     onResume(): void;
     private run;

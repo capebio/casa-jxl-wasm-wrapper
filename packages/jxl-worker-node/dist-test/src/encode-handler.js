@@ -3,6 +3,7 @@
 // Drives the selected native/WASM backend facade.
 const CHUNK_HWM = 4;
 const CHUNK_MAX_BUFFERED = 32;
+const MAX_QUEUED_BYTES = 128 * 1024 * 1024;
 const DRAIN_MIN_INTERVAL_MS = 8;
 export class EncodeHandler {
     sessionId;
@@ -14,6 +15,7 @@ export class EncodeHandler {
     pixelQueue = [];
     pixelReadIndex = 0;
     queueDepth = 0;
+    queuedBytes = 0;
     cancelled = false;
     finished = false;
     ended = false;
@@ -21,6 +23,8 @@ export class EncodeHandler {
     wakeResolve = null;
     lastDrainPostedMs = 0;
     lastDrainAllowed = false;
+    encoder = null;
+    disposePromise = null;
     constructor(opts, backend, callbacks) {
         this.sessionId = opts.sessionId;
         this.opts = opts;
@@ -40,12 +44,17 @@ export class EncodeHandler {
             this.failSession("BackpressureOverflow", `Encode input queue exceeded ${CHUNK_MAX_BUFFERED} buffered chunks`);
             return;
         }
+        if (this.queuedBytes + chunk.byteLength > MAX_QUEUED_BYTES) {
+            this.failSession("QueueOverflow", `Encode input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
+            return;
+        }
         const buf = Buffer.from(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, chunk instanceof ArrayBuffer ? 0 : chunk.byteOffset, chunk instanceof ArrayBuffer ? chunk.byteLength : chunk.byteLength);
         const entry = { chunk: buf };
         if (region !== undefined)
             entry.region = region;
         this.pixelQueue.push(entry);
         this.queueDepth++;
+        this.queuedBytes += buf.byteLength;
         this.wake();
     }
     onFinish() {
@@ -64,13 +73,16 @@ export class EncodeHandler {
         this.cancelled = true;
         this.state = "cancelled";
         this.wake();
-        const msg = { type: "encode_cancelled", sessionId: this.sessionId };
-        this.port.postMessage(msg);
+        if (reason !== "release_state") {
+            const msg = { type: "encode_cancelled", sessionId: this.sessionId };
+            this.port.postMessage(msg);
+        }
         this.endSessionOnce();
+        void this.disposeActiveEncoder(reason, true);
     }
     async run() {
         const codec = this.backend.module;
-        const encoder = codec.createEncoder({
+        const encOpts = {
             format: this.opts.format,
             width: this.opts.width,
             height: this.opts.height,
@@ -84,13 +96,23 @@ export class EncodeHandler {
             progressive: this.opts.progressive,
             previewFirst: this.opts.previewFirst,
             chunked: this.opts.chunked,
-        });
+        };
+        if (this.opts.progressiveDc != null)
+            encOpts.progressiveDc = this.opts.progressiveDc;
+        if (this.opts.progressiveAc != null)
+            encOpts.progressiveAc = this.opts.progressiveAc;
+        if (this.opts.qProgressiveAc != null)
+            encOpts.qProgressiveAc = this.opts.qProgressiveAc;
+        if (this.opts.groupOrder != null)
+            encOpts.groupOrder = this.opts.groupOrder;
+        const encoder = codec.createEncoder(encOpts);
+        this.encoder = encoder;
         this.state = "configured";
         try {
             await Promise.all([this.feedEncoder(encoder), this.readEncoderChunks(encoder)]);
         }
         finally {
-            await encoder.dispose();
+            await this.disposeActiveEncoder();
         }
     }
     wake() {
@@ -104,7 +126,39 @@ export class EncodeHandler {
         if (this.ended)
             return;
         this.ended = true;
+        this.clearPixelQueue();
         this.callbacks.onSessionEnd(this.sessionId);
+    }
+    clearPixelQueue() {
+        this.pixelQueue.length = 0;
+        this.pixelReadIndex = 0;
+        this.queueDepth = 0;
+        this.queuedBytes = 0;
+    }
+    disposeActiveEncoder(reason, cancelFirst = false) {
+        if (this.disposePromise !== null)
+            return this.disposePromise;
+        const encoder = this.encoder;
+        if (encoder === null)
+            return Promise.resolve();
+        this.encoder = null;
+        this.disposePromise = (async () => {
+            if (cancelFirst) {
+                try {
+                    await encoder.cancel(reason);
+                }
+                catch {
+                    // Best-effort cleanup.
+                }
+            }
+            try {
+                await encoder.dispose();
+            }
+            catch {
+                // Best-effort cleanup.
+            }
+        })();
+        return this.disposePromise;
     }
     waitForPixels() {
         if (this.pixelQueue.length > this.pixelReadIndex || this.finished || this.cancelled
@@ -113,19 +167,36 @@ export class EncodeHandler {
         }
         return new Promise((resolve) => { this.wakeResolve = resolve; });
     }
+    takeNextPixels() {
+        const entry = this.pixelQueue[this.pixelReadIndex];
+        this.pixelQueue[this.pixelReadIndex++] = undefined;
+        if (entry === undefined) {
+            this.compactQueue();
+            return null;
+        }
+        this.queueDepth--;
+        this.queuedBytes -= entry.chunk.byteLength;
+        this.compactQueue();
+        return entry;
+    }
+    compactQueue() {
+        if (this.pixelReadIndex >= this.pixelQueue.length) {
+            this.pixelQueue.length = 0;
+            this.pixelReadIndex = 0;
+        }
+        else if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
+            this.pixelQueue.copyWithin(0, this.pixelReadIndex);
+            this.pixelQueue.length -= this.pixelReadIndex;
+            this.pixelReadIndex = 0;
+        }
+    }
     async feedEncoder(encoder) {
         while (!this.cancelled && this.state !== "done" && !this.isErrored()) {
             await this.waitForPixels();
             while (this.pixelQueue.length > this.pixelReadIndex) {
-                const entry = this.pixelQueue[this.pixelReadIndex++];
-                if (entry === undefined)
+                const entry = this.takeNextPixels();
+                if (entry === null)
                     break;
-                if (this.pixelReadIndex > 64 && this.pixelReadIndex * 2 > this.pixelQueue.length) {
-                    this.pixelQueue.copyWithin(0, this.pixelReadIndex);
-                    this.pixelQueue.length -= this.pixelReadIndex;
-                    this.pixelReadIndex = 0;
-                }
-                this.queueDepth--;
                 if (this.cancelled || this.isErrored())
                     return;
                 await encoder.pushPixels(entry.chunk, entry.region);
@@ -153,7 +224,14 @@ export class EncodeHandler {
         if (!crossedIntoDrain && !intervalElapsed)
             return;
         this.lastDrainPostedMs = now;
-        this.port.postMessage({ type: "worker_drain", sessionId: this.sessionId });
+        this.port.postMessage({
+            type: "worker_drain",
+            sessionId: this.sessionId,
+            latencyMs: 0,
+            queueDepth: this.queueDepth,
+            queuedBytes: this.queuedBytes,
+            adaptiveHwm: CHUNK_HWM,
+        });
     }
     isErrored() {
         return this.state === "error";
@@ -209,6 +287,7 @@ export class EncodeHandler {
         const msg = { type: "encode_error", sessionId: this.sessionId, code, message };
         this.port.postMessage(msg);
         this.endSessionOnce();
+        void this.disposeActiveEncoder();
     }
 }
 function toBuffer(value) {
