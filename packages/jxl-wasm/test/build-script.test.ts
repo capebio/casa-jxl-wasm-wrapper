@@ -28,7 +28,7 @@ test("docker build forwards CLI flags", () => {
 
 test("size budget violations fail after manifest write", () => {
   expect(source).toContain("const budgetViolations = [];");
-  expect(source).toContain("budgetViolations.push(`${tierKey}: ${wasmStats.size} > ${budget}`);");
+  expect(source).toContain("budgetViolations.push(`${tierKey}: ${wasmArtifact.bytes} > ${budget}`);");
   expect(source).toContain('throw new Error(`Size budgets exceeded:\\n${budgetViolations.join("\\n")}`);');
 });
 
@@ -41,4 +41,28 @@ test("build workdirs are removed after success unless keep-work is set", () => {
 test("bridge exports are preflighted before the build matrix runs", () => {
   expect(source).toContain("await validateBridgeExports();");
   expect(source).toContain("function findBridgeExportMismatches(");
+});
+
+test("incoming Module API is trimmed to handwritten loader hooks", () => {
+  expect(source).toContain('return "-sINCOMING_MODULE_JS_API=locateFile,wasmBinary";');
+});
+
+test("artifact metadata records wire bytes and SRI hashes", () => {
+  expect(source).toContain("jsBrotliBytes");
+  expect(source).toContain("wasmBrotliBytes");
+  expect(source).toContain("jsIntegrity");
+  expect(source).toContain("wasmIntegrity");
+  expect(source).toContain('sha384-${createHash("sha384").update(data).digest("base64")}');
+});
+
+test("wasm artifacts are validated and checked against exports files", () => {
+  expect(source).toContain("await validateWasmArtifact(outWasm, exportsFile, tierKey");
+  expect(source).toContain("WebAssembly.Module.exports(module)");
+  expect(source).toContain('throw new Error(`${tierKey}: exports missing from wasm: ${missing.join(", ")}`);');
+});
+
+test("size report can request symbol maps and prints real rebuild command", () => {
+  expect(source).toContain('const sizeReportRequested = process.argv.includes("--size-report");');
+  expect(source).toContain('"--emit-symbol-map"');
+  expect(source).toContain('formatBuildCommand(["--size-report"])');
 });

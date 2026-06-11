@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile, access, stat, readdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, access, readdir } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, "..");
@@ -89,6 +90,7 @@ async function main() {
   const hostToolchain = process.argv.includes("--host-toolchain");
   const pgoRequested = process.argv.includes("--pgo");
   const keepWork = process.argv.includes("--keep-work");
+  const sizeReportRequested = process.argv.includes("--size-report");
   await mkdir(distDir, { recursive: true });
   await mkdir(workDir, { recursive: true });
 
@@ -178,6 +180,7 @@ async function main() {
 
       const tierFlags = [
         ...baseFlags,
+        getIncomingModuleJsApiFlag(),
         `-sINITIAL_MEMORY=${initialMem}`,
         ...(isMt ? ["-pthread", "-sUSE_PTHREADS=1", `-sPTHREAD_POOL_SIZE=${poolSize}`] : []),
         ...(isMt && isDec ? ["-sPTHREAD_POOL_SIZE_STRICT=0"] : []), // lazy spawn for worker dec-MT
@@ -218,35 +221,42 @@ async function main() {
       await runEmscripten(emcmakeBinary, ["cmake", ...cmakeArgs], { cwd: packageRoot, env: tierEnv });
       await run("cmake", ["--build", buildDir, "--", "-j", `${Math.max(1, osCpusMinusOne())}`], { cwd: packageRoot, env: tierEnv });
       const exportsFile = getExportsFileForKind(kind);
-      await linkBridge(buildDir, outJs, tierFlags, tierEnv, kind, exportsFile, initialMem);
+      await linkBridge(buildDir, outJs, tierFlags, tierEnv, exportsFile, { emitSymbolMap: sizeReportRequested });
 
-      const jsStats = await stat(outJs);
-      const wasmStats = await stat(outWasm);
-      const linkOnlyExtras = getLinkOnlyExtras(tierFlags, exportsFile);
       const tierKey = `${kind}:${tier.name}`;
+      const linkOnlyExtras = getLinkOnlyExtras(tierFlags, exportsFile, { emitSymbolMap: sizeReportRequested });
+      const wasmBytes = await validateWasmArtifact(outWasm, exportsFile, tierKey, { allowValidateOnly: tier.relaxedSimd });
+      const jsArtifact = await readArtifactMetadata(outJs);
+      const wasmArtifact = readArtifactMetadataFromBytes(wasmBytes);
       manifest.tiers[tierKey] = {
         kind,
         tier: tier.name,
-        jsBytes: jsStats.size,
-        wasmBytes: wasmStats.size,
-        jsSha256: await sha256File(outJs),
-        wasmSha256: await sha256File(outWasm),
+        jsBytes: jsArtifact.bytes,
+        wasmBytes: wasmArtifact.bytes,
+        jsBrotliBytes: jsArtifact.brotliBytes,
+        wasmBrotliBytes: wasmArtifact.brotliBytes,
+        jsSha256: jsArtifact.sha256,
+        wasmSha256: wasmArtifact.sha256,
+        jsIntegrity: jsArtifact.integrity,
+        wasmIntegrity: wasmArtifact.integrity,
         flags: [...tierFlags, ...linkOnlyExtras]
       };
 
       const budgetKey = tier.name; // budgets remain per cpu tier; dec/enc measured separately
       const budget = config.sizeBudgets[budgetKey];
-      if (budget && wasmStats.size > budget) {
+      if (budget && wasmArtifact.bytes > budget) {
         await writeFile(
           join(distDir, `${kind}.${tier.name}.size-report.txt`),
           [
             `Module ${kind} tier ${tier.name} exceeded the size budget.`,
             `Budget: ${budget} bytes`,
-            `Actual: ${wasmStats.size} bytes`,
-            "Inspect the generated size report and linker inputs for the heaviest objects."
+            `Actual: ${wasmArtifact.bytes} bytes`,
+            sizeReportRequested
+              ? `Inspect ${outJs}.symbols and linker inputs for the heaviest symbols.`
+              : `Re-run ${formatBuildCommand(["--size-report"])} to emit an Emscripten symbol map (${outJs}.symbols).`
           ].join("\n")
         );
-        budgetViolations.push(`${tierKey}: ${wasmStats.size} > ${budget}`);
+        budgetViolations.push(`${tierKey}: ${wasmArtifact.bytes} > ${budget}`);
       }
 
       if (!keepWork) {
@@ -327,7 +337,7 @@ async function buildDockerImage(image, dockerEnv) {
   throw lastError ?? new Error("No Emscripten Docker images configured");
 }
 
-async function linkBridge(buildDir, outJs, tierFlags, env, kind, exportsFile, initialMem) {
+async function linkBridge(buildDir, outJs, tierFlags, env, exportsFile, options = {}) {
   const archives = await findStaticArchives(buildDir);
   const preferred = sortArchivesForLink(archives);
   const includeDirs = [
@@ -343,7 +353,7 @@ async function linkBridge(buildDir, outJs, tierFlags, env, kind, exportsFile, in
     "-o",
     outJs,
     ...tierFlags,
-    ...getLinkOnlyExtras(tierFlags, exportsFile)
+    ...getLinkOnlyExtras(tierFlags, exportsFile, options)
   ], { cwd: packageRoot, env });
 }
 
@@ -351,9 +361,17 @@ function getExportsFileForKind(kind) {
   return config.modules.find((module) => module.role === kind)?.exportsFile ?? `exports-${kind}.txt`;
 }
 
-function getLinkOnlyExtras(tierFlags, exportsFile) {
+function getIncomingModuleJsApiFlag() {
+  // Handwritten entry points pass only these incoming Module hooks today:
+  // - locateFile: browser + tests resolve sibling wasm URL
+  // - wasmBinary: Node/Bun preload avoids fetch during local/test runs
+  return "-sINCOMING_MODULE_JS_API=locateFile,wasmBinary";
+}
+
+function getLinkOnlyExtras(tierFlags, exportsFile, options = {}) {
   return [
     `-sEXPORTED_FUNCTIONS=@${toCmakePath(join(packageRoot, exportsFile))}`,
+    ...(options.emitSymbolMap ? ["--emit-symbol-map"] : []),
     "--closure", "1",
     // EVAL_CTORS shrinks .data/ctors but is incompatible with pthreads (passive segments error in libpthread.js).
     // Apply only to non-MT tiers. MT glue still gets --closure 1 (P2-1) for the 31k->~20k win.
@@ -482,9 +500,77 @@ async function writeManifest(manifest) {
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-async function sha256File(path) {
+async function readArtifactMetadata(path) {
   const data = await readFile(path);
-  return createHash("sha256").update(data).digest("hex");
+  return readArtifactMetadataFromBytes(data);
+}
+
+function readArtifactMetadataFromBytes(data) {
+  return {
+    bytes: data.byteLength,
+    brotliBytes: brotliCompressSync(data, {
+      params: {
+        [zlibConstants.BROTLI_PARAM_QUALITY]: 11,
+        [zlibConstants.BROTLI_PARAM_SIZE_HINT]: data.byteLength
+      }
+    }).byteLength,
+    sha256: createHash("sha256").update(data).digest("hex"),
+    integrity: `sha384-${createHash("sha384").update(data).digest("base64")}`
+  };
+}
+
+async function validateWasmArtifact(outWasm, exportsFile, tierKey, options = {}) {
+  const bytes = await readFile(outWasm);
+  let module;
+  try {
+    module = await WebAssembly.compile(bytes);
+  } catch (error) {
+    if (!WebAssembly.validate(bytes)) {
+      throw new Error(`${tierKey}: wasm validation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!options.allowValidateOnly) {
+      throw new Error(`${tierKey}: wasm validated but could not compile for export check: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return bytes;
+  }
+
+  const expectedExports = parseExpectedWasmExports(await readFile(join(packageRoot, exportsFile), "utf8"));
+  const actualExports = new Set(WebAssembly.Module.exports(module).map((entry) => entry.name));
+  const missing = expectedExports.filter((name) => !actualExports.has(name));
+  if (missing.length) {
+    throw new Error(`${tierKey}: exports missing from wasm: ${missing.join(", ")}`);
+  }
+  return bytes;
+}
+
+function parseExpectedWasmExports(source) {
+  return source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((name) => name.replace(/^_/, ""));
+}
+
+function formatBuildCommand(extraArgs = []) {
+  const seen = new Set();
+  const args = [
+    "node",
+    "scripts/build.mjs",
+    ...process.argv
+      .slice(2)
+      .filter((arg) => arg !== "--inside-docker")
+      .filter((arg) => {
+        if (seen.has(arg)) return false;
+        seen.add(arg);
+        return true;
+      }),
+    ...extraArgs.filter((arg) => {
+      if (seen.has(arg)) return false;
+      seen.add(arg);
+      return true;
+    })
+  ];
+  return args.join(" ");
 }
 
 function osCpusMinusOne() {

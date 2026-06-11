@@ -52,6 +52,10 @@ This document records optimization proposals that were evaluated and rejected.
 ## `packages/jxl-wasm/src/bridge.cpp`
 *   **Redundant Copy (B-1):** False claim. `libjxl` writes directly into the `malloc`'d buffer via `JxlDecoderSetImageOutBuffer`. No intermediate `memcpy` exists.
 
+## `packages/jxl-wasm/scripts/build.mjs`
+*   **B11 explicit per-role `wasm-opt` post-pass (`dec -Oz`, `enc -O3`):** Rejected for now on evidence bar, not because the idea is impossible. The request itself sets the acceptance gate: measure size deltas per tier and reject the decode-side `-Oz` path if the tile/decode spot-check regresses by more than 2%, with a fallback to `-O3 --converge` for dec if needed. This session/tree does not contain that tile bench wiring or fresh before/after numbers, and shipping a hard-coded `dec -Oz` without that guard would violate the project's repeated "benchmark first" rule for heuristics/perf knobs. Build-script work landed around artifact validation/provenance/glue trimming instead; revisit `wasm-opt` only after running the required size + decode-throughput A/B on the current split artifacts.
+*   **B16 `--verify-repro` reproducibility mode:** Rejected for now on build-cost/maintenance tradeoff. A useful repro check should run in CI or a dedicated provenance job, not as copy-pasted second-build logic embedded into an already expensive local toolchain script. In current state it would either duplicate most of the tier-build pipeline inside `build.mjs` or unconditionally add a second full compile/link pass to local builds. The artifact-side provenance wins that do not double build time (sha256, SRI, Brotli sizes, wasm validation/export checks) were implemented first. Revisit once there is a dedicated CI lane or a shared single-cell build helper worth reusing.
+
 ## `packages/jxl-worker-browser/src/decode-handler.ts` & `packages/jxl-worker-node/src/decode-handler.ts`
 *   **Worker-side createImageBitmap (R4-2):** Invalid MIME type (`image/x-rgba8`), breaks 16-bit/float formats, and mixes DOM logic into an agnostic worker.
 *   **Pixel buffer pool for output (DH-2):** Transferred buffers detach. No safe return mechanism.
