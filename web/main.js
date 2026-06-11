@@ -2866,6 +2866,24 @@ function initFilmstrip() {
     filmstripActions = document.getElementById('filmstrip-actions');
     if (!filmstripEl || !filmstripScroll) return;
 
+    // Resize handle: drag up/down to change filmstrip height (thumbs scale via CSS var)
+    const resizeHandle = document.getElementById('filmstrip-resize-handle');
+    if (resizeHandle) {
+        let startY = 0, startH = 0;
+        resizeHandle.addEventListener('pointerdown', e => {
+            e.preventDefault();
+            startY = e.clientY;
+            startH = filmstripEl.offsetHeight;
+            resizeHandle.setPointerCapture(e.pointerId);
+        });
+        resizeHandle.addEventListener('pointermove', e => {
+            if (!resizeHandle.hasPointerCapture(e.pointerId)) return;
+            const dy = startY - e.clientY; // drag up → increase height
+            const newH = Math.max(60, Math.min(320, startH + dy));
+            filmstripEl.style.setProperty('--filmstrip-h', newH + 'px');
+        });
+    }
+
     // Selection count + apply button (wired in P1-4/P1-5)
     const applyBtn = document.getElementById('filmstrip-apply-selection');
     if (applyBtn) {

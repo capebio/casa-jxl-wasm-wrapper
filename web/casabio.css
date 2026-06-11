@@ -1,6 +1,8 @@
 .casabio-toggle {
-    margin-left: 12px;
-    padding: 3px 8px;
+    margin-left: 0;
+    padding: 5px 14px;
+    width: fit-content;
+    justify-self: start;
     border: 1px solid #4a90e2;
     background: transparent;
     color: #4a90e2;
