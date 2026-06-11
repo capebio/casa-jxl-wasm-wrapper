@@ -29,10 +29,9 @@ const config = {
     { name: "simd", threads: false, simd: true, relaxedSimd: false }
   ],
   sizeBudgets: {
-    "relaxed-simd-mt": 1_677_721.6,
+    "relaxed-simd-mt": 1_677_722,
     "simd-mt": 1_572_864,
-    "simd": 1_363_148.8,
-    "scalar": 1_048_576
+    "simd": 1_363_149
   },
   // Phase 1 module split: dec for viewer (decode-only, smaller), enc for ingest (lazy loaded).
   // Separate exports.txt per role lets wasm-metadce strip unused call trees (encode in dec, unused legacy in enc).
@@ -51,8 +50,7 @@ const exportedRuntimeMethods = "['HEAPU8','HEAPU32']";
 
 // Phase 1 module split: dec (viewer: decode/region/tile-container-decode, no encoder, no transcode)
 // vs enc (ingest: streaming + container encode + sidecars + metadata + gain). Lazy for enc.
-const moduleKinds = ["dec", "enc"] as const;
-type ModuleKind = (typeof moduleKinds)[number];
+const moduleKinds = ["dec", "enc"];
 
 const baseFlags = [
   "-O3",
@@ -90,6 +88,7 @@ async function main() {
   const insideDocker = process.argv.includes("--inside-docker");
   const hostToolchain = process.argv.includes("--host-toolchain");
   const pgoRequested = process.argv.includes("--pgo");
+  const keepWork = process.argv.includes("--keep-work");
   await mkdir(distDir, { recursive: true });
   await mkdir(workDir, { recursive: true });
 
@@ -130,7 +129,11 @@ async function main() {
     buildMode: hostToolchain ? "host-toolchain" : insideDocker ? "docker" : "local",
     generatedAt: new Date().toISOString(),
     tiers: {},
-    skippedTiers: (hostToolchain && !process.argv.includes("--include-mt")) ? config.tiers.filter((tier) => tier.threads).map((tier) => tier.name) : [],
+    skippedTiers: (hostToolchain && !process.argv.includes("--include-mt"))
+      ? config.tiers
+        .filter((tier) => tier.threads)
+        .flatMap((tier) => moduleKinds.map((kind) => `${kind}:${tier.name}`))
+      : [],
     // P5-4: PGO info (if staged). Encoder benefits first.
     pgo: null
   };
@@ -139,13 +142,18 @@ async function main() {
   try {
     const lockPath = join(distDir, "pgo-manifest.lock.json");
     const lock = JSON.parse(await readFile(lockPath, "utf8"));
-    manifest.pgo = { enabled: true, corpusHash: lock.corpusHash, source: lock.source };
+    manifest.pgo = { staged: true, applied: false, corpusHash: lock.corpusHash, source: lock.source };
   } catch {}
 
   const onlyMt = process.argv.includes("--only-mt");
   const activeTiers = onlyMt
     ? config.tiers.filter((tier) => tier.threads)
     : (hostToolchain && !process.argv.includes("--include-mt")) ? config.tiers.filter((tier) => !tier.threads) : config.tiers;
+  const budgetViolations = [];
+
+  await validateBridgeExports();
+  await ensureLibjxlSource();
+  await ensureLibjxlDeps(hostToolchain);
 
   // Phase 1/3: build matrix is (kind x tier). dec = viewer (decode + tile-decode + region, no enc, transcode=OFF).
   // enc = ingest (streaming/container encode, sidecars, metadata, gain). Lazy-loaded.
@@ -207,19 +215,14 @@ async function main() {
         CXXFLAGS: tierFlags.join(" "),
         LDFLAGS: tierFlags.join(" ")
       };
-      await ensureLibjxlSource();
-      await ensureLibjxlDeps(hostToolchain);
       await runEmscripten(emcmakeBinary, ["cmake", ...cmakeArgs], { cwd: packageRoot, env: tierEnv });
       await run("cmake", ["--build", buildDir, "--", "-j", `${Math.max(1, osCpusMinusOne())}`], { cwd: packageRoot, env: tierEnv });
-      const exportsFile = isDec ? "exports-dec.txt" : "exports-enc.txt";
+      const exportsFile = getExportsFileForKind(kind);
       await linkBridge(buildDir, outJs, tierFlags, tierEnv, kind, exportsFile, initialMem);
 
       const jsStats = await stat(outJs);
       const wasmStats = await stat(outWasm);
-      const linkExtras = ["--closure", "1"];
-      if (!isMt && !tierFlags.some((f) => /pthread|USE_PTHREADS/.test(f))) {
-        linkExtras.push("-sEVAL_CTORS=2");
-      }
+      const linkOnlyExtras = getLinkOnlyExtras(tierFlags, exportsFile);
       const tierKey = `${kind}:${tier.name}`;
       manifest.tiers[tierKey] = {
         kind,
@@ -228,7 +231,7 @@ async function main() {
         wasmBytes: wasmStats.size,
         jsSha256: await sha256File(outJs),
         wasmSha256: await sha256File(outWasm),
-        flags: [...tierFlags, ...linkExtras]
+        flags: [...tierFlags, ...linkOnlyExtras]
       };
 
       const budgetKey = tier.name; // budgets remain per cpu tier; dec/enc measured separately
@@ -240,15 +243,23 @@ async function main() {
             `Module ${kind} tier ${tier.name} exceeded the size budget.`,
             `Budget: ${budget} bytes`,
             `Actual: ${wasmStats.size} bytes`,
-            "Run the linked map/size-report helper to identify the heaviest objects."
+            "Inspect the generated size report and linker inputs for the heaviest objects."
           ].join("\n")
         );
+        budgetViolations.push(`${tierKey}: ${wasmStats.size} > ${budget}`);
+      }
+
+      if (!keepWork) {
+        await rmDir(buildDir);
       }
     }
   }
 
   assertDistinctRelaxedSimdMt(manifest);
   await writeManifest(manifest);
+  if (budgetViolations.length) {
+    throw new Error(`Size budgets exceeded:\n${budgetViolations.join("\n")}`);
+  }
 }
 
 function assertDistinctRelaxedSimdMt(manifest) {
@@ -268,6 +279,7 @@ function assertDistinctRelaxedSimdMt(manifest) {
 async function runDockerBuild() {
   const image = "jxl-wasm-builder:local";
   const dockerEnv = { ...process.env };
+  const passthrough = process.argv.slice(2).filter((arg) => arg !== "--inside-docker");
   await assertBinary(dockerBinary);
   await assertDockerDaemon(dockerEnv);
   const emsdkImage = await buildDockerImage(image, dockerEnv);
@@ -283,7 +295,8 @@ async function runDockerBuild() {
     image,
     "node",
     "scripts/build.mjs",
-    "--inside-docker"
+    "--inside-docker",
+    ...passthrough
   ], { cwd: packageRoot, env: dockerEnv });
 }
 
@@ -314,7 +327,7 @@ async function buildDockerImage(image, dockerEnv) {
   throw lastError ?? new Error("No Emscripten Docker images configured");
 }
 
-async function linkBridge(buildDir, outJs, tierFlags, env, kind: ModuleKind, exportsFile: string, initialMem: number) {
+async function linkBridge(buildDir, outJs, tierFlags, env, kind, exportsFile, initialMem) {
   const archives = await findStaticArchives(buildDir);
   const preferred = sortArchivesForLink(archives);
   const includeDirs = [
@@ -330,26 +343,26 @@ async function linkBridge(buildDir, outJs, tierFlags, env, kind: ModuleKind, exp
     "-o",
     outJs,
     ...tierFlags,
-    "-sMODULARIZE=1",
-    "-sEXPORT_ES6=1",
-    "-sEXPORT_NAME=createJxlModule",
-    "-sALLOW_MEMORY_GROWTH=1",
-    `-sINITIAL_MEMORY=${initialMem}`,
-    "-sMAXIMUM_MEMORY=4294967296",
-    "-sFILESYSTEM=0",
-    "-sASSERTIONS=0",
-    "-sINVOKE_RUN=0",
-    `-sEXPORTED_RUNTIME_METHODS=${exportedRuntimeMethods}`,
+    ...getLinkOnlyExtras(tierFlags, exportsFile)
+  ], { cwd: packageRoot, env });
+}
+
+function getExportsFileForKind(kind) {
+  return config.modules.find((module) => module.role === kind)?.exportsFile ?? `exports-${kind}.txt`;
+}
+
+function getLinkOnlyExtras(tierFlags, exportsFile) {
+  return [
     `-sEXPORTED_FUNCTIONS=@${toCmakePath(join(packageRoot, exportsFile))}`,
-    "-sWASM_BIGINT=1",
-    "-flto",
     "--closure", "1",
     // EVAL_CTORS shrinks .data/ctors but is incompatible with pthreads (passive segments error in libpthread.js).
     // Apply only to non-MT tiers. MT glue still gets --closure 1 (P2-1) for the 31k->~20k win.
-    ...(!tierFlags.some((f) => /pthread|USE_PTHREADS/.test(f)) ? ["-sEVAL_CTORS=2"] : []),
-    "-fno-rtti",
-    "-fno-exceptions"
-  ], { cwd: packageRoot, env });
+    ...(!isThreadedTierFlags(tierFlags) ? ["-sEVAL_CTORS=2"] : [])
+  ];
+}
+
+function isThreadedTierFlags(tierFlags) {
+  return tierFlags.some((flag) => /pthread|USE_PTHREADS/.test(flag));
 }
 
 async function findStaticArchives(root) {
@@ -401,6 +414,31 @@ async function ensureLibjxlDeps(hostToolchain) {
   await run(bashBinary, ["deps.sh"], { cwd: sourceDir });
 }
 
+async function validateBridgeExports() {
+  const bridgeSource = await readFile(join(packageRoot, "src", "bridge.cpp"), "utf8");
+  const mismatches = [];
+  for (const kind of moduleKinds) {
+    const exportsFile = getExportsFileForKind(kind);
+    const exportsPath = join(packageRoot, exportsFile);
+    await access(exportsPath, fsConstants.R_OK);
+    const exportsSource = await readFile(exportsPath, "utf8");
+    mismatches.push(...findBridgeExportMismatches(exportsSource, bridgeSource, exportsFile));
+  }
+  if (mismatches.length) {
+    throw new Error(`Bridge/export mismatch:\n${mismatches.join("\n")}`);
+  }
+}
+
+function findBridgeExportMismatches(exportsSource, bridgeSource, exportsFile) {
+  return exportsSource
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((name) => !["_malloc", "_free"].includes(name))
+    .filter((name) => !bridgeSource.includes(name.slice(1)))
+    .map((name) => `${exportsFile}: ${name} not found in src/bridge.cpp`);
+}
+
 async function clonePinnedSource() {
   await run("git", [
     "clone",
@@ -450,7 +488,9 @@ async function sha256File(path) {
 }
 
 function osCpusMinusOne() {
-  const count = Number(process.env.CPU_COUNT ?? 8);
+  const count = process.env.CPU_COUNT
+    ? Number(process.env.CPU_COUNT)
+    : (os.availableParallelism?.() ?? os.cpus().length);
   return Math.max(1, count - 1);
 }
 
