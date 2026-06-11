@@ -3408,6 +3408,34 @@ document.addEventListener('keydown', (e) => {
         refreshSelectionOverlay();
     });
 
+    // "Open img" — load any image file directly into lightbox for lens/selector testing
+    const imgFileInput = document.getElementById('pl-image-input');
+    document.getElementById('pl-load-image')?.addEventListener('click', () => imgFileInput?.click());
+    imgFileInput?.addEventListener('change', async () => {
+        const file = imgFileInput.files?.[0];
+        if (!file) return;
+        imgFileInput.value = '';
+        try {
+            const bmp = await createImageBitmap(file);
+            const MAX = 1800;
+            const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+            const w = Math.round(bmp.width * scale);
+            const h = Math.round(bmp.height * scale);
+            lightboxCanvas.width  = w;
+            lightboxCanvas.height = h;
+            const ctx = lightboxCanvas.getContext('2d');
+            ctx.drawImage(bmp, 0, 0, w, h);
+            bmp.close();
+            lightbox.hidden = false;
+            lightboxIndex = -1;
+            lbDisplayLongPx = null; lbPanX = 0; lbPanY = 0; lbRotation = 0;
+            syncZoomToDisplayLong();
+            captureCleanAndApplyLens(ctx.getImageData(0, 0, w, h));
+        } catch (err) {
+            console.error('pl-load-image failed:', err);
+        }
+    });
+
     // Click-to-probe / Ctrl+click to add region — only fires when lens active and no drag occurred
     let plDragDist = 0, plDragTracking = false;
     lbViewport.addEventListener('mousedown', () => { plDragDist = 0; plDragTracking = true; }, true);
