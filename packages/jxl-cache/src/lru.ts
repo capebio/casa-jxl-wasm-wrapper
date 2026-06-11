@@ -1,14 +1,19 @@
 export class LRUCache<V> {
   private cache = new Map<string, { value: V, size: number }>();
   private currentSize = 0;
+  private mruKey: string | undefined;
 
   constructor(private maxSize: number) {}
 
   get(key: string): V | undefined {
     const item = this.cache.get(key);
     if (item) {
+      if (key === this.mruKey) {
+        return item.value;
+      }
       this.cache.delete(key);
       this.cache.set(key, item);
+      this.mruKey = key;
       return item.value;
     }
     return undefined;
@@ -23,26 +28,49 @@ export class LRUCache<V> {
     return this.cache.get(key)?.value;
   }
 
+  has(key: string): boolean {
+    return this.cache.has(key);
+  }
+
+  setMaxSize(n: number): void {
+    if (!(n >= 0) || !Number.isFinite(n)) return;
+    this.maxSize = n;
+    this.evictToFit(0);
+  }
+
   set(key: string, value: V, size: number): void {
-    // Items that can never fit are dropped immediately without evicting
-    // anything — callers that evict-before-set have already ensured room.
-    if (size > this.maxSize) return;
+    if (!(size >= 0) || !Number.isFinite(size)) return;
 
     if (this.cache.has(key)) {
       this.currentSize -= this.cache.get(key)!.size;
       this.cache.delete(key);
+      if (this.mruKey === key) {
+        this.mruKey = undefined;
+      }
     }
 
+    // Items that can never fit are dropped immediately without evicting
+    // anything — callers that evict-before-set have already ensured room.
+    if (size > this.maxSize) return;
+
+    this.evictToFit(size);
+
+    this.cache.set(key, { value, size });
+    this.currentSize += size;
+    this.mruKey = key;
+  }
+
+  private evictToFit(incomingSize: number) {
     const iter = this.cache.keys();
-    while (this.currentSize + size > this.maxSize && this.cache.size > 0) {
+    while (this.currentSize + incomingSize > this.maxSize && this.cache.size > 0) {
       const oldestKey = iter.next().value;
       if (oldestKey === undefined) break;
       this.currentSize -= this.cache.get(oldestKey)!.size;
       this.cache.delete(oldestKey);
+      if (this.mruKey === oldestKey) {
+        this.mruKey = undefined;
+      }
     }
-
-    this.cache.set(key, { value, size });
-    this.currentSize += size;
   }
 
   delete(key: string): void {
@@ -50,12 +78,16 @@ export class LRUCache<V> {
     if (item) {
       this.currentSize -= item.size;
       this.cache.delete(key);
+      if (this.mruKey === key) {
+        this.mruKey = undefined;
+      }
     }
   }
 
   clear(): void {
     this.cache.clear();
     this.currentSize = 0;
+    this.mruKey = undefined;
   }
 
   getOldestKey(): string | undefined {

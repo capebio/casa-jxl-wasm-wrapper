@@ -2,6 +2,7 @@ export declare class LRUCache<V> {
     private maxSize;
     private cache;
     private currentSize;
+    private mruKey;
     constructor(maxSize: number);
     get(key: string): V | undefined;
     /**
@@ -10,7 +11,10 @@ export declare class LRUCache<V> {
      * the Map insertion-order (= LRU order) is not disturbed.
      */
     peek(key: string): V | undefined;
+    has(key: string): boolean;
+    setMaxSize(n: number): void;
     set(key: string, value: V, size: number): void;
+    private evictToFit;
     delete(key: string): void;
     clear(): void;
     getOldestKey(): string | undefined;
