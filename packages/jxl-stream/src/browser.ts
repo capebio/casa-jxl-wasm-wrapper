@@ -68,8 +68,14 @@ export async function fromReadableStream(
   let delivered = 0;
 
   try {
+    // Mark prefetch rejections as handled; the loop still awaits and surfaces them.
+    const read = () => {
+      const p = reader.read();
+      void p.catch(() => {});
+      return p;
+    };
     // SB-3 / maxBytes: no type anno on let (prevents cycle through ReadResult.value); cast only the null branch on reassign.
-    let pending = reader.read();
+    let pending = read();
 
     while (true) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -82,13 +88,18 @@ export async function fromReadableStream(
       const { done, value } = await pending;
       if (done) break;
 
+      if (value.byteLength === 0) {
+        pending = read();
+        continue;
+      }
+
       const remaining = maxBytes != null ? maxBytes - delivered : Infinity;
       if (remaining <= 0) {
         void reader.cancel('maxBytes satisfied');
         break;
       }
 
-      pending = remaining > value.byteLength ? reader.read() : (null as any);
+      pending = remaining > value.byteLength ? read() : (null as any);
 
       const chunk = value.byteLength <= remaining ? value : value.subarray(0, remaining);
       delivered += chunk.byteLength;
@@ -218,6 +229,26 @@ export async function fromBlob(
   return fromReadableStream(blob.stream() as ReadableStream<Uint8Array>, session, signalOrOpts);
 }
 
+/**
+ * Pipe the byte window [start, endExclusive) of a Blob into a session.
+ * Blob.slice is a zero-copy reference — ideal for OPFS-cached pyramid files
+ * where the manifest supplies exact per-level/tile offsets (local analogue of fromByteRange).
+ * Window is clamped to blob.size; start at/after the end delivers 0 bytes and closes cleanly.
+ */
+export async function fromBlobRange(
+  blob: Blob,
+  start: number,
+  endExclusive: number,
+  session: DecodeSession,
+  signalOrOpts?: AbortSignal | PipeOptions,
+): Promise<number> {
+  if (!Number.isFinite(start) || !Number.isFinite(endExclusive) || start < 0 || start >= endExclusive) {
+    throw new RangeError('[jxl-stream] start and endExclusive must satisfy 0 <= start < endExclusive and be finite');
+  }
+  const slice = blob.slice(start, Math.min(endExclusive, blob.size));
+  return fromReadableStream(slice.stream() as ReadableStream<Uint8Array>, session, signalOrOpts);
+}
+
 export interface RangeNegotiation {
   /** Bytes the caller asked for. */
   requested: number;
@@ -229,6 +260,10 @@ export interface RangeNegotiation {
   fullSize?: number;
   /** ETag from the response, if present. Useful for safe resumable Range with If-Range. */
   etag?: string;
+  /** Milliseconds from fetch dispatch to response headers (TTFB). */
+  ttfbMs?: number;
+  /** Milliseconds from headers to transfer end (success or failure). */
+  transferMs?: number;
 }
 
 export interface RangePrefixOptions {
@@ -242,10 +277,24 @@ export interface RangePrefixOptions {
    */
   fetchImpl?: typeof fetch;
   /**
-   * Diagnostic callback fired once after fetch headers arrive.
-   * Inspect `honored` to detect servers that ignored Range and returned 200 OK.
+   * Diagnostic callback fired once from finally after the transfer completes
+   * or fails mid-body (with final delivered byte count). It does not fire for
+   * pre-body failures (like 416, non-ok status, or initial fetch rejection).
    */
   onRangeNegotiated?: (info: RangeNegotiation) => void;
+  /** Fired once as soon as response headers arrive, before any bytes are pumped.
+   *  `delivered` is 0 at this point. Lets callers abort wasteful 200-fallback skips early via their signal. */
+  onHeaders?: (info: RangeNegotiation) => void;
+  /** Forwarded to fetch() as RequestInit.priority where supported ('high' | 'low' | 'auto').
+   *  Lets callers mark speculative pyramid prefetches 'low' and on-screen tiles 'high'. */
+  priority?: 'high' | 'low' | 'auto';
+  /**
+   * If set and the server responds 200 (Range ignored) with a *different* ETag,
+   * cancel the session and throw — the resource changed; previously delivered
+   * bytes belong to an older version and must not be stitched. Set automatically
+   * by resumeFromByteRange.
+   */
+  expectEtag?: string;
 }
 
 /**
@@ -256,7 +305,7 @@ export interface RangePrefixOptions {
  */
 export interface ByteRangeResumeState {
   url: string;
-  start: number;          // next byte to request (usually previous delivered)
+  start: number;          // next absolute byte offset to request
   endExclusive: number;
   etag?: string;          // from the first successful RangeNegotiation
   fullSize?: number;
@@ -278,7 +327,7 @@ export function createByteRangeResumeState(
   const originalEnd = originalStart + previous.requested;
   return {
     url,
-    start: previous.delivered,
+    start: originalStart + previous.delivered,
     endExclusive: originalEnd,
     etag: previous.etag,
     fullSize: previous.fullSize,
@@ -309,7 +358,7 @@ export async function fromByteRange(
     throw new RangeError('[jxl-stream] start and endExclusive must satisfy 0 <= start < endExclusive and be finite');
   }
 
-  const { signal, headers, fetchImpl = globalThis.fetch, onRangeNegotiated } = opts;
+  const { signal, headers, fetchImpl = globalThis.fetch, onRangeNegotiated, onHeaders, priority } = opts;
   const requested = endExclusive - start;
 
   let delivered = 0;
@@ -318,11 +367,17 @@ export async function fromByteRange(
   let etagFromResponse: string | undefined;
   let info: RangeNegotiation | undefined;
 
+  let t0: number | undefined = undefined;
+  let tHeaders: number | undefined = undefined;
+
   const makeInfo = (d: number): RangeNegotiation => {
     if (!info) {
       info = { requested, honored, delivered: d };
       if (fullSize !== undefined) info.fullSize = fullSize;
       if (etagFromResponse) info.etag = etagFromResponse;
+      if (t0 !== undefined && tHeaders !== undefined) {
+        info.ttfbMs = tHeaders - t0;
+      }
     }
     info.delivered = d;
     return info;
@@ -333,15 +388,15 @@ export async function fromByteRange(
     return makeInfo(0);
   }
 
-  // SB-1 guard adapted for general range (fetch + reader).
+  t0 = performance.now();
   let resp: Response;
   let reader: ReadableStreamDefaultReader<Uint8Array>;
   try {
     const mergedHeaders = new Headers(headers);
     mergedHeaders.set('Range', `bytes=${start}-${endExclusive - 1}`);
-    resp = await fetchImpl(url, { headers: mergedHeaders, signal });
+    resp = await fetchImpl(url, { headers: mergedHeaders, signal, priority } as RequestInit);
     if (resp.status === 416) throw new RangeError(`[jxl-stream] 416 Range Not Satisfiable: ${url}`);
-    if (!resp.ok && resp.status !== 206) throw new Error(`[jxl-stream] HTTP ${resp.status} ${resp.statusText}: ${url}`);
+    if (!resp.ok) throw new Error(`[jxl-stream] HTTP ${resp.status} ${resp.statusText}: ${url}`);
     if (!resp.body) throw new Error('[jxl-stream] Response has no body');
     reader = resp.body.getReader();
   } catch (e) {
@@ -349,10 +404,12 @@ export async function fromByteRange(
     throw e;
   }
 
+  tHeaders = performance.now();
+
   honored = resp.status === 206;
-  fullSize =
-    parseContentRangeTotal(resp.headers.get('Content-Range')) ??
-    parseNonNegativeInt(resp.headers.get('Content-Length'));
+  const cr = parseContentRange(resp.headers.get('Content-Range'));
+  // P0-4: on 206, Content-Length is the PART size, not the full resource — only fall back on 200.
+  fullSize = cr.total ?? (!honored ? parseNonNegativeInt(resp.headers.get('Content-Length')) : undefined);
   etagFromResponse = resp.headers.get('ETag') || undefined;
 
   const cancelBoth = (reason: string) => {
@@ -369,9 +426,30 @@ export async function fromByteRange(
   }
   signal?.addEventListener('abort', onAbort, { once: true });
 
+  if (opts.expectEtag && !honored && etagFromResponse && etagFromResponse !== opts.expectEtag) {
+    const err = new Error('[jxl-stream] resource changed during resume (ETag mismatch); restart from byte 0');
+    await cancelBoth(err.message);
+    throw err;
+  }
+
+  // P1-2: a 206 whose Content-Range start differs from what we asked would silently corrupt.
+  if (honored && cr.start !== undefined && cr.start !== start) {
+    const err = new Error(`[jxl-stream] server returned mismatched range start ${cr.start}, expected ${start}: ${url}`);
+    await cancelBoth(err.message);
+    throw err;
+  }
+
+  onHeaders?.(makeInfo(0));
+
   try {
+    // Mark prefetch rejections as handled; the loop still awaits and surfaces them.
+    const read = () => {
+      const p = reader.read();
+      void p.catch(() => {});
+      return p;
+    };
     // SB-3: no type anno on let (lets inference from read() init); cast only null branch. Avoids 'value' cycle in reassign.
-    let pending = reader.read();
+    let pending = read();
     let skipped = 0;
     const target = endExclusive - start;
 
@@ -386,6 +464,11 @@ export async function fromByteRange(
       const { done, value } = await pending;
       if (done) break;
 
+      if (value.byteLength === 0) {
+        pending = read();
+        continue;
+      }
+
       let current: Uint8Array = value;
 
       // 200 fallback: skip leading bytes before delivering window content.
@@ -393,7 +476,7 @@ export async function fromByteRange(
         const need = start - skipped;
         if (current.byteLength <= need) {
           skipped += current.byteLength;
-          pending = reader.read();
+          pending = read();
           continue;
         }
         current = current.subarray(need);
@@ -406,7 +489,7 @@ export async function fromByteRange(
         break;
       }
 
-      pending = remaining > current.byteLength ? reader.read() : (null as any);
+      pending = remaining > current.byteLength ? read() : (null as any);
 
       const chunk = current.byteLength <= remaining ? current : current.subarray(0, remaining);
       delivered += chunk.byteLength;
@@ -432,8 +515,12 @@ export async function fromByteRange(
   } finally {
     signal?.removeEventListener('abort', onAbort);
     try { reader.releaseLock(); } catch { /* already released by cancel() */ }
+    const finalInfo = makeInfo(delivered);
+    if (tHeaders !== undefined) {
+      finalInfo.transferMs = performance.now() - tHeaders;
+    }
     // SB-5: fire onRangeNegotiated from finally (error paths report delivered too); build info once.
-    onRangeNegotiated?.(makeInfo(delivered));
+    onRangeNegotiated?.(finalInfo);
   }
 }
 
@@ -507,6 +594,12 @@ export async function resumeFromByteRange(
   session: DecodeSession,
   opts: RangePrefixOptions = {}
 ): Promise<RangeNegotiation> {
+  if (state.start === state.endExclusive) {
+    // Previous transfer completed; nothing to fetch.
+    await session.close();
+    return { requested: 0, honored: true, delivered: 0, fullSize: state.fullSize, etag: state.etag };
+  }
+
   if (!Number.isFinite(state.start) || !Number.isFinite(state.endExclusive) ||
       state.start < 0 || state.start >= state.endExclusive) {
     throw new RangeError('[jxl-stream] resume state has invalid start/endExclusive');
@@ -514,26 +607,30 @@ export async function resumeFromByteRange(
 
   const resumeOpts: RangePrefixOptions = { ...opts };
 
-  if (state.etag) {
+  const strongEtag = state.etag && !state.etag.startsWith('W/') ? state.etag : undefined;
+  if (strongEtag) {
     const merged = new Headers(opts.headers);
-    // If-Range tells the server: only honor the Range if the etag still matches,
-    // otherwise send the full resource (or 412). Our skip logic will still do the right thing.
-    merged.set('If-Range', state.etag);
+    // on ETag mismatch the server ignores Range and returns 200 with the full new resource; expectEtag detects this and fails fast
+    merged.set('If-Range', strongEtag);
     resumeOpts.headers = merged;
+    resumeOpts.expectEtag = strongEtag;
   }
 
   return fromByteRange(state.url, state.start, state.endExclusive, session, resumeOpts);
 }
 
-/**
- * Parse the `total` component of a `Content-Range: bytes start-end/total` header.
- * Returns undefined for missing header or `*` (unknown total).
- */
-function parseContentRangeTotal(header: string | null): number | undefined {
-  if (header === null) return undefined;
-  const match = /\/(\d+)\s*$/.exec(header);
-  if (match === null) return undefined;
-  return parseNonNegativeInt(match[1]);
+interface ParsedContentRange { start?: number; end?: number; total?: number }
+
+/** Parse `Content-Range: bytes start-end/total` (or `bytes * /total`). */
+function parseContentRange(header: string | null): ParsedContentRange {
+  if (header === null) return {};
+  const m = /^\s*bytes\s+(?:(\d+)-(\d+)|\*)\/(\d+|\*)\s*$/i.exec(header);
+  if (m === null) return {};
+  return {
+    start: m[1] !== undefined ? parseNonNegativeInt(m[1]) : undefined,
+    end: m[2] !== undefined ? parseNonNegativeInt(m[2]) : undefined,
+    total: m[3] !== '*' ? parseNonNegativeInt(m[3]) : undefined,
+  };
 }
 
 function parseNonNegativeInt(s: string | null | undefined): number | undefined {

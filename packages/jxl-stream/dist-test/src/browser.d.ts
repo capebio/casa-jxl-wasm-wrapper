@@ -36,6 +36,13 @@ export declare function fromResponse(response: Response, session: DecodeSession,
  * Accepts signal or PipeOptions (maxBytes forwarded); returns bytes delivered.
  */
 export declare function fromBlob(blob: Blob, session: DecodeSession, signalOrOpts?: AbortSignal | PipeOptions): Promise<number>;
+/**
+ * Pipe the byte window [start, endExclusive) of a Blob into a session.
+ * Blob.slice is a zero-copy reference — ideal for OPFS-cached pyramid files
+ * where the manifest supplies exact per-level/tile offsets (local analogue of fromByteRange).
+ * Window is clamped to blob.size; start at/after the end delivers 0 bytes and closes cleanly.
+ */
+export declare function fromBlobRange(blob: Blob, start: number, endExclusive: number, session: DecodeSession, signalOrOpts?: AbortSignal | PipeOptions): Promise<number>;
 export interface RangeNegotiation {
     /** Bytes the caller asked for. */
     requested: number;
@@ -45,6 +52,12 @@ export interface RangeNegotiation {
     delivered: number;
     /** Content-Length of full resource if server reported it (parsed from Content-Range or Content-Length). */
     fullSize?: number;
+    /** ETag from the response, if present. Useful for safe resumable Range with If-Range. */
+    etag?: string;
+    /** Milliseconds from fetch dispatch to response headers (TTFB). */
+    ttfbMs?: number;
+    /** Milliseconds from headers to transfer end (success or failure). */
+    transferMs?: number;
 }
 export interface RangePrefixOptions {
     /** Extra request headers (Authorization, custom auth tokens, etc). */
@@ -57,11 +70,47 @@ export interface RangePrefixOptions {
      */
     fetchImpl?: typeof fetch;
     /**
-     * Diagnostic callback fired once after fetch headers arrive.
-     * Inspect `honored` to detect servers that ignored Range and returned 200 OK.
+     * Diagnostic callback fired once from finally after the transfer completes
+     * or fails mid-body (with final delivered byte count). It does not fire for
+     * pre-body failures (like 416, non-ok status, or initial fetch rejection).
      */
     onRangeNegotiated?: (info: RangeNegotiation) => void;
+    /** Fired once as soon as response headers arrive, before any bytes are pumped.
+     *  `delivered` is 0 at this point. Lets callers abort wasteful 200-fallback skips early via their signal. */
+    onHeaders?: (info: RangeNegotiation) => void;
+    /** Forwarded to fetch() as RequestInit.priority where supported ('high' | 'low' | 'auto').
+     *  Lets callers mark speculative pyramid prefetches 'low' and on-screen tiles 'high'. */
+    priority?: 'high' | 'low' | 'auto';
+    /**
+     * If set and the server responds 200 (Range ignored) with a *different* ETag,
+     * cancel the session and throw — the resource changed; previously delivered
+     * bytes belong to an older version and must not be stitched. Set automatically
+     * by resumeFromByteRange.
+     */
+    expectEtag?: string;
 }
+/**
+ * Serializable state for resuming a previous byte-range fetch.
+ * Persist this (e.g. with jxl-cache or your own storage) across reconnects or app restarts.
+ * Use with resumeFromByteRange() to continue from where you left off,
+ * automatically using If-Range when an etag is available for safety.
+ */
+export interface ByteRangeResumeState {
+    url: string;
+    start: number;
+    endExclusive: number;
+    etag?: string;
+    fullSize?: number;
+}
+/**
+ * Create a resume state from a previous negotiation (typically the one returned
+ * by fromByteRange or fromRangePrefix).
+ *
+ * originalStart: the `start` you used in the *first* fromByteRange call
+ *   (usually 0 for prefix/tile fetches). This lets us correctly compute the
+ *   original endExclusive for the resume request.
+ */
+export declare function createByteRangeResumeState(url: string, previous: RangeNegotiation, originalStart?: number): ByteRangeResumeState;
 /**
  * Fetch an arbitrary byte window [start, endExclusive) via HTTP Range and pipe into session.
  *
@@ -113,3 +162,21 @@ export declare function fromByteRange(url: string, start: number, endExclusive: 
  * the full resource size are valid (server responds 200 or short 206).
  */
 export declare function fromRangePrefix(url: string, byteCount: number, session: DecodeSession, opts?: RangePrefixOptions): Promise<RangeNegotiation>;
+/**
+ * Resume a previous byte-range fetch using a ByteRangeResumeState (created via
+ * createByteRangeResumeState from an earlier RangeNegotiation).
+ *
+ * This is the ergonomic entry point for SB-10 resumable Range.
+ * - If the state has an etag, automatically adds `If-Range: <etag>` for safe resume
+ *   (server will 412 if the resource changed).
+ * - Still supports all the normal RangePrefixOptions (extra headers are merged,
+ *   signal, custom fetchImpl, onRangeNegotiated).
+ * - The underlying fromByteRange skip/206/200 logic handles the continuation.
+ *
+ * Typical usage for unreliable/field/offline:
+ *   const neg1 = await fromByteRange(url, 0, wantedEnd, session1, { onRangeNegotiated: saveState });
+ *   const resumeState = createByteRangeResumeState(url, neg1);
+ *   // ... network drop, app restart, persist resumeState + any partial bytes via jxl-cache ...
+ *   const neg2 = await resumeFromByteRange(resumeState, session2);
+ */
+export declare function resumeFromByteRange(state: ByteRangeResumeState, session: DecodeSession, opts?: RangePrefixOptions): Promise<RangeNegotiation>;
