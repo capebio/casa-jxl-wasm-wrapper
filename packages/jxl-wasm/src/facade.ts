@@ -3,6 +3,7 @@ export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = { x: number; y: number; w: number; h: number };
 export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";
 const DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS = 1;
+const TEXT_ENCODER = new TextEncoder();
 export type CachePolicy = "onFirst" | "onFinal" | "onProgress" | "disabled";
 
 export const DOWNSAMPLE_THUMBNAILS = 2;
@@ -587,7 +588,7 @@ export function serializeExtraChannelsForWasm(channels: ExtraChannel[]): { buffe
     dv.setFloat32(off + 32, spot ? spot.blue : 0, true);
     dv.setFloat32(off + 36, spot ? spot.solidity : 0, true);
     const nameStr = ch.name ?? '';
-    const nameBytes = new TextEncoder().encode(nameStr);
+    const nameBytes = TEXT_ENCODER.encode(nameStr);
     const nameLen = Math.min(nameBytes.length, 31);
     dv.setUint8(off + 40, nameLen);
     for (let k = 0; k < nameLen; k++) dv.setUint8(off + 41 + k, nameBytes[k] ?? 0);
@@ -644,19 +645,69 @@ export async function computeButteraugli(
   if (view1.byteLength < pixelSize || view2.byteLength < pixelSize) {
     throw new Error(`computeButteraugli: expected ${pixelSize} bytes for ${width}×${height} RGBA8, got ${view1.byteLength}/${view2.byteLength}`);
   }
-  const ptr1 = module._malloc(pixelSize);
-  const ptr2 = module._malloc(pixelSize);
+  const ptr1 = mallocOrThrow(module, pixelSize, "Butteraugli image A");
+  const ptr2 = mallocOrThrow(module, pixelSize, "Butteraugli image B");
   try {
     module.HEAPU8.set(view1.subarray(0, pixelSize), ptr1);
     module.HEAPU8.set(view2.subarray(0, pixelSize), ptr2);
     const bits = module._jxl_wasm_butteraugli_compare(ptr1, ptr2, width, height);
     if (bits < 0) throw new Error("Butteraugli WASM compare failed");
-    const floatBuf = new ArrayBuffer(4);
-    new Int32Array(floatBuf)[0] = bits;
-    return new Float32Array(floatBuf)[0] as number;
+    return floatFromI32Bits(bits);
   } finally {
     module._free(ptr1);
     module._free(ptr2);
+  }
+}
+
+export class ButteraugliComparator {
+  private refPtr = 0;
+
+  private constructor(
+    private readonly module: LibjxlWasmModule,
+    private readonly width: number,
+    private readonly height: number,
+  ) {}
+
+  static async create(reference: ArrayBuffer | Uint8Array, width: number, height: number): Promise<ButteraugliComparator> {
+    const module = await loadLibjxlModule();
+    if (!module._jxl_wasm_butteraugli_compare) {
+      throw new CapabilityMissing("Butteraugli comparator requires a rebuilt WASM with butteraugli bridge");
+    }
+    const pixelSize = butteraugliPixelSize(reference, width, height, "ButteraugliComparator.create");
+    const comparator = new ButteraugliComparator(module, width, height);
+    comparator.refPtr = mallocOrThrow(module, pixelSize, "Butteraugli reference");
+    try {
+      const view = copyOrBorrowInput(reference, false);
+      module.HEAPU8.set(view.subarray(0, pixelSize), comparator.refPtr);
+      return comparator;
+    } catch (error) {
+      comparator.dispose();
+      throw error;
+    }
+  }
+
+  compare(candidate: ArrayBuffer | Uint8Array): number {
+    if (this.refPtr === 0) {
+      throw new Error("ButteraugliComparator has been disposed");
+    }
+    const pixelSize = butteraugliPixelSize(candidate, this.width, this.height, "ButteraugliComparator.compare");
+    const ptr = mallocOrThrow(this.module, pixelSize, "Butteraugli candidate");
+    try {
+      const view = copyOrBorrowInput(candidate, false);
+      this.module.HEAPU8.set(view.subarray(0, pixelSize), ptr);
+      const bits = this.module._jxl_wasm_butteraugli_compare!(this.refPtr, ptr, this.width, this.height);
+      if (bits < 0) throw new Error("Butteraugli WASM compare failed");
+      return floatFromI32Bits(bits);
+    } finally {
+      this.module._free(ptr);
+    }
+  }
+
+  dispose(): void {
+    if (this.refPtr !== 0) {
+      this.module._free(this.refPtr);
+      this.refPtr = 0;
+    }
   }
 }
 
@@ -665,7 +716,7 @@ export async function computeButteraugli(
  * Container JXLs (created with encodeTileContainerRgba8/JXTC) may embed
  * the original JPEG bitstream for fast native preview. Scans container
  * header for jbrd (JPEG Reconstruction) box.
- * Returns null if no embedded JPEG or not a container JXL.
+ * Returns a copied Uint8Array, or null if no embedded JPEG or not a container JXL.
  */
 export function extractJpegReconstructionFromJxl(jxlData: ArrayBuffer | Uint8Array): Uint8Array | null {
   const view = jxlData instanceof Uint8Array ? jxlData : new Uint8Array(jxlData);
@@ -675,23 +726,11 @@ export function extractJpegReconstructionFromJxl(jxlData: ArrayBuffer | Uint8Arr
 
   if (!isJxtc) return null;
 
-  // Scan JXTC container for embedded JPEG (jbrd box signature).
-  // Box header: magic (4B) + size (4B); jbrd is common for container JXLs.
-  // Exact format depends on container layout; heuristic: scan for JPEG SOI marker (0xFFD8).
-  let offset = 32; // skip JXTC header
-  while (offset < view.byteLength - 2) {
-    if (view[offset] === 0xFF && view[offset + 1] === 0xD8) {
-      // Found JPEG SOI marker; scan for EOI (0xFFD9) to find end
-      let jpegEnd = offset + 2;
-      while (jpegEnd < view.byteLength - 1) {
-        if (view[jpegEnd] === 0xFF && view[jpegEnd + 1] === 0xD9) {
-          return new Uint8Array(view.buffer, view.byteOffset + offset, jpegEnd - offset + 2);
-        }
-        jpegEnd++;
-      }
-      break;
-    }
-    offset++;
+  const scanRanges = jxtcNonTileRanges(view);
+  if (scanRanges.length === 0) return null;
+  for (const [start, end] of scanRanges) {
+    const jpeg = scanForValidJpeg(view, start, end);
+    if (jpeg !== null) return jpeg;
   }
   return null;
 }
@@ -1136,13 +1175,14 @@ class LibjxlDecoder implements JxlDecoder {
     try {
       if (this.cancelled) return;
       const module = await loadLibjxlModule();
-      if (this.options.format !== "rgba8") {
+      const caps = getCapabilities(module);
+      if (this.options.format !== "rgba8" && !caps.progressiveDecode) {
         const decFn = this.options.format === "rgba16" ? "_jxl_wasm_decode_rgba16" : "_jxl_wasm_decode_rgbaf32";
         if (typeof module[decFn] !== "function") {
           throw new CapabilityMissing(`${this.options.format} decode requires a rebuilt WASM with multi-format bridge`);
         }
       }
-      if (getCapabilities(module).progressiveDecode) {
+      if (caps.progressiveDecode) {
         yield* this.eventsProgressive(module);
       } else {
         yield* this.eventsOneShot(module);
@@ -1157,6 +1197,7 @@ class LibjxlDecoder implements JxlDecoder {
       this.chunkQueue = [];
       this.readIndex = 0;
       this.queuedBytes = 0;
+      this.cancelled = true;
     }
   }
 
@@ -1188,8 +1229,8 @@ class LibjxlDecoder implements JxlDecoder {
       // subsequent flushes are AC refinement passes.
       let flushCount = 0;
 
-      const buildInfo = (w: number, h: number): ImageInfo => {
-        info ??= { width: w, height: h, bitsPerSample: 8, hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false };
+      const buildInfo = (w: number, h: number, bitsPerSample: 8 | 16 | 32 = normalizeBitsPerSample(bpc * 8), hasAlpha = true): ImageInfo => {
+        info ??= { width: w, height: h, bitsPerSample, hasAlpha, hasAnimation: false, jpegReconstructionAvailable: false };
         return info;
       };
 
@@ -1198,13 +1239,13 @@ class LibjxlDecoder implements JxlDecoder {
       const fmt = this.options.format;
       const takeAndWrap = (handle: number): { pixels: { data: Uint8Array; width: number; height: number; region?: Region }; evInfo: ImageInfo } | null => {
         if (handle === 0) return null;
-        const buf = takeBuffer(module, handle, "decode");
+        const buf = takeBufferView(module, handle, "decode");
         const pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region ?? null, this.options.downsample ?? 1, bpc);
         // When ROI/downsample crops the frame, pixels.width/height differ from full image dims.
         // buildInfo memoizes on first call (full dims from header), so we must not pass it
         // cropped dims — it would return the already-memoized full-dim object regardless.
         // Instead, derive evInfo from the base info with actual pixel dimensions.
-        const baseInfo = buildInfo(buf.width, buf.height);
+        const baseInfo = buildInfo(buf.width, buf.height, buf.bitsPerSample, buf.hasAlpha);
         const evInfo: ImageInfo = (pixels.width !== buf.width || pixels.height !== buf.height)
           ? { ...baseInfo, width: pixels.width, height: pixels.height }
           : baseInfo;
@@ -1553,6 +1594,8 @@ class LibjxlEncoder implements JxlEncoder {
   private moduleInitPromise: Promise<LibjxlWasmModule> | null = null;
   private pendingPushPromise: Promise<void> = Promise.resolve();
   private pendingPushError: unknown = null;
+  private advIdsPtr = 0;
+  private advValuesPtr = 0;
 
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
@@ -1625,35 +1668,11 @@ class LibjxlEncoder implements JxlEncoder {
       const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
       const { progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder } = resolveEncoderBridgeSettings(this.options);
 
-      const adv = this.options.advancedFrameSettings;
-      let advIdsPtr = 0;
-      let advValuesPtr = 0;
-      let advCount = 0;
-
-      if (adv && adv.length > 0 && module._malloc) {
-        advCount = adv.length;
-        const ids = new Int32Array(adv.map(s => s.id));
-        const values = new Int32Array(adv.map(s => s.value));
-        advIdsPtr = module._malloc(ids.byteLength);
-        advValuesPtr = module._malloc(values.byteLength);
-        if (advIdsPtr === 0 || advValuesPtr === 0) {
-          if (advIdsPtr !== 0) module._free(advIdsPtr);
-          if (advValuesPtr !== 0) module._free(advValuesPtr);
-          console.warn("[jxl-wasm] OOM while allocating advanced settings. Bypassing advanced options.");
-          advCount = 0;
-        } else {
-          module.HEAP32.set(ids, advIdsPtr >> 2);
-          module.HEAP32.set(values, advValuesPtr >> 2);
-          // remember to free in dispose / after use
-          (this as any)._advIdsPtr = advIdsPtr;
-          (this as any)._advValuesPtr = advValuesPtr;
-        }
-      }
-
       const o = this.options;
       const resampling = o.resampling ?? 1;
       const needsY = caps.streamingInputY && (o.epf != null || o.gaborish != null || o.dots != null || o.colorTransform != null);
       const needsX = !needsY && caps.streamingInputX && (o.modular != null || o.brotliEffort != null || o.decodingSpeed != null || o.photonNoiseIso != null);
+      const needsAdv = !needsY && !needsX && !!module._jxl_wasm_enc_create_image_adv && !!o.advancedFrameSettings?.length;
 
       if (needsY) {
         this.wasmEncState = module._jxl_wasm_enc_create_image_y!(
@@ -1672,13 +1691,31 @@ class LibjxlEncoder implements JxlEncoder {
           o.modular ?? -1, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
           0, 0, 0, 0, 0, -1
         );
-      } else if (advCount > 0 && module._jxl_wasm_enc_create_image_adv) {
-        this.wasmEncState = module._jxl_wasm_enc_create_image_adv!(
-          o.width, o.height, distance, o.effort,
-          fmtIndex, o.hasAlpha ? 1 : 0,
-          progressiveDc, progressiveAc, qProgressiveAc, buffering,
-          advIdsPtr, advValuesPtr, advCount
-        );
+      } else if (needsAdv) {
+        const adv = this.prepareAdvancedSettings(module);
+        this.advIdsPtr = adv.idsPtr;
+        this.advValuesPtr = adv.valuesPtr;
+        try {
+          if (adv.count > 0) {
+            this.wasmEncState = module._jxl_wasm_enc_create_image_adv!(
+              o.width, o.height, distance, o.effort,
+              fmtIndex, o.hasAlpha ? 1 : 0,
+              progressiveDc, progressiveAc, qProgressiveAc, buffering,
+              adv.idsPtr, adv.valuesPtr, adv.count
+            );
+          } else {
+            this.wasmEncState = module._jxl_wasm_enc_create_image!(
+              o.width, o.height, distance, o.effort,
+              fmtIndex, o.hasAlpha ? 1 : 0,
+              progressiveDc, progressiveAc, qProgressiveAc, buffering,
+              groupOrder, resampling
+            );
+          }
+        } finally {
+          adv.free();
+          this.advIdsPtr = 0;
+          this.advValuesPtr = 0;
+        }
       } else {
         this.wasmEncState = module._jxl_wasm_enc_create_image!(
           o.width, o.height, distance, o.effort,
@@ -1713,13 +1750,6 @@ class LibjxlEncoder implements JxlEncoder {
 
     // Module may not be loaded yet if no pixels were pushed (zero-byte edge case).
     const module = this.wasmModule ?? await loadLibjxlModule();
-    if (this.options.format === "rgba16" || this.options.format === "rgbaf32") {
-      const encFn = this.options.format === "rgba16" ? "_jxl_wasm_encode_rgba16" : "_jxl_wasm_encode_rgbaf32";
-      if (typeof module[encFn] !== "function") {
-        throw new CapabilityMissing(`${this.options.format} encode requires a rebuilt WASM with multi-format bridge`);
-      }
-    }
-
     if (this.queuedPixelBytes !== this.pixelByteTotal) {
       throw new Error(`JXL encode expected ${this.pixelByteTotal} bytes for ${this.options.format}, got ${this.queuedPixelBytes}`);
     }
@@ -1747,6 +1777,12 @@ class LibjxlEncoder implements JxlEncoder {
       // Buffered path — accumulate pixelChunks in JS, copy to WASM, then encode.
       // Write pixel chunks directly into WASM heap — no concatBytes allocation.
       // Release each JS chunk reference immediately after copying to reduce peak JS heap overlap.
+      if (this.options.format === "rgba16" || this.options.format === "rgbaf32") {
+        const encFn = this.options.format === "rgba16" ? "_jxl_wasm_encode_rgba16" : "_jxl_wasm_encode_rgbaf32";
+        if (typeof module[encFn] !== "function") {
+          throw new CapabilityMissing(`${this.options.format} encode requires a rebuilt WASM with multi-format bridge`);
+        }
+      }
       const ptr = module._malloc(this.pixelByteTotal);
       try {
         let offset = 0;
@@ -1830,8 +1866,8 @@ class LibjxlEncoder implements JxlEncoder {
           let handle: number;
 
           // Use metadata path if any metadata is present.
-          // fmt: 0=rgba8, 1=rgba16, 2=rgbaf32 — matches bridge parameter order.
-          const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
+          // fmt: 0=rgba8, 1=rgba16, 2=rgbaf32, 3=rgb8 — matches bridge parameter order.
+          const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : this.options.format === "rgb8" ? 3 : 0;
           const hasMetadata = this.options.iccProfile !== null || this.options.exif !== null || this.options.xmp !== null;
           if (hasMetadata && module._jxl_wasm_encode_rgba8_with_metadata) {
             const iccView = this.options.iccProfile ? copyOrBorrowInput(this.options.iccProfile, false) : new Uint8Array(0);
@@ -1938,12 +1974,10 @@ class LibjxlEncoder implements JxlEncoder {
 
   private freeWasmState(): void {
     if (this.wasmModule !== null) {
-      const advIds = (this as any)._advIdsPtr as number | undefined;
-      const advValues = (this as any)._advValuesPtr as number | undefined;
-      if (advIds) this.wasmModule._free(advIds);
-      if (advValues) this.wasmModule._free(advValues);
-      (this as any)._advIdsPtr = 0;
-      (this as any)._advValuesPtr = 0;
+      if (this.advIdsPtr !== 0) this.wasmModule._free(this.advIdsPtr);
+      if (this.advValuesPtr !== 0) this.wasmModule._free(this.advValuesPtr);
+      this.advIdsPtr = 0;
+      this.advValuesPtr = 0;
     }
 
     if (this.wasmEncState !== 0 && this.wasmModule !== null) {
@@ -2230,7 +2264,8 @@ function expectedPixelBytes(width: number, height: number, format: PixelFormat, 
     throw new Error(`Invalid image dimensions: ${width} × ${height}`);
   }
   const bpc = bytesPerChannelForFormat(format);
-  const bytes = width * height * 4 * bpc;
+  const channels = format === "rgb8" ? 3 : 4;
+  const bytes = width * height * channels * bpc;
   if (!Number.isSafeInteger(bytes) || bytes <= 0) {
     throw new Error(`Pixel byte size overflow for ${width} × ${height} ${format}`);
   }
@@ -2251,6 +2286,103 @@ function distanceFromQuality(quality: number | null): number {
 function copyOrBorrowInput(value: ArrayBuffer | Uint8Array, copy: boolean): Uint8Array {
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   return copy ? value.slice() : value;
+}
+
+function mallocOrThrow(module: LibjxlWasmModule, size: number, label: string): number {
+  const ptr = module._malloc(size);
+  if (ptr === 0) throw new Error(`WASM malloc failed for ${label}`);
+  return ptr;
+}
+
+function floatFromI32Bits(bits: number): number {
+  const floatBuf = new ArrayBuffer(4);
+  new Int32Array(floatBuf)[0] = bits;
+  return new Float32Array(floatBuf)[0] as number;
+}
+
+function butteraugliPixelSize(pixels: ArrayBuffer | Uint8Array, width: number, height: number, operation: string): number {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new Error(`${operation}: invalid dimensions ${width}×${height}`);
+  }
+  const pixelSize = width * height * 4;
+  const view = copyOrBorrowInput(pixels, false);
+  if (!Number.isSafeInteger(pixelSize) || pixelSize <= 0) {
+    throw new Error(`${operation}: pixel byte size overflow for ${width}×${height}`);
+  }
+  if (view.byteLength < pixelSize) {
+    throw new Error(`${operation}: expected ${pixelSize} bytes for ${width}×${height} RGBA8, got ${view.byteLength}`);
+  }
+  return pixelSize;
+}
+
+function jxtcNonTileRanges(view: Uint8Array): Array<[number, number]> {
+  if (view.byteLength < 40) return [];
+  const dv = new DataView(view.buffer, view.byteOffset, view.byteLength);
+  const version = dv.getUint32(4, true);
+  const tilesX = dv.getUint32(20, true);
+  const tilesY = dv.getUint32(24, true);
+  if (version !== 1 || tilesX === 0 || tilesY === 0) return [];
+  const tileCount = tilesX * tilesY;
+  if (!Number.isSafeInteger(tileCount) || tileCount <= 0) return [];
+  const indexEnd = 32 + tileCount * 8;
+  if (indexEnd > view.byteLength) return [];
+
+  const intervals: Array<[number, number]> = [];
+  for (let i = 0; i < tileCount; i++) {
+    const offset = dv.getUint32(32 + i * 8, true);
+    const length = dv.getUint32(32 + i * 8 + 4, true);
+    const end = offset + length;
+    if (length === 0 || offset < indexEnd || end > view.byteLength || end < offset) return [];
+    intervals.push([offset, end]);
+  }
+  intervals.sort((a, b) => a[0] - b[0]);
+
+  const ranges: Array<[number, number]> = [];
+  let cursor = indexEnd;
+  for (const [start, end] of intervals) {
+    if (start > cursor) ranges.push([cursor, start]);
+    cursor = Math.max(cursor, end);
+  }
+  if (cursor < view.byteLength) ranges.push([cursor, view.byteLength]);
+  return ranges;
+}
+
+function scanForValidJpeg(view: Uint8Array, start: number, end: number): Uint8Array | null {
+  for (let offset = start; offset < end - 3; offset++) {
+    if (view[offset] !== 0xff || view[offset + 1] !== 0xd8) continue;
+    const jpegEnd = findValidJpegEnd(view, offset, end);
+    if (jpegEnd !== 0) return view.slice(offset, jpegEnd);
+  }
+  return null;
+}
+
+function findValidJpegEnd(view: Uint8Array, soi: number, limit: number): number {
+  let offset = soi + 2;
+  let segments = 0;
+  while (offset + 1 < limit) {
+    if (view[offset] !== 0xff) return 0;
+    while (offset < limit && view[offset] === 0xff) offset++;
+    if (offset >= limit) return 0;
+    const marker = view[offset++]!;
+    if (marker === 0xd9) return segments >= 2 ? offset : 0;
+    if (!isValidJpegHeaderMarker(marker) || offset + 2 > limit) return 0;
+    const length = (view[offset]! << 8) | view[offset + 1]!;
+    if (length < 2 || offset + length > limit) return 0;
+    offset += length;
+    segments++;
+  }
+  return 0;
+}
+
+function isValidJpegHeaderMarker(marker: number): boolean {
+  return (
+    (marker >= 0xe0 && marker <= 0xef) ||
+    marker === 0xdb ||
+    marker === 0xc4 ||
+    marker === 0xdd ||
+    marker === 0xfe ||
+    (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc8 && marker !== 0xcc)
+  );
 }
 
 function applyRegionAndDownsample(
@@ -2322,15 +2454,13 @@ function applyRegionAndDownsample(
   return result;
 }
 
-const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
-
-function buildResizeAxis(srcSize: number, dstSize: number): { i0: Int32Array; i1: Int32Array; t: Float32Array } {
+function buildResizeAxis(srcSize: number, dstSize: number, srcStart = 0, srcSpan = srcSize): { i0: Int32Array; i1: Int32Array; t: Float32Array } {
   const i0 = new Int32Array(dstSize);
   const i1 = new Int32Array(dstSize);
   const t = new Float32Array(dstSize);
-  const scale = srcSize / dstSize;
+  const scale = srcSpan / dstSize;
   for (let d = 0; d < dstSize; d++) {
-    const f = (d + 0.5) * scale - 0.5;
+    const f = srcStart + (d + 0.5) * scale - 0.5;
     const base = Math.max(0, Math.floor(f));
     i0[d] = base;
     i1[d] = Math.min(srcSize - 1, base + 1);
@@ -2346,12 +2476,43 @@ function bilinearResize(
   dstW: number,
   dstH: number,
   stride: number, // 4=rgba8, 8=rgba16, 16=rgbaf32
+  xAxisIn?: { i0: Int32Array; i1: Int32Array; t: Float32Array },
+  yAxisIn?: { i0: Int32Array; i1: Int32Array; t: Float32Array },
 ): Uint8Array {
   if (srcW === dstW && srcH === dstH) return src;
   const dst = new Uint8Array(dstW * dstH * stride);
-  const xAxis = buildResizeAxis(srcW, dstW);
-  const yAxis = buildResizeAxis(srcH, dstH);
+  const xAxis = xAxisIn ?? buildResizeAxis(srcW, dstW);
+  const yAxis = yAxisIn ?? buildResizeAxis(srcH, dstH);
   if (stride === 4) {
+    // 8.8 fixed-point weights: eliminates float↔int traffic per channel.
+    // Weights sum to exactly 256; +128 before >>8 gives unbiased rounding.
+    for (let dy = 0; dy < dstH; dy++) {
+      const y0 = yAxis.i0[dy]!;
+      const y1 = yAxis.i1[dy]!;
+      const ytI = (yAxis.t[dy]! * 256) | 0;
+      const row00 = y0 * srcW * 4;
+      const row10 = y1 * srcW * 4;
+      for (let dx = 0; dx < dstW; dx++) {
+        const x0 = xAxis.i0[dx]!;
+        const x1 = xAxis.i1[dx]!;
+        const xtI = (xAxis.t[dx]! * 256) | 0;
+        const w11 = (xtI * ytI) >> 8;
+        const w10 = ytI - w11;
+        const w01 = xtI - w11;
+        const w00 = 256 - xtI - ytI + w11;
+        const topLeft    = row00 + x0 * 4;
+        const topRight   = row00 + x1 * 4;
+        const bottomLeft = row10 + x0 * 4;
+        const bottomRight = row10 + x1 * 4;
+        const dstOff = (dy * dstW + dx) * 4;
+        for (let c = 0; c < 4; c++) {
+          dst[dstOff + c] = (src[topLeft + c]! * w00 + src[topRight + c]! * w01 + src[bottomLeft + c]! * w10 + src[bottomRight + c]! * w11 + 128) >> 8;
+        }
+      }
+    }
+  } else if (stride === 8) {
+    const srcView = new Uint16Array(src.buffer, src.byteOffset, src.byteLength >> 1);
+    const dstView = new Uint16Array(dst.buffer);
     for (let dy = 0; dy < dstH; dy++) {
       const y0 = yAxis.i0[dy]!;
       const y1 = yAxis.i1[dy]!;
@@ -2366,90 +2527,51 @@ function bilinearResize(
         const w01 = xt * (1 - yt);
         const w10 = (1 - xt) * yt;
         const w11 = xt * yt;
-        const topLeft = row00 + x0 * 4;
-        const topRight = row00 + x1 * 4;
+        const topLeft    = row00 + x0 * 4;
+        const topRight   = row00 + x1 * 4;
         const bottomLeft = row10 + x0 * 4;
         const bottomRight = row10 + x1 * 4;
         const dstOff = (dy * dstW + dx) * 4;
         for (let c = 0; c < 4; c++) {
-          const tl = src[topLeft + c]!;
-          const tr = src[topRight + c]!;
-          const bl = src[bottomLeft + c]!;
-          const br = src[bottomRight + c]!;
-          dst[dstOff + c] = Math.round(tl * w00 + tr * w01 + bl * w10 + br * w11);
+          const tl = srcView[topLeft + c]!;
+          const tr = srcView[topRight + c]!;
+          const bl = srcView[bottomLeft + c]!;
+          const br = srcView[bottomRight + c]!;
+          dstView[dstOff + c] = Math.max(0, Math.min(65535, Math.round(tl * w00 + tr * w01 + bl * w10 + br * w11)));
         }
       }
     }
-  } else if (stride === 8) {
-    if (IS_LITTLE_ENDIAN) {
-      const srcView = new Uint16Array(src.buffer, src.byteOffset, src.byteLength >> 1);
-      const dstView = new Uint16Array(dst.buffer);
-      for (let dy = 0; dy < dstH; dy++) {
-        const y0 = yAxis.i0[dy]!;
-        const y1 = yAxis.i1[dy]!;
-        const yt = yAxis.t[dy]!;
-        const row00 = y0 * srcW * 4;
-        const row10 = y1 * srcW * 4;
-        for (let dx = 0; dx < dstW; dx++) {
-          const x0 = xAxis.i0[dx]!;
-          const x1 = xAxis.i1[dx]!;
-          const xt = xAxis.t[dx]!;
-          const w00 = (1 - xt) * (1 - yt);
-          const w01 = xt * (1 - yt);
-          const w10 = (1 - xt) * yt;
-          const w11 = xt * yt;
-          const topLeft = row00 + x0 * 4;
-          const topRight = row00 + x1 * 4;
-          const bottomLeft = row10 + x0 * 4;
-          const bottomRight = row10 + x1 * 4;
-          const dstOff = (dy * dstW + dx) * 4;
-          for (let c = 0; c < 4; c++) {
-            const tl = srcView[topLeft + c]!;
-            const tr = srcView[topRight + c]!;
-            const bl = srcView[bottomLeft + c]!;
-            const br = srcView[bottomRight + c]!;
-            dstView[dstOff + c] = Math.max(0, Math.min(65535, Math.round(tl * w00 + tr * w01 + bl * w10 + br * w11)));
-          }
-        }
-      }
-    }
-    // Big-endian DataView branches removed (A5): WASM/JS runtime is always little-endian;
-    // the old else paths forced LE via get/set(..., true) anyway and were unreachable dead code.
   } else {
-    if (IS_LITTLE_ENDIAN) {
-      const srcView = new Float32Array(src.buffer, src.byteOffset, src.byteLength >> 2);
-      const dstView = new Float32Array(dst.buffer);
-      for (let dy = 0; dy < dstH; dy++) {
-        const y0 = yAxis.i0[dy]!;
-        const y1 = yAxis.i1[dy]!;
-        const yt = yAxis.t[dy]!;
-        const row00 = y0 * srcW * 4;
-        const row10 = y1 * srcW * 4;
-        for (let dx = 0; dx < dstW; dx++) {
-          const x0 = xAxis.i0[dx]!;
-          const x1 = xAxis.i1[dx]!;
-          const xt = xAxis.t[dx]!;
-          const w00 = (1 - xt) * (1 - yt);
-          const w01 = xt * (1 - yt);
-          const w10 = (1 - xt) * yt;
-          const w11 = xt * yt;
-          const topLeft = row00 + x0 * 4;
-          const topRight = row00 + x1 * 4;
-          const bottomLeft = row10 + x0 * 4;
-          const bottomRight = row10 + x1 * 4;
-          const dstOff = (dy * dstW + dx) * 4;
-          for (let c = 0; c < 4; c++) {
-            const tl = srcView[topLeft + c]!;
-            const tr = srcView[topRight + c]!;
-            const bl = srcView[bottomLeft + c]!;
-            const br = srcView[bottomRight + c]!;
-            dstView[dstOff + c] = tl * w00 + tr * w01 + bl * w10 + br * w11;
-          }
+    const srcView = new Float32Array(src.buffer, src.byteOffset, src.byteLength >> 2);
+    const dstView = new Float32Array(dst.buffer);
+    for (let dy = 0; dy < dstH; dy++) {
+      const y0 = yAxis.i0[dy]!;
+      const y1 = yAxis.i1[dy]!;
+      const yt = yAxis.t[dy]!;
+      const row00 = y0 * srcW * 4;
+      const row10 = y1 * srcW * 4;
+      for (let dx = 0; dx < dstW; dx++) {
+        const x0 = xAxis.i0[dx]!;
+        const x1 = xAxis.i1[dx]!;
+        const xt = xAxis.t[dx]!;
+        const w00 = (1 - xt) * (1 - yt);
+        const w01 = xt * (1 - yt);
+        const w10 = (1 - xt) * yt;
+        const w11 = xt * yt;
+        const topLeft    = row00 + x0 * 4;
+        const topRight   = row00 + x1 * 4;
+        const bottomLeft = row10 + x0 * 4;
+        const bottomRight = row10 + x1 * 4;
+        const dstOff = (dy * dstW + dx) * 4;
+        for (let c = 0; c < 4; c++) {
+          const tl = srcView[topLeft + c]!;
+          const tr = srcView[topRight + c]!;
+          const bl = srcView[bottomLeft + c]!;
+          const br = srcView[bottomRight + c]!;
+          dstView[dstOff + c] = tl * w00 + tr * w01 + bl * w10 + br * w11;
         }
       }
     }
-    // Big-endian DataView branches removed (A5): unreachable on WASM/JS targets (always LE);
-    // explicit get/set(..., true) was forcing LE anyway.
   }
   return dst;
 }
@@ -2477,15 +2599,26 @@ function applyTargetResize(
     if (dstW === srcW && dstH === srcH) return { data: src, width: srcW, height: srcH };
     return { data: bilinearResize(src, srcW, srcH, dstW, dstH, stride), width: dstW, height: dstH };
   }
-  // cover: scale up so both dims >= target, then center-crop
+  // cover: map target pixels directly to cropped source span via windowed axes —
+  // no intermediate scaled buffer. cropX/Y computed in scaled coords then converted
+  // to source coords using scale factor srcW/scaledW so sub-pixel positions are
+  // bit-exact with the old two-pass path (scaledW = round(srcW*scale)).
   const scale = Math.max(targetW / srcW, targetH / srcH);
   const scaledW = Math.max(targetW, Math.round(srcW * scale));
   const scaledH = Math.max(targetH, Math.round(srcH * scale));
-  const scaled = (scaledW === srcW && scaledH === srcH) ? src : bilinearResize(src, srcW, srcH, scaledW, scaledH, stride);
   const cropX = Math.floor((scaledW - targetW) / 2);
   const cropY = Math.floor((scaledH - targetH) / 2);
-  const cropped = applyRegionAndDownsample(scaled, scaledW, scaledH, { x: cropX, y: cropY, w: targetW, h: targetH }, 1, bpc);
-  return { data: cropped.data, width: targetW, height: targetH };
+  if (scaledW === srcW && scaledH === srcH) {
+    const cropped = applyRegionAndDownsample(src, srcW, srcH, { x: cropX, y: cropY, w: targetW, h: targetH }, 1, bpc);
+    return { data: cropped.data, width: targetW, height: targetH };
+  }
+  const srcSpanW = targetW * srcW / scaledW;
+  const srcSpanH = targetH * srcH / scaledH;
+  const srcStartX = cropX * srcW / scaledW;
+  const srcStartY = cropY * srcH / scaledH;
+  const xa = buildResizeAxis(srcW, targetW, srcStartX, srcSpanW);
+  const ya = buildResizeAxis(srcH, targetH, srcStartY, srcSpanH);
+  return { data: bilinearResize(src, srcW, srcH, targetW, targetH, stride, xa, ya), width: targetW, height: targetH };
 }
 
 function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8 {

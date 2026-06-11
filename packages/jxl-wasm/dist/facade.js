@@ -1316,8 +1316,8 @@ class LibjxlEncoder {
                     // Standard single-image encode path
                     let handle;
                     // Use metadata path if any metadata is present.
-                    // fmt: 0=rgba8, 1=rgba16, 2=rgbaf32 — matches bridge parameter order.
-                    const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : 0;
+                    // fmt: 0=rgba8, 1=rgba16, 2=rgbaf32, 3=rgb8 — matches bridge parameter order.
+                    const fmt = this.options.format === "rgba16" ? 1 : this.options.format === "rgbaf32" ? 2 : this.options.format === "rgb8" ? 3 : 0;
                     const hasMetadata = this.options.iccProfile !== null || this.options.exif !== null || this.options.xmp !== null;
                     if (hasMetadata && module._jxl_wasm_encode_rgba8_with_metadata) {
                         const iccView = this.options.iccProfile ? copyOrBorrowInput(this.options.iccProfile, false) : new Uint8Array(0);
@@ -1605,7 +1605,8 @@ function expectedPixelBytes(width, height, format, maxBytes = MAX_PIXEL_BYTES) {
         throw new Error(`Invalid image dimensions: ${width} × ${height}`);
     }
     const bpc = bytesPerChannelForFormat(format);
-    const bytes = width * height * 4 * bpc;
+    const channels = format === "rgb8" ? 3 : 4;
+    const bytes = width * height * channels * bpc;
     if (!Number.isSafeInteger(bytes) || bytes <= 0) {
         throw new Error(`Pixel byte size overflow for ${width} × ${height} ${format}`);
     }
