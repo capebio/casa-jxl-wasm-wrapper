@@ -7,6 +7,22 @@
     <link rel="stylesheet" href="style.css" />
     <link rel="stylesheet" href="test-nav.css" />
     <link rel="stylesheet" href="casabio.css" />
+    <style>
+/* Perceptual Lens + Colour Selector overlay */
+#pl-overlay {
+    position: absolute;
+    transform-origin: center center;
+    pointer-events: none;
+    z-index: 20;
+    display: block;
+    image-rendering: pixelated;
+}
+#pl-controls { display: flex; align-items: center; gap: 4px; margin-left: 4px; }
+#pl-controls .pl-sep { width: 1px; height: 14px; background: rgba(255,255,255,0.15); margin: 0 2px; }
+#pl-lens-toggle.pl-active { background: rgba(99,102,241,0.75); color: #fff; }
+.pl-lbl { font-size: 10px; color: #9ca3af; }
+#pl-probe-readout { font-size: 10px; color: #d1d5db; min-width: 120px; font-family: monospace; }
+    </style>
     <script type="importmap">
     {
       "imports": {
@@ -326,9 +342,24 @@
                 <span id="lb-straighten-val" style="min-width:28px;text-align:right">0°</span>
             </label>
             <button id="lb-straighten-auto" class="lb-btn" title="Compute largest rect after straighten for current aspect" style="font-size:11px">Auto</button>
+            <span class="lb-sep"></span>
+            <div id="pl-controls">
+                <button id="pl-lens-toggle" class="lb-btn" title="Perceptual Lens — non-Riemannian chroma damp + illuminant adapt (P)">Lens</button>
+                <span class="pl-sep"></span>
+                <span class="pl-lbl">str</span>
+                <input id="pl-strength" type="range" min="0" max="1" step="0.05" value="0.7" style="width:58px" title="Lens strength">
+                <span class="pl-sep"></span>
+                <label class="pl-lbl" title="Shoulder-aware lightness compression (never brightens highlights)"><input id="pl-lightness" type="checkbox" checked> light</label>
+                <span class="pl-sep"></span>
+                <span class="pl-lbl">tol</span>
+                <input id="pl-tolerance" type="range" min="5" max="200" step="5" value="30" style="width:58px" title="Colour-select tolerance (phiDampedDistance)">
+                <button id="pl-clear" class="lb-btn" title="Clear colour selection">Clear</button>
+                <span id="pl-probe-readout"></span>
+            </div>
         </div>
         <div class="lightbox-viewport">
             <canvas id="lightbox-canvas"></canvas>
+            <canvas id="pl-overlay"></canvas>
             <div id="lb-source-label" aria-live="polite"></div>
             <div class="lb-source-banner" id="lb-source-banner" data-source="jxl">JXL</div>
             <div class="lb-preview-badge" data-source="raw" hidden>RAW</div>
