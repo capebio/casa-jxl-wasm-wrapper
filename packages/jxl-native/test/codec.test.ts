@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createDecoder, createEncoder, type DecodeEvent } from "../src/index";
 
 const nativeIncludeDir =
-  "C:\\Foo\\raw-converter\\target\\release\\build\\jpegxl-sys-26f294f2024eaecb\\out\\include";
-const nativeLibDir = "C:\\TEMP\\jxl-mt-libs";
+  process.env.JXL_NATIVE_INCLUDE_DIR || "C:\\Foo\\raw-converter\\target\\release\\build\\jpegxl-sys-26f294f2024eaecb\\out\\include";
+const nativeLibDir = process.env.JXL_NATIVE_LIB_DIR || "C:\\TEMP\\jxl-mt-libs";
 
 function asUint8Array(value: ArrayBuffer | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(value);
