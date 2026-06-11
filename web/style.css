@@ -996,6 +996,7 @@ main { padding: 24px 32px 64px; }
 .lightbox {
     position: fixed;
     inset: 0;
+    top: var(--home-bar-height, 0px);
     background: rgba(0, 0, 0, 0.95);
     z-index: 100;
     display: flex;
