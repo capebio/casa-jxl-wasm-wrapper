@@ -94,6 +94,11 @@ const lbStraighten = document.getElementById('lb-straighten');
 const lbStraightenVal = document.getElementById('lb-straighten-val');
 const lbStraightenAuto = document.getElementById('lb-straighten-auto');
 
+let filmstripEl = null;
+let filmstripScroll = null;
+let filmstripActions = null;
+let filmstripSelection = new Set();
+let filmstripLastClicked = -1;
 initFilmstrip();
 
 const qualityRange = document.getElementById('quality-range');
@@ -2855,12 +2860,6 @@ function applyStraightenToLightboxCanvas(card) {
 // ---------------------------------------------------------------------------
 // Filmstrip (Phase 1) — lightweight bottom row for navigation + future multi-select
 // ---------------------------------------------------------------------------
-let filmstripEl = null;
-let filmstripScroll = null;
-let filmstripActions = null;
-let filmstripSelection = new Set(); // indices into the global `cards` array
-let filmstripLastClicked = -1;
-
 function initFilmstrip() {
     filmstripEl = document.getElementById('lightbox-filmstrip');
     filmstripScroll = document.getElementById('filmstrip-scroll');
