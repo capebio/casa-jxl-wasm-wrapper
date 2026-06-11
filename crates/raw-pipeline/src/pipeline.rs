@@ -194,9 +194,9 @@ struct LutCache {
     wb_r_bits: u32, wb_g_bits: u32, wb_b_bits: u32, exp_gain_bits: u32,
     contrast_bits: u32, shadows_bits: u32, highlights_bits: u32,
     whites_bits: u32, blacks_bits: u32,
-    pre_r: Vec<u16>, pre_g: Vec<u16>, pre_b: Vec<u16>,
-    post: Vec<u8>,
-    post16: Option<Vec<u16>>,
+    pre_r: std::sync::Arc<Vec<u16>>, pre_g: std::sync::Arc<Vec<u16>>, pre_b: std::sync::Arc<Vec<u16>>,
+    post: std::sync::Arc<Vec<u8>>,
+    post16: Option<std::sync::Arc<Vec<u16>>>,
 }
 
 impl LutCache {
@@ -246,7 +246,7 @@ pub fn gaussian_kernel_5() -> [f32; 5] {
 
 pub fn gaussian_kernel_13() -> [f32; 13] {
     [0.0185, 0.0342, 0.0563, 0.0831, 0.1097, 0.1296,
-     0.1370,
+     0.1372,
      0.1296, 0.1097, 0.0831, 0.0563, 0.0342, 0.0185]
 }
 
@@ -402,14 +402,24 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
         let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
         if params.texture != 0.0 {
             separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_5(), temp, blurred);
-            let n = rgb16.len();
-            let mut i = 0;
-            while i < n {
-                let orig = rgb16[i] as i32;
-                let blur = blurred[i] as i32;
-                rgb16[i] = (orig + (params.texture * (orig - blur) as f32).round() as i32)
-                    .clamp(0, 65535) as u16;
-                i += 1;
+            #[cfg(feature = "parallel")]
+            rgb16.par_chunks_mut(width * 3).zip(blurred.par_chunks(width * 3)).for_each(|(r_row, b_row)| {
+                for i in 0..r_row.len() {
+                    let orig = r_row[i] as i32;
+                    let blur = b_row[i] as i32;
+                    r_row[i] = (orig + (params.texture * (orig - blur) as f32).round() as i32).clamp(0, 65535) as u16;
+                }
+            });
+            #[cfg(not(feature = "parallel"))]
+            {
+                let n = rgb16.len();
+                let mut i = 0;
+                while i < n {
+                    let orig = rgb16[i] as i32;
+                    let blur = blurred[i] as i32;
+                    rgb16[i] = (orig + (params.texture * (orig - blur) as f32).round() as i32).clamp(0, 65535) as u16;
+                    i += 1;
+                }
             }
         }
         if params.clarity != 0.0 {
@@ -465,17 +475,16 @@ fn apply_tone_math(
     (r2, g2, b2)
 }
 
-pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
-    let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
 
-    // Temp / tint folded into WB.  Temp ±1 → ±40% R/B shift; tint ±1 →
-    // ±20% G shift with mild R+B counter-balance.
+struct ToneInputs { pub exp_gain: f32, pub wb_r: f32, pub wb_g: f32, pub wb_b: f32, pub tone: TonePost, pub sat: f32, pub vib: f32, pub vib_zero: bool }
+
+fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
+    let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
     let temp = params.temp.clamp(-1.0, 1.0);
     let tint = params.tint.clamp(-1.0, 1.0);
     let wb_r = params.wb_r * (1.0 + temp * 0.40) * (1.0 + tint * 0.10);
     let wb_g = params.wb_g * (1.0 - tint * 0.20);
     let wb_b = params.wb_b * (1.0 - temp * 0.40) * (1.0 + tint * 0.10);
-
     let tone = TonePost {
         contrast: params.contrast.clamp(-1.0, 1.0),
         shadows: params.shadows.clamp(-1.0, 1.0),
@@ -483,9 +492,6 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
         whites: params.whites.clamp(-1.0, 1.0),
         blacks: params.blacks.clamp(-1.0, 1.0),
     };
-
-    // Saturation: asymmetric around zero so -1.0 reaches true black-and-white.
-    // Negative side scales BASELINE_SAT → 0; positive side adds up to +0.8.
     let sat_param = params.saturation.clamp(-1.0, 1.0);
     let sat = if sat_param < 0.0 {
         BASELINE_SAT * (1.0 + sat_param)
@@ -494,49 +500,59 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     }.max(0.0);
     let vib = params.vibrance.clamp(-1.0, 1.0);
     let vib_zero = vib.abs() < 1e-6;
+    ToneInputs { exp_gain, wb_r, wb_g, wb_b, tone, sat, vib, vib_zero }
+}
 
+fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneInputs, need16: bool) {
+    if cache.as_ref().map_or(true, |c| {
+        !c.matches(params.black, params.white, ti.wb_r, ti.wb_g, ti.wb_b, ti.exp_gain, &ti.tone)
+    }) {
+        *cache = Some(LutCache {
+            black: params.black, white: params.white,
+            wb_r_bits: ti.wb_r.to_bits(), wb_g_bits: ti.wb_g.to_bits(),
+            wb_b_bits: ti.wb_b.to_bits(), exp_gain_bits: ti.exp_gain.to_bits(),
+            contrast_bits:   ti.tone.contrast.to_bits(),
+            shadows_bits:    ti.tone.shadows.to_bits(),
+            highlights_bits: ti.tone.highlights.to_bits(),
+            whites_bits:     ti.tone.whites.to_bits(),
+            blacks_bits:     ti.tone.blacks.to_bits(),
+            pre_r: std::sync::Arc::new(build_pre_lut(params.black, params.white, ti.wb_r, ti.exp_gain)),
+            pre_g: std::sync::Arc::new(build_pre_lut(params.black, params.white, ti.wb_g, ti.exp_gain)),
+            pre_b: std::sync::Arc::new(build_pre_lut(params.black, params.white, ti.wb_b, ti.exp_gain)),
+            post: std::sync::Arc::new(build_post_lut(&ti.tone)),
+            post16: if need16 { Some(std::sync::Arc::new(build_post16_lut(&ti.tone))) } else { None },
+        });
+    } else if need16 {
+        let c = cache.as_mut().unwrap();
+        if c.post16.is_none() {
+            c.post16 = Some(std::sync::Arc::new(build_post16_lut(&ti.tone)));
+        }
+    }
+}
+
+pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
+    debug_assert_eq!(rgb16.len() % 3, 0);
+    let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
-
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 3];
 
     #[cfg(not(feature = "parallel"))]
     {
-        // Borrow LUT in-place — no 448KB clone on the WASM hot path.
         LUT_CACHE.with(|cache_cell| {
-            {
-                let mut cache = cache_cell.borrow_mut();
-                if cache.as_ref().map_or(true, |c| {
-                    !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-                }) {
-                    *cache = Some(LutCache {
-                        black: params.black, white: params.white,
-                        wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                        wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                        contrast_bits:   tone.contrast.to_bits(),
-                        shadows_bits:    tone.shadows.to_bits(),
-                        highlights_bits: tone.highlights.to_bits(),
-                        whites_bits:     tone.whites.to_bits(),
-                        blacks_bits:     tone.blacks.to_bits(),
-                        pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                        pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                        pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                        post: build_post_lut(&tone),
-                        post16: None,
-                    });
-                }
-            }
+            ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
             let cache = cache_cell.borrow();
             let c = cache.as_ref().unwrap();
-            let n = rgb16.len();
+            
+            let nbytes = rgb16.len();
             let mut i = 0;
             let mut o = 0;
-            while i < n {
+            while i < nbytes {
                 let r = c.pre_r[rgb16[i] as usize] as f32; i += 1;
                 let g = c.pre_g[rgb16[i] as usize] as f32; i += 1;
                 let b = c.pre_b[rgb16[i] as usize] as f32; i += 1;
-                let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+                let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero);
                 out[o] = c.post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
                 out[o] = c.post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
                 out[o] = c.post[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
@@ -547,40 +563,20 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     #[cfg(feature = "parallel")]
     {
         let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
-            let mut cache = cache_cell.borrow_mut();
-            if cache.as_ref().map_or(true, |c| {
-                !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-            }) {
-                *cache = Some(LutCache {
-                    black: params.black, white: params.white,
-                    wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                    wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                    contrast_bits:   tone.contrast.to_bits(),
-                    shadows_bits:    tone.shadows.to_bits(),
-                    highlights_bits: tone.highlights.to_bits(),
-                    whites_bits:     tone.whites.to_bits(),
-                    blacks_bits:     tone.blacks.to_bits(),
-                    pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                    pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                    pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                    post: build_post_lut(&tone),
-                    post16: None,
-                });
-            }
-            let c = cache.as_ref().unwrap();
-            (c.pre_r.clone(), c.pre_g.clone(), c.pre_b.clone(), c.post.clone())
+            ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
+            let c = cache_cell.borrow();
+            let cr = c.as_ref().unwrap();
+            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone())
         });
-        out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
+        out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).with_min_len(4096).for_each(|(out_px, in_px)| {
             let r = pre_r[in_px[0] as usize] as f32;
             let g = pre_g[in_px[1] as usize] as f32;
             let b = pre_b[in_px[2] as usize] as f32;
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
-            let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
-            let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
-            let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
-            out_px[0] = post[ri];
-            out_px[1] = post[gi];
-            out_px[2] = post[bi];
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero);
+            out_px[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
+            out_px[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
+            out_px[2] = post[b2.clamp(0.0, 65535.0) as u16 as usize];
+            
         });
     }
 
@@ -598,68 +594,20 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
 /// Callers that must retain RGB (e.g. rotation, further CPU processing) should
 /// continue to use `process` + manual convert or the WASM `rgb_to_rgba` helper.
 pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
-    let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
-
-    // Temp / tint folded into WB.  Temp ±1 → ±40% R/B shift; tint ±1 →
-    // ±20% G shift with mild R+B counter-balance.
-    let temp = params.temp.clamp(-1.0, 1.0);
-    let tint = params.tint.clamp(-1.0, 1.0);
-    let wb_r = params.wb_r * (1.0 + temp * 0.40) * (1.0 + tint * 0.10);
-    let wb_g = params.wb_g * (1.0 - tint * 0.20);
-    let wb_b = params.wb_b * (1.0 - temp * 0.40) * (1.0 + tint * 0.10);
-
-    let tone = TonePost {
-        contrast: params.contrast.clamp(-1.0, 1.0),
-        shadows: params.shadows.clamp(-1.0, 1.0),
-        highlights: params.highlights.clamp(-1.0, 1.0),
-        whites: params.whites.clamp(-1.0, 1.0),
-        blacks: params.blacks.clamp(-1.0, 1.0),
-    };
-
-    // Saturation: asymmetric around zero so -1.0 reaches true black-and-white.
-    // Negative side scales BASELINE_SAT → 0; positive side adds up to +0.8.
-    let sat_param = params.saturation.clamp(-1.0, 1.0);
-    let sat = if sat_param < 0.0 {
-        BASELINE_SAT * (1.0 + sat_param)
-    } else {
-        BASELINE_SAT + sat_param * 0.8
-    }.max(0.0);
-    let vib = params.vibrance.clamp(-1.0, 1.0);
-    let vib_zero = vib.abs() < 1e-6;
-
+    debug_assert_eq!(rgb16.len() % 3, 0);
+    let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
-
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 4];
 
     #[cfg(not(feature = "parallel"))]
     {
         LUT_CACHE.with(|cache_cell| {
-            {
-                let mut cache = cache_cell.borrow_mut();
-                if cache.as_ref().map_or(true, |c| {
-                    !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-                }) {
-                    *cache = Some(LutCache {
-                        black: params.black, white: params.white,
-                        wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                        wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                        contrast_bits:   tone.contrast.to_bits(),
-                        shadows_bits:    tone.shadows.to_bits(),
-                        highlights_bits: tone.highlights.to_bits(),
-                        whites_bits:     tone.whites.to_bits(),
-                        blacks_bits:     tone.blacks.to_bits(),
-                        pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                        pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                        pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                        post: build_post_lut(&tone),
-                        post16: None,
-                    });
-                }
-            }
+            ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
             let cache = cache_cell.borrow();
             let c = cache.as_ref().unwrap();
+            
             let nbytes = rgb16.len();
             let mut i = 0;
             let mut o = 0;
@@ -667,7 +615,7 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
                 let r = c.pre_r[rgb16[i] as usize] as f32; i += 1;
                 let g = c.pre_g[rgb16[i] as usize] as f32; i += 1;
                 let b = c.pre_b[rgb16[i] as usize] as f32; i += 1;
-                let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+                let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero);
                 out[o] = c.post[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
                 out[o] = c.post[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
                 out[o] = c.post[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
@@ -679,40 +627,19 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     #[cfg(feature = "parallel")]
     {
         let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
-            let mut cache = cache_cell.borrow_mut();
-            if cache.as_ref().map_or(true, |c| {
-                !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-            }) {
-                *cache = Some(LutCache {
-                    black: params.black, white: params.white,
-                    wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                    wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                    contrast_bits:   tone.contrast.to_bits(),
-                    shadows_bits:    tone.shadows.to_bits(),
-                    highlights_bits: tone.highlights.to_bits(),
-                    whites_bits:     tone.whites.to_bits(),
-                    blacks_bits:     tone.blacks.to_bits(),
-                    pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                    pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                    pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                    post: build_post_lut(&tone),
-                    post16: None,
-                });
-            }
-            let c = cache.as_ref().unwrap();
-            (c.pre_r.clone(), c.pre_g.clone(), c.pre_b.clone(), c.post.clone())
+            ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
+            let c = cache_cell.borrow();
+            let cr = c.as_ref().unwrap();
+            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone())
         });
-        out.par_chunks_mut(4).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
+        out.par_chunks_mut(4).zip(rgb16.par_chunks(3)).with_min_len(4096).for_each(|(out_px, in_px)| {
             let r = pre_r[in_px[0] as usize] as f32;
             let g = pre_g[in_px[1] as usize] as f32;
             let b = pre_b[in_px[2] as usize] as f32;
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
-            let ri = r2.clamp(0.0, 65535.0) as u16 as usize;
-            let gi = g2.clamp(0.0, 65535.0) as u16 as usize;
-            let bi = b2.clamp(0.0, 65535.0) as u16 as usize;
-            out_px[0] = post[ri];
-            out_px[1] = post[gi];
-            out_px[2] = post[bi];
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero);
+            out_px[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
+            out_px[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
+            out_px[2] = post[b2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[3] = 255;
         });
     }
@@ -721,8 +648,8 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
 }
 
 /// Gray-world auto-WB from raw Bayer (RGGB) pixels.  Returns (r_gain,
-/// b_gain) normalised so G_gain = 1.0.  Samples every 4×4 block to keep it
-/// cheap.  Clamps the result to a sane range so a colour-cast scene (e.g.
+/// b_gain) normalised so G_gain = 1.0.  Samples every 8×8 block to keep it
+/// cheap (strides by 8).  Assumes an RGGB CFA at (0,0). Clamps the result to a sane range so a colour-cast scene (e.g.
 /// uniform-red rocks) doesn't blow the highlights.
 pub fn auto_wb_rggb(raw: &[u16], w: usize, h: usize, black: u16) -> (f32, f32) {
     let blk = black as u32;
@@ -782,27 +709,8 @@ pub fn apply_luminance_nr(rgb16: &mut [u16], width: usize, height: usize, streng
 /// Maps the tone-curved, sRGB-gamma-corrected result to [0, 65535] instead of [0, 255].
 /// Suitable as a 16-bit TIFF source for further editing.
 pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
-    let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
-    let temp = params.temp.clamp(-1.0, 1.0);
-    let tint = params.tint.clamp(-1.0, 1.0);
-    let wb_r = params.wb_r * (1.0 + temp * 0.40) * (1.0 + tint * 0.10);
-    let wb_g = params.wb_g * (1.0 - tint * 0.20);
-    let wb_b = params.wb_b * (1.0 - temp * 0.40) * (1.0 + tint * 0.10);
-    let tone = TonePost {
-        contrast:   params.contrast.clamp(-1.0, 1.0),
-        shadows:    params.shadows.clamp(-1.0, 1.0),
-        highlights: params.highlights.clamp(-1.0, 1.0),
-        whites:     params.whites.clamp(-1.0, 1.0),
-        blacks:     params.blacks.clamp(-1.0, 1.0),
-    };
-    let sat_param = params.saturation.clamp(-1.0, 1.0);
-    let sat = if sat_param < 0.0 {
-        BASELINE_SAT * (1.0 + sat_param)
-    } else {
-        BASELINE_SAT + sat_param * 0.8
-    }.max(0.0);
-    let vib = params.vibrance.clamp(-1.0, 1.0);
-    let vib_zero = vib.abs() < 1e-6;
+    debug_assert_eq!(rgb16.len() % 3, 0);
+    let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
     let n = rgb16.len() / 3;
@@ -811,44 +719,18 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     #[cfg(not(feature = "parallel"))]
     {
         LUT_CACHE.with(|cache_cell| {
-            {
-                let mut cache = cache_cell.borrow_mut();
-                if cache.as_ref().map_or(true, |c| {
-                    !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-                }) {
-                    *cache = Some(LutCache {
-                        black: params.black, white: params.white,
-                        wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                        wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                        contrast_bits:   tone.contrast.to_bits(),
-                        shadows_bits:    tone.shadows.to_bits(),
-                        highlights_bits: tone.highlights.to_bits(),
-                        whites_bits:     tone.whites.to_bits(),
-                        blacks_bits:     tone.blacks.to_bits(),
-                        pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                        pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                        pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                        post: build_post_lut(&tone),
-                        post16: Some(build_post16_lut(&tone)),
-                    });
-                } else {
-                    let c = cache.as_mut().unwrap();
-                    if c.post16.is_none() {
-                        c.post16 = Some(build_post16_lut(&tone));
-                    }
-                }
-            }
+            ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, true);
             let cache = cache_cell.borrow();
             let c = cache.as_ref().unwrap();
             let post16 = c.post16.as_ref().unwrap();
-            let n = rgb16.len();
+            let nbytes = rgb16.len();
             let mut i = 0;
             let mut o = 0;
-            while i < n {
+            while i < nbytes {
                 let r = c.pre_r[rgb16[i] as usize] as f32; i += 1;
                 let g = c.pre_g[rgb16[i] as usize] as f32; i += 1;
                 let b = c.pre_b[rgb16[i] as usize] as f32; i += 1;
-                let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+                let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero);
                 out[o] = post16[r2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
                 out[o] = post16[g2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
                 out[o] = post16[b2.clamp(0.0, 65535.0) as u16 as usize]; o += 1;
@@ -859,44 +741,16 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     #[cfg(feature = "parallel")]
     {
         let (pre_r, pre_g, pre_b, post16) = LUT_CACHE.with(|cache_cell| {
-            let mut cache = cache_cell.borrow_mut();
-            if cache.as_ref().map_or(true, |c| {
-                !c.matches(params.black, params.white, wb_r, wb_g, wb_b, exp_gain, &tone)
-            }) {
-                *cache = Some(LutCache {
-                    black: params.black, white: params.white,
-                    wb_r_bits: wb_r.to_bits(), wb_g_bits: wb_g.to_bits(),
-                    wb_b_bits: wb_b.to_bits(), exp_gain_bits: exp_gain.to_bits(),
-                    contrast_bits:   tone.contrast.to_bits(),
-                    shadows_bits:    tone.shadows.to_bits(),
-                    highlights_bits: tone.highlights.to_bits(),
-                    whites_bits:     tone.whites.to_bits(),
-                    blacks_bits:     tone.blacks.to_bits(),
-                    pre_r: build_pre_lut(params.black, params.white, wb_r, exp_gain),
-                    pre_g: build_pre_lut(params.black, params.white, wb_g, exp_gain),
-                    pre_b: build_pre_lut(params.black, params.white, wb_b, exp_gain),
-                    post: build_post_lut(&tone),
-                    post16: Some(build_post16_lut(&tone)),
-                });
-            } else {
-                let c = cache.as_mut().unwrap();
-                if c.post16.is_none() {
-                    c.post16 = Some(build_post16_lut(&tone));
-                }
-            }
-            let c = cache.as_ref().unwrap();
-            (
-                c.pre_r.clone(),
-                c.pre_g.clone(),
-                c.pre_b.clone(),
-                c.post16.as_ref().unwrap().clone(),
-            )
+            ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, true);
+            let c = cache_cell.borrow();
+            let cr = c.as_ref().unwrap();
+            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post16.as_ref().unwrap().clone())
         });
-        out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).for_each(|(out_px, in_px)| {
+        out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).with_min_len(4096).for_each(|(out_px, in_px)| {
             let r = pre_r[in_px[0] as usize] as f32;
             let g = pre_g[in_px[1] as usize] as f32;
             let b = pre_b[in_px[2] as usize] as f32;
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, sat, vib, vib_zero);
+            let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero);
             out_px[0] = post16[r2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[1] = post16[g2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[2] = post16[b2.clamp(0.0, 65535.0) as u16 as usize];
@@ -1003,8 +857,11 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
         let xstep = sw / dw;
         let ystep = sh / dh;
         let n = (xstep * ystep) as u32;
-        for dy in 0..dh {
-            let row = &mut out[dy * dw * 3..(dy + 1) * dw * 3];
+        #[cfg(feature = "parallel")]
+        let iter = out.par_chunks_mut(dw * 3);
+        #[cfg(not(feature = "parallel"))]
+        let iter = out.chunks_mut(dw * 3);
+        iter.enumerate().for_each(|(dy, row)| {
             for dx in 0..dw {
                 let mut rr = 0u32;
                 let mut gg = 0u32;
@@ -1024,7 +881,7 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
                 row[o + 1] = (gg / n) as u8;
                 row[o + 2] = (bb / n) as u8;
             }
-        }
+        });
         return;
     }
 
