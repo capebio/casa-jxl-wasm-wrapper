@@ -3,67 +3,27 @@
 
 import init, { process_orf, downscale_rgb, rgb_to_rgba } from "./pkg/raw_converter_wasm.js";
 import { readFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
 import sharp from "sharp";
 import encodeJxl from "@jsquash/jxl/encode.js";
 import decodeJxl from "@jsquash/jxl/decode.js";
+import { createDecoder, createEncoder } from "./packages/jxl-wasm/dist/facade.js";
+import { CMP_W, extractLargestJpeg, stats, Stats } from "./tools/orf-utils.ts";
 
 const wasmBytes = readFileSync(
     new URL("./pkg/raw_converter_wasm_bg.wasm", import.meta.url),
 );
 await init({ module_or_path: wasmBytes });
 
-const CMP_W = 1200;
+const args = process.argv.slice(2);
+const hasFacade = args.includes("--facade");
+const files = args.filter(arg => arg !== "--facade");
 
-function extractLargestJpeg(bytes: Uint8Array): Uint8Array | null {
-    const sois: number[] = [];
-    for (let i = 0; i < bytes.length - 2; i++) {
-        if (bytes[i] === 0xFF && bytes[i + 1] === 0xD8 && bytes[i + 2] === 0xFF) {
-            sois.push(i); i += 2;
-        }
-    }
-    let best: Uint8Array | null = null;
-    for (let n = 0; n < sois.length; n++) {
-        const start = sois[n];
-        const end = n + 1 < sois.length ? sois[n + 1] : bytes.length;
-        let eoi = -1;
-        for (let j = end - 2; j >= start + 2; j--) {
-            if (bytes[j] === 0xFF && bytes[j + 1] === 0xD9) { eoi = j; break; }
-        }
-        if (eoi !== -1) {
-            const blob = bytes.slice(start, eoi + 2);
-            if (!best || blob.length > best.length) best = blob;
-        }
-    }
-    return best;
+if (files.length === 0) {
+    console.error("usage: bun jxl-roundtrip.ts [--facade] <orf> [orf2 ...]");
+    process.exit(1);
 }
 
-interface Stats {
-    rMean: number; gMean: number; bMean: number;
-    lum: number;
-    rgRatio: number;
-    bgRatio: number;
-    sat: number;
-}
-
-function stats(rgb: Uint8Array): Stats {
-    const n = rgb.length / 3;
-    let r = 0, g = 0, b = 0, lum = 0, sat = 0;
-    for (let i = 0; i < n; i++) {
-        const R = rgb[i*3], G = rgb[i*3+1], B = rgb[i*3+2];
-        r += R; g += G; b += B;
-        lum += 0.2126 * R + 0.7152 * G + 0.0722 * B;
-        const mx = Math.max(R, G, B), mn = Math.min(R, G, B);
-        if (mx > 0) sat += (mx - mn) / mx;
-    }
-    return {
-        rMean: r/n, gMean: g/n, bMean: b/n, lum: lum/n,
-        rgRatio: (r/n) / Math.max(g/n, 1e-6),
-        bgRatio: (b/n) / Math.max(g/n, 1e-6),
-        sat: sat / n,
-    };
-}
-
-const files = process.argv.slice(2);
 for (const f of files) {
     const raw = new Uint8Array(readFileSync(f));
 
@@ -71,32 +31,6 @@ for (const f of files) {
     const res = process_orf(raw, 0,0,0,0,0,0,0,0,0,0, NaN, NaN, 0, 0);
     const ours8 = res.take_rgb();
     const w = res.width, h = res.height;
-
-    // Encode JXL from RGBA (lossless to isolate any colour drift from compression)
-    const rgba = rgb_to_rgba(ours8);
-    const rgbaBuf = rgba.buffer.slice(rgba.byteOffset, rgba.byteOffset + rgba.byteLength);
-    const t0 = performance.now();
-    const jxl = await encodeJxl(
-        { data: new Uint8ClampedArray(rgbaBuf), width: w, height: h },
-        { lossless: true, effort: 5 },
-    );
-    const encMs = performance.now() - t0;
-
-    // Decode JXL back
-    const dec = await decodeJxl(new Uint8Array(jxl));
-    // dec is ImageData-like with rgba data
-    const decRgba = new Uint8Array(dec.data.buffer, dec.data.byteOffset, dec.data.byteLength);
-
-    // Strip alpha → RGB
-    const decRgb = new Uint8Array(dec.width * dec.height * 3);
-    for (let i = 0, j = 0; i < decRgb.length; i += 3, j += 4) {
-        decRgb[i] = decRgba[j]; decRgb[i+1] = decRgba[j+1]; decRgb[i+2] = decRgba[j+2];
-    }
-
-    // Downscale both ours and dec to CMP_W
-    const cmpH = Math.round((h * CMP_W) / w);
-    const oursSmall = downscale_rgb(ours8, w, h, CMP_W, cmpH);
-    const decSmall  = downscale_rgb(decRgb, dec.width, dec.height, CMP_W, cmpH);
 
     // Reference JPEG
     const jpeg = extractLargestJpeg(raw);
@@ -116,8 +50,164 @@ for (const f of files) {
         `R=${s.rMean.toFixed(0).padStart(3)} G=${s.gMean.toFixed(0).padStart(3)} B=${s.bMean.toFixed(0).padStart(3)} ` +
         `lum=${s.lum.toFixed(0).padStart(3)} sat=${s.sat.toFixed(2)} R/G=${s.rgRatio.toFixed(3)} B/G=${s.bgRatio.toFixed(3)}`;
 
-    console.log(`\n=== ${name} ===  (jxl ${(jxl.byteLength/1024).toFixed(0)}KB, enc ${encMs.toFixed(0)}ms)`);
+    console.log(`\n=== ${name} ===`);
     if (refRgb.length > 0) console.log(`  jpeg ref : ${fmt(stats(refRgb))}`);
-    console.log(`  ours rgb : ${fmt(stats(new Uint8Array(oursSmall)))}`);
-    console.log(`  jxl->dec : ${fmt(stats(new Uint8Array(decSmall)))}`);
+
+    // Encode JXL from RGBA (lossless to isolate any colour drift from compression)
+    const rgba = rgb_to_rgba(ours8);
+
+    // Run @jsquash roundtrip
+    await runRoundtrip("jsquash", rgba, ours8, w, h);
+
+    // Run facade roundtrip if requested
+    if (hasFacade) {
+        await runRoundtrip("facade", rgba, ours8, w, h);
+    }
+}
+
+async function runRoundtrip(label: string, rgba: Uint8Array, ours8: Uint8Array, w: number, h: number) {
+    let jxl: Uint8Array;
+    let encMs: number;
+    let decRgba: Uint8Array;
+    let decW: number;
+    let decH: number;
+
+    if (label === "jsquash") {
+        const t0 = performance.now();
+        // Pass Uint8ClampedArray to encodeJxl to avoid 80MB buffer copy (J1)
+        const clamped = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+        const jxlBuffer = await encodeJxl(
+            { data: clamped, width: w, height: h },
+            { lossless: true, effort: 1 } // Drop jxl encode effort from 5 to 1 for lossless speed (J3)
+        );
+        jxl = new Uint8Array(jxlBuffer);
+        encMs = performance.now() - t0;
+
+        const dec = await decodeJxl(jxl);
+        decRgba = new Uint8Array(dec.data.buffer, dec.data.byteOffset, dec.data.byteLength);
+        decW = dec.width;
+        decH = dec.height;
+    } else {
+        // Facade J4
+        const t0 = performance.now();
+        const encoder = createEncoder({
+            format: "rgba8",
+            width: w,
+            height: h,
+            hasAlpha: true,
+            iccProfile: null,
+            exif: null,
+            xmp: null,
+            distance: 0, // lossless
+            quality: null,
+            effort: 1, // Drop jxl encode effort from 5 to 1 for lossless speed (J3)
+            progressive: false,
+            previewFirst: false,
+            chunked: false,
+        });
+
+        try {
+            await encoder.pushPixels(rgba);
+            await encoder.finish();
+            const chunks: Uint8Array[] = [];
+            for await (const chunk of encoder.chunks()) {
+                chunks.push(chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : chunk);
+            }
+            const totalLen = chunks.reduce((n, c) => n + c.byteLength, 0);
+            jxl = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const chunk of chunks) {
+                jxl.set(chunk, offset);
+                offset += chunk.byteLength;
+            }
+        } finally {
+            await encoder.dispose();
+        }
+        encMs = performance.now() - t0;
+
+        // Decode using facade
+        const decoder = createDecoder({
+            format: "rgba8",
+            progressionTarget: "final",
+            emitEveryPass: false,
+            preserveIcc: false,
+            preserveMetadata: false,
+            copyInput: false,
+        });
+
+        try {
+            decoder.push(jxl);
+            await decoder.close();
+            let pixels: any = null;
+            for await (const event of decoder.events()) {
+                if (event.type === "error") {
+                    throw new Error("JXL decode failed: " + event.message);
+                }
+                if (event.type === "final") {
+                    pixels = event.pixels;
+                    decW = event.info.width;
+                    decH = event.info.height;
+                    break;
+                }
+            }
+            if (!pixels) {
+                throw new Error("JXL decode produced no final frame");
+            }
+            decRgba = new Uint8Array(pixels instanceof ArrayBuffer ? pixels : pixels.buffer, pixels.byteOffset, pixels.byteLength);
+        } finally {
+            await decoder.dispose();
+        }
+    }
+
+    const jxlKB = (jxl.byteLength / 1024).toFixed(0);
+
+    // Compare bit-exact (J2)
+    const same = Buffer.compare(
+        Buffer.from(decRgba.buffer, decRgba.byteOffset, decRgba.byteLength),
+        Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength)
+    ) === 0;
+
+    console.log(`  ${label.padEnd(8)} : ${same ? "BIT-EXACT ✓" : "MISMATCH ✗"} (jxl ${jxlKB}KB, enc ${encMs.toFixed(0)}ms)`);
+
+    if (!same) {
+        // Find first mismatching byte and count
+        let firstDiffIdx = -1;
+        let diffCount = 0;
+        const len = Math.min(decRgba.length, rgba.length);
+        for (let i = 0; i < len; i++) {
+            if (decRgba[i] !== rgba[i]) {
+                if (firstDiffIdx === -1) {
+                    firstDiffIdx = i;
+                }
+                diffCount++;
+            }
+        }
+        if (decRgba.length !== rgba.length) {
+            diffCount += Math.abs(decRgba.length - rgba.length);
+            if (firstDiffIdx === -1) {
+                firstDiffIdx = len;
+            }
+        }
+        console.log(`    [Mismatch info] first diff at byte ${firstDiffIdx}, total diff bytes: ${diffCount} / ${rgba.length}`);
+
+        // Strip alpha → RGB
+        const decRgb = new Uint8Array(decW * decH * 3);
+        for (let i = 0, j = 0; i < decRgb.length; i += 3, j += 4) {
+            decRgb[i] = decRgba[j];
+            decRgb[i+1] = decRgba[j+1];
+            decRgb[i+2] = decRgba[j+2];
+        }
+
+        // Downscale both ours and dec to CMP_W
+        const cmpH = Math.round((h * CMP_W) / w);
+        const oursSmall = downscale_rgb(ours8, w, h, CMP_W, cmpH);
+        const decSmall  = downscale_rgb(decRgb, decW, decH, CMP_W, cmpH);
+
+        const fmt = (s: Stats) =>
+            `R=${s.rMean.toFixed(0).padStart(3)} G=${s.gMean.toFixed(0).padStart(3)} B=${s.bMean.toFixed(0).padStart(3)} ` +
+            `lum=${s.lum.toFixed(0).padStart(3)} sat=${s.sat.toFixed(2)} R/G=${s.rgRatio.toFixed(3)} B/G=${s.bgRatio.toFixed(3)}`;
+
+        console.log(`    ours rgb : ${fmt(stats(new Uint8Array(oursSmall)))}`);
+        console.log(`    jxl->dec : ${fmt(stats(new Uint8Array(decSmall)))}`);
+    }
 }
