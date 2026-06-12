@@ -61,7 +61,43 @@ describe("selectBackend", () => {
             env: {},
             importNative: async () => ({ probe() { } }),
             importWasm: async () => ({ loadJxlModule() { } }),
-        })).rejects.toThrow("Neither jxl-native nor jxl-wasm exposes a codec facade");
+        })).rejects.toThrow("Neither jxl-native nor jxl-wasm exposes a codec facade. Install usable @casabio/jxl-native or @casabio/jxl-wasm artifacts. Diagnostics:");
+    });
+    test("ESM default interop: can resolve loadNativeBinding from default property", async () => {
+        const backend = await selectBackend({
+            env: {},
+            importNative: async () => ({
+                default: {
+                    loadNativeBinding() {
+                        return fakeCodecModule();
+                    },
+                },
+            }),
+            importWasm: async () => fakeCodecModule(),
+        });
+        expect(backend.type).toBe("native");
+    });
+    test("JXL_FORCE_NATIVE=1 throws on native failure and stops fallback to WASM", async () => {
+        await expect(selectBackend({
+            env: { JXL_FORCE_NATIVE: "1" },
+            importNative: async () => ({
+                loadNativeBinding() {
+                    throw new Error("addon compilation failed");
+                },
+            }),
+            importWasm: async () => fakeCodecModule(),
+        })).rejects.toThrow("JXL_FORCE_NATIVE=1 but native backend failed to load. Diagnostics:");
+    });
+    test("uses onDiagnostic option callback", async () => {
+        const diagnostics = [];
+        await expect(selectBackend({
+            env: {},
+            importNative: async () => null,
+            importWasm: async () => null,
+            onDiagnostic: (msg) => diagnostics.push(msg),
+        })).rejects.toThrow();
+        expect(diagnostics.length).toBeGreaterThan(0);
+        expect(diagnostics.some(d => d.includes("Failed to import @casabio/jxl-native"))).toBe(true);
     });
 });
 function fakeCodecModule() {

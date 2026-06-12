@@ -10,7 +10,7 @@ export declare class DedupeRegistry {
     register(sessionId: string, sourceKey: string): void;
     findPrimary(sourceKey: string): string | null;
     subscribe(subscriberId: string, primarySessionId: string): Subscription;
-    cancelSubscriber(subscriberId: string): {
+    cancelSubscriber(subscriberId: string, pickPromoted?: (candidates: ReadonlySet<string>) => string | undefined): {
         cancelWorker: boolean;
         promotedTo?: string;
     };

@@ -132,13 +132,21 @@ async function attachConverged(jxl: JxlBackend, levels: PyramidLevelBytes[]): Pr
   // (b: pass refPixels to skip backend re-decode is deferred API change touching backends.ts)
   const tasks = levels.map(async (lvl) => {
     const mx = Math.max(lvl.width, lvl.height);
-    if (mx >= 1024 && typeof jxl.profileConvergence === "function") {
-      try {
+    if (mx < 1024) return;
+    try {
+      if (typeof jxl.profileConvergenceCurve === "function") {
+        // full curve: persisted to manifest so clients pick any byte/quality cutoff offline
+        const prof = await jxl.profileConvergenceCurve(lvl.data, lvl.width, lvl.height);
+        if (prof) {
+          if (prof.convergedByteEnd != null && prof.convergedByteEnd > 0) lvl.convergedByteEnd = prof.convergedByteEnd;
+          if (prof.curve.length > 0) lvl.qualityCurve = prof.curve;
+        }
+      } else if (typeof jxl.profileConvergence === "function") {
         const ce = await jxl.profileConvergence(lvl.data, lvl.width, lvl.height);
         if (ce != null && ce > 0) lvl.convergedByteEnd = ce;
-      } catch {
-        // graceful: omit on error, single-pass JXL, or no ssim
       }
+    } catch {
+      // graceful: omit on error, single-pass JXL, or no ssim
     }
   });
   await Promise.all(tasks);

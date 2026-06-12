@@ -65,7 +65,7 @@ export interface IngestPlan {
   orientation: Orientation;
   width: number;
   height: number;
-  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean; convergedByteEnd?: number; stagedBytes?: number }>;
+  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean; convergedByteEnd?: number; qualityCurve?: Array<{ bytes: number; ssim?: number; butteraugli?: number }>; stagedBytes?: number }>;
   entries: LevelEntry[];
   proxy: boolean;
   manifest: Manifest;

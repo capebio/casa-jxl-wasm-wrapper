@@ -6,7 +6,8 @@
 // spawn, reserve, bind, release, recycle, reap, shutdown.
 // Scheduling policy — priority, preemption, dedupe, fairness — belongs in Scheduler.
 import { CoreBudget } from "./budget.js";
-const DEV = typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
+const DEV = (typeof process !== "undefined" && process.env["NODE_ENV"] !== "production") ||
+    (typeof process === "undefined" && typeof globalThis.__JXL_DEV__ !== "undefined");
 const DEFAULT_SPAWN_TIMEOUT_MS = 15_000;
 const RECYCLE_SHUTDOWN_TIMEOUT_MS = 1_000;
 const POOL_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -387,11 +388,19 @@ export class WorkerPool {
     }
     async createWorkerWithTimeout() {
         let timeout;
+        let timedOut = false;
+        const factoryPromise = this.factory();
+        // Late arrival after timeout: shut the orphan down instead of leaking it (P1).
+        factoryPromise.then((h) => { if (timedOut)
+            void h.shutdown(RECYCLE_SHUTDOWN_TIMEOUT_MS).catch(() => undefined); }, () => undefined);
         try {
             return await Promise.race([
-                this.factory(),
+                factoryPromise,
                 new Promise((_, reject) => {
-                    timeout = globalThis.setTimeout(() => reject(new Error(`[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`)), this.spawnTimeoutMs);
+                    timeout = globalThis.setTimeout(() => {
+                        timedOut = true;
+                        reject(new Error(`[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`));
+                    }, this.spawnTimeoutMs);
                 }),
             ]);
         }

@@ -44,7 +44,10 @@ interface NodeCodecModule {
     progressive: boolean;
     previewFirst: boolean;
     chunked: boolean;
-    // progressive (predator) accepted via any at call site to satisfy exactOptional + MsgEncodeStart source
+    progressiveDc?: number;
+    progressiveAc?: number;
+    qProgressiveAc?: number;
+    groupOrder?: number;
   }): NodeEncoder;
 }
 
@@ -52,6 +55,7 @@ const CHUNK_HWM = 4;
 const CHUNK_MAX_BUFFERED = 32;
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024;
 const DRAIN_MIN_INTERVAL_MS = 8;
+const HWM_EMA_ALPHA = 0.25;
 
 export class EncodeHandler {
   private readonly sessionId: string;
@@ -74,6 +78,9 @@ export class EncodeHandler {
   private lastDrainAllowed = false;
   private encoder: NodeEncoder | null = null;
   private disposePromise: Promise<void> | null = null;
+
+  private readonly stageStartMs = performance.now();
+  private pushLatencyEma = 0;
 
   constructor(opts: MsgEncodeStart, backend: Backend, callbacks: EncodeHandlerCallbacks) {
     this.sessionId = opts.sessionId;
@@ -141,7 +148,7 @@ export class EncodeHandler {
 
   private async run(): Promise<void> {
     const codec = this.backend.module as NodeCodecModule;
-    const encOpts: any = {
+    const encOpts = {
       format: this.opts.format,
       width: this.opts.width,
       height: this.opts.height,
@@ -155,11 +162,11 @@ export class EncodeHandler {
       progressive: this.opts.progressive,
       previewFirst: this.opts.previewFirst,
       chunked: this.opts.chunked,
+      ...(this.opts.progressiveDc != null ? { progressiveDc: this.opts.progressiveDc } : {}),
+      ...(this.opts.progressiveAc != null ? { progressiveAc: this.opts.progressiveAc } : {}),
+      ...(this.opts.qProgressiveAc != null ? { qProgressiveAc: this.opts.qProgressiveAc } : {}),
+      ...(this.opts.groupOrder != null ? { groupOrder: this.opts.groupOrder } : {}),
     };
-    if (this.opts.progressiveDc != null) encOpts.progressiveDc = this.opts.progressiveDc;
-    if (this.opts.progressiveAc != null) encOpts.progressiveAc = this.opts.progressiveAc;
-    if (this.opts.qProgressiveAc != null) encOpts.qProgressiveAc = this.opts.qProgressiveAc;
-    if (this.opts.groupOrder != null) encOpts.groupOrder = this.opts.groupOrder;
     const encoder = codec.createEncoder(encOpts);
     this.encoder = encoder;
     this.state = "configured";
@@ -253,7 +260,12 @@ export class EncodeHandler {
         const entry = this.takeNextPixels();
         if (entry === null) break;
         if (this.cancelled || this.isErrored()) return;
+
+        const t0 = performance.now();
         await encoder.pushPixels(entry.chunk, entry.region);
+        const pushMs = performance.now() - t0;
+        this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
+
         if (this.cancelled || this.isErrored()) return;
         this.maybePostDrain();
       }
@@ -282,7 +294,7 @@ export class EncodeHandler {
     this.port.postMessage({
       type: "worker_drain",
       sessionId: this.sessionId,
-      latencyMs: 0,
+      latencyMs: Math.round(this.pushLatencyEma),
       queueDepth: this.queueDepth,
       queuedBytes: this.queuedBytes,
       adaptiveHwm: CHUNK_HWM,
@@ -293,16 +305,38 @@ export class EncodeHandler {
     return this.state === "error";
   }
 
+  private postChunk(msg: MsgEncodeChunk, chunk: Buffer): void {
+    const ab = chunk.buffer;
+    if (chunk.byteOffset === 0 && chunk.byteLength === ab.byteLength) {
+      this.port.postMessage(msg, [ab]);
+    } else {
+      const exact = ab.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+      msg.chunk = exact as unknown as ArrayBuffer;
+      this.port.postMessage(msg, [exact]);
+    }
+  }
+
+  private postMetric(name: string, value: number): void {
+    this.port.postMessage({
+      type: "metric",
+      sessionId: this.sessionId,
+      metric: { name, value },
+    });
+  }
+
   private async readEncoderChunks(encoder: NodeEncoder): Promise<void> {
     let totalBytes = 0;
     let chunkIndex = 0;
     const sidecarCount = this.opts.sidecarSizes?.length ?? 0;
     const sidecarOffsets: number[] = [];
+
     for await (const chunk of encoder.chunks()) {
       if (this.cancelled || this.state === "done" || this.state === "error") return;
       const buffer = toBuffer(chunk);
       if (!this.firstByteEmitted) {
         this.firstByteEmitted = true;
+        this.state = "streaming";
+        this.postMetric("time_to_first_byte_ms", performance.now() - this.stageStartMs);
         const msg: MsgEncodeFirstByteReady = {
           type: "encode_first_byte_ready",
           sessionId: this.sessionId,
@@ -310,21 +344,26 @@ export class EncodeHandler {
         this.port.postMessage(msg);
       }
       totalBytes += buffer.byteLength;
+
       if (chunkIndex < sidecarCount) {
         sidecarOffsets.push(totalBytes);
       }
       chunkIndex++;
+
       const msg: MsgEncodeChunk = {
         type: "encode_chunk",
         sessionId: this.sessionId,
         chunk: buffer as unknown as ArrayBuffer,
       };
-      this.state = "streaming";
-      this.port.postMessage(msg);
+      this.postChunk(msg, buffer);
     }
 
     if (this.cancelled || this.state === "done" || this.state === "error") return;
     this.state = "done";
+
+    this.postMetric("output_bytes", totalBytes);
+    this.postMetric("encode_total_ms", performance.now() - this.stageStartMs);
+
     const doneMsg: MsgEncodeDone = {
       type: "encode_done",
       sessionId: this.sessionId,

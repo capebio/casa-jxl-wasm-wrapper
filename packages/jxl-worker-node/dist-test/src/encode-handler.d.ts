@@ -26,6 +26,8 @@ export declare class EncodeHandler {
     private lastDrainAllowed;
     private encoder;
     private disposePromise;
+    private readonly stageStartMs;
+    private pushLatencyEma;
     constructor(opts: MsgEncodeStart, backend: Backend, callbacks: EncodeHandlerCallbacks);
     onPixels(chunk: ArrayBuffer | Uint8Array | Buffer, region?: Region): void;
     onFinish(): void;
@@ -41,6 +43,8 @@ export declare class EncodeHandler {
     private feedEncoder;
     private maybePostDrain;
     private isErrored;
+    private postChunk;
+    private postMetric;
     private readEncoderChunks;
     private failSession;
 }

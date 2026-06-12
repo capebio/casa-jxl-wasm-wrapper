@@ -204,6 +204,104 @@ describe("node codec handlers", () => {
     expect(messages.some((msg) => msg.type === "encode_cancelled")).toBe(false);
     expect(ended).toEqual(["encode-node-release-state"]);
   });
+
+  test("decode handler suppresses release_state cancellation message", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    const backend: Backend = {
+      type: "native",
+      module: {
+        createDecoder() {
+          return {
+            push() {},
+            close() {},
+            cancel() {},
+            dispose() {},
+            async *events() {
+              await new Promise(() => undefined);
+            },
+          };
+        },
+        createEncoder() {
+          return {
+            pushPixels() {},
+            finish() {},
+            cancel() {},
+            dispose() {},
+            async *chunks() {},
+          };
+        },
+      },
+    };
+
+    const handler = new DecodeHandler(
+      { ...baseDecodeStart, sessionId: "decode-node-release-state" },
+      backend,
+      {
+        port: fakePort(messages),
+        onSessionEnd: (sessionId) => ended.push(sessionId),
+      },
+    );
+
+    await handler.onCancel("release_state");
+
+    expect(messages.some((msg) => msg.type === "decode_cancelled")).toBe(false);
+    expect(ended).toEqual(["decode-node-release-state"]);
+  });
+
+  test("encode handler emits correct telemetry metrics", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    const backend: Backend = {
+      type: "native",
+      module: {
+        createEncoder() {
+          return {
+            pushPixels() {},
+            finish() {},
+            cancel() {},
+            dispose() {},
+            async *chunks() {
+              yield Buffer.from([1, 2, 3]);
+            },
+          };
+        },
+        createDecoder() {
+          return {
+            push() {},
+            close() {},
+            cancel() {},
+            dispose() {},
+            async *events() {},
+          };
+        },
+      },
+    };
+
+    const handler = new EncodeHandler(baseEncodeStart, backend, {
+      port: fakePort(messages),
+      onSessionEnd: (sessionId) => ended.push(sessionId),
+    });
+    handler.onPixels(Buffer.from([0, 0, 0, 0]));
+    handler.onFinish();
+
+    await waitFor(() => ended.length === 1);
+
+    const metrics = messages.filter((msg) => msg.type === "metric") as Array<{ type: "metric"; metric: { name: string; value: number } }>;
+    expect(metrics.length).toBe(3);
+
+    const firstByteMetric = metrics.find((m) => m.metric.name === "time_to_first_byte_ms");
+    expect(firstByteMetric).toBeDefined();
+    expect(firstByteMetric!.metric.value >= 0).toBe(true);
+
+    const outputBytesMetric = metrics.find((m) => m.metric.name === "output_bytes");
+    expect(outputBytesMetric).toBeDefined();
+    expect(outputBytesMetric!.metric.value).toBe(3);
+
+    const totalTimeMetric = metrics.find((m) => m.metric.name === "encode_total_ms");
+    expect(totalTimeMetric).toBeDefined();
+    expect(totalTimeMetric!.metric.value >= 0).toBe(true);
+  });
 });
 
 function fakePort(messages: WorkerToMainMessage[]) {

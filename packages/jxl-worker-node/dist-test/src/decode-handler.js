@@ -69,13 +69,15 @@ export class DecodeHandler {
         this.inputClosed = true;
         this.wake();
     }
-    async onCancel(_reason) {
+    async onCancel(reason) {
         if (this.ended || this.cancelled)
             return;
         this.cancelled = true;
         this.paused = false;
-        const msg = { type: "decode_cancelled", sessionId: this.sessionId };
-        this.port.postMessage(msg);
+        if (reason !== "release_state") {
+            const msg = { type: "decode_cancelled", sessionId: this.sessionId };
+            this.port.postMessage(msg);
+        }
         this.finishSession("cancelled");
         void this.disposeActiveDecoder();
     }
@@ -147,7 +149,7 @@ export class DecodeHandler {
             downsample: this.opts.downsample,
             progressionTarget: this.opts.progressionTarget,
             emitEveryPass: this.opts.emitEveryPass,
-            ...(this.opts.progressiveDetail != null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
+            ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
             preserveIcc: this.opts.preserveIcc,
             preserveMetadata: this.opts.preserveMetadata,
         });
@@ -223,7 +225,7 @@ export class DecodeHandler {
             await this.waitForChunk();
             if (this.isTerminal() || this.paused)
                 continue;
-            while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
+            while (!this.isTerminal() && !this.paused && this.chunkQueue.length > this.chunkReadIndex) {
                 const chunk = this.takeNextChunk();
                 if (chunk === null)
                     break;
@@ -233,7 +235,7 @@ export class DecodeHandler {
                 this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
                 this.maybePostDrain();
             }
-            if (this.inputClosed && !this.isTerminal()) {
+            if (this.inputClosed && !this.isTerminal() && !this.paused) {
                 await decoder.close();
                 return;
             }
@@ -244,6 +246,8 @@ export class DecodeHandler {
         return Math.floor(HWM_BASE * factor);
     }
     maybePostDrain() {
+        if (this.isTerminal())
+            return;
         const now = performance.now();
         const hwm = this.adaptiveHwm();
         const drainAllowed = this.queueDepth < hwm && this.queuedBytes < BYTE_DRAIN_HWM;
@@ -356,8 +360,13 @@ export class DecodeHandler {
     }
     postWithPixels(msg, pixels) {
         const ab = pixels.buffer;
-        const owns = pixels.byteOffset === 0 && pixels.byteLength === ab.byteLength;
-        this.port.postMessage(msg, owns ? [ab] : []);
+        if (pixels.byteOffset === 0 && pixels.byteLength === ab.byteLength) {
+            this.port.postMessage(msg, [ab]);
+            return;
+        }
+        const exact = ab.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+        msg.pixels = exact;
+        this.port.postMessage(msg, [exact]);
     }
     postBudgetExceeded(stage, info, pixels, format, pixelStride) {
         if (this.ended)

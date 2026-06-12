@@ -18,6 +18,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:pgo": "node scripts/build-pgo.mjs",
+    "benchmark:pgo": "node scripts/benchmark-pgo.mjs",
     "manifest": "node scripts/write-manifest.mjs",
     "typecheck": "tsc --noEmit"
   },

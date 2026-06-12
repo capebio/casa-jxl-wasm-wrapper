@@ -323,6 +323,7 @@ export type CodecMetric =
   | { name: "time_to_first_byte_ms"; value: number }
   | { name: "input_bytes"; value: number }
   | { name: "output_bytes"; value: number }
+  | { name: "encode_total_ms"; value: number }
   | { name: "peak_memory_bytes"; value: number }
   | { name: "format_downcast"; value: number }      // emitted when output bpc < source bpc
   | { name: "region_fallback_full_frame"; value: 1 } // emitted when region decode falls back

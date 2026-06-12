@@ -40,6 +40,33 @@ test("buildRawLadder keeps every encoded level, ascending, full last, all 8-bit 
   }
 });
 
+test("buildRawLadder attaches qualityCurve + convergedByteEnd from profileConvergenceCurve on >=1024 levels", async () => {
+  const module = await loadScalarModule();
+  setJxlModuleFactoryForTesting(scalarFactory(module));
+  const curve = [
+    { bytes: 2, ssim: 0.97, butteraugli: 3.2 },
+    { bytes: 6, ssim: 0.9996, butteraugli: 1.05 },
+  ];
+  const jxl: JxlBackend = {
+    ...makeTestJxlBackend(),
+    async profileConvergenceCurve(_jxl: Uint8Array, _w?: number, _h?: number) {
+      return { curve, convergedByteEnd: 6 };
+    },
+  };
+  const W = 1280, H = 960;
+  const decoded: DecodedMaster = { rgba: gradientRgba(W, H), width: W, height: H, orientation: "baked" };
+  const ladder = await buildRawLadder(jxl, decoded, true);
+  for (const lvl of ladder.levels) {
+    if (Math.max(lvl.width, lvl.height) >= 1024) {
+      expect(lvl.qualityCurve).toEqual(curve);
+      expect(lvl.convergedByteEnd).toBe(6);
+    } else {
+      expect(lvl.qualityCurve).toBeUndefined();
+      expect(lvl.convergedByteEnd).toBeUndefined();
+    }
+  }
+});
+
 test("buildJpgLadder produces all levels (incl full) as tiled JXTC (no transcode substitution)", async () => {
   const transcodeBytes = new Uint8Array([0xff, 0x0a, 0x42, 0x13]);
   const fake: JxlBackend = {

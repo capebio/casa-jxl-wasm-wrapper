@@ -129,12 +129,14 @@ export class DecodeHandler {
     this.wake();
   }
 
-  async onCancel(_reason?: string): Promise<void> {
+  async onCancel(reason?: string): Promise<void> {
     if (this.ended || this.cancelled) return;
     this.cancelled = true;
     this.paused = false;
-    const msg: MsgDecodeCancelled = { type: "decode_cancelled", sessionId: this.sessionId };
-    this.port.postMessage(msg);
+    if (reason !== "release_state") {
+      const msg: MsgDecodeCancelled = { type: "decode_cancelled", sessionId: this.sessionId };
+      this.port.postMessage(msg);
+    }
     this.finishSession("cancelled");
     void this.disposeActiveDecoder();
   }
@@ -294,7 +296,7 @@ export class DecodeHandler {
       await this.waitForChunk();
       if (this.isTerminal() || this.paused) continue;
 
-      while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
+      while (!this.isTerminal() && !this.paused && this.chunkQueue.length > this.chunkReadIndex) {
         const chunk = this.takeNextChunk();
         if (chunk === null) break;
 
@@ -306,7 +308,7 @@ export class DecodeHandler {
         this.maybePostDrain();
       }
 
-      if (this.inputClosed && !this.isTerminal()) {
+      if (this.inputClosed && !this.isTerminal() && !this.paused) {
         await decoder.close();
         return;
       }
@@ -319,6 +321,7 @@ export class DecodeHandler {
   }
 
   private maybePostDrain(): void {
+    if (this.isTerminal()) return;
     const now = performance.now();
     const hwm = this.adaptiveHwm();
 
@@ -432,10 +435,15 @@ export class DecodeHandler {
     return performance.now() - this.stageStartMs > this.opts.budgetMs;
   }
 
-  private postWithPixels(msg: object, pixels: Buffer): void {
+  private postWithPixels(msg: { pixels: ArrayBuffer }, pixels: Buffer): void {
     const ab = pixels.buffer;
-    const owns = pixels.byteOffset === 0 && pixels.byteLength === ab.byteLength;
-    this.port.postMessage(msg, owns ? [ab] : []);
+    if (pixels.byteOffset === 0 && pixels.byteLength === ab.byteLength) {
+      this.port.postMessage(msg, [ab]);
+      return;
+    }
+    const exact = ab.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+    msg.pixels = exact;
+    this.port.postMessage(msg, [exact]);
   }
 
   private postBudgetExceeded(stage: DecodeStage, info: ImageInfo, pixels: Buffer, format: PixelFormat, pixelStride: number): void {

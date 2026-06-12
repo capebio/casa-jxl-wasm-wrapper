@@ -29,6 +29,13 @@ export const producedBySchema = z.object({
 
 export const levelSizeSchema = z.union([z.number().int().positive(), z.literal("full")]);
 
+/** Encode-time progressive quality curve point (measured once at ingest; read-only for clients). */
+export const qualityCurvePointSchema = z.object({
+  bytes: z.number().int().positive(),
+  ssim: z.number().min(0).max(1).optional(),
+  butteraugli: z.number().nonnegative().optional(),
+});
+
 export const levelEntrySchema = z.object({
   size: levelSizeSchema,
   w: z.number().int().positive(),
@@ -38,6 +45,7 @@ export const levelEntrySchema = z.object({
   contenthash: z.string().length(16),
   tiled: z.boolean(),
   convergedByteEnd: z.number().int().positive().optional(),
+  qualityCurve: z.array(qualityCurvePointSchema).optional(),
 });
 
 export const masterInfoSchema = z.object({
