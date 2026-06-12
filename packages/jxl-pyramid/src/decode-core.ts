@@ -378,7 +378,7 @@ export interface DecodeOptions {
   cacheDcTiles?: boolean;
 }
 
-export type ProgressiveMode = 'dc-then-final' | undefined;
+export type ProgressiveMode = 'dc-then-final' | 'dc-only' | undefined;
 
 /** Agent6-4: once-per-LevelSource lazy capture of ICC (and future metadata) using minimal header decoder + facade.getIccProfile.
  *  Caches on the source object (like bytesId). Shared reference stamped to results (no per-tile copies).

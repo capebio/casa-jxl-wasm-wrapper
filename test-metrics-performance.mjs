@@ -208,7 +208,7 @@ async function main() {
     console.log(`Grand total Butteraugli time (with precompute): ${(totalButtTime + preTime).toFixed(2)} ms`);
 
     const grandTotal = totalPsnrTime + totalSsimTime + totalButtTime + preTime;
-    console.log(`\\nTotal synchronous UI lockup time: ${grandTotal.toFixed(2)} ms`);
+    console.log(`\\nTotal metric compute time: ${grandTotal.toFixed(2)} ms (Node, full-res, synchronous — browser runs these in jxl-frame-stats-worker at <=1MP; NOT a UI-thread measurement)`);
 }
 
 main().catch(console.error);

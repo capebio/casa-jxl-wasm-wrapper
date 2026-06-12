@@ -19,6 +19,7 @@ const gitBinary = resolveGitBinary();
 const emcmakeBinary = resolveEmscriptenBinary("emcmake");
 const emppBinary = resolveEmscriptenBinary("em++");
 const bashBinary = resolveBashBinary();
+const cmakeBinary = resolveCmakeBinary();
 const config = {
   buildId: "jxl-wasm-0.1.0",
   libjxlRepo: process.env.LIBJXL_REPO ?? "https://github.com/libjxl/libjxl.git",
@@ -194,6 +195,7 @@ export async function runConfigureProbe(options = {}) {
     "-DCMAKE_REQUIRED_LINK_OPTIONS=-pthread",
     "-DCMAKE_C_COMPILER_CLANG_SCAN_DEPS:FILEPATH=",
     "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS:FILEPATH=",
+    `-DPKG_CONFIG_EXECUTABLE:FILEPATH=${toCmakePath(join(packageRoot, "cmake-shims", "pkg-config-disabled.bat"))}`,
     "-DCMAKE_C_COMPILER_FORCED=TRUE",
     "-DCMAKE_CXX_COMPILER_FORCED=TRUE",
     "-DCMAKE_CXX_LINK_PIE_SUPPORTED=0",
@@ -202,12 +204,15 @@ export async function runConfigureProbe(options = {}) {
     "-DCXX_MACRO_PREFIX_MAP=1",
     "-DCXX_NO_RTTI_SUPPORTED=1",
     "-DJXL_HWY_DISABLED_TARGETS_FORCED=1",
+    "-DHWY_EMSCRIPTEN=1",
+    "-DHWY_RISCV=0",
+    "-DATOMICS_LOCK_FREE_INSTRUCTIONS=1",
     "-DCMAKE_CXX_SCAN_FOR_MODULES=OFF",
     "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
     `-DCMAKE_MODULE_PATH=${toCmakePath(join(packageRoot, "cmake-shims"))}`
   ];
   const env = {
-    ...process.env,
+    ...buildPgoToolEnv(),
     CFLAGS: tierFlags.join(" "),
     CXXFLAGS: tierFlags.join(" "),
     LDFLAGS: tierFlags.join(" ")
@@ -458,6 +463,7 @@ async function buildEncSimd({ mode, outJs, outWasm, profilesDir, profdataPath })
     "-DCMAKE_REQUIRED_LINK_OPTIONS=-pthread",
     "-DCMAKE_C_COMPILER_CLANG_SCAN_DEPS:FILEPATH=",
     "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS:FILEPATH=",
+    `-DPKG_CONFIG_EXECUTABLE:FILEPATH=${toCmakePath(join(packageRoot, "cmake-shims", "pkg-config-disabled.bat"))}`,
     "-DCMAKE_C_COMPILER_FORCED=TRUE",
     "-DCMAKE_CXX_COMPILER_FORCED=TRUE",
     "-DCMAKE_CXX_LINK_PIE_SUPPORTED=0",
@@ -466,13 +472,16 @@ async function buildEncSimd({ mode, outJs, outWasm, profilesDir, profdataPath })
     "-DCXX_MACRO_PREFIX_MAP=1",
     "-DCXX_NO_RTTI_SUPPORTED=1",
     "-DJXL_HWY_DISABLED_TARGETS_FORCED=1",
+    "-DHWY_EMSCRIPTEN=1",
+    "-DHWY_RISCV=0",
+    "-DATOMICS_LOCK_FREE_INSTRUCTIONS=1",
     "-DCMAKE_CXX_SCAN_FOR_MODULES=OFF",
     "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
     `-DCMAKE_MODULE_PATH=${toCmakePath(join(packageRoot, "cmake-shims"))}`
   ];
 
   const env = {
-    ...process.env,
+    ...buildPgoToolEnv(),
     CFLAGS: tierFlags.join(" "),
     CXXFLAGS: tierFlags.join(" "),
     LDFLAGS: tierFlags.join(" ")
@@ -770,6 +779,13 @@ function resolveEmscriptenBinary(name) {
   return join(root, "upstream", "emscripten", name);
 }
 
+function resolveCmakeBinary() {
+  if (process.platform === "win32") {
+    return "C:\\Program Files\\CMake\\bin\\cmake.exe";
+  }
+  return "cmake";
+}
+
 function resolveBashBinary() {
   if (process.platform === "win32") {
     return "C:\\Program Files\\Git\\bin\\bash.exe";
@@ -783,6 +799,57 @@ function resolveGitBinary() {
     return "C:\\Program Files\\Git\\cmd\\git.exe";
   }
   return "git";
+}
+
+function buildPgoToolEnv() {
+  const pathEntries = [];
+  const add = (value) => {
+    if (!value) return;
+    for (const entry of String(value).split(pathDelimiter())) {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      if (!pathEntries.includes(trimmed)) {
+        pathEntries.push(trimmed);
+      }
+    }
+  };
+
+  add(dirname(emcmakeBinary));
+  add(dirname(emppBinary));
+  add(process.env.EMSDK);
+  add(dirname(cmakeBinary));
+  add(dirname(gitBinary));
+  add(dirname(bashBinary));
+
+  const keepPathEntry = (entry) => {
+    if (!entry) return false;
+    const normalized = entry.replaceAll("/", "\\").toLowerCase();
+    return normalized.includes("\\emsdk")
+      || normalized.includes("\\cmake\\bin")
+      || normalized.includes("\\git\\cmd")
+      || normalized.includes("\\git\\bin")
+      || normalized.includes("\\windows\\system32")
+      || normalized === "c:\\windows"
+      || normalized.includes("\\powershell\\7")
+      || normalized.includes("\\nodejs")
+      || normalized.includes("\\python")
+      || normalized.includes("ninja-build.ninja");
+  };
+
+  for (const entry of String(process.env.PATH ?? "").split(pathDelimiter())) {
+    if (keepPathEntry(entry.trim())) {
+      add(entry);
+    }
+  }
+
+  return {
+    ...process.env,
+    PATH: pathEntries.join(pathDelimiter())
+  };
+}
+
+function pathDelimiter() {
+  return process.platform === "win32" ? ";" : ":";
 }
 
 function toCmakePath(path) {

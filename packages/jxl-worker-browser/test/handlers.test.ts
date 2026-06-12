@@ -257,6 +257,53 @@ describe("browser codec handlers", () => {
     expect(finalMessage?.timeToFinalMs).toBeDefined();
   });
 
+  test("decode handler finishes worker session after early progression target progress without waiting for close", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    const info = {
+      width: 1, height: 1, bitsPerSample: 8,
+      hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+    };
+    const codec = {
+      createDecoder() {
+        return {
+          push() {},
+          close() {},
+          cancel() {},
+          dispose() {},
+          async *events() {
+            yield { type: "header", info };
+            yield {
+              type: "progress",
+              stage: "dc" as const,
+              info,
+              pixels: new Uint8Array([1, 2, 3, 4]).buffer,
+              format: "rgba8" as const,
+              pixelStride: 4,
+            };
+          },
+        };
+      },
+    };
+
+    const handler = new DecodeHandler(
+      { ...baseDecodeStart, sessionId: "early-progress-target", progressionTarget: "dc", emitEveryPass: false },
+      codec as never,
+      { onSessionEnd: (sessionId) => ended.push(sessionId) },
+    );
+    handler.onChunk(new Uint8Array([0xff]).buffer);
+
+    await waitFor(() => ended.length === 1);
+
+    expect(messages.filter((msg) => msg.type.startsWith("decode_")).map((msg) => msg.type)).toEqual([
+      "decode_header",
+      "decode_progress",
+    ]);
+    expect(ended).toEqual(["early-progress-target"]);
+  });
+
   test("decode handler does not post decode_cancelled for release_state", async () => {
     const messages: WorkerToMainMessage[] = [];
     const ended: string[] = [];

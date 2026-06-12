@@ -86,7 +86,7 @@ Rebuilding WASM (`libjxl` bridge) requires:
 - Emscripten (`emsdk`) — use `docker.io/emscripten/emsdk` (not `ghcr.io/emscripten-core/emsdk` — auth issues)
 - Build command: `node scripts/build.mjs` from `packages/jxl-wasm`
 
-Use shipped `web/pkg` when possible. Known blocker: forward-declaration needed for `jxl_wasm_transcode_jpeg_to_jxl` in `bridge.cpp:575` (pre-existing).
+Use shipped `web/pkg` when possible. The old `jxl_wasm_transcode_jpeg_to_jxl` forward-declaration blocker is resolved (declared at `bridge.cpp:1992`, defined at `:3144`; symbol exported in shipped `dist/jxl-core.simd.js` — verified 2026-06-12). Note: the P3 dec/enc split artifacts (`jxl-core.dec.*.js`) are not built yet; test helpers must fall back to monolithic `jxl-core.simd.js` (see `packages/pyramid-ingest/test/scalar.ts`).
 
 ## Test Gaps (decode-handler)
 

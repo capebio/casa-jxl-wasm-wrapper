@@ -12,7 +12,8 @@ import { loadScalarModule, scalarFactory } from "./scalar.js";
 import { createInMemoryPyramidCache } from "../src/cache.js";
 import type { RegionDecoder } from "../src/decode-core.js";
 import { PyramidError } from "../src/decode-level.js";
-import { tileKey } from "../src/decode-core.js";
+import { tileKey, viewportCacheKey } from "../src/decode-core.js";
+import { getLevelId } from "../src/cache.js";
 
 function gradient(w: number, h: number): Uint8Array {
   const px = new Uint8Array(w * h * 4);
@@ -26,6 +27,101 @@ function gradient(w: number, h: number): Uint8Array {
     }
   }
   return px;
+}
+
+function createFakeProgressiveDecodeModule(tileW = 512, tileH = 512) {
+  const memory = new ArrayBuffer(Math.max(65536, tileW * tileH * 4 * 4));
+  const HEAPU8 = new Uint8Array(memory);
+  const HEAP32 = new Int32Array(memory);
+  const HEAPU32 = new Uint32Array(memory);
+  let nextPtr = 64;
+  let nextHandle = 1;
+  const allocations = new Map<number, number>();
+  const handles = new Map<number, { dataPtr: number; size: number; width: number; height: number; bits: number; alpha: number }>();
+
+  const malloc = (size: number) => {
+    const ptr = nextPtr;
+    nextPtr += size + 8;
+    allocations.set(ptr, size);
+    return ptr;
+  };
+
+  const makeHandle = (bytes: Uint8Array, width: number, height: number, bits = 8) => {
+    const dataPtr = malloc(bytes.byteLength);
+    HEAPU8.set(bytes, dataPtr);
+    const handle = nextHandle++;
+    handles.set(handle, { dataPtr, size: bytes.byteLength, width, height, bits, alpha: 1 });
+    return handle;
+  };
+
+  const pixels = new Uint8Array(tileW * tileH * 4);
+  pixels.fill(17);
+
+  let closed = false;
+  let flushed = false;
+
+  return {
+    HEAPU8,
+    HEAP32,
+    HEAPU32,
+    _malloc: malloc,
+    _free: (ptr: number) => allocations.delete(ptr),
+    _jxl_wasm_buffer_data: (handle: number) => handles.get(handle)?.dataPtr ?? 0,
+    _jxl_wasm_buffer_size: (handle: number) => handles.get(handle)?.size ?? 0,
+    _jxl_wasm_buffer_width: (handle: number) => handles.get(handle)?.width ?? 0,
+    _jxl_wasm_buffer_height: (handle: number) => handles.get(handle)?.height ?? 0,
+    _jxl_wasm_buffer_bits_per_sample: (handle: number) => handles.get(handle)?.bits ?? 8,
+    _jxl_wasm_buffer_has_alpha: (handle: number) => handles.get(handle)?.alpha ?? 1,
+    _jxl_wasm_buffer_free: (handle: number) => {
+      const entry = handles.get(handle);
+      if (entry) allocations.delete(entry.dataPtr);
+      handles.delete(handle);
+    },
+    _jxl_wasm_decode_rgba8: () => makeHandle(pixels, tileW, tileH, 8),
+    _jxl_wasm_dec_create: () => 1,
+    _jxl_wasm_dec_push: (_state: number, _dataPtr: number, size: number) => {
+      if (closed || size === 0) return 2;
+      flushed = true;
+      return 1;
+    },
+    _jxl_wasm_dec_close_input: () => {
+      closed = true;
+    },
+    _jxl_wasm_dec_width: () => tileW,
+    _jxl_wasm_dec_height: () => tileH,
+    _jxl_wasm_dec_error: () => 0,
+    _jxl_wasm_dec_take_flushed: () => {
+      if (!flushed) return 0;
+      flushed = false;
+      return makeHandle(pixels, tileW, tileH, 8);
+    },
+    _jxl_wasm_dec_take_final: () => makeHandle(pixels, tileW, tileH, 8),
+    _jxl_wasm_dec_free: () => {},
+  };
+}
+
+function createSyntheticJxtcContainer(w: number, h: number, tileSize: number, tileByteLength: number) {
+  const tilesX = Math.ceil(w / tileSize);
+  const tilesY = Math.ceil(h / tileSize);
+  const numTiles = tilesX * tilesY;
+  const indexBytes = numTiles * 8;
+  const dataBase = 32 + indexBytes;
+  const out = new Uint8Array(dataBase + numTiles * tileByteLength);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, 0x4354584a, true);
+  dv.setUint32(4, 1, true);
+  dv.setUint32(8, w, true);
+  dv.setUint32(12, h, true);
+  dv.setUint32(16, tileSize, true);
+  dv.setUint32(20, tilesX, true);
+  dv.setUint32(24, tilesY, true);
+  dv.setUint32(28, 0, true);
+  for (let i = 0; i < numTiles; i++) {
+    dv.setUint32(32 + i * 8, i * tileByteLength, true);
+    dv.setUint32(32 + i * 8 + 4, tileByteLength, true);
+    out.fill((i + 1) * 9, dataBase + i * tileByteLength, dataBase + (i + 1) * tileByteLength);
+  }
+  return out;
 }
 
 afterEach(() => setJxlModuleFactoryForTesting(null));
@@ -250,6 +346,42 @@ test("progressive option accepted on decodeTiledViewport (F1 surface; full event
   }).not.toThrow();
 });
 
+test("dc-only progressive mode emits only DC tile passes and caches under qdc", { timeout: 120_000 }, async () => {
+  const W = 1024;
+  const H = 512;
+  const tileSize = 512;
+  setJxlModuleFactoryForTesting(async () => createFakeProgressiveDecodeModule(tileSize, tileSize) as any);
+  const container = createSyntheticJxtcContainer(W, H, tileSize, 8);
+  const source = createLevelSource({ w: W, h: H, tiled: true }, container);
+  const region = { x: 0, y: 0, w: 1024, h: 512 };
+  const cache = createInMemoryPyramidCache({ maxBytes: 4 * 1024 * 1024 });
+
+  const seenStages: Array<'dc' | 'final'> = [];
+  const seenCompleted: number[] = [];
+  const onTile = (_r: any, completed: number, progress?: any) => {
+    if (progress) seenStages.push(progress.stage);
+    seenCompleted.push(completed);
+  };
+
+  const decoded = await decodeTiledViewport(source, region, {
+    progressive: 'dc-only' as any,
+    parallel: false,
+    cache,
+    onTile,
+  });
+
+  expect(decoded.width).toBe(region.w);
+  expect(decoded.height).toBe(region.h);
+  expect(seenStages.length).toBe(2);
+  expect(seenStages).toEqual(['dc', 'dc']);
+  expect(seenCompleted).toEqual([1, 2]);
+
+  const dcKey = viewportCacheKey(getLevelId(source), region, source.format, 'dc');
+  const finalKey = viewportCacheKey(getLevelId(source), region, source.format, 'final');
+  expect(cache.has(dcKey)).toBe(true);
+  expect(cache.has(finalKey)).toBe(false);
+});
+
 // --- Phase 2 handoff required tests (F6/F7/MoreF2) ---
 
 test("F6: LevelSource carries format monotonically from 16-bit manifest (no bits calcs at call sites)", async () => {
@@ -394,5 +526,6 @@ test("F-2/F-3/F-1: predictRegion, prefetchViewport and per-tile caching features
   const source = createLevelSource({ w: W, h: H, tiled: true }, container);
   
   // prefetch is best-effort and shouldn't throw even without workers
-  await expect(prefetchViewport(source as any, vp, { cache })).resolves.not.toThrow();
+  // (direct await: a rejection would fail the test; .resolves.not.toThrow() can't be used on a void promise)
+  await prefetchViewport(source as any, vp, { cache });
 });

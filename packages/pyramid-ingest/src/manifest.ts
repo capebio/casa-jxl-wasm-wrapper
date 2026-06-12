@@ -68,8 +68,11 @@ export function buildManifest(args: {
 }
 
 export function buildIndexEntry(manifest: Manifest): IndexEntry {
-  const l0 = manifest.levels[0];
+  const l0 = manifest.levels?.[0];
   if (!l0) throw new Error(`manifest ${manifest.imageId} has no levels`);
+  // aspect is optional on v1 manifests; the index schema requires it, so fail loudly here
+  // (previously undefined would flow through and fail galleryIndexSchema.parse later).
+  if (manifest.aspect == null) throw new Error(`manifest ${manifest.imageId} has no aspect`);
   return {
     imageId: manifest.imageId,
     aspect: manifest.aspect,

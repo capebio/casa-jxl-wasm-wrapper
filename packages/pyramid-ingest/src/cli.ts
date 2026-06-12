@@ -4,7 +4,7 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { setForcedTier } from "@casabio/jxl-wasm";
-import { createJxlBackend } from "./backends.js";
+import { createJxlBackend, type MasterFormat } from "./backends.js";
 import { createRawBackend } from "./raw-backend.js";
 import { computeIngestPlan, formatFromPath, ingestBatch, rebuildIndex, type Backends, type IngestPlan } from "./ingest.js";
 import { createTtyTelemetry, noOpTelemetry } from "./telemetry-tty.js";
@@ -147,8 +147,9 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
         return 1;
       }
       const levelsDir = join(parsed.out, "levels");
+      const mLevels = manifest.levels ?? []; // v1 manifests may omit levels
       let onDisk = 0;
-      for (const e of manifest.levels) {
+      for (const e of mLevels) {
         try {
           await stat(join(levelsDir, `${e.contenthash}.jxl`));
           onDisk++;
@@ -157,13 +158,13 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       process.stdout.write(`Image: ${manifest.imageId}\n`);
       process.stdout.write(`Master: ${manifest.master.name} (mtimeMs ${manifest.master.mtimeMs})\n`);
       process.stdout.write(`Format: ${manifest.master.format}\n`);
-      process.stdout.write(`Plan: ${manifest.levels.length} levels\n`);
-      for (const lv of manifest.levels) {
+      process.stdout.write(`Plan: ${mLevels.length} levels\n`);
+      for (const lv of mLevels) {
         const label = lv.size === "full" ? "full" : `sidecar ${lv.size}`;
         process.stdout.write(`  - ${label}  (${lv.w}×${lv.h}, ${Math.round(lv.bytes/102.4)/10} KB)\n`);
       }
       process.stdout.write(`Manifest exists: yes\n`);
-      process.stdout.write(`On-disk levels: ${onDisk} / ${manifest.levels.length} present\n`);
+      process.stdout.write(`On-disk levels: ${onDisk} / ${mLevels.length} present\n`);
       return 0;
     }
     // treat as master path: compute plan (no write)
@@ -187,7 +188,9 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       jxl: createJxlBackend(),
       telemetry: noOpTelemetry,
     };
-    const plan = await computeIngestPlan(bytes, format, b, identity, { outDir: parsed.out, force: false });
+    // formatFromPath covers extended raw formats (nef/arw/...) beyond the MasterFormat core four;
+    // computeIngestPlan handles them at runtime via degraded tiers.
+    const plan = await computeIngestPlan(bytes, format as MasterFormat, b, identity, { outDir: parsed.out, force: false });
     printPlanHuman(plan);
     return 0;
   }
@@ -195,7 +198,7 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
   // WU-6 prereqs + subcommand parsing (approved plan): support `gc` / `validate` / `rm` as first positional
   // (or --gc/--validate/--rm flag for BC). reindex/explain keep flag paths. Batch is default.
   // Locks acquired per L3 (write for gc/rm/ingest, read for validate). Release on sig + finally.
-  let subcmd: "gc" | "validate" | "rm" | "batch" | "reindex" | "explain" | null = null;
+  let subcmd: "gc" | "validate" | "rm" | "batch" | "reindex" | "explain" | "migrate" | null = null;
   let cmdPositionals = [...positionals];
   const first = cmdPositionals[0]?.toLowerCase();
   if (first && ["gc", "validate", "rm"].includes(first)) {
@@ -252,10 +255,10 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       const info = await stat(masterPath);
       if (info.size > 512 * 1024 * 1024) { process.stderr.write("explain: master too large\n"); return 1; }
       const bytes = await readFile(masterPath);
-      const imageId = imageIdForPath(masterPath);
+      const imageId = await imageIdForPath(masterPath);
       const identity = { imageId, masterName: basename(masterPath), mtimeMs: info.mtimeMs };
       const b: Backends = backendsOverride ?? { raw: createRawBackend(), jxl: createJxlBackend(), telemetry: noOpTelemetry };
-      const plan = await computeIngestPlan(bytes, format, b, identity, { outDir: parsed.out, force: false });
+      const plan = await computeIngestPlan(bytes, format as MasterFormat, b, identity, { outDir: parsed.out, force: false });
       printPlanHuman(plan);
       return 0;
     }

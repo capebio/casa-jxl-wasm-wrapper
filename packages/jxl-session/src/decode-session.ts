@@ -29,11 +29,14 @@ const INTERNAL: JxlErrorCode = "Internal";
 const CANCELLED: JxlErrorCode = "Cancelled";
 const BUDGET_EXCEEDED: JxlErrorCode = "BudgetExceeded";
 const CONFIG_ERROR: JxlErrorCode = "ConfigError";
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return typeof (value as Promise<T>)?.then === "function";
+}
 
 export class DecodeSessionImpl implements DecodeSession {
   readonly id: string;
 
-  private readonly scheduler: Scheduler;
+  private scheduler: Scheduler | null = null;
   private readonly opts: DecodeOptions;
   private readonly frameStream = new AsyncEventStream<DecodeFrameEvent>();
   private readonly doneDeferred: Deferred<ImageInfo> = deferred<ImageInfo>();
@@ -49,8 +52,7 @@ export class DecodeSessionImpl implements DecodeSession {
   private framesConsumed = false;
   private terminalError: JxlError | null = null;
 
-  constructor(scheduler: Scheduler, opts: DecodeOptions) {
-    this.scheduler = scheduler;
+  constructor(schedulerOrPromise: Scheduler | Promise<Scheduler>, opts: DecodeOptions) {
     this.opts = opts;
     this.id = newSessionId();
 
@@ -89,18 +91,23 @@ export class DecodeSessionImpl implements DecodeSession {
       return; // ctor done; no listener, no acquire, no cancel for unrequested slot
     }
 
-    // Register the message handler BEFORE acquireSlot sends decode_start,
-    // so decode_header is never missed.
-    this.scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
-
-    this.acquirePromise = this.scheduler
-      .acquireSlot({
+    const initAcquire = (scheduler: Scheduler): Promise<unknown> => {
+      this.scheduler = scheduler;
+      // Register the message handler BEFORE acquireSlot sends decode_start,
+      // so decode_header is never missed.
+      scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
+      return scheduler.acquireSlot({
         sessionId: this.id,
         priority: startMsg.priority,
         startMsg,
         sourceKey: null,
         signal: opts.signal ?? null,
-      })
+      });
+    };
+
+    this.acquirePromise = (isPromiseLike(schedulerOrPromise)
+      ? schedulerOrPromise.then((scheduler) => initAcquire(scheduler))
+      : initAcquire(schedulerOrPromise))
       .catch((err: unknown) => {
         this.fail(new JxlError(INTERNAL, `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
       });
@@ -110,7 +117,7 @@ export class DecodeSessionImpl implements DecodeSession {
       this.abortHandler = () => {
         // Cancel the scheduler slot before failing so the worker is told to stop
         // and the pool slot is released immediately (task 007-concurrency-e7f8a9b0).
-        this.scheduler.cancelSession(this.id);
+        this.scheduler?.cancelSession(this.id);
         this.fail(new JxlError(CANCELLED, "Decode aborted by signal", { sessionId: this.id }));
       };
       this.abortSignal.addEventListener("abort", this.abortHandler, { once: true });
@@ -137,11 +144,13 @@ export class DecodeSessionImpl implements DecodeSession {
     // (task 007-concurrency-e5f6a7b8 / 007-errors-f6a7b8c9).
     if (this.terminated || this.closed) return;
     // Backpressure: resolves when the worker queue is below the high-water mark.
-    await this.scheduler.waitForDrain(this.id);
+    const scheduler = this.scheduler;
+    if (scheduler === null) return;
+    await scheduler.waitForDrain(this.id);
     // Re-check: cancellation or worker error may have arrived during drain wait.
     if (this.terminated || this.closed) return;
     const ab = toTransferableBuffer(chunk);
-    this.scheduler.send(this.id, { type: "decode_chunk", sessionId: this.id, chunk: ab }, [ab]);
+    scheduler.send(this.id, { type: "decode_chunk", sessionId: this.id, chunk: ab }, [ab]);
   }
 
   async close(): Promise<void> {
@@ -149,7 +158,7 @@ export class DecodeSessionImpl implements DecodeSession {
     this.closed = true;
     await this.acquirePromise;
     if (this.terminated) return;
-    this.scheduler.send(this.id, { type: "decode_close", sessionId: this.id });
+    this.scheduler?.send(this.id, { type: "decode_close", sessionId: this.id });
   }
 
   /**
@@ -191,7 +200,7 @@ export class DecodeSessionImpl implements DecodeSession {
     await this.acquirePromise.catch(() => undefined);
     // Re-check: abort handler or error may have terminated us during the await.
     if (this.terminated) return;
-    this.scheduler.cancelSession(this.id);
+    this.scheduler?.cancelSession(this.id);
     this.fail(new JxlError(CANCELLED, reason ?? "Decode cancelled", { sessionId: this.id }));
   }
 
@@ -338,7 +347,6 @@ export class DecodeSessionImpl implements DecodeSession {
     if (this.terminated) return;
     this.terminated = true;
     this.cleanup();
-    if (!this.framesConsumed) this.frameStream.clear();  // DS-2: release progressive pixel buffers for done()-only consumers (ES-5 clear)
     this.frameStream.end();
     if (!this.doneDeferred.settled) {
       this.doneDeferred.resolve(info);
@@ -356,15 +364,7 @@ export class DecodeSessionImpl implements DecodeSession {
     this.terminated = true;
     this.cleanup();
     this.terminalError = err;  // DS-7
-    if (this.framesConsumed) {
-      // Active consumer: end gracefully so all buffered frames are visible.
-      this.frameStream.end();
-    } else {
-      // No consumer ever called frames() — discard the buffered pixel
-      // ArrayBuffers immediately rather than retaining them until GC
-      // (task 007-concurrency-a7b8c9d0).
-      this.frameStream.fail(err);
-    }
+    this.frameStream.end();
     if (!this.doneDeferred.settled) {
       this.doneDeferred.reject(err);
     }

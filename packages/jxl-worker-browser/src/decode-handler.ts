@@ -399,6 +399,10 @@ export class DecodeHandler {
           if (event.region !== undefined) msg.region = event.region;
           self.postMessage(msg, [pixels]);
           this.postFirstPixelMetric();
+          if (this.opts.progressionTarget !== "final" && !this.opts.emitEveryPass) {
+            this.finishSession("final");
+            return;
+          }
           break;
         }
         case "final": {

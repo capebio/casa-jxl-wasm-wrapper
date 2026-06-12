@@ -89,10 +89,9 @@ function dn2(src, w, h) {
 }
 
 // Perceptual error at one spatial scale.
-// Uses Y-channel blur for masking (brighter/higher-contrast areas tolerate more error).
-function scaleErr(rX, rY, rB, tX, tY, tB, w, h) {
-    const blurR = Math.max(1, Math.min(8, w >> 6));  // ~w/64, clamped 1–8
-    const mask = boxBlur(rY, w, h, blurR);
+// mask: precomputed box blur of the reference Y channel (brighter/higher-contrast
+// areas tolerate more error) — constant per reference, see prepRef().
+function scaleErr(mask, rX, rY, rB, tX, tY, tB, w, h) {
     const n = w * h;
     const p = 3.0;
     // Per-channel weights: opponent (X) highest, luminance (Y) mid, blue (B) lowest
@@ -104,9 +103,42 @@ function scaleErr(rX, rY, rB, tX, tY, tB, w, h) {
         const ey = (rY[i] - tY[i]) / m;
         const eb = (rB[i] - tB[i]) / m;
         const e2 = kX * ex * ex + kY * ey * ey + kB * eb * eb;
-        if (e2 > 1e-9) sum += e2 ** (p / 2);
+        if (e2 > 1e-9) sum += e2 * Math.sqrt(e2);  // e2^(p/2) with p=3; pow() is far slower
     }
     return (sum / n) ** (1 / p);
+}
+
+// Reference-side work is identical for every pass compared against the same
+// reference: the 3-scale downsampled pyramid of the ref channels and the masking
+// blur of ref Y. Charts evaluate many passes per reference, so precompute once,
+// keyed on the refXyb array identity (WeakMap — GC-safe, zero API change).
+const _refPrep = new WeakMap();
+
+function prepRef(refXyb, width, height) {
+    const cached = _refPrep.get(refXyb);
+    if (cached && cached.width === width && cached.height === height) return cached;
+    let [X, Y, B] = refXyb;
+    let w = width, h = height;
+    const levels = [];
+    for (let s = 0; s < 3; s++) {
+        const prev = levels[levels.length - 1];
+        if (prev && prev.X === X) {
+            levels.push(prev);  // degenerate 1px dims: scale not downsampled, reuse level
+        } else {
+            const blurR = Math.max(1, Math.min(8, w >> 6));  // ~w/64, clamped 1–8
+            levels.push({ X, Y, B, mask: boxBlur(Y, w, h, blurR) });
+        }
+        if (s < 2 && w > 1 && h > 1) {
+            X = dn2(X, w, h)[0];
+            Y = dn2(Y, w, h)[0];
+            B = dn2(B, w, h)[0];
+            w = Math.max(1, w >> 1);
+            h = Math.max(1, h >> 1);
+        }
+    }
+    const prep = { width, height, levels };
+    _refPrep.set(refXyb, prep);
+    return prep;
 }
 
 // Compute Butteraugli-inspired score.
@@ -119,7 +151,7 @@ export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
     const n = width * height;
     if (!n || testPixels.length !== n * 4) return NaN;
 
-    let [rX, rY, rB] = refXyb;
+    const ref = prepRef(refXyb, width, height);
     let [tX, tY, tB] = pixelsToXyb(testPixels, n);
     let w = width, h = height;
 
@@ -127,17 +159,14 @@ export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
     let total = 0;
 
     for (let s = 0; s < 3; s++) {
-        total += scaleErr(rX, rY, rB, tX, tY, tB, w, h) * weights[s];
+        const L = ref.levels[s];
+        total += scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, w, h) * weights[s];
         if (s < 2 && w > 1 && h > 1) {
-            const nw = Math.max(1, w >> 1);
-            const nh = Math.max(1, h >> 1);
-            rX = dn2(rX, w, h)[0];
-            rY = dn2(rY, w, h)[0];
-            rB = dn2(rB, w, h)[0];
             tX = dn2(tX, w, h)[0];
             tY = dn2(tY, w, h)[0];
             tB = dn2(tB, w, h)[0];
-            w = nw; h = nh;
+            w = Math.max(1, w >> 1);
+            h = Math.max(1, h >> 1);
         }
     }
 

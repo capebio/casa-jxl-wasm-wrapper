@@ -157,9 +157,10 @@ export async function decodeTiledViewport(
   }
 
   try {
-    const cacheKeyFinal = cache ? viewportCacheKey(getLevelId(source), vp, plan.format, 'final') : undefined;
-    if (cache && cacheKeyFinal) {
-      const cached = cache.get(cacheKeyFinal);
+    const cacheQuality = progressive === 'dc-only' ? 'dc' : 'final';
+    const cacheKey = cache ? viewportCacheKey(getLevelId(source), vp, plan.format, cacheQuality) : undefined;
+    if (cache && cacheKey) {
+      const cached = cache.get(cacheKey);
       if (cached) {
         if (outBuf) {
           if (cached.length >= need) {
@@ -187,7 +188,7 @@ export async function decodeTiledViewport(
     // Progressive DC-then-final (F1 + L3-1): Phase 1 all DC, Phase 2 all final.
     // Delivers onTile twice per tile (DC first for full coarse paint, then final). Stream-stitch friendly.
     // Only when no custom decodeRegion (tests use mocks for the one-shot path).
-    if (progressive === 'dc-then-final' && !options?.decodeRegion) {
+    if ((progressive === 'dc-then-final' || progressive === 'dc-only') && !options?.decodeRegion) {
       target = outBuf ? outBuf : new Uint8Array(need);
       let completed = 0;
       const tilesX = Math.ceil(source.width / source.tileSize);
@@ -203,7 +204,7 @@ export async function decodeTiledViewport(
         version: (source as any).version ?? 1,
       };
       const n = plan.tiles.length;
-      const total = n * 2;
+      const total = progressive === 'dc-only' ? n : n * 2;
       // Pre-extract for efficiency (L3-1).
       const tileBytesList: Uint8Array[] = plan.tiles.map((t) => extractTileBitstream(source.bytes, t, exHeader));
 
@@ -308,82 +309,84 @@ export async function decodeTiledViewport(
         }
       });
 
-      // Phase 2: all final (refine) with bounded fallback concurrency DL-7(b)
-      await runWithBoundedConcurrency(ordered, 3, async (item) => {
-        if (signal?.aborted) throw new PyramidError('ABORTED', 'decode aborted');
-        if (deadlineHit) return;
-        if (deadline != null && performance.now() > deadline) {
-          if (errorPolicy === 'skip-tile') {
-            deadlineHit = true;
-            return;
-          }
-          throw new PyramidError('TIMEOUT', 'budgetMs deadline exceeded during progressive decode');
-        }
-        const t = item.tile;
-        const id = tileIdOf(t, source.tileSize, source.level ?? 0);
-        const key = tileKey(id);
-        if (skipTiles?.has(key)) {
-          completed += 1;
-          const prog: TileProgress = { id, key, stage: 'final', completed, total };
-          onTile?.(t, completed, prog);
-          return;
-        }
-
-        if (stitchedFinal.has(key)) {
-          completed += 1;
-          const prog: TileProgress = { id, key, stage: 'final', completed, total };
-          onTile?.(t, completed, prog);
-          return;
-        }
-
-        const tileSize = source.tileSize;
-        const tx = Math.floor(t.x / tileSize);
-        const ty = Math.floor(t.y / tileSize);
-        const srcOriginX = tx * tileSize;
-        const srcOriginY = ty * tileSize;
-        const decodedW = Math.min(tileSize, source.width - srcOriginX);
-        const decodedH = Math.min(tileSize, source.height - srcOriginY);
-        const expectedLen = decodedW * decodedH * plan.bpp;
-
-        // Check for final cache hit
-        const finalKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:final`;
-        const finalHit = cache?.get(finalKey);
-        if (finalHit && finalHit.byteLength === expectedLen) {
-          stitchTileIntoViewport(target!, vp, t, finalHit, source, plan.bpp);
-          stitchedFinal.add(key);
-          completed += 1;
-          const prog: TileProgress = { id, key, stage: 'final', completed, total };
-          onTile?.(t, completed, prog);
-          return;
-        }
-
-        try {
-          const t0 = performance.now();
-          const finalPixels = await decodeTileBytesProgressive(item.bytes, plan.format, 'final');
-          const decodeMs = performance.now() - t0;
-          if (cache) {
-            const cap = cache.capacityBytes;
-            if (cap === undefined || finalPixels.byteLength <= cap) {
-              cache.set(finalKey, finalPixels);
+      if (progressive !== 'dc-only') {
+        // Phase 2: all final (refine) with bounded fallback concurrency DL-7(b)
+        await runWithBoundedConcurrency(ordered, 3, async (item) => {
+          if (signal?.aborted) throw new PyramidError('ABORTED', 'decode aborted');
+          if (deadlineHit) return;
+          if (deadline != null && performance.now() > deadline) {
+            if (errorPolicy === 'skip-tile') {
+              deadlineHit = true;
+              return;
             }
+            throw new PyramidError('TIMEOUT', 'budgetMs deadline exceeded during progressive decode');
           }
-          stitchTileIntoViewport(target!, vp, t, finalPixels, source, plan.bpp);
-          stitchedFinal.add(key);
-          completed += 1;
-          const prog: TileProgress = { id, key, stage: 'final', completed, total, decodeMs, bytesDecoded: item.bytes.byteLength };
-          onTile?.(t, completed, prog);
-        } catch (e) {
-          if (errorPolicy === 'skip-tile') {
-            zeroFillRect(target!, vp, t, plan.bpp);
-            failedTiles.push(id);
+          const t = item.tile;
+          const id = tileIdOf(t, source.tileSize, source.level ?? 0);
+          const key = tileKey(id);
+          if (skipTiles?.has(key)) {
             completed += 1;
             const prog: TileProgress = { id, key, stage: 'final', completed, total };
             onTile?.(t, completed, prog);
             return;
           }
-          throw e;
-        }
-      });
+
+          if (stitchedFinal.has(key)) {
+            completed += 1;
+            const prog: TileProgress = { id, key, stage: 'final', completed, total };
+            onTile?.(t, completed, prog);
+            return;
+          }
+
+          const tileSize = source.tileSize;
+          const tx = Math.floor(t.x / tileSize);
+          const ty = Math.floor(t.y / tileSize);
+          const srcOriginX = tx * tileSize;
+          const srcOriginY = ty * tileSize;
+          const decodedW = Math.min(tileSize, source.width - srcOriginX);
+          const decodedH = Math.min(tileSize, source.height - srcOriginY);
+          const expectedLen = decodedW * decodedH * plan.bpp;
+
+          // Check for final cache hit
+          const finalKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:final`;
+          const finalHit = cache?.get(finalKey);
+          if (finalHit && finalHit.byteLength === expectedLen) {
+            stitchTileIntoViewport(target!, vp, t, finalHit, source, plan.bpp);
+            stitchedFinal.add(key);
+            completed += 1;
+            const prog: TileProgress = { id, key, stage: 'final', completed, total };
+            onTile?.(t, completed, prog);
+            return;
+          }
+
+          try {
+            const t0 = performance.now();
+            const finalPixels = await decodeTileBytesProgressive(item.bytes, plan.format, 'final');
+            const decodeMs = performance.now() - t0;
+            if (cache) {
+              const cap = cache.capacityBytes;
+              if (cap === undefined || finalPixels.byteLength <= cap) {
+                cache.set(finalKey, finalPixels);
+              }
+            }
+            stitchTileIntoViewport(target!, vp, t, finalPixels, source, plan.bpp);
+            stitchedFinal.add(key);
+            completed += 1;
+            const prog: TileProgress = { id, key, stage: 'final', completed, total, decodeMs, bytesDecoded: item.bytes.byteLength };
+            onTile?.(t, completed, prog);
+          } catch (e) {
+            if (errorPolicy === 'skip-tile') {
+              zeroFillRect(target!, vp, t, plan.bpp);
+              failedTiles.push(id);
+              completed += 1;
+              const prog: TileProgress = { id, key, stage: 'final', completed, total };
+              onTile?.(t, completed, prog);
+              return;
+            }
+            throw e;
+          }
+        });
+      }
 
       // DL-1 (bug, high): budget-break / skipTiles can cache an incomplete viewport as 'final'.
       if (deadlineHit) {
@@ -412,7 +415,7 @@ export async function decodeTiledViewport(
 
       const complete = !deadlineHit && failedTiles.length === 0 && !(skipTiles && skipTiles.size > 0);
       if (complete) {
-        cacheStore(cache, cacheKeyFinal, target!, need);
+        cacheStore(cache, cacheKey, target!, need);
       }
 
       // Agent6-4: attach ICC (shared ref) if requested. ensure is lazy + cached on source.
@@ -443,7 +446,7 @@ export async function decodeTiledViewport(
     const result: DecodedLevel = { pixels, width: vp.w, height: vp.h, format: plan.format };
     
     // DL-9 / DL-5: Uses extracted local cacheStore helper
-    cacheStore(cache, cacheKeyFinal, pixels, need);
+    cacheStore(cache, cacheKey, pixels, need);
 
     const dirId = tileIdOf(vp, source.tileSize, 0);
     const dirKey = tileKey(dirId);

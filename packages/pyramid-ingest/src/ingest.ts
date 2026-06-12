@@ -749,7 +749,8 @@ export async function ingestBatch(
     const wi = i;
     // B9: .js extension required for plain tsc emit (dist/ingest.js + dist/ingest-worker.js).
     // Tests bypass the real worker pool via __testInProcess; production node run of dist/cli.js resolves the sibling .js.
-    const w = new Worker(new URL("./ingest-worker.js", import.meta.url), { type: "module" });
+    // `type: "module"` is the web/bun Worker option; node:worker_threads ignores it (ESM resolved by extension).
+    const w = new Worker(new URL("./ingest-worker.js", import.meta.url), { type: "module" } as any);
     w.on("message", (m: any) => {
       const p = pending.get(m.id);
       if (p) {

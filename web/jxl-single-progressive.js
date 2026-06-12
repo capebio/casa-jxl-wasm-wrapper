@@ -4,8 +4,7 @@ import { createBrowserContext } from '@casabio/jxl-session';
 import { getCapabilities } from '@casabio/jxl-capabilities';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
-import { computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
-import { pixelsToXyb, computeButteraugliVsFinal } from './jxl-butteraugli.js';
+import { computePsnrVsFinal } from './jxl-progressive-quality.js';
 import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
@@ -403,9 +402,9 @@ function chartsEnabled() {
 }
 
 function drawEmptyCharts(legendText) {
-    drawPsnrChart([], null);
-    drawSsimChart([], null);
-    drawButtChart([], null);
+    drawQualityChart('psnr-chart', 'psnr-chart-legend', [], [], { yLabel: 'dB', yFormat: v => v.toFixed(1) });
+    drawQualityChart('ssim-chart', 'ssim-chart-legend', [], [], { yLabel: 'SSIM', yFormat: v => v.toFixed(3) });
+    drawQualityChart('butt-chart', 'butt-chart-legend', [], [], { yLabel: 'Butt', yFormat: v => v.toFixed(3) });
     if (!legendText) return;
     for (const id of ['psnr-chart-legend', 'ssim-chart-legend', 'butt-chart-legend']) {
         const el = document.getElementById(id);
@@ -1998,83 +1997,6 @@ function drawQualityChart(canvasId, legendId, passes, values, {
     if (legend) legend.textContent = `${finite.length} of ${passes.length} passes · ${yFormat(finite.at(-1))} final`;
 }
 
-function drawPsnrChart(passes, targetRgba) {
-    if (!passes?.length) {
-        drawQualityChart('psnr-chart', 'psnr-chart-legend', [], [], { yLabel: 'dB', yFormat: v => v.toFixed(1) });
-        return;
-    }
-    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
-    const reference = targetRgba ?? finalPass?.pixels ?? null;
-    if (!reference) {
-        const legend = document.getElementById('psnr-chart-legend');
-        if (legend) legend.textContent = 'final pixels released';
-        return;
-    }
-    const pw = passes[0]?.width ?? 1;
-    const ph = passes[0]?.height ?? 1;
-    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
-    const needsDs = dsW !== pw;
-    const values = passes.map(pass => {
-        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
-        return computePsnrVsFinal(refDs, px);
-    });
-    drawQualityChart('psnr-chart', 'psnr-chart-legend', passes, values, {
-        yPad: 2, yClampMin: 10, yClampMax: 80,
-        yLabel: 'dB', yFormat: v => v.toFixed(1),
-    });
-}
-
-function drawSsimChart(passes, targetRgba) {
-    if (!passes?.length) {
-        drawQualityChart('ssim-chart', 'ssim-chart-legend', [], [], { yLabel: 'SSIM', yFormat: v => v.toFixed(3) });
-        return;
-    }
-    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
-    const reference = targetRgba ?? finalPass?.pixels ?? null;
-    if (!reference) return;
-    const pw = passes[0]?.width ?? 1;
-    const ph = passes[0]?.height ?? 1;
-    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
-    const needsDs = dsW !== pw;
-    const values = passes.map(pass => {
-        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
-        return computeSsimVsFinal(refDs, px, dsW, dsH);
-    });
-    drawQualityChart('ssim-chart', 'ssim-chart-legend', passes, values, {
-        yPad: 0.002, yClampMin: 0, yClampMax: 1,
-        yLabel: 'SSIM', yFormat: v => v.toFixed(3),
-        lineColor: '#f0c86a', finalColor: '#7de0b0',
-    });
-}
-
-function drawButtChart(passes, targetRgba) {
-    if (!passes?.length) {
-        drawQualityChart('butt-chart', 'butt-chart-legend', [], [], { yLabel: 'Butt', yFormat: v => v.toFixed(3) });
-        return;
-    }
-    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
-    const reference = targetRgba ?? finalPass?.pixels ?? null;
-    if (!reference) return;
-    const pw = passes[0]?.width ?? 1;
-    const ph = passes[0]?.height ?? 1;
-    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
-    const needsDs = dsW !== pw;
-    const n = dsW * dsH;
-    const refXyb = pixelsToXyb(refDs, n);  // precompute once on downsampled reference
-    const values = passes.map(pass => {
-        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
-        return computeButteraugliVsFinal(refXyb, px, dsW, dsH);
-    });
-    drawQualityChart('butt-chart', 'butt-chart-legend', passes, values, {
-        yPad: 0.05, yClampMin: 0,
-        yLabel: 'Butt', yFormat: v => v.toFixed(3),
-        lineColor: '#ff8c7d', finalColor: '#7de0b0',
-    });
-}
-
 function setMetric(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
@@ -2088,9 +2010,7 @@ function clearRunView() {
     viewerMeta.textContent = 'Loading...';
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawPsnrChart([], null);
-    drawSsimChart([], null);
-    drawButtChart([], null);
+    drawEmptyCharts();
 }
 
 function exportMeasurementsCSV() {

@@ -1,3 +1,8 @@
+Main Gemini - gemini --resume "d7f09e93-741a-412d-89b0-d42ce1891107" 
+node StandardMultifileTest.mjs
+
+
+
 If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
 
 --------
@@ -7,7 +12,7 @@ Your focus will ONLY be on these files. DO NOT work on any other files than the 
   With every lens pass, you will be
   looking for improvements to 1) efficiency, 2) speed, 3) performance, 4) bugs and 5) existing or opportunities for proposed features. Be thorough. Be meticulous. Be exhaustive. Think broadly then think deeply. Consider well and contemplate what you're looking at from different angles and think for the long term. Integrate your existing knowledge. 
   
-  At the very end, create a cohesive document with duplicate items amalgamated that provides handoffs to five Grok agents to implement. There can be more than 5 sessions. Each agent should only handle one file. This should include suggested code snippets where there is anything ambiguous. THAT DOCUMENT IS: docs/ProgressiveSaliencyImplementationPlan.md. Each handoff section should begin with the phrase: "If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md"
+  At the very end, create a cohesive document with duplicate items amalgamated that provides handoffs to five Grok agents to implement. There can be more than 5 sessions. Each agent should only handle one file but may extend the search beyond the file for information and may defer editing other files till the end and after requesting approval. This should include suggested code snippets where there is anything ambiguous. Name the .md document with an appropriately descriptive name, preferably named after the files that you're examining. Each handoff section should begin with the phrase: "If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md". Each agent handoff should be self-contained having all the information the agent needs to implement the item and each agent handoff will include the words: "You may reference files outside your ambit if necessary, but if you want to change them, request to do so at the end of everything else. If there are any unusually important novel features or highlights, add them to the file c:\Foo\raw-converter-wasm\docs\Headline Features.md providing two or three paragraphs about it as if it were a news article. "
   
  
 Lens 1: "a strategic view of each file and how they link and the data they pass between them link".
@@ -95,13 +100,33 @@ Lens 17: 1. We are integrating a unified, non-Riemannian perceptual color scienc
    10. For the upcoming phase, we need to design a highly optimized, SIMD-accelerated, or precomputed multi-dimensional lookup-table (LUT) structure in Rust to
        execute these complex logarithmic, exponential, and local spline transformations at sub-millisecond speeds.
 	   
-Lens 18: Knowing the code and what questions have been asked. What are the gaps? If each question shines a light into the code, what are the three larges parts of the house left unilluminated and unexplored?
+Lens 18: Pure mathematics - algorithmic optimization and discrete mathematics, with emphasis on asymptotic complexity, graph theory, combinatorics, linear algebra, numerical methods, and formal simplification
 
-Lens 19: Step back with a defocused eye. Cast a feeling eye over the whole setup. A birds eye view. What do you see. What stands out. What do you notice about their connectivity. Any last improvements to be made?	   
+Lens 19: Hacker skills! Review the code for systems-level performance hacks and hacker-style speedups: look for low-level tricks such as cache-aware layout, branch elimination, bit-twiddling, SIMD, lookup tables, zero-copy paths, batching, fast paths, unsafe-but-contained optimizations, and exploiting domain-specific assumptions.Exploit invariants — identify values, checks, bounds, or relationships that never change and hoist them out of loops or hot paths.
+Use monotonicity — replace repeated searching/sorting with two-pointer scans, sliding windows, prefix sums, or incremental updates.
+Turn branches into data — replace unpredictable if chains with tables, masks, arithmetic selection, or precomputed dispatch.
+Specialize for common cases — create fast paths for the 80–95% case, leaving rare cases to slower generic logic.
+Fuse passes — combine multiple loops over the same data into one pass to reduce memory bandwidth and cache misses.
+Split hot and cold code/data — keep frequently used fields and logic compact; move rare error/debug/metadata paths away from the cache-hot path.
+Precompute aggressively — use lookup tables, cached transforms, generated constants, jump tables, or compile-time computation.
+Use arena/pool allocation — avoid repeated heap churn by allocating in bulk, reusing buffers, or using object pools for predictable lifetimes.
+Batch boundary crossings — reduce calls across JS/WASM, worker, FFI, thread, process, or network boundaries by batching work and messages.
+Exploit representation — choose encodings that make the operation cheap: packed bits, structure-of-arrays, sentinel values, tagged integers, sparse formats, or aligned buffers. 
+	   
+Lens 20: Do it again from a slightly different perspective
 
-Provide a two or three paragaph overview of what would be achieved by implementing these suggestions at the end.
+Lens 21: Knowing the code and what questions have been asked. What are the gaps? If each question shines a light into the code, what are the three larges parts of the house left unilluminated and unexplored?
+
+Lens 21: Do this again from a different perspective.
+
+Lens 22: Step back with a defocused eye. Cast a feeling eye over the whole setup. A birds eye view. What do you see. What stands out. What do you notice about their connectivity. Any last improvements to be made?	   
+
+Provide a three or four paragaph overview of what would be achieved by implementing these suggestions at the end.
 
 
+
+
+===========
  I want you to review and organise this large and piecemeal document into sensible chunks. Each chapter will be an implementation layer focused on related
    things such that a suitably skilled worker can implement it.
 

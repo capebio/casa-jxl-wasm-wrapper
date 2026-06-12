@@ -2131,8 +2131,14 @@ function callDecodeNoRegion(module: LibjxlWasmModule, ptr: number, size: number,
   return module._jxl_wasm_decode_rgba8(ptr, size, downsample);
 }
 
-// Read buffer metadata without freeing handle. Caller is responsible for freeing.
-function readBufferView(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
+function readBufferFields(module: LibjxlWasmModule, handle: number, operation: string): {
+  dataPtr: number;
+  size: number;
+  width: number;
+  height: number;
+  bitsVal: number;
+  alphaVal: number;
+} {
   if (handle === 0) throw new Error(`JXL ${operation} failed`);
 
   assertA6WordSize(module);
@@ -2166,6 +2172,13 @@ function readBufferView(module: LibjxlWasmModule, handle: number, operation: str
   if (dataPtr === 0 || size === 0) {
     throw new Error(`JXL ${operation} failed${errorCode === 0 ? "" : ` (${errorCode})`}`);
   }
+
+  return { dataPtr, size, width, height, bitsVal, alphaVal };
+}
+
+// Read buffer metadata without freeing handle. Caller is responsible for freeing.
+function readBufferView(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
+  const { dataPtr, size, width, height, bitsVal, alphaVal } = readBufferFields(module, handle, operation);
   return {
     handle,
     data: module.HEAPU8.slice(dataPtr, dataPtr + size),
@@ -2207,34 +2220,7 @@ function takeBuffer(module: LibjxlWasmModule, handle: number, operation: string)
 // consumer draws/hashes/posts immediately. Long-lived pixel retention should copy.
 function takeBufferView(module: LibjxlWasmModule, handle: number, operation: string): LibjxlBuffer {
   try {
-    if (handle === 0) throw new Error(`JXL ${operation} failed`);
-
-    assertA6WordSize(module);
-
-    let dataPtr: number, size: number, width: number, height: number, bitsVal: number, alphaVal: number, errorCode: number;
-    const h32 = module.HEAPU32;
-    if (h32 && (handle & 3) === 0 && handle >= 16) {
-      const b = handle >>> 2;
-      dataPtr   = h32[b] ?? 0;
-      size      = h32[b + 1] ?? 0;
-      width     = h32[b + 2] ?? 0;
-      height    = h32[b + 3] ?? 0;
-      bitsVal   = h32[b + 4] ?? 0;
-      alphaVal  = h32[b + 5] ?? 0;
-      errorCode = h32[b + 6] ?? 0;
-    } else {
-      dataPtr   = module._jxl_wasm_buffer_data(handle);
-      size      = module._jxl_wasm_buffer_size(handle);
-      width     = module._jxl_wasm_buffer_width(handle);
-      height    = module._jxl_wasm_buffer_height(handle);
-      bitsVal   = module._jxl_wasm_buffer_bits_per_sample(handle);
-      alphaVal  = module._jxl_wasm_buffer_has_alpha(handle);
-      errorCode = module._jxl_wasm_buffer_error?.(handle) ?? 0;
-    }
-
-    if (dataPtr === 0 || size === 0) {
-      throw new Error(`JXL ${operation} failed${errorCode === 0 ? "" : ` (${errorCode})`}`);
-    }
+    const { dataPtr, size, width, height, bitsVal, alphaVal } = readBufferFields(module, handle, operation);
     return {
       handle,
       data: module.HEAPU8.subarray(dataPtr, dataPtr + size),
