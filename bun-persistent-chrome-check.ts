@@ -1,13 +1,19 @@
-import { chromium } from "playwright";
-import { mkdtemp } from "node:fs/promises";
-import { join } from "node:path";
+import { launch } from "./tools/launch-browser.mjs";
 
-const BROWSER = String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
-const userDataDir = await mkdtemp(join(process.cwd(), "bun-chrome-"));
-const context = await chromium.launchPersistentContext(userDataDir, {
-  executablePath: BROWSER,
-  headless: true,
-  timeout: 120000,
-});
-console.log("pages", context.pages().length);
-await context.close();
+const watchdog = setTimeout(() => {
+  console.error("FAIL: watchdog timeout triggered");
+  process.exit(2);
+}, 150_000);
+
+try {
+  const t0 = Date.now();
+  const { context, close } = await launch({ headless: true });
+  const pages = context.pages().length;
+  console.log(`PASS pages=${pages} chrome=? elapsedMs=${Date.now() - t0}`);
+  clearTimeout(watchdog);
+  await close();
+} catch (err) {
+  clearTimeout(watchdog);
+  console.error("Caught error in check script:", err);
+  process.exitCode = 1;
+}
