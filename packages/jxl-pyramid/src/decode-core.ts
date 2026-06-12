@@ -19,6 +19,8 @@ export interface DecodedLevel {
   iccProfile?: Uint8Array;
 }
 
+export const buffersInFlight = new WeakSet<Uint8Array>();
+
 export const formatFromBits = (bits: 8 | 16): PixelFormat => (bits === 16 ? 'rgba16' : 'rgba8');
 export const bppOfFormat = (f: PixelFormat): 4 | 8 => (f === 'rgba16' ? 8 : 4);
 
@@ -236,7 +238,8 @@ export function raceWithAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T
   if (!signal) return p;
   if (signal.aborted) {
     p.catch(() => {});
-    return Promise.reject(new PyramidError('ABORTED', 'decode aborted before start', signal.reason));
+    const msg = typeof signal.reason === 'string' ? `decode aborted before start: ${signal.reason}` : 'decode aborted before start';
+    return Promise.reject(new PyramidError('ABORTED', msg, signal.reason));
   }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -248,7 +251,8 @@ export function raceWithAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T
       settled = true;
       cleanup();
       p.catch(() => {}); // prevent orphaned rejection from the raced promise
-      reject(new PyramidError('ABORTED', 'decode aborted', signal.reason));
+      const msg = typeof signal.reason === 'string' ? `decode aborted: ${signal.reason}` : 'decode aborted';
+      reject(new PyramidError('ABORTED', msg, signal.reason));
     };
     signal.addEventListener('abort', onAbort, { once: true });
     p.then(
@@ -285,12 +289,14 @@ export function tileIdOf(rect: ImageRegion, tileSize: number, level: number): Ti
   return { level, col: Math.floor(rect.x / tileSize), row: Math.floor(rect.y / tileSize) };
 }
 
+export const DEV = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+
 /** Packed numeric tile key for hot maps: level ≤ 8190, col/row < 2^20 — keeps value < 2^53 (exact in IEEE double). */
 export function tileKeyPacked(tile: TileId): number {
   // level ≤ 8190, col/row < 2^20 — documented bound tightened from <8192 because
   // 8191 * 2^40 + (2^20-1)*2^20 + (2^20-1) exceeds 2^53-1. Real pyramids use << 32 levels.
   // Dev guard (no prod cost) to catch contract violations early.
-  if (process.env.NODE_ENV !== 'production') {
+  if (DEV) {
     if (
       !Number.isInteger(tile.level) || tile.level > 8190 || tile.level < 0 ||
       !Number.isInteger(tile.col) || tile.col < 0 || tile.col >= (1 << 20) ||
@@ -319,11 +325,8 @@ export interface TileProgress {
   completed: number;
   total: number;
   /**
-   * Optional per-tile cost/identity fields (P3, Lens 12/14/16).
-   * decodeMs: wall time for this tile's decode stage (for AR real-time dc-vs-final decisions, latency budgeting).
-   * bytesDecoded: compressed bytes consumed for this tile (ML pipeline cost accounting, photogrammetry QC for re-capture).
-   * Backward-compatible: third arg to onTile has always been optional; existing two-arg callers unaffected.
-   * Population of these fields occurs at per-tile sites in decode-level.ts and tiled-decode-pool.ts (deferred).
+   * decodeMs: wall time (in milliseconds) of the tile's decode stage as observed by the dispatching thread (e.g., from performance.now() round-trip).
+   * bytesDecoded: exact compressed input bytes consumed for this tile when known (from bitstream extraction), else undefined.
    */
   decodeMs?: number;
   bytesDecoded?: number;
@@ -372,6 +375,7 @@ export interface DecodeOptions {
    * Undefined (default) = existing one-shot final behavior (no behavior change for happy path).
    */
   progressive?: Exclude<ProgressiveMode, undefined>;
+  cacheDcTiles?: boolean;
 }
 
 export type ProgressiveMode = 'dc-then-final' | undefined;
@@ -380,36 +384,38 @@ export type ProgressiveMode = 'dc-then-final' | undefined;
  *  Caches on the source object (like bytesId). Shared reference stamped to results (no per-tile copies).
  *  Only runs if options.preserveMetadata. For JXTC the profile lives in the codestream(s); header target is cheap.
  */
-export async function ensureIccProfile(
+export function ensureIccProfile(
   source: { bytes: Uint8Array; [k: string]: any },
   opts?: { preserveMetadata?: boolean },
 ): Promise<Uint8Array | null> {
-  if (!opts?.preserveMetadata) return null;
+  if (!opts?.preserveMetadata) return Promise.resolve(null);
   const key = '_iccProfile';
-  if (key in (source as any)) return (source as any)[key] || null;
-  try {
-    // Dynamic import avoids any potential cycle; facade has the getIccProfile (added for decode states).
-    const wasm = await import("@casabio/jxl-wasm");
-    const dec = wasm.createDecoder({
-      format: 'rgba8',
-      progressionTarget: 'header',
-      emitEveryPass: false,
-      preserveIcc: true,
-      preserveMetadata: false,
-    } as any);
-    // Prefix is sufficient for header + color profile (libjxl emits early).
-    const prefixLen = Math.min(256 * 1024, source.bytes.length);
-    await dec.push(source.bytes.subarray(0, prefixLen));
-    await dec.close();
-    let icc = (dec as any).getIccProfile ? (dec as any).getIccProfile() : null;
-    if (icc) icc = new Uint8Array(icc); // own the bytes
-    (source as any)[key] = icc || null;
-    await Promise.resolve((dec as any).dispose()).catch(() => {});
-    return (source as any)[key];
-  } catch {
-    (source as any)[key] = null;
-    return null;
-  }
+  if (key in (source as any)) return (source as any)[key];
+  const p = (async () => {
+    try {
+      // Dynamic import avoids any potential cycle; facade has the getIccProfile (added for decode states).
+      const wasm = await import("@casabio/jxl-wasm");
+      const dec = wasm.createDecoder({
+        format: 'rgba8',
+        progressionTarget: 'header',
+        emitEveryPass: false,
+        preserveIcc: true,
+        preserveMetadata: false,
+      } as any);
+      // Prefix is sufficient for header + color profile (libjxl emits early).
+      const prefixLen = Math.min(256 * 1024, source.bytes.length);
+      await dec.push(source.bytes.subarray(0, prefixLen));
+      await dec.close();
+      let icc = (dec as any).getIccProfile ? (dec as any).getIccProfile() : null;
+      if (icc) icc = new Uint8Array(icc); // own the bytes
+      await Promise.resolve((dec as any).dispose()).catch(() => {});
+      return icc || null;
+    } catch {
+      return null;
+    }
+  })();
+  (source as any)[key] = p;
+  return p;
 }
 
 /**
@@ -467,4 +473,26 @@ export interface DecoderInit {
   emitEveryPass: boolean;
   preserveIcc: boolean;
   preserveMetadata: boolean;
+}
+
+export function cacheStore(cache: PyramidCache | undefined, key: string | undefined, pixels: Uint8Array, need: number): void {
+  if (!cache || !key) return;
+  const cap = cache.capacityBytes;
+  if (cap !== undefined && need > cap) return;
+  cache.set(key, pixels.byteLength > need ? pixels.slice(0, need) : pixels.slice());
+}
+
+export function sortCenterOut<T>(
+  items: T[],
+  viewport: ImageRegion,
+  getRect: (item: T) => ImageRegion,
+): T[] {
+  const cx = viewport.x + viewport.w / 2;
+  const cy = viewport.y + viewport.h / 2;
+  return items.slice().sort((a, b) => {
+    const ra = getRect(a), rb = getRect(b);
+    const da = (ra.x + ra.w / 2 - cx) ** 2 + (ra.y + ra.h / 2 - cy) ** 2;
+    const db = (rb.x + rb.w / 2 - cx) ** 2 + (rb.y + rb.h / 2 - cy) ** 2;
+    return da - db;
+  });
 }

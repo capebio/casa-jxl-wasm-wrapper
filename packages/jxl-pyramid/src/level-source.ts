@@ -3,21 +3,26 @@ import type { PyramidLevel } from "./manifest.js";
 import { formatFromBits, bppOfFormat, type PixelFormat, PyramidError } from "./decode-core.js";
 
 /** Uniform handle for whole-frame JXL or tiled JXTC top levels.
- * bytesId is attached lazily by the pool (Grok 2) for the load/decode protocol to avoid N-clones.
+ * Instances are safe to share across concurrent decodes; treat all fields as frozen after creation.
  */
 export type LevelSource =
-  | { kind: "whole"; bytes: Uint8Array; width: number; height: number; bitsPerSample: 8 | 16; format: PixelFormat; bpp: 4 | 8; bytesId?: number }
-  | { kind: "tiled"; bytes: Uint8Array; width: number; height: number; tileSize: number; bitsPerSample: 8 | 16; format: PixelFormat; bpp: 4 | 8; version: 1 | 2; bytesId?: number };
+  | { kind: "whole"; bytes: Uint8Array; width: number; height: number; bitsPerSample: 8 | 16; format: PixelFormat; bpp: 4 | 8; level?: number }
+  | { kind: "tiled"; bytes: Uint8Array; width: number; height: number; tileSize: number; bitsPerSample: 8 | 16; format: PixelFormat; bpp: 4 | 8; version: 1 | 2; level?: number; tilesX: number; tilesY: number };
 
 export function createLevelSource(
   entry: Pick<PyramidLevel, "w" | "h" | "tiled"> & { bitsPerSample?: 8 | 16 },
   bytes: Uint8Array,
+  levelIndex?: number,
 ): LevelSource {
   if (entry.tiled) {
     if (!isJxtcContainer(bytes)) {
       throw new PyramidError('JXTC_PARSE', 'manifest level is tiled but bytes are not a JXTC container');
     }
     const header = parseJxtcHeader(bytes);
+    if ((entry.w && entry.w !== header.imageW) || (entry.h && entry.h !== header.imageH)) {
+      throw new PyramidError('BAD_MANIFEST',
+        `manifest says ${entry.w}x${entry.h} but JXTC header says ${header.imageW}x${header.imageH}`);
+    }
     const fmt = formatFromBits(header.bitsPerSample);
     const bp = bppOfFormat(fmt);
     return {
@@ -30,6 +35,9 @@ export function createLevelSource(
       format: fmt,
       bpp: bp,
       version: header.version,
+      level: levelIndex ?? 0,
+      tilesX: header.tilesX,
+      tilesY: header.tilesY,
     };
   }
   const bits = entry.bitsPerSample ?? 8;
@@ -56,18 +64,6 @@ export function createLevelSource(
     bitsPerSample: bits,
     format: fmt,
     bpp: bp,
+    level: levelIndex ?? 0,
   };
-}
-
-/**
- * Ensure the LevelSource is "prepared" for worker protocol use (Grok2).
- * Attaches bytesId lazily (the actual numeric value is assigned by the PyramidWorkerPool
- * instance using its own counter so ids are scoped to the pool, not global module).
- * Safe to call multiple times; idempotent on the source object identity.
- */
-export function prepareLevelSource(source: LevelSource): LevelSource {
-  if ('bytesId' in source) return source;
-  // Marker; the pool will overwrite with a real id the first time this source is used for a decode.
-  (source as any).bytesId = undefined;
-  return source;
 }

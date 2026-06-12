@@ -5,7 +5,7 @@ import {
   setJxlModuleFactoryForTesting,
 } from "@casabio/jxl-wasm";
 import { createLevelSource } from "../src/level-source.js";
-import { decodeLevel, decodeTiledViewport } from "../src/decode-level.js";
+import { decodeLevel, decodeTiledViewport, predictRegion, prefetchViewport } from "../src/decode-level.js";
 import { extractTileBitstream } from "../src/tiling.js";
 import { JXTC_TILE_SIZE } from "../src/tiling.js";
 import { loadScalarModule, scalarFactory } from "./scalar.js";
@@ -374,4 +374,25 @@ test("More F2: progressive dc-then-final reuses exact same outBuffer ref across 
   for (const r of seenBufRefs) {
     expect(r).toBe(buf);
   }
+});
+
+test("F-2/F-3/F-1: predictRegion, prefetchViewport and per-tile caching features", async () => {
+  const module = await loadScalarModule();
+  setJxlModuleFactoryForTesting(scalarFactory(module));
+
+  const vp = { x: 10, y: 20, w: 100, h: 100 };
+  const predicted = predictRegion(vp, 0.5, -0.2, 100);
+  expect(predicted.x).toBe(10 + 0.5 * 100);
+  expect(predicted.y).toBe(20 - 0.2 * 100);
+  expect(predicted.w).toBe(100);
+  expect(predicted.h).toBe(100);
+
+  const cache = createInMemoryPyramidCache({ maxBytes: 10 * 1024 * 1024 });
+  const W = 128, H = 128;
+  const src = gradient(W, H);
+  const container = await encodeTileContainerRgba8(src, W, H, { tileSize: 64, distance: 0, effort: 1 });
+  const source = createLevelSource({ w: W, h: H, tiled: true }, container);
+  
+  // prefetch is best-effort and shouldn't throw even without workers
+  await expect(prefetchViewport(source as any, vp, { cache })).resolves.not.toThrow();
 });
