@@ -20,9 +20,16 @@ export class CoreBudget {
     return this.tokens;
   }
 
+  get pendingCount(): number {
+    return this.waiters.length;
+  }
+
   /** FIFO acquire. Blocks until cost tokens free. */
   async acquire(cost = 1): Promise<void> {
     if (cost <= 0) return;
+    if (cost > this.capacity) {
+      throw new Error(`[jxl-scheduler] CoreBudget: cost ${cost} exceeds capacity ${this.capacity}`);
+    }
     if (this.tokens >= cost) {
       this.tokens -= cost;
       return;
@@ -34,7 +41,11 @@ export class CoreBudget {
 
   release(cost = 1): void {
     if (cost <= 0) return;
-    this.tokens = Math.min(this.capacity, this.tokens + cost);
+    const next = this.tokens + cost;
+    if (next > this.capacity && typeof process !== "undefined" && process.env["NODE_ENV"] !== "production") {
+      console.warn(`[jxl-scheduler] CoreBudget over-release: ${this.tokens}+${cost} > ${this.capacity}`);
+    }
+    this.tokens = Math.min(this.capacity, next);
     this.drainWaiters();
   }
 
@@ -54,6 +65,9 @@ export class CoreBudget {
   /** Non-blocking: deduct cost if available, else false. Never queues. */
   tryAcquire(cost = 1): boolean {
     if (cost <= 0) return true;
+    if (cost > this.capacity) {
+      return false;
+    }
     if (this.tokens >= cost) {
       this.tokens -= cost;
       return true;
@@ -73,7 +87,7 @@ export class CoreBudget {
       await this.acquire(1);
       return 1;
     }
-    if (this.tokens >= mtCost) {
+    if (this.tokens >= mtCost && mtCost <= this.capacity) {
       this.tokens -= mtCost;
       return mtCost;
     }

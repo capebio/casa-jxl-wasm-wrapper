@@ -10,7 +10,8 @@ import type { PoolWorker, WorkerFactory, WorkerHandle } from "./types.js";
 import { CoreBudget } from "./budget.js";
 
 const DEV =
-  typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
+  (typeof process !== "undefined" && process.env["NODE_ENV"] !== "production") ||
+  (typeof process === "undefined" && typeof (globalThis as any).__JXL_DEV__ !== "undefined");
 
 const DEFAULT_SPAWN_TIMEOUT_MS = 15_000;
 const RECYCLE_SHUTDOWN_TIMEOUT_MS = 1_000;
@@ -465,19 +466,21 @@ export class WorkerPool {
 
   private async createWorkerWithTimeout(): Promise<WorkerHandle> {
     let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+    let timedOut = false;
+    const factoryPromise = this.factory();
+    // Late arrival after timeout: shut the orphan down instead of leaking it (P1).
+    factoryPromise.then(
+      (h) => { if (timedOut) void h.shutdown(RECYCLE_SHUTDOWN_TIMEOUT_MS).catch(() => undefined); },
+      () => undefined, // factory rejection after timeout: nothing to clean
+    );
     try {
       return await Promise.race([
-        this.factory(),
+        factoryPromise,
         new Promise<never>((_, reject) => {
-          timeout = globalThis.setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`,
-                ),
-              ),
-            this.spawnTimeoutMs,
-          );
+          timeout = globalThis.setTimeout(() => {
+            timedOut = true;
+            reject(new Error(`[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`));
+          }, this.spawnTimeoutMs);
         }),
       ]);
     } finally {
