@@ -70,11 +70,21 @@ struct BitReader<'a> {
     bits: u64,
     nbits: u32,
     finished: bool,
+    real_in_buf: u32,
+    truncated: bool,
 }
 
 impl<'a> BitReader<'a> {
     fn new(src: &'a [u8]) -> Self {
-        BitReader { src, pos: 0, bits: 0, nbits: 0, finished: false }
+        BitReader {
+            src,
+            pos: 0,
+            bits: 0,
+            nbits: 0,
+            finished: false,
+            real_in_buf: 0,
+            truncated: false,
+        }
     }
 
     #[inline]
@@ -97,6 +107,7 @@ impl<'a> BitReader<'a> {
                     self.pos += 1;
                     self.bits = (self.bits << 8) | 0xFF;
                     self.nbits += 8;
+                    self.real_in_buf += 8;
                 } else {
                     // Marker — end of compressed stream.
                     self.finished = true;
@@ -105,6 +116,7 @@ impl<'a> BitReader<'a> {
             } else {
                 self.bits = (self.bits << 8) | (b as u64);
                 self.nbits += 8;
+                self.real_in_buf += 8;
             }
         }
     }
@@ -128,6 +140,12 @@ impl<'a> BitReader<'a> {
 
     #[inline]
     fn consume(&mut self, n: u32) {
+        if n > self.real_in_buf {
+            self.truncated = true;
+            self.real_in_buf = 0;
+        } else {
+            self.real_in_buf -= n;
+        }
         if self.nbits >= n {
             self.nbits -= n;
             self.bits &= (1u64 << self.nbits).wrapping_sub(1);
@@ -145,6 +163,9 @@ impl<'a> BitReader<'a> {
         if self.nbits < n {
             self.fill();
         }
+        if n > self.real_in_buf {
+            self.truncated = true;
+        }
         let avail = self.nbits.min(n);
         let mut v = if avail > 0 {
             ((self.bits >> (self.nbits - avail)) & ((1u64 << avail) - 1)) as u32
@@ -153,6 +174,7 @@ impl<'a> BitReader<'a> {
         };
         self.nbits -= avail;
         self.bits &= (1u64 << self.nbits).wrapping_sub(1);
+        self.real_in_buf = self.real_in_buf.saturating_sub(avail);
         if avail < n {
             v <<= n - avail;
         }
@@ -421,6 +443,16 @@ pub fn decode_tile(
                     bail!("ljpeg: invalid huffman code at row={row} col={col} comp={comp}");
                 }
                 br.consume(consume as u32);
+                if br.truncated {
+                    bail!("ljpeg: entropy bitstream exhausted at row={row} col={col} comp={comp}");
+                }
+                if t == 16 {
+                    if sof.precision != 16 {
+                        bail!("ljpeg: category 16 exceeds precision {}", sof.precision);
+                    }
+                } else if t > sof.precision {
+                    bail!("ljpeg: category {} exceeds precision {}", t, sof.precision);
+                }
                 let diff = if t == 0 {
                     0
                 } else if t == 16 {
@@ -429,6 +461,9 @@ pub fn decode_tile(
                     -32768i32
                 } else {
                     let bits = br.get_bits(t as u32) as i32;
+                    if br.truncated {
+                        bail!("ljpeg: entropy bitstream exhausted at row={row} col={col} comp={comp}");
+                    }
                     extend(bits, t as u32)
                 };
 
@@ -648,5 +683,35 @@ mod tests {
         let mut out2 = vec![0u16; 4];
         decode_tile(&src, &mut out2, 0, 2, 2, 2).unwrap();
         assert_eq!(out1, out2);
+    }
+
+    #[test]
+    fn ljpeg_truncated_entropy_errors() {
+        let mut src = make_minimal_sof3();
+        src.pop();
+        let mut out = vec![0u16; 4];
+        let err = decode_tile(&src, &mut out, 0, 2, 2, 2).unwrap_err();
+        assert!(err.to_string().contains("ljpeg: entropy bitstream exhausted"), "got: {}", err);
+    }
+
+    #[test]
+    fn ljpeg_rejects_huffman_category_above_precision() {
+        let src = vec![
+            0xFF, 0xD8,
+            0xFF, 0xC3, 0x00, 0x0B,
+            0x08, 0x00, 0x01, 0x00, 0x01, 0x01,
+            0x01, 0x11, 0x00,
+            0xFF, 0xC4, 0x00, 0x14,
+            0x00,
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            9,
+            0xFF, 0xDA, 0x00, 0x08,
+            0x01, 0x01, 0x00,
+            0x01, 0x00, 0x00,
+            0x00,
+        ];
+        let mut out = vec![0u16; 1];
+        let err = decode_tile(&src, &mut out, 0, 1, 1, 1).unwrap_err();
+        assert!(err.to_string().contains("ljpeg: category 9 exceeds precision 8"), "got: {}", err);
     }
 }

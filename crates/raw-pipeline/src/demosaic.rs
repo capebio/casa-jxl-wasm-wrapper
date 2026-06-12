@@ -268,6 +268,201 @@ pub fn demosaic_bayer(raw: &[u16], width: usize, height: usize, phase: (u8, u8))
     Ok(rgb)
 }
 
+#[inline(always)]
+fn mhc_pixel_phased(
+    raw: &[u16],
+    width: usize,
+    r_c: usize,
+    r_n: usize,
+    r_s: usize,
+    r_n2: usize,
+    r_s2: usize,
+    col: usize,
+    c_w: usize,
+    c_e: usize,
+    c_w2: usize,
+    c_e2: usize,
+    phase: (usize, usize),
+) -> (i32, i32, i32) {
+    match ((r_c + phase.0) & 1, (col + phase.1) & 1) {
+        (0, 0) => {
+            let rc = at(raw, width, r_c, col);
+            let gn = at(raw, width, r_n, col);
+            let ge = at(raw, width, r_c, c_e);
+            let gs = at(raw, width, r_s, col);
+            let gw = at(raw, width, r_c, c_w);
+            let rn2 = at(raw, width, r_n2, col);
+            let re2 = at(raw, width, r_c, c_e2);
+            let rs2 = at(raw, width, r_s2, col);
+            let rw2 = at(raw, width, r_c, c_w2);
+            let g_mhc = (2 * (gn + ge + gs + gw) + 4 * rc - rn2 - re2 - rs2 - rw2) >> 3;
+            let b_v = (at(raw, width, r_n, c_w)
+                + at(raw, width, r_n, c_e)
+                + at(raw, width, r_s, c_w)
+                + at(raw, width, r_s, c_e))
+                >> 2;
+            (rc, g_mhc.clamp(0, 65535), b_v.clamp(0, 65535))
+        }
+        (0, 1) => {
+            let gc = at(raw, width, r_c, col);
+            let re = at(raw, width, r_c, c_e);
+            let rw = at(raw, width, r_c, c_w);
+            let bn = at(raw, width, r_n, col);
+            let bs = at(raw, width, r_s, col);
+            let ge2 = at(raw, width, r_c, c_e2);
+            let gw2 = at(raw, width, r_c, c_w2);
+            let gn2 = at(raw, width, r_n2, col);
+            let gs2 = at(raw, width, r_s2, col);
+            let r_v = (2 * (re + rw) + 2 * gc - ge2 - gw2) >> 2;
+            let b_v = (2 * (bn + bs) + 2 * gc - gn2 - gs2) >> 2;
+            (r_v.clamp(0, 65535), gc, b_v.clamp(0, 65535))
+        }
+        (1, 0) => {
+            let gc = at(raw, width, r_c, col);
+            let rn = at(raw, width, r_n, col);
+            let rs = at(raw, width, r_s, col);
+            let be = at(raw, width, r_c, c_e);
+            let bw = at(raw, width, r_c, c_w);
+            let gn2 = at(raw, width, r_n2, col);
+            let gs2 = at(raw, width, r_s2, col);
+            let ge2 = at(raw, width, r_c, c_e2);
+            let gw2 = at(raw, width, r_c, c_w2);
+            let r_v = (2 * (rn + rs) + 2 * gc - gn2 - gs2) >> 2;
+            let b_v = (2 * (be + bw) + 2 * gc - ge2 - gw2) >> 2;
+            (r_v.clamp(0, 65535), gc, b_v.clamp(0, 65535))
+        }
+        _ => {
+            let bc = at(raw, width, r_c, col);
+            let gn = at(raw, width, r_n, col);
+            let ge = at(raw, width, r_c, c_e);
+            let gs = at(raw, width, r_s, col);
+            let gw = at(raw, width, r_c, c_w);
+            let bn2 = at(raw, width, r_n2, col);
+            let be2 = at(raw, width, r_c, c_e2);
+            let bs2 = at(raw, width, r_s2, col);
+            let bw2 = at(raw, width, r_c, c_w2);
+            let g_mhc = (2 * (gn + ge + gs + gw) + 4 * bc - bn2 - be2 - bs2 - bw2) >> 3;
+            let r_v = (2 * (at(raw, width, r_n, c_e)
+                + at(raw, width, r_n, c_w)
+                + at(raw, width, r_s, c_e)
+                + at(raw, width, r_s, c_w))
+                + 4 * bc
+                - bn2
+                - be2
+                - bs2
+                - bw2)
+                >> 3;
+            (r_v.clamp(0, 65535), g_mhc.clamp(0, 65535), bc)
+        }
+    }
+}
+
+pub fn demosaic_bayer_mhc(
+    raw: &[u16],
+    width: usize,
+    height: usize,
+    phase: (u8, u8),
+) -> Result<Vec<u16>, String> {
+    validate(raw, width, height)?;
+    let mut rgb = vec![0u16; width * height * 3];
+    let w_max = (width - 1) as isize;
+    let h_max = (height - 1) as isize;
+    let phase = (phase.0 as usize, phase.1 as usize);
+
+    let do_row = |row: usize, out_row: &mut [u16]| {
+        let r = row as isize;
+        let r_n = clamp(r - 1, 0, h_max);
+        let r_s = clamp(r + 1, 0, h_max);
+        let r_n2 = clamp(r - 2, 0, h_max);
+        let r_s2 = clamp(r + 2, 0, h_max);
+        for col in 0..width {
+            let c = col as isize;
+            let (rr, gg, bb) = mhc_pixel_phased(
+                raw,
+                width,
+                row,
+                r_n,
+                r_s,
+                r_n2,
+                r_s2,
+                col,
+                clamp(c - 1, 0, w_max),
+                clamp(c + 1, 0, w_max),
+                clamp(c - 2, 0, w_max),
+                clamp(c + 2, 0, w_max),
+                phase,
+            );
+            let o = col * 3;
+            out_row[o] = rr as u16;
+            out_row[o + 1] = gg as u16;
+            out_row[o + 2] = bb as u16;
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    rgb.par_chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    #[cfg(not(feature = "parallel"))]
+    rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+
+    Ok(rgb)
+}
+
+pub fn demosaic_bayer_mhc_band(
+    ctx: &[u16],
+    width: usize,
+    ctx_h: usize,
+    halo: usize,
+    phase: (u8, u8),
+    first_local: usize,
+    num_rows: usize,
+    rgb_out: &mut [u16],
+) -> Result<(), String> {
+    if num_rows == 0 {
+        return Ok(());
+    }
+    let out_len = num_rows * width * 3;
+    if rgb_out.len() < out_len {
+        return Err(format!("demosaic: band rgb_out too small ({} < {})", rgb_out.len(), out_len));
+    }
+    let w_max = (width - 1) as isize;
+    let h_max = (ctx_h - 1) as isize;
+    let phase = (phase.0 as usize, phase.1 as usize);
+
+    for local_row in 0..num_rows {
+        let ctx_row = halo + first_local + local_row;
+        let r = ctx_row as isize;
+        let r_n = clamp(r - 1, 0, h_max);
+        let r_s = clamp(r + 1, 0, h_max);
+        let r_n2 = clamp(r - 2, 0, h_max);
+        let r_s2 = clamp(r + 2, 0, h_max);
+        let out_base = local_row * width * 3;
+        for col in 0..width {
+            let c = col as isize;
+            let (rr, gg, bb) = mhc_pixel_phased(
+                ctx,
+                width,
+                ctx_row,
+                r_n,
+                r_s,
+                r_n2,
+                r_s2,
+                col,
+                clamp(c - 1, 0, w_max),
+                clamp(c + 1, 0, w_max),
+                clamp(c - 2, 0, w_max),
+                clamp(c + 2, 0, w_max),
+                phase,
+            );
+            let o = out_base + col * 3;
+            rgb_out[o] = rr as u16;
+            rgb_out[o + 1] = gg as u16;
+            rgb_out[o + 2] = bb as u16;
+        }
+    }
+
+    Ok(())
+}
+
 /// MHC-corrected RGGB demosaic — quality path.
 ///
 /// Adds a Laplacian correction term to each interpolated channel, derived from
@@ -943,8 +1138,8 @@ mod tests {
         let raw = vec![65535u16; w * h];
         let rgb = demosaic_rggb(&raw, w, h).unwrap();
         let rgbm = demosaic_rggb_mhc(&raw, w, h).unwrap();
-        assert!(rgb.iter().all(|&v| v <= 65535));
-        assert!(rgbm.iter().all(|&v| v <= 65535));
+        assert!(rgb.iter().all(|&v| v == 65535));
+        assert!(rgbm.iter().all(|&v| v == 65535));
         // Spot: R site keeps 65535, B site keeps 65535, G sites are averages <=65535
         // (no underflow from the MHC laplacian terms either).
     }
@@ -1018,6 +1213,21 @@ mod tests {
         let _ = demosaic_bayer(&bggr_raw, 2, 2, (1, 1)).unwrap();
         let gbrg_raw = vec![30u16, 40, 10, 20];
         let _ = demosaic_bayer(&gbrg_raw, 2, 2, (1, 0)).unwrap();
+    }
+
+    #[test]
+    fn m11_bayer_mhc_phase_rggb_matches_existing() {
+        let raw: Vec<u16> = (1u16..=16).collect();
+        let old = demosaic_rggb_mhc(&raw, 4, 4).unwrap();
+        let phased = demosaic_bayer_mhc(&raw, 4, 4, (0, 0)).unwrap();
+        assert_eq!(phased, old);
+    }
+
+    #[test]
+    fn m11_bayer_mhc_grbg_preserves_red_site() {
+        let grbg_raw = vec![20u16, 10, 40, 30];
+        let rgb = demosaic_bayer_mhc(&grbg_raw, 2, 2, (0, 1)).unwrap();
+        assert_eq!(rgb[3], 10, "phase-aware mhc must keep direct R sample at GRBG (0,1)");
     }
 
     #[test]

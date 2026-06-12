@@ -8,6 +8,7 @@ use crate::ljpeg;
 use anyhow::{anyhow, bail, Context, Result};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,14 +87,14 @@ pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
     let mut out = vec![0u16; width * height];
 
     match raw.compression {
-        1 => decode_uncompressed(data, &raw, width, height, &mut out)?,
+        1 => decode_uncompressed(data, &raw, width, height, le, &mut out)?,
         7 => decode_tiles(data, &raw, width, height, cps, &mut out)?,
         c => bail!("DNG compression {c} not supported"),
     }
 
-    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(0.5);
+    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(1.0);
     let wb_g_neutral = state.as_shot_neutral.map(|n| n[1]).unwrap_or(1.0);
-    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(0.6);
+    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(1.0);
     let wb_r = wb_g_neutral / wb_r_neutral.max(1e-6);
     let wb_g = 1.0;
     let wb_b = wb_g_neutral / wb_b_neutral.max(1e-6);
@@ -223,40 +224,85 @@ fn decode_uncompressed(
     raw: &RawIfd,
     width: usize,
     height: usize,
+    le: bool,
     out: &mut [u16],
 ) -> Result<()> {
     let bps = raw.bits_per_sample;
-    if raw.tile_offsets.is_empty() {
-        bail!("uncompressed DNG: strip-offset path not implemented");
-    }
     if bps != 16 {
         bail!("uncompressed DNG: bps {} unsupported", bps);
     }
-    let tw = raw.tile_width.ok_or_else(|| anyhow!("TileWidth"))? as usize;
-    let tl = raw.tile_length.ok_or_else(|| anyhow!("TileLength"))? as usize;
-    let coltiles = (width + tw - 1) / tw;
-    let rowtiles = (height + tl - 1) / tl;
-    for tr in 0..rowtiles {
-        for tc in 0..coltiles {
-            let idx = tr * coltiles + tc;
-            let off = raw.tile_offsets[idx] as usize;
-            let bc = raw.tile_byte_counts[idx] as usize;
-            let src = &data[off..off + bc];
-            let col_start = tc * tw;
-            let col_end = ((tc + 1) * tw).min(width);
-            let row_start = tr * tl;
-            let row_end = ((tr + 1) * tl).min(height);
-            let mut sp = 0;
-            for r in row_start..row_end {
-                for c in col_start..col_end {
-                    out[r * width + c] = u16::from_le_bytes([src[sp], src[sp + 1]]);
-                    sp += 2;
+    if !raw.tile_offsets.is_empty() {
+        let tw = raw.tile_width.ok_or_else(|| anyhow!("TileWidth"))? as usize;
+        let tl = raw.tile_length.ok_or_else(|| anyhow!("TileLength"))? as usize;
+        let coltiles = (width + tw - 1) / tw;
+        let rowtiles = (height + tl - 1) / tl;
+        for tr in 0..rowtiles {
+            for tc in 0..coltiles {
+                let idx = tr * coltiles + tc;
+                let off = raw.tile_offsets[idx] as usize;
+                let bc = raw.tile_byte_counts[idx] as usize;
+                let src = data
+                    .get(off..off + bc)
+                    .ok_or_else(|| anyhow!("uncompressed DNG: tile {idx} OOB"))?;
+                let col_start = tc * tw;
+                let col_end = ((tc + 1) * tw).min(width);
+                let row_start = tr * tl;
+                let row_end = ((tr + 1) * tl).min(height);
+                let mut sp = 0usize;
+                for r in row_start..row_end {
+                    for c in col_start..col_end {
+                        if sp + 2 > src.len() {
+                            bail!("uncompressed DNG: tile {idx} truncated");
+                        }
+                        out[r * width + c] = if le {
+                            u16::from_le_bytes([src[sp], src[sp + 1]])
+                        } else {
+                            u16::from_be_bytes([src[sp], src[sp + 1]])
+                        };
+                        sp += 2;
+                    }
+                    sp += (tw - (col_end - col_start)) * 2;
                 }
-                sp += (tw - (col_end - col_start)) * 2;
             }
         }
+        return Ok(());
     }
-    Ok(())
+    if !raw.strip_offsets.is_empty() {
+        if raw.strip_offsets.len() != raw.strip_byte_counts.len() {
+            bail!("uncompressed DNG: strip count mismatch");
+        }
+        let rows_per_strip = raw.rows_per_strip.unwrap_or(height as u32).max(1) as usize;
+        for (idx, (&off_u32, &bc_u32)) in raw
+            .strip_offsets
+            .iter()
+            .zip(raw.strip_byte_counts.iter())
+            .enumerate()
+        {
+            let off = off_u32 as usize;
+            let bc = bc_u32 as usize;
+            let src = data
+                .get(off..off + bc)
+                .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} OOB"))?;
+            let row_start = idx * rows_per_strip;
+            let row_end = (row_start + rows_per_strip).min(height);
+            let mut sp = 0usize;
+            for r in row_start..row_end {
+                for c in 0..width {
+                    if sp + 2 > src.len() {
+                        bail!("uncompressed DNG: strip {idx} truncated");
+                    }
+                    out[r * width + c] = if le {
+                        u16::from_le_bytes([src[sp], src[sp + 1]])
+                    } else {
+                        u16::from_be_bytes([src[sp], src[sp + 1]])
+                    };
+                    sp += 2;
+                }
+            }
+        }
+        return Ok(());
+    }
+    bail!("uncompressed DNG: missing tile or strip offsets");
 }
 
 pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u16], usize, usize) {
@@ -277,6 +323,15 @@ pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u
     (raw, width, height)
 }
 
+fn cfa_phase(cfa: Cfa) -> (u8, u8) {
+    match cfa {
+        Cfa::Rggb => (0, 0),
+        Cfa::Grbg => (0, 1),
+        Cfa::Gbrg => (1, 0),
+        Cfa::Bggr => (1, 1),
+    }
+}
+
 #[derive(Default, Debug)]
 struct RawIfd {
     width: u32,
@@ -284,6 +339,9 @@ struct RawIfd {
     bits_per_sample: u16,
     samples_per_pixel: u16,
     compression: u32,
+    strip_offsets: Vec<u32>,
+    strip_byte_counts: Vec<u32>,
+    rows_per_strip: Option<u32>,
     tile_offsets: Vec<u32>,
     tile_byte_counts: Vec<u32>,
     tile_width: Option<u32>,
@@ -307,7 +365,31 @@ struct WalkState {
     orientation: Option<u16>,
 }
 
+fn raw_ifd_supported_candidate(ifd: &RawIfd, new_subfile_type: u32) -> bool {
+    let has_storage =
+        (!ifd.tile_offsets.is_empty() && !ifd.tile_byte_counts.is_empty())
+            || (!ifd.strip_offsets.is_empty() && !ifd.strip_byte_counts.is_empty());
+    let is_subsampled = (new_subfile_type & 1) != 0;
+    ifd.width > 0
+        && ifd.height > 0
+        && has_storage
+        && !is_subsampled
+        && (ifd.compression == 7 || ifd.compression == 1 || ifd.compression == 0x884C)
+}
+
 fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
+    fn walk_inner(
+        data: &[u8],
+        off: usize,
+        le: bool,
+        state: &mut WalkState,
+        visited: &mut HashSet<usize>,
+        depth: usize,
+    ) {
+        const MAX_IFD_DEPTH: usize = 64;
+        if depth >= MAX_IFD_DEPTH || !visited.insert(off) {
+            return;
+        }
     if off + 2 > data.len() {
         return;
     }
@@ -347,6 +429,15 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
             0x0115 => {
                 ifd.samples_per_pixel =
                     first_u32(data, dtype, cnt, val, inline_pos, le).unwrap_or(1) as u16;
+            }
+            0x0111 => {
+                ifd.strip_offsets = read_array_u32(data, dtype, cnt, val, inline_pos, le);
+            }
+            0x0116 => {
+                ifd.rows_per_strip = first_u32(data, dtype, cnt, val, inline_pos, le);
+            }
+            0x0117 => {
+                ifd.strip_byte_counts = read_array_u32(data, dtype, cnt, val, inline_pos, le);
             }
             0x0142 => {
                 ifd.tile_width = first_u32(data, dtype, cnt, val, inline_pos, le);
@@ -413,21 +504,25 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
 
     // Determine if this IFD is the full-res raw: needs ImageWidth/Length and
     // tile offsets, and NewSubFileType bit 0 must be 0 (full-res).
-    let is_subsampled = (new_subfile_type & 1) != 0;
-    if has_image_dims
-        && has_tiles
-        && !is_subsampled
-        && (ifd.compression == 7 || ifd.compression == 1 || ifd.compression == 0x884C)
-        && ifd.width > 1000
-    {
-        if state.raw_ifd.is_none() || ifd.width > state.raw_ifd.as_ref().unwrap().width {
+    let _ = has_tiles;
+    if has_image_dims && raw_ifd_supported_candidate(&ifd, new_subfile_type) {
+        let area = (ifd.width as u64) * (ifd.height as u64);
+        let replace = state
+            .raw_ifd
+            .as_ref()
+            .map(|prev| area > (prev.width as u64) * (prev.height as u64))
+            .unwrap_or(true);
+        if replace {
             state.raw_ifd = Some(ifd);
         }
     }
 
     for s in subs {
-        walk(data, s as usize, le, state);
+            walk_inner(data, s as usize, le, state, visited, depth + 1);
     }
+    }
+    let mut visited = HashSet::new();
+    walk_inner(data, off, le, state, &mut visited, 0);
 }
 
 fn first_u32(
@@ -780,6 +875,58 @@ mod tests {
         );
         assert_matrix_close(matrix, expected);
     }
+
+    #[test]
+    fn decode_uncompressed_tile_respects_big_endian() {
+        let raw = RawIfd {
+            bits_per_sample: 16,
+            tile_offsets: vec![0],
+            tile_byte_counts: vec![8],
+            tile_width: Some(2),
+            tile_length: Some(2),
+            ..Default::default()
+        };
+        let data = [0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04];
+        let mut out = vec![0u16; 4];
+        decode_uncompressed(&data, &raw, 2, 2, false, &mut out).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn decode_uncompressed_strip_path_supported() {
+        let raw = RawIfd {
+            bits_per_sample: 16,
+            strip_offsets: vec![0, 4],
+            strip_byte_counts: vec![4, 4],
+            rows_per_strip: Some(1),
+            ..Default::default()
+        };
+        let data = [1, 0, 2, 0, 3, 0, 4, 0];
+        let mut out = vec![0u16; 4];
+        decode_uncompressed(&data, &raw, 2, 2, true, &mut out).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn cfa_phase_maps_all_patterns() {
+        assert_eq!(cfa_phase(Cfa::Rggb), (0, 0));
+        assert_eq!(cfa_phase(Cfa::Grbg), (0, 1));
+        assert_eq!(cfa_phase(Cfa::Gbrg), (1, 0));
+        assert_eq!(cfa_phase(Cfa::Bggr), (1, 1));
+    }
+
+    #[test]
+    fn raw_candidate_accepts_strips_and_small_width() {
+        let raw = RawIfd {
+            width: 640,
+            height: 480,
+            compression: 1,
+            strip_offsets: vec![100],
+            strip_byte_counts: vec![200],
+            ..Default::default()
+        };
+        assert!(raw_ifd_supported_candidate(&raw, 0));
+    }
 }
 
 /// X2 deliverable: post-demosaic RGB16 + metadata, without a full mosaic buffer resident
@@ -842,9 +989,9 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
     };
 
     // WB / matrix / black/white / iso / names (same as decode_bytes)
-    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(0.5);
+    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(1.0);
     let wb_g_neutral = state.as_shot_neutral.map(|n| n[1]).unwrap_or(1.0);
-    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(0.6);
+    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(1.0);
     let wb_r = wb_g_neutral / wb_r_neutral.max(1e-6);
     let wb_g = 1.0;
     let wb_b = wb_g_neutral / wb_b_neutral.max(1e-6);
@@ -866,14 +1013,13 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
         let t0 = Instant::now();
         let img = decode_bytes(data)?;
         let decode_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let (raw_a, aw, ah) = align_to_rggb(&img.raw, img.width, img.height, img.cfa);
         let t1 = Instant::now();
-        let rgb = demosaic::demosaic_rggb_mhc(raw_a, aw, ah)
+        let rgb = demosaic::demosaic_bayer_mhc(&img.raw, img.width, img.height, cfa_phase(img.cfa))
             .map_err(|e| anyhow!("demosaic: {}", e))?;
         let demosaic_ms = t1.elapsed().as_secs_f64() * 1000.0;
         return Ok(DngDemosaiced {
-            width: aw,
-            height: ah,
+            width: img.width,
+            height: img.height,
             rgb,
             black: img.black,
             white: img.white,
@@ -913,6 +1059,8 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
 
     let halo = 2usize;
     let mut halo_rows: Vec<u16> = vec![0u16; width * halo];
+    let mut band = vec![0u16; width * tl.max(1)];
+    let mut ctx = vec![0u16; width * (halo + tl.max(1) + halo)];
     let mut rgb_write_row: usize = 0usize;
 
     let mut decode_ms = 0.0f64;
@@ -924,7 +1072,8 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
         let row_h = row_end - row_start;
 
         let tdec = Instant::now();
-        let mut band = vec![0u16; width * row_h];
+        band.resize(width * row_h, 0);
+        band.fill(0);
         for tc in 0..coltiles {
             let idx = tr * coltiles + tc;
             let off = raw.tile_offsets[idx] as usize;
@@ -942,7 +1091,8 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
 
         // ctx = [top halo | band | bottom (replicate for this pass)]
         let ctx_h = halo + row_h + halo;
-        let mut ctx = vec![0u16; width * ctx_h];
+        ctx.resize(width * ctx_h, 0);
+        ctx.fill(0);
         if tr == 0 {
             if row_h > 0 {
                 let first = &band[0..width];

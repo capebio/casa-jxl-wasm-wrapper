@@ -18,9 +18,32 @@ pub fn decompress_rows(compressed: &[u8], width: usize, height: usize, max_rows:
     -> Result<Vec<u16>, String>
 {
     let nrows = max_rows.min(height);
-    let n = width.checked_mul(nrows)
-        .ok_or_else(|| format!("decompress: {}×{} overflows", width, nrows))?;
+    let n = width
+        .checked_mul(nrows)
+        .ok_or_else(|| format!("decompress: {}x{} overflows", width, nrows))?;
     let mut out = vec![0u16; n];
+    let rows = decompress_rows_into(compressed, width, height, max_rows, &mut out)?;
+    out.truncate(width * rows);
+    Ok(out)
+}
+
+pub fn decompress_rows_into(
+    compressed: &[u8],
+    width: usize,
+    height: usize,
+    max_rows: usize,
+    out: &mut [u16],
+) -> Result<usize, String> {
+    let nrows = max_rows.min(height);
+    let n = width
+        .checked_mul(nrows)
+        .ok_or_else(|| format!("decompress: {}x{} overflows", width, nrows))?;
+    if out.len() < n {
+        return Err(format!("decompress: output too small ({} < {})", out.len(), n));
+    }
+    if nrows == 0 {
+        return Ok(0);
+    }
     if compressed.len() <= HEADER_SKIP {
         return Err(format!(
             "decompress: input too short ({} bytes, need > {})",
@@ -39,7 +62,7 @@ pub fn decompress_rows(compressed: &[u8], width: usize, height: usize, max_rows:
 
         // D1: delay lines replace re-reads of out[] (west/nw from col-2 same parity).
         // north_row borrows the prior row slice; cur_row mut for current.
-        let (above, cur) = out.split_at_mut(row_base);
+        let (above, cur) = out[..n].split_at_mut(row_base);
         let north_row: &[u16] = if row >= 2 { &above[row2_base..row2_base + width] } else { &[] };
         let cur_row = &mut cur[..width];
 
@@ -54,11 +77,17 @@ pub fn decompress_rows(compressed: &[u8], width: usize, height: usize, max_rows:
             let nbits = (2 + i as i32).max(bitlen - i as i32).min(16) as usize;
 
             let sb = br.read_bits(3);
+            if br.truncated {
+                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+            }
             let low = (sb & 3) as i32;
             // arithmetic shift spreads top bit of the 3-bit field into a -1/0 mask
             let sign = (((sb as i32) << 29) >> 31) as i32;
 
             let high0 = br.read_huff(&huff);
+            if br.truncated {
+                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+            }
             // Escape path reads (16 - nbits) bits — NOT a flat 16.  Then drop LSB.
             let high = if high0 == 12 {
                 let extra = (16u32).saturating_sub(nbits as u32);
@@ -66,10 +95,16 @@ pub fn decompress_rows(compressed: &[u8], width: usize, height: usize, max_rows:
             } else {
                 high0 as i32
             };
+            if br.truncated {
+                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+            }
 
             // carry[0] = (high << nbits) | nbits-bit literal.  `low` is NOT
             // OR'ed in here — it is applied to the diff when storing the pixel.
             acarry[parity][0] = (high << (nbits as u32)) | (br.read_bits(nbits as u32) as i32);
+            if br.truncated {
+                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+            }
             let diff = (acarry[parity][0] ^ sign) + acarry[parity][1];
             // Running average uses the carry's OWN previous value (carry[1]),
             // not carry[0].  This is the dcraw / LibRaw / rawloader form.
@@ -113,9 +148,9 @@ pub fn decompress_rows(compressed: &[u8], width: usize, height: usize, max_rows:
         }
     }
     if br.truncated {
-        return Err(format!("decompress: bitstream exhausted before {}×{} pixels", width, nrows));
+        return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
     }
-    Ok(out)
+    Ok(nrows)
 }
 
 fn build_huff() -> [u16; 4096] {
@@ -279,10 +314,10 @@ mod tests {
         // truncate inside the payload
         let short: Vec<u8> = full[..(7 + 5)].to_vec();
         let e = decompress(&short, GOLDEN_W, GOLDEN_H).unwrap_err();
-        assert!(e.contains("decompress: bitstream exhausted before 4×3 pixels"));
+        assert!(e.contains("decompress: bitstream exhausted before 4x3 pixels"));
         // also for rows prefix
         let e2 = decompress_rows(&short, GOLDEN_W, GOLDEN_H, 2).unwrap_err();
-        assert!(e2.contains("decompress: bitstream exhausted before 4×2 pixels"));
+        assert!(e2.contains("decompress: bitstream exhausted before 4x2 pixels"));
     }
 
     // D8(d): decompress_rows(k) == first k rows of full decode.
@@ -297,6 +332,30 @@ mod tests {
         // >H returns full (clamped)
         let over = decompress_rows(GOLDEN_FULL, GOLDEN_W, GOLDEN_H, 99).unwrap();
         assert_eq!(over, full_out);
+    }
+
+    #[test]
+    fn decompress_rows_into_prefix_matches_and_reports_rows_written() {
+        let mut out = vec![999u16; GOLDEN_W * GOLDEN_H];
+        let rows = decompress_rows_into(GOLDEN_FULL, GOLDEN_W, GOLDEN_H, 2, &mut out).unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(&out[..GOLDEN_W * 2], &GOLDEN_EXPECT[..GOLDEN_W * 2]);
+        assert_eq!(out[GOLDEN_W * 2], 999);
+    }
+
+    #[test]
+    fn decompress_rows_into_short_output_errors() {
+        let mut out = vec![0u16; GOLDEN_W * 2 - 1];
+        let err = decompress_rows_into(GOLDEN_FULL, GOLDEN_W, GOLDEN_H, 2, &mut out).unwrap_err();
+        assert!(err.contains("decompress: output too small"));
+    }
+
+    #[test]
+    fn decompress_errors_use_ascii_x() {
+        let short: Vec<u8> = GOLDEN_FULL[..(7 + 5)].to_vec();
+        let err = decompress(&short, GOLDEN_W, GOLDEN_H).unwrap_err();
+        assert!(err.contains("4x3"), "got: {}", err);
+        assert!(!err.contains('×'));
     }
 
     // D3 benchmark-gated: one fill(48) + unchecked. Existing batch-to-56 already near-free.
