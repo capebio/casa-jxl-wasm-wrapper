@@ -2,7 +2,7 @@ import type { PyramidLevel } from "./manifest.js";
 import { longEdge } from "./decode-core.js";
 
 interface CacheEntry {
-  sorted: PyramidLevel[];
+  sorted: Array<{ level: PyramidLevel; long: number }>;
   lastTarget?: number;
   lastLevel?: PyramidLevel;
 }
@@ -21,9 +21,9 @@ export function chooseLevelForTarget(
 
   let entry = cache.get(levels);
   if (!entry) {
-    entry = {
-      sorted: [...levels].sort((a, b) => longEdge(a.w, a.h) - longEdge(b.w, b.h)),
-    };
+    const withLong = levels.map((level) => ({ level, long: longEdge(level.w, level.h) }));
+    const sorted = withLong.sort((a, b) => a.long - b.long);
+    entry = { sorted };
     cache.set(levels, entry);
   }
 
@@ -32,9 +32,9 @@ export function chooseLevelForTarget(
   }
 
   const sorted = entry.sorted;
-  const maxLevel = sorted[sorted.length - 1]!;
-  if (targetLongEdge > longEdge(maxLevel.w, maxLevel.h)) {
-    const fallback = levels[levels.length - 1]!;
+  const maxInfo = sorted[sorted.length - 1]!;
+  if (targetLongEdge > maxInfo.long) {
+    const fallback = maxInfo.level;
     entry.lastTarget = targetLongEdge;
     entry.lastLevel = fallback;
     return fallback;
@@ -42,13 +42,13 @@ export function chooseLevelForTarget(
 
   let low = 0;
   let high = sorted.length - 1;
-  let best = maxLevel;
+  let best = maxInfo.level;
 
   while (low <= high) {
     const mid = (low + high) >>> 1;
-    const level = sorted[mid]!;
-    if (longEdge(level.w, level.h) >= targetLongEdge) {
-      best = level;
+    const info = sorted[mid]!;
+    if (info.long >= targetLongEdge) {
+      best = info.level;
       high = mid - 1;
     } else {
       low = mid + 1;
