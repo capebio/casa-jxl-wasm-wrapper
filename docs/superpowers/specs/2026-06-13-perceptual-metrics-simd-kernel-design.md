@@ -240,7 +240,27 @@ break.
 - GPU (WebGPU/CUDA) paths.
 - Porting non-metric chart code.
 
-## 11. Open risks
+## 11. Future directions (NOT in this plan)
+
+Recorded for follow-on specs; do not expand the current implementation scope.
+
+### 11.1 Planar input from the decoder (CPU)
+The kernel is already planar internally (X/Y/B `f32` planes — why `scaleErr`
+vectorizes). The only interleaved step is the RGBA→planes **deinterleave** (§5.1).
+If the decode boundary emitted planar RGB (libjxl is natively planar — `Image3F`),
+the deinterleave is deleted for all three metrics. Pipeline-deep (decoder output
+format), gain limited to the deinterleave fraction. Secondary to the SIMD win.
+
+### 11.2 GPU compute batch path (the real "planar is great for GPUs" payoff)
+For **millions-of-images offline ingest** (native/server), a WebGPU (`wgpu`) /
+CUDA compute path fed **planar** buffers is potentially 10–100× over CPU SIMD:
+per-pixel XYB, separable box blur, and parallel reduction all map to compute
+shaders; planar = one storage buffer per channel, coalesced, no gather.
+**Amortizes only when batching** many images resident on the GPU — upload
+(~4 MB/MP) + readback latency kills it for single interactive images. Therefore an
+*offline-ingest* play, not the interactive browser chart. Separate spec/plan.
+
+## 12. Open risks
 
 - **relaxed-simd availability**: not all wasm engines enable it; the strict v128
   Path A is the guaranteed baseline, relaxed Path B is opportunistic via probe.
