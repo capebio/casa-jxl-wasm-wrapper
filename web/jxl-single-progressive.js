@@ -473,7 +473,27 @@ const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
 const showBlockBordersEl = document.getElementById('show-block-borders');
 const chartsEnabledEl = document.getElementById('charts-enabled');
+const perceptualCutoffEl = document.getElementById('perceptual-cutoff');
 const timingBordersOverride = readBoolParam('borders', null);
+
+// Lens17 (and 12/14/16/9/11/13): paint-time hook for non-Riemannian perceptual constancy engine
+// (Schrödinger geodesics via B + log-flat + Molchanov A_tensor residuals + LA f(c) diminishing).
+// Real engine lives in Rust LookRenderer apply_tone_math. This is the exact "during progressive JXL paints" call site.
+// Hook receives display buffer (may be downsampled), w/h; must return Uint8ClampedArray (same length) or falsy (use original).
+// NEVER mutates input (pass.pixels / targetRgba used for cutoff psnr/butter, exports, stats, one-shot).
+// Enable: globalThis.__perceptualConstancyPaint = yourWasmOrLUTFn;
+const perceptualConstancyPaint =
+    (typeof globalThis.__perceptualConstancyPaint === 'function') ? globalThis.__perceptualConstancyPaint : null;
+
+// Layer 3 shared helper (per plan handoff): eager stats precompute for cutoff is identical in both decode paths.
+// Extracted to eliminate dupe while leaving final-detection + cancel + stoppedEarlyReason branching in callers
+// (different because main decoder vs session worker, and graceful return semantics).
+function eagerComputeCutoffStats(passes) {
+  if (passes.length >= 2) {
+    computeAndCachePassStats(passes.at(-1));
+    computeAndCachePassStats(passes.at(-2));
+  }
+}
 const bordersOverride = new URLSearchParams(location.search).get('borders') === '0';
 
 const runMeasurements = [];
@@ -1088,7 +1108,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
 
                 // Perceptual cutoff check (opt-in). After non-final pass recorded.
                 // Eager stats for hash trigger only when enabled (avoids paying analyze cost on diagnostic default-OFF runs; makes hash-equal viable despite post-F lazy precompute).
-                const cutoffEnabled = document.getElementById('perceptual-cutoff')?.checked === true;
+                const cutoffEnabled = perceptualCutoffEl?.checked === true;
                 if (cutoffEnabled && !pass.isFinal && passes.length >= 2) {
                     computeAndCachePassStats(passes.at(-1));
                     computeAndCachePassStats(passes.at(-2));
@@ -1179,8 +1199,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
             // Eager stats for hash (only under toggle; see main decode path comment).
             const cutoffEnabled = document.getElementById('perceptual-cutoff')?.checked === true;
             if (cutoffEnabled && !(frame.stage === 'final' || frame.isFinal) && passes.length >= 2) {
-                computeAndCachePassStats(passes.at(-1));
-                computeAndCachePassStats(passes.at(-2));
+                eagerComputeCutoffStats(passes);
             }
             if (cutoffEnabled && !(frame.stage === 'final' || frame.isFinal)) {
                 const verdict = shouldStopAtPass(passes, targetRgba);
@@ -1312,11 +1331,19 @@ function shouldStopAtPass(passes, targetRgba) {
     // Now uses butterSeries/monotone instead of psnr-only (robust to color/illum via future constancy).
     if ((last.intendedRatio ?? 8) <= 1 && (prev.intendedRatio ?? 8) <= 1 && targetRgba) {
         if (last.pixels?.byteLength === targetRgba.byteLength && prev.pixels?.byteLength === targetRgba.byteLength) {
-            const psnrLast = computePsnrVsFinal(targetRgba, last.pixels);
-            const psnrPrev = computePsnrVsFinal(targetRgba, prev.pixels);
-            const cmp = createButteraugliComparer(targetRgba, last.width ?? 0, last.height ?? 0);
-            const buttLast = cmp(last.pixels);
-            const buttPrev = cmp(prev.pixels);
+            let cmpRef = targetRgba, cmpW = last.width ?? 0, cmpH = last.height ?? 0;
+            let cmpLastP = last.pixels, cmpPrevP = prev.pixels;
+            if ((last.width * last.height) > CHART_MAX_PIXELS) {
+                const dsRef = downsamplePixelsForChart(targetRgba, last.width, last.height);
+                cmpRef = dsRef.pixels; cmpW = dsRef.width; cmpH = dsRef.height;
+                cmpLastP = downsamplePixelsForChart(last.pixels, last.width, last.height).pixels;
+                cmpPrevP = downsamplePixelsForChart(prev.pixels, prev.width, prev.height).pixels;
+            }
+            const psnrLast = computePsnrVsFinal(cmpRef, cmpLastP);
+            const psnrPrev = computePsnrVsFinal(cmpRef, cmpPrevP);
+            const cmp = createButteraugliComparer(cmpRef, cmpW, cmpH);
+            const buttLast = cmp(cmpLastP);
+            const buttPrev = cmp(cmpPrevP);
             const smallSeries = [
                 { bytes: 0, psnr: psnrPrev, butter: buttPrev },
                 { bytes: 1, psnr: psnrLast, butter: buttLast },
@@ -1611,7 +1638,12 @@ async function drawPixels(targetCanvas, pixels, width, height, options = {}) {
     const data = (paintSize.width === width && paintSize.height === height)
         ? source
         : downsampleRgbaNearest(source, width, height, paintSize.width, paintSize.height);
-    const bitmap = await createImageBitmap(new ImageData(data, paintSize.width, paintSize.height));
+    let paintSource = data;
+    if (perceptualConstancyPaint) {
+        const hooked = perceptualConstancyPaint(paintSource, paintSize.width, paintSize.height);
+        if (hooked && hooked.length === paintSource.length) paintSource = hooked;
+    }
+    const bitmap = await createImageBitmap(new ImageData(paintSource, paintSize.width, paintSize.height));
     targetCanvas.getContext('2d').drawImage(bitmap, 0, 0);
     bitmap.close();
     return { scaleX: paintSize.width / width, scaleY: paintSize.height / height };
@@ -1640,14 +1672,12 @@ function displayPaintSize(targetCanvas, width, height) {
 
 function downsampleRgbaNearest(source, width, height, targetWidth, targetHeight) {
     const out = new Uint8ClampedArray(targetWidth * targetHeight * 4);
-    const xScale = width / targetWidth;
-    const yScale = height / targetHeight;
     for (let y = 0; y < targetHeight; y++) {
-        const sy = Math.min(height - 1, Math.floor((y + 0.5) * yScale));
+        const sy = Math.min(height - 1, Math.floor(((y * 2 + 1) * height) / (targetHeight * 2)));
         const srcRow = sy * width * 4;
         const dstRow = y * targetWidth * 4;
         for (let x = 0; x < targetWidth; x++) {
-            const sx = Math.min(width - 1, Math.floor((x + 0.5) * xScale));
+            const sx = Math.min(width - 1, Math.floor(((x * 2 + 1) * width) / (targetWidth * 2)));
             const srcIdx = srcRow + sx * 4;
             const dstIdx = dstRow + x * 4;
             out[dstIdx] = source[srcIdx];
