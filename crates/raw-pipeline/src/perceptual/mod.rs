@@ -6,7 +6,7 @@ mod blur;
 pub(crate) mod butteraugli;
 mod psnr;
 pub(crate) mod ssim;
-mod xyb;
+pub(crate) mod xyb;
 mod simd;
 pub use simd::{detect_native, Backend};
 
@@ -127,7 +127,36 @@ impl Comparer {
     }
 
     fn fill_test_xyb(&mut self, test: &[u8]) {
-        xyb::pixels_to_xyb(test, self.n, &mut self.tx, &mut self.ty, &mut self.tb);
+        match self.backend {
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
+                simd::avx2::pixels_to_xyb_avx2(
+                    test, self.n, xyb::sqrt_lin_lut_ptr(),
+                    &mut self.tx, &mut self.ty, &mut self.tb,
+                );
+            },
+            _ => xyb::pixels_to_xyb(test, self.n, &mut self.tx, &mut self.ty, &mut self.tb),
+        }
+    }
+
+    fn downsample_dispatch(&mut self, w: usize, h: usize, dw: usize, dh: usize) {
+        let dn = dw * dh;
+        match self.backend {
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
+                simd::avx2::downsample_avx2(&self.tx, &mut self.dx, w, h, dw, dh);
+                simd::avx2::downsample_avx2(&self.ty, &mut self.dy, w, h, dw, dh);
+                simd::avx2::downsample_avx2(&self.tb, &mut self.db, w, h, dw, dh);
+            },
+            _ => {
+                downsample_inplace(&self.tx, &mut self.dx, w, h, dw, dh);
+                downsample_inplace(&self.ty, &mut self.dy, w, h, dw, dh);
+                downsample_inplace(&self.tb, &mut self.db, w, h, dw, dh);
+            }
+        }
+        self.tx[..dn].copy_from_slice(&self.dx[..dn]);
+        self.ty[..dn].copy_from_slice(&self.dy[..dn]);
+        self.tb[..dn].copy_from_slice(&self.db[..dn]);
     }
 
     /// 3-scale butteraugli. Mutates test scratch (tx/ty/tb get downsampled in place).
@@ -143,13 +172,7 @@ impl Comparer {
             total += e;
             if s < 2 && w > 1 && h > 1 {
                 let (dw, dh) = ((w >> 1).max(1), (h >> 1).max(1));
-                downsample_inplace(&self.tx, &mut self.dx, w, h, dw, dh);
-                downsample_inplace(&self.ty, &mut self.dy, w, h, dw, dh);
-                downsample_inplace(&self.tb, &mut self.db, w, h, dw, dh);
-                let dn = dw * dh;
-                self.tx[..dn].copy_from_slice(&self.dx[..dn]);
-                self.ty[..dn].copy_from_slice(&self.dy[..dn]);
-                self.tb[..dn].copy_from_slice(&self.db[..dn]);
+                self.downsample_dispatch(w, h, dw, dh);
                 w = dw; h = dh;
             }
         }
