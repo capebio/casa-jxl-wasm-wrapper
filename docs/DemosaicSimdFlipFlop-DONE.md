@@ -30,23 +30,37 @@ pinpointed col 11 row 1 (R) — my scalar *tail* used the `bayer_pixel` helper, 
 4-diagonal average, while `demosaic_rggb`'s unrolled interior uses a horizontal average. The two
 disagree, so any column my SIMD pushed into the bayer_pixel tail mismatched.
 
-### After fixing the tail to use the unrolled formula — bit-identical, and the win evaporates
-| context | equal | scalar ms | simd ms | speedup | verdict |
-|---|---|--:|--:|--:|---|
-| 20MP | true | 154.80 | 149.57 | **1.03×** | reject (<3%) |
-| lightbox | true | 16.17 | 16.52 | **0.98×** | reject (slower) |
-| thumb | true | 2.03 | 2.16 | **0.94×** | reject (slower) |
+### After fixing the tail to use the unrolled formula — bit-identical, win evaporates
+First (block-timed) pass: 20MP 1.03×, lightbox 0.98×, thumb 0.94×. **But those were contaminated by
+a concurrent agent's CPU load** (scalar timed in one block, simd in another → a load spike on the simd
+block biased it). See the corrected measurement below.
 
-## Why no win
+### Corrected: TRUE alternation (scalar,simd,scalar,simd…) + MIN (least-contended run)
+Two back-to-back runs. Absolute times swing with background load (20MP: 128 ms vs 168 ms run-to-run),
+but the **min-based ratio is rock-stable at ~1.00×** because alternation + min cancel time-varying load:
 
-The bottleneck isn't the neighbor arithmetic — LLVM already autovectorizes the scalar demosaic well.
-The explicit SIMD pays for: u16→i32 widen + i32→u16 narrow per channel, and especially the
-**planar→interleaved RGB store** (8 lanes scattered to `out[col*3 + 0/1/2]`), which the parity-select
-approach defers to a scalar interleave. That store + the widen/narrow overhead cancel the vectorized
-adds. At small sizes the SIMD setup is pure overhead → slightly slower.
+| context | equal | speedup (min), run1 / run2 | speedup (median) | verdict |
+|---|---|--:|--:|---|
+| 20MP | true | 0.996 / 1.003 | ~0.99 | **tie → reject** |
+| lightbox | true | 1.003 / 1.001 | ~1.00 | **tie → reject** |
+| thumb | true | 1.000 / 1.000 | ~1.00 | **tie → reject** |
 
-This matches the prior lens prediction ("autovec is likely good; measure before committing SIMD") and
-the repo's evidence-gated policy: **do not put unproven SIMD in the hot RAW path.**
+So the SIMD is neither faster nor slower — a **dead tie** with the scalar path.
+
+## Why a tie (and why a server won't change it)
+
+- **Both paths are wasm128.** The build sets `+simd128` (the production "simd" tier), so LLVM
+  auto-vectorizes the *scalar* demosaic too. This is autovec-128 vs hand-128 → tie expected.
+- **wasm SIMD is fixed at 128 bits.** Engines (V8 etc.) do **not** auto-widen wasm128 to a server's
+  AVX2/AVX-512. A faster server speeds up both paths equally; it cannot make 128-bit hand-SIMD beat
+  128-bit autovec. (Confirmed indirectly here: absolute times varied ~30% run-to-run under load, ratio
+  did not.)
+- **The bottleneck is memory layout, not arithmetic.** Cost is dominated by u16↔i32 widen/narrow and the
+  **planar→interleaved RGB store** (8 lanes scattered to `out[col*3 + 0/1/2]`), which the parity-select
+  approach leaves scalar. That's a shuffle/store problem a wider server doesn't help.
+
+Matches the prior lens prediction ("autovec is likely good; measure first") and the repo's policy:
+**no unproven SIMD in the hot RAW path.**
 
 ## Artifacts (bench-only, reproducible)
 - `crates/raw-pipeline/src/demosaic.rs` — `demosaic_rggb_simd` (cfg-gated; native delegates to scalar).
