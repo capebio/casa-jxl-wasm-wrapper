@@ -69,6 +69,7 @@ pub struct Comparer {
     height: usize,
     n: usize,
     opts: Opts,
+    backend: Backend,
     levels: Vec<Level>,
     ref_rgba: Vec<u8>,
     // SSIM reference autos (per channel, RGBA stride 4)
@@ -105,8 +106,17 @@ impl Comparer {
             }
         }
         let (ssim_sb, ssim_sbb) = ssim::ref_moments(ref_rgba, n, 4);
+        let backend = match opts.backend {
+            BackendChoice::ForceScalar => Backend::Scalar,
+            BackendChoice::Force(id) => match id {
+                1 => Backend::Avx2Strict,
+                2 => Backend::Avx2Rsqrt,
+                _ => Backend::Scalar,
+            },
+            BackendChoice::Auto => detect_native(false),
+        };
         Comparer {
-            width, height, n, opts, levels,
+            width, height, n, opts, backend, levels,
             ref_rgba: ref_rgba.to_vec(),
             ssim_sb, ssim_sbb,
             tx: vec![0f32; n], ty: vec![0f32; n], tb: vec![0f32; n],
@@ -127,13 +137,7 @@ impl Comparer {
         let (mut w, mut h) = (self.width, self.height);
         let mut total = 0f32;
         for s in 0..3 {
-            let lvl = &self.levels[s];
-            let cur_n = w * h;
-            let e = butteraugli::scale_err(
-                &lvl.mask, &lvl.x, &lvl.y, &lvl.b,
-                &self.tx[..cur_n], &self.ty[..cur_n], &self.tb[..cur_n],
-                cur_n, &self.opts.k,
-            ) * self.opts.weights[s];
+            let e = self.scale_err_dispatch(s, w, h) * self.opts.weights[s];
             total += e;
             if s < 2 && w > 1 && h > 1 {
                 let (dw, dh) = ((w >> 1).max(1), (h >> 1).max(1));
@@ -161,7 +165,36 @@ impl Comparer {
         if test.len() != self.n * 4 {
             return f32::NAN;
         }
-        psnr::psnr(test, &self.ref_rgba)
+        let sum_sq = match self.backend {
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe { simd::avx2::ssd_avx2(test, &self.ref_rgba) },
+            _ => {
+                let mut s = 0u64;
+                for i in 0..test.len() { let d = test[i] as i64 - self.ref_rgba[i] as i64; s += (d * d) as u64; }
+                s
+            }
+        };
+        if sum_sq == 0 { return f32::INFINITY; }
+        let mse = sum_sq as f64 / test.len() as f64;
+        (10.0 * (255.0f64 * 255.0 / mse).log10()) as f32
+    }
+
+    fn scale_err_dispatch(&self, s: usize, w: usize, h: usize) -> f32 {
+        let lvl = &self.levels[s];
+        let cur_n = w * h;
+        let (tx, ty, tb) = (&self.tx[..cur_n], &self.ty[..cur_n], &self.tb[..cur_n]);
+        let k = &self.opts.k;
+        match self.backend {
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx2Strict => unsafe {
+                simd::avx2::scale_err_avx2(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb, false)
+            },
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx2Rsqrt => unsafe {
+                simd::avx2::scale_err_avx2(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb, true)
+            },
+            _ => butteraugli::scale_err(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k),
+        }
     }
 
     /// All three metrics. Scalar version calls each path; the SIMD override in a
