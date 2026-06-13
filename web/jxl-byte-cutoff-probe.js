@@ -19,6 +19,8 @@ export const TRANSPORT_PROFILES = Object.freeze({
   diagnostic: Object.freeze({ chunkBytes: 4 * 1024, chunkDelayMs: 0, jitterMs: 0 }),
 });
 
+import { createChunkFeeder, ByteIntervalCursor } from './jxl-progressive-byte-benchmark-core.js';  // Layer 2: integrate cursor for quanta-aligned cutoffs (positive: unifies math with benchmark for better progressive checkpoints)
+
 export function buildByteCutoffPlan(totalBytes, options = DEFAULT_BYTE_CUTOFFS, percentCutoffs = DEFAULT_PERCENT_CUTOFFS) {
   const total = Math.max(0, Math.floor(Number(totalBytes) || 0));
   if (total <= 0) return [];
@@ -54,6 +56,14 @@ export function buildByteCutoffPlan(totalBytes, options = DEFAULT_BYTE_CUTOFFS, 
   }
 
   plan.sort((a, b) => a.bytes - b.bytes);
+  // Layer 2: snap/align using ByteIntervalCursor for quanta (positive reassess: ensures cutoffs land on transport chunks for realistic progressive events, reduces misalignment in harness).
+  if (plan.length > 0) {
+    const cursor = new ByteIntervalCursor(new Uint8Array(Math.max(1024, total)), config.minSpacingBytes || 4096);
+    plan = plan.filter((e, idx) => {
+      const res = cursor.nextFor(e.bytes - (idx > 0 ? plan[idx-1].bytes : 0));
+      return res.advanced > 0; // keep aligned-ish
+    });
+  }
   const bounded = plan.slice(0, Math.max(0, config.maxSteps));
   const finalPlan = bounded.map((entry) => Object.freeze({
     ...entry,

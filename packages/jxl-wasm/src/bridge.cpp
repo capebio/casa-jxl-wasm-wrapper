@@ -2897,6 +2897,7 @@ JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
   const double tTake0 = emscripten_get_now();
   const size_t remaining = s->outbuf_size - s->taken;
   const size_t take = (remaining < CHUNK) ? remaining : CHUNK;
+  // Layer 3: ByteIntervalCursor (from benchmark-core) on JS can drive aligned input chunks to enc_push_image; take here yields in CHUNK quanta for symmetric use in byte-cutoff encode tests. Positive for math unification.
   // MakeBufferBorrowed: zero-copy handle into live outbuf (eliminates per-chunk C++ memcpy / performance-1).
   // JS takeBuffer + HEAPU8.slice materializes the owned copy for the yielded chunk.
   // outbuf must stay alive for all borrows; enc_free (after chunks() drain) does the free.
@@ -3686,3 +3687,18 @@ extern "C" void perceptual_apply_full_avx2(const float* in_r, const float* in_g,
 #endif // __AVX2__
 
 // Scalar fallback is the previous perceptual_apply_full (already added).
+
+// Stub implementation for JxlGainMapReadBundle (and friends if needed) to allow
+// linking of dec-only modules in the P3 split build when the gain map .o from
+// libjxl is not included in the dec static libs, even though the header was
+// visible at bridge compile time (pulling in the call site under
+// JXL_GAIN_MAP_SUPPORTED).
+#if JXL_GAIN_MAP_SUPPORTED
+JXL_EXPORT JXL_BOOL JxlGainMapReadBundle(JxlGainMapBundle* map_bundle,
+                                         const uint8_t* data,
+                                         size_t size,
+                                         size_t* bytes_read) {
+  (void)map_bundle; (void)data; (void)size; (void)bytes_read;
+  return 0;  // JXL_FALSE
+}
+#endif

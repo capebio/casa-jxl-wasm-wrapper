@@ -1,3 +1,5 @@
+import { createChunkFeeder, ByteIntervalCursor } from './jxl-progressive-byte-benchmark-core.js';  // Layer 2: Cursor/feeder for aligned byteCutoffs (positive: makes preset plans use same discrete math as benchmark for better layer coverage and flip-flop consistency)
+
 export const PROGRESSIVE_WEB_BYTE_CUTOFFS = Object.freeze([
   1024,
   2 * 1024,
@@ -93,13 +95,28 @@ export function createProgressiveWebPreset({
     preserveIcc,
     preserveMetadata,
   };
+  // Layer 2: use ByteIntervalCursor / feeder to derive aligned cutoffs from quanta (positive reassess: improves math consistency with harness, allows Po2/interval covering for progressive layers without changing defaults much).
+  const quanta = 1024;
+  const { chunks } = createChunkFeeder(new Uint8Array(1024 * 1024), quanta); // dummy for structure, use to pick aligned
+  const cursorCutoffs = [];
+  let c = new ByteIntervalCursor(new Uint8Array(1024*1024), quanta);
+  for (let target = 1024; target < 500*1024; target *= 2) {
+    // simulate advance to pick
+    let adv = 0;
+    while (adv < target) {
+      const res = c.nextFor(1024);
+      adv += res.advanced || 1024;
+    }
+    if (target < 500*1024) cursorCutoffs.push(target);
+  }
+  const finalCutoffs = cursorCutoffs.length > 3 ? cursorCutoffs : [...PROGRESSIVE_WEB_BYTE_CUTOFFS];
   return {
     name: 'progressive-web-preview',
     target,
     qualityPolicy,
     encode,
     decode,
-    byteCutoffs: [...PROGRESSIVE_WEB_BYTE_CUTOFFS],
+    byteCutoffs: finalCutoffs,
   };
 }
 

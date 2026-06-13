@@ -292,6 +292,7 @@ export interface JxlEncoder {
   /** Populated after chunks() completes normally. Null before or on error. */
   getStats(): EncodeStats | null;
 }
+// Layer 3: support ByteIntervalCursor buffers from benchmark-core for client-side chunked push (positive: allows using the same discrete math cursor for encode quanta in byte-bench and other, reduces copy at boundary). Push accepts the views/ABs from cursor.nextFor without extra exact.
 
 interface LibjxlBuffer {
   handle: number;

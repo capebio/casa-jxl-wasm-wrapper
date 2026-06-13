@@ -146,6 +146,31 @@ test('buildBenchmarkExport returns stable json payload shape', () => {
   });
 });
 
+// Layer 6 cross: test explicit Cursor + driveRealSession wiring (positive for flip-flop support).
+test('ByteIntervalCursor and driveRealSession are wired for custom/flip-flop strategies', async () => {
+  const { ByteIntervalCursor, createChunkFeeder } = await import('./jxl-progressive-byte-benchmark-core.js');
+  const cursor = new ByteIntervalCursor(new Uint8Array(4096), 1024);
+  const res = cursor.nextFor(2048);
+  expect(res.advanced).toBeGreaterThan(0);
+  expect(res.buffer).toBeTruthy();
+
+  // driveReal in session DI (uses 0-delay + cursor internally)
+  const result = await runBenchmarkSession({
+    state: { rawReady: true, running: false, results: [] },
+    runCount: 1,
+    loadSource: async () => ({ name: 't', width: 4, height: 4, rawBytes: 100, rgb: new Uint8Array(48), rgba: new Uint8Array(64) }),
+    makeTargetRgba: (s, w, h) => s.rgba,
+    encodeTarget: async () => new Uint8Array(100),
+    buildByteCutoffPlan: () => [{ bytes: 50 }, { bytes: 100 }],
+    streamDecodeCutoffs: streamDecodeCutoffs, // default uses cursor
+    driveRealSession: true,
+    classifyByteCutoffFrame: (c) => ({ painted: !!c.frame, bytes: c.bytes }),
+    summarizeByteCutoffResults: (cs, t) => ({ firstPaintBytes: cs[0]?.bytes, finalBytes: t }),
+  });
+  expect(result.length).toBe(1);
+  expect(result[0].driveRealSession).toBe(true);
+});
+
 function createClock() {
   let tick = 0;
   return () => {

@@ -132,7 +132,7 @@ function percent(bytes, totalBytes) {
 
 // buildSeries: auto producer helper. ref + list of cutoff pixel bufs + parallel byteSizes -> ready series for summarize.
 // Uses comparer for butter speed (layer1/2 cohesion win). No final needed if using self-stability or external.
-export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, height) {
+export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, height, postDecodeTransform = null) {
   if (!Array.isArray(cutoffPixelsList) || !Array.isArray(byteSizes) || cutoffPixelsList.length !== byteSizes.length) {
     throw new Error('cutoffPixelsList and byteSizes must be parallel arrays');
   }
@@ -143,11 +143,18 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
   const butterSeries = [];
   const ssimSeries = [];
   for (let i = 0; i < cutoffPixelsList.length; i++) {
-    const p = cutoffPixelsList[i];
+    let p = cutoffPixelsList[i];
     const b = byteSizes[i];
     if (!p || p.length !== n * 4) continue;
+    if (postDecodeTransform) {
+      // Layer 2: support for post layer transform (e.g. perceptual constancy) before expensive butter.
+      // Allows early exit sampling + vision hooks without full cost every cutoff.
+      p = postDecodeTransform(p, { bytes: b, width, height, index: i }) || p;
+    }
+    // Early sample for butter cost reduction (Layer 2): compute full only on key cutoffs or every other for large N.
+    const doFull = (i % 2 === 0) || (b > 100 * 1024);
     qualitySeries.push({ bytes: b, psnr: computePsnrVsFinal(p, refPixels) });
-    butterSeries.push({ bytes: b, butter: cmp(p) });
+    butterSeries.push({ bytes: b, butter: doFull ? cmp(p) : null });
     ssimSeries.push({ bytes: b, ssim: computeSsimVsFinal(p, refPixels, width, height) });
   }
   return { qualitySeries, butterSeries, ssimSeries };

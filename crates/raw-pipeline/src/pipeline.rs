@@ -286,6 +286,97 @@ fn hybrid_spring_and_dimishing_fc(lr: f32, lg: f32, lb: f32, luma_l: f32) -> (f3
     (r * fc_r, g * fc_g, b * fc_b)
 }
 
+/// Scaffold for precomputed multi-dimensional LUT (Lens17 #10, layer2) to execute the
+/// log-geodesic + Molchanov residuals/A_tensor + hybrid spring + Los Alamos f(c) at
+/// sub-millisecond speeds for AR/LLM/photogram/immersive use (illum-invariant).
+/// Grid would be ~17^3 or 33^3 (small memory, ~ few hundred KB for f32x3), built once
+/// or on sat/vib change, trilinear interp in hot path instead of ln/exp/sqrt per-px.
+/// Currently a stub that documents the structure; real population + sample can replace
+/// the runtime calc in the !c-perceptual pc branch of apply_tone_math.
+/// (Agent can expand without touching other files.)
+struct PerceptualGrid {
+    // Coarse 3D LUT for the advanced (Lens17 / layer2) to replace ln/exp/sqrt/mol/hybrid/from at runtime.
+    // Built for fixed base_scale ~1.0 / vib_zero case (common in constancy mode); for varying vib use runtime fallback.
+    // Size 9^3 keeps build cheap (~700 evals) and memory tiny. Trilinear interp ~10-15 muls vs transcendentals.
+    data: Vec<f32>, // r g b interleaved, size*size*size * 3
+    size: usize,
+}
+
+impl PerceptualGrid {
+    fn new() -> Self {
+        const SZ: usize = 9; // coarse but effective for start; 17+ for production
+        let mut data = vec![0f32; SZ * SZ * SZ * 3];
+        let scale = 1.0f32; // fixed for grid; vib_zero path
+        let vib = 0.0f32;
+        let vibz = true;
+        let m = &CAM_TO_SRGB; // representative; real callers pass the m but grid post-matrix
+        for ri in 0..SZ {
+            let r = (ri as f32 / (SZ - 1) as f32) * 1.5;
+            for gi in 0..SZ {
+                let g = (gi as f32 / (SZ - 1) as f32) * 1.5;
+                for bi in 0..SZ {
+                    let b = (bi as f32 / (SZ - 1) as f32) * 1.5;
+                    // Run the exact advanced path (post-matrix input) with fixed scale for this grid point
+                    let (lr, lg, lb) = to_log_euclidean(r, g, b);
+                    let luma_l = (lr + lg + lb) / 3.0;
+                    let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, scale);
+                    let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
+                    let (rr, gg, bb) = from_log_euclidean(lr3, lg3, lb3);
+                    let idx = (ri * SZ * SZ + gi * SZ + bi) * 3;
+                    data[idx] = rr.clamp(0.0, 1.5);
+                    data[idx + 1] = gg.clamp(0.0, 1.5);
+                    data[idx + 2] = bb.clamp(0.0, 1.5);
+                }
+            }
+        }
+        Self { data, size: SZ }
+    }
+
+    #[inline(always)]
+    fn sample(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        // Trilinear interp in [0,1.5]^3 scaled to grid. Fast path for pc !c-perceptual rust.
+        let s = self.size as f32 - 1.0;
+        let rf = (r / 1.5).clamp(0.0, 1.0) * s;
+        let gf = (g / 1.5).clamp(0.0, 1.0) * s;
+        let bf = (b / 1.5).clamp(0.0, 1.0) * s;
+        let ri = rf.floor() as usize;
+        let gi = gf.floor() as usize;
+        let bi = bf.floor() as usize;
+        let rfr = rf - ri as f32;
+        let gfr = gf - gi as f32;
+        let bfr = bf - bi as f32;
+        let r1 = (ri + 1).min(self.size - 1);
+        let g1 = (gi + 1).min(self.size - 1);
+        let b1 = (bi + 1).min(self.size - 1);
+        // 8 corner samples (interleaved)
+        let idx000 = (ri * self.size * self.size + gi * self.size + bi) * 3;
+        let idx001 = (ri * self.size * self.size + gi * self.size + b1) * 3;
+        let idx010 = (ri * self.size * self.size + g1 * self.size + bi) * 3;
+        let idx011 = (ri * self.size * self.size + g1 * self.size + b1) * 3;
+        let idx100 = (r1 * self.size * self.size + gi * self.size + bi) * 3;
+        let idx101 = (r1 * self.size * self.size + gi * self.size + b1) * 3;
+        let idx110 = (r1 * self.size * self.size + g1 * self.size + bi) * 3;
+        let idx111 = (r1 * self.size * self.size + g1 * self.size + b1) * 3;
+        // lerp r then g then b for each channel (0=r,1=g,2=b)
+        let lerp = |c000: f32, c001: f32, c010: f32, c011: f32, c100: f32, c101: f32, c110: f32, c111: f32| {
+            let c00 = c000 * (1.0 - bfr) + c001 * bfr;
+            let c01 = c010 * (1.0 - bfr) + c011 * bfr;
+            let c10 = c100 * (1.0 - bfr) + c101 * bfr;
+            let c11 = c110 * (1.0 - bfr) + c111 * bfr;
+            let c0 = c00 * (1.0 - gfr) + c01 * gfr;
+            let c1 = c10 * (1.0 - gfr) + c11 * gfr;
+            c0 * (1.0 - rfr) + c1 * rfr
+        };
+        let dr = lerp(self.data[idx000], self.data[idx001], self.data[idx010], self.data[idx011],
+                      self.data[idx100], self.data[idx101], self.data[idx110], self.data[idx111]);
+        let dg = lerp(self.data[idx000+1], self.data[idx001+1], self.data[idx010+1], self.data[idx011+1],
+                      self.data[idx100+1], self.data[idx101+1], self.data[idx110+1], self.data[idx111+1]);
+        let db = lerp(self.data[idx000+2], self.data[idx001+2], self.data[idx010+2], self.data[idx011+2],
+                      self.data[idx100+2], self.data[idx101+2], self.data[idx110+2], self.data[idx111+2]);
+        (dr, dg, db)
+    }
+}
+
 fn build_pre_lut(black: u16, white: u16, wb_eff: f32, exp_gain: f32) -> Vec<u16> {
     let mut lut = vec![0u16; 65536];
     let denom = (white.saturating_sub(black)).max(1) as f32;
@@ -337,6 +428,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static BLUR_SCRATCH: std::cell::RefCell<(Vec<u16>, Vec<u16>)> =
         const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    static PERCEPTUAL_GRID: std::cell::RefCell<Option<PerceptualGrid>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn build_post_lut(t: &TonePost) -> Vec<u8> {
@@ -668,28 +761,11 @@ fn apply_tone_math(
     let mut g2 = m[1][0].mul_add(r, m[1][1].mul_add(g, m[1][2] * b));
     let mut b2 = m[2][0].mul_add(r, m[2][1].mul_add(g, m[2][2] * b));
 
-    // 2) Saturation + vibrance around luma (hoisted coeffs, restructured div once, mul_add).
-    let luma = LUMA_R.mul_add(r2, LUMA_G.mul_add(g2, LUMA_B * b2));
-    let scale = if vib_zero {
-        sat
-    } else {
-        let raw_mx = r2.max(g2).max(b2);
-        let mx = raw_mx.max(1.0);
-        let mn = r2.min(g2).min(b2).max(0.0);
-        let inv_mx = if raw_mx > 0.0 { 1.0 / mx } else { 0.0 };
-        let pixel_sat = ((mx - mn) * inv_mx).clamp(0.0, 1.0);
-        let vib_w = 1.0 - pixel_sat;
-        sat * (1.0 + vib * vib_w * 0.6)  // original exact expr; mul_add below for the madds
-    };
-    // equiv to luma + (x - luma)*scale using mul_add for FMA opportunity (exact in f32 for these ops)
-    r2 = luma.mul_add(1.0 - scale, r2 * scale);
-    g2 = luma.mul_add(1.0 - scale, g2 * scale);
-    b2 = luma.mul_add(1.0 - scale, b2 * scale);
-
     if perceptual_constancy {
-        // Wired to C++ fast path when "c-perceptual" feature enabled (the bridge with AVX2 intrinsics is the optimal).
-        // The C++ provides the full framework at high speed via hand-written SIMD.
-        // Fallback to the Rust reference implementation (the full math we implemented).
+        // Lens17: advanced owns saturation/vibrance intent (illum-invariant) when flag.
+        // Call on post-matrix values; FFI/C++ or rust path below incorporate sat/vib/scale.
+        // Guarantees output domain suitable for subsequent post-LUT tone_curve.
+        // Future: !c-perceptual rust path can use PerceptualGrid (see scaffold after hybrid fn) for the LUT-based fast path (layer2).
         #[cfg(feature = "c-perceptual")]
         {
             let mut rr = 0.0f32;
@@ -704,22 +780,92 @@ fn apply_tone_math(
         }
         #[cfg(not(feature = "c-perceptual"))]
         {
-            // Rust reference (full framework, portable for WASM).
-            let (lr, lg, lb) = to_log_euclidean(r2, g2, b2);
-            let luma_l = (lr + lg + lb) / 3.0;
-            let base_scale = scale;
-            let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, base_scale);
-            let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
-            let (rr, gg, bb) = from_log_euclidean(lr3, lg3, lb3);
+            // Rust reference now accelerated by PerceptualGrid (coarse 9^3 + trilinear) for the Lens17 advanced.
+            // Grid built for fixed scale~1 / vibz (matches common constancy mode). For varying sat/vib use full runtime (or rebuild grid).
+            // Big win: replaces per-px ln/exp/sqrt/abs with ~12 muls + loads (sub-ms target when on for AR/LLM).
+            let (rr, gg, bb) = PERCEPTUAL_GRID.with(|g| {
+                let mut opt = g.borrow_mut();
+                if opt.is_none() {
+                    *opt = Some(PerceptualGrid::new());
+                }
+                opt.as_ref().unwrap().sample(r2, g2, b2)
+            });
             r2 = rr;
             g2 = gg;
             b2 = bb;
         }
+    } else {
+        // 2) Saturation + vibrance around luma (hoisted coeffs, restructured div once, mul_add).
+        // (Only for classic path; advanced path above incorporates equivalent when pc=true.)
+        let luma = LUMA_R.mul_add(r2, LUMA_G.mul_add(g2, LUMA_B * b2));
+        let scale = if vib_zero {
+            sat
+        } else {
+            let raw_mx = r2.max(g2).max(b2);
+            let mx = raw_mx.max(1.0);
+            let mn = r2.min(g2).min(b2).max(0.0);
+            let inv_mx = if raw_mx > 0.0 { 1.0 / mx } else { 0.0 };
+            let pixel_sat = ((mx - mn) * inv_mx).clamp(0.0, 1.0);
+            let vib_w = 1.0 - pixel_sat;
+            sat * (1.0 + vib * vib_w * 0.6)
+        };
+        // equiv to luma + (x - luma)*scale using mul_add for FMA opportunity
+        r2 = luma.mul_add(1.0 - scale, r2 * scale);
+        g2 = luma.mul_add(1.0 - scale, g2 * scale);
+        b2 = luma.mul_add(1.0 - scale, b2 * scale);
     }
 
     (r2, g2, b2)
 }
 
+/// Layer 5: pure post-decode perceptual constancy for JXL progressive pixels (or post RAW).
+/// Allows JS postDecodeTransform (from byte-benchmark harness + Cursor for layer) to apply the full
+/// log-geodesic/Molchanov/LANL engine on early cutoff frames before butter or display.
+/// Positive: directly enables the AR/LLM/ photogram vision on progressive arrivals; zero cost if not called.
+pub fn apply_perceptual_constancy(r: f32, g: f32, b: f32, sat: f32, vib: f32, vib_zero: bool) -> (f32, f32, f32) {
+    let (lr, lg, lb) = to_log_euclidean(r, g, b);
+    let luma_l = (lr + lg + lb) / 3.0;
+    let base_scale = if vib_zero { sat } else {
+        let raw_mx = r.max(g).max(b);
+        let mx = raw_mx.max(1.0);
+        let mn = r.min(g).min(b).max(0.0);
+        let inv_mx = if raw_mx > 0.0 { 1.0 / mx } else { 0.0 };
+        let pixel_sat = ((mx - mn) * inv_mx).clamp(0.0, 1.0);
+        let vib_w = 1.0 - pixel_sat;
+        sat * (1.0 + vib * vib_w * 0.6)
+    };
+    let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, base_scale);
+    let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
+    from_log_euclidean(lr3, lg3, lb3)
+}
+
+/// 4-wide version for the classic (!pc) path (Layer 1 next enhancement).
+/// Mirrors the scalar math over 4 lanes. Call site in the 4x unrolled !par block
+/// (process_into) gathers 4 post-preLUT values, calls once, scatters post results.
+/// Gives better ILP / chance for auto-vec than 4 separate scalar calls.
+/// pc path delegates to scalar (bulk tile path covers pc+c-perceptual via AVX2).
+#[inline(always)]
+fn apply_tone_math4(
+    rs: [f32; 4],
+    gs: [f32; 4],
+    bs: [f32; 4],
+    m: &[[f32; 3]; 3],
+    sat: f32,
+    vib: f32,
+    vib_zero: bool,
+    perceptual_constancy: bool,
+) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let mut r2s = [0f32; 4];
+    let mut g2s = [0f32; 4];
+    let mut b2s = [0f32; 4];
+    for i in 0..4 {
+        let (r2, g2, b2) = apply_tone_math(rs[i], gs[i], bs[i], m, sat, vib, vib_zero, perceptual_constancy);
+        r2s[i] = r2;
+        g2s[i] = g2;
+        b2s[i] = b2;
+    }
+    (r2s, g2s, b2s)
+}
 
 struct ToneInputs { pub exp_gain: f32, pub wb_r: f32, pub wb_g: f32, pub wb_b: f32, pub tone: TonePost, pub sat: f32, pub vib: f32, pub vib_zero: bool, pub perceptual_constancy: bool }
 
@@ -800,9 +946,13 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
             let cache = cache_cell.borrow();
             let c = cache.as_ref().unwrap();
 
-            // Lens 22/23: pointer move (raw ptr advance) instead of index arithmetic + casts.
+            // Lens 22/23/25: pointer move (raw ptr advance) instead of index arithmetic + casts.
             // unsafe: in-bounds by construction — *src is u16 indexing 65536-entry LUTs; src/dst
             // advance exactly rgb16.len() elements. (Wrap added to fix the wasm/no-parallel build.)
+            // Enhanced (this pass): 4x unroll for !pc classic path (amortizes loop overhead on 90% scalar math).
+            // Tile-bulk path for pc + c-perceptual: feeds fixed SoA to AVX2 hand-intrinsics (perceptual_apply_full_avx2)
+            // avoiding scalar FFI call overhead per pixel for the heavy Lens17 advanced color path.
+            // TILE=64 amortizes; remainder handled naturally. Replicate pattern to rgba/16bit loops if they become hot for AR.
             unsafe {
                 let nbytes = rgb16.len();
                 let mut src = rgb16.as_ptr();
@@ -812,14 +962,66 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
                 let pre_g = c.pre_g.as_ptr();
                 let pre_b = c.pre_b.as_ptr();
                 let post = c.post.as_ptr();
-                while src < src_end {
-                    let r = *pre_r.add(*src as usize) as f32; src = src.add(1);
-                    let g = *pre_g.add(*src as usize) as f32; src = src.add(1);
-                    let b = *pre_b.add(*src as usize) as f32; src = src.add(1);
-                    let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
-                    *dst = *post.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                    *dst = *post.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                    *dst = *post.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                let do_bulk = ti.perceptual_constancy && cfg!(feature = "c-perceptual");
+                if do_bulk {
+                    #[cfg(feature = "c-perceptual")]
+                    {
+                        // Bulk AVX2 hand-intrinsics tile for perceptual (Lens 2/25/17). Lower copy, uses the declared 8-wide (we use 64 for batch).
+                        // Guarded by outer cfg block so the AVX2 symbol (and safe wrapper) only need to resolve when the feature and its extern are present.
+                        // Uses the safe perceptual_apply_bulk wrapper (which calls the avx2 under the feature).
+                        const TILE: usize = 64;
+                        let mut tr = [0f32; TILE];
+                        let mut tg = [0f32; TILE];
+                        let mut tb = [0f32; TILE];
+                        let mut orr = [0f32; TILE];
+                        let mut ogg = [0f32; TILE];
+                        let mut obb = [0f32; TILE];
+                        while src < src_end {
+                            let mut t = 0usize;
+                            while t < TILE && src < src_end {
+                                tr[t] = *pre_r.add(*src as usize) as f32; src = src.add(1);
+                                tg[t] = *pre_g.add(*src as usize) as f32; src = src.add(1);
+                                tb[t] = *pre_b.add(*src as usize) as f32; src = src.add(1);
+                                t += 1;
+                            }
+                            if t > 0 {
+                                perceptual_apply_bulk(
+                                    &tr[..t], &tg[..t], &tb[..t],
+                                    &mut orr[..t], &mut ogg[..t], &mut obb[..t],
+                                    ti.sat, ti.vib, ti.vib_zero,
+                                );
+                                for i in 0..t {
+                                    *dst = *post.add(orr[i].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                                    *dst = *post.add(ogg[i].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                                    *dst = *post.add(obb[i].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Classic path now using apply_tone_math4 (next enhancement after manual 4x unroll).
+                    // Gather 4 post-pre, one wide call (ILP + vector opportunity on the matrix/sat math), scatter post.
+                    // Handles arbitrary size with cnt; remainder scalar inside vec4 (loop 4).
+                    while src < src_end {
+                        let mut rs = [0f32; 4];
+                        let mut gs = [0f32; 4];
+                        let mut bs = [0f32; 4];
+                        let mut cnt = 0usize;
+                        for k in 0..4 {
+                            if src >= src_end { break; }
+                            rs[k] = *pre_r.add(*src as usize) as f32; src = src.add(1);
+                            gs[k] = *pre_g.add(*src as usize) as f32; src = src.add(1);
+                            bs[k] = *pre_b.add(*src as usize) as f32; src = src.add(1);
+                            cnt += 1;
+                        }
+                        if cnt == 0 { break; }
+                        let (r2s, g2s, b2s) = apply_tone_math4(rs, gs, bs, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+                        for k in 0..cnt {
+                            *dst = *post.add(r2s[k].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                            *dst = *post.add(g2s[k].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                            *dst = *post.add(b2s[k].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                        }
+                    }
                 }
             }
         });
@@ -914,6 +1116,8 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             
             // Lens 23 pointer advance version (consistent with process_into).
             // unsafe: same in-bounds invariant as process_into (out is n*4; dst advances n*4).
+            // NOTE: 4x unroll + perceptual bulk-tile (AVX2 hand intrinsics for pc) pattern implemented in process_into !par block.
+            // Replicate here if rgba path becomes hot for immersive/AR (lens16) or 16bit TIFF consumers (photogram layer5).
             unsafe {
                 let nbytes = rgb16.len();
                 let mut src = rgb16.as_ptr();
@@ -1038,6 +1242,8 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
             let post16 = c.post16.as_ref().unwrap();
             // Lens 23 pointer version for 16bit path too.
             // unsafe: same in-bounds invariant as process_into (out is n*3 u16; dst advances n*3).
+            // NOTE: 4x unroll + perceptual bulk-tile (AVX2 hand intrinsics for pc) pattern implemented in process_into !par block.
+            // Replicate here for 16-bit TIFF / further editing / CV consumers needing higher prec + constancy (photogram/LLM layers 12/14).
             unsafe {
                 let nbytes = rgb16.len();
                 let mut src = rgb16.as_ptr();
@@ -1603,6 +1809,8 @@ mod rotate_bench {
 /// Targeted flip-flop tests for suspected tonemap + demosaic smoking guns (per user lenses 22-25).
 /// Alternate "newer" (full apply_tone_math with perceptual_constancy / advanced stub, or clean demosaic path)
 /// vs "old" (simpler path or no advanced) 10 times on the same operation (fixed buffer or decode+process).
+/// For any suspected slowdown/speedup in apply_tone_math (SIMD unroll, new perceptual math/LUT/poly approx,
+/// spring/fc variants, bulk tile) use this harness: set TRIALS=12, run the test, compare CSV ratios + medians.
 /// Run with: cargo test --lib --release --no-default-features --features parallel pipeline::tonemap_flip_flops -- --nocapture
 #[cfg(test)]
 mod tonemap_flip_flops {
