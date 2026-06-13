@@ -442,12 +442,19 @@ export async function ingestImage(
   // med-manifesttmp-orphan + B2: clear stale tmp from prior crash before any check/write
   await unlink(manifestPath + ".tmp").catch(() => {});
 
-  if (!opts.force && (await fileExists(manifestPath))) {
-    const existing = parseManifest(await readFile(manifestPath, "utf8"));
-    const wantProxy = opts.proxy !== undefined;
-    // P7: allow proxy manifests to skip on mtime match (previously guarded out); match proxy flag too (no size recorded yet; schema add deferred)
-    const uptodate = isUpToDate(existing, info.mtimeMs, wantProxy) || ((existing as any).stub === true && existing.master.mtimeMs === info.mtimeMs);
-    if (uptodate) return { outcome: "skipped" };
+  if (!opts.force) {
+    // ING-5: single read (no fileExists+readFile); a corrupt existing manifest falls through to
+    // a clean re-ingest instead of throwing and failing the image.
+    const existingTxt = await readFileOrNull(manifestPath);
+    if (existingTxt !== null) {
+      try {
+        const existing = parseManifest(existingTxt);
+        const wantProxy = opts.proxy !== undefined;
+        // P7: allow proxy manifests to skip on mtime match (previously guarded out); match proxy flag too (no size recorded yet; schema add deferred)
+        const uptodate = isUpToDate(existing, info.mtimeMs, wantProxy) || ((existing as any).stub === true && existing.master.mtimeMs === info.mtimeMs);
+        if (uptodate) return { outcome: "skipped" };
+      } catch { /* corrupt/unparseable manifest → re-ingest (overwrite) */ }
+    }
   }
 
   const bytes = await readFile(masterPath); // Buffer satisfies Uint8Array; avoids copy (low-readfile)
@@ -636,7 +643,7 @@ export async function ingestBatch(
   const batchId = checkpoint?.batchId || randomUUID();
   const startedAt = checkpoint?.startedAt || now(backends);
   // local working state (merged with loaded on persist)
-  const cpState: CheckpointState = checkpoint || { batchId, startedAt, inFlight: [], completed: [], failed: [] };
+  const cpState: CheckpointState = checkpoint || { version: "1", batchId, startedAt, inFlight: [], completed: [], failed: [] };
   // B3: inFlight as Set for O(1) includes/add/delete during batch; snapshot to array only on persist.
   const inFlight = new Set<string>(cpState.inFlight || []);
   let completedDirty = false;
@@ -711,7 +718,7 @@ export async function ingestBatch(
           const res = await ingestImage(path, backends, callOpts);
           const outcome = res.outcome;
           const dur = now(backends) - t0;
-          if (res.degraded) (result as any).degraded = ((result as any).degraded || 0) + 1;
+          if (res.degraded) result.degraded = (result.degraded || 0) + 1;
           // move out of inFlight
           inFlight.delete(path);
           if (outcome === "written") {
@@ -747,7 +754,7 @@ export async function ingestBatch(
       ...cpState.failed.filter((f: any) => thisRun.has(f.path)).map(f => ({ path: f.path, outcome: "failed" as const, error: f.error })),
     ];
     const s = cpState.completed.reduce((sum: number, c: any) => sum + (c.stagedBytes || 0), 0);
-    if (s > 0) (result as any).totalStagedBytes = s;
+    if (s > 0) result.totalStagedBytes = s;
     return result;
   }
 
@@ -858,23 +865,25 @@ export async function ingestBatch(
         if (!inFlight.has(path)) { inFlight.add(path); await persistInFlightImmediate(); }
         tel?.progress(idx + 1, total, path);
         tel?.event?.("image-start", { path, imageId, idx: idx + 1, total });
-        const id = ++jobId;
-        const p = new Promise<IngestOutcome>((resolve, reject) => pending.set(id, { resolve, reject, worker: wi }));
-        // B5: send only the per-path stat entry (if any); full statMap Record can be large and is pure waste to clone per job.
-        // B11 + idMap: forward single precomputed imageId; strip idMap to avoid shipping full map across postMessage.
-        const preId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || imageId;
-        const jobOpts: any = { ...opts, statMap: undefined, statEntry: (opts as any).statMap?.[path], idMap: undefined, imageId: preId };
-        w.postMessage({ id, path, opts: jobOpts });
         const tJob = now(backends);
         try {
           if (opts.chaosTest && Math.random() < 0.25) {
             throw new Error("chaos-test injected failure (for K2 resume/GC recovery test)");
           }
+          // ING-9: claim job + dispatch only after the chaos gate, so an injected failure models a
+          // real pre-work failure instead of wasting a full worker decode/encode then mislabelling it.
+          const id = ++jobId;
+          const p = new Promise<IngestOutcome>((resolve, reject) => pending.set(id, { resolve, reject, worker: wi }));
+          // B5: send only the per-path stat entry (if any); full statMap Record can be large and is pure waste to clone per job.
+          // B11 + idMap: forward single precomputed imageId; strip idMap to avoid shipping full map across postMessage.
+          const preId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || imageId;
+          const jobOpts: any = { ...opts, statMap: undefined, statEntry: (opts as any).statMap?.[path], idMap: undefined, imageId: preId };
+          w.postMessage({ id, path, opts: jobOpts });
           const res: any = await p;
           const outcome = res.outcome;
           const staged = res.stagedBytes;
           const dur = res.durationMs ?? (now(backends) - tJob);
-          if (res && res.degraded) (result as any).degraded = ((result as any).degraded || 0) + 1;
+          if (res && res.degraded) result.degraded = (result.degraded || 0) + 1;
           inFlight.delete(path);
           if (outcome === "written") {
             result.written++;

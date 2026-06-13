@@ -151,6 +151,7 @@ export function createJxlBackend(telemetry?: Telemetry): JxlBackend {
     async encodeTileContainer16(rgba16, width, height, opts) {
       const t0 = Date.now();
       const enc = JW.encodeTileContainerRgba16;
+      if (typeof enc !== "function") throw new Error("encodeTileContainerRgba16 missing on jxl-wasm module (16-bit JXTC build required)"); // BK-4
       const data = await enc(rgba16, width, height, {
         tileSize: opts.tileSize,
         distance: opts.distance,
@@ -224,7 +225,7 @@ async function getCachedSsimFn(): Promise<((a: unknown, b: unknown) => any) | nu
     const f = ssimMod && (ssimMod.default || ssimMod).ssim;
     cachedSsim = (typeof f === "function") ? f : null;
   } catch { cachedSsim = null; }
-  return cachedSsim;
+  return cachedSsim ?? null; // BK-9: narrow away the `undefined` the module-level let carries
 }
 
 // Final-only decode helper (used by decodeToRgba8 and by measure for ref without buffering passes).
@@ -260,72 +261,6 @@ async function decodeFinal(jxl: Uint8Array): Promise<{ pixels: Uint8Array; w: nu
     await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
   }
   return result || undefined;
-}
-
-/** Progressive decode of a level's own bytes, collecting per-pass pixels + byte offsets.
- *  Kept for any external/legacy use of full pass buffers. Profile measure now uses streaming path below. */
-async function decodeProgressivePasses(
-  jxl: Uint8Array,
-  w?: number,
-  h?: number,
-): Promise<{ passes: Array<{ bytes: number; pixels: Uint8Array }>; finalPixels: Uint8Array; useW: number; useH: number } | undefined> {
-  if (!jxl || jxl.length === 0) return undefined;
-  if (w != null && h != null && Math.max(w, h) < 1024) return undefined;
-  const createDecoder = JW.createDecoder;
-  if (typeof createDecoder !== "function") return undefined;
-  const decoder = createDecoder({
-    format: "rgba8",
-    progressionTarget: "final",
-    emitEveryPass: true,
-    preserveIcc: false,
-    preserveMetadata: false,
-  });
-  const passes: Array<{ bytes: number; pixels: Uint8Array }> = [];
-  let finalPixels: Uint8Array | null = null;
-  let infoW = w ?? 0, infoH = h ?? 0;
-  let bytesPushed = 0;
-  const drainP = (async () => {
-    for await (const ev of decoder.events()) {
-      if (ev.type === "header") {
-        infoW = ev.info?.width ?? infoW;
-        infoH = ev.info?.height ?? infoH;
-      } else if (ev.type === "progress") {
-        const raw = ev.pixels;
-        const px = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
-        passes.push({ bytes: bytesPushed, pixels: px });
-      } else if (ev.type === "final") {
-        const raw = ev.pixels;
-        finalPixels = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
-        infoW = ev.info?.width ?? infoW;
-        infoH = ev.info?.height ?? infoH;
-      } else if (ev.type === "error") {
-        throw new Error(`profile decode ${ev.code}: ${ev.message}`);
-      }
-    }
-  })();
-  try {
-    const CHUNK = 32768;
-    for (let off = 0; off < jxl.length; off += CHUNK) {
-      const end = Math.min(off + CHUNK, jxl.length);
-      const chunk = jxl.subarray(off, end);
-      bytesPushed += chunk.length;
-      await Promise.resolve(decoder.push(chunk));
-    }
-    await Promise.resolve(decoder.close());
-    await drainP;
-  } catch {
-    await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
-    return undefined;
-  } finally {
-    await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
-  }
-  if (!finalPixels || passes.length === 0) return undefined;
-  const finalPx: Uint8Array = finalPixels;
-  const useW = infoW || w || 0;
-  const useH = infoH || h || 0;
-  if (useW <= 0 || useH <= 0) return undefined;
-  if (Math.max(useW, useH) < 1024) return undefined;
-  return { passes, finalPixels: finalPx, useW, useH };
 }
 
 /** Measure ssim + butteraugli for every progressive pass vs the level's own final.

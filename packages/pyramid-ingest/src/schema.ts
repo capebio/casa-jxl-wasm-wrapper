@@ -50,7 +50,9 @@ export const levelEntrySchema = z.object({
 
 export const masterInfoSchema = z.object({
   name: z.string(),
-  format: z.enum(["orf", "dng", "cr2", "jpg", "nef", "arw", "raf", "rw2", "unknown"]),
+  // SCH-1: keep in sync with ingest RAW_EXT — pef/srw/x3f are advertised there, so a manifest with
+  // those formats must validate (otherwise parseManifest throws and the image is lost).
+  format: z.enum(["orf", "dng", "cr2", "jpg", "nef", "arw", "raf", "rw2", "pef", "srw", "x3f", "unknown"]),
   mtimeMs: z.number(),
 });
 
@@ -71,8 +73,13 @@ export const manifestSchemaV1 = z.object({
   metadata: z.record(z.unknown()).optional(),
   producedBy: producedBySchema
     .refine((p) => {
-      const maj = (p.version || "").split(".")[0];
-      return maj === "0";
+      // SCH-5: accept majors up to the running tool's own major (was hard-pinned to "0", which would
+      // make every manifest written by a 1.x release fail its own parseManifest). Still rejects
+      // forward-incompatible manifests written by a newer major than this tool.
+      const maj = Number((p.version || "0").split(".")[0]);
+      if (!Number.isFinite(maj) || maj < 0) return false;
+      const curMaj = Number((getVersion() || "0").split(".")[0]);
+      return maj <= (Number.isFinite(curMaj) ? curMaj : 0);
     }, { message: "unsupported producedBy major version" })
     .optional(),
 });

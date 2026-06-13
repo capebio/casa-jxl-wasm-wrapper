@@ -344,9 +344,10 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
     if (!backendsOverride) {
       let tier: any = parsed.tier;
       const thr = parsed["encoder-threads"];
-      if (thr === 1) {
-        if (tier === "auto" || tier === "simd-mt" || tier === "relaxed-simd-mt") tier = "simd";
-      }
+      // SCH-4: cliArgsSchema.tier ∈ {simd, scalar, auto}; with a single encoder thread, drop the
+      // (potentially multi-threaded) "auto" tier to plain "simd". The old simd-mt/relaxed-simd-mt
+      // names could never pass schema validation and have been removed.
+      if (thr === 1 && tier === "auto") tier = "simd";
       setForcedTier(tier);
     }
 
