@@ -33,6 +33,8 @@ pub unsafe fn scale_err_avx2(
     let v2 = _mm256_set1_ps(2.0);
     let v015 = _mm256_set1_ps(0.15);
     let veps = _mm256_set1_ps(1e-12);
+    let half = _mm256_set1_ps(0.5); // loop-invariant rsqrt Newton constants
+    let threehalf = _mm256_set1_ps(1.5);
     let mut acc = _mm256_setzero_ps();
 
     let lanes = n / 8 * 8;
@@ -54,9 +56,7 @@ pub unsafe fn scale_err_avx2(
             // sqrt(z) = z * rsqrt(z); one Newton step on rsqrt for accuracy.
             let z = _mm256_add_ps(e2, veps);
             let y0 = _mm256_rsqrt_ps(z);
-            // y1 = y0 * (1.5 - 0.5*z*y0*y0)
-            let half = _mm256_set1_ps(0.5);
-            let threehalf = _mm256_set1_ps(1.5);
+            // y1 = y0 * (1.5 - 0.5*z*y0*y0)  (one Newton step on 1/sqrt(z))
             let y1 = _mm256_mul_ps(y0, _mm256_fnmadd_ps(_mm256_mul_ps(half, z), _mm256_mul_ps(y0, y0), threehalf));
             _mm256_mul_ps(z, y1) // z * rsqrt(z) ≈ sqrt(z)
         } else {
@@ -112,9 +112,15 @@ pub unsafe fn ssd_avx2(a: &[u8], b: &[u8]) -> u64 {
     sum
 }
 
-/// AVX2 SSIM moment accumulation over RGBA test+ref. Produces the five per-channel
-/// sums (sa, saa, sab) for c in 0..3; sb/sbb are precomputed on the reference.
-/// Deinterleaves RGBA by gathering channel bytes; widening to i32 keeps products exact.
+/// SSIM moment accumulation over RGBA test+ref. Produces three per-channel sums
+/// (sa, saa, sab) for c in 0..3; sb/sbb are precomputed on the reference.
+///
+/// NOTE: this is a *scalar* u64 reduction, not vectorized. A madd-based SIMD
+/// deinterleave gave no measured win in pilot timing (confirmed by the flip-flop
+/// bench), so the scalar loop is kept here — inside the avx2 module purely so the
+/// dispatcher has one call site. Correctness == scalar oracle by construction.
+/// Carries `#[target_feature(enable = "avx2")]` only for call-site uniformity; it
+/// uses no AVX2 intrinsics.
 #[target_feature(enable = "avx2")]
 pub unsafe fn ssim_moments_avx2(
     a: &[u8], b: &[u8], np: usize,
