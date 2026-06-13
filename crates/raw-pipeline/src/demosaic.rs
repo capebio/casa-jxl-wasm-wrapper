@@ -118,6 +118,14 @@ fn bayer_pixel(
 ///   (odd  row, odd  col) = B
 pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
+    // Lens 22: on wasm32 use the explicit wasm128 SIMD version of the bilinear unroll (8-wide v128
+    // for the avg4/avg2 in the interior; parity bitselect to handle even/odd cols without deinterleave).
+    // Bit-identical to the scalar unroll path. Production wiring for bilinear (used in fast/LOD paths
+    // and some lib.rs calls); MHC remains the quality default.
+    #[cfg(target_arch = "wasm32")]
+    {
+        return demosaic_rggb_simd(raw, width, height);
+    }
     let mut rgb = vec![0u16; width * height * 3];
     demosaic_rggb_into(raw, width, height, &mut rgb)?;
     Ok(rgb)
@@ -231,6 +239,143 @@ pub fn demosaic_rggb_into(raw: &[u16], width: usize, height: usize, out: &mut [u
     out.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
 
     Ok(())
+}
+
+// ─── Lens 22: explicit wasm128 SIMD bilinear RGGB demosaic (BENCH-ONLY) ────────────────────────────
+// `demosaic_rggb_simd` is bit-identical to `demosaic_rggb`. It is NOT wired into production decode —
+// it exists solely so the SIMD-vs-autovec flip-flop can be run + correctness-pinned in real wasm
+// (see root crate `demosaic_bench_*` exports + tools/demosaic-flipflop.mjs). Promotion to the
+// production path is a separate, evidence-gated decision once the pin + A/B both pass.
+//
+// Trick: the two CFA phases (even/odd column) are computed for ALL 8 lanes, then selected by a static
+// parity mask via `v128_bitselect` — avoiding any deinterleave shuffle. Interior only; borders scalar.
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
+    // Native builds/tests have no wasm128; delegate so the crate still compiles and the API exists.
+    demosaic_rggb(raw, width, height)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
+    use core::arch::wasm32::*;
+    validate(raw, width, height)?;
+    let mut rgb = vec![0u16; width * height * 3];
+    let h_max = height - 1;
+    let w_max = width - 1;
+    // lane parity mask: even lanes (cols) all-ones → bitselect picks the "even-column" candidate.
+    static PARITY_EVEN: [u16; 8] = [0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0];
+
+    let do_row = |row: usize, out_row: &mut [u16]| {
+        let rn = if row == 0 { 0 } else { row - 1 };
+        let rs = if row == h_max { h_max } else { row + 1 };
+        let north = &raw[rn * width..rn * width + width];
+        let here = &raw[row * width..row * width + width];
+        let south = &raw[rs * width..rs * width + width];
+
+        // Left border col 0 (scalar, identical to demosaic_rggb).
+        {
+            let (r, g, b) = bayer_pixel(raw, width, row, 0, rn, rs, 0, 1.min(w_max), (0, 0));
+            out_row[0] = r; out_row[1] = g; out_row[2] = b;
+        }
+        // Rows too narrow for an 8-wide block: full scalar (matches demosaic_rggb behaviour).
+        if width < 12 {
+            for col in 1..w_max {
+                let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, (col + 1).min(w_max), (0, 0));
+                let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
+            }
+            if width > 1 {
+                let col = w_max;
+                let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, col, (0, 0));
+                let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
+            }
+            return;
+        }
+        // col 1 scalar prologue (matches demosaic_rggb).
+        {
+            let (r, g, b) = bayer_pixel(raw, width, row, 1, rn, rs, 0, 2, (0, 0));
+            out_row[3] = r; out_row[4] = g; out_row[5] = b;
+        }
+
+        let parity = unsafe { v128_load(PARITY_EVEN.as_ptr() as *const v128) };
+        let row_par = row & 1;
+        // avg of 4 u16 lanes, >>2 (widen to i32 to avoid overflow, narrow back; values ≤ 65535 so exact).
+        let avg4 = |a: v128, b: v128, c: v128, d: v128| -> v128 {
+            let lo = u32x4_shr(
+                i32x4_add(i32x4_add(i32x4_extend_low_u16x8(a), i32x4_extend_low_u16x8(b)),
+                          i32x4_add(i32x4_extend_low_u16x8(c), i32x4_extend_low_u16x8(d))), 2);
+            let hi = u32x4_shr(
+                i32x4_add(i32x4_add(i32x4_extend_high_u16x8(a), i32x4_extend_high_u16x8(b)),
+                          i32x4_add(i32x4_extend_high_u16x8(c), i32x4_extend_high_u16x8(d))), 2);
+            u16x8_narrow_i32x4(lo, hi)
+        };
+        let avg2 = |a: v128, b: v128| -> v128 {
+            let lo = u32x4_shr(i32x4_add(i32x4_extend_low_u16x8(a), i32x4_extend_low_u16x8(b)), 1);
+            let hi = u32x4_shr(i32x4_add(i32x4_extend_high_u16x8(a), i32x4_extend_high_u16x8(b)), 1);
+            u16x8_narrow_i32x4(lo, hi)
+        };
+
+        let mut col = 2usize;
+        while col + 8 <= w_max {
+            let (rv, gv, bv) = unsafe {
+                let ld = |s: &[u16], idx: usize| v128_load(s.as_ptr().add(idx) as *const v128);
+                let h = ld(here, col);
+                let hm1 = ld(here, col - 1);
+                let hp1 = ld(here, col + 1);
+                let n = ld(north, col);
+                let nm1 = ld(north, col - 1);
+                let np1 = ld(north, col + 1);
+                let s = ld(south, col);
+                let sm1 = ld(south, col - 1);
+                let sp1 = ld(south, col + 1);
+                if row_par == 0 {
+                    // even row: R = even→h, odd→avg2(hm1,hp1); G = even→avg4(n,s,hm1,hp1), odd→h;
+                    //           B = even→avg4(nm1,np1,sm1,sp1), odd→avg2(n,s)
+                    let rv = v128_bitselect(h, avg2(hm1, hp1), parity);
+                    let gv = v128_bitselect(avg4(n, s, hm1, hp1), h, parity);
+                    let bv = v128_bitselect(avg4(nm1, np1, sm1, sp1), avg2(n, s), parity);
+                    (rv, gv, bv)
+                } else {
+                    // odd row: R = even→avg2(n,s), odd→avg2(hm1,hp1); G = h (all lanes);
+                    //          B = even→avg2(hm1,hp1), odd→avg2(n,s)
+                    let rv = v128_bitselect(avg2(n, s), avg2(hm1, hp1), parity);
+                    let gv = h;
+                    let bv = v128_bitselect(avg2(hm1, hp1), avg2(n, s), parity);
+                    (rv, gv, bv)
+                }
+            };
+            let mut rr = [0u16; 8];
+            let mut gg = [0u16; 8];
+            let mut bb = [0u16; 8];
+            unsafe {
+                v128_store(rr.as_mut_ptr() as *mut v128, rv);
+                v128_store(gg.as_mut_ptr() as *mut v128, gv);
+                v128_store(bb.as_mut_ptr() as *mut v128, bv);
+            }
+            for j in 0..8 {
+                let o = (col + j) * 3;
+                out_row[o] = rr[j]; out_row[o + 1] = gg[j]; out_row[o + 2] = bb[j];
+            }
+            col += 8;
+        }
+        // Scalar tail interior.
+        while col < w_max {
+            let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, (col + 1).min(w_max), (0, 0));
+            let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
+            col += 1;
+        }
+        // Right border.
+        if width > 1 {
+            let col = w_max;
+            let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, col, (0, 0));
+            let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
+        }
+    };
+
+    // Single-threaded: the flip-flop isolates SIMD-vs-autovec at one thread (production wasm is also
+    // single-thread unless parallel-wasm). Bit-identical to demosaic_rggb's per-row output.
+    rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    Ok(rgb)
 }
 
 /// 2×2 superpixel demosaic: R = raw R, G = mean(G1, G2), B = raw B.

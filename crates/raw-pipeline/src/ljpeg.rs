@@ -121,7 +121,7 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn peek(&mut self, n: u32) -> u32 {
         if n == 0 {
             return 0;
@@ -138,7 +138,7 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn consume(&mut self, n: u32) {
         if n > self.real_in_buf {
             self.truncated = true;
@@ -155,7 +155,7 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn get_bits(&mut self, n: u32) -> u32 {
         if n == 0 {
             return 0;
@@ -182,7 +182,7 @@ impl<'a> BitReader<'a> {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn extend(diff: i32, t: u32) -> i32 {
     if t == 0 {
         return 0;
@@ -475,7 +475,9 @@ pub fn decode_tile(
 
                 let raw_col = col * cps + comp;
                 if row < out_rows && raw_col < out_pixel_cols {
-                    let off = base + row * stride_pixels + raw_col;
+                    // Lens 23 next: hoist row base to avoid repeated row*stride mul/add inside per-comp
+                    let row_base = base + row * stride_pixels;
+                    let off = row_base + raw_col;
                     out[off] = ((val << sos.point_transform) & 0xFFFF) as u16;
                 }
             }

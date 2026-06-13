@@ -25,6 +25,7 @@ export function computeSsimVsFinal(cutoffPixels, finalPixels, width, height) {
     throw new Error(`SSIM length mismatch: ${cutoffPixels.length} vs ${finalPixels.length}`);
   }
   const np = width * height;
+  if (np === 0) return 0;
   const channels = cutoffPixels.length / np;
   if (!Number.isInteger(channels)) {
     throw new Error(`SSIM pixel count not divisible by ${width}*${height}`);
@@ -92,4 +93,25 @@ export function detectMonotone(series, toleranceDb = MONOTONE_TOLERANCE_DB, opts
 }
 
 // Future: feed butter/ssim series (lower/higher better) via opts to detect for unified cutoff analysis.
+
+// computeChannelMoments: cheap per-channel mu/var for surrogate features (lens12 LLM/plant recog).
+// Zero extra alloc in hot path if caller provides outs. Useful side output for "will cutoff ID plant?" tiny model.
+export function computeChannelMoments(pixels, width, height, maxCh = 3) {
+  const np = width * height;
+  if (np === 0) return [];
+  const ch = Math.min(maxCh, (pixels.length / np) | 0);
+  const mus = new Array(ch).fill(0);
+  const vars = new Array(ch).fill(0);
+  for (let c = 0; c < ch; c++) {
+    let sum = 0, sum2 = 0;
+    for (let i = c, j = 0; j < np; j++, i += (pixels.length / np) | 0) {
+      const v = pixels[i];
+      sum += v; sum2 += v * v;
+    }
+    const mu = sum / np;
+    mus[c] = mu;
+    vars[c] = sum2 / np - mu * mu;
+  }
+  return { mus, vars, ch };
+}
 

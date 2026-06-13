@@ -163,12 +163,12 @@ export function createSidecarTargetPlan(targetLongEdge, { thumbnailLongEdge = 30
   return [thumb, target];
 }
 
-export function getPushBatchingOptions(fileByteLength, { chunkSize = DEFAULT_CHUNK_SIZE, windowSize = DEFAULT_WINDOW_SIZE, byteCutoffs = PROGRESSIVE_WEB_BYTE_CUTOFFS } = {}) {
+export function getPushBatchingOptions(fileByteLength, { mode = 'window', chunkSize = DEFAULT_CHUNK_SIZE, windowSize = DEFAULT_WINDOW_SIZE, byteCutoffs = PROGRESSIVE_WEB_BYTE_CUTOFFS } = {}) {
   const size = Number(fileByteLength) || 0;
   let w = windowSize;
   if (size > (byteCutoffs[9] || 500 * 1024)) w = Math.min(16, windowSize);
   else if (size > (byteCutoffs[7] || 150 * 1024)) w = Math.min(24, windowSize);
-  return { mode: 'window', chunkSize, windowSize: w };
+  return { mode, chunkSize, windowSize: w };
 }
 
 function assertPositiveInteger(value, name) {

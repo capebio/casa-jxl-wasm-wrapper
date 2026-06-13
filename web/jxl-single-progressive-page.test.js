@@ -173,7 +173,7 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(html).toContain('id="psnr-chart"');
     expect(html).toContain('id="psnr-chart-legend"');
     expect(html).toContain('PSNR vs pass');
-    expect(source).toContain('drawPsnrChart');
+    expect(source).toContain('drawQualityChart');
     expect(source).toContain('computePsnrVsFinal');
     expect(source).toContain('computeAndDrawChartsAsync(decode.passes, targetRgba)');
     // Charts gated behind the Graphs toggle (default off); metrics computed on downsampled pixels.

@@ -1,7 +1,11 @@
-import { detectMonotone } from './jxl-progressive-quality.js';
+import { detectMonotone, computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
+import { createButteraugliComparer } from './jxl-butteraugli.js';  // for buildSeries helper (cohesion)
 
 export const RECOGNIZABLE_DB = 20;
 export const PREVIEW_DB = 30;
+export const GOOD_BUTTER = 1.0;
+export const SSIM_GOOD = 0.8;
+export const BUTTER_MONOTONE_TOL = 0.1;
 
 export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   const frames = events.filter((event) => event && (event.type === 'progress' || event.type === 'final'));
@@ -15,7 +19,7 @@ export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   };
 }
 
-export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries = null, butterSeries = null, ssimSeries = null, goodButter = 1.0 } = {}) {
+export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries = null, butterSeries = null, ssimSeries = null, goodButter = GOOD_BUTTER } = {}) {
   const sorted = ensureSorted(results);
   const painted = sorted.filter((result) => result.painted);
   const firstPaint = painted[0] ?? null;
@@ -40,6 +44,12 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     previewBytes = pickPreviewCutoffBytesOnly(painted, totalBytes);
   }
 
+  // perceptual-aware preview if butterSeries present (even without qualitySeries)
+  if (previewBytes == null && Array.isArray(butterSeries) && butterSeries.length > 0) {
+    const ss = ensureSorted(butterSeries);
+    previewBytes = ss.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? ss.at(-1)?.bytes ?? null;
+  }
+
   let firstPerceptuallyGoodBytes = null;
   let firstPerceptuallyGoodPercent = null;
   let finalButter = null;
@@ -51,7 +61,7 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     firstPerceptuallyGoodBytes = ss.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? null;
     firstPerceptuallyGoodPercent = percent(firstPerceptuallyGoodBytes, totalBytes);
     finalButter = ss.at(-1)?.butter ?? null;
-    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, butter: e.butter })), 0.1, { valueKey: 'butter', lowerIsBetter: true });
+    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, butter: e.butter })), BUTTER_MONOTONE_TOL, { valueKey: 'butter', lowerIsBetter: true });
     butterMonotone = m.monotone;
     butterRegressions = m.regressions;
   }
@@ -60,7 +70,7 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
   let firstGoodSsimBytes = null, finalSsim = null, ssimMonotone = null, ssimRegressions = [];
   if (Array.isArray(ssimSeries) && ssimSeries.length > 0) {
     const ss = ensureSorted(ssimSeries);
-    firstGoodSsimBytes = ss.find((e) => e.ssim != null && e.ssim >= 0.8)?.bytes ?? null;
+    firstGoodSsimBytes = ss.find((e) => e.ssim != null && e.ssim >= SSIM_GOOD)?.bytes ?? null;
     finalSsim = ss.at(-1)?.ssim ?? null;
     const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, ssim: e.ssim })));
     ssimMonotone = m.monotone;
@@ -119,4 +129,28 @@ function percent(bytes, totalBytes) {
 // Layer5 / Lens12/16/18: Pass butterSeries (or ssimSeries) computed from external model/recog score
 // (e.g. plant classifier logit or embedding dist on cutoff pixels) for task-aware early term instead of
 // pure fidelity. Pairs with new color constancy in Rust LookRenderer for illum-invariant AR.
+
+// buildSeries: auto producer helper. ref + list of cutoff pixel bufs + parallel byteSizes -> ready series for summarize.
+// Uses comparer for butter speed (layer1/2 cohesion win). No final needed if using self-stability or external.
+export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, height) {
+  if (!Array.isArray(cutoffPixelsList) || !Array.isArray(byteSizes) || cutoffPixelsList.length !== byteSizes.length) {
+    throw new Error('cutoffPixelsList and byteSizes must be parallel arrays');
+  }
+  const n = width * height;
+  if (!n || refPixels.length !== n * 4) return { qualitySeries: [], butterSeries: [], ssimSeries: [] };
+  const cmp = createButteraugliComparer(refPixels, width, height);
+  const qualitySeries = [];
+  const butterSeries = [];
+  const ssimSeries = [];
+  for (let i = 0; i < cutoffPixelsList.length; i++) {
+    const p = cutoffPixelsList[i];
+    const b = byteSizes[i];
+    if (!p || p.length !== n * 4) continue;
+    qualitySeries.push({ bytes: b, psnr: computePsnrVsFinal(p, refPixels) });
+    butterSeries.push({ bytes: b, butter: cmp(p) });
+    ssimSeries.push({ bytes: b, ssim: computeSsimVsFinal(p, refPixels, width, height) });
+  }
+  return { qualitySeries, butterSeries, ssimSeries };
+}
+
 

@@ -187,3 +187,51 @@ Add zoom/pan fields + listeners; on open/handle emit cancel/deeper requests or p
 4. **Core delivered:** The wrap-bug fix (real correctness), constancy/attended/focus surfaces (for Lens 17/12/16), and the return value are in. When a zoom/pan lightbox or priority-aware decode path exists, the attended hook is the attachment point.
 
 If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+## Group 2 (jxl-session tiered contexts) rejections from 2026-06-13 plan implementation pass
+
+### G2-F3: Abortable / wakeable grace window for visible MT/ST fallback (BrowserContextTierEvent.md Agent 1/3 + finding 3)
+
+**Proposed Optimization**  
+Make the visible grace sleep in createTieredSchedulerRouter abortable (tie to session AbortSignal) and/or wake early on pool metric / budget release so visible work does not pay full 16ms when capacity frees during the wait. Pass shutdown signal too.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. The grace is intentionally tiny (16ms default). Benefit is marginal compared to full decode budgets (seconds) and the cost of visible work starving.  
+2. Making the router.pick() promise respect abort requires non-local changes: modify createTieredSchedulerRouter signature or context to accept signal, make the injected sleep cancellable (AbortController race), update TieredJxlContextImpl, and ensure Decode/EncodeSessionImpl ctor + acquirePromise chain correctly short-circuits before scheduler assignment. This risks new races in the admission/acquire path (see scheduler abortAcquisition, cancelledDuringAcquisition sets).  
+3. Current abort handling in decode-session is deliberately pre-acquire for already-aborted (DS-3) and post for handler. Injecting into the pick grace adds complexity across session/context-base layers without touching the core preemption/budget invariants.  
+4. Reassessed as low-ROI vs risk; 16ms pay is acceptable for the contention fallback feature. If grace is ever raised significantly, revisit. Touches more than Group 2 files for full cohesion.
+
+### G2-F4: Runtime enforcement + bounded buffer for AsyncEventStream single-consumer (finding 4, Layer 3)
+
+**Proposed Optimization**  
+Add active iterator guard (throw on second [Symbol.asyncIterator] while one live) and/or max buffer size with drop-oldest or error on overflow for frames/metrics.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. Contract is already explicit and strong in comments (single-consumer, return() clears). Existing guards (returned flag, clear on return, single waiter slot) + compaction hygiene are in place and tested.  
+2. Runtime second-iterator detection is fragile in async (return() timing, multiple microtask iterators). Adding would be new public error mode for misuse.  
+3. Bounding buffer or drop policy is adjacent to previously rejected ideas around pixel buffer pools, compactQueue thresholds <64, and pre-alloc (see R1-2, DH-4, R12-5 in CLAUDE.md and this file). Buffer growth is consumer-driven (UI must drain or cancel); the layer is not the right place for global memory pressure.  
+4. Reassessed: document + contract is sufficient. Changes would be non-surgical and risk perf/compat for legitimate single-consumer progressive use.
+
+### G2-F5: Centralized capability probe + readiness surface (finding 5, Layer 2)
+
+**Proposed Optimization**  
+Move probe out of CapabilityAwareContext per-instance fire-and-forget into shared/cache, expose JxlContext.ready() or probeSettled or capabilities promise so callers (and the tier router) can wait for real SIMD/threads/SAB data before first decode.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. Explicit design decision D-002: capabilities() is sync per spec/contract; async probe is side-effect update. Conservative default is the floor.  
+2. Adding readiness would be additive public API on JxlContext (affects all callers, browser + node), require coordination with @casabio/jxl-capabilities, and change when MT decision in Tiered can prefer real caps vs default.  
+3. Current probe is cheap (one-time dynamic import) and "good enough" for the use (caps used for telemetry/diagnostics more than hard routing). Race is documented.  
+4. Reassessed: not a bug fix, would be feature/API change. Not surgical.
+
+### G2-F6: Smarter (hysteresis/age/saliency) MT routing policy (finding 6, Layer 2)
+
+**Proposed Optimization**  
+Extend shouldUseMtImmediately + router.pick with hysteresis, queued age, work-class hints from DecodeOptions, or saliency to avoid thrashing between MT/ST under varying load.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. The policy is intentionally minimal and delegates real contention to CoreBudget + scheduler pool metrics / preemption (which already do sophisticated victim selection).  
+2. Adding state (hysteresis counters) or work-class would either live in context-base (dupe across schedulers) or require new fields on ContextOptions/DecodeOptions flowing to router — cross-layer and changes contract.  
+3. "Too binary" was noted as future in the original design doc; any heuristic requires benchmark data per CLAUDE rules ("Do not add tunables without evidence").  
+4. Reassessed: belongs in scheduler or at T-INT caller level once saliency/priority signals are richer. Not positive surgical edit here.
+
+(Grace, stream, probe, and policy rejections recorded after reassessment against full pipeline position and CLAUDE invariants. The two contract items (URL + node) were the only ones passing the "positive change" bar for immediate surgical application.)

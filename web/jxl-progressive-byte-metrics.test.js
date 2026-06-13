@@ -4,6 +4,8 @@ import {
   summarizeByteCutoffResults,
   RECOGNIZABLE_DB,
   PREVIEW_DB,
+  GOOD_BUTTER,
+  buildSeries,
 } from './jxl-progressive-byte-metrics.js';
 
 test('summarizeByteCutoffResults reports first paint, preview, final and counts', () => {
@@ -139,4 +141,21 @@ test('butterSeries with regression flags via lowerIsBetter in detect', () => {
   const s = summarizeByteCutoffResults(results, 2000, { butterSeries: bs });
   expect(s.butterMonotone).toBe(false);
   expect(s.butterRegressions.length).toBe(1);
+});
+
+test('exports GOOD_BUTTER and buildSeries shape', () => {
+  expect(GOOD_BUTTER).toBe(1.0);
+  const ref = new Uint8Array(16).fill(128);
+  const cuts = [new Uint8Array(16).fill(128), new Uint8Array(16).fill(100)];
+  const bytes = [1000, 5000];
+  const built = buildSeries(ref, cuts, bytes, 2, 2);
+  expect(built.butterSeries.length).toBe(2);
+  expect(built.qualitySeries[0].psnr).toBe(Infinity);
+});
+
+test('preview uses butter when no qualitySeries', () => {
+  const results = [{ bytes: 1000, painted: true, frameCount: 1, isFinal: true }];
+  const bs = [{ bytes: 1000, butter: 0.4 }];
+  const s = summarizeByteCutoffResults(results, 1000, { butterSeries: bs });
+  expect(s.previewBytes).toBe(1000);
 });
