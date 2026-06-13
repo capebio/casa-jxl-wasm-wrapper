@@ -10,6 +10,7 @@ pub mod exif;
 pub mod ljpeg;
 pub mod pipeline;
 pub mod tiff;
+pub mod perceptual;
 
 // Re-export the stable B4 metadata-only public API for convenience
 pub use tiff::{parse_orf_metadata, bench_decode_orf, OrfMetadata, DecodeBench};
