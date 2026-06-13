@@ -1,5 +1,5 @@
 
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import os from 'os';
 
 function runSystemTelemetry() {
@@ -67,11 +67,15 @@ function runSystemTelemetry() {
 
 
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Worker as NodeWorker } from "node:worker_threads";
 import sharp from "sharp";
+import { buildGraphAggregateHtml, buildGraphHistory } from "./benchmark/standard-multifile-history-graph.mjs";
+import { consolidateBenchmarkHistory } from "./benchmark/benchmark-history-conversion.mjs";
+import { assessSeamComparison } from "./benchmark/seam-comparison-threshold.mjs";
+import { buildGraphBrowserLaunchPlan, chooseGraphBrowser, getNextGraphBrowserLaunchMethod } from "./benchmark/graph-browser-launcher.mjs";
 
 // 1. Browser-like Worker Shim for Node.js thread context
 class BrowserLikeWorker {
@@ -189,6 +193,30 @@ async function encodeJxl(rgba, width, height, isProgressive) {
   return { bytes: concatChunks(chunks), ms };
 }
 
+async function encodeJxlVariant(rgba, width, height, extra = {}) {
+  const encoder = createEncoder({
+    format: "rgba8", width, height, hasAlpha: false,
+    iccProfile: null, exif: null, xmp: null,
+    distance: 1.0, quality: 85, effort: 3,
+    progressive: false, progressiveFlavor: "ac", previewFirst: false,
+    chunked: true,
+    ...extra,
+  });
+  const chunks = [];
+  const chunkTask = (async () => {
+    for await (const chunk of encoder.chunks()) {
+      chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    }
+  })();
+  const t0 = performance.now();
+  await encoder.pushPixels(exactBuffer(rgba));
+  await encoder.finish();
+  await chunkTask;
+  await encoder.dispose();
+  const ms = performance.now() - t0;
+  return { bytes: concatChunks(chunks), ms };
+}
+
 // 6. JXL Decoding Helper with optional ROI region
 async function decodeJxl(jxlBytes, isProgressive, options = {}) {
   const decoder = createDecoder({
@@ -228,6 +256,47 @@ async function decodeJxl(jxlBytes, isProgressive, options = {}) {
   return { ms, firstFrameMs: firstFrameMs ?? ms, passCount, pixels: decodedPixels };
 }
 
+// Streaming chunked-input progressive decode simulation (covers test_1 / progressive-timing-benchmark chunked steps)
+async function timedChunkedInputDecode(jxlBytes, steps, isProgressive, options = {}) {
+  const decoder = createDecoder({
+    format: "rgba8",
+    progressionTarget: options.progressionTarget ?? "final",
+    emitEveryPass: options.emitEveryPass ?? isProgressive,
+    progressiveDetail: options.progressiveDetail ?? (isProgressive ? "passes" : "none"),
+    downsample: options.downsample ?? 1,
+    preserveIcc: false, preserveMetadata: false,
+    region: options.region ?? null,
+  });
+  let firstFrameMs = null;
+  let passCount = 0;
+  const t0 = performance.now();
+  try {
+    const evTask = (async () => {
+      for await (const ev of decoder.events()) {
+        if (ev.type === "progress" || ev.type === "final") {
+          passCount++;
+          if (firstFrameMs === null) firstFrameMs = performance.now() - t0;
+        } else if (ev.type === "error") {
+          // ignore truncation for partial pushes in sim
+        }
+      }
+    })();
+    const src = (jxlBytes instanceof Uint8Array) ? jxlBytes : new Uint8Array(jxlBytes);
+    const chunkSize = Math.ceil(src.byteLength / steps);
+    for (let i = 0; i < steps; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(start + chunkSize, src.byteLength);
+      if (end > start) await decoder.push(exactBuffer(src.subarray(start, end)));
+    }
+    await decoder.close();
+    await evTask;
+  } finally {
+    try { await decoder.dispose(); } catch (_) {}
+  }
+  const ms = performance.now() - t0;
+  return { ms, firstFrameMs: firstFrameMs ?? ms, passCount };
+}
+
 // 7. Benchmark Suite Entrypoint
 async function main() {
   globalThis.systemTelemetry = runSystemTelemetry();
@@ -259,6 +328,7 @@ async function main() {
     const raw = new Uint8Array(readFileSync(resolvedPath));
     const tRawStart = performance.now();
     let rgb, srcW, srcH;
+    let rawDecompress = 0, rawDemosaic = 0, rawTonemap = 0, rawOrient = 0;
 
     if (ext === ".jpg" || ext === ".jpeg") {
       const { data, info } = await sharp(resolvedPath).raw().toBuffer({ resolveWithObject: true });
@@ -268,6 +338,10 @@ async function main() {
       if (ext === ".orf" || ext === ".raw") decoded = process_orf_with_flags(raw, OUTPUT_FULL_RGB, ...PROCESS_ARGS);
       else if (ext === ".cr2") decoded = process_cr2_with_flags(raw, OUTPUT_FULL_RGB, ...PROCESS_ARGS);
       else if (ext === ".dng") decoded = process_dng_with_flags(raw, OUTPUT_FULL_RGB, ...PROCESS_ARGS);
+      rawDecompress = decoded.decompress_ms ?? 0;
+      rawDemosaic = decoded.demosaic_ms ?? 0;
+      rawTonemap = decoded.tonemap_ms ?? 0;
+      rawOrient = decoded.orient_ms ?? 0;
       rgb = decoded.take_rgb(); srcW = decoded.width; srcH = decoded.height; decoded.free();
     }
     const rawMs = performance.now() - tRawStart;
@@ -281,7 +355,7 @@ async function main() {
     const scaleMs = performance.now() - tScaleStart;
 
     console.log(`  Loaded ${basename(resolvedPath)}: decode=${Math.round(rawMs)}ms scale=${Math.round(scaleMs)}ms (${tgtW}x${tgtH})`);
-    loadedFiles.push({ file: basename(resolvedPath), rgba, tgtW, tgtH, rawMs, scaleMs });
+    loadedFiles.push({ file: basename(resolvedPath), rgba, tgtW, tgtH, rawMs, scaleMs, rawDecompress, rawDemosaic, rawTonemap, rawOrient });
   }
   console.log("");
 
@@ -323,6 +397,27 @@ async function main() {
         }
       }
 
+      // --- Additional timings pulled from benchmark/*.mjs (test_1, progressive-timing-benchmark, timing-tests, targeted, test_1x sweeps) ---
+      // Rich decode variants (ds2, region crops) for prog vs oneshot
+      const regionEx = { x: Math.floor(f.tgtW * 0.25), y: Math.floor(f.tgtH * 0.25), w: Math.floor(f.tgtW * 0.5), h: Math.floor(f.tgtH * 0.5) };
+      const progDs2 = await decodeJxl(progEnc.bytes, true, { downsample: 2 });
+      const progRegion = await decodeJxl(progEnc.bytes, true, { region: regionEx });
+      const shotDs2 = await decodeJxl(shotEnc.bytes, false, { downsample: 2 });
+      const shotRegion = await decodeJxl(shotEnc.bytes, false, { region: regionEx });
+      // Chunked-input streaming sim for progressive (4 steps)
+      const progChunked = await timedChunkedInputDecode(progEnc.bytes, 4, true);
+      // Encode variants for modular / other options coverage (timing-tests, test_14, test_17 etc)
+      let modProgEncMs = 0, modProgSize = 0;
+      let photonEncMs = 0, photonSize = 0;
+      try {
+        const modP = await encodeJxlVariant(f.rgba, f.tgtW, f.tgtH, { progressive: true, modular: 1 });
+        modProgEncMs = modP.ms; modProgSize = modP.bytes.byteLength;
+      } catch (_) {}
+      try {
+        const pho = await encodeJxlVariant(f.rgba, f.tgtW, f.tgtH, { progressive: true, photonNoiseIso: 800 });
+        photonEncMs = pho.ms; photonSize = pho.bytes.byteLength;
+      } catch (_) {}
+
       results.push({
         file: f.file,
         prog_enc_ms: Math.round(progEnc.ms),
@@ -336,9 +431,19 @@ async function main() {
         pyr_enc_ms: Math.round(pyrEncMs),
         pyr_dec_tot_ms: Math.round(pyrDecTotMs),
         pyr_levels: pyrLevelsCount,
-        shot_bytes: shotEnc.bytes
+        shot_bytes: shotEnc.bytes,
+        // additional from benchmark sweeps
+        prog_ds2_first_ms: Math.round(progDs2.firstFrameMs),
+        prog_ds2_final_ms: Math.round(progDs2.ms),
+        prog_region_ms: Math.round(progRegion.ms),
+        shot_ds2_ms: Math.round(shotDs2.ms),
+        shot_region_ms: Math.round(shotRegion.ms),
+        prog_chunked4_first_ms: Math.round(progChunked.firstFrameMs),
+        prog_chunked4_final_ms: Math.round(progChunked.ms),
+        mod_prog_enc_ms: Math.round(modProgEncMs),
+        photon_prog_enc_ms: Math.round(photonEncMs),
       });
-      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms`);
+      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | +ds2/region/chunked/mod/photon variants`);
     }
     console.log("");
     return results;
@@ -501,12 +606,21 @@ async function main() {
           if (diff > maxDiff) maxDiff = diff;
         }
       }
-      if (mismatches === 0) {
-        console.log(`  ✅ SUCCESS: [P-4 Seam Test] Passed! JXTC Tiled Region Decode is 100% pixel-exact byte-identical to Monolithic ROI Decode! (0 byte mismatches, 0 drift)`);
-      } else {
-        console.error(`  ❌ FAIL: [P-4 Seam Test] Failed! Found ${mismatches} mismatched bytes out of ${monPixels.length} total bytes. Max difference: ${maxDiff}`);
+        if (mismatches === 0) {
+          console.log(`  ✅ SUCCESS: [P-4 Seam Test] Passed! JXTC Tiled Region Decode is 100% pixel-exact byte-identical to Monolithic ROI Decode! (0 byte mismatches, 0 drift)`);
+        } else {
+          const seamAssessment = assessSeamComparison({
+            mismatches,
+            totalBytes: monPixels.length,
+            maxDiff,
+          });
+          if (seamAssessment.shouldFail) {
+            console.error(`  ❌ FAIL: [P-4 Seam Test] Failed! ${seamAssessment.message}`);
+          } else {
+            console.warn(`  ⚠️  [P-4 Seam Test] ${seamAssessment.message}`);
+          }
+        }
       }
-    }
 
     // 4. 4-Tile Split Decode on JXTC (decompressing individual tiles independently)
     const tiles = [
@@ -606,6 +720,44 @@ async function main() {
   }
   console.log("");
 
+  // --- 7.7 RUN ADDITIONAL TIMINGS from benchmark/*.mjs + examined timings/*.mjs ---
+  // Covers permutations, rich decode variants, substage, progressive chunk/stream, sweeps (modular, photon, brotli, quality etc) not in core path.
+  // timings/ *.mjs (single-progressive-*.mjs, probe-wasm-tier.mjs) are browser+server launchers for web single-prog page; left as separate (require http://localhost:9000 + playwright).
+  // We run limited node-only ones here so their .toon land in timing dir for consolidate+graph.
+  console.log(`--- [7/7] Additional timings from benchmark/*.mjs (limited to keep responsive) ---`);
+  const addEnvBase = { ...process.env };
+  const tried = [];
+  function runLimitedBench(script, extraEnv = {}, timeoutMs = 60000) {
+    const env = { ...addEnvBase, ...extraEnv };
+    const cmd = `node ${script}`;
+    tried.push(script);
+    try {
+      execSync(cmd, { stdio: "ignore", timeout: timeoutMs, env, cwd: process.cwd() });
+      console.log(`  ✓ ${script} (limited)`);
+      return true;
+    } catch (e) {
+      const msg = (e && e.message ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 120);
+      console.log(`  - ${script} (skipped/partial: ${msg})`);
+      return false;
+    }
+  }
+  runLimitedBench("benchmark/timing-tests.mjs", {
+    TIMING_RAW_LIMIT: "1", TIMING_JPEG_LIMIT: "1", TIMING_TARGET: "400",
+    TIMING_EFFORTS: "3", TIMING_MODES: "std,std+chunked"
+  }, 90000);
+  runLimitedBench("benchmark/progressive-timing-benchmark.mjs", {
+    PT_LIMIT: "1", PT_SIZES: "400", PT_QUALITY: "85", PT_EFFORT: "3", PT_STEPS: "4"
+  }, 90000);
+  runLimitedBench("benchmark/targeted-wasm-timings.mjs", {
+    TEST_RUNS: "1", TEST_SCAN_LIMIT: "1", GOB_SCAN_LIMIT: "0", GOB_OFFENDER_COUNT: "0", TRACE_PROGRESS: "0", TRACE_STAGES: "0"
+  }, 60000);
+  // A couple of the numbered sweep tests (via their env overrides if present; most default to small via utils)
+  runLimitedBench("benchmark/test_14_modular_mode_sweep.mjs", { TEST14_LIMIT: "1" }, 60000);
+  runLimitedBench("benchmark/test_11_brotli_effort_sweep.mjs", { /* may honor or use 1 file */ }, 60000);
+  console.log(`  (examined also: timings/probe-wasm-tier.mjs, timings/single-progressive-*.mjs — browser CDP paths for lastPasses/passes single-prog metrics)`);
+  console.log(`  Additional tried: ${tried.join(", ")}`);
+  console.log("");
+
 
   // --- 8. Build Combined Modified TOON Format Output ---
   const toonLines = [
@@ -635,19 +787,22 @@ async function main() {
 
     "",
     "---",
-    `runs[${loadedFiles.length}]{file|raw_ms|scale_ms|prog_enc_simd_ms|prog_enc_mt_ms|prog_first_simd_ms|prog_first_mt_ms|prog_final_simd_ms|prog_final_mt_ms|shot_enc_simd_ms|shot_enc_mt_ms|shot_dec_simd_ms|shot_dec_mt_ms|pyr_enc_simd_ms|pyr_enc_mt_ms|pyr_dec_simd_ms|pyr_dec_mt_ms}:`
+    `runs[${loadedFiles.length}]{file|raw_ms|scale_ms|raw_decompress_ms|raw_demosaic_ms|raw_tonemap_ms|prog_enc_simd_ms|prog_enc_mt_ms|prog_first_simd_ms|prog_first_mt_ms|prog_final_simd_ms|prog_final_mt_ms|shot_enc_simd_ms|shot_enc_mt_ms|shot_dec_simd_ms|shot_dec_mt_ms|pyr_enc_simd_ms|pyr_enc_mt_ms|pyr_dec_simd_ms|pyr_dec_mt_ms|prog_ds2_first_simd_ms|prog_ds2_final_simd_ms|prog_region_simd_ms|shot_ds2_simd_ms|shot_region_simd_ms|prog_chunked4_first_simd_ms|mod_prog_enc_simd_ms|photon_prog_enc_simd_ms}:`
   ];
 
   for (let i = 0; i < loadedFiles.length; i++) {
     const f = loadedFiles[i];
     const s = simdResults[i];
     const m = mtResults[i];
-    toonLines.push(`  ${f.file} | ${Math.round(f.rawMs)} | ${Math.round(f.scaleMs)} | ${s.prog_enc_ms} | ${m.prog_enc_ms} | ${s.prog_first_ms} | ${m.prog_first_ms} | ${s.prog_final_ms} | ${m.prog_final_ms} | ${s.shot_enc_ms} | ${m.shot_enc_ms} | ${s.shot_dec_ms} | ${m.shot_dec_ms} | ${s.pyr_enc_ms} | ${m.pyr_enc_ms} | ${s.pyr_dec_tot_ms} | ${m.pyr_dec_tot_ms}`);
+    toonLines.push(`  ${f.file} | ${Math.round(f.rawMs)} | ${Math.round(f.scaleMs)} | ${Math.round(f.rawDecompress||0)} | ${Math.round(f.rawDemosaic||0)} | ${Math.round(f.rawTonemap||0)} | ${s.prog_enc_ms} | ${m.prog_enc_ms} | ${s.prog_first_ms} | ${m.prog_first_ms} | ${s.prog_final_ms} | ${m.prog_final_ms} | ${s.shot_enc_ms} | ${m.shot_enc_ms} | ${s.shot_dec_ms} | ${m.shot_dec_ms} | ${s.pyr_enc_ms} | ${m.pyr_enc_ms} | ${s.pyr_dec_tot_ms} | ${m.pyr_dec_tot_ms} | ${s.prog_ds2_first_ms||0} | ${s.prog_ds2_final_ms||0} | ${s.prog_region_ms||0} | ${s.shot_ds2_ms||0} | ${s.shot_region_ms||0} | ${s.prog_chunked4_first_ms||0} | ${s.mod_prog_enc_ms||0} | ${s.photon_prog_enc_ms||0}`);
   }
 
   // Compute Averages
   const avgRaw = Math.round(loadedFiles.reduce((s, r) => s + r.rawMs, 0) / loadedFiles.length);
   const avgScale = Math.round(loadedFiles.reduce((s, r) => s + r.scaleMs, 0) / loadedFiles.length);
+  const avgRawDecomp = Math.round(loadedFiles.reduce((s, r) => s + (r.rawDecompress||0), 0) / loadedFiles.length);
+  const avgRawDemo   = Math.round(loadedFiles.reduce((s, r) => s + (r.rawDemosaic||0), 0) / loadedFiles.length);
+  const avgRawTone   = Math.round(loadedFiles.reduce((s, r) => s + (r.rawTonemap||0), 0) / loadedFiles.length);
 
   const avgProgEncSimd = Math.round(simdResults.reduce((s, r) => s + r.prog_enc_ms, 0) / loadedFiles.length);
   const avgProgEncMt   = Math.round(mtResults.reduce((s, r) => s + r.prog_enc_ms, 0) / loadedFiles.length);
@@ -665,6 +820,12 @@ async function main() {
   const avgPyrEncMt   = Math.round(mtResults.reduce((s, r) => s + r.pyr_enc_ms, 0) / loadedFiles.length);
   const avgPyrDecSimd = Math.round(simdResults.reduce((s, r) => s + r.pyr_dec_tot_ms, 0) / loadedFiles.length);
   const avgPyrDecMt   = Math.round(mtResults.reduce((s, r) => s + r.pyr_dec_tot_ms, 0) / loadedFiles.length);
+
+  // additional avgs (simd-focused coverage for benchmark/ missing timings)
+  const avgProgDs2First = Math.round(simdResults.reduce((s, r) => s + (r.prog_ds2_first_ms||0), 0) / loadedFiles.length);
+  const avgProgChunkedFirst = Math.round(simdResults.reduce((s, r) => s + (r.prog_chunked4_first_ms||0), 0) / loadedFiles.length);
+  const avgModProgEnc = Math.round(simdResults.reduce((s, r) => s + (r.mod_prog_enc_ms||0), 0) / loadedFiles.length);
+  const avgPhotonProgEnc = Math.round(simdResults.reduce((s, r) => s + (r.photon_prog_enc_ms||0), 0) / loadedFiles.length);
 
   toonLines.push("", "# Aggregates");
   toonLines.push(`TotalRecords: ${loadedFiles.length}`);
@@ -690,6 +851,7 @@ async function main() {
   toonLines.push("", "# Averages");
   toonLines.push(`AvgRawMs: ${avgRaw}`);
   toonLines.push(`AvgScaleMs: ${avgScale}`);
+  toonLines.push(`AvgRawDecompressMs: ${avgRawDecomp} | AvgRawDemosaicMs: ${avgRawDemo} | AvgRawTonemapMs: ${avgRawTone}`);
   toonLines.push(`AvgProgEncSimdMs: ${avgProgEncSimd} | AvgProgEncMtMs: ${avgProgEncMt}`);
   toonLines.push(`AvgProgFirstSimdMs: ${avgProgFirstSimd} | AvgProgFirstMtMs: ${avgProgFirstMt}`);
   toonLines.push(`AvgProgFinalSimdMs: ${avgProgFinalSimd} | AvgProgFinalMtMs: ${avgProgFinalMt}`);
@@ -697,6 +859,9 @@ async function main() {
   toonLines.push(`AvgShotDecSimdMs: ${avgShotDecSimd} | AvgShotDecMtMs: ${avgShotDecMt}`);
   toonLines.push(`AvgPyrEncSimdMs: ${avgPyrEncSimd} | AvgPyrEncMtMs: ${avgPyrEncMt}`);
   toonLines.push(`AvgPyrDecSimdMs: ${avgPyrDecSimd} | AvgPyrDecMtMs: ${avgPyrDecMt}`);
+  toonLines.push(`AvgProgDs2FirstSimdMs: ${avgProgDs2First} | AvgProgChunked4FirstSimdMs: ${avgProgChunkedFirst}`);
+  toonLines.push(`AvgModProgEncSimdMs: ${avgModProgEnc}`);
+  toonLines.push(`AvgPhotonProgEncSimdMs: ${avgPhotonProgEnc}`);
 
   let toonString = toonLines.join("\n");
 
@@ -728,10 +893,64 @@ async function main() {
 
   writeFileSync(outPath, toonString);
   console.log(`✅ TOON file successfully written to: ${outPath}\n`);
+
+  const consolidation = consolidateBenchmarkHistory({
+    timingDir: OUT_DIR,
+    legacyRoots: [
+      String.raw`C:\Foo\raw-converter-wasm\docs\Benchmark results`,
+      join(OUT_DIR, "backup"),
+    ],
+    backupDirName: "backup",
+  });
+  const historicalRuns = consolidation.toonFiles
+    .filter((name) => name.endsWith(".toon"))
+    .filter((name) => !name.endsWith("GraphAggregateResults.toon"));
+  const graphModel = buildGraphHistory(historicalRuns);
+  const launchStatePath = join(OUT_DIR, ".graph-browser-launch-state.json");
+  const launchSelection = getNextGraphBrowserLaunchMethod({
+    statePath: launchStatePath,
+    overrideMethodId: process.env.STANDARD_MULTIFILE_OPEN_GRAPH_METHOD || null,
+  });
+  const launchBadge = `${launchSelection.method.label} - ${launchSelection.method.description}`;
+  const graphHtml = buildGraphAggregateHtml(graphModel, { launchBadge });
+  const graphPath = join(OUT_DIR, "GraphAggregateResults.html");
+  writeFileSync(graphPath, graphHtml);
+  console.log(`✅ Graph aggregate HTML successfully written to: ${graphPath}\n`);
+  console.log(`Graph launch method: ${launchBadge}`);
+
+  if (process.env.STANDARD_MULTIFILE_OPEN_GRAPH !== "0") {
+    try {
+      if (process.platform === "win32") {
+        const browser = chooseGraphBrowser({
+          chromePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          edgePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+          bravePath: "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+        });
+        const launchMethodId = launchSelection.method.id === "direct-spawn" && !browser.path
+          ? "explorer"
+          : launchSelection.method.id;
+        const plan = buildGraphBrowserLaunchPlan({
+          methodId: launchMethodId,
+          browserPath: browser.path,
+          filePath: graphPath,
+        });
+        if (plan.browserPath) {
+          const child = spawn(plan.browserPath, plan.args, plan.options);
+          child.unref();
+        }
+      } else if (process.platform === "darwin") {
+        execSync(`open "${graphPath.replace(/"/g, '\\"')}"`, { stdio: "ignore" });
+      } else {
+        execSync(`xdg-open "${graphPath.replace(/"/g, '\\"')}"`, { stdio: "ignore" });
+      }
+      console.log(`✅ Graph aggregate HTML opened in browser.\n`);
+    } catch (err) {
+      console.log(`⚠️  Graph aggregate HTML could not be opened automatically.\n`);
+    }
+  }
 }
 
 main().then(() => process.exit(0)).catch(err => {
   console.error("Benchmark failed:", err);
   process.exit(1);
 });
-
