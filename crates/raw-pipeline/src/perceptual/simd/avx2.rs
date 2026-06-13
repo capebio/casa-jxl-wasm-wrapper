@@ -43,7 +43,13 @@ pub unsafe fn scale_err_avx2(
         let m = _mm256_loadu_ps(mask.as_ptr().add(i));
         // m = max(mask*2 + 0.15, 0.15)
         let mm = _mm256_max_ps(_mm256_fmadd_ps(m, v2, v015), v015);
-        let inv = _mm256_div_ps(_mm256_set1_ps(1.0), mm);
+        let inv = if rsqrt_path {
+            // rcp(mm) refined one Newton step: r1 = r0 * (2 - mm*r0)
+            let r0 = _mm256_rcp_ps(mm);
+            _mm256_mul_ps(r0, _mm256_fnmadd_ps(mm, r0, _mm256_set1_ps(2.0)))
+        } else {
+            _mm256_div_ps(_mm256_set1_ps(1.0), mm)
+        };
         let ex = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(rx.as_ptr().add(i)), _mm256_loadu_ps(tx.as_ptr().add(i))), inv);
         let ey = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(ry.as_ptr().add(i)), _mm256_loadu_ps(ty.as_ptr().add(i))), inv);
         let eb = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(rb.as_ptr().add(i)), _mm256_loadu_ps(tb.as_ptr().add(i))), inv);
@@ -139,6 +145,204 @@ pub unsafe fn ssim_moments_avx2(
         j += 4;
     }
     (sa, saa, sab)
+}
+
+/// AVX2 RGBA(u8) → planar X/Y/B using i32-gather over the sqrt-linear LUT.
+/// `lut` must point to a 256-entry f32 table. Processes 8 px/iter + scalar tail.
+#[target_feature(enable = "avx2")]
+pub unsafe fn pixels_to_xyb_avx2(
+    px: &[u8],
+    n: usize,
+    lut: *const f32,
+    x: &mut [f32],
+    y: &mut [f32],
+    b: &mut [f32],
+) {
+    let half = _mm256_set1_ps(0.5);
+    let lanes = n / 8 * 8;
+    let mut i = 0;
+    while i < lanes {
+        // Gather the 8 R/G/B bytes (stride 4) for px[i..i+8] into i32 index vectors.
+        let mut ri = [0i32; 8];
+        let mut gi = [0i32; 8];
+        let mut bi = [0i32; 8];
+        for l in 0..8 {
+            let base = (i + l) * 4;
+            ri[l] = *px.get_unchecked(base) as i32;
+            gi[l] = *px.get_unchecked(base + 1) as i32;
+            bi[l] = *px.get_unchecked(base + 2) as i32;
+        }
+        let r = _mm256_i32gather_ps(lut, _mm256_loadu_si256(ri.as_ptr() as *const __m256i), 4);
+        let g = _mm256_i32gather_ps(lut, _mm256_loadu_si256(gi.as_ptr() as *const __m256i), 4);
+        let bb = _mm256_i32gather_ps(lut, _mm256_loadu_si256(bi.as_ptr() as *const __m256i), 4);
+        // X=(r-b)*0.5 ; Y=(r+b)*0.5+g ; B=b
+        _mm256_storeu_ps(x.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_sub_ps(r, bb), half));
+        _mm256_storeu_ps(
+            y.as_mut_ptr().add(i),
+            _mm256_fmadd_ps(_mm256_add_ps(r, bb), half, g),
+        );
+        _mm256_storeu_ps(b.as_mut_ptr().add(i), bb);
+        i += 8;
+    }
+    // scalar tail
+    let lut_s = core::slice::from_raw_parts(lut, 256);
+    while i < n {
+        let j = i * 4;
+        let r = lut_s[px[j] as usize];
+        let g = lut_s[px[j + 1] as usize];
+        let bb = lut_s[px[j + 2] as usize];
+        x[i] = (r - bb) * 0.5;
+        y[i] = (r + bb) * 0.5 + g;
+        b[i] = bb;
+        i += 1;
+    }
+}
+
+/// AVX2 2× box downsample of a single plane (w×h) into `dst` (dw×dh).
+/// Interior fast path: 8 output px/iter via permutevar8x32 deinterleave;
+/// edges handled by scalar remainder.
+#[target_feature(enable = "avx2")]
+pub unsafe fn downsample_avx2(
+    src: &[f32],
+    dst: &mut [f32],
+    w: usize,
+    h: usize,
+    dw: usize,
+    dh: usize,
+) {
+    let quarter = _mm256_set1_ps(0.25);
+    // Index vectors for _mm256_permutevar8x32_ps to extract even/odd lanes
+    // from a 16-float pair of 256-bit registers.
+    // Given p00=[s0,s1,s2,s3,s4,s5,s6,s7] and p01=[s8,s9,s10,s11,s12,s13,s14,s15]:
+    //   even = [s0,s2,s4,s6, s8,s10,s12,s14]  (indices 0,2,4,6 from p00, 0,2,4,6 from p01)
+    //   odd  = [s1,s3,s5,s7, s9,s11,s13,s15]  (indices 1,3,5,7 from p00, 1,3,5,7 from p01)
+    // We use _mm256_permutevar8x32_ps on each register with even/odd index vectors,
+    // then combine with _mm256_permute2f128_ps.
+    //
+    // _mm256_permutevar8x32_ps permutes within the full 256-bit register (all 8 lanes).
+    // For p00: even_lo_idx=[0,2,4,6,0,2,4,6], odd_lo_idx=[1,3,5,7,1,3,5,7]
+    // For p01: same indices
+    // Then we take [lo 128 of permuted_p00, lo 128 of permuted_p01] via permute2f128.
+    let even_idx = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
+    let odd_idx = _mm256_setr_epi32(1, 3, 5, 7, 1, 3, 5, 7);
+
+    for y in 0..dh {
+        let sy0 = y << 1;
+        let sy1 = if sy0 + 1 < h { sy0 + 1 } else { h - 1 };
+        let row0 = sy0 * w;
+        let row1 = sy1 * w;
+        let drow = y * dw;
+        // Bulk: 8 output px at a time. Each reads 16 src floats per row (2 src px per out px).
+        // Need 2*8=16 src floats, which means src indices start at 2*x, length 16.
+        // Require 2*x+15 < w, i.e. x <= (w-16)/2 = dw - 8 when w is even.
+        // Safe bulk count: we need row0+2*x+15 < w*h and row1+2*x+15 similarly.
+        // Simplest: bulk while 2*(x+8) <= w, i.e., x+8 <= dw (w even case).
+        // For safety just check 2*x+15 < w for the last bulk iteration.
+        // Bulk reads src[2x..2x+16] per row, so the guard `2*x+16 <= w` keeps the
+        // load in-bounds; the scalar remainder handles the (clamped) odd-width tail.
+        let mut x = 0usize;
+        while x + 8 <= dw && 2 * x + 16 <= w {
+            // Load 16 consecutive src floats per row starting at src[row0 + 2*x].
+            let p00 = _mm256_loadu_ps(src.as_ptr().add(row0 + 2 * x));       // s0..s7
+            let p01 = _mm256_loadu_ps(src.as_ptr().add(row0 + 2 * x + 8));   // s8..s15
+            let p10 = _mm256_loadu_ps(src.as_ptr().add(row1 + 2 * x));
+            let p11 = _mm256_loadu_ps(src.as_ptr().add(row1 + 2 * x + 8));
+
+            // Deinterleave: extract even-indexed lanes (sx0) and odd-indexed (sx1).
+            // permutevar8x32 on p00 with even_idx=[0,2,4,6,0,2,4,6]:
+            //   lo 4 lanes = s0,s2,s4,s6 (correct even from p00)
+            //   hi 4 lanes = s0,s2,s4,s6 (duplicate — discarded)
+            // permutevar8x32 on p01 with even_idx:
+            //   lo 4 lanes = s8,s10,s12,s14 (correct even from p01)
+            //   hi 4 lanes = duplicate — discarded
+            // Then permute2f128 with imm8=0x20 takes lo128 of first, lo128 of second.
+            let e0_perm = _mm256_permutevar8x32_ps(p00, even_idx);
+            let e1_perm = _mm256_permutevar8x32_ps(p01, even_idx);
+            let even_r0 = _mm256_permute2f128_ps(e0_perm, e1_perm, 0x20); // [s0,s2,s4,s6,s8,s10,s12,s14]
+
+            let o0_perm = _mm256_permutevar8x32_ps(p00, odd_idx);
+            let o1_perm = _mm256_permutevar8x32_ps(p01, odd_idx);
+            let odd_r0 = _mm256_permute2f128_ps(o0_perm, o1_perm, 0x20);  // [s1,s3,s5,s7,s9,s11,s13,s15]
+
+            let e0_perm10 = _mm256_permutevar8x32_ps(p10, even_idx);
+            let e1_perm10 = _mm256_permutevar8x32_ps(p11, even_idx);
+            let even_r1 = _mm256_permute2f128_ps(e0_perm10, e1_perm10, 0x20);
+
+            let o0_perm10 = _mm256_permutevar8x32_ps(p10, odd_idx);
+            let o1_perm10 = _mm256_permutevar8x32_ps(p11, odd_idx);
+            let odd_r1 = _mm256_permute2f128_ps(o0_perm10, o1_perm10, 0x20);
+
+            // sum = (even_r0 + odd_r0) + (even_r1 + odd_r1)
+            let sum = _mm256_add_ps(
+                _mm256_add_ps(even_r0, odd_r0),
+                _mm256_add_ps(even_r1, odd_r1),
+            );
+            _mm256_storeu_ps(dst.as_mut_ptr().add(drow + x), _mm256_mul_ps(sum, quarter));
+            x += 8;
+        }
+        // scalar remainder + clamped last column
+        while x < dw {
+            let sx0 = x << 1;
+            let sx1 = if sx0 + 1 < w { sx0 + 1 } else { w - 1 };
+            dst[drow + x] = (src[row0 + sx0]
+                + src[row0 + sx1]
+                + src[row1 + sx0]
+                + src[row1 + sx1])
+                * 0.25;
+            x += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod xyb_tests {
+    use super::*;
+    use crate::perceptual::xyb::{pixels_to_xyb, sqrt_lin_lut_ptr};
+
+    #[test]
+    fn xyb_avx2_matches_scalar() {
+        if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
+            return;
+        }
+        let n = 1000usize; // non-multiple of 8
+        let px: Vec<u8> = (0..n * 4).map(|i| (i * 37 % 256) as u8).collect();
+        let (mut sx, mut sy, mut sb) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
+        pixels_to_xyb(&px, n, &mut sx, &mut sy, &mut sb);
+        let (mut ax, mut ay, mut ab) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
+        unsafe { pixels_to_xyb_avx2(&px, n, sqrt_lin_lut_ptr(), &mut ax, &mut ay, &mut ab) };
+        for i in 0..n {
+            assert!((sx[i] - ax[i]).abs() < 1e-6, "x[{i}] {} vs {}", sx[i], ax[i]);
+            assert!((sy[i] - ay[i]).abs() < 1e-6, "y[{i}] {} vs {}", sy[i], ay[i]);
+            assert!((sb[i] - ab[i]).abs() < 1e-6, "b[{i}] {} vs {}", sb[i], ab[i]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod downsample_tests {
+    use super::*;
+    use crate::perceptual::butteraugli::dn2;
+
+    #[test]
+    fn downsample_avx2_matches_dn2() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        for (w, h) in [(64usize, 48usize), (65, 49), (2, 2), (33, 17)] {
+            let src: Vec<f32> = (0..w * h).map(|i| (i as f32 * 0.013).sin()).collect();
+            let (want, dw, dh) = dn2(&src, w, h);
+            let mut got = vec![0f32; dw * dh];
+            unsafe { downsample_avx2(&src, &mut got, w, h, dw, dh) };
+            for i in 0..dw * dh {
+                assert!(
+                    (want[i] - got[i]).abs() < 1e-5,
+                    "({w}x{h})[{i}] {} vs {}",
+                    want[i],
+                    got[i]
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

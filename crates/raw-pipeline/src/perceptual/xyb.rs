@@ -21,6 +21,11 @@ pub(crate) fn sqrt_lin_lut() -> &'static [f32; 256] {
     })
 }
 
+/// Raw base pointer to the sqrt-linear LUT, for SIMD gather paths.
+pub(crate) fn sqrt_lin_lut_ptr() -> *const f32 {
+    sqrt_lin_lut().as_ptr()
+}
+
 /// RGBA (stride 4, alpha ignored) → planar X/Y/B. `x`,`y`,`b_out` len == n.
 pub(crate) fn pixels_to_xyb(px: &[u8], n: usize, x: &mut [f32], y: &mut [f32], b_out: &mut [f32]) {
     let lut = sqrt_lin_lut();
