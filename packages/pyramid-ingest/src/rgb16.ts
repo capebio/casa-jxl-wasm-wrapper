@@ -10,12 +10,15 @@ export function packedRgb16ToRgba16(packed: Uint8Array, width: number, height: n
   }
   const n = width * height;
   const out = new Uint16Array(n * 4);
+  // DataView for explicit LE (matches "packed LE"); profile vs direct ![] if JIT prefers.
+  // True zero-copy win is WASM binding from Rust 16-bit output (see lens20 pointer move + boundary).
+  const dv = new DataView(packed.buffer, packed.byteOffset, packed.byteLength);
   for (let i = 0; i < n; i++) {
     const o = i * 6;
     const o16 = i * 4;
-    out[o16] = packed[o]! | (packed[o + 1]! << 8);
-    out[o16 + 1] = packed[o + 2]! | (packed[o + 3]! << 8);
-    out[o16 + 2] = packed[o + 4]! | (packed[o + 5]! << 8);
+    out[o16] = dv.getUint16(o, true);
+    out[o16 + 1] = dv.getUint16(o + 2, true);
+    out[o16 + 2] = dv.getUint16(o + 4, true);
     out[o16 + 3] = 65535;
   }
   return out;
@@ -36,12 +39,15 @@ export function targetDimsForLongEdge(width: number, height: number, longEdge: n
 /**
  * Encode RAW big levels {2048, full} as true 16-bit JXL via WASM downscale + encode.
  * Master full always from original buffer; 2048+ sidecars downscale from it (desc).
+ * linear?: true reserves path for non-Riemannian / perceptual constancy (lens17) and photogram linear reflectance.
+ * Currently forwarded as no-op (encode path unchanged); when engine lands in Rust LookRenderer, plumb here.
  */
 export async function encodeBigLevelsRgba16(
   packedRgb16: Uint8Array,
   masterW: number,
   masterH: number,
   plan: PyramidEncodeOptions,
+  linear?: boolean,
 ): Promise<PyramidLevelBytes[]> {
   let rgba16 = packedRgb16ToRgba16(packedRgb16, masterW, masterH);
   let curW = masterW;

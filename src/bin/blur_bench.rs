@@ -46,6 +46,8 @@
 // VERDICT: v_pass_clarity REJECTED. Fixed LANE=8 does not help — LLVM vectorises
 // the larger [[f32;3]; TILE] accumulator more effectively than the 8-wide variant.
 // At 20.5 MP, clarity-8 is slower than even the naive baseline.
+// Pointer-advance applied to v_pass_tiled (winner) 2026-06-13 — moves *const u16 per channel
+// instead of (row + x*3) index math per tap (classic  strided vertical win).
 //
 // Production recommendation (../raw-converter-tauri/raw-pipeline):
 //   Use v_pass_tiled::<128> for separable_blur (full round-trip winner at both scales).
@@ -118,11 +120,17 @@ fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], d
                 let yi =
                     (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
                 let row = yi * w * 3;
+                // Pointer advance (lens20): move ptr instead of recompute mul+add per pixel.
+                // SAFETY: tile, x0, yi validated by caller contract + clamp; bench synthetic data.
+                let mut sp = unsafe { src.as_ptr().add(row + x0 * 3) };
                 for xi in 0..tile {
-                    let b = row + (x0 + xi) * 3;
-                    acc[xi][0] += src[b] as f32 * kv;
-                    acc[xi][1] += src[b + 1] as f32 * kv;
-                    acc[xi][2] += src[b + 2] as f32 * kv;
+                    // Read 3 consecutive u16 via ptr (LE mem layout).
+                    let v0 = *sp as f32 * kv; sp = unsafe { sp.add(1) };
+                    let v1 = *sp as f32 * kv; sp = unsafe { sp.add(1) };
+                    let v2 = *sp as f32 * kv; sp = unsafe { sp.add(1) };
+                    acc[xi][0] += v0;
+                    acc[xi][1] += v1;
+                    acc[xi][2] += v2;
                 }
             }
             for xi in 0..tile {
@@ -288,9 +296,7 @@ fn bench_size(w: usize, h: usize, kernel: &[f32], runs: usize) {
     time_fn("tiled-128", runs, || {
         v_pass_tiled::<128>(&temp, w, h, kernel, &mut out)
     });
-    time_fn("clarity-8 (unrolled)", runs, || {
-        v_pass_clarity(&temp, w, h, kernel, &mut out)
-    });
+    // clarity-8 removed per 2026-05-30 verdict (slower than naive at 20 MP); fn kept for ref only.
     time_fn("transpose+h+transpose", runs, || {
         v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2)
     });
@@ -316,10 +322,7 @@ fn bench_size(w: usize, h: usize, kernel: &[f32], runs: usize) {
         h_pass(&src, w, h, kernel, &mut temp);
         v_pass_tiled::<128>(&temp, w, h, kernel, &mut out);
     });
-    time_fn("clarity-8", runs, || {
-        h_pass(&src, w, h, kernel, &mut temp);
-        v_pass_clarity(&temp, w, h, kernel, &mut out);
-    });
+    // clarity-8 removed (see v-pass section); transpose kept for comparison.
     time_fn("transpose+h+transpose", runs, || {
         h_pass(&src, w, h, kernel, &mut temp);
         v_pass_via_transpose(&temp, w, h, kernel, &mut out, &mut s1, &mut s2);

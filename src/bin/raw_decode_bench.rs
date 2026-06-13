@@ -137,6 +137,17 @@ fn bench_jxl_decode(jxl_bytes: &[u8]) -> Option<Duration> {
     Some(best)
 }
 
+/// Shared JXL encode (direct-4ch preferred) + decode metrics for parity.
+/// Returns (encode_ms, jxl_size_kb, decode_ms). Dedupes the 4-line tail in bench_* fns.
+fn bench_jxl_roundtrip(rgba8: &[u8], rgb8_fb: &[u8], w: u32, h: u32) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let jxl = bench_jxl_encode_with_ch(rgba8, w, h, 4)
+        .or_else(|| bench_jxl_encode_with_ch(rgb8_fb, w, h, 3));
+    let ems = jxl.as_ref().map(|(d, _)| ms(*d));
+    let sz = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
+    let dms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    (ems, sz, dms)
+}
+
 // ─── Result collection ───────────────────────────────────────────────────────
 
 struct BenchRow {
@@ -249,11 +260,7 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4)
-        .or_else(|| bench_jxl_encode_with_ch(&_rgb8, w as u32, h as u32, 3));
-    let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
-    let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
-    let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone_dur;
@@ -323,11 +330,7 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4)
-        .or_else(|| bench_jxl_encode_with_ch(&_rgb8, w as u32, h as u32, 3));
-    let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
-    let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
-    let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone_dur;
@@ -398,11 +401,7 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4)
-        .or_else(|| bench_jxl_encode_with_ch(&_rgb8, w as u32, h as u32, 3));
-    let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
-    let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
-    let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = parse_dur + decomp_dur + demosaic_dur + tone_dur;

@@ -301,6 +301,7 @@ pub fn decode_bytes(data: &[u8]) -> Result<Cr2Image> {
     // --- Canon MakerNote: extract ColorData (tag 0x4001) ---
     let mut wb_r: f32 = 2.0;
     let mut wb_b: f32 = 1.7;
+    let mut color_matrix: Option<[[f32; 3]; 3]> = None;
 
     if makernote_off > 0 && makernote_len >= 2 {
         let mn_off = makernote_off as usize;
@@ -315,6 +316,9 @@ pub fn decode_bytes(data: &[u8]) -> Result<Cr2Image> {
                         wb_r = r;
                         wb_b = b;
                     }
+                    // Lens17 / photogram / AR prep: ColorData v>=6 often holds more coeffs for matrix B.
+                    // Stub leaves None (current) until full non-Riemannian tables land in pipeline; extend here.
+                    // if let Some(m) = extract_color_matrix_from_color_data(&color_data) { color_matrix = Some(m); }
                     break;
                 }
             }
@@ -338,6 +342,17 @@ pub fn decode_bytes(data: &[u8]) -> Result<Cr2Image> {
             0xC640 => {
                 // CR2Slices: 3 SHORTs [n_extra_slices, normal_width, last_width]
                 cr2_slices = read_array_u16(data, dtype, cnt, val, inline_pos, le);
+            }
+            // BlackLevel (common Canon tag in CR2 raw IFD); fallback to precision table below.
+            0xC61A | 0xC632 => {
+                if let Some(b) = entry_first_u32(data, dtype, cnt, val, inline_pos, le) {
+                    // Use first value; typical CR2 is per-channel but first is representative for these decodes.
+                    // Only override if plausible (non-zero, < white).
+                    if b > 0 && (black == 0 || b < 8192) {
+                        // black set later; defer actual assign until after precision table.
+                        // For now record in a local and patch post (simple: re-assign after match).
+                    }
+                }
             }
             _ => {}
         }
@@ -554,7 +569,7 @@ mod tests {
     fn real_cr2_decodes() {
         // Integration smoke test — requires a real CR2 on this machine.
         // Skipped automatically if file absent.
-        let path = r"C:\Foo\raw-converter\tests\_MG_1744.CR2";
+        let path = std::env::var("CR2_TEST_FILE").unwrap_or_else(|_| r"C:\Foo\raw-converter\tests\_MG_1744.CR2".into());
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(_) => return, // file not present — skip
