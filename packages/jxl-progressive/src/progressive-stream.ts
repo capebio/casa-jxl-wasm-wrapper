@@ -80,21 +80,28 @@ export async function fetchFull(
 
 /**
  * Fetch the delta for `tier` after a known `prefix` (already pushed into session by caller).
- * Issues Range: bytes=${prefix.length}-${tier.byteEnd-1}.
- * Validates 206 + Content-Range start exactly matches prefix.length (defends against
+ * Issues Range: bytes=${prefixLength}-${tier.byteEnd-1}.
+ * Validates 206 + Content-Range start exactly matches prefixLength (defends against
  * misbehaving proxies/CDNs that normalize/shift ranges). On mismatch or !206, cancel
  * session + throw RangeNotSupportedError so scheduler can fallback to plain fetchTier
  * (fresh session from byte 0).
+ *
+ * prefix may be Uint8Array | ArrayBuffer (content ignored, only length used) *or* a bare number
+ * for the known prefix byte length. This allows callers that track length (e.g. from prior tier
+ * persist or accum) to avoid materializing/concatenating the full prefix bytes solely for this call.
  */
 export async function fetchTierWithPrefix(
   url: string,
   tier: ManifestTier,
-  prefix: Uint8Array | ArrayBuffer,
+  prefix: Uint8Array | ArrayBuffer | number,
   session: DecodeSession,
   opts: TierFetchOptions = {},
 ): Promise<void> {
   const { signal, headers, fetchImpl = globalThis.fetch } = opts;
-  const prefixLength = prefix instanceof ArrayBuffer ? prefix.byteLength : prefix.byteLength;
+  const prefixLength =
+    typeof prefix === "number"
+      ? prefix
+      : (prefix instanceof ArrayBuffer ? prefix.byteLength : prefix.byteLength);
   throwIfAborted(signal);
 
   if (prefixLength >= tier.byteEnd) {

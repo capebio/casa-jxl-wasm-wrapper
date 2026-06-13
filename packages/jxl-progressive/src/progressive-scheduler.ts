@@ -36,8 +36,14 @@ export interface ProgressiveImageJob {
   priority: number;
   lastServedAt: number;
   bytesLoaded: number;
-  prefixChunks: Uint8Array[];
+  /** Single accum buffer + logical length for known prefix bytes of currentTier.
+   *  Replaces prefixChunks[] + repeated concat to avoid O(bytes) copy on every resume/upgrade/persist.
+   *  Appends during capture; only sliced at persist or for local decoder feed.
+   */
+  prefixAccum: Uint8Array | null;
   prefixBytes: number;
+  /** Last time onProgress was emitted (throttled). */
+  lastProgressEmit?: number;
   manifest: ProgressiveManifest | null;
   manifestDispatched: boolean;
   decoderAbort: AbortController | null;
@@ -219,8 +225,9 @@ export class ProgressiveGallery {
       priority: 5,
       lastServedAt: 0,
       bytesLoaded: 0,
-      prefixChunks: [],
+      prefixAccum: null,
       prefixBytes: 0,
+      lastProgressEmit: undefined,
       manifest: null,
       manifestDispatched: false,
       decoderAbort: null,
@@ -246,8 +253,9 @@ export class ProgressiveGallery {
       this.armedRetryAt = null;
     }
     job.decoderAbort?.abort("unobserved");
-    job.prefixChunks = [];
+    job.prefixAccum = null;
     job.prefixBytes = 0;
+    job.lastProgressEmit = undefined;
     this.observer.unobserve(job.element);
     this.byElement.delete(job.element);
     this.jobs.delete(id);
@@ -368,9 +376,10 @@ export class ProgressiveGallery {
       job.cleanupTimer = null;
       if (!job.visible && !job.selected) {
         job.decoderAbort?.abort("left-viewport");
-        job.prefixChunks = [];
+        job.prefixAccum = null;
         job.prefixBytes = 0;
         job.bytesLoaded = 0;
+        job.lastProgressEmit = undefined;
         // timer only aborts; finally owns activeDecoders decrement (C-2)
       }
     }, 2000);
@@ -484,7 +493,6 @@ export class ProgressiveGallery {
       typeof performance !== "undefined" ? performance.now() : Date.now();
 
     let capture: { fetchImpl: typeof fetch; settled: () => Promise<void> } | null = null;
-    const prefixChunks = job.prefixChunks || (job.prefixChunks = []);
     let capturedBytes = 0;
 
     try {
@@ -501,24 +509,48 @@ export class ProgressiveGallery {
         this.opts.onManifest(job.id, job.manifest);
       }
 
+      // Saliency-aware: manifest carries center/conf from encode-side policy (saliency-policy.ts).
+      // Boost priority + target for images with reliable ROI data so human-important detail arrives first.
+      // This makes the "Saliency-Aware" name real in the delivery pipeline (AR/LLM/photogram/gaming LOD wins).
+      if (job.manifest?.saliency?.enabled) {
+        if (job.priority > 1) job.priority = Math.max(1, job.priority - 1);
+        if (job.targetTier === "preview") job.targetTier = "full";
+      }
+
       const target = nextTier(job.currentTier);
       if (target === null) return;
 
       const manifestTier =
         job.manifest !== null ? lookupTier(job.manifest, target as TierName) : undefined;
 
+      // Fast path from bitmap cache (in-mem ImageBitmap populated by consumer after prior onFrame).
+      // If we already have the decoded result for the next tier, claim instantly, notify, skip network+decode.
+      // Positive for revisit perf in galleries without re-paying decode cost.
+      if (manifestTier) {
+        try {
+          const bm = await this.cache.getBitmap(job.jxlUrl, target as TierName);
+          if (bm) {
+            job.currentTier = target;
+            this.opts.onTier(job.id, target);
+            this.opts.onProgress(job.id, manifestTier.byteEnd, manifestTier.byteEnd);
+            return;
+          }
+        } catch {
+          // fallthrough to network
+        }
+      }
+
       const session = this.sessionFactory();
 
-      const ft: any = this.testFetchTier ?? fetchTier;
-      const ff: any = this.testFetchFull ?? fetchFull;
-      const st: any = this.testStreamTierFrames ?? streamTierFrames;
-      const fwp = this.testFetchTierWithPrefix ?? fetchTierWithPrefix;
-
-      // E-1 prefix resolve: in-mem or cache.getByteRange(currentTier) for delta fetch
+      // E-1: feed known prefix bytes *locally* to the fresh DecodeSession before delta fetch.
+      // fwp only delivers the tail over wire (bandwidth win); decoder needs full logical codestream
+      // from byte 0 for correct progressive layer state on tier upgrade. This fulfills the
+      // "already pushed into session by caller" contract in fetchTierWithPrefix jsdoc.
+      // Without this the delta path would feed mid-stream only -> broken higher-tier progressive frames.
+      // (was missing; now positive correctness + resume fix)
       let startingPrefix: Uint8Array | null = null;
-      if (prefixChunks.length > 0) {
-        startingPrefix = concatUint8Arrays(prefixChunks);
-        job.prefixBytes = startingPrefix.byteLength;
+      if (job.prefixAccum && job.prefixBytes > 0) {
+        startingPrefix = job.prefixAccum.slice(0, job.prefixBytes);
       } else if (job.currentTier !== "none") {
         try {
           const cached = await this.cache.getByteRange(
@@ -527,46 +559,70 @@ export class ProgressiveGallery {
           );
           if (cached && cached.byteLength > 0) {
             const arr = new Uint8Array(cached);
-            prefixChunks.push(arr);
-            startingPrefix = arr;
+            job.prefixAccum = arr;
             job.prefixBytes = arr.byteLength;
+            startingPrefix = arr;
           }
         } catch {
           // no prefix available
         }
       }
 
+      if (startingPrefix && startingPrefix.byteLength > 0) {
+        (session as any).push(startingPrefix);
+      }
+
+      const ft: any = this.testFetchTier ?? fetchTier;
+      const ff: any = this.testFetchFull ?? fetchFull;
+      const st: any = this.testStreamTierFrames ?? streamTierFrames;
+      const fwp = this.testFetchTierWithPrefix ?? fetchTierWithPrefix;
+
       job.bytesLoaded = job.prefixBytes || 0;
       const byteTarget = manifestTier?.byteEnd;
       this.opts.onProgress(job.id, job.bytesLoaded, byteTarget);
 
       const onChunk = (c: Uint8Array) => {
-        prefixChunks.push(new Uint8Array(c));
-        capturedBytes += c.byteLength;
-        job.bytesLoaded = (job.prefixBytes || 0) + capturedBytes;
+        const chunk = new Uint8Array(c);
+        const needed = job.prefixBytes + chunk.byteLength;
+        if (!job.prefixAccum || job.prefixAccum.byteLength < needed) {
+          const oldCap = job.prefixAccum ? job.prefixAccum.byteLength : 0;
+          const newCap = Math.max(needed, oldCap * 2 || 4096);
+          const grown = new Uint8Array(newCap);
+          if (job.prefixAccum && job.prefixBytes > 0) {
+            grown.set(job.prefixAccum.subarray(0, job.prefixBytes));
+          }
+          job.prefixAccum = grown;
+        }
+        job.prefixAccum.set(chunk, job.prefixBytes);
+        job.prefixBytes += chunk.byteLength;
+        capturedBytes += chunk.byteLength;
+        job.bytesLoaded = job.prefixBytes;
         const now = Date.now();
-        if (now - ((job as any)._lastProgEmit || 0) > 50) {
-          (job as any)._lastProgEmit = now;
+        if (now - (job.lastProgressEmit || 0) > 50) {
+          job.lastProgressEmit = now;
           this.opts.onProgress(job.id, job.bytesLoaded, byteTarget);
         }
       };
 
       // E-1/E-2/E-5 wiring with capture tee at boundary; preserve C-1 fetchDone pattern
       let fetchError: unknown;
-      const hasPrefix = prefixChunks.length > 0;
+      const hasPrefix = job.prefixBytes > 0;
       const useWith = manifestTier !== undefined && hasPrefix;
 
       // build the fetch promise (with optional tee capture)
       let fetchP: Promise<unknown>;
       if (useWith) {
         capture = this.teeFetch(onChunk);
-        const prefixArg = startingPrefix || concatUint8Arrays(prefixChunks);
-        const p = (fwp as any)(job.jxlUrl, manifestTier, prefixArg, session, {
+        // pass *length only* (number) to fwp now that it accepts it; no need to concat/ materialise
+        // full prefix bytes just for the Range header + CR validation
+        const p = (fwp as any)(job.jxlUrl, manifestTier, job.prefixBytes, session, {
           signal: abort.signal,
           fetchImpl: capture.fetchImpl,
         }).catch((e: unknown) => {
           if (e instanceof RangeNotSupportedError && !abort.signal.aborted) {
-            prefixChunks.length = 0;
+            // delta range not supported by server/proxy; discard any partial accum from this attempt
+            // and fall back to full fetch from byte 0 (will rebuild accum via onChunk from scratch)
+            job.prefixAccum = null;
             job.prefixBytes = 0;
             capturedBytes = 0;
             job.bytesLoaded = 0;
@@ -614,30 +670,32 @@ export class ProgressiveGallery {
         // E-1: persist captured prefix for tier just completed (after settled; capture may trail)
         if (capture) {
           await capture.settled().catch(() => {});
-          const fullPrefix = concatUint8Arrays(prefixChunks);
-          if (fullPrefix.byteLength > 0) {
-            const buffer = fullPrefix.buffer.slice(
-              fullPrefix.byteOffset,
-              fullPrefix.byteOffset + fullPrefix.byteLength,
-            );
-            await this.cache.setByteRange(job.jxlUrl, achieved as "dc" | "preview" | "full", buffer as ArrayBuffer);
-            // E-5 opt-in
-            if (achieved === "full" && this.opts.verifyHash && job.manifest) {
-              const ok = await checkHash(job.manifest, fullPrefix);
-              if (!ok) {
-                await this.cache.invalidate(job.jxlUrl);
-                prefixChunks.length = 0;
-                job.prefixBytes = 0;
-                job.bytesLoaded = 0;
-                this.opts.onError(
-                  job.id,
-                  new Error("Full tier hash verification failed; cache invalidated"),
-                );
+          if (job.prefixAccum && job.prefixBytes > 0) {
+            const fullPrefix = job.prefixAccum.slice(0, job.prefixBytes);
+            if (fullPrefix.byteLength > 0) {
+              const buffer = fullPrefix.buffer.slice(
+                fullPrefix.byteOffset,
+                fullPrefix.byteOffset + fullPrefix.byteLength,
+              );
+              await this.cache.setByteRange(job.jxlUrl, achieved as "dc" | "preview" | "full", buffer as ArrayBuffer);
+              // E-5 opt-in
+              if (achieved === "full" && this.opts.verifyHash && job.manifest) {
+                const ok = await checkHash(job.manifest, fullPrefix);
+                if (!ok) {
+                  await this.cache.invalidate(job.jxlUrl);
+                  job.prefixAccum = null;
+                  job.prefixBytes = 0;
+                  job.bytesLoaded = 0;
+                  this.opts.onError(
+                    job.id,
+                    new Error("Full tier hash verification failed; cache invalidated"),
+                  );
+                }
               }
-            }
-            if (achieved === "full") {
-              prefixChunks.length = 0;
-              job.prefixBytes = 0;
+              if (achieved === "full") {
+                job.prefixAccum = null;
+                job.prefixBytes = 0;
+              }
             }
           }
         }
@@ -662,7 +720,7 @@ export class ProgressiveGallery {
       job.decoderAbort = null;
       this.activeDecoders = Math.max(0, this.activeDecoders - 1);
       this.requestTick();
-      // partial prefixChunks left on job for resume (dropped only on C-2 timer / unobserve / full persist)
+      // partial prefix left in accum for resume (dropped only on C-2 timer / unobserve / full persist)
     }
   }
 
