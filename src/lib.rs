@@ -19,6 +19,55 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "parallel-wasm")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+// === Lens 22 demosaic SIMD flip-flop (bench-only; driven by tools/demosaic-flipflop.mjs) ===
+// Times are taken in the JS host (wasm32-unknown-unknown has no wall clock); these exports just
+// run one demosaic and return a cheap checksum so wasm-bindgen marshalling is constant.
+use std::cell::RefCell;
+thread_local! {
+    static DEMO_BENCH: RefCell<(Vec<u16>, usize, usize)> = const { RefCell::new((Vec::new(), 0, 0)) };
+}
+fn demo_checksum(v: &[u16]) -> u32 {
+    v.iter().fold(0u32, |a, &x| a.wrapping_mul(31).wrapping_add(x as u32))
+}
+#[wasm_bindgen]
+pub fn demosaic_bench_prepare(w: usize, h: usize) {
+    let raw: Vec<u16> = (0..w * h).map(|i| (i.wrapping_mul(2654435761) & 0x3fff) as u16).collect();
+    DEMO_BENCH.with(|b| *b.borrow_mut() = (raw, w, h));
+}
+#[wasm_bindgen]
+pub fn demosaic_bench_scalar() -> u32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        demo_checksum(&demosaic::demosaic_rggb(&g.0, g.1, g.2).unwrap())
+    })
+}
+#[wasm_bindgen]
+pub fn demosaic_bench_simd() -> u32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        demo_checksum(&demosaic::demosaic_rggb_simd(&g.0, g.1, g.2).unwrap())
+    })
+}
+#[wasm_bindgen]
+pub fn demosaic_bench_equal() -> bool {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        demosaic::demosaic_rggb(&g.0, g.1, g.2).unwrap() == demosaic::demosaic_rggb_simd(&g.0, g.1, g.2).unwrap()
+    })
+}
+#[wasm_bindgen]
+pub fn demosaic_bench_first_diff() -> i32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        let a = demosaic::demosaic_rggb(&g.0, g.1, g.2).unwrap();
+        let s = demosaic::demosaic_rggb_simd(&g.0, g.1, g.2).unwrap();
+        for i in 0..a.len() {
+            if a[i] != s[i] { return i as i32; }
+        }
+        -1
+    })
+}
+
 /// Result of processing an ORF: RGB8 buffer + dims (post-orientation).
 #[wasm_bindgen]
 pub struct ProcessResult {

@@ -278,8 +278,9 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
             let (r, g, b) = bayer_pixel(raw, width, row, 0, rn, rs, 0, 1.min(w_max), (0, 0));
             out_row[0] = r; out_row[1] = g; out_row[2] = b;
         }
-        // Rows too narrow for an 8-wide block: full scalar (matches demosaic_rggb behaviour).
-        if width < 12 {
+        // Very narrow rows: bayer_pixel loop, exactly matching demosaic_rggb's `width < 4` branch.
+        // (4..=11 wide rows fall through: no SIMD block fits, the unrolled pair tail below handles them.)
+        if width < 4 {
             for col in 1..w_max {
                 let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, (col + 1).min(w_max), (0, 0));
                 let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
@@ -358,11 +359,38 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
             }
             col += 8;
         }
-        // Scalar tail interior.
-        while col < w_max {
+        // Tail: continue with demosaic_rggb's EXACT unrolled pair loop so the SIMD↔scalar boundary is
+        // seamless (the SIMD block above produces identical values). bayer_pixel is used only for the
+        // final leftover odd column + borders, exactly as demosaic_rggb does — its (1,1)-site R uses a
+        // 4-diagonal average that differs from the unrolled horizontal form, so it must NOT cover interior.
+        while col + 1 < w_max {
+            let o = col * 3;
+            if row_par == 0 {
+                let rv = here[col];
+                let gv = ((north[col] as u32 + south[col] as u32 + here[col-1] as u32 + here[col+1] as u32) >> 2) as u16;
+                let bv = ((north[col-1] as u32 + north[col+1] as u32 + south[col-1] as u32 + south[col+1] as u32) >> 2) as u16;
+                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
+                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
+                let gv2 = here[col+1];
+                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                let o2 = (col+1)*3;
+                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
+            } else {
+                let rv = ((north[col] as u32 + south[col] as u32) >> 1) as u16;
+                let gv = here[col];
+                let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
+                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
+                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
+                let gv2 = here[col+1];
+                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                let o2 = (col+1)*3;
+                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
+            }
+            col += 2;
+        }
+        if col < w_max {
             let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, (col + 1).min(w_max), (0, 0));
             let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
-            col += 1;
         }
         // Right border.
         if width > 1 {
