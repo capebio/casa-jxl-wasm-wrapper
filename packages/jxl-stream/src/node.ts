@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import type { DecodeSession, EncodeSession, PipeOptions } from './browser.js';
+import { ABORT_REASON, type DecodeSession, type EncodeSession, type PipeOptions } from './browser.js';
 
 /**
  * Pipes a Node.js Readable into a DecodeSession.
@@ -20,13 +20,13 @@ export async function fromNodeReadable(
   }
 
   const onAbort = () => {
-    void session.cancel('AbortSignal triggered');
+    void session.cancel(ABORT_REASON);
     readable.destroy(new Error('Aborted'));
   };
 
   if (signal?.aborted) {
     readable.destroy(new Error('Aborted'));
-    await session.cancel('AbortSignal triggered');   // P1-6: awaited, no floating promise
+    await session.cancel(ABORT_REASON);   // P1-6: awaited, no floating promise
     return 0;
   }
   signal?.addEventListener('abort', onAbort, { once: true });
@@ -56,7 +56,7 @@ export async function fromNodeReadable(
       if (cutoff) { readable.destroy(); break; }
     }
     if (signal?.aborted) {
-      await session.cancel('AbortSignal triggered');
+      await session.cancel(ABORT_REASON);
     } else {
       await session.close();
     }

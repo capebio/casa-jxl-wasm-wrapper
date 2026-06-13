@@ -14,7 +14,7 @@ export interface PipeOptions {
   maxBytes?: number;
 }
 
-const ABORT_REASON = 'AbortSignal triggered';
+export const ABORT_REASON = 'AbortSignal triggered';
 
 /**
  * Pipes a ReadableStream into a DecodeSession.
@@ -433,7 +433,7 @@ export async function fromByteRange(
   }
 
   // P1-2: a 206 whose Content-Range start differs from what we asked would silently corrupt.
-  if (honored && cr.start !== undefined && cr.start !== start) {
+  if (honored && cr.start !== start) {
     const err = new Error(`[jxl-stream] server returned mismatched range start ${cr.start}, expected ${start}: ${url}`);
     await cancelBoth(err.message);
     throw err;

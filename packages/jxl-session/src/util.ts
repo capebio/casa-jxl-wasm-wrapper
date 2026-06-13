@@ -25,6 +25,8 @@ export function deferred<T>(): Deferred<T> {
 // Normalize a chunk to a standalone ArrayBuffer suitable for transfer.
 // An exact-span Uint8Array transfers its buffer directly; a partial view
 // is copied so the transfer does not detach memory the caller still holds.
+// JxlCache.get() (browser/node) now returns independent ArrayBuffers; callers
+// may transfer the result without invalidating the cache master copy.
 export function toTransferableBuffer(chunk: ArrayBuffer | Uint8Array): ArrayBuffer {
   if (chunk instanceof ArrayBuffer) return chunk;
   if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
@@ -35,5 +37,12 @@ export function toTransferableBuffer(chunk: ArrayBuffer | Uint8Array): ArrayBuff
 
 // Generate a session id. crypto.randomUUID is available in browsers and Node >= 19.
 export function newSessionId(): string {
-  return `jxl-${crypto.randomUUID()}`;
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `jxl-${crypto.randomUUID()}`;
+    }
+  } catch {
+    // fall through
+  }
+  return `jxl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }

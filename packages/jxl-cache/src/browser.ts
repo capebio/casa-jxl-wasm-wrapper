@@ -104,7 +104,7 @@ export class JxlCacheBrowser implements JxlCache {
     if (mem !== undefined) {
       this.persistentTracker.get(key);
       this.hitCount++;
-      return mem;
+      return mem.slice(0);
     }
 
     if (!this.opfsRoot) {
@@ -144,7 +144,8 @@ export class JxlCacheBrowser implements JxlCache {
   async set(key: string, buffer: ArrayBuffer): Promise<void> {
     if (this.initPromise) await this.initPromise.catch(() => undefined);
     const size = buffer.byteLength;
-    this.memoryCache.set(key, buffer, size);
+    const master = buffer.slice(0);
+    this.memoryCache.set(key, master, size);
 
     if (!this.opfsRoot || size > this.persistentLimit) {
       if (this.opfsRoot) {
@@ -168,7 +169,7 @@ export class JxlCacheBrowser implements JxlCache {
     const pending = (async () => {
       try { await previous; } catch { /* proceed */ }
       if (this._generation !== gen) return;
-      await this.setPersistent(key, buffer);
+      await this.setPersistent(key, master);
     })();
 
     this.inflightSets.set(key, pending);
@@ -267,7 +268,7 @@ export class JxlCacheBrowser implements JxlCache {
         this.persistentTracker.set(key, { name }, buffer.byteLength);
       }
 
-      return buffer;
+      return buffer.slice(0);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'NotFoundError') {
         this.persistentTracker.delete(key);
@@ -398,10 +399,10 @@ export class JxlCacheBrowser implements JxlCache {
     const onDisk = new Set<string>();
     for await (const name of (this.opfsRoot as IterableDirectoryHandle).keys()) onDisk.add(name);
     onDisk.delete(MANIFEST_NAME);
-    for (const [key, entry] of this.persistentTracker.entriesOldestFirst()) {
+    this.persistentTracker.forEachOldestFirst((key, entry, size) => {
       if (!onDisk.has(entry.name)) this.persistentTracker.delete(key);
       else onDisk.delete(entry.name);
-    }
+    });
     await Promise.allSettled([...onDisk].map(n => this.opfsRoot!.removeEntry(n).catch(() => undefined)));
   }
 
@@ -432,9 +433,9 @@ export class JxlCacheBrowser implements JxlCache {
       try {
         const entries: Array<{ key: string; name: string; size: number }> = [];
 
-        for (const [key, entry, size] of this.persistentTracker.entriesOldestFirst()) {
+        this.persistentTracker.forEachOldestFirst((key, entry, size) => {
           entries.push({ key, name: entry.name, size });
-        }
+        });
 
         const manifest = { version: 1 as const, entries };
         const encoded = this._encoder.encode(JSON.stringify(manifest));
