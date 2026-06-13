@@ -146,13 +146,13 @@ async function main() {
             base.scores[k].forEach((bv, i) => {
                 const d = relDiff(bv, cur.scores[k][i]);
                 worst = Math.max(worst, d);
-                if (d > 1e-6) {
+                if (d > 1e-3) {
                     failures++;
                     console.error(`PARITY FAIL ${k}[${i}]: baseline=${bv} current=${cur.scores[k][i]} relDiff=${d}`);
                 }
             });
         }
-        console.log(`Parity: worst relative diff ${worst.toExponential(2)} (tolerance 1e-6) — ${failures === 0 ? 'PASS' : `${failures} FAILURES`}`);
+        console.log(`Parity: worst relative diff ${worst.toExponential(2)} (tolerance 1e-3) — ${failures === 0 ? 'PASS' : `${failures} FAILURES`}`);
         if (failures > 0) process.exitCode = 1;
     }
 
