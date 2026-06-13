@@ -33,6 +33,7 @@ export async function runBenchmarkSession({
   streamDecodeCutoffs: streamCutoffs = streamDecodeCutoffs,
   classifyByteCutoffFrame: classifyCutoff = classifyByteCutoffFrame,
   summarizeByteCutoffResults: summarizeCutoffs = summarizeByteCutoffResults,
+  driveRealSession = false,  // Layer 1: for fidelity vs synthetic; when true, forces 0-delay transport + cursor-based chunking for "real arrival" simulation in flip-flops
 } = {}) {
   if (!state || state.running) return state?.results ?? [];
   if (!state.rawReady) {
@@ -69,7 +70,7 @@ export async function runBenchmarkSession({
         plan,
         preset.decode,
         () => {},
-        { transportProfile: resolvedTransport },
+        { transportProfile: resolvedTransport, driveRealSession },
       );
       // connectedness R1: collect for buildSeries (unified psnr/butter/ssim series)
       const cutoffPixels = [];
@@ -103,6 +104,7 @@ export async function runBenchmarkSession({
         summary,
         cutoffs: cutoffResults,
         builtSeries,  // R1 connectedness: full psnr/butter/ssim series for cutoff
+        driveRealSession,  // Layer 1: for direct flip-flop use of Cursor vs legacy / real fidelity
       });
     }
 
@@ -120,6 +122,7 @@ export async function runBenchmarkSession({
       sidecarFirstVisibleBytes: sidecarFirst?.summary.firstPaintBytes ?? null,
       firstVisibleBytes: firstVisible?.summary.firstPaintBytes ?? null,
       ssimulacra2: resolveRecordSsimulacra2(variants, ssimulacra2Target),
+      driveRealSession,  // Layer 1 wiring
     };
     results.push(record);
     onRecord(record, { source, variants });
@@ -127,6 +130,45 @@ export async function runBenchmarkSession({
 
   state.results = results;
   return results;
+}
+
+class ByteIntervalCursor {
+  // Tiny mathematical abstraction over the byte interval [0, total) partitioned into fixed-size quanta.
+  // Encapsulates the partition (via createChunkFeeder) and the advancing cursor (cIdx, cOff).
+  // The hot loop only asks "cover the next 'need' bytes" and gets back the exact buffer to push + how far we advanced.
+  // This makes the discrete covering math, remainder handling, and pre-paid copy explicit and reusable
+  // (e.g. for different partitioning strategies or flip-flop experiments).
+  constructor(jxlBytes, chunkBytes) {
+    const { chunks } = createChunkFeeder(jxlBytes, chunkBytes);
+    this.chunks = chunks;
+    this.cIdx = 0;
+    this.cOff = 0;
+  }
+
+  // Returns { buffer: ArrayBuffer to push, advanced: bytes covered } or {buffer: null, advanced: 0} when exhausted.
+  // For full quanta we return the pre-owned AB (no copy). For partial tails only the needed sub-slice is copied.
+  nextFor(need) {
+    if (this.cIdx >= this.chunks.length || need <= 0) {
+      return { buffer: null, advanced: 0 };
+    }
+    const pre = this.chunks[this.cIdx];
+    const remain = pre.byteLength - this.cOff;
+    const take = Math.min(need, remain);
+    if (take <= 0) return { buffer: null, advanced: 0 };
+
+    let buf;
+    if (this.cOff === 0 && take === pre.byteLength) {
+      buf = pre; // identity hand-off of owned AB
+    } else {
+      buf = pre.slice(this.cOff, this.cOff + take);
+    }
+    this.cOff += take;
+    if (this.cOff >= pre.byteLength) {
+      this.cIdx++;
+      this.cOff = 0;
+    }
+    return { buffer: buf, advanced: take };
+  }
 }
 
 export async function streamDecodeCutoffs(...args) {
@@ -144,12 +186,22 @@ export async function streamDecodeCutoffs(...args) {
     selfStability = false,
     pixels: withPixels = true,
     onProgressiveFrame,
+    driveRealSession = false,
   } = normalizeStreamArgs(args);
-  const resolvedTransport = resolveTransportProfile(transportProfile);
+  let resolvedTransport = resolveTransportProfile(transportProfile);
+  if (driveRealSession) {
+    // Layer 1 wiring: driveRealSession forces immediate (0-delay) "arrival" to simulate real
+    // session/worker path without synthetic jitter, while still using byte cutoffs + Cursor for measurement.
+    // Useful for fidelity comparison in flip-flop tests vs full transport sim.
+    resolvedTransport = { ...resolvedTransport, chunkDelayMs: 0, jitterMs: 0, name: resolvedTransport.name + '-real' };
+  }
   const activeDecoder = decoder ?? createDecoder(decodeOptions);
   const cutoffs = plan.map((entry) => ({ entry, bytes: entry.bytes, events: [], frame: null, error: null }));
   const byBytes = new Map(cutoffs.map((cutoff) => [cutoff.bytes, cutoff]));
-  const eventLog = [];
+  // Parallel arrays for the raw time series (primitives + original event objects).
+  // Avoids per-event object spread + allocation in the hot concurrent eventTask.
+  // Materialization of augmented {..., tMs} objects is deferred until cutoff snapshot time (rare).
+  const eventLog = { tMs: [], types: [], data: [] };
   let seenEvents = 0;
   let offset = 0;
   let streamError = null;
@@ -160,21 +212,16 @@ export async function streamDecodeCutoffs(...args) {
       for await (const event of activeDecoder.events()) {
         if (event.type === 'error') throw new Error(`${event.code}: ${event.message}`);
         if (event.type === 'progress' || event.type === 'final') {
-          eventLog.push({ ...event, tMs: now() - startMs });
+          eventLog.tMs.push(now() - startMs);
+          eventLog.types.push(event.type);
+          eventLog.data.push(event); // keep original event object, no spread here
         }
       }
     })();
 
-    // presplit + advancing cursor (pointer move): copies paid once before startMs, feed by index/offset instead of repeated subarray+exact on master
+    // Use the mathematical cursor over the pre-partitioned byte interval.
     const tChunk = resolvedTransport.chunkBytes;
-    const preChunks = [];
-    const jb = exactBuffer(jxlBytes);
-    for (let o = 0; o < jb.byteLength; o += tChunk) {
-      const e = Math.min(o + tChunk, jb.byteLength);
-      preChunks.push(jb.slice(o, e));
-    }
-    let cIdx = 0;
-    let cOff = 0;
+    const cursor = new ByteIntervalCursor(jxlBytes, tChunk);
 
     for (const entry of plan) {
       if (entry.bytes <= offset) continue;
@@ -182,20 +229,15 @@ export async function streamDecodeCutoffs(...args) {
       while (offset < entry.bytes) {
         const need = entry.bytes - offset;
         let took = 0;
-        while (need > took && cIdx < preChunks.length) {
-          const pre = preChunks[cIdx];
-          const remain = pre.byteLength - cOff;
-          const take = Math.min(need - took, remain, tChunk);
-          if (take <= 0) break;
-          const chunkView = (cOff === 0 && take === pre.byteLength) ? pre : pre.subarray(cOff, cOff + take);
-          await activeDecoder.push(exactBuffer(chunkView));
-          cOff += take;
-          took += take;
-          offset += take;
-          if (cOff >= pre.byteLength) { cIdx++; cOff = 0; }
+        while (need > took) {
+          const { buffer, advanced } = cursor.nextFor(need - took);
+          if (!buffer || advanced <= 0) break;
+          await activeDecoder.push(buffer);
+          took += advanced;
+          offset += advanced;
         }
         if (took === 0) {
-          // fallback for any misalign (should not normally hit)
+          // rare misalignment fallback (keeps original observable behavior)
           const nextOffset = Math.min(entry.bytes, offset + tChunk);
           await activeDecoder.push(exactBuffer(jxlBytes.subarray(offset, nextOffset)));
           offset = nextOffset;
@@ -206,6 +248,33 @@ export async function streamDecodeCutoffs(...args) {
         }
       }
       await drainDecoderTurns(waitForTurn, 2);
+
+      // Snapshot only at cutoff boundaries (materialize the small slice of augmented events here).
+      const cutoff = byBytes.get(entry.bytes);
+      if (cutoff) {
+        const startIdx = seenEvents;
+        const endIdx = eventLog.tMs.length;
+        const newEvents = [];
+        for (let i = startIdx; i < endIdx; i++) {
+          const orig = eventLog.data[i];
+          newEvents.push({
+            ...orig,
+            tMs: eventLog.tMs[i],
+            type: eventLog.types[i]
+          });
+        }
+        cutoff.events.push(...newEvents);
+        const lastEv = newEvents.length > 0 ? newEvents[newEvents.length - 1] : cutoff.frame;
+        if (withPixels && lastEv && lastEv.pixels) {
+          cutoff.frame = { ...lastEv, pixels: toUint8Array(lastEv.pixels) };
+        } else if (lastEv) {
+          cutoff.frame = lastEv;
+        }
+        seenEvents = endIdx;
+        if (typeof onProgressiveFrame === 'function') {
+          onProgressiveFrame({ entry, bytes: entry.bytes, frame: cutoff.frame, tMs: lastEv?.tMs ?? null });
+        }
+      }
     }
 
     await activeDecoder.close();
@@ -266,23 +335,41 @@ function resolveTransportProfile(profile) {
 }
 
 function summarizeTimeline(cutoffs) {
-  const paints = cutoffs
-    .flatMap((cutoff) => cutoff.events)
-    .filter((event) => event && Number.isFinite(event.tMs))
-    .sort((a, b) => a.tMs - b.tMs);
-  const firstPaint = paints[0] ?? null;
-  const preview = paints.find((event) => event.type === 'progress') ?? firstPaint;
-  const final = paints.find((event) => event.type === 'final') ?? paints.at(-1) ?? null;
-  const gaps = [];
-  for (let i = 1; i < paints.length; i++) {
-    gaps.push(paints[i].tMs - paints[i - 1].tMs);
+  // Online / single-pass aggregates over the time series.
+  // Events are appended in emission order (monotonic tMs from successive pushes + now()).
+  // We maintain running milestone state + gap statistics without materializing a paints list
+  // or sorting. This is O(E) time and O(1) extra space (E = total progress+final events).
+  let firstPaint = null;
+  let preview = null;
+  let final = null;
+  let prevT = null;
+  let gapSum = 0;
+  let gapCount = 0;
+  let stallCount = 0;
+
+  for (const cutoff of cutoffs) {
+    for (const ev of cutoff.events) {
+      if (!ev || !Number.isFinite(ev.tMs)) continue;
+      const t = ev.tMs;
+      if (firstPaint === null) firstPaint = ev;
+      if (preview === null && ev.type === 'progress') preview = ev;
+      final = ev; // last seen wins (later events have higher t)
+      if (prevT !== null) {
+        const g = t - prevT;
+        gapSum += g;
+        gapCount++;
+        if (g > 250) stallCount++;
+      }
+      prevT = t;
+    }
   }
+  const usePreview = preview || firstPaint;
   return {
     firstPaintMs: firstPaint?.tMs ?? null,
-    previewMs: preview?.tMs ?? null,
+    previewMs: usePreview?.tMs ?? null,
     finalMs: final?.tMs ?? null,
-    stallCount: gaps.filter((gap) => gap > 250).length,
-    avgPaintGapMs: gaps.length ? gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length : 0,
+    stallCount,
+    avgPaintGapMs: gapCount ? gapSum / gapCount : 0,
   };
 }
 
@@ -294,7 +381,9 @@ async function drainDecoderTurns(waitForTurn, turns) {
 
 function applyJitter(profile, random) {
   if (!profile.jitterMs) return profile.chunkDelayMs;
-  const delta = (random() * 2 - 1) * profile.jitterMs;
+  // Integer delta keeps the simulated arrival times on a discrete ms lattice.
+  // Better for reproducibility in diagnostic-passes mode and for flip-flop A/B timing experiments.
+  const delta = Math.round((random() * 2 - 1) * profile.jitterMs);
   return Math.max(0, profile.chunkDelayMs + delta);
 }
 
@@ -321,4 +410,17 @@ async function defaultSleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export { exactBuffer, toUint8Array };
+export function createChunkFeeder(jxlBytes, chunkBytes) {
+  // Pure discrete partition of the byte range [0, length) into fixed-size quanta (last may be smaller).
+  // Returns owned small ArrayBuffers so callers can advance a cursor without re-deriving slices
+  // from the master on every step. Useful for flip-flop timing experiments and external harnesses.
+  const jb = exactBuffer(jxlBytes);
+  const chunks = [];
+  for (let o = 0; o < jb.byteLength; o += chunkBytes) {
+    const e = Math.min(o + chunkBytes, jb.byteLength);
+    chunks.push(jb.slice(o, e));
+  }
+  return { chunks, totalBytes: jb.byteLength };
+}
+
+export { exactBuffer, toUint8Array, createChunkFeeder, ByteIntervalCursor };

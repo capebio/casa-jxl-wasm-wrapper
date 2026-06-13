@@ -857,3 +857,21 @@ pub fn bench_pipeline_orf(data: &[u8]) -> Result<PipelineBench> {
         height: info.height,
     })
 }
+
+/// Decode an ORF to rgb16, then sub-profile the tone pass: returns
+/// (tone_full_ms, tone_lut_only_ms). full − lut_only = the per-pixel
+/// apply_tone_math (matrix + sat/vibrance) cost; lut_only = LUT gather + store.
+pub fn bench_tone_split_orf(data: &[u8]) -> Result<(f64, f64)> {
+    let info = parse(data)?;
+    if info.compression != 1 {
+        bail!("compression {} not supported for bench", info.compression);
+    }
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    let strip = &data[info.strip_offset as usize..strip_end];
+    let raw = crate::decompress::decompress(strip, w, h)?;
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let params = crate::pipeline::PipelineParams::default_olympus();
+    Ok(crate::pipeline::bench_tone_split(&rgb16, &params))
+}

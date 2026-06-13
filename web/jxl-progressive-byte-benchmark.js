@@ -71,6 +71,7 @@ async function runBenchmark() {
   const transportProfile = document.getElementById('transport-profile')?.value ?? 'lte';
   const ssimulacra2Value = document.getElementById('ssimulacra2-target')?.value;
   const ssimulacra2Target = ssimulacra2Value === '' ? null : Number(ssimulacra2Value);
+  const driveRealSession = false; // Layer 1: wire for fidelity flip-flops (real session path vs synthetic Cursor+transport). Toggle to true to force 0-delay real-like arrival while still measuring byte cutoffs.
 
   try {
     for (let i = 0; i < runCount; i++) {
@@ -108,7 +109,7 @@ async function runBenchmark() {
         const plan = buildByteCutoffPlan(jxlBytes.byteLength, preset.byteCutoffs);
         const streamed = await streamDecodeCutoffs(jxlBytes, plan, preset.decode, (entry) => {
           setStatus(`${source.name} ${label}: streaming through ${formatByteCutoffLabel(entry)}...`);
-        }, { transportProfile, selfStability: true });  // expose for byte runs (R1 self-stability)
+        }, { transportProfile, selfStability: true, driveRealSession });  // Layer 1 wiring: pass driveRealSession for Cursor-based real-fidelity measurement in flip-flops
         // R1 wire buildSeries (connectedness from byte-metrics)
         const cutoffPixels = [];
         const byteSizes = [];
@@ -145,6 +146,7 @@ async function runBenchmark() {
           summary,
           cutoffs: cutoffResults,
           builtSeries,  // R1
+          driveRealSession,  // Layer 1: recorded for flip-flop analysis of synthetic vs real fidelity
         });
       }
       const targetVariant = variants.at(-1);
@@ -161,6 +163,7 @@ async function runBenchmark() {
         sidecarFirstVisibleBytes: sidecarFirst?.summary.firstPaintBytes ?? null,
         firstVisibleBytes: firstVisible?.summary.firstPaintBytes ?? null,
         ssimulacra2: resolveRecordSsimulacra2(variants, ssimulacra2Target),
+        driveRealSession,  // Layer 1
       };
       state.results.push(record);
       renderSummaryTable(card.table, record);
@@ -344,7 +347,10 @@ function inputValue(id, fallback) {
 }
 
 function concatChunks(chunks) {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  // Length is the sum of the lengths (L1 norm of the part sizes). Explicit accumulation
+  // makes the integer arithmetic obvious before the single allocation + memmove passes.
+  let total = 0;
+  for (const chunk of chunks) total += chunk.byteLength;
   const out = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {

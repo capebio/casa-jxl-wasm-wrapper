@@ -845,6 +845,48 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     }
 }
 
+/// Sub-profile of the tone pass: isolates the per-pixel `apply_tone_math`
+/// compute (matrix + sat/vibrance, with its divide) from the LUT-gather/store
+/// cost. Single-threaded. Returns (full_ms, lut_only_ms); full − lut_only is the
+/// tone-math cost. Used by examples/pipeline_profile to decide what to vectorize.
+pub fn bench_tone_split(rgb16: &[u16], params: &PipelineParams) -> (f64, f64) {
+    let ti = derive_tone_inputs(params);
+    let fallback = CAM_TO_SRGB;
+    let m = params.color_matrix.as_ref().unwrap_or(&fallback);
+    let pre_r = build_pre_lut(params.black, params.white, ti.wb_r, ti.exp_gain);
+    let pre_g = build_pre_lut(params.black, params.white, ti.wb_g, ti.exp_gain);
+    let pre_b = build_pre_lut(params.black, params.white, ti.wb_b, ti.exp_gain);
+    let post = build_post_lut(&ti.tone);
+    let mut out = vec![0u8; rgb16.len()];
+
+    let t = std::time::Instant::now();
+    for (o, px) in out.chunks_mut(3).zip(rgb16.chunks(3)) {
+        let r = pre_r[px[0] as usize] as f32;
+        let g = pre_g[px[1] as usize] as f32;
+        let b = pre_b[px[2] as usize] as f32;
+        let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+        o[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
+        o[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
+        o[2] = post[b2.clamp(0.0, 65535.0) as u16 as usize];
+    }
+    let full_ms = t.elapsed().as_secs_f64() * 1000.0;
+    std::hint::black_box(&out);
+
+    let t = std::time::Instant::now();
+    for (o, px) in out.chunks_mut(3).zip(rgb16.chunks(3)) {
+        let r = pre_r[px[0] as usize] as f32;
+        let g = pre_g[px[1] as usize] as f32;
+        let b = pre_b[px[2] as usize] as f32;
+        o[0] = post[r.clamp(0.0, 65535.0) as u16 as usize];
+        o[1] = post[g.clamp(0.0, 65535.0) as u16 as usize];
+        o[2] = post[b.clamp(0.0, 65535.0) as u16 as usize];
+    }
+    let lut_only_ms = t.elapsed().as_secs_f64() * 1000.0;
+    std::hint::black_box(&out);
+
+    (full_ms, lut_only_ms)
+}
+
 /// Like `process`, but writes interleaved RGBA8 directly (A=255).
 ///
 /// This is the native/Tauri equivalent of the "direct RGBA" (Phase 2B) path.

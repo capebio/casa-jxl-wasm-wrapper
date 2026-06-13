@@ -5,7 +5,7 @@
 //!        --example pipeline_profile -- <path-to.orf>
 //! Default file: C:/Foo/raw-converter/tests/P1110226.ORF
 
-use raw_pipeline::tiff::bench_pipeline_orf;
+use raw_pipeline::tiff::{bench_pipeline_orf, bench_tone_split_orf};
 use std::fs;
 
 fn med(mut v: Vec<f64>) -> f64 {
@@ -40,4 +40,19 @@ fn main() {
     println!("  tone       {:9.2} ms  {:5.1}%", t, 100.0 * t / total);
     println!("  ───────────────────────────────");
     println!("  TOTAL      {:9.2} ms  ({:.1} ms/MP)", total, total / mp);
+
+    // Sub-profile the tone pass (single-thread): apply_tone_math vs LUT gather.
+    let _ = bench_tone_split_orf(&data);
+    let (mut full, mut luto) = (Vec::new(), Vec::new());
+    for _ in 0..runs {
+        let (f, l) = bench_tone_split_orf(&data).expect("tone split");
+        full.push(f);
+        luto.push(l);
+    }
+    let (f, l) = (med(full), med(luto));
+    let math = (f - l).max(0.0);
+    println!("\ntone sub-profile (single-thread, median of {}):", runs);
+    println!("  LUT gather+store {:9.2} ms  {:5.1}%", l, 100.0 * l / f);
+    println!("  apply_tone_math  {:9.2} ms  {:5.1}%  (matrix + sat/vibrance + divide)", math, 100.0 * math / f);
+    println!("  tone full        {:9.2} ms", f);
 }
