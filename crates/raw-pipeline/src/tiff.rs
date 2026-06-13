@@ -813,3 +813,47 @@ pub fn bench_decode_orf(data: &[u8]) -> Result<DecodeBench> {
         height: info.height,
     })
 }
+
+/// Per-stage timing for the full ORF → RGB8 pipeline (decompress + demosaic +
+/// tone). For end-to-end profiling to locate the real cost center.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PipelineBench {
+    pub decompress_ms: f64,
+    pub demosaic_ms: f64,
+    pub tone_ms: f64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Time decompress + demosaic + tone (pipeline::process) for one ORF.
+pub fn bench_pipeline_orf(data: &[u8]) -> Result<PipelineBench> {
+    let info = parse(data)?;
+    if info.compression != 1 {
+        bail!("compression {} not supported for bench", info.compression);
+    }
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    let strip = &data[info.strip_offset as usize..strip_end];
+
+    let t = std::time::Instant::now();
+    let raw = crate::decompress::decompress(strip, w, h)?;
+    let decompress_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = std::time::Instant::now();
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let demosaic_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let params = crate::pipeline::PipelineParams::default_olympus();
+    let t = std::time::Instant::now();
+    let _rgb8 = crate::pipeline::process(&rgb16, &params);
+    let tone_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(PipelineBench {
+        decompress_ms,
+        demosaic_ms,
+        tone_ms,
+        width: info.width,
+        height: info.height,
+    })
+}
