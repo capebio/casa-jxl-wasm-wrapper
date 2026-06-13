@@ -1,0 +1,16 @@
+wasm relaxed-simd (f32x4_relaxed_madd) flip-flop — DEFERRED (2026-06-14)
+
+Strict v128 wasm vs JS measured 2.01x (parity 1.4e-5) on the 1.02 MP synthetic
+workload (benchmark/perceptual-wasm-parity.mjs).
+
+Decision: NOT building a relaxed-simd second artifact + flip-flop. Rationale:
+- relaxed-madd only fuses mul+add (a COMPUTE optimization).
+- The kernel is memory-bound: native rcp/rsqrt (the AVX2/AVX-512 FMA-equivalent
+  compute micro-opts) were a flat TIE vs strict (see
+  perceptual-flipflop-native-headroom-*.txt). A memory-bound kernel won't move
+  on FMA fusion.
+- relaxed-simd lacks universal engine support; a second pkg artifact + load-time
+  probe is real complexity for a predicted-no-win.
+
+Strict v128 is the shipped wasm default. Revisit only if browser profiling shows
+the metrics kernel is compute-bound on real hardware (it was not in Node/V8).
