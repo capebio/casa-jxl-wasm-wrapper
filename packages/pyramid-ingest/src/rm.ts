@@ -1,9 +1,7 @@
-import { readdir, readFile, rm, stat, unlink } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parseManifest } from "./schema.js";
-import { fileExists } from "./ingest.js";
-import { removeOrphans } from "./ingest.js";
-import { rebuildIndex } from "./ingest.js";
+import { readFileOrNull, removeOrphans } from "./ingest.js";
 
 // F6 (WU-6): --rm. Exact per plan.
 export async function removeImage(
@@ -17,20 +15,24 @@ export async function removeImage(
   const imageDir = join(outDir, "images", imageId);
   const manifestPath = join(imageDir, "manifest.json");
 
-  if (!(await fileExists(manifestPath))) {
+  // RM-4: single read instead of fileExists()+readFile().
+  const txt = await readFileOrNull(manifestPath);
+  if (txt === null) {
     // nothing to do or already gone
     return { removedDirs, removedLevels };
   }
 
-  const manifest = parseManifest(await readFile(manifestPath, "utf8"));
-  const hashes = (manifest.levels || []).map((l: any) => l.contenthash).filter(Boolean);
+  // RM-1: a corrupt manifest must NOT block removal — that is exactly when rm is most needed.
+  // We don't use this image's hash list (gc below does a full refcount scan), so parsing is
+  // only a best-effort validation; failure is non-fatal.
+  try { parseManifest(txt); } catch { /* proceed to remove regardless */ }
 
   if (!opts.dryRun) {
     // delete the image dir recursively (levels stay until gc or explicit)
     try {
       await rm(imageDir, { recursive: true, force: true });
       removedDirs.push(imageId);
-    } catch (e) {
+    } catch {
       // best effort
     }
   } else {
@@ -38,7 +40,9 @@ export async function removeImage(
   }
 
   if (opts.gc) {
-    // scoped: remove unreferenced after this delete
+    // RM-3: full-store orphan scan. A level may be shared across images (content-addressed dedup),
+    // so a targeted delete by this manifest's hashes would be unsafe; the full refcount scan is the
+    // correct choice. removeOrphans now refuses to delete when any manifest is unparseable.
     const gcRes = await removeOrphans(outDir, { dryRun: opts.dryRun });
     removedLevels.push(...gcRes.removedLevelFiles);
   }

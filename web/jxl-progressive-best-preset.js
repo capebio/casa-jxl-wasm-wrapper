@@ -11,6 +11,14 @@ export const PROGRESSIVE_WEB_BYTE_CUTOFFS = Object.freeze([
   500 * 1024,
 ]);
 
+export const DEFAULT_PROGRESSIVE_DC = 2;
+export const DEFAULT_GROUP_ORDER = 1;
+export const DEFAULT_PREVIEW_FIRST = true;
+export const DEFAULT_EMIT_EVERY_PASS = true;
+export const DEFAULT_PROGRESSIVE_DETAIL = 'passes';
+export const DEFAULT_CHUNK_SIZE = 65536;
+export const DEFAULT_WINDOW_SIZE = 32;
+
 export function resolveTargetDimensions(width, height, targetLongEdge) {
   assertPositiveInteger(width, 'width');
   assertPositiveInteger(height, 'height');
@@ -55,7 +63,9 @@ export function createProgressiveWebPreset({
   effort = 3,
   hasAlpha = true,
   ssimulacra2Target = null,
-  progressiveDetail = 'passes',
+  progressiveDetail = DEFAULT_PROGRESSIVE_DETAIL,
+  preserveIcc = false,
+  preserveMetadata = false,
 } = {}) {
   const target = resolveTargetDimensions(width, height, targetLongEdge);
   const qualityPolicy = resolveQualityPolicy({ quality, ssimulacra2Target });
@@ -68,9 +78,9 @@ export function createProgressiveWebPreset({
     effort: clamp(Math.round(Number(effort)), 1, 9),
     progressive: true,
     progressiveFlavor: 'ac',
-    previewFirst: true,
-    progressiveDc: 2,
-    groupOrder: 1,
+    previewFirst: DEFAULT_PREVIEW_FIRST,
+    progressiveDc: DEFAULT_PROGRESSIVE_DC,
+    groupOrder: DEFAULT_GROUP_ORDER,
     chunked: false,
   };
   const decode = {
@@ -78,10 +88,10 @@ export function createProgressiveWebPreset({
     region: null,
     downsample: 1,
     progressionTarget: 'final',
-    emitEveryPass: true,
+    emitEveryPass: DEFAULT_EMIT_EVERY_PASS,
     progressiveDetail,
-    preserveIcc: false,
-    preserveMetadata: false,
+    preserveIcc,
+    preserveMetadata,
   };
   return {
     name: 'progressive-web-preview',
@@ -95,11 +105,11 @@ export function createProgressiveWebPreset({
 
 export const SNEYERS_PRESET = Object.freeze({
   progressive: true,
-  previewFirst: true,
-  progressiveDc: 2,
+  previewFirst: DEFAULT_PREVIEW_FIRST,
+  progressiveDc: DEFAULT_PROGRESSIVE_DC,
   progressiveAc: 1,
   qProgressiveAc: 1,
-  groupOrder: 1,
+  groupOrder: DEFAULT_GROUP_ORDER,
   effort: 3,
   decodingSpeed: 0,
 });
@@ -110,8 +120,10 @@ export function createSneyersPreset({
   targetLongEdge = 1200,
   quality = 85,
   hasAlpha = true,
-  progressiveDetail = 'passes',
+  progressiveDetail = DEFAULT_PROGRESSIVE_DETAIL,
   ssimulacra2Target = null,
+  preserveIcc = false,
+  preserveMetadata = false,
 } = {}) {
   const target = resolveTargetDimensions(width, height, targetLongEdge);
   const qualityPolicy = resolveQualityPolicy({ quality, ssimulacra2Target });
@@ -129,10 +141,10 @@ export function createSneyersPreset({
     region: null,
     downsample: 1,
     progressionTarget: 'final',
-    emitEveryPass: true,
+    emitEveryPass: DEFAULT_EMIT_EVERY_PASS,
     progressiveDetail,
-    preserveIcc: false,
-    preserveMetadata: false,
+    preserveIcc,
+    preserveMetadata,
   };
   return {
     name: 'sneyers',
@@ -149,6 +161,14 @@ export function createSidecarTargetPlan(targetLongEdge, { thumbnailLongEdge = 30
   const thumb = Math.max(1, Math.floor(Number(thumbnailLongEdge)));
   if (target !== 'full' && target <= thumb) return [target];
   return [thumb, target];
+}
+
+export function getPushBatchingOptions(fileByteLength, { chunkSize = DEFAULT_CHUNK_SIZE, windowSize = DEFAULT_WINDOW_SIZE, byteCutoffs = PROGRESSIVE_WEB_BYTE_CUTOFFS } = {}) {
+  const size = Number(fileByteLength) || 0;
+  let w = windowSize;
+  if (size > (byteCutoffs[9] || 500 * 1024)) w = Math.min(16, windowSize);
+  else if (size > (byteCutoffs[7] || 150 * 1024)) w = Math.min(24, windowSize);
+  return { mode: 'window', chunkSize, windowSize: w };
 }
 
 function assertPositiveInteger(value, name) {

@@ -82,3 +82,24 @@ test('gallery push mode controls drive the chunk push pipeline', () => {
   expect(js).toContain("ev.type === 'progress' || ev.type === 'final'");
   expect(js).toContain("stage: ev.type === 'final' ? 'final' : ev.stage");
 });
+
+// REGRESSION LOCK: protects DONOTCHANGE progressive decode checkpoints, emitEveryPass, chunked-feed + yield between pushes for 'passes' detail,
+// Sneyers baseline alignment, multi-asset handoff, ctxReady, round-robin coordinator, and now preset-driven + abort + limiter + rAF batching.
+// Update strings only if behavior change is approved + full tests re-run.
+test('gallery wires best-preset for unified progressive config + adaptive push + concurrency + abort + rAF batch render', () => {
+  expect(js).toContain("from './jxl-progressive-best-preset.js';");
+  expect(js).toContain('createProgressiveWebPreset');
+  expect(js).toContain('getPushBatchingOptions');
+  expect(js).toContain('basePreset');
+  expect(js).toContain('getPushBatchingOptions(buffer.byteLength');
+  expect(js).toContain('...pushOpts');
+  expect(js).toContain('currentGalleryAbort');
+  expect(js).toContain('signal.aborted');
+  expect(js).toContain('AbortController');
+  expect(js).toContain('runLimited');
+  expect(js).toContain('concurrentEl?.value');
+  expect(js).toContain('requestRender');
+  expect(js).toContain('requestAnimationFrame');
+  // still using the critical progressive emit path
+  expect(js).toContain('emitEveryPass');
+});

@@ -63,6 +63,9 @@ export const manifestSchemaV1 = z.object({
   height: z.number().int().positive().optional(),
   aspect: z.number().finite().positive().optional(),
   levels: z.array(levelEntrySchema).optional(),
+  // M2: on-disk layout marker (set by `migrate --migrate-layout`). Optional + additive so it
+  // round-trips through parseManifest instead of being stripped (which would cause re-migrate loops).
+  layout: z.string().optional(),
   proxy: z.literal(true).optional(),
   stub: z.literal(true).optional(),
   metadata: z.record(z.unknown()).optional(),

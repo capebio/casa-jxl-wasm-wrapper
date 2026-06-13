@@ -143,6 +143,17 @@ export async function fileExists(p: string): Promise<boolean> {
   }
 }
 
+/** Read a UTF-8 file, returning null if it does not exist. Collapses the fileExists()+readFile()
+ *  double-stat used across the admin commands (cli/validate/migrate/rm) into a single syscall. */
+export async function readFileOrNull(p: string): Promise<string | null> {
+  try {
+    return await readFile(p, "utf8");
+  } catch (err: any) {
+    if (err && err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
 // WU-5 Tier3/5 helpers (dynamic exifr to avoid hard dep at load; ratified Q3 use exifr).
 // F2: cheap JPEG SOF (FFC0/FFC2) long-edge dim probe. No new deps; ~20 lines.
 function getJpegDimensions(bytes: Uint8Array): { w: number; h: number } | null {
@@ -954,6 +965,9 @@ export async function rebuildIndex(outDir: string, telemetry?: Telemetry): Promi
 export interface GcResult {
   removedLevelFiles: string[];
   removedImageDirs: string[];
+  /** Number of manifests that failed to parse. When > 0, orphan-level deletion is skipped
+   *  (their referenced hashes are unknown, so deleting "unreferenced" blobs could destroy live data). */
+  parseErrors?: number;
 }
 
 export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } = {}): Promise<GcResult> {
@@ -964,18 +978,24 @@ export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } =
 
   // 1. collect all referenced contenthashes from manifests (parallel bounded for large collections)
   const referenced = new Set<string>();
+  let parseErrors = 0;
   let ids: string[] = [];
   try { ids = await readdir(imagesDir); } catch { ids = []; }
   await pMapLimit(ids, 8, async (id) => {
     const mp = join(imagesDir, id, "manifest.json");
-    if (!(await fileExists(mp))) return;
+    const txt = await readFileOrNull(mp);
+    if (txt === null) return;
     try {
-      const m = parseManifest(await readFile(mp, "utf8"));
+      const m = parseManifest(txt);
       for (const lv of (m.levels || [])) {
         if (lv && lv.contenthash) referenced.add(lv.contenthash);
       }
-    } catch { /* skip bad */ }
+    } catch { parseErrors++; /* DATA-SAFETY: a manifest we can't parse may reference live levels */ }
   });
+
+  // DATA-SAFETY: if any manifest failed to parse, the `referenced` set is incomplete, so blobs that
+  // are actually live would look orphaned. Refuse to delete any level files in that case.
+  const orphanDeleteSafe = parseErrors === 0;
 
   // 2. scan levels/ for orphans
   // P6: grace window so levels written by in-flight ingest (pre-manifest-rename) are not GC'd.
@@ -987,6 +1007,7 @@ export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } =
     if (!f.endsWith(".jxl")) continue;
     const h = f.replace(/\.jxl$/, "");
     if (!referenced.has(h)) {
+      if (!orphanDeleteSafe) continue; // unparseable manifest present — cannot trust orphan judgement
       const full = join(levelsDir, f);
       const st = await stat(full).catch(() => null);
       if (st && Date.now() - st.mtimeMs < GRACE_MS) continue; // too fresh to judge (in-flight writer)
@@ -1014,13 +1035,13 @@ export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } =
     }
   }
 
-  return { removedLevelFiles, removedImageDirs };
+  return { removedLevelFiles, removedImageDirs, parseErrors };
 }
 
 // Bounded parallel map for large-gallery maintenance ops (rebuildIndex, removeOrphans).
 // N manifests can be 10k+ for biodiversity/photogram collections; serial read+parse is slow wall time.
 // Limit prevents excessive concurrent fd/heap during parse. Pushes are safe (Set or sort-after).
-async function pMapLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+export async function pMapLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let i = 0;
   const runners = Array.from({ length: Math.max(1, limit) }, async () => {
     while (i < items.length) {
