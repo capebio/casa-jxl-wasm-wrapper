@@ -6,6 +6,9 @@ import { classifyByteCutoffFrame, summarizeByteCutoffResults, buildSeries } from
 import {
   buildBenchmarkExport,
   streamDecodeCutoffs as streamDecodeCutoffsCore,
+  exactBuffer,
+  toUint8Array,
+  resolveRecordSsimulacra2,
 } from './jxl-progressive-byte-benchmark-core.js';
 
 const runBtn = document.getElementById('run-byte-benchmark');
@@ -111,7 +114,7 @@ async function runBenchmark() {
         const byteSizes = [];
         for (const cutoff of streamed.cutoffs) {
           if (cutoff.frame && cutoff.frame.pixels) {
-            const p = cutoff.frame.pixels instanceof Uint8Array ? cutoff.frame.pixels : new Uint8Array(cutoff.frame.pixels);
+            const p = toUint8Array(cutoff.frame.pixels);
             cutoffPixels.push(p);
             byteSizes.push(cutoff.bytes);
           }
@@ -201,7 +204,7 @@ function makeTargetRgba(source, width, height) {
   return exactBuffer(rgb_to_rgba(rgb));
 }
 
-async function encodeTarget(rgba, encodeOptions) {
+async function encodeTarget(rgba, encodeOptions, _variantTarget /* accept for runBenchmarkSession DI compat */) {
   const encoder = createEncoder(encodeOptions);
   const chunks = [];
   const chunkTask = (async () => {
@@ -246,16 +249,17 @@ function renderCutoffTile(parent, sourceName, entry, decoded) {
   tile.className = `bytebench-tile${decoded.frame ? '' : ' is-empty'}`;
   tile.type = 'button';
 
+  const meta = document.createElement('div');
+  meta.className = 'bytebench-tile-meta';
   if (decoded.frame) {
-    const canvas = frameToCanvas(decoded.frame);
-    const meta = document.createElement('div');
-    meta.className = 'bytebench-tile-meta';
     meta.textContent = `${formatByteCutoffLabel(entry)} | ${decoded.frame.type}`;
-    tile.append(canvas, meta);
-    tile.addEventListener('click', () => openLightbox(`${sourceName} | ${formatByteCutoffLabel(entry)} | ${decoded.frame.type}`, canvas));
+    tile.append(meta);
+    tile.addEventListener('click', () => {
+      // realize canvas only on demand (lazy) — avoids ImageData/canvas/put per cutoff during benchmark runs
+      const canvas = frameToCanvas(decoded.frame);
+      openLightbox(`${sourceName} | ${formatByteCutoffLabel(entry)} | ${decoded.frame.type}`, canvas);
+    });
   } else {
-    const meta = document.createElement('div');
-    meta.className = 'bytebench-tile-meta';
     meta.textContent = `${formatByteCutoffLabel(entry)} | no paint${decoded.error ? ` | ${decoded.error}` : ''}`;
     tile.append(meta);
   }
@@ -304,15 +308,6 @@ function updateStats() {
   document.getElementById('stat-ssimulacra2').textContent = requested ? 'unavailable' : 'not requested';
 }
 
-function resolveRecordSsimulacra2(_variants, requestedTarget) {
-  const requested = Number.isFinite(Number(requestedTarget));
-  return {
-    requested,
-    available: false,
-    target: requested ? Number(requestedTarget) : null,
-  };
-}
-
 function openLightbox(title, sourceCanvas) {
   lightboxTitle.textContent = title;
   lightboxCanvas.width = sourceCanvas.width;
@@ -346,20 +341,6 @@ function setStatus(text) {
 function inputValue(id, fallback) {
   const value = Number(document.getElementById(id)?.value);
   return Number.isFinite(value) ? value : fallback;
-}
-
-function exactBuffer(view) {
-  if (view instanceof ArrayBuffer) return view;
-  return view.byteOffset === 0 && view.byteLength === view.buffer.byteLength
-    ? view.buffer
-    : view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
-}
-
-function toUint8Array(value) {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  throw new TypeError('frame pixels must be ArrayBuffer or ArrayBufferView');
 }
 
 function concatChunks(chunks) {

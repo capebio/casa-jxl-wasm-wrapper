@@ -76,7 +76,7 @@ export async function runBenchmarkSession({
       const byteSizes = [];
       for (const cutoff of streamed.cutoffs) {
         if (cutoff.frame && cutoff.frame.pixels) {
-          const p = cutoff.frame.pixels instanceof Uint8Array ? cutoff.frame.pixels : new Uint8Array(cutoff.frame.pixels.buffer || cutoff.frame.pixels);
+          const p = toUint8Array(cutoff.frame.pixels);
           cutoffPixels.push(p);
           byteSizes.push(cutoff.bytes);
         }
@@ -141,6 +141,9 @@ export async function streamDecodeCutoffs(...args) {
     sleep = defaultSleep,
     now = () => performance.now(),
     random = Math.random,
+    selfStability = false,
+    pixels: withPixels = true,
+    onProgressiveFrame,
   } = normalizeStreamArgs(args);
   const resolvedTransport = resolveTransportProfile(transportProfile);
   const activeDecoder = decoder ?? createDecoder(decodeOptions);
@@ -162,25 +165,47 @@ export async function streamDecodeCutoffs(...args) {
       }
     })();
 
+    // presplit + advancing cursor (pointer move): copies paid once before startMs, feed by index/offset instead of repeated subarray+exact on master
+    const tChunk = resolvedTransport.chunkBytes;
+    const preChunks = [];
+    const jb = exactBuffer(jxlBytes);
+    for (let o = 0; o < jb.byteLength; o += tChunk) {
+      const e = Math.min(o + tChunk, jb.byteLength);
+      preChunks.push(jb.slice(o, e));
+    }
+    let cIdx = 0;
+    let cOff = 0;
+
     for (const entry of plan) {
       if (entry.bytes <= offset) continue;
       onStep(entry);
       while (offset < entry.bytes) {
-        const nextOffset = Math.min(entry.bytes, offset + resolvedTransport.chunkBytes);
-        await activeDecoder.push(exactBuffer(jxlBytes.subarray(offset, nextOffset)));
-        offset = nextOffset;
+        const need = entry.bytes - offset;
+        let took = 0;
+        while (need > took && cIdx < preChunks.length) {
+          const pre = preChunks[cIdx];
+          const remain = pre.byteLength - cOff;
+          const take = Math.min(need - took, remain, tChunk);
+          if (take <= 0) break;
+          const chunkView = (cOff === 0 && take === pre.byteLength) ? pre : pre.subarray(cOff, cOff + take);
+          await activeDecoder.push(exactBuffer(chunkView));
+          cOff += take;
+          took += take;
+          offset += take;
+          if (cOff >= pre.byteLength) { cIdx++; cOff = 0; }
+        }
+        if (took === 0) {
+          // fallback for any misalign (should not normally hit)
+          const nextOffset = Math.min(entry.bytes, offset + tChunk);
+          await activeDecoder.push(exactBuffer(jxlBytes.subarray(offset, nextOffset)));
+          offset = nextOffset;
+        }
         await waitForTurn();
         if (offset < entry.bytes) {
           await sleep(applyJitter(resolvedTransport, random));
         }
       }
       await drainDecoderTurns(waitForTurn, 2);
-      const cutoff = byBytes.get(entry.bytes);
-      if (cutoff) {
-        cutoff.events.push(...eventLog.slice(seenEvents));
-        cutoff.frame = cutoff.events.at(-1) ?? cutoff.frame;
-        seenEvents = eventLog.length;
-      }
     }
 
     await activeDecoder.close();
@@ -203,7 +228,8 @@ export async function streamDecodeCutoffs(...args) {
     error: streamError,
     transportProfile: resolvedTransport.name,
     ...timeline,
-    selfStability: context.selfStability || null,  // option for no-ref early stop (lens18/20)
+    selfStability: selfStability || null,
+    withPixels,
   };
 }
 
@@ -279,6 +305,13 @@ function exactBuffer(view) {
     : view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 }
 
+function toUint8Array(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  throw new TypeError('frame pixels must be ArrayBuffer or ArrayBufferView');
+}
+
 async function defaultWaitForTurn() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -287,3 +320,5 @@ async function defaultSleep(ms) {
   if (ms <= 0) return;
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+export { exactBuffer, toUint8Array };
