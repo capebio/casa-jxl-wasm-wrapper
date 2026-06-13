@@ -7,6 +7,8 @@ pub(crate) mod butteraugli;
 mod psnr;
 pub(crate) mod ssim;
 mod xyb;
+mod simd;
+pub use simd::{detect_native, Backend};
 
 pub use butteraugli::Kweights;
 
