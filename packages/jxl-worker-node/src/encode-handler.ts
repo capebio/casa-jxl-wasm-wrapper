@@ -255,7 +255,12 @@ export class EncodeHandler {
 
   private async feedEncoder(encoder: NodeEncoder): Promise<void> {
     while (!this.cancelled && this.state !== "done" && !this.isErrored()) {
+      const wait0 = performance.now();
       await this.waitForPixels();
+      const waitMs = performance.now() - wait0;
+      // simple accum for profile (node already has ema for push)
+      // could postMetric("encode_wait_pixels_ms", waitMs) here if wanted per-wait
+
       while (this.pixelQueue.length > this.pixelReadIndex) {
         const entry = this.takeNextPixels();
         if (entry === null) break;
@@ -272,7 +277,10 @@ export class EncodeHandler {
       if (this.finished) {
         if (this.cancelled || this.isErrored()) return;
         this.state = "finalising";
+        const fin0 = performance.now();
         await encoder.finish();
+        const finMs = performance.now() - fin0;
+        this.postMetric("encode_finish_ms", finMs);
         return;
       }
     }

@@ -56,6 +56,16 @@ export class EncodeHandler {
   private encoder: BrowserEncoder | null = null;
   private disposePromise: Promise<void> | null = null;
 
+  // Profiling hooks (accumulated, posted as metrics at key points + end)
+  private readonly stageStartMs = performance.now();
+  private createEncoderMs = 0;
+  private totalWaitForPixelsMs = 0;
+  private totalPushPixelsMs = 0;
+  private finishMs = 0;
+  private totalChunkYieldMs = 0;
+  private firstByteMs = 0;
+  private lastPushStart = 0;
+
   // Pre-allocated message objects — mutated in-place before postMessage (safe: structured clone is synchronous).
   private readonly _drainMsg = {
     type: "worker_drain" as const,
@@ -167,7 +177,10 @@ export class EncodeHandler {
       codestreamLevel: (this.opts as MsgEncodeStart).codestreamLevel,
       copyInput: false,
     } as Parameters<JxlModule["createEncoder"]>[0];
+    const tCreate0 = performance.now();
     const encoder = this.wasm.createEncoder(encoderOpts);
+    this.createEncoderMs = performance.now() - tCreate0;
+    this.postMetric("encode_create_ms", this.createEncoderMs);
     this.encoder = encoder;
     this.state = "configured";
     try {
@@ -178,7 +191,19 @@ export class EncodeHandler {
     } finally {
       await this.disposeActiveEncoder();
       this.finishSession(this.state);
+      this.postFinalMetrics();
     }
+  }
+
+  private postFinalMetrics(): void {
+    const total = performance.now() - this.stageStartMs;
+    this.postMetric("encode_total_ms", total);
+    this.postMetric("encode_create_ms", this.createEncoderMs);
+    this.postMetric("encode_push_pixels_ms", this.totalPushPixelsMs);
+    this.postMetric("encode_wait_pixels_ms", this.totalWaitForPixelsMs);
+    this.postMetric("encode_finish_ms", this.finishMs);
+    this.postMetric("encode_chunk_yield_ms", this.totalChunkYieldMs);
+    if (this.firstByteMs > 0) this.postMetric("encode_time_to_first_byte_ms", this.firstByteMs);
   }
 
   // ---------------------------------------------------------------------------
@@ -269,11 +294,18 @@ export class EncodeHandler {
 
   private async feedEncoder(encoder: BrowserEncoder): Promise<void> {
     while (!this.isTerminal()) {
+      const waitStart = performance.now();
       await this.waitForPixels();
+      this.totalWaitForPixelsMs += performance.now() - waitStart;
+
       while (this.pixelQueue.length > this.pixelReadIndex) {
         const entry = this.takeNextPixels();
         if (entry === null) break;
+
+        const pushStart = performance.now();
         await encoder.pushPixels(entry.chunk, entry.region);
+        this.totalPushPixelsMs += performance.now() - pushStart;
+
         // Re-check state after async pushPixels — cancellation or error may have arrived.
         // Cast through string to defeat TypeScript's pre-await control-flow narrowing.
         if (this.isTerminal()) return;
@@ -283,12 +315,15 @@ export class EncodeHandler {
         // Re-check state before calling finish — guard against race with onCancel.
         if (this.isTerminal()) return;
         this.state = "finalising";
+        const finStart = performance.now();
         await Promise.race([
           encoder.finish(),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error("encoder.finish() timed out after 30 s")), FINISH_TIMEOUT_MS),
           ),
         ]);
+        this.finishMs = performance.now() - finStart;
+        this.postMetric("encode_finish_ms", this.finishMs);
         return;
       }
     }
@@ -313,6 +348,14 @@ export class EncodeHandler {
     self.postMessage(this._drainMsg);
   }
 
+  private postMetric(name: string, value: number): void {
+    self.postMessage({
+      type: "metric",
+      sessionId: this.sessionId,
+      metric: { name, value },
+    });
+  }
+
   private async readEncoderChunks(encoder: BrowserEncoder): Promise<void> {
     let totalBytes = 0;
     const sidecarCount = this.opts.sidecarSizes?.length ?? 0;
@@ -321,9 +364,15 @@ export class EncodeHandler {
 
     for await (const chunk of encoder.chunks()) {
       if (this.isTerminal()) return;
+      const tChunk0 = performance.now();
       const buffer = toArrayBuffer(chunk);
+      const chunkYieldMs = performance.now() - tChunk0;
+      this.totalChunkYieldMs += chunkYieldMs;
+
       if (!this.firstByteEmitted) {
         this.firstByteEmitted = true;
+        this.firstByteMs = performance.now() - this.stageStartMs;
+        this.postMetric("encode_time_to_first_byte_ms", this.firstByteMs);
         const firstByteMsg: MsgEncodeFirstByteReady = {
           type: "encode_first_byte_ready",
           sessionId: this.sessionId,
@@ -344,6 +393,9 @@ export class EncodeHandler {
 
     if (this.isTerminal()) return;
     this.state = "done";
+    this.postMetric("encode_chunk_yield_total_ms", this.totalChunkYieldMs);
+    this.postMetric("encode_output_bytes", totalBytes);
+
     const doneMsg: MsgEncodeDone = {
       type: "encode_done",
       sessionId: this.sessionId,
@@ -352,6 +404,7 @@ export class EncodeHandler {
     };
     self.postMessage(doneMsg);
     this.finishSession("done");
+    // final summary post already in finally via postFinalMetrics
   }
 
   private failSession(code: string, message: string): void {

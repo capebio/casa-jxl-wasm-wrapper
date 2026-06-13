@@ -1687,6 +1687,13 @@ class LibjxlEncoder implements JxlEncoder {
   private advIdsPtr = 0;
   private advValuesPtr = 0;
 
+  // Profiling accumulators (for console summary + optional onMetric if wired)
+  private tCreateStart = 0;
+  private tPushTotal = 0;
+  private tFinishStart = 0;
+  private tTakeTotal = 0;
+  private tMallocCopy = 0;
+
   constructor(private readonly options: EncoderOptions) {
     this.sortedSidecarSizes = options.sidecarSizes ? [...options.sidecarSizes].sort((a, b) => a - b) : [];
     this.pixelByteTotal = expectedPixelBytes(options.width, options.height, options.format);
@@ -1703,23 +1710,28 @@ class LibjxlEncoder implements JxlEncoder {
     }
     this.queuedPixelBytes += view.byteLength;
     const pushTask = this.pendingPushPromise.then(async () => {
+      const tPush0 = performance.now();
       const module = await this.ensureModule();
       if (this.cancelled) return;
 
       if (this.streamingInputActive) {
         if (module._jxl_wasm_enc_pixels_ptr && module._jxl_wasm_enc_advance_written) {
+          const t0 = performance.now();
           const ptr = module._jxl_wasm_enc_pixels_ptr(this.wasmEncState, view.byteLength);
           if (ptr === 0) throw new Error("JXL streaming pixel push failed (0)");
           module.HEAPU8.set(view, ptr);
           const rc = module._jxl_wasm_enc_advance_written(this.wasmEncState, view.byteLength);
           if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
+          this.tMallocCopy += performance.now() - t0;
         } else {
           // Back-compat with older WASM bridge: temp copy into WASM, then bridge memcpy.
+          const t0 = performance.now();
           const ptr = module._malloc(view.byteLength);
           try {
             module.HEAPU8.set(view, ptr);
             const rc = module._jxl_wasm_enc_push_chunk!(this.wasmEncState, ptr, view.byteLength);
             if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
+            this.tMallocCopy += performance.now() - t0;
           } finally {
             module._free(ptr);
           }
@@ -1727,6 +1739,7 @@ class LibjxlEncoder implements JxlEncoder {
       } else {
         this.pixelChunks.push(view);
       }
+      this.tPushTotal += performance.now() - tPush0;
     });
     this.pendingPushPromise = pushTask.catch((error) => {
       this.pendingPushError = error;
@@ -1740,9 +1753,12 @@ class LibjxlEncoder implements JxlEncoder {
   }
 
   private async initModule(): Promise<LibjxlWasmModule> {
+    const t0 = performance.now();
     const module = await loadLibjxlModule();
     this.wasmModule = module;
     if (this.cancelled) return module;
+    this.tCreateStart = performance.now() - t0; // includes first load if cold
+    console.log(`[jxl-wasm-enc] module+create_image setup: ${this.tCreateStart.toFixed(1)}ms`);
 
     const caps = getCapabilities(module);
     // Use streaming input only when sidecars are not requested — sidecar path takes
@@ -1850,11 +1866,16 @@ class LibjxlEncoder implements JxlEncoder {
       // #16: Streaming input path — pixels already in WASM pixel buffer.
       // enc_finish runs the encode; enc_take_chunk drains the output.
       try {
+        const tFin0 = performance.now();
         const rc = module._jxl_wasm_enc_finish!(this.wasmEncState);
         if (rc !== 0) throw new Error(`JXL streaming encode finish failed (${rc})`);
+        this.tFinishStart = performance.now() - tFin0;
+
         let chunkHandle: number;
         while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(this.wasmEncState)) !== 0) {
+          const tTake0 = performance.now();
           const chunk = takeBufferView(module, chunkHandle, "encode");
+          this.tTakeTotal += performance.now() - tTake0;
           compressedBytes += chunk.data.byteLength;
           yield chunk.data;
         }
@@ -2042,6 +2063,10 @@ class LibjxlEncoder implements JxlEncoder {
     }
 
     this.encodeStats = { originalBytes: this.pixelByteTotal, compressedBytes, ratio: this.pixelByteTotal > 0 ? compressedBytes / this.pixelByteTotal : 0 };
+
+    // Profile summary (visible even without external onMetric harness)
+    const totalFacade = (this.tCreateStart || 0) + this.tPushTotal + (this.tFinishStart || 0) + this.tTakeTotal + this.tMallocCopy;
+    console.log(`[jxl-wasm-enc] facade profile: create=${(this.tCreateStart||0).toFixed(1)} push=${this.tPushTotal.toFixed(1)} finish=${(this.tFinishStart||0).toFixed(1)} take=${this.tTakeTotal.toFixed(1)} mallocCopy=${this.tMallocCopy.toFixed(1)} totalFacade≈${totalFacade.toFixed(1)}ms | compressed=${compressedBytes}B`);
   }
 
   getStats(): EncodeStats | null { return this.encodeStats; }

@@ -13,6 +13,8 @@
 #include "lib/jxl/butteraugli/butteraugli.h"
 #include "lib/jxl/image.h"
 #include "lib/jxl/memory_manager_internal.h"
+
+#include <emscripten.h>  // for emscripten_get_now() in profiling hooks
 #if __has_include(<jxl/gain_map.h>)
 #include <jxl/gain_map.h>
 #define JXL_GAIN_MAP_SUPPORTED 1
@@ -2892,6 +2894,7 @@ int jxl_wasm_enc_push_pixels_x(JxlWasmEncState* s,
 JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
   static const size_t CHUNK = 262144;
   if (s == nullptr || s->outbuf == nullptr || s->taken >= s->outbuf_size) return nullptr;
+  const double tTake0 = emscripten_get_now();
   const size_t remaining = s->outbuf_size - s->taken;
   const size_t take = (remaining < CHUNK) ? remaining : CHUNK;
   // MakeBufferBorrowed: zero-copy handle into live outbuf (eliminates per-chunk C++ memcpy / performance-1).
@@ -2903,6 +2906,8 @@ JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
     // No early free / null here. Borrowed views into outbuf remain valid only while
     // the allocation lives; enc_free (post-drain in JS chunks() finally) releases it.
   }
+  const double tTake1 = emscripten_get_now();
+  if (take > 1024) EM_ASM({ console.log("[jxl-enc-bridge] take_chunk", $0, "bytes in", ($1).toFixed(2), "ms (zero-copy borrow)"); }, (int)take, tTake1 - tTake0);
   return chunk;
 }
 
@@ -3059,6 +3064,7 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
   if (s->pixels_buf == nullptr) { s->error_code = -2; return -2; }
   if (s->pixels_written != s->pixels_size) { s->error_code = -4; return -4; }
 
+  const double tEnc0 = emscripten_get_now();
   // B3: use metadata path when ICC/EXIF/XMP were set via jxl_wasm_enc_set_metadata,
   // eliminating the buffered-encode malloc+copy that was forced when metadata was present.
   JxlWasmBuffer* buf = EncodeRgbaWithMetadata(
@@ -3083,6 +3089,9 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
 
   if (buf == nullptr) { s->error_code = 25; return 25; }
   if (buf->error != 0) { int ec = buf->error; FreeBufferNoChain(buf); s->error_code = ec; return ec; }
+
+  const double tEnc1 = emscripten_get_now();
+  EM_ASM({ console.log("[jxl-enc-bridge] EncodeRgbaWithMetadata took", $0.toFixed(1), "ms"); }, tEnc1 - tEnc0);
 
   // Steal the output buffer pointer from JxlWasmBuffer — avoids a memcpy.
   s->outbuf      = buf->data;
@@ -3677,5 +3686,3 @@ extern "C" void perceptual_apply_full_avx2(const float* in_r, const float* in_g,
 #endif // __AVX2__
 
 // Scalar fallback is the previous perceptual_apply_full (already added).
-
-} // end added intrinsics block (in the extern scope conceptually)
