@@ -1,3 +1,5 @@
+// PSNR/SSIM on RGBA/any-channel u8 pixel buffers (len must == w*h*ch). Layout assumed packed contiguous.
+// 0-len -> Infinity (psnr) / 0 (ssim). For profiling early term cutoffs vs final only.
 export function computePsnrVsFinal(cutoffPixels, finalPixels) {
   if (cutoffPixels.length !== finalPixels.length) {
     throw new Error(`PSNR length mismatch: ${cutoffPixels.length} vs ${finalPixels.length}`);
@@ -12,9 +14,12 @@ export function computePsnrVsFinal(cutoffPixels, finalPixels) {
   return 10 * Math.log10((255 * 255) / mse);
 }
 
-const C1 = (0.01 * 255) ** 2;
-const C2 = (0.03 * 255) ** 2;
+export const C1 = (0.01 * 255) ** 2;
+export const C2 = (0.03 * 255) ** 2;
 
+// computeSsimVsFinal: global (image-wide) channel-averaged SSIM approximation using raw moments.
+// No local windows (unlike classic SSIM 8x8+). Fast for cutoff profiling. Use external lib for full SSIM.
+// series can carry butter/ssim for future unified recog (Lens12); color constancy metrics feed same shape.
 export function computeSsimVsFinal(cutoffPixels, finalPixels, width, height) {
   if (cutoffPixels.length !== finalPixels.length) {
     throw new Error(`SSIM length mismatch: ${cutoffPixels.length} vs ${finalPixels.length}`);
@@ -68,17 +73,23 @@ export function computeSsimVsFinal(cutoffPixels, finalPixels, width, height) {
   return windowChannels === 0 ? 0 : sumSsim / windowChannels;
 }
 
-const MONOTONE_TOLERANCE_DB = 0.5;
+export const MONOTONE_TOLERANCE_DB = 0.5;
 
-export function detectMonotone(series, toleranceDb = MONOTONE_TOLERANCE_DB) {
+export function detectMonotone(series, toleranceDb = MONOTONE_TOLERANCE_DB, opts = {}) {
+  const { valueKey = 'psnr', lowerIsBetter = false } = opts;
   const regressions = [];
-  let prev = -Infinity;
+  let prev = lowerIsBetter ? Infinity : -Infinity;
   for (const entry of series) {
-    if (!Number.isFinite(entry.psnr)) continue;
-    if (prev !== -Infinity && entry.psnr < prev - toleranceDb) {
-      regressions.push({ bytes: entry.bytes, dropDb: Number((prev - entry.psnr).toFixed(2)) });
+    const v = entry[valueKey];
+    if (!Number.isFinite(v)) continue;
+    const worse = lowerIsBetter ? (v > prev + toleranceDb) : (v < prev - toleranceDb);
+    if (prev !== (lowerIsBetter ? Infinity : -Infinity) && worse) {
+      regressions.push({ bytes: entry.bytes, dropDb: Number(Math.abs(prev - v).toFixed(2)) });
     }
-    if (entry.psnr > prev) prev = entry.psnr;
+    if (lowerIsBetter ? (v < prev) : (v > prev)) prev = v;
   }
   return { monotone: regressions.length === 0, regressions };
 }
+
+// Future: feed butter/ssim series (lower/higher better) via opts to detect for unified cutoff analysis.
+

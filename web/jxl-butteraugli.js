@@ -20,6 +20,8 @@ const _sqrtLin = (() => {
 
 // Convert RGBA uint8 pixels → XYB float32 channels.
 // Exported so callers can precompute reference once and reuse across passes.
+// pixels: Uint8Array RGBA (stride 4, alpha ignored). For batch reuse see createButteraugliComparer.
+// Approx only; not bit-exact libjxl.
 export function pixelsToXyb(pixels, n) {
     const X = new Float32Array(n);
     const Y = new Float32Array(n);
@@ -103,7 +105,7 @@ function scaleErr(mask, rX, rY, rB, tX, tY, tB, w, h) {
         const ey = (rY[i] - tY[i]) / m;
         const eb = (rB[i] - tB[i]) / m;
         const e2 = kX * ex * ex + kY * ey * ey + kB * eb * eb;
-        if (e2 > 1e-9) sum += e2 * Math.sqrt(e2);  // e2^(p/2) with p=3; pow() is far slower
+        sum += e2 * Math.sqrt(e2 + 1e-12);  // branchless; e2^(p/2) p=3
     }
     return (sum / n) ** (1 / p);
 }
@@ -141,12 +143,61 @@ function prepRef(refXyb, width, height) {
     return prep;
 }
 
+// createButteraugliComparer: returns (testPixels)=>score fn with prealloc scratch for tX/tY/tB + dn buffers.
+// Cuts alloc/GC for repeated cutoff evals vs same ref (profiling hot path). Keeps old API unchanged.
+export function createButteraugliComparer(refPixels, width, height) {
+    const n = width * height;
+    if (!n || refPixels.length !== n * 4) throw new Error('bad ref');
+    const refXyb = pixelsToXyb(refPixels, n);
+    const prep = prepRef(refXyb, width, height);
+    const maxN = n;
+    let tX = new Float32Array(maxN), tY = new Float32Array(maxN), tB = new Float32Array(maxN);
+    let dX = new Float32Array(maxN), dY = new Float32Array(maxN), dB = new Float32Array(maxN);
+    return function computeVsFinal(testPixels) {
+        if (testPixels.length !== n * 4) return NaN;
+        for (let i = 0, j = 0; i < n; i++, j += 4) {
+            const r = _sqrtLin[testPixels[j]];
+            const g = _sqrtLin[testPixels[j + 1]];
+            const b = _sqrtLin[testPixels[j + 2]];
+            tX[i] = (r - b) * 0.5;
+            tY[i] = (r + b) * 0.5 + g;
+            tB[i] = b;
+        }
+        let w = width, h = height, total = 0;
+        const weights = [4, 2, 1];
+        for (let s = 0; s < 3; s++) {
+            const L = prep.levels[s];
+            total += scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, w, h) * weights[s];
+            if (s < 2 && w > 1 && h > 1) {
+                const dw = Math.max(1, w >> 1), dh = Math.max(1, h >> 1), dn = dw * dh;
+                for (let y = 0; y < dh; y++) {
+                    const sy0 = y << 1, sy1 = Math.min(sy0 + 1, h - 1);
+                    for (let x = 0; x < dw; x++) {
+                        const sx0 = x << 1, sx1 = Math.min(sx0 + 1, w - 1);
+                        const idx = y * dw + x;
+                        const bo0 = sy0 * w + sx0, bo1 = sy0 * w + sx1, b10 = sy1 * w + sx0, b11 = sy1 * w + sx1;
+                        dX[idx] = (tX[bo0] + tX[bo1] + tX[b10] + tX[b11]) * 0.25;
+                        dY[idx] = (tY[bo0] + tY[bo1] + tY[b10] + tY[b11]) * 0.25;
+                        dB[idx] = (tB[bo0] + tB[bo1] + tB[b10] + tB[b11]) * 0.25;
+                    }
+                }
+                tX.set(dX.subarray(0, dn));
+                tY.set(dY.subarray(0, dn));
+                tB.set(dB.subarray(0, dn));
+                w = dw; h = dh;
+            }
+        }
+        return total / 7;
+    };
+}
+
 // Compute Butteraugli-inspired score.
 //
 // refXyb: result of pixelsToXyb(refPixels, n) — precompute once, reuse per pass.
 // testPixels: Uint8Array of RGBA bytes for the pass being compared.
 //
 // Returns a non-negative float; 0 = identical, ~0.5 = excellent, >1.5 = visible.
+// For repeated use prefer createButteraugliComparer (reuses bufs).
 export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
     const n = width * height;
     if (!n || testPixels.length !== n * 4) return NaN;
@@ -172,3 +223,21 @@ export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
 
     return total / 7;
 }
+
+// 1-scale fast approx (full weight only). For coarse param sweeps / early reject in profiling.
+// Still uses ref prep cache.
+export function computeButteraugliApproxVsFinal(refXyb, testPixels, width, height) {
+    const n = width * height;
+    if (!n || testPixels.length !== n * 4) return NaN;
+    const ref = prepRef(refXyb, width, height);
+    const L = ref.levels[0];
+    let [tX, tY, tB] = pixelsToXyb(testPixels, n);
+    return scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, width, height) * 4 / 7;
+}
+
+// Future (Lens17/12/16/14): Rust LookRenderer PerceptualConstancy (schrodinger geodesic + molchanov + losalamos)
+// will allow illum-invariant sat/wb/exposure in progressive paints. Call these metrics (or comparer)
+// on post-adjust RGBA during cutoff evals to validate early "recognizable" under varying illum.
+// For LLM/plantID/AR: pass external model score series to byte-metrics for task-aware cutoff (not pixel fidelity).
+// Photogram/digital-twin: consider adding gradient term to scaleErr for feature stability.
+

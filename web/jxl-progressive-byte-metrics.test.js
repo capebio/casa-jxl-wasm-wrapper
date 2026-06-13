@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test';
 import {
   classifyByteCutoffFrame,
   summarizeByteCutoffResults,
+  RECOGNIZABLE_DB,
+  PREVIEW_DB,
 } from './jxl-progressive-byte-metrics.js';
 
 test('summarizeByteCutoffResults reports first paint, preview, final and counts', () => {
@@ -28,6 +30,15 @@ test('summarizeByteCutoffResults reports first paint, preview, final and counts'
     usefulEarlyPaint: true,
     monotone: null,
     regressions: [],
+    firstPerceptuallyGoodBytes: null,
+    firstPerceptuallyGoodPercent: null,
+    finalButter: null,
+    butterMonotone: null,
+    butterRegressions: [],
+    firstGoodSsimBytes: null,
+    finalSsim: null,
+    ssimMonotone: null,
+    ssimRegressions: [],
   });
 });
 
@@ -90,4 +101,42 @@ test('summarizeByteCutoffResults without qualitySeries keeps backwards-compatibl
   expect(summary.firstRecognizableBytes).toBeNull();
   expect(summary.finalPsnr).toBeNull();
   expect(summary.monotone).toBeNull();
+});
+
+test('summarize accepts butterSeries, computes firstGoodButter + monotone', () => {
+  const results = [
+    { bytes: 1000, painted: true, frameCount: 1, isFinal: false },
+    { bytes: 5000, painted: true, frameCount: 1, isFinal: true },
+  ];
+  const butterSeries = [
+    { bytes: 1000, butter: 1.8 },
+    { bytes: 5000, butter: 0.3 },
+  ];
+  const s = summarizeByteCutoffResults(results, 5000, { butterSeries });
+  expect(s.firstPerceptuallyGoodBytes).toBe(5000);
+  expect(s.finalButter).toBe(0.3);
+  expect(s.butterMonotone).toBe(true);
+  expect(s.butterRegressions).toEqual([]);
+});
+
+test('summarize sort guard + unsorted input still yields correct firsts', () => {
+  const unsorted = [
+    { bytes: 50000, painted: true, frameCount: 3, isFinal: true },
+    { bytes: 1000, painted: true, frameCount: 1, isFinal: false },
+  ];
+  const s = summarizeByteCutoffResults(unsorted, 50000);
+  expect(s.firstPaintBytes).toBe(1000);
+});
+
+test('exports RECOGNIZABLE_DB / PREVIEW_DB', () => {
+  expect(RECOGNIZABLE_DB).toBe(20);
+  expect(PREVIEW_DB).toBe(30);
+});
+
+test('butterSeries with regression flags via lowerIsBetter in detect', () => {
+  const results = [{ bytes: 1000, painted: true, frameCount: 1, isFinal: false }, { bytes: 2000, painted: true, frameCount: 1, isFinal: true }];
+  const bs = [{ bytes: 1000, butter: 0.5 }, { bytes: 2000, butter: 0.9 }];
+  const s = summarizeByteCutoffResults(results, 2000, { butterSeries: bs });
+  expect(s.butterMonotone).toBe(false);
+  expect(s.butterRegressions.length).toBe(1);
 });

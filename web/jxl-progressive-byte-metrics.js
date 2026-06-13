@@ -1,7 +1,7 @@
 import { detectMonotone } from './jxl-progressive-quality.js';
 
-const RECOGNIZABLE_DB = 20;
-const PREVIEW_DB = 30;
+export const RECOGNIZABLE_DB = 20;
+export const PREVIEW_DB = 30;
 
 export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   const frames = events.filter((event) => event && (event.type === 'progress' || event.type === 'final'));
@@ -15,8 +15,8 @@ export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   };
 }
 
-export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries = null } = {}) {
-  const sorted = [...results].sort((a, b) => a.bytes - b.bytes);
+export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries = null, butterSeries = null, ssimSeries = null, goodButter = 1.0 } = {}) {
+  const sorted = ensureSorted(results);
   const painted = sorted.filter((result) => result.painted);
   const firstPaint = painted[0] ?? null;
   const final = sorted.find((result) => result.isFinal) ?? sorted.at(-1) ?? null;
@@ -29,7 +29,7 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
   let regressions = [];
 
   if (Array.isArray(qualitySeries) && qualitySeries.length > 0) {
-    const sortedSeries = [...qualitySeries].sort((a, b) => a.bytes - b.bytes);
+    const sortedSeries = ensureSorted(qualitySeries);
     firstRecognizableBytes = sortedSeries.find((entry) => entry.psnr >= RECOGNIZABLE_DB)?.bytes ?? null;
     previewBytes = sortedSeries.find((entry) => entry.psnr >= PREVIEW_DB)?.bytes ?? null;
     finalPsnr = sortedSeries.at(-1)?.psnr ?? null;
@@ -38,6 +38,33 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     regressions = monotoneResult.regressions;
   } else {
     previewBytes = pickPreviewCutoffBytesOnly(painted, totalBytes);
+  }
+
+  let firstPerceptuallyGoodBytes = null;
+  let firstPerceptuallyGoodPercent = null;
+  let finalButter = null;
+  let butterMonotone = null;
+  let butterRegressions = [];
+
+  if (Array.isArray(butterSeries) && butterSeries.length > 0) {
+    const ss = ensureSorted(butterSeries);
+    firstPerceptuallyGoodBytes = ss.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? null;
+    firstPerceptuallyGoodPercent = percent(firstPerceptuallyGoodBytes, totalBytes);
+    finalButter = ss.at(-1)?.butter ?? null;
+    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, butter: e.butter })), 0.1, { valueKey: 'butter', lowerIsBetter: true });
+    butterMonotone = m.monotone;
+    butterRegressions = m.regressions;
+  }
+
+  // ssimSeries support for symmetry (higher-better like psnr); fields added if present
+  let firstGoodSsimBytes = null, finalSsim = null, ssimMonotone = null, ssimRegressions = [];
+  if (Array.isArray(ssimSeries) && ssimSeries.length > 0) {
+    const ss = ensureSorted(ssimSeries);
+    firstGoodSsimBytes = ss.find((e) => e.ssim != null && e.ssim >= 0.8)?.bytes ?? null;
+    finalSsim = ss.at(-1)?.ssim ?? null;
+    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, ssim: e.ssim })));
+    ssimMonotone = m.monotone;
+    ssimRegressions = m.regressions;
   }
 
   return {
@@ -56,7 +83,24 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     usefulEarlyPaint: !!firstPaint && firstPaint.bytes < totalBytes,
     monotone,
     regressions,
+    firstPerceptuallyGoodBytes,
+    firstPerceptuallyGoodPercent,
+    finalButter,
+    butterMonotone,
+    butterRegressions,
+    firstGoodSsimBytes,
+    finalSsim,
+    ssimMonotone,
+    ssimRegressions,
   };
+}
+
+function ensureSorted(arr) {
+  if (!Array.isArray(arr) || arr.length < 2) return arr || [];
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i].bytes < arr[i - 1].bytes) return [...arr].sort((a, b) => a.bytes - b.bytes);
+  }
+  return arr;
 }
 
 function pickPreviewCutoffBytesOnly(painted, totalBytes) {
@@ -71,3 +115,8 @@ function percent(bytes, totalBytes) {
   if (bytes == null || !Number.isFinite(totalBytes) || totalBytes <= 0) return null;
   return Number(((bytes / totalBytes) * 100).toFixed(1));
 }
+
+// Layer5 / Lens12/16/18: Pass butterSeries (or ssimSeries) computed from external model/recog score
+// (e.g. plant classifier logit or embedding dist on cutoff pixels) for task-aware early term instead of
+// pure fidelity. Pairs with new color constancy in Rust LookRenderer for illum-invariant AR.
+
