@@ -45,17 +45,32 @@ fn main() {
     let iters = 30;
     let rounds = 10;
 
-    let candidates: &[(&str, BackendChoice)] = &[
+    let mut candidates: Vec<(&str, BackendChoice)> = vec![
         ("scalar", BackendChoice::ForceScalar),
         ("avx2-strict", BackendChoice::Force(1)),
         ("avx2-rsqrt", BackendChoice::Force(2)),
     ];
+    // AVX-512 routes are added only when the CPU actually supports them — forcing
+    // them on a non-AVX-512 part would execute illegal instructions (SIGILL).
+    // When present they take indices 3 (strict) and 4 (rsqrt).
+    let have_avx512 = std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw");
+    if have_avx512 {
+        candidates.push(("avx512-strict", BackendChoice::Force(3)));
+        candidates.push(("avx512-rsqrt", BackendChoice::Force(5)));
+    } else {
+        println!("(AVX-512 not detected on this CPU — avx512 routes skipped; run on server hardware to compare)");
+    }
 
     println!("perceptual butteraugli flip-flop — {}x{} ({:.2} MP), {} iters x {} rounds",
         w, h, (w * h) as f64 / 1e6, iters, rounds);
 
-    for pair in [(0usize, 1usize), (1, 2)] {
-        let (ia, ib) = pair;
+    // avx2-strict vs scalar, avx2-strict vs avx2-rsqrt; plus avx512 routes when present.
+    let mut pairs = vec![(0usize, 1usize), (1usize, 2usize)];
+    if have_avx512 {
+        pairs.push((1, 3)); // avx2-strict vs avx512-strict
+        pairs.push((3, 4)); // avx512-strict vs avx512-rsqrt
+    }
+    for &(ia, ib) in &pairs {
         let (mut a_times, mut b_times) = (Vec::new(), Vec::new());
         for _ in 0..rounds {
             a_times.push(time_runs(&reference, &test, w, h, candidates[ia].1, iters));

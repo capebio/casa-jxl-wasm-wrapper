@@ -5,12 +5,15 @@ pub enum Backend {
     Scalar = 0,
     Avx2Strict = 1,
     Avx2Rsqrt = 2,
-    /// AVX-512 (f32x16, fast gather on server CPUs). NOT benchmarked on the dev
-    /// machine (i7-10850H has no AVX-512) — kept for the production fleet per an
-    /// explicit decision; correctness verified by parity tests on real hardware.
-    Avx512 = 3,
+    /// AVX-512 strict (f32x16, full sqrt + div, fast gather on server CPUs). NOT
+    /// benchmarked on the dev machine (i7-10850H has no AVX-512) — kept for the
+    /// production fleet; correctness verified by parity tests on real hardware.
+    Avx512Strict = 3,
     /// wasm32 v128 SIMD (4-wide f32). Selected at wasm build time when simd128 is on.
     WasmSimd = 4,
+    /// AVX-512 rsqrt (rsqrt14/rcp14 approximations for sqrt and 1/m). Alternate
+    /// route flip-flopped against Avx512Strict on real hardware.
+    Avx512Rsqrt = 5,
 }
 
 /// Backend for the current wasm build: WasmSimd when compiled with `+simd128`,
@@ -34,7 +37,7 @@ pub fn detect_native(prefer_rsqrt: bool) -> Backend {
     #[cfg(target_arch = "x86_64")]
     {
         if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
-            return Backend::Avx512;
+            return Backend::Avx512Strict;
         }
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
             return if prefer_rsqrt { Backend::Avx2Rsqrt } else { Backend::Avx2Strict };
@@ -59,6 +62,6 @@ mod tests {
     #[test]
     fn detect_returns_something() {
         let b = detect_native(false);
-        assert!(matches!(b, Backend::Scalar | Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512 | Backend::WasmSimd));
+        assert!(matches!(b, Backend::Scalar | Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512Strict | Backend::Avx512Rsqrt | Backend::WasmSimd));
     }
 }

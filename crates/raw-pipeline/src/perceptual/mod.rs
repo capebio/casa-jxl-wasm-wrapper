@@ -111,7 +111,8 @@ impl Comparer {
             BackendChoice::Force(id) => match id {
                 1 => Backend::Avx2Strict,
                 2 => Backend::Avx2Rsqrt,
-                3 => Backend::Avx512,
+                3 => Backend::Avx512Strict,
+                5 => Backend::Avx512Rsqrt,
                 _ => Backend::Scalar,
             },
             // rsqrt variant stays opt-in (Force(2)) until the flip-flop bench
@@ -150,7 +151,7 @@ impl Comparer {
                 );
             },
             #[cfg(target_arch = "x86_64")]
-            Backend::Avx512 => unsafe {
+            Backend::Avx512Strict | Backend::Avx512Rsqrt => unsafe {
                 simd::avx512::pixels_to_xyb_avx512(
                     test, self.n, xyb::sqrt_lin_lut_ptr(),
                     &mut self.tx, &mut self.ty, &mut self.tb,
@@ -175,7 +176,7 @@ impl Comparer {
                 simd::avx2::downsample_avx2(&self.tb, &mut self.db, w, h, dw, dh);
             },
             #[cfg(target_arch = "x86_64")]
-            Backend::Avx512 => unsafe {
+            Backend::Avx512Strict | Backend::Avx512Rsqrt => unsafe {
                 simd::avx512::downsample_avx512(&self.tx, &mut self.dx, w, h, dw, dh);
                 simd::avx512::downsample_avx512(&self.ty, &mut self.dy, w, h, dw, dh);
                 simd::avx512::downsample_avx512(&self.tb, &mut self.db, w, h, dw, dh);
@@ -223,7 +224,7 @@ impl Comparer {
         }
         match self.backend {
             #[cfg(target_arch = "x86_64")]
-            Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512 => {
+            Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512Strict | Backend::Avx512Rsqrt => {
                 let (sa, saa, sab) = unsafe { simd::avx2::ssim_moments_avx2(test, &self.ref_rgba, self.n) };
                 ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
             }
@@ -237,7 +238,7 @@ impl Comparer {
         }
         match self.backend {
             #[cfg(target_arch = "x86_64")]
-            Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512 => {
+            Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512Strict | Backend::Avx512Rsqrt => {
                 let sum_sq = unsafe { simd::avx2::ssd_avx2(test, &self.ref_rgba) };
                 if sum_sq == 0 {
                     return f32::INFINITY;
@@ -264,8 +265,12 @@ impl Comparer {
                 simd::avx2::scale_err_avx2(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb, true)
             },
             #[cfg(target_arch = "x86_64")]
-            Backend::Avx512 => unsafe {
+            Backend::Avx512Strict => unsafe {
                 simd::avx512::scale_err_avx512(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb, false)
+            },
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx512Rsqrt => unsafe {
+                simd::avx512::scale_err_avx512(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb, true)
             },
             #[cfg(target_arch = "wasm32")]
             Backend::WasmSimd => simd::wasm::scale_err_wasm(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb),
