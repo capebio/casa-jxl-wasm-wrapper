@@ -3,3 +3,4 @@
 //! See docs/superpowers/specs/2026-06-13-perceptual-metrics-simd-kernel-design.md
 
 mod psnr;
+mod ssim;
