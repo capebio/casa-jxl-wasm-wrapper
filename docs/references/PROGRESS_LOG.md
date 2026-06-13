@@ -215,6 +215,34 @@ Use the template below for every entry.
 
 ---
 
+## Feature: Group 13 Client-Side Bandwidth & Cutoff Profiling (web/ lens review + verification) — 2026-06-13
+
+**Branch:** `PenultimateRoundOfUpgrades`
+
+**Status:** Complete (plan-mode analysis + handoff doc + verification; no source edits to the 5 files in this pass per plan mode + focus rules).
+
+**Scope:** Exhaustive 21-lens review (strategic linkage, public APIs, pipeline stages, state, data structs, hot kernels, boundaries, support + creative lenses 9-21 on efficiency/speed/perf/bugs/features + AR/photogram/LLM/perceptual/immersion angles) strictly limited to the 5 files:
+- web/jxl-progressive-byte-benchmark.js
+- web/jxl-progressive-byte-benchmark.test.js
+- web/jxl-byte-cutoff-probe.js
+- web/jxl-byte-cutoff-probe.test.js
+- web/jxl-preset-benchmark.js
+
+Produced `docs/JxlByteCutoffBenchmarks.md` (amalgamated findings, 5 one-file agent handoff sections each starting with the exact required phrase + code snippets for ambiguous parts, Implemented chapter, achievement overview paragraphs). Executed `node "c:\Foo\raw-converter-wasm\StandardMultifileTest.mjs"` (baseline timings captured; exit 0; no regressions from the non-code suggestions). File renamed to -DONE.md per its own terminal instruction. .gitignore respected (docs/outputs/ artifacts from the test not staged).
+
+**Key Changes (docs + audit only):**
+- `docs/JxlByteCutoffBenchmarks-DONE.md` (full lens output + handoffs + verification record + -DONE marker).
+- Supporting audit updates (this PROGRESS_LOG entry; row in implemented improvements.md).
+
+**Verification:**
+- `node "c:\Foo\raw-converter-wasm\StandardMultifileTest.mjs"` — exit 0; telemetry + 8 assets (RAW/JPEG/CR2/ORF/DNG) under simd + relaxed-simd-mt; prog_first_simd ~135ms avg, first_mt ~54ms; JXTC tiled ROI 4.5x vs monolithic; transfer 50-289x wins; no crashes/regressions.
+- Plan mode enforced throughout: only read_file/list_dir/grep on the 5 + allowed docs (rejection + git meta); search_replace *only* on this session plan file until approval; no terminal git or edits to sources.
+- Post-rename + test: `git status -sb` confirms ?? docs/JxlByteCutoffBenchmarks-DONE.md (and many unrelated ?? / M from other work); docs/outputs/ correctly ignored.
+
+**Docs Updated:** `docs/references/PROGRESS_LOG.md` (this entry); `docs/implemented improvements.md` (registry row); `docs/JxlByteCutoffBenchmarks-DONE.md` (self-contained completion signal per repo convention).
+
+---
+
 ## Feature: Remaining Low-Level Frame Settings (completeness audit) — 2026-06
 
 **Branch:** `feature/animation-decode-enhancements`
