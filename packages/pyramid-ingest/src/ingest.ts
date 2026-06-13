@@ -35,6 +35,7 @@ export interface IngestOptions {
   chaosTest?: boolean;  // K2: random failure injection for recovery tests
   statMap?: Record<string, { size: number; mtimeMs: number }>;  // C1: from upfront collect to avoid re-stat
   stripGps?: boolean; // F4: privacy for sensitive species (biodiversity)
+  idMap?: Record<string, string>;  // B5/B11 extension: precomputed imageIds to elide re-hash in batch dispatchers (mirrors statMap pattern)
 }
 
 export type IngestOutcome = "written" | "skipped";
@@ -165,6 +166,20 @@ function getJpegDimensions(bytes: Uint8Array): { w: number; h: number } | null {
   return null;
 }
 
+// Deduped exifr orientation probe (used by jpg decode path, computeIngestPlan jpg ladder, and embedded Tier3 fallback).
+// Returns "baked" only for identity (1); "source" otherwise. Dynamic import keeps exifr optional.
+async function probeOrientation(bytes: Uint8Array): Promise<Orientation> {
+  try {
+    const exifrMod: any = await import("exifr").catch(() => null);
+    if (!exifrMod) return "source";
+    const ex = exifrMod.default || exifrMod;
+    const o = await ex.orientation?.(bytes).catch(() => 1);
+    return (o === 1 || o == null) ? "baked" : "source";
+  } catch {
+    return "source";
+  }
+}
+
 async function tryExtractEmbeddedJpeg(bytes: Uint8Array): Promise<Uint8Array | null> {
   try {
     // dynamic so static module load succeeds even if exifr not yet installed in env
@@ -251,15 +266,7 @@ async function decodeMaster(b: Backends, format: MasterFormat, bytes: Uint8Array
     // F6: read EXIF Orientation (1-8); map to "baked" only for identity (upright pixels as-stored).
     // Verification (see verify-f6-orient.mjs): transcode+decodeToRgba8 does NOT bake (lossless JPEG rewrap + stored-layout decode).
     // Pixels for orient!=1 are sideways; "source" signals that. Ladder edit for plumb deferred (Agent 4/L9).
-    let orient: Orientation = "source";
-    try {
-      const exifrMod: any = await import("exifr").catch(() => null);
-      if (exifrMod) {
-        const ex = exifrMod.default || exifrMod;
-        const o = await ex.orientation?.(bytes).catch(() => 1);
-        if (o === 1 || o == null) orient = "baked";
-      }
-    } catch {}
+    const orient = await probeOrientation(bytes);
     return { rgba: d.rgba, width: d.width, height: d.height, orientation: orient };
   }
   return b.raw.decode(bytes, format);
@@ -323,14 +330,9 @@ export async function computeIngestPlan(
   } else if (format === "jpg") {
     // F6/L9: jpg decode does not bake EXIF rotation (verified); pass "source" (or real EXIF when plumbed in caller)
     ladder = await buildJpgLadder(b.jxl, bytes, !!opts.profileConvergence, "source");
-    try {
-      const exifrMod: any = await import("exifr").catch(() => null);
-      if (exifrMod) {
-        const ex = exifrMod.default || exifrMod;
-        const o = await ex.orientation?.(bytes).catch(() => 1);
-        if (o === 1 || o == null) (ladder as any).orientation = "baked";
-      }
-    } catch {}
+    if (await probeOrientation(bytes) === "baked") {
+      (ladder as any).orientation = "baked";
+    }
   } else {
     const decoded = await b.raw.decode(bytes, format);
     tel?.stage("decode-master", { w: decoded.width, h: decoded.height });
@@ -408,8 +410,9 @@ export async function ingestImage(
 
   // B11: prefer precomputed imageId (passed by batch dispatcher) to avoid duplicate realpath+sha256.
   // B5: support pre-resolved single entry (from job shaping to avoid cloning full statMap per postMessage)
+  // idMap extension: lookup by masterPath when provided (avoids per-image hash in hot paths for large batches)
   const anyOpts: any = opts;
-  const imageId = anyOpts.imageId || await imageIdForPath(masterPath);
+  const imageId = anyOpts.imageId || (anyOpts.idMap && anyOpts.idMap[masterPath]) || await imageIdForPath(masterPath);
   let info: { size: number; mtimeMs: number };
   if (anyOpts.statEntry) {
     info = anyOpts.statEntry;
@@ -472,6 +475,13 @@ export async function ingestImage(
 
     if (opts.dryRun) {
       // F7: bypass apply; caller (CLI) prints plan; return plan under dryRun (P8)
+      // Trim heavy level data (the encoded JXL bytes) for memory efficiency on large masters;
+      // entries/manifest/sizes/curves remain for explain output.
+      if (plan) {
+        for (const lv of plan.levels) {
+          (lv as any).data = new Uint8Array(0);
+        }
+      }
       return { outcome: "written", plan: plan!, degraded: usedFallback || undefined };
     }
 
@@ -523,14 +533,9 @@ async function buildFallbackPlan(
     } else {
       ladder = await buildJpgLadder(b.jxl, jpeg, !!opts.profileConvergence);
       // F6 (embedded path): same map as master jpg; ladder override (deferred full plumb)
-      try {
-        const exifrMod: any = await import("exifr").catch(() => null);
-        if (exifrMod) {
-          const ex = exifrMod.default || exifrMod;
-          const o = await ex.orientation?.(jpeg).catch(() => 1);
-          if (o === 1 || o == null) (ladder as any).orientation = "baked";
-        }
-      } catch {}
+      if (await probeOrientation(jpeg) === "baked") {
+        (ladder as any).orientation = "baked";
+      }
     }
     // F2: min-dim gate; if long <1024 mark degraded (proceed; small preview passed 4kB gate)
     const dims = getJpegDimensions(jpeg);
@@ -663,7 +668,7 @@ export async function ingestBatch(
         const idx = next++;
         if (idx >= activeFiles.length) return;
         const path = activeFiles[idx]!;
-        const imageId = await imageIdForPath(path);
+        const imageId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || await imageIdForPath(path);
         // full L3: acquire per-image write lock only for real mutate (skip in dry-run to avoid side-effect dirs; cross-proc for live runs)
         let imgLock: AdvisoryLock | null = null;
         let lockOk = true;
@@ -792,6 +797,7 @@ export async function ingestBatch(
   // B7: prompt mid-image abort for the worker pool path (in-process polls between images already).
   if (backends.signal) {
     const onAbort = () => {
+      forceFlushCheckpoint().catch(() => {}); // best-effort cp durability on cancel (matches force on error paths)
       for (let wi = 0; wi < workers.length; wi++) {
         dead.add(wi);
         const w = workers[wi];
@@ -818,7 +824,7 @@ export async function ingestBatch(
         const idx = nextFile++;
         if (idx >= activeFiles.length) break;
         const path = activeFiles[idx]!;
-        const imageId = await imageIdForPath(path);
+        const imageId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || await imageIdForPath(path);
         // full L3: per-image write lock held for worker job duration only for real runs (dry-run avoids mkdir side effects)
         let imgLock: AdvisoryLock | null = null;
         let lockOk = true;
@@ -844,8 +850,9 @@ export async function ingestBatch(
         const id = ++jobId;
         const p = new Promise<IngestOutcome>((resolve, reject) => pending.set(id, { resolve, reject, worker: wi }));
         // B5: send only the per-path stat entry (if any); full statMap Record can be large and is pure waste to clone per job.
-        // B11: also forward precomputed imageId so ingestImage (in worker) skips the second realpath+hash.
-        const jobOpts: any = { ...opts, statMap: undefined, statEntry: (opts as any).statMap?.[path], imageId };
+        // B11 + idMap: forward single precomputed imageId; strip idMap to avoid shipping full map across postMessage.
+        const preId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || imageId;
+        const jobOpts: any = { ...opts, statMap: undefined, statEntry: (opts as any).statMap?.[path], idMap: undefined, imageId: preId };
         w.postMessage({ id, path, opts: jobOpts });
         const tJob = now(backends);
         try {
@@ -910,9 +917,10 @@ export async function rebuildIndex(outDir: string, telemetry?: Telemetry): Promi
   } catch {
     imageIds = [];
   }
-  for (const id of imageIds) {
+  // Parallel bounded for speed on large N (manifest parse is IO+JSON+Zod); sort afterward restores D3 deterministic order.
+  await pMapLimit(imageIds, 8, async (id) => {
     const manifestPath = join(imagesDir, id, "manifest.json");
-    if (!(await fileExists(manifestPath))) continue;
+    if (!(await fileExists(manifestPath))) return;
     let manifest: Manifest;
     try {
       manifest = parseManifest(await readFile(manifestPath, "utf8"));
@@ -924,11 +932,11 @@ export async function rebuildIndex(outDir: string, telemetry?: Telemetry): Promi
       } else {
         process.stderr.write(`${msg}\n`);
       }
-      continue;
+      return;
     }
-    if (manifest.proxy || (manifest as any).stub) continue; // Q5: stubs excluded from central index
+    if (manifest.proxy || (manifest as any).stub) return; // Q5: stubs excluded from central index
     index.images.push(buildIndexEntry(manifest));
-  }
+  });
   // INVARIANT (D3): index order deterministic across readdir / fs. Do not remove this sort.
   index.images.sort((a, b) => (a.imageId < b.imageId ? -1 : a.imageId > b.imageId ? 1 : 0));
 
@@ -954,20 +962,20 @@ export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } =
   const removedLevelFiles: string[] = [];
   const removedImageDirs: string[] = [];
 
-  // 1. collect all referenced contenthashes from manifests
+  // 1. collect all referenced contenthashes from manifests (parallel bounded for large collections)
   const referenced = new Set<string>();
   let ids: string[] = [];
   try { ids = await readdir(imagesDir); } catch { ids = []; }
-  for (const id of ids) {
+  await pMapLimit(ids, 8, async (id) => {
     const mp = join(imagesDir, id, "manifest.json");
-    if (!(await fileExists(mp))) continue;
+    if (!(await fileExists(mp))) return;
     try {
       const m = parseManifest(await readFile(mp, "utf8"));
       for (const lv of (m.levels || [])) {
         if (lv && lv.contenthash) referenced.add(lv.contenthash);
       }
     } catch { /* skip bad */ }
-  }
+  });
 
   // 2. scan levels/ for orphans
   // P6: grace window so levels written by in-flight ingest (pre-manifest-rename) are not GC'd.
@@ -1007,4 +1015,19 @@ export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } =
   }
 
   return { removedLevelFiles, removedImageDirs };
+}
+
+// Bounded parallel map for large-gallery maintenance ops (rebuildIndex, removeOrphans).
+// N manifests can be 10k+ for biodiversity/photogram collections; serial read+parse is slow wall time.
+// Limit prevents excessive concurrent fd/heap during parse. Pushes are safe (Set or sort-after).
+async function pMapLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let i = 0;
+  const runners = Array.from({ length: Math.max(1, limit) }, async () => {
+    while (i < items.length) {
+      const cur = i++;
+      if (cur >= items.length) break;
+      await fn(items[cur]).catch(() => {});
+    }
+  });
+  await Promise.all(runners);
 }

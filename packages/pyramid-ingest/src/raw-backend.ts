@@ -8,13 +8,21 @@ import init, {
 import type { DecodedMaster, RawBackend, RawFormat } from "./backends.js";
 
 let initialized = false;
+let initPromise: Promise<void> | null = null;
 
 async function ensureWasm(): Promise<void> {
   if (initialized) return;
-  const url = new URL("../../../pkg/raw_converter_wasm_bg.wasm", import.meta.url);
-  const bytes = readFileSync(fileURLToPath(url));
-  await init({ module_or_path: bytes });
-  initialized = true;
+  if (!initPromise) {
+    initPromise = (async () => {
+      // Dynamic to keep load async (no block worker thread) and singleton guard prevents double wasm read+init under any interleaving.
+      const { readFile } = await import("node:fs/promises");
+      const url = new URL("../../../pkg/raw_converter_wasm_bg.wasm", import.meta.url);
+      const bytes = await readFile(fileURLToPath(url));
+      await init({ module_or_path: bytes });
+      initialized = true;
+    })();
+  }
+  await initPromise;
 }
 
 const ZERO_LOOK = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Number.NaN, Number.NaN, 0, 0] as const;
@@ -35,6 +43,8 @@ export function createRawBackend(): RawBackend {
       }
       try {
         // Prefer take_rgba (RGB->RGBA inside WASM). Falls back to rgb+convert if needed.
+        // The rgb fallback runs a hot per-pixel JS expand loop (lens6) on every pixel of the master.
+        // This is the slow path for large RAW ingest into the JXL pyramid; take_rgba (WASM-side) is strongly preferred.
         let rgba: Uint8Array;
         if (typeof res.take_rgba === "function") {
           rgba = new Uint8Array(res.take_rgba());
