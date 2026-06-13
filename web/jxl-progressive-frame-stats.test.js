@@ -28,3 +28,26 @@ test('frame stats formatting includes measurement field names', () => {
     expect(formatFrameStatsCompact(stats)).toContain('hash=');
     expect(formatFrameStatsCompact(stats)).toContain('rgbNonzero=');
 });
+
+test('analyzeProgressiveFrame handles zero dims + empty buffer', () => {
+    const s = analyzeProgressiveFrame(new Uint8Array(0), 0, 0);
+    expect(s.pixelCount).toBe(0);
+    expect(s.alphaMin).toBe(0);
+    expect(s.alphaZeroPct).toBe(0);
+    expect(s.frameHash).toMatch(/^[0-9a-f]{8}$/);
+});
+
+test('analyzeProgressiveFrame handles truncated buffer (partial pixels)', () => {
+    const buf = new Uint8Array([10,20,30,255, 40,50,60]); // 1 full + partial
+    const s = analyzeProgressiveFrame(buf, 2, 2);
+    expect(s.pixelCount).toBe(4);
+    expect(s.alphaMax).toBe(255);
+    expect(s.rgbNonzeroCount).toBeGreaterThanOrEqual(3);
+});
+
+test('analyzeProgressiveFrame hash differs on content, stable on same', () => {
+    const a = analyzeProgressiveFrame(new Uint8Array([1,2,3,4]), 1, 1).frameHash;
+    const b = analyzeProgressiveFrame(new Uint8Array([1,2,3,5]), 1, 1).frameHash;
+    expect(a).not.toBe(b);
+    expect(analyzeProgressiveFrame(new Uint8Array([1,2,3,4]), 1, 1).frameHash).toBe(a);
+});

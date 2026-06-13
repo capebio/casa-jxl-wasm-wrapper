@@ -2,6 +2,9 @@ export function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
+let escapeWired = false;
+let helpCloseWired = false;
+
 export function wireSlideoutPanel({
     panel,
     openButton,
@@ -21,9 +24,12 @@ export function wireSlideoutPanel({
         setOpen(panel.dataset.open !== 'true');
     });
     closeButton?.addEventListener('click', () => setOpen(false));
-    document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') setOpen(false);
-    });
+    if (!escapeWired) {
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') setOpen(false);
+        });
+        escapeWired = true;
+    }
 
     setOpen(defaultOpen);
     return {
@@ -33,6 +39,7 @@ export function wireSlideoutPanel({
 }
 
 export function wireHelpPopovers(root = document) {
+    if (!root) return { closeAll() {}, toggle() {} };
     const buttons = [...root.querySelectorAll('[data-help-target]')];
     const popovers = [...root.querySelectorAll('[data-help-popover]')];
 
@@ -59,7 +66,10 @@ export function wireHelpPopovers(root = document) {
         popover.addEventListener('click', (event) => event.stopPropagation());
     }
 
-    document.addEventListener('click', closeAll);
+    if (!helpCloseWired) {
+        document.addEventListener('click', closeAll);
+        helpCloseWired = true;
+    }
     return { closeAll, toggle };
 }
 

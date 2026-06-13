@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import {
+  clamp, wireSlideoutPanel, wireHelpPopovers, setGroupDisabled, bindRangeLabel, setCssVar,
+} from './jxl-dashboard-ui.js';
 
 const progressiveHtml = readFileSync(new URL('./jxl-progressive.html', import.meta.url), 'utf8');
 const progressiveJs = readFileSync(new URL('./jxl-progressive.js', import.meta.url), 'utf8');
@@ -84,4 +87,40 @@ test('wrapper page records source load timing', () => {
 
 test('wrapper page exposes first-paint timing in tiles', () => {
     expect(wrapperJs).toContain('tile.timing.textContent');
+});
+
+test('clamp basic', () => {
+  expect(clamp(3, 0, 10)).toBe(3);
+  expect(clamp(-2, 0, 10)).toBe(0);
+  expect(clamp(99, 0, 10)).toBe(10);
+});
+
+test('setCssVar and bindRangeLabel (mocked)', () => {
+  const root = { style: { setProperty: (k, v) => { root.style[k] = v; } } };
+  setCssVar('--x', 123, root);
+  const input = { value: '5', addEventListener: () => {} };
+  const label = { textContent: '' };
+  bindRangeLabel(input, label, v => `#${v}`);
+  expect(label.textContent).toBe('#5');
+});
+
+test('setGroupDisabled smoke (no real DOM)', () => {
+  const fakeBtn = { classList: { contains: (c) => c === 'info-btn' }, disabled: false };
+  const group = {
+    classList: { toggle: () => {}, add() {}, remove() {} },
+    setAttribute: () => {},
+    dataset: {},
+    querySelectorAll: () => [fakeBtn],
+  };
+  setGroupDisabled(group, true, 'reason');
+  // no crash = pass for smoke
+});
+
+test('wire* safe on missing inputs (return apis)', () => {
+  const s = wireSlideoutPanel({ panel: null });
+  expect(typeof s.isOpen).toBe('function');
+  expect(s.isOpen()).toBe(false);
+  const h = wireHelpPopovers(null);
+  expect(typeof h.closeAll).toBe('function');
+  h.closeAll();
 });
