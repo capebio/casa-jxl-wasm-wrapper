@@ -1,6 +1,6 @@
 import { analyzeProgressiveFrame } from './jxl-progressive-frame-stats.js';
-import { computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
-import { pixelsToXyb, computeButteraugliVsFinal } from './jxl-butteraugli.js';
+import { computePsnrVsFinal, computeSsimVsFinal, computeChannelMoments } from './jxl-progressive-quality.js';
+import { pixelsToXyb, computeButteraugliVsFinal, createButteraugliComparer, computeButteraugliApproxVsFinal } from './jxl-butteraugli.js';
 
 self.onmessage = (event) => {
     const { id, type } = event.data ?? {};
@@ -35,6 +35,7 @@ function handleChartRequest(id, data) {
         const refPx = new Uint8Array(ref);
         const n = refWidth * refHeight;
         const refXyb = pixelsToXyb(refPx, n);
+        const cmp = createButteraugliComparer(refPx, refWidth, refHeight);  // batch reuse from original5
         const values = passes.map(p => {
             if (!p) return null;
             const px = new Uint8Array(p.buf);
@@ -42,9 +43,10 @@ function handleChartRequest(id, data) {
                 index: p.index,
                 psnr: computePsnrVsFinal(refPx, px),
                 ssim: computeSsimVsFinal(refPx, px, refWidth, refHeight),
+                moments: computeChannelMoments(px, refWidth, refHeight),  // features for ML surrogate (lens12)
             };
             if (data.includeButter !== false) {
-                rec.butt = computeButteraugliVsFinal(refXyb, px, refWidth, refHeight);
+                rec.butt = (data.includeButter === 'approx') ? computeButteraugliApproxVsFinal(refXyb, px, refWidth, refHeight) : cmp(px);
             } else {
                 rec.butt = null;
             }

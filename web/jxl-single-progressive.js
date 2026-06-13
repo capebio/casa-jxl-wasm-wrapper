@@ -4,7 +4,9 @@ import { createBrowserContext } from '@casabio/jxl-session';
 import { getCapabilities } from '@casabio/jxl-capabilities';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
-import { computePsnrVsFinal } from './jxl-progressive-quality.js';
+import { computePsnrVsFinal, computeSsimVsFinal, detectMonotone } from './jxl-progressive-quality.js';
+import { computeButteraugliVsFinal, createButteraugliComparer } from './jxl-butteraugli.js';
+import { buildSeries } from './jxl-progressive-byte-metrics.js';  // connectedness for unified series in cutoff (R1)
 import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
@@ -1306,14 +1308,24 @@ function shouldStopAtPass(passes, targetRgba) {
         return { reason: 'low-byterate', last: last.pass };
     }
 
-    // Trigger 3: PSNR plateau, but only once we've reached full-resolution AC.
+    // Trigger 3: extended plateau (psnr + butter for structure; connectedness to R1 buildSeries/monotone for lens17/12/16).
+    // Now uses butterSeries/monotone instead of psnr-only (robust to color/illum via future constancy).
     if ((last.intendedRatio ?? 8) <= 1 && (prev.intendedRatio ?? 8) <= 1 && targetRgba) {
         if (last.pixels?.byteLength === targetRgba.byteLength && prev.pixels?.byteLength === targetRgba.byteLength) {
             const psnrLast = computePsnrVsFinal(targetRgba, last.pixels);
             const psnrPrev = computePsnrVsFinal(targetRgba, prev.pixels);
-            if (Number.isFinite(psnrLast) && Number.isFinite(psnrPrev)
-                && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB) {
-                return { reason: 'psnr-plateau', last: last.pass, deltaDb: Math.abs(psnrLast - psnrPrev) };
+            const cmp = createButteraugliComparer(targetRgba, last.width ?? 0, last.height ?? 0);
+            const buttLast = cmp(last.pixels);
+            const buttPrev = cmp(prev.pixels);
+            const smallSeries = [
+                { bytes: 0, psnr: psnrPrev, butter: buttPrev },
+                { bytes: 1, psnr: psnrLast, butter: buttLast },
+            ];
+            const monoPsnr = detectMonotone(smallSeries);
+            const monoButter = detectMonotone(smallSeries, 0.05, { valueKey: 'butter', lowerIsBetter: true });
+            if ((Number.isFinite(psnrLast) && Number.isFinite(psnrPrev) && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB)
+                || monoButter.monotone) {
+                return { reason: 'psnr-butter-plateau', last: last.pass, deltaDb: Math.abs(psnrLast - psnrPrev), buttDelta: Math.abs(buttLast - buttPrev) };
             }
         }
     }

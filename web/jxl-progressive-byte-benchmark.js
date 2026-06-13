@@ -2,7 +2,11 @@ import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from './pkg/raw_conv
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
 import { createProgressiveWebPreset, createSidecarTargetPlan } from './jxl-progressive-best-preset.js';
-import { classifyByteCutoffFrame, summarizeByteCutoffResults } from './jxl-progressive-byte-metrics.js';
+import { classifyByteCutoffFrame, summarizeByteCutoffResults, buildSeries } from './jxl-progressive-byte-metrics.js';  // R1 for buildSeries wire (connectedness)
+import {
+  buildBenchmarkExport,
+  streamDecodeCutoffs as streamDecodeCutoffsCore,
+} from './jxl-progressive-byte-benchmark-core.js';
 
 const runBtn = document.getElementById('run-byte-benchmark');
 const exportBtn = document.getElementById('export-json');
@@ -31,7 +35,7 @@ runBtn?.addEventListener('click', () => {
 });
 
 exportBtn?.addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), results: state.results }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify(buildBenchmarkExport(state.results), null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `progressive-byte-benchmark-${Date.now()}.json`;
@@ -61,6 +65,7 @@ async function runBenchmark() {
   const targetLongEdge = document.getElementById('target-long-edge')?.value ?? '800';
   const quality = clampInt(inputValue('quality', 85), 1, 100);
   const progressiveDetail = document.getElementById('progressive-detail')?.value ?? 'passes';
+  const transportProfile = document.getElementById('transport-profile')?.value ?? 'lte';
   const ssimulacra2Value = document.getElementById('ssimulacra2-target')?.value;
   const ssimulacra2Target = ssimulacra2Value === '' ? null : Number(ssimulacra2Value);
 
@@ -100,12 +105,25 @@ async function runBenchmark() {
         const plan = buildByteCutoffPlan(jxlBytes.byteLength, preset.byteCutoffs);
         const streamed = await streamDecodeCutoffs(jxlBytes, plan, preset.decode, (entry) => {
           setStatus(`${source.name} ${label}: streaming through ${formatByteCutoffLabel(entry)}...`);
-        });
-        const cutoffResults = streamed.cutoffs.map((cutoff) => classifyByteCutoffFrame(cutoff));
+        }, { transportProfile, selfStability: true });  // expose for byte runs (R1 self-stability)
+        // R1 wire buildSeries (connectedness from byte-metrics)
+        const cutoffPixels = [];
+        const byteSizes = [];
         for (const cutoff of streamed.cutoffs) {
-          renderCutoffTile(card.ladder, `${source.name} | ${label}`, cutoff.entry, cutoff);
-          await nextPaint();
+          if (cutoff.frame && cutoff.frame.pixels) {
+            const p = cutoff.frame.pixels instanceof Uint8Array ? cutoff.frame.pixels : new Uint8Array(cutoff.frame.pixels);
+            cutoffPixels.push(p);
+            byteSizes.push(cutoff.bytes);
+          }
         }
+        const builtSeries = (cutoffPixels.length > 0 && typeof buildSeries === 'function') ? buildSeries(targetRgba, cutoffPixels, byteSizes, preset.target.width, preset.target.height) : null;
+        const cutoffResults = streamed.cutoffs.map((cutoff) => classifyByteCutoffFrame(cutoff));
+        const frag = document.createDocumentFragment();
+        for (const cutoff of streamed.cutoffs) {
+          renderCutoffTile(frag, `${source.name} | ${label}`, cutoff.entry, cutoff);
+        }
+        card.ladder.appendChild(frag);
+        await nextPaint();
 
         const summary = summarizeByteCutoffResults(cutoffResults, jxlBytes.byteLength);
         variants.push({
@@ -115,8 +133,15 @@ async function runBenchmark() {
           encode: preset.encode,
           encodeMs,
           jxlBytes: jxlBytes.byteLength,
+          transportProfile: streamed.transportProfile,
+          firstPaintMs: streamed.firstPaintMs,
+          previewMs: streamed.previewMs,
+          finalMs: streamed.finalMs,
+          stallCount: streamed.stallCount,
+          avgPaintGapMs: streamed.avgPaintGapMs,
           summary,
           cutoffs: cutoffResults,
+          builtSeries,  // R1
         });
       }
       const targetVariant = variants.at(-1);
@@ -125,6 +150,7 @@ async function runBenchmark() {
       const record = {
         source: source.name,
         rawBytes: source.rawBytes,
+        transportProfile,
         variants,
         target: targetVariant?.target ?? null,
         summary: targetVariant?.summary ?? null,
@@ -190,49 +216,8 @@ async function encodeTarget(rgba, encodeOptions) {
   return concatChunks(chunks);
 }
 
-async function streamDecodeCutoffs(jxlBytes, plan, decodeOptions, onStep = () => {}) {
-  const decoder = createDecoder(decodeOptions);
-  const cutoffs = plan.map((entry) => ({ entry, bytes: entry.bytes, events: [], frame: null, error: null }));
-  const byBytes = new Map(cutoffs.map((cutoff) => [cutoff.bytes, cutoff]));
-  let currentEntry = plan[0] ?? null;
-  let streamError = null;
-  let error = null;
-  try {
-    const eventTask = (async () => {
-      for await (const event of decoder.events()) {
-        if (event.type === 'progress' || event.type === 'final') {
-          const cutoff = byBytes.get(currentEntry?.bytes) ?? cutoffs.at(-1);
-          if (cutoff) {
-            cutoff.events.push(event);
-            cutoff.frame = event;
-          }
-        }
-        if (event.type === 'error') throw new Error(`${event.code}: ${event.message}`);
-      }
-    })();
-    let offset = 0;
-    for (const entry of plan) {
-      if (entry.bytes <= offset) continue;
-      currentEntry = entry;
-      onStep(entry);
-      await decoder.push(exactBuffer(jxlBytes.subarray(offset, entry.bytes)));
-      offset = entry.bytes;
-      await waitForStreamEvents();
-    }
-    await decoder.close();
-    await eventTask;
-  } catch (caught) {
-    error = caught instanceof Error ? caught.message : String(caught);
-    streamError = error;
-  } finally {
-    await decoder.dispose();
-  }
-  if (streamError) {
-    for (const cutoff of cutoffs) {
-      if (!cutoff.frame) cutoff.error = streamError;
-    }
-  }
-  return { cutoffs, error };
+async function streamDecodeCutoffs(jxlBytes, plan, decodeOptions, onStep = () => {}, context = {}) {
+  return streamDecodeCutoffsCore(jxlBytes, plan, decodeOptions, onStep, context);
 }
 
 function createResultCard(source, index) {
@@ -256,7 +241,7 @@ function createResultCard(source, index) {
   return { el, meta, policy, ladder, table };
 }
 
-function renderCutoffTile(ladder, sourceName, entry, decoded) {
+function renderCutoffTile(parent, sourceName, entry, decoded) {
   const tile = document.createElement('button');
   tile.className = `bytebench-tile${decoded.frame ? '' : ' is-empty'}`;
   tile.type = 'button';
@@ -275,7 +260,7 @@ function renderCutoffTile(ladder, sourceName, entry, decoded) {
     tile.append(meta);
   }
 
-  ladder.append(tile);
+  parent.appendChild(tile);
 }
 
 function renderVariantHeading(container, text) {
@@ -291,9 +276,11 @@ function renderSummaryTable(container, record) {
     <tr>
       <td>${variant.label}</td>
       <td>${fmtMaybeBytes(variant.summary.firstPaintBytes)} (${fmtMaybePercent(variant.summary.firstPaintPercent)})</td>
+      <td>${fmtMaybeBytes(variant.summary.firstPerceptuallyGoodBytes)} (${fmtMaybePercent(variant.summary.firstPerceptuallyGoodPercent)})</td>
       <td>${fmtMaybeBytes(variant.summary.previewBytes)} (${fmtMaybePercent(variant.summary.previewPercent)})</td>
       <td>${fmtMaybeBytes(variant.summary.finalBytes)} (${fmtMaybePercent(variant.summary.finalPercent)})</td>
       <td>${variant.summary.usefulEarlyPaint ? 'yes' : 'no'}</td>
+      <td>${variant.summary.butterMonotone ? 'yes' : 'no'}</td>
       <td>${variant.summary.paintedCutoffs}</td>
       <td>${variant.summary.maxFrameCount}</td>
     </tr>
@@ -301,7 +288,7 @@ function renderSummaryTable(container, record) {
   container.innerHTML = `
     <table class="bytebench-table">
       <thead>
-        <tr><th>Variant</th><th>First paint</th><th>Preview</th><th>Final</th><th>Early?</th><th>Painted cutoffs</th><th>Frames</th></tr>
+        <tr><th>Variant</th><th>First paint</th><th>Percept. good (R1)</th><th>Preview</th><th>Final</th><th>Early?</th><th>Butter monotone</th><th>Painted cutoffs</th><th>Frames</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
@@ -421,6 +408,3 @@ function nextPaint() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
-function waitForStreamEvents() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
