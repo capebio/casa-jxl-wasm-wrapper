@@ -3,6 +3,7 @@
 //! See docs/superpowers/specs/2026-06-13-perceptual-metrics-simd-kernel-design.md
 
 mod blur;
+mod butteraugli;
 mod psnr;
 mod ssim;
 mod xyb;
