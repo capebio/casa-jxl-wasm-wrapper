@@ -4,3 +4,4 @@
 
 mod psnr;
 mod ssim;
+mod xyb;
