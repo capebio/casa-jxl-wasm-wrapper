@@ -1,4 +1,4 @@
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // F2 (WU-6): checkpoint for --resume crash recovery.
@@ -6,6 +6,7 @@ import { join } from "node:path";
 // Cleared on clean exit. Main coordinator persists; workers see opts.
 
 export interface CheckpointState {
+  version: "1";               // schema for resume forward-compat
   batchId: string;            // UUID per invocation
   startedAt: number;
   inFlight: string[];         // master paths currently being processed
@@ -42,6 +43,14 @@ async function writeFileAtomic(dest: string, data: string): Promise<void> {
   await withEbusyRetry(() => writeFile(tmp, data), "write-tmp");
   try {
     await withEbusyRetry(() => rename(tmp, dest), "rename-atomic");
+    // durability for crash recovery on cluster FS / power loss (win32 rename often sufficient)
+    if (process.platform !== "win32") {
+      try {
+        const fd = await open(dest, "r");
+        await fd.sync();
+        await fd.close();
+      } catch {}
+    }
   } catch (e: any) {
     if (e && e.code === "EEXIST") {
       await unlink(tmp).catch(() => {});
@@ -64,10 +73,10 @@ export async function readCheckpoint(outDir: string): Promise<CheckpointState | 
 
 export async function writeCheckpoint(outDir: string, state: CheckpointState): Promise<void> {
   const p = join(outDir, CHECKPOINT_FILE);
-  await writeFileAtomic(p, JSON.stringify(state, null, 2));
+  await writeFileAtomic(p, JSON.stringify(state)); // compact: I/O + disk win for large batches; machine file
 }
 
 export async function clearCheckpoint(outDir: string): Promise<void> {
   const p = join(outDir, CHECKPOINT_FILE);
-  await unlink(p).catch(() => {});
+  await withEbusyRetry(() => unlink(p), "clear-checkpoint").catch(() => {});
 }

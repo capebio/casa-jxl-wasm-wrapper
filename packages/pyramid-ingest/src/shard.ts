@@ -22,8 +22,10 @@ export function boundedConcurrency(
 /**
  * 0-based shard split for --shard i/N deterministic partition.
  * Used for fan-out across machines / processes without overlap.
+ * n<=0 => all (no sharding); i<0 or i>=n => [] (empty for this worker).
  */
 export function planShard<T>(items: readonly T[], i: number, n: number): T[] {
   if (n <= 0) return items.slice();
+  if (i < 0 || i >= n) return [];
   return items.filter((_, k) => (k % n) === i);
 }

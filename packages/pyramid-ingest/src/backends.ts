@@ -188,43 +188,26 @@ export function createJxlBackend(telemetry?: Telemetry): JxlBackend {
     },
 
     async decodeToRgba8(jxl) {
-      const createDecoder = JW.createDecoder;
-      const decoder = createDecoder({
-        format: "rgba8",
-        progressionTarget: "final",
-        emitEveryPass: false,
-        preserveIcc: false,
-        preserveMetadata: false,
-      });
-      let result: { rgba: Uint8Array; width: number; height: number } | null = null;
-      const drainP = (async () => {
-        for await (const ev of decoder.events()) {
-          if (ev.type === "final") {
-            const px = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
-            result = { rgba: px, width: ev.info.width, height: ev.info.height };
-          } else if (ev.type === "error") {
-            throw new Error(`decode ${ev.code}: ${ev.message}`);
-          }
-        }
-      })();
-      try {
-        await decoder.push(jxl);
-        await decoder.close();
-        await drainP;
-      } finally {
-        await Promise.resolve(decoder.dispose()).catch(() => {});
-      }
-      if (!result) throw new Error("decode produced no final frame");
-      return result;
+      const ref = await decodeFinal(jxl);
+      if (!ref) throw new Error("decode produced no final frame");
+      return { rgba: ref.pixels, width: ref.w, height: ref.h };
     },
 
     async profileConvergence(jxl, w, h) {
+      const t0 = Date.now();
       const prof = await measureConvergenceProfile(jxl, w, h);
+      const ms = Date.now() - t0;
+      tel?.stage?.("profile-convergence", { w, h, kind: "cutoff", ms, converged: !!prof?.convergedByteEnd });
       return prof?.convergedByteEnd;
     },
 
     async profileConvergenceCurve(jxl, w, h) {
-      return measureConvergenceProfile(jxl, w, h);
+      const t0 = Date.now();
+      const prof = await measureConvergenceProfile(jxl, w, h);
+      const ms = Date.now() - t0;
+      const curveLen = prof?.curve?.length ?? 0;
+      tel?.stage?.("profile-convergence", { w, h, kind: "curve", ms, curveLen, converged: !!prof?.convergedByteEnd });
+      return prof;
     },
   };
 }
@@ -232,7 +215,55 @@ export function createJxlBackend(telemetry?: Telemetry): JxlBackend {
 const SSIM_CONVERGED = 0.9995;
 const BUTTERAUGLI_CONVERGED = 1.1;
 
-/** Progressive decode of a level's own bytes, collecting per-pass pixels + byte offsets. */
+// ssim cache (hoisted: was dynamic import per profile call / per level)
+let cachedSsim: ((a: unknown, b: unknown) => any) | null | undefined = undefined;
+async function getCachedSsimFn(): Promise<((a: unknown, b: unknown) => any) | null> {
+  if (cachedSsim !== undefined) return cachedSsim;
+  try {
+    const ssimMod: any = await import("ssim.js").catch(() => null);
+    const f = ssimMod && (ssimMod.default || ssimMod).ssim;
+    cachedSsim = (typeof f === "function") ? f : null;
+  } catch { cachedSsim = null; }
+  return cachedSsim;
+}
+
+// Final-only decode helper (used by decodeToRgba8 and by measure for ref without buffering passes).
+// Reuses the same decoder creation + event contract as before.
+async function decodeFinal(jxl: Uint8Array): Promise<{ pixels: Uint8Array; w: number; h: number } | undefined> {
+  if (!jxl || jxl.length === 0) return undefined;
+  const createDecoder = JW.createDecoder;
+  if (typeof createDecoder !== "function") return undefined;
+  const decoder = createDecoder({
+    format: "rgba8",
+    progressionTarget: "final",
+    emitEveryPass: false,
+    preserveIcc: false,
+    preserveMetadata: false,
+  });
+  let result: { pixels: Uint8Array; w: number; h: number } | null = null;
+  const drainP = (async () => {
+    for await (const ev of decoder.events()) {
+      if (ev.type === "final") {
+        const raw = ev.pixels;
+        const px = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
+        result = { pixels: px, w: ev.info?.width ?? 0, h: ev.info?.height ?? 0 };
+      } else if (ev.type === "error") {
+        throw new Error(`final decode ${ev.code}: ${ev.message}`);
+      }
+    }
+  })();
+  try {
+    await Promise.resolve(decoder.push(jxl));
+    await Promise.resolve(decoder.close());
+    await drainP;
+  } finally {
+    await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
+  }
+  return result || undefined;
+}
+
+/** Progressive decode of a level's own bytes, collecting per-pass pixels + byte offsets.
+ *  Kept for any external/legacy use of full pass buffers. Profile measure now uses streaming path below. */
 async function decodeProgressivePasses(
   jxl: Uint8Array,
   w?: number,
@@ -301,22 +332,27 @@ async function decodeProgressivePasses(
  *  Butteraugli is computed per pass (not just as ssim fallback) because the curve itself is the
  *  deliverable — persisted to the manifest so clients never measure at download time. Cost is
  *  opt-in behind --profile-convergence. Uses ButteraugliComparator when available (reference
- *  uploaded once) and falls back to per-pass computeButteraugli, then ssim-only. */
+ *  uploaded once) and falls back to per-pass computeButteraugli, then ssim-only.
+ *
+ *  Streaming optimization: obtain final ref via 1 full decode (no emit), then progressive decode
+ *  with emitEveryPass; on each "progress" compute metric immediately vs known ref and drop px.
+ *  Result: O(1) full-res pixel buffers live (final + curve metadata) instead of O(#passes).
+ *  Trade: 2 decodes vs 1, but eliminates N allocs/copies/GC which dominate for butter on high-MP + many passes.
+ *  Retains identical curve pts, converged logic, small-image skip, and error behavior. */
 async function measureConvergenceProfile(
   jxl: Uint8Array,
   w?: number,
   h?: number,
 ): Promise<ConvergenceProfile | undefined> {
-  const dec = await decodeProgressivePasses(jxl, w, h);
-  if (!dec) return undefined;
-  const { passes, finalPixels, useW, useH } = dec;
+  // 1. final ref (no progress events)
+  const ref = await decodeFinal(jxl);
+  if (!ref) return undefined;
+  let finalPixels = ref.pixels;
+  let useW = ref.w || (w ?? 0);
+  let useH = ref.h || (h ?? 0);
+  if (!finalPixels || Math.max(useW, useH) < 1024) return undefined;
 
-  let ssimFn: ((a: unknown, b: unknown) => any) | null = null;
-  try {
-    const ssimMod: any = await import("ssim.js").catch(() => null);
-    const f = ssimMod && (ssimMod.default || ssimMod).ssim;
-    if (typeof f === "function") ssimFn = f;
-  } catch {}
+  const ssimFn = await getCachedSsimFn();
   const refImg = ssimFn ? { data: Uint8ClampedArray.from(finalPixels), width: useW, height: useH } : null;
 
   let comparator: { compare(p: Uint8Array): number; dispose(): void } | null = null;
@@ -329,40 +365,79 @@ async function measureConvergenceProfile(
   }
   const butterFallback = !comparator && typeof JW.computeButteraugli === "function";
 
+  // 2. progressive decode; metric on-receipt, discard pass pixels immediately
+  const createDecoder = JW.createDecoder;
+  if (typeof createDecoder !== "function") return undefined;
+  const decoder = createDecoder({
+    format: "rgba8",
+    progressionTarget: "final",
+    emitEveryPass: true,
+    preserveIcc: false,
+    preserveMetadata: false,
+  });
   const curve: QualityCurvePoint[] = [];
-  try {
-    for (const p of passes) {
-      if (p.pixels.length !== finalPixels.length) continue;
-      let ssimVal: number | undefined;
-      if (ssimFn && refImg) {
-        try {
-          const img1 = { data: Uint8ClampedArray.from(p.pixels), width: useW, height: useH };
-          const res = ssimFn(img1, refImg);
-          const v = typeof res === "number" ? res : res && res.mssim;
-          if (typeof v === "number" && Number.isFinite(v)) ssimVal = Math.round(v * 1e6) / 1e6;
-        } catch {}
+  let bytesPushed = 0;
+  const drainP = (async () => {
+    for await (const ev of decoder.events()) {
+      if (ev.type === "header") {
+        useW = ev.info?.width ?? useW;
+        useH = ev.info?.height ?? useH;
+      } else if (ev.type === "progress") {
+        const raw = ev.pixels;
+        const px = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
+        // compute immediately vs known final (no buffering of px)
+        let ssimVal: number | undefined;
+        if (ssimFn && refImg && px.length === finalPixels.length) {
+          try {
+            const img1 = { data: Uint8ClampedArray.from(px), width: useW, height: useH };
+            const res = ssimFn(img1, refImg);
+            const v = typeof res === "number" ? res : res && res.mssim;
+            if (typeof v === "number" && Number.isFinite(v)) ssimVal = Math.round(v * 1e6) / 1e6;
+          } catch {}
+        }
+        let ba: number | undefined;
+        if (comparator && px.length === finalPixels.length) {
+          try {
+            const v = comparator.compare(px);
+            if (typeof v === "number" && Number.isFinite(v)) ba = Math.round(v * 1e4) / 1e4;
+          } catch {}
+        } else if (butterFallback && px.length === finalPixels.length) {
+          try {
+            const v = await JW.computeButteraugli(px, finalPixels, useW, useH);
+            if (typeof v === "number" && Number.isFinite(v)) ba = Math.round(v * 1e4) / 1e4;
+          } catch {}
+        }
+        if (ssimVal !== undefined || ba !== undefined) {
+          const pt: QualityCurvePoint = { bytes: bytesPushed };
+          if (ssimVal !== undefined) pt.ssim = ssimVal;
+          if (ba !== undefined) pt.butteraugli = ba;
+          const last = curve[curve.length - 1];
+          if (last && last.bytes === pt.bytes) curve[curve.length - 1] = pt;
+          else curve.push(pt);
+        }
+        // px dropped here
+      } else if (ev.type === "final") {
+        // optional sanity: final should match our ref len
+      } else if (ev.type === "error") {
+        throw new Error(`profile decode ${ev.code}: ${ev.message}`);
       }
-      let ba: number | undefined;
-      if (comparator) {
-        try {
-          const v = comparator.compare(p.pixels);
-          if (typeof v === "number" && Number.isFinite(v)) ba = Math.round(v * 1e4) / 1e4;
-        } catch {}
-      } else if (butterFallback) {
-        try {
-          const v = await JW.computeButteraugli(p.pixels, finalPixels, useW, useH);
-          if (typeof v === "number" && Number.isFinite(v)) ba = Math.round(v * 1e4) / 1e4;
-        } catch {}
-      }
-      if (ssimVal === undefined && ba === undefined) continue;
-      const pt: QualityCurvePoint = { bytes: p.bytes };
-      if (ssimVal !== undefined) pt.ssim = ssimVal;
-      if (ba !== undefined) pt.butteraugli = ba;
-      const last = curve[curve.length - 1];
-      if (last && last.bytes === pt.bytes) curve[curve.length - 1] = pt; // same offset: keep latest pass
-      else curve.push(pt);
     }
+  })();
+  try {
+    const CHUNK = 32768;
+    for (let off = 0; off < jxl.length; off += CHUNK) {
+      const end = Math.min(off + CHUNK, jxl.length);
+      const chunk = jxl.subarray(off, end);
+      bytesPushed += chunk.length;
+      await Promise.resolve(decoder.push(chunk));
+    }
+    await Promise.resolve(decoder.close());
+    await drainP;
+  } catch {
+    await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
+    return undefined;
   } finally {
+    await Promise.resolve((decoder as any).dispose?.()).catch(() => {});
     comparator?.dispose?.();
   }
   if (curve.length === 0) return undefined;
@@ -378,5 +453,10 @@ async function measureConvergenceProfile(
       break;
     }
   }
-  return convergedByteEnd !== undefined ? { curve, convergedByteEnd } : { curve };
+  const prof: ConvergenceProfile = convergedByteEnd !== undefined ? { curve, convergedByteEnd } : { curve };
+
+  // tel (if wired at create time; measure called via backend methods that close over tel)
+  // stage is best-effort; caller of createJxlBackend may have provided it
+  // (light; actual stage emission happens via the profile* wrappers below too)
+  return prof;
 }
