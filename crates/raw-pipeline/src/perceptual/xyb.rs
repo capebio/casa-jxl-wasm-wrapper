@@ -21,7 +21,8 @@ pub(crate) fn sqrt_lin_lut() -> &'static [f32; 256] {
     })
 }
 
-/// Raw base pointer to the sqrt-linear LUT, for SIMD gather paths.
+/// Raw base pointer to the sqrt-linear LUT, for the x86 SIMD gather paths.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn sqrt_lin_lut_ptr() -> *const f32 {
     sqrt_lin_lut().as_ptr()
 }

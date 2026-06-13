@@ -68,6 +68,86 @@ pub fn demosaic_bench_first_diff() -> i32 {
     })
 }
 
+fn demo_checksum3(r: &[u16], g: &[u16], b: &[u16]) -> u32 {
+    let mut c = demo_checksum(r);
+    c = c.wrapping_mul(31).wrapping_add(demo_checksum(g));
+    c = c.wrapping_mul(31).wrapping_add(demo_checksum(b));
+    c
+}
+
+#[wasm_bindgen]
+pub fn demosaic_bench_planar_scalar() -> u32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        let (r, gp, bp) = demosaic::demosaic_rggb_planar(&g.0, g.1, g.2).unwrap();
+        demo_checksum3(&r, &gp, &bp)
+    })
+}
+
+#[wasm_bindgen]
+pub fn demosaic_bench_planar_simd() -> u32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        let (r, gp, bp) = demosaic::demosaic_rggb_planar_simd(&g.0, g.1, g.2).unwrap();
+        demo_checksum3(&r, &gp, &bp)
+    })
+}
+
+#[wasm_bindgen]
+pub fn demosaic_bench_planar_equal() -> bool {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        demosaic::demosaic_rggb_planar(&g.0, g.1, g.2).unwrap()
+            == demosaic::demosaic_rggb_planar_simd(&g.0, g.1, g.2).unwrap()
+    })
+}
+
+#[wasm_bindgen]
+pub fn demosaic_bench_planar_first_diff() -> i32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        let (ra, ga, ba) = demosaic::demosaic_rggb_planar(&g.0, g.1, g.2).unwrap();
+        let (rs, gs, bs) = demosaic::demosaic_rggb_planar_simd(&g.0, g.1, g.2).unwrap();
+        let n = ra.len();
+        for i in 0..n {
+            if ra[i] != rs[i] { return i as i32; }
+            if ga[i] != gs[i] { return (n + i) as i32; }
+            if ba[i] != bs[i] { return (2 * n + i) as i32; }
+        }
+        -1
+    })
+}
+
+#[wasm_bindgen]
+pub fn demosaic_bench_shuffle_simd() -> u32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        demo_checksum(&demosaic::demosaic_rggb_shuffle_simd(&g.0, g.1, g.2).unwrap())
+    })
+}
+
+#[wasm_bindgen]
+pub fn demosaic_bench_shuffle_equal() -> bool {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        demosaic::demosaic_rggb(&g.0, g.1, g.2).unwrap()
+            == demosaic::demosaic_rggb_shuffle_simd(&g.0, g.1, g.2).unwrap()
+    })
+}
+
+#[wasm_bindgen]
+pub fn demosaic_bench_shuffle_first_diff() -> i32 {
+    DEMO_BENCH.with(|b| {
+        let g = b.borrow();
+        let a = demosaic::demosaic_rggb(&g.0, g.1, g.2).unwrap();
+        let s = demosaic::demosaic_rggb_shuffle_simd(&g.0, g.1, g.2).unwrap();
+        for i in 0..a.len() {
+            if a[i] != s[i] { return i as i32; }
+        }
+        -1
+    })
+}
+
 /// Result of processing an ORF: RGB8 buffer + dims (post-orientation).
 #[wasm_bindgen]
 pub struct ProcessResult {
@@ -86,6 +166,12 @@ pub struct ProcessResult {
     pub tonemap_ms: f64,
     #[wasm_bindgen(readonly)]
     pub orient_ms: f64,
+    #[wasm_bindgen(readonly)]
+    pub preview_demosaic_ms: f64,  // fast planar bilinear demosaic for lb/thumb previews
+    #[wasm_bindgen(readonly)]
+    pub preview_downscale_ms: f64,  // planar downscales for previews (lb + thumb)
+    #[wasm_bindgen(readonly)]
+    pub fast_preview: bool,  // true if fast planar bilinear + planar down was used for lb/thumb (vs full mhc path)
     #[wasm_bindgen(readonly)]
     pub wb_r_used: f32,
     #[wasm_bindgen(readonly)]
@@ -469,6 +555,17 @@ struct OrfDecoded {
     params: pipeline::PipelineParams,
     color_matrix_from_mn: bool,
     color_matrix_flat: [f32; 9],
+    // Hypercar: precomputed fast planar bilinear + planar down for lb/thumb (cheap SIMD path, no mhc cost for preview).
+    // Packed LE u8 6B/px. Avoids full-res interleaved materialization for common preview paths.
+    lb_packed: Vec<u8>,
+    lb_w: usize,
+    lb_h: usize,
+    thumb_packed: Vec<u8>,
+    thumb_w: usize,
+    thumb_h: usize,
+    preview_demosaic_ms: f64,  // fast planar bilinear demosaic for previews
+    preview_downscale_ms: f64,  // planar downscales for lb + thumb previews
+    fast_preview: bool,  // fast planar path used for previews
 }
 
 /// Shared ORF decode path: parse → validate → decompress → demosaic → NR → WB/matrix setup.
@@ -494,6 +591,19 @@ fn decode_orf_raw(data: &[u8]) -> Result<OrfDecoded, JsError> {
     let t = now_ms();
     let raw = decompress::decompress(strip, w, h).map_err(|e| JsError::new(&e))?;
     let decompress_ms = now_ms() - t;
+
+    // Hypercar fast path for previews (OUT_LIGHTBOX/THUMB): always use planar bilinear SIMD demosaic + planar downscale.
+    // Cheap (SIMD planar store win), no mhc cost for common gallery/lb paths. mhc only for full quality tone when OUT_FULL_RGB8.
+    let (lb_w, lb_h) = target_dims(w, h, 1800);
+    let (thumb_w, thumb_h) = target_dims(w, h, 360);
+    let t_dem = now_ms();
+    let (pr, pg, pb) = demosaic::demosaic_rggb_planar(&raw, w, h).map_err(|e| JsError::new(&e))?;
+    let preview_demosaic_ms = now_ms() - t_dem;  // just the fast planar bilinear demosaic
+    let t_down = now_ms();
+    let lb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, lb_w, lb_h);
+    let thumb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, thumb_w, thumb_h);
+    let preview_downscale_ms = now_ms() - t_down;  // the two planar downs for previews (lb + thumb)
+    let fast_preview = true;  // we always compute and use the fast planar path for previews now
 
     let mut params = pipeline::PipelineParams::default_olympus();
     // Trust camera WB_RBLevels (ImageProcessing 0x0100 / MakerNote 0x1017/1018/1029)
@@ -557,6 +667,15 @@ fn decode_orf_raw(data: &[u8]) -> Result<OrfDecoded, JsError> {
         params,
         color_matrix_from_mn,
         color_matrix_flat,
+        lb_packed,
+        lb_w,
+        lb_h,
+        thumb_packed,
+        thumb_w,
+        thumb_h,
+        preview_demosaic_ms,
+        preview_downscale_ms,
+        fast_preview,
     })
 }
 
@@ -579,27 +698,27 @@ fn process_orf_impl(
         mut params,
         color_matrix_from_mn,
         color_matrix_flat,
+        lb_packed,
+        lb_w,
+        lb_h,
+        thumb_packed,
+        thumb_w,
+        thumb_h,
+        preview_demosaic_ms,
+        preview_downscale_ms,
+        fast_preview,
     } = decoded;
 
-    let (lb_w, lb_h) = target_dims(w, h, 1800);
+    // Hypercar: use precomputed fast planar bilinear + planar down for lb/thumb (cheap SIMD, no mhc for preview paths).
+    // The old down from (mhc) rgb16 is bypassed for previews; full rgb16 only for OUT_FULL_RGB8 tone.
     let (rgb16_lb, out_lb_w, out_lb_h) = if output_flags & OUT_LIGHTBOX != 0 {
-        let lb = downscale_rgb16_impl(&rgb16, w, h, lb_w, lb_h);
-        (lb, lb_w, lb_h)
+        (lb_packed, lb_w, lb_h)
     } else {
         (vec![], 0, 0)
     };
 
-    let (thumb_w, thumb_h) = target_dims(w, h, 360);
     let (rgb16_thumb, out_thumb_w, out_thumb_h) = if output_flags & OUT_THUMB != 0 {
-        let thumb = if output_flags & OUT_LIGHTBOX != 0 {
-            // Optimized: downscale directly from the packed LE bytes we just created for lb.
-            // Avoids a full unpack allocation + pass when both lb and thumb are requested
-            // (the common UI case for LookRenderer + gallery thumbs).
-            downscale_packed_rgb16_le(&rgb16_lb, lb_w, lb_h, thumb_w, thumb_h)
-        } else {
-            downscale_rgb16_impl(&rgb16, w, h, thumb_w, thumb_h)
-        };
-        (thumb, thumb_w, thumb_h)
+        (thumb_packed, thumb_w, thumb_h)
     } else {
         (vec![], 0, 0)
     };
@@ -632,7 +751,10 @@ fn process_orf_impl(
         if params.texture != 0.0 || params.clarity != 0.0 {
             pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
         }
-        let rgb8 = pipeline::process(&rgb16, &params);
+        // Lens 23/24: use process_into + preallocated buffer to avoid internal Vec alloc
+        // inside the tone path (reuses the "into" pattern from demosaic/pipeline).
+        let mut rgb8 = vec![0u8; w * h * 3];
+        pipeline::process_into(&rgb16, &params, &mut rgb8);
         let tonemap_ms = now_ms() - t;
         drop(rgb16);
         let t2 = now_ms();
@@ -659,6 +781,9 @@ fn process_orf_impl(
         demosaic_ms,
         tonemap_ms,
         orient_ms,
+        preview_demosaic_ms,
+        preview_downscale_ms,
+        fast_preview,
         wb_r_used: params.wb_r,
         wb_b_used: params.wb_b,
         color_matrix_from_mn,
@@ -975,6 +1100,41 @@ pub fn downscale_rgb(
         }
     }
     Ok(out)
+}
+
+/// Planar SoA downscale (hypercar layer): 3 separate contiguous planes in (R/G/B from demosaic_planar).
+/// Zero interleave cost. Sequential per-channel box filter = massive cache win vs interleaved scatter.
+/// Outputs packed LE u8 6B/px (same as before) for drop-in use in lb/thumb paths. Integer fast path per plane.
+fn downscale_rgb16_planar(r: &[u16], g: &[u16], b: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; dw * dh * 6];
+    if (sw % dw == 0) && (sh % dh == 0) {
+        let xstep = sw / dw;
+        let ystep = sh / dh;
+        let pixel_count = (xstep * ystep) as u32;
+        let mut o = 0usize;
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                let x_base = dx * xstep;
+                let mut row_base = dy * ystep * sw;
+                for _yy in 0..ystep {
+                    let mut idx = row_base + x_base;
+                    for _xx in 0..xstep {
+                        rr += r[idx] as u32; gg += g[idx] as u32; bb += b[idx] as u32;
+                        idx += 1;
+                    }
+                    row_base += sw;
+                }
+                write_rgb16_le(&mut out, o, (rr / pixel_count) as u16, (gg / pixel_count) as u16, (bb / pixel_count) as u16);
+                o += 6;
+            }
+        }
+        return out;
+    }
+    downscale_rgb_float_path(sw, sh, dw, dh, &mut out, |idx| {
+        (r[idx] as u32, g[idx] as u32, b[idx] as u32)
+    });
+    out
 }
 
 /// Box-filter downscale an RGBA8 buffer.  Useful for thumbnail generation.
@@ -1690,6 +1850,9 @@ fn process_dng_impl(
         demosaic_ms,
         tonemap_ms,
         orient_ms,
+        preview_demosaic_ms: 0.0,
+        preview_downscale_ms: 0.0,
+        fast_preview: false,
         wb_r_used: params.wb_r,
         wb_b_used: params.wb_b,
         color_matrix_from_mn: params.color_matrix.is_some(),
@@ -2020,4 +2183,72 @@ pub fn process_cr2_with_flags(
         clarity,
     };
     process_cr2_impl(decode_cr2_raw(data)?, output_flags, &look)
+}
+
+// ---------------------------------------------------------------------------
+// Perceptual metrics (Butteraugli-approx / SSIM / PSNR) — wasm-bindgen binding.
+// Precompute the reference once, evaluate many test images against it. The kernel
+// lives in raw-pipeline (shared with native/Tauri); here we only expose it.
+// ---------------------------------------------------------------------------
+
+use raw_pipeline::perceptual::{Comparer as PerceptualCore, Metrics, Opts};
+
+#[wasm_bindgen]
+pub struct PerceptualComparer {
+    inner: PerceptualCore,
+    scratch: Vec<u8>, // grow-only RGBA staging for the zero-copy path
+}
+
+#[wasm_bindgen]
+impl PerceptualComparer {
+    #[wasm_bindgen(constructor)]
+    pub fn new(ref_rgba: &[u8], width: usize, height: usize) -> PerceptualComparer {
+        let n = width * height;
+        let inner = PerceptualCore::new(ref_rgba, width, height, Opts::default());
+        PerceptualComparer { inner, scratch: vec![0u8; n * 4] }
+    }
+
+    /// Copying convenience path: pass RGBA, get {butteraugli, ssim, psnr} as a JS object.
+    pub fn all(&mut self, test_rgba: &[u8]) -> JsValue {
+        metrics_to_js(&self.inner.all(test_rgba))
+    }
+
+    pub fn butteraugli(&mut self, test_rgba: &[u8]) -> f32 {
+        self.inner.butteraugli(test_rgba)
+    }
+    pub fn ssim(&self, test_rgba: &[u8]) -> f32 {
+        self.inner.ssim(test_rgba)
+    }
+    pub fn psnr(&self, test_rgba: &[u8]) -> f32 {
+        self.inner.psnr(test_rgba)
+    }
+
+    /// Zero-copy: returns a pointer into the wasm heap staging buffer of `len`
+    /// bytes. JS writes the test RGBA straight here (no ArrayBuffer copy across
+    /// the boundary), then calls `all_at(len)`. Grows the buffer if needed; the
+    /// returned pointer is valid until the next `input_ptr` call.
+    pub fn input_ptr(&mut self, len: usize) -> *mut u8 {
+        if self.scratch.len() < len {
+            self.scratch.resize(len, 0);
+        }
+        self.scratch.as_mut_ptr()
+    }
+
+    /// Compute all three metrics over the `len` bytes previously written into the
+    /// staging buffer via `input_ptr`.
+    pub fn all_at(&mut self, len: usize) -> JsValue {
+        // Split the borrow: take the staging buffer out, evaluate, put it back.
+        let buf = std::mem::take(&mut self.scratch);
+        let m = self.inner.all(&buf[..len]);
+        self.scratch = buf;
+        metrics_to_js(&m)
+    }
+}
+
+fn metrics_to_js(m: &Metrics) -> JsValue {
+    let o = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&o, &"butteraugli".into(), &JsValue::from_f64(m.butteraugli as f64));
+    let _ = js_sys::Reflect::set(&o, &"ssim".into(), &JsValue::from_f64(m.ssim as f64));
+    let _ = js_sys::Reflect::set(&o, &"psnr".into(), &JsValue::from_f64(m.psnr as f64));
+    o.into()
 }
