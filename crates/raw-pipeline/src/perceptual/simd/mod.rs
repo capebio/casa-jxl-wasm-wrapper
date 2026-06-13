@@ -9,6 +9,22 @@ pub enum Backend {
     /// machine (i7-10850H has no AVX-512) — kept for the production fleet per an
     /// explicit decision; correctness verified by parity tests on real hardware.
     Avx512 = 3,
+    /// wasm32 v128 SIMD (4-wide f32). Selected at wasm build time when simd128 is on.
+    WasmSimd = 4,
+}
+
+/// Backend for the current wasm build: WasmSimd when compiled with `+simd128`,
+/// else Scalar. (simd128 is a compile-time target feature, not runtime-probed.)
+#[cfg(target_arch = "wasm32")]
+pub fn detect_wasm() -> Backend {
+    #[cfg(target_feature = "simd128")]
+    {
+        Backend::WasmSimd
+    }
+    #[cfg(not(target_feature = "simd128"))]
+    {
+        Backend::Scalar
+    }
 }
 
 /// Best backend available on this CPU. Prefers AVX-512 when present (its fast
@@ -34,12 +50,15 @@ pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx512;
 
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn detect_returns_something() {
         let b = detect_native(false);
-        assert!(matches!(b, Backend::Scalar | Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512));
+        assert!(matches!(b, Backend::Scalar | Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512 | Backend::WasmSimd));
     }
 }

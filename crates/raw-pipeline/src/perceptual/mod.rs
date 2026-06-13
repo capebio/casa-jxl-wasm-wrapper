@@ -115,8 +115,21 @@ impl Comparer {
                 _ => Backend::Scalar,
             },
             // rsqrt variant stays opt-in (Force(2)) until the flip-flop bench
-            // (Task 11) promotes it; Auto picks strict sqrt for now.
-            BackendChoice::Auto => detect_native(false),
+            // promotes it; Auto picks strict sqrt for now. Target-aware.
+            BackendChoice::Auto => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    detect_native(false)
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    simd::detect_wasm()
+                }
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
+                {
+                    Backend::Scalar
+                }
+            }
         };
         Comparer {
             width, height, n, opts, backend, levels,
@@ -143,6 +156,11 @@ impl Comparer {
                     &mut self.tx, &mut self.ty, &mut self.tb,
                 );
             },
+            #[cfg(target_arch = "wasm32")]
+            Backend::WasmSimd => simd::wasm::pixels_to_xyb_wasm(
+                test, self.n, xyb::sqrt_lin_lut(),
+                &mut self.tx, &mut self.ty, &mut self.tb,
+            ),
             _ => xyb::pixels_to_xyb(test, self.n, &mut self.tx, &mut self.ty, &mut self.tb),
         }
     }
@@ -161,6 +179,12 @@ impl Comparer {
                 simd::avx512::downsample_avx512(&self.tx, &mut self.dx, w, h, dw, dh);
                 simd::avx512::downsample_avx512(&self.ty, &mut self.dy, w, h, dw, dh);
                 simd::avx512::downsample_avx512(&self.tb, &mut self.db, w, h, dw, dh);
+            },
+            #[cfg(target_arch = "wasm32")]
+            Backend::WasmSimd => {
+                simd::wasm::downsample_wasm(&self.tx, &mut self.dx, w, h, dw, dh);
+                simd::wasm::downsample_wasm(&self.ty, &mut self.dy, w, h, dw, dh);
+                simd::wasm::downsample_wasm(&self.tb, &mut self.db, w, h, dw, dh);
             },
             _ => {
                 downsample_inplace(&self.tx, &mut self.dx, w, h, dw, dh);
@@ -243,6 +267,8 @@ impl Comparer {
             Backend::Avx512 => unsafe {
                 simd::avx512::scale_err_avx512(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb, false)
             },
+            #[cfg(target_arch = "wasm32")]
+            Backend::WasmSimd => simd::wasm::scale_err_wasm(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k.kx, k.ky, k.kb),
             _ => butteraugli::scale_err(&lvl.mask, &lvl.x, &lvl.y, &lvl.b, tx, ty, tb, cur_n, k),
         }
     }
