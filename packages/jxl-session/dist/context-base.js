@@ -1,8 +1,9 @@
 // Shared JxlContext implementation. Environment-specific entry points live in
 // context.ts and browser.ts so browser bundlers never see node worker imports.
-import { Scheduler, globalCoreBudget, defaultCoreBudgetCapacity } from "@casabio/jxl-scheduler";
+import { Scheduler, globalCoreBudget, defaultCoreBudgetCapacity, } from "@casabio/jxl-scheduler";
 import { DecodeSessionImpl } from "./decode-session.js";
 import { EncodeSessionImpl } from "./encode-session.js";
+import { shouldUseMtImmediately } from "./tier-routing.js";
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 // Allowed URL schemes for the caller-supplied wasmUrl (task 007-security-a1b2c3d4).
 const ALLOWED_WASM_URL_PREFIXES = ["https://", "http://", "blob:", "/"];
@@ -55,43 +56,35 @@ function defaultCapabilities() {
         libjxlVersion: "unknown",
     };
 }
-export class JxlContextImpl {
-    scheduler;
+export function computeWorkerCostForWasmUrl(url) {
+    if (!url)
+        return 1;
+    try {
+        const u = new URL(url, "https://dummy.invalid");
+        const tier = u.searchParams.get("jxlWorkerTier");
+        if (tier === "relaxed-simd-mt" || tier === "simd-mt") {
+            return defaultCoreBudgetCapacity();
+        }
+    }
+    catch {
+        // malformed url -> conservative ST cost
+    }
+    return 1;
+}
+function createScheduler(factory, opts, maxWorkers, workerCost) {
+    return new Scheduler({
+        factory,
+        maxWorkers,
+        idleTimeoutMs: opts?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+        ...(opts?.pushHwm !== undefined ? { pushHwm: opts.pushHwm } : {}),
+        coreBudget: globalCoreBudget,
+        workerCost,
+    });
+}
+class CapabilityAwareContext {
     caps = defaultCapabilities();
     shuttingDown = false;
-    // Track the probe so shutdown() can guard against stale writes
-    // (task 007-concurrency-a5b6c7d8).
     probeSettled = false;
-    constructor(factory, opts, maxWorkers) {
-        const workerCost = this.computeWorkerCost(opts);
-        this.scheduler = new Scheduler({
-            factory,
-            maxWorkers,
-            idleTimeoutMs: opts?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
-            ...(opts?.pushHwm !== undefined ? { pushHwm: opts.pushHwm } : {}),
-            coreBudget: globalCoreBudget,
-            workerCost,
-        });
-    }
-    computeWorkerCost(opts) {
-        const url = opts?.wasmUrl;
-        if (!url)
-            return 1;
-        try {
-            // Supports relative or absolute worker script URLs carrying ?jxlWorkerTier=...
-            const u = new URL(url, "https://dummy.invalid");
-            const tier = u.searchParams.get("jxlWorkerTier");
-            if (tier === "relaxed-simd-mt" || tier === "simd-mt") {
-                return defaultCoreBudgetCapacity();
-            }
-        }
-        catch {
-            // malformed url -> conservative ST cost
-        }
-        return 1;
-    }
-    // Kick off the async capability probe; capabilities() returns the cached
-    // value, which updates once the probe resolves.
     probeCapabilities() {
         void (async () => {
             try {
@@ -110,6 +103,32 @@ export class JxlContextImpl {
             }
         })();
     }
+    capabilities() {
+        return this.caps;
+    }
+}
+export function createTieredSchedulerRouter(params) {
+    const sleep = params.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const canUseMtNow = () => shouldUseMtImmediately(params.mtScheduler.getMetrics(), params.maxWorkers, params.coreBudget.available, params.mtCost);
+    return {
+        async pick(priority) {
+            if (priority === "visible") {
+                if (canUseMtNow())
+                    return params.mtScheduler;
+                await sleep(params.visibleGraceMs);
+                return canUseMtNow() ? params.mtScheduler : params.stScheduler;
+            }
+            return canUseMtNow() ? params.mtScheduler : params.stScheduler;
+        },
+    };
+}
+export class JxlContextImpl extends CapabilityAwareContext {
+    scheduler;
+    constructor(factory, opts, maxWorkers) {
+        super();
+        const workerCost = computeWorkerCostForWasmUrl(opts?.wasmUrl);
+        this.scheduler = createScheduler(factory, opts, maxWorkers, workerCost);
+    }
     decode(opts) {
         if (this.shuttingDown) {
             throw new Error("[jxl-session] decode() called after shutdown()");
@@ -122,12 +141,53 @@ export class JxlContextImpl {
         }
         return new EncodeSessionImpl(this.scheduler, opts);
     }
-    capabilities() {
-        return this.caps;
-    }
     async shutdown() {
         this.shuttingDown = true;
         await this.scheduler.shutdown();
+    }
+}
+export class TieredJxlContextImpl extends CapabilityAwareContext {
+    mtScheduler;
+    stScheduler;
+    router;
+    constructor(params) {
+        super();
+        const mtCost = computeWorkerCostForWasmUrl(params.opts?.wasmUrl);
+        this.mtScheduler = createScheduler(params.mtFactory, params.opts, params.maxWorkers, mtCost);
+        this.stScheduler = createScheduler(params.stFactory, params.opts, params.maxWorkers, 1);
+        this.router = createTieredSchedulerRouter({
+            mtScheduler: {
+                getMetrics: () => {
+                    const metrics = this.mtScheduler.getMetrics();
+                    return {
+                        poolIdle: metrics.poolIdle,
+                        poolSize: metrics.poolSize,
+                        poolSpawning: metrics.poolSpawning,
+                    };
+                },
+            },
+            stScheduler: this.stScheduler,
+            mtCost,
+            maxWorkers: params.maxWorkers,
+            coreBudget: globalCoreBudget,
+            visibleGraceMs: params.visibleGraceMs ?? 16,
+        });
+    }
+    decode(opts) {
+        if (this.shuttingDown) {
+            throw new Error("[jxl-session] decode() called after shutdown()");
+        }
+        return new DecodeSessionImpl(this.router.pick(opts.priority ?? "visible"), opts);
+    }
+    encode(opts) {
+        if (this.shuttingDown) {
+            throw new Error("[jxl-session] encode() called after shutdown()");
+        }
+        return new EncodeSessionImpl(this.router.pick(opts.priority ?? "visible"), opts);
+    }
+    async shutdown() {
+        this.shuttingDown = true;
+        await Promise.all([this.mtScheduler.shutdown(), this.stScheduler.shutdown()]);
     }
 }
 //# sourceMappingURL=context-base.js.map

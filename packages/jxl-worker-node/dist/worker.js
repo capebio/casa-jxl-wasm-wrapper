@@ -99,13 +99,13 @@ function failPendingDecode(sessionId, code, message) {
     cancelledPendingStarts.add(sessionId);
     pendingDecodeStarts.delete(sessionId);
     clearQueuedDecode(sessionId);
-    port.postMessage({ type: "decode_error", sessionId, code, message });
+    safePostMessage({ type: "decode_error", sessionId, code, message });
 }
 function failPendingEncode(sessionId, code, message) {
     cancelledPendingStarts.add(sessionId);
     pendingEncodeStarts.delete(sessionId);
     clearQueuedEncode(sessionId);
-    port.postMessage({ type: "encode_error", sessionId, code, message });
+    safePostMessage({ type: "encode_error", sessionId, code, message });
 }
 function queueDecodeMessage(sessionId, msg) {
     let queue = queuedDecodeMessages.get(sessionId);
@@ -127,6 +127,7 @@ function queueDecodeMessage(sessionId, msg) {
     }
     queue.push(msg);
 }
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function queueEncodeMessage(sessionId, msg) {
     let queue = queuedEncodeMessages.get(sessionId);
     if (queue === undefined) {
@@ -251,16 +252,6 @@ port.on("message", (msg) => {
 // ---------------------------------------------------------------------------
 // Decode session start
 // ---------------------------------------------------------------------------
-function cleanupFailedBackendStart(sessionId, isDecode) {
-    if (isDecode) {
-        pendingDecodeStarts.delete(sessionId);
-        clearQueuedDecode(sessionId);
-    }
-    else {
-        pendingEncodeStarts.delete(sessionId);
-        clearQueuedEncode(sessionId);
-    }
-}
 async function handleDecodeStart(msg) {
     if (hasAnySession(msg.sessionId)) {
         safePostMessage({
@@ -271,23 +262,29 @@ async function handleDecodeStart(msg) {
         });
         return;
     }
-    const startPromise = (async () => {
+    let startPromise = null;
+    startPromise = (async () => {
         let b;
         try {
             b = await initBackend();
         }
         catch (err) {
-            cleanupFailedBackendStart(msg.sessionId, true);
-            if (!cancelledPendingStarts.delete(msg.sessionId)) {
-                safePostMessage({
-                    type: "decode_error",
-                    sessionId: msg.sessionId,
-                    code: "CapabilityMissing",
-                    message: `Backend init failed: ${formatError(err)}`,
-                });
+            if (pendingDecodeStarts.get(msg.sessionId) === startPromise) {
+                pendingDecodeStarts.delete(msg.sessionId);
+                clearQueuedDecode(msg.sessionId);
+                if (!cancelledPendingStarts.delete(msg.sessionId)) {
+                    safePostMessage({
+                        type: "decode_error",
+                        sessionId: msg.sessionId,
+                        code: "CapabilityMissing",
+                        message: `Backend init failed: ${formatError(err)}`,
+                    });
+                }
             }
             return;
         }
+        if (pendingDecodeStarts.get(msg.sessionId) !== startPromise)
+            return; // superseded
         pendingDecodeStarts.delete(msg.sessionId);
         if (shuttingDown || cancelledPendingStarts.delete(msg.sessionId)) {
             clearQueuedDecode(msg.sessionId);
@@ -315,23 +312,29 @@ async function handleEncodeStart(msg) {
         });
         return;
     }
-    const startPromise = (async () => {
+    let startPromise = null;
+    startPromise = (async () => {
         let b;
         try {
             b = await initBackend();
         }
         catch (err) {
-            cleanupFailedBackendStart(msg.sessionId, false);
-            if (!cancelledPendingStarts.delete(msg.sessionId)) {
-                safePostMessage({
-                    type: "encode_error",
-                    sessionId: msg.sessionId,
-                    code: "CapabilityMissing",
-                    message: `Backend init failed: ${formatError(err)}`,
-                });
+            if (pendingEncodeStarts.get(msg.sessionId) === startPromise) {
+                pendingEncodeStarts.delete(msg.sessionId);
+                clearQueuedEncode(msg.sessionId);
+                if (!cancelledPendingStarts.delete(msg.sessionId)) {
+                    safePostMessage({
+                        type: "encode_error",
+                        sessionId: msg.sessionId,
+                        code: "CapabilityMissing",
+                        message: `Backend init failed: ${formatError(err)}`,
+                    });
+                }
             }
             return;
         }
+        if (pendingEncodeStarts.get(msg.sessionId) !== startPromise)
+            return; // superseded
         pendingEncodeStarts.delete(msg.sessionId);
         if (shuttingDown || cancelledPendingStarts.delete(msg.sessionId)) {
             clearQueuedEncode(msg.sessionId);
@@ -350,7 +353,9 @@ async function handleEncodeStart(msg) {
 // Release session state
 // ---------------------------------------------------------------------------
 async function releaseSessionState(sessionId) {
-    cancelledPendingStarts.add(sessionId);
+    if (pendingDecodeStarts.has(sessionId) || pendingEncodeStarts.has(sessionId)) {
+        cancelledPendingStarts.add(sessionId);
+    }
     pendingDecodeStarts.delete(sessionId);
     pendingEncodeStarts.delete(sessionId);
     clearQueuedDecode(sessionId);
@@ -414,15 +419,17 @@ process.on("uncaughtException", (err) => {
     safePostMessage({
         type: "worker_error",
         code: "UnhandledError",
-        message: err.message,
+        message: formatError(err),
     });
+    void handleShutdown();
 });
 process.on("unhandledRejection", (reason) => {
     safePostMessage({
         type: "worker_error",
         code: "UnhandledRejection",
-        message: reason instanceof Error ? reason.message : String(reason),
+        message: formatError(reason),
     });
+    void handleShutdown();
 });
 // ---------------------------------------------------------------------------
 // Startup: select backend and post worker_ready

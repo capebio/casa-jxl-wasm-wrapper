@@ -43,11 +43,11 @@ export function packFramePixels(frame, options = {}) {
     packed.set(source.subarray(srcStart, srcEnd), row * rowBytes);
   }
 
-  // Hook for future Perceptual Constancy (Lens 17 non-Riemannian engine) / AR foveation.
-  // Actual transform (log, matrix B, A_tensor, diminishing f(c), hybrid DE) lives in Rust LookRenderer.
-  // When ready, apply in-place or return transformed view here (or no-op).
-  if (constancyParams && constancyParams.mode === 'constancy') {
-    // TODO: forward to WASM LUT or SIMD apply when exposed; for now pass-through packed
+  // Hook for Perceptual Constancy (Lens 17 non-Riemannian: B matrix + log + Molchanov A_tensor + hybrid DE + diminishing f(c)).
+  // Actual math in Rust LookRenderer / WASM. Gallery/lightbox now wire constancyParams (preset -> set -> render -> here).
+  // Current: identity passthrough (packed is correct for viz). When LUT/SIMD ready, transform here or return new view.
+  if (constancyParams && constancyParams.mode && constancyParams.mode !== 'off') {
+    // constancy active – future in-place or view transform
   }
 
   return packed;

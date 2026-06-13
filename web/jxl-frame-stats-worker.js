@@ -2,6 +2,22 @@ import { analyzeProgressiveFrame } from './jxl-progressive-frame-stats.js';
 import { computePsnrVsFinal, computeSsimVsFinal, computeChannelMoments } from './jxl-progressive-quality.js';
 import { pixelsToXyb, computeButteraugliVsFinal, createButteraugliComparer, computeButteraugliApproxVsFinal } from './jxl-butteraugli.js';
 
+// Optional wasm-accelerated metrics (PerceptualComparer in web/pkg). JS remains
+// the fallback for no-WASM environments (CSP, locked-down webviews) or load
+// failures. null = untried, false = unavailable, object = loaded module.
+let _wasmMetrics = null;
+async function ensureWasmMetrics() {
+    if (_wasmMetrics !== null) return _wasmMetrics;
+    try {
+        const mod = await import('./pkg/raw_converter_wasm.js');
+        await mod.default(); // browser worker: init() fetches _bg.wasm via module URL
+        _wasmMetrics = (typeof mod.PerceptualComparer === 'function') ? mod : false;
+    } catch {
+        _wasmMetrics = false;
+    }
+    return _wasmMetrics;
+}
+
 // Stats offload (post-decode only). Lenses 1-25 applied at creation.
 // Gaps (18/19): (1) no cancel/preempt for long butter (sync block); (2) pixel materialization at receive/xyb/return; (3) vs-final only, limited live/no-ref for AR/stream.
 // Fast ML/AR gate (12/16): use includeButter=false + moments/psnr/ssim as surrogate; avoid butter cost.
@@ -47,7 +63,7 @@ function handleFrameStats(id, data) {
     }
 }
 
-function handleChartRequest(id, data) {
+async function handleChartRequest(id, data) {
     const { ref, refWidth, refHeight, passes } = data;
     try {
         if (!passes || !passes.length) {
@@ -57,9 +73,25 @@ function handleChartRequest(id, data) {
         const start = performance.now();
         const refPx = ref instanceof Uint8Array ? ref : new Uint8Array(ref);
         const n = refWidth * refHeight;
+
+        // Prefer the wasm PerceptualComparer for the default (full butteraugli)
+        // path: it computes psnr+ssim+butteraugli in one shared pass. The 'approx'
+        // and includeButter===false paths stay on JS (different semantics). Falls
+        // back to JS if wasm is unavailable or the comparer can't be built.
+        const wm = (data.includeButter !== false && data.includeButter !== 'approx')
+            ? await ensureWasmMetrics() : false;
+        let wcmp = null;
+        if (wm) {
+            try {
+                wcmp = new wm.PerceptualComparer(refPx, refWidth, refHeight);
+            } catch {
+                wcmp = null;
+            }
+        }
+
         let refXyb = null;
         let cmp = null;
-        if (data.includeButter !== false) {
+        if (!wcmp && data.includeButter !== false) {
             if (data.includeButter === 'approx') {
                 refXyb = pixelsToXyb(refPx, n);
             } else {
@@ -69,6 +101,16 @@ function handleChartRequest(id, data) {
         const values = passes.map(p => {
             if (!p) return null;
             const px = p.buf instanceof Uint8Array ? p.buf : new Uint8Array(p.buf);
+            if (wcmp) {
+                const m = wcmp.all(px); // {butteraugli, ssim, psnr}
+                return {
+                    index: p.index,
+                    psnr: m.psnr,
+                    ssim: m.ssim,
+                    butt: m.butteraugli,
+                    moments: computeChannelMoments(px, refWidth, refHeight),
+                };
+            }
             const rec = {
                 index: p.index,
                 psnr: computePsnrVsFinal(refPx, px),
@@ -83,7 +125,7 @@ function handleChartRequest(id, data) {
             return rec;
         });
         const end = performance.now();
-        self.postMessage({ id, ok: true, type: 'chart', values, timings: { totalMs: end - start, passes: values.length } });
+        self.postMessage({ id, ok: true, type: 'chart', values, timings: { totalMs: end - start, passes: values.length, backend: wcmp ? 'wasm' : 'js' } });
     } catch (error) {
         self.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
     }

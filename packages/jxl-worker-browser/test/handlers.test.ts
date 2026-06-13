@@ -304,6 +304,145 @@ describe("browser codec handlers", () => {
     expect(ended).toEqual(["early-progress-target"]);
   });
 
+  test("decode handler checks budget before touching progress pixels", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    let nowMs = 0;
+    const restoreNow = mockPerformanceNow(() => nowMs);
+    const info = {
+      width: 1, height: 1, bitsPerSample: 8,
+      hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+    };
+    const codec = {
+      createDecoder() {
+        return {
+          push() {},
+          close() {},
+          cancel() {},
+          dispose() {},
+          async *events() {
+            yield { type: "header", info };
+            nowMs = 5;
+            const progress: Record<string, unknown> = {
+              type: "progress",
+              stage: "dc",
+              info,
+              format: "rgba8",
+              pixelStride: 4,
+            };
+            Object.defineProperty(progress, "pixels", {
+              get() {
+                throw new Error("pixels getter should not run after budget expires");
+              },
+            });
+            yield progress as any;
+          },
+        };
+      },
+    };
+
+    const handler = new DecodeHandler(
+      { ...baseDecodeStart, sessionId: "budget-before-copy", budgetMs: 0 },
+      codec as never,
+      { onSessionEnd: (sessionId) => ended.push(sessionId) },
+    );
+    handler.onChunk(new Uint8Array([0xff]).buffer);
+    handler.onClose();
+
+    await waitFor(() => ended.length === 1);
+    restoreNow();
+
+    const budget = messages.find((msg) => msg.type === "decode_budget_exceeded") as
+      | { type: "decode_budget_exceeded"; pixels: ArrayBuffer }
+      | undefined;
+    expect(budget?.pixels.byteLength).toBe(0);
+  });
+
+  test("decode handler forwards progressive metadata and transfer-copy metrics", async () => {
+    const messages: WorkerToMainMessage[] = [];
+    const ended: string[] = [];
+    installWorkerPostMessage(messages);
+
+    const info = {
+      width: 1, height: 1, bitsPerSample: 8,
+      hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+    };
+    const backing = new Uint8Array([0, 1, 2, 3, 4, 5]).buffer;
+    const codec = {
+      createDecoder() {
+        return {
+          push() {},
+          close() {},
+          cancel() {},
+          dispose() {},
+          async *events() {
+            yield { type: "header", info };
+            yield {
+              type: "progress",
+              stage: "dc" as const,
+              info,
+              pixels: new Uint8Array(backing, 1, 4),
+              format: "rgba8" as const,
+              pixelStride: 4,
+              region: { x: 1, y: 2, w: 3, h: 4 },
+              sourceScale: 4,
+              progressiveRegion: false,
+              regionFallback: "full-frame-then-crop" as const,
+              frameDuration: 7,
+              progressiveSequence: 1,
+              passOrdinal: 0,
+            };
+            yield {
+              type: "final",
+              info,
+              pixels: new Uint8Array([1, 2, 3, 4]).buffer,
+              format: "rgba8" as const,
+              pixelStride: 4,
+            };
+          },
+        };
+      },
+    };
+
+    const handler = new DecodeHandler(
+      { ...baseDecodeStart, sessionId: "progress-metadata" },
+      codec as never,
+      { onSessionEnd: (sessionId) => ended.push(sessionId) },
+    );
+    handler.onChunk(new Uint8Array([0xff]).buffer);
+    handler.onClose();
+
+    await waitFor(() => ended.length === 1);
+
+    const progress = messages.find((msg) => msg.type === "decode_progress") as
+      | {
+          type: "decode_progress";
+          sourceScale?: number;
+          progressiveRegion?: boolean;
+          regionFallback?: string;
+          frameDuration?: number;
+          progressiveSequence?: number;
+          passOrdinal?: number;
+          region?: { x: number; y: number; w: number; h: number };
+        }
+      | undefined;
+    const metricNames = messages
+      .filter((msg) => msg.type === "metric")
+      .map((msg) => (msg as { type: "metric"; metric: { name: string } }).metric.name);
+
+    expect(progress?.sourceScale).toBe(4);
+    expect(progress?.progressiveRegion).toBe(false);
+    expect(progress?.regionFallback).toBe("full-frame-then-crop");
+    expect(progress?.frameDuration).toBe(7);
+    expect(progress?.progressiveSequence).toBe(1);
+    expect(progress?.passOrdinal).toBe(0);
+    expect(progress?.region).toEqual({ x: 1, y: 2, w: 3, h: 4 });
+    expect(metricNames).toContain("copy_to_transfer_ms");
+    expect(metricNames).toContain("copied_bytes");
+  });
+
   test("decode handler does not post decode_cancelled for release_state", async () => {
     const messages: WorkerToMainMessage[] = [];
     const ended: string[] = [];

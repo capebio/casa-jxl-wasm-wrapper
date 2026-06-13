@@ -1,8 +1,9 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-const workerSource = readFileSync(join(process.cwd(), "src", "worker.ts"), "utf8");
+import { fileURLToPath } from "node:url";
+const workerSourcePath = fileURLToPath(new URL("../../src/worker.ts", import.meta.url));
+const workerSource = readFileSync(workerSourcePath, "utf8");
 describe("browser worker cold-start guardrails", () => {
     test("cold-start queue overflow aborts the pending start before handler creation", () => {
         assert.match(workerSource, /abortedStarts\s*=\s*new Set<string>/);

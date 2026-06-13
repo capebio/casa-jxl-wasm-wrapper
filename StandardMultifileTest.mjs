@@ -68,7 +68,8 @@ function runSystemTelemetry() {
 
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { Worker as NodeWorker } from "node:worker_threads";
 import sharp from "sharp";
@@ -117,7 +118,8 @@ const {
   encodeRgba8Pyramid,
   encodeTileContainerRgba8,
   decodeTileContainerRegionRgba8,
-  setForcedTier
+  setForcedTier,
+  encodeRgb16Planar
 } = await import("./packages/jxl-wasm/dist/index.js");
 
 await initRaw({ module_or_path: readFileSync(new URL("./pkg/raw_converter_wasm_bg.wasm", import.meta.url)) });
@@ -151,7 +153,7 @@ const FILES_CONFIG = [
 ];
 
 const TARGET = 1920;
-const OUTPUT_FULL_RGB = 1;
+const OUTPUT_FULL_RGB = 1 | 2 | 4; // full + lightbox + thumb: populate preview packed 6B/px + always-on preview_demosaic_ms / downscale_ms / fast_preview (precompute was already free; return of small buffers negligible)
 const PROCESS_ARGS = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Number.NaN, Number.NaN, 0, 0];
 
 // 4. Helper to ensure correct Buffer extraction
@@ -167,6 +169,13 @@ function concatChunks(chunks) {
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.byteLength; }
   return out;
+}
+
+// Flip-flop style median (matches tools/demosaic-flipflop.mjs and Rust tonemap_flip_flops / flipflop_ab)
+function median(arr) {
+  if (!arr || !arr.length) return 0;
+  const a = arr.slice().sort((x, y) => x - y);
+  return a[Math.floor(a.length / 2)];
 }
 
 // 5. JXL Encoding Helper (Progressive or One-shot)
@@ -329,6 +338,8 @@ async function main() {
     const tRawStart = performance.now();
     let rgb, srcW, srcH;
     let rawDecompress = 0, rawDemosaic = 0, rawTonemap = 0, rawOrient = 0;
+    let previewDem = 0, previewDown = 0, fastPrev = false;
+    let lbPack = null, lbWw = 0, lbHh = 0, thPack = null, thWw = 0, thHh = 0;
 
     if (ext === ".jpg" || ext === ".jpeg") {
       const { data, info } = await sharp(resolvedPath).raw().toBuffer({ resolveWithObject: true });
@@ -342,6 +353,17 @@ async function main() {
       rawDemosaic = decoded.demosaic_ms ?? 0;
       rawTonemap = decoded.tonemap_ms ?? 0;
       rawOrient = decoded.orient_ms ?? 0;
+      previewDem = decoded.preview_demosaic_ms ?? 0;
+      previewDown = decoded.preview_downscale_ms ?? 0;
+      fastPrev = !!decoded.fast_preview;
+      // Packed 6B/px (per-pixel rgb16 LE) from fast planar path (when flags include lightbox/thumb bits).
+      // Small for lb/thumb; enables zero-copy planar16 encode demo via the new hook without full-res materialization.
+      lbPack = decoded.rgb16_lb || null;
+      lbWw = decoded.lb_w || 0;
+      lbHh = decoded.lb_h || 0;
+      thPack = decoded.rgb16_thumb || null;
+      thWw = decoded.thumb_w || 0;
+      thHh = decoded.thumb_h || 0;
       rgb = decoded.take_rgb(); srcW = decoded.width; srcH = decoded.height; decoded.free();
     }
     const rawMs = performance.now() - tRawStart;
@@ -354,10 +376,96 @@ async function main() {
     const rgba = scale < 1 ? rgb_to_rgba(downscale_rgb(rgb, srcW, srcH, tgtW, tgtH)) : rgb_to_rgba(rgb);
     const scaleMs = performance.now() - tScaleStart;
 
-    console.log(`  Loaded ${basename(resolvedPath)}: decode=${Math.round(rawMs)}ms scale=${Math.round(scaleMs)}ms (${tgtW}x${tgtH})`);
-    loadedFiles.push({ file: basename(resolvedPath), rgba, tgtW, tgtH, rawMs, scaleMs, rawDecompress, rawDemosaic, rawTonemap, rawOrient });
+    console.log(`  Loaded ${basename(resolvedPath)}: decode=${Math.round(rawMs)}ms scale=${Math.round(scaleMs)}ms (${tgtW}x${tgtH}) preview_demosaic=${Math.round(previewDem)} down=${Math.round(previewDown)} fast=${fastPrev}`);
+    loadedFiles.push({ file: basename(resolvedPath), rgba, tgtW, tgtH, rawMs, scaleMs, rawDecompress, rawDemosaic, rawTonemap, rawOrient, previewDem, previewDown, fastPrev, lbPack, lbW: lbWw, lbH: lbHh, thPack, thW: thWw, thH: thHh });
   }
   console.log("");
+
+  // === Tier Flip-Flop Core (A/B alternating, repo-standard flip-flop style) ===
+  // Alternates blocks of all files under simd then relaxed-simd-mt (multiple rounds).
+  // Produces medians for exactly the 4 headline numbers from the original complaint
+  // (prog_enc, first_paint, final_paint, shot_dec). Lightweight: no variants, no pyr,
+  // no ds2/region/chunked/mod/photon, no extra shot_enc in reporting.
+  // Purpose: stable apples-to-apples simd vs mt comparison (controls warm-up, freq,
+  // cache state between tiers) + direct match to the "printed ~500ms vs counted 4s" gap.
+  // The body= in the rich [2/6]/[3/6] lines (below) will now also show full per-file wall.
+  const FLIP_ROUNDS = 10;
+  console.log(`--- Tier Flip-Flop Core (simd <-> relaxed-simd-mt, ${FLIP_ROUNDS} rounds for medians) ---`);
+  const flipSamples = Object.create(null);
+  for (const f of loadedFiles) {
+    flipSamples[f.file] = {
+      simd: { prog_enc: [], first: [], final: [], shot_dec: [] },
+      mt:   { prog_enc: [], first: [], final: [], shot_dec: [] },
+    };
+  }
+
+  for (let r = 0; r < FLIP_ROUNDS; r++) {
+    // simd block (one module load for the tier, then all files reuse)
+    setForcedTier("simd");
+    for (const f of loadedFiles) {
+      const progEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, true);
+      const progDec = await decodeJxl(progEnc.bytes, true);
+      const shotEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, false);
+      const shotDec = await decodeJxl(shotEnc.bytes, false);
+      const s = flipSamples[f.file].simd;
+      s.prog_enc.push(progEnc.ms);
+      s.first.push(progDec.firstFrameMs);
+      s.final.push(progDec.ms);
+      s.shot_dec.push(shotDec.ms);
+    }
+
+    // mt block (flip)
+    setForcedTier("relaxed-simd-mt");
+    for (const f of loadedFiles) {
+      const progEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, true);
+      const progDec = await decodeJxl(progEnc.bytes, true);
+      const shotEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, false);
+      const shotDec = await decodeJxl(shotEnc.bytes, false);
+      const m = flipSamples[f.file].mt;
+      m.prog_enc.push(progEnc.ms);
+      m.first.push(progDec.firstFrameMs);
+      m.final.push(progDec.ms);
+      m.shot_dec.push(shotDec.ms);
+    }
+  }
+
+  // Compute medians + print (flip-flop output, stable numbers for the quoted metrics)
+  const flipFlopResults = [];
+  for (const f of loadedFiles) {
+    const s = flipSamples[f.file].simd;
+    const m = flipSamples[f.file].mt;
+    const sm = {
+      prog: median(s.prog_enc),
+      first: median(s.first),
+      final: median(s.final),
+      shot: median(s.shot_dec),
+    };
+    const mm = {
+      prog: median(m.prog_enc),
+      first: median(m.first),
+      final: median(m.final),
+      shot: median(m.shot_dec),
+    };
+    const spdProg = sm.prog / Math.max(1, mm.prog);
+    const spdFirst = sm.first / Math.max(1, mm.first);
+    const spdFinal = sm.final / Math.max(1, mm.final);
+    const spdShot = sm.shot / Math.max(1, mm.shot);
+    console.log(
+      `  ➔ ${f.file} [flip]: ` +
+      `prog_enc simd=${sm.prog.toFixed(0)}/mt=${mm.prog.toFixed(0)} (${spdProg.toFixed(2)}x) ` +
+      `first=${sm.first.toFixed(0)}/${mm.first.toFixed(0)} (${spdFirst.toFixed(2)}x) ` +
+      `final=${sm.final.toFixed(0)}/${mm.final.toFixed(0)} (${spdFinal.toFixed(2)}x) ` +
+      `shot_dec=${sm.shot.toFixed(0)}/${mm.shot.toFixed(0)} (${spdShot.toFixed(2)}x)`
+    );
+    flipFlopResults.push({
+      file: f.file,
+      simd_prog: Math.round(sm.prog), mt_prog: Math.round(mm.prog), spd_prog: parseFloat(spdProg.toFixed(2)),
+      simd_first: Math.round(sm.first), mt_first: Math.round(mm.first), spd_first: parseFloat(spdFirst.toFixed(2)),
+      simd_final: Math.round(sm.final), mt_final: Math.round(mm.final), spd_final: parseFloat(spdFinal.toFixed(2)),
+      simd_shot: Math.round(sm.shot), mt_shot: Math.round(mm.shot), spd_shot: parseFloat(spdShot.toFixed(2)),
+    });
+  }
+  console.log("  (flip-flop medians from interleaved rounds; reload cost on tier switch included fairly)\n");
 
   // Helper to run sequential benchmark loop on a specific JXL tier
   async function runSequentialSuite(tierName) {
@@ -366,6 +474,8 @@ async function main() {
     const results = [];
 
     for (const f of loadedFiles) {
+      const tBodyStart = performance.now();
+
       // Progressive JXL Benchmarks
       const progEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, true);
       const progDec = await decodeJxl(progEnc.bytes, true);
@@ -418,6 +528,8 @@ async function main() {
         photonEncMs = pho.ms; photonSize = pho.bytes.byteLength;
       } catch (_) {}
 
+      const bodyMs = performance.now() - tBodyStart;
+
       results.push({
         file: f.file,
         prog_enc_ms: Math.round(progEnc.ms),
@@ -432,6 +544,7 @@ async function main() {
         pyr_dec_tot_ms: Math.round(pyrDecTotMs),
         pyr_levels: pyrLevelsCount,
         shot_bytes: shotEnc.bytes,
+        body_wall_ms: Math.round(bodyMs),
         // additional from benchmark sweeps
         prog_ds2_first_ms: Math.round(progDs2.firstFrameMs),
         prog_ds2_final_ms: Math.round(progDs2.ms),
@@ -443,19 +556,41 @@ async function main() {
         mod_prog_enc_ms: Math.round(modProgEncMs),
         photon_prog_enc_ms: Math.round(photonEncMs),
       });
-      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | +ds2/region/chunked/mod/photon variants`);
+      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | body=${Math.round(bodyMs)}ms | +ds2/region/chunked/mod/photon variants`);
     }
     console.log("");
     return results;
   }
 
   // --- 7.2 Run Single-Threaded sequential benchmarks (simd) ---
+  // (rich: all variants + body= full per-file wall now logged. Stable core medians + speedups were already emitted by the preceding flip-flop A/B.)
   console.log(`--- [2/6] Executing Single-Threaded Sequential (simd) ---`);
   const simdResults = await runSequentialSuite("simd");
 
   // --- 7.3 Run Multi-Threaded sequential benchmarks (relaxed-simd-mt) ---
   console.log(`--- [3/6] Executing Multi-Threaded Sequential (relaxed-simd-mt) ---`);
   const mtResults = await runSequentialSuite("relaxed-simd-mt");
+
+  // --- Combined: Flip-Flop Core (new, stable interleaved medians + speedups) + Rich headlines + observed body (old full diagnostic run) ---
+  // This directly merges the flip-flop A/B results (for trustworthy core tier comparison on the 4 headline metrics)
+  // with the rich per-iteration numbers (prog/shot + the body= wall time that explains the "4s per file" count).
+  console.log(`--- Combined Flip-Flop + Rich Headlines + Body Summary ---`);
+  for (let i = 0; i < loadedFiles.length; i++) {
+    const f = loadedFiles[i];
+    const ff = (flipFlopResults || []).find(r => r.file === f.file) || {};
+    const s = simdResults[i] || {};
+    const m = mtResults[i] || {};
+    console.log(
+      `  ${f.file}: ` +
+      `FLIP prog=${ff.simd_prog || 0}/${ff.mt_prog || 0} (${ff.spd_prog || 0}x) ` +
+      `first=${ff.simd_first || 0}/${ff.mt_first || 0} (${ff.spd_first || 0}x) ` +
+      `final=${ff.simd_final || 0}/${ff.mt_final || 0} (${ff.spd_final || 0}x) ` +
+      `shot=${ff.simd_shot || 0}/${ff.mt_shot || 0} (${ff.spd_shot || 0}x) | ` +
+      `RICH_s prog=${s.prog_enc_ms || 0} first=${s.prog_first_ms || 0} final=${s.prog_final_ms || 0} shot=${s.shot_dec_ms || 0} body=${s.body_wall_ms || 0}ms | ` +
+      `RICH_m prog=${m.prog_enc_ms || 0} first=${m.prog_first_ms || 0} final=${m.prog_final_ms || 0} shot=${m.shot_dec_ms || 0} body=${m.body_wall_ms || 0}ms`
+    );
+  }
+  console.log("  (FLIP = 10-round interleaved medians for core stability; RICH = full variant diagnostic pass with explicit body wall)");
 
   // --- 7.4 Run Multiple Workers parallel benchmark (simd Parallel) ---
   console.log(`--- [4/6] Executing Parallel Concurrency (Multiple Workers in Parallel) ---`);
@@ -494,7 +629,7 @@ async function main() {
   const sizesToTest = [
     { label: "1MB", bytes: 1024 * 1024 },
     { label: "10MB", bytes: 10 * 1024 * 1024 },
-    { label: "30MB (Typical 1920 RGBA)", bytes: 1920 * 1440 * 4 } // ~11MB
+    { label: "30MB (Typical 1920 RGBA at benchmark target scale)", bytes: 1920 * 1440 * 4 } // benchmark uses 1920px long-edge, not native 20MP size
   ];
 
   const diagTransferResults = [];
@@ -706,7 +841,7 @@ async function main() {
     console.log(`  ➔ JXTC Sequential 4-Tile Crop Decodes:        ${Math.round(tiledSeqMs)}ms`);
     console.log(`  ➔ JXTC Parallel 4-Tile Crop Decodes:          ${Math.round(tiledParMs)}ms`);
 
-    console.log(`\n  --- FULL-SIZE (1920px) TIMINGS ---`);
+    console.log(`\n  --- BENCHMARK SCALE (1920px long-edge target; native 20MP RAWs scaled for consistent timing) ---`);
     console.log(`  ➔ Monolithic Full Decode (Standard):          ${Math.round(monolithicFullMs)}ms`);
     console.log(`  ➔ Real JXTC Tiled Full Decode (One Call):     ${Math.round(jxtcFullMs)}ms`);
     console.log(`  ➔ JXTC Sequential All-Tile Decode (Stitch):   ${Math.round(fullTiledSeqMs)}ms`);
@@ -715,6 +850,51 @@ async function main() {
     console.log(`\n  --- ENCODING TIMINGS (Tiled vs Monolithic) ---`);
     console.log(`  ➔ Monolithic JXL Encoding Speed:              ${Math.round(monolithicEncMs)}ms`);
     console.log(`  ➔ Real JXTC Tiled Container Encoding Speed:   ${Math.round(jxtcEncMs)}ms (Overhead: +${(jxtcEncMs - monolithicEncMs).toFixed(0)}ms)`);
+
+    // Wire + exercise the JXL encode zero-copy hook (encodeRgb16Planar): 3 u16 planes direct (no JS interleaved rgb16 alloc/copy).
+    // Demo 1: promoted from the target rgba (exercises planar marshal/ensureU16Heap + bridge interleave vs rgba8 path).
+    // Demo 2 (when available): real 16-bit from fast preview thumb packed (6B/px from planar dem+downscale in raw decode; deinterleave small, then planar encode).
+    // This is the "see what a difference" measurement point for boundary cost after the planar hypercar changes.
+    if (typeof encodeRgb16Planar === 'function') {
+      try {
+        const npix = f.tgtW * f.tgtH;
+        const r16 = new Uint16Array(npix), g16 = new Uint16Array(npix), b16 = new Uint16Array(npix);
+        const src = f.rgba || new Uint8Array();
+        const ch = src.length >= npix * 3 ? (src.length / npix | 0) : 4;
+        for (let i = 0, o = 0; i < npix; i++, o += ch) {
+          const rv = src[o] || 0, gv = src[o + 1] || 0, bv = src[o + 2] || 0;
+          r16[i] = (rv << 8) | rv; g16[i] = (gv << 8) | gv; b16[i] = (bv << 8) | bv;
+        }
+        const tP = performance.now();
+        const p16 = await encodeRgb16Planar(r16, g16, b16, f.tgtW, f.tgtH, 1.0, 3, 0, 0, 0, 0, 0, 1);
+        const p16ms = performance.now() - tP;
+        console.log(`  ➔ planar16_enc (hook, promoted rgba8->u16 planes): ${Math.round(p16ms)}ms size=${(p16.byteLength/1024).toFixed(0)}KB (vs monolithic rgba8 ${Math.round(monolithicEncMs)}ms)`);
+      } catch (e) {
+        console.log(`  ➔ planar16_enc hook: skipped (${e && e.message ? e.message : e}) — rebuild jxl-wasm bridge if symbol missing`);
+      }
+
+      // Real data from fast preview path (if this large file had thumb packed populated by the |2|4 flags + orf/dng path)
+      if (f.thPack && f.thW && f.thH) {
+        try {
+          const n = f.thW * f.thH;
+          const pr = new Uint16Array(n), pg = new Uint16Array(n), pb = new Uint16Array(n);
+          const pk = f.thPack;
+          for (let i = 0, o = 0; i < n; i++, o += 6) {
+            pr[i] = pk[o] | (pk[o + 1] << 8);
+            pg[i] = pk[o + 2] | (pk[o + 3] << 8);
+            pb[i] = pk[o + 4] | (pk[o + 5] << 8);
+          }
+          const tThumb = performance.now();
+          const thumbJ = await encodeRgb16Planar(pr, pg, pb, f.thW, f.thH, 1.0, 3);
+          const thumbMs = performance.now() - tThumb;
+          console.log(`  ➔ planar16_thumb (real 16b from fast planar preview path + zero-copy hook): ${Math.round(thumbMs)}ms size=${(thumbJ.byteLength/1024).toFixed(1)}KB (${f.thW}x${f.thH})`);
+        } catch (e) {
+          console.log(`  ➔ planar16_thumb from preview: ${e && e.message ? e.message : e}`);
+        }
+      }
+    } else {
+      console.log("  ➔ encodeRgb16Planar not in jxl-wasm export (source has it; dist rebuild will surface)");
+    }
   } else {
     console.log("  ⚠️  Skipping ROI diagnostics: No large RAW file was loaded.");
   }
@@ -787,14 +967,14 @@ async function main() {
 
     "",
     "---",
-    `runs[${loadedFiles.length}]{file|raw_ms|scale_ms|raw_decompress_ms|raw_demosaic_ms|raw_tonemap_ms|prog_enc_simd_ms|prog_enc_mt_ms|prog_first_simd_ms|prog_first_mt_ms|prog_final_simd_ms|prog_final_mt_ms|shot_enc_simd_ms|shot_enc_mt_ms|shot_dec_simd_ms|shot_dec_mt_ms|pyr_enc_simd_ms|pyr_enc_mt_ms|pyr_dec_simd_ms|pyr_dec_mt_ms|prog_ds2_first_simd_ms|prog_ds2_final_simd_ms|prog_region_simd_ms|shot_ds2_simd_ms|shot_region_simd_ms|prog_chunked4_first_simd_ms|mod_prog_enc_simd_ms|photon_prog_enc_simd_ms}:`
+    `runs[${loadedFiles.length}]{file|raw_ms|scale_ms|raw_decompress_ms|raw_demosaic_ms|raw_tonemap_ms|prog_enc_simd_ms|prog_enc_mt_ms|prog_first_simd_ms|prog_first_mt_ms|prog_final_simd_ms|prog_final_mt_ms|shot_enc_simd_ms|shot_enc_mt_ms|shot_dec_simd_ms|shot_dec_mt_ms|pyr_enc_simd_ms|pyr_enc_mt_ms|pyr_dec_simd_ms|pyr_dec_mt_ms|prog_ds2_first_simd_ms|prog_ds2_final_simd_ms|prog_region_simd_ms|shot_ds2_simd_ms|shot_region_simd_ms|prog_chunked4_first_simd_ms|mod_prog_enc_simd_ms|photon_prog_enc_simd_ms|body_wall_ms}:`
   ];
 
   for (let i = 0; i < loadedFiles.length; i++) {
     const f = loadedFiles[i];
     const s = simdResults[i];
     const m = mtResults[i];
-    toonLines.push(`  ${f.file} | ${Math.round(f.rawMs)} | ${Math.round(f.scaleMs)} | ${Math.round(f.rawDecompress||0)} | ${Math.round(f.rawDemosaic||0)} | ${Math.round(f.rawTonemap||0)} | ${s.prog_enc_ms} | ${m.prog_enc_ms} | ${s.prog_first_ms} | ${m.prog_first_ms} | ${s.prog_final_ms} | ${m.prog_final_ms} | ${s.shot_enc_ms} | ${m.shot_enc_ms} | ${s.shot_dec_ms} | ${m.shot_dec_ms} | ${s.pyr_enc_ms} | ${m.pyr_enc_ms} | ${s.pyr_dec_tot_ms} | ${m.pyr_dec_tot_ms} | ${s.prog_ds2_first_ms||0} | ${s.prog_ds2_final_ms||0} | ${s.prog_region_ms||0} | ${s.shot_ds2_ms||0} | ${s.shot_region_ms||0} | ${s.prog_chunked4_first_ms||0} | ${s.mod_prog_enc_ms||0} | ${s.photon_prog_enc_ms||0}`);
+    toonLines.push(`  ${f.file} | ${Math.round(f.rawMs)} | ${Math.round(f.scaleMs)} | ${Math.round(f.rawDecompress||0)} | ${Math.round(f.rawDemosaic||0)} | ${Math.round(f.rawTonemap||0)} | ${s.prog_enc_ms} | ${m.prog_enc_ms} | ${s.prog_first_ms} | ${m.prog_first_ms} | ${s.prog_final_ms} | ${m.prog_final_ms} | ${s.shot_enc_ms} | ${m.shot_enc_ms} | ${s.shot_dec_ms} | ${m.shot_dec_ms} | ${s.pyr_enc_ms} | ${m.pyr_enc_ms} | ${s.pyr_dec_tot_ms} | ${m.pyr_dec_tot_ms} | ${s.prog_ds2_first_ms||0} | ${s.prog_ds2_final_ms||0} | ${s.prog_region_ms||0} | ${s.shot_ds2_ms||0} | ${s.shot_region_ms||0} | ${s.prog_chunked4_first_ms||0} | ${s.mod_prog_enc_ms||0} | ${s.photon_prog_enc_ms||0} | ${s.body_wall_ms||0}`);
   }
 
   // Compute Averages
@@ -803,6 +983,9 @@ async function main() {
   const avgRawDecomp = Math.round(loadedFiles.reduce((s, r) => s + (r.rawDecompress||0), 0) / loadedFiles.length);
   const avgRawDemo   = Math.round(loadedFiles.reduce((s, r) => s + (r.rawDemosaic||0), 0) / loadedFiles.length);
   const avgRawTone   = Math.round(loadedFiles.reduce((s, r) => s + (r.rawTonemap||0), 0) / loadedFiles.length);
+  // New hooks (preview fast path from planar dem+down; meaningful for RAW files; jpgs stay 0)
+  const avgPrevDem = Math.round(loadedFiles.reduce((s, r) => s + (r.previewDem||0), 0) / loadedFiles.length);
+  const avgPrevDown = Math.round(loadedFiles.reduce((s, r) => s + (r.previewDown||0), 0) / loadedFiles.length);
 
   const avgProgEncSimd = Math.round(simdResults.reduce((s, r) => s + r.prog_enc_ms, 0) / loadedFiles.length);
   const avgProgEncMt   = Math.round(mtResults.reduce((s, r) => s + r.prog_enc_ms, 0) / loadedFiles.length);
@@ -848,10 +1031,23 @@ async function main() {
     toonLines.push(`  JxtcTiledParallel_4_256_256_Ms: ${r.tiledParMs}`);
   }
 
+  // Flip-flop core (performed alternating blocks for stable tier A/B on headline metrics)
+  toonLines.push("", "# Flip-Flop Core (interleaved simd <-> mt medians, 3 rounds)");
+  for (const ff of (flipFlopResults || [])) {
+    toonLines.push(
+      `  ${ff.file} | ` +
+      `simd_prog=${ff.simd_prog} mt=${ff.mt_prog} spd=${ff.spd_prog}x | ` +
+      `first=${ff.simd_first}/${ff.mt_first} (${ff.spd_first}x) | ` +
+      `final=${ff.simd_final}/${ff.mt_final} (${ff.spd_final}x) | ` +
+      `shot=${ff.simd_shot}/${ff.mt_shot} (${ff.spd_shot}x)`
+    );
+  }
+
   toonLines.push("", "# Averages");
   toonLines.push(`AvgRawMs: ${avgRaw}`);
   toonLines.push(`AvgScaleMs: ${avgScale}`);
   toonLines.push(`AvgRawDecompressMs: ${avgRawDecomp} | AvgRawDemosaicMs: ${avgRawDemo} | AvgRawTonemapMs: ${avgRawTone}`);
+  toonLines.push(`AvgPreviewDemosaicMs: ${avgPrevDem} | AvgPreviewDownscaleMs: ${avgPrevDown} | (fast planar bilinear dem + planar box for lb/thumb; mhc only full; fast_preview flag per-RAW)`);
   toonLines.push(`AvgProgEncSimdMs: ${avgProgEncSimd} | AvgProgEncMtMs: ${avgProgEncMt}`);
   toonLines.push(`AvgProgFirstSimdMs: ${avgProgFirstSimd} | AvgProgFirstMtMs: ${avgProgFirstMt}`);
   toonLines.push(`AvgProgFinalSimdMs: ${avgProgFinalSimd} | AvgProgFinalMtMs: ${avgProgFinalMt}`);
@@ -863,6 +1059,12 @@ async function main() {
   toonLines.push(`AvgModProgEncSimdMs: ${avgModProgEnc}`);
   toonLines.push(`AvgPhotonProgEncSimdMs: ${avgPhotonProgEnc}`);
 
+  // flip-flop avgs (medians of the stable interleaved samples)
+  if (flipFlopResults && flipFlopResults.length) {
+    const avgS = (k) => (flipFlopResults.reduce((sum, r) => sum + (r[k] || 0), 0) / flipFlopResults.length).toFixed(1);
+    toonLines.push(`FlipProgSpdX: ${avgS('spd_prog')} | FlipFirstSpdX: ${avgS('spd_first')} | FlipFinalSpdX: ${avgS('spd_final')} | FlipShotSpdX: ${avgS('spd_shot')}`);
+  }
+
   let toonString = toonLines.join("\n");
 
   console.log(`=========================================`);
@@ -871,8 +1073,12 @@ async function main() {
   console.log(toonString);
   console.log(`=========================================\n`);
 
-  // Write TOON file to output directory
-  const OUT_DIR = String.raw`C:\Foo\raw-converter-wasm\docs\outputs\timing tests`;
+  // Write TOON file to output directory.
+  // Use dynamic path from this script's location (avoids hardcoded absolute Windows paths
+  // that can trigger extended-length prefix handling in Node/fs on deep dirs with spaces,
+  // which previously broke some file:// launches for the aggregate graph HTML).
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const OUT_DIR = join(scriptDir, 'docs', 'outputs', 'timing tests');
   if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
 
   const stamp = runTimestamp.replace(/[:.]/g, "-");
@@ -897,7 +1103,7 @@ async function main() {
   const consolidation = consolidateBenchmarkHistory({
     timingDir: OUT_DIR,
     legacyRoots: [
-      String.raw`C:\Foo\raw-converter-wasm\docs\Benchmark results`,
+      join(scriptDir, 'docs', 'Benchmark results'),
       join(OUT_DIR, "backup"),
     ],
     backupDirName: "backup",
@@ -926,9 +1132,13 @@ async function main() {
           edgePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
           bravePath: "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
         });
-        const launchMethodId = launchSelection.method.id === "direct-spawn" && !browser.path
-          ? "explorer"
-          : launchSelection.method.id;
+        // Prefer direct-spawn (clean file:// URL + browser isolation flags) because explorer/cmd/rundll
+        // often trigger "blocked" warnings or fail on large self-contained history HTMLs with inline JSON/JS.
+        // This makes the graphs actually appear without security interstitials.
+        let launchMethodId = "direct-spawn";
+        if (!browser.path) {
+          launchMethodId = launchSelection.method.id;  // fall back only if no browser binary found
+        }
         const plan = buildGraphBrowserLaunchPlan({
           methodId: launchMethodId,
           browserPath: browser.path,

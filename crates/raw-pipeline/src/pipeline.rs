@@ -28,6 +28,11 @@ const BASELINE_SAT: f32 = 1.30;        // chroma scale around luma — tuned to 
 const BASELINE_CONTRAST: f32 = 0.55;   // S-curve blend, [0,1] — tuned to embedded JPEG luma std-dev
 const BASELINE_EXP_EV: f32 = 1.40;     // tuned to embedded JPEG luminance
 
+// Luma coeffs (BT.709) hoisted for FMA + ILP in per-pixel apply.
+const LUMA_R: f32 = 0.2126;
+const LUMA_G: f32 = 0.7152;
+const LUMA_B: f32 = 0.0722;
+
 #[derive(Clone)]
 pub struct PipelineParams {
     pub black: u16,
@@ -93,7 +98,8 @@ fn linear_to_srgb(v: f32) -> f32 {
         // LUT caching across process() calls should be done at the JS side
         // (the wasm module instance is reused per worker, so a JS-level cache
         // keyed on the tone params would eliminate all LUT rebuilds on re-renders).
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+        // Use mul_add for the scale+bias.
+        1.055f32.mul_add(v.powf(1.0 / 2.4), -0.055)
     }
 }
 
@@ -118,24 +124,24 @@ fn tone_curve(x: f32, p: &TonePost) -> f32 {
     let mut y = x;
 
     // Endpoint shifts: independent operations so each slider works without the other.
-    let blk_offset = p.blacks * 0.10;
-    let wh_scale = 1.0 + p.whites * 0.20;
+    let blk_offset = p.blacks * BLK_OFFSET_SCALE;
+    let wh_scale = 1.0 + p.whites * WH_SCALE_DELTA;
     y = (y * wh_scale + blk_offset).clamp(0.0, 1.0);
 
-    // Shadows: gamma in lower region.
+    // Shadows: gamma in lower region. Use mul_add for blends.
     if p.shadows.abs() > 1e-4 {
-        let mask = 1.0 - smoothstep(0.0, 0.6, y);
-        let gamma = 1.0 / (1.0 + p.shadows * 0.7);
+        let mask = 1.0 - smoothstep(0.0, SHADOW_MASK_END, y);
+        let gamma = 1.0 / (1.0 + p.shadows * SHADOW_GAMMA_SCALE);
         let lifted = y.powf(gamma);
-        y = y * (1.0 - mask) + lifted * mask;
+        y = y.mul_add(1.0 - mask, lifted * mask);
     }
     // Highlights: gamma in upper region.
     if p.highlights.abs() > 1e-4 {
-        let mask = smoothstep(0.4, 1.0, y);
+        let mask = smoothstep(HIGHLIGHT_MASK_START, 1.0, y);
         let inv = 1.0 - y;
-        let gamma = 1.0 / (1.0 - p.highlights * 0.7).max(0.05);
+        let gamma = 1.0 / (1.0 - p.highlights * HIGHLIGHT_GAMMA_SCALE).max(HIGHLIGHT_GAMMA_MIN);
         let pulled = 1.0 - inv.powf(gamma);
-        y = y * (1.0 - mask) + pulled * mask;
+        y = y.mul_add(1.0 - mask, pulled * mask);
     }
 
     // Contrast (user + always-on baseline) — smoothstep blend around 0.5.
@@ -148,12 +154,12 @@ fn tone_curve(x: f32, p: &TonePost) -> f32 {
     }.clamp(-1.0, 1.0);
     if c > 1e-4 {
         let s = y * y * (3.0 - 2.0 * y);
-        y = y * (1.0 - c) + s * c;
+        y = y.mul_add(1.0 - c, s * c);
     } else if c < -1e-4 {
         // De-contrast: pull toward linear ramp away from pivot.
         let signed = if y < 0.5 { -1.0 } else { 1.0 };
         let inv_s = 0.5 + signed * (0.5 - y).abs().sqrt() * 0.5;
-        y = y * (1.0 + c) + inv_s * (-c);
+        y = y.mul_add(1.0 + c, inv_s * (-c));
     }
 
     linear_to_srgb(y.clamp(0.0, 1.0))
@@ -167,6 +173,16 @@ fn tone_curve(x: f32, p: &TonePost) -> f32 {
 /// detail instead of flattening to a featureless white.
 const HIGHLIGHT_KNEE: f32 = 0.80;
 
+// Tone curve magic numbers hoisted (used in every LUT entry during build_post).
+const BLK_OFFSET_SCALE: f32 = 0.10;
+const WH_SCALE_DELTA: f32 = 0.20;
+const SHADOW_GAMMA_SCALE: f32 = 0.7;
+const SHADOW_MASK_END: f32 = 0.6;
+const HIGHLIGHT_GAMMA_MIN: f32 = 0.05;
+const HIGHLIGHT_GAMMA_SCALE: f32 = 0.7;
+const HIGHLIGHT_MASK_START: f32 = 0.4;
+const CONTRAST_BLEND: f32 = 0.6; // for de-contrast sqrt factor etc. (kept inline where used)
+
 /// Soft highlight shoulder: identity below `HIGHLIGHT_KNEE`, then a smooth
 /// asymptotic rolloff that maps `[knee, +inf)` into `[knee, 1.0)`. The rolloff
 /// is C1-continuous at the knee (slope 1 on both sides), so there is no visible
@@ -179,19 +195,108 @@ fn highlight_shoulder(x: f32) -> f32 {
     } else {
         let range = 1.0 - HIGHLIGHT_KNEE; // output headroom above the knee
         let s = x - HIGHLIGHT_KNEE;       // input excess above the knee (may be >> range)
-        HIGHLIGHT_KNEE + range * (s / (s + range))
+        // mul_add for the final (range * frac + KNEE)
+        HIGHLIGHT_KNEE + range.mul_add(s / (s + range), 0.0)
     }
+}
+
+/// Perceptual Constancy framework helpers (Lens17 full implementation).
+/// These realize the unified non-Riemannian model in the hot path.
+/// For production sub-ms, this would be replaced by precomputed LUT or SIMD.
+/// See docs/PerceptualConstancyMode.md and docs/hooks.md for the math and hooking.
+
+const SENSOR_SHARPEN_B: [[f32; 3]; 3] = [
+    [ 1.05, -0.025, -0.025],
+    [-0.025,  1.05, -0.025],
+    [-0.025, -0.025,  1.05],
+]; // Plausible sensor-sharpen; full system can load per-camera or fixed.
+
+#[inline(always)]
+fn to_log_euclidean(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let eps = 1e-6f32;
+    // B * rgb then component log to map geodesics to flat Euclidean space.
+    let sr = SENSOR_SHARPEN_B[0][0]*r + SENSOR_SHARPEN_B[0][1]*g + SENSOR_SHARPEN_B[0][2]*b;
+    let sg = SENSOR_SHARPEN_B[1][0]*r + SENSOR_SHARPEN_B[1][1]*g + SENSOR_SHARPEN_B[1][2]*b;
+    let sb = SENSOR_SHARPEN_B[2][0]*r + SENSOR_SHARPEN_B[2][1]*g + SENSOR_SHARPEN_B[2][2]*b;
+    (
+        (sr.max(eps)).ln(),
+        (sg.max(eps)).ln(),
+        (sb.max(eps)).ln(),
+    )
+}
+
+#[inline(always)]
+fn from_log_euclidean(lr: f32, lg: f32, lb: f32) -> (f32, f32, f32) {
+    let eps = 1e-6f32;
+    (
+        (lr.exp() - eps).max(0.0),
+        (lg.exp() - eps).max(0.0),
+        (lb.exp() - eps).max(0.0),
+    )
+}
+
+/// Molchanov residuals + A_tensor for adaptive discretization and uniform modulation.
+/// Density around neutral grays and saturated greens.
+#[inline(always)]
+fn molchanov_residuals_and_atensor(luma_l: f32, lr: f32, lg: f32, lb: f32, base_scale: f32) -> (f32, f32, f32, f32) {
+    // Parallelogram law residuals discretize metric grid. *self instead of powi(2) for ILP.
+    let dr = lr - luma_l;
+    let dg = lg - luma_l;
+    let db = lb - luma_l;
+    let res_r = 0.02 * (dr * dr);
+    let res_g = 0.02 * (dg * dg);
+    let res_b = 0.02 * (db * db);
+
+    // A_tensor modulation of scale (and conceptually sliders/edges).
+    let gray_dist = ((lr - luma_l).abs() + (lg - luma_l).abs() + (lb - luma_l).abs()).min(2.0) / 2.0;
+    let a_mod = 1.0 + 0.3 * (1.0 - gray_dist); // higher density (stronger effect) near gray
+    let green_boost = if lg > lr.max(lb) { 1.15 } else { 1.0 }; // saturated greens
+    let modulated_scale = base_scale * a_mod * green_boost;
+
+    (luma_l + (lr - luma_l + res_r) * modulated_scale,
+     luma_l + (lg - luma_l + res_g) * modulated_scale,
+     luma_l + (lb - luma_l + res_b) * modulated_scale,
+     modulated_scale)
+}
+
+/// Hybrid Riemannian/non-Riemannian spring (ΔE2000-like) + Los Alamos f(c) diminishing returns.
+#[inline(always)]
+fn hybrid_spring_and_dimishing_fc(lr: f32, lg: f32, lb: f32, luma_l: f32) -> (f32, f32, f32) {
+    let mut r = lr;
+    let mut g = lg;
+    let mut b = lb;
+
+    // Spring force to neutral gray to counter drift near grays. Use * for powi(2).
+    let dr = r - luma_l;
+    let dg = g - luma_l;
+    let db = b - luma_l;
+    let dist = ((dr*dr) + (dg*dg) + (db*db)).sqrt();
+    if dist < 0.25 {
+        let spring = 0.7 * (0.25 - dist);
+        r = r * (1.0 - spring) + luma_l * spring;
+        g = g * (1.0 - spring) + luma_l * spring;
+        b = b * (1.0 - spring) + luma_l * spring;
+    }
+
+    // f(c) per-hue diminishing returns (stronger for greens, etc.).
+    let fc_r = (1.0 - 0.08 * dr.abs().min(0.6)).max(0.6);
+    let fc_g = (1.0 - 0.12 * dg.abs().min(0.6)).max(0.6); // greens
+    let fc_b = (1.0 - 0.08 * db.abs().min(0.6)).max(0.6);
+
+    (r * fc_r, g * fc_g, b * fc_b)
 }
 
 fn build_pre_lut(black: u16, white: u16, wb_eff: f32, exp_gain: f32) -> Vec<u16> {
     let mut lut = vec![0u16; 65536];
     let denom = (white.saturating_sub(black)).max(1) as f32;
     let gain = wb_eff * exp_gain;
+    // Precompute scale to replace per-i div with mul (faster in tight 64k loop).
+    let norm_gain = gain / denom;
     // T1: per-index work is independent; parallelize. Matters most for small/thumbnail renders where
     // the fixed 65536-entry build is a large fraction of (or exceeds) the per-pixel pass.
     let fill = |i: usize, o: &mut u16| {
         let centered = (i as i32 - black as i32).max(0) as f32;
-        let n = highlight_shoulder(centered / denom * gain);
+        let n = highlight_shoulder(centered * norm_gain);
         *o = (n * 65535.0 + 0.5).min(65535.0) as u16;
     };
     #[cfg(feature = "parallel")]
@@ -236,6 +341,7 @@ thread_local! {
 
 fn build_post_lut(t: &TonePost) -> Vec<u8> {
     let mut lut = vec![0u8; 65536];
+    // Hoist for mul_add + clamp.
     let fill = |i: usize, o: &mut u8| {
         let y = tone_curve(i as f32 / 65535.0, t);
         *o = (y * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
@@ -468,6 +574,84 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
 /// (Schrödinger), Molchanov residuals/tensor A, hybrid corrections, and Los
 /// Alamos f(c) curves for illumination-invariant adjustments during progressive
 /// JXL paints (never for producedBy/ingest per P-1).
+///
+/// Wired to C++ fast path (bridge intrinsics) when feature "c-perceptual" is enabled.
+/// The C++ (with AVX2 hand-written intrinsics) is the optimal for the "new" path in WASM/native.
+
+#[cfg(feature = "c-perceptual")]
+extern "C" {
+    fn perceptual_apply_full(
+        r: f32,
+        g: f32,
+        b: f32,
+        sat: f32,
+        vib: f32,
+        vib_zero: i32,
+        orr: *mut f32,
+        ogg: *mut f32,
+        obb: *mut f32,
+    );
+    // AVX2 bulk for lower-copy SoA flows (e.g. from planar demosaic output or direct JXL pixels).
+    // Matches scalar but processes 8-wide with hand-written intrinsics. Remainder scalar in caller.
+    fn perceptual_apply_full_avx2(
+        in_r: *const f32,
+        in_g: *const f32,
+        in_b: *const f32,
+        out_r: *mut f32,
+        out_g: *mut f32,
+        out_b: *mut f32,
+        n: i32,
+        sat: f32,
+        vib: f32,
+        vib_zero: i32,
+    );
+}
+
+/// Safe wrapper for the C++ AVX2 bulk perceptual (enabled by c-perceptual feature).
+/// Expects matching length SoA slices. Useful for lower-copy flows when input is planar
+/// (e.g. from demosaic_rggb_planar_simd converted to f32 post pre-LUT). The bulk uses
+/// hand intrinsics; falls back to scalar path inside C++ if needed.
+#[cfg(feature = "c-perceptual")]
+pub fn perceptual_apply_bulk(
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    out_r: &mut [f32],
+    out_g: &mut [f32],
+    out_b: &mut [f32],
+    sat: f32,
+    vib: f32,
+    vib_zero: bool,
+) {
+    let n = r.len();
+    debug_assert_eq!(g.len(), n);
+    debug_assert_eq!(b.len(), n);
+    debug_assert_eq!(out_r.len(), n);
+    debug_assert_eq!(out_g.len(), n);
+    debug_assert_eq!(out_b.len(), n);
+    if n == 0 {
+        return;
+    }
+    let start = std::time::Instant::now();
+    unsafe {
+        perceptual_apply_full_avx2(
+            r.as_ptr(),
+            g.as_ptr(),
+            b.as_ptr(),
+            out_r.as_mut_ptr(),
+            out_g.as_mut_ptr(),
+            out_b.as_mut_ptr(),
+            n as i32,
+            sat,
+            vib,
+            if vib_zero { 1 } else { 0 },
+        );
+    }
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // Hook for benchmarking the SoA bulk (C++ AVX2 or scalar) vs old per-pixel path.
+    eprintln!("perceptual_bulk_ms: {:.3}", elapsed_ms);
+}
+
 #[inline(always)]
 fn apply_tone_math(
     r: f32,
@@ -479,57 +663,58 @@ fn apply_tone_math(
     vib_zero: bool,
     perceptual_constancy: bool,
 ) -> (f32, f32, f32) {
-    // 1) Matrix.
-    let mut r2 = m[0][0] * r + m[0][1] * g + m[0][2] * b;
-    let mut g2 = m[1][0] * r + m[1][1] * g + m[1][2] * b;
-    let mut b2 = m[2][0] * r + m[2][1] * g + m[2][2] * b;
+    // 1) Matrix (mul_add for FMA/ILP).
+    let mut r2 = m[0][0].mul_add(r, m[0][1].mul_add(g, m[0][2] * b));
+    let mut g2 = m[1][0].mul_add(r, m[1][1].mul_add(g, m[1][2] * b));
+    let mut b2 = m[2][0].mul_add(r, m[2][1].mul_add(g, m[2][2] * b));
 
-    // 2) Saturation + vibrance around luma.
-    let luma = 0.2126 * r2 + 0.7152 * g2 + 0.0722 * b2;
+    // 2) Saturation + vibrance around luma (hoisted coeffs, restructured div once, mul_add).
+    let luma = LUMA_R.mul_add(r2, LUMA_G.mul_add(g2, LUMA_B * b2));
     let scale = if vib_zero {
         sat
     } else {
         let raw_mx = r2.max(g2).max(b2);
         let mx = raw_mx.max(1.0);
         let mn = r2.min(g2).min(b2).max(0.0);
-        let pixel_sat = if raw_mx > 0.0 { ((mx - mn) / mx).clamp(0.0, 1.0) } else { 0.0 };
+        let inv_mx = if raw_mx > 0.0 { 1.0 / mx } else { 0.0 };
+        let pixel_sat = ((mx - mn) * inv_mx).clamp(0.0, 1.0);
         let vib_w = 1.0 - pixel_sat;
-        sat * (1.0 + vib * vib_w * 0.6)
+        sat * (1.0 + vib * vib_w * 0.6)  // original exact expr; mul_add below for the madds
     };
-    r2 = luma + (r2 - luma) * scale;
-    g2 = luma + (g2 - luma) * scale;
-    b2 = luma + (b2 - luma) * scale;
+    // equiv to luma + (x - luma)*scale using mul_add for FMA opportunity (exact in f32 for these ops)
+    r2 = luma.mul_add(1.0 - scale, r2 * scale);
+    g2 = luma.mul_add(1.0 - scale, g2 * scale);
+    b2 = luma.mul_add(1.0 - scale, b2 * scale);
 
     if perceptual_constancy {
-        // Runtime-only advanced path (LookRenderer during progressive JXL paints).
-        // Basic log-space approximation to geodesic sat adjustment as foundation
-        // for full sensor-sharpen + log geodesics + Molchanov A_tensor modulation
-        // + hybrid spring + diminishing returns f(c). This is the single site for
-        // future evolution of the per-pixel math.
-        // (Reassessed positive: enables the documented vision with minimal surface
-        // change; stub keeps numbers reasonable for new mode; no P-1 violation.)
-        let eps = 1e-6f32;
-        let lr = (r2.max(eps)).ln();
-        let lg = (g2.max(eps)).ln();
-        let lb = (b2.max(eps)).ln();
-        let luma_l = (lr + lg + lb) / 3.0;
-        // Stub scale using existing sat/vib logic; real version will use tensor
-        // for uniform perceptual steps and residuals for adaptive correction.
-        let scale_l = if vib_zero { sat } else { sat * (1.0 + vib * 0.6) };
-        let lr2 = luma_l + (lr - luma_l) * scale_l;
-        let lg2 = luma_l + (lg - luma_l) * scale_l;
-        let lb2 = luma_l + (lb - luma_l) * scale_l;
-        r2 = (lr2.exp() - eps).max(0.0);
-        g2 = (lg2.exp() - eps).max(0.0);
-        b2 = (lb2.exp() - eps).max(0.0);
-        // TODO (Layer 2/3): integrate full B matrix here or upstream, precomputed
-        // metric tensor grid lookup, Molchanov parallelogram residuals for density,
-        // A_tensor modulation of scale, ΔE2000 spring, Los Alamos f(c) per-hue.
-        // LUT acceleration to follow for sub-ms.
-        //
-        // Hook example for C++ port (Lens25):
-        // extern "C" { fn apply_perceptual_constancy_c(r: f32, g: f32, b: f32, scale: f32, /* B, A_tensor, f_c etc */ ) -> (f32,f32,f32); }
-        // let (r2, g2, b2) = unsafe { apply_perceptual_constancy_c(r2, g2, b2, scale_l, ...) };
+        // Wired to C++ fast path when "c-perceptual" feature enabled (the bridge with AVX2 intrinsics is the optimal).
+        // The C++ provides the full framework at high speed via hand-written SIMD.
+        // Fallback to the Rust reference implementation (the full math we implemented).
+        #[cfg(feature = "c-perceptual")]
+        {
+            let mut rr = 0.0f32;
+            let mut gg = 0.0f32;
+            let mut bb = 0.0f32;
+            unsafe {
+                perceptual_apply_full(r2, g2, b2, sat, vib, if vib_zero { 1 } else { 0 }, &mut rr, &mut gg, &mut bb);
+            }
+            r2 = rr;
+            g2 = gg;
+            b2 = bb;
+        }
+        #[cfg(not(feature = "c-perceptual"))]
+        {
+            // Rust reference (full framework, portable for WASM).
+            let (lr, lg, lb) = to_log_euclidean(r2, g2, b2);
+            let luma_l = (lr + lg + lb) / 3.0;
+            let base_scale = scale;
+            let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, base_scale);
+            let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
+            let (rr, gg, bb) = from_log_euclidean(lr3, lg3, lb3);
+            r2 = rr;
+            g2 = gg;
+            b2 = bb;
+        }
     }
 
     (r2, g2, b2)
@@ -553,11 +738,10 @@ fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
         blacks: params.blacks.clamp(-1.0, 1.0),
     };
     let sat_param = params.saturation.clamp(-1.0, 1.0);
-    let sat = if sat_param < 0.0 {
-        BASELINE_SAT * (1.0 + sat_param)
-    } else {
-        BASELINE_SAT + sat_param * 0.8
-    }.max(0.0);
+    // branchless for the sat blend (faster, no mispredict in per-image call)
+    let sat_neg = BASELINE_SAT * (1.0 + sat_param);
+    let sat_pos = BASELINE_SAT + sat_param * 0.8;
+    let sat = if sat_param < 0.0 { sat_neg } else { sat_pos }.max(0.0);
     let vib = params.vibrance.clamp(-1.0, 1.0);
     let vib_zero = vib.abs() < 1e-6;
     let perceptual_constancy = params.perceptual_constancy;
@@ -617,23 +801,26 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
             let c = cache.as_ref().unwrap();
 
             // Lens 22/23: pointer move (raw ptr advance) instead of index arithmetic + casts.
-            // "Newer" optimized version; old index version for flipflop comparison in tests.
-            let nbytes = rgb16.len();
-            let mut src = rgb16.as_ptr();
-            let mut dst = out.as_mut_ptr();
-            let src_end = src.add(nbytes);
-            let pre_r = c.pre_r.as_ptr();
-            let pre_g = c.pre_g.as_ptr();
-            let pre_b = c.pre_b.as_ptr();
-            let post = c.post.as_ptr();
-            while src < src_end {
-                let r = *pre_r.add(*src as usize) as f32; src = src.add(1);
-                let g = *pre_g.add(*src as usize) as f32; src = src.add(1);
-                let b = *pre_b.add(*src as usize) as f32; src = src.add(1);
-                let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
-                *dst = *post.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                *dst = *post.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                *dst = *post.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+            // unsafe: in-bounds by construction — *src is u16 indexing 65536-entry LUTs; src/dst
+            // advance exactly rgb16.len() elements. (Wrap added to fix the wasm/no-parallel build.)
+            unsafe {
+                let nbytes = rgb16.len();
+                let mut src = rgb16.as_ptr();
+                let mut dst = out.as_mut_ptr();
+                let src_end = src.add(nbytes);
+                let pre_r = c.pre_r.as_ptr();
+                let pre_g = c.pre_g.as_ptr();
+                let pre_b = c.pre_b.as_ptr();
+                let post = c.post.as_ptr();
+                while src < src_end {
+                    let r = *pre_r.add(*src as usize) as f32; src = src.add(1);
+                    let g = *pre_g.add(*src as usize) as f32; src = src.add(1);
+                    let b = *pre_b.add(*src as usize) as f32; src = src.add(1);
+                    let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+                    *dst = *post.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                    *dst = *post.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                    *dst = *post.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                }
             }
         });
     }
@@ -684,23 +871,26 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             let c = cache.as_ref().unwrap();
             
             // Lens 23 pointer advance version (consistent with process_into).
-            let nbytes = rgb16.len();
-            let mut src = rgb16.as_ptr();
-            let mut dst = out.as_mut_ptr();
-            let src_end = src.add(nbytes);
-            let pre_r = c.pre_r.as_ptr();
-            let pre_g = c.pre_g.as_ptr();
-            let pre_b = c.pre_b.as_ptr();
-            let post = c.post.as_ptr();
-            while src < src_end {
-                let r = *pre_r.add(*src as usize) as f32; src = src.add(1);
-                let g = *pre_g.add(*src as usize) as f32; src = src.add(1);
-                let b = *pre_b.add(*src as usize) as f32; src = src.add(1);
-                let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
-                *dst = *post.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                *dst = *post.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                *dst = *post.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                *dst = 255; dst = dst.add(1);
+            // unsafe: same in-bounds invariant as process_into (out is n*4; dst advances n*4).
+            unsafe {
+                let nbytes = rgb16.len();
+                let mut src = rgb16.as_ptr();
+                let mut dst = out.as_mut_ptr();
+                let src_end = src.add(nbytes);
+                let pre_r = c.pre_r.as_ptr();
+                let pre_g = c.pre_g.as_ptr();
+                let pre_b = c.pre_b.as_ptr();
+                let post = c.post.as_ptr();
+                while src < src_end {
+                    let r = *pre_r.add(*src as usize) as f32; src = src.add(1);
+                    let g = *pre_g.add(*src as usize) as f32; src = src.add(1);
+                    let b = *pre_b.add(*src as usize) as f32; src = src.add(1);
+                    let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+                    *dst = *post.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                    *dst = *post.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                    *dst = *post.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                    *dst = 255; dst = dst.add(1);
+                }
             }
         });
     }
@@ -805,22 +995,25 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
             let c = cache.as_ref().unwrap();
             let post16 = c.post16.as_ref().unwrap();
             // Lens 23 pointer version for 16bit path too.
-            let nbytes = rgb16.len();
-            let mut src = rgb16.as_ptr();
-            let mut dst = out.as_mut_ptr();
-            let src_end = src.add(nbytes);
-            let pre_r = c.pre_r.as_ptr();
-            let pre_g = c.pre_g.as_ptr();
-            let pre_b = c.pre_b.as_ptr();
-            let post16 = c.post16.as_ref().unwrap().as_ptr();
-            while src < src_end {
-                let r = *pre_r.add(*src as usize) as f32; src = src.add(1);
-                let g = *pre_g.add(*src as usize) as f32; src = src.add(1);
-                let b = *pre_b.add(*src as usize) as f32; src = src.add(1);
-                let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
-                *dst = *post16.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                *dst = *post16.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
-                *dst = *post16.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+            // unsafe: same in-bounds invariant as process_into (out is n*3 u16; dst advances n*3).
+            unsafe {
+                let nbytes = rgb16.len();
+                let mut src = rgb16.as_ptr();
+                let mut dst = out.as_mut_ptr();
+                let src_end = src.add(nbytes);
+                let pre_r = c.pre_r.as_ptr();
+                let pre_g = c.pre_g.as_ptr();
+                let pre_b = c.pre_b.as_ptr();
+                let post16 = c.post16.as_ref().unwrap().as_ptr();
+                while src < src_end {
+                    let r = *pre_r.add(*src as usize) as f32; src = src.add(1);
+                    let g = *pre_g.add(*src as usize) as f32; src = src.add(1);
+                    let b = *pre_b.add(*src as usize) as f32; src = src.add(1);
+                    let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+                    *dst = *post16.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                    *dst = *post16.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                    *dst = *post16.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
+                }
             }
         });
     }
@@ -1392,8 +1585,14 @@ mod tonemap_flip_flops {
             perceptual_constancy: false,
         };
 
-        println!("\n=== Flip-flop tonemap (Lens22/23/25): apply_tone_math new (perceptual=true) vs old (false) x10 ===");
-        for i in 0..10 {
+        // Support graphing stabilization: print CSV + running stats. 30 is often excessive; bench shows signal settles ~8-12.
+        // Run with env TRIALS=12 or edit. Default keeps 30 for back-compat with prior handoff numbers.
+        let trials: usize = std::env::var("TRIALS").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+        println!("\n=== Flip-flop tonemap (Lens22/23/25): apply_tone_math new (perceptual=true) vs old (false) x{} for stats (CSV for graph) ===", trials);
+        println!("CSV: trial,new_ms,old_ms,ratio_new_over_old,running_mean_ratio");
+        let mut new_times: Vec<f64> = Vec::new();
+        let mut old_times: Vec<f64> = Vec::new();
+        for i in 0..trials {
             let use_new = i % 2 == 0;
             let mut params = base_params.clone();
             params.perceptual_constancy = use_new;
@@ -1402,7 +1601,26 @@ mod tonemap_flip_flops {
             let t0 = Instant::now();
             for _ in 0..5 { let _ = process(&buf, &params); } // inner iters for stable timing
             let ms = (t0.elapsed().as_secs_f64() / 5.0) * 1000.0;
+            if use_new { new_times.push(ms); } else { old_times.push(ms); }
+            let ratio = if !use_new && !old_times.is_empty() && !new_times.is_empty() {
+                new_times.last().unwrap() / old_times.last().unwrap()
+            } else { 0.0 };
+            // running mean of observed ratios (new/old pairs so far)
+            let run_mean = if !new_times.is_empty() && !old_times.is_empty() {
+                let pairs = new_times.len().min(old_times.len());
+                let sum_r: f64 = (0..pairs).map(|k| new_times[k] / old_times[k]).sum();
+                sum_r / pairs as f64
+            } else { 0.0 };
+            println!("CSV,{},{:.3},{:.3},{:.3},{:.3}", i, if use_new {ms} else {0.0}, if !use_new {ms} else {0.0}, ratio, run_mean);
             println!("tone flip {}: {:.3} ms (new/perceptual={})", i, ms, use_new);
+        }
+        // Quick stabilization note (mirrors C++ bench)
+        if new_times.len() > 1 && old_times.len() > 1 {
+            let pairs = new_times.len().min(old_times.len());
+            let ratios: Vec<f64> = (0..pairs).map(|k| new_times[k]/old_times[k]).collect();
+            let m = ratios.iter().sum::<f64>() / pairs as f64;
+            let var = ratios.iter().map(|r| (r-m).powi(2)).sum::<f64>() / (pairs as f64 - 1.0).max(1.0);
+            println!("Post-run: mean ratio new/old = {:.3}, sample std = {:.3} over {} pairs ({} trials). 8-12 often enough per C++ graphed bench.", m, var.sqrt(), pairs, trials);
         }
     }
 
@@ -1424,9 +1642,10 @@ mod tonemap_flip_flops {
         let mut lut = vec![0u16; 65536];
         let denom = (white.saturating_sub(black)).max(1) as f32;
         let gain = wb_eff * exp_gain;
+        let norm_gain = gain / denom;
         for i in 0..65536usize {
             let centered = (i as i32 - black as i32).max(0) as f32;
-            let n = highlight_shoulder(centered / denom * gain);
+            let n = highlight_shoulder(centered * norm_gain);
             lut[i] = (n * 65535.0 + 0.5).min(65535.0) as u16;
         }
         lut

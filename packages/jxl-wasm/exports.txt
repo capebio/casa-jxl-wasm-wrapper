@@ -38,3 +38,5 @@ _jxl_wasm_dec_is_last_frame
 _jxl_wasm_dec_anim_ticks_per_second
 _jxl_wasm_dec_anim_loop_count
 _jxl_wasm_dec_seek_to_frame
+_jxl_wasm_encode_rgb16_planar
+_jxl_wasm_encode_rgb16_planar

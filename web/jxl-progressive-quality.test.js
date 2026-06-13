@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { computePsnrVsFinal, computeSsimVsFinal, detectMonotone, MONOTONE_TOLERANCE_DB } from './jxl-progressive-quality.js';
+import { computePsnrVsFinal, computeSsimVsFinal, detectMonotone, MONOTONE_TOLERANCE_DB, computeChannelMoments } from './jxl-progressive-quality.js';
 import { pixelsToXyb, computeButteraugliVsFinal, createButteraugliComparer, computeButteraugliApproxVsFinal } from './jxl-butteraugli.js';
 
 test('PSNR of identical buffers is +Infinity', () => {
@@ -117,6 +117,12 @@ test('butter approx defined and non-nan', () => {
 test('psnr/ssim handle 0-len gracefully', () => {
   const z = new Uint8Array(0);
   expect(computePsnrVsFinal(z, z)).toBe(Infinity);
-  // ssim on 0 is edge (np=0); callers avoid, but no crash on len check
-  expect(() => computeSsimVsFinal(z, z, 0, 0)).not.toThrow();
+  expect(computeSsimVsFinal(z, z, 0, 0)).toBe(0);
+});
+
+test('computeChannelMoments basic for features surrogate (lens12)', () => {
+  const p = new Uint8Array(16).fill(128);
+  const m = computeChannelMoments(p, 2, 2);
+  expect(m.ch).toBeGreaterThan(0);
+  expect(m.mus.length).toBe(m.ch);
 });

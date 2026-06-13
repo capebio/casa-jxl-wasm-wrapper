@@ -317,6 +317,96 @@ export class OrfMetadata {
 }
 if (Symbol.dispose) OrfMetadata.prototype[Symbol.dispose] = OrfMetadata.prototype.free;
 
+export class PerceptualComparer {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        PerceptualComparerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_perceptualcomparer_free(ptr, 0);
+    }
+    /**
+     * Copying convenience path: pass RGBA, get {butteraugli, ssim, psnr} as a JS object.
+     * @param {Uint8Array} test_rgba
+     * @returns {any}
+     */
+    all(test_rgba) {
+        const ptr0 = passArray8ToWasm0(test_rgba, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.perceptualcomparer_all(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Compute all three metrics over the `len` bytes previously written into the
+     * staging buffer via `input_ptr`.
+     * @param {number} len
+     * @returns {any}
+     */
+    all_at(len) {
+        const ret = wasm.perceptualcomparer_all_at(this.__wbg_ptr, len);
+        return ret;
+    }
+    /**
+     * @param {Uint8Array} test_rgba
+     * @returns {number}
+     */
+    butteraugli(test_rgba) {
+        const ptr0 = passArray8ToWasm0(test_rgba, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.perceptualcomparer_butteraugli(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Zero-copy: returns a pointer into the wasm heap staging buffer of `len`
+     * bytes. JS writes the test RGBA straight here (no ArrayBuffer copy across
+     * the boundary), then calls `all_at(len)`. Grows the buffer if needed; the
+     * returned pointer is valid until the next `input_ptr` call.
+     * @param {number} len
+     * @returns {number}
+     */
+    input_ptr(len) {
+        const ret = wasm.perceptualcomparer_input_ptr(this.__wbg_ptr, len);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Uint8Array} ref_rgba
+     * @param {number} width
+     * @param {number} height
+     */
+    constructor(ref_rgba, width, height) {
+        const ptr0 = passArray8ToWasm0(ref_rgba, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.perceptualcomparer_new(ptr0, len0, width, height);
+        this.__wbg_ptr = ret;
+        PerceptualComparerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {Uint8Array} test_rgba
+     * @returns {number}
+     */
+    psnr(test_rgba) {
+        const ptr0 = passArray8ToWasm0(test_rgba, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.perceptualcomparer_psnr(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * @param {Uint8Array} test_rgba
+     * @returns {number}
+     */
+    ssim(test_rgba) {
+        const ptr0 = passArray8ToWasm0(test_rgba, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.perceptualcomparer_ssim(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+}
+if (Symbol.dispose) PerceptualComparer.prototype[Symbol.dispose] = PerceptualComparer.prototype.free;
+
 /**
  * Result of processing an ORF: RGB8 buffer + dims (post-orientation).
  */
@@ -371,6 +461,13 @@ export class ProcessResult {
     get exposure_num() {
         const ret = wasm.__wbg_get_processresult_exposure_num(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * @returns {boolean}
+     */
+    get fast_preview() {
+        const ret = wasm.__wbg_get_processresult_fast_preview(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * @returns {number}
@@ -475,6 +572,20 @@ export class ProcessResult {
      */
     get orientation() {
         const ret = wasm.__wbg_get_processresult_orientation(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get preview_demosaic_ms() {
+        const ret = wasm.__wbg_get_processresult_preview_demosaic_ms(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get preview_downscale_ms() {
+        const ret = wasm.__wbg_get_processresult_preview_downscale_ms(this.__wbg_ptr);
         return ret;
     }
     /**
@@ -783,6 +894,102 @@ export function bench_decode_orf(data) {
 }
 
 /**
+ * @returns {boolean}
+ */
+export function demosaic_bench_equal() {
+    const ret = wasm.demosaic_bench_equal();
+    return ret !== 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_first_diff() {
+    const ret = wasm.demosaic_bench_first_diff();
+    return ret;
+}
+
+/**
+ * @returns {boolean}
+ */
+export function demosaic_bench_planar_equal() {
+    const ret = wasm.demosaic_bench_planar_equal();
+    return ret !== 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_planar_first_diff() {
+    const ret = wasm.demosaic_bench_planar_first_diff();
+    return ret;
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_planar_scalar() {
+    const ret = wasm.demosaic_bench_planar_scalar();
+    return ret >>> 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_planar_simd() {
+    const ret = wasm.demosaic_bench_planar_simd();
+    return ret >>> 0;
+}
+
+/**
+ * @param {number} w
+ * @param {number} h
+ */
+export function demosaic_bench_prepare(w, h) {
+    wasm.demosaic_bench_prepare(w, h);
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_scalar() {
+    const ret = wasm.demosaic_bench_scalar();
+    return ret >>> 0;
+}
+
+/**
+ * @returns {boolean}
+ */
+export function demosaic_bench_shuffle_equal() {
+    const ret = wasm.demosaic_bench_shuffle_equal();
+    return ret !== 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_shuffle_first_diff() {
+    const ret = wasm.demosaic_bench_shuffle_first_diff();
+    return ret;
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_shuffle_simd() {
+    const ret = wasm.demosaic_bench_shuffle_simd();
+    return ret >>> 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function demosaic_bench_simd() {
+    const ret = wasm.demosaic_bench_simd();
+    return ret >>> 0;
+}
+
+/**
  * Box-filter downscale an RGB8 buffer.  Useful for thumbnail generation.
  *
  * Fast path: when src dims are exact integer multiple of dst (common for 1/2, 1/4, 1/8 thumbs),
@@ -913,7 +1120,7 @@ export function process_cr2_with_flags(data, output_flags, exposure_ev, contrast
 
 /**
  * Parse + decode a DNG file blob. Returns an error string on failure.
- * Single-threaded (no rayon in WASM).  Look params: LR-style (-1..+1), except
+ * (Rayon when parallel-wasm feature active.) Look params: LR-style (-1..+1), except
  * exposure_ev in stops.  Pass NaN/≤0 for wb_r_override/wb_b_override to use defaults.
  *
  * Always generates full RGB8, 1800 px lightbox RGB16, and 360 px thumbnail RGB16.
@@ -1125,6 +1332,10 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_new_02d162bc6cf02f60: function() {
+            const ret = new Object();
+            return ret;
+        },
         __wbg_now_3cd905700d21a70b: function(arg0) {
             const ret = arg0.now();
             return ret;
@@ -1141,6 +1352,10 @@ function __wbg_get_imports() {
             const ret = arg0.performance;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         },
+        __wbg_set_a0e911be3da02782: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
         __wbg_static_accessor_GLOBAL_THIS_02344c9b09eb08a9: function() {
             const ret = typeof globalThis === 'undefined' ? null : globalThis;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
@@ -1156,6 +1371,16 @@ function __wbg_get_imports() {
         __wbg_static_accessor_WINDOW_b34d2126934e16ba: function() {
             const ret = typeof window === 'undefined' ? null : window;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+        },
+        __wbindgen_cast_0000000000000001: function(arg0) {
+            // Cast intrinsic for `F64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000002: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(String) -> Externref`.
+            const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
         },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
@@ -1182,6 +1407,9 @@ const LookRendererFinalization = (typeof FinalizationRegistry === 'undefined')
 const OrfMetadataFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_orfmetadata_free(ptr, 1));
+const PerceptualComparerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_perceptualcomparer_free(ptr, 1));
 const ProcessResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_processresult_free(ptr, 1));
@@ -1231,6 +1459,15 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function handleError(f, args) {
+    try {
+        return f.apply(this, args);
+    } catch (e) {
+        const idx = addToExternrefTable0(e);
+        wasm.__wbindgen_exn_store(idx);
+    }
 }
 
 function isLikeNone(x) {

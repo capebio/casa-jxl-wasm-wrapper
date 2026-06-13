@@ -78,6 +78,15 @@ export interface MsgDecodeProgress {
   format: PixelFormat;
   region?: Region;
   pixelStride: number;
+  sourceScale?: number;
+  progressiveRegion?: boolean;
+  regionFallback?: "full-frame-then-crop";
+  progressiveSequence?: number;
+  passOrdinal?: number;
+  frameIndex?: number;
+  frameDuration?: number;
+  frameName?: string;
+  animTicksPerSecond?: number;
 }
 
 export interface MsgDecodeFinal {
@@ -88,6 +97,15 @@ export interface MsgDecodeFinal {
   format: PixelFormat;
   region?: Region;
   pixelStride: number;
+  sourceScale?: number;
+  progressiveRegion?: boolean;
+  regionFallback?: "full-frame-then-crop";
+  progressiveSequence?: number;
+  passOrdinal?: number;
+  frameIndex?: number;
+  frameDuration?: number;
+  frameName?: string;
+  animTicksPerSecond?: number;
   /** Byte length of the transferred pixel buffer (avoids a separate metric IPC). */
   outputBytes?: number;
   /** Elapsed ms from session start to first pixel (may be set here if no progress event fired). */

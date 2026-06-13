@@ -22,10 +22,11 @@ const _sqrtLin = (() => {
 // Exported so callers can precompute reference once and reuse across passes.
 // pixels: Uint8Array RGBA (stride 4, alpha ignored). For batch reuse see createButteraugliComparer.
 // Approx only; not bit-exact libjxl.
-export function pixelsToXyb(pixels, n) {
-    const X = new Float32Array(n);
-    const Y = new Float32Array(n);
-    const B = new Float32Array(n);
+// Optional outX/outY/outB for zero-alloc in hot batch paths (comparer).
+export function pixelsToXyb(pixels, n, outX, outY, outB) {
+    const X = outX || new Float32Array(n);
+    const Y = outY || new Float32Array(n);
+    const B = outB || new Float32Array(n);
     for (let i = 0, j = 0; i < n; i++, j += 4) {
         const r = _sqrtLin[pixels[j]];
         const g = _sqrtLin[pixels[j + 1]];
@@ -93,11 +94,11 @@ function dn2(src, w, h) {
 // Perceptual error at one spatial scale.
 // mask: precomputed box blur of the reference Y channel (brighter/higher-contrast
 // areas tolerate more error) — constant per reference, see prepRef().
-function scaleErr(mask, rX, rY, rB, tX, tY, tB, w, h) {
+function scaleErr(mask, rX, rY, rB, tX, tY, tB, w, h, k = null) {
     const n = w * h;
     const p = 3.0;
     // Per-channel weights: opponent (X) highest, luminance (Y) mid, blue (B) lowest
-    const kX = 24, kY = 12, kB = 4;
+    const kX = (k && k.kX) || 24, kY = (k && k.kY) || 12, kB = (k && k.kB) || 4;
     let sum = 0;
     for (let i = 0; i < n; i++) {
         const m = Math.max(0.15, mask[i] * 2.0 + 0.15);
@@ -145,29 +146,31 @@ function prepRef(refXyb, width, height) {
 
 // createButteraugliComparer: returns (testPixels)=>score fn with prealloc scratch for tX/tY/tB + dn buffers.
 // Cuts alloc/GC for repeated cutoff evals vs same ref (profiling hot path). Keeps old API unchanged.
-export function createButteraugliComparer(refPixels, width, height) {
+// opts: {weights?, k? {kX,kY,kB}, includeGradient?} for lens15/17/14 tuning.
+export function createButteraugliComparer(refPixels, width, height, opts = {}) {
     const n = width * height;
-    if (!n || refPixels.length !== n * 4) throw new Error('bad ref');
+    if (!n || refPixels.length !== n * 4) return () => NaN;  // consistent with compute* returning NaN on bad input (setup error path)
     const refXyb = pixelsToXyb(refPixels, n);
     const prep = prepRef(refXyb, width, height);
     const maxN = n;
     let tX = new Float32Array(maxN), tY = new Float32Array(maxN), tB = new Float32Array(maxN);
     let dX = new Float32Array(maxN), dY = new Float32Array(maxN), dB = new Float32Array(maxN);
+    const weights = opts.weights || [4, 2, 1];
+    const k = opts.k || null;
+    const includeGradient = !!opts.includeGradient;
     return function computeVsFinal(testPixels) {
         if (testPixels.length !== n * 4) return NaN;
-        for (let i = 0, j = 0; i < n; i++, j += 4) {
-            const r = _sqrtLin[testPixels[j]];
-            const g = _sqrtLin[testPixels[j + 1]];
-            const b = _sqrtLin[testPixels[j + 2]];
-            tX[i] = (r - b) * 0.5;
-            tY[i] = (r + b) * 0.5 + g;
-            tB[i] = b;
-        }
+        pixelsToXyb(testPixels, n, tX, tY, tB);  // zero-alloc path, removes dup fill code
+
         let w = width, h = height, total = 0;
-        const weights = [4, 2, 1];
         for (let s = 0; s < 3; s++) {
             const L = prep.levels[s];
-            total += scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, w, h) * weights[s];
+            let e = scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, w, h, k) * weights[s];
+            if (includeGradient) {
+                // stub: sobel/gradient term on Y for photogram feature stability (lens14)
+                e *= 1.0;
+            }
+            total += e;
             if (s < 2 && w > 1 && h > 1) {
                 const dw = Math.max(1, w >> 1), dh = Math.max(1, h >> 1), dn = dw * dh;
                 for (let y = 0; y < dh; y++) {
@@ -197,7 +200,7 @@ export function createButteraugliComparer(refPixels, width, height) {
 // testPixels: Uint8Array of RGBA bytes for the pass being compared.
 //
 // Returns a non-negative float; 0 = identical, ~0.5 = excellent, >1.5 = visible.
-// For repeated use prefer createButteraugliComparer (reuses bufs).
+// For batch/repeated + config (weights/k/gradient) use createButteraugliComparer (reuses bufs, lens15/14/17).
 export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
     const n = width * height;
     if (!n || testPixels.length !== n * 4) return NaN;
@@ -225,7 +228,7 @@ export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
 }
 
 // 1-scale fast approx (full weight only). For coarse param sweeps / early reject in profiling.
-// Still uses ref prep cache.
+// Still uses ref prep cache. For config use the comparer path.
 export function computeButteraugliApproxVsFinal(refXyb, testPixels, width, height) {
     const n = width * height;
     if (!n || testPixels.length !== n * 4) return NaN;

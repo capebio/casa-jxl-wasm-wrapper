@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import type { DecodeSession, EncodeSession, PipeOptions } from './browser.js';
+import { type DecodeSession, type EncodeSession, type PipeOptions } from './browser.js';
 /**
  * Pipes a Node.js Readable into a DecodeSession.
  * Honours backpressure (awaits session.push); prefetches the next chunk during push dispatch.

@@ -125,9 +125,9 @@ fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], d
                 let mut sp = unsafe { src.as_ptr().add(row + x0 * 3) };
                 for xi in 0..tile {
                     // Read 3 consecutive u16 via ptr (LE mem layout).
-                    let v0 = *sp as f32 * kv; sp = unsafe { sp.add(1) };
-                    let v1 = *sp as f32 * kv; sp = unsafe { sp.add(1) };
-                    let v2 = *sp as f32 * kv; sp = unsafe { sp.add(1) };
+                    let v0 = unsafe { *sp as f32 * kv }; sp = unsafe { sp.add(1) };
+                    let v1 = unsafe { *sp as f32 * kv }; sp = unsafe { sp.add(1) };
+                    let v2 = unsafe { *sp as f32 * kv }; sp = unsafe { sp.add(1) };
                     acc[xi][0] += v0;
                     acc[xi][1] += v1;
                     acc[xi][2] += v2;

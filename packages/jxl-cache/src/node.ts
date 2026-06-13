@@ -151,7 +151,7 @@ export class JxlCacheNode implements JxlCache {
           if (oldest === undefined) break;
           this.persistentTracker.delete(oldest);
           this.evictionsCount++;
-          await fs.unlink(path.join(this.opts.basePath, oldest)).catch(() => undefined);
+          await fs.unlink(path.join(this.opts.basePath!, oldest)).catch(() => undefined);
         }
 
         try {

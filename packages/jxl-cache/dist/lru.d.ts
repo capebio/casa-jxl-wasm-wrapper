@@ -20,5 +20,6 @@ export declare class LRUCache<V> {
     getOldestKey(): string | undefined;
     get size(): number;
     get count(): number;
+    forEachOldestFirst(fn: (key: string, value: V, size: number) => void): void;
     entriesOldestFirst(): Array<[string, V, number]>;
 }

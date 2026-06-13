@@ -40,6 +40,12 @@ export interface DecodeFrameEvent {
   sourceScale?: number;
   progressiveRegion?: boolean;
   regionFallback?: "full-frame-then-crop";
+  progressiveSequence?: number;
+  passOrdinal?: number;
+  frameIndex?: number;
+  frameDuration?: number;
+  frameName?: string;
+  animTicksPerSecond?: number;
 }
 
 export interface Region {
@@ -330,6 +336,10 @@ export type CodecMetric =
   | { name: "decode_scale_used"; value: number }
   | { name: "decode_region_area"; value: number }
   | { name: "source_pixels_decoded"; value: number }
+  | { name: "copy_to_transfer_ms"; value: number }
+  | { name: "copied_bytes"; value: number }
+  | { name: "dropped_due_to_budget"; value: 1 }
+  | { name: "dropped_due_to_cancel"; value: 1 }
   // Scheduler-level wait (populated by jxl-scheduler when a job had to queue for a worker slot).
   // Emitted via the normal metric path so onMetric consumers (benchmarks, parity harnesses)
   // receive it uniformly with time_to_*_ms. 0 or absent for immediate-acquire / preemption paths.

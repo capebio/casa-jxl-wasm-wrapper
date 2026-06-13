@@ -15,6 +15,7 @@ parallel-wasm = ["raw-pipeline/parallel", "dep:wasm-bindgen-rayon"]
 # Use when building the native bench or other native tools that want the shared low-level decoder model.
 jxl-encode = ["raw-pipeline/jxl-encode"]
 jxl-lowlevel = ["raw-pipeline/jxl-lowlevel"]
+c-perceptual = ["raw-pipeline/c-perceptual"]
 
 [dependencies]
 wasm-bindgen = "0.2"

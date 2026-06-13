@@ -1,4 +1,5 @@
 import { Readable } from 'node:stream';
+import { ABORT_REASON } from './browser.js';
 /**
  * Pipes a Node.js Readable into a DecodeSession.
  * Honours backpressure (awaits session.push); prefetches the next chunk during push dispatch.
@@ -13,12 +14,12 @@ export async function fromNodeReadable(readable, session, signalOrOpts) {
         throw new RangeError('[jxl-stream] maxBytes must be a positive finite number');
     }
     const onAbort = () => {
-        void session.cancel('AbortSignal triggered');
+        void session.cancel(ABORT_REASON);
         readable.destroy(new Error('Aborted'));
     };
     if (signal?.aborted) {
         readable.destroy(new Error('Aborted'));
-        await session.cancel('AbortSignal triggered'); // P1-6: awaited, no floating promise
+        await session.cancel(ABORT_REASON); // P1-6: awaited, no floating promise
         return 0;
     }
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -53,7 +54,7 @@ export async function fromNodeReadable(readable, session, signalOrOpts) {
             }
         }
         if (signal?.aborted) {
-            await session.cancel('AbortSignal triggered');
+            await session.cancel(ABORT_REASON);
         }
         else {
             await session.close();

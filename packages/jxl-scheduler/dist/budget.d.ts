@@ -4,6 +4,7 @@ export declare class CoreBudget {
     private readonly waiters;
     constructor(capacity: number);
     get available(): number;
+    get pendingCount(): number;
     /** FIFO acquire. Blocks until cost tokens free. */
     acquire(cost?: number): Promise<void>;
     release(cost?: number): void;

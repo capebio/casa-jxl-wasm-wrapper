@@ -23,9 +23,21 @@ export function parseRequestedWorkerTier(url?: string): RequestedWorkerTier {
 
 export function appendWorkerTierQuery(url: string | undefined, tier: RequestedWorkerTier): string | undefined {
   if (url === undefined) return undefined;
-  const parsed = new URL(url, "https://dummy.invalid");
+  let parsed: URL;
+  let hadOrigin: boolean;
+  try {
+    parsed = new URL(url);
+    hadOrigin = true;
+  } catch {
+    parsed = new URL(url, "https://dummy.invalid");
+    hadOrigin = false;
+  }
   parsed.searchParams.set(TIER_QUERY_KEY, tier);
-  return parsed.pathname + parsed.search + parsed.hash;
+  return hadOrigin ? parsed.toString() : parsed.pathname + parsed.search + parsed.hash;
+}
+
+export function withWorkerTier(url: string | undefined, tier: RequestedWorkerTier): string | undefined {
+  return appendWorkerTierQuery(url, tier);
 }
 
 export function isMtRequestedTier(tier: RequestedWorkerTier): boolean {

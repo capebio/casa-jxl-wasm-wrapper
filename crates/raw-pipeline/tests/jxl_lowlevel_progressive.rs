@@ -5,7 +5,10 @@
 ))]
 
 use raw_pipeline::casabio_encode::{encode_variants_with_progressive, SourceType};
-use raw_pipeline::jxl_lowlevel::{decode_progressive_frames, ProgressiveFrame};
+use raw_pipeline::jxl_lowlevel::{
+    decode_progressive_frames, decode_progressive_frames_borrowed, DecodeProgressiveEvent,
+    ProgressiveFrame,
+};
 
 fn gradient_rgba(w: u32, h: u32) -> Vec<u8> {
     let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -47,5 +50,44 @@ fn progressive_decode_emits_final_frame_with_image_shape() {
                 .any(|frame| !frame.is_final),
             "expected non-final frame before final callback when multiple frames emitted"
         );
+    }
+}
+
+#[test]
+fn progressive_decode_borrowed_api_emits_progress_and_final_shapes() {
+    let (w, h) = (256u32, 192u32);
+    let rgba = gradient_rgba(w, h);
+    let variants = encode_variants_with_progressive(&rgba, w, h, SourceType::Raw, false, 2, 1)
+        .expect("encode progressive test image");
+
+    let mut saw_final = false;
+    let mut saw_non_final = false;
+    let timings = decode_progressive_frames_borrowed(&variants.full, |event| match event {
+        DecodeProgressiveEvent::Progress {
+            width,
+            height,
+            rgba,
+        } => {
+            saw_non_final = true;
+            assert_eq!(width, w);
+            assert_eq!(height, h);
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+        }
+        DecodeProgressiveEvent::Final {
+            width,
+            height,
+            rgba,
+        } => {
+            saw_final = true;
+            assert_eq!(width, w);
+            assert_eq!(height, h);
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+        }
+    });
+
+    assert!(timings.is_some(), "expected progressive decode timings");
+    assert!(saw_final, "expected final borrowed event");
+    if saw_non_final {
+        assert!(saw_final, "non-final events must still end with final");
     }
 }

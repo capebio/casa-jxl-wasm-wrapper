@@ -12,6 +12,15 @@ export type BrowserDecodeEvent = {
     format: PixelFormat;
     region?: Region;
     pixelStride: number;
+    sourceScale?: number;
+    progressiveRegion?: boolean;
+    regionFallback?: "full-frame-then-crop";
+    progressiveSequence?: number;
+    passOrdinal?: number;
+    frameIndex?: number;
+    frameDuration?: number;
+    frameName?: string;
+    animTicksPerSecond?: number;
 } | {
     type: "final";
     info: ImageInfo;
@@ -19,6 +28,15 @@ export type BrowserDecodeEvent = {
     format: PixelFormat;
     region?: Region;
     pixelStride: number;
+    sourceScale?: number;
+    progressiveRegion?: boolean;
+    regionFallback?: "full-frame-then-crop";
+    progressiveSequence?: number;
+    passOrdinal?: number;
+    frameIndex?: number;
+    frameDuration?: number;
+    frameName?: string;
+    animTicksPerSecond?: number;
 } | {
     type: "budget_exceeded";
     stage: DecodeStage;

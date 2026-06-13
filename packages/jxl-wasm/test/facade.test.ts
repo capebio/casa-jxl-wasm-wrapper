@@ -72,7 +72,9 @@ describe("@casabio/jxl-wasm facade", () => {
   test("viewport helper chooses power-of-two downsample from region and target size", () => {
     const source = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8");
 
-    expect(source).toContain("function pickDownsample(options: { region?: Region | null; targetWidth?: number | null; targetHeight?: number | null }): 1 | 2 | 4 | 8");
+    expect(source).toContain("function pickDownsample(");
+    expect(source).toContain("sourceWidth?: number | null;");
+    expect(source).toContain("sourceHeight?: number | null;");
     expect(source).toContain("Math.ceil(sourceLongEdge / factor) >= targetLongEdge");
   });
 
@@ -512,6 +514,46 @@ describe("@casabio/jxl-wasm facade", () => {
     decoder.close();
     const final = await nextWithin(iterator, 100);
     expect(final.value).toMatchObject({ type: "final", info: { width: 1, height: 1 }, format: "rgba8" });
+    await decoder.dispose();
+  });
+
+  test("progressive decoder copies flushed pixels before freeing WASM handle", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeFreedViewProgressiveLibjxlModule());
+
+    const decoder = createDecoder({ ...decodeOptions, emitEveryPass: true });
+    const iterator = decoder.events()[Symbol.asyncIterator]();
+
+    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
+
+    await nextWithin(iterator, 100); // header
+    const progress = await nextWithin(iterator, 100);
+
+    expect(progress.value).toMatchObject({ type: "progress", stage: "dc", format: "rgba8" });
+    expect(Array.from(new Uint8Array((progress.value as any).pixels))).toEqual([9, 8, 7, 6]);
+
+    decoder.close();
+    await decoder.dispose();
+  });
+
+  test("full-frame target sizing auto-selects downsample once progressive header dimensions are known", async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeMeasuredProgressiveLibjxlModule());
+
+    const decoder = createDecoder({
+      ...decodeOptions,
+      emitEveryPass: true,
+      targetWidth: 16,
+      targetHeight: 16,
+      downsample: undefined,
+    });
+    const events = [];
+    decoder.push(new Uint8Array([1, 2, 3, 4]).buffer);
+    decoder.close();
+    for await (const event of decoder.events()) {
+      events.push(event);
+    }
+
+    const progress = events.find((event) => event.type === "progress") as any;
+    expect(progress?.sourceScale).toBe(8);
     await decoder.dispose();
   });
 
@@ -1230,6 +1272,38 @@ function createFakeStreamingInputLibjxlModule() {
     states.delete(state);
   };
 
+  return module;
+}
+
+function createFakeFreedViewProgressiveLibjxlModule() {
+  const module = createFakeProgressiveLibjxlModule() as ReturnType<typeof createFakeProgressiveLibjxlModule> & {
+    __progressHandle?: number;
+  };
+
+  const baseDecode = module._jxl_wasm_decode_rgba8;
+  module._jxl_wasm_dec_take_flushed = () => {
+    module.__progressHandle = baseDecode(0, 4, 1);
+    const ptr = module._jxl_wasm_buffer_data(module.__progressHandle);
+    module.HEAPU8.set(new Uint8Array([9, 8, 7, 6]), ptr);
+    return module.__progressHandle;
+  };
+  const originalFree = module._jxl_wasm_buffer_free;
+  module._jxl_wasm_buffer_free = (handle: number) => {
+    const ptr = module._jxl_wasm_buffer_data(handle);
+    const size = module._jxl_wasm_buffer_size(handle);
+    if (ptr !== 0 && size > 0) {
+      module.HEAPU8.fill(0, ptr, ptr + size);
+    }
+    originalFree(handle);
+  };
+
+  return module;
+}
+
+function createFakeMeasuredProgressiveLibjxlModule() {
+  const module = createFakeProgressiveLibjxlModule() as ReturnType<typeof createFakeProgressiveLibjxlModule>;
+  module._jxl_wasm_dec_width = () => 128;
+  module._jxl_wasm_dec_height = () => 128;
   return module;
 }
 

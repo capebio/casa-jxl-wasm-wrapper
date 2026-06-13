@@ -5,7 +5,7 @@ import { LRUCache } from './lru.js';
 import { safeCacheName } from './browser.js';
 function fileNameFor(key) {
     const enc = safeCacheName(key);
-    return enc.length <= 150
+    return enc.length <= 200
         ? enc
         : 'sha256-' + createHash('sha256').update(key).digest('hex');
 }
@@ -15,6 +15,9 @@ export class JxlCacheNode {
     memoryCache;
     persistentTracker;
     inflightGets = new Map();
+    inflightSets = new Map();
+    _generation = 0;
+    evictionsCount = 0;
     hitCount = 0;
     missCount = 0;
     initPromise = null;
@@ -58,7 +61,7 @@ export class JxlCacheNode {
             const name = fileNameFor(key);
             this.persistentTracker.get(name);
             this.hitCount++;
-            return mem;
+            return mem.slice(0);
         }
         if (!this.opts.persistent || !this.opts.basePath) {
             this.missCount++;
@@ -95,9 +98,10 @@ export class JxlCacheNode {
         try {
             const buffer = await fs.readFile(filePath);
             const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-            this.memoryCache.set(key, arrayBuffer, arrayBuffer.byteLength);
+            const master = arrayBuffer.slice(0);
+            this.memoryCache.set(key, master, master.byteLength);
             this.persistentTracker.set(name, true, buffer.byteLength);
-            return arrayBuffer;
+            return master;
         }
         catch {
             this.persistentTracker.delete(name);
@@ -120,30 +124,51 @@ export class JxlCacheNode {
         if (this.initPromise)
             await this.initPromise.catch(() => undefined);
         const size = buffer.byteLength;
-        this.memoryCache.set(key, buffer, size);
+        const master = buffer.slice(0);
+        this.memoryCache.set(key, master, size);
         if (this.opts.persistent && this.opts.basePath) {
             const name = fileNameFor(key);
             const filePath = path.join(this.opts.basePath, name);
             if (size > this.opts.persistentLimit) {
                 this.persistentTracker.delete(name);
+                this.evictionsCount++;
                 await fs.unlink(filePath).catch(() => undefined);
                 return;
             }
-            while (this.persistentTracker.size + size > this.opts.persistentLimit && this.persistentTracker.count > 0) {
-                const oldest = this.persistentTracker.getOldestKey();
-                if (oldest === undefined)
-                    break;
-                this.persistentTracker.delete(oldest);
-                await fs.unlink(path.join(this.opts.basePath, oldest)).catch(() => undefined);
-            }
+            const gen = this._generation;
+            const previous = this.inflightSets.get(key) ?? Promise.resolve();
+            const pending = (async () => {
+                try {
+                    await previous;
+                }
+                catch { /* proceed */ }
+                if (this._generation !== gen)
+                    return;
+                while (this.persistentTracker.size + size > this.opts.persistentLimit && this.persistentTracker.count > 0) {
+                    const oldest = this.persistentTracker.getOldestKey();
+                    if (oldest === undefined)
+                        break;
+                    this.persistentTracker.delete(oldest);
+                    this.evictionsCount++;
+                    await fs.unlink(path.join(this.opts.basePath, oldest)).catch(() => undefined);
+                }
+                try {
+                    const tmp = filePath + `.tmp-${process.pid}-${tmpCounter++}`;
+                    await fs.writeFile(tmp, Buffer.from(master));
+                    await fs.rename(tmp, filePath);
+                    this.persistentTracker.set(name, true, size);
+                }
+                catch (e) {
+                    console.error('Failed to write to Node cache', e);
+                }
+            })();
+            this.inflightSets.set(key, pending);
             try {
-                const tmp = filePath + `.tmp-${process.pid}-${tmpCounter++}`;
-                await fs.writeFile(tmp, Buffer.from(buffer));
-                await fs.rename(tmp, filePath);
-                this.persistentTracker.set(name, true, size);
+                await pending;
             }
-            catch (e) {
-                console.error('Failed to write to Node cache', e);
+            finally {
+                if (this.inflightSets.get(key) === pending)
+                    this.inflightSets.delete(key);
             }
         }
     }
@@ -154,15 +179,18 @@ export class JxlCacheNode {
         if (this.opts.persistent && this.opts.basePath) {
             const name = fileNameFor(key);
             this.persistentTracker.delete(name);
+            this.evictionsCount++;
             await fs.unlink(path.join(this.opts.basePath, name)).catch(() => undefined);
         }
     }
     async clear() {
         if (this.initPromise)
             await this.initPromise.catch(() => undefined);
+        this._generation++;
         this.memoryCache.clear();
         this.persistentTracker.clear();
         this.inflightGets.clear();
+        this.inflightSets.clear();
         if (this.opts.persistent && this.opts.basePath) {
             try {
                 const files = await fs.readdir(this.opts.basePath);
@@ -185,11 +213,12 @@ export class JxlCacheNode {
                 count: this.persistentTracker.count,
                 size: this.persistentTracker.size,
                 limit: this.opts.persistentLimit,
-                enabled: !!this.opts.persistent && !!this.opts.basePath
+                enabled: !!this.opts.persistent && !!this.opts.basePath,
+                evictions: this.evictionsCount
             },
             inflight: {
                 gets: this.inflightGets.size,
-                sets: 0
+                sets: this.inflightSets.size
             },
             hitRate: total > 0 ? this.hitCount / total : null,
         };

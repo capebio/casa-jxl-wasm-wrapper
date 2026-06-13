@@ -11,6 +11,7 @@ export interface PipeOptions {
     signal?: AbortSignal;
     maxBytes?: number;
 }
+export declare const ABORT_REASON = "AbortSignal triggered";
 /**
  * Pipes a ReadableStream into a DecodeSession.
  * Honours backpressure: awaits session.push() before reading next chunk.

@@ -23,6 +23,12 @@ export interface DecodeFrameEvent {
     sourceScale?: number;
     progressiveRegion?: boolean;
     regionFallback?: "full-frame-then-crop";
+    progressiveSequence?: number;
+    passOrdinal?: number;
+    frameIndex?: number;
+    frameDuration?: number;
+    frameName?: string;
+    animTicksPerSecond?: number;
 }
 export interface Region {
     x: number;
@@ -286,6 +292,9 @@ export type CodecMetric = {
     name: "output_bytes";
     value: number;
 } | {
+    name: "encode_total_ms";
+    value: number;
+} | {
     name: "peak_memory_bytes";
     value: number;
 } | {
@@ -303,6 +312,18 @@ export type CodecMetric = {
 } | {
     name: "source_pixels_decoded";
     value: number;
+} | {
+    name: "copy_to_transfer_ms";
+    value: number;
+} | {
+    name: "copied_bytes";
+    value: number;
+} | {
+    name: "dropped_due_to_budget";
+    value: 1;
+} | {
+    name: "dropped_due_to_cancel";
+    value: 1;
 } | {
     name: "scheduler_queue_wait_ms";
     value: number;

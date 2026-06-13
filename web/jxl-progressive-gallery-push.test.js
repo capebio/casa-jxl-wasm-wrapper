@@ -69,3 +69,16 @@ test('buildPushBatches can use cutoff-derived sizes for multi-asset delivery', (
   expect(batches.length).toBeGreaterThan(0);
   expect(batches[0].every(c => c.byteLength <= 65536)).toBe(true);
 });
+
+test('buildPushBatches byteCutoffs param (pass 2 direct) – adaptive lives in caller getPushBatchingOptions; fn accepts but does not mutate chunk inside', () => {
+  const buf = new Uint8Array(300 * 1024).buffer;
+  const batches = buildPushBatches(buf, {
+    mode: 'window',
+    chunkSize: 65536,
+    windowSize: 32,
+    byteCutoffs: Best.PROGRESSIVE_WEB_BYTE_CUTOFFS,
+  });
+  // still produces reasonable windows; no internal size-based chunk resize (by design, after reassess)
+  expect(batches[0].length).toBeGreaterThan(0);
+  expect(batches[0][0].byteLength).toBe(65536);
+});

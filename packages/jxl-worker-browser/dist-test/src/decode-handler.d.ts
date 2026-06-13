@@ -10,7 +10,6 @@ export declare class DecodeHandler {
     private readonly callbacks;
     private state;
     private chunkQueue;
-    private chunkReadIndex;
     private queueDepth;
     private queuedBytes;
     private cancelled;
@@ -24,6 +23,7 @@ export declare class DecodeHandler {
     private lastDrainPostedMs;
     private lastDrainAllowed;
     private pushLatencyEma;
+    private copyLatencyEma;
     private readonly stageStartMs;
     private firstPixelMetricPosted;
     private readonly _metricInner;
@@ -47,7 +47,6 @@ export declare class DecodeHandler {
     private waitForChunk;
     private waitForResume;
     private takeNextChunk;
-    private compactQueue;
     private feedDecoder;
     private maybePostDrain;
     private readDecoderEvents;

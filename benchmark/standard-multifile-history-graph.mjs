@@ -316,8 +316,22 @@ function formatDelta(metric, latest, previous) {
 }
 
 function buildSummary(runs, activeMetrics) {
-  const latest = runs.at(-1) || null;
-  const previous = runs.length > 1 ? runs.at(-2) : null;
+  // Prefer the two most recent "standard-multifile" runs for the "latest vs previous" delta summary.
+  // This avoids the "Need at least two runs" message when the absolute latest files in the dir
+  // are sweep/policy tests that don't share the core Avg* metric keys with each other.
+  // Falls back to the overall last two only if there aren't two usable standard runs.
+  let latest = null;
+  let previous = null;
+
+  const standardRuns = runs.filter(r => r.familyId === "standard-multifile");
+  if (standardRuns.length >= 2) {
+    latest = standardRuns.at(-1);
+    previous = standardRuns.at(-2);
+  } else {
+    latest = runs.at(-1) || null;
+    previous = runs.length > 1 ? runs.at(-2) : null;
+  }
+
   const deltas = latest && previous
     ? activeMetrics.map((metric) => formatDelta(metric, latest, previous)).filter(Boolean).sort((a, b) => b.absDelta - a.absDelta)
     : [];
@@ -444,17 +458,45 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
     .launch-badge {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      margin-top: 10px;
-      padding: 8px 12px;
+      gap: 4px;
+      padding: 2px 8px;
       border-radius: 999px;
       background: rgba(141, 227, 255, 0.12);
       border: 1px solid rgba(141, 227, 255, 0.24);
       color: #d7f5ff;
-      font-size: 12px;
-      letter-spacing: 0.08em;
+      font-size: 10px;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
+      cursor: default;
     }
+    .title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 4px 0 2px;
+    }
+    .title-row h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.1;
+    }
+    .badges {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .console-btn {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(141,227,255,0.3);
+      background: rgba(141,227,255,0.08);
+      color: #d7f5ff;
+      cursor: pointer;
+    }
+    .console-btn:hover { background: rgba(141,227,255,0.2); }
     h1 { margin: 6px 0 8px; font-size: 24px; line-height: 1.05; }
     .copy { color: var(--muted); font-size: 14px; line-height: 1.45; }
     .control-group, .hero, .chart-shell {
@@ -542,6 +584,20 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
       font-size: 12px;
       margin-top: 4px;
     }
+    .tooltip.frozen {
+      pointer-events: auto;
+      border-color: var(--accent);
+      box-shadow: 0 18px 40px rgba(0,0,0,0.4), 0 0 0 2px rgba(141, 227, 255, 0.35);
+    }
+    .tooltip .copy-instruction {
+      margin-top: 10px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(141, 227, 255, 0.2);
+      font-size: 11px;
+      color: var(--accent);
+      text-align: center;
+      letter-spacing: 0.02em;
+    }
     .footnote { color: var(--muted); font-size: 12px; margin-top: 12px; }
     @media (max-width: 1180px) {
       .hero-grid { grid-template-columns: 1fr; }
@@ -552,17 +608,23 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
   <div class="shell">
     <aside class="sidebar">
       <div class="eyebrow">Historical Benchmarks</div>
-      <h1>JXL Wrapper Benchmark</h1>
-      ${launchBadge ? `<div class="launch-badge">${launchBadge}</div>` : ""}
-      <div class="copy">True timestamp spacing. Smooth metric splines. CPU heat overlay behind the data so timing jumps can be explained instead of guessed.</div>
+      <div class="title-row">
+        <h1>JXL Wrapper Benchmark</h1>
+        <div class="badges">
+          ${launchBadge ? `<span class="launch-badge" title="Click to log launch info">${launchBadge}</span>` : ""}
+          <button class="console-btn" onclick="try { const dataEl = document.getElementById('graph-data'); const d = dataEl ? JSON.parse(dataEl.textContent) : null; const std = (d?.runs||[]).filter(r => r.familyId === 'standard-multifile'); const summary = 'GRAPH_DATA: ' + (d?.runs?.length||0) + ' runs total, ' + std.length + ' standard-multifile. Recent std timestamps: ' + std.slice(-3).map(r => r.timestampIso).join(', '); alert(summary + '\n\nFull object + state dumped to console (F12).'); console.log('GRAPH_DATA runs:', d?.runs?.length, 'metrics:', d?.metrics); console.log('Full GRAPH_DATA:', d); if (typeof window.__graphState !== 'undefined') console.log('__graphState:', window.__graphState); else if (typeof state !== 'undefined') console.log('state (legacy):', state); const svg = document.getElementById('history-chart'); if (svg && svg.innerHTML.indexOf('Benchmark History Chart') > -1 && typeof window.renderChart === 'function') { console.log('Console btn also forcing render...'); window.renderChart(); } } catch(e){ alert('Console dump error: ' + e); console.error('console dump failed', e); }">console</button>
+        </div>
+      </div>
+      <div class="copy">True timestamp spacing. Smooth metric splines. CPU heat overlay behind the data so timing jumps can be explained instead of guessed. <em style="font-size:10px;opacity:0.7">(Timings use consistent 1920px long-edge target scale for comparability; native ~20MP RAWs are scaled to this in the test harness.)</em></div>
       <div class="control-group">
         <div class="eyebrow">Visible Metrics</div>
         <div class="preset-row">
-          <button data-preset="core">Core</button>
-          <button data-preset="raw">Raw</button>
-          <button data-preset="encode">Encode</button>
-          <button data-preset="decode">Decode</button>
-          <button data-preset="all">All</button>
+          <button data-preset="core" onclick="(window.setPreset||function(n){console.log('setPreset not ready for',n)})(this.getAttribute('data-preset'))">Core</button>
+          <button data-preset="raw" onclick="(window.setPreset||function(n){console.log('setPreset not ready for',n)})(this.getAttribute('data-preset'))">Raw</button>
+          <button data-preset="encode" onclick="(window.setPreset||function(n){console.log('setPreset not ready for',n)})(this.getAttribute('data-preset'))">Encode</button>
+          <button data-preset="decode" onclick="(window.setPreset||function(n){console.log('setPreset not ready for',n)})(this.getAttribute('data-preset'))">Decode</button>
+          <button data-preset="standard" onclick="(window.setPreset||function(n){console.log('setPreset not ready for',n)})(this.getAttribute('data-preset'))">Standard</button>
+          <button data-preset="all" onclick="(window.setPreset||function(n){console.log('setPreset not ready for',n)})(this.getAttribute('data-preset'))">All</button>
           <button data-action="toggle-hidden">Show Hidden</button>
           <button data-action="reset-colors">Reset Colors</button>
         </div>
@@ -595,7 +657,14 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
           <button data-action="reset-view">Reset View</button>
           <span class="copy">Wheel to zoom. Drag to pan.</span>
         </div>
-        <svg id="history-chart" viewBox="0 0 1600 900" preserveAspectRatio="none"></svg>
+        <svg id="history-chart" viewBox="0 0 1600 900" preserveAspectRatio="none">
+          <!-- fallback visible frame (overwritten by JS if successful) -->
+          <rect x="98" y="38" width="1460" height="830" fill="#0a1a22" stroke="#8de3ff" stroke-width="2" rx="16" />
+          <text x="800" y="300" fill="#8de3ff" font-size="28" text-anchor="middle" font-family="Segoe UI, system-ui">Benchmark History Chart</text>
+          <text x="800" y="360" fill="#a8c5d3" font-size="18" text-anchor="middle">Click presets (Core/Standard etc) • Zoom/Fit • Console btn now alerts + dumps to F12 console</text>
+          <line x1="98" y1="868" x2="1558" y2="868" stroke="#8de3ff" stroke-opacity="0.4" />
+          <text x="100" y="900" fill="#6b8a9e" font-size="14">Time →</text>
+        </svg>
         <div id="tooltip" class="tooltip hidden"></div>
         <div class="footnote">Timestamp spacing is continuous, not bucketed by day or ordinal run number. Closely spaced runs stay closely spaced.</div>
       </section>
@@ -648,11 +717,35 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
           view: { min: fullDomain.min, max: fullDomain.max },
         };
 
+        // Bias view to recent *standard-multifile* runs (the ones carrying Avg* RAW/tonemap/prog timings)
+        // so the chart lines are visible even if other test .toons have newer timestamps.
+        try {
+          const std = state.runs.filter(r => r.familyId === "standard-multifile");
+          if (std.length > 0) {
+            const n = Math.min(50, std.length);
+            const win = std.slice(-n);
+            state.view.min = win[0].timestampMs;
+            state.view.max = win[win.length - 1].timestampMs;
+          }
+        } catch (e) { /* non-fatal */ }
+
+        // Force-enable the metrics that matter for StandardMultifile (RAW, photon, mono ROI etc.)
+        // so the SVG actually draws lines on load.
+        try {
+          const isStdMetric = (m) => m.group === "core" || m.group === "raw" ||
+            (m.key || "").startsWith("Avg") || (m.key || "").includes("Photon") ||
+            (m.key || "").includes("Mono") || (m.key || "").includes("Roi");
+          state.metrics.forEach(m => { if (isStdMetric(m)) m.enabled = true; });
+        } catch (e) {}
+
+        let frozenPoint = null;
+
         const presets = {
           core: (metric) => metric.group === "core",
           raw: (metric) => metric.group === "raw",
           encode: (metric) => metric.group === "encode",
           decode: (metric) => metric.group === "decode",
+          standard: (metric) => (metric.group === "core" || metric.group === "raw" || (metric.key || "").startsWith("Avg") || (metric.key || "").includes("Photon") || (metric.key || "").includes("Mono") || (metric.key || "").includes("Roi")),
           all: () => true,
         };
 
@@ -867,7 +960,7 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
             const value = (maxY / 5) * idx;
             const y = toY(value);
               return \`
-                <line x1="\${x0}" y1="\${y}" x2="\${x1}" y2="\${y}" stroke="rgba(255,255,255,0.08)" pointer-events="none" />
+                <line x1="\${x0}" y1="\${y}" x2="\${x1}" y2="\${y}" stroke="rgba(141,227,255,0.35)" stroke-width="1" pointer-events="none" />
                 <text x="\${x0 - 16}" y="\${y + 5}" fill="#8fa8b6" font-size="20" text-anchor="end">\${Math.round(value)} ms</text>
               \`;
           }).join("");
@@ -876,7 +969,7 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
             if (idx !== 0 && idx !== activeRuns.length - 1 && idx % Math.ceil(Math.max(1, activeRuns.length / 8)) !== 0) return "";
             const x = toX(run.timestampMs);
             const stamp = new Date(run.timestampIso);
-            const label = stamp.toISOString().slice(5, 16).replace("T", " ");
+            const label = (stamp && !isNaN(stamp.getTime())) ? stamp.toISOString().slice(5, 16).replace("T", " ") : "?";
             return \`
               <line x1="\${x}" y1="\${y1}" x2="\${x}" y2="\${y1 + 8}" stroke="rgba(255,255,255,0.16)" />
               <text x="\${x}" y="\${y1 + 30}" fill="#8fa8b6" font-size="18" text-anchor="middle">\${label}</text>
@@ -925,7 +1018,7 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
               </clipPath>
             </defs>
             <rect x="0" y="0" width="\${size.width}" height="\${size.height}" fill="url(#bg)" rx="24" />
-            <rect x="\${x0}" y="\${y0}" width="\${x1 - x0}" height="\${y1 - y0}" rx="20" fill="rgba(2,8,11,0.48)" stroke="rgba(255,255,255,0.08)" />
+            <rect x="\${x0}" y="\${y0}" width="\${x1 - x0}" height="\${y1 - y0}" rx="20" fill="rgba(2,8,11,0.65)" stroke="#8de3ff" stroke-width="1.5" />
             <g clip-path="url(#chart-clip)">
               \${heatBands}
               \${grid}
@@ -967,36 +1060,59 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
 
         function showTooltip(event, target = null) {
           const rect = svg.getBoundingClientRect();
+          let point;
           const metricKey = target instanceof Element ? target.getAttribute("data-metric-key") : null;
-          const point = nearestPoint(event.clientX, event.clientY, rect, metricKey || null);
-          if (!point || (!metricKey && point.dist > 28)) {
-            tooltip.classList.add("hidden");
-            return;
+          if (frozenPoint) {
+            point = frozenPoint;
+          } else {
+            point = nearestPoint(event.clientX, event.clientY, rect, metricKey || null);
+            if (!point || (!metricKey && point.dist > 28)) {
+              tooltip.classList.add("hidden");
+              return;
+            }
           }
           const run = point.run;
-          const focusRow = \`<div class="tip-row"><span>Point</span><strong style="color:\${point.metric.color}">\${point.metric.label}: \${fmtMs(run.metrics[point.metric.key])}</strong></div>\`;
-          const rows = enabledMetrics().map((metric) => {
+          const focusRow = "<div class=\"tip-row\"><span>Point</span><strong style=\"color:" + point.metric.color + "\">" + point.metric.label + ": " + fmtMs(run.metrics[point.metric.key]) + "</strong></div>";
+          const rows = enabledMetrics().map(function(metric) {
             const value = run.metrics[metric.key];
-            return value == null ? "" : \`<div class="tip-row"><span>\${metric.label}</span><strong style="color:\${metric.color}">\${fmtMs(value)}</strong></div>\`;
+            return value == null ? "" : "<div class=\"tip-row\"><span>" + metric.label + "</span><strong style=\"color:" + metric.color + "\">" + fmtMs(value) + "</strong></div>";
           }).join("");
-          tooltip.innerHTML = \`
-            <div class="stamp">\${fmtStamp(run.timestampIso)}</div>
-            <div class="tip-row"><span>Family</span><strong>\${run.familyLabel ?? run.testName}</strong></div>
-            \${focusRow}
-            \${rows}
-            <div class="tip-row"><span>CpuActiveLoadPct</span><strong>\${fmtNum(run.telemetry.CpuActiveLoadPct, "%")}</strong></div>
-            <div class="tip-row"><span>CpuThrottlingPct</span><strong>\${fmtNum(run.telemetry.CpuThrottlingPct, "%")}</strong></div>
-            <div class="tip-row"><span>CpuClockCurrentGhz</span><strong>\${fmtNum(run.telemetry.CpuClockCurrentGhz, " GHz")}</strong></div>
-            <div class="tip-row"><span>SystemMemoryFreeGb</span><strong>\${fmtNum(run.telemetry.SystemMemoryFreeGb, " GB")}</strong></div>
-          \`;
+          let content = "<div class=\"stamp\">" + fmtStamp(run.timestampIso) + "</div>" +
+            "<div class=\"tip-row\"><span>Family</span><strong>" + (run.familyLabel ?? run.testName) + "</strong></div>" +
+            focusRow +
+            rows +
+            "<div class=\"tip-row\"><span>CpuActiveLoadPct</span><strong>" + fmtNum(run.telemetry.CpuActiveLoadPct, "%") + "</strong></div>" +
+            "<div class=\"tip-row\"><span>CpuThrottlingPct</span><strong>" + fmtNum(run.telemetry.CpuThrottlingPct, "%") + "</strong></div>" +
+            "<div class=\"tip-row\"><span>CpuClockCurrentGhz</span><strong>" + fmtNum(run.telemetry.CpuClockCurrentGhz, " GHz") + "</strong></div>" +
+            "<div class=\"tip-row\"><span>SystemMemoryFreeGb</span><strong>" + fmtNum(run.telemetry.SystemMemoryFreeGb, " GB") + "</strong></div>";
+          if (frozenPoint) {
+            content += "<div class=\"copy-instruction\">ctrl+c to copy to clipboard</div>";
+          }
+          tooltip.innerHTML = content;
           tooltip.classList.remove("hidden");
-          const left = clamp(event.clientX - rect.left + 14, 12, rect.width - 280);
-          tooltip.style.left = left + "px";
-          tooltip.style.top = (event.clientY - rect.top) + "px";
+          if (!frozenPoint) {
+            const left = clamp(event.clientX - rect.left + 14, 12, rect.width - 280);
+            tooltip.style.left = left + "px";
+            tooltip.style.top = (event.clientY - rect.top) + "px";
+          }
         }
 
         renderControls();
         renderChart();
+
+        // Force the standard preset and re-render so the chart lines (not just the hero deltas)
+        // actually appear for the StandardMultifile data.
+        try {
+          if (typeof setPreset === 'function') setPreset('standard');
+          renderChart();
+        } catch (e) { console && console.warn && console.warn('force standard preset failed', e); }
+
+        // Expose globals so preset buttons (even static ones) and console button can call them
+        // and to allow forcing render from outside if needed.
+        window.setPreset = setPreset;
+        window.renderChart = renderChart;
+        window.renderControls = renderControls;
+        window.__graphState = state;
 
         metricListEl.addEventListener("input", (event) => {
           const el = event.target;
@@ -1023,6 +1139,17 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
         document.querySelector('[data-action="fit-view"]').addEventListener("click", fitView);
         document.querySelector('[data-action="reset-view"]').addEventListener("click", fitView);
 
+        // Freeze support: ctrl+c (or cmd+c) copies the frozen infobox
+        document.addEventListener("keydown", (e) => {
+          if (frozenPoint && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+            e.preventDefault();
+            const text = tooltip.innerText || tooltip.textContent || "";
+            if (text) {
+              navigator.clipboard.writeText(text.trim()).catch(() => {});
+            }
+          }
+        });
+
         let dragState = null;
         svg.addEventListener("wheel", (event) => {
           event.preventDefault();
@@ -1036,7 +1163,28 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
         }, { passive: false });
         svg.addEventListener("pointerdown", (event) => {
           const target = event.target instanceof Element ? event.target.closest("[data-hit='1']") : null;
-          if (target) return;
+          if (target) {
+            // Freeze infobox on click on a dot or line segment
+            const rect = svg.getBoundingClientRect();
+            const metricKey = target.getAttribute("data-metric-key");
+            const point = nearestPoint(event.clientX, event.clientY, rect, metricKey || null);
+            if (point) {
+              frozenPoint = point;
+              showTooltip(event, target);
+              const left = clamp(event.clientX - rect.left + 14, 12, rect.width - 280);
+              tooltip.style.left = left + "px";
+              tooltip.style.top = (event.clientY - rect.top) + "px";
+              tooltip.classList.remove("hidden");
+              tooltip.classList.add("frozen");
+            }
+            return; // prevent starting drag
+          }
+          // Clicked elsewhere: unfreeze
+          if (frozenPoint) {
+            frozenPoint = null;
+            tooltip.classList.remove("frozen");
+            tooltip.classList.add("hidden");
+          }
           dragState = { x: event.clientX, y: event.clientY };
           svg.style.cursor = "grabbing";
           svg.setPointerCapture(event.pointerId);
@@ -1049,10 +1197,15 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
             const deltaRatio = -(event.clientX - dragState.x) / rect.width;
             dragState = { x: event.clientX, y: event.clientY };
             panBy(deltaRatio);
-            tooltip.classList.add("hidden");
+            if (!frozenPoint) {
+              tooltip.classList.add("hidden");
+            }
             return;
           }
           svg.style.cursor = target ? "pointer" : "grab";
+          if (frozenPoint) {
+            return;
+          }
           if (!target) {
             tooltip.classList.add("hidden");
             return;
@@ -1065,7 +1218,9 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
         });
         svg.addEventListener("pointerleave", () => {
           dragState = null;
-          tooltip.classList.add("hidden");
+          if (!frozenPoint) {
+            tooltip.classList.add("hidden");
+          }
           svg.style.cursor = "grab";
         });
         svg.addEventListener("dblclick", fitView);
@@ -1074,6 +1229,41 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
       }
     })();
   </script>
+<script>
+  // Safety net: force the chart to render and overwrite any placeholder/fallback text
+  // in the SVG viewport. This ensures the real history lines appear even if timing
+  // or partial execution left the static fallback visible.
+  setTimeout(function() {
+    try {
+      if (typeof window.renderChart === 'function') {
+        console.log('[graph] Forcing renderChart to overwrite placeholder...');
+        window.renderChart();
+        if (typeof window.renderControls === 'function') window.renderControls();
+      } else {
+        console.log('[graph] renderChart not exposed yet');
+      }
+    } catch(e) {
+      console.error('[graph] Force render failed', e);
+      const svg = document.getElementById('history-chart');
+      if (svg) {
+        svg.innerHTML = '<rect x="98" y="38" width="1460" height="830" fill="#0a1a22" stroke="#8de3ff" stroke-width="2" rx="16" />\n' +
+          '<text x="800" y="400" fill="#8de3ff" font-size="24" text-anchor="middle">Render error - see console.</text>\n' +
+          '<text x="800" y="440" fill="#a8c5d3" font-size="16" text-anchor="middle">Click console button for details + data dump.</text>';
+      }
+    }
+    // Final safety: if still showing placeholder text, force a visible frame
+    setTimeout(function() {
+      const svg = document.getElementById('history-chart');
+      if (svg && svg.innerHTML.indexOf('Benchmark History Chart') > -1) {
+        console.log('[graph] Still placeholder after force, setting basic visible content');
+        svg.innerHTML = '<rect x="98" y="38" width="1460" height="830" fill="#0a1a22" stroke="#8de3ff" stroke-width="2" rx="16" />\n' +
+          '<text x="800" y="400" fill="#8de3ff" font-size="24" text-anchor="middle">Chart data present but render had issue.</text>\n' +
+          '<text x="800" y="440" fill="#a8c5d3" font-size="16" text-anchor="middle">Click presets or console button. Check DevTools console for errors.</text>\n' +
+          '<line x1="98" y1="868" x2="1558" y2="868" stroke="#8de3ff" stroke-opacity="0.4" />';
+      }
+    }, 300);
+  }, 120);
+</script>
 </body>
 </html>`;
 }

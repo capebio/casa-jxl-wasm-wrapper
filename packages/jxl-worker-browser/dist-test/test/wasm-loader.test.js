@@ -2,6 +2,28 @@ import { describe, test } from "node:test";
 import { existsSync, readFileSync } from "node:fs";
 import { loadWasmModule } from "../src/wasm-loader.js";
 import { expect } from "./expect.js";
+function withMockSelf(search, fn) {
+    return async () => {
+        const desc = Object.getOwnPropertyDescriptor(globalThis, "self");
+        Object.defineProperty(globalThis, "self", {
+            value: { location: { search } },
+            configurable: true,
+            writable: true,
+        });
+        try {
+            await fn();
+        }
+        finally {
+            if (desc) {
+                Object.defineProperty(globalThis, "self", desc);
+            }
+            else {
+                // @ts-ignore
+                delete globalThis.self;
+            }
+        }
+    };
+}
 describe("loadWasmModule", () => {
     test("returns an imported codec facade without fetching wasm bytes", async () => {
         let fetched = false;
@@ -17,8 +39,6 @@ describe("loadWasmModule", () => {
         expect(fetched).toBe(false);
     });
     test("explicit simd query forces non-threaded tier (override honored)", async () => {
-        const globalWithSelf = globalThis;
-        const originalSelf = globalWithSelf.self;
         const forcedTiers = [];
         const facade = {
             ...fakeFacade(),
@@ -26,8 +46,7 @@ describe("loadWasmModule", () => {
                 forcedTiers.push(tier);
             },
         };
-        try {
-            globalWithSelf.self = { location: { search: "?jxlWorkerTier=simd" } };
+        const run = withMockSelf("?jxlWorkerTier=simd", async () => {
             const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
                 importWasm: async () => facade,
                 fetchImpl: async () => {
@@ -36,10 +55,8 @@ describe("loadWasmModule", () => {
             });
             expect(module).toBe(facade);
             expect(forcedTiers).toEqual(["simd"]);
-        }
-        finally {
-            globalWithSelf.self = originalSelf;
-        }
+        });
+        await run();
     });
     test("no query string defaults to auto (no forceWorkerSafeTier) — locks W-1 default choice", async () => {
         const forcedTiers = [];
@@ -60,8 +77,6 @@ describe("loadWasmModule", () => {
         expect(forcedTiers).toEqual([]);
     });
     test("worker tier auto query leaves codec tier unforced", async () => {
-        const globalWithSelf = globalThis;
-        const originalSelf = globalWithSelf.self;
         const forcedTiers = [];
         const facade = {
             ...fakeFacade(),
@@ -69,8 +84,7 @@ describe("loadWasmModule", () => {
                 forcedTiers.push(tier);
             },
         };
-        try {
-            globalWithSelf.self = { location: { search: "?jxlWorkerTier=auto" } };
+        const run = withMockSelf("?jxlWorkerTier=auto", async () => {
             const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
                 importWasm: async () => facade,
                 fetchImpl: async () => {
@@ -79,10 +93,8 @@ describe("loadWasmModule", () => {
             });
             expect(module).toBe(facade);
             expect(forcedTiers).toEqual([]);
-        }
-        finally {
-            globalWithSelf.self = originalSelf;
-        }
+        });
+        await run();
     });
     test("default import resolves the built jxl-wasm facade from browser package layout", async () => {
         let fetched = false;

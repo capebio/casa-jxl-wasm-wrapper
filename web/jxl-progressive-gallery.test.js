@@ -83,6 +83,21 @@ test('gallery push mode controls drive the chunk push pipeline', () => {
   expect(js).toContain("stage: ev.type === 'final' ? 'final' : ev.stage");
 });
 
+// REGRESSION LOCK (pass 2): protects chunked progressive feed + yield, coordinator min-frames round-robin visible,
+// Sneyers baseline via preset, abort/limiter/rAF, getPushBatching + priority/attended/constancy oracles,
+// pack fastpath + Lens17 hook. Update strings only on approved behavior change + re-run.
+test('gallery (pass 2) centralizes on preset, wires oracles, honors preserve/priority/constancy prep', () => {
+  expect(js).toContain('basePreset.encode');
+  expect(js).toContain('getPushBatchingOptions(buffer.byteLength');
+  expect(js).toContain('coordinator.getPriorityTargets');
+  expect(js).toContain('lightbox.setConstancyParams');
+  expect(js).toContain('preserveIcc: basePreset.decode.preserveIcc');
+  expect(js).toContain('quality: encodeOptions?.quality ?? 82');
+  expect(js).toContain('requestRender');
+  // legacy getGalleryEncodeOptions removed/deprecated in pass 2
+  expect(js).not.toContain('function getGalleryEncodeOptions()');
+});
+
 // REGRESSION LOCK: protects DONOTCHANGE progressive decode checkpoints, emitEveryPass, chunked-feed + yield between pushes for 'passes' detail,
 // Sneyers baseline alignment, multi-asset handoff, ctxReady, round-robin coordinator, and now preset-driven + abort + limiter + rAF batching.
 // Update strings only if behavior change is approved + full tests re-run.

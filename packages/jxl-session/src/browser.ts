@@ -11,7 +11,7 @@ import {
   validateWasmUrl,
   type JxlContext,
 } from "./context-base.js";
-import { appendWorkerTierQuery, isMtRequestedTier, parseRequestedWorkerTier } from "./tier-routing.js";
+import { isMtRequestedTier, parseRequestedWorkerTier, withWorkerTier } from "./tier-routing.js";
 
 export type { JxlContext } from "./context-base.js";
 export { DecodeSessionImpl } from "./decode-session.js";
@@ -51,8 +51,8 @@ export function createBrowserContext(opts?: ContextOptions): JxlContext {
   const requestedTier = parseRequestedWorkerTier(opts?.wasmUrl);
   const ctx = isMtRequestedTier(requestedTier)
     ? new TieredJxlContextImpl({
-      mtFactory: factoryForUrl(appendWorkerTierQuery(opts?.wasmUrl, requestedTier)),
-      stFactory: factoryForUrl(appendWorkerTierQuery(opts?.wasmUrl, "simd")),
+      mtFactory: factoryForUrl(withWorkerTier(opts?.wasmUrl, requestedTier)),
+      stFactory: factoryForUrl(withWorkerTier(opts?.wasmUrl, "simd")),
       opts,
       maxWorkers: poolSize,
     })

@@ -66,7 +66,7 @@ export class JxlCacheBrowser {
         if (mem !== undefined) {
             this.persistentTracker.get(key);
             this.hitCount++;
-            return mem;
+            return mem.slice(0);
         }
         if (!this.opfsRoot) {
             this.missCount++;
@@ -111,7 +111,8 @@ export class JxlCacheBrowser {
         if (this.initPromise)
             await this.initPromise.catch(() => undefined);
         const size = buffer.byteLength;
-        this.memoryCache.set(key, buffer, size);
+        const master = buffer.slice(0);
+        this.memoryCache.set(key, master, size);
         if (!this.opfsRoot || size > this.persistentLimit) {
             if (this.opfsRoot) {
                 const previous = this.inflightSets.get(key) ?? Promise.resolve();
@@ -143,7 +144,7 @@ export class JxlCacheBrowser {
             catch { /* proceed */ }
             if (this._generation !== gen)
                 return;
-            await this.setPersistent(key, buffer);
+            await this.setPersistent(key, master);
         })();
         this.inflightSets.set(key, pending);
         try {
@@ -231,7 +232,7 @@ export class JxlCacheBrowser {
             if (entry === undefined) {
                 this.persistentTracker.set(key, { name }, buffer.byteLength);
             }
-            return buffer;
+            return buffer.slice(0);
         }
         catch (e) {
             if (e instanceof DOMException && e.name === 'NotFoundError') {
@@ -361,12 +362,12 @@ export class JxlCacheBrowser {
         for await (const name of this.opfsRoot.keys())
             onDisk.add(name);
         onDisk.delete(MANIFEST_NAME);
-        for (const [key, entry] of this.persistentTracker.entriesOldestFirst()) {
+        this.persistentTracker.forEachOldestFirst((key, entry, size) => {
             if (!onDisk.has(entry.name))
                 this.persistentTracker.delete(key);
             else
                 onDisk.delete(entry.name);
-        }
+        });
         await Promise.allSettled([...onDisk].map(n => this.opfsRoot.removeEntry(n).catch(() => undefined)));
     }
     scheduleManifestWrite() {
@@ -393,9 +394,9 @@ export class JxlCacheBrowser {
                 return;
             try {
                 const entries = [];
-                for (const [key, entry, size] of this.persistentTracker.entriesOldestFirst()) {
+                this.persistentTracker.forEachOldestFirst((key, entry, size) => {
                     entries.push({ key, name: entry.name, size });
-                }
+                });
                 const manifest = { version: 1, entries };
                 const encoded = this._encoder.encode(JSON.stringify(manifest));
                 if (this._generation !== gen)

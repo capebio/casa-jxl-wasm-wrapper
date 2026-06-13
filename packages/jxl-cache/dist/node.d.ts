@@ -4,6 +4,9 @@ export declare class JxlCacheNode implements JxlCache {
     private readonly memoryCache;
     private readonly persistentTracker;
     private readonly inflightGets;
+    private readonly inflightSets;
+    private _generation;
+    private evictionsCount;
     private hitCount;
     private missCount;
     private initPromise;
@@ -27,6 +30,7 @@ export declare class JxlCacheNode implements JxlCache {
             size: number;
             limit: number;
             enabled: boolean;
+            evictions: number;
         };
         inflight: {
             gets: number;

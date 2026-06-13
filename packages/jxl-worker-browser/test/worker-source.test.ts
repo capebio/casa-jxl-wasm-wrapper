@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const workerSourcePath = fileURLToPath(new URL("../src/worker.ts", import.meta.url));
+const workerSourcePath = fileURLToPath(new URL("../../src/worker.ts", import.meta.url));
 const workerSource = readFileSync(workerSourcePath, "utf8");
 
 describe("browser worker cold-start guardrails", () => {

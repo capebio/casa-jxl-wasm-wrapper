@@ -1,10 +1,28 @@
 # build-parallel-wasm.ps1
-# Builds raw-converter-wasm with configurable cargo features (default: parallel-wasm).
+# Builds raw-converter-wasm with configurable cargo features for quickest most performant runs.
 #
-# This produces a build that:
-# - Uses rayon (via wasm-bindgen-rayon) for demosaic/tonemap/downscale in RAW pipeline.
-# - Requires the host page to set COOP/COEP headers (already done for libjxl MT).
-# - The emitted glue now tolerates import under Node for benchmark/tooling use.
+# Performance pathway (C++, AVX2, Rust intrinsics, SIMD, parallel, threads - "build it all in"):
+# 1. Nightly toolchain + rust-src + target for wasm32 (enables +simd, atomics, bulk-memory, threads).
+# 2. Features: parallel-wasm (rayon/wasm threads for demosaic/tonemap/downscale), c-perceptual
+#    (pulls C++ bridge with hand-written AVX2 intrinsics for perceptual_constancy in tonemap;
+#     see perceptual_constancy_cpp_stability_bench.cpp for the __m256 log/exp/blendv/FMA code;
+#     falls back to portable Rust in apply_tone_math when not enabled or no AVX2).
+# 3. Demosaic: on wasm32, rggb (bilinear fast) uses explicit wasm128 SIMD (8-wide v128 loads/avgs/
+#    bitselect/shuffles + ptr stores). Production for previews/LOD (lib.rs planar path).
+#    MHC (quality, ~2x slower) uses scalar + recent Lens23 pointers (band writes, planar deinterleave).
+#    Black sub: wasm128 u16x8 SIMD (or pointer). Future: mhc intrinsics/C++ like perceptual (Lens22/25).
+# 4. Tonemap/pipeline: pointer-advance LUT loops (Lens23) + process_into/planar_into (Lens24, no extra allocs).
+#    With c-perceptual: C++/AVX2 bulk for advanced math (perceptual_apply_full_avx2 SoA).
+#    Basic path (default perceptual_constancy=false): fast matrix/sat/vib + LUT.
+# 5. Glue in src/lib.rs: always fast preview (planar bilinear + simd + downs + into), full mhc only for
+#    quality rgb16. Early drops (raw after demosaic, rgb16 after tone). Feature-gated fast paths.
+# 6. JXL layer (separate): MT tiers (simd / relaxed-simd-mt), scheduler, progressive first-paint.
+# 7. Run: this script (cargo +nightly --lib --target wasm32... + bindgen + wasm-opt + copy to pkg/ + web/pkg).
+#    Then node StandardMultifileTest.mjs (or native cargo run --bin raw_decode_bench --release --features c-perceptual,parallel).
+#    Compare raw_*_ms, body=, flip medians, TOON. Use mt tier + parallel for lowest times.
+#
+# This script + features = all optimizations built in (C++ AVX2 where possible, Rust/wasm intrinsics,
+# pointers, dedup crossings, parallel, simd in build flags).
 #
 # Prerequisites (one-time):
 #   rustup toolchain install nightly-2026-06-01 --target wasm32-unknown-unknown
@@ -12,8 +30,9 @@
 #
 # Usage:
 #   .\build-parallel-wasm.ps1
+# Default now: parallel-wasm + c-perceptual (max perf). Pass -Features 'parallel-wasm,c-perceptual' explicitly if overriding.
 
-param([string[]]$Features = @('parallel-wasm'))
+param([string[]]$Features = @('parallel-wasm', 'c-perceptual'))
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

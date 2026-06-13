@@ -372,6 +372,6 @@ export class EncodeHandler {
 function toArrayBuffer(value: ArrayBuffer | Uint8Array): ArrayBuffer {
   if (value instanceof ArrayBuffer) return value;
   return value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
-    ? value.buffer
-    : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+    ? value.buffer as ArrayBuffer
+    : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer;
 }

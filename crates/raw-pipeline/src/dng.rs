@@ -53,22 +53,7 @@ pub fn decode(path: &std::path::Path) -> Result<DngImage> {
 }
 
 pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
-    if data.len() < 8 {
-        bail!("too small");
-    }
-    let le = match &data[0..4] {
-        [0x49, 0x49, 0x2A, 0x00] => true,
-        [0x4D, 0x4D, 0x00, 0x2A] => false,
-        m => bail!("not TIFF: {m:?}"),
-    };
-    let ifd0_off = read_u32(data, 4, le);
-
-    let mut state = WalkState::default();
-    walk(data, ifd0_off as usize, le, &mut state);
-
-    let raw = state
-        .raw_ifd
-        .ok_or_else(|| anyhow!("no raw SubIFD found"))?;
+    let (state, raw, le) = load_dng(data)?;
 
     let width = raw.width as usize;
     let height = raw.height as usize;
@@ -107,6 +92,10 @@ pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
         state.color_matrix_1,
         state.color_matrix_2,
     );
+    // Color matrix (camera native -> sRGB via XYZ) is passed through to higher
+    // LookRenderer for the advanced non-Riemannian / log geodesic / Molchanov
+    // perceptual model (lens17). The demosaic stage (incl. optional mhc_matrix
+    // fusion) + this + black/white/wb provide the clean linear starting point.
 
     Ok(DngImage {
         width,
@@ -211,9 +200,9 @@ fn decode_tiles(
         for r in 0..ah {
             let src_base = r * td.buf_w;
             let dst_base = (td.row_start + r) * width + td.col_start;
-            for k in 0..aw {
-                out[dst_base + k] = td.buf[src_base + k];
-            }
+            let dst = &mut out[dst_base..dst_base + aw];
+            let src = &td.buf[src_base..src_base + aw];
+            dst.copy_from_slice(src);
         }
     }
     Ok(())
@@ -330,6 +319,26 @@ fn cfa_phase(cfa: Cfa) -> (u8, u8) {
         Cfa::Gbrg => (1, 0),
         Cfa::Bggr => (1, 1),
     }
+}
+
+/// Common parse for both decode paths (dedup per plan).
+fn load_dng(data: &[u8]) -> Result<(WalkState, RawIfd, bool)> {
+    if data.len() < 8 {
+        bail!("too small");
+    }
+    let le = match &data[0..4] {
+        [0x49, 0x49, 0x2A, 0x00] => true,
+        [0x4D, 0x4D, 0x00, 0x2A] => false,
+        m => bail!("not TIFF: {m:?}"),
+    };
+    let ifd0_off = read_u32(data, 4, le);
+    let mut state = WalkState::default();
+    walk(data, ifd0_off as usize, le, &mut state);
+    let raw = state
+        .raw_ifd
+        .take()
+        .ok_or_else(|| anyhow!("no raw SubIFD found"))?;
+    Ok((state, raw, le))
 }
 
 #[derive(Default, Debug)]
@@ -927,17 +936,69 @@ mod tests {
         };
         assert!(raw_ifd_supported_candidate(&raw, 0));
     }
+
+    /// Targeted flip-flop test (per user request): alternate "newer code" (subtract_black=true,
+    /// clean linear for Lens17/photogram/AR) vs "old code" (false) 10 times on the same operation.
+    /// Uses real asset if findable from cwd (when running benchmark context), else synthetic
+    /// timing of the black sub kernel itself (the source of the raw decode creep).
+    #[test]
+    fn flip_flop_raw_decode_black_sub_10x() {
+        println!("\n=== Targeted flip-flop: newer (clean linear) vs old (preserve bias) 10 alternations ===");
+
+        // Try to load a real benchmark asset for full path (works when cwd has the files, e.g. from mjs run)
+        let candidates = [
+            "PXL_20260501_093507165.RAW-02.ORIGINAL.dng",
+            "PXL_20260527_180319603.RAW-02.ORIGINAL.dng",
+            "../PXL_20260501_093507165.RAW-02.ORIGINAL.dng",
+        ];
+        let mut used_real = false;
+        for path in &candidates {
+            if let Ok(data) = std::fs::read(path) {
+                println!("Using real asset: {} ({} bytes)", path, data.len());
+                for i in 0..10 {
+                    let subtract = i % 2 == 0; // alternate: even = newer (true), odd = old (false)
+                    let t0 = std::time::Instant::now();
+                    let _res = decode_bytes_demosaiced_impl(&data, subtract);
+                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    println!("flip {}: {:.2} ms (subtract_black={})", i, ms, subtract);
+                }
+                used_real = true;
+                break;
+            }
+        }
+
+        if !used_real {
+            println!("No real asset found in cwd; falling back to synthetic black-sub kernel timing (isolates the new scalar loop cost).");
+            let black = 64u16;
+            let mut base: Vec<u16> = (0..(1920*1440)).map(|i| (i % 1000 + 100) as u16).collect();
+            for i in 0..10 {
+                let subtract = i % 2 == 0;
+                let mut buf = base.clone();
+                let t0 = std::time::Instant::now();
+                if subtract {
+                    demosaic::subtract_black_in_place(&mut buf, black);
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                println!("synthetic flip {}: {:.4} ms (subtract_black={})", i, ms, subtract);
+            }
+        }
+        println!("=== End flip-flop ===\n");
+    }
 }
 
 /// X2 deliverable: post-demosaic RGB16 + metadata, without a full mosaic buffer resident
 /// at the same time as the RGB (strip fusion with 2-row halo for demosaic dependencies).
 /// The bayer mosaic is produced band-by-band (tile-row) and dropped after its demosaic
 /// contribution is written. Peak mem during fused path ~ full RGB + 1 tile-row band + 2 halo rows.
+///
+/// For the demosaiced path (decode_bytes_demosaiced), .rgb is black-subtracted (clean
+/// linear) and .black==0 so that downstream tone (pipeline::process) receives unbiased
+/// input. The bayer DngImage path preserves sensor values + original .black metadata.
 #[derive(Debug)]
 pub struct DngDemosaiced {
     pub width: usize,
     pub height: usize,
-    pub rgb: Vec<u16>, // post-align, post-demosaic (mhc), interleaved RGB16
+    pub rgb: Vec<u16>, // post-align, post-demosaic (mhc), interleaved RGB16; black-subbed in demosaiced path
     pub black: u16,
     pub white: u16,
     pub wb_r: f32,
@@ -957,22 +1018,13 @@ pub struct DngDemosaiced {
 /// + demosaic (rare; still correct, pay old peak). Callers (wasm process_dng_raw) use this
 /// to avoid simultaneous 32 MB mosaic + 120 MB rgb.
 pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
-    if data.len() < 8 {
-        bail!("too small");
-    }
-    let le = match &data[0..4] {
-        [0x49, 0x49, 0x2A, 0x00] => true,
-        [0x4D, 0x4D, 0x00, 0x2A] => false,
-        m => bail!("not TIFF: {m:?}"),
-    };
-    let ifd0_off = read_u32(data, 4, le);
+    decode_bytes_demosaiced_impl(data, true)
+}
 
-    let mut state = WalkState::default();
-    walk(data, ifd0_off as usize, le, &mut state);
-
-    let raw = state
-        .raw_ifd
-        .ok_or_else(|| anyhow!("no raw SubIFD found"))?;
+/// Internal impl with switch for "newer code" (subtract_black=true, clean linear for Lens17/photogram/AR)
+/// vs "old code" (false, preserve bias like pre-clean-linear change). Used for targeted flip-flop tests.
+pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) -> Result<DngDemosaiced> {
+    let (state, raw, _le) = load_dng(data)?;
 
     let width = raw.width as usize;
     let height = raw.height as usize;
@@ -1003,6 +1055,10 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
         state.color_matrix_1,
         state.color_matrix_2,
     );
+    // Color matrix (camera native -> sRGB via XYZ) is passed through to higher
+    // LookRenderer for the advanced non-Riemannian / log geodesic / Molchanov
+    // perceptual model (lens17). The demosaic stage (incl. optional mhc_matrix
+    // fusion) + this + black/white/wb provide the clean linear starting point.
     let orientation = state.orientation.unwrap_or(1);
     let iso = state.iso;
     let make = state.make.clone();
@@ -1011,7 +1067,10 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
     if cfa != Cfa::Rggb {
         // Fallback: full mosaic path (still correct; only RGGB gets the X2 mem cut).
         let t0 = Instant::now();
-        let img = decode_bytes(data)?;
+        let mut img = decode_bytes(data)?;
+        if subtract_black {
+            demosaic::subtract_black_in_place(&mut img.raw, img.black);
+        }
         let decode_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let t1 = Instant::now();
         let rgb = demosaic::demosaic_bayer_mhc(&img.raw, img.width, img.height, cfa_phase(img.cfa))
@@ -1021,7 +1080,7 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
             width: img.width,
             height: img.height,
             rgb,
-            black: img.black,
+            black: if subtract_black { 0 } else { img.black },
             white: img.white,
             wb_r: img.wb_r,
             wb_g: img.wb_g,
@@ -1088,6 +1147,15 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
                 .with_context(|| format!("tile r={tr} c={tc}"))?;
         }
         decode_ms += tdec.elapsed().as_secs_f64() * 1000.0;
+
+        // Subtract black on the raw mosaic band *before* demosaic (standard raw
+        // processing order) and before halo ctx assembly. This delivers clean
+        // linear rgb in DngDemosaiced (facilitates lens17 color engine, photogram,
+        // LLM raw features) while keeping the main decode_bytes bayer path with
+        // bias+metadata for other consumers.
+        if subtract_black {
+            demosaic::subtract_black_in_place(&mut band, black);
+        }
 
         // ctx = [top halo | band | bottom (replicate for this pass)]
         let ctx_h = halo + row_h + halo;
@@ -1166,7 +1234,7 @@ pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
         width: aw,
         height: ah,
         rgb,
-        black,
+        black: if subtract_black { 0 } else { black },
         white,
         wb_r,
         wb_g,

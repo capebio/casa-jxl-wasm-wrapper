@@ -335,6 +335,7 @@ pub fn decode_bytes(data: &[u8]) -> Result<Cr2Image> {
     let mut strip_offset: u32 = 0;
     let mut strip_byte_count: u32 = 0;
     let mut cr2_slices: Vec<u16> = Vec::new();
+    let mut black: u32 = 0; // fixed dangling ref in BlackLevel arm (remnant from refactor; if does nothing currently)
     for &(tag, dtype, cnt, val, inline_pos) in &raw_entries {
         match tag {
             0x0111 => strip_offset = entry_first_u32(data, dtype, cnt, val, inline_pos, le).unwrap_or(0),
@@ -348,7 +349,7 @@ pub fn decode_bytes(data: &[u8]) -> Result<Cr2Image> {
                 if let Some(b) = entry_first_u32(data, dtype, cnt, val, inline_pos, le) {
                     // Use first value; typical CR2 is per-channel but first is representative for these decodes.
                     // Only override if plausible (non-zero, < white).
-                    if b > 0 && (black == 0 || b < 8192) {
+                    if b > 0 && (b < 8192) {
                         // black set later; defer actual assign until after precision table.
                         // For now record in a local and patch post (simple: re-assign after match).
                     }

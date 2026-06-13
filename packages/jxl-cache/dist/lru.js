@@ -61,7 +61,10 @@ export class LRUCache {
             const oldestKey = iter.next().value;
             if (oldestKey === undefined)
                 break;
-            this.currentSize -= this.cache.get(oldestKey).size;
+            const item = this.cache.get(oldestKey);
+            if (!item)
+                break;
+            this.currentSize -= item.size;
             this.cache.delete(oldestKey);
             if (this.mruKey === oldestKey) {
                 this.mruKey = undefined;
@@ -92,7 +95,14 @@ export class LRUCache {
     get count() {
         return this.cache.size;
     }
+    forEachOldestFirst(fn) {
+        for (const [key, { value, size }] of this.cache.entries()) {
+            fn(key, value, size);
+        }
+    }
     entriesOldestFirst() {
-        return Array.from(this.cache.entries(), ([key, { value, size }]) => [key, value, size]);
+        const out = [];
+        this.forEachOldestFirst((key, value, size) => out.push([key, value, size]));
+        return out;
     }
 }

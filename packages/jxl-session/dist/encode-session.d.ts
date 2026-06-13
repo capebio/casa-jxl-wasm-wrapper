@@ -2,7 +2,7 @@ import type { EncodeOptions, EncodeSession, EncodeStats, Region } from "@casabio
 import type { Scheduler } from "@casabio/jxl-scheduler";
 export declare class EncodeSessionImpl implements EncodeSession {
     readonly id: string;
-    private readonly scheduler;
+    private scheduler;
     private readonly opts;
     private readonly chunkStream;
     private readonly doneDeferred;
@@ -13,7 +13,7 @@ export declare class EncodeSessionImpl implements EncodeSession {
     private terminated;
     private totalBytesWritten;
     private sidecarOffsets;
-    constructor(scheduler: Scheduler, opts: EncodeOptions);
+    constructor(schedulerOrPromise: Scheduler | Promise<Scheduler>, opts: EncodeOptions);
     pushPixels(chunk: ArrayBuffer, region?: Region): Promise<void>;
     finish(): Promise<void>;
     chunks(): AsyncIterable<ArrayBuffer>;

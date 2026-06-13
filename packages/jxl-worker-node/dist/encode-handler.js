@@ -5,6 +5,7 @@ const CHUNK_HWM = 4;
 const CHUNK_MAX_BUFFERED = 32;
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024;
 const DRAIN_MIN_INTERVAL_MS = 8;
+const HWM_EMA_ALPHA = 0.25;
 export class EncodeHandler {
     sessionId;
     opts;
@@ -25,6 +26,8 @@ export class EncodeHandler {
     lastDrainAllowed = false;
     encoder = null;
     disposePromise = null;
+    stageStartMs = performance.now();
+    pushLatencyEma = 0;
     constructor(opts, backend, callbacks) {
         this.sessionId = opts.sessionId;
         this.opts = opts;
@@ -96,15 +99,11 @@ export class EncodeHandler {
             progressive: this.opts.progressive,
             previewFirst: this.opts.previewFirst,
             chunked: this.opts.chunked,
+            ...(this.opts.progressiveDc != null ? { progressiveDc: this.opts.progressiveDc } : {}),
+            ...(this.opts.progressiveAc != null ? { progressiveAc: this.opts.progressiveAc } : {}),
+            ...(this.opts.qProgressiveAc != null ? { qProgressiveAc: this.opts.qProgressiveAc } : {}),
+            ...(this.opts.groupOrder != null ? { groupOrder: this.opts.groupOrder } : {}),
         };
-        if (this.opts.progressiveDc != null)
-            encOpts.progressiveDc = this.opts.progressiveDc;
-        if (this.opts.progressiveAc != null)
-            encOpts.progressiveAc = this.opts.progressiveAc;
-        if (this.opts.qProgressiveAc != null)
-            encOpts.qProgressiveAc = this.opts.qProgressiveAc;
-        if (this.opts.groupOrder != null)
-            encOpts.groupOrder = this.opts.groupOrder;
         const encoder = codec.createEncoder(encOpts);
         this.encoder = encoder;
         this.state = "configured";
@@ -199,7 +198,10 @@ export class EncodeHandler {
                     break;
                 if (this.cancelled || this.isErrored())
                     return;
+                const t0 = performance.now();
                 await encoder.pushPixels(entry.chunk, entry.region);
+                const pushMs = performance.now() - t0;
+                this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
                 if (this.cancelled || this.isErrored())
                     return;
                 this.maybePostDrain();
@@ -227,7 +229,7 @@ export class EncodeHandler {
         this.port.postMessage({
             type: "worker_drain",
             sessionId: this.sessionId,
-            latencyMs: 0,
+            latencyMs: Math.round(this.pushLatencyEma),
             queueDepth: this.queueDepth,
             queuedBytes: this.queuedBytes,
             adaptiveHwm: CHUNK_HWM,
@@ -235,6 +237,24 @@ export class EncodeHandler {
     }
     isErrored() {
         return this.state === "error";
+    }
+    postChunk(msg, chunk) {
+        const ab = chunk.buffer;
+        if (chunk.byteOffset === 0 && chunk.byteLength === ab.byteLength) {
+            this.port.postMessage(msg, [ab]);
+        }
+        else {
+            const exact = ab.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+            msg.chunk = exact;
+            this.port.postMessage(msg, [exact]);
+        }
+    }
+    postMetric(name, value) {
+        this.port.postMessage({
+            type: "metric",
+            sessionId: this.sessionId,
+            metric: { name, value },
+        });
     }
     async readEncoderChunks(encoder) {
         let totalBytes = 0;
@@ -247,6 +267,8 @@ export class EncodeHandler {
             const buffer = toBuffer(chunk);
             if (!this.firstByteEmitted) {
                 this.firstByteEmitted = true;
+                this.state = "streaming";
+                this.postMetric("time_to_first_byte_ms", performance.now() - this.stageStartMs);
                 const msg = {
                     type: "encode_first_byte_ready",
                     sessionId: this.sessionId,
@@ -263,12 +285,13 @@ export class EncodeHandler {
                 sessionId: this.sessionId,
                 chunk: buffer,
             };
-            this.state = "streaming";
-            this.port.postMessage(msg);
+            this.postChunk(msg, buffer);
         }
         if (this.cancelled || this.state === "done" || this.state === "error")
             return;
         this.state = "done";
+        this.postMetric("output_bytes", totalBytes);
+        this.postMetric("encode_total_ms", performance.now() - this.stageStartMs);
         const doneMsg = {
             type: "encode_done",
             sessionId: this.sessionId,

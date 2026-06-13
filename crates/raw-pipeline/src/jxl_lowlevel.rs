@@ -86,12 +86,16 @@ pub fn decode_full(jxl_bytes: &[u8]) -> Option<Duration> {
                         == JxlDecoderStatus::Success
                     {
                         out_buf.resize(size, 0);
-                        let _ = JxlDecoderSetImageOutBuffer(
+                        if JxlDecoderSetImageOutBuffer(
                             dec,
                             &pf,
                             out_buf.as_mut_ptr() as *mut _,
                             size,
-                        );
+                        ) != JxlDecoderStatus::Success
+                        {
+                            status = JxlDecoderStatus::Error;
+                            break;
+                        }
                     }
                 }
                 JxlDecoderStatus::FullImage | JxlDecoderStatus::Success => break,
@@ -119,13 +123,31 @@ pub struct ProgressiveFrame {
     pub is_final: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum DecodeProgressiveEvent<'a> {
+    Progress {
+        width: u32,
+        height: u32,
+        rgba: &'a [u8],
+    },
+    Final {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+}
+
 /// Low-level progressive decode using FRAME_PROGRESSION events + FlushImage.
 /// Invokes `on_frame` after each successful flush (partial passes + final).
 /// Returns (time_to_first_usable_pixel_ms, total_wall_ms).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn decode_progressive_frames<F>(jxl_bytes: &[u8], mut on_frame: F) -> Option<(f64, f64)>
+pub fn decode_progressive_frames_borrowed<F>(
+    jxl_bytes: &[u8],
+    mut on_frame: F,
+) -> Option<(f64, f64)>
 where
-    F: FnMut(ProgressiveFrame),
+    F: FnMut(DecodeProgressiveEvent<'_>),
 {
     use jpegxl_sys::codestream_header::JxlBasicInfo;
     use jpegxl_sys::decode::*;
@@ -178,12 +200,16 @@ where
                         == JxlDecoderStatus::Success
                     {
                         out_buf.resize(size, 0);
-                        let _ = JxlDecoderSetImageOutBuffer(
+                        if JxlDecoderSetImageOutBuffer(
                             dec,
                             &pf,
                             out_buf.as_mut_ptr() as *mut _,
                             size,
-                        );
+                        ) != JxlDecoderStatus::Success
+                        {
+                            status = JxlDecoderStatus::Error;
+                            break;
+                        }
                     }
                 }
                 JxlDecoderStatus::FrameProgression => {
@@ -194,11 +220,10 @@ where
                         if first_ms.is_none() {
                             first_ms = Some(ms(t_start.elapsed()));
                         }
-                        on_frame(ProgressiveFrame {
+                        on_frame(DecodeProgressiveEvent::Progress {
                             width: image_w,
                             height: image_h,
-                            rgba: out_buf.clone(),
-                            is_final: false,
+                            rgba: &out_buf,
                         });
                     }
                 }
@@ -214,17 +239,46 @@ where
             && image_w > 0
             && image_h > 0
         {
-            on_frame(ProgressiveFrame {
+            on_frame(DecodeProgressiveEvent::Final {
                 width: image_w,
                 height: image_h,
                 rgba: out_buf,
-                is_final: true,
             });
             Some((first_ms.unwrap_or(0.0), ms(total)))
         } else {
             None
         }
     }
+}
+
+/// Compatibility wrapper that clones progressive frames for callers that retain them.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn decode_progressive_frames<F>(jxl_bytes: &[u8], mut on_frame: F) -> Option<(f64, f64)>
+where
+    F: FnMut(ProgressiveFrame),
+{
+    decode_progressive_frames_borrowed(jxl_bytes, |event| match event {
+        DecodeProgressiveEvent::Progress {
+            width,
+            height,
+            rgba,
+        } => on_frame(ProgressiveFrame {
+            width,
+            height,
+            rgba: rgba.to_vec(),
+            is_final: false,
+        }),
+        DecodeProgressiveEvent::Final {
+            width,
+            height,
+            rgba,
+        } => on_frame(ProgressiveFrame {
+            width,
+            height,
+            rgba,
+            is_final: true,
+        }),
+    })
 }
 
 /// Timing-only wrapper around [`decode_progressive_frames`].

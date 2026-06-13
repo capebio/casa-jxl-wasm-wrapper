@@ -10,6 +10,7 @@ export interface BackendSelectorOptions {
     env?: Record<string, string | undefined>;
     importNative?: () => Promise<unknown>;
     importWasm?: () => Promise<unknown>;
+    onDiagnostic?: (msg: string) => void;
 }
 export declare function selectBackend(options?: BackendSelectorOptions): Promise<Backend>;
 //# sourceMappingURL=backend-selector.d.ts.map

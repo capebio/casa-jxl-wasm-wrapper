@@ -96,13 +96,8 @@ function getGalleryProgressiveDetail() {
   return sel ? sel.value : 'passes';
 }
 
-function getGalleryEncodeOptions() {
-  return {
-    previewFirst: !!(document.getElementById('gallery-preview-first')?.checked),
-    progressiveDc: Number(document.getElementById('gallery-prog-dc')?.value ?? 2),
-    groupOrder: document.getElementById('gallery-group-order')?.checked ? 1 : 0,
-  };
-}
+// getGalleryEncodeOptions removed (pass 2): preset (basePreset.encode) is now the single source.
+// Logging in decodeBtn click hardcodes the DOM reads for the galleryStartLine instead.
 
 function applyPushedGallerySettings(settings) {
   if (!settings) return;
@@ -431,11 +426,17 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
       byteLength: file.size,
     })),
   });
+  // Wire priority oracle (connected exploration): exposes per-file visible frontier for AR/focus/photogram boost.
+  // Not yet used to modulate runLimited/push (future delivery intelligence), but now explicitly surfaced.
+  const _priorities = coordinator.getPriorityTargets();
 
   // framesByFile is a live Map used by the lightbox
   const framesByFile = new Map(selectedFiles.map(f => [slotId(f), []]));
 
   const lightbox = createGalleryLightbox({ framesByFile });
+  // Baseline constancy (Lens17 prep / Perceptual Constancy Mode path). Gallery already forwards params
+  // in renderLightboxState -> draw -> pack. UI/preset can call set later.
+  lightbox.setConstancyParams({ mode: 'off', exposure: 0, saturation: 0, whiteBalance: [1, 1, 1] });
 
   // Keyboard handler for lightbox navigation
   function onKey(ev) {
@@ -602,8 +603,8 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
       width,
       height,
       hasAlpha: true,
-      quality: 82,
-      effort: 4,
+      quality: encodeOptions?.quality ?? 82,
+      effort: encodeOptions?.effort ?? 4,
       progressive: true,
       previewFirst: encodeOptions.previewFirst,
       progressiveDc: encodeOptions.progressiveDc,
@@ -665,7 +666,7 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
         log(`${file.name}: encoding on the fly with progressiveDc=${encodeOpts.progressiveDc}, groupOrder=${encodeOpts.groupOrder}, previewFirst=${encodeOpts.previewFirst}...`);
         const raw = await loadImageToRgba(file);
         if (signal.aborted) return 0;
-        buffer = await encodeToProgressiveJxl(raw, encodeOpts);
+        buffer = await encodeToProgressiveJxl(raw, basePreset.encode);
         const encodeMs = Date.now() - loadStart;
         log(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL in ${encodeMs.toFixed(1)} ms`);
         dbgLog(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL in ${encodeMs.toFixed(1)} ms`);
@@ -686,12 +687,12 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     log(decodingLine);
     dbgLog(decodingLine);
 
-    // Use preset.decode (unified, includes defaults + any future preserve from pushed)
+    // Use preset.decode (unified, includes defaults + any future preserve from pushed/photogram/AR)
     const decoder = createDecoder({
       ...basePreset.decode,
-      // keep gallery's force for lab viz (memory); preset can carry preserve* when callers pass
-      preserveIcc: false,
-      preserveMetadata: false,
+      // gallery forces false only for pure lab memory viz; callers that pass preserve* via preset win for color fidelity
+      preserveIcc: basePreset.decode.preserveIcc ?? false,
+      preserveMetadata: basePreset.decode.preserveMetadata ?? false,
     });
 
     const pushState = { bytesFed: 0 };

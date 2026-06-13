@@ -8,7 +8,6 @@ import type { WorkerFactory } from "@casabio/jxl-scheduler";
 import {
   hardwareConcurrency,
   JxlContextImpl,
-  validateWasmUrl,
   type JxlContext,
 } from "./context-base.js";
 
@@ -27,6 +26,15 @@ export function createBrowserContext(opts?: ContextOptions): JxlContext {
 // ---------------------------------------------------------------------------
 
 export function createNodeContext(opts?: ContextOptions): JxlContext {
+  if (opts?.wasmUrl !== undefined) {
+    throw new Error(
+      "[jxl-session] createNodeContext() does not support wasmUrl; node worker resolution is controlled by @casabio/jxl-worker-node",
+    );
+  }
+
+  // ContextOptions.wasmUrl (and browser-only tier routing) is not supported for node
+  // until @casabio/jxl-worker-node provides asset override. Explicit error prevents
+  // silent no-op (see Agent 2 handoff in BrowserContextTierEvent.md).
   // Pool size: hardwareConcurrency - 1 per Section 12.1 (no min(4) cap server-side).
   const poolSize = opts?.poolSize ?? Math.max(1, hardwareConcurrency() - 1);
 

@@ -1,14 +1,5 @@
 import type { WorkerToMainMessage, MainToWorkerMessage } from "@casabio/jxl-core/protocol";
 export type Priority = "visible" | "near" | "background";
-export interface Session {
-    sessionId: string;
-    priority: Priority;
-    sourceKey: string | null;
-    pendingResolve: (() => void) | null;
-    pendingReject: ((err: unknown) => void) | null;
-    signal: AbortSignal | null;
-    subscribers: string[];
-}
 export type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 export interface PoolWorker {
     id: number;
@@ -22,9 +13,21 @@ export interface WorkerHandle {
     onMessage(handler: (msg: WorkerToMainMessage) => void): void;
     shutdown(timeoutMs?: number): Promise<void>;
     readonly terminated: boolean;
+    /** Optional: fired on worker-level error; pool recycles the worker (T2). */
+    onError?(handler: (err: unknown) => void): void;
+    /** Optional: fired on unexpected worker exit; pool recycles the worker (T2). */
+    onExit?(handler: () => void): void;
 }
 export type WorkerFactory = () => Promise<WorkerHandle>;
 export interface AdmissionGate {
+    /**
+     * Request admission slot for a session.
+     * Note on cancellation contract (T3):
+     * admit() may resolve after the session was cancelled or the scheduler destroyed;
+     * the scheduler releases the returned token immediately in that case.
+     * Implementations should resolve promptly and must tolerate the release being
+     * the first and only interaction.
+     */
     admit(sessionId: string, priority: Priority): Promise<() => void>;
 }
 //# sourceMappingURL=types.d.ts.map
