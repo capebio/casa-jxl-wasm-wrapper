@@ -38,6 +38,26 @@ fn validate(raw: &[u16], width: usize, height: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Subtract black level in-place from a u16 buffer (bayer mosaic or post-demosaic rgb).
+/// Used to produce clean linear sensor data for photogrammetry, ML, and advanced
+/// non-Riemannian perceptual color pipelines (lens17 etc). Matches the centered
+/// math used in pipeline::build_pre_lut but available early on raw counts.
+/// Safe no-op when black==0. Callers that want normalized data before tone can use
+/// this then pass black=0 downstream.
+pub fn subtract_black_in_place(buf: &mut [u16], black: u16) {
+    if black == 0 {
+        return;
+    }
+    let mut p = buf.as_mut_ptr();
+    let end = unsafe { p.add(buf.len()) };
+    while p < end {
+        unsafe {
+            *p = (*p).saturating_sub(black);
+            p = p.add(1);
+        }
+    }
+}
+
 pub const SALIENCY_BLOCK: usize = 32;
 
 /// Compute one demosaiced RGB pixel. Caller passes pre-resolved neighbor
@@ -99,6 +119,18 @@ fn bayer_pixel(
 pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
     let mut rgb = vec![0u16; width * height * 3];
+    demosaic_rggb_into(raw, width, height, &mut rgb)?;
+    Ok(rgb)
+}
+
+/// T3: like `demosaic_rggb` but writes into a caller-owned buffer (must be width*height*3 u16s).
+/// Lets callers reuse one RGB16 buffer across frames instead of allocating + zeroing 3N u16 each call.
+/// Output is bit-identical to `demosaic_rggb`.
+pub fn demosaic_rggb_into(raw: &[u16], width: usize, height: usize, out: &mut [u16]) -> Result<(), String> {
+    validate(raw, width, height)?;
+    if out.len() != width * height * 3 {
+        return Err(format!("demosaic: out len {} != {}*{}*3", out.len(), width, height));
+    }
 
     let h_max = height - 1;
     let w_max = width  - 1;
@@ -194,11 +226,11 @@ pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16
     };
 
     #[cfg(feature = "parallel")]
-    rgb.par_chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    out.par_chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
     #[cfg(not(feature = "parallel"))]
-    rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
+    out.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
 
-    Ok(rgb)
+    Ok(())
 }
 
 /// 2×2 superpixel demosaic: R = raw R, G = mean(G1, G2), B = raw B.
@@ -486,77 +518,8 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
 
-    // Per-pixel MHC math. Caller resolves all neighbor indices; interior pixels
-    // pass col±1/col±2 directly (no clamping); border pixels pass clamped values.
-    #[inline(always)]
-    fn mhc_pixel(
-        raw: &[u16], width: usize,
-        r_c: usize, r_n: usize, r_s: usize, r_n2: usize, r_s2: usize,
-        col: usize, c_w: usize, c_e: usize, c_w2: usize, c_e2: usize,
-    ) -> (i32, i32, i32) {
-        match (r_c & 1, col & 1) {
-            (0, 0) => {
-                let rc  = at(raw, width, r_c, col);
-                let gn  = at(raw, width, r_n, col);
-                let ge  = at(raw, width, r_c, c_e);
-                let gs  = at(raw, width, r_s, col);
-                let gw  = at(raw, width, r_c, c_w);
-                let rn2 = at(raw, width, r_n2, col);
-                let re2 = at(raw, width, r_c,  c_e2);
-                let rs2 = at(raw, width, r_s2, col);
-                let rw2 = at(raw, width, r_c,  c_w2);
-                let g_mhc = (2*(gn+ge+gs+gw) + 4*rc - rn2-re2-rs2-rw2) >> 3;
-                let b_v = (at(raw,width,r_n,c_w)+at(raw,width,r_n,c_e)
-                          +at(raw,width,r_s,c_w)+at(raw,width,r_s,c_e)) >> 2;
-                (rc, g_mhc.clamp(0,65535), b_v.clamp(0,65535))
-            }
-            (0, 1) => {
-                let gc  = at(raw, width, r_c, col);
-                let re  = at(raw, width, r_c, c_e);
-                let rw  = at(raw, width, r_c, c_w);
-                let bn  = at(raw, width, r_n, col);
-                let bs  = at(raw, width, r_s, col);
-                let ge2 = at(raw, width, r_c,  c_e2);
-                let gw2 = at(raw, width, r_c,  c_w2);
-                let gn2 = at(raw, width, r_n2, col);
-                let gs2 = at(raw, width, r_s2, col);
-                let r_v = (2*(re+rw) + 2*gc - ge2-gw2) >> 2;
-                let b_v = (2*(bn+bs) + 2*gc - gn2-gs2) >> 2;
-                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
-            }
-            (1, 0) => {
-                let gc  = at(raw, width, r_c, col);
-                let rn  = at(raw, width, r_n, col);
-                let rs  = at(raw, width, r_s, col);
-                let be  = at(raw, width, r_c, c_e);
-                let bw  = at(raw, width, r_c, c_w);
-                let gn2 = at(raw, width, r_n2, col);
-                let gs2 = at(raw, width, r_s2, col);
-                let ge2 = at(raw, width, r_c,  c_e2);
-                let gw2 = at(raw, width, r_c,  c_w2);
-                let r_v = (2*(rn+rs) + 2*gc - gn2-gs2) >> 2;
-                let b_v = (2*(be+bw) + 2*gc - ge2-gw2) >> 2;
-                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
-            }
-            _ => {
-                let bc  = at(raw, width, r_c, col);
-                let gn  = at(raw, width, r_n, col);
-                let ge  = at(raw, width, r_c, c_e);
-                let gs  = at(raw, width, r_s, col);
-                let gw  = at(raw, width, r_c, c_w);
-                let bn2 = at(raw, width, r_n2, col);
-                let be2 = at(raw, width, r_c,  c_e2);
-                let bs2 = at(raw, width, r_s2, col);
-                let bw2 = at(raw, width, r_c,  c_w2);
-                let g_mhc = (2*(gn+ge+gs+gw) + 4*bc - bn2-be2-bs2-bw2) >> 3;
-                let r_v = (2*(at(raw,width,r_n,c_e)+at(raw,width,r_n,c_w)
-                             +at(raw,width,r_s,c_e)+at(raw,width,r_s,c_w))
-                           + 4*bc - bn2-be2-bs2-bw2) >> 3;
-                (r_v.clamp(0,65535), g_mhc.clamp(0,65535), bc)
-            }
-        }
-    }
-
+    // Shared mhc_pixel_phased(..., (0,0)) used for all scalar RGGB MHC sites in this fn
+    // (borders/tail). The hot unrolled interior (below) remains hand-specialized for speed.
     let do_row = |row: usize, out_row: &mut [u16]| {
         let r = row as isize;
         let r_n  = clamp(r - 1, 0, h_max);
@@ -568,12 +531,12 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
         let int_start = 2.min(width);
         let int_end   = width.saturating_sub(2);
 
-        // Left border (cols 0..int_start): clamp column neighbors. Helper unchanged.
+        // Left border (cols 0..int_start): clamp column neighbors. Use shared phased (phase 0,0 for RGGB).
         for col in 0..int_start {
             let c = col as isize;
-            let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
+            let (rr, gg, bb) = mhc_pixel_phased(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
                 clamp(c-1,0,w_max), clamp(c+1,0,w_max),
-                clamp(c-2,0,w_max), clamp(c+2,0,w_max));
+                clamp(c-2,0,w_max), clamp(c+2,0,w_max), (0, 0));
             let o = col * 3;
             out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
         }
@@ -581,16 +544,16 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
         if width < 6 || int_end <= int_start {
             // Small widths or no interior: original scalar interior + right via helper.
             for col in int_start..int_end {
-                let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2,
-                    col, col-1, col+1, col-2, col+2);
+                let (rr, gg, bb) = mhc_pixel_phased(raw, width, r_c, r_n, r_s, r_n2, r_s2,
+                    col, col-1, col+1, col-2, col+2, (0, 0));
                 let o = col * 3;
                 out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
             }
             for col in int_end..width {
                 let c = col as isize;
-                let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
+                let (rr, gg, bb) = mhc_pixel_phased(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
                     clamp(c-1,0,w_max), clamp(c+1,0,w_max),
-                    clamp(c-2,0,w_max), clamp(c+2,0,w_max));
+                    clamp(c-2,0,w_max), clamp(c+2,0,w_max), (0, 0));
                 let o = col * 3;
                 out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
             }
@@ -683,8 +646,8 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
 
         // Tail single interior col (if any) via helper.
         if col < int_end {
-            let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2,
-                col, col-1, col+1, col-2, col+2);
+            let (rr, gg, bb) = mhc_pixel_phased(raw, width, r_c, r_n, r_s, r_n2, r_s2,
+                col, col-1, col+1, col-2, col+2, (0, 0));
             let o = col * 3;
             out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
         }
@@ -692,9 +655,9 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
         // Right border (cols int_end..width): clamp column neighbors. Helper unchanged.
         for col in int_end..width {
             let c = col as isize;
-            let (rr, gg, bb) = mhc_pixel(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
+            let (rr, gg, bb) = mhc_pixel_phased(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
                 clamp(c-1,0,w_max), clamp(c+1,0,w_max),
-                clamp(c-2,0,w_max), clamp(c+2,0,w_max));
+                clamp(c-2,0,w_max), clamp(c+2,0,w_max), (0, 0));
             let o = col * 3;
             out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
         }
@@ -734,74 +697,8 @@ pub fn demosaic_rggb_mhc_band(
     let w_max = (width - 1) as isize;
     let h_max = (ctx_h - 1) as isize;
 
-    #[inline(always)]
-    fn mhc_pixel(
-        raw: &[u16], width: usize,
-        r_c: usize, r_n: usize, r_s: usize, r_n2: usize, r_s2: usize,
-        col: usize, c_w: usize, c_e: usize, c_w2: usize, c_e2: usize,
-    ) -> (i32, i32, i32) {
-        match (r_c & 1, col & 1) {
-            (0, 0) => {
-                let rc  = at(raw, width, r_c, col);
-                let gn  = at(raw, width, r_n, col);
-                let ge  = at(raw, width, r_c, c_e);
-                let gs  = at(raw, width, r_s, col);
-                let gw  = at(raw, width, r_c, c_w);
-                let rn2 = at(raw, width, r_n2, col);
-                let re2 = at(raw, width, r_c,  c_e2);
-                let rs2 = at(raw, width, r_s2, col);
-                let rw2 = at(raw, width, r_c,  c_w2);
-                let g_mhc = (2*(gn+ge+gs+gw) + 4*rc - rn2-re2-rs2-rw2) >> 3;
-                let b_v = (at(raw,width,r_n,c_w)+at(raw,width,r_n,c_e)
-                          +at(raw,width,r_s,c_w)+at(raw,width,r_s,c_e)) >> 2;
-                (rc, g_mhc.clamp(0,65535), b_v.clamp(0,65535))
-            }
-            (0, 1) => {
-                let gc  = at(raw, width, r_c, col);
-                let re  = at(raw, width, r_c, c_e);
-                let rw  = at(raw, width, r_c, c_w);
-                let bn  = at(raw, width, r_n, col);
-                let bs  = at(raw, width, r_s, col);
-                let ge2 = at(raw, width, r_c,  c_e2);
-                let gw2 = at(raw, width, r_c,  c_w2);
-                let gn2 = at(raw, width, r_n2, col);
-                let gs2 = at(raw, width, r_s2, col);
-                let r_v = (2*(re+rw) + 2*gc - ge2-gw2) >> 2;
-                let b_v = (2*(bn+bs) + 2*gc - gn2-gs2) >> 2;
-                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
-            }
-            (1, 0) => {
-                let gc  = at(raw, width, r_c, col);
-                let rn  = at(raw, width, r_n, col);
-                let rs  = at(raw, width, r_s, col);
-                let be  = at(raw, width, r_c, c_e);
-                let bw  = at(raw, width, r_c, c_w);
-                let gn2 = at(raw, width, r_n2, col);
-                let gs2 = at(raw, width, r_s2, col);
-                let ge2 = at(raw, width, r_c,  c_e2);
-                let gw2 = at(raw, width, r_c,  c_w2);
-                let r_v = (2*(rn+rs) + 2*gc - gn2-gs2) >> 2;
-                let b_v = (2*(be+bw) + 2*gc - ge2-gw2) >> 2;
-                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
-            }
-            _ => {
-                let bc  = at(raw, width, r_c, col);
-                let gn  = at(raw, width, r_n, col);
-                let ge  = at(raw, width, r_c, c_e);
-                let gs  = at(raw, width, r_s, col);
-                let gw  = at(raw, width, r_c, c_w);
-                let bn2 = at(raw, width, r_n2, col);
-                let be2 = at(raw, width, r_c,  c_e2);
-                let bs2 = at(raw, width, r_s2, col);
-                let bw2 = at(raw, width, r_c,  c_w2);
-                let g_mhc = (2*(gn+ge+gs+gw) + 4*bc - bn2-be2-bs2-bw2) >> 3;
-                let r_v = (2*(at(raw,width,r_n,c_e)+at(raw,width,r_n,c_w)
-                             +at(raw,width,r_s,c_e)+at(raw,width,r_s,c_w))
-                           + 4*bc - bn2-be2-bs2-bw2) >> 3;
-                (r_v.clamp(0,65535), g_mhc.clamp(0,65535), bc)
-            }
-        }
-    }
+    // Uses shared mhc_pixel_phased(..., (0,0)) below for RGGB band (dng fused path).
+    // (The local copy was removed for DRY; phase param makes it general.)
 
     for br in 0..num_rows {
         let local = halo + first_local + br;
@@ -816,10 +713,10 @@ pub fn demosaic_rggb_mhc_band(
         let out_base = br * width * 3;
         for col in 0..width {
             let c = col as isize;
-            let (rr, gg, bb) = mhc_pixel(
+            let (rr, gg, bb) = mhc_pixel_phased(
                 ctx, width, r_c, r_n, r_s, r_n2, r_s2, col,
                 clamp(c-1,0,w_max), clamp(c+1,0,w_max),
-                clamp(c-2,0,w_max), clamp(c+2,0,w_max),
+                clamp(c-2,0,w_max), clamp(c+2,0,w_max), (0, 0),
             );
             let o = out_base + col * 3;
             rgb_out[o] = rr as u16;
@@ -971,6 +868,10 @@ pub fn demosaic_rggb_mhc_with_saliency(raw: &[u16], width: usize, height: usize)
 /// out_ch = clamp( (m[3c]*r + m[3c+1]*g + m[3c+2]*b) >> 12 , 0, 65535 )
 /// |m[i]| must be <= 8<<12 (asserted). i64 accum used so the 3-term dot cannot overflow
 /// before the shift (on wasm32 i64 is cheap and removes the footgun vs i32).
+///
+/// Hook for future non-Riemannian perceptual color (lens17): callers (LookRenderer)
+/// can supply a precomputed sensor-sharpen B or other transform here for per-pipeline
+/// constancy during progressive paints. The output remains linear 16-bit.
 pub fn demosaic_rggb_mhc_matrix(raw: &[u16], width: usize, height: usize, m: &[i32; 9])
     -> Result<Vec<u16>, String>
 {
@@ -985,75 +886,8 @@ pub fn demosaic_rggb_mhc_matrix(raw: &[u16], width: usize, height: usize, m: &[i
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
 
-    // Local pixel helper (math duplicated to keep demosaic_rggb_mhc body unchanged).
-    #[inline(always)]
-    fn mhc_pixel(
-        raw: &[u16], width: usize,
-        r_c: usize, r_n: usize, r_s: usize, r_n2: usize, r_s2: usize,
-        col: usize, c_w: usize, c_e: usize, c_w2: usize, c_e2: usize,
-    ) -> (i32, i32, i32) {
-        match (r_c & 1, col & 1) {
-            (0, 0) => {
-                let rc  = at(raw, width, r_c, col);
-                let gn  = at(raw, width, r_n, col);
-                let ge  = at(raw, width, r_c, c_e);
-                let gs  = at(raw, width, r_s, col);
-                let gw  = at(raw, width, r_c, c_w);
-                let rn2 = at(raw, width, r_n2, col);
-                let re2 = at(raw, width, r_c,  c_e2);
-                let rs2 = at(raw, width, r_s2, col);
-                let rw2 = at(raw, width, r_c,  c_w2);
-                let g_mhc = (2*(gn+ge+gs+gw) + 4*rc - rn2-re2-rs2-rw2) >> 3;
-                let b_v = (at(raw,width,r_n,c_w)+at(raw,width,r_n,c_e)
-                          +at(raw,width,r_s,c_w)+at(raw,width,r_s,c_e)) >> 2;
-                (rc, g_mhc.clamp(0,65535), b_v.clamp(0,65535))
-            }
-            (0, 1) => {
-                let gc  = at(raw, width, r_c, col);
-                let re  = at(raw, width, r_c, c_e);
-                let rw  = at(raw, width, r_c, c_w);
-                let bn  = at(raw, width, r_n, col);
-                let bs  = at(raw, width, r_s, col);
-                let ge2 = at(raw, width, r_c,  c_e2);
-                let gw2 = at(raw, width, r_c,  c_w2);
-                let gn2 = at(raw, width, r_n2, col);
-                let gs2 = at(raw, width, r_s2, col);
-                let r_v = (2*(re+rw) + 2*gc - ge2-gw2) >> 2;
-                let b_v = (2*(bn+bs) + 2*gc - gn2-gs2) >> 2;
-                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
-            }
-            (1, 0) => {
-                let gc  = at(raw, width, r_c, col);
-                let rn  = at(raw, width, r_n, col);
-                let rs  = at(raw, width, r_s, col);
-                let be  = at(raw, width, r_c, c_e);
-                let bw  = at(raw, width, r_c, c_w);
-                let gn2 = at(raw, width, r_n2, col);
-                let gs2 = at(raw, width, r_s2, col);
-                let ge2 = at(raw, width, r_c,  c_e2);
-                let gw2 = at(raw, width, r_c,  c_w2);
-                let r_v = (2*(rn+rs) + 2*gc - gn2-gs2) >> 2;
-                let b_v = (2*(be+bw) + 2*gc - ge2-gw2) >> 2;
-                (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
-            }
-            _ => {
-                let bc  = at(raw, width, r_c, col);
-                let gn  = at(raw, width, r_n, col);
-                let ge  = at(raw, width, r_c, c_e);
-                let gs  = at(raw, width, r_s, col);
-                let gw  = at(raw, width, r_c, c_w);
-                let bn2 = at(raw, width, r_n2, col);
-                let be2 = at(raw, width, r_c,  c_e2);
-                let bs2 = at(raw, width, r_s2, col);
-                let bw2 = at(raw, width, r_c,  c_w2);
-                let g_mhc = (2*(gn+ge+gs+gw) + 4*bc - bn2-be2-bs2-bw2) >> 3;
-                let r_v = (2*(at(raw,width,r_n,c_e)+at(raw,width,r_n,c_w)
-                             +at(raw,width,r_s,c_e)+at(raw,width,r_s,c_w))
-                           + 4*bc - bn2-be2-bs2-bw2) >> 3;
-                (r_v.clamp(0,65535), g_mhc.clamp(0,65535), bc)
-            }
-        }
-    }
+    // Local mhc_pixel removed; delegates to mhc_pixel_phased(raw, ..., (0,0)) above in the per-col loop.
+    // (DRY for the Q12 matrix path.)
 
     let do_row = |row: usize, out_row: &mut [u16]| {
         let r = row as isize;
@@ -1069,12 +903,12 @@ pub fn demosaic_rggb_mhc_matrix(raw: &[u16], width: usize, height: usize, m: &[i
         for col in 0..width {
             let c = col as isize;
             let (rr, gg, bb) = if col < int_start || col >= int_end {
-                mhc_pixel(raw, width, r_c, r_n as usize, r_s as usize, r_n2 as usize, r_s2 as usize, col,
+                mhc_pixel_phased(raw, width, r_c, r_n as usize, r_s as usize, r_n2 as usize, r_s2 as usize, col,
                     clamp(c-1,0,w_max), clamp(c+1,0,w_max),
-                    clamp(c-2,0,w_max), clamp(c+2,0,w_max))
+                    clamp(c-2,0,w_max), clamp(c+2,0,w_max), (0, 0))
             } else {
-                mhc_pixel(raw, width, r_c, r_n as usize, r_s as usize, r_n2 as usize, r_s2 as usize, col,
-                    col-1, col+1, col-2, col+2)
+                mhc_pixel_phased(raw, width, r_c, r_n as usize, r_s as usize, r_n2 as usize, r_s2 as usize, col,
+                    col-1, col+1, col-2, col+2, (0, 0))
             };
             // Fuse Q12 matrix (i64 to avoid overflow).
             let r64 = rr as i64;
