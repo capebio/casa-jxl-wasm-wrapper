@@ -23,3 +23,167 @@ Track sidecar cumulative byte offsets in the node worker's `readEncoderChunks` l
 1. **Conceptual Type/Domain Mismatch:** The proposed fix incorrectly treats `this.opts.sidecarSizes` as an array of *byte sizes*. In our system architecture, `sidecarSizes` represents the *pixel dimensions* (long-edge max pixel size, e.g., `[256, 512, 1024, 2048]`) of the requested thumbnails, not their compressed byte sizes.
 2. **Severe Data Corruption Hazard:** Comparing cumulative output bytes to pixel dimensions (e.g., checking if `totalBytes >= 256` or `512` bytes) would trigger false completions of sidecar offsets at extremely early stages of encoding. This would emit incorrect `sidecarOffsets` (e.g. 256 bytes instead of the actual compressed JXL size of several kilobytes), resulting in truncated/corrupted thumbnail image fetches when clients perform range-prefix requests.
 3. **Architecture Guarantee:** In both our WASM and native bindings, the encoding engine is guaranteed to yield each sidecar thumbnail as a single, discrete, complete JXL container chunk before the main codestream. Thus, tracking the end-of-chunk boundaries of the first `sidecarSizes.length` chunks is the mathematically correct and byte-accurate representation of cumulative sidecar boundaries.
+
+---
+
+## RP-2026-06-12: Raw Pipeline Handback Rejections / Deferrals
+
+### Proposed Optimization
+`decompress.rs`: add per-row callback / ROI-downsample hook during Olympus raw decompression.
+
+### Technical Rationale for Rejection
+1. **Public API surface too early:** Current callers only need full-frame rows or row-prefix decode. A callback API would freeze semantics around row parity, ownership, and cancellation before there is a proven cross-stage preview contract.
+2. **Pipeline boundary mismatch:** Useful ROI/downsample needs agreement across decompress, demosaic, and DNG metadata. Landing it in `decompress.rs` alone would create a one-off hook instead of a stable pipeline seam.
+
+### Proposed Optimization
+`demosaic.rs`: fuse matrix math into MHC hot kernels, add SIMD path, add planar / `_into` output APIs, expose saliency as stable public contract, and add half-res crop-policy metadata.
+
+### Technical Rationale for Rejection
+1. **Correctness bug fixed first:** This pass prioritized phase-correct MHC because that fixes real misrendering. Kernel fusion/SIMD/public output-shape expansion are performance and API changes without benchmark evidence in this session.
+2. **API freeze risk:** Planar output, `_into` surfaces, and saliency contract would become long-lived public interfaces. They need explicit downstream consumers and naming decisions, not opportunistic introduction during a correctness pass.
+3. **Half-res policy needs product choice:** `floor`, `ceil`, or explicit crop metadata changes caller-visible behavior. No product decision was provided, so silent policy change would be riskier than deferral.
+
+### Proposed Optimization
+`dng.rs` / `ljpeg.rs`: parsed `LjpegPlan`, shared decode plan across tiles, bounded tile queue / row-band sink, and structured `DngDecodePlan` provenance object.
+
+### Technical Rationale for Rejection
+1. **Larger architectural refactor:** These changes cross multiple files and would rework tile decode ownership, cache lifetime, and DNG staging together. They are valid directions, but materially larger than the verified correctness fixes completed here.
+2. **Needs dedicated measurement pass:** The existing implementation now has safer truncation handling, strip support, endian correctness, phase-correct demosaic fallback, and scratch reuse. Further decode-plan work should be benchmarked against this new baseline.
+3. **Provenance object incomplete without callers:** `DngDecodePlan { wb_source, matrix_source, crop }` is useful only if surfaced through native/WASM boundary types and consumed by product code. That integration was not in scope here.
+
+### Proposed Optimization
+`exif.rs`: add broad provenance/capture geometry fields (`wb_source`, `crop_origin`, pose-ish tags, serials) and string-pooling optimizations.
+
+### Technical Rationale for Rejection
+1. **Upstream data not consistently available:** `OrfInfo` does not currently provide enough trustworthy source data for all of those fields.
+2. **No hot-path evidence:** String pooling / `Cow<'a, str>` would complicate serde-facing types without evidence that EXIF serialization is a real bottleneck.
+
+### Proposed Optimization
+`ljpeg.rs`: replace current thread-local DHT cache, add planar decode API, and add restart-marker future hook now.
+
+### Technical Rationale for Rejection
+1. **Current cache no longer critical path:** This pass did not introduce parsed plans, so replacing the cache alone would be isolated churn with unclear gain.
+2. **Planar decode API premature:** No current caller requires a separate planar LJPEG layout after the completed fixes.
+3. **Restart markers remain corpus-driven:** Existing assets do not require restart-marker support. Carrying speculative parser complexity now would not improve current pipeline behavior.
+
+---
+
+## 2026-06 RawPipeline Lenses Review (DecompressDemosaicDngExifLjpeg)
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+### Rejected from decompress.rs
+- Expose/document a "linearize" / black subtract post step in decompress (or pre in its callers).
+  Rationale: Black subtract is intentionally post-demosaic in pipeline::build_pre_lut (applied to demosaiced rgb16, with highlight shoulder and per-channel WB/gain). Pre-sub on bayer in decompress would require coordinated changes to all ORF paths (wasm src/lib.rs, crate compile tests) to pass black=0, else double-sub dark output. The ingest deliberately hands off "as captured" + metadata for consistency with DNG bayer path. Better as opt-in utility in demosaic (implemented) for advanced consumers. No behavior change here.
+
+- Any fill/alloc micro-opts (D3 one-fill, D6 skip zeroinit via MaybeUninit).
+  Rationale: Already explicitly rejected in the file's own tests (D3/D6 benches showed <1-3% or negative, plus WASM/unsafe/audit risk per project policy in CLAUDE.md). Current batch-fill + vec![0] is sound and sufficient.
+
+### Rejected from ljpeg.rs
+- Specialize inner decode loop for cps==1 (CFA DNG common case) to elide comp loop/arrays.
+  Rationale: Marginal win (1-iteration loop, tiny fixed MAX=4 arrays; LLVM already specializes well). Would require near-dupe of the predictor/left/prev_row_first/ store logic for general cps<=4 support. Current hot path (peek/table/get_bits/extend) dominates; no benchmark evidence this is worth the maintenance surface. Rejected per "no speculative without evidence" and simplicity.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+---
+
+## F-1: Remove SSIMULACRA2 placeholder field from progressive byte benchmark
+
+### Proposed Optimization
+Remove the SSIMULACRA2 input/output surface from `web/jxl-progressive-byte-benchmark.js` until a real metric runner exists, or compute an asynchronous sidecar quality score immediately after every target encode.
+
+### Technical Rationale for Rejection
+1. **Capability Signaling Matters:** The current UI already labels the metric as unavailable. Keeping the field preserves forward compatibility with the preset benchmark and export schema without falsely claiming a measured result.
+2. **No In-Loop Metric Runner Exists:** Computing a real score here would require introducing a new quality pipeline into a benchmark whose primary purpose is byte/timeline instrumentation. That would mix orthogonal concerns and inflate runtime variance.
+3. **Better Future Landing Point:** When a metric runner is added, it should be shared across benchmark surfaces and gated to finalist/post-pass analysis, not bolted onto this page alone.
+
+---
+
+## F-2: Move entire preset sweep engine into a Worker immediately
+
+### Proposed Optimization
+Move `web/jxl-preset-benchmark.js` sweep execution, resize, encode, decode, IDB restore, and RAW isolation wholesale into a Worker so timings are isolated from UI interference.
+
+### Technical Rationale for Rejection
+1. **Large Architectural Surface Area:** The current module mixes DOM wiring, IDB restoration, canvas resizing, WASM calls, and chart updates. A correct Worker migration is not a local optimization; it is a subsystem split with non-trivial message protocol design.
+2. **Browser Primitive Gaps:** Several code paths rely on main-thread-only or environment-sensitive primitives (`createImageBitmap`, `OffscreenCanvas`, file picker flows, chart refresh cadence, debug console integration). A rushed move would risk silent feature regressions.
+3. **Need Measured Baseline First:** Before paying migration cost, we need profiler evidence that main-thread interference is dominating current benchmark noise. The changes landed in this pass already remove avoidable cache misses and stale-result errors with much lower risk.
+
+---
+
+## P-1: Perceptual color model (non-Riemannian / HPCS / Molchanov) field in producedBySchema + makeProducedBy (pyramid-ingest schema.ts / manifest.ts)
+
+### Proposed Optimization
+Extend producedBy.encoder with optional `perceptual: { model: string, version: string }` (additive to the zod object) and emit it from makeProducedBy so manifests can record the advanced color science engine version. Intended to prep for the upcoming Schrödinger-geodesic / Los Alamos diminishing-returns / Molchanov tensor flat-space LookRenderer.
+
+### Technical Rationale for Rejection (in context of the JPegXL pipeline)
+1. **Wrong layer / creation vs. paint time:** The JPegXL pipeline (jxl-stream/session/scheduler/worker/decode-handler/facade/bridge.cpp + progressive single-pass checkpoints) consumes the pyramids *produced* by this ingest cluster. The described engine (sensor-sharpen B + log transform for flat Euclidean, Molchanov parallelogram residuals + A_tensor, hybrid Riemannian spring + Los Alamos f(c) curves) is explicitly specified to live in `LookRenderer` under the *hot per-pixel apply_tone_math loop* in raw-pipeline for *runtime* illumination-invariant adjustments "during progressive JXL paints" in the lightbox. It is a decode/paint-time concern, not an ingest-time encoder configuration.
+
+2. **producedBy mis-semantics:** producedBy (and its encoder.effort/quality.grid/big/proxy) describes *how the JXL asset bytes were created* at pyramid build time (the ladder + jxl encode settings). Recording a runtime perceptual model here would be factually incorrect for current (and intended) neutral ingest path (ZERO_LOOK for raw, direct transcode for jpg). Current design correctly keeps the base pyramids look-neutral so that the flat-space engine can do correct math at view time without double-applying.
+
+3. **Speculative / premature per project rules:** The lens states "we intend to implement", "for the upcoming phase", "design a highly optimized SIMD or LUT". No implementation exists yet in the Rust/WASM LookRenderer. Adding schema surface, producedBy emission, and (to be useful) wiring through buildManifest now is exactly the class of "speculative abstraction" and "no opportunistic refactors" that the CLAUDE.md / AGENTS.md / rejected-optimizations history repeatedly reject. Surface would need to be maintained forever even if the integration story changes (e.g. the model lives only in JXL metadata or a separate render-intent sidecar).
+
+4. **Additive but still cost:** Although the discriminated manifest schema tolerates extra keys and the field can be omitted today, updating the authoritative producedBySchema + parse paths + makeProducedBy still expands the contract that every manifest reader (rebuild, gc, index, CLI, potentially external tools) must understand. The flexible `metadata?: Record<unknown>` already on Manifest is the correct escape hatch for any per-image render notes until the engine lands and a deliberate ingest-vs-runtime decision is made.
+
+5. **Cross-file and future integration risk:** Realizing the proposal would also require edits in manifest.ts (buildManifest/makeProducedBy call) and potentially callers in ingest.ts. Even within the 5-file rule the change is not self-contained and anticipates an architecture that has not been reviewed against the progressive decode invariants, budget, or LookRenderer hot loop.
+
+Decision: rejected. Do not extend producedBy or the encoder schema for this. When the Rust engine lands and the exact versioning + whether any ingest-time recording/baking is desired is decided, a fresh proposal with benchmarks and layer analysis can be made.
+
+---
+
+## G5-S1: Rename createProgressiveSession / add progressiveContext / full abort+error surface (web/jxl-progressive-session.js)
+
+### Proposed Optimization
+Rename the session factory (name implies progressive but is generic backend/source cache). Add setProgressiveOptions / progressiveContext passthrough, abort support on loadSource, onError hook, make ensureSource resolve to {error?} record instead of reject, and carry AR/ perceptual hints.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **Cosmetic rename + opportunistic churn:** Current name is accurate for its actual role (a thin source+backend holder used by jxl-progressive.js bench variants and thumb encoding). Gallery path uses direct file load + decoder, not this session. Renaming touches creation sites, 3+ test files, docs, and provides zero efficiency/speed/perf/bugfix. Violates "surgical changes; match existing style; no opportunistic refactors".
+2. **Abort / error surface changes contract for callers:** loadSource is supplied by the page (loadRandomSource etc). Adding abort token or forcing {error} record would require edits in jxl-progressive.js + all tests + any future loadSource providers. No observed bug report or race repro in current ensure/reload usage (single session for bench). Per CLAUDE: "no speculative abstractions", "weak verification" if added without failing case.
+3. **Per-file / AR context / perceptual passthrough premature:** This session is not per-file (gallery has N files, one shared for encode policy in bench). The advanced color (Lens17) + AR/LLM surfaces belong on the *display* side (lightbox + pack + draw in gallery) or in Rust LookRenderer, not a source loader for bench encoding. Adding here would be wrong layer. Future when the Rust engine and lightbox usage exist, a deliberate extension can be proposed with the actual call sites.
+4. **Policy integration was the only +ve delta:** We implemented the narrow, high-cohesion piece (optional policy + chooseEncodeBackend used by the single caller in progressive.js). The rest were rejected as scope creep without evidence.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+---
+
+## G5-C1: Full hole-safe next/prev rewrite + onVisibleChange + manifest/tile descriptors + error/partial tracking (web/jxl-progressive-gallery-coordinator.js)
+
+### Proposed Optimization
+Rewrite next/prev to skip holes using maxIndex tracking; accept onVisibleChange callback; add manifest/tile support; track error/partial frames in series entries; unify with lightbox framesByFile.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **next/prev not on hot path + tests assume sequential:** Gallery uses coordinator only for visibleFrames (synced min-count for thumbs) + register/markClosed. next/prev only exercised in its own unit test with sequential 0/1/2 registration (frameIndex++ in push). visibleFrames already does .filter(Boolean). Changing % logic risks test deltas and adds complexity for a non-used API in the actual gallery pipeline (lightbox does its own wrap math on framesByFile arrays).
+2. **onVisibleChange / manifest / tile / error state:** No current consumer (reRenderAll is explicit in gallery.js). Adding would be speculative API. Tile descriptors / manifests are mentioned in charter but belong with decode events or jxl-session layer, not this post-arrival sync counter. Error/partial already surfaced via the decoder 'error' / 'final' paths and logged in gallery; duplicating into coordinator violates "session protocol knowledge must not leak".
+3. **Duplication with lightbox:** framesByFile is intentionally the *full history* (for lightbox full nav), coordinator is the *synced visible count* view. They serve different consumers (thumbs vs modal). Unifying would be larger refactor, not surgical, and not required for the visible sync correctness.
+4. **Cache + priorityTargets delivered the value:** We added the alloc reduction (dirty cache on register/close) and getPriorityTargets() + accessors. These are the efficiency + "manage priority" surfaces without overbuilding.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+---
+
+## G5-F1: Always forceCopy in pack + broad format/16-bit/float/YUV support now (web/jxl-progressive-gallery-frame.js)
+
+### Proposed Optimization
+Default to forceCopy for safety on 0-copy view path (detached buffer hazard); expand pack immediately to support rgb8/16/float/YUV output formats for ML/CV; add tests.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **0-copy view is the documented win (Lens 20 "pointer move"):** The fast path (when stride matches) reuses the buffer view exactly to avoid 60 MiB+ copies on high-res progressive frames. Forcing copy by default would regress perf for the common tight case and for gallery thumbs. We added *optional* forceCopy (and used the view path in wired draw) — the correct balance.
+2. **Format expansion speculative:** Current decoder events + gallery enriched frames are rgba8 (or with stride). No ML/CV consumer, no 16-bit path active in this gallery (see perceptual-color.mjs for other). Adding branches now bloats the hot row loop without callers or benchmarks. pack test only exercises rgba8 stride. Per rules: "adaptive/heuristic... require benchmark data. Do not add tunables without evidence."
+3. **Wiring + ROI + constancy stub landed instead:** We integrated pack into drawFrameToCanvas (fixing latent stride bug in gallery thumbs + lightbox paints, deduping manual view code) and added the options bag + roi + constancy hook. That delivers immediate pipeline correctness + future surface with zero risk.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+---
+
+## G5-L1: Zoom/pan state machine + full cancel/boost emission + reactivity on framesByFile (web/jxl-progressive-gallery-lightbox.js)
+
+### Proposed Optimization
+Add zoom/pan fields + listeners; on open/handle emit cancel/deeper requests or priority to scheduler; make framesByFile reactive so lightbox auto-updates when new frames pushed.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **This gallery/lightbox has no zoom/pan:** Current UI is thumb strips + modal full-frame lightbox with arrow/ctrl-arrow nav only. No canvas pan/scale, no wheel zoom. Adding state/listeners would be dead code + DOM assumptions. The "priority shifts when zooming/panning" in the Group 5 charter is aspirational; actual priority lives in packages/jxl-scheduler (preemption/dedup). Emitting from here would be cross-layer violation without a defined protocol.
+2. **Cancel/boost belongs at scheduler/worker boundary:** Per CLAUDE invariants: "Preemption is scheduler-only", "Backpressure lives at the scheduler/worker boundary". Lightbox open/nav already drives which frames are "attended" (we added getAttended + focusRegion + constancy). Gallery starts all decodes concurrently via the push; there is no "deeper frame request" API exposed from the decoder in use here. Adding would require touching jxl-progressive-decode + decoder, outside the allowed cohesion for this item.
+3. **Reactivity unnecessary:** framesByFile is mutated by the event loop in gallery (push then register + reRender). Lightbox queries on key / open. The max visited fix + perFile map delivers the progressive guarantee. Observers or proxies would add GC/alloc without measured win.
+4. **Core delivered:** The wrap-bug fix (real correctness), constancy/attended/focus surfaces (for Lens 17/12/16), and the return value are in. When a zoom/pan lightbox or priority-aware decode path exists, the attended hook is the attachment point.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md

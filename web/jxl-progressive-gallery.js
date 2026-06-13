@@ -9,6 +9,7 @@ import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createGalleryCoordinator } from './jxl-progressive-gallery-coordinator.js';
 import { createGalleryLightbox } from './jxl-progressive-gallery-lightbox.js';
 import { buildPushBatches } from './jxl-progressive-gallery-push.js';
+import { packFramePixels } from './jxl-progressive-gallery-frame.js';
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Progressive Gallery] jxl-progressive-gallery.js loaded — multi-frame progressive gallery + lightbox', 'color:#06b6d4;font-weight:600', { page: 'Progressive Gallery', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
@@ -495,7 +496,12 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     if (!frame) return;
 
     const canvas = document.getElementById('lightbox-canvas');
-    if (canvas) drawFrameToCanvas(canvas, frame);
+    if (canvas) {
+      const params = (lightbox && typeof lightbox.getConstancyParams === 'function')
+        ? lightbox.getConstancyParams()
+        : undefined;
+      drawFrameToCanvas(canvas, frame, params);
+    }
 
     const metaEl = document.getElementById('lightbox-meta');
     if (metaEl) metaEl.textContent = `${fileId.replace(/^slot-/, '')} — frame ${frameIndex} — ${formatFrameMeta(frame)}`;
@@ -694,17 +700,21 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
   };
 }
 
-function drawFrameToCanvas(canvas, frame) {
+function drawFrameToCanvas(canvas, frame, constancyParams) {
   const { width, height } = frame.info;
   canvas.width = width;
   canvas.height = height;
   const ctx2d = canvas.getContext('2d');
-  const pixels = frame.pixels instanceof Uint8Array
-    ? new Uint8ClampedArray(frame.pixels.buffer, frame.pixels.byteOffset, frame.pixels.byteLength)
-    : new Uint8ClampedArray(frame.pixels);
-  const imageData = typeof frame.getImageData === 'function'
-    ? frame.getImageData()
-    : new ImageData(pixels, width, height);
+  let pixelsForImage;
+  if (typeof frame.getImageData === 'function') {
+    const gid = frame.getImageData();
+    pixelsForImage = gid && gid.data ? gid.data : gid;
+  } else {
+    pixelsForImage = packFramePixels(frame, { constancyParams });
+  }
+  const imageData = (pixelsForImage instanceof ImageData)
+    ? pixelsForImage
+    : new ImageData(pixelsForImage, width, height);
   ctx2d.putImageData(imageData, 0, 0);
 }
 

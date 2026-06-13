@@ -3,6 +3,7 @@ export function createProgressiveSession({
     initialEncodeBackend,
     initialDecodeBackend,
     loadSource,
+    policy, // optional { encodeBackendForTarget(w, h) } for size-aware choice (see jxl-progressive-policy)
 }) {
     if (typeof loadSource !== 'function') {
         throw new TypeError('createProgressiveSession requires a loadSource function');
@@ -43,6 +44,13 @@ export function createProgressiveSession({
         },
         setDecodeBackend(nextBackend) {
             decodeBackend = nextBackend;
+        },
+        chooseEncodeBackend(width, height) {
+            if (policy && typeof policy.encodeBackendForTarget === 'function' &&
+                Number.isFinite(width) && Number.isFinite(height)) {
+                return policy.encodeBackendForTarget(encodeBackend, width, height);
+            }
+            return encodeBackend;
         },
         async ensureSource() {
             if (sourceRecord) return sourceRecord;
