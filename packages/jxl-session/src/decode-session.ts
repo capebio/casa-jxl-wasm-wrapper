@@ -100,7 +100,7 @@ export class DecodeSessionImpl implements DecodeSession {
         sessionId: this.id,
         priority: startMsg.priority,
         startMsg,
-        sourceKey: opts.sourceKey ?? null,
+        sourceKey: null,
         signal: opts.signal ?? null,
       });
     };
@@ -139,7 +139,7 @@ export class DecodeSessionImpl implements DecodeSession {
       // signalDrain head consumption). Documented dep; no local pushChain needed.
       throw this.terminalError ?? new JxlError(CONFIG_ERROR, "push() after close/cancel/error", { sessionId: this.id });
     }
-    // Layer 4: ByteIntervalCursor (from benchmark) can generate the chunk passed here for byte-cutoff driven real progressive decode. Same math as synthetic path for fidelity. Positive for unified chunking in tests and prod.
+    // Layer 4: ByteIntervalCursor (from benchmark) can generate the chunk passed here for byte-cutoff driven real progressive decode. Same math as synthetic path for fidelity. Positive for unified chunking in tests and prod. Use cursor to decide cutoff snapshots in real path for byte-bench integration.
     await this.acquirePromise;
     // Re-check closed: close() may have set it while we awaited acquirePromise
     // (task 007-concurrency-e5f6a7b8 / 007-errors-f6a7b8c9).

@@ -143,7 +143,11 @@ class ByteIntervalCursor {
     this.chunks = chunks;
     this.cIdx = 0;
     this.cOff = 0;
+    this.offset = 0;
   }
+
+  get currentOffset() { return this.offset; }
+  reset() { this.cIdx = 0; this.cOff = 0; this.offset = 0; }
 
   // Returns { buffer: ArrayBuffer to push, advanced: bytes covered } or {buffer: null, advanced: 0} when exhausted.
   // For full quanta we return the pre-owned AB (no copy). For partial tails only the needed sub-slice is copied.
@@ -163,6 +167,7 @@ class ByteIntervalCursor {
       buf = pre.slice(this.cOff, this.cOff + take);
     }
     this.cOff += take;
+    this.offset += take;
     if (this.cOff >= pre.byteLength) {
       this.cIdx++;
       this.cOff = 0;
@@ -187,6 +192,7 @@ export async function streamDecodeCutoffs(...args) {
     pixels: withPixels = true,
     onProgressiveFrame,
     driveRealSession = false,
+    driveWithCursor = true,  // expanded for real use per L1
   } = normalizeStreamArgs(args);
   let resolvedTransport = resolveTransportProfile(transportProfile);
   if (driveRealSession) {

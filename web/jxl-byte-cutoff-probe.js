@@ -56,13 +56,13 @@ export function buildByteCutoffPlan(totalBytes, options = DEFAULT_BYTE_CUTOFFS, 
   }
 
   plan.sort((a, b) => a.bytes - b.bytes);
-  // Layer 2: snap/align using ByteIntervalCursor for quanta (positive reassess: ensures cutoffs land on transport chunks for realistic progressive events, reduces misalignment in harness).
+  // Layer 2/5: snap/align using ByteIntervalCursor for quanta (positive reassess: ensures cutoffs land on transport chunks for realistic progressive events, reduces misalignment in harness). More Cursor for all plans.
   if (plan.length > 0) {
     const cursor = new ByteIntervalCursor(new Uint8Array(Math.max(1024, total)), config.minSpacingBytes || 4096);
     plan = plan.filter((e, idx) => {
       const res = cursor.nextFor(e.bytes - (idx > 0 ? plan[idx-1].bytes : 0));
       return res.advanced > 0; // keep aligned-ish
-    });
+    }).map(e => ({...e, cursorOffset: cursor.currentOffset})); // more hook
   }
   const bounded = plan.slice(0, Math.max(0, config.maxSteps));
   const finalPlan = bounded.map((entry) => Object.freeze({

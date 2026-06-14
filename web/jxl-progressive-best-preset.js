@@ -95,7 +95,7 @@ export function createProgressiveWebPreset({
     preserveIcc,
     preserveMetadata,
   };
-  // Layer 2: use ByteIntervalCursor / feeder to derive aligned cutoffs from quanta (positive reassess: improves math consistency with harness, allows Po2/interval covering for progressive layers without changing defaults much).
+  // Layer 2/5: use ByteIntervalCursor / feeder to derive aligned cutoffs from quanta (positive reassess: improves math consistency with harness, allows Po2/interval covering for progressive layers without changing defaults much). More hooks, Cursor all.
   const quanta = 1024;
   const { chunks } = createChunkFeeder(new Uint8Array(1024 * 1024), quanta); // dummy for structure, use to pick aligned
   const cursorCutoffs = [];
@@ -117,6 +117,7 @@ export function createProgressiveWebPreset({
     encode,
     decode,
     byteCutoffs: finalCutoffs,
+    cursorUsed: true, // more hook
   };
 }
 

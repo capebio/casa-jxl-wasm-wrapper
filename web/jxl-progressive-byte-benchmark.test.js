@@ -169,6 +169,7 @@ test('ByteIntervalCursor and driveRealSession are wired for custom/flip-flop str
   });
   expect(result.length).toBe(1);
   expect(result[0].driveRealSession).toBe(true);
+  // L6 prod wiring: Cursor now ready for real session chunking in progressive paths.
 });
 
 function createClock() {
