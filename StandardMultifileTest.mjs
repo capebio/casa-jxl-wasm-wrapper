@@ -1087,6 +1087,7 @@ async function main() {
   const avgProgChunkedFirst = Math.round(simdResults.reduce((s, r) => s + (r.prog_chunked4_first_ms||0), 0) / loadedFiles.length);
   const avgModProgEnc = Math.round(simdResults.reduce((s, r) => s + (r.mod_prog_enc_ms||0), 0) / loadedFiles.length);
   const avgPhotonProgEnc = Math.round(simdResults.reduce((s, r) => s + (r.photon_prog_enc_ms||0), 0) / loadedFiles.length);
+  const avgPlanar16ShotEncSimd = Math.round(simdResults.reduce((s, r) => s + (r.planar16_shot_enc_ms||0), 0) / loadedFiles.length);
 
   toonLines.push("", "# Aggregates");
   toonLines.push(`TotalRecords: ${loadedFiles.length}`);

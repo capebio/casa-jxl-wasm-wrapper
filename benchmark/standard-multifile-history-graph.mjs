@@ -444,14 +444,23 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
     }
     .shell {
       display: grid;
-      grid-template-columns: 1fr;
+      grid-template-columns: 360px 1fr;
       min-height: 100vh;
     }
     .sidebar, .main { padding: 24px; }
     .sidebar {
-      border-bottom: 1px solid var(--line);
+      border-right: 1px solid var(--line);
       background: linear-gradient(180deg, rgba(6,15,20,0.96), rgba(8,18,24,0.78));
       backdrop-filter: blur(20px);
+      overflow-y: auto;
+      max-height: 100vh;
+      position: sticky;
+      top: 0;
+      align-self: start;
+    }
+    @media (max-width: 900px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { border-right: none; border-bottom: 1px solid var(--line); max-height: none; position: static; }
     }
     .main { display: grid; gap: 18px; }
     .eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px; }
