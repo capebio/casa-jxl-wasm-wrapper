@@ -2897,7 +2897,7 @@ JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
   const double tTake0 = emscripten_get_now();
   const size_t remaining = s->outbuf_size - s->taken;
   const size_t take = (remaining < CHUNK) ? remaining : CHUNK;
-  // Layer 3: ByteIntervalCursor (from benchmark-core) on JS can drive aligned input chunks to enc_push_image; take here yields in CHUNK quanta for symmetric use in byte-cutoff encode tests. Positive for math unification.
+  // Layer 3: ByteIntervalCursor (from benchmark-core) on JS can drive aligned input chunks to enc_push_image; take here yields in CHUNK quanta for symmetric use in byte-cutoff encode tests. Positive for math unification. Support pc post JXL.
   // MakeBufferBorrowed: zero-copy handle into live outbuf (eliminates per-chunk C++ memcpy / performance-1).
   // JS takeBuffer + HEAPU8.slice materializes the owned copy for the yielded chunk.
   // outbuf must stay alive for all borrows; enc_free (after chunks() drain) does the free.
@@ -3403,6 +3403,178 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
   return bits;
 }
 
+}
+
+// ============================================================================
+// Ref-cached Butteraugli (B2): pre-build ref Image3F once; per-compare only builds test.
+// For batch mode (same ref, N tests) saves N-1 ref gamma-decodes + planarizations vs
+// single-shot jxl_wasm_butteraugli_compare. ButteraugliInterfaceInPlace moves both images,
+// so we manually copy ref planes before each call.
+// ============================================================================
+
+struct JxlWasmButterRef {
+  jxl::Image3F ref_img;
+  uint32_t width;
+  uint32_t height;
+};
+
+extern "C" JxlWasmButterRef* jxl_wasm_butteraugli_ref_create(
+    const uint8_t* ref_data, uint32_t width, uint32_t height) {
+  auto* s = new (std::nothrow) JxlWasmButterRef();
+  if (!s) return nullptr;
+  s->width = width;
+  s->height = height;
+
+  JxlMemoryManager mem;
+  if (!jxl::MemoryManagerInit(&mem, nullptr)) { delete s; return nullptr; }
+
+  auto img_or = jxl::Image3F::Create(&mem, width, height);
+  if (!img_or.ok()) { delete s; return nullptr; }
+  s->ref_img = std::move(img_or).value_();
+
+  for (size_t y = 0; y < height; ++y) {
+    float* JXL_RESTRICT rr = s->ref_img.PlaneRow(0, y);
+    float* JXL_RESTRICT gr = s->ref_img.PlaneRow(1, y);
+    float* JXL_RESTRICT br = s->ref_img.PlaneRow(2, y);
+    const uint8_t* src = ref_data + y * (size_t)width * 4u;
+    for (size_t x = 0; x < width; ++x) {
+      rr[x] = std::pow(src[x * 4u + 0u] * (1.0f / 255.0f), 2.2f);
+      gr[x] = std::pow(src[x * 4u + 1u] * (1.0f / 255.0f), 2.2f);
+      br[x] = std::pow(src[x * 4u + 2u] * (1.0f / 255.0f), 2.2f);
+    }
+  }
+  return s;
+}
+
+extern "C" int32_t jxl_wasm_butteraugli_ref_compare(
+    JxlWasmButterRef* s, const uint8_t* test_data) {
+  if (!s) return -1;
+  const uint32_t width = s->width, height = s->height;
+
+  JxlMemoryManager mem;
+  if (!jxl::MemoryManagerInit(&mem, nullptr)) return -1;
+
+  // Build test Image3F.
+  auto test_or = jxl::Image3F::Create(&mem, width, height);
+  if (!test_or.ok()) return -1;
+  jxl::Image3F test_img = std::move(test_or).value_();
+  for (size_t y = 0; y < height; ++y) {
+    float* JXL_RESTRICT rr = test_img.PlaneRow(0, y);
+    float* JXL_RESTRICT gr = test_img.PlaneRow(1, y);
+    float* JXL_RESTRICT br = test_img.PlaneRow(2, y);
+    const uint8_t* src = test_data + y * (size_t)width * 4u;
+    for (size_t x = 0; x < width; ++x) {
+      rr[x] = std::pow(src[x * 4u + 0u] * (1.0f / 255.0f), 2.2f);
+      gr[x] = std::pow(src[x * 4u + 1u] * (1.0f / 255.0f), 2.2f);
+      br[x] = std::pow(src[x * 4u + 2u] * (1.0f / 255.0f), 2.2f);
+    }
+  }
+
+  // Deep-copy ref planes (ButteraugliInterfaceInPlace moves/consumes both args).
+  auto ref_copy_or = jxl::Image3F::Create(&mem, width, height);
+  if (!ref_copy_or.ok()) return -1;
+  jxl::Image3F ref_copy = std::move(ref_copy_or).value_();
+  for (size_t c = 0; c < 3; ++c) {
+    for (size_t y = 0; y < height; ++y) {
+      const float* src_row = s->ref_img.ConstPlaneRow(c, y);
+      float* dst_row = ref_copy.PlaneRow(c, y);
+      memcpy(dst_row, src_row, width * sizeof(float));
+    }
+  }
+
+  auto diffmap_or = jxl::ImageF::Create(&mem, width, height);
+  if (!diffmap_or.ok()) return -1;
+  jxl::ImageF diffmap = std::move(diffmap_or).value_();
+
+  jxl::ButteraugliParams params;
+  double diffvalue = 0.0;
+  if (!jxl::ButteraugliInterfaceInPlace(std::move(ref_copy), std::move(test_img),
+                                        params, diffmap, diffvalue)) return -1;
+
+  const float dist = static_cast<float>(diffvalue);
+  int32_t bits;
+  memcpy(&bits, &dist, 4);
+  return bits;
+}
+
+extern "C" void jxl_wasm_butteraugli_ref_free(JxlWasmButterRef* s) {
+  delete s;
+}
+
+// ============================================================================
+// PSNR (B3): sum squared diffs over RGB channels, result in dB as float bits.
+// Identical images → +Inf. Skips alpha channel.
+// ============================================================================
+extern "C" int32_t jxl_wasm_psnr_compare(
+    const uint8_t* img1, const uint8_t* img2, uint32_t width, uint32_t height) {
+  const size_t npixels = (size_t)width * height;
+  double sum = 0.0;
+  for (size_t i = 0; i < npixels; ++i) {
+    const size_t off = i * 4u;
+    for (int c = 0; c < 3; ++c) {
+      const double d = (double)img1[off + c] - (double)img2[off + c];
+      sum += d * d;
+    }
+  }
+  float result;
+  if (sum == 0.0) {
+    result = std::numeric_limits<float>::infinity();
+  } else {
+    const double mse = sum / (3.0 * (double)npixels);
+    result = static_cast<float>(10.0 * std::log10(255.0 * 255.0 / mse));
+  }
+  int32_t bits;
+  memcpy(&bits, &result, 4);
+  return bits;
+}
+
+// ============================================================================
+// SSIM (B4): 8×8 block-windowed SSIM, luminance-only (mean of RGB channels).
+// Matches the approximation level of JS computeSsimVsFinal in jxl-progressive-quality.js.
+// ============================================================================
+static double ssim_block_luma(
+    const uint8_t* a, const uint8_t* b,
+    uint32_t width, uint32_t bx, uint32_t by, uint32_t bw, uint32_t bh) {
+  const uint32_t n = bw * bh;
+  double ma = 0.0, mb = 0.0;
+  for (uint32_t y = by; y < by + bh; ++y) {
+    for (uint32_t x = bx; x < bx + bw; ++x) {
+      const size_t idx = ((size_t)y * width + x) * 4u;
+      ma += ((double)a[idx] + a[idx + 1] + a[idx + 2]) * (1.0 / 3.0);
+      mb += ((double)b[idx] + b[idx + 1] + b[idx + 2]) * (1.0 / 3.0);
+    }
+  }
+  ma /= n; mb /= n;
+  double va = 0.0, vb = 0.0, cov = 0.0;
+  for (uint32_t y = by; y < by + bh; ++y) {
+    for (uint32_t x = bx; x < bx + bw; ++x) {
+      const size_t idx = ((size_t)y * width + x) * 4u;
+      const double av = ((double)a[idx] + a[idx + 1] + a[idx + 2]) * (1.0 / 3.0) - ma;
+      const double bv = ((double)b[idx] + b[idx + 1] + b[idx + 2]) * (1.0 / 3.0) - mb;
+      va += av * av; vb += bv * bv; cov += av * bv;
+    }
+  }
+  va /= n; vb /= n; cov /= n;
+  const double C1 = 6.5025, C2 = 58.5225; // (0.01*255)^2, (0.03*255)^2
+  return ((2.0 * ma * mb + C1) * (2.0 * cov + C2))
+       / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+}
+
+extern "C" int32_t jxl_wasm_ssim_compare(
+    const uint8_t* img1, const uint8_t* img2, uint32_t width, uint32_t height) {
+  const uint32_t BLOCK = 8u;
+  double total = 0.0;
+  uint32_t count = 0u;
+  for (uint32_t y = 0; y + BLOCK <= height; y += BLOCK) {
+    for (uint32_t x = 0; x + BLOCK <= width; x += BLOCK) {
+      total += ssim_block_luma(img1, img2, width, x, y, BLOCK, BLOCK);
+      ++count;
+    }
+  }
+  const float result = count > 0u ? static_cast<float>(total / count) : 1.0f;
+  int32_t bits;
+  memcpy(&bits, &result, 4);
+  return bits;
 }
 
 // ============================================================================
