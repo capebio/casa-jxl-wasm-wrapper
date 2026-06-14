@@ -1,6 +1,7 @@
 // PSNR/SSIM on RGBA/any-channel u8 pixel buffers (len must == w*h*ch). Layout assumed packed contiguous.
 // 0-len -> Infinity (psnr) / 0 (ssim). For profiling early term cutoffs vs final only.
-export function computePsnrVsFinal(cutoffPixels, finalPixels) {
+/** @param {Uint8Array} cutoffPixels @param {Uint8Array} finalPixels @param {number} [peak=255] */
+export function computePsnrVsFinal(cutoffPixels, finalPixels, peak = 255) {
   if (cutoffPixels.length !== finalPixels.length) {
     throw new Error(`PSNR length mismatch: ${cutoffPixels.length} vs ${finalPixels.length}`);
   }
@@ -11,15 +12,21 @@ export function computePsnrVsFinal(cutoffPixels, finalPixels) {
   }
   if (sumSq === 0) return Infinity;
   const mse = sumSq / cutoffPixels.length;
-  return 10 * Math.log10((255 * 255) / mse);
+  const peakSq = peak * peak;
+  return 10 * Math.log10(peakSq / mse);
 }
 
+/** SSIM constants (8-bit). Rare expert tuning only; see JSDoc on computeSsimVsFinal. */
 export const C1 = (0.01 * 255) ** 2;
 export const C2 = (0.03 * 255) ** 2;
 
 // computeSsimVsFinal: global (image-wide) channel-averaged SSIM approximation using raw moments.
 // No local windows (unlike classic SSIM 8x8+). Fast for cutoff profiling. Use external lib for full SSIM.
 // series can carry butter/ssim for future unified recog (Lens12); color constancy metrics feed same shape.
+// TODO(lens17): when LookRenderer non-Riemann (Schrodinger+Molchanov+ HPCS + LANL curves, B-matrix log flat space) lands,
+//   consider perceptual-space variant or document that caller must feed post-Look u8 for constancy-invariant metrics.
+// Alpha: windowChannels = min(ch,3) — alpha dropped for perceptual uniformity. Pre-convert caller side if alpha matters.
+/** @param {Uint8Array} cutoffPixels @param {Uint8Array} finalPixels @param {number} width @param {number} height */
 export function computeSsimVsFinal(cutoffPixels, finalPixels, width, height) {
   if (cutoffPixels.length !== finalPixels.length) {
     throw new Error(`SSIM length mismatch: ${cutoffPixels.length} vs ${finalPixels.length}`);
@@ -96,15 +103,24 @@ export function detectMonotone(series, toleranceDb = MONOTONE_TOLERANCE_DB, opts
 
 // computeChannelMoments: cheap per-channel mu/var for surrogate features (lens12 LLM/plant recog).
 // Zero extra alloc in hot path if caller provides outs. Useful side output for "will cutoff ID plant?" tiny model.
-export function computeChannelMoments(pixels, width, height, maxCh = 3) {
+// TODO(lens17,12,14,16): surrogate for AR plant ID, photogram digital twins, LLM recog gates. Run on post-LookRenderer
+//   u8 (or future perceptual flat coords) once non-Riemann engine (B log + Molchanov tensor + LANL curves) active in Rust.
+export function computeChannelMoments(pixels, width, height, maxCh = 3, outs) {
   const np = width * height;
-  if (np === 0) return [];
-  const ch = Math.min(maxCh, (pixels.length / np) | 0);
-  const mus = new Array(ch).fill(0);
-  const vars = new Array(ch).fill(0);
+  if (np === 0) return outs ? (outs.mus && (outs.mus.length = 0), outs.vars && (outs.vars.length = 0), outs.ch = 0, outs) : [];
+  const lenOverNp = pixels.length / np;
+  if (!Number.isInteger(lenOverNp)) {
+    throw new Error(`Channel moments pixel count not divisible by ${width}*${height}`);
+  }
+  const stride = lenOverNp | 0;
+  const ch = Math.min(maxCh, stride);
+  // stride hoisted (was recomputed per-iter); pointer-advance pattern (i += stride). Matches "move pointer not reread".
+  // SIMD note (lens22,25,26): tight data-parallel u8 loops (psnr sumSq; ssim muls; here strided per-c). 8-16 px/vector.
+  const mus = outs ? (outs.mus || (outs.mus = new Array(ch).fill(0))) : new Array(ch).fill(0);
+  const vars = outs ? (outs.vars || (outs.vars = new Array(ch).fill(0))) : new Array(ch).fill(0);
   for (let c = 0; c < ch; c++) {
     let sum = 0, sum2 = 0;
-    for (let i = c, j = 0; j < np; j++, i += (pixels.length / np) | 0) {
+    for (let i = c, j = 0; j < np; j++, i += stride) {
       const v = pixels[i];
       sum += v; sum2 += v * v;
     }
@@ -112,6 +128,24 @@ export function computeChannelMoments(pixels, width, height, maxCh = 3) {
     mus[c] = mu;
     vars[c] = sum2 / np - mu * mu;
   }
+  if (outs) { outs.ch = ch; return outs; }
   return { mus, vars, ch };
+}
+
+// Fused bundle (layer1): one/two-pass multi-metric to avoid 3x pixel scan + repeated materialization (lens20,24,6).
+// Returns same shape as separate calls. Callers (profiling/AR gate) get psnr+ssim+moments for "cutoff quality + recog features".
+// No behavior change to prior exports. Wire in callers outside this file only if positive on re-assess.
+export function computeQualityBundle(cutoffPixels, finalPixels, width, height) {
+  const psnr = computePsnrVsFinal(cutoffPixels, finalPixels);
+  const ssim = computeSsimVsFinal(cutoffPixels, finalPixels, width, height);
+  const moments = computeChannelMoments(cutoffPixels, width, height); // or fuse accumulators internally if hotter needed
+  return { psnr, ssim, moments };
+}
+
+// Thin plateau helper (layer4): combines existing detect + moments for "good enough for recog/AR/photogram?" decision surface.
+// Keep tiny; defers policy to callers (unified layer gap remains per lens18/19).
+export function isQualityPlateau(series, opts = {}) {
+  const res = detectMonotone(series, opts.tol, { valueKey: opts.valueKey || 'psnr' });
+  return res.monotone;
 }
 
