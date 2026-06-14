@@ -124,6 +124,48 @@ const {
 
 await initRaw({ module_or_path: readFileSync(new URL("./pkg/raw_converter_wasm_bg.wasm", import.meta.url)) });
 
+// Direct low-level planar16 encode shim.
+// Uses the just-built core (jxl-core.simd) so the _jxl_wasm_encode_rgb16_planar
+// symbol from our bridge addition is exercised even if the high-level facade
+// wrapper in dist/index is stale. This puts the zero-copy entry point "in place"
+// for the benchmark measurement (split planes -> ensure + call + take buffer).
+let _directPlanar = null;
+async function getDirectPlanar16() {
+  if (_directPlanar) return _directPlanar;
+  const core = await import("./packages/jxl-wasm/dist/jxl-core.simd.js");
+  const factory = core.default || core;
+  const mod = await (typeof factory === "function" ? factory() : factory);
+  const fn = mod && mod._jxl_wasm_encode_rgb16_planar;
+  if (typeof fn !== "function") return null;
+  const ensureU16 = (m, arr) => {
+    const nbytes = arr.byteLength;
+    const p = m._malloc(nbytes);
+    if (!p) throw new Error("u16 malloc failed for planar");
+    new Uint8Array(m.HEAPU8.buffer, p, nbytes).set(new Uint8Array(arr.buffer, arr.byteOffset || 0, nbytes));
+    return p;
+  };
+  const take = (m, h) => {
+    const dp = m._jxl_wasm_buffer_data(h);
+    const sz = m._jxl_wasm_buffer_size(h);
+    const out = new Uint8Array(sz);
+    out.set(new Uint8Array(m.HEAPU8.buffer, dp, sz));
+    m._jxl_wasm_buffer_free(h);
+    return out;
+  };
+  _directPlanar = async (r, g, b, w, h, distance=1, effort=3, ...rest) => {
+    const m = mod;
+    const rp = (typeof r === "number") ? r : ensureU16(m, r);
+    const gp = (typeof g === "number") ? g : ensureU16(m, g);
+    const bp = (typeof b === "number") ? b : ensureU16(m, b);
+    const hdl = m._jxl_wasm_encode_rgb16_planar(rp, gp, bp, w, h, distance, effort, ...rest);
+    if (typeof r !== "number") m._free(rp);
+    if (typeof g !== "number") m._free(gp);
+    if (typeof b !== "number") m._free(bp);
+    return take(m, hdl);
+  };
+  return _directPlanar;
+}
+
 
 
 // 3. Resolve Standard Test Files (2 of each format: ORF, CR2, DNG, JPG)
@@ -140,10 +182,14 @@ const FILES_CONFIG = [
     name: "PXL_20260527_180319603.RAW-02.ORIGINAL.dng",
     paths: [
       join(TEST_ROOT, "PXL_20260527_180319603.RAW-02.ORIGINAL.dng"),
-      join(TIMING_SOURCE, "PXL_20260527_180319603.RAW-02.ORIGINAL.dng")
+      join(TIMING_SOURCE, "PXL_20260527_180319603.RAW-02.ORIGINAL.dng"),
+      String.raw`C:\Foo\raw-converter-wasm\.timing-source\PXL_20260527_180319603.RAW-02.ORIGINAL.dng`
     ]
   },
-  { name: "PXL_20260501_093507165.RAW-02.ORIGINAL.dng", paths: [join(TEST_ROOT, "PXL_20260501_093507165.RAW-02.ORIGINAL.dng")] },
+  { name: "PXL_20260501_093507165.RAW-02.ORIGINAL.dng", paths: [
+      join(TEST_ROOT, "PXL_20260501_093507165.RAW-02.ORIGINAL.dng"),
+      String.raw`C:\Foo\raw-converter-wasm\.timing-source\PXL_20260501_093507165.RAW-02.ORIGINAL.dng`
+    ] },
   // --- ORF formats ---
   { name: "P1110226.ORF", paths: [join(TEST_ROOT, "P1110226.ORF")] },
   { name: "P2200474.ORF", paths: [join(GOB_ROOT, "P2200474.ORF")] },
@@ -346,9 +392,13 @@ async function main() {
       rgb = data; srcW = info.width; srcH = info.height;
     } else {
       let decoded;
-      if (ext === ".orf" || ext === ".raw") decoded = process_orf_with_flags(raw, OUTPUT_FULL_RGB, ...PROCESS_ARGS);
-      else if (ext === ".cr2") decoded = process_cr2_with_flags(raw, OUTPUT_FULL_RGB, ...PROCESS_ARGS);
-      else if (ext === ".dng") decoded = process_dng_with_flags(raw, OUTPUT_FULL_RGB, ...PROCESS_ARGS);
+      // Use preview bits only for ORF (fast planar + packed implemented there).
+      // CR2/DNG use plain full to avoid binding surprises with extra bits in those paths.
+      const usePreview = (ext === ".orf" || ext === ".raw");
+      const fl = usePreview ? OUTPUT_FULL_RGB : 1;
+      if (ext === ".orf" || ext === ".raw") decoded = process_orf_with_flags(raw, fl, ...PROCESS_ARGS);
+      else if (ext === ".cr2") decoded = process_cr2_with_flags(raw, fl, ...PROCESS_ARGS);
+      else if (ext === ".dng") decoded = process_dng_with_flags(raw, fl, ...PROCESS_ARGS);
       rawDecompress = decoded.decompress_ms ?? 0;
       rawDemosaic = decoded.demosaic_ms ?? 0;
       rawTonemap = decoded.tonemap_ms ?? 0;
@@ -528,6 +578,29 @@ async function main() {
         photonEncMs = pho.ms; photonSize = pho.bytes.byteLength;
       } catch (_) {}
 
+      // Zero/low-copy planar16 encode path measurement (the hook).
+      // Split the target rgba to 3 u16 planes (promote), feed via encodeRgb16Planar
+      // (JS does 3 smaller ensureU16Heap, bridge does fast interleave + EncodeRgba).
+      // Compare to the normal rgba8 path to quantify the input marshal/boundary
+      // cost difference for this pipeline. "with" = using the planar entry point.
+      let planar16ShotMs = 0;
+      const doPlanar = (typeof encodeRgb16Planar === 'function') ? encodeRgb16Planar : await getDirectPlanar16();
+      if (doPlanar) {
+        try {
+          const npix = f.tgtW * f.tgtH;
+          const pr = new Uint16Array(npix), pg = new Uint16Array(npix), pb = new Uint16Array(npix);
+          const src = f.rgba || new Uint8Array();
+          const ch = (src.length / npix) | 0 || 4;
+          for (let i = 0, o = 0; i < npix; i++, o += ch) {
+            const rv = src[o] || 0, gv = src[o + 1] || 0, bv = src[o + 2] || 0;
+            pr[i] = rv * 257; pg[i] = gv * 257; pb[i] = bv * 257;  // 8->16 promote
+          }
+          const t0 = performance.now();
+          const _ = await doPlanar(pr, pg, pb, f.tgtW, f.tgtH, 1.0, 3, 0, 0, 0, 0, 0, 1);
+          planar16ShotMs = performance.now() - t0;
+        } catch (_) {}
+      }
+
       const bodyMs = performance.now() - tBodyStart;
 
       results.push({
@@ -555,8 +628,9 @@ async function main() {
         prog_chunked4_final_ms: Math.round(progChunked.ms),
         mod_prog_enc_ms: Math.round(modProgEncMs),
         photon_prog_enc_ms: Math.round(photonEncMs),
+        planar16_shot_enc_ms: Math.round(planar16ShotMs),
       });
-      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | body=${Math.round(bodyMs)}ms | +ds2/region/chunked/mod/photon variants`);
+      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | body=${Math.round(bodyMs)}ms | planar16_shot=${Math.round(planar16ShotMs)} | +ds2/region/chunked/mod/photon +planar16 variants`);
     }
     console.log("");
     return results;
@@ -921,21 +995,25 @@ async function main() {
       return false;
     }
   }
-  runLimitedBench("benchmark/timing-tests.mjs", {
-    TIMING_RAW_LIMIT: "1", TIMING_JPEG_LIMIT: "1", TIMING_TARGET: "400",
-    TIMING_EFFORTS: "3", TIMING_MODES: "std,std+chunked"
-  }, 90000);
-  runLimitedBench("benchmark/progressive-timing-benchmark.mjs", {
-    PT_LIMIT: "1", PT_SIZES: "400", PT_QUALITY: "85", PT_EFFORT: "3", PT_STEPS: "4"
-  }, 90000);
-  runLimitedBench("benchmark/targeted-wasm-timings.mjs", {
-    TEST_RUNS: "1", TEST_SCAN_LIMIT: "1", GOB_SCAN_LIMIT: "0", GOB_OFFENDER_COUNT: "0", TRACE_PROGRESS: "0", TRACE_STAGES: "0"
-  }, 60000);
-  // A couple of the numbered sweep tests (via their env overrides if present; most default to small via utils)
-  runLimitedBench("benchmark/test_14_modular_mode_sweep.mjs", { TEST14_LIMIT: "1" }, 60000);
-  runLimitedBench("benchmark/test_11_brotli_effort_sweep.mjs", { /* may honor or use 1 file */ }, 60000);
-  console.log(`  (examined also: timings/probe-wasm-tier.mjs, timings/single-progressive-*.mjs — browser CDP paths for lastPasses/passes single-prog metrics)`);
-  console.log(`  Additional tried: ${tried.join(", ")}`);
+  if (process.env.SKIP_ADDITIONAL_BENCHES) {
+    console.log(`  (SKIP_ADDITIONAL_BENCHES=1 — skipping limited additional benches to guarantee .toon + graph write)`);
+  } else {
+    runLimitedBench("benchmark/timing-tests.mjs", {
+      TIMING_RAW_LIMIT: "1", TIMING_JPEG_LIMIT: "1", TIMING_TARGET: "400",
+      TIMING_EFFORTS: "3", TIMING_MODES: "std,std+chunked"
+    }, 90000);
+    runLimitedBench("benchmark/progressive-timing-benchmark.mjs", {
+      PT_LIMIT: "1", PT_SIZES: "400", PT_QUALITY: "85", PT_EFFORT: "3", PT_STEPS: "4"
+    }, 90000);
+    runLimitedBench("benchmark/targeted-wasm-timings.mjs", {
+      TEST_RUNS: "1", TEST_SCAN_LIMIT: "1", GOB_SCAN_LIMIT: "0", GOB_OFFENDER_COUNT: "0", TRACE_PROGRESS: "0", TRACE_STAGES: "0"
+    }, 60000);
+    // A couple of the numbered sweep tests (via their env overrides if present; most default to small via utils)
+    runLimitedBench("benchmark/test_14_modular_mode_sweep.mjs", { TEST14_LIMIT: "1" }, 60000);
+    runLimitedBench("benchmark/test_11_brotli_effort_sweep.mjs", { /* may honor or use 1 file */ }, 60000);
+    console.log(`  (examined also: timings/probe-wasm-tier.mjs, timings/single-progressive-*.mjs — browser CDP paths for lastPasses/passes single-prog metrics)`);
+    console.log(`  Additional tried: ${tried.join(", ")}`);
+  }
   console.log("");
 
 
@@ -1058,6 +1136,7 @@ async function main() {
   toonLines.push(`AvgProgDs2FirstSimdMs: ${avgProgDs2First} | AvgProgChunked4FirstSimdMs: ${avgProgChunkedFirst}`);
   toonLines.push(`AvgModProgEncSimdMs: ${avgModProgEnc}`);
   toonLines.push(`AvgPhotonProgEncSimdMs: ${avgPhotonProgEnc}`);
+  toonLines.push(`AvgPlanar16ShotEncSimdMs: ${avgPlanar16ShotEncSimd} (planar16 low-copy encode path vs rgba8 baseline for the target encodes)`);
 
   // flip-flop avgs (medians of the stable interleaved samples)
   if (flipFlopResults && flipFlopResults.length) {

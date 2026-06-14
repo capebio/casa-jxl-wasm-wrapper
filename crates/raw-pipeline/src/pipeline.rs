@@ -304,12 +304,14 @@ struct PerceptualGrid {
 
 impl PerceptualGrid {
     fn new() -> Self {
-        const SZ: usize = 9; // coarse but effective for start; 17+ for production
+        const SZ: usize = 17; // Phase 2 of WASM/native strategy: production quality (vs 9). ~4913 evals, still cheap on init.
+                              // Pure Rust path (this grid + vec4) is the default for WASM and when c-perceptual feature is off.
+                              // C++ AVX2 bulk (via tile in !par loops) is optional native turbo when feature + pc flag.
         let mut data = vec![0f32; SZ * SZ * SZ * 3];
-        let scale = 1.0f32; // fixed for grid; vib_zero path
+        let scale = 1.0f32; // fixed for grid; vib_zero path (mode common case). Varying sat/vib falls back or rebuilds.
         let vib = 0.0f32;
         let vibz = true;
-        let m = &CAM_TO_SRGB; // representative; real callers pass the m but grid post-matrix
+        let m = &CAM_TO_SRGB; // representative; grid operates post-matrix in the tone stage.
         for ri in 0..SZ {
             let r = (ri as f32 / (SZ - 1) as f32) * 1.5;
             for gi in 0..SZ {
@@ -670,6 +672,9 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
 ///
 /// Wired to C++ fast path (bridge intrinsics) when feature "c-perceptual" is enabled.
 /// The C++ (with AVX2 hand-written intrinsics) is the optimal for the "new" path in WASM/native.
+/// Strategy: hybrid. Pure Rust (vec4 + this grid) is default/WASM/portable/correctness path.
+/// C++ bulk is optional native turbo (fed via SoA tile gather in !par tone loops).
+/// See WASM vs native section in ApplyToneMathPipeline-DONE.md. Never make advanced math C++-only.
 
 #[cfg(feature = "c-perceptual")]
 extern "C" {
@@ -704,6 +709,9 @@ extern "C" {
 /// Expects matching length SoA slices. Useful for lower-copy flows when input is planar
 /// (e.g. from demosaic_rggb_planar_simd converted to f32 post pre-LUT). The bulk uses
 /// hand intrinsics; falls back to scalar path inside C++ if needed.
+/// Connection to pipelines: the !par tone loops (process_into etc.) do the interleaved->SoA tile
+/// to feed this from the existing pre-LUT -> matrix -> advanced -> post-LUT flow. Rust grid/vec4
+/// is the WASM equivalent.
 #[cfg(feature = "c-perceptual")]
 pub fn perceptual_apply_bulk(
     r: &[f32],
@@ -822,7 +830,7 @@ fn apply_tone_math(
 /// Allows JS postDecodeTransform (from byte-benchmark harness + Cursor for layer) to apply the full
 /// log-geodesic/Molchanov/LANL engine on early cutoff frames before butter or display.
 /// Positive: directly enables the AR/LLM/ photogram vision on progressive arrivals; zero cost if not called.
-pub fn apply_perceptual_constancy(r: f32, g: f32, b: f32, sat: f32, vib: f32, vib_zero: bool) -> (f32, f32, f32) {
+pub fn apply_perceptual_constancy(r: f32, g: f32, b: f32, sat: f32, vib: f32, vib_zero: bool, layer: u32) -> (f32, f32, f32) {
     let (lr, lg, lb) = to_log_euclidean(r, g, b);
     let luma_l = (lr + lg + lb) / 3.0;
     let base_scale = if vib_zero { sat } else {
@@ -836,7 +844,10 @@ pub fn apply_perceptual_constancy(r: f32, g: f32, b: f32, sat: f32, vib: f32, vi
     };
     let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, base_scale);
     let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
-    from_log_euclidean(lr3, lg3, lb3)
+    // milk more: layer aware (early low layer less aggressive for progressive)
+    let layer_scale = 1.0 - (layer as f32 * 0.1).min(0.5);
+    let (rr, gg, bb) = from_log_euclidean(lr3 * layer_scale, lg3 * layer_scale, lb3 * layer_scale);
+    (rr.clamp(0.0, 1.5), gg.clamp(0.0, 1.5), bb.clamp(0.0, 1.5))
 }
 
 /// 4-wide version for the classic (!pc) path (Layer 1 next enhancement).
@@ -855,14 +866,46 @@ fn apply_tone_math4(
     vib_zero: bool,
     perceptual_constancy: bool,
 ) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    // Fleshed for Phase 1 of WASM/native strategy: explicit 4-wide arithmetic for the classic !pc path
+    // (matrix + sat/vib). Eliminates 4 scalar calls inside the vec4 helper. LLVM can vectorize the
+    // independent lanes or schedule better. pc path delegates (bulk tile covers pc+c-perceptual on native;
+    // pure-Rust grid path on WASM/no-feature).
     let mut r2s = [0f32; 4];
     let mut g2s = [0f32; 4];
     let mut b2s = [0f32; 4];
-    for i in 0..4 {
-        let (r2, g2, b2) = apply_tone_math(rs[i], gs[i], bs[i], m, sat, vib, vib_zero, perceptual_constancy);
-        r2s[i] = r2;
-        g2s[i] = g2;
-        b2s[i] = b2;
+
+    if perceptual_constancy {
+        // Rare in this call site (bulk handles when c-perceptual); fall back for correctness.
+        for i in 0..4 {
+            let (r2, g2, b2) = apply_tone_math(rs[i], gs[i], bs[i], m, sat, vib, vib_zero, true);
+            r2s[i] = r2; g2s[i] = g2; b2s[i] = b2;
+        }
+    } else {
+        // Unrolled classic path (the 90% case).
+        // Matrix (mul_add for FMA/ILP) per lane.
+        for i in 0..4 {
+            r2s[i] = m[0][0].mul_add(rs[i], m[0][1].mul_add(gs[i], m[0][2] * bs[i]));
+            g2s[i] = m[1][0].mul_add(rs[i], m[1][1].mul_add(gs[i], m[1][2] * bs[i]));
+            b2s[i] = m[2][0].mul_add(rs[i], m[2][1].mul_add(gs[i], m[2][2] * bs[i]));
+        }
+        // Sat + vibrance around luma per lane.
+        for i in 0..4 {
+            let luma = LUMA_R.mul_add(r2s[i], LUMA_G.mul_add(g2s[i], LUMA_B * b2s[i]));
+            let scale = if vib_zero {
+                sat
+            } else {
+                let raw_mx = r2s[i].max(g2s[i]).max(b2s[i]);
+                let mx = raw_mx.max(1.0);
+                let mn = r2s[i].min(g2s[i]).min(b2s[i]).max(0.0);
+                let inv_mx = if raw_mx > 0.0 { 1.0 / mx } else { 0.0 };
+                let pixel_sat = ((mx - mn) * inv_mx).clamp(0.0, 1.0);
+                let vib_w = 1.0 - pixel_sat;
+                sat * (1.0 + vib * vib_w * 0.6)
+            };
+            r2s[i] = luma.mul_add(1.0 - scale, r2s[i] * scale);
+            g2s[i] = luma.mul_add(1.0 - scale, g2s[i] * scale);
+            b2s[i] = luma.mul_add(1.0 - scale, b2s[i] * scale);
+        }
     }
     (r2s, g2s, b2s)
 }
@@ -951,6 +994,7 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
             // advance exactly rgb16.len() elements. (Wrap added to fix the wasm/no-parallel build.)
             // Enhanced (this pass): 4x unroll for !pc classic path (amortizes loop overhead on 90% scalar math).
             // Tile-bulk path for pc + c-perceptual: feeds fixed SoA to AVX2 hand-intrinsics (perceptual_apply_full_avx2)
+// (WASM/native strategy: C++ only when feature + native; else pure Rust vec4/grid for WASM + default)
             // avoiding scalar FFI call overhead per pixel for the heavy Lens17 advanced color path.
             // TILE=64 amortizes; remainder handled naturally. Replicate pattern to rgba/16bit loops if they become hot for AR.
             unsafe {

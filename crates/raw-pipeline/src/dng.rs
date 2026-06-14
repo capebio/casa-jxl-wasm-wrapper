@@ -1188,18 +1188,34 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
         if tr > 0 && halo > 0 {
             // Demosaic the carried prev bottom halo rows now that south data (current band) exists.
             let carried_g0 = row_start - halo;
+            // Dedicated temp ctx for carried demosaic to supply north halo margin (replicate top of carried data from halo_rows).
+            // The main ctx build for tr>0 places the carried data at ctx[0:] without a north margin, causing OOB read in demosaic_rggb_mhc_band (which expects halo rows of context above the band being demosaiced).
+            let c_halo = halo;
+            let c_h = c_halo + c_halo + c_halo;
+            let mut c_ctx: Vec<u16> = vec![0u16; width * c_h];
+            if c_halo > 0 {
+                let top = &halo_rows[0..width];
+                for hi in 0..c_halo {
+                    c_ctx[hi*width..(hi+1)*width].copy_from_slice(top);
+                }
+            }
+            let mid_off = c_halo * width;
+            c_ctx[mid_off..mid_off + c_halo*width].copy_from_slice(&halo_rows);
+            let south_top = &ctx[band_off..band_off + c_halo*width];
+            let south_off = (c_halo + c_halo) * width;
+            c_ctx[south_off..south_off + c_halo*width].copy_from_slice(south_top);
             demosaic::demosaic_rggb_mhc_band(
-                &ctx,
+                &c_ctx,
                 width,
-                ctx_h,
-                halo,
+                c_h,
+                c_halo,
                 carried_g0,
                 0,
-                halo,
+                c_halo,
                 &mut rgb[(rgb_write_row * width * 3)..],
             )
-            .map_err(|e| anyhow!("demosaic band: {}", e))?;
-            rgb_write_row += halo;
+            .map_err(|e| anyhow!("demosaic carried: {}", e))?;
+            rgb_write_row += c_halo;
         }
 
         let safe = if is_last { row_h } else { row_h.saturating_sub(halo) };
