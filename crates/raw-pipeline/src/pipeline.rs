@@ -754,7 +754,7 @@ pub fn perceptual_apply_bulk(
 }
 
 #[inline(always)]
-fn apply_tone_math(
+pub(crate) fn apply_tone_math(
     r: f32,
     g: f32,
     b: f32,
@@ -1089,6 +1089,65 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
             out_px[2] = post[b2.clamp(0.0, 65535.0) as u16 as usize];
         });
     }
+}
+
+/// SIMD variant of `process_into`: block-deinterleaves the pre-LUT output into
+/// SoA, runs the vectorized tone math (`tone_simd::apply_tone_bulk`), then
+/// reinterleaves through the post-LUT. New fn — leaves `process_into` untouched
+/// while the end-to-end win is measured. Plain ingest path only
+/// (perceptual_constancy must be false).
+pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
+    debug_assert_eq!(rgb16.len() % 3, 0);
+    assert_eq!(out.len(), rgb16.len(), "process_into_simd: out must be rgb16.len() bytes");
+    let ti = derive_tone_inputs(params);
+    debug_assert!(!ti.perceptual_constancy, "process_into_simd is the plain ingest path only");
+    let fallback = CAM_TO_SRGB;
+    let m = params.color_matrix.as_ref().unwrap_or(&fallback);
+    let (pre_r, pre_g, pre_b, post) = LUT_CACHE.with(|cache_cell| {
+        ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
+        let c = cache_cell.borrow();
+        let cr = c.as_ref().unwrap();
+        (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone())
+    });
+
+    const BLK: usize = 2048;
+    let process_block = |ob: &mut [u8], ib: &[u16]| {
+        let np = ib.len() / 3;
+        let mut r = [0f32; BLK];
+        let mut g = [0f32; BLK];
+        let mut b = [0f32; BLK];
+        for i in 0..np {
+            r[i] = pre_r[ib[i * 3] as usize] as f32;
+            g[i] = pre_g[ib[i * 3 + 1] as usize] as f32;
+            b[i] = pre_b[ib[i * 3 + 2] as usize] as f32;
+        }
+        crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
+        for i in 0..np {
+            ob[i * 3] = post[(r[i].clamp(0.0, 65535.0) as u16) as usize];
+            ob[i * 3 + 1] = post[(g[i].clamp(0.0, 65535.0) as u16) as usize];
+            ob[i * 3 + 2] = post[(b[i].clamp(0.0, 65535.0) as u16) as usize];
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        out.par_chunks_mut(3 * BLK)
+            .zip(rgb16.par_chunks(3 * BLK))
+            .for_each(|(ob, ib)| process_block(ob, ib));
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        out.chunks_mut(3 * BLK)
+            .zip(rgb16.chunks(3 * BLK))
+            .for_each(|(ob, ib)| process_block(ob, ib));
+    }
+}
+
+/// `process` using the SIMD tone path. See `process_into_simd`.
+pub fn process_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
+    let mut out = vec![0u8; rgb16.len()];
+    process_into_simd(rgb16, params, &mut out);
+    out
 }
 
 /// Sub-profile of the tone pass: isolates the per-pixel `apply_tone_math`
