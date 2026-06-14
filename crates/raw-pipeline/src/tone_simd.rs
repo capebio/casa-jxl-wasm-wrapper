@@ -11,11 +11,15 @@
 //!   - wasm32 SIMD128 `f32x4` (4-wide; wasm ships `+simd128`) — the shipping target
 //!   - branchless scalar fallback that LLVM autovectorizes (SSE/NEON/baseline wasm)
 //!
-//! Algebra (folded once on the host): `vib6 = vib*0.6`, `c1 = sat*(1+vib6)`,
-//! `c2 = sat*vib6`. Then `scale = c1 - c2*psat`, and per-pixel saturation is
-//! `psat = 1 - mn/mx` (masked to 0 when `raw_mx <= 0`) — provably in [0,1] for
-//! `raw_mx > 0`, so no clamp. Blend is the lerp `luma + (x-luma)*scale`. All forms
-//! are algebraically equal to the oracle within the SIMD reassociation tolerance
+//! Algebra. Luma is a linear functional of the *input*: `luma = lm·rgb` where
+//! `lm = Lᵀ·M` (`luma_weights`). So the `vib_zero` tone (matrix + constant-`sat`
+//! blend) collapses to a single 3×3: `M' = sat·M + (1-sat)·[lm;lm;lm]`
+//! (`vib_zero_matrix`), which also subsumes the `sat==1` identity (`M' == M`). The
+//! vibrance-active path keeps `M` for the post-matrix RGB but takes `luma` straight
+//! from the input via `lm` (decoupled from the matrix → better ILP), with
+//! `scale = c1 - c2·psat`, `psat = 1 - mn/mx` (masked to 0 when `raw_mx<=0`, proven
+//! in [0,1] so no clamp), and the lerp blend `luma + (x-luma)·scale`. All forms are
+//! algebraically equal to the oracle within the SIMD reassociation tolerance
 //! (parity tests assert ≤0.05 abs OR <1e-3 rel).
 
 #[allow(unused_imports)]
@@ -25,28 +29,52 @@ const LUMA_R: f32 = 0.2126;
 const LUMA_G: f32 = 0.7152;
 const LUMA_B: f32 = 0.0722;
 
-/// Oracle-equivalent tone math for one pixel, const-generic over `vib_zero` so the
-/// scalar loop monomorphizes (no per-iter branch) and stays branchless inside —
-/// letting LLVM autovectorize the SoA loop on targets without a hand kernel.
-/// `c1 = sat*(1+vib*0.6)`, `c2 = sat*vib*0.6` (folded once by the caller).
+/// `lm = Lᵀ·M` — the per-input-channel weights that yield post-matrix luma directly
+/// from the *input* RGB (`luma = lm·rgb`). Reusable seam for adjacent code that needs
+/// post-matrix luma (preview/histogram in `pipeline.rs`) without running the matrix.
 #[inline(always)]
-fn tone_one<const VIB_ZERO: bool>(
-    rr: f32, gg: f32, bb: f32, m: &[[f32; 3]; 3], sat: f32, c1: f32, c2: f32,
+pub(crate) fn luma_weights(m: &[[f32; 3]; 3]) -> [f32; 3] {
+    [
+        LUMA_R * m[0][0] + LUMA_G * m[1][0] + LUMA_B * m[2][0],
+        LUMA_R * m[0][1] + LUMA_G * m[1][1] + LUMA_B * m[2][1],
+        LUMA_R * m[0][2] + LUMA_G * m[1][2] + LUMA_B * m[2][2],
+    ]
+}
+
+/// The `vib_zero` tone collapsed to one 3×3: `M'[i][j] = sat·M[i][j] + (1-sat)·lm[j]`.
+/// Applying `M'·rgb` reproduces `luma + sat·(M·rgb - luma)` exactly. `sat==1 ⇒ M'==M`
+/// (identity), `sat==0 ⇒ every row == lm` (full desaturate to grayscale).
+/// Reusable seam: `pipeline.rs` can premultiply this into the pre-LUT→matrix step so
+/// the common no-vibrance path is a single matrix multiply with no luma/blend.
+#[inline(always)]
+pub(crate) fn vib_zero_matrix(m: &[[f32; 3]; 3], sat: f32) -> [[f32; 3]; 3] {
+    let lm = luma_weights(m);
+    let inv = 1.0 - sat;
+    let mut mp = [[0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            mp[i][j] = sat * m[i][j] + inv * lm[j];
+        }
+    }
+    mp
+}
+
+/// Vibrance-active per-pixel tone. Branchless (the `raw_mx>0` test is a multiply by a
+/// 0/1 mask) so the SoA loop autovectorizes. `lm = luma_weights(m)`, `c1 = sat*(1+vib*0.6)`,
+/// `c2 = sat*vib*0.6` (all folded once by the caller).
+#[inline(always)]
+fn tone_active(
+    rr: f32, gg: f32, bb: f32, m: &[[f32; 3]; 3], lm: &[f32; 3], c1: f32, c2: f32,
 ) -> (f32, f32, f32) {
     let r2 = m[0][0].mul_add(rr, m[0][1].mul_add(gg, m[0][2] * bb));
     let g2 = m[1][0].mul_add(rr, m[1][1].mul_add(gg, m[1][2] * bb));
     let b2 = m[2][0].mul_add(rr, m[2][1].mul_add(gg, m[2][2] * bb));
-    let luma = LUMA_R.mul_add(r2, LUMA_G.mul_add(g2, LUMA_B * b2));
-    let scale = if VIB_ZERO {
-        sat
-    } else {
-        let raw_mx = r2.max(g2).max(b2);
-        let mx = raw_mx.max(1.0);
-        let mn = r2.min(g2).min(b2).max(0.0);
-        // psat = 1 - mn/mx ∈ [0,1] for raw_mx>0; branchless mask zeroes the raw_mx<=0 case.
-        let psat = (1.0 - mn / mx) * ((raw_mx > 0.0) as u32 as f32);
-        c1 - c2 * psat
-    };
+    let luma = lm[0].mul_add(rr, lm[1].mul_add(gg, lm[2] * bb)); // from input, parallel to matrix
+    let raw_mx = r2.max(g2).max(b2);
+    let mx = raw_mx.max(1.0);
+    let mn = r2.min(g2).min(b2).max(0.0);
+    let psat = (1.0 - mn / mx) * ((raw_mx > 0.0) as u32 as f32);
+    let scale = c1 - c2 * psat;
     (
         scale.mul_add(r2 - luma, luma),
         scale.mul_add(g2 - luma, luma),
@@ -103,16 +131,21 @@ fn apply_tone_bulk_scalar(
     r: &mut [f32], g: &mut [f32], b: &mut [f32],
     m: &[[f32; 3]; 3], sat: f32, vib: f32, vib_zero: bool, n: usize,
 ) {
-    let vib6 = vib * 0.6;
-    let (c1, c2) = (sat * (1.0 + vib6), sat * vib6);
     if vib_zero {
+        // Entire tone is the single 3×3 M'.
+        let p = vib_zero_matrix(m, sat);
         for i in 0..n {
-            let (nr, ng, nb) = tone_one::<true>(r[i], g[i], b[i], m, sat, c1, c2);
-            r[i] = nr; g[i] = ng; b[i] = nb;
+            let (rr, gg, bb) = (r[i], g[i], b[i]);
+            r[i] = p[0][0].mul_add(rr, p[0][1].mul_add(gg, p[0][2] * bb));
+            g[i] = p[1][0].mul_add(rr, p[1][1].mul_add(gg, p[1][2] * bb));
+            b[i] = p[2][0].mul_add(rr, p[2][1].mul_add(gg, p[2][2] * bb));
         }
     } else {
+        let lm = luma_weights(m);
+        let vib6 = vib * 0.6;
+        let (c1, c2) = (sat * (1.0 + vib6), sat * vib6);
         for i in 0..n {
-            let (nr, ng, nb) = tone_one::<false>(r[i], g[i], b[i], m, sat, c1, c2);
+            let (nr, ng, nb) = tone_active(r[i], g[i], b[i], m, &lm, c1, c2);
             r[i] = nr; g[i] = ng; b[i] = nb;
         }
     }
@@ -125,48 +158,34 @@ unsafe fn apply_tone_bulk_avx2(
     m: &[[f32; 3]; 3], sat: f32, vib: f32, vib_zero: bool, n: usize,
 ) {
     use core::arch::x86_64::*;
-    let (m00, m01, m02) = (_mm256_set1_ps(m[0][0]), _mm256_set1_ps(m[0][1]), _mm256_set1_ps(m[0][2]));
-    let (m10, m11, m12) = (_mm256_set1_ps(m[1][0]), _mm256_set1_ps(m[1][1]), _mm256_set1_ps(m[1][2]));
-    let (m20, m21, m22) = (_mm256_set1_ps(m[2][0]), _mm256_set1_ps(m[2][1]), _mm256_set1_ps(m[2][2]));
-    let (lr, lg, lb) = (_mm256_set1_ps(LUMA_R), _mm256_set1_ps(LUMA_G), _mm256_set1_ps(LUMA_B));
-    let one = _mm256_set1_ps(1.0);
-    let zero = _mm256_setzero_ps();
-
     let lanes = n / 8 * 8;
     let mut i = 0;
-    if vib_zero && sat == 1.0 {
-        // saturation identity → matrix only (no luma/blend).
+    if vib_zero {
+        // M'·rgb — one matrix multiply covers matrix + sat blend + identity.
+        let p = vib_zero_matrix(m, sat);
+        let (p00, p01, p02) = (_mm256_set1_ps(p[0][0]), _mm256_set1_ps(p[0][1]), _mm256_set1_ps(p[0][2]));
+        let (p10, p11, p12) = (_mm256_set1_ps(p[1][0]), _mm256_set1_ps(p[1][1]), _mm256_set1_ps(p[1][2]));
+        let (p20, p21, p22) = (_mm256_set1_ps(p[2][0]), _mm256_set1_ps(p[2][1]), _mm256_set1_ps(p[2][2]));
         while i < lanes {
             let vr = _mm256_loadu_ps(r.as_ptr().add(i));
             let vg = _mm256_loadu_ps(g.as_ptr().add(i));
             let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            let r2 = _mm256_fmadd_ps(m00, vr, _mm256_fmadd_ps(m01, vg, _mm256_mul_ps(m02, vb)));
-            let g2 = _mm256_fmadd_ps(m10, vr, _mm256_fmadd_ps(m11, vg, _mm256_mul_ps(m12, vb)));
-            let b2 = _mm256_fmadd_ps(m20, vr, _mm256_fmadd_ps(m21, vg, _mm256_mul_ps(m22, vb)));
-            _mm256_storeu_ps(r.as_mut_ptr().add(i), r2);
-            _mm256_storeu_ps(g.as_mut_ptr().add(i), g2);
-            _mm256_storeu_ps(b.as_mut_ptr().add(i), b2);
-            i += 8;
-        }
-    } else if vib_zero {
-        let vsat = _mm256_set1_ps(sat);
-        while i < lanes {
-            let vr = _mm256_loadu_ps(r.as_ptr().add(i));
-            let vg = _mm256_loadu_ps(g.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            let r2 = _mm256_fmadd_ps(m00, vr, _mm256_fmadd_ps(m01, vg, _mm256_mul_ps(m02, vb)));
-            let g2 = _mm256_fmadd_ps(m10, vr, _mm256_fmadd_ps(m11, vg, _mm256_mul_ps(m12, vb)));
-            let b2 = _mm256_fmadd_ps(m20, vr, _mm256_fmadd_ps(m21, vg, _mm256_mul_ps(m22, vb)));
-            let luma = _mm256_fmadd_ps(lr, r2, _mm256_fmadd_ps(lg, g2, _mm256_mul_ps(lb, b2)));
-            let nr = _mm256_fmadd_ps(vsat, _mm256_sub_ps(r2, luma), luma);
-            let ng = _mm256_fmadd_ps(vsat, _mm256_sub_ps(g2, luma), luma);
-            let nb = _mm256_fmadd_ps(vsat, _mm256_sub_ps(b2, luma), luma);
+            let nr = _mm256_fmadd_ps(p00, vr, _mm256_fmadd_ps(p01, vg, _mm256_mul_ps(p02, vb)));
+            let ng = _mm256_fmadd_ps(p10, vr, _mm256_fmadd_ps(p11, vg, _mm256_mul_ps(p12, vb)));
+            let nb = _mm256_fmadd_ps(p20, vr, _mm256_fmadd_ps(p21, vg, _mm256_mul_ps(p22, vb)));
             _mm256_storeu_ps(r.as_mut_ptr().add(i), nr);
             _mm256_storeu_ps(g.as_mut_ptr().add(i), ng);
             _mm256_storeu_ps(b.as_mut_ptr().add(i), nb);
             i += 8;
         }
     } else {
+        let (m00, m01, m02) = (_mm256_set1_ps(m[0][0]), _mm256_set1_ps(m[0][1]), _mm256_set1_ps(m[0][2]));
+        let (m10, m11, m12) = (_mm256_set1_ps(m[1][0]), _mm256_set1_ps(m[1][1]), _mm256_set1_ps(m[1][2]));
+        let (m20, m21, m22) = (_mm256_set1_ps(m[2][0]), _mm256_set1_ps(m[2][1]), _mm256_set1_ps(m[2][2]));
+        let lm = luma_weights(m);
+        let (l0, l1, l2) = (_mm256_set1_ps(lm[0]), _mm256_set1_ps(lm[1]), _mm256_set1_ps(lm[2]));
+        let one = _mm256_set1_ps(1.0);
+        let zero = _mm256_setzero_ps();
         let vib6 = vib * 0.6;
         let c1 = _mm256_set1_ps(sat * (1.0 + vib6));
         let neg_c2 = _mm256_set1_ps(-(sat * vib6));
@@ -177,12 +196,12 @@ unsafe fn apply_tone_bulk_avx2(
             let r2 = _mm256_fmadd_ps(m00, vr, _mm256_fmadd_ps(m01, vg, _mm256_mul_ps(m02, vb)));
             let g2 = _mm256_fmadd_ps(m10, vr, _mm256_fmadd_ps(m11, vg, _mm256_mul_ps(m12, vb)));
             let b2 = _mm256_fmadd_ps(m20, vr, _mm256_fmadd_ps(m21, vg, _mm256_mul_ps(m22, vb)));
-            let luma = _mm256_fmadd_ps(lr, r2, _mm256_fmadd_ps(lg, g2, _mm256_mul_ps(lb, b2)));
+            // luma straight from input (decoupled from the matrix chain).
+            let luma = _mm256_fmadd_ps(l0, vr, _mm256_fmadd_ps(l1, vg, _mm256_mul_ps(l2, vb)));
             let raw_mx = _mm256_max_ps(_mm256_max_ps(r2, g2), b2);
             let mx = _mm256_max_ps(raw_mx, one);
             let mn = _mm256_max_ps(_mm256_min_ps(_mm256_min_ps(r2, g2), b2), zero);
             let inv = _mm256_div_ps(one, mx);
-            // psat = (1 - mn*inv), masked to 0 where raw_mx <= 0. No clamp needed.
             let psat = _mm256_and_ps(
                 _mm256_fnmadd_ps(mn, inv, one),
                 _mm256_cmp_ps::<_CMP_GT_OQ>(raw_mx, zero),
@@ -214,48 +233,34 @@ fn apply_tone_bulk_wasm(
     m: &[[f32; 3]; 3], sat: f32, vib: f32, vib_zero: bool, n: usize,
 ) {
     use core::arch::wasm32::*;
-    let (m00, m01, m02) = (f32x4_splat(m[0][0]), f32x4_splat(m[0][1]), f32x4_splat(m[0][2]));
-    let (m10, m11, m12) = (f32x4_splat(m[1][0]), f32x4_splat(m[1][1]), f32x4_splat(m[1][2]));
-    let (m20, m21, m22) = (f32x4_splat(m[2][0]), f32x4_splat(m[2][1]), f32x4_splat(m[2][2]));
-    let (lr, lg, lb) = (f32x4_splat(LUMA_R), f32x4_splat(LUMA_G), f32x4_splat(LUMA_B));
-    let one = f32x4_splat(1.0);
-    let zero = f32x4_splat(0.0);
-
     let lanes = n / 4 * 4;
     let mut i = 0;
     unsafe {
-        if vib_zero && sat == 1.0 {
+        if vib_zero {
+            let p = vib_zero_matrix(m, sat);
+            let (p00, p01, p02) = (f32x4_splat(p[0][0]), f32x4_splat(p[0][1]), f32x4_splat(p[0][2]));
+            let (p10, p11, p12) = (f32x4_splat(p[1][0]), f32x4_splat(p[1][1]), f32x4_splat(p[1][2]));
+            let (p20, p21, p22) = (f32x4_splat(p[2][0]), f32x4_splat(p[2][1]), f32x4_splat(p[2][2]));
             while i < lanes {
                 let vr = v128_load(r.as_ptr().add(i) as *const v128);
                 let vg = v128_load(g.as_ptr().add(i) as *const v128);
                 let vb = v128_load(b.as_ptr().add(i) as *const v128);
-                let r2 = f32x4_add(f32x4_mul(m00, vr), f32x4_add(f32x4_mul(m01, vg), f32x4_mul(m02, vb)));
-                let g2 = f32x4_add(f32x4_mul(m10, vr), f32x4_add(f32x4_mul(m11, vg), f32x4_mul(m12, vb)));
-                let b2 = f32x4_add(f32x4_mul(m20, vr), f32x4_add(f32x4_mul(m21, vg), f32x4_mul(m22, vb)));
-                v128_store(r.as_mut_ptr().add(i) as *mut v128, r2);
-                v128_store(g.as_mut_ptr().add(i) as *mut v128, g2);
-                v128_store(b.as_mut_ptr().add(i) as *mut v128, b2);
-                i += 4;
-            }
-        } else if vib_zero {
-            let vsat = f32x4_splat(sat);
-            while i < lanes {
-                let vr = v128_load(r.as_ptr().add(i) as *const v128);
-                let vg = v128_load(g.as_ptr().add(i) as *const v128);
-                let vb = v128_load(b.as_ptr().add(i) as *const v128);
-                let r2 = f32x4_add(f32x4_mul(m00, vr), f32x4_add(f32x4_mul(m01, vg), f32x4_mul(m02, vb)));
-                let g2 = f32x4_add(f32x4_mul(m10, vr), f32x4_add(f32x4_mul(m11, vg), f32x4_mul(m12, vb)));
-                let b2 = f32x4_add(f32x4_mul(m20, vr), f32x4_add(f32x4_mul(m21, vg), f32x4_mul(m22, vb)));
-                let luma = f32x4_add(f32x4_mul(lr, r2), f32x4_add(f32x4_mul(lg, g2), f32x4_mul(lb, b2)));
-                let nr = f32x4_add(luma, f32x4_mul(vsat, f32x4_sub(r2, luma)));
-                let ng = f32x4_add(luma, f32x4_mul(vsat, f32x4_sub(g2, luma)));
-                let nb = f32x4_add(luma, f32x4_mul(vsat, f32x4_sub(b2, luma)));
+                let nr = f32x4_add(f32x4_mul(p00, vr), f32x4_add(f32x4_mul(p01, vg), f32x4_mul(p02, vb)));
+                let ng = f32x4_add(f32x4_mul(p10, vr), f32x4_add(f32x4_mul(p11, vg), f32x4_mul(p12, vb)));
+                let nb = f32x4_add(f32x4_mul(p20, vr), f32x4_add(f32x4_mul(p21, vg), f32x4_mul(p22, vb)));
                 v128_store(r.as_mut_ptr().add(i) as *mut v128, nr);
                 v128_store(g.as_mut_ptr().add(i) as *mut v128, ng);
                 v128_store(b.as_mut_ptr().add(i) as *mut v128, nb);
                 i += 4;
             }
         } else {
+            let (m00, m01, m02) = (f32x4_splat(m[0][0]), f32x4_splat(m[0][1]), f32x4_splat(m[0][2]));
+            let (m10, m11, m12) = (f32x4_splat(m[1][0]), f32x4_splat(m[1][1]), f32x4_splat(m[1][2]));
+            let (m20, m21, m22) = (f32x4_splat(m[2][0]), f32x4_splat(m[2][1]), f32x4_splat(m[2][2]));
+            let lm = luma_weights(m);
+            let (l0, l1, l2) = (f32x4_splat(lm[0]), f32x4_splat(lm[1]), f32x4_splat(lm[2]));
+            let one = f32x4_splat(1.0);
+            let zero = f32x4_splat(0.0);
             let vib6 = vib * 0.6;
             let c1 = f32x4_splat(sat * (1.0 + vib6));
             let neg_c2 = f32x4_splat(-(sat * vib6));
@@ -266,12 +271,11 @@ fn apply_tone_bulk_wasm(
                 let r2 = f32x4_add(f32x4_mul(m00, vr), f32x4_add(f32x4_mul(m01, vg), f32x4_mul(m02, vb)));
                 let g2 = f32x4_add(f32x4_mul(m10, vr), f32x4_add(f32x4_mul(m11, vg), f32x4_mul(m12, vb)));
                 let b2 = f32x4_add(f32x4_mul(m20, vr), f32x4_add(f32x4_mul(m21, vg), f32x4_mul(m22, vb)));
-                let luma = f32x4_add(f32x4_mul(lr, r2), f32x4_add(f32x4_mul(lg, g2), f32x4_mul(lb, b2)));
+                let luma = f32x4_add(f32x4_mul(l0, vr), f32x4_add(f32x4_mul(l1, vg), f32x4_mul(l2, vb)));
                 let raw_mx = f32x4_max(f32x4_max(r2, g2), b2);
                 let mx = f32x4_max(raw_mx, one);
                 let mn = f32x4_max(f32x4_min(f32x4_min(r2, g2), b2), zero);
                 let inv = f32x4_div(one, mx);
-                // psat = (1 - mn*inv), masked to 0 where raw_mx <= 0. No clamp needed.
                 let psat = v128_and(f32x4_sub(one, f32x4_mul(mn, inv)), f32x4_gt(raw_mx, zero));
                 let scale = f32x4_add(c1, f32x4_mul(neg_c2, psat));
                 let nr = f32x4_add(luma, f32x4_mul(scale, f32x4_sub(r2, luma)));
@@ -370,6 +374,9 @@ mod tests {
     fn parity_identity_fast_path() { check(&M, true, 1.0, 0.0, 1000); }
 
     #[test]
+    fn parity_full_desaturate() { check(&M, true, 0.0, 0.0, 1000); }
+
+    #[test]
     fn parity_empty() {
         let mut e: Vec<f32> = vec![];
         let (mut a, mut bb) = (Vec::<f32>::new(), Vec::<f32>::new());
@@ -399,5 +406,31 @@ mod tests {
         check_scalar(&M, false, 1.30, 0.5, 1000);
         check_scalar(&M, false, 0.7, -0.4, 1000);
         check_scalar(&M, true, 1.0, 0.0, 1000);
+    }
+
+    // Locks the algebra: M'·rgb == luma + sat·(M·rgb - luma), and sat==1 ⇒ M'==M.
+    #[test]
+    fn algebra_vib_zero_matrix() {
+        let lm = luma_weights(&M);
+        for &sat in &[0.0f32, 0.5, 1.0, 1.3] {
+            let p = vib_zero_matrix(&M, sat);
+            for &(rr, gg, bb) in &[(12000.0f32, 30000.0, 51000.0), (0.0, 0.0, 0.0), (60000.0, 5.0, 33000.0)] {
+                let r2 = M[0][0] * rr + M[0][1] * gg + M[0][2] * bb;
+                let g2 = M[1][0] * rr + M[1][1] * gg + M[1][2] * bb;
+                let b2 = M[2][0] * rr + M[2][1] * gg + M[2][2] * bb;
+                let luma = lm[0] * rr + lm[1] * gg + lm[2] * bb;
+                let want = (luma + sat * (r2 - luma), luma + sat * (g2 - luma), luma + sat * (b2 - luma));
+                let got = (
+                    p[0][0] * rr + p[0][1] * gg + p[0][2] * bb,
+                    p[1][0] * rr + p[1][1] * gg + p[1][2] * bb,
+                    p[2][0] * rr + p[2][1] * gg + p[2][2] * bb,
+                );
+                assert!(ok(want.0, got.0) && ok(want.1, got.1) && ok(want.2, got.2),
+                    "sat={sat} want={want:?} got={got:?}");
+            }
+        }
+        // sat==1 ⇒ identity.
+        let p1 = vib_zero_matrix(&M, 1.0);
+        for i in 0..3 { for j in 0..3 { assert!((p1[i][j] - M[i][j]).abs() < 1e-4); } }
     }
 }
