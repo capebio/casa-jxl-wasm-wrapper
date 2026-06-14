@@ -1055,10 +1055,13 @@ function splitEncodedBytesIntoSteps(bytes, stepCount) {
 }
 
 async function streamIntoDecoder(decoder, jxlBytes, stepCount) {
-    dbgLog('  local stream', `${(jxlBytes.byteLength / 1024).toFixed(1)} KB in one push; requested steps=${stepCount}`, 'info');
-    await decoder.push(exactBuffer(jxlBytes));
+    const steps = splitEncodedBytesIntoSteps(jxlBytes, stepCount);
+    dbgLog('  local stream', `${(jxlBytes.byteLength / 1024).toFixed(1)} KB in ${steps.length} step(s) (requested=${stepCount})`, 'info');
+    for (const step of steps) {
+        await decoder.push(exactBuffer(step));
+    }
     await decoder.close();
-    return 1;
+    return steps.length;
 }
 
 function renderProgressiveComparison({ requestedPassCount, passCount, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB, encodeMs, previewFirst, progressiveDetail, progressiveDc, groupOrder }) {
