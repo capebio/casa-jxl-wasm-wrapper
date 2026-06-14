@@ -28,7 +28,6 @@ _jxl_wasm_decode_rgba16_region
 _jxl_wasm_decode_rgbaf32_region
 _jxl_wasm_decode_region_tiled_rgba8
 _jxl_wasm_decode_tile_container_region_rgba8
-
 _jxl_wasm_dec_has_gain_map
 _jxl_wasm_dec_take_gain_map
 _jxl_wasm_dec_frame_index

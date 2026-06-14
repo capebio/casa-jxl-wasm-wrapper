@@ -3873,4 +3873,16 @@ JXL_EXPORT JXL_BOOL JxlGainMapReadBundle(JxlGainMapBundle* map_bundle,
   (void)map_bundle; (void)data; (void)size; (void)bytes_read;
   return 0;  // JXL_FALSE
 }
+JXL_EXPORT JXL_BOOL JxlGainMapGetBundleSize(const JxlGainMapBundle* map_bundle,
+                                            size_t* bundle_size) {
+  (void)map_bundle; (void)bundle_size;
+  return 0;  // JXL_FALSE
+}
+JXL_EXPORT JXL_BOOL JxlGainMapWriteBundle(const JxlGainMapBundle* map_bundle,
+                                          uint8_t* output_buffer,
+                                          size_t output_buffer_size,
+                                          size_t* bytes_written) {
+  (void)map_bundle; (void)output_buffer; (void)output_buffer_size; (void)bytes_written;
+  return 0;  // JXL_FALSE
+}
 #endif

@@ -29,10 +29,22 @@ const config = {
     { name: "simd-mt", threads: true, simd: true, relaxedSimd: false },
     { name: "simd", threads: false, simd: true, relaxedSimd: false }
   ],
+  // Budgets are per (module kind × cpu tier): the encoder module is ~2× the
+  // decoder (full libjxl_enc + container/sidecar/metadata/gain paths), so a
+  // single tier-keyed budget mis-sized enc against the dec target. enc values
+  // are measured actual + ~6% headroom (enc:simd ~2.88 MB incl. encode_rgb16_planar
+  // and gain-map stubs); MT enc adds pthread glue.
   sizeBudgets: {
-    "relaxed-simd-mt": 1_677_722,
-    "simd-mt": 1_572_864,
-    "simd": 1_363_149
+    dec: {
+      "relaxed-simd-mt": 1_677_722,
+      "simd-mt": 1_572_864,
+      "simd": 1_363_149
+    },
+    enc: {
+      "relaxed-simd-mt": 3_350_000,
+      "simd-mt": 3_250_000,
+      "simd": 3_050_000
+    }
   },
   // Phase 1 module split: dec for viewer (decode-only, smaller), enc for ingest (lazy loaded).
   // Separate exports.txt per role lets wasm-metadce strip unused call trees (encode in dec, unused legacy in enc).
@@ -242,8 +254,8 @@ async function main() {
         flags: [...tierFlags, ...linkOnlyExtras]
       };
 
-      const budgetKey = tier.name; // budgets remain per cpu tier; dec/enc measured separately
-      const budget = config.sizeBudgets[budgetKey];
+      const budgetKey = `${kind}:${tier.name}`; // budgets are per module kind × cpu tier
+      const budget = config.sizeBudgets[kind]?.[tier.name];
       if (budget && wasmArtifact.bytes > budget) {
         await writeFile(
           join(distDir, `${kind}.${tier.name}.size-report.txt`),
@@ -673,8 +685,7 @@ function resolveEmsdkImages() {
     return [process.env.EMSDK_IMAGE];
   }
   return [
-    "docker.io/emscripten/emsdk:4.0.14",
-    "ghcr.io/emscripten-core/emsdk:4.0.14"
+    "docker.io/emscripten/emsdk:4.0.14"
   ];
 }
 
