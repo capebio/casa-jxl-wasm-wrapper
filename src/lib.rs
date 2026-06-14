@@ -1720,13 +1720,13 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
     const MAX_DIM: u32 = 8192;
     const MAX_PIXELS: usize = 50_000_000;
 
-    // X2: fused DNG decode+demosaic (strip with halo for RGGB). Returns pre-NR rgb16 + meta + internal ms.
-    // Old decode_bytes + align + full demosaic removed for this path to avoid full mosaic + full RGB residency.
-    let fused = raw_pipeline::dng::decode_bytes_demosaiced(data)
+    let t = now_ms();
+    let img = raw_pipeline::dng::decode_bytes(data)
         .map_err(|e| JsError::new(&format!("DNG decode: {}", e)))?;
+    let decode_ms = now_ms() - t;
 
-    let w = fused.width;
-    let h = fused.height;
+    let w = img.width;
+    let h = img.height;
     if w == 0 || h == 0 {
         return Err(JsError::new("DNG: zero image dimension"));
     }
@@ -1743,19 +1743,26 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
         )));
     }
 
-    let mut rgb16 = fused.rgb;
-    let aw = fused.width;
-    let ah = fused.height;
-    let decode_ms = fused.decode_ms;
-    let demosaic_ms = fused.demosaic_ms;
+    let t = now_ms();
+    let phase = match img.cfa {
+        raw_pipeline::dng::Cfa::Rggb => (0, 0),
+        raw_pipeline::dng::Cfa::Grbg => (0, 1),
+        raw_pipeline::dng::Cfa::Gbrg => (1, 0),
+        raw_pipeline::dng::Cfa::Bggr => (1, 1),
+    };
+    let mut rgb16 = demosaic::demosaic_bayer_mhc(&img.raw, w, h, phase)
+        .map_err(|e| JsError::new(&format!("DNG demosaic: {}", e)))?;
+    let demosaic_ms = now_ms() - t;
+    let aw = w;
+    let ah = h;
 
-    // Build pipeline params from DNG metadata (post-fused)
+    // Build pipeline params from DNG metadata (full-mosaic path)
     let mut params = pipeline::PipelineParams::default_olympus();
-    params.black = fused.black;
-    params.white = fused.white;
-    params.wb_r = fused.wb_r;
-    params.wb_b = fused.wb_b;
-    params.color_matrix = fused.color_matrix;
+    params.black = img.black;
+    params.white = img.white;
+    params.wb_r = img.wb_r;
+    params.wb_b = img.wb_b;
+    params.color_matrix = img.color_matrix;
     let color_matrix_flat: [f32; 9] = {
         let m = params.color_matrix.unwrap_or(pipeline::CAM_TO_SRGB);
         [
@@ -1764,7 +1771,7 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
     };
 
     // Use ISO from DNG metadata for NR strength; fall back to 100 if absent.
-    let iso = fused.iso.unwrap_or(100);
+    let iso = img.iso.unwrap_or(100);
     let nr_strength = match iso {
         iso if iso >= 6400 => 0.50f32,
         iso if iso >= 3200 => 0.35,
@@ -1783,9 +1790,9 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
         color_matrix_flat,
         decode_ms,
         demosaic_ms,
-        orientation: fused.orientation,
-        make: fused.make,
-        model: fused.model,
+          orientation: img.orientation,
+          make: img.make,
+          model: img.model,
         iso,
     })
 }

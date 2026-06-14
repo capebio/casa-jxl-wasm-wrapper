@@ -132,9 +132,11 @@ await initRaw({ module_or_path: readFileSync(new URL("./pkg/raw_converter_wasm_b
 let _directPlanar = null;
 async function getDirectPlanar16() {
   if (_directPlanar) return _directPlanar;
+  const wasmPath = new URL("./packages/jxl-wasm/dist/jxl-core.simd.wasm", import.meta.url);
+  const wasmBinary = readFileSync(wasmPath);
   const core = await import("./packages/jxl-wasm/dist/jxl-core.simd.js");
   const factory = core.default || core;
-  const mod = await (typeof factory === "function" ? factory() : factory);
+  const mod = await (typeof factory === "function" ? factory({ wasmBinary }) : factory);
   const fn = mod && mod._jxl_wasm_encode_rgb16_planar;
   if (typeof fn !== "function") return null;
   const ensureU16 = (m, arr) => {
