@@ -9,12 +9,13 @@ export const BUTTER_MONOTONE_TOL = 0.1;
 
 export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   const frames = events.filter((event) => event && (event.type === 'progress' || event.type === 'final'));
+  const last = frames.at(-1);
   return {
     bytes,
     painted: frames.length > 0,
     frameCount: frames.length,
     isFinal: frames.some((event) => event.type === 'final'),
-    stage: frames.at(-1)?.stage ?? (frames.at(-1)?.type ?? null),
+    stage: last?.stage ?? last?.type ?? null,
     error,
   };
 }
@@ -123,7 +124,69 @@ function pickPreviewCutoffBytesOnly(painted, totalBytes) {
 
 function percent(bytes, totalBytes) {
   if (bytes == null || !Number.isFinite(totalBytes) || totalBytes <= 0) return null;
-  return Number(((bytes / totalBytes) * 100).toFixed(1));
+  return Math.round((bytes / totalBytes) * 1000) / 10;
+}
+
+/**
+ * Async buildSeries variant. Accepts a pre-inited comparator (e.g. ButteraugliComparator from
+ * facade.ts) to reuse ref-cached WASM state across calls. Falls back to JS createButteraugliComparer
+ * when opts.comparator not provided. Supports WASM PSNR/SSIM hooks via opts.psnrFn/ssimFn.
+ *
+ * opts.comparator  — object with .compare(pixels) → number (sync)
+ * opts.psnrFn      — async (test, ref, w, h) → number | null  (WASM PSNR if available)
+ * opts.ssimFn      — async (test, ref, w, h) → number | null  (WASM SSIM if available)
+ * opts.postDecodeTransform — same signature as buildSeries
+ */
+export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, width, height, opts = {}) {
+  if (!Array.isArray(cutoffPixelsList) || !Array.isArray(byteSizes) || cutoffPixelsList.length !== byteSizes.length) {
+    throw new Error('cutoffPixelsList and byteSizes must be parallel arrays');
+  }
+  const n = width * height;
+  if (!n || refPixels.length !== n * 4) return { qualitySeries: [], butterSeries: [], ssimSeries: [], timing: { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 } };
+
+  performance.mark('buildSeriesAsync-start');
+  const { comparator = null, postDecodeTransform = null, psnrFn = null, ssimFn = null } = opts;
+  // comparator: ButteraugliComparator (has .compare method) or null → fall back to JS createButteraugliComparer (returns callable)
+  const cmp = comparator ?? createButteraugliComparer(refPixels, width, height);
+  const callCmp = typeof cmp === 'function' ? cmp : (p) => cmp.compare(p);
+
+  const qualitySeries = [], butterSeries = [], ssimSeries = [];
+  const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
+
+  for (let i = 0; i < cutoffPixelsList.length; i++) {
+    let p = cutoffPixelsList[i];
+    const b = byteSizes[i];
+    if (!p || p.length !== n * 4) continue;
+    if (postDecodeTransform) {
+      const transformed = postDecodeTransform(p, { bytes: b, width, height, index: i, layer: i >> 1 });
+      if (transformed && transformed.length === p.length) p = transformed;
+    }
+
+    let t = performance.now();
+    const currentPsnr = psnrFn
+      ? (await psnrFn(p, refPixels, width, height) ?? computePsnrVsFinal(p, refPixels))
+      : computePsnrVsFinal(p, refPixels);
+    timing.psnrMs += performance.now() - t;
+
+    const prevPsnr = qualitySeries.length > 0 ? qualitySeries[qualitySeries.length - 1].psnr : null;
+    const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
+    const doFull = (i % 2 === 0) || (b > 100 * 1024) || psnrDelta > 0.5;
+    qualitySeries.push({ bytes: b, psnr: currentPsnr });
+
+    t = performance.now();
+    butterSeries.push({ bytes: b, butter: doFull ? callCmp(p) : null });
+    timing.butterMs += performance.now() - t;
+
+    t = performance.now();
+    const currentSsim = ssimFn
+      ? (await ssimFn(p, refPixels, width, height) ?? computeSsimVsFinal(p, refPixels, width, height))
+      : computeSsimVsFinal(p, refPixels, width, height);
+    timing.ssimMs += performance.now() - t;
+    ssimSeries.push({ bytes: b, ssim: currentSsim });
+  }
+  performance.measure('buildSeriesAsync', 'buildSeriesAsync-start');
+  timing.totalMs = timing.psnrMs + timing.butterMs + timing.ssimMs;
+  return { qualitySeries, butterSeries, ssimSeries, timing };
 }
 
 // Layer5 / Lens12/16/18: Pass butterSeries (or ssimSeries) computed from external model/recog score
@@ -137,27 +200,42 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
     throw new Error('cutoffPixelsList and byteSizes must be parallel arrays');
   }
   const n = width * height;
-  if (!n || refPixels.length !== n * 4) return { qualitySeries: [], butterSeries: [], ssimSeries: [] };
+  if (!n || refPixels.length !== n * 4) return { qualitySeries: [], butterSeries: [], ssimSeries: [], timing: { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 } };
+  performance.mark('buildSeries-start');
   const cmp = createButteraugliComparer(refPixels, width, height);
   const qualitySeries = [];
   const butterSeries = [];
   const ssimSeries = [];
+  // Per-metric timing accumulators — zero-overhead performance.now() pairs; visible in DevTools Timeline.
+  const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
   for (let i = 0; i < cutoffPixelsList.length; i++) {
     let p = cutoffPixelsList[i];
     const b = byteSizes[i];
     if (!p || p.length !== n * 4) continue;
     if (postDecodeTransform) {
-      // Layer 2: support for post layer transform (e.g. perceptual constancy) before expensive butter.
-      // Allows early exit sampling + vision hooks without full cost every cutoff.
-      p = postDecodeTransform(p, { bytes: b, width, height, index: i }) || p;
+      // Layer 2/5: support for post layer transform (e.g. perceptual constancy) before expensive butter.
+      // Allows early exit sampling + vision hooks without full cost every cutoff. More hooks for Cursor layer.
+      const transformed = postDecodeTransform(p, { bytes: b, width, height, index: i, layer: i >> 1 });
+      if (transformed && transformed.length === p.length) p = transformed;
     }
-    // Early sample for butter cost reduction (Layer 2): compute full only on key cutoffs or every other for large N.
-    const doFull = (i % 2 === 0) || (b > 100 * 1024);
-    qualitySeries.push({ bytes: b, psnr: computePsnrVsFinal(p, refPixels) });
+    // Adaptive butter skip: if PSNR delta from previous entry < 0.5 dB, perceptual score won't change significantly.
+    let t = performance.now();
+    const currentPsnr = computePsnrVsFinal(p, refPixels);
+    timing.psnrMs += performance.now() - t;
+    const prevPsnr = qualitySeries.length > 0 ? qualitySeries[qualitySeries.length - 1].psnr : null;
+    const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
+    const doFull = (i % 2 === 0) || (b > 100 * 1024) || psnrDelta > 0.5;
+    qualitySeries.push({ bytes: b, psnr: currentPsnr });
+    t = performance.now();
     butterSeries.push({ bytes: b, butter: doFull ? cmp(p) : null });
+    timing.butterMs += performance.now() - t;
+    t = performance.now();
     ssimSeries.push({ bytes: b, ssim: computeSsimVsFinal(p, refPixels, width, height) });
+    timing.ssimMs += performance.now() - t;
   }
-  return { qualitySeries, butterSeries, ssimSeries };
+  performance.measure('buildSeries', 'buildSeries-start');
+  timing.totalMs = timing.psnrMs + timing.butterMs + timing.ssimMs;
+  return { qualitySeries, butterSeries, ssimSeries, timing };
 }
 
 
