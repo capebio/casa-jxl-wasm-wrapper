@@ -142,12 +142,21 @@ function probeRelaxedSimd() {
     }
 }
 let modulePromise;
+let syncModulePromise;
 let testModuleFactory = null;
 let _forcedTier = null;
 let _cachedDetectedTier;
+function isNodeRuntime() {
+    return typeof process !== "undefined" && !!process.versions?.node;
+}
+function activeTierUsesPthreads() {
+    const tier = _forcedTier ?? detectTier();
+    return tier === "simd-mt" || tier === "relaxed-simd-mt";
+}
 export function setJxlModuleFactoryForTesting(factory) {
     testModuleFactory = factory;
     modulePromise = undefined;
+    syncModulePromise = undefined;
 }
 /**
  * Override the WASM tier used on the next module load.
@@ -157,6 +166,7 @@ export function setJxlModuleFactoryForTesting(factory) {
 export function setForcedTier(tier) {
     _forcedTier = tier;
     modulePromise = undefined;
+    syncModulePromise = undefined;
 }
 export function getForcedTier() {
     return _forcedTier;
@@ -218,7 +228,7 @@ export function createEncoder(options) {
  * Requires a WASM build that includes the #15 bridge (jxl_wasm_transcode_jpeg_to_jxl).
  */
 export async function transcodeJpegToJxl(jpeg) {
-    const module = await loadLibjxlModule();
+    const module = await loadLibjxlSyncModule();
     if (!getCapabilities(module).jpegTranscode) {
         throw new CapabilityMissing("JPEG→JXL transcode requires a rebuilt WASM with transcode bridge");
     }
@@ -227,7 +237,9 @@ export async function transcodeJpegToJxl(jpeg) {
     try {
         module.HEAPU8.set(view, ptr);
         const handle = module._jxl_wasm_transcode_jpeg_to_jxl(ptr, view.byteLength);
-        return takeBuffer(module, handle, "transcode").data;
+        const data = takeBuffer(module, handle, "transcode").data;
+        await drainNodePthreadPool(module);
+        return data;
     }
     finally {
         module._free(ptr);
@@ -642,10 +654,11 @@ class LibjxlDecoder {
             return;
         }
         this.eventsStarted = true;
+        let module;
         try {
             if (this.cancelled)
                 return;
-            const module = await loadLibjxlModule();
+            module = await loadLibjxlSyncModule();
             if (this.options.format !== "rgba8") {
                 const decFn = this.options.format === "rgba16" ? "_jxl_wasm_decode_rgba16" : "_jxl_wasm_decode_rgbaf32";
                 if (typeof module[decFn] !== "function") {
@@ -670,6 +683,7 @@ class LibjxlDecoder {
             this.chunkQueue = [];
             this.readIndex = 0;
             this.queuedBytes = 0;
+            await drainNodePthreadPool(module);
         }
     }
     async *eventsProgressive(module) {
@@ -1377,6 +1391,7 @@ class LibjxlEncoder {
             }
         }
         this.encodeStats = { originalBytes: this.pixelByteTotal, compressedBytes, ratio: this.pixelByteTotal > 0 ? compressedBytes / this.pixelByteTotal : 0 };
+        await drainNodePthreadPool(module);
     }
     getStats() { return this.encodeStats; }
     cancel(_reason) {
@@ -1445,12 +1460,53 @@ class LibjxlEncoder {
         return new Promise((resolve) => { this.finishResolve = resolve; });
     }
 }
+const NODE_PTHREAD_DRAIN_TICKS = 8;
+/**
+ * Emscripten MT builds run libjxl on the Node main thread synchronously. Pthread
+ * workers post cleanup/mailbox messages that must be delivered before the next sync
+ * WASM call. Without yielding, workers can remain stuck in runningWorkers and later
+ * transcode/decode/encode chains hang (notably nosharp under relaxed-simd-mt).
+ */
+async function drainNodePthreadPool(module) {
+    if (typeof process === "undefined" || !process.versions?.node)
+        return;
+    const pthread = module?.PThread;
+    if (pthread !== undefined) {
+        const workers = [
+            ...(pthread.runningWorkers ?? []),
+            ...(pthread.unusedWorkers ?? []),
+        ];
+        for (const worker of workers) {
+            try {
+                worker.postMessage({ cmd: "checkMailbox" });
+            }
+            catch {
+                // Worker may already be terminated.
+            }
+        }
+    }
+    for (let i = 0; i < NODE_PTHREAD_DRAIN_TICKS; i++) {
+        await new Promise((resolve) => globalThis.setImmediate(resolve));
+    }
+}
 async function loadLibjxlModule() {
     modulePromise ??= (testModuleFactory ?? loadGeneratedLibjxlModule)();
     return modulePromise;
 }
+/** Node MT tier: sync transcode/decode on simd module to avoid main-thread pthread deadlock. */
+async function loadLibjxlSyncModule() {
+    if (testModuleFactory !== null)
+        return loadLibjxlModule();
+    if (!isNodeRuntime() || !activeTierUsesPthreads())
+        return loadLibjxlModule();
+    syncModulePromise ??= loadGeneratedLibjxlModuleForTier("simd");
+    return syncModulePromise;
+}
 async function loadGeneratedLibjxlModule() {
     const tier = _forcedTier ?? detectTier();
+    return loadGeneratedLibjxlModuleForTier(tier);
+}
+async function loadGeneratedLibjxlModuleForTier(tier) {
     const modulePath = `./jxl-core.${tier}.js`;
     const imported = await import(modulePath);
     const factory = imported.default;

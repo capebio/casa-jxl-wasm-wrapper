@@ -1,0 +1,11 @@
+{
+  "name": "fast-jpeg",
+  "version": "0.1.0",
+  "files": [
+    "fast_jpeg_bg.wasm",
+    "fast_jpeg.js",
+    "fast_jpeg.d.ts"
+  ],
+  "main": "fast_jpeg.js",
+  "types": "fast_jpeg.d.ts"
+}

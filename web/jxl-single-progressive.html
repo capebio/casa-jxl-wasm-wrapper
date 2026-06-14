@@ -37,6 +37,12 @@
       --sp-impact-mild: #e6d06a;
       --sp-impact-slow: #e89a4a;
       --sp-impact-severe: #f07060;
+      --sp-impact-mild-text: #f5e6a8;
+      --sp-impact-slow-text: #ffc08a;
+      --sp-impact-severe-text: #ffb0a4;
+      --sp-impact-mild-bg: #1a1810;
+      --sp-impact-slow-bg: #1c140f;
+      --sp-impact-severe-bg: #1f100e;
     }
     body { margin: 0; background: var(--sp-bg); color: var(--sp-text); font-family: "Segoe UI", Verdana, sans-serif; }
     .single-shell { max-width: 1560px; margin: 0 auto; padding: 22px; }
@@ -46,16 +52,25 @@
     .single-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; padding: 12px; background: var(--sp-panel); border: 1px solid var(--sp-line); border-radius: 8px; }
     .single-controls label { display: grid; gap: 5px; min-width: 132px; color: var(--sp-muted); font-size: 12px; transition: color .15s ease; }
     .single-controls input, .single-controls select { background: #090e10; color: var(--sp-text); border: 1px solid #40565d; border-radius: 6px; padding: 8px; transition: border-color .15s ease, box-shadow .15s ease; }
-    .single-controls label.setting-impact-mild { color: var(--sp-impact-mild); }
+    .single-controls label.setting-impact-mild { color: var(--sp-impact-mild); font-weight: 600; }
     .single-controls label.setting-impact-mild select,
-    .single-controls label.setting-impact-mild.inline-toggle { border-color: #a89030; box-shadow: inset 0 0 0 1px rgba(230, 208, 106, .12); }
-    .single-controls label.setting-impact-slow { color: var(--sp-impact-slow); }
+    .single-controls label.setting-impact-mild.inline-toggle,
+    .single-controls select.setting-impact-mild,
+    .single-controls label.setting-impact-mild.inline-toggle { color: var(--sp-impact-mild-text) !important; background: var(--sp-impact-mild-bg); border-color: #a89030; box-shadow: inset 0 0 0 1px rgba(230, 208, 106, .18); font-weight: 600; }
+    .single-controls label.setting-impact-mild select option { color: var(--sp-impact-mild-text); background: #12100a; }
+    .single-controls label.setting-impact-slow { color: var(--sp-impact-slow); font-weight: 600; }
     .single-controls label.setting-impact-slow select,
-    .single-controls label.setting-impact-slow.inline-toggle { border-color: #b86a28; box-shadow: inset 0 0 0 1px rgba(232, 154, 74, .14); }
-    .single-controls label.setting-impact-severe { color: var(--sp-impact-severe); }
+    .single-controls label.setting-impact-slow.inline-toggle,
+    .single-controls select.setting-impact-slow,
+    .single-controls label.setting-impact-slow.inline-toggle { color: var(--sp-impact-slow-text) !important; background: var(--sp-impact-slow-bg); border-color: #b86a28; box-shadow: inset 0 0 0 1px rgba(232, 154, 74, .2); font-weight: 600; }
+    .single-controls label.setting-impact-slow select option { color: var(--sp-impact-slow-text); background: #140f0a; }
+    .single-controls label.setting-impact-severe { color: var(--sp-impact-severe); font-weight: 600; }
     .single-controls label.setting-impact-severe select,
-    .single-controls label.setting-impact-severe.inline-toggle { border-color: #c04838; box-shadow: inset 0 0 0 1px rgba(240, 112, 96, .16); }
-    .inline-toggle { min-width: 120px; align-self: stretch; display: flex !important; align-items: center; justify-content: center; grid-template-columns: none !important; gap: 8px !important; padding: 8px 10px; background: #090e10; border: 1px solid #40565d; border-radius: 6px; color: var(--sp-text) !important; }
+    .single-controls label.setting-impact-severe.inline-toggle,
+    .single-controls select.setting-impact-severe,
+    .single-controls label.setting-impact-severe.inline-toggle { color: var(--sp-impact-severe-text) !important; background: var(--sp-impact-severe-bg); border-color: #c04838; box-shadow: inset 0 0 0 1px rgba(240, 112, 96, .22); font-weight: 600; }
+    .single-controls label.setting-impact-severe select option { color: var(--sp-impact-severe-text); background: #160c0a; }
+    .inline-toggle { min-width: 120px; align-self: stretch; display: flex !important; align-items: center; justify-content: center; grid-template-columns: none !important; gap: 8px !important; padding: 8px 10px; background: #090e10; border: 1px solid #40565d; border-radius: 6px; color: var(--sp-text); }
     .inline-toggle input { width: 16px; height: 16px; accent-color: var(--sp-bad); }
     .single-controls button, .metric-actions button, .lightbox-close { background: var(--sp-accent); color: #04100c; border: 0; border-radius: 6px; padding: 9px 12px; font-weight: 700; cursor: pointer; }
     .single-controls button[disabled], .metric-actions button[disabled] { opacity: .55; cursor: wait; }

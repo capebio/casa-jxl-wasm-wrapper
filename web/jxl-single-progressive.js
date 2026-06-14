@@ -137,10 +137,17 @@ function labelForSettingControl(id) {
     return el?.closest('label') ?? null;
 }
 
-function applySettingImpactClass(label, level) {
-    if (!label) return;
-    label.classList.remove(SETTING_IMPACT_CLASS.mild, SETTING_IMPACT_CLASS.slow, SETTING_IMPACT_CLASS.severe);
-    if (level) label.classList.add(SETTING_IMPACT_CLASS[level]);
+function applySettingImpactClass(label, control, level) {
+    const classes = [SETTING_IMPACT_CLASS.mild, SETTING_IMPACT_CLASS.slow, SETTING_IMPACT_CLASS.severe];
+    for (const node of [label, control]) {
+        if (!node) continue;
+        node.classList.remove(...classes);
+        if (level) node.classList.add(SETTING_IMPACT_CLASS[level]);
+    }
+    if (control) {
+        if (level) control.dataset.impact = level;
+        else delete control.dataset.impact;
+    }
 }
 
 function composeSettingTitle(id, impact) {
@@ -164,9 +171,10 @@ function readSettingImpactSnapshot() {
 function refreshSettingImpactHints() {
     const snapshot = readSettingImpactSnapshot();
     for (const id of SETTING_IMPACT_WATCH_IDS) {
+        const control = document.getElementById(id);
         const label = labelForSettingControl(id);
         const impact = resolveSettingImpact(id, snapshot);
-        applySettingImpactClass(label, impact?.level ?? null);
+        applySettingImpactClass(label, control, impact?.level ?? null);
         const title = composeSettingTitle(id, impact);
         if (label && title) label.title = title;
     }
