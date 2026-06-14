@@ -125,20 +125,19 @@ pub fn decompress_rows_into(
             } else if col < 2 {
                 north_row[col] as i32
             } else {
+                // Branchless: flatten the nested data-dependent branches (every
+                // pixel mispredicted) into precomputed candidates + cmov selects.
+                // Bit-exact with the original gradient predictor.
                 let w_ = west[parity];
                 let n_ = north_row[col] as i32;
                 let nw = north_west[parity];
-                if (w_ < nw && nw < n_) || (n_ < nw && nw < w_) {
-                    if (w_ - nw).abs() > 32 || (n_ - nw).abs() > 32 {
-                        w_ + n_ - nw
-                    } else {
-                        (w_ + n_) >> 1
-                    }
-                } else if (w_ - nw).abs() > (n_ - nw).abs() {
-                    w_
-                } else {
-                    n_
-                }
+                let awn = (w_ - nw).abs();
+                let ann = (n_ - nw).abs();
+                let between = ((w_ < nw) & (nw < n_)) | ((n_ < nw) & (nw < w_));
+                let far = (awn > 32) | (ann > 32);
+                let p_between = if far { w_ + n_ - nw } else { (w_ + n_) >> 1 };
+                let p_else = if awn > ann { w_ } else { n_ };
+                if between { p_between } else { p_else }
             };
 
             let v = (pred + ((diff << 2) | low)) & 0xFFFF;
