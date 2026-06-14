@@ -21,6 +21,64 @@ pub const CAM_TO_SRGB: [[f32; 3]; 3] = [
     [ 0.018, -0.298,  1.281],
 ];
 
+/// Max pixel payload (<1 GiB) — blocks corrupt dimension exploits before buffer writes.
+pub const MAX_PIXEL_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Validate width×height×channels fits the memory budget.
+pub fn validate_pixel_dims(width: usize, height: usize, channels: usize) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!("pixel dimensions must be positive, got {width}×{height}"));
+    }
+    let bytes = width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(channels))
+        .ok_or_else(|| format!("pixel dimension overflow: {width}×{height}×{channels}"))?;
+    if bytes > MAX_PIXEL_BUFFER_BYTES {
+        return Err(format!(
+            "pixel buffer {bytes} bytes exceeds {MAX_PIXEL_BUFFER_BYTES} byte limit ({width}×{height}×{channels})"
+        ));
+    }
+    Ok(())
+}
+
+/// Assert `buffer.len() == width×height×channels` and dims are within budget.
+pub fn validate_pixel_buffer(
+    buffer: &[u8],
+    width: usize,
+    height: usize,
+    channels: usize,
+) -> Result<(), String> {
+    validate_pixel_dims(width, height, channels)?;
+    let expected = width * height * channels;
+    if buffer.len() != expected {
+        return Err(format!(
+            "pixel buffer length mismatch: got {} expected {} ({width}×{height}×{channels})",
+            buffer.len(),
+            expected
+        ));
+    }
+    Ok(())
+}
+
+/// u16 slice variant (RGB16 etc.).
+pub fn validate_pixel_buffer_u16(
+    buffer: &[u16],
+    width: usize,
+    height: usize,
+    channels: usize,
+) -> Result<(), String> {
+    validate_pixel_dims(width, height, channels)?;
+    let expected = width * height * channels;
+    if buffer.len() != expected {
+        return Err(format!(
+            "pixel buffer length mismatch: got {} expected {} ({width}×{height}×{channels})",
+            buffer.len(),
+            expected
+        ));
+    }
+    Ok(())
+}
+
 /// Always-applied baselines that emulate Olympus Picture-Mode (Natural).
 /// Without these, raw matrix output looks "flat" relative to the embedded
 /// JPEG.  User look sliders adjust on top.
@@ -1407,7 +1465,10 @@ pub fn downscale_rgb16(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) 
 pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize, out: &mut [u16]) {
     #[cfg(feature = "parallel")]
     use rayon::prelude::*;
-    assert_eq!(out.len(), dw * dh * 3);
+    validate_pixel_buffer_u16(src, sw, sh, 3)
+        .expect("downscale_rgb16_into: source buffer bounds");
+    validate_pixel_buffer_u16(out, dw, dh, 3)
+        .expect("downscale_rgb16_into: output buffer bounds");
 
     // Integer fast path for exact factors (very common: 1800px lb → 360px thumb = 5x).
     // Matches the style of the WASM glue downscalers; avoids all f32 math + rayon overhead.
@@ -1481,7 +1542,10 @@ pub fn downscale_rgb8(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) ->
 pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, out: &mut [u8]) {
     #[cfg(feature = "parallel")]
     use rayon::prelude::*;
-    assert_eq!(out.len(), dw * dh * 3);
+    validate_pixel_buffer(src, sw, sh, 3)
+        .expect("downscale_rgb8_into: source buffer bounds");
+    validate_pixel_buffer(out, dw, dh, 3)
+        .expect("downscale_rgb8_into: output buffer bounds");
 
     // Integer fast path for exact factors (symmetric to the rgb16 version).
     if (sw % dw == 0) && (sh % dh == 0) {
@@ -1729,6 +1793,31 @@ pub fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     #[cfg(not(feature = "parallel"))]
     dst.chunks_mut(row_bytes).enumerate().for_each(body);
     dst
+}
+
+#[cfg(test)]
+mod pixel_buffer_validation_tests {
+    use super::*;
+
+    #[test]
+    fn validate_pixel_buffer_accepts_exact_rgb8() {
+        let buf = vec![0u8; 4 * 3 * 3];
+        assert!(validate_pixel_buffer(&buf, 4, 3, 3).is_ok());
+    }
+
+    #[test]
+    fn validate_pixel_buffer_rejects_slack() {
+        let buf = vec![0u8; 100];
+        let err = validate_pixel_buffer(&buf, 4, 3, 3).unwrap_err();
+        assert!(err.contains("length mismatch"), "{err}");
+    }
+
+    #[test]
+    fn validate_pixel_dims_rejects_oversize() {
+        let side = 65536usize;
+        let err = validate_pixel_dims(side, side, 4).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+    }
 }
 
 #[cfg(test)]

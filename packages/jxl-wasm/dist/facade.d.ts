@@ -298,6 +298,8 @@ interface LibjxlWasmModule {
     _jxl_wasm_dec_take_final?(state: number): number;
     _jxl_wasm_dec_free?(state: number): void;
     _jxl_wasm_encode_rgba8_with_sidecars?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number): number;
+    _jxl_wasm_encode_rgba8_with_sidecars_v2?(pixelsPtr: number, width: number, height: number, fullDistance: number, sidecarDistancesPtr: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, resampling: number): number;
+    _jxl_wasm_downscale_rgba16?(srcPtr: number, sw: number, sh: number, dstPtr: number, dw: number, dh: number): void;
     _jxl_wasm_buffer_next?(handle: number): number;
     _jxl_wasm_decode_rgba8_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
     _jxl_wasm_decode_rgba16_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
@@ -466,6 +468,51 @@ export declare function encodeTileContainerRgba16(pixels: ArrayBuffer | Uint8Arr
     effort?: number;
     hasAlpha?: boolean;
 }): Promise<Uint8Array>;
+/** One pyramid level produced by encodeRgba8Pyramid. Ordered smallest-first, full image last. */
+export interface PyramidLevel {
+    data: Uint8Array;
+    width: number;
+    height: number;
+    /** Always 8 — this is the RGBA8 pyramid encoder. 16-bit RAW big levels are a separate path. */
+    bitsPerSample: 8;
+}
+/**
+ * Encode an RGBA8 image into a JXL pyramid in one WASM call: each sidecar level is
+ * area-box downscaled (cascaded, smallest from previous) and encoded at its OWN distance
+ * (no 1.5 floor); the full image is encoded at `fullDistance`. `sidecarSizes[i]` is a
+ * long-edge target and pairs with `sidecarDistances[i]` BY INDEX. Pass parallel,
+ * equal-length arrays — do NOT pre-filter. Sizes >= the image long edge are skipped by the
+ * bridge (the matching distance slot is ignored too). Returns levels smallest-first, full
+ * image last; every level is 8-bit.
+ */
+export declare function encodeRgba8Pyramid(pixels: ArrayBuffer | Uint8Array, width: number, height: number, options: {
+    fullDistance: number;
+    sidecarSizes: readonly number[];
+    sidecarDistances: readonly number[];
+    effort?: number;
+    hasAlpha?: boolean;
+    resampling?: number;
+}): Promise<PyramidLevel[]>;
+/** One 16-bit pyramid level from encodeRgba16. */
+export interface PyramidLevel16 {
+    data: Uint8Array;
+    width: number;
+    height: number;
+    bitsPerSample: 16;
+}
+/**
+ * Encode a single RGBA16 image to JXL (used for RAW big pyramid levels {2048, full}).
+ */
+export declare function encodeRgba16(pixels: Uint16Array, width: number, height: number, options: {
+    distance: number;
+    effort?: number;
+    hasAlpha?: boolean;
+}): Promise<PyramidLevel16>;
+/**
+ * Area-box downscale an RGBA16 buffer (4 channels x uint16, interleaved) inside WASM.
+ * Used to build 16-bit RAW pyramid levels (e.g. full -> 2048) with no 8-bit roundtrip.
+ */
+export declare function downscaleRgba16(src: Uint16Array, srcWidth: number, srcHeight: number, dstWidth: number, dstHeight: number): Promise<Uint16Array>;
 /**
  * Decode a rectangular region from a JXTC tile container produced by
  * encodeTileContainerRgba8. Each overlapping tile is decoded as a standalone

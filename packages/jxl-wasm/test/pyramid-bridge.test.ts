@@ -6,12 +6,9 @@ const facade = readFileSync(new URL("../src/facade.ts", import.meta.url), "utf8"
 const exportsTxt = readFileSync(new URL("../exports.txt", import.meta.url), "utf8");
 
 test("sidecar encoder takes per-level distances; v1 floor only on the null path", () => {
-  // unified static fn now takes a nullable per-level distance array
   expect(bridge).toContain("const float* sidecar_distances");
   expect(bridge).toContain("jxl_wasm_encode_rgba8_with_sidecars_v2");
-  // per-level (v2) path: distance from the caller's array, no floor
   expect(bridge).toContain("sidecar_distances[i]");
-  // legacy (v1 / _x) path still floors to 1.5 when distances are null — regression guard
   expect(bridge).toContain("std::max(full_distance, 1.5f)");
 });
 

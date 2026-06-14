@@ -1,0 +1,14 @@
+export function planShard(files, i, n) {
+    if (!Number.isInteger(n) || n < 1)
+        throw new Error(`shard count must be >= 1, got ${n}`);
+    if (!Number.isInteger(i) || i < 0 || i >= n)
+        throw new Error(`shard index ${i} out of range for n=${n}`);
+    return files.filter((_, idx) => idx % n === i);
+}
+export function boundedConcurrency(cores, requested, memBudgetBytes, perImageBytes) {
+    const byMem = Math.max(1, Math.floor(memBudgetBytes / Math.max(1, perImageBytes)));
+    const byCores = Math.max(1, Math.floor(cores) || 1);
+    const ceiling = requested && requested > 0 ? Math.floor(requested) : byCores;
+    return Math.max(1, Math.min(byCores, ceiling, byMem));
+}
+//# sourceMappingURL=shard.js.map

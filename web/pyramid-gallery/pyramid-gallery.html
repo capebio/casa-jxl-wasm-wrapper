@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pyramid Gallery</title>
+  <link rel="stylesheet" href="../test-nav.css" />
+  <link rel="stylesheet" href="pyramid-gallery.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "@casabio/jxl-core": "../../packages/jxl-core/dist/index.js",
+      "@casabio/jxl-wasm": "../../packages/jxl-wasm/dist/index.js",
+      "@casabio/jxl-worker-browser": "../../packages/jxl-worker-browser/dist/index.js",
+      "@casabio/jxl-session": "../../packages/jxl-session/dist/index.js",
+      "@casabio/jxl-scheduler": "../../packages/jxl-scheduler/dist/index.js",
+      "@casabio/jxl-cache": "../../packages/jxl-cache/dist/index.js",
+      "@casabio/jxl-pyramid": "../../packages/jxl-pyramid/dist/index.js"
+    }
+  }
+  </script>
+</head>
+<body class="has-home-bar">
+  <nav class="home-bar" aria-label="Test pages">
+    <div class="home-bar-label">Test pages</div>
+    <div class="home-bar-links">
+      <a class="home-bar-link" href="../index.html">Home</a>
+      <a class="home-bar-link is-active" href="./pyramid-gallery.html" aria-current="page">Pyramid gallery</a>
+    </div>
+  </nav>
+
+  <header class="pyramid-toolbar">
+    <label>Gallery root URL
+      <input id="gallery-url" type="url" placeholder="https://host/gallery/ (index.json parent)" />
+    </label>
+    <button id="load-gallery" type="button">Load</button>
+    <span id="gallery-status"></span>
+  </header>
+
+  <main id="pyramid-grid" class="pyramid-grid" data-pyramid-grid></main>
+
+  <div id="pyramid-lightbox" class="pyramid-lightbox" data-lightbox-root hidden>
+    <button type="button" data-lightbox-close aria-label="Close">×</button>
+    <div class="lightbox-stage">
+      <canvas data-lightbox-canvas></canvas>
+    </div>
+    <div class="lightbox-hud">
+      <span data-zoom-pct>100%</span>
+      <label class="toggle-16"><input type="checkbox" data-toggle-16bit /> 16-bit HDR (RAW)</label>
+      <button type="button" data-export-roi title="16-bit HDR: exports .jxl + preview .png">Export crop</button>
+      <canvas data-histogram width="256" height="64"></canvas>
+    </div>
+    <aside class="lightbox-adjust">
+      <label>Preset <select id="preset-select"></select></label>
+      <div id="slider-panel"></div>
+      <button type="button" id="reset-adjust">Reset</button>
+    </aside>
+  </div>
+
+  <script type="module" src="./pyramid-gallery.js"></script>
+</body>
+</html>

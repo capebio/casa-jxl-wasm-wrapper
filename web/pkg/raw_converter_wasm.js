@@ -507,6 +507,20 @@ export class ProcessResult {
     /**
      * @returns {number}
      */
+    get full16_h() {
+        const ret = wasm.__wbg_get_processresult_full16_h(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get full16_w() {
+        const ret = wasm.__wbg_get_processresult_full16_w(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     get gps_alt() {
         const ret = wasm.__wbg_get_processresult_gps_alt(this.__wbg_ptr);
         return ret;
@@ -747,6 +761,17 @@ export class ProcessResult {
      */
     take_rgb() {
         const ret = wasm.processresult_take_rgb(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * Move the full-resolution packed u16 LE buffer out (M3 16-bit path). Caller owns the bytes.
+     * Packed 6 bytes per pixel LE (r g b u16). Only non-empty if OUT_FULL_16 was requested.
+     * @returns {Uint8Array}
+     */
+    take_rgb16_full() {
+        const ret = wasm.processresult_take_rgb16_full(this.__wbg_ptr);
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
