@@ -292,7 +292,7 @@ export interface JxlEncoder {
   /** Populated after chunks() completes normally. Null before or on error. */
   getStats(): EncodeStats | null;
 }
-// Layer 3: support ByteIntervalCursor buffers from benchmark-core for client-side chunked push (positive: allows using the same discrete math cursor for encode quanta in byte-bench and other, reduces copy at boundary). Push accepts the views/ABs from cursor.nextFor without extra exact.
+// Layer 3: support ByteIntervalCursor buffers from benchmark-core for client-side chunked push (positive: allows using the same discrete math cursor for encode quanta in byte-bench and other, reduces copy at boundary). Push accepts the views/ABs from cursor.nextFor without extra exact. Also hook for pc post JXL using raw pipeline apply_perceptual_constancy for progressive paints.
 
 interface LibjxlBuffer {
   handle: number;
@@ -681,7 +681,8 @@ export async function computeButteraugli(
 }
 
 export class ButteraugliComparator {
-  private refPtr = 0;
+  private refPtr = 0;       // raw pixels in WASM heap (legacy single-shot path)
+  private refStatePtr = 0;  // JxlWasmButterRef* (ref-cached path — only test Image3F built per compare)
 
   private constructor(
     private readonly module: LibjxlWasmModule,
@@ -691,24 +692,40 @@ export class ButteraugliComparator {
 
   static async create(reference: ArrayBuffer | Uint8Array, width: number, height: number): Promise<ButteraugliComparator> {
     const module = await loadLibjxlModule();
-    if (!module._jxl_wasm_butteraugli_compare) {
+    const m = module as any;
+    if (!module._jxl_wasm_butteraugli_compare && typeof m._jxl_wasm_butteraugli_ref_create !== "function") {
       throw new CapabilityMissing("Butteraugli comparator requires a rebuilt WASM with butteraugli bridge");
     }
     const pixelSize = butteraugliPixelSize(reference, width, height, "ButteraugliComparator.create");
+    const view = copyOrBorrowInput(reference, false);
     const comparator = new ButteraugliComparator(module, width, height);
-    comparator.refPtr = mallocOrThrow(module, pixelSize, "Butteraugli reference");
-    try {
-      const view = copyOrBorrowInput(reference, false);
-      module.HEAPU8.set(view.subarray(0, pixelSize), comparator.refPtr);
-      return comparator;
-    } catch (error) {
-      comparator.dispose();
-      throw error;
+
+    if (typeof m._jxl_wasm_butteraugli_ref_create === "function") {
+      // Ref-cached path (B2): build Image3F for ref once in C++; compare() only builds test.
+      // Temp pixel ptr freed immediately after ref state created.
+      const ptr = mallocOrThrow(module, pixelSize, "Butteraugli ref pixels temp");
+      try {
+        module.HEAPU8.set(view.subarray(0, pixelSize), ptr);
+        comparator.refStatePtr = m._jxl_wasm_butteraugli_ref_create(ptr, width, height);
+        if (comparator.refStatePtr === 0) throw new Error("jxl_wasm_butteraugli_ref_create failed (OOM)");
+      } finally {
+        module._free(ptr);
+      }
+    } else {
+      // Legacy path: keep ref raw pixels in WASM heap; both ref+test gamma-decoded per call.
+      comparator.refPtr = mallocOrThrow(module, pixelSize, "Butteraugli reference");
+      try {
+        module.HEAPU8.set(view.subarray(0, pixelSize), comparator.refPtr);
+      } catch (error) {
+        comparator.dispose();
+        throw error;
+      }
     }
+    return comparator;
   }
 
   compare(candidate: ArrayBuffer | Uint8Array): number {
-    if (this.refPtr === 0) {
+    if (this.refStatePtr === 0 && this.refPtr === 0) {
       throw new Error("ButteraugliComparator has been disposed");
     }
     const pixelSize = butteraugliPixelSize(candidate, this.width, this.height, "ButteraugliComparator.compare");
@@ -716,19 +733,85 @@ export class ButteraugliComparator {
     try {
       const view = copyOrBorrowInput(candidate, false);
       this.module.HEAPU8.set(view.subarray(0, pixelSize), ptr);
-      const bits = this.module._jxl_wasm_butteraugli_compare!(this.refPtr, ptr, this.width, this.height);
-      if (bits < 0) throw new Error("Butteraugli WASM compare failed");
-      return floatFromI32Bits(bits);
+      if (this.refStatePtr !== 0) {
+        const bits = (this.module as any)._jxl_wasm_butteraugli_ref_compare(this.refStatePtr, ptr);
+        if (bits < 0) throw new Error("Butteraugli WASM compare failed");
+        return floatFromI32Bits(bits);
+      } else {
+        const bits = this.module._jxl_wasm_butteraugli_compare!(this.refPtr, ptr, this.width, this.height);
+        if (bits < 0) throw new Error("Butteraugli WASM compare failed");
+        return floatFromI32Bits(bits);
+      }
     } finally {
       this.module._free(ptr);
     }
   }
 
   dispose(): void {
+    if (this.refStatePtr !== 0) {
+      (this.module as any)._jxl_wasm_butteraugli_ref_free(this.refStatePtr);
+      this.refStatePtr = 0;
+    }
     if (this.refPtr !== 0) {
       this.module._free(this.refPtr);
       this.refPtr = 0;
     }
+  }
+}
+
+/**
+ * WASM PSNR between two RGBA8 images. Returns dB (Infinity = identical).
+ * Requires rebuilt WASM with jxl_wasm_psnr_compare (Task B3). Returns null if unavailable.
+ */
+export async function computePsnrWasm(
+  pixels1: ArrayBuffer | Uint8Array,
+  pixels2: ArrayBuffer | Uint8Array,
+  width: number,
+  height: number,
+): Promise<number | null> {
+  const module = await loadLibjxlModule();
+  const fn = (module as any)._jxl_wasm_psnr_compare;
+  if (typeof fn !== "function") return null;
+  const pixelSize = width * height * 4;
+  const v1 = copyOrBorrowInput(pixels1, false);
+  const v2 = copyOrBorrowInput(pixels2, false);
+  const ptr1 = mallocOrThrow(module, pixelSize, "PSNR image A");
+  const ptr2 = mallocOrThrow(module, pixelSize, "PSNR image B");
+  try {
+    module.HEAPU8.set(v1.subarray(0, pixelSize), ptr1);
+    module.HEAPU8.set(v2.subarray(0, pixelSize), ptr2);
+    return floatFromI32Bits(fn(ptr1, ptr2, width, height));
+  } finally {
+    module._free(ptr1);
+    module._free(ptr2);
+  }
+}
+
+/**
+ * WASM SSIM between two RGBA8 images. Returns [0,1] (1 = identical).
+ * Requires rebuilt WASM with jxl_wasm_ssim_compare (Task B4). Returns null if unavailable.
+ */
+export async function computeSsimWasm(
+  pixels1: ArrayBuffer | Uint8Array,
+  pixels2: ArrayBuffer | Uint8Array,
+  width: number,
+  height: number,
+): Promise<number | null> {
+  const module = await loadLibjxlModule();
+  const fn = (module as any)._jxl_wasm_ssim_compare;
+  if (typeof fn !== "function") return null;
+  const pixelSize = width * height * 4;
+  const v1 = copyOrBorrowInput(pixels1, false);
+  const v2 = copyOrBorrowInput(pixels2, false);
+  const ptr1 = mallocOrThrow(module, pixelSize, "SSIM image A");
+  const ptr2 = mallocOrThrow(module, pixelSize, "SSIM image B");
+  try {
+    module.HEAPU8.set(v1.subarray(0, pixelSize), ptr1);
+    module.HEAPU8.set(v2.subarray(0, pixelSize), ptr2);
+    return floatFromI32Bits(fn(ptr1, ptr2, width, height));
+  } finally {
+    module._free(ptr1);
+    module._free(ptr2);
   }
 }
 
