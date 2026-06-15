@@ -1,4 +1,6 @@
-export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32";
+// "rgb8" is encode-only (3-channel, no alpha — bridge fmt=3). Decode never produces it,
+// but EncoderOptions.format and the encode paths use it, so it belongs in the shared union.
+export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32" | "rgb8";
 export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = { x: number; y: number; w: number; h: number };
 export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";
@@ -403,10 +405,12 @@ interface LibjxlWasmModule {
 type JxlModuleFactory = () => Promise<LibjxlWasmModule>;
 
 function normalizeDecoderOptions(options: DecoderOptions): DecoderOptions {
+  const downsample = options.downsample ?? (options.region != null ? pickDownsample(options) : undefined);
   return {
     ...options,
     region: options.region ?? null,
-    downsample: options.downsample ?? (options.region != null ? pickDownsample(options) : undefined),
+    // Omit the key entirely when undefined (exactOptionalPropertyTypes forbids `downsample: undefined`).
+    ...(downsample !== undefined ? { downsample } : {}),
     ...(options.progressiveDetail !== undefined ? { progressiveDetail: options.progressiveDetail } : {}),
     targetWidth: options.targetWidth ?? null,
     targetHeight: options.targetHeight ?? null,
@@ -3024,7 +3028,7 @@ export async function perceptualConstancyApplyBulk(
   if (typeof fns === "function") {
     // Fallback scalar per-pixel (still faster boundary than full Rust roundtrip for some cases)
     for (let i = 0; i < n; i++) {
-      const rr = r[i], gg = g[i], bb = b[i];
+      const rr = r[i] ?? 0, gg = g[i] ?? 0, bb = b[i] ?? 0;
       // scalar signature is scalar out by ptr; emulate via small stack? In practice the bulk is what ships.
       // For demo we call a JS poly if needed; real scalar is in WASM for direct call from C++ side.
       // Here we just no-op warn; users should rebuild to get the bulk.
