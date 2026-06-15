@@ -467,7 +467,19 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
 fn main() {
     println!("=== RAW Decode Pipeline Benchmark ===");
     println!("Runs per file: {RUNS} (reporting minimum)");
-    println!("JXL: effort=3 (Falcon), quality={JXL_QUALITY}\n");
+    println!("JXL: effort=3 (Falcon), quality={JXL_QUALITY}");
+    // Loud guard: the tone/demosaic passes only multi-thread when the root
+    // `parallel` feature (-> raw-pipeline/parallel = rayon) is enabled. It is NOT
+    // a default (the root crate is also the WASM cdylib; rayon would break that
+    // build). Built without it, tone/demosaic run the single-threaded scalar path
+    // and timings are ~5-7x slower — which looks like "the optimisation was lost".
+    if cfg!(feature = "parallel") {
+        println!("Pipeline threading: ON (rayon, --features parallel)\n");
+    } else {
+        eprintln!("\n!!! WARNING: built WITHOUT `parallel` — tone/demosaic run SINGLE-THREADED.");
+        eprintln!("!!! Timings will be ~5-7x slower. Re-run with:");
+        eprintln!("!!!   .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\"\n");
+    }
 
     let test_dir = r"C:\Foo\raw-converter\tests";
     let mut rows: Vec<BenchRow> = Vec::new();
@@ -500,10 +512,11 @@ fn main() {
     }
 
     println!("=== Done ===");
-    println!("Tip: use --release + MSVC toolchain for representative numbers:");
-    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode 2>&1 | tee benchmark/results_latest.txt");
+    println!("Tip: use --release + MSVC toolchain for representative numbers.");
+    println!("     `parallel` is REQUIRED for representative tone/demosaic numbers (multi-threaded):");
+    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\" 2>&1 | tee benchmark/results_latest.txt");
     println!("For Tauri/WASM parity ref sets (per HANDOFF-tauri-parity-2026-06-03.md):");
-    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode");
+    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\"");
 
     if rows.is_empty() {
         eprintln!("[warn] no files processed; JSON not written");
