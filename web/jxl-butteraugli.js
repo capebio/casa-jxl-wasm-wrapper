@@ -244,3 +244,50 @@ export function computeButteraugliApproxVsFinal(refXyb, testPixels, width, heigh
 // For LLM/plantID/AR: pass external model score series to byte-metrics for task-aware cutoff (not pixel fidelity).
 // Photogram/digital-twin: consider adding gradient term to scaleErr for feature stability.
 
+// ---------------------------------------------------------------------------
+// WASM-backed path — uses PerceptualEngine from compiled raw_converter_wasm.
+// Pointer-based: zero ArrayBuffer copy on the test side (direct view into WASM
+// heap). Falls back to JS path if wasmModule has no PerceptualEngine.
+// ---------------------------------------------------------------------------
+
+// Create a WASM-backed comparer. Returns (testPixels) => score closure,
+// same contract as createButteraugliComparer.
+//
+// wasmModule: instantiated wasm module (from raw_converter_wasm init()).
+//   Must expose: PerceptualEngine class, memory export.
+// refPixels:   Uint8Array RGBA, width*height*4 bytes.
+// width/height: image dimensions in pixels.
+//
+// Returns null if PerceptualEngine is absent (older WASM build). Caller
+// should fall back to createButteraugliComparer in that case.
+export function createWasmEngine(wasmModule, refPixels, width, height) {
+    if (!wasmModule || typeof wasmModule.PerceptualEngine !== 'function') {
+        return null;
+    }
+    const n = width * height;
+    if (!n || refPixels.length !== n * 4) return null;
+
+    const engine = new wasmModule.PerceptualEngine(width, height);
+    engine.set_reference(refPixels);
+
+    // Cache a typed view into the WASM staging buffer for zero-copy test writes.
+    // Re-create the view each call in case the WASM memory grows (buffer detaches).
+    const ptr = engine.input_ptr();
+
+    return function compareViaWasm(testPixels) {
+        if (testPixels.length !== n * 4) return NaN;
+        // View is recreated each call to handle potential WASM memory growth.
+        const view = new Uint8Array(wasmModule.memory.buffer, ptr, n * 4);
+        view.set(testPixels);
+        return engine.compare_from_buf();
+    };
+}
+
+// Auto-select best available path: WASM if PerceptualEngine present, else JS.
+// Drop-in replacement for createButteraugliComparer in performance-sensitive paths.
+export function createBestEngine(wasmModule, refPixels, width, height) {
+    const wasm = createWasmEngine(wasmModule, refPixels, width, height);
+    if (wasm) return wasm;
+    return createButteraugliComparer(refPixels, width, height);
+}
+
