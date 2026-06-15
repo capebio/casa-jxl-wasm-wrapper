@@ -4,6 +4,7 @@
 
 mod blur;
 pub(crate) mod butteraugli;
+pub mod engine;
 mod psnr;
 pub(crate) mod ssim;
 pub(crate) mod xyb;
@@ -11,6 +12,7 @@ mod simd;
 pub use simd::{detect_native, Backend};
 
 pub use butteraugli::Kweights;
+pub use engine::{AlgorithmMode, ButteraugliEngine, EngineMetrics};
 
 /// Which compute backend to use. `Auto` picks the fastest available at runtime.
 /// `ForceScalar` and `Force(id)` exist for the flip-flop bench.
