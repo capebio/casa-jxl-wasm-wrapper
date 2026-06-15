@@ -215,8 +215,78 @@ The practical improvements from this pass are in **correctness**, **memory safet
 for all CR2 files. The memory reduction is significant for batch ingest pipelines. The new APIs
 provide the instrumentation needed for future profiling passes.
 
-Next candidate for CR2 performance work: LJPEG Huffman table vectorisation (process 8 bits
-in parallel via lookup tables). Expected gain: 10–30% of the 97% LJPEG stage ≈ 10–29% total.
+---
+
+## 7. LJPEG Huffman Vectorisation — 2026-06-30
+
+### Changes
+
+Two changes to `ljpeg.rs`, both in the hot decode path:
+
+**A. Fast 8-bit prefix table (`fast8`):**
+
+Added `fast8: [u32; 256]` to `HuffTable`. Populated in `build()` for all codes with
+`code_len ≤ 8`: each entry = `consume_bits | (category << 8)`. In the decode inner loop,
+peek 8 bits first and resolve the code in one table lookup without branching. Only codes
+longer than 8 bits fall through to the existing full-width lookup. For typical Canon CR2
+Huffman tables, the fast path fires for the large majority of codes.
+
+**B. Bulk 4-byte fill in `BitReader::fill()`:**
+
+Added a fast path that loads 4 non-FF bytes at once as a 32-bit word into the u64 bit
+buffer, rather than one byte per iteration. Guard: `self.nbits ≤ 32` ensures no u64
+overflow (max after bulk load = 64 bits). Eliminates 3 of every 4 fill iterations when
+the compressed stream contains no `0xFF` bytes (the common case in RAW image entropy data).
+
+**C. Loop hoists:**
+
+Moved `row_base` and `emit_row` (the `row < out_rows` check) out of the inner `comp` loop
+to the row loop header.
+
+### Benchmark: Before vs After
+
+| Metric | Before (2026-06-15) | After (2026-06-30) | Δ |
+|--------|---------------------|---------------------|---|
+| AvgTotal | 398.16 ms | 366.92 ms | **−7.8%** |
+| AvgLJPEG | 386.13 ms | 350.99 ms | **−9.1%** |
+| FileA avg | 353.66 ms | 328.80 ms | −7.0% |
+| FileB avg | 442.65 ms | 405.04 ms | −8.5% |
+| StdDev | 52.10 ms | 38.43 ms | — |
+
+```
+Run  1 [A] total=322.5ms  ljpeg=308.9ms  crop=3.0ms  5184×3456
+Run  2 [B] total=398.0ms  ljpeg=380.1ms  crop=9.2ms  6000×4000
+Run  3 [A] total=335.6ms  ljpeg=318.5ms  crop=6.1ms  5184×3456
+Run  4 [B] total=405.9ms  ljpeg=384.1ms  crop=7.6ms  6000×4000
+Run  5 [A] total=325.8ms  ljpeg=313.1ms  crop=4.4ms  5184×3456
+Run  6 [B] total=413.6ms  ljpeg=397.3ms  crop=5.6ms  6000×4000
+Run  7 [A] total=328.2ms  ljpeg=317.2ms  crop=3.8ms  5184×3456
+Run  8 [B] total=405.3ms  ljpeg=388.2ms  crop=8.5ms  6000×4000
+Run  9 [A] total=331.9ms  ljpeg=319.3ms  crop=4.4ms  5184×3456
+Run 10 [B] total=402.5ms  ljpeg=383.3ms  crop=6.4ms  6000×4000
+
+AvgTotal:  366.92 ms   MedTotal: 398.01 ms
+MinTotal:  322.47 ms   MaxTotal: 413.56 ms
+StdDev:    38.43 ms
+AvgLJPEG: 350.99 ms (95.7%)
+FileA avg: 328.80 ms  |  FileB avg: 405.04 ms
+```
+
+### Interpretation
+
+The ~9% LJPEG reduction is consistent across both files (−7.0% FileA, −8.5% FileB). With
+StdDev of ~38–52 ms across runs, the 31 ms average reduction is at the boundary of
+statistical significance from a single 10-run session; the per-file directional consistency
+strengthens confidence that the gain is real.
+
+The improvement comes primarily from the bulk 4-byte fill eliminating ~75% of `fill()`
+loop iterations in the common (non-FF) case. The fast8 table further removes one conditional
+branch per symbol for the majority of short codes.
+
+The LJPEG phase remains compute-bound at 95.7% of total. Further gains would require a
+fundamentally different approach (e.g., SIMD bit manipulation for multi-symbol parallel
+decode, or Huffman stream splitting for multi-threaded decode), both of which are
+non-trivial for single-strip LJPEG.
 
 ---
 

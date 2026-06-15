@@ -22,6 +22,9 @@ struct HuffTable {
     // For decode we maintain a max_bits-sized table (right-sized, not fixed 16).
     lookup: Vec<(u8, u8)>, // index = peek(max_bits), (consume_bits, value). 0 if invalid.
     max_bits: u8,
+    // Fast 8-bit prefix table: index = peek(8), value = consume_bits | (category << 8).
+    // 0 means code is longer than 8 bits — fall back to full lookup.
+    fast8: [u32; 256],
 }
 
 impl HuffTable {
@@ -51,15 +54,29 @@ impl HuffTable {
         // top `code_len` bits match get filled. Sized 1<<max_bits not 1<<16.
         let table_size = if max_bits == 0 { 1 } else { 1usize << max_bits };
         let mut lookup = vec![(0u8, 0u8); table_size];
+        let mut fast8 = [0u32; 256];
         for &(code_len, value, code) in &codes {
+            // Full-width table.
             let shift = max_bits as u32 - code_len as u32;
             let lo = (code << shift) as usize;
             let hi = lo + (1 << shift);
             for slot in &mut lookup[lo..hi] {
                 *slot = (code_len, value);
             }
+            // 8-bit fast table for short codes: map every 8-bit pattern whose
+            // top code_len bits match this code → encode (consume|category<<8).
+            // Non-zero sentinel: consume ≥ 1 for any valid code.
+            if code_len <= 8 {
+                let shift8 = 8u32 - code_len as u32;
+                let lo8 = (code << shift8) as usize;
+                let hi8 = lo8 + (1usize << shift8);
+                let entry = (code_len as u32) | ((value as u32) << 8);
+                for slot in &mut fast8[lo8..hi8] {
+                    *slot = entry;
+                }
+            }
         }
-        Ok(HuffTable { lookup, max_bits })
+        Ok(HuffTable { lookup, max_bits, fast8 })
     }
 
 }
@@ -90,6 +107,27 @@ impl<'a> BitReader<'a> {
     #[inline]
     fn fill(&mut self) {
         while self.nbits <= 48 && !self.finished {
+            let remaining = self.src.len().saturating_sub(self.pos);
+            // Fast bulk path: load 4 bytes at once when none are 0xFF and there
+            // is room in the u64 buffer (nbits + 32 ≤ 64).
+            if remaining >= 4 && self.nbits <= 32 {
+                let b0 = self.src[self.pos];
+                let b1 = self.src[self.pos + 1];
+                let b2 = self.src[self.pos + 2];
+                let b3 = self.src[self.pos + 3];
+                if b0 != 0xFF && b1 != 0xFF && b2 != 0xFF && b3 != 0xFF {
+                    let word = ((b0 as u64) << 24)
+                        | ((b1 as u64) << 16)
+                        | ((b2 as u64) << 8)
+                        | (b3 as u64);
+                    self.bits = (self.bits << 32) | word;
+                    self.nbits += 32;
+                    self.real_in_buf += 32;
+                    self.pos += 4;
+                    continue;
+                }
+            }
+            // Slow path: single byte with FF/stuffing handling.
             if self.pos >= self.src.len() {
                 self.finished = true;
                 break;
@@ -416,6 +454,8 @@ pub fn decode_tile(
     let mut prev_row_first = vec![0i32; cps];
 
     for row in 0..sof_h {
+        let row_base = base + row * stride_pixels;
+        let emit_row = row < out_rows;
         // Track left predictor per component (for current row).
         let mut left = [0i32; MAX_COMPONENTS];
         for col in 0..sof_w {
@@ -437,11 +477,21 @@ pub fn decode_tile(
                 if table.max_bits == 0 {
                     bail!("ljpeg: missing huffman table {}", sos.dht_id[comp]);
                 }
-                let peek = br.peek(table.max_bits as u32);
-                let (consume, t) = table.lookup[peek as usize];
-                if consume == 0 {
-                    bail!("ljpeg: invalid huffman code at row={row} col={col} comp={comp}");
-                }
+
+                // Fast 8-bit prefix lookup: resolves codes ≤ 8 bits without a
+                // second peek. Falls back to full-width table only for long codes.
+                let peek8 = br.peek(8);
+                let fast_entry = table.fast8[peek8 as usize];
+                let (consume, t) = if fast_entry != 0 {
+                    ((fast_entry & 0xFF) as u8, ((fast_entry >> 8) & 0xFF) as u8)
+                } else {
+                    let peek_full = br.peek(table.max_bits as u32);
+                    let entry = table.lookup[peek_full as usize];
+                    if entry.0 == 0 {
+                        bail!("ljpeg: invalid huffman code at row={row} col={col} comp={comp}");
+                    }
+                    entry
+                };
                 br.consume(consume as u32);
                 if br.truncated {
                     bail!("ljpeg: entropy bitstream exhausted at row={row} col={col} comp={comp}");
@@ -473,12 +523,11 @@ pub fn decode_tile(
                     prev_row_first[comp] = val;
                 }
 
-                let raw_col = col * cps + comp;
-                if row < out_rows && raw_col < out_pixel_cols {
-                    // Lens 23 next: hoist row base to avoid repeated row*stride mul/add inside per-comp
-                    let row_base = base + row * stride_pixels;
-                    let off = row_base + raw_col;
-                    out[off] = ((val << sos.point_transform) & 0xFFFF) as u16;
+                if emit_row {
+                    let raw_col = col * cps + comp;
+                    if raw_col < out_pixel_cols {
+                        out[row_base + raw_col] = ((val << sos.point_transform) & 0xFFFF) as u16;
+                    }
                 }
             }
         }
@@ -674,6 +723,25 @@ mod tests {
         let tbl = HuffTable::build(&bits, &values).unwrap();
         assert_eq!(tbl.max_bits, 3);
         assert_eq!(tbl.lookup.len(), 1 << 3, "L10 right-size: expected 8, got {}", tbl.lookup.len());
+    }
+
+    #[test]
+    fn ljpeg_fast8_resolves_short_codes() {
+        // 4 codes at length 3 (canonical: 000→t0, 001→t1, 010→t2, 011→t5).
+        // max_bits=3; codes only cover 3-bit prefixes 000–011 → fast8[0..128] filled.
+        // 3-bit prefixes 100–111 have no code → fast8[128..256] stays 0 (slow path).
+        let bits = [0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0];
+        let values = [0u8, 1, 2, 5];
+        let tbl = HuffTable::build(&bits, &values).unwrap();
+        // fast8[000_xxxxx] (indices 0..32): consume=3, category=0
+        assert_eq!(tbl.fast8[0] & 0xFF, 3, "consume for t=0");
+        assert_eq!((tbl.fast8[0] >> 8) & 0xFF, 0, "category for first code");
+        assert_eq!(tbl.fast8[31] & 0xFF, 3);
+        // fast8[011_xxxxx] (indices 96..128): consume=3, category=5
+        assert_eq!(tbl.fast8[96] & 0xFF, 3, "consume for t=5");
+        assert_eq!((tbl.fast8[96] >> 8) & 0xFF, 5, "category for last code");
+        // fast8[128..256]: no code → 0 (slow path will bail with invalid code)
+        assert!(tbl.fast8[128..].iter().all(|&e| e == 0), "uncovered prefixes must be 0");
     }
 
     #[test]
