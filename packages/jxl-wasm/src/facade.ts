@@ -497,16 +497,18 @@ export function detectTier(): Tier {
     if (!hasSimd) {
       tier = "scalar";
     } else {
-      // SharedArrayBuffer can be *defined* yet unusable for threaded WASM: browsers
-      // require cross-origin isolation (COOP/COEP) before `new WebAssembly.Memory({shared:true})`
-      // succeeds. Without it, loading the *-mt build throws at instantiation and the decode
-      // never recovers. Demote mt→simd when the page is not crossOriginIsolated. Node/Bun
-      // leave crossOriginIsolated undefined and run threads fine, so treat undefined as allowed.
+      // Threaded WASM needs BOTH: (1) SharedArrayBuffer for shared memory — browsers gate it
+      // behind cross-origin isolation (COOP/COEP), else `new WebAssembly.Memory({shared:true})`
+      // throws at instantiation; and (2) the web `Worker` constructor to spawn pthreads, since the
+      // modules are built `-sENVIRONMENT=web,worker`. Plain Node has SharedArrayBuffer but NO web
+      // `Worker`, so the *-mt modules throw "Worker is not defined" at init there — demote to simd.
       const hasSab = typeof SharedArrayBuffer !== "undefined" &&
         (typeof crossOriginIsolated === "undefined" || crossOriginIsolated === true);
+      const hasWorker = typeof Worker !== "undefined";
+      const hasThreads = hasSab && hasWorker;
       const hasRelaxedSimd = probeRelaxedSimd();
-      if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
-      else if (hasSab) tier = "simd-mt";
+      if (hasThreads && hasRelaxedSimd) tier = "relaxed-simd-mt";
+      else if (hasThreads) tier = "simd-mt";
       else tier = "simd";
     }
   }
@@ -1983,13 +1985,15 @@ class LibjxlEncoder implements JxlEncoder {
         let chunkHandle: number;
         while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(this.wasmEncState)) !== 0) {
           const tTake0 = performance.now();
-          const chunk = takeBufferView(module, chunkHandle, "encode");
+          const chunk = takeBuffer(module, chunkHandle, "encode");
           this.tTakeTotal += performance.now() - tTake0;
           compressedBytes += chunk.data.byteLength;
           yield chunk.data;
         }
-        // C++ uses MakeBufferBorrowed (zero-copy into outbuf). takeBufferView (A4) returns
-        // subarray view eliminating the JS HEAPU8 materializing copy for same-tick chunk drains.
+        // C++ uses MakeBufferBorrowed (zero-copy into outbuf), but the chunks() consumer accumulates
+        // chunks and the `finally` below runs enc_free (frees outbuf) once the generator completes —
+        // so a borrowed subarray would dangle. takeBuffer copies each chunk (HEAPU8.slice) so the
+        // yielded bytes outlive enc_free. (Multi-chunk outputs >256 KB corrupted with the old borrow.)
       } finally {
         this.freeWasmState(); // handles advanced pointers + enc_free
       }
@@ -2074,7 +2078,7 @@ class LibjxlEncoder implements JxlEncoder {
             if (rc !== 0) throw new Error(`JXL streaming encode failed (${rc})`);
             let chunkHandle: number;
             while ((chunkHandle = module._jxl_wasm_enc_take_chunk!(encState)) !== 0) {
-              const chunk = takeBufferView(module, chunkHandle, "encode");
+              const chunk = takeBuffer(module, chunkHandle, "encode");
               compressedBytes += chunk.data.byteLength;
               yield chunk.data;
             }
@@ -2265,13 +2269,25 @@ async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
 
 async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
   const tier = _forcedTier ?? detectTier();
-  const modulePath = `./jxl-core.${tier}.js`;
-  const imported = await import(modulePath) as { default?: unknown };
-  const factory = imported.default;
-  if (typeof factory !== "function") {
-    throw new CapabilityMissing("Generated libjxl WASM module is missing default Emscripten factory");
-  }
+  // Prefer the split full-feature `enc` module emitted by scripts/build.mjs (it is a superset:
+  // decode + encode + planar + perceptual). Fall back to the legacy monolithic artifact when the
+  // split isn't present for this tier, so the facade works across the monolithic→split migration.
+  const candidates = [`enc.${tier}`, `${tier}`];
   const baseUrl = new URL("./", import.meta.url);
+  let factory: unknown;
+  let chosen: string | undefined;
+  let lastErr: unknown;
+  for (const name of candidates) {
+    try {
+      const imported = await import(`./jxl-core.${name}.js`) as { default?: unknown };
+      if (typeof imported.default === "function") { factory = imported.default; chosen = name; break; }
+    } catch (error) {
+      lastErr = error;
+    }
+  }
+  if (typeof factory !== "function" || chosen === undefined) {
+    throw new CapabilityMissing("Generated libjxl WASM module is missing default Emscripten factory", lastErr);
+  }
   const options: Record<string, unknown> = {
     locateFile: (path: string) => new URL(path, baseUrl).href,
   };
@@ -2281,7 +2297,7 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
     try {
       const fsMod = await import("node:fs/promises") as { readFile: (p: URL | string) => Promise<Uint8Array> };
       const urlMod = await import("node:url") as { fileURLToPath: (u: URL | string) => string };
-      options["wasmBinary"] = await fsMod.readFile(urlMod.fileURLToPath(new URL(`jxl-core.${tier}.wasm`, baseUrl)));
+      options["wasmBinary"] = await fsMod.readFile(urlMod.fileURLToPath(new URL(`jxl-core.${chosen}.wasm`, baseUrl)));
     } catch {
       // Node/Bun but binary unavailable; let Emscripten resolve it another way.
     }

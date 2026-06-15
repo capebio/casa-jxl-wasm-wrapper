@@ -1,4 +1,4 @@
-export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32";
+export type PixelFormat = "rgba8" | "rgba16" | "rgbaf32" | "rgb8";
 export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = {
     x: number;
@@ -32,6 +32,8 @@ export type DecodeEvent = {
     sourceScale?: number;
     progressiveRegion?: boolean;
     regionFallback?: "full-frame-then-crop";
+    progressiveSequence?: number;
+    passOrdinal?: number;
     frameIndex?: number;
     frameDuration?: number;
     frameName?: string;
@@ -46,6 +48,8 @@ export type DecodeEvent = {
     sourceScale?: number;
     progressiveRegion?: boolean;
     regionFallback?: "full-frame-then-crop";
+    progressiveSequence?: number;
+    passOrdinal?: number;
     frameIndex?: number;
     frameDuration?: number;
     frameName?: string;
@@ -276,6 +280,7 @@ interface LibjxlWasmModule {
     _jxl_wasm_decode_rgbaf32?(inputPtr: number, inputSize: number, downsample: number): number;
     _jxl_wasm_encode_rgba8(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
     _jxl_wasm_encode_rgba16?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
+    _jxl_wasm_encode_rgb16_planar?(rPtr: number, gPtr: number, bPtr: number, width: number, height: number, distance: number, effort: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, resampling: number): number;
     _jxl_wasm_encode_rgbaf32?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number): number;
     _jxl_wasm_encode_rgba8_with_metadata?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number): number;
     _jxl_wasm_encode_rgba8_with_metadata_adv?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, iccPtr: number, iccSize: number, exifPtr: number, exifSize: number, xmpPtr: number, xmpSize: number, idsPtr: number, valuesPtr: number, count: number): number;
@@ -298,8 +303,6 @@ interface LibjxlWasmModule {
     _jxl_wasm_dec_take_final?(state: number): number;
     _jxl_wasm_dec_free?(state: number): void;
     _jxl_wasm_encode_rgba8_with_sidecars?(pixelsPtr: number, width: number, height: number, distance: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number): number;
-    _jxl_wasm_encode_rgba8_with_sidecars_v2?(pixelsPtr: number, width: number, height: number, fullDistance: number, sidecarDistancesPtr: number, effort: number, hasAlpha: number, sidecarDimsPtr: number, numSidecars: number, resampling: number): number;
-    _jxl_wasm_downscale_rgba16?(srcPtr: number, sw: number, sh: number, dstPtr: number, dw: number, dh: number): void;
     _jxl_wasm_buffer_next?(handle: number): number;
     _jxl_wasm_decode_rgba8_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
     _jxl_wasm_decode_rgba16_region?(inputPtr: number, inputSize: number, cx: number, cy: number, cw: number, ch: number, downsample: number): number;
@@ -390,12 +393,33 @@ export declare function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Prom
  * Requires a WASM build with the butteraugli bridge (jxl_wasm_butteraugli_compare).
  */
 export declare function computeButteraugli(pixels1: ArrayBuffer | Uint8Array, pixels2: ArrayBuffer | Uint8Array, width: number, height: number): Promise<number>;
+export declare class ButteraugliComparator {
+    private readonly module;
+    private readonly width;
+    private readonly height;
+    private refPtr;
+    private refStatePtr;
+    private constructor();
+    static create(reference: ArrayBuffer | Uint8Array, width: number, height: number): Promise<ButteraugliComparator>;
+    compare(candidate: ArrayBuffer | Uint8Array): number;
+    dispose(): void;
+}
+/**
+ * WASM PSNR between two RGBA8 images. Returns dB (Infinity = identical).
+ * Requires rebuilt WASM with jxl_wasm_psnr_compare (Task B3). Returns null if unavailable.
+ */
+export declare function computePsnrWasm(pixels1: ArrayBuffer | Uint8Array, pixels2: ArrayBuffer | Uint8Array, width: number, height: number): Promise<number | null>;
+/**
+ * WASM SSIM between two RGBA8 images. Returns [0,1] (1 = identical).
+ * Requires rebuilt WASM with jxl_wasm_ssim_compare (Task B4). Returns null if unavailable.
+ */
+export declare function computeSsimWasm(pixels1: ArrayBuffer | Uint8Array, pixels2: ArrayBuffer | Uint8Array, width: number, height: number): Promise<number | null>;
 /**
  * Extract embedded JPEG reconstruction from JXL container (if present).
  * Container JXLs (created with encodeTileContainerRgba8/JXTC) may embed
  * the original JPEG bitstream for fast native preview. Scans container
  * header for jbrd (JPEG Reconstruction) box.
- * Returns null if no embedded JPEG or not a container JXL.
+ * Returns a copied Uint8Array, or null if no embedded JPEG or not a container JXL.
  */
 export declare function extractJpegReconstructionFromJxl(jxlData: ArrayBuffer | Uint8Array): Uint8Array | null;
 /**
@@ -468,51 +492,7 @@ export declare function encodeTileContainerRgba16(pixels: ArrayBuffer | Uint8Arr
     effort?: number;
     hasAlpha?: boolean;
 }): Promise<Uint8Array>;
-/** One pyramid level produced by encodeRgba8Pyramid. Ordered smallest-first, full image last. */
-export interface PyramidLevel {
-    data: Uint8Array;
-    width: number;
-    height: number;
-    /** Always 8 — this is the RGBA8 pyramid encoder. 16-bit RAW big levels are a separate path. */
-    bitsPerSample: 8;
-}
-/**
- * Encode an RGBA8 image into a JXL pyramid in one WASM call: each sidecar level is
- * area-box downscaled (cascaded, smallest from previous) and encoded at its OWN distance
- * (no 1.5 floor); the full image is encoded at `fullDistance`. `sidecarSizes[i]` is a
- * long-edge target and pairs with `sidecarDistances[i]` BY INDEX. Pass parallel,
- * equal-length arrays — do NOT pre-filter. Sizes >= the image long edge are skipped by the
- * bridge (the matching distance slot is ignored too). Returns levels smallest-first, full
- * image last; every level is 8-bit.
- */
-export declare function encodeRgba8Pyramid(pixels: ArrayBuffer | Uint8Array, width: number, height: number, options: {
-    fullDistance: number;
-    sidecarSizes: readonly number[];
-    sidecarDistances: readonly number[];
-    effort?: number;
-    hasAlpha?: boolean;
-    resampling?: number;
-}): Promise<PyramidLevel[]>;
-/** One 16-bit pyramid level from encodeRgba16. */
-export interface PyramidLevel16 {
-    data: Uint8Array;
-    width: number;
-    height: number;
-    bitsPerSample: 16;
-}
-/**
- * Encode a single RGBA16 image to JXL (used for RAW big pyramid levels {2048, full}).
- */
-export declare function encodeRgba16(pixels: Uint16Array, width: number, height: number, options: {
-    distance: number;
-    effort?: number;
-    hasAlpha?: boolean;
-}): Promise<PyramidLevel16>;
-/**
- * Area-box downscale an RGBA16 buffer (4 channels x uint16, interleaved) inside WASM.
- * Used to build 16-bit RAW pyramid levels (e.g. full -> 2048) with no 8-bit roundtrip.
- */
-export declare function downscaleRgba16(src: Uint16Array, srcWidth: number, srcHeight: number, dstWidth: number, dstHeight: number): Promise<Uint16Array>;
+export declare function encodeRgb16Planar(r: Uint16Array | number, g: Uint16Array | number, b: Uint16Array | number, width: number, height: number, distance?: number, effort?: number, progressiveDc?: number, progressiveAc?: number, qProgressiveAc?: number, buffering?: number, groupOrder?: number, resampling?: number): Promise<Uint8Array>;
 /**
  * Decode a rectangular region from a JXTC tile container produced by
  * encodeTileContainerRgba8. Each overlapping tile is decoded as a standalone
@@ -582,5 +562,18 @@ export declare function pixelToNormalizedExtent(region: Region, imageWidth: numb
     w: number;
     h: number;
 };
+export interface PerceptualConstancySupport {
+    hasScalar: boolean;
+    hasAvx2Bulk: boolean;
+}
+export declare function getPerceptualConstancySupport(): Promise<PerceptualConstancySupport>;
+/**
+ * Apply the full perceptual constancy transform (B + log geodesic + Molchanov + hybrid spring + f(c))
+ * using the fastest available C++ path from the bridge (AVX2 bulk preferred).
+ * Expects separate channel SoA buffers (length = numPixels). Mutates outputs in place if provided,
+ * otherwise writes to the input arrays.
+ * This is the direct JS hook for the lightbox progressive paint path (toggleable, runtime only).
+ */
+export declare function perceptualConstancyApplyBulk(r: Float32Array, g: Float32Array, b: Float32Array, sat: number, vib: number, vibZero: boolean, outR?: Float32Array, outG?: Float32Array, outB?: Float32Array): Promise<void>;
 export {};
 //# sourceMappingURL=facade.d.ts.map

@@ -11,6 +11,8 @@ export interface LoaderOptions {
     };
     cacheDbName?: string;
     wasmUrl?: string;
+    signal?: AbortSignal;
+    priority?: 'high' | 'low' | 'auto';
 }
 export declare function loadJxlModule(manifest: JxlWasmManifest, options?: LoaderOptions): Promise<WebAssembly.Module>;
 //# sourceMappingURL=loader.d.ts.map
