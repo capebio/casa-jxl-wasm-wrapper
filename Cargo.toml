@@ -17,6 +17,14 @@ jxl-encode = ["raw-pipeline/jxl-encode"]
 jxl-lowlevel = ["raw-pipeline/jxl-lowlevel"]
 c-perceptual = ["raw-pipeline/c-perceptual"]
 
+# Native rayon forwarder (no wasm-bindgen-rayon). The native bench builds
+# raw-pipeline with default-features=false, which silently dropped `parallel` —
+# so the tone pass (process / process_rgba / process_16bit) ran the single-threaded
+# scalar branch. Measurement showed tone as the dominant cost (~600-790ms/24MP)
+# precisely because of this. rayon par_chunks is per-pixel deterministic =>
+# byte-identical output. Use for representative native numbers.
+parallel = ["raw-pipeline/parallel"]
+
 [dependencies]
 wasm-bindgen = "0.2"
 js-sys = "0.3"

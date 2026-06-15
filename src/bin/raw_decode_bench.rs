@@ -121,12 +121,23 @@ fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -
 }
 
 /// Decode JXL bytes via jpegxl-rs. Returns min decode duration over RUNS.
+///
+/// Uses a multi-threaded `ThreadsRunner` so the decode side matches the encode
+/// side (which already threads). The previous single-threaded `decoder_builder()`
+/// left libjxl decode serial — the measured ~270-740ms decode was serial cost.
+/// libjxl MT decode is deterministic => byte-identical reconstruction.
 fn bench_jxl_decode(jxl_bytes: &[u8]) -> Option<Duration> {
     use jpegxl_rs::decode::decoder_builder;
+    use jpegxl_rs::ThreadsRunner;
 
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let mut best = Duration::MAX;
     for _ in 0..RUNS {
-        let decoder = decoder_builder().build().ok()?;
+        // Runner must outlive the decoder; declared first so it drops last.
+        let runner = ThreadsRunner::new(None, Some(threads))?;
+        let decoder = decoder_builder().parallel_runner(&runner).build().ok()?;
         let t = Instant::now();
         let _ = decoder.decode(jxl_bytes).ok()?;
         let elapsed = t.elapsed();
@@ -264,7 +275,8 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone_dur;
-    let mpps = mp as f64 / 1e6 / (ms(demosaic_dur) / 1000.0);
+    let demosaic_s = ms(demosaic_dur) / 1000.0;
+    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
     println!("DNG  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -334,7 +346,8 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone_dur;
-    let mpps = mp as f64 / 1e6 / (ms(demosaic_dur) / 1000.0);
+    let demosaic_s = ms(demosaic_dur) / 1000.0;
+    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
     println!("CR2  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -385,8 +398,12 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     let w = info.width as usize;
     let h = info.height as usize;
     let mp = w * h;
-    let strip = &data[info.strip_offset as usize
-        ..info.strip_offset as usize + info.strip_byte_count as usize];
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    if strip_end > data.len() {
+        eprintln!("  [skip] {path} — strip out of bounds ({strip_end} > {})", data.len());
+        return;
+    }
+    let strip = &data[info.strip_offset as usize..strip_end];
 
     let (decomp_dur, raw) = bench(|| decompress::decompress(strip, w, h).expect("ORF decompress"));
     let (demosaic_dur, rgb16) = bench(|| demosaic::demosaic_rggb(&raw, w, h).expect("demosaic"));
@@ -405,7 +422,8 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = parse_dur + decomp_dur + demosaic_dur + tone_dur;
-    let mpps = mp as f64 / 1e6 / (ms(demosaic_dur) / 1000.0);
+    let demosaic_s = ms(demosaic_dur) / 1000.0;
+    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
     println!("ORF  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -611,25 +629,28 @@ fn env_or_default(key: &str, default: &str) -> String {
 }
 
 fn scan_orf_dir(root: &str, limit: usize, name_filter: Option<&str>) -> Vec<String> {
+    // Collect *all* matches, then sort, then truncate to `limit`. Selecting the
+    // first N in filesystem readdir order (which varies run-to-run) and only
+    // sorting afterwards yielded a non-reproducible file set; sort-then-truncate
+    // makes the benchmark corpus deterministic (lens 27: benchmark integrity).
     let mut files = Vec::new();
+    let filter_lc = name_filter.map(|f| f.to_lowercase()); // hoist out of the loop
     if let Ok(rd) = std::fs::read_dir(root) {
-        for e in rd {
-            if let Ok(e) = e {
-                let p = e.path();
-                if p.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("orf")) {
-                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    if let Some(f) = name_filter {
-                        if !name.to_lowercase().contains(&f.to_lowercase()) { continue; }
-                    }
-                    files.push(p.to_string_lossy().into_owned());
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("orf")) {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if let Some(f) = &filter_lc {
+                    if !name.to_lowercase().contains(f.as_str()) { continue; }
                 }
+                files.push(p.to_string_lossy().into_owned());
             }
-            if files.len() >= limit { break; }
         }
     } else {
         eprintln!("  [scan] root not readable: {root}");
     }
     files.sort();
+    files.truncate(limit);
     files
 }
 

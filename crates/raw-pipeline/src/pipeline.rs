@@ -367,9 +367,6 @@ impl PerceptualGrid {
                               // C++ AVX2 bulk (via tile in !par loops) is optional native turbo when feature + pc flag.
         let mut data = vec![0f32; SZ * SZ * SZ * 3];
         let scale = 1.0f32; // fixed for grid; vib_zero path (mode common case). Varying sat/vib falls back or rebuilds.
-        let vib = 0.0f32;
-        let vibz = true;
-        let m = &CAM_TO_SRGB; // representative; grid operates post-matrix in the tone stage.
         for ri in 0..SZ {
             let r = (ri as f32 / (SZ - 1) as f32) * 1.5;
             for gi in 0..SZ {
