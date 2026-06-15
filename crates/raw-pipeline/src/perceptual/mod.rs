@@ -5,6 +5,7 @@
 mod blur;
 pub(crate) mod butteraugli;
 pub mod engine;
+pub mod reference_ffi;
 mod psnr;
 pub(crate) mod ssim;
 pub(crate) mod xyb;
