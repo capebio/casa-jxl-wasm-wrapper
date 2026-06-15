@@ -1,0 +1,24 @@
+TestName: metrics-performance
+RunTimestamp: 2026-06-14T19-50-39Z
+Agent: haiku
+Metric: psnr,ssim,butteraugli
+Source: Pogonospermum cleomoides
+Target: 1920x1433
+Quality: 85
+Effort: 0
+Passes: 2
+TimeBase: 2026-06-14T19:
+
+---
+runs[0]{run|psnr_ms|ssim_ms|butt_ms|total_ms}:
+
+# Aggregates
+RunCount: 0
+AvgTotal: NaN ms
+AvgPsnr: NaN ms
+AvgSsim: NaN ms
+AvgButteraugli: NaN ms
+MinTotal: Infinity ms
+MaxTotal: -Infinity ms
+StdDev: NaN ms
+PassedGate: 0/0
