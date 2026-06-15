@@ -1405,6 +1405,8 @@ class LibjxlDecoder implements JxlDecoder {
       let resolvedDownsample: 1 | 2 | 4 | 8 = this.options.downsample ?? 1;
       let resizePlan: ResizePlan | null = null;
       let progressiveSequence = 0;
+      let progFramePrepMs = 0;
+      let progFrameCount = 0;
       const takeAndWrap = (handle: number): { pixels: { data: Uint8Array; width: number; height: number; region?: Region }; evInfo: ImageInfo } | null => {
         if (handle === 0) return null;
         const buf = retainBufferView(module, handle, "decode");
@@ -1513,6 +1515,14 @@ class LibjxlDecoder implements JxlDecoder {
           gotRealFlush = true;
           flushCount++;
           const stage: DecodeStage = flushCount === 1 ? "dc" : "pass";
+          // Skip intermediate frame processing when consumer only wants the final frame.
+          // Must still consume the WASM buffer handle to unblock the decoder.
+          if (!this.options.emitEveryPass && this.options.progressionTarget === "final") {
+            const h = decTakeFlushed(dec);
+            if (h !== 0) { retainBufferView(module, h, "decode").release(); }
+            continue;
+          }
+          const tFramePrep0 = performance.now();
           const wrapped = takeAndWrap(decTakeFlushed(dec));
           if (wrapped !== null) {
             const { pixels: rawPixels, evInfo } = wrapped;
@@ -1532,6 +1542,8 @@ class LibjxlDecoder implements JxlDecoder {
               const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4, resizePlan);
               outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
             }
+            progFramePrepMs += performance.now() - tFramePrep0;
+            progFrameCount++;
 
             const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
               ? { ...evInfo, width: outPixels.width, height: outPixels.height }
@@ -1566,6 +1578,7 @@ class LibjxlDecoder implements JxlDecoder {
       }
 
       if (done) {
+        const tFinalPrep0 = performance.now();
         const wrapped = takeAndWrap(decTakeFinal(dec));
         if (wrapped !== null) {
           const { pixels: rawPixels, evInfo } = wrapped;
@@ -1590,6 +1603,13 @@ class LibjxlDecoder implements JxlDecoder {
           if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
             const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4, resizePlan);
             outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
+          }
+
+          progFramePrepMs += performance.now() - tFinalPrep0;
+          progFrameCount++;
+          if (onMetric) {
+            onMetric("prog_frame_prep_ms", progFramePrepMs);
+            onMetric("prog_frame_count", progFrameCount);
           }
 
           const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)
@@ -1677,11 +1697,14 @@ class LibjxlDecoder implements JxlDecoder {
         (fmt === "rgba16" && !!module._jxl_wasm_decode_rgba16_region) ||
         (fmt === "rgbaf32" && !!module._jxl_wasm_decode_rgbaf32_region)
       );
+      const tWasmDec0 = performance.now();
       const decoded = callDecodeFromPtr(module, inputPtr, totalSize, this.options.downsample ?? 1, fmt, cppDidCrop ? regionForDecode : null);
       decodedHandle = decoded.handle;
+      this.options.onMetric?.("shot_wasm_ms", performance.now() - tWasmDec0);
       // If C++ did the crop, decoded.width/height already reflect the region; no further JS crop.
       // Otherwise, scale region into downsampled coords and apply in JS.
       const ds = this.options.downsample ?? 1;
+      const tTransform0 = performance.now();
       const scaledRegion = (!cppDidCrop && regionForDecode != null) ? {
         x: Math.trunc(regionForDecode.x / ds),
         y: Math.trunc(regionForDecode.y / ds),
@@ -1721,6 +1744,7 @@ class LibjxlDecoder implements JxlDecoder {
       const actualScale = this.options.downsample ?? 1;
       const onMetric = this.options.onMetric;
       if (onMetric) {
+        onMetric("shot_transform_ms", performance.now() - tTransform0);
         onMetric("decode_scale_used", actualScale);
         onMetric("source_pixels_decoded", decoded.width * decoded.height);
         if (this.options.region != null) {

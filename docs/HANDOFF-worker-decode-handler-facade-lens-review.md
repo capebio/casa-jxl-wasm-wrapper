@@ -295,3 +295,28 @@ The two structural wins are memory-bandwidth and lifecycle truthfulness. R14-F1 
 The correctness cluster (R14-W1, R14-D1, R14-F2, R14-F3/F6, R14-F8) closes lifecycle gaps that today only stay invisible because the scheduler's release/budget machinery sweeps up after them: zombie sessions born after their own death notice, early-target decodes that hold worker slots until externally released, 16-bit progressive frames mislabeled as 8-bit, capability gates that test the wrong bridge generation, and a JPEG-extraction heuristic that will eventually hand a viewer garbage bytes. Fixing these makes worker slots return promptly under preemption pressure and removes a class of "works until the build composition changes" latent failures.
 
 Net effect: the worker boundary gets honest (every session that ends, ends once, with the right message and no stragglers), the WASM boundary gets cheaper (one materializing copy per frame, exactly where the output is born), and the measurement tooling that steers encode quality gets fast enough to run routinely rather than exceptionally — groundwork that the pyramid gallery, AR identification latency budgets, and the perceptual color engine all draw on.
+
+---
+
+## Conclusion — DONE (2026-06-16)
+
+**All valid R14 findings were already implemented in prior sessions** before this round began. Verified in-situ against `worker.ts`, `decode-handler.ts`, and `facade.ts`. No previously-unimplemented items remained in the "implement" column.
+
+**This session implemented:**
+- Timing hooks in `facade.ts` (`prog_frame_prep_ms`, `prog_frame_count` via `onMetric`) measuring per-frame buffer-take + region/downsample + resize cost across all progressive decode paths.
+- One-shot WASM decode timer (`shot_wasm_ms`) and transform timer (`shot_transform_ms`) in `eventsOneShot`.
+- Heap memory delta measurement per RAW file in `StandardMultifileTest.mjs` (`heap_delta=…MB` per file).
+- `onMetric` wired into `decodeJxl()` so `prog_frame_prep_ms`, `shot_wasm_ms`, `shot_transform_ms` appear in benchmark results.
+- **Optimization (new):** `eventsProgressive` now skips `takeAndWrap` on intermediate flushes (dc/pass) when `progressionTarget === "final"` and `emitEveryPass === false`. Avoids 2× full-frame pixel copies (~10–22MB) per shot decode. Handle still consumed via `retainBufferView(...).release()` to unblock the WASM decoder.
+
+**Benchmark results (R14-hooks-opt, 2026-06-16, 2.71 GHz):**
+- FLIP simd/mt shot_dec (median across 7 large files): ~280ms / ~72ms
+- FLIP simd/mt first_paint: ~150ms / ~42ms
+- Progressive frame prep (`prog_frame_prep_ms`): 7–25ms for 3 frames on 1920×1440 RGBA8 (dominated by the single mandatory materializing copy of the final frame)
+- `shot_wasm_ms` / `shot_transform_ms`: 0 for this corpus — test JXL files use progressive containers, routing through `eventsProgressive` not `eventsOneShot`; hooks are live and will fire for non-progressive containers
+- Heap delta per RAW: ≤ 0.1 MB (GC-masked); ORF shows –1.3 MB (GC triggered during decode)
+
+**Rejected (with reasons logged in `docs/rejected optimizations.md`):**
+- R14-D2: pause check between inner while iterations — `push()` is synchronous; no macrotask boundary exists there
+- R14-F10: `computeButteraugliDownsampled` — function absent from codebase
+- R14-F14: `distanceFromQuality` formula change — behavior change requiring user sign-off before implementation

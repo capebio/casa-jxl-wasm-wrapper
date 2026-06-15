@@ -394,3 +394,18 @@ Targets: `.worktrees/check-368/src/bin/raw_decode_bench.rs`, `.worktrees/check-3
 - **Warmup run in bench().** Min-of-3 already discards the cold first-iteration outlier for the reported value; warmup only adds wall time.
 - **Cache process_orf_to_rgba8 re-decode in P2200 ROI scan.** The re-read+re-decode is entirely outside timed regions (produces pixels to crop only). Dedup saves scan wall-time but changes nothing measured; not worth the coupling.
 - **Emit p50/max alongside min in results_native.json.** Schema contract is `"reporting":"minimum"`; widening is a cross-file schema change, out of scope.
+
+---
+
+## 2026-06-16 — R14 lens review: worker.ts, decode-handler.ts, facade.ts (agent findings)
+
+Targets: `packages/jxl-worker-browser/src/worker.ts`, `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-wasm/src/facade.ts`
+
+**R14-D2: "Add pause check between inner while iterations when push() spans macrotask boundaries."**
+Rejected. `LibjxlDecoder.push()` (facade.ts) returns `void` (strictly synchronous — the inner while loop runs WASM `decPush` to completion with no `await` or microtask yield). The premise that macrotask boundaries exist between inner while iterations is false for any JXL container whose decode fits in a single event-loop turn. The existing pause check at the top of the outer `while (!done && !this.cancelled)` loop (before `waitForQueueItem`) is the correct location — it fires after each chunk boundary where the event loop can actually yield. Adding an inner check would be dead code for the synchronous push path and misleading about where yield points exist. Verified: `push()` in wasm-loader.ts typed `void | Promise<void>`; the concrete `LibjxlDecoder.push()` implementation returns `void`.
+
+**R14-F10: "Eliminate intermediate allocation in computeButteraugliDownsampled."**
+Not applicable — `computeButteraugliDownsampled` does not exist in the current codebase (not in facade.ts, not in any exported symbol). The finding likely referenced a prototype or a different version. No action.
+
+**R14-F14: "Replace `distanceFromQuality(q)` formula with libjxl reference."**
+Deferred pending user sign-off. The proposed formula diverges from the existing implementation's calibrated behavior for this pipeline's encoding quality range. Changing the formula would shift encoded file sizes and visual quality for all callers without a controlled A/B comparison. Requires: (1) user confirmation that behavior change is acceptable, (2) before/after perceptual comparison across the test corpus. Not rejected outright — flagged for future review.

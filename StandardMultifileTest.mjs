@@ -276,6 +276,7 @@ async function encodeJxlVariant(rgba, width, height, extra = {}) {
 
 // 6. JXL Decoding Helper with optional ROI region
 async function decodeJxl(jxlBytes, isProgressive, options = {}) {
+  const metrics = {};
   const decoder = createDecoder({
     format: "rgba8",
     progressionTarget: options.progressionTarget ?? "final",
@@ -284,6 +285,7 @@ async function decodeJxl(jxlBytes, isProgressive, options = {}) {
     downsample: options.downsample ?? 1,
     preserveIcc: false, preserveMetadata: false,
     region: options.region ?? null,
+    onMetric: (name, value) => { metrics[name] = value; },
   });
 
   let passCount = 0;
@@ -310,7 +312,7 @@ async function decodeJxl(jxlBytes, isProgressive, options = {}) {
     try { await decoder.dispose(); } catch (_) {}
   }
   const ms = performance.now() - t0;
-  return { ms, firstFrameMs: firstFrameMs ?? ms, passCount, pixels: decodedPixels };
+  return { ms, firstFrameMs: firstFrameMs ?? ms, passCount, pixels: decodedPixels, metrics };
 }
 
 // Streaming chunked-input progressive decode simulation (covers test_1 / progressive-timing-benchmark chunked steps)
@@ -383,6 +385,7 @@ async function main() {
 
     const ext = extname(resolvedPath).toLowerCase();
     const raw = new Uint8Array(readFileSync(resolvedPath));
+    const heapBefore = process.memoryUsage().heapUsed;
     const tRawStart = performance.now();
     let rgb, srcW, srcH;
     let rawDecompress = 0, rawDemosaic = 0, rawTonemap = 0, rawOrient = 0;
@@ -419,6 +422,7 @@ async function main() {
       rgb = decoded.take_rgb(); srcW = decoded.width; srcH = decoded.height; decoded.free();
     }
     const rawMs = performance.now() - tRawStart;
+    const rawHeapDeltaMb = ((process.memoryUsage().heapUsed - heapBefore) / (1024 * 1024)).toFixed(1);
 
     const tScaleStart = performance.now();
     const longEdge = Math.max(srcW, srcH);
@@ -428,7 +432,7 @@ async function main() {
     const rgba = scale < 1 ? rgb_to_rgba(downscale_rgb(rgb, srcW, srcH, tgtW, tgtH)) : rgb_to_rgba(rgb);
     const scaleMs = performance.now() - tScaleStart;
 
-    console.log(`  Loaded ${basename(resolvedPath)}: decode=${Math.round(rawMs)}ms scale=${Math.round(scaleMs)}ms (${tgtW}x${tgtH}) preview_demosaic=${Math.round(previewDem)} down=${Math.round(previewDown)} fast=${fastPrev}`);
+    console.log(`  Loaded ${basename(resolvedPath)}: decode=${Math.round(rawMs)}ms scale=${Math.round(scaleMs)}ms (${tgtW}x${tgtH}) heap_delta=${rawHeapDeltaMb}MB preview_demosaic=${Math.round(previewDem)} down=${Math.round(previewDown)} fast=${fastPrev}`);
     loadedFiles.push({ file: basename(resolvedPath), rgba, tgtW, tgtH, rawMs, scaleMs, rawDecompress, rawDemosaic, rawTonemap, rawOrient, previewDem, previewDown, fastPrev, lbPack, lbW: lbWw, lbH: lbHh, thPack, thW: thWw, thH: thHh });
   }
   console.log("");
@@ -631,6 +635,11 @@ async function main() {
         mod_prog_enc_ms: Math.round(modProgEncMs),
         photon_prog_enc_ms: Math.round(photonEncMs),
         planar16_shot_enc_ms: Math.round(planar16ShotMs),
+        // R14 timing hooks: frame prep (buffer take + region/downsample + resize) and WASM decode
+        prog_frame_prep_ms: Math.round(progDec.metrics?.prog_frame_prep_ms ?? 0),
+        prog_frame_count: progDec.metrics?.prog_frame_count ?? 0,
+        shot_wasm_ms: Math.round(shotDec.metrics?.shot_wasm_ms ?? 0),
+        shot_transform_ms: Math.round(shotDec.metrics?.shot_transform_ms ?? 0),
       });
       console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | body=${Math.round(bodyMs)}ms | planar16_shot=${Math.round(planar16ShotMs)} | +ds2/region/chunked/mod/photon +planar16 variants`);
     }
@@ -662,8 +671,8 @@ async function main() {
       `first=${ff.simd_first || 0}/${ff.mt_first || 0} (${ff.spd_first || 0}x) ` +
       `final=${ff.simd_final || 0}/${ff.mt_final || 0} (${ff.spd_final || 0}x) ` +
       `shot=${ff.simd_shot || 0}/${ff.mt_shot || 0} (${ff.spd_shot || 0}x) | ` +
-      `RICH_s prog=${s.prog_enc_ms || 0} first=${s.prog_first_ms || 0} final=${s.prog_final_ms || 0} shot=${s.shot_dec_ms || 0} body=${s.body_wall_ms || 0}ms | ` +
-      `RICH_m prog=${m.prog_enc_ms || 0} first=${m.prog_first_ms || 0} final=${m.prog_final_ms || 0} shot=${m.shot_dec_ms || 0} body=${m.body_wall_ms || 0}ms`
+      `RICH_s prog=${s.prog_enc_ms || 0} first=${s.prog_first_ms || 0} final=${s.prog_final_ms || 0} shot=${s.shot_dec_ms || 0} body=${s.body_wall_ms || 0}ms prep=${s.prog_frame_prep_ms || 0}ms[${s.prog_frame_count || 0}f] wasm=${s.shot_wasm_ms || 0}+tx=${s.shot_transform_ms || 0} | ` +
+      `RICH_m prog=${m.prog_enc_ms || 0} first=${m.prog_first_ms || 0} final=${m.prog_final_ms || 0} shot=${m.shot_dec_ms || 0} body=${m.body_wall_ms || 0}ms prep=${m.prog_frame_prep_ms || 0}ms[${m.prog_frame_count || 0}f] wasm=${m.shot_wasm_ms || 0}+tx=${m.shot_transform_ms || 0}`
     );
   }
   console.log("  (FLIP = 10-round interleaved medians for core stability; RICH = full variant diagnostic pass with explicit body wall)");
@@ -1268,7 +1277,13 @@ async function main() {
   }
 }
 
-main().then(() => process.exit(0)).catch(err => {
+main().then(() => {
+  // Force exit after a timeout to ensure no hanging worker threads
+  setTimeout(() => {
+    console.log("\n⏱️  Force-exit timeout (all workers should be closed by now)");
+    process.exit(0);
+  }, 2000);
+}).catch(err => {
   console.error("Benchmark failed:", err);
-  process.exit(1);
+  setTimeout(() => process.exit(1), 500);
 });
