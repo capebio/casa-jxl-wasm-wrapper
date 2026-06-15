@@ -10,8 +10,6 @@ export declare class DecodeHandler {
     private readonly callbacks;
     private state;
     private chunkQueue;
-    private queueDepth;
-    private queuedBytes;
     private cancelled;
     private ended;
     private inputClosed;
@@ -54,7 +52,6 @@ export declare class DecodeHandler {
     private checkBudget;
     private failSession;
     private postBudgetExceeded;
-    private postFirstPixelMetric;
     private postMetric;
 }
 export {};

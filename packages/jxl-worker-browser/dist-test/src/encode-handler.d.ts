@@ -23,6 +23,14 @@ export declare class EncodeHandler {
     private lastDrainAllowed;
     private encoder;
     private disposePromise;
+    private readonly stageStartMs;
+    private createEncoderMs;
+    private totalWaitForPixelsMs;
+    private totalPushPixelsMs;
+    private finishMs;
+    private totalChunkYieldMs;
+    private firstByteMs;
+    private lastPushStart;
     private readonly _drainMsg;
     private readonly _chunkMsg;
     constructor(opts: MsgEncodeStart, wasm: JxlModule, callbacks: EncodeHandlerCallbacks);
@@ -30,6 +38,7 @@ export declare class EncodeHandler {
     onFinish(): void;
     onCancel(reason?: string): Promise<void>;
     private run;
+    private postFinalMetrics;
     private finishSession;
     private isTerminal;
     private clearPixelQueue;
@@ -40,6 +49,7 @@ export declare class EncodeHandler {
     private compactQueue;
     private feedEncoder;
     private maybePostDrain;
+    private postMetric;
     private readEncoderChunks;
     private failSession;
 }

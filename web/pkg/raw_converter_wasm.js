@@ -1,4 +1,6 @@
 /* @ts-self-types="./raw_converter_wasm.d.ts" */
+import { startWorkers } from './snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.js';
+
 
 /**
  * Timing results for the decompress + demosaic stages only.
@@ -1063,6 +1065,15 @@ export function downscale_rgba(src, src_w, src_h, dst_w, dst_h) {
 }
 
 /**
+ * @param {number} num_threads
+ * @returns {Promise<any>}
+ */
+export function initThreadPool(num_threads) {
+    const ret = wasm.initThreadPool(num_threads);
+    return ret;
+}
+
+/**
  * Parse ORF EXIF metadata only — no decompress, no demosaic, no tonemap.
  * Returns camera, lens, exposure, GPS for batch ingest and gallery views.
  * @param {Uint8Array} data
@@ -1113,8 +1124,8 @@ export function process_cr2(data, exposure_ev, contrast, highlights, shadows, wh
 /**
  * Variant of `process_cr2` with explicit output flags.
  *
- * `output_flags` bitmask: 1 = full RGB8, 2 = 1800 px lightbox RGB16, 4 = 360 px thumb RGB16.
- * Pass `7` to match `process_cr2`.
+ * `output_flags` bitmask: 1 = full RGB8, 2 = 1800 px lightbox RGB16, 4 = 360 px thumb RGB16, 8 = full RGB16 (M3).
+ * Pass `7` for classic; 15 for M3 full16 too.
  * @param {Uint8Array} data
  * @param {number} output_flags
  * @param {number} exposure_ev
@@ -1262,7 +1273,7 @@ export function process_orf(data, exposure_ev, contrast, highlights, shadows, wh
  * - `4`: 360 px thumbnail RGB16 cache (needed to construct a thumb `LookRenderer`)
  *
  * Absent outputs have empty buffers and zero dims in `ProcessResult`.
- * Pass `7` to match the behaviour of `process_orf`.
+ * Pass `7` for classic (no full16). For M3 16-bit big levels pass e.g. 15 (7|8).
  * @param {Uint8Array} data
  * @param {number} output_flags
  * @param {number} exposure_ev
@@ -1323,6 +1334,50 @@ export function rotate_rgb8(src, width, height, turns) {
     }
     return RotateResult.__wrap(ret[0]);
 }
+
+export class wbg_rayon_PoolBuilder {
+    static __wrap(ptr) {
+        const obj = Object.create(wbg_rayon_PoolBuilder.prototype);
+        obj.__wbg_ptr = ptr;
+        wbg_rayon_PoolBuilderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        wbg_rayon_PoolBuilderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 0);
+    }
+    build() {
+        wasm.wbg_rayon_poolbuilder_build(this.__wbg_ptr);
+    }
+    /**
+     * @returns {number}
+     */
+    numThreads() {
+        const ret = wasm.wbg_rayon_poolbuilder_numThreads(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    receiver() {
+        const ret = wasm.wbg_rayon_poolbuilder_receiver(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) wbg_rayon_PoolBuilder.prototype[Symbol.dispose] = wbg_rayon_PoolBuilder.prototype.free;
+
+/**
+ * @param {number} receiver
+ */
+export function wbg_rayon_start_worker(receiver) {
+    wasm.wbg_rayon_start_worker(receiver);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -1332,6 +1387,14 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_undefined_35bb9f4c7fd651d5: function(arg0) {
             const ret = arg0 === undefined;
+            return ret;
+        },
+        __wbg___wbindgen_memory_9544558992fc5400: function() {
+            const ret = wasm.memory;
+            return ret;
+        },
+        __wbg___wbindgen_module_598c7f098f85bbd9: function() {
+            const ret = wasmModule;
             return ret;
         },
         __wbg___wbindgen_throw_9c31b086c2b26051: function(arg0, arg1) {
@@ -1381,6 +1444,10 @@ function __wbg_get_imports() {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_startWorkers_8b582d57e92bd2d4: function(arg0, arg1, arg2) {
+            const ret = startWorkers(arg0, arg1, wbg_rayon_PoolBuilder.__wrap(arg2));
+            return ret;
+        },
         __wbg_static_accessor_GLOBAL_THIS_02344c9b09eb08a9: function() {
             const ret = typeof globalThis === 'undefined' ? null : globalThis;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
@@ -1441,6 +1508,9 @@ const ProcessResultFinalization = (typeof FinalizationRegistry === 'undefined')
 const RotateResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_rotateresult_free(ptr, 1));
+const wbg_rayon_PoolBuilderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wbg_rayon_poolbuilder_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();

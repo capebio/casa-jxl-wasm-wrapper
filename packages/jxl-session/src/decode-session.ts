@@ -10,6 +10,7 @@ import type {
   ImageInfo,
   WorkerToMainMessage,
   MsgDecodeStart,
+  CodecMetric,
 } from "@casabio/jxl-core";
 import { JxlError, type JxlErrorCode } from "@casabio/jxl-core/errors";
 import type { Scheduler } from "@casabio/jxl-scheduler";
@@ -209,6 +210,35 @@ export class DecodeSessionImpl implements DecodeSession {
   // Worker message handling
   // ---------------------------------------------------------------------------
 
+  // Re-emit metrics folded onto decode_progress / decode_final frames as CodecMetric.
+  // Each field is optional; absent fields (e.g. a Node worker that posts metrics the
+  // old way, or a zero-copy frame) emit nothing — additive, never double-counts.
+  private emitFoldedMetrics(m: {
+    copyMs?: number;
+    copiedBytes?: number;
+    timeToFirstPixelMs?: number;
+    outputBytes?: number;
+    timeToFinalMs?: number;
+  }): void {
+    const cb = this.opts.onMetric;
+    if (cb === undefined) return;
+    const emit = (name: CodecMetric["name"], value: number | undefined): void => {
+      if (value === undefined) return;
+      try {
+        cb({ name, value } as CodecMetric);
+      } catch (e) {
+        if (typeof process !== "undefined" && process.env?.["NODE_ENV"] === "development") {
+          console.warn(`[jxl-session] onMetric threw`, e);
+        }
+      }
+    };
+    emit("copy_to_transfer_ms", m.copyMs);
+    emit("copied_bytes", m.copiedBytes);
+    emit("time_to_first_pixel_ms", m.timeToFirstPixelMs);
+    emit("output_bytes", m.outputBytes);
+    emit("time_to_final_ms", m.timeToFinalMs);
+  }
+
   private handleMessage(msg: WorkerToMainMessage): void {
     if (this.terminated) return;
     // All session-routed WorkerToMainMessage variants carry sessionId (worker_* lifecycle
@@ -221,6 +251,11 @@ export class DecodeSessionImpl implements DecodeSession {
         this.lastInfo = msg.info;
         if (!this.headerDeferred.settled) {
           this.headerDeferred.resolve(msg.info);
+        }
+        // progressionTarget "header" stops the worker right after the header — it
+        // sends no decode_final — so complete here, otherwise done() hangs forever.
+        if ((this.opts.progressionTarget ?? "final") === "header") {
+          this.finish(msg.info);
         }
         break;
 
@@ -240,6 +275,18 @@ export class DecodeSessionImpl implements DecodeSession {
           ...(msg.region !== undefined ? { region: msg.region } : {}),
         };
         this.frameStream.push(ev);
+        // Folded per-frame metrics ride on the frame to avoid separate metric IPCs;
+        // re-emit them through onMetric so telemetry consumers see them uniformly.
+        this.emitFoldedMetrics(msg);
+        // Mirror the worker's early-finish: for a non-"final" target with
+        // emitEveryPass disabled, the worker stops after the first progress and
+        // sends no decode_final, so complete here or done() would hang.
+        if (
+          (this.opts.progressionTarget ?? "final") !== "final" &&
+          (this.opts.emitEveryPass ?? true) === false
+        ) {
+          this.finish(msg.info);
+        }
         break;
       }
 
@@ -254,6 +301,7 @@ export class DecodeSessionImpl implements DecodeSession {
           ...(msg.region !== undefined ? { region: msg.region } : {}),
         };
         this.frameStream.push(ev);
+        this.emitFoldedMetrics(msg);
         this.finish(msg.info);
         break;
       }

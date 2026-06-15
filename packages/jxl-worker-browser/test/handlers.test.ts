@@ -426,11 +426,10 @@ describe("browser codec handlers", () => {
           progressiveSequence?: number;
           passOrdinal?: number;
           region?: { x: number; y: number; w: number; h: number };
+          copyMs?: number;
+          copiedBytes?: number;
         }
       | undefined;
-    const metricNames = messages
-      .filter((msg) => msg.type === "metric")
-      .map((msg) => (msg as { type: "metric"; metric: { name: string } }).metric.name);
 
     expect(progress?.sourceScale).toBe(4);
     expect(progress?.progressiveRegion).toBe(false);
@@ -439,8 +438,10 @@ describe("browser codec handlers", () => {
     expect(progress?.progressiveSequence).toBe(1);
     expect(progress?.passOrdinal).toBe(0);
     expect(progress?.region).toEqual({ x: 1, y: 2, w: 3, h: 4 });
-    expect(metricNames).toContain("copy_to_transfer_ms");
-    expect(metricNames).toContain("copied_bytes");
+    // Copy metrics are now folded onto the frame (sub-view pixels → copied), not posted
+    // as separate metric messages. The session re-emits them via onMetric.
+    expect(progress?.copyMs).toBeDefined();
+    expect(progress?.copiedBytes).toBe(4);
   });
 
   test("decode handler does not post decode_cancelled for release_state", async () => {

@@ -121,3 +121,38 @@ out the way the next stage actually expects. This is exactly the kind of fault t
 you study the *handoff* between two pieces rather than each piece on its own: each looked plausible
 alone; together their agreement was wrong. The fixes are in the source code and take effect on the
 next rebuild; the shipped build was re-run to confirm nothing else changed.
+
+### 2026-06-15 — A Broken Quality Alarm Gets Fixed (and Made Faster)
+
+Files: web/jxl-progressive-byte-metrics.js, web/jxl-progressive-byte-benchmark-core.js
+
+Imagine a smoke alarm that was wired so it could never go off — it always showed a green "all clear"
+light no matter how much smoke filled the room. That is what we found in one of our image-quality checks.
+
+When the app loads a photo a little at a time (so a blurry version appears fast, then sharpens), we watch
+a quality score called SSIM to make sure each step looks BETTER than the last, never worse. The code that
+was supposed to raise a flag when quality went backwards was looking at the wrong number every single time,
+so it silently reported "quality is always improving" even when it wasn't. We fixed the wiring so the alarm
+now actually watches the SSIM score. We proved it with a tiny test: feed it a sequence that clearly gets
+worse in the middle, and the old code shrugged ("fine"), while the fixed code correctly says "that got worse."
+
+The same cleanup also made the check almost twice as fast (1.92x) and used about half the computer power,
+because the old code was making and throwing away little scratch lists of numbers it didn't need. Removing
+that waste is what exposed the broken alarm in the first place — the unnecessary copy was hiding the bug.
+
+No downside, no slowdown anywhere else: this only touches the bookkeeping that runs after an image is decoded,
+not the heavy lifting of decoding itself.
+
+### Trustworthy RAW Benchmark: Same Files Every Run, No More Crashes on a Bad Photo
+
+The native speed-test tool that times how fast the program turns camera RAW photos (from Olympus, Canon, and phone DNG files) into finished pictures has been made dependable. Two problems were fixed. First, when you asked it to test a batch of, say, 30 photos from a folder, it used to grab whichever 30 the computer's file system happened to hand over first — and that order can change from one run to the next. That meant two "identical" test runs could secretly be timing two different sets of photos, so the numbers could not be honestly compared. Now it always sorts the folder and takes the same first 30 by name, so every run measures exactly the same photos. Second, a single damaged or corrupted photo file used to crash the entire test partway through, throwing away all the results gathered so far. Now a bad file is simply skipped with a short note, and the test finishes the rest.
+
+A small housekeeping cleanup was also made in the colour-and-tone engine these tests measure, removing leftover unused code so the program builds cleanly. None of this changes how fast the program runs or how the final pictures look — it makes the measuring stick honest, which matters because those native numbers are compared directly against the in-browser version to decide where to spend future speed work.
+
+### Fixed: "Just Give Me the Photo's Size" No Longer Freezes Forever (2026-06-15)
+
+*Files: packages/jxl-session/src/decode-session.ts, packages/jxl-session/src/event-stream.ts*
+
+When the app opens a picture it can ask the decoder for different amounts of work: sometimes the whole finished image, sometimes only a quick blurry preview, and sometimes just the photo's basic facts — its width and height — without decoding any pixels at all. That last "facts only" mode is exactly what a fast gallery or a phone pointing at a plant wants first, so it can lay out the screen before the real picture arrives. A bug meant that when you asked for "facts only" (or for a single quick preview frame and nothing more), the part of the program waiting for the job to *finish* was never told it had finished — so it waited, and waited, forever. The screen could hang. This review found and fixed that: the decoder's front desk now recognises these "stop early" requests and reports completion itself the moment the requested information arrives, instead of waiting for a final signal that, by design, was never going to come. Everyday "give me the whole picture" decoding was never affected and behaves exactly as before.
+
+The review also looked hard at the program's memory use, where every preview frame of a photo is kept in a list so that a viewer can replay them. A tempting change to throw those frames away sooner — to save memory — was deliberately *rejected*, because the program's own automated tests prove that some callers rely on replaying that list later; quietly dropping the frames would have broken them. Catching that trap is itself the win: the safe, correct behaviour was kept, the real hang was fixed, and the reasoning for not "optimising" was written down so no one re-introduces the bug. All 45 active session tests pass, and the unrelated RAW-speed benchmark showed no slowdown.

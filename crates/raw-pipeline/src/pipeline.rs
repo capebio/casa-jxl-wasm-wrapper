@@ -1208,6 +1208,27 @@ pub fn process_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     out
 }
 
+/// Decode-path tone dispatch: take the SIMD bulk path for the plain (non
+/// perceptual-constancy) case, else the byte-exact scalar `process_into`.
+/// Output differs from `process_into` only by the documented ≤1-LUT-step SIMD
+/// reassociation tolerance, so `process_into` stays byte-exact for callers that
+/// require it (LookRenderer, exact-equality tests). Heavy full-res RAW decode
+/// opts in via this wrapper.
+pub fn process_into_auto(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
+    if params.perceptual_constancy {
+        process_into(rgb16, params, out);
+    } else {
+        process_into_simd(rgb16, params, out);
+    }
+}
+
+/// `process` peer of [`process_into_auto`].
+pub fn process_auto(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
+    let mut out = vec![0u8; rgb16.len()];
+    process_into_auto(rgb16, params, &mut out);
+    out
+}
+
 /// Sub-profile of the tone pass: isolates the per-pixel `apply_tone_math`
 /// compute (matrix + sat/vibrance, with its divide) from the LUT-gather/store
 /// cost. Single-threaded. Returns (full_ms, lut_only_ms); full − lut_only is the

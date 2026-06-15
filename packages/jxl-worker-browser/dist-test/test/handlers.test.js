@@ -347,9 +347,6 @@ describe("browser codec handlers", () => {
         handler.onClose();
         await waitFor(() => ended.length === 1);
         const progress = messages.find((msg) => msg.type === "decode_progress");
-        const metricNames = messages
-            .filter((msg) => msg.type === "metric")
-            .map((msg) => msg.metric.name);
         expect(progress?.sourceScale).toBe(4);
         expect(progress?.progressiveRegion).toBe(false);
         expect(progress?.regionFallback).toBe("full-frame-then-crop");
@@ -357,8 +354,10 @@ describe("browser codec handlers", () => {
         expect(progress?.progressiveSequence).toBe(1);
         expect(progress?.passOrdinal).toBe(0);
         expect(progress?.region).toEqual({ x: 1, y: 2, w: 3, h: 4 });
-        expect(metricNames).toContain("copy_to_transfer_ms");
-        expect(metricNames).toContain("copied_bytes");
+        // Copy metrics are now folded onto the frame (sub-view pixels → copied), not posted
+        // as separate metric messages. The session re-emits them via onMetric.
+        expect(progress?.copyMs).toBeDefined();
+        expect(progress?.copiedBytes).toBe(4);
     });
     test("decode handler does not post decode_cancelled for release_state", async () => {
         const messages = [];

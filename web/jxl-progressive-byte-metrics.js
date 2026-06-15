@@ -6,6 +6,7 @@ export const PREVIEW_DB = 30;
 export const GOOD_BUTTER = 1.0;
 export const SSIM_GOOD = 0.8;
 export const BUTTER_MONOTONE_TOL = 0.1;
+export const SSIM_MONOTONE_TOL = 0.01; // SSIM is 0..1, not dB — needs its own tolerance scale
 
 export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   const frames = events.filter((event) => event && (event.type === 'progress' || event.type === 'final'));
@@ -45,10 +46,13 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     previewBytes = pickPreviewCutoffBytesOnly(painted, totalBytes);
   }
 
+  // Sort butterSeries once; reused by both the preview fallback and the perceptual block below.
+  const hasButter = Array.isArray(butterSeries) && butterSeries.length > 0;
+  const sortedButter = hasButter ? ensureSorted(butterSeries) : null;
+
   // perceptual-aware preview if butterSeries present (even without qualitySeries)
-  if (previewBytes == null && Array.isArray(butterSeries) && butterSeries.length > 0) {
-    const ss = ensureSorted(butterSeries);
-    previewBytes = ss.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? ss.at(-1)?.bytes ?? null;
+  if (previewBytes == null && hasButter) {
+    previewBytes = sortedButter.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? sortedButter.at(-1)?.bytes ?? null;
   }
 
   let firstPerceptuallyGoodBytes = null;
@@ -57,12 +61,13 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
   let butterMonotone = null;
   let butterRegressions = [];
 
-  if (Array.isArray(butterSeries) && butterSeries.length > 0) {
-    const ss = ensureSorted(butterSeries);
+  if (hasButter) {
+    const ss = sortedButter;
     firstPerceptuallyGoodBytes = ss.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? null;
     firstPerceptuallyGoodPercent = percent(firstPerceptuallyGoodBytes, totalBytes);
     finalButter = ss.at(-1)?.butter ?? null;
-    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, butter: e.butter })), BUTTER_MONOTONE_TOL, { valueKey: 'butter', lowerIsBetter: true });
+    // entries already carry {bytes, butter} — pass directly via valueKey, no array re-materialization
+    const m = detectMonotone(ss, BUTTER_MONOTONE_TOL, { valueKey: 'butter', lowerIsBetter: true });
     butterMonotone = m.monotone;
     butterRegressions = m.regressions;
   }
@@ -73,7 +78,9 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     const ss = ensureSorted(ssimSeries);
     firstGoodSsimBytes = ss.find((e) => e.ssim != null && e.ssim >= SSIM_GOOD)?.bytes ?? null;
     finalSsim = ss.at(-1)?.ssim ?? null;
-    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, ssim: e.ssim })));
+    // BUG FIX: ssim is higher-better with key 'ssim'; without valueKey detectMonotone read entry.psnr
+    // (undefined) → every entry skipped → ssimMonotone always trivially true. Pass valueKey + ssim tol.
+    const m = detectMonotone(ss, SSIM_MONOTONE_TOL, { valueKey: 'ssim' });
     ssimMonotone = m.monotone;
     ssimRegressions = m.regressions;
   }

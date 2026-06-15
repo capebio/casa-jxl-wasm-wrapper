@@ -309,3 +309,61 @@ ReferenceError); resurrected. bridge.jxl_wasm_encode_rgb16_planar built a 3-chan
 EncodeRgba's has_alpha=0 strip read it as 4-channel (mis-read + heap over-read) → now builds a
 4-channel RGBA16 buffer that the strip consumes correctly. Both were required together: the facade
 fix makes the (previously unreachable) bridge bug live.
+
+---
+
+## 2026-06-15 — jxl-progressive-byte-benchmark-core.js + jxl-progressive-byte-metrics.js (multi-lens review)
+
+**Rejected (deferred): Wire WASM `buildSeriesAsync` (psnrFn/ssimFn) into core's sync `buildSeries` call.**
+The "2× free" perceptual path. Requires importing a PerceptualComparer and confirmed WASM perceptual
+exports, not reliably present in the Node benchmark context (cf. encodeRgb16Planar / dist-rebuild gap).
+High-value but blocked on dist rebuild; deferred, not discarded. Timing hooks already in place to measure
+once dist exists.
+
+**Rejected: Apply the `doFull` adaptive skip to SSIM (as already done for butteraugli).**
+Skipping SSIM on a cutoff inserts null; `firstGoodSsimBytes` uses `.find(e => e.ssim != null && e.ssim >= SSIM_GOOD)`.
+A skipped cutoff at the true threshold would push the reported "first good" later — a fidelity regression not
+gated by a golden/SSIM diff (lens 24). Not worth the SSIM cost saved.
+
+**Rejected: Merge `buildSeries` into `buildSeriesAsync` to kill the ~40-line duplication.**
+The sync variant cannot await the WASM hooks and is the hot path core calls; collapsing them would force an
+async boundary into a tight synchronous loop. Divergence accepted.
+
+---
+
+## 2026-06-15 — decode-session.ts + event-stream.ts (multi-lens review)
+
+**Rejected: Bound frame-buffer memory by gating progressive-frame push on `framesConsumed`.**
+Idea was: when no consumer has opened `frames()`, skip pushing/buffering progressive frames (each holds a
+transferred pixel `ArrayBuffer`) to cap the memory peak for `done()`-only callers (the default path, since
+`emitEveryPass` defaults to `true`). **Rejected** — the tested contract (`decode-session.test.ts` "frames()
+yields progress events then a final frame") emits all frames *before* `frames()` is called and expects them
+buffered and replayed (`["dc","pass","final"]`). `end()` deliberately does not clear the buffer, so late
+subscribers still get the full sequence. Gating would drop those frames and break replay. The buffering is
+load-bearing; the memory cost is inherent to the replay contract. `framesConsumed` stays dead.
+
+**Rejected: Add a bounded-buffer cap (drop-oldest / coalesce) inside `AsyncEventStream`.**
+`AsyncEventStream<T>` is generic and content-agnostic; it cannot know "progressive vs final" semantics, so any
+cap would silently drop data the replay contract promises. Wrong layer; would corrupt the single-consumer
+buffer-and-replay guarantee.
+
+**Rejected: Replace the per-call `emit` closure in `emitFoldedMetrics` with a private method to avoid one
+closure allocation per progress/final frame.** Marginal — the closure is only allocated when `onMetric` is set
+(absent in production; present only in benchmarks/parity harnesses) and is dwarfed by the pixel structured-clone
+already in flight. Not worth the readability cost.
+
+**Rejected (cross-file, deferred not rejected): proper terminal signal for early-stop targets.** The clean fix
+for the `done()` hang is for the worker (decode-handler) to always post a terminal message. Implemented instead
+as a self-contained mirror in decode-session (it owns `progressionTarget`/`emitEveryPass`); a worker-side
+terminal message is the better long-term design but is a cross-file protocol change deferred for approval.
+
+---
+
+## 2026-06-15 — raw_decode_bench.rs + crates/raw-pipeline/src/pipeline.rs (multi-lens review)
+
+Targets: `.worktrees/check-368/src/bin/raw_decode_bench.rs`, `.worktrees/check-368/crates/raw-pipeline/src/pipeline.rs`
+
+- **Replicate process_into 4x-unroll into process_rgba/process_16bit (non-parallel branch).** Native bench builds with default `parallel` feature, so it runs the rayon branch, not the scalar 4x-unroll. Zero effect on any measured number; widens scope with no benchmark evidence. Rejected per "no evidence-free perf changes".
+- **Warmup run in bench().** Min-of-3 already discards the cold first-iteration outlier for the reported value; warmup only adds wall time.
+- **Cache process_orf_to_rgba8 re-decode in P2200 ROI scan.** The re-read+re-decode is entirely outside timed regions (produces pixels to crop only). Dedup saves scan wall-time but changes nothing measured; not worth the coupling.
+- **Emit p50/max alongside min in results_native.json.** Schema contract is `"reporting":"minimum"`; widening is a cross-file schema change, out of scope.
