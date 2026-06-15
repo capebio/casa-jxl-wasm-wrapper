@@ -668,22 +668,48 @@ async function main() {
   }
   console.log("  (FLIP = 10-round interleaved medians for core stability; RICH = full variant diagnostic pass with explicit body wall)");
 
-  // --- 7.4 Run Multiple Workers parallel benchmark (simd Parallel) ---
-  console.log(`--- [4/6] Executing Parallel Concurrency (Multiple Workers in Parallel) ---`);
-  setForcedTier("simd");
+  // --- 7.4 Run Multiple Workers parallel benchmark (scheduler stack) ---
+  // createNodeContext spins a worker_thread pool (OS threads via jxl-worker-node).
+  // Promise.all below achieves real CPU parallelism — unlike the old facade path where
+  // all WASM ran on one thread and Promise.all serialized onto the same event loop.
+  console.log(`--- [4/6] Executing Parallel Concurrency (jxl-session → jxl-scheduler → jxl-worker-node pool) ---`);
+  const { createNodeContext } = await import("./packages/jxl-session/dist/index.js");
+  const poolSize = Math.max(1, os.cpus().length - 1);
+  const nodeCtx = createNodeContext({ poolSize });
 
   const tParallelStart = performance.now();
   const parallelDecResults = await Promise.all(
     simdResults.map(async (r) => {
       const tLvlDec = performance.now();
-      await decodeJxl(r.shot_bytes, false);
+      const session = nodeCtx.decode({
+        format: "rgba8",
+        progressionTarget: "final",
+        emitEveryPass: false,
+        progressiveDetail: "none",
+        downsample: 1,
+        preserveIcc: false,
+        preserveMetadata: false,
+      });
+      // DS-2: consume frames() before done()
+      const framesTask = (async () => {
+        try { for await (const _ of session.frames()) {} } catch (_) {}
+      })();
+      // Copy before push: session.push() transfers the ArrayBuffer to the worker
+      // (detaches it). shot_bytes is reused in section [6/6], so must not transfer original.
+      await session.push(r.shot_bytes.buffer.slice(0)).catch(() => {});
+      await session.close().catch(() => {});
+      await framesTask;
+      try { await session.done(); } catch (_) {}
       return performance.now() - tLvlDec;
     })
   );
   const parallelWallMs = Math.round(performance.now() - tParallelStart);
+  await nodeCtx.shutdown();
+
   const sequentialDecSum = simdResults.reduce((sum, r) => sum + r.shot_dec_ms, 0);
   const throughputGain = (sequentialDecSum / parallelWallMs).toFixed(2);
 
+  console.log(`  Pool size:                 ${poolSize} workers (OS threads via jxl-worker-node)`);
   console.log(`  Sequential Sum of Decodes: ${sequentialDecSum}ms`);
   console.log(`  Parallel Wall-Clock Time:  ${parallelWallMs}ms`);
   console.log(`  🚀 Multi-Worker Speedup:   ${throughputGain}x (Parallel vs Sequential throughput)\n`);
