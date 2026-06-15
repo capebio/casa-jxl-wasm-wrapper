@@ -98,3 +98,26 @@ These changes live in the source code and switch on the next time the engine is 
 shipped build was re-run to confirm nothing got slower in the meantime (it didn't — this run was in
 fact the fastest of the recent batch). The one bigger prize left — making the actual compression
 itself faster — lives inside the third-party JPEG XL library, not in our glue code.
+
+---
+
+## 2026-06-15 — A Broken 16-bit Save Path, Quietly Fixed at Both Ends
+
+**Files:** `packages/jxl-wasm/src/facade.ts`, `packages/jxl-wasm/src/bridge.cpp`
+
+The engine has a fast way to save high-quality 16-bit-per-colour images that takes the three colour
+layers (red, green, blue) separately instead of bundling them first. Looking closely at how the
+JavaScript side and the C++ side hand this data to each other turned up that the path was broken at
+*both* ends — and in a way that hid itself.
+
+On the JavaScript side, the function called two helpers that did not exist, so it crashed the instant
+anything tried to use it. Because it always crashed, nobody ever reached the C++ side — which had its
+own hidden flaw: it packed the three colours into a three-slot layout but then told the next stage to
+read four slots per pixel, so it would have read the wrong colours and run off the end of its memory.
+The crash on the first side was accidentally shielding the broken second side.
+
+Both are now fixed together — the missing helpers were written, and the C++ side now lays the data
+out the way the next stage actually expects. This is exactly the kind of fault that only shows up when
+you study the *handoff* between two pieces rather than each piece on its own: each looked plausible
+alone; together their agreement was wrong. The fixes are in the source code and take effect on the
+next rebuild; the shipped build was re-run to confirm nothing else changed.

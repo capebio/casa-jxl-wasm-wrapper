@@ -2406,20 +2406,27 @@ JxlWasmBuffer* jxl_wasm_encode_rgb16_planar(const uint16_t* r_plane, const uint1
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
   if (!r_plane || !g_plane || !b_plane || width == 0 || height == 0) return MakeError(99);
   size_t npix = (size_t)width * height;
-  size_t buf_bytes = npix * 6; // 3 * uint16
-  uint8_t* rgb_pixels = (uint8_t*)malloc(buf_bytes);
-  if (!rgb_pixels) return MakeError(100);
-  // Interleave to packed native-endian u16 (matches JXL_NATIVE_ENDIAN; wasm is LE, same as
-  // other 16-bit paths). Direct u16 stores replace 3× memcpy(2) per pixel — rgb_pixels is
-  // malloc'd (≥2-byte aligned) so the aliased u16 writes are well-defined.
-  uint16_t* out16 = reinterpret_cast<uint16_t*>(rgb_pixels);
+  // Interleave to packed RGBA16, not RGB16: EncodeRgba(fmt=1, has_alpha=0) runs StripAlphaToRgb,
+  // which reads a 4-channel (8 B/px) stride. Feeding it a 3-channel (6 B/px) buffer mis-reads
+  // every pixel and over-reads the tail. So build a 4-channel buffer with opaque alpha; the
+  // strip drops alpha and libjxl encodes a clean 3-channel RGB16 frame (no alpha plane in output).
+  // (A future fmt==4 "rgb16 passthrough" mode in EncodeRgba would let us keep the 3-channel buffer
+  // and skip the strip — deferred: it touches the shared encoder's channel math, needs a build to
+  // validate. See docs/rejected optimizations.md.)
+  size_t buf_bytes = npix * 8; // 4 * uint16 (RGBA; alpha stripped before encode)
+  uint8_t* rgba_pixels = (uint8_t*)malloc(buf_bytes);
+  if (!rgba_pixels) return MakeError(100);
+  // Direct native-endian u16 stores (wasm is LE = JXL_NATIVE_ENDIAN); rgba_pixels is malloc'd
+  // (≥2-byte aligned) so the aliased u16 writes are well-defined.
+  uint16_t* out16 = reinterpret_cast<uint16_t*>(rgba_pixels);
   for (size_t i = 0; i < npix; ++i) {
-    out16[i * 3 + 0] = r_plane[i];
-    out16[i * 3 + 1] = g_plane[i];
-    out16[i * 3 + 2] = b_plane[i];
+    out16[i * 4 + 0] = r_plane[i];
+    out16[i * 4 + 1] = g_plane[i];
+    out16[i * 4 + 2] = b_plane[i];
+    out16[i * 4 + 3] = 0xFFFFu; // opaque; dropped by the has_alpha=0 strip in EncodeRgba
   }
-  JxlWasmBuffer* res = EncodeRgba(rgb_pixels, width, height, distance, effort, 1 /*16bit*/, 0 /*no alpha*/, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
-  free(rgb_pixels);
+  JxlWasmBuffer* res = EncodeRgba(rgba_pixels, width, height, distance, effort, 1 /*16bit*/, 0 /*no alpha*/, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
+  free(rgba_pixels);
   return res;
 }
 JxlWasmBuffer* jxl_wasm_encode_rgbaf32(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,

@@ -289,3 +289,23 @@ dstW×dstH truncations it removes.
 **ACCEPTED (applied this pass):** B-1 Butteraugli sRGB→linear 256-entry LUT (bit-identical, ~9.3×
 on the gamma-decode stage; flip-flop benchmark/butteraugli-gamma-lut.mjs, 0/6.22M mismatches);
 B-2 planar RGB16 direct u16 stores; F-1 bilinearResize rgba8 column-weight hoist.
+
+---
+
+## 2026-06-15T02:54Z — encodeRgb16Planar / jxl_wasm_encode_rgb16_planar (planar seam)
+
+**DEFERRED (recommend, not done): fmt==4 "rgb16 passthrough" in EncodeRgba.** The planar encode
+now interleaves a 4-channel RGBA16 buffer (opaque alpha) so EncodeRgba(fmt=1, has_alpha=0)'s
+StripAlphaToRgb reads the correct 4-channel stride. The zero-extra-copy ideal would be a 3-channel
+RGB16 buffer fed through a no-strip passthrough (like the existing fmt==3 rgb8 path but 16-bit).
+NOT done now: it edits the shared central encoder's channel math (FormatToDataType / FormatToBits /
+bytes_per_channel ternaries repeated across EncodeRgbaWithMetadata, incl. the initial_size calc) and
+there is no way to compile-validate without an emscripten rebuild. Editing the shared encoder blind
+risks silently corrupting every rgba16/rgbaf32 encode on the next build. Do it WITH a build to
+validate; until then the self-contained 4-channel fix is correct.
+
+**FIXED (this pass):** facade.encodeRgb16Planar was dead (undefined ensureU16Heap/takeJxlBuffer →
+ReferenceError); resurrected. bridge.jxl_wasm_encode_rgb16_planar built a 3-channel buffer then let
+EncodeRgba's has_alpha=0 strip read it as 4-channel (mis-read + heap over-read) → now builds a
+4-channel RGBA16 buffer that the strip consumes correctly. Both were required together: the facade
+fix makes the (previously unreachable) bridge bug live.

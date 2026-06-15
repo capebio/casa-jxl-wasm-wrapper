@@ -1038,7 +1038,16 @@ export async function encodeRgb16Planar(
   if (typeof r !== 'number') m._free(rPtr);
   if (typeof g !== 'number') m._free(gPtr);
   if (typeof b !== 'number') m._free(bPtr);
-  return takeJxlBuffer(handle);
+  return takeBuffer(module, handle, "encodeRgb16Planar").data;
+}
+
+// Copy a Uint16Array R/G/B plane into the WASM heap and return its pointer.
+// Used by encodeRgb16Planar when callers pass arrays rather than pre-allocated heap pointers.
+function ensureU16Heap(module: LibjxlWasmModule, arr: Uint16Array): number {
+  const bytes = arr.byteLength;
+  const ptr = mallocOrThrow(module, bytes, "RGB16 plane");
+  module.HEAPU8.set(new Uint8Array(arr.buffer, arr.byteOffset, bytes), ptr);
+  return ptr;
 }
 
 async function encodeTileContainer(
