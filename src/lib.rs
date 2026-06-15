@@ -2308,3 +2308,72 @@ fn metrics_to_js(m: &Metrics) -> JsValue {
     let _ = js_sys::Reflect::set(&o, &"psnr".into(), &JsValue::from_f64(m.psnr as f64));
     o.into()
 }
+
+// ---------------------------------------------------------------------------
+// PerceptualEngine — pointer-based WASM API for the fused AOS pipeline.
+// JS: write RGBA into input_ptr(), call compare_from_buf(), read score.
+// ---------------------------------------------------------------------------
+
+use raw_pipeline::perceptual::ButteraugliEngine as EngineCore;
+
+#[wasm_bindgen]
+pub struct PerceptualEngine {
+    inner: EngineCore,
+    buf: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl PerceptualEngine {
+    /// Create engine for images of `width × height` pixels.
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: usize, height: usize) -> PerceptualEngine {
+        let n = width * height * 4;
+        PerceptualEngine {
+            inner: EngineCore::new(width, height),
+            buf: vec![0u8; n],
+        }
+    }
+
+    /// Return pointer to the internal RGBA staging buffer (width*height*4 bytes).
+    /// JS: `new Uint8Array(wasm.memory.buffer, engine.input_ptr(), n * 4).set(rgba)`
+    pub fn input_ptr(&self) -> *const u8 {
+        self.buf.as_ptr()
+    }
+
+    /// Set reference image from a JS-provided RGBA slice.
+    pub fn set_reference(&mut self, ref_rgba: &[u8]) {
+        self.inner.set_reference(ref_rgba);
+    }
+
+    /// Set reference from the staging buffer (populated via `input_ptr`).
+    pub fn set_reference_from_buf(&mut self) {
+        let buf = std::mem::take(&mut self.buf);
+        self.inner.set_reference(&buf);
+        self.buf = buf;
+    }
+
+    /// Compare test image written into staging buf via `input_ptr` against reference.
+    /// Returns perceptual distance (0 = identical, >1 = visible difference).
+    pub fn compare_from_buf(&mut self) -> f32 {
+        let buf = std::mem::take(&mut self.buf);
+        let score = self.inner.compare(&buf);
+        self.buf = buf;
+        score
+    }
+
+    /// Convenience copying path: pass RGBA directly.
+    pub fn compare(&mut self, test_rgba: &[u8]) -> f32 {
+        self.inner.compare(test_rgba)
+    }
+
+    /// Per-scale scores and early-exit flag as a JS object.
+    pub fn get_metrics(&self) -> JsValue {
+        let m = &self.inner.metrics;
+        let o = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&o, &"scale0".into(), &JsValue::from_f64(m.scale0_score as f64));
+        let _ = js_sys::Reflect::set(&o, &"scale1".into(), &JsValue::from_f64(m.scale1_score as f64));
+        let _ = js_sys::Reflect::set(&o, &"scale2".into(), &JsValue::from_f64(m.scale2_score as f64));
+        let _ = js_sys::Reflect::set(&o, &"early_exit".into(), &JsValue::from_bool(m.early_exit));
+        o.into()
+    }
+}
