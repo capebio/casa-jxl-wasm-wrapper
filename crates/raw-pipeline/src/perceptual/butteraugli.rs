@@ -225,7 +225,8 @@ pub fn compare_level(ref_level: &ImageLevel, test_level: &ImageLevel) -> f32 {
         let e = dx * dx + dy * dy + db * db;
         total += fast_response(e);
     }
-    total
+    // p-norm normalization: (sum / n)^(1/p), p=3 — matches JS scaleErr convention
+    (total / n as f32).powf(1.0 / 3.0)
 }
 
 #[cfg(test)]

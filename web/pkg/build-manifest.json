@@ -1,0 +1,8 @@
+{
+  "builtAt": "2026-06-15T18:04:11.0599142+02:00",
+  "rustflags": "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--max-memory=4294967296",
+  "rustc": "rustc 1.98.0-nightly (14210df0e 2026-05-31)",
+  "wasmBytes": 382850,
+  "features": "parallel-wasm",
+  "sha256": "fea8a68492118a703a257a1ec0a8fea5563a9e719899f8098026cd328036dd2c"
+}

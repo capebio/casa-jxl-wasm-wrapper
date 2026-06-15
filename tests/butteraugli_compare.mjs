@@ -27,14 +27,22 @@ function makeSyntheticRgba(w, h, seed) {
 
 async function loadWasm() {
     try {
-        // Dynamic import — works if pkg/ is present; silently skips otherwise.
-        const mod = await import('../web/pkg/raw_converter_wasm.js');
-        const wasm = await mod.default();
-        if (typeof wasm.PerceptualEngine === 'function') return wasm;
+        const { readFile } = await import('node:fs/promises');
+        const { pathToFileURL } = await import('node:url');
+        const pkgDir = new URL('../web/pkg/', import.meta.url);
+        const wasmBytes = await readFile(new URL('raw_converter_wasm_bg.wasm', pkgDir));
+        const wasmModule = await WebAssembly.compile(wasmBytes);
+        // Dynamic import needs file:// URL on Windows (bare relative path fails for ESM)
+        const pkgJsUrl = pathToFileURL(
+            new URL('../web/pkg/raw_converter_wasm.js', import.meta.url).pathname.replace(/^\//, '')
+        ).href;
+        const mod = await import(pkgJsUrl);
+        await mod.default({ module_or_path: wasmModule });
+        if (typeof mod.PerceptualEngine === 'function') return mod;
         console.warn('# WASM loaded but PerceptualEngine missing — rebuild needed');
         return null;
-    } catch {
-        console.warn('# WASM unavailable — JS path only');
+    } catch (e) {
+        console.warn('# WASM unavailable — JS path only:', e.message);
         return null;
     }
 }

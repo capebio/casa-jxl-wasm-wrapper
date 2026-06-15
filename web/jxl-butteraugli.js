@@ -274,12 +274,18 @@ export function createWasmEngine(wasmModule, refPixels, width, height) {
     // Re-create the view each call in case the WASM memory grows (buffer detaches).
     const ptr = engine.input_ptr();
 
+    // Zero-copy path requires WASM memory export; fall back to copying compare().
+    const hasMemory = wasmModule.memory instanceof WebAssembly.Memory;
+
     return function compareViaWasm(testPixels) {
         if (testPixels.length !== n * 4) return NaN;
-        // View is recreated each call to handle potential WASM memory growth.
-        const view = new Uint8Array(wasmModule.memory.buffer, ptr, n * 4);
-        view.set(testPixels);
-        return engine.compare_from_buf();
+        if (hasMemory) {
+            // View recreated each call to handle potential WASM memory growth.
+            const view = new Uint8Array(wasmModule.memory.buffer, ptr, n * 4);
+            view.set(testPixels);
+            return engine.compare_from_buf();
+        }
+        return engine.compare(testPixels);
     };
 }
 
