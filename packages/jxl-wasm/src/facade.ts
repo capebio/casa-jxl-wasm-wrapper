@@ -493,7 +493,13 @@ export function detectTier(): Tier {
     if (!hasSimd) {
       tier = "scalar";
     } else {
-      const hasSab = typeof SharedArrayBuffer !== "undefined";
+      // SharedArrayBuffer can be *defined* yet unusable for threaded WASM: browsers
+      // require cross-origin isolation (COOP/COEP) before `new WebAssembly.Memory({shared:true})`
+      // succeeds. Without it, loading the *-mt build throws at instantiation and the decode
+      // never recovers. Demote mt→simd when the page is not crossOriginIsolated. Node/Bun
+      // leave crossOriginIsolated undefined and run threads fine, so treat undefined as allowed.
+      const hasSab = typeof SharedArrayBuffer !== "undefined" &&
+        (typeof crossOriginIsolated === "undefined" || crossOriginIsolated === true);
       const hasRelaxedSimd = probeRelaxedSimd();
       if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
       else if (hasSab) tier = "simd-mt";
@@ -667,8 +673,9 @@ export async function computeButteraugli(
     throw new Error(`computeButteraugli: expected ${pixelSize} bytes for ${width}×${height} RGBA8, got ${view1.byteLength}/${view2.byteLength}`);
   }
   const ptr1 = mallocOrThrow(module, pixelSize, "Butteraugli image A");
-  const ptr2 = mallocOrThrow(module, pixelSize, "Butteraugli image B");
+  let ptr2 = 0;
   try {
+    ptr2 = mallocOrThrow(module, pixelSize, "Butteraugli image B");
     module.HEAPU8.set(view1.subarray(0, pixelSize), ptr1);
     module.HEAPU8.set(view2.subarray(0, pixelSize), ptr2);
     const bits = module._jxl_wasm_butteraugli_compare(ptr1, ptr2, width, height);
@@ -676,7 +683,7 @@ export async function computeButteraugli(
     return floatFromI32Bits(bits);
   } finally {
     module._free(ptr1);
-    module._free(ptr2);
+    if (ptr2 !== 0) module._free(ptr2);
   }
 }
 
@@ -776,14 +783,15 @@ export async function computePsnrWasm(
   const v1 = copyOrBorrowInput(pixels1, false);
   const v2 = copyOrBorrowInput(pixels2, false);
   const ptr1 = mallocOrThrow(module, pixelSize, "PSNR image A");
-  const ptr2 = mallocOrThrow(module, pixelSize, "PSNR image B");
+  let ptr2 = 0;
   try {
+    ptr2 = mallocOrThrow(module, pixelSize, "PSNR image B");
     module.HEAPU8.set(v1.subarray(0, pixelSize), ptr1);
     module.HEAPU8.set(v2.subarray(0, pixelSize), ptr2);
     return floatFromI32Bits(fn(ptr1, ptr2, width, height));
   } finally {
     module._free(ptr1);
-    module._free(ptr2);
+    if (ptr2 !== 0) module._free(ptr2);
   }
 }
 
@@ -804,14 +812,15 @@ export async function computeSsimWasm(
   const v1 = copyOrBorrowInput(pixels1, false);
   const v2 = copyOrBorrowInput(pixels2, false);
   const ptr1 = mallocOrThrow(module, pixelSize, "SSIM image A");
-  const ptr2 = mallocOrThrow(module, pixelSize, "SSIM image B");
+  let ptr2 = 0;
   try {
+    ptr2 = mallocOrThrow(module, pixelSize, "SSIM image B");
     module.HEAPU8.set(v1.subarray(0, pixelSize), ptr1);
     module.HEAPU8.set(v2.subarray(0, pixelSize), ptr2);
     return floatFromI32Bits(fn(ptr1, ptr2, width, height));
   } finally {
     module._free(ptr1);
-    module._free(ptr2);
+    if (ptr2 !== 0) module._free(ptr2);
   }
 }
 
@@ -1634,6 +1643,9 @@ class LibjxlDecoder implements JxlDecoder {
     // Write all chunks directly into a single WASM heap buffer — no intermediate JS allocation.
     const totalSize = allChunks.reduce((s, c) => s + c.byteLength, 0);
     const inputPtr = module._malloc(totalSize);
+    if (inputPtr === 0 && totalSize > 0) {
+      throw new Error("WASM malloc failed for one-shot decode input");
+    }
     let decodedHandle = 0;
     try {
       let woff = 0;
@@ -2227,7 +2239,14 @@ class LibjxlEncoder implements JxlEncoder {
 }
 
 async function loadLibjxlModule(): Promise<LibjxlWasmModule> {
-  modulePromise ??= (testModuleFactory ?? loadGeneratedLibjxlModule)();
+  if (modulePromise === undefined) {
+    const p = (testModuleFactory ?? loadGeneratedLibjxlModule)();
+    modulePromise = p;
+    // A rejected module promise must not poison every future call. Clear the cache on
+    // failure (identity-guarded so a newer attempt isn't clobbered) so a transient cold-load
+    // error — e.g. a failed .wasm fetch — can be retried by the next decode/encode.
+    p.catch(() => { if (modulePromise === p) modulePromise = undefined; });
+  }
   return modulePromise;
 }
 
@@ -2498,10 +2517,15 @@ function mallocOrThrow(module: LibjxlWasmModule, size: number, label: string): n
   return ptr;
 }
 
+// Reused scratch for int32-bits→float reinterpret. JS workers are single-threaded, so a
+// shared 4-byte view is safe and avoids 3 allocations (ArrayBuffer + 2 typed arrays) per call.
+const _f32ScratchBuf = new ArrayBuffer(4);
+const _f32ScratchI32 = new Int32Array(_f32ScratchBuf);
+const _f32ScratchF32 = new Float32Array(_f32ScratchBuf);
+
 function floatFromI32Bits(bits: number): number {
-  const floatBuf = new ArrayBuffer(4);
-  new Int32Array(floatBuf)[0] = bits;
-  return new Float32Array(floatBuf)[0] as number;
+  _f32ScratchI32[0] = bits;
+  return _f32ScratchF32[0] as number;
 }
 
 function butteraugliPixelSize(pixels: ArrayBuffer | Uint8Array, width: number, height: number, operation: string): number {
@@ -2690,6 +2714,10 @@ function bilinearResize(
   if (stride === 4) {
     // 8.8 fixed-point weights: eliminates float↔int traffic per channel.
     // Weights sum to exactly 256; +128 before >>8 gives unbiased rounding.
+    // The x-axis fixed-point weight is column-invariant — precompute it once
+    // (dstW truncations) instead of per pixel (dstW×dstH truncations).
+    const xtIs = new Int32Array(dstW);
+    for (let dx = 0; dx < dstW; dx++) xtIs[dx] = (xAxis.t[dx]! * 256) | 0;
     for (let dy = 0; dy < dstH; dy++) {
       const y0 = yAxis.i0[dy]!;
       const y1 = yAxis.i1[dy]!;
@@ -2699,7 +2727,7 @@ function bilinearResize(
       for (let dx = 0; dx < dstW; dx++) {
         const x0 = xAxis.i0[dx]!;
         const x1 = xAxis.i1[dx]!;
-        const xtI = (xAxis.t[dx]! * 256) | 0;
+        const xtI = xtIs[dx]!;
         const w11 = (xtI * ytI) >> 8;
         const w10 = ytI - w11;
         const w01 = xtI - w11;

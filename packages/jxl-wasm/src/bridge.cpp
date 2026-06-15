@@ -2409,14 +2409,14 @@ JxlWasmBuffer* jxl_wasm_encode_rgb16_planar(const uint16_t* r_plane, const uint1
   size_t buf_bytes = npix * 6; // 3 * uint16
   uint8_t* rgb_pixels = (uint8_t*)malloc(buf_bytes);
   if (!rgb_pixels) return MakeError(100);
-  // Interleave to packed LE (assuming host endian matches JXL_NATIVE_ENDIAN for the format; matches other 16bit paths).
+  // Interleave to packed native-endian u16 (matches JXL_NATIVE_ENDIAN; wasm is LE, same as
+  // other 16-bit paths). Direct u16 stores replace 3× memcpy(2) per pixel — rgb_pixels is
+  // malloc'd (≥2-byte aligned) so the aliased u16 writes are well-defined.
+  uint16_t* out16 = reinterpret_cast<uint16_t*>(rgb_pixels);
   for (size_t i = 0; i < npix; ++i) {
-    uint16_t rr = r_plane[i];
-    uint16_t gg = g_plane[i];
-    uint16_t bb = b_plane[i];
-    memcpy(rgb_pixels + i*6 + 0, &rr, 2);
-    memcpy(rgb_pixels + i*6 + 2, &gg, 2);
-    memcpy(rgb_pixels + i*6 + 4, &bb, 2);
+    out16[i * 3 + 0] = r_plane[i];
+    out16[i * 3 + 1] = g_plane[i];
+    out16[i * 3 + 2] = b_plane[i];
   }
   JxlWasmBuffer* res = EncodeRgba(rgb_pixels, width, height, distance, effort, 1 /*16bit*/, 0 /*no alpha*/, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
   free(rgb_pixels);
@@ -3346,6 +3346,21 @@ JxlWasmBuffer* jxl_wasm_decode_tile_container_region_rgba8(const uint8_t* input,
   return DecodeRgba8TileContainerRegion(input, input_size, region_x, region_y, region_w, region_h);
 }
 
+// sRGB approximate gamma (2.2) decode LUT for u8 inputs. Replaces the per-pixel
+// std::pow(v/255, 2.2f) in the butteraugli gamma-decode loops (3 call sites below):
+// the input is always u8, so a 256-entry table is bit-identical to calling pow per
+// pixel while removing ~width*height*3*2 transcendental calls per comparison.
+// (Lens 11/19 + output-fidelity-safe: same values, no pixel drift.)
+static const float* SrgbGamma22Lut() {
+  static float lut[256];
+  static bool initialized = false;
+  if (!initialized) {
+    for (int i = 0; i < 256; ++i) lut[i] = std::pow(i * (1.0f / 255.0f), 2.2f);
+    initialized = true;
+  }
+  return lut;
+}
+
 // Butteraugli perceptual distance between two RGBA8 images.
 // img1_data, img2_data: RGBA8 buffers, width*height*4 bytes each.
 // Returns: float distance bits packed in int32 (0=identical, ~1.0=imperceptible,
@@ -3360,6 +3375,7 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
   if (!jxl::MemoryManagerInit(&mem, nullptr)) return -1;
 
   // Build linear-light float Image3F (planar RGB, sRGB gamma decoded)
+  const float* gamma_lut = SrgbGamma22Lut();
   auto build_image = [&](const uint8_t* data) -> jxl::StatusOr<jxl::Image3F> {
     JXL_ASSIGN_OR_RETURN(jxl::Image3F img,
                          jxl::Image3F::Create(&mem, width, height));
@@ -3369,10 +3385,10 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
       float* JXL_RESTRICT br = img.PlaneRow(2, y);
       const uint8_t* src = data + y * width * 4u;
       for (size_t x = 0; x < width; ++x) {
-        // sRGB approximate gamma decode: linearise before butteraugli
-        rr[x] = std::pow(src[x * 4u + 0u] * (1.0f / 255.0f), 2.2f);
-        gr[x] = std::pow(src[x * 4u + 1u] * (1.0f / 255.0f), 2.2f);
-        br[x] = std::pow(src[x * 4u + 2u] * (1.0f / 255.0f), 2.2f);
+        // sRGB approximate gamma decode via LUT: linearise before butteraugli
+        rr[x] = gamma_lut[src[x * 4u + 0u]];
+        gr[x] = gamma_lut[src[x * 4u + 1u]];
+        br[x] = gamma_lut[src[x * 4u + 2u]];
       }
     }
     return img;
@@ -3432,15 +3448,16 @@ extern "C" JxlWasmButterRef* jxl_wasm_butteraugli_ref_create(
   if (!img_or.ok()) { delete s; return nullptr; }
   s->ref_img = std::move(img_or).value_();
 
+  const float* gamma_lut = SrgbGamma22Lut();
   for (size_t y = 0; y < height; ++y) {
     float* JXL_RESTRICT rr = s->ref_img.PlaneRow(0, y);
     float* JXL_RESTRICT gr = s->ref_img.PlaneRow(1, y);
     float* JXL_RESTRICT br = s->ref_img.PlaneRow(2, y);
     const uint8_t* src = ref_data + y * (size_t)width * 4u;
     for (size_t x = 0; x < width; ++x) {
-      rr[x] = std::pow(src[x * 4u + 0u] * (1.0f / 255.0f), 2.2f);
-      gr[x] = std::pow(src[x * 4u + 1u] * (1.0f / 255.0f), 2.2f);
-      br[x] = std::pow(src[x * 4u + 2u] * (1.0f / 255.0f), 2.2f);
+      rr[x] = gamma_lut[src[x * 4u + 0u]];
+      gr[x] = gamma_lut[src[x * 4u + 1u]];
+      br[x] = gamma_lut[src[x * 4u + 2u]];
     }
   }
   return s;
@@ -3458,15 +3475,16 @@ extern "C" int32_t jxl_wasm_butteraugli_ref_compare(
   auto test_or = jxl::Image3F::Create(&mem, width, height);
   if (!test_or.ok()) return -1;
   jxl::Image3F test_img = std::move(test_or).value_();
+  const float* gamma_lut = SrgbGamma22Lut();
   for (size_t y = 0; y < height; ++y) {
     float* JXL_RESTRICT rr = test_img.PlaneRow(0, y);
     float* JXL_RESTRICT gr = test_img.PlaneRow(1, y);
     float* JXL_RESTRICT br = test_img.PlaneRow(2, y);
     const uint8_t* src = test_data + y * (size_t)width * 4u;
     for (size_t x = 0; x < width; ++x) {
-      rr[x] = std::pow(src[x * 4u + 0u] * (1.0f / 255.0f), 2.2f);
-      gr[x] = std::pow(src[x * 4u + 1u] * (1.0f / 255.0f), 2.2f);
-      br[x] = std::pow(src[x * 4u + 2u] * (1.0f / 255.0f), 2.2f);
+      rr[x] = gamma_lut[src[x * 4u + 0u]];
+      gr[x] = gamma_lut[src[x * 4u + 1u]];
+      br[x] = gamma_lut[src[x * 4u + 2u]];
     }
   }
 

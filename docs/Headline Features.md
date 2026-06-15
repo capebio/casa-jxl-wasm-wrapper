@@ -40,3 +40,61 @@ Complementing this lifecycle robustness is a highly efficient zero-copy transfer
 
 
 
+
+---
+
+## 2026-06-15 — The Image Engine Stops Quietly Breaking Itself
+
+**Files:** `packages/jxl-wasm/src/facade.ts`, `packages/jxl-worker-browser/src/decode-handler.ts`
+
+The part of casabio that turns camera files into pictures got five repairs that stop it from
+quietly dying.
+
+Two of them are the big ones. First: on some web pages — the ones not set up with a special pair
+of security headers — the engine used to pick a "many-helpers-at-once" speed mode that those pages
+simply cannot run. The moment it tried, the whole picture engine fell over and nothing loaded. It
+now checks first and calmly steps down to a mode the page can actually use, so pictures appear
+instead of a blank. Second: if the engine's core failed to load once — say the network hiccupped
+while fetching it — the old code remembered that one failure forever and refused to ever try again
+for the rest of your visit. Now a stumble is just a stumble: the next picture you open makes it try
+afresh.
+
+The other three close small leaks and a corruption risk that only bite when the computer is running
+low on memory — exactly the worst moment to have a hidden fault. One path could scribble into the
+wrong place in memory when an allocation failed; another quietly wasted a little memory every time a
+picture-quality comparison ran out of room; a third did three pointless throwaway allocations on
+every quality score. All tidied.
+
+None of this changes how a photo looks or how fast a normal conversion runs — measured timings are
+unchanged. It is pure sturdiness: the engine now bends instead of snapping. The companion piece that
+*receives* the decoded pictures was examined just as hard and needed nothing — it was already solid.
+One worthwhile future feature was identified (rescuing a half-finished preview when a download is cut
+short) but deliberately shelved, because doing it today would either slow the fast path or risk
+showing a garbled image — and a wrong picture is worse than none.
+
+---
+
+## 2026-06-15 — A Lookup Table Makes Image-Quality Scoring ~9× Cheaper
+
+**Files:** `packages/jxl-wasm/src/bridge.cpp`, `packages/jxl-wasm/src/facade.ts`
+
+The engine has a part that scores how close two pictures look to the human eye (used to check that a
+compressed photo still looks right). Before it can do that, it has to convert every pixel from the
+form screens use into a form that matches how we perceive brightness. That conversion ran a slow
+mathematical "power" calculation on every single colour value of every pixel — millions of them, on
+both pictures, every time it compared.
+
+But those colour values are whole numbers from 0 to 255. There are only 256 possible answers. So we
+now work all 256 out once, write them in a little table, and just look up the answer for each pixel.
+A measured side-by-side test (ten rounds, two-megapixel images) shows the table version is about
+**nine times faster** at this step — and produces **exactly** the same numbers, down to the last
+digit, over six million checks. No quality is lost; only waiting time.
+
+Two smaller tidies went in alongside: the 16-bit photo encoder now writes colour values straight
+into memory instead of copying them one tiny piece at a time, and the picture-resizing routine stops
+recalculating a value it could work out once per column instead of once per pixel.
+
+These changes live in the source code and switch on the next time the engine is rebuilt; the
+shipped build was re-run to confirm nothing got slower in the meantime (it didn't — this run was in
+fact the fastest of the recent batch). The one bigger prize left — making the actual compression
+itself faster — lives inside the third-party JPEG XL library, not in our glue code.

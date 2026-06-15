@@ -235,3 +235,57 @@ Extend shouldUseMtImmediately + router.pick with hysteresis, queued age, work-cl
 4. Reassessed: belongs in scheduler or at T-INT caller level once saliency/priority signals are richer. Not positive surgical edit here.
 
 (Grace, stream, probe, and policy rejections recorded after reassessment against full pipeline position and CLAUDE invariants. The two contract items (URL + node) were the only ones passing the "positive change" bar for immediate surgical application.)
+
+---
+
+## 2026-06-15T01:35Z — facade.ts / decode-handler.ts (multi-lens review)
+
+**REJECTED: Wire partial-frame-on-error from facade `events()` to decode-handler.**
+decode-handler already reads `event.partialPixels`/`partialInfo`/`partialPixelStride`/`partialStage`
+on the `error` arm, but facade emits only `{code,message}`, so a truncated progressive decode
+discards all already-flushed passes. Wiring it was rejected:
+1. Safe capture of the last good pass requires a per-pass full-frame **copy** on the hot progressive
+   path (the emitted frame is transferred/detached by the consumer, so it cannot be re-read at error
+   time) — this regresses the deliberate zero-extra-copy design.
+2. The alternative, calling `dec_take_flushed` at error time, runs against a libjxl decoder already
+   in an error state: post-error flush output is undefined and may be corrupt — fails the
+   output-fidelity gate (lens 24). Cannot prove the salvaged pixels are valid.
+   Verdict: genuine latent feature, but blocked on a bridge-level `dec_take_partial` that guarantees
+   a clean last-rendered frame. Documented as a recommendation in `docs/FacadeDecodeHandler - DONE.md`,
+   not shipped.
+
+**REJECTED: Defensive-copy the `takeBufferView` subarray (encode chunk drain) to remove the
+"valid same-tick only" footgun.** By design (documented at the function). Adding a copy regresses
+the encode drain that the zero-copy view exists to optimise; the sole consumer (encode-handler)
+already uses it synchronously before the next bridge call. No change.
+
+**ACCEPTED (for the record, applied this pass):** detectTier crossOriginIsolated gate; module-promise
+poison clear-on-reject; eventsOneShot OOM guard; ptr1 leak fix in computeButteraugli/Psnr/Ssim;
+floatFromI32Bits shared scratch.
+
+---
+
+## 2026-06-15T02:35Z — facade.ts / bridge.cpp (final-optimization multi-lens review)
+
+**REJECTED: Box-filter decode-time downsampling (replace nearest-neighbour in DownsampleRgba +
+applyRegionAndDownsample).** A genuine *quality* improvement (less aliasing on shrunk field images,
+relevant to the biodiversity platform), but it changes pixel output and trades decode speed. Per the
+output-fidelity lens it must be gated on golden-image/SSIM diffs AND the user's own viewer (see
+feedback: RGB-mean parity != user's viewer). Not a silent in-pass edit. Documented as a
+fidelity-gated recommendation in docs/FacadeBridge - DONE.md.
+
+**REJECTED: Fixed-point (8.8) rewrite of bilinearResize rgba16/rgbaf32 branches.** The rgba8 branch
+uses 8.8 fixed-point; extending it to 16-bit/float would change rounding and thus pixel values for
+high-bit-depth output — fidelity risk on exactly the high-bit-depth path the platform cares about,
+for a marginal ALU saving. The float path is correct; left unchanged. (rgba8 got only a pure,
+output-identical weight hoist — F-1.)
+
+**REJECTED: Per-call alloc of x-weight array in bilinearResize as a cross-frame cache.** Considered
+storing the hoisted xtIs[] on the ResizePlan for reuse across frames. Rejected: ResizePlan already
+caches the resize axes; adding a third parallel array widens the plan contract for a sub-percent
+gain and risks staleness if dstW changes. The per-call Int32Array(dstW) is cheap relative to the
+dstW×dstH truncations it removes.
+
+**ACCEPTED (applied this pass):** B-1 Butteraugli sRGB→linear 256-entry LUT (bit-identical, ~9.3×
+on the gamma-decode stage; flip-flop benchmark/butteraugli-gamma-lut.mjs, 0/6.22M mismatches);
+B-2 planar RGB16 direct u16 stores; F-1 bilinearResize rgba8 column-weight hoist.

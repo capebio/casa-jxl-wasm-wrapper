@@ -87,7 +87,11 @@ export function detectTier() {
             tier = "scalar";
         }
         else {
-            const hasSab = typeof SharedArrayBuffer !== "undefined";
+            // SharedArrayBuffer can be defined yet unusable for threaded WASM without
+            // cross-origin isolation (COOP/COEP); the *-mt build then throws at instantiation.
+            // Demote mt→simd when not crossOriginIsolated. Node/Bun leave it undefined (allowed).
+            const hasSab = typeof SharedArrayBuffer !== "undefined" &&
+                (typeof crossOriginIsolated === "undefined" || crossOriginIsolated === true);
             const hasRelaxedSimd = probeRelaxedSimd();
             if (hasSab && hasRelaxedSimd)
                 tier = "relaxed-simd-mt";
@@ -1092,6 +1096,9 @@ class LibjxlDecoder {
         // Write all chunks directly into a single WASM heap buffer — no intermediate JS allocation.
         const totalSize = allChunks.reduce((s, c) => s + c.byteLength, 0);
         const inputPtr = module._malloc(totalSize);
+        if (inputPtr === 0 && totalSize > 0) {
+            throw new Error("WASM malloc failed for one-shot decode input");
+        }
         let decodedHandle = 0;
         try {
             let woff = 0;
@@ -1636,7 +1643,13 @@ async function drainNodePthreadPool(module) {
     }
 }
 async function loadLibjxlModule() {
-    modulePromise ??= (testModuleFactory ?? loadGeneratedLibjxlModule)();
+    if (modulePromise === undefined) {
+        const p = (testModuleFactory ?? loadGeneratedLibjxlModule)();
+        modulePromise = p;
+        // A rejected module promise must not poison every future call: clear the cache on
+        // failure (identity-guarded) so a transient cold-load error can be retried.
+        p.catch(() => { if (modulePromise === p) modulePromise = undefined; });
+    }
     return modulePromise;
 }
 /** Node MT tier: sync transcode/decode on simd module to avoid main-thread pthread deadlock. */
