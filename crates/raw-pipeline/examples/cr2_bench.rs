@@ -14,6 +14,7 @@ use raw_pipeline::cr2;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
+use raw_pipeline::ljpeg::LjpegStats;
 
 struct Run {
     file:      String,
@@ -47,9 +48,18 @@ fn main() {
     println!("File A: {} ({} KB)", file1, data1.len() / 1024);
     println!("File B: {} ({} KB)\n", file2, data2.len() / 1024);
 
-    // Warmup (not counted)
+    // Warmup (not counted) — also used to collect LJPEG stage stats.
     let _ = cr2::decode_bytes_bench(&data1);
     let _ = cr2::decode_bytes_bench(&data2);
+
+    // LJPEG stage breakdown (diagnostic — runs once per file after warmup).
+    println!("=== LJPEG stage breakdown (L1-L5) ===");
+    for (label, data) in [("A", &data1), ("B", &data2)] {
+        let (img, stats) = cr2::decode_bytes_with_ljpeg_stats(data)
+            .unwrap_or_else(|e| panic!("stats decode failed [{label}]: {e}"));
+        print_ljpeg_stats(label, &img, &stats);
+    }
+    println!();
 
     let mut runs: Vec<Run> = Vec::new();
 
@@ -90,6 +100,37 @@ fn main() {
     let path = format!("{dir}/cr2-flipflop-{ts}.toon");
     fs::write(&path, &toon).ok();
     eprintln!("saved → {path}");
+}
+
+fn print_ljpeg_stats(label: &str, img: &raw_pipeline::cr2::Cr2Image, s: &LjpegStats) {
+    let syms = s.total_symbols as f64;
+    let fills = s.fill_calls as f64;
+    println!("--- File {label} ({}×{}, sof {}×{}×{} prec={}) ---",
+        img.width, img.height, s.sof_w, s.sof_h, s.cps, s.precision);
+    println!("  L2 Huffman decode:");
+    println!("    total symbols  : {}", s.total_symbols);
+    println!("    fast8 hits     : {} ({:.1}%)", s.fast8_hits,
+        100.0 * s.fast8_hits as f64 / syms);
+    println!("    slow_huffman   : {} ({:.1}%)", s.slow_huffman_hits,
+        100.0 * s.slow_huffman_hits as f64 / syms);
+    println!("  L3 Magnitude receive:");
+    println!("    get_bits calls : {} ({:.1}% of symbols)", s.get_bits_calls,
+        100.0 * s.get_bits_calls as f64 / syms);
+    println!("    avg t per call : {:.2} bits",
+        if s.get_bits_calls > 0 { s.get_bits_total_bits as f64 / s.get_bits_calls as f64 } else { 0.0 });
+    println!("  L1 Bitstream refill (fill() calls):");
+    println!("    fill() calls   : {} (1 per {:.1} symbols)", s.fill_calls,
+        if fills > 0.0 { syms / fills } else { 0.0 });
+    println!("    bulk_fill hits : {} ({:.1}% of fill iters)", s.bulk_fill_hits,
+        100.0 * s.bulk_fill_hits as f64 / (s.bulk_fill_hits + s.slow_fill_hits).max(1) as f64);
+    println!("    slow_fill hits : {} ({:.1}% of fill iters)", s.slow_fill_hits,
+        100.0 * s.slow_fill_hits as f64 / (s.bulk_fill_hits + s.slow_fill_hits).max(1) as f64);
+    let compressed_bits = (s.bulk_fill_hits * 32 + s.slow_fill_hits * 8) as f64;
+    let huff_bits = s.fast8_hits as f64 * 6.0; // rough: avg code len 6 bits for common tables
+    println!("  approx bits:    compressed={:.1}M  symbols≈{}  L3_bits={}M",
+        compressed_bits / 1e6,
+        s.total_symbols,
+        s.get_bits_total_bits / 1_000_000);
 }
 
 fn generate_toon(runs: &[Run], file1: &str, file2: &str) -> String {

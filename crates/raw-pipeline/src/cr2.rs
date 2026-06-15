@@ -209,19 +209,26 @@ fn parse_ljpeg_sof(data: &[u8], strip_off: usize, strip_len: usize) -> Option<(u
 /// Decode CR2 from raw bytes. Single call, no second Vec allocation.
 pub fn decode_bytes(data: &[u8]) -> Result<Cr2Image> {
     let mut buf = Vec::new();
-    decode_impl(data, &mut buf, true, false).map(|(img, _)| img)
+    decode_impl(data, &mut buf, true, false, false).map(|(img, _, _)| img)
 }
 
 /// Decode with per-phase timings for benchmarking.
 pub fn decode_bytes_bench(data: &[u8]) -> Result<(Cr2Image, Cr2Timings)> {
     let mut buf = Vec::new();
-    decode_impl(data, &mut buf, true, true)
+    decode_impl(data, &mut buf, true, true, false).map(|(img, t, _)| (img, t))
+}
+
+/// Decode with full LJPEG stage statistics (for profiling only — slightly slower due to counters).
+pub fn decode_bytes_with_ljpeg_stats(data: &[u8]) -> Result<(Cr2Image, ljpeg::LjpegStats)> {
+    let mut buf = Vec::new();
+    decode_impl(data, &mut buf, true, false, true)
+        .map(|(img, _, stats)| (img, stats.expect("capture_stats=true always yields Some")))
 }
 
 /// Decode reusing scratch buffer to avoid per-call full-frame allocation (batch mode).
 /// The scratch.raw buffer grows to full-frame size on the first call and is reused thereafter.
 pub fn decode_with_scratch(data: &[u8], scratch: &mut ScratchBuffers) -> Result<Cr2Image> {
-    decode_impl(data, &mut scratch.raw, false, false).map(|(img, _)| img)
+    decode_impl(data, &mut scratch.raw, false, false, false).map(|(img, _, _)| img)
 }
 
 // ---------------------------------------------------------------------------
@@ -231,11 +238,12 @@ pub fn decode_with_scratch(data: &[u8], scratch: &mut ScratchBuffers) -> Result<
 /// `move_buf`: when true, moves `raw_buf` into the returned Cr2Image (no copy of crop data).
 ///             when false, clones crop data from raw_buf (scratch retains capacity).
 fn decode_impl(
-    data:        &[u8],
-    raw_buf:     &mut Vec<u16>,
-    move_buf:    bool,
-    time_phases: bool,
-) -> Result<(Cr2Image, Cr2Timings)> {
+    data:           &[u8],
+    raw_buf:        &mut Vec<u16>,
+    move_buf:       bool,
+    time_phases:    bool,
+    capture_stats:  bool,
+) -> Result<(Cr2Image, Cr2Timings, Option<ljpeg::LjpegStats>)> {
     let t_total = time_phases.then(std::time::Instant::now);
 
     // Minimum: TIFF header (8) + CR2 extension (8) = 16 bytes.
@@ -410,8 +418,15 @@ fn decode_impl(
 
     let strip_bytes = &data[strip_off..strip_off + strip_len];
     let t_ljpeg = time_phases.then(std::time::Instant::now);
-    ljpeg::decode_tile(strip_bytes, raw_buf, 0, stride, stride, sof_h)
-        .with_context(|| "CR2: LJPEG decode failed")?;
+    let ljpeg_stats = if capture_stats {
+        let s = ljpeg::decode_tile_stats(strip_bytes, raw_buf, 0, stride, stride, sof_h)
+            .with_context(|| "CR2: LJPEG decode failed")?;
+        Some(s)
+    } else {
+        ljpeg::decode_tile(strip_bytes, raw_buf, 0, stride, stride, sof_h)
+            .with_context(|| "CR2: LJPEG decode failed")?;
+        None
+    };
     let ljpeg_ms = t_ljpeg.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
 
     // -----------------------------------------------------------------------
@@ -494,7 +509,7 @@ fn decode_impl(
         make,
         model,
         orientation,
-    }, timings))
+    }, timings, ljpeg_stats))
 }
 
 // ---------------------------------------------------------------------------
