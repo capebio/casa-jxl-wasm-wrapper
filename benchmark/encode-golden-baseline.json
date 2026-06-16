@@ -1,0 +1,76 @@
+{
+  "capturedAt": "2026-06-16T00:39:27.603Z",
+  "note": "Byte-identical hashes required after data-structure-only encode.cc changes (F001/F002/F004/F005). Stage-decomposition changes (F006/F009) must also produce identical hashes.",
+  "rows": [
+    {
+      "image": "small-512x384",
+      "variant": "lossy-d1.0-e3",
+      "sizeBytes": 36179,
+      "encMs": 85,
+      "sha256": "a6d08a138091fd27a402480edf11033a1c24470569e9f6be452bdd541eda2792"
+    },
+    {
+      "image": "small-512x384",
+      "variant": "lossy-d2.0-e3",
+      "sizeBytes": 22978,
+      "encMs": 27.1,
+      "sha256": "138ec0b4378bb366fa4eb6a9299c5c2f1fab2c063ff87816c8205961c8ffd2fc"
+    },
+    {
+      "image": "small-512x384",
+      "variant": "lossy-d0.5-e3",
+      "sizeBytes": 56755,
+      "encMs": 21.6,
+      "sha256": "0744420b3d542f67ba8a83cd1f05028f7278e578f0a1ab1214903571740767c4"
+    },
+    {
+      "image": "small-512x384",
+      "variant": "lossless-d0-e3",
+      "sizeBytes": 478047,
+      "encMs": 43.1,
+      "sha256": "a2853f5e58d158c8c1ffe9de3bfb739e59565eef659385a2d0e438b57664f47c"
+    },
+    {
+      "image": "small-512x384",
+      "variant": "lossy-d1.0-e5",
+      "sizeBytes": 32312,
+      "encMs": 116.3,
+      "sha256": "3e6fc3fd3a7f17698273223aee34a8709f4fcc28fcd07b7eb4e30683864e45d4"
+    },
+    {
+      "image": "medium-1280x800",
+      "variant": "lossy-d1.0-e3",
+      "sizeBytes": 171281,
+      "encMs": 72.1,
+      "sha256": "7223f59bd5c1d0d233fd6497570d7c065c3718d2a973f9993369e473fa2761df"
+    },
+    {
+      "image": "medium-1280x800",
+      "variant": "lossy-d2.0-e3",
+      "sizeBytes": 107215,
+      "encMs": 60.2,
+      "sha256": "fb5ade8b5ffcee53a047298de812960dd9538cba047e2fdedfbca57b08e76903"
+    },
+    {
+      "image": "medium-1280x800",
+      "variant": "lossy-d0.5-e3",
+      "sizeBytes": 272419,
+      "encMs": 84.9,
+      "sha256": "b39fadc7a353a674252a98e6182cce3f53d58f59924e2ee348fa0a390728ff88"
+    },
+    {
+      "image": "medium-1280x800",
+      "variant": "lossless-d0-e3",
+      "sizeBytes": 2448618,
+      "encMs": 156.5,
+      "sha256": "f734b99ace82581286f2bc39016b7721095279fac73e6d888efe4e1301aa9ff7"
+    },
+    {
+      "image": "medium-1280x800",
+      "variant": "lossy-d1.0-e5",
+      "sizeBytes": 150762,
+      "encMs": 389,
+      "sha256": "f5c444d815a9eec7bcb6ccbf771802dc69ec5d68b61da192c920a9f715d7d41b"
+    }
+  ]
+}
