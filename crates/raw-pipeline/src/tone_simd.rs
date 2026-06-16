@@ -296,6 +296,54 @@ fn apply_tone_bulk_wasm(
     }
 }
 
+/// Fused single-pass tone for the caller's `process_into_simd` shape (Blueprint
+/// Ch.1/6: eliminate copies + per-block zeroing, fuse kernels). Interleaved u16 →
+/// pre-LUT gather → matrix/sat/vibrance (SIMD via `apply_tone_bulk`) → post-LUT →
+/// interleaved u8, reusing **one** stack SoA scratch (zeroed once, not per block).
+///
+/// `pre_*` (65536×u16) and `post` (65536×u8) are the caller-owned LUTs. Byte-exact to
+/// the explicit pre-LUT → `apply_tone_bulk` → post-LUT two-pass (same kernel, same
+/// clamp, same LUTs).
+///
+/// STATUS (2026-06): on an isolated single-thread bench this is ~0.8–0.9× the
+/// two-pass — the path is **gather-bound** (random-access LUT lookups dominate; the
+/// SoA round-trip it removes is L1-resident and the per-block stack zeroing is
+/// effectively free). Retained as a dormant primitive: it becomes a win once the
+/// surrounding cost is moved — cache-resident/smaller LUTs, SIMD gather, or a fused
+/// post-LUT — at which point removing the round-trip and zeroing matters. See
+/// `docs/ToneSimd-LutGather-JsWasm-handoff.md`.
+pub fn apply_tone_fused_u16_u8(
+    rgb16: &[u16],
+    pre_r: &[u16], pre_g: &[u16], pre_b: &[u16], post: &[u8],
+    m: &[[f32; 3]; 3], sat: f32, vib: f32, vib_zero: bool,
+    out: &mut [u8],
+) {
+    const BLK: usize = 2048;
+    let np = (rgb16.len() / 3).min(out.len() / 3);
+    // One reused stack scratch (zeroed once), not a fresh zeroed buffer per block.
+    let mut rs = [0f32; BLK];
+    let mut gs = [0f32; BLK];
+    let mut bs = [0f32; BLK];
+    let mut p = 0;
+    while p < np {
+        let cnt = (np - p).min(BLK);
+        for i in 0..cnt {
+            let j = 3 * (p + i);
+            rs[i] = pre_r[rgb16[j] as usize] as f32;
+            gs[i] = pre_g[rgb16[j + 1] as usize] as f32;
+            bs[i] = pre_b[rgb16[j + 2] as usize] as f32;
+        }
+        apply_tone_bulk(&mut rs[..cnt], &mut gs[..cnt], &mut bs[..cnt], m, sat, vib, vib_zero);
+        for i in 0..cnt {
+            let j = 3 * (p + i);
+            out[j] = post[(rs[i].clamp(0.0, 65535.0) as u16) as usize];
+            out[j + 1] = post[(gs[i].clamp(0.0, 65535.0) as u16) as usize];
+            out[j + 2] = post[(bs[i].clamp(0.0, 65535.0) as u16) as usize];
+        }
+        p += cnt;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +480,39 @@ mod tests {
         // sat==1 ⇒ identity.
         let p1 = vib_zero_matrix(&M, 1.0);
         for i in 0..3 { for j in 0..3 { assert!((p1[i][j] - M[i][j]).abs() < 1e-4); } }
+    }
+
+    // Fused u16→u8 path is byte-exact to the explicit two-pass (pre-LUT, tone, post-LUT).
+    #[test]
+    fn parity_fused_u16_u8() {
+        let pre: Vec<u16> = (0..=65535u32).map(|x| x as u16).collect();
+        let post: Vec<u8> = (0..=65535u32).map(|x| (x >> 8) as u8).collect();
+        let np = 1000usize;
+        let mut rgb16 = vec![0u16; np * 3];
+        for i in 0..np {
+            rgb16[3 * i] = (i.wrapping_mul(7919) & 0xffff) as u16;
+            rgb16[3 * i + 1] = (i.wrapping_mul(104729) & 0xffff) as u16;
+            rgb16[3 * i + 2] = (i.wrapping_mul(1299709) & 0xffff) as u16;
+        }
+        for &(vz, sat, vib) in &[(true, 1.3f32, 0f32), (false, 1.3, 0.5), (false, 0.7, -0.4), (true, 1.0, 0.0)] {
+            // explicit two-pass oracle
+            let (mut r, mut g, mut b) = (vec![0f32; np], vec![0f32; np], vec![0f32; np]);
+            for i in 0..np {
+                r[i] = pre[rgb16[3 * i] as usize] as f32;
+                g[i] = pre[rgb16[3 * i + 1] as usize] as f32;
+                b[i] = pre[rgb16[3 * i + 2] as usize] as f32;
+            }
+            apply_tone_bulk(&mut r, &mut g, &mut b, &M, sat, vib, vz);
+            let mut want = vec![0u8; np * 3];
+            for i in 0..np {
+                want[3 * i] = post[(r[i].clamp(0.0, 65535.0) as u16) as usize];
+                want[3 * i + 1] = post[(g[i].clamp(0.0, 65535.0) as u16) as usize];
+                want[3 * i + 2] = post[(b[i].clamp(0.0, 65535.0) as u16) as usize];
+            }
+            // fused
+            let mut got = vec![0u8; np * 3];
+            apply_tone_fused_u16_u8(&rgb16, &pre, &pre, &pre, &post, &M, sat, vib, vz, &mut got);
+            assert_eq!(want, got, "fused mismatch vz={vz} sat={sat} vib={vib}");
+        }
     }
 }
