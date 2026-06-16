@@ -7,9 +7,11 @@ import type { WorkerFactory } from "@casabio/jxl-scheduler";
 import {
   hardwareConcurrency,
   JxlContextImpl,
+  TieredJxlContextImpl,
   validateWasmUrl,
   type JxlContext,
 } from "./context-base.js";
+import { isMtRequestedTier, parseRequestedWorkerTier, withWorkerTier } from "./tier-routing.js";
 
 export type { JxlContext } from "./context-base.js";
 export { DecodeSessionImpl } from "./decode-session.js";
@@ -41,12 +43,20 @@ export function createBrowserContext(opts?: ContextOptions): JxlContext {
     validateWasmUrl(opts.wasmUrl);
   }
 
-  const factory: WorkerFactory = async () => {
+  const factoryForUrl = (workerUrl: string | undefined): WorkerFactory => async () => {
     const mod = await import("@casabio/jxl-worker-browser");
-    return mod.spawnWorker(opts?.wasmUrl) as unknown as Awaited<ReturnType<WorkerFactory>>;
+    return mod.spawnWorker(workerUrl) as unknown as Awaited<ReturnType<WorkerFactory>>;
   };
 
-  const ctx = new JxlContextImpl(factory, opts, poolSize);
+  const requestedTier = parseRequestedWorkerTier(opts?.wasmUrl);
+  const ctx = isMtRequestedTier(requestedTier)
+    ? new TieredJxlContextImpl({
+      mtFactory: factoryForUrl(withWorkerTier(opts?.wasmUrl, requestedTier)),
+      stFactory: factoryForUrl(withWorkerTier(opts?.wasmUrl, "simd")),
+      opts,
+      maxWorkers: poolSize,
+    })
+    : new JxlContextImpl(factoryForUrl(opts?.wasmUrl), opts, poolSize);
   ctx.probeCapabilities();
   return ctx;
 }

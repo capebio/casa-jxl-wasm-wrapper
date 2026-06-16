@@ -37,6 +37,7 @@ test("parseJxtcHeader reads the 32-byte container header", () => {
     tilesY: 12,
     hasAlpha: true,
     bitsPerSample: 8,
+    version: 1,
   });
 });
 

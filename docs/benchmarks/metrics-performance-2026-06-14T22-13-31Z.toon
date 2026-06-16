@@ -1,0 +1,33 @@
+TestName: metrics-performance
+RunTimestamp: 2026-06-14T22-13-31Z
+Agent: haiku
+Metric: psnr,ssim,butteraugli
+Source: Pogonospermum cleomoides
+Target: 1920x1433
+Quality: 85
+Effort: 0
+Passes: 2
+TimeBase: 2026-06-14T22:
+
+---
+runs[10]{run|psnr_ms|ssim_ms|butt_ms|total_ms}:
+  1 | 30.72 | 57.91 | 249.79 | 338.42
+  2 | 32.08 | 54.89 | 223.34 | 310.30
+  3 | 32.20 | 50.16 | 324.50 | 406.86
+  4 | 35.26 | 46.85 | 195.09 | 277.20
+  5 | 35.39 | 54.10 | 221.14 | 310.63
+  6 | 35.47 | 53.16 | 224.09 | 312.72
+  7 | 32.59 | 49.30 | 212.16 | 294.06
+  8 | 31.58 | 46.79 | 202.53 | 280.90
+  9 | 31.60 | 48.03 | 207.93 | 287.56
+  10 | 36.18 | 52.12 | 224.06 | 312.36
+
+# Aggregates
+RunCount: 10
+AvgTotal: 313.10 ms
+AvgPsnr: 33.31 ms
+AvgSsim: 51.33 ms
+AvgButteraugli: 228.46 ms
+MinTotal: 277.20 ms
+MaxTotal: 406.86 ms
+StdDev: 35.76 ms

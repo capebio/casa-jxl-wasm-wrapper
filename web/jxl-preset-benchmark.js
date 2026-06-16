@@ -1,6 +1,15 @@
 import initRaw, * as rawWasm from './pkg/raw_converter_wasm.js';
 import { createEncoder, createDecoder } from '@casabio/jxl-wasm';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
+import {
+    buildRawMeasurementKey,
+    createBenchmarkRow,
+    findRawIsolationMatch,
+    getCachedResizeVariant,
+    joinCsvRow,
+    pickScenarioWinner,
+    shouldPublishSweepArtifacts,
+} from './jxl-preset-benchmark-core.js';
 
 console.log('%c[Preset Benchmark] jxl-preset-benchmark.js loaded — preset/scenario sweep across tiers + sizes', 'color:#f97316;font-weight:600', { page: 'Preset Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
@@ -159,10 +168,15 @@ async function handleFile(slot, file) {
     clearSlotError(slot.id);
     try {
         const result = await decodeSource(bytes, ext);
-        loadedSources[slot.id] = { name: file.name, ...result };
+        loadedSources[slot.id] = {
+            name: file.name,
+            byteLength: bytes.byteLength,
+            lastModified: file.lastModified || 0,
+            ...result,
+        };
         if (idbAvailable) {
             try {
-                await idbPut(slot.id, { name: file.name, bytes, ext });
+                await idbPut(slot.id, { name: file.name, bytes, ext, byteLength: bytes.byteLength, lastModified: file.lastModified || 0 });
             } catch (err) {
                 console.warn('[preset-bench] IDB write failed:', err);
             }
@@ -248,7 +262,12 @@ for (const slot of SLOTS) {
     if (!record) continue;
     try {
         const result = await decodeSource(record.bytes, record.ext);
-        loadedSources[slot.id] = { name: record.name, ...result };
+        loadedSources[slot.id] = {
+            name: record.name,
+            byteLength: record.byteLength ?? record.bytes?.byteLength ?? 0,
+            lastModified: record.lastModified || 0,
+            ...result,
+        };
         setSlotFilename(slot.id, record.name);
     } catch (err) {
         console.error(`[preset-bench] Restore decode failed for slot ${slot.id}:`, err);
@@ -380,20 +399,22 @@ function _concatChunks(chunks) {
 }
 
 function resizeRgba(source, targetPx) {
-    if (targetPx === 'full') return { rgba: source.rgba, width: source.width, height: source.height };
-    const scale = targetPx / Math.max(source.width, source.height);
-    if (scale >= 1) return { rgba: source.rgba, width: source.width, height: source.height };
-    const w = Math.round(source.width * scale);
-    const h = Math.round(source.height * scale);
-    const canvas = new OffscreenCanvas(w, h);
-    const ctx = canvas.getContext('2d');
-    const srcCanvas = new OffscreenCanvas(source.width, source.height);
-    const srcCtx = srcCanvas.getContext('2d');
-    const srcView = source.rgba instanceof Uint8Array ? source.rgba : new Uint8Array(source.rgba);
-    srcCtx.putImageData(new ImageData(new Uint8ClampedArray(srcView.buffer, srcView.byteOffset, srcView.byteLength), source.width, source.height), 0, 0);
-    ctx.drawImage(srcCanvas, 0, 0, w, h);
-    const { data } = ctx.getImageData(0, 0, w, h);
-    return { rgba: new Uint8Array(data.buffer, data.byteOffset, data.byteLength), width: w, height: h };
+    return getCachedResizeVariant(source, targetPx, () => {
+        if (targetPx === 'full') return { rgba: source.rgba, width: source.width, height: source.height };
+        const scale = targetPx / Math.max(source.width, source.height);
+        if (scale >= 1) return { rgba: source.rgba, width: source.width, height: source.height };
+        const w = Math.round(source.width * scale);
+        const h = Math.round(source.height * scale);
+        const canvas = new OffscreenCanvas(w, h);
+        const ctx = canvas.getContext('2d');
+        const srcCanvas = new OffscreenCanvas(source.width, source.height);
+        const srcCtx = srcCanvas.getContext('2d');
+        const srcView = source.rgba instanceof Uint8Array ? source.rgba : new Uint8Array(source.rgba);
+        srcCtx.putImageData(new ImageData(new Uint8ClampedArray(srcView.buffer, srcView.byteOffset, srcView.byteLength), source.width, source.height), 0, 0);
+        ctx.drawImage(srcCanvas, 0, 0, w, h);
+        const { data } = ctx.getImageData(0, 0, w, h);
+        return { rgba: new Uint8Array(data.buffer, data.byteOffset, data.byteLength), width: w, height: h };
+    });
 }
 
 async function encodeOnce(rgbaResized, width, height, opts) {
@@ -481,7 +502,12 @@ async function runRawIsolation() {
     }
 
     // Cheap session cache: if the set of loaded files hasn't changed, reuse last measurement
-    const currentKey = Object.keys(loadedSources).filter(k => loadedSources[k]).sort().join('|');
+    const currentKey = buildRawMeasurementKey(loaded.map(([slotId, src]) => ({
+        slotId,
+        sourceName: src.name,
+        byteLength: src.byteLength,
+        lastModified: src.lastModified,
+    })));
     if (lastRawMeasurementKey === currentKey && rawIsolationData && Object.keys(rawIsolationData).length > 0) {
         status.textContent = 'Using cached RAW isolation results (files unchanged)';
         renderRawIsolationResults();
@@ -518,6 +544,7 @@ async function runRawIsolation() {
                 }
                 runs.sort((a, b) => (a.decompress_ms + a.demosaic_ms) - (b.decompress_ms + b.demosaic_ms));
                 bench = runs[2]; // median of 5
+                // (flip-flop harness removed; was temporary for old-vs-new measurement of pointer/SIMD scalar opts in raw hot path)
             } catch (e) {
                 console.warn('[raw-isolation] bench_decode_orf failed', slotId, e);
                 bench = { error: 'bench_decode_orf threw' };
@@ -593,6 +620,8 @@ async function runRawIsolation() {
         };
 
         rawIsolationData[slotId] = {
+            slotId,
+            sourceName: src.name,
             bench,
             modes,
             rawCostForScoring,
@@ -811,6 +840,16 @@ async function nextFrame() {
     return new Promise(r => requestAnimationFrame(r));
 }
 
+let lastYield = 0;
+let yC = 0;
+async function maybeYield() {
+  const n = performance.now();
+  if (++yC % 4 === 0 || n - lastYield > 16) {
+    lastYield = n;
+    await nextFrame();
+  }
+}
+
 // --- Main sweep orchestrator -------------------------------------------------
 
 export async function runSweep(options = {}) {
@@ -877,6 +916,10 @@ export async function runSweep(options = {}) {
                         if (sweepAborted) return;
                         updateLiveStatus(`P1 ${tier.label} · ${fileSlot.label} · ${sizePx}px · effort ${effort}`);
 
+                        // warm
+                        await encodeOnce(rgba, width, height, { quality: tier.quality, lossless: tier.lossless, effort, decodingSpeed: 0, modular: -1, brotliEffort: -1, resampling: 1 });
+                        await decodeOnce((await encodeOnce(rgba, width, height, { quality: tier.quality, lossless: tier.lossless, effort, decodingSpeed: 0, modular: -1, brotliEffort: -1, resampling: 1 })).jxlBytes);
+
                         const encMsVals = [], decMsVals = [], sizeVals = [];
                         for (let run = 0; run < runsPerConfig; run++) {
                             const enc = await encodeOnce(rgba, width, height, {
@@ -894,8 +937,9 @@ export async function runSweep(options = {}) {
                             sizeVals.push(enc.jxlBytes.byteLength);
                         }
 
-                        const row = {
-                            file: fileSlot.id,
+                        const row = createBenchmarkRow({
+                            fileSlot,
+                            source: src,
                             sizePx,
                             tier: tier.id,
                             phase: 1,
@@ -904,16 +948,17 @@ export async function runSweep(options = {}) {
                             modular: -1,
                             brotli: -1,
                             resamp: 1,
-                            encMs:     _medianOf(encMsVals),
-                            decMs:     _medianOf(decMsVals),
+                            encMs: _medianOf(encMsVals),
+                            decMs: _medianOf(decMsVals),
                             sizeBytes: _medianOf(sizeVals),
                             score: 0,
-                        };
+                            measuredCapabilities: { phase3ValidatedSizes: [] },
+                        });
                         effortRows.push(row);
                         sweepRows.push(row);
                         phase1Rows.push(row);
 
-                        await nextFrame();
+                        await maybeYield();
                         if (sweepAborted) return;
                     }
 
@@ -972,8 +1017,9 @@ export async function runSweep(options = {}) {
                             sizeVals.push(enc.jxlBytes.byteLength);
                         }
 
-                        const row = {
-                            file: fileSlot.id,
+                        const row = createBenchmarkRow({
+                            fileSlot,
+                            source: src,
                             sizePx,
                             tier: tier.id,
                             phase: 2,
@@ -982,18 +1028,19 @@ export async function runSweep(options = {}) {
                             modular: -1,
                             brotli: -1,
                             resamp: 1,
-                            encMs:     _medianOf(encMsVals),
-                            decMs:     _medianOf(decMsVals),
+                            encMs: _medianOf(encMsVals),
+                            decMs: _medianOf(decMsVals),
                             sizeBytes: _medianOf(sizeVals),
                             score: 0,
-                        };
+                            measuredCapabilities: { phase3ValidatedSizes: [] },
+                        });
 
                         if (decSpeed === 0) baselineEncMs = row.encMs;
                         decRows.push(row);
                         sweepRows.push(row);
                         phase2Rows.push(row);
 
-                        await nextFrame();
+                        await maybeYield();
                         if (sweepAborted) return;
                     }
 
@@ -1049,8 +1096,9 @@ export async function runSweep(options = {}) {
                             sizeVals.push(enc.jxlBytes.byteLength);
                         }
 
-                        const row = {
-                            file: fileSlot.id,
+                        const row = createBenchmarkRow({
+                            fileSlot,
+                            source: src,
                             sizePx,
                             tier: tier.id,
                             phase: 3,
@@ -1059,16 +1107,17 @@ export async function runSweep(options = {}) {
                             modular,
                             brotli,
                             resamp: 1,
-                            encMs:     _medianOf(encMsVals),
-                            decMs:     _medianOf(decMsVals),
+                            encMs: _medianOf(encMsVals),
+                            decMs: _medianOf(decMsVals),
                             sizeBytes: _medianOf(sizeVals),
                             score: 0,
-                        };
+                            measuredCapabilities: { phase3ValidatedSizes: [512] },
+                        });
                         comboRows.push(row);
                         sweepRows.push(row);
                         phase3Rows.push(row);
 
-                        await nextFrame();
+                        await maybeYield();
                         if (sweepAborted) return;
                     }
                 }
@@ -1132,8 +1181,9 @@ export async function runSweep(options = {}) {
                             sizeVals.push(enc.jxlBytes.byteLength);
                         }
 
-                        const row = {
-                            file: fileSlot.id,
+                        const row = createBenchmarkRow({
+                            fileSlot,
+                            source: src,
                             sizePx,
                             tier: tier.id,
                             phase: 4,
@@ -1142,16 +1192,17 @@ export async function runSweep(options = {}) {
                             modular,
                             brotli,
                             resamp,
-                            encMs:     _medianOf(encMsVals),
-                            decMs:     _medianOf(decMsVals),
+                            encMs: _medianOf(encMsVals),
+                            decMs: _medianOf(decMsVals),
                             sizeBytes: _medianOf(sizeVals),
                             score: 0,
-                        };
+                            measuredCapabilities: { phase3ValidatedSizes: [] },
+                        });
                         resampRows.push(row);
                         sweepRows.push(row);
                         phase4Rows.push(row);
 
-                        await nextFrame();
+                        await maybeYield();
                         if (sweepAborted) return;
                     }
 
@@ -1173,6 +1224,7 @@ export async function runSweep(options = {}) {
         sweepRunning = false;
         if (!sweepAborted) updatePhaseStatus(null, null); // all phases done
     }
+    return { aborted: sweepAborted, rows: [...sweepRows] };
 }
 
 export function abortSweep() {
@@ -1628,7 +1680,12 @@ function wireButtons() {
         btnStop.disabled = false;
 
         try {
-            await runSweep({ tiers, sizes, efforts, scenarios, runsPerConfig });
+            const result = await runSweep({ tiers, sizes, efforts, scenarios, runsPerConfig });
+            if (!shouldPublishSweepArtifacts(result)) {
+                dbgLog('Sweep aborted', 'partial rows kept in memory; skipping tables/recommendations/export');
+                updateButtonStates();
+                return;
+            }
         } finally {
             btnRun.disabled  = false;
             btnStop.disabled = true;
@@ -2028,10 +2085,7 @@ function scoreRowForScenario(row, scenario) {
     // RAW cost integration (from the new isolation surface)
     if (w.rawCost && rawIsolationData) {
         // Improved matching: try exact name match first, then contains
-        let match = Object.values(rawIsolationData).find(d => d.name && row.file && d.name === row.file);
-        if (!match) {
-            match = Object.values(rawIsolationData).find(d => d.name && row.file && d.name.includes(row.file));
-        }
+        const match = findRawIsolationMatch(rawIsolationData, row);
         const rawCost = match ? (match.rawCostForScoring?.thumb || match.rawCostForScoring?.full || 0) : 0;
         if (rawCost > 0) {
             const maxRaw = Math.max(...Object.values(rawIsolationData).map(d => d.rawCostForScoring?.full || d.rawCostForScoring?.thumb || 1));
@@ -2074,7 +2128,7 @@ export function buildScenarioRecommendations(rows, selectedScenarios) {
 
         const scored = candidates.map(r => ({ r, s: scoreRowForScenario(r, scenId) }));
         scored.sort((a, b) => b.s - a.s);
-        const best = scored[0].r;
+        const best = pickScenarioWinner(scored);
 
         let rawInfo = '';
         if (rawIsolationData) {
@@ -2104,7 +2158,10 @@ export function buildScenarioRecommendations(rows, selectedScenarios) {
         btn.addEventListener('click', () => {
             const scen = btn.dataset.scenario;
             const prof = SCENARIO_PROFILES[scen];
-            const bestForScen = /* simplistic: take first good row */ rows.find(r => prof.sizes.some(s => r.sizePx === s)) || {};
+            const scoredRows = rows
+                .filter(r => prof.sizes.some(s => r.sizePx === s))
+                .map(r => ({ row: r, score: scoreRowForScenario(r, scen) }));
+            const bestForScen = pickScenarioWinner(scoredRows) || {};
             const payload = { scenario: scen, profile: prof, bestRow: bestForScen, generatedAt: new Date().toISOString() };
             navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
             btn.textContent = 'Copied!';
@@ -2149,7 +2206,7 @@ export function exportCsv(rows) {
         // Try to attach latest RAW data if present for this file
         let rawBench = '', rawFull = '', rawLb = '', rawTh = '';
         if (rawIsolationData) {
-            const match = Object.values(rawIsolationData).find(d => d.name && r.file && d.name.includes(r.file));
+            const match = findRawIsolationMatch(rawIsolationData, r);
             if (match) {
                 if (match.bench) rawBench = (match.bench.decompress_ms + match.bench.demosaic_ms).toFixed(1);
                 if (match.rawCostForScoring) {
@@ -2159,13 +2216,13 @@ export function exportCsv(rows) {
                 }
             }
         }
-        csvRows.push([
+        csvRows.push(joinCsvRow([
             r.file, r.sizePx, r.tier, r.phase, r.effort, r.decSpeed,
             r.modular, r.brotli, r.resamp,
             r.encMs.toFixed(1), r.decMs.toFixed(1),
             (r.sizeBytes / 1024).toFixed(1), r.score,
             rawBench, rawFull, rawLb, rawTh
-        ].join(','));
+        ]));
     }
     const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -2257,12 +2314,12 @@ function buildExportText(rows, format = 'json') {
         const header = ['file','format','sizePx','tier','phase','effort','decSpeed','modular','brotli','resamp','encMs','decMs','sizeKB','score'];
         const lines = [header.join(',')];
         for (const r of enriched) {
-            lines.push([
+            lines.push(joinCsvRow([
                 r.file, r.format, r.sizePx, r.tier, r.phase, r.effort, r.decSpeed,
                 r.modular, r.brotli, r.resamp,
                 r.encMs.toFixed(1), r.decMs.toFixed(1),
                 (r.sizeBytes/1024).toFixed(1), r.score
-            ].join(','));
+            ]));
         }
         // meta as comment block (non-standard but useful when pasted)
         const metaLines = Object.entries(meta).map(([k,v]) => `# ${k}: ${typeof v==='object'?JSON.stringify(v):v}`);

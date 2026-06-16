@@ -7,14 +7,17 @@ export async function loadScalarModule() {
   // Post P3 split: artifacts are jxl-core.{dec,enc}.*.js. Pre-rebuild the file may be absent.
   // Tests that reach here override encodeTileContainer etc via makeTestJxlBackend; provide a
   // minimal stub module so import doesn't hard-fail the suite before rebuild.
-  try {
-    const imported = await import("../../jxl-wasm/dist/jxl-core.dec.simd.js");
-    if (typeof imported.default === "function") {
-      const baseUrl = new URL("../../jxl-wasm/dist/", import.meta.url);
-      const module = await imported.default({ locateFile: (p: string) => new URL(p, baseUrl).href });
-      if (module && typeof module._malloc === "function") return module;
-    }
-  } catch {}
+  // Fallback order: dec split (post-P3) -> monolithic simd (current shipped dist) -> stub.
+  for (const artifact of ["jxl-core.dec.simd.js", "jxl-core.simd.js"]) {
+    try {
+      const imported = await import(`../../jxl-wasm/dist/${artifact}`);
+      if (typeof imported.default === "function") {
+        const baseUrl = new URL("../../jxl-wasm/dist/", import.meta.url);
+        const module = await imported.default({ locateFile: (p: string) => new URL(p, baseUrl).href });
+        if (module && typeof module._malloc === "function") return module;
+      }
+    } catch {}
+  }
   // Fallback stub (sufficient because callers replace the encode surface).
   return {
     _malloc: (n: number) => 0,

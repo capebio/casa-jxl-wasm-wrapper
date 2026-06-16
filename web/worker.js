@@ -50,9 +50,20 @@ const thumbStateMap = new Map(); // taskId → same shape but thumb-sized LookRe
 async function ensureWasm() {
     if (!wasmReady) wasmReady = (async () => {
         await init();
-        // A2: init rayon thread pool when parallel-wasm feature is compiled in
+        // A2: init rayon thread pool when parallel-wasm feature is compiled in.
+        // Guard: shared memory requires crossOriginIsolated (COOP/COEP). Falls
+        // back silently to single-threaded WASM if the context is not isolated
+        // or the browser rejects the memory transfer (e.g. nested worker COI gap).
         if (typeof rawWasm.initThreadPool === 'function') {
-            await rawWasm.initThreadPool(navigator.hardwareConcurrency);
+            if (crossOriginIsolated) {
+                try {
+                    await rawWasm.initThreadPool(navigator.hardwareConcurrency);
+                } catch (e) {
+                    console.warn('[worker] rayon thread pool init failed, using single-thread WASM:', e.message);
+                }
+            } else {
+                console.warn('[worker] crossOriginIsolated=false — skipping rayon thread pool');
+            }
         }
     })();
     try {

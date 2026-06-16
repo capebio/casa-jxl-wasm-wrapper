@@ -1,9 +1,9 @@
 use crate::tiff::OrfInfo;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Rational {
-    pub num: u32,
-    pub den: u32,
+pub enum ExifRatio {
+    Unsigned { num: u32, den: u32 },
+    Signed { num: i32, den: i32 },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -19,15 +19,17 @@ pub struct ExifData {
     pub model: Option<String>,
     pub lens: Option<String>,
     pub datetime: Option<String>,
-    pub exposure: Option<Rational>,
-    pub fnumber: Option<Rational>,
+    pub exposure: Option<ExifRatio>,
+    pub fnumber: Option<ExifRatio>,
     pub iso: Option<u32>,
-    pub focal_length: Option<Rational>,
+    pub focal_length: Option<ExifRatio>,
     pub focal_length_35: Option<u32>,
     pub gps: Option<GpsData>,
     pub orientation: u16,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub raw_width: Option<u32>,
+    pub raw_height: Option<u32>,
     pub wb_r: Option<f32>,
     pub wb_b: Option<f32>,
     pub wb_mode: Option<u16>,
@@ -38,6 +40,9 @@ pub struct ExifData {
 impl ExifData {
     pub fn from_orf_info(info: &OrfInfo, image_w: u32, image_h: u32) -> Self {
         let nonempty = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
+        let unsigned_ratio = |(num, den): (u32, u32)| {
+            (den != 0).then_some(ExifRatio::Unsigned { num, den })
+        };
 
         let gps = if info.gps_lat.is_some() && info.gps_lon.is_some() {
             Some(GpsData {
@@ -54,15 +59,17 @@ impl ExifData {
             model:          nonempty(&info.model),
             lens:           nonempty(&info.lens),
             datetime:       nonempty(&info.datetime),
-            exposure:       info.exposure.map(|(n, d)| Rational { num: n, den: d }),
-            fnumber:        info.fnumber.map(|(n, d)| Rational { num: n, den: d }),
+            exposure:       info.exposure.and_then(unsigned_ratio),
+            fnumber:        info.fnumber.and_then(unsigned_ratio),
             iso:            info.iso,
-            focal_length:   info.focal_length.map(|(n, d)| Rational { num: n, den: d }),
+            focal_length:   info.focal_length.and_then(unsigned_ratio),
             focal_length_35: info.focal_length_35.map(|v| v as u32),
             gps,
             orientation:    info.orientation,
             width:          Some(image_w),
             height:         Some(image_h),
+            raw_width:      Some(info.width),
+            raw_height:     Some(info.height),
             wb_r:           info.wb_r,
             wb_b:           info.wb_b,
             wb_mode:        info.wb_mode,
@@ -126,11 +133,15 @@ mod tests {
         assert!(exif.wb_from_camera);
         assert_eq!(exif.quality, Some(3));
 
-        let exp = exif.exposure.unwrap();
-        assert_eq!((exp.num, exp.den), (1, 500));
+        match exif.exposure.unwrap() {
+            ExifRatio::Unsigned { num, den } => assert_eq!((num, den), (1, 500)),
+            _ => panic!("expected unsigned exposure"),
+        }
 
-        let f = exif.fnumber.unwrap();
-        assert_eq!((f.num, f.den), (28, 10));
+        match exif.fnumber.unwrap() {
+            ExifRatio::Unsigned { num, den } => assert_eq!((num, den), (28, 10)),
+            _ => panic!("expected unsigned fnumber"),
+        }
 
         let gps = exif.gps.unwrap();
         assert!((gps.lat - 48.8566).abs() < 1e-4);
@@ -151,5 +162,36 @@ mod tests {
         assert!(!exif.wb_from_camera);
         assert!(exif.lens.is_none());
         assert!(exif.datetime.is_none());
+    }
+
+    #[test]
+    fn exif_from_orf_info_preserves_raw_dims_and_skips_zero_denominators() {
+        let mut info = make_info();
+        info.width = 5184;
+        info.height = 3888;
+        info.exposure = Some((1, 0));
+        info.fnumber = Some((28, 0));
+        info.focal_length = Some((40, 0));
+
+        let exif = ExifData::from_orf_info(&info, 4608, 3456);
+        assert_eq!(exif.width, Some(4608));
+        assert_eq!(exif.height, Some(3456));
+        assert_eq!(exif.raw_width, Some(5184));
+        assert_eq!(exif.raw_height, Some(3888));
+        assert!(exif.exposure.is_none());
+        assert!(exif.fnumber.is_none());
+        assert!(exif.focal_length.is_none());
+    }
+
+    #[test]
+    fn exif_ratio_supports_signed_values() {
+        let ratio = ExifRatio::Signed { num: -1, den: 3 };
+        match ratio {
+            ExifRatio::Signed { num, den } => {
+                assert_eq!(num, -1);
+                assert_eq!(den, 3);
+            }
+            _ => panic!("expected signed ratio"),
+        }
     }
 }

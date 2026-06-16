@@ -7,6 +7,11 @@
 // `navigator.hardwareConcurrency` so a batch saturates all cores.
 
 import { getContext } from './jxl-browser-context.js';
+import {
+    applyLens, estimateSceneWhiteLms,
+    normalizedLabBuffer, selectByColour, unionMask, maskBorder, maskCoverage,
+    probe as probeColour,
+} from './perceptual-color.mjs';
 
 const IS_TAURI = typeof window !== 'undefined' && !!window.__TAURI__;
 window.IS_TAURI = IS_TAURI;
@@ -68,6 +73,7 @@ const statusText = document.getElementById('status-text');
 
 const lightbox = document.getElementById('lightbox');
 const lightboxCanvas = document.getElementById('lightbox-canvas');
+const plOverlayCanvas = document.getElementById('pl-overlay');
 const lightboxInfo = lightbox.querySelector('.lightbox-info');
 const lightboxClose = lightbox.querySelector('.lightbox-close');
 const lightboxPrev = lightbox.querySelector('.lightbox-prev');
@@ -88,6 +94,11 @@ const lbStraighten = document.getElementById('lb-straighten');
 const lbStraightenVal = document.getElementById('lb-straighten-val');
 const lbStraightenAuto = document.getElementById('lb-straighten-auto');
 
+let filmstripEl = null;
+let filmstripScroll = null;
+let filmstripActions = null;
+let filmstripSelection = new Set();
+let filmstripLastClicked = -1;
 initFilmstrip();
 
 const qualityRange = document.getElementById('quality-range');
@@ -921,10 +932,9 @@ pool.setLiveHandler((msg) => {
             const sH = msg.nativeH ?? msg.h;
             const ori = msg.orientation ?? 1;
             drawSensorWithOrientation(lightboxCanvas, msg.rgb, sW, sH, ori);
-            // Histogram panel reads back canvas pixels — only runs when panel is open (guard inside)
-            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            if (lightboxCanvas.width > 0) {
                 const ctx = lightboxCanvas.getContext('2d');
-                setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                captureCleanAndApplyLens(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
         }
     }
@@ -1990,10 +2000,109 @@ function repaintThumbFromJxl(card) {
     }, 'low');
 }
 
+// ---------------------------------------------------------------------------
+// Perceptual Lens + Colour Selector
+// ---------------------------------------------------------------------------
+let cleanSnapshot = null;
+const perceptualLens = { active: false, strength: 0.7, lightness: true };
+const colourSelect = { labBuf: null, mask: null, tolerance: 30, seeds: [] };
+
+function captureCleanAndApplyLens(imageData) {
+    cleanSnapshot = imageData;
+    if (typeof setCleanCanvas === 'function') setCleanCanvas(imageData);
+    applyPerceptualLens();
+}
+
+function applyPerceptualLens() {
+    if (!lightboxCanvas.width) return;
+    const ctx = lightboxCanvas.getContext('2d');
+    if (perceptualLens.active && cleanSnapshot) {
+        const out = applyLens(
+            cleanSnapshot.data, lightboxCanvas.width, lightboxCanvas.height,
+            { strength: perceptualLens.strength, lightness: perceptualLens.lightness },
+        );
+        ctx.putImageData(new ImageData(out, lightboxCanvas.width, lightboxCanvas.height), 0, 0);
+    } else if (!perceptualLens.active && cleanSnapshot) {
+        ctx.putImageData(cleanSnapshot, 0, 0);
+    }
+    refreshSelectionOverlay();
+}
+
+function ensureLabBuf() {
+    if (!cleanSnapshot || !lightboxCanvas.width) return;
+    const sceneWhite = estimateSceneWhiteLms(
+        cleanSnapshot.data, lightboxCanvas.width, lightboxCanvas.height,
+    );
+    colourSelect.labBuf = normalizedLabBuffer(
+        cleanSnapshot.data, lightboxCanvas.width, lightboxCanvas.height, sceneWhite,
+    );
+}
+
+function refreshSelectionOverlay() {
+    if (!plOverlayCanvas) return;
+    plOverlayCanvas.width = lightboxCanvas.width;
+    plOverlayCanvas.height = lightboxCanvas.height;
+    const vpW = lightboxCanvas.parentElement?.offsetWidth ?? 0;
+    const vpH = lightboxCanvas.parentElement?.offsetHeight ?? 0;
+    plOverlayCanvas.style.left = Math.round((vpW - lightboxCanvas.width) / 2) + 'px';
+    plOverlayCanvas.style.top  = Math.round((vpH - lightboxCanvas.height) / 2) + 'px';
+    plOverlayCanvas.style.transform = lightboxCanvas.style.transform;
+    const ctx = plOverlayCanvas.getContext('2d');
+    ctx.clearRect(0, 0, plOverlayCanvas.width, plOverlayCanvas.height);
+    if (!colourSelect.mask || !colourSelect.seeds.length) return;
+    const border  = maskBorder(colourSelect.mask, plOverlayCanvas.width, plOverlayCanvas.height);
+    const imgData = ctx.createImageData(plOverlayCanvas.width, plOverlayCanvas.height);
+    for (let i = 0; i < colourSelect.mask.length; i++) {
+        if (colourSelect.mask[i]) {
+            imgData.data[i*4]   = 100;
+            imgData.data[i*4+1] = 120;
+            imgData.data[i*4+2] = 255;
+            imgData.data[i*4+3] = 60;
+        }
+        if (border[i]) {
+            imgData.data[i*4]   = 255;
+            imgData.data[i*4+1] = 220;
+            imgData.data[i*4+2] = 0;
+            imgData.data[i*4+3] = 200;
+        }
+    }
+    ctx.putImageData(imgData, 0, 0);
+    const cov = maskCoverage(colourSelect.mask);
+    const readout = document.getElementById('pl-probe-readout');
+    if (readout) readout.textContent = `${(cov.fraction * 100).toFixed(1)}% selected`;
+}
+
+function handleLensClick(e) {
+    ensureLabBuf();
+    if (!colourSelect.labBuf) return;
+    const rect = lightboxCanvas.getBoundingClientRect();
+    const scaleX = lightboxCanvas.width / rect.width;
+    const scaleY = lightboxCanvas.height / rect.height;
+    const cx = Math.round((e.clientX - rect.left) * scaleX);
+    const cy = Math.round((e.clientY - rect.top) * scaleY);
+    const w = lightboxCanvas.width, h = lightboxCanvas.height;
+    if (cx < 0 || cy < 0 || cx >= w || cy >= h) return;
+    const p = probeColour(colourSelect.labBuf, w, h, cx, cy, 3);
+    const readout = document.getElementById('pl-probe-readout');
+    if (readout) readout.textContent = `H:${p.hueDeg.toFixed(0)}° S:${p.dampedSaturation.toFixed(1)} L:${p.lightness.toFixed(0)}`;
+    const i = cy * w + cx;
+    const seedLab = [colourSelect.labBuf[i*3], colourSelect.labBuf[i*3+1], colourSelect.labBuf[i*3+2]];
+    const newMask = selectByColour(colourSelect.labBuf, w, h, seedLab, colourSelect.tolerance);
+    if (e.ctrlKey && colourSelect.mask) {
+        colourSelect.mask = unionMask(colourSelect.mask, newMask);
+        colourSelect.seeds.push(seedLab);
+    } else {
+        colourSelect.mask = newMask;
+        colourSelect.seeds = [seedLab];
+    }
+    refreshSelectionOverlay();
+}
+
 function applyLbTransform() {
-    lightboxCanvas.style.transform =
-        `translate(${lbPanX}px, ${lbPanY}px) scale(${lbZoom}) rotate(${lbRotation}deg)`;
+    const t = `translate(${lbPanX}px, ${lbPanY}px) scale(${lbZoom}) rotate(${lbRotation}deg)`;
+    lightboxCanvas.style.transform = t;
     lbZoomLabel.textContent = Math.round(lbZoom * 100) + '%';
+    if (plOverlayCanvas) plOverlayCanvas.style.transform = t;
 }
 
 // Returns {fitW, fitH, vp} accounting for rotation, or null if canvas invalid.
@@ -2092,9 +2201,9 @@ function drawLightboxForCard(card) {
             const { w, h } = card._lightbox;
             const { bmp, orientation } = card._embeddedPreview;
             drawJpegToTargetDims(lightboxCanvas, bmp, orientation || 1, w, h);
-            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            if (lightboxCanvas.width > 0) {
                 const _ctx = lightboxCanvas.getContext('2d');
-                setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                captureCleanAndApplyLens(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
             setPaintedSourceBadge('jpeg');
             lbLoadingBadge.hidden = true;
@@ -2117,8 +2226,8 @@ function drawLightboxForCard(card) {
             lightboxCanvas.height = h;
             const ctx = lightboxCanvas.getContext('2d');
             ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
-            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-                setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            if (lightboxCanvas.width > 0) {
+                captureCleanAndApplyLens(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
             setPaintedSourceBadge('jxl');
             lbLoadingBadge.hidden = true;
@@ -2141,8 +2250,8 @@ function drawLightboxForCard(card) {
                 lightboxCanvas.height = msg.h;
                 const ctx = lightboxCanvas.getContext('2d');
                 ctx.putImageData(new ImageData(msg.rgba, msg.w, msg.h), 0, 0);
-                if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-                    setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                if (lightboxCanvas.width > 0) {
+                    captureCleanAndApplyLens(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
                 }
                 setPaintedSourceBadge('jxl');
                 lbLoadingBadge.hidden = true;
@@ -2199,9 +2308,9 @@ function drawLightboxForCard(card) {
         } else {
             drawCanvas(lightboxCanvas, lb.w, lb.h, lb.rgb);
         }
-        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+        if (lightboxCanvas.width > 0) {
             const _ctx = lightboxCanvas.getContext('2d');
-            setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+            captureCleanAndApplyLens(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
         }
         setPaintedSourceBadge('raw');
         lbLoadingBadge.hidden = true;
@@ -2244,9 +2353,9 @@ function drawLightboxForCard(card) {
                 targetW = Math.max(1, Math.round(srcDispW * targetH / srcDispH));
             }
             drawJpegToTargetDims(lightboxCanvas, bmp, o, targetW, targetH);
-            if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
+            if (lightboxCanvas.width > 0) {
                 const _ctx = lightboxCanvas.getContext('2d');
-                setCleanCanvas(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+                captureCleanAndApplyLens(_ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
             }
             // Actual painted source is the embedded JPEG even though mode='raw'.
             setPaintedSourceBadge('jpeg');
@@ -2743,28 +2852,37 @@ function applyStraightenToLightboxCanvas(card) {
     const outCtx = lightboxCanvas.getContext('2d');
     outCtx.drawImage(tmp, 0, 0);
 
-    // Update the clean canvas snapshot if the hook exists (used by histogram/levels)
-    if (typeof setCleanCanvas === 'function') {
-        try {
-            setCleanCanvas(outCtx.getImageData(0, 0, tmp.width, tmp.height));
-        } catch {}
-    }
+    try {
+        captureCleanAndApplyLens(outCtx.getImageData(0, 0, tmp.width, tmp.height));
+    } catch {}
 }
 
 // ---------------------------------------------------------------------------
 // Filmstrip (Phase 1) — lightweight bottom row for navigation + future multi-select
 // ---------------------------------------------------------------------------
-let filmstripEl = null;
-let filmstripScroll = null;
-let filmstripActions = null;
-let filmstripSelection = new Set(); // indices into the global `cards` array
-let filmstripLastClicked = -1;
-
 function initFilmstrip() {
     filmstripEl = document.getElementById('lightbox-filmstrip');
     filmstripScroll = document.getElementById('filmstrip-scroll');
     filmstripActions = document.getElementById('filmstrip-actions');
     if (!filmstripEl || !filmstripScroll) return;
+
+    // Resize handle: drag up/down to change filmstrip height (thumbs scale via CSS var)
+    const resizeHandle = document.getElementById('filmstrip-resize-handle');
+    if (resizeHandle) {
+        let startY = 0, startH = 0;
+        resizeHandle.addEventListener('pointerdown', e => {
+            e.preventDefault();
+            startY = e.clientY;
+            startH = filmstripEl.offsetHeight;
+            resizeHandle.setPointerCapture(e.pointerId);
+        });
+        resizeHandle.addEventListener('pointermove', e => {
+            if (!resizeHandle.hasPointerCapture(e.pointerId)) return;
+            const dy = startY - e.clientY; // drag up → increase height
+            const newH = Math.max(60, Math.min(320, startH + dy));
+            filmstripEl.style.setProperty('--filmstrip-h', newH + 'px');
+        });
+    }
 
     // Selection count + apply button (wired in P1-4/P1-5)
     const applyBtn = document.getElementById('filmstrip-apply-selection');
@@ -3241,8 +3359,113 @@ document.addEventListener('keydown', (e) => {
         zoomAtPoint(vp.left + vp.width / 2, vp.top + vp.height / 2, 1 / LB_ZOOM_STEP);
     } else if (e.key === '0') {
         resetLbZoom();
+    } else if (!isInput && (e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        document.getElementById('pl-lens-toggle')?.click();
     }
 });
+
+// ---------------------------------------------------------------------------
+// Perceptual Lens controls + colour-select click handler
+// ---------------------------------------------------------------------------
+{
+    const toggleBtn   = document.getElementById('pl-lens-toggle');
+    const strengthEl  = document.getElementById('pl-strength');
+    const lightnessEl = document.getElementById('pl-lightness');
+    const toleranceEl = document.getElementById('pl-tolerance');
+    const clearBtn    = document.getElementById('pl-clear');
+
+    let lensDebounce = null;
+    function scheduleLensApply() {
+        clearTimeout(lensDebounce);
+        lensDebounce = setTimeout(() => applyPerceptualLens(), 80);
+    }
+
+    toggleBtn?.addEventListener('click', () => {
+        perceptualLens.active = !perceptualLens.active;
+        toggleBtn.classList.toggle('pl-active', perceptualLens.active);
+        if (!perceptualLens.active) {
+            colourSelect.mask = null;
+            colourSelect.seeds = [];
+            colourSelect.labBuf = null;
+        }
+        applyPerceptualLens();
+    });
+
+    strengthEl?.addEventListener('input', () => {
+        perceptualLens.strength = parseFloat(strengthEl.value);
+        scheduleLensApply();
+    });
+
+    lightnessEl?.addEventListener('change', () => {
+        perceptualLens.lightness = lightnessEl.checked;
+        scheduleLensApply();
+    });
+
+    toleranceEl?.addEventListener('input', () => {
+        colourSelect.tolerance = parseInt(toleranceEl.value, 10);
+        if (colourSelect.seeds.length && colourSelect.labBuf) {
+            const w = lightboxCanvas.width, h = lightboxCanvas.height;
+            let mask = null;
+            for (const seed of colourSelect.seeds) {
+                const m = selectByColour(colourSelect.labBuf, w, h, seed, colourSelect.tolerance);
+                mask = mask ? unionMask(mask, m) : m;
+            }
+            colourSelect.mask = mask;
+            refreshSelectionOverlay();
+        }
+    });
+
+    clearBtn?.addEventListener('click', () => {
+        colourSelect.mask = null;
+        colourSelect.seeds = [];
+        colourSelect.labBuf = null;
+        const readout = document.getElementById('pl-probe-readout');
+        if (readout) readout.textContent = '';
+        refreshSelectionOverlay();
+    });
+
+    // "Open img" — load any image file directly into lightbox for lens/selector testing
+    const imgFileInput = document.getElementById('pl-image-input');
+    document.getElementById('pl-load-image')?.addEventListener('click', () => imgFileInput?.click());
+    imgFileInput?.addEventListener('change', async () => {
+        const file = imgFileInput.files?.[0];
+        if (!file) return;
+        imgFileInput.value = '';
+        try {
+            const bmp = await createImageBitmap(file);
+            const MAX = 1800;
+            const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+            const w = Math.round(bmp.width * scale);
+            const h = Math.round(bmp.height * scale);
+            lightboxCanvas.width  = w;
+            lightboxCanvas.height = h;
+            const ctx = lightboxCanvas.getContext('2d');
+            ctx.drawImage(bmp, 0, 0, w, h);
+            bmp.close();
+            lightbox.hidden = false;
+            lightboxIndex = -1;
+            lbDisplayLongPx = null; lbPanX = 0; lbPanY = 0; lbRotation = 0;
+            syncZoomToDisplayLong();
+            captureCleanAndApplyLens(ctx.getImageData(0, 0, w, h));
+        } catch (err) {
+            console.error('pl-load-image failed:', err);
+        }
+    });
+
+    // Click-to-probe / Ctrl+click to add region — only fires when lens active and no drag occurred
+    let plDragDist = 0, plDragTracking = false;
+    lbViewport.addEventListener('mousedown', () => { plDragDist = 0; plDragTracking = true; }, true);
+    window.addEventListener('mouseup', () => { plDragTracking = false; }, true);
+    window.addEventListener('mousemove', (e) => {
+        if (plDragTracking) plDragDist += Math.hypot(e.movementX, e.movementY);
+    }, true);
+    lbViewport.addEventListener('click', (e) => {
+        if (!perceptualLens.active || plDragDist > 8) return;
+        if (e.target.closest('.lb-panels, #pl-controls')) return;
+        handleLensClick(e);
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Re-process — applies current look-controls to either selected cards or all.
@@ -4335,8 +4558,8 @@ function paintPeepCurrent() {
             ? dec.rgba
             : new Uint8ClampedArray(dec.rgba.buffer, dec.rgba.byteOffset, dec.rgba.byteLength);
         ctx.putImageData(new ImageData(rgba, dec.w, dec.h), 0, 0);
-        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        if (lightboxCanvas.width > 0) {
+            captureCleanAndApplyLens(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
         }
         pushStat(`[peep] painted photo ${peepIdx+1} ${fmtPeepQ(paintedQ)}  ${dec.w}×${dec.h}`);
     } catch (err) {
@@ -4781,8 +5004,8 @@ async function triggerLiveUpdateTauri(look) {
         }
         const ctx = lightboxCanvas.getContext('2d');
         ctx.putImageData(new ImageData(rgbToRgbaArr(rgb), w, h), 0, 0);
-        if (typeof setCleanCanvas === 'function' && lightboxCanvas.width > 0) {
-            setCleanCanvas(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
+        if (lightboxCanvas.width > 0) {
+            captureCleanAndApplyLens(ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height));
         }
         // Real RAW pixels now on screen → update colour-coded badge accordingly,
         // and preserve displayed size if the canvas just got resized.

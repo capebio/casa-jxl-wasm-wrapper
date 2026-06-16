@@ -9,7 +9,7 @@ export type JxtcHeader = Readonly<TilingJxtcHeader & { version: number }>;
 
 export interface DecodePlan {
   viewport: ImageRegion;
-  tiles: ImageRegion[];
+  tiles: readonly ImageRegion[];
   header: JxtcHeader;
   bits: 8 | 16;
   bpp: 4 | 8;
@@ -17,12 +17,17 @@ export interface DecodePlan {
   decodeRegion: RegionDecoder;
 }
 
+function sameRegion(a: ImageRegion, b: ImageRegion): boolean {
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+
 // P3: header memo by bytes identity; frozen and shared (no per-call copies, uniform identity).
 const headerMemo = new WeakMap<Uint8Array, JxtcHeader>();
 function memoParseHeader(bytes: Uint8Array): JxtcHeader {
   const hit = headerMemo.get(bytes);
   if (hit) return hit;
-  const h: JxtcHeader = Object.freeze({ ...parseJxtcHeader(bytes), version: 1 });
+  const parsed = parseJxtcHeader(bytes);
+  const h: JxtcHeader = Object.freeze({ ...parsed, version: parsed.version });
   headerMemo.set(bytes, h);
   return h;
 }
@@ -30,6 +35,8 @@ function memoParseHeader(bytes: Uint8Array): JxtcHeader {
 // P3: memoize only per-source-stable parts; viewport/tiles are per-call (no dead retention, no alias pinning).
 interface PlanCore {
   header: JxtcHeader; bits: 8 | 16; bpp: 4 | 8; format: PixelFormat; decodeRegion: RegionDecoder;
+  lastRegion?: ImageRegion;
+  lastPlan?: DecodePlan;
 }
 const coreMemo = new WeakMap<LevelSource, PlanCore>();
 
@@ -50,6 +57,8 @@ export function prepareDecodePlan(source: LevelSource, region: ImageRegion): Dec
     core = {
       header, bits, format, bpp: bppOfFormat(format),
       decodeRegion: bits === 16 ? REGION_DECODER_RGBA16 : REGION_DECODER_RGBA8, // F6 unchanged
+      lastRegion: undefined,
+      lastPlan: undefined,
     };
     coreMemo.set(source, core);
   }
@@ -58,9 +67,17 @@ export function prepareDecodePlan(source: LevelSource, region: ImageRegion): Dec
   if (viewport.w <= 0 || viewport.h <= 0) {
     throw new PyramidError('BAD_REGION', 'empty region after clamp');
   }
+  if (core.lastRegion && sameRegion(core.lastRegion, viewport)) {
+    // fast path for identical viewport (panning, settle, AR predictive reuse)
+    // single retention per source (P3 discipline, no history growth, no alias of caller region)
+    return core.lastPlan!;
+  }
   // P5: already clamped — skip re-validate/re-clamp (T7 core walk).
   const tiles = tilesForClampedRegion(source.width, source.height, source.tileSize, viewport.x, viewport.y, viewport.w, viewport.h);
-  return { viewport, tiles, header: core.header, bits: core.bits, bpp: core.bpp, format: core.format, decodeRegion: core.decodeRegion };
+  const plan: DecodePlan = { viewport, tiles, header: core.header, bits: core.bits, bpp: core.bpp, format: core.format, decodeRegion: core.decodeRegion };
+  core.lastRegion = viewport; // owned clamped viewport
+  core.lastPlan = plan;
+  return plan;
 }
 
 /** P6: prefetch ring — expand a viewport by whole tiles, clamped to the image (gaming/AR predictive fetch).

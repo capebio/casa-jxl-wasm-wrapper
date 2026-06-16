@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./test && tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck test/index.type-test.ts"
   },
   "peerDependencies": {
     "@casabio/jxl-core": "0.1.0"

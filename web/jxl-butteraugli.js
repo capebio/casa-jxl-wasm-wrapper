@@ -18,28 +18,6 @@ const _sqrtLin = (() => {
     return t;
 })();
 
-// Reusable scratch buffer pool with geometric growth.
-// Adapts to working region size; zero allocations after first ensureScratch call.
-export function createButteraugliScratch() {
-    return {
-        a: null,
-        b: null,
-        c: null,
-        capacity: 0
-    };
-}
-
-// Grow scratch buffers geometrically if needed. Does nothing if capacity is sufficient.
-function ensureScratch(scratch, length) {
-    if (scratch.capacity >= length) return;
-
-    const next = Math.ceil(Math.max(length, scratch.capacity * 1.5));
-    scratch.a = new Float32Array(next);
-    scratch.b = new Float32Array(next);
-    scratch.c = new Float32Array(next);
-    scratch.capacity = next;
-}
-
 // Convert RGBA uint8 pixels → XYB float32 channels (allocation-free variant).
 // outX, outY, outB must be pre-allocated Float32Arrays of size n.
 export function pixelsToXybInto(pixels, n, outX, outY, outB) {
@@ -55,10 +33,13 @@ export function pixelsToXybInto(pixels, n, outX, outY, outB) {
 
 // Convert RGBA uint8 pixels → XYB float32 channels.
 // Exported so callers can precompute reference once and reuse across passes.
-export function pixelsToXyb(pixels, n) {
-    const X = new Float32Array(n);
-    const Y = new Float32Array(n);
-    const B = new Float32Array(n);
+// pixels: Uint8Array RGBA (stride 4, alpha ignored). For batch reuse see createButteraugliComparer.
+// Approx only; not bit-exact libjxl.
+// Optional outX/outY/outB for zero-alloc in hot batch paths.
+export function pixelsToXyb(pixels, n, outX, outY, outB) {
+    const X = outX || new Float32Array(n);
+    const Y = outY || new Float32Array(n);
+    const B = outB || new Float32Array(n);
     pixelsToXybInto(pixels, n, X, Y, B);
     return [X, Y, B];
 }
@@ -103,7 +84,7 @@ function boxBlur(src, w, h, r) {
 }
 
 // 2× area downsample into pre-allocated buffer (allocation-free variant).
-// dst must be a pre-allocated Float32Array of size Math.max(1, w>>1) × Math.max(1, h>>1).
+// dst must be a pre-allocated Float32Array of size Math.max(1,w>>1) × Math.max(1,h>>1).
 function dn2Into(src, dst, w, h) {
     const dw = Math.max(1, w >> 1);
     const dh = Math.max(1, h >> 1);
@@ -122,7 +103,7 @@ function dn2Into(src, dst, w, h) {
     return [dst, dw, dh];
 }
 
-// 2× area downsample (box filter) — allocates new buffer.
+// 2× area downsample (box filter) — allocates new buffer. Returns [dst, dw, dh].
 function dn2(src, w, h) {
     const dw = Math.max(1, w >> 1);
     const dh = Math.max(1, h >> 1);
@@ -130,16 +111,46 @@ function dn2(src, w, h) {
     return dn2Into(src, dst, w, h);
 }
 
+// Reference-side work is identical for every pass compared against the same
+// reference: the 3-scale downsampled pyramid of the ref channels and the masking
+// blur of ref Y. Charts evaluate many passes per reference, so precompute once,
+// keyed on the refXyb array identity (WeakMap — GC-safe, zero API change).
+const _refPrep = new WeakMap();
+
+function prepRef(refXyb, width, height) {
+    const cached = _refPrep.get(refXyb);
+    if (cached && cached.width === width && cached.height === height) return cached;
+    let [X, Y, B] = refXyb;
+    let w = width, h = height;
+    const levels = [];
+    for (let s = 0; s < 3; s++) {
+        const prev = levels[levels.length - 1];
+        if (prev && prev.X === X) {
+            levels.push(prev);  // degenerate 1px dims: scale not downsampled, reuse level
+        } else {
+            const blurR = Math.max(1, Math.min(8, w >> 6));  // ~w/64, clamped 1–8
+            levels.push({ X, Y, B, mask: boxBlur(Y, w, h, blurR) });
+        }
+        if (s < 2 && w > 1 && h > 1) {
+            X = dn2(X, w, h)[0];
+            Y = dn2(Y, w, h)[0];
+            B = dn2(B, w, h)[0];
+            w = Math.max(1, w >> 1);
+            h = Math.max(1, h >> 1);
+        }
+    }
+    const prep = { width, height, levels };
+    _refPrep.set(refXyb, prep);
+    return prep;
+}
+
 // Perceptual error at one spatial scale.
-// Uses Y-channel blur for masking (brighter/higher-contrast areas tolerate more error).
-// scratch: pre-allocated buffers from createButteraugliScratch(), sized to w*h.
-function scaleErr(rX, rY, rB, tX, tY, tB, w, h, scratch) {
-    const blurR = Math.max(1, Math.min(8, w >> 6));  // ~w/64, clamped 1–8
+// mask: precomputed box blur of the reference Y channel (brighter/higher-contrast
+// areas tolerate more error) — constant per reference, see prepRef().
+// k: optional per-channel weight overrides {kX, kY, kB}; defaults: kX=24 kY=12 kB=4.
+function scaleErr(mask, rX, rY, rB, tX, tY, tB, w, h, k = null) {
     const n = w * h;
-    ensureScratch(scratch, n);
-    const mask = boxBlurInto(rY, scratch.a, scratch.b, w, h, blurR);
-    // Per-channel weights: opponent (X) highest, luminance (Y) mid, blue (B) lowest
-    const kX = 24, kY = 12, kB = 4;
+    const kX = (k && k.kX) || 24, kY = (k && k.kY) || 12, kB = (k && k.kB) || 4;
     let sum = 0;
     for (let i = 0; i < n; i++) {
         const m = Math.max(0.15, mask[i] * 2.0 + 0.15);
@@ -147,60 +158,59 @@ function scaleErr(rX, rY, rB, tX, tY, tB, w, h, scratch) {
         const ey = (rY[i] - tY[i]) / m;
         const eb = (rB[i] - tB[i]) / m;
         const e2 = kX * ex * ex + kY * ey * ey + kB * eb * eb;
-        if (e2 > 1e-9) sum += e2 * Math.sqrt(e2);  // e2^1.5 = e2 * sqrt(e2)
+        sum += e2 * Math.sqrt(e2 + 1e-12);  // branchless e2^1.5 (p=3)
     }
-    return (sum / n) ** (1 / 3);  // p=3 → 1/p=1/3
+    return (sum / n) ** (1 / 3);
 }
 
-// Compute Butteraugli-inspired score with scratch pool for memory efficiency.
-//
-// refXyb: result of pixelsToXyb(refPixels, n) — precompute once, reuse per pass.
-// testPixels: Uint8Array of RGBA bytes for the pass being compared.
-// scratch: optional pre-allocated scratch buffers from createButteraugliScratch();
-//          if omitted, created internally (one allocation per score).
-//
-// Returns a non-negative float; 0 = identical, ~0.5 = excellent, >1.5 = visible.
-export function computeButteraugliVsFinal(refXyb, testPixels, width, height, scratch) {
-    if (_backend.score) {
-        return _backend.score(refXyb, testPixels, width, height);
-    }
+// createButteraugliComparer: factory with pre-allocated test buffers.
+// Cuts alloc/GC for repeated cutoff evals vs same ref. Keeps old compute* API unchanged.
+// opts: {weights?, k? {kX,kY,kB}, includeGradient?} for lens15/17/14 tuning.
+export function createButteraugliComparer(refPixels, width, height, opts = {}) {
     const n = width * height;
-    if (!n || testPixels.length !== n * 4) return NaN;
+    if (!n || refPixels.length !== n * 4) return () => NaN;
+    const refXyb = pixelsToXyb(refPixels, n);
+    const prep = prepRef(refXyb, width, height);
+    const maxN = n;
+    let tX = new Float32Array(maxN), tY = new Float32Array(maxN), tB = new Float32Array(maxN);
+    let dX = new Float32Array(maxN), dY = new Float32Array(maxN), dB = new Float32Array(maxN);
+    const weights = opts.weights || [4, 2, 1];
+    const k = opts.k || null;
+    const includeGradient = !!opts.includeGradient;
+    return function computeVsFinal(testPixels) {
+        if (testPixels.length !== n * 4) return NaN;
+        pixelsToXyb(testPixels, n, tX, tY, tB);
 
-    const ownsScratch = !scratch;
-    scratch = scratch || createButteraugliScratch();
-
-    let [rX, rY, rB] = refXyb;
-    let [tX, tY, tB] = pixelsToXyb(testPixels, n);
-    let w = width, h = height;
-
-    const weights = [4, 2, 1];
-    let total = 0;
-
-    for (let s = 0; s < 3; s++) {
-        total += scaleErr(rX, rY, rB, tX, tY, tB, w, h, scratch) * weights[s];
-        if (s < 2 && w > 1 && h > 1) {
-            const nw = Math.max(1, w >> 1);
-            const nh = Math.max(1, h >> 1);
-            const nsize = nw * nh;
-            ensureScratch(scratch, nsize);
-
-            // Downsample via scratch buffers; pointer-swap to avoid extra allocations
-            dn2Into(rX, scratch.a, w, h);
-            dn2Into(rY, scratch.b, w, h);
-            dn2Into(rB, scratch.c, w, h);
-            rX = scratch.a; rY = scratch.b; rB = scratch.c;
-
-            dn2Into(tX, scratch.a, w, h);
-            dn2Into(tY, scratch.b, w, h);
-            dn2Into(tB, scratch.c, w, h);
-            tX = scratch.a; tY = scratch.b; tB = scratch.c;
-
-            w = nw; h = nh;
+        let w = width, h = height, total = 0;
+        for (let s = 0; s < 3; s++) {
+            const L = prep.levels[s];
+            let e = scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, w, h, k) * weights[s];
+            if (includeGradient) {
+                // stub: sobel/gradient term on Y for photogram feature stability (lens14)
+                e *= 1.0;
+            }
+            total += e;
+            if (s < 2 && w > 1 && h > 1) {
+                const dw = Math.max(1, w >> 1), dh = Math.max(1, h >> 1), dn = dw * dh;
+                for (let y = 0; y < dh; y++) {
+                    const sy0 = y << 1, sy1 = Math.min(sy0 + 1, h - 1);
+                    for (let x = 0; x < dw; x++) {
+                        const sx0 = x << 1, sx1 = Math.min(sx0 + 1, w - 1);
+                        const idx = y * dw + x;
+                        const bo0 = sy0 * w + sx0, bo1 = sy0 * w + sx1, b10 = sy1 * w + sx0, b11 = sy1 * w + sx1;
+                        dX[idx] = (tX[bo0] + tX[bo1] + tX[b10] + tX[b11]) * 0.25;
+                        dY[idx] = (tY[bo0] + tY[bo1] + tY[b10] + tY[b11]) * 0.25;
+                        dB[idx] = (tB[bo0] + tB[bo1] + tB[b10] + tB[b11]) * 0.25;
+                    }
+                }
+                tX.set(dX.subarray(0, dn));
+                tY.set(dY.subarray(0, dn));
+                tB.set(dB.subarray(0, dn));
+                w = dw; h = dh;
+            }
         }
-    }
-
-    return total / 7;
+        return total / 7;
+    };
 }
 
 // =============================================================================
@@ -236,23 +246,76 @@ export function computeInformationField(image, width, height) {
     return null;
 }
 
-// Multi-scale score on pre-converted XYB channel arrays (correct, no aliasing).
-// Uses allocating dn2() for downsampled scales — regions are small so this is fine.
+// Compute Butteraugli-inspired score.
+//
+// refXyb: result of pixelsToXyb(refPixels, n) — precompute once, reuse per pass.
+// testPixels: Uint8Array of RGBA bytes for the pass being compared.
+//
+// Returns a non-negative float; 0 = identical, ~0.5 = excellent, >1.5 = visible.
+// For batch/repeated use (zero-alloc, config) use createButteraugliComparer instead.
+export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
+    if (_backend.score) {
+        return _backend.score(refXyb, testPixels, width, height);
+    }
+    const n = width * height;
+    if (!n || testPixels.length !== n * 4) return NaN;
+
+    const ref = prepRef(refXyb, width, height);
+    let [tX, tY, tB] = pixelsToXyb(testPixels, n);
+    let w = width, h = height;
+
+    const weights = [4, 2, 1];
+    let total = 0;
+
+    for (let s = 0; s < 3; s++) {
+        const L = ref.levels[s];
+        total += scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, w, h) * weights[s];
+        if (s < 2 && w > 1 && h > 1) {
+            tX = dn2(tX, w, h)[0];
+            tY = dn2(tY, w, h)[0];
+            tB = dn2(tB, w, h)[0];
+            w = Math.max(1, w >> 1);
+            h = Math.max(1, h >> 1);
+        }
+    }
+
+    return total / 7;
+}
+
+// 1-scale fast approx (full weight only). For coarse param sweeps / early reject in profiling.
+// Still uses ref prep cache. For config use the comparer path.
+export function computeButteraugliApproxVsFinal(refXyb, testPixels, width, height) {
+    const n = width * height;
+    if (!n || testPixels.length !== n * 4) return NaN;
+    const ref = prepRef(refXyb, width, height);
+    const L = ref.levels[0];
+    const [tX, tY, tB] = pixelsToXyb(testPixels, n);
+    return scaleErr(L.mask, L.X, L.Y, L.B, tX, tY, tB, width, height) * 4 / 7;
+}
+
+// Future (Lens17/12/16/14): Rust LookRenderer PerceptualConstancy (schrodinger geodesic + molchanov + losalamos)
+// will allow illum-invariant sat/wb/exposure in progressive paints. Call these metrics (or comparer)
+// on post-adjust RGBA during cutoff evals to validate early "recognizable" under varying illum.
+// For LLM/plantID/AR: pass external model score series to byte-metrics for task-aware cutoff (not pixel fidelity).
+// Photogram/digital-twin: consider adding gradient term to scaleErr for feature stability.
+
+// Multi-scale score on pre-converted XYB channel arrays.
+// Used by computeButteraugliRegion (operating on extracted sub-region arrays, no WeakMap cache).
 function _multiScaleScore(rX, rY, rB, tX, tY, tB, w, h) {
-    const scratch = createButteraugliScratch();
     const weights = [4, 2, 1];
     let total = 0;
     for (let s = 0; s < 3; s++) {
-        total += scaleErr(rX, rY, rB, tX, tY, tB, w, h, scratch) * weights[s];
+        const blurR = Math.max(1, Math.min(8, w >> 6));
+        const mask = boxBlur(rY, w, h, blurR);
+        total += scaleErr(mask, rX, rY, rB, tX, tY, tB, w, h) * weights[s];
         if (s < 2 && w > 1 && h > 1) {
-            const [rXd, nw, nh] = dn2(rX, w, h);
-            const [rYd] = dn2(rY, w, h);
-            const [rBd] = dn2(rB, w, h);
-            const [tXd] = dn2(tX, w, h);
-            const [tYd] = dn2(tY, w, h);
-            const [tBd] = dn2(tB, w, h);
-            rX = rXd; rY = rYd; rB = rBd;
-            tX = tXd; tY = tYd; tB = tBd;
+            let nw, nh;
+            [rX, nw, nh] = dn2(rX, w, h);
+            [rY] = dn2(rY, w, h);
+            [rB] = dn2(rB, w, h);
+            [tX] = dn2(tX, w, h);
+            [tY] = dn2(tY, w, h);
+            [tB] = dn2(tB, w, h);
             w = nw; h = nh;
         }
     }
@@ -301,13 +364,12 @@ export function computeButteraugliRegion(refXyb, pixels, x, y, width, height, im
         }
     }
 
+    // Compute mask from reference Y at full scale for max-error pixel location.
+    const blurR = Math.max(1, Math.min(8, width >> 6));
+    const mask = boxBlur(rY, width, height, blurR);
+
     // Find max per-pixel error at full resolution so callers can locate hotspots.
     const kX = 24, kY = 12, kB = 4;
-    const maskScratch = createButteraugliScratch();
-    const blurR = Math.max(1, Math.min(8, width >> 6));
-    ensureScratch(maskScratch, n);
-    const mask = boxBlurInto(rY, maskScratch.a, maskScratch.b, width, height, blurR);
-
     let maxError = 0, maxPy = 0, maxPx = 0;
     for (let i = 0; i < n; i++) {
         const m = Math.max(0.15, mask[i] * 2.0 + 0.15);

@@ -4,38 +4,68 @@
 export async function selectBackend(options = {}) {
     const env = options.env ?? process.env;
     const forceWasm = env["JXL_FORCE_WASM"] === "1";
+    const forceNative = env["JXL_FORCE_NATIVE"] === "1";
+    const diagnostics = [];
+    const onDiagnostic = options.onDiagnostic ?? ((msg) => diagnostics.push(msg));
+    if (forceWasm && forceNative) {
+        throw new Error("[jxl-worker-node] Conflict: Both JXL_FORCE_WASM and JXL_FORCE_NATIVE are set to 1.");
+    }
     if (!forceWasm) {
-        const native = await tryNative(options);
+        const native = await tryNative({ ...options, onDiagnostic }, diagnostics);
         if (native !== null)
             return native;
     }
-    const wasm = await tryWasm(options);
+    else {
+        onDiagnostic("JXL_FORCE_WASM is set, skipping native backend");
+    }
+    if (forceNative) {
+        throw new Error(`[jxl-worker-node] JXL_FORCE_NATIVE=1 but native backend failed to load. Diagnostics:\n${diagnostics.join("\n")}`);
+    }
+    const wasm = await tryWasm({ ...options, onDiagnostic }, diagnostics);
     if (wasm !== null)
         return wasm;
-    throw new Error("[jxl-worker-node] Neither jxl-native nor jxl-wasm exposes a codec facade. " +
-        "Install usable @casabio/jxl-native or @casabio/jxl-wasm artifacts.");
+    throw new Error(`[jxl-worker-node] Neither jxl-native nor jxl-wasm exposes a codec facade. ` +
+        `Install usable @casabio/jxl-native or @casabio/jxl-wasm artifacts. Diagnostics:\n${diagnostics.join("\n")}`);
 }
-async function tryNative(options) {
+async function tryNative(options, diagnostics) {
+    const onDiagnostic = options.onDiagnostic ?? ((msg) => diagnostics.push(msg));
     try {
         const imported = await (options.importNative ?? defaultImportNative)();
-        const module = resolveCodecModule(imported);
-        if (module === null)
+        if (imported === null) {
+            onDiagnostic("Failed to import @casabio/jxl-native (returned null)");
             return null;
+        }
+        const module = resolveCodecModule(imported, onDiagnostic);
+        if (module === null) {
+            onDiagnostic("Failed to resolve native codec module from import");
+            return null;
+        }
         return { type: "native", module };
     }
-    catch {
+    catch (err) {
+        const msg = `Native import failed: ${err instanceof Error ? err.stack || err.message : String(err)}`;
+        onDiagnostic(msg);
         return null;
     }
 }
-async function tryWasm(options) {
+async function tryWasm(options, diagnostics) {
+    const onDiagnostic = options.onDiagnostic ?? ((msg) => diagnostics.push(msg));
     try {
         const imported = await (options.importWasm ?? defaultImportWasm)();
-        const module = resolveCodecModule(imported);
-        if (module === null)
+        if (imported === null) {
+            onDiagnostic("Failed to import @casabio/jxl-wasm (returned null)");
             return null;
+        }
+        const module = resolveCodecModule(imported, onDiagnostic);
+        if (module === null) {
+            onDiagnostic("Failed to resolve WASM codec module from import");
+            return null;
+        }
         return { type: "wasm", module };
     }
-    catch {
+    catch (err) {
+        const msg = `WASM import failed: ${err instanceof Error ? err.stack || err.message : String(err)}`;
+        onDiagnostic(msg);
         return null;
     }
 }
@@ -51,34 +81,70 @@ async function defaultImportWasm() {
     // @ts-ignore - module may be absent until local packages are installed
     return await import("@casabio/jxl-wasm").catch(() => null);
 }
-function resolveCodecModule(value) {
-    if (isRecord(value) && typeof value["loadNativeBinding"] === "function") {
-        try {
-            const binding = value["loadNativeBinding"]();
-            if (!isLoadedBinding(binding))
-                return null;
-            return isCodecModule(binding) ? binding : null;
+function resolveCodecModule(value, onDiagnostic) {
+    const candidates = [value, isRecord(value) ? value["default"] : undefined];
+    let index = 0;
+    for (const c of candidates) {
+        const suffix = index === 0 ? "" : " (default)";
+        index++;
+        if (c === undefined)
+            continue;
+        if (!isRecord(c)) {
+            onDiagnostic?.(`Candidate${suffix} is not a record/object`);
+            continue;
         }
-        catch {
-            return null;
+        if (typeof c["loadNativeBinding"] === "function") {
+            try {
+                const binding = c["loadNativeBinding"]();
+                if (!isLoadedBinding(binding, onDiagnostic)) {
+                    onDiagnostic?.(`Candidate${suffix} loadNativeBinding returned an unloaded binding`);
+                    continue;
+                }
+                if (isCodecModule(binding)) {
+                    return binding;
+                }
+                else {
+                    onDiagnostic?.(`Candidate${suffix} loadNativeBinding returned a module missing createDecoder/createEncoder`);
+                }
+            }
+            catch (err) {
+                onDiagnostic?.(`Candidate${suffix} loadNativeBinding threw: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            continue;
+        }
+        if (isCodecModule(c)) {
+            return c;
+        }
+        else {
+            onDiagnostic?.(`Candidate${suffix} is missing createDecoder/createEncoder`);
         }
     }
-    if (isCodecModule(value))
-        return value;
-    if (isRecord(value) && isCodecModule(value["default"]))
-        return value["default"];
     return null;
 }
 function isCodecModule(value) {
     return isRecord(value) && typeof value["createDecoder"] === "function" && typeof value["createEncoder"] === "function";
 }
-function isLoadedBinding(value) {
-    if (!isRecord(value))
+function isLoadedBinding(value, onDiagnostic) {
+    if (!isRecord(value)) {
+        onDiagnostic?.("Binding is not a record");
         return false;
+    }
     if (typeof value["probe"] === "function") {
-        const probe = value["probe"]();
-        if (!isRecord(probe) || probe["loaded"] !== true)
+        try {
+            const probe = value["probe"]();
+            if (!isRecord(probe)) {
+                onDiagnostic?.("Binding probe did not return a record");
+                return false;
+            }
+            if (probe["loaded"] !== true) {
+                onDiagnostic?.(`Binding probe.loaded is not true (loaded: ${probe["loaded"]})`);
+                return false;
+            }
+        }
+        catch (err) {
+            onDiagnostic?.(`Binding probe threw: ${err instanceof Error ? err.message : String(err)}`);
             return false;
+        }
     }
     return true;
 }

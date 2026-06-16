@@ -63,6 +63,9 @@ test('single progressive page settings put Sneyers product decode behind retriev
     expect(html).toContain('setting-impact-slow');
     expect(html).toContain('setting-impact-severe');
     expect(source).toContain('refreshSettingImpactHints');
+    expect(source).toContain('applySettingImpactClass(label, control');
+    expect(source).toContain('control.dataset.impact');
+    expect(html).toContain('--sp-impact-mild-text');
     expect(source).toContain('initSettingImpactHints');
     expect(source).toContain('SETTING_IMPACT_BASE_HINTS');
     expect(html).toContain('value="2" selected>2 · 1:32 then 1:8 preview');
@@ -173,7 +176,7 @@ test('single progressive page exposes console and measurement exports', () => {
     expect(html).toContain('id="psnr-chart"');
     expect(html).toContain('id="psnr-chart-legend"');
     expect(html).toContain('PSNR vs pass');
-    expect(source).toContain('drawPsnrChart');
+    expect(source).toContain('drawQualityChart');
     expect(source).toContain('computePsnrVsFinal');
     expect(source).toContain('computeAndDrawChartsAsync(decode.passes, targetRgba)');
     // Charts gated behind the Graphs toggle (default off); metrics computed on downsampled pixels.

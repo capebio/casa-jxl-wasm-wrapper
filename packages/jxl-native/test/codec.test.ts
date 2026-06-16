@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createDecoder, createEncoder, type DecodeEvent } from "../src/index";
 
 const nativeIncludeDir =
-  "C:\\Foo\\raw-converter\\target\\release\\build\\jpegxl-sys-26f294f2024eaecb\\out\\include";
-const nativeLibDir = "C:\\TEMP\\jxl-mt-libs";
+  process.env.JXL_NATIVE_INCLUDE_DIR || "C:\\Foo\\raw-converter\\target\\release\\build\\jpegxl-sys-26f294f2024eaecb\\out\\include";
+const nativeLibDir = process.env.JXL_NATIVE_LIB_DIR || "C:\\TEMP\\jxl-mt-libs";
 
 function asUint8Array(value: ArrayBuffer | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(value);
@@ -23,8 +23,7 @@ function concat(chunks: Array<ArrayBuffer | Uint8Array>): Uint8Array {
 
 describe("@casabio/jxl-native real codec", () => {
   test("round-trips a 2x2 rgba8 image through libjxl", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     const pixels = new Uint8Array([
       255, 0, 0, 255,
@@ -80,8 +79,7 @@ describe("@casabio/jxl-native real codec", () => {
   });
 
   test("encodes with brotliEffort:5 and round-trips correctly", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     const pixels = new Uint8Array([128, 64, 32, 255, 0, 128, 255, 255]);
 
@@ -181,8 +179,7 @@ describe("progressive encode types (predator Tauri parity) in native index.ts", 
 
 describe("@casabio/jxl-native extra channel roundtrips", () => {
   test("encodes with alphaDistance:0 (lossless alpha) and round-trips correctly", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     // 2×2 RGBA8: pixels with semi-transparent alpha
     const pixels = new Uint8Array([
@@ -240,8 +237,7 @@ describe("@casabio/jxl-native extra channel roundtrips", () => {
   });
 
   test("encodes with extraChannels depth plane and decodes extraPlanes", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     const pixels = new Uint8Array([
       200, 100, 50, 255,
@@ -283,6 +279,7 @@ describe("@casabio/jxl-native extra channel roundtrips", () => {
       emitEveryPass: false,
       preserveIcc: true,
       preserveMetadata: true,
+      decodeExtraChannels: true,
     });
 
     await decoder.push(encoded);
@@ -304,8 +301,7 @@ describe("@casabio/jxl-native extra channel roundtrips", () => {
 
 describe("@casabio/jxl-native modular and advanced settings", () => {
   test("encodes with modularOptions force+predictor and produces valid JXL", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     const pixels = new Uint8Array([10, 20, 30, 255, 40, 50, 60, 255]);
 
@@ -351,8 +347,7 @@ describe("@casabio/jxl-native modular and advanced settings", () => {
   });
 
   test("encodes with advancedFrameSettings (patches=8) and produces valid JXL", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     const pixels = new Uint8Array([10, 20, 30, 255, 40, 50, 60, 255]);
 
@@ -382,8 +377,7 @@ describe("@casabio/jxl-native modular and advanced settings", () => {
 
 describe("@casabio/jxl-native custom boxes", () => {
   test("encodes with customBoxes and produces non-empty output", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     const pixels = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
     const customData = new Uint8Array([0xca, 0xfe, 0xba, 0xbe]);
@@ -415,8 +409,7 @@ describe("@casabio/jxl-native custom boxes", () => {
 
 describe("@casabio/jxl-native animation", () => {
   test("encodes 2-frame animation and decodes frame metadata", async () => {
-    expect(process.env.JXL_NATIVE_INCLUDE_DIR).toBe(nativeIncludeDir);
-    expect(process.env.JXL_NATIVE_LIB_DIR).toBe(nativeLibDir);
+
 
     const frame1 = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
     const frame2 = new Uint8Array([0, 0, 255, 255, 255, 255, 0, 255]);
@@ -466,5 +459,167 @@ describe("@casabio/jxl-native animation", () => {
     expect(final).toBeDefined();
     expect(final?.animTicksPerSecond).toBe(100);
     expect(final?.frameIndex).toBeGreaterThanOrEqual(0);
+  });
+
+  test("decompression-bomb guard triggers ImageTooLarge error", async () => {
+    const pixels = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: 2,
+      height: 1,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 0,
+      quality: null,
+      effort: 3,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+    });
+    await encoder.pushPixels(pixels);
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+
+    const decoder = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: true,
+      preserveMetadata: true,
+      maxPixels: 1, // Set tiny maxPixels limit
+    });
+    await decoder.push(encoded);
+    expect(decoder.close()).rejects.toThrow("image exceeds maxPixels");
+  });
+
+  test("animation encodes fractional ticksPerSecond and clamps negative loopCount", async () => {
+    const frame1 = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: 2,
+      height: 1,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 0,
+      quality: null,
+      effort: 3,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+      animation: { ticksPerSecond: 100.5, loopCount: -5 }, // loopCount negative clamps to 0
+      frames: [
+        { data: frame1, width: 2, height: 1, duration: 10, name: "f1" },
+      ],
+    });
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+
+    const decoder = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: true,
+      preserveMetadata: true,
+    });
+    await decoder.push(encoded);
+    await decoder.close();
+    const events = await Array.fromAsync(decoder.events());
+    const final = events.find((e): e is Extract<DecodeEvent, { type: "final" }> => e.type === "final");
+    expect(final).toBeDefined();
+    // Decoded tps must be float 100.5 exactly!
+    expect(final?.animTicksPerSecond).toBeCloseTo(100.5, 4);
+  });
+
+  test("encodes with custom boxes (compressed and uncompressed)", async () => {
+    const pixels = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
+    const customData = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: 2,
+      height: 1,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 0,
+      quality: null,
+      effort: 3,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+      customBoxes: [
+        { type: "cas1", data: customData, compress: false },
+        { type: "cas2", data: customData, compress: true },
+      ],
+    });
+
+    await encoder.pushPixels(pixels);
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+    expect(encoded.byteLength).toBeGreaterThan(0);
+  });
+
+  test("decoder zero-copy single push vs multi push", async () => {
+    const pixels = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
+    const encoder = createEncoder({
+      format: "rgba8",
+      width: 2,
+      height: 1,
+      hasAlpha: true,
+      iccProfile: null,
+      exif: null,
+      xmp: null,
+      distance: 0,
+      quality: null,
+      effort: 3,
+      progressive: false,
+      previewFirst: false,
+      chunked: false,
+    });
+    await encoder.pushPixels(pixels);
+    await encoder.finish();
+    const encoded = concat(await Array.fromAsync(encoder.chunks()));
+
+    // Case A: single-push decoder
+    const decA = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: false,
+      preserveMetadata: false,
+    });
+    await decA.push(encoded);
+    await decA.close();
+    const evsA = await Array.fromAsync(decA.events());
+    expect(evsA.find(e => e.type === "final")).toBeDefined();
+
+    // Case B: multi-push decoder
+    const decB = createDecoder({
+      format: "rgba8",
+      region: null,
+      downsample: 1,
+      progressionTarget: "final",
+      emitEveryPass: false,
+      preserveIcc: false,
+      preserveMetadata: false,
+    });
+    const chunk1 = encoded.slice(0, 10);
+    const chunk2 = encoded.slice(10);
+    await decB.push(chunk1);
+    await decB.push(chunk2);
+    await decB.close();
+    const evsB = await Array.fromAsync(decB.events());
+    expect(evsB.find(e => e.type === "final")).toBeDefined();
   });
 });

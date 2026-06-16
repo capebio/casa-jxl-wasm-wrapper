@@ -17,7 +17,7 @@ import type {
   MsgDecodePaused,
   MsgDecodeBudgetExceeded,
 } from "@casabio/jxl-core/protocol";
-import type { ImageInfo, DecodeStage, Region } from "@casabio/jxl-core/types";
+import type { ImageInfo, DecodeStage, PixelFormat, Region } from "@casabio/jxl-core/types";
 
 type DecodeState =
   | "created"
@@ -43,6 +43,71 @@ const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB
 const DRAIN_MIN_INTERVAL_MS = 8;
 const BYTE_DRAIN_HWM = 2 * 1024 * 1024; // 2 MiB — byte-level secondary drain gate
 
+class ChunkRing {
+  private items: Array<ArrayBuffer | undefined>;
+  private head = 0;
+  private tail = 0;
+  private length = 0;
+  private totalBytes = 0;
+  private mask: number;
+
+  // Invariant: capacity is always a power of two (default 16, grow() doubles),
+  // so cursor wrap can use `& mask` instead of `%`.
+  constructor(initialCapacity = 16) {
+    this.items = new Array(initialCapacity);
+    this.mask = initialCapacity - 1;
+  }
+
+  get size(): number {
+    return this.length;
+  }
+
+  get bytes(): number {
+    return this.totalBytes;
+  }
+
+  push(chunk: ArrayBuffer): void {
+    if (this.length === this.items.length) this.grow();
+    this.items[this.tail] = chunk;
+    this.tail = (this.tail + 1) & this.mask;
+    this.length++;
+    this.totalBytes += chunk.byteLength;
+  }
+
+  shift(): ArrayBuffer | null {
+    if (this.length === 0) return null;
+    const chunk = this.items[this.head];
+    this.items[this.head] = undefined;
+    this.head = (this.head + 1) & this.mask;
+    this.length--;
+    if (chunk !== undefined) {
+      this.totalBytes -= chunk.byteLength;
+      return chunk;
+    }
+    return null;
+  }
+
+  clear(): void {
+    this.items.fill(undefined);
+    this.head = 0;
+    this.tail = 0;
+    this.length = 0;
+    this.totalBytes = 0;
+  }
+
+  private grow(): void {
+    const cap = this.items.length * 2;
+    const next = new Array<ArrayBuffer | undefined>(cap);
+    for (let i = 0; i < this.length; i++) {
+      next[i] = this.items[(this.head + i) & this.mask];
+    }
+    this.items = next;
+    this.head = 0;
+    this.tail = this.length;
+    this.mask = cap - 1;
+  }
+}
+
 export class DecodeHandler {
   private readonly sessionId: string;
   private readonly opts: MsgDecodeStart;
@@ -50,10 +115,8 @@ export class DecodeHandler {
   private readonly callbacks: DecodeHandlerCallbacks;
 
   private state: DecodeState = "created";
-  private chunkQueue: Array<ArrayBuffer | undefined> = [];
-  private chunkReadIndex = 0;
-  private queueDepth = 0;
-  private queuedBytes = 0;
+  // ChunkRing is the single source of truth for queue depth (.size) and bytes (.bytes).
+  private chunkQueue = new ChunkRing();
   private cancelled = false;
   private ended = false;
   private inputClosed = false;
@@ -71,6 +134,7 @@ export class DecodeHandler {
 
   // Adaptive drain HWM: EMA of decoder.push() duration (ms).
   private pushLatencyEma = 0;
+  private copyLatencyEma = 0;
   // Elapsed from session creation; used for both budget and timing metrics.
   private readonly stageStartMs: number = performance.now();
 
@@ -121,13 +185,11 @@ export class DecodeHandler {
   onChunk(chunk: ArrayBuffer): void {
     if (this.isTerminal() || this.inputClosed) return;
     if (chunk.byteLength === 0) return;
-    if (this.queuedBytes + chunk.byteLength > MAX_QUEUED_BYTES) {
+    if (this.chunkQueue.bytes + chunk.byteLength > MAX_QUEUED_BYTES) {
       this.failSession("QueueOverflow", `Input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
       return;
     }
     this.chunkQueue.push(chunk);
-    this.queuedBytes += chunk.byteLength;
-    this.queueDepth++;
     this.wake();
   }
 
@@ -137,15 +199,18 @@ export class DecodeHandler {
     this.wake();
   }
 
-  async onCancel(_reason?: string): Promise<void> {
+  async onCancel(reason?: string): Promise<void> {
     if (this.ended || this.cancelled) return;
     this.cancelled = true;
     this.paused = false;
-    const msg: MsgDecodeCancelled = {
-      type: "decode_cancelled",
-      sessionId: this.sessionId,
-    };
-    self.postMessage(msg);
+    this.postMetric("dropped_due_to_cancel", 1);
+    if (reason !== "release_state") {
+      const msg: MsgDecodeCancelled = {
+        type: "decode_cancelled",
+        sessionId: this.sessionId,
+      };
+      self.postMessage(msg);
+    }
     this.finishSession("cancelled");
 
     // Best-effort: dispose the active decoder so any blocked event iterator is unblocked.
@@ -225,10 +290,7 @@ export class DecodeHandler {
   }
 
   private clearInputQueue(): void {
-    this.chunkQueue.length = 0;
-    this.chunkReadIndex = 0;
-    this.queueDepth = 0;
-    this.queuedBytes = 0;
+    this.chunkQueue.clear();
   }
 
   private wake(): void {
@@ -263,7 +325,7 @@ export class DecodeHandler {
   // ---------------------------------------------------------------------------
 
   private waitForChunk(): Promise<void> {
-    if (this.chunkQueue.length > this.chunkReadIndex || this.inputClosed || this.isTerminal()) {
+    if (this.chunkQueue.size > 0 || this.inputClosed || this.isTerminal()) {
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => { this.wakeResolve = resolve; });
@@ -275,27 +337,7 @@ export class DecodeHandler {
   }
 
   private takeNextChunk(): ArrayBuffer | null {
-    const chunk = this.chunkQueue[this.chunkReadIndex];
-    this.chunkQueue[this.chunkReadIndex++] = undefined;
-    if (chunk === undefined) {
-      this.compactQueue();
-      return null;
-    }
-    this.queueDepth--;
-    this.queuedBytes -= chunk.byteLength;
-    this.compactQueue();
-    return chunk;
-  }
-
-  private compactQueue(): void {
-    if (this.chunkReadIndex >= this.chunkQueue.length) {
-      this.chunkQueue.length = 0;
-      this.chunkReadIndex = 0;
-    } else if (this.chunkReadIndex > 64 && this.chunkReadIndex * 2 > this.chunkQueue.length) {
-      this.chunkQueue.copyWithin(0, this.chunkReadIndex);
-      this.chunkQueue.length -= this.chunkReadIndex;
-      this.chunkReadIndex = 0;
-    }
+    return this.chunkQueue.shift();
   }
 
   private async feedDecoder(decoder: BrowserDecoder): Promise<void> {
@@ -307,12 +349,13 @@ export class DecodeHandler {
 
       // Skip the await when chunks are already queued — avoids a microtask
       // yield on every outer iteration during active streaming.
-      if (this.chunkQueue.length <= this.chunkReadIndex && !this.inputClosed) {
+      if (this.chunkQueue.size === 0 && !this.inputClosed) {
         await this.waitForChunk();
         if (this.ended || this.paused) continue;
       }
 
-      while (!this.ended && this.chunkQueue.length > this.chunkReadIndex) {
+      while (!this.ended && this.chunkQueue.size > 0) {
+        if (this.paused) break;
         const chunk = this.takeNextChunk();
         if (chunk === null) break;
 
@@ -337,7 +380,8 @@ export class DecodeHandler {
   private maybePostDrain(now: number): void {
     const hwm = this.adaptiveHwm();
 
-    const drainAllowed = this.queueDepth < hwm && this.queuedBytes < BYTE_DRAIN_HWM;
+    const drainAllowed =
+      this.chunkQueue.size < hwm && this.chunkQueue.bytes < BYTE_DRAIN_HWM;
 
     const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
     const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
@@ -350,8 +394,8 @@ export class DecodeHandler {
     this.lastDrainPostedMs = now;
 
     this._drainMsg.latencyMs = Math.round(this.pushLatencyEma);
-    this._drainMsg.queueDepth = this.queueDepth;
-    this._drainMsg.queuedBytes = this.queuedBytes;
+    this._drainMsg.queueDepth = this.chunkQueue.size;
+    this._drainMsg.queuedBytes = this.chunkQueue.bytes;
     this._drainMsg.adaptiveHwm = hwm;
     self.postMessage(this._drainMsg);
   }
@@ -373,15 +417,30 @@ export class DecodeHandler {
         }
         case "progress": {
           this.state = "progressive";
-          const t0 = performance.now();
-          const pixels = toArrayBuffer(event.pixels);
-          const tToArray = performance.now() - t0;
-          this.postMetric("decode_toarraybuffer_ms", tToArray);
-
-          // Budget check BEFORE transferring pixels. postMessage([pixels]) detaches the
-          // buffer — reusing it in postBudgetExceeded would send a zero-length payload.
+          // Budget check 1 (before touching pixels): if budget is already exceeded when this
+          // progress arrives, exit cheaply WITHOUT materializing event.pixels — the getter /
+          // copy can be costly. The consumer keeps its last in-budget frame; the empty buffer
+          // marks the stop.
           if (this.checkBudget()) {
-            this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride, event.region);
+            this.postMetric("dropped_due_to_budget", 1);
+            this.postBudgetExceeded(event.stage, event.info, new ArrayBuffer(0), event.format, event.pixelStride, event.region);
+            return;
+          }
+          const t0 = performance.now();
+          const transfer = toTransferablePixels(event.pixels);
+          const tToArray = performance.now() - t0;
+          this.copyLatencyEma = HWM_EMA_ALPHA * tToArray + (1 - HWM_EMA_ALPHA) * this.copyLatencyEma;
+
+          // Budget check 2 (after the copy): if budget crossed during the copy we just did,
+          // send the already-copied pixels (don't waste the copy). postMessage detaches the
+          // buffer, so this is terminal. Copy metrics posted directly here — no frame to fold.
+          if (this.checkBudget()) {
+            if (transfer.copied) {
+              this.postMetric("copy_to_transfer_ms", tToArray);
+              this.postMetric("copied_bytes", transfer.buffer.byteLength);
+            }
+            this.postMetric("dropped_due_to_budget", 1);
+            this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event.region);
             return;
           }
           const msg: MsgDecodeProgress = {
@@ -389,26 +448,50 @@ export class DecodeHandler {
             sessionId: this.sessionId,
             stage: event.stage,
             info: event.info,
-            pixels,
+            pixels: transfer.buffer,
             format: event.format,
             pixelStride: event.pixelStride,
           };
-          if (event.region !== undefined) msg.region = event.region;
-          self.postMessage(msg, [pixels]);
-          this.postFirstPixelMetric();
+          assignFrameMeta(msg, event);
+          // Fold per-frame metrics onto the frame (session re-emits as CodecMetric) —
+          // avoids separate metric IPCs on the hot progress path.
+          if (transfer.copied) {
+            msg.copyMs = tToArray;
+            msg.copiedBytes = transfer.buffer.byteLength;
+          }
+          if (!this.firstPixelMetricPosted) {
+            this.firstPixelMetricPosted = true;
+            msg.timeToFirstPixelMs = performance.now() - this.stageStartMs;
+          }
+          self.postMessage(msg, [transfer.buffer]);
+          if (this.opts.progressionTarget !== "final" && !this.opts.emitEveryPass) {
+            this.finishSession("final");
+            return;
+          }
           break;
         }
         case "final": {
-          const t0 = performance.now();
-          const pixels = toArrayBuffer(event.pixels);
-          const tToArray = performance.now() - t0;
-          this.postMetric("decode_toarraybuffer_ms", tToArray);
-
-          // Budget check BEFORE transferring pixels — same pattern as "progress".
-          // postMessage([pixels]) detaches the buffer; reusing it in postBudgetExceeded
-          // would send a zero-length payload.
+          // Budget check 1 (before touching pixels): exit cheaply without materializing
+          // event.pixels if budget is already exceeded. (Same lazy pattern as "progress".)
           if (this.checkBudget()) {
-            this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride, event.region);
+            this.postMetric("dropped_due_to_budget", 1);
+            this.postBudgetExceeded("final", event.info, new ArrayBuffer(0), event.format, event.pixelStride, event.region);
+            return;
+          }
+          const t0 = performance.now();
+          const transfer = toTransferablePixels(event.pixels);
+          const tToArray = performance.now() - t0;
+          this.copyLatencyEma = HWM_EMA_ALPHA * tToArray + (1 - HWM_EMA_ALPHA) * this.copyLatencyEma;
+
+          // Budget check 2 (after the copy): send the already-copied pixels if budget crossed
+          // during the copy. postMessage detaches the buffer so this is terminal.
+          if (this.checkBudget()) {
+            if (transfer.copied) {
+              this.postMetric("copy_to_transfer_ms", tToArray);
+              this.postMetric("copied_bytes", transfer.buffer.byteLength);
+            }
+            this.postMetric("dropped_due_to_budget", 1);
+            this.postBudgetExceeded("final", event.info, transfer.buffer, event.format, event.pixelStride, event.region);
             return;
           }
           const now = performance.now();
@@ -416,24 +499,35 @@ export class DecodeHandler {
             type: "decode_final",
             sessionId: this.sessionId,
             info: event.info,
-            pixels,
+            pixels: transfer.buffer,
             format: event.format,
             pixelStride: event.pixelStride,
-            outputBytes: pixels.byteLength,
+            outputBytes: transfer.buffer.byteLength,
             timeToFinalMs: now - this.stageStartMs,
           };
-          if (event.region !== undefined) msg.region = event.region;
+          assignFrameMeta(msg, event);
+          // Fold per-frame metrics onto the frame (session re-emits as CodecMetric).
+          if (transfer.copied) {
+            msg.copyMs = tToArray;
+            msg.copiedBytes = transfer.buffer.byteLength;
+          }
           // Embed first-pixel timing if it hasn't been reported via a progress event.
           if (!this.firstPixelMetricPosted) {
+            this.firstPixelMetricPosted = true;
             msg.timeToFirstPixelMs = now - this.stageStartMs;
-            this.postFirstPixelMetric();
           }
-          self.postMessage(msg, [pixels]);
+          self.postMessage(msg, [transfer.buffer]);
           this.finishSession("final");
           return;
         }
         case "budget_exceeded": {
-          this.postBudgetExceeded(event.stage, event.info, toArrayBuffer(event.pixels), event.format, event.pixelStride, event.region);
+          const transfer = toTransferablePixels(event.pixels);
+          if (transfer.copied) {
+            this.postMetric("copy_to_transfer_ms", 0);
+            this.postMetric("copied_bytes", transfer.buffer.byteLength);
+          }
+          this.postMetric("dropped_due_to_budget", 1);
+          this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event.region);
           return;
         }
         case "error": {
@@ -442,7 +536,7 @@ export class DecodeHandler {
             event.message,
             event.partialPixels !== undefined ? toArrayBuffer(event.partialPixels) : undefined,
             event.partialInfo,
-            event.partialPixelStride,
+            event.partialPixelStride ?? (event.partialPixels !== undefined ? pixelStrideForFormat(this.opts.format) : undefined),
             event.partialStage,
           );
           return;
@@ -452,7 +546,7 @@ export class DecodeHandler {
   }
 
   private adaptiveHwm(): number {
-    const ema = this.pushLatencyEma;
+    const ema = Math.max(this.pushLatencyEma, this.copyLatencyEma);
     if (Math.abs(ema - this._hwmLastEma) < 1.0) return this._cachedHwm;
     this._hwmLastEma = ema;
     const factor = Math.max(0.6, Math.min(2.0, 120 / (ema + 10)));
@@ -520,12 +614,6 @@ export class DecodeHandler {
     void this.disposeActiveDecoder();
   }
 
-  private postFirstPixelMetric(): void {
-    if (this.firstPixelMetricPosted) return;
-    this.firstPixelMetricPosted = true;
-    this.postMetric("time_to_first_pixel_ms", performance.now() - this.stageStartMs);
-  }
-
   private postMetric(name: string, value: number): void {
     this._metricInner.name = name;
     this._metricInner.value = value;
@@ -533,9 +621,60 @@ export class DecodeHandler {
   }
 }
 
+// Shared frame-metadata copy for progress/final frames — mirrors protocol DecodeFrameMeta
+// so the two emit paths cannot drift (the duplication this removes is what forced the
+// budget two-check fix to be applied in both arms). Fields are `| undefined` to accept the
+// decoder event (present-but-undefined optionals) under exactOptionalPropertyTypes.
+type FrameMetaSource = {
+  region?: Region | undefined;
+  sourceScale?: number | undefined;
+  progressiveRegion?: boolean | undefined;
+  regionFallback?: "full-frame-then-crop" | undefined;
+  progressiveSequence?: number | undefined;
+  passOrdinal?: number | undefined;
+  frameIndex?: number | undefined;
+  frameDuration?: number | undefined;
+  frameName?: string | undefined;
+  animTicksPerSecond?: number | undefined;
+};
+
+function assignFrameMeta(msg: MsgDecodeProgress | MsgDecodeFinal, src: FrameMetaSource): void {
+  if (src.region !== undefined) msg.region = src.region;
+  if (src.sourceScale !== undefined) msg.sourceScale = src.sourceScale;
+  if (src.progressiveRegion !== undefined) msg.progressiveRegion = src.progressiveRegion;
+  if (src.regionFallback !== undefined) msg.regionFallback = src.regionFallback;
+  if (src.progressiveSequence !== undefined) msg.progressiveSequence = src.progressiveSequence;
+  if (src.passOrdinal !== undefined) msg.passOrdinal = src.passOrdinal;
+  if (src.frameIndex !== undefined) msg.frameIndex = src.frameIndex;
+  if (src.frameDuration !== undefined) msg.frameDuration = src.frameDuration;
+  if (src.frameName !== undefined) msg.frameName = src.frameName;
+  if (src.animTicksPerSecond !== undefined) msg.animTicksPerSecond = src.animTicksPerSecond;
+}
+
+function toTransferablePixels(value: ArrayBuffer | Uint8Array): { buffer: ArrayBuffer; copied: boolean } {
+  if (value instanceof ArrayBuffer) return { buffer: value, copied: false };
+  const buf = value.buffer;
+  // SharedArrayBuffer (threaded / SIMD-MT WASM builds) cannot be transferred via
+  // postMessage — the transfer list rejects it and the post throws. Copy the view's
+  // bytes into a fresh, transferable ArrayBuffer instead of returning the SAB.
+  // %TypedArray%.prototype.slice() allocates a non-shared ArrayBuffer for the copy.
+  if (typeof SharedArrayBuffer !== "undefined" && buf instanceof SharedArrayBuffer) {
+    return { buffer: value.slice().buffer as ArrayBuffer, copied: true };
+  }
+  if (value.byteOffset === 0 && value.byteLength === buf.byteLength) {
+    return { buffer: buf as ArrayBuffer, copied: false };
+  }
+  return {
+    buffer: buf.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer,
+    copied: true,
+  };
+}
+
 function toArrayBuffer(value: ArrayBuffer | Uint8Array): ArrayBuffer {
-  if (value instanceof ArrayBuffer) return value;
-  return value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
-    ? value.buffer
-    : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+  return toTransferablePixels(value).buffer;
+}
+
+function pixelStrideForFormat(format: PixelFormat): number {
+  if (format === "rgb8") return 3;
+  return format === "rgbaf32" ? 16 : format === "rgba16" ? 8 : 4;
 }

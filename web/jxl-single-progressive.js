@@ -4,8 +4,9 @@ import { createBrowserContext } from '@casabio/jxl-session';
 import { getCapabilities } from '@casabio/jxl-capabilities';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
-import { computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
-import { pixelsToXyb, computeButteraugliVsFinal } from './jxl-butteraugli.js';
+import { computePsnrVsFinal, computeSsimVsFinal, detectMonotone } from './jxl-progressive-quality.js';
+import { computeButteraugliVsFinal, createButteraugliComparer } from './jxl-butteraugli.js';
+import { buildSeries } from './jxl-progressive-byte-metrics.js';  // connectedness for unified series in cutoff (R1)
 import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
@@ -136,10 +137,17 @@ function labelForSettingControl(id) {
     return el?.closest('label') ?? null;
 }
 
-function applySettingImpactClass(label, level) {
-    if (!label) return;
-    label.classList.remove(SETTING_IMPACT_CLASS.mild, SETTING_IMPACT_CLASS.slow, SETTING_IMPACT_CLASS.severe);
-    if (level) label.classList.add(SETTING_IMPACT_CLASS[level]);
+function applySettingImpactClass(label, control, level) {
+    const classes = [SETTING_IMPACT_CLASS.mild, SETTING_IMPACT_CLASS.slow, SETTING_IMPACT_CLASS.severe];
+    for (const node of [label, control]) {
+        if (!node) continue;
+        node.classList.remove(...classes);
+        if (level) node.classList.add(SETTING_IMPACT_CLASS[level]);
+    }
+    if (control) {
+        if (level) control.dataset.impact = level;
+        else delete control.dataset.impact;
+    }
 }
 
 function composeSettingTitle(id, impact) {
@@ -163,9 +171,10 @@ function readSettingImpactSnapshot() {
 function refreshSettingImpactHints() {
     const snapshot = readSettingImpactSnapshot();
     for (const id of SETTING_IMPACT_WATCH_IDS) {
+        const control = document.getElementById(id);
         const label = labelForSettingControl(id);
         const impact = resolveSettingImpact(id, snapshot);
-        applySettingImpactClass(label, impact?.level ?? null);
+        applySettingImpactClass(label, control, impact?.level ?? null);
         const title = composeSettingTitle(id, impact);
         if (label && title) label.title = title;
     }
@@ -403,9 +412,9 @@ function chartsEnabled() {
 }
 
 function drawEmptyCharts(legendText) {
-    drawPsnrChart([], null);
-    drawSsimChart([], null);
-    drawButtChart([], null);
+    drawQualityChart('psnr-chart', 'psnr-chart-legend', [], [], { yLabel: 'dB', yFormat: v => v.toFixed(1) });
+    drawQualityChart('ssim-chart', 'ssim-chart-legend', [], [], { yLabel: 'SSIM', yFormat: v => v.toFixed(3) });
+    drawQualityChart('butt-chart', 'butt-chart-legend', [], [], { yLabel: 'Butt', yFormat: v => v.toFixed(3) });
     if (!legendText) return;
     for (const id of ['psnr-chart-legend', 'ssim-chart-legend', 'butt-chart-legend']) {
         const el = document.getElementById(id);
@@ -472,7 +481,27 @@ const copyMeasurementsMdBtn = document.getElementById('copy-measurements-md');
 const clearMeasurementsBtn = document.getElementById('clear-measurements-btn');
 const showBlockBordersEl = document.getElementById('show-block-borders');
 const chartsEnabledEl = document.getElementById('charts-enabled');
+const perceptualCutoffEl = document.getElementById('perceptual-cutoff');
 const timingBordersOverride = readBoolParam('borders', null);
+
+// Lens17 (and 12/14/16/9/11/13): paint-time hook for non-Riemannian perceptual constancy engine
+// (Schrödinger geodesics via B + log-flat + Molchanov A_tensor residuals + LA f(c) diminishing).
+// Real engine lives in Rust LookRenderer apply_tone_math. This is the exact "during progressive JXL paints" call site.
+// Hook receives display buffer (may be downsampled), w/h; must return Uint8ClampedArray (same length) or falsy (use original).
+// NEVER mutates input (pass.pixels / targetRgba used for cutoff psnr/butter, exports, stats, one-shot).
+// Enable: globalThis.__perceptualConstancyPaint = yourWasmOrLUTFn;
+const perceptualConstancyPaint =
+    (typeof globalThis.__perceptualConstancyPaint === 'function') ? globalThis.__perceptualConstancyPaint : null;
+
+// Layer 3 shared helper (per plan handoff): eager stats precompute for cutoff is identical in both decode paths.
+// Extracted to eliminate dupe while leaving final-detection + cancel + stoppedEarlyReason branching in callers
+// (different because main decoder vs session worker, and graceful return semantics).
+function eagerComputeCutoffStats(passes) {
+  if (passes.length >= 2) {
+    computeAndCachePassStats(passes.at(-1));
+    computeAndCachePassStats(passes.at(-2));
+  }
+}
 const bordersOverride = new URLSearchParams(location.search).get('borders') === '0';
 
 const runMeasurements = [];
@@ -1087,7 +1116,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
 
                 // Perceptual cutoff check (opt-in). After non-final pass recorded.
                 // Eager stats for hash trigger only when enabled (avoids paying analyze cost on diagnostic default-OFF runs; makes hash-equal viable despite post-F lazy precompute).
-                const cutoffEnabled = document.getElementById('perceptual-cutoff')?.checked === true;
+                const cutoffEnabled = perceptualCutoffEl?.checked === true;
                 if (cutoffEnabled && !pass.isFinal && passes.length >= 2) {
                     computeAndCachePassStats(passes.at(-1));
                     computeAndCachePassStats(passes.at(-2));
@@ -1178,8 +1207,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
             // Eager stats for hash (only under toggle; see main decode path comment).
             const cutoffEnabled = document.getElementById('perceptual-cutoff')?.checked === true;
             if (cutoffEnabled && !(frame.stage === 'final' || frame.isFinal) && passes.length >= 2) {
-                computeAndCachePassStats(passes.at(-1));
-                computeAndCachePassStats(passes.at(-2));
+                eagerComputeCutoffStats(passes);
             }
             if (cutoffEnabled && !(frame.stage === 'final' || frame.isFinal)) {
                 const verdict = shouldStopAtPass(passes, targetRgba);
@@ -1307,14 +1335,32 @@ function shouldStopAtPass(passes, targetRgba) {
         return { reason: 'low-byterate', last: last.pass };
     }
 
-    // Trigger 3: PSNR plateau, but only once we've reached full-resolution AC.
+    // Trigger 3: extended plateau (psnr + butter for structure; connectedness to R1 buildSeries/monotone for lens17/12/16).
+    // Now uses butterSeries/monotone instead of psnr-only (robust to color/illum via future constancy).
     if ((last.intendedRatio ?? 8) <= 1 && (prev.intendedRatio ?? 8) <= 1 && targetRgba) {
         if (last.pixels?.byteLength === targetRgba.byteLength && prev.pixels?.byteLength === targetRgba.byteLength) {
-            const psnrLast = computePsnrVsFinal(targetRgba, last.pixels);
-            const psnrPrev = computePsnrVsFinal(targetRgba, prev.pixels);
-            if (Number.isFinite(psnrLast) && Number.isFinite(psnrPrev)
-                && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB) {
-                return { reason: 'psnr-plateau', last: last.pass, deltaDb: Math.abs(psnrLast - psnrPrev) };
+            let cmpRef = targetRgba, cmpW = last.width ?? 0, cmpH = last.height ?? 0;
+            let cmpLastP = last.pixels, cmpPrevP = prev.pixels;
+            if ((last.width * last.height) > CHART_MAX_PIXELS) {
+                const dsRef = downsamplePixelsForChart(targetRgba, last.width, last.height);
+                cmpRef = dsRef.pixels; cmpW = dsRef.width; cmpH = dsRef.height;
+                cmpLastP = downsamplePixelsForChart(last.pixels, last.width, last.height).pixels;
+                cmpPrevP = downsamplePixelsForChart(prev.pixels, prev.width, prev.height).pixels;
+            }
+            const psnrLast = computePsnrVsFinal(cmpRef, cmpLastP);
+            const psnrPrev = computePsnrVsFinal(cmpRef, cmpPrevP);
+            const cmp = createButteraugliComparer(cmpRef, cmpW, cmpH);
+            const buttLast = cmp(cmpLastP);
+            const buttPrev = cmp(cmpPrevP);
+            const smallSeries = [
+                { bytes: 0, psnr: psnrPrev, butter: buttPrev },
+                { bytes: 1, psnr: psnrLast, butter: buttLast },
+            ];
+            const monoPsnr = detectMonotone(smallSeries);
+            const monoButter = detectMonotone(smallSeries, 0.05, { valueKey: 'butter', lowerIsBetter: true });
+            if ((Number.isFinite(psnrLast) && Number.isFinite(psnrPrev) && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB)
+                || monoButter.monotone) {
+                return { reason: 'psnr-butter-plateau', last: last.pass, deltaDb: Math.abs(psnrLast - psnrPrev), buttDelta: Math.abs(buttLast - buttPrev) };
             }
         }
     }
@@ -1600,7 +1646,12 @@ async function drawPixels(targetCanvas, pixels, width, height, options = {}) {
     const data = (paintSize.width === width && paintSize.height === height)
         ? source
         : downsampleRgbaNearest(source, width, height, paintSize.width, paintSize.height);
-    const bitmap = await createImageBitmap(new ImageData(data, paintSize.width, paintSize.height));
+    let paintSource = data;
+    if (perceptualConstancyPaint) {
+        const hooked = perceptualConstancyPaint(paintSource, paintSize.width, paintSize.height);
+        if (hooked && hooked.length === paintSource.length) paintSource = hooked;
+    }
+    const bitmap = await createImageBitmap(new ImageData(paintSource, paintSize.width, paintSize.height));
     targetCanvas.getContext('2d').drawImage(bitmap, 0, 0);
     bitmap.close();
     return { scaleX: paintSize.width / width, scaleY: paintSize.height / height };
@@ -1629,14 +1680,12 @@ function displayPaintSize(targetCanvas, width, height) {
 
 function downsampleRgbaNearest(source, width, height, targetWidth, targetHeight) {
     const out = new Uint8ClampedArray(targetWidth * targetHeight * 4);
-    const xScale = width / targetWidth;
-    const yScale = height / targetHeight;
     for (let y = 0; y < targetHeight; y++) {
-        const sy = Math.min(height - 1, Math.floor((y + 0.5) * yScale));
+        const sy = Math.min(height - 1, Math.floor(((y * 2 + 1) * height) / (targetHeight * 2)));
         const srcRow = sy * width * 4;
         const dstRow = y * targetWidth * 4;
         for (let x = 0; x < targetWidth; x++) {
-            const sx = Math.min(width - 1, Math.floor((x + 0.5) * xScale));
+            const sx = Math.min(width - 1, Math.floor(((x * 2 + 1) * width) / (targetWidth * 2)));
             const srcIdx = srcRow + sx * 4;
             const dstIdx = dstRow + x * 4;
             out[dstIdx] = source[srcIdx];
@@ -1998,83 +2047,6 @@ function drawQualityChart(canvasId, legendId, passes, values, {
     if (legend) legend.textContent = `${finite.length} of ${passes.length} passes · ${yFormat(finite.at(-1))} final`;
 }
 
-function drawPsnrChart(passes, targetRgba) {
-    if (!passes?.length) {
-        drawQualityChart('psnr-chart', 'psnr-chart-legend', [], [], { yLabel: 'dB', yFormat: v => v.toFixed(1) });
-        return;
-    }
-    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
-    const reference = targetRgba ?? finalPass?.pixels ?? null;
-    if (!reference) {
-        const legend = document.getElementById('psnr-chart-legend');
-        if (legend) legend.textContent = 'final pixels released';
-        return;
-    }
-    const pw = passes[0]?.width ?? 1;
-    const ph = passes[0]?.height ?? 1;
-    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
-    const needsDs = dsW !== pw;
-    const values = passes.map(pass => {
-        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
-        return computePsnrVsFinal(refDs, px);
-    });
-    drawQualityChart('psnr-chart', 'psnr-chart-legend', passes, values, {
-        yPad: 2, yClampMin: 10, yClampMax: 80,
-        yLabel: 'dB', yFormat: v => v.toFixed(1),
-    });
-}
-
-function drawSsimChart(passes, targetRgba) {
-    if (!passes?.length) {
-        drawQualityChart('ssim-chart', 'ssim-chart-legend', [], [], { yLabel: 'SSIM', yFormat: v => v.toFixed(3) });
-        return;
-    }
-    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
-    const reference = targetRgba ?? finalPass?.pixels ?? null;
-    if (!reference) return;
-    const pw = passes[0]?.width ?? 1;
-    const ph = passes[0]?.height ?? 1;
-    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
-    const needsDs = dsW !== pw;
-    const values = passes.map(pass => {
-        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
-        return computeSsimVsFinal(refDs, px, dsW, dsH);
-    });
-    drawQualityChart('ssim-chart', 'ssim-chart-legend', passes, values, {
-        yPad: 0.002, yClampMin: 0, yClampMax: 1,
-        yLabel: 'SSIM', yFormat: v => v.toFixed(3),
-        lineColor: '#f0c86a', finalColor: '#7de0b0',
-    });
-}
-
-function drawButtChart(passes, targetRgba) {
-    if (!passes?.length) {
-        drawQualityChart('butt-chart', 'butt-chart-legend', [], [], { yLabel: 'Butt', yFormat: v => v.toFixed(3) });
-        return;
-    }
-    const finalPass = passes.find(p => p.isFinal) ?? passes.at(-1);
-    const reference = targetRgba ?? finalPass?.pixels ?? null;
-    if (!reference) return;
-    const pw = passes[0]?.width ?? 1;
-    const ph = passes[0]?.height ?? 1;
-    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
-    const needsDs = dsW !== pw;
-    const n = dsW * dsH;
-    const refXyb = pixelsToXyb(refDs, n);  // precompute once on downsampled reference
-    const values = passes.map(pass => {
-        if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
-        return computeButteraugliVsFinal(refXyb, px, dsW, dsH);
-    });
-    drawQualityChart('butt-chart', 'butt-chart-legend', passes, values, {
-        yPad: 0.05, yClampMin: 0,
-        yLabel: 'Butt', yFormat: v => v.toFixed(3),
-        lineColor: '#ff8c7d', finalColor: '#7de0b0',
-    });
-}
-
 function setMetric(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
@@ -2088,9 +2060,7 @@ function clearRunView() {
     viewerMeta.textContent = 'Loading...';
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawPsnrChart([], null);
-    drawSsimChart([], null);
-    drawButtChart([], null);
+    drawEmptyCharts();
 }
 
 function exportMeasurementsCSV() {

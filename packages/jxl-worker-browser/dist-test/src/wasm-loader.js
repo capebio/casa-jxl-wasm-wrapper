@@ -1,6 +1,10 @@
 // jxl-worker-browser/src/wasm-loader.ts
 // Loads the WASM codec facade. T-WASM-BUILD supplies the generated libjxl
 // adapter behind this facade.
+// keep in sync with @casabio/jxl-capabilities/src/index.ts detectTier + _probes
+// (includes crossOriginIsolated check for canDoMT; local copy required — static
+// bare import from worker graph would not resolve reliably, see defaultImportWasm
+// comment, "no top-level bare jxl-wasm" test guard, and git history removing the dep).
 let cachedDetectedTier;
 export function detectTier() {
     if (cachedDetectedTier !== undefined)
@@ -10,16 +14,20 @@ export function detectTier() {
         tier = "scalar";
     }
     else {
-        const hasSimd = probeSimd();
+        const hasSimd = _probeSimd();
         if (!hasSimd) {
             tier = "scalar";
         }
         else {
             const hasSab = typeof SharedArrayBuffer !== "undefined";
-            const hasRelaxedSimd = probeRelaxedSimd();
-            if (hasSab && hasRelaxedSimd)
+            const crossOriginIsolated = typeof self !== "undefined" && !!self.crossOriginIsolated;
+            // Match jxl-wasm / worker tier pick: COI + SAB enable threaded builds; do not
+            // require the wasm-threads validate probe (false on some Chrome builds that still run MT WASM).
+            const canDoMT = hasSab && crossOriginIsolated;
+            const hasRelaxedSimd = _probeRelaxedSimd();
+            if (canDoMT && hasRelaxedSimd)
                 tier = "relaxed-simd-mt";
-            else if (hasSab)
+            else if (canDoMT)
                 tier = "simd-mt";
             else
                 tier = "simd";
@@ -28,7 +36,7 @@ export function detectTier() {
     cachedDetectedTier = tier;
     return tier;
 }
-function probeSimd() {
+function _probeSimd() {
     try {
         return WebAssembly.validate(new Uint8Array([
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
@@ -42,7 +50,7 @@ function probeSimd() {
         return false;
     }
 }
-function probeRelaxedSimd() {
+function _probeRelaxedSimd() {
     try {
         return WebAssembly.validate(new Uint8Array([
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
@@ -56,6 +64,15 @@ function probeRelaxedSimd() {
         return false;
     }
 }
+/**
+ * Loads the codec facade from the sibling jxl-wasm package (via importWasm or
+ * defaultImportWasm URL-relative + bare fallback).
+ * `wasmUrl` is used only for failure diagnostics; the module itself is resolved via `importWasm`/sibling-package import.
+ *
+ * Note (W-7): loadWasmModule is invoked exactly once per worker under normal operation
+ * (see getWasm singleton + wasmLoadPromise in worker.ts; only reset on error for retry).
+ * Memoization deliberately omitted here.
+ */
 export async function loadWasmModule(wasmUrl, options = {}) {
     const imported = await (options.importWasm ?? defaultImportWasm)();
     forceWorkerSafeTier(imported);
@@ -71,10 +88,12 @@ export async function loadWasmModule(wasmUrl, options = {}) {
     try {
         const fetchImpl = options.fetchImpl ?? (typeof fetch !== "undefined" ? fetch : null);
         if (fetchImpl !== null) {
-            const resp = await fetchImpl(wasmUrl);
+            let resp = await fetchImpl(wasmUrl, { method: "HEAD" });
+            if (resp.status === 405) {
+                resp = await fetchImpl(wasmUrl);
+                await resp.body?.cancel();
+            }
             probeStatus = resp.status;
-            // Drain the body to avoid keeping a connection open.
-            await resp.body?.cancel();
         }
     }
     catch {
@@ -115,16 +134,25 @@ function forceWorkerSafeTier(value) {
     if (typeof setForcedTier === "function") {
         setForcedTier(tier);
     }
+    else {
+        console.warn("[jxl-worker-browser] facade lacks setForcedTier; tier override ignored");
+    }
 }
 function readWorkerTierOverride() {
     const search = readWorkerLocationSearch();
+    // Default "auto" (not "simd"): investigation of worker.ts (getWasm singleton + detectTier only for ready),
+    // pool.ts (MT cost accounting + ST fallback via budget), git log ( "simd" default introduced in
+    // progressive commit with force logic; no documented MT-in-worker instability or pthread-nesting
+    // reason for pinning default; prior history used re-exports allowing MT when SAB+COI present).
+    // Spawn callers that want MT pass ?jxlWorkerTier=... ; absent query now honors the worker's
+    // detected tier instead of hard-pinning every default worker to ST simd.
     if (search === "")
-        return "simd";
+        return "auto";
     const tier = new URLSearchParams(search).get("jxlWorkerTier");
     if (tier === "auto" || tier === "relaxed-simd-mt" || tier === "simd-mt" || tier === "simd" || tier === "scalar") {
         return tier;
     }
-    return "simd";
+    return "auto";
 }
 function readWorkerLocationSearch() {
     const globalSelf = globalThis;

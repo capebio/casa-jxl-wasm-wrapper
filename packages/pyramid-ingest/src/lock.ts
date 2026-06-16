@@ -1,5 +1,6 @@
-import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { hostname } from "node:os";
 
 // WU-6 / Phase 2 L1-L3: advisory (cooperative) lock for multi-process safety on --out.
 // Write locks for ingest/gc/rm/migrate. Read locks for validate/explain.
@@ -13,6 +14,7 @@ export interface AdvisoryLock {
 interface LockFile {
   kind: "write" | "read";
   pid: number;
+  host?: string; // LOCK-2: pid liveness is only meaningful on the same host (network volumes)
   createdAt: number;
 }
 
@@ -43,159 +45,139 @@ async function readLockFile(p: string): Promise<LockFile | null> {
   }
 }
 
-async function writeLockFileAtomic(p: string, data: LockFile): Promise<void> {
-  const tmp = `${p}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  await writeFile(tmp, JSON.stringify(data), { flag: "wx" }); // atomic create
-  try {
-    await writeFile(p, JSON.stringify(data)); // or rename, but for simplicity overwrite after wx success (rare)
-    // Better: rename for atomicity on content, but since we hold wx, ok. Use rename pattern from ingest.
-    await unlink(tmp).catch(() => {});
-  } catch (e) {
-    await unlink(tmp).catch(() => {});
-    throw e;
+// LOCK-2: a lock is stale if older than STALE_MS, or (same host only) its pid is gone.
+// Cross-host locks can't be liveness-checked, so they rely on age alone.
+async function isLockStale(lock: LockFile): Promise<boolean> {
+  if (Date.now() - lock.createdAt > STALE_MS) return true;
+  if (lock.host && lock.host !== hostname()) return false;
+  return !(await isPidAlive(lock.pid));
+}
+
+// LOCK-1/LOCK-3: a writer must drain live readers before proceeding. Read locks live beside the write
+// lock as `${basename(writeLockPath)}.read.*`. Stale read locks (dead pid / aged out) are pruned here.
+async function waitForReadLocksToClear(writeLockPath: string, deadline: number, label: string): Promise<void> {
+  const dir = dirname(writeLockPath);
+  const rlPrefix = `${basename(writeLockPath)}.read.`;
+  for (;;) {
+    let entries: string[];
+    try { entries = await readdir(dir); } catch { return; } // dir gone → no readers
+    let live = 0;
+    for (const e of entries) {
+      if (!e.startsWith(rlPrefix)) continue;
+      const full = join(dir, e);
+      const lf = await readLockFile(full);
+      if (!lf) continue; // unreadable / mid-write — ignore this pass
+      if (await isLockStale(lf)) await unlink(full).catch(() => {}); // prune (LOCK-3)
+      else live++;
+    }
+    if (live === 0) return;
+    if (Date.now() > deadline) throw new Error(`acquireWriteLock timeout: ${live} read lock(s) held for ${label}`);
+    await sleep(50 + Math.random() * 50);
   }
 }
 
-async function acquireWriteLock(outDir: string, timeoutMs = 30000): Promise<AdvisoryLock> {
-  const lockPath = join(outDir, LOCK_FILE);
-  await mkdir(outDir, { recursive: true });
-  const start = Date.now();
+// ebusy retry (mirrors checkpoint.ts for FS contention on network volumes)
+async function withEbusyRetry<T>(op: () => Promise<T>, label = "fs-op", attempts = 3, delayMs = 50): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try { return await op(); } catch (e: any) {
+      last = e;
+      const code = e && (e.code || e.errno);
+      if ((code === "EBUSY" || code === "EAGAIN" || code === "EPERM") && i < attempts - 1) {
+        await sleep(delayMs); continue;
+      }
+      throw e;
+    }
+  }
+  throw last;
+}
 
+async function acquireWriteLockFile(lockPath: string, timeoutMs: number, label: string): Promise<AdvisoryLock> {
+  await mkdir(dirname(lockPath), { recursive: true });
+  const start = Date.now();
   for (;;) {
-    // Try exclusive wx
     const now = Date.now();
-    const data: LockFile = { kind: "write", pid: process.pid, createdAt: now };
+    const data: LockFile = { kind: "write", pid: process.pid, host: hostname(), createdAt: now };
     try {
-      await writeFile(lockPath, JSON.stringify(data), { flag: "wx" });
-      // Success: we hold write lock.
-      return {
-        async release() {
-          await unlink(lockPath).catch(() => {});
-        },
-      };
+      await withEbusyRetry(() => writeFile(lockPath, JSON.stringify(data), { flag: "wx" }), "wx-write-lock");
+      // The write-lock file now blocks NEW readers; LOCK-1: also drain readers already holding.
+      // On timeout, release our write lock (we couldn't get exclusivity) and propagate.
+      try {
+        await waitForReadLocksToClear(lockPath, start + timeoutMs, label);
+      } catch (e) {
+        await unlink(lockPath).catch(() => {});
+        throw e;
+      }
+      return { async release() { await unlink(lockPath).catch(() => {}); } };
+    } catch (e: any) {
+      if (e && e.code !== "EEXIST") throw e; // includes the drain-timeout above → propagate out
+    }
+    const existing = await readLockFile(lockPath);
+    if (existing && (await isLockStale(existing))) {
+      await withEbusyRetry(() => unlink(lockPath), "steal-stale").catch(() => {});
+      continue;
+    }
+    if (Date.now() - start > timeoutMs) throw new Error(`acquireWriteLock timeout after ${timeoutMs}ms for ${label}`);
+    await sleep(50 + Math.random() * 50);
+  }
+}
+
+async function acquireReadLockFile(writeLockPath: string, readLockPath: string, timeoutMs: number, label: string): Promise<AdvisoryLock> {
+  await mkdir(dirname(writeLockPath), { recursive: true });
+  const start = Date.now();
+  for (;;) {
+    // 1. if a live writer holds the write lock, wait for it.
+    const write = await readLockFile(writeLockPath);
+    if (write && write.kind === "write" && !(await isLockStale(write))) {
+      if (Date.now() - start > timeoutMs) throw new Error(`acquireReadLock timeout (write held) ${label}`);
+      await sleep(50); continue;
+    }
+    // 2. optimistically claim our (unique) read lock.
+    const data: LockFile = { kind: "read", pid: process.pid, host: hostname(), createdAt: Date.now() };
+    try {
+      await withEbusyRetry(() => writeFile(readLockPath, JSON.stringify(data), { flag: "wx" }), "wx-read-lock");
     } catch (e: any) {
       if (e && e.code !== "EEXIST") throw e;
+      if (Date.now() - start > timeoutMs) throw new Error(`acquireReadLock timeout after ${timeoutMs}ms for ${label}`);
+      await sleep(20); continue;
     }
-
-    // Contended: check existing for stale
-    const existing = await readLockFile(lockPath);
-    if (existing) {
-      const age = Date.now() - existing.createdAt;
-      const alive = await isPidAlive(existing.pid);
-      if (!alive || age > STALE_MS) {
-        // Stale: force acquire
-        await unlink(lockPath).catch(() => {});
-        // retry loop will wx again
-        continue;
-      }
+    // 3. re-check: if a writer raced in between (1) and (2), yield to it (LOCK-1 symmetry).
+    const write2 = await readLockFile(writeLockPath);
+    if (write2 && write2.kind === "write" && !(await isLockStale(write2))) {
+      await unlink(readLockPath).catch(() => {});
+      if (Date.now() - start > timeoutMs) throw new Error(`acquireReadLock timeout (write raced) ${label}`);
+      await sleep(50); continue;
     }
-
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`acquireWriteLock timeout after ${timeoutMs}ms for ${outDir}`);
-    }
-    await sleep(50 + Math.random() * 50); // small backoff
+    return { async release() { await unlink(readLockPath).catch(() => {}); } };
   }
+}
+
+// old writeLockFileAtomic removed (dead: never called by acquires; used weaker non-rename update vs checkpoint rename+ebusy)
+
+async function acquireWriteLock(outDir: string, timeoutMs = 30000): Promise<AdvisoryLock> {
+  const lockPath = join(outDir, LOCK_FILE);
+  return acquireWriteLockFile(lockPath, timeoutMs, outDir);
 }
 
 async function acquireReadLock(outDir: string, timeoutMs = 30000): Promise<AdvisoryLock> {
   const lockPath = join(outDir, LOCK_FILE);
   const readLockPath = join(outDir, `${READ_LOCK_PREFIX}${process.pid}.${Math.random().toString(36).slice(2)}`);
-  await mkdir(outDir, { recursive: true });
-  const start = Date.now();
-
-  for (;;) {
-    // Check for write lock holder (non-stale)
-    const write = await readLockFile(lockPath);
-    if (write && write.kind === "write") {
-      const age = Date.now() - write.createdAt;
-      const alive = await isPidAlive(write.pid);
-      if (alive && age <= STALE_MS) {
-        if (Date.now() - start > timeoutMs) throw new Error(`acquireReadLock timeout (write held) ${outDir}`);
-        await sleep(50);
-        continue;
-      }
-      // stale write: ignore (will be cleaned on next write acquire)
-    }
-
-    // No blocking write: create our read lock file (unique name)
-    const now = Date.now();
-    try {
-      await writeFile(readLockPath, JSON.stringify({ kind: "read", pid: process.pid, createdAt: now }), { flag: "wx" });
-      return {
-        async release() {
-          await unlink(readLockPath).catch(() => {});
-        },
-      };
-    } catch (e: any) {
-      if (e && e.code !== "EEXIST") throw e;
-      // rare name collision, retry name
-    }
-
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`acquireReadLock timeout after ${timeoutMs}ms for ${outDir}`);
-    }
-    await sleep(20);
-  }
+  return acquireReadLockFile(lockPath, readLockPath, timeoutMs, outDir);
 }
 
 export { acquireWriteLock, acquireReadLock };
 
 /** Full L3 per-image: write lock for mutate on specific image (rm, targeted migrate). Uses images/<id>/.lock */
 export async function acquireImageWriteLock(outDir: string, imageId: string, timeoutMs = 30000): Promise<AdvisoryLock> {
-  const imageDir = join(outDir, "images", imageId);
-  await mkdir(imageDir, { recursive: true });
-  const lockPath = join(imageDir, ".lock");
-  const start = Date.now();
-  for (;;) {
-    const now = Date.now();
-    const data: LockFile = { kind: "write", pid: process.pid, createdAt: now };
-    try {
-      await writeFile(lockPath, JSON.stringify(data), { flag: "wx" });
-      return { async release() { await unlink(lockPath).catch(() => {}); } };
-    } catch (e: any) {
-      if (e && e.code !== "EEXIST") throw e;
-    }
-    const existing = await readLockFile(lockPath);
-    if (existing) {
-      const age = Date.now() - existing.createdAt;
-      const alive = await isPidAlive(existing.pid);
-      if (!alive || age > STALE_MS) {
-        await unlink(lockPath).catch(() => {});
-        continue;
-      }
-    }
-    if (Date.now() - start > timeoutMs) throw new Error(`acquireImageWriteLock timeout for ${imageId}`);
-    await sleep(50 + Math.random() * 50);
-  }
+  const lockPath = join(outDir, "images", imageId, ".lock");
+  return acquireWriteLockFile(lockPath, timeoutMs, imageId);
 }
 
 /** Full L3 per-image read (for targeted validate on image). */
 export async function acquireImageReadLock(outDir: string, imageId: string, timeoutMs = 30000): Promise<AdvisoryLock> {
-  const imageDir = join(outDir, "images", imageId);
-  await mkdir(imageDir, { recursive: true });
-  const lockPath = join(imageDir, ".lock"); // reuse same; for read we still check write holder
-  const readLockPath = join(imageDir, `.lock.read.${process.pid}.${Math.random().toString(36).slice(2)}`);
-  const start = Date.now();
-  for (;;) {
-    const write = await readLockFile(lockPath);
-    if (write && write.kind === "write") {
-      const age = Date.now() - write.createdAt;
-      const alive = await isPidAlive(write.pid);
-      if (alive && age <= STALE_MS) {
-        if (Date.now() - start > timeoutMs) throw new Error(`acquireImageReadLock timeout (write held) ${imageId}`);
-        await sleep(50);
-        continue;
-      }
-    }
-    try {
-      await writeFile(readLockPath, JSON.stringify({ kind: "read", pid: process.pid, createdAt: Date.now() }), { flag: "wx" });
-      return { async release() { await unlink(readLockPath).catch(() => {}); } };
-    } catch (e: any) {
-      if (e && e.code !== "EEXIST") throw e;
-    }
-    if (Date.now() - start > timeoutMs) throw new Error(`acquireImageReadLock timeout ${imageId}`);
-    await sleep(20);
-  }
+  const writeLockPath = join(outDir, "images", imageId, ".lock");
+  const readLockPath = join(outDir, "images", imageId, `.lock.read.${process.pid}.${Math.random().toString(36).slice(2)}`);
+  return acquireReadLockFile(writeLockPath, readLockPath, timeoutMs, imageId);
 }
 
 // L3 granularity (applied at call sites):

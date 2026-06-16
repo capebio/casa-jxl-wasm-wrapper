@@ -10,9 +10,12 @@ pub mod exif;
 pub mod ljpeg;
 pub mod pipeline;
 pub mod tiff;
+pub mod perceptual;
+pub mod tone_simd;
 
 // Re-export the stable B4 metadata-only public API for convenience
 pub use tiff::{parse_orf_metadata, bench_decode_orf, OrfMetadata, DecodeBench};
+pub use pipeline::apply_perceptual_constancy;  // Layer 5: exposed for post-JXL / progressive pixel constancy (ties to benchmark postDecodeTransform + Cursor for early layers). Positive for vision use cases. Now takes layer for progressive awareness.
 
 #[cfg(test)]
 mod compile_tests {

@@ -1,0 +1,79 @@
+# .gitattributes
+# Force LF line endings for text files (source + generated dist outputs).
+# This eliminates spurious "modified" entries on Windows from CRLF conversion
+# while keeping committed blobs and future working trees consistent (LF).
+# Binaries are marked explicitly so they are never mangled.
+#
+# No broad policy change to stop committing dist/ — we still track the built
+# artifacts per the package.json "files" + exports shape.
+
+* text=auto
+
+# Code and generated JS/TS outputs (the previous source of noise)
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.d.ts text eol=lf
+*.map text eol=lf
+
+*.json text eol=lf
+*.jsonc text eol=lf
+*.toml text eol=lf
+
+*.rs text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.cc text eol=lf
+*.hpp text eol=lf
+
+# Docs and scripts
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=crlf
+
+# Explicitly cover the committed build outputs under packages
+packages/**/dist/** text eol=lf
+packages/**/dist-test/** text eol=lf
+web/pkg/** text eol=lf
+.gitattributes text eol=lf
+
+# Lockfiles
+package-lock.json text eol=lf
+Cargo.lock text eol=lf
+
+# Binaries and non-text (never convert)
+*.wasm binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.node binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.otf binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.blend binary
+*.blend1 binary
+
+# OS/Editor noise (defense in depth)
+*.swp binary
+*~ binary
+Thumbs.db binary
+.DS_Store binary

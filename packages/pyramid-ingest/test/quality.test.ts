@@ -41,6 +41,24 @@ test("planLadder pairs grid sizes with q85 and the 2048 big level with q95", () 
   expect(plan.fullDistance).toBeCloseTo(qualityToDistance(BIG_QUALITY), 5);
 });
 
+test("planLadder(masterLong) filters to meaningful targets only (Q1)", () => {
+  // master 3000: 2048 is <3000 but 3000/2048 ~1.46 >1.15 → keep; 1024 etc keep
+  const p3k = planLadder(3000);
+  expect(p3k.sidecars.map(s => s.size)).toEqual([256,512,1024,2048]);
+
+  // master 2200: 2048/2200 wait, 2200/2048~1.07 <1.15 → drop 2048 as near-full redundant
+  const p22 = planLadder(2200);
+  expect(p22.sidecars.map(s => s.size)).toEqual([256,512,1024]);
+
+  // master=500: 256 <500 and 500/256~1.95>=1.15 → keep 256 only
+  const p500 = planLadder(500);
+  expect(p500.sidecars.map(s => s.size)).toEqual([256]);
+
+  // master=200: 256 not <200 → empty
+  const p200 = planLadder(200);
+  expect(p200.sidecars).toEqual([]);
+});
+
 test("planProxy emits a single q85 level at the requested size", () => {
   const plan = planProxy(512);
   expect(plan.sidecars.map((s) => s.size)).toEqual([512]);

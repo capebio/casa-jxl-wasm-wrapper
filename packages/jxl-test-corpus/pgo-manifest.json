@@ -1,7 +1,61 @@
 {
-  "pgo_fixtures": [
-    "srgb-8bit",
-    "srgb-alpha-8bit",
-    "adobe-rgb-16bit"
-  ]
+  "version": 2,
+  "scenarios": [
+    {
+      "name": "gallery-scroll",
+      "weight": 0.6,
+      "op": "encode-tiles",
+      "files": [
+        "tiles/256/*.ppm"
+      ],
+      "effort": 3,
+      "note": "Q8 256px tile ladder, dominant ingest op"
+    },
+    {
+      "name": "pyramid-ladder",
+      "weight": 0.25,
+      "op": "encode-pyramid",
+      "files": [
+        "full/*.ppm"
+      ],
+      "effort": 3,
+      "levels": 5
+    },
+    {
+      "name": "metadata-sidecars",
+      "weight": 0.1,
+      "op": "encode-container",
+      "files": [
+        "full/withmeta/*.ppm"
+      ],
+      "effort": 3,
+      "note": "same pixels, metadata exercised in trainer"
+    },
+    {
+      "name": "hiquality-archival",
+      "weight": 0.05,
+      "op": "encode",
+      "files": [
+        "full/*.ppm"
+      ],
+      "effort": 7,
+      "note": "high-effort search coverage on full-frame sources"
+    }
+  ],
+  "generated": {
+    "at": "2026-06-12T00:55:49.330Z",
+    "sources": [
+      {
+        "source": "PXL_20260527_180319603.RAW-02.ORIGINAL.dng",
+        "full": {
+          "width": 3628,
+          "height": 2731
+        },
+        "tile": {
+          "width": 256,
+          "height": 193
+        }
+      }
+    ]
+  }
 }

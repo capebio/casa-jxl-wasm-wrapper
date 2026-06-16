@@ -39,7 +39,7 @@ export class DedupeRegistry {
     // Cancel a subscriber. Returns { cancelWorker, promotedTo }.
     // If the primary itself is cancelled but subscribers remain, one subscriber
     // is PROMOTED to be the new primary. The underlying worker is NOT cancelled.
-    cancelSubscriber(subscriberId) {
+    cancelSubscriber(subscriberId, pickPromoted) {
         const primaryId = this.subscriberToPrimary.get(subscriberId) ?? subscriberId;
         const isPrimary = primaryId === subscriberId;
         const subs = this.sessionToSubscribers.get(primaryId);
@@ -57,8 +57,8 @@ export class DedupeRegistry {
             return { cancelWorker: true };
         }
         if (isPrimary) {
-            // Fan-out subscribers still alive. Promote the first remaining subscriber.
-            const newPrimaryId = subs.values().next().value;
+            // Fan-out subscribers still alive. Promote the subscriber chosen by the callback, or the first remaining.
+            const newPrimaryId = pickPromoted?.(subs) ?? subs.values().next().value;
             const key = this.sessionToKey.get(primaryId);
             if (key !== undefined) {
                 this.keyToSession.set(key, newPrimaryId);
@@ -81,6 +81,13 @@ export class DedupeRegistry {
     }
     // Clean up a completed or errored primary session.
     complete(sessionId) {
+        const primary = this.subscriberToPrimary.get(sessionId);
+        if (primary !== undefined) {
+            // Subscriber completing independently of its primary: detach only.
+            this.subscriberToPrimary.delete(sessionId);
+            this.sessionToSubscribers.get(primary)?.delete(sessionId);
+            return;
+        }
         const key = this.sessionToKey.get(sessionId);
         if (key !== undefined)
             this.keyToSession.delete(key);
@@ -96,10 +103,12 @@ export class DedupeRegistry {
     }
     /** @internal — prefer forEachSubscriber for zero-allocation iteration */
     // Returns all subscriber IDs for a primary (including itself).
+    // Note: The primary session registers itself as a subscriber, so the primary's ID is included in this list.
     subscribers(primaryId) {
         return [...(this.sessionToSubscribers.get(primaryId) ?? [])];
     }
     // Iterates subscriber IDs without allocating an intermediate array.
+    // Note: The primary session registers itself as a subscriber, so the callback is invoked for the primary's ID as well.
     forEachSubscriber(primaryId, fn) {
         const subs = this.sessionToSubscribers.get(primaryId);
         if (subs === undefined)

@@ -4,6 +4,9 @@
 // Drives the selected native/WASM backend facade.
 // Adaptive drain HWM: EMA of decoder.push() latency scales the drain threshold.
 // Mirrors the browser decode-handler's coalescing strategy exactly.
+// Adaptive drain is meaningful for streaming backends (WASM); the batch native
+// backend decodes inside close(), so these gates (HWM, EMA, BYTE_DRAIN_HWM) are
+// inert there — push() is ~0 ms memcpy and full decode happens before any events flow.
 const HWM_BASE = 6;
 const HWM_EMA_ALPHA = 0.25;
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB safety cap — see browser handler
@@ -53,7 +56,8 @@ export class DecodeHandler {
             this.failSession("QueueOverflow", `Input queue exceeded ${MAX_QUEUED_BYTES >> 20} MiB`);
             return;
         }
-        const buf = Buffer.from(chunk instanceof ArrayBuffer ? chunk : chunk.buffer, chunk instanceof ArrayBuffer ? 0 : chunk.byteOffset, chunk instanceof ArrayBuffer ? chunk.byteLength : chunk.byteLength);
+        const isAB = chunk instanceof ArrayBuffer;
+        const buf = Buffer.from(isAB ? chunk : chunk.buffer, isAB ? 0 : chunk.byteOffset, isAB ? chunk.byteLength : chunk.byteLength);
         this.chunkQueue.push(buf);
         this.queuedBytes += chunk.byteLength;
         this.queueDepth++;
@@ -65,13 +69,15 @@ export class DecodeHandler {
         this.inputClosed = true;
         this.wake();
     }
-    async onCancel(_reason) {
+    async onCancel(reason) {
         if (this.ended || this.cancelled)
             return;
         this.cancelled = true;
         this.paused = false;
-        const msg = { type: "decode_cancelled", sessionId: this.sessionId };
-        this.port.postMessage(msg);
+        if (reason !== "release_state") {
+            const msg = { type: "decode_cancelled", sessionId: this.sessionId };
+            this.port.postMessage(msg);
+        }
         this.finishSession("cancelled");
         void this.disposeActiveDecoder();
     }
@@ -157,7 +163,9 @@ export class DecodeHandler {
             }
         }
         finally {
-            this.finishSession(this.state);
+            if (!this.ended) {
+                this.failSession("Internal", "decoder event stream ended without a terminal event");
+            }
             await this.disposeActiveDecoder();
         }
     }
@@ -217,7 +225,7 @@ export class DecodeHandler {
             await this.waitForChunk();
             if (this.isTerminal() || this.paused)
                 continue;
-            while (!this.isTerminal() && this.chunkQueue.length > this.chunkReadIndex) {
+            while (!this.isTerminal() && !this.paused && this.chunkQueue.length > this.chunkReadIndex) {
                 const chunk = this.takeNextChunk();
                 if (chunk === null)
                     break;
@@ -227,7 +235,7 @@ export class DecodeHandler {
                 this.pushLatencyEma = HWM_EMA_ALPHA * pushMs + (1 - HWM_EMA_ALPHA) * this.pushLatencyEma;
                 this.maybePostDrain();
             }
-            if (this.inputClosed && !this.isTerminal()) {
+            if (this.inputClosed && !this.isTerminal() && !this.paused) {
                 await decoder.close();
                 return;
             }
@@ -238,6 +246,8 @@ export class DecodeHandler {
         return Math.floor(HWM_BASE * factor);
     }
     maybePostDrain() {
+        if (this.isTerminal())
+            return;
         const now = performance.now();
         const hwm = this.adaptiveHwm();
         const drainAllowed = this.queueDepth < hwm && this.queuedBytes < BYTE_DRAIN_HWM;
@@ -277,9 +287,9 @@ export class DecodeHandler {
                 case "progress": {
                     this.state = "progressive";
                     const pixels = toBuffer(event.pixels);
-                    // Budget check BEFORE using pixels — mirrors the browser handler's
-                    // detached-buffer fix (Node Buffers aren't transferred but the ordering
-                    // is correct and symmetric).
+                    // Budget check BEFORE posting pixels — mirrors browser. postWithPixels
+                    // transfers the underlying ArrayBuffer when the Buffer owns it wholly
+                    // (native binding case); small views fall back to clone. No reuse after post.
                     if (this.checkBudget()) {
                         this.postBudgetExceeded(event.stage, event.info, pixels, event.format, event.pixelStride);
                         return;
@@ -295,14 +305,14 @@ export class DecodeHandler {
                     };
                     if (event.region !== undefined)
                         msg.region = event.region;
-                    this.port.postMessage(msg);
+                    this.postWithPixels(msg, pixels);
                     this.postFirstPixelMetric();
                     break;
                 }
                 case "final": {
                     const pixels = toBuffer(event.pixels);
                     // Budget check BEFORE posting pixels — mirrors browser handler's
-                    // "final" budget check (browser decode-handler.ts lines 371-373).
+                    // "final" budget check (browser decode-handler.ts lines 407-409).
                     if (this.checkBudget()) {
                         this.postBudgetExceeded("final", event.info, pixels, event.format, event.pixelStride);
                         return;
@@ -317,7 +327,7 @@ export class DecodeHandler {
                     };
                     if (event.region !== undefined)
                         msg.region = event.region;
-                    this.port.postMessage(msg);
+                    this.postWithPixels(msg, pixels);
                     this.postFirstPixelMetric();
                     this.postMetric("time_to_final_ms", performance.now() - this.stageStartMs);
                     this.finishSession("final");
@@ -348,6 +358,16 @@ export class DecodeHandler {
             return false;
         return performance.now() - this.stageStartMs > this.opts.budgetMs;
     }
+    postWithPixels(msg, pixels) {
+        const ab = pixels.buffer;
+        if (pixels.byteOffset === 0 && pixels.byteLength === ab.byteLength) {
+            this.port.postMessage(msg, [ab]);
+            return;
+        }
+        const exact = ab.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
+        msg.pixels = exact;
+        this.port.postMessage(msg, [exact]);
+    }
     postBudgetExceeded(stage, info, pixels, format, pixelStride) {
         if (this.ended)
             return;
@@ -360,7 +380,7 @@ export class DecodeHandler {
             format,
             pixelStride,
         };
-        this.port.postMessage(msg);
+        this.postWithPixels(msg, pixels);
         this.finishSession("budget_exceeded");
         // Best-effort unblock of decoder.events() iterator — mirrors browser handler.
         void this.disposeActiveDecoder();

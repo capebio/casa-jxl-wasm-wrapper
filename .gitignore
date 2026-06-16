@@ -64,3 +64,6 @@ test-images/
 web/jxl-correlation-matrix.html
 web/jxl-correlation-matrix.js
 .worktrees/
+
+# Research papers (large PDFs, ~57MB; kept on disk, not tracked to keep clones lean)
+Papers/

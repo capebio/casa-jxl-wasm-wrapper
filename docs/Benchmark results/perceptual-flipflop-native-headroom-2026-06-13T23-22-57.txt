@@ -1,0 +1,13 @@
+perceptual butteraugli flip-flop — 1280x800 (1.02 MP), 30 iters x 10 rounds
+  scalar       14.612 ms  vs  avx2-strict  9.470 ms  | margin 0.512 ms | WINNER avx2-strict (1.54x)
+  avx2-strict  9.930 ms  vs  avx2-rsqrt   10.857 ms  | margin 1.582 ms | TIE (within noise) → keep simpler
+
+--- VERDICT (2026-06-13) ---
+AVX2 xyb-gather + downsample-avx2 + rcp-for-1/m: NO measured win on i7-10850H
+(Comet Lake). avx2-strict ~9.5ms = unchanged vs Plan-1 scale_err-only (~9.3ms).
+Diagnosis: vgatherdps slow pre-Zen4/AVX-512; kernel appears memory-bound
+(scale_err streams 7x1M f32/scale). sqrt/div/rcp/rsqrt all TIE => not compute-bound.
+Banked win stands: Rust 4.5x + AVX2 1.5x ~= 9x vs JS (83ms->9.5ms @1MP).
+DECISION: keep native gather code + add AVX-512 f32x16 gather path (commit 5093dc85)
+for the production server fleet (fast gather), accepting it is unbenchmarkable on
+dev hardware. AVX-512 parity tests skip locally, validate on real silicon.

@@ -7,6 +7,10 @@ import type { DecodeStage, ImageInfo, PixelFormat, Region } from "@casabio/jxl-c
 export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
 type WorkerTierOverride = Tier | "auto";
 
+// keep in sync with @casabio/jxl-capabilities/src/index.ts detectTier + _probes
+// (includes crossOriginIsolated check for canDoMT; local copy required — static
+// bare import from worker graph would not resolve reliably, see defaultImportWasm
+// comment, "no top-level bare jxl-wasm" test guard, and git history removing the dep).
 let cachedDetectedTier: Tier | undefined;
 
 export function detectTier(): Tier {
@@ -15,14 +19,18 @@ export function detectTier(): Tier {
   if (typeof WebAssembly === "undefined") {
     tier = "scalar";
   } else {
-    const hasSimd = probeSimd();
+    const hasSimd = _probeSimd();
     if (!hasSimd) {
       tier = "scalar";
     } else {
       const hasSab = typeof SharedArrayBuffer !== "undefined";
-      const hasRelaxedSimd = probeRelaxedSimd();
-      if (hasSab && hasRelaxedSimd) tier = "relaxed-simd-mt";
-      else if (hasSab) tier = "simd-mt";
+      const crossOriginIsolated = typeof self !== "undefined" && !!(self as any).crossOriginIsolated;
+      // Match jxl-wasm / worker tier pick: COI + SAB enable threaded builds; do not
+      // require the wasm-threads validate probe (false on some Chrome builds that still run MT WASM).
+      const canDoMT = hasSab && crossOriginIsolated;
+      const hasRelaxedSimd = _probeRelaxedSimd();
+      if (canDoMT && hasRelaxedSimd) tier = "relaxed-simd-mt";
+      else if (canDoMT) tier = "simd-mt";
       else tier = "simd";
     }
   }
@@ -30,7 +38,7 @@ export function detectTier(): Tier {
   return tier;
 }
 
-function probeSimd(): boolean {
+function _probeSimd(): boolean {
   try {
     return WebAssembly.validate(new Uint8Array([
       0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
@@ -39,12 +47,10 @@ function probeSimd(): boolean {
       0x0a, 0x08, 0x01, 0x06, 0x00,
       0x41, 0x00, 0xfd, 0x0f, 0x0b,
     ]));
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-function probeRelaxedSimd(): boolean {
+function _probeRelaxedSimd(): boolean {
   try {
     return WebAssembly.validate(new Uint8Array([
       0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
@@ -53,9 +59,7 @@ function probeRelaxedSimd(): boolean {
       0x0a, 0x0b, 0x01, 0x09, 0x00,
       0x20, 0x00, 0x20, 0x01, 0xfd, 0x80, 0x02, 0x0b,
     ]));
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 export type BrowserDecodeEvent =
@@ -68,6 +72,15 @@ export type BrowserDecodeEvent =
       format: PixelFormat;
       region?: Region;
       pixelStride: number;
+      sourceScale?: number;
+      progressiveRegion?: boolean;
+      regionFallback?: "full-frame-then-crop";
+      progressiveSequence?: number;
+      passOrdinal?: number;
+      frameIndex?: number;
+      frameDuration?: number;
+      frameName?: string;
+      animTicksPerSecond?: number;
     }
   | {
       type: "final";
@@ -76,6 +89,15 @@ export type BrowserDecodeEvent =
       format: PixelFormat;
       region?: Region;
       pixelStride: number;
+      sourceScale?: number;
+      progressiveRegion?: boolean;
+      regionFallback?: "full-frame-then-crop";
+      progressiveSequence?: number;
+      passOrdinal?: number;
+      frameIndex?: number;
+      frameDuration?: number;
+      frameName?: string;
+      animTicksPerSecond?: number;
     }
   | {
       type: "budget_exceeded";
@@ -152,6 +174,15 @@ export interface WasmLoaderOptions {
   importWasm?: () => Promise<unknown>;
 }
 
+/**
+ * Loads the codec facade from the sibling jxl-wasm package (via importWasm or
+ * defaultImportWasm URL-relative + bare fallback).
+ * `wasmUrl` is used only for failure diagnostics; the module itself is resolved via `importWasm`/sibling-package import.
+ *
+ * Note (W-7): loadWasmModule is invoked exactly once per worker under normal operation
+ * (see getWasm singleton + wasmLoadPromise in worker.ts; only reset on error for retry).
+ * Memoization deliberately omitted here.
+ */
 export async function loadWasmModule(wasmUrl: string, options: WasmLoaderOptions = {}): Promise<JxlModule> {
   const imported = await (options.importWasm ?? defaultImportWasm)();
   forceWorkerSafeTier(imported);
@@ -167,10 +198,9 @@ export async function loadWasmModule(wasmUrl: string, options: WasmLoaderOptions
   try {
     const fetchImpl = options.fetchImpl ?? (typeof fetch !== "undefined" ? fetch : null);
     if (fetchImpl !== null) {
-      const resp = await fetchImpl(wasmUrl);
+      let resp = await fetchImpl(wasmUrl, { method: "HEAD" });
+      if (resp.status === 405) { resp = await fetchImpl(wasmUrl); await resp.body?.cancel(); }
       probeStatus = resp.status;
-      // Drain the body to avoid keeping a connection open.
-      await resp.body?.cancel();
     }
   } catch {
     // Probe failure is non-fatal; we still throw the primary error below.
@@ -214,17 +244,25 @@ function forceWorkerSafeTier(value: unknown): void {
   const setForcedTier = target["setForcedTier"];
   if (typeof setForcedTier === "function") {
     setForcedTier(tier);
+  } else {
+    console.warn("[jxl-worker-browser] facade lacks setForcedTier; tier override ignored");
   }
 }
 
 function readWorkerTierOverride(): WorkerTierOverride {
   const search = readWorkerLocationSearch();
-  if (search === "") return "simd";
+  // Default "auto" (not "simd"): investigation of worker.ts (getWasm singleton + detectTier only for ready),
+  // pool.ts (MT cost accounting + ST fallback via budget), git log ( "simd" default introduced in
+  // progressive commit with force logic; no documented MT-in-worker instability or pthread-nesting
+  // reason for pinning default; prior history used re-exports allowing MT when SAB+COI present).
+  // Spawn callers that want MT pass ?jxlWorkerTier=... ; absent query now honors the worker's
+  // detected tier instead of hard-pinning every default worker to ST simd.
+  if (search === "") return "auto";
   const tier = new URLSearchParams(search).get("jxlWorkerTier");
   if (tier === "auto" || tier === "relaxed-simd-mt" || tier === "simd-mt" || tier === "simd" || tier === "scalar") {
     return tier;
   }
-  return "simd";
+  return "auto";
 }
 
 function readWorkerLocationSearch(): string {

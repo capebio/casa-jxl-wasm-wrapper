@@ -29,6 +29,13 @@ export const producedBySchema = z.object({
 
 export const levelSizeSchema = z.union([z.number().int().positive(), z.literal("full")]);
 
+/** Encode-time progressive quality curve point (measured once at ingest; read-only for clients). */
+export const qualityCurvePointSchema = z.object({
+  bytes: z.number().int().positive(),
+  ssim: z.number().min(0).max(1).optional(),
+  butteraugli: z.number().nonnegative().optional(),
+});
+
 export const levelEntrySchema = z.object({
   size: levelSizeSchema,
   w: z.number().int().positive(),
@@ -38,11 +45,14 @@ export const levelEntrySchema = z.object({
   contenthash: z.string().length(16),
   tiled: z.boolean(),
   convergedByteEnd: z.number().int().positive().optional(),
+  qualityCurve: z.array(qualityCurvePointSchema).optional(),
 });
 
 export const masterInfoSchema = z.object({
   name: z.string(),
-  format: z.enum(["orf", "dng", "cr2", "jpg", "nef", "arw", "raf", "rw2", "unknown"]),
+  // SCH-1: keep in sync with ingest RAW_EXT — pef/srw/x3f are advertised there, so a manifest with
+  // those formats must validate (otherwise parseManifest throws and the image is lost).
+  format: z.enum(["orf", "dng", "cr2", "jpg", "nef", "arw", "raf", "rw2", "pef", "srw", "x3f", "unknown"]),
   mtimeMs: z.number(),
 });
 
@@ -55,13 +65,21 @@ export const manifestSchemaV1 = z.object({
   height: z.number().int().positive().optional(),
   aspect: z.number().finite().positive().optional(),
   levels: z.array(levelEntrySchema).optional(),
+  // M2: on-disk layout marker (set by `migrate --migrate-layout`). Optional + additive so it
+  // round-trips through parseManifest instead of being stripped (which would cause re-migrate loops).
+  layout: z.string().optional(),
   proxy: z.literal(true).optional(),
   stub: z.literal(true).optional(),
   metadata: z.record(z.unknown()).optional(),
   producedBy: producedBySchema
     .refine((p) => {
-      const maj = (p.version || "").split(".")[0];
-      return maj === "0";
+      // SCH-5: accept majors up to the running tool's own major (was hard-pinned to "0", which would
+      // make every manifest written by a 1.x release fail its own parseManifest). Still rejects
+      // forward-incompatible manifests written by a newer major than this tool.
+      const maj = Number((p.version || "0").split(".")[0]);
+      if (!Number.isFinite(maj) || maj < 0) return false;
+      const curMaj = Number((getVersion() || "0").split(".")[0]);
+      return maj <= (Number.isFinite(curMaj) ? curMaj : 0);
     }, { message: "unsupported producedBy major version" })
     .optional(),
 });
@@ -216,6 +234,8 @@ export const cliArgsSchema = z.object({
   "suggest-migrations": z.boolean().optional().default(false),
   // K2: chaos injection for testing resume/GC under failure (unlocked by surface + locks + checkpoint)
   "chaos-test": z.boolean().optional().default(false),
+  // B6: allow retrying prior failures recorded in checkpoint (transient errors like EBUSY/OOM during previous run)
+  "retry-failed": z.boolean().optional().default(false),
   config: z.string().optional(),
   // O1/O6 Phase2: structured output + bounded runlog
   json: z.boolean().optional().default(false),

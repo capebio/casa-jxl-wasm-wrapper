@@ -1,12 +1,12 @@
 // Process the test ORF through wasm at all-zero look controls and write a
 // PNG so we can eyeball the baseline against the camera's embedded JPEG.
 
-import init, { process_orf } from "./pkg/raw_converter_wasm.js";
-import { readFileSync, writeFileSync } from "node:fs";
+import init, { process_orf, downscale_rgb } from "./pkg/raw_converter_wasm.js";
+import { readFileSync } from "node:fs";
 import sharp from "sharp";
 
-const ORF = String.raw`c:\Foo\raw-converter\tests\P1110226.ORF`;
-const OUT = String.raw`c:\foo\raw-converter-wasm\baseline-out.png`;
+const ORF = process.argv[2] ?? String.raw`c:\Foo\raw-converter\tests\P1110226.ORF`;
+const OUT = process.argv[3] ?? String.raw`c:\foo\raw-converter-wasm\baseline-out.png`;
 
 const wasmBytes = readFileSync(
     new URL("./pkg/raw_converter_wasm_bg.wasm", import.meta.url),
@@ -34,8 +34,10 @@ console.log(`WB used: R=${r.wb_r_used.toFixed(3)}  B=${r.wb_b_used.toFixed(3)}`)
 const rgb = r.take_rgb();
 console.log(`rgb buffer: ${(rgb.length / 1024 / 1024).toFixed(1)} MB`);
 
-await sharp(rgb, { raw: { width: r.width, height: r.height, channels: 3 } })
-    .resize({ width: 1200 })
+const h1200 = Math.round((r.height * 1200) / r.width);
+const rgbSmall = downscale_rgb(rgb, r.width, r.height, 1200, h1200);
+
+await sharp(rgbSmall, { raw: { width: 1200, height: h1200, channels: 3 } })
     .png({ compressionLevel: 6 })
     .toFile(OUT);
 

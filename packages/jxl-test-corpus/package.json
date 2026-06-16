@@ -11,9 +11,12 @@
     "fixtures"
   ],
   "scripts": {
-    "build": "tsc"
+    "build": "tsc && node scripts/generate-fixtures.mjs",
+    "generate:fixtures": "node scripts/generate-fixtures.mjs",
+    "generate:pgo": "node scripts/generate-pgo-fixtures.mjs"
   },
   "devDependencies": {
+    "@casabio/jxl-wasm": "workspace:*",
     "typescript": "5.4.5"
   }
 }

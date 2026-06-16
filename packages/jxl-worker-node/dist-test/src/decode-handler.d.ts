@@ -32,7 +32,7 @@ export declare class DecodeHandler {
     constructor(opts: MsgDecodeStart, backend: Backend, callbacks: DecodeHandlerCallbacks);
     onChunk(chunk: ArrayBuffer | Uint8Array | Buffer): void;
     onClose(): void;
-    onCancel(_reason?: string): Promise<void>;
+    onCancel(reason?: string): Promise<void>;
     onPause(): void;
     onResume(): void;
     private isTerminal;
@@ -52,6 +52,7 @@ export declare class DecodeHandler {
     private readDecoderEvents;
     private failSession;
     private checkBudget;
+    private postWithPixels;
     private postBudgetExceeded;
     private postFirstPixelMetric;
     private postMetric;

@@ -38,6 +38,7 @@ export function toEntry(level: PyramidLevelBytes, masterW: number, masterH: numb
     contenthash: contentHash16(level.data),
     tiled: level.tiled === true,
     ...(level.convergedByteEnd != null ? { convergedByteEnd: level.convergedByteEnd } : {}),
+    ...(level.qualityCurve && level.qualityCurve.length > 0 ? { qualityCurve: level.qualityCurve } : {}),
   };
 }
 
@@ -67,8 +68,11 @@ export function buildManifest(args: {
 }
 
 export function buildIndexEntry(manifest: Manifest): IndexEntry {
-  const l0 = manifest.levels[0];
+  const l0 = manifest.levels?.[0];
   if (!l0) throw new Error(`manifest ${manifest.imageId} has no levels`);
+  // aspect is optional on v1 manifests; the index schema requires it, so fail loudly here
+  // (previously undefined would flow through and fail galleryIndexSchema.parse later).
+  if (manifest.aspect == null) throw new Error(`manifest ${manifest.imageId} has no aspect`);
   return {
     imageId: manifest.imageId,
     aspect: manifest.aspect,
@@ -76,7 +80,9 @@ export function buildIndexEntry(manifest: Manifest): IndexEntry {
   };
 }
 
-export function isUpToDate(existing: Manifest, mtimeMs: number): boolean {
+export function isUpToDate(existing: Manifest, mtimeMs: number, proxy = false): boolean {
   // mtime exact match (low-mtime-rounding): drop rounding for determinism; fs mtimes are comparable at ms.
-  return existing.proxy !== true && existing.master.mtimeMs === mtimeMs;
+  // P7: proxy flag match for skip (when caller requests proxy, only proxy manifests count as uptodate)
+  const proxyOk = proxy ? existing.proxy === true : existing.proxy !== true;
+  return proxyOk && existing.master.mtimeMs === mtimeMs;
 }

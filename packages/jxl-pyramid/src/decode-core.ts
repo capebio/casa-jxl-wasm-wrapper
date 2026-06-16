@@ -9,9 +9,17 @@ export interface DecodedLevel {
   width: number;
   height: number;
   format?: PixelFormat;
-  /** When errorPolicy='skip-tile' and tile decodes failed, lists the grid tiles that were zero-filled (L20-1). */
+  /**
+   * When errorPolicy='skip-tile' and tile decodes failed, lists the grid tiles that were zero-filled (L20-1).
+   * See DecodeOptions.errorPolicy for the viewport cache contract: do not cache a DecodedLevel with failedTiles
+   * under a 'final' viewportCacheKey — later hits would return zero-filled holes as complete final pixels.
+   */
   failedTiles?: TileId[];
+  /** ICC profile bytes from the container (pass-through; no transform applied). Populated when DecodeOptions.preserveMetadata (Agent 6 item 4). */
+  iccProfile?: Uint8Array;
 }
+
+export const buffersInFlight = new WeakSet<Uint8Array>();
 
 export const formatFromBits = (bits: 8 | 16): PixelFormat => (bits === 16 ? 'rgba16' : 'rgba8');
 export const bppOfFormat = (f: PixelFormat): 4 | 8 => (f === 'rgba16' ? 8 : 4);
@@ -24,11 +32,11 @@ export type RegionDecoder = (
 // Module-level decoder constants (Grok1)
 export const REGION_DECODER_RGBA8: RegionDecoder = async (b, r) => {
   const out = await decodeTileContainerRegionRgba8(b, r);
-  return { pixels: out.pixels, width: out.width, height: out.height };
+  return { pixels: out.pixels, width: out.width, height: out.height, format: 'rgba8' };
 };
 export const REGION_DECODER_RGBA16: RegionDecoder = async (b, r) => {
   const out = await decodeTileContainerRegionRgba16(b, r);
-  return { pixels: out.pixels, width: out.width, height: out.height };
+  return { pixels: out.pixels, width: out.width, height: out.height, format: 'rgba16' };
 };
 
 export const pickRegionDecoder = (bits: 8 | 16): RegionDecoder =>
@@ -116,8 +124,9 @@ export function stitch(
 
   const dstStride = vw * bytesPerPixel;
   const srcStride = decoded.width * bytesPerPixel;
-  if (decoded.width === vw && dx === 0 && decoded.height + dy <= viewport.h) {
-    // Fast path requires decoded.height + dy <= viewport.h (L6-2); stride-aligned full-width tile block at this y.
+  if (decoded.width === vw && dx === 0 /* decoded.height + dy <= viewport.h guaranteed by STITCH_OOB guard above */) {
+    // Fast path: stride-aligned full-width tile block at this y. The height bound is already enforced by the
+    // STITCH_OOB throw immediately prior; omitting the redundant test here removes one branch per aligned tile write.
     outBuffer.set(decoded.pixels, dy * dstStride);
   } else {
     let srcOff = 0;
@@ -229,7 +238,8 @@ export function raceWithAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T
   if (!signal) return p;
   if (signal.aborted) {
     p.catch(() => {});
-    return Promise.reject(new PyramidError('ABORTED', 'decode aborted before start'));
+    const msg = typeof signal.reason === 'string' ? `decode aborted before start: ${signal.reason}` : 'decode aborted before start';
+    return Promise.reject(new PyramidError('ABORTED', msg, signal.reason));
   }
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -241,7 +251,8 @@ export function raceWithAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T
       settled = true;
       cleanup();
       p.catch(() => {}); // prevent orphaned rejection from the raced promise
-      reject(new PyramidError('ABORTED', 'decode aborted'));
+      const msg = typeof signal.reason === 'string' ? `decode aborted: ${signal.reason}` : 'decode aborted';
+      reject(new PyramidError('ABORTED', msg, signal.reason));
     };
     signal.addEventListener('abort', onAbort, { once: true });
     p.then(
@@ -278,8 +289,22 @@ export function tileIdOf(rect: ImageRegion, tileSize: number, level: number): Ti
   return { level, col: Math.floor(rect.x / tileSize), row: Math.floor(rect.y / tileSize) };
 }
 
-/** Packed numeric tile key for hot maps: level<8192, col/row<2^20; safe int. */
+export const DEV = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+
+/** Packed numeric tile key for hot maps: level ≤ 8190, col/row < 2^20 — keeps value < 2^53 (exact in IEEE double). */
 export function tileKeyPacked(tile: TileId): number {
+  // level ≤ 8190, col/row < 2^20 — documented bound tightened from <8192 because
+  // 8191 * 2^40 + (2^20-1)*2^20 + (2^20-1) exceeds 2^53-1. Real pyramids use << 32 levels.
+  // Dev guard (no prod cost) to catch contract violations early.
+  if (DEV) {
+    if (
+      !Number.isInteger(tile.level) || tile.level > 8190 || tile.level < 0 ||
+      !Number.isInteger(tile.col) || tile.col < 0 || tile.col >= (1 << 20) ||
+      !Number.isInteger(tile.row) || tile.row < 0 || tile.row >= (1 << 20)
+    ) {
+      throw new PyramidError('BAD_REGION', `tileKeyPacked bounds violation: level=${tile.level} col=${tile.col} row=${tile.row} (level≤8190, col/row<2^20)`);
+    }
+  }
   return tile.level * 0x10000000000 + tile.row * 0x100000 + tile.col;
 }
 
@@ -299,6 +324,12 @@ export interface TileProgress {
   stage: 'dc' | 'final';
   completed: number;
   total: number;
+  /**
+   * decodeMs: wall time (in milliseconds) of the tile's decode stage as observed by the dispatching thread (e.g., from performance.now() round-trip).
+   * bytesDecoded: exact compressed input bytes consumed for this tile when known (from bitstream extraction), else undefined.
+   */
+  decodeMs?: number;
+  bytesDecoded?: number;
 }
 
 export interface DecodeOptions {
@@ -306,7 +337,8 @@ export interface DecodeOptions {
   decodeRegion?: RegionDecoder;
   signal?: AbortSignal;
   workerFactory?: () => WorkerLike;
-  pool?: any; // PyramidWorkerPool for explicit
+  /** Explicit pool for parallel tiled decode (duck-typed; see PyramidPoolLike). */
+  pool?: PyramidPoolLike;
   /** Opt-in decoded viewport cache (keyed by level+region+format; no auto persistence). */
   cache?: PyramidCache;
   /** Caller-owned recyclable buffer for stitched result (must be >= w*h*bpp). Returned .pixels will be this buffer on use. */
@@ -318,12 +350,23 @@ export interface DecodeOptions {
   onTile?: (region: ImageRegion, completedCount: number, progress?: TileProgress) => void;
   // F2 note: outBuffer + onTile together enable Grok 4 stream-stitch (on-arrival writes into caller buffer,
   // no results[] retention, paint as tiles land, reuse buffer across pans for 60fps). See decodeTiledViewport + decodeTilesParallel.
-  /** L20-1: when 'skip-tile', per-tile errors in progressive direct path zero the tile rect and continue; failedTiles populated on result. */
+  /**
+   * L20-1: when 'skip-tile', per-tile errors in progressive direct path zero the tile rect and continue; failedTiles populated on result.
+   * Cache contract: results carrying failedTiles?.length > 0 represent partial viewports (zero-filled holes). Callers and
+   * any cache layer using viewportCacheKey(..., 'final') must not store such results as complete final pixels; doing so
+   * would serve zeroed tiles as authoritative on subsequent hits (cache poisoning). The progressive direct path in
+   * decodeTiledViewport already elides the cache.set when failedTiles is non-empty. Pooled paths do not implement
+   * skip-tile (they fail-fast the batch). This field documents the invariant for all consumers of DecodeOptions + DecodedLevel.
+   */
   errorPolicy?: 'fail-fast' | 'skip-tile';
   /** L20-2: wall-clock budget for the decodeLevel call (checked in progressive per-tile loops for direct path). */
   budgetMs?: number;
   /** L4-4: resume-after-abort support; skip these tile keys (tileKey format) during progressive per-tile decode. */
   skipTiles?: ReadonlySet<string>;
+  /** When true (opt-in for Agent6-4), attaches iccProfile (pass-through from container) to results. Uses once-per-LevelSource lazy capture. Default false keeps prior perf for common sRGB paths. */
+  preserveMetadata?: boolean;
+  /** Opt-in CoreBudget (e.g. global from jxl-scheduler) to bound concurrent WASM workers with the main scheduler pool (Agent6-1). Passed to internal PyramidWorkerPool if workerFactory used. */
+  coreBudget?: { acquire(cost?: number): Promise<void>; release(cost?: number): void; tryAcquire(cost?: number): boolean; } | null;
   /**
    * Progressive DC-then-final first-paint (F1, cites L3m-2 L21m-2 L8pm-3).
    * When set, per-tile (or viewport) uses createDecoder({ progressionTarget: 'dc' }) for fast coarse paint,
@@ -332,11 +375,64 @@ export interface DecodeOptions {
    * Undefined (default) = existing one-shot final behavior (no behavior change for happy path).
    */
   progressive?: Exclude<ProgressiveMode, undefined>;
+  cacheDcTiles?: boolean;
 }
 
-export type ProgressiveMode = 'dc-then-final' | undefined;
+export type ProgressiveMode = 'dc-then-final' | 'dc-only' | undefined;
 
-/** Worker-like handle accepted by the pyramid pool (duck-typed; matches browser Worker + test doubles). */
+/** Agent6-4: once-per-LevelSource lazy capture of ICC (and future metadata) using minimal header decoder + facade.getIccProfile.
+ *  Caches on the source object (like bytesId). Shared reference stamped to results (no per-tile copies).
+ *  Only runs if options.preserveMetadata. For JXTC the profile lives in the codestream(s); header target is cheap.
+ */
+export function ensureIccProfile(
+  source: { bytes: Uint8Array; [k: string]: any },
+  opts?: { preserveMetadata?: boolean },
+): Promise<Uint8Array | null> {
+  if (!opts?.preserveMetadata) return Promise.resolve(null);
+  const key = '_iccProfile';
+  if (key in (source as any)) return (source as any)[key];
+  const p = (async () => {
+    try {
+      // Dynamic import avoids any potential cycle; facade has the getIccProfile (added for decode states).
+      const wasm = await import("@casabio/jxl-wasm");
+      const dec = wasm.createDecoder({
+        format: 'rgba8',
+        progressionTarget: 'header',
+        emitEveryPass: false,
+        preserveIcc: true,
+        preserveMetadata: false,
+      } as any);
+      // Prefix is sufficient for header + color profile (libjxl emits early).
+      const prefixLen = Math.min(256 * 1024, source.bytes.length);
+      await dec.push(source.bytes.subarray(0, prefixLen));
+      await dec.close();
+      let icc = (dec as any).getIccProfile ? (dec as any).getIccProfile() : null;
+      if (icc) icc = new Uint8Array(icc); // own the bytes
+      await Promise.resolve((dec as any).dispose()).catch(() => {});
+      return icc || null;
+    } catch {
+      return null;
+    }
+  })();
+  (source as any)[key] = p;
+  return p;
+}
+
+/**
+ * Scheduler boundary documentation (P3, Lens 1/19).
+ * decode-core's WorkerLike + PyramidPoolLike (and the tiled worker pool in tiled-decode-pool.ts) are for the
+ * JXTC *synchronous region/tile decode* path: small fixed grids of tiles, direct libjxl ROI or per-tile worker
+ * calls, stream-stitch writes, optional dc-then-final progressive. This is intentionally separate from the
+ * jxl-scheduler / jxl-session streaming protocol (chunked progressive full-codestream sessions with preemption,
+ * DedupeRegistry fan-out, adaptive HWM backpressure, and pause/resume). Both may create WASM-backed workers,
+ * but they are different workloads (random viewport tiles vs sequential byte-stream decode).
+ *
+ * Cross-pool CPU/core oversubscription (Agent 6 item 1): Pyramid pool now supports optional CoreBudget
+ * (from @casabio/jxl-scheduler) for opt-in bounding alongside scheduler. Pools remain distinct by design
+ * (dumb tile ROI vs full session state). Acquire/release tokens around the batch handle window (not per-tile).
+ */
+
+/** Worker-like handle accepted by the pyramid pool (duck-typed; matches browser Worker + test doubles). See module comment above for scheduler boundary. */
 export interface WorkerLike {
   addEventListener(
     type: "message" | "error" | "messageerror",
@@ -350,6 +446,26 @@ export interface WorkerLike {
   terminate(): void;
 }
 
+/**
+ * Minimal structural (duck) type for DecodeOptions.pool.
+ * Captures the exact members dereferenced by decodeTiledViewportPooled and shouldUseParallel
+ * when an explicit pool is supplied (preferred over the module default singleton).
+ * The concrete PyramidWorkerPool implementation lives in tiled-decode-pool.ts; this interface
+ * lives here so decode-core (the types root) does not create a circular dependency.
+ * Used only for the JXTC tiled/region fast path — intentionally separate from jxl-scheduler pools.
+ */
+export interface PyramidPoolLike {
+  allocateBytesId(source: any): number;
+  acquire(count: number, opts?: { maxWaitMs?: number }): Promise<any[]>;
+  release(handles: any[]): void;
+  readonly requestTimeout?: number;
+  // Lifecycle surface for holders that manage the pool outside a single decode call.
+  destroy?(graceMs?: number): Promise<void> | void;
+  readonly destroyed?: boolean;
+  readonly poolState?: string;
+  prewarm?(count: number): void;
+}
+
 /** Init/options bag passed to jxl-wasm createDecoder (local name for cast sites; structural). */
 export interface DecoderInit {
   format: PixelFormat;
@@ -357,4 +473,26 @@ export interface DecoderInit {
   emitEveryPass: boolean;
   preserveIcc: boolean;
   preserveMetadata: boolean;
+}
+
+export function cacheStore(cache: PyramidCache | undefined, key: string | undefined, pixels: Uint8Array, need: number): void {
+  if (!cache || !key) return;
+  const cap = cache.capacityBytes;
+  if (cap !== undefined && need > cap) return;
+  cache.set(key, pixels.byteLength > need ? pixels.slice(0, need) : pixels.slice());
+}
+
+export function sortCenterOut<T>(
+  items: T[],
+  viewport: ImageRegion,
+  getRect: (item: T) => ImageRegion,
+): T[] {
+  const cx = viewport.x + viewport.w / 2;
+  const cy = viewport.y + viewport.h / 2;
+  return items.slice().sort((a, b) => {
+    const ra = getRect(a), rb = getRect(b);
+    const da = (ra.x + ra.w / 2 - cx) ** 2 + (ra.y + ra.h / 2 - cy) ** 2;
+    const db = (rb.x + rb.w / 2 - cx) ** 2 + (rb.y + rb.h / 2 - cy) ** 2;
+    return da - db;
+  });
 }

@@ -9,6 +9,14 @@ import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createGalleryCoordinator } from './jxl-progressive-gallery-coordinator.js';
 import { createGalleryLightbox } from './jxl-progressive-gallery-lightbox.js';
 import { buildPushBatches } from './jxl-progressive-gallery-push.js';
+import {
+  createProgressiveWebPreset,
+  createSneyersPreset,
+  getPushBatchingOptions,
+  DEFAULT_CHUNK_SIZE,
+  DEFAULT_WINDOW_SIZE,
+} from './jxl-progressive-best-preset.js';
+import { packFramePixels } from './jxl-progressive-gallery-frame.js';
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Progressive Gallery] jxl-progressive-gallery.js loaded — multi-frame progressive gallery + lightbox', 'color:#06b6d4;font-weight:600', { page: 'Progressive Gallery', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
@@ -36,7 +44,8 @@ let pushMode = 'all-chunks';
 let pendingFiles = null;
 let activeKeyHandler = null;  // cleaned up on each startGallery() call
 let lastPushedPayload = null;
-const consumedPushIds = new Set();
+let currentGalleryAbort = null;
+const consumedPushIds = new Map(); // id -> ts, bounded
 
 const CHUNK_SIZE = 65536; // 64 KiB per chunk
 // Keep this comfortably above the scheduler drain HWM so the worker can
@@ -55,6 +64,9 @@ ctxReadyPromise = (async () => {
     dbgLog('Init error', e.message, 'error');
   }
 })();
+// ctx used only for readiness/side-effect init of WASM bindings.
+// Actual per-file progressive decodes use direct createDecoder + explicit chunk push
+// (required for windowed/all-chunks feed + yield between batches for passes detail checkpoints).
 
 if (dbgConsoleBtn) initDebugConsole(dbgConsoleBtn);
 if (decodePushedBtn) {
@@ -84,13 +96,8 @@ function getGalleryProgressiveDetail() {
   return sel ? sel.value : 'passes';
 }
 
-function getGalleryEncodeOptions() {
-  return {
-    previewFirst: !!(document.getElementById('gallery-preview-first')?.checked),
-    progressiveDc: Number(document.getElementById('gallery-prog-dc')?.value ?? 2),
-    groupOrder: document.getElementById('gallery-group-order')?.checked ? 1 : 0,
-  };
-}
+// getGalleryEncodeOptions removed (pass 2): preset (basePreset.encode) is now the single source.
+// Logging in decodeBtn click hardcodes the DOM reads for the galleryStartLine instead.
 
 function applyPushedGallerySettings(settings) {
   if (!settings) return;
@@ -117,7 +124,14 @@ async function ingestPushedGalleryPayload(payload) {
   // allow batch payloads (which have .items not top-level .bytes) for multi from paint
   if (!payload?.bytes && !(payload.batch && Array.isArray(payload.items))) return;
   if (payload.transferId && consumedPushIds.has(payload.transferId)) return;
-  if (payload.transferId) consumedPushIds.add(payload.transferId);
+  if (payload.transferId) {
+    consumedPushIds.set(payload.transferId, Date.now());
+    // bound size
+    if (consumedPushIds.size > 128) {
+      const oldest = [...consumedPushIds.entries()].sort((a,b)=>a[1]-b[1])[0]?.[0];
+      if (oldest) consumedPushIds.delete(oldest);
+    }
+  }
 
   await decodePushedGalleryPayload(payload);
 }
@@ -361,7 +375,22 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     return { totalFrames: 0 };
   }
 
-  const encodeOpts = encodeOnTheFly ? getGalleryEncodeOptions() : null;
+  // Abort prior (prevents decoder leaks, overlapping pushes, pixel buffer accumulation on rapid multi-asset switches/pushes)
+  if (currentGalleryAbort) currentGalleryAbort.abort();
+  currentGalleryAbort = new AbortController();
+  const signal = currentGalleryAbort.signal;
+
+  // Derive from preset (single source of truth, Sneyers baseline, cutoffs for adaptive push)
+  const progDetail = getGalleryProgressiveDetail();
+  const basePreset = createProgressiveWebPreset({
+    width: 1, height: 1, targetLongEdge: 'full',
+    progressiveDetail: progDetail === 'auto' ? null : progDetail,
+  });
+  const encodeOpts = encodeOnTheFly ? {
+    previewFirst: basePreset.encode.previewFirst,
+    progressiveDc: basePreset.encode.progressiveDc,
+    groupOrder: basePreset.encode.groupOrder,
+  } : null;
 
   // Remove any previous keyboard handler from prior gallery load
   if (activeKeyHandler) {
@@ -397,11 +426,17 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
       byteLength: file.size,
     })),
   });
+  // Wire priority oracle (connected exploration): exposes per-file visible frontier for AR/focus/photogram boost.
+  // Not yet used to modulate runLimited/push (future delivery intelligence), but now explicitly surfaced.
+  const _priorities = coordinator.getPriorityTargets();
 
   // framesByFile is a live Map used by the lightbox
   const framesByFile = new Map(selectedFiles.map(f => [slotId(f), []]));
 
   const lightbox = createGalleryLightbox({ framesByFile });
+  // Baseline constancy (Lens17 prep / Perceptual Constancy Mode path). Gallery already forwards params
+  // in renderLightboxState -> draw -> pack. UI/preset can call set later.
+  lightbox.setConstancyParams({ mode: 'off', exposure: 0, saturation: 0, whiteBalance: [1, 1, 1] });
 
   // Keyboard handler for lightbox navigation
   function onKey(ev) {
@@ -420,7 +455,25 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
   document.addEventListener('keydown', onKey);
 
   // Re-render all file strips based on current coordinator visibility
+  const dirtyStrips = new Set();
+  let rafId = 0;
+  function requestRender(fileId) {
+    dirtyStrips.add(fileId);
+    if (rafId) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      for (const fid of dirtyStrips) {
+        const stripEl = stripEls.get(fid);
+        if (stripEl) {
+          const visible = coordinator.visibleFrames(fid);
+          syncStrip(stripEl, fid, visible);
+        }
+      }
+      dirtyStrips.clear();
+    });
+  }
   function reRenderAll() {
+    dirtyStrips.clear();
     for (const [fileId, stripEl] of stripEls) {
       const visible = coordinator.visibleFrames(fileId);
       syncStrip(stripEl, fileId, visible);
@@ -495,7 +548,12 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     if (!frame) return;
 
     const canvas = document.getElementById('lightbox-canvas');
-    if (canvas) drawFrameToCanvas(canvas, frame);
+    if (canvas) {
+      const params = (lightbox && typeof lightbox.getConstancyParams === 'function')
+        ? lightbox.getConstancyParams()
+        : undefined;
+      drawFrameToCanvas(canvas, frame, params);
+    }
 
     const metaEl = document.getElementById('lightbox-meta');
     if (metaEl) metaEl.textContent = `${fileId.replace(/^slot-/, '')} — frame ${frameIndex} — ${formatFrameMeta(frame)}`;
@@ -545,8 +603,8 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
       width,
       height,
       hasAlpha: true,
-      quality: 82,
-      effort: 4,
+      quality: encodeOptions?.quality ?? 82,
+      effort: encodeOptions?.effort ?? 4,
       progressive: true,
       previewFirst: encodeOptions.previewFirst,
       progressiveDc: encodeOptions.progressiveDc,
@@ -575,9 +633,31 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     return out;
   }
 
-  // Decode all files concurrently, register frames with coordinator
-  const filePromises = selectedFiles.map(async file => {
+  // Concurrency limiter from the (previously unused) slider. Default 4 to protect worker pool / scheduler under multi-asset gallery.
+  const maxConc = Math.max(1, parseInt(concurrentEl?.value || '4', 10));
+  const limiter = (max) => {
+    let active = 0;
+    const waiters = [];
+    return (fn) => new Promise((resolve, reject) => {
+      const run = async () => {
+        active++;
+        try { resolve(await fn()); }
+        catch (e) { reject(e); }
+        finally {
+          active--;
+          if (waiters.length) waiters.shift()();
+        }
+      };
+      if (active < max) run();
+      else waiters.push(run);
+    });
+  };
+  const runLimited = limiter(maxConc);
+
+  // Decode all files (now limited + abort-aware), register frames with coordinator
+  const filePromises = selectedFiles.map(file => runLimited(async () => {
     const fileId = slotId(file);
+    if (signal.aborted) return 0;
 
     let buffer;
     const loadStart = Date.now();
@@ -585,12 +665,14 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
       if (encodeOnTheFly) {
         log(`${file.name}: encoding on the fly with progressiveDc=${encodeOpts.progressiveDc}, groupOrder=${encodeOpts.groupOrder}, previewFirst=${encodeOpts.previewFirst}...`);
         const raw = await loadImageToRgba(file);
-        buffer = await encodeToProgressiveJxl(raw, encodeOpts);
+        if (signal.aborted) return 0;
+        buffer = await encodeToProgressiveJxl(raw, basePreset.encode);
         const encodeMs = Date.now() - loadStart;
         log(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL in ${encodeMs.toFixed(1)} ms`);
         dbgLog(`${file.name}: encoded to ${(buffer.byteLength / 1024).toFixed(1)} KB progressive JXL in ${encodeMs.toFixed(1)} ms`);
       } else {
         buffer = await file.arrayBuffer();
+        if (signal.aborted) return 0;
         const loadMs = Date.now() - loadStart;
         log(`${file.name}: loaded ${(buffer.byteLength / 1024).toFixed(1)} KB in ${loadMs.toFixed(1)} ms`);
         dbgLog(`${file.name}: loaded ${(buffer.byteLength / 1024).toFixed(1)} KB in ${loadMs.toFixed(1)} ms`);
@@ -605,33 +687,37 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     log(decodingLine);
     dbgLog(decodingLine);
 
-    const chosenDetail = getGalleryProgressiveDetail();
+    // Use preset.decode (unified, includes defaults + any future preserve from pushed/photogram/AR)
     const decoder = createDecoder({
-      format: 'rgba8',
-      region: null,
-      downsample: 1,
-      progressionTarget: 'final',
-      emitEveryPass: true,
-      progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail,
-      preserveIcc: false,
-      preserveMetadata: false,
+      ...basePreset.decode,
+      // gallery forces false only for pure lab memory viz; callers that pass preserve* via preset win for color fidelity
+      preserveIcc: basePreset.decode.preserveIcc ?? false,
+      preserveMetadata: basePreset.decode.preserveMetadata ?? false,
     });
 
     const pushState = { bytesFed: 0 };
-    const pushBatches = buildPushBatches(buffer, { mode: pushMode, chunkSize: CHUNK_SIZE, windowSize: WINDOW_SIZE });
+    const pushOpts = getPushBatchingOptions(buffer.byteLength, {
+      chunkSize: CHUNK_SIZE,
+      windowSize: WINDOW_SIZE,
+      byteCutoffs: basePreset.byteCutoffs,
+    });
+    const pushBatches = buildPushBatches(buffer, { mode: pushMode, ...pushOpts });
     const pushPromise = (async () => {
       for (const batch of pushBatches) {
+        if (signal.aborted) break;
         await Promise.all(batch.map(chunk => {
+          if (signal.aborted) return;
           pushState.bytesFed += chunk.byteLength;
           return decoder.push(chunk);
         }));
       }
-      await decoder.close();
+      if (!signal.aborted) await decoder.close();
     })();
 
     let frameIndex = 0;
     const framesPromise = (async () => {
       for await (const ev of decoder.events()) {
+        if (signal.aborted) break;
         if (ev.type === 'header') {
           const hMs = Date.now() - decodeStartMs;
           const headerLine = `${file.name}: header ${ev.info.width}×${ev.info.height} @ ${hMs.toFixed(1)} ms`;
@@ -663,16 +749,18 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
         };
         framesByFile.get(fileId).push(enriched);
         coordinator.registerFrame(fileId, enriched);
-        reRenderAll();
+        requestRender(fileId);
         const frameLine = `${file.name}: [${enriched.stage}] ${elapsedMs.toFixed(1)} ms · ${bytesFed.toLocaleString()} / ${buffer.byteLength.toLocaleString()} B · ${percentFed.toFixed(1)}%`;
         log(frameLine);
         dbgLog(frameLine);
       }
-      coordinator.markFileClosed(fileId);
-      reRenderAll();
-      const doneLine = `${file.name}: done (${frameIndex} frame${frameIndex !== 1 ? 's' : ''})`;
-      log(doneLine);
-      dbgLog(doneLine, '', 'success');
+      if (!signal.aborted) {
+        coordinator.markFileClosed(fileId);
+        requestRender(fileId);
+        const doneLine = `${file.name}: done (${frameIndex} frame${frameIndex !== 1 ? 's' : ''})`;
+        log(doneLine);
+        dbgLog(doneLine, '', 'success');
+      }
     })();
 
     try {
@@ -686,25 +774,31 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
     } finally {
       await decoder.dispose();
     }
-  });
+  }));
 
   const frameCounts = await Promise.all(filePromises);
+  // cleanup this controller if still ours (supports cancel while running)
+  if (currentGalleryAbort && currentGalleryAbort.signal === signal) currentGalleryAbort = null;
   return {
     totalFrames: frameCounts.reduce((sum, count) => sum + (count || 0), 0),
   };
 }
 
-function drawFrameToCanvas(canvas, frame) {
+function drawFrameToCanvas(canvas, frame, constancyParams) {
   const { width, height } = frame.info;
   canvas.width = width;
   canvas.height = height;
   const ctx2d = canvas.getContext('2d');
-  const pixels = frame.pixels instanceof Uint8Array
-    ? new Uint8ClampedArray(frame.pixels.buffer, frame.pixels.byteOffset, frame.pixels.byteLength)
-    : new Uint8ClampedArray(frame.pixels);
-  const imageData = typeof frame.getImageData === 'function'
-    ? frame.getImageData()
-    : new ImageData(pixels, width, height);
+  let pixelsForImage;
+  if (typeof frame.getImageData === 'function') {
+    const gid = frame.getImageData();
+    pixelsForImage = gid && gid.data ? gid.data : gid;
+  } else {
+    pixelsForImage = packFramePixels(frame, { constancyParams });
+  }
+  const imageData = (pixelsForImage instanceof ImageData)
+    ? pixelsForImage
+    : new ImageData(pixelsForImage, width, height);
   ctx2d.putImageData(imageData, 0, 0);
 }
 

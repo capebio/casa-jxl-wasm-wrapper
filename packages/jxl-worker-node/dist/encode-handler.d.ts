@@ -16,6 +16,7 @@ export declare class EncodeHandler {
     private pixelQueue;
     private pixelReadIndex;
     private queueDepth;
+    private queuedBytes;
     private cancelled;
     private finished;
     private ended;
@@ -23,6 +24,10 @@ export declare class EncodeHandler {
     private wakeResolve;
     private lastDrainPostedMs;
     private lastDrainAllowed;
+    private encoder;
+    private disposePromise;
+    private readonly stageStartMs;
+    private pushLatencyEma;
     constructor(opts: MsgEncodeStart, backend: Backend, callbacks: EncodeHandlerCallbacks);
     onPixels(chunk: ArrayBuffer | Uint8Array | Buffer, region?: Region): void;
     onFinish(): void;
@@ -30,10 +35,16 @@ export declare class EncodeHandler {
     private run;
     private wake;
     private endSessionOnce;
+    private clearPixelQueue;
+    private disposeActiveEncoder;
     private waitForPixels;
+    private takeNextPixels;
+    private compactQueue;
     private feedEncoder;
     private maybePostDrain;
     private isErrored;
+    private postChunk;
+    private postMetric;
     private readEncoderChunks;
     private failSession;
 }

@@ -5,22 +5,6 @@ import type { WorkerToMainMessage, MainToWorkerMessage } from "@casabio/jxl-core
 
 export type Priority = "visible" | "near" | "background";
 
-// A live or queued session with all its metadata.
-export interface Session {
-  sessionId: string;
-  priority: Priority;
-  // Source identity for dedupe. null if no identity provided.
-  sourceKey: string | null;
-  // Resolve/reject for the "slot acquired" promise returned to the caller.
-  // Null once the session is running.
-  pendingResolve: (() => void) | null;
-  pendingReject: ((err: unknown) => void) | null;
-  // AbortSignal for external cancellation.
-  signal: AbortSignal | null;
-  // For deduped fan-out: list of subscriber session IDs that share this stream.
-  subscribers: string[];
-}
-
 export type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 
 // A worker slot in the pool.
@@ -41,11 +25,23 @@ export interface WorkerHandle {
   onMessage(handler: (msg: WorkerToMainMessage) => void): void;
   shutdown(timeoutMs?: number): Promise<void>;
   readonly terminated: boolean;
+  /** Optional: fired on worker-level error; pool recycles the worker (T2). */
+  onError?(handler: (err: unknown) => void): void;
+  /** Optional: fired on unexpected worker exit; pool recycles the worker (T2). */
+  onExit?(handler: () => void): void;
 }
 
 // Factory function the scheduler uses to create workers.
 export type WorkerFactory = () => Promise<WorkerHandle>;
 
 export interface AdmissionGate {
+  /**
+   * Request admission slot for a session.
+   * Note on cancellation contract (T3):
+   * admit() may resolve after the session was cancelled or the scheduler destroyed;
+   * the scheduler releases the returned token immediately in that case.
+   * Implementations should resolve promptly and must tolerate the release being
+   * the first and only interaction.
+   */
   admit(sessionId: string, priority: Priority): Promise<() => void>;
 }

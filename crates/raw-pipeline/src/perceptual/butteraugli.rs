@@ -1,0 +1,81 @@
+//! Butteraugli-approx scale error + 2× area downsample. Port of the JS
+//! `scaleErr` and `dn2`. `scale_err` returns the per-scale p-norm (p=3).
+
+/// Per-channel weights (opponent X highest, luminance Y mid, blue B lowest).
+#[derive(Clone, Copy)]
+pub struct Kweights {
+    pub kx: f32,
+    pub ky: f32,
+    pub kb: f32,
+}
+impl Default for Kweights {
+    fn default() -> Self {
+        Kweights { kx: 24.0, ky: 12.0, kb: 4.0 }
+    }
+}
+
+/// Scalar reference p-norm error at one scale. `sum` accumulates in f64 to match
+/// the JS number semantics; the `(mask*2+0.15).max(0.15)` clamp is kept literal.
+pub(crate) fn scale_err(
+    mask: &[f32],
+    rx: &[f32], ry: &[f32], rb: &[f32],
+    tx: &[f32], ty: &[f32], tb: &[f32],
+    n: usize,
+    k: &Kweights,
+) -> f32 {
+    let mut sum = 0f64;
+    for i in 0..n {
+        let m = (mask[i] * 2.0 + 0.15).max(0.15);
+        let inv = 1.0 / m;
+        let ex = (rx[i] - tx[i]) * inv;
+        let ey = (ry[i] - ty[i]) * inv;
+        let eb = (rb[i] - tb[i]) * inv;
+        let e2 = k.kx * ex * ex + k.ky * ey * ey + k.kb * eb * eb;
+        sum += (e2 * (e2 + 1e-12).sqrt()) as f64; // e2^(3/2)
+    }
+    ((sum / n as f64).powf(1.0 / 3.0)) as f32
+}
+
+/// 2× area downsample (box) of one plane → (dst, dw, dh). Port of `dn2`.
+pub(crate) fn dn2(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
+    let dw = (w >> 1).max(1);
+    let dh = (h >> 1).max(1);
+    let mut dst = vec![0f32; dw * dh];
+    for y in 0..dh {
+        let sy0 = y << 1;
+        let sy1 = (sy0 + 1).min(h - 1);
+        for x in 0..dw {
+            let sx0 = x << 1;
+            let sx1 = (sx0 + 1).min(w - 1);
+            dst[y * dw + x] = (src[sy0 * w + sx0]
+                + src[sy0 * w + sx1]
+                + src[sy1 * w + sx0]
+                + src[sy1 * w + sx1])
+                * 0.25;
+        }
+    }
+    (dst, dw, dh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_scale_err_is_zero() {
+        let n = 16;
+        let z = vec![0.5f32; n];
+        let mask = vec![0.3f32; n];
+        let e = scale_err(&mask, &z, &z, &z, &z, &z, &z, n, &Kweights::default());
+        assert!(e.abs() < 1e-6, "got {e}");
+    }
+
+    #[test]
+    fn dn2_halves_and_averages() {
+        // 2x2 all-ones → 1x1 == 1.0
+        let src = vec![1.0f32; 4];
+        let (d, dw, dh) = dn2(&src, 2, 2);
+        assert_eq!((dw, dh), (1, 1));
+        assert!((d[0] - 1.0).abs() < 1e-6);
+    }
+}

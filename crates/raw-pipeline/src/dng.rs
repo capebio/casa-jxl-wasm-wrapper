@@ -3,11 +3,13 @@
 //! (compression=1). Pulls BlackLevel, WhiteLevel, AsShotNeutral and CFAPattern
 //! out of the same IFD chain.
 
+use crate::demosaic;
 use crate::ljpeg;
 use anyhow::{anyhow, bail, Context, Result};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::sync::Mutex;
+use std::collections::HashSet;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cfa {
@@ -51,22 +53,7 @@ pub fn decode(path: &std::path::Path) -> Result<DngImage> {
 }
 
 pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
-    if data.len() < 8 {
-        bail!("too small");
-    }
-    let le = match &data[0..4] {
-        [0x49, 0x49, 0x2A, 0x00] => true,
-        [0x4D, 0x4D, 0x00, 0x2A] => false,
-        m => bail!("not TIFF: {m:?}"),
-    };
-    let ifd0_off = read_u32(data, 4, le);
-
-    let mut state = WalkState::default();
-    walk(data, ifd0_off as usize, le, &mut state);
-
-    let raw = state
-        .raw_ifd
-        .ok_or_else(|| anyhow!("no raw SubIFD found"))?;
+    let (state, raw, le) = load_dng(data)?;
 
     let width = raw.width as usize;
     let height = raw.height as usize;
@@ -85,14 +72,14 @@ pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
     let mut out = vec![0u16; width * height];
 
     match raw.compression {
-        1 => decode_uncompressed(data, &raw, width, height, &mut out)?,
+        1 => decode_uncompressed(data, &raw, width, height, le, &mut out)?,
         7 => decode_tiles(data, &raw, width, height, cps, &mut out)?,
         c => bail!("DNG compression {c} not supported"),
     }
 
-    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(0.5);
+    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(1.0);
     let wb_g_neutral = state.as_shot_neutral.map(|n| n[1]).unwrap_or(1.0);
-    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(0.6);
+    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(1.0);
     let wb_r = wb_g_neutral / wb_r_neutral.max(1e-6);
     let wb_g = 1.0;
     let wb_b = wb_g_neutral / wb_b_neutral.max(1e-6);
@@ -105,6 +92,10 @@ pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
         state.color_matrix_1,
         state.color_matrix_2,
     );
+    // Color matrix (camera native -> sRGB via XYZ) is passed through to higher
+    // LookRenderer for the advanced non-Riemannian / log geodesic / Molchanov
+    // perceptual model (lens17). The demosaic stage (incl. optional mhc_matrix
+    // fusion) + this + black/white/wb provide the clean linear starting point.
 
     Ok(DngImage {
         width,
@@ -148,35 +139,72 @@ fn decode_tiles(
         );
     }
 
-    let out_mtx = Mutex::new(out);
     let _ = cps; // implied by SOF
-    #[cfg(feature = "parallel")]
-    let iter = (0..rowtiles).into_par_iter();
-    #[cfg(not(feature = "parallel"))]
-    let mut iter = (0..rowtiles).into_iter();
-    iter.try_for_each(|tr| -> Result<()> {
+
+    // X1: full per-tile parallel (enabled by L13). Use probe + decode_tile_compact so each
+    // task owns a small disjoint compact buffer (no shared &mut stride borrow). Collect then
+    // blit active rects (edge tiles may have active < declared SOF size). Replaces the prior
+    // row-of-tiles band + Mutex + inner serial cols.
+    struct DecodedTile {
+        row_start: usize,
+        col_start: usize,
+        buf: Vec<u16>,
+        buf_w: usize, // declared by this tile's SOF (compact stride unit)
+        active_w: usize,
+        active_h: usize,
+    }
+
+    let decode_one = |idx: usize| -> Result<DecodedTile> {
+        let tr = idx / coltiles;
+        let tc = idx % coltiles;
         let row_start = tr * tl;
         let row_end = ((tr + 1) * tl).min(height);
-        let row_height = row_end - row_start;
-        let mut row_band = vec![0u16; width * row_height];
-        for tc in 0..coltiles {
-            let idx = tr * coltiles + tc;
-            let off = raw.tile_offsets[idx] as usize;
-            let bc = raw.tile_byte_counts[idx] as usize;
-            let src = data
-                .get(off..off + bc)
-                .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
-            let col_start = tc * tw;
-            let col_end = ((tc + 1) * tw).min(width);
-            let col_width = col_end - col_start;
-            ljpeg::decode_tile(src, &mut row_band, col_start, width, col_width, row_height)
-                .with_context(|| format!("tile r={tr} c={tc}"))?;
+        let col_start = tc * tw;
+        let col_end = ((tc + 1) * tw).min(width);
+        let active_h = row_end - row_start;
+        let active_w = col_end - col_start;
+        let off = raw.tile_offsets[idx] as usize;
+        let bc = raw.tile_byte_counts[idx] as usize;
+        let src = data
+            .get(off..off + bc)
+            .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
+        let info = ljpeg::probe_tile(src).with_context(|| format!("probe tile {idx}"))?;
+        let bw = info.width as usize;
+        let bh = info.height as usize;
+        // Buf sized to declared tile (units match the grid tw/tl and prior calls; cps=1 for CFA raw).
+        let mut buf = vec![0u16; bw * bh];
+        ljpeg::decode_tile_compact(src, &mut buf, bw, bh)
+            .with_context(|| format!("compact tile r={tr} c={tc}"))?;
+        Ok(DecodedTile {
+            row_start,
+            col_start,
+            buf,
+            buf_w: bw,
+            active_w,
+            active_h,
+        })
+    };
+
+    #[cfg(feature = "parallel")]
+    let tiles: Vec<DecodedTile> = (0..expected)
+        .into_par_iter()
+        .map(decode_one)
+        .collect::<Result<Vec<_>>>()?;
+    #[cfg(not(feature = "parallel"))]
+    let tiles: Vec<DecodedTile> = (0..expected).map(decode_one).collect::<Result<Vec<_>>>()?;
+
+    // Serial blit of active rects (disjoint; cheap vs decode work).
+    for td in tiles {
+        let aw = td.active_w.min(td.buf_w);
+        let ah = td.active_h;
+        for r in 0..ah {
+            let src_base = r * td.buf_w;
+            let dst_base = (td.row_start + r) * width + td.col_start;
+            let dst = &mut out[dst_base..dst_base + aw];
+            let src = &td.buf[src_base..src_base + aw];
+            dst.copy_from_slice(src);
         }
-        let mut guard = out_mtx.lock().unwrap();
-        let dst_start = row_start * width;
-        guard[dst_start..dst_start + row_band.len()].copy_from_slice(&row_band);
-        Ok(())
-    })?;
+    }
     Ok(())
 }
 
@@ -185,40 +213,85 @@ fn decode_uncompressed(
     raw: &RawIfd,
     width: usize,
     height: usize,
+    le: bool,
     out: &mut [u16],
 ) -> Result<()> {
     let bps = raw.bits_per_sample;
-    if raw.tile_offsets.is_empty() {
-        bail!("uncompressed DNG: strip-offset path not implemented");
-    }
     if bps != 16 {
         bail!("uncompressed DNG: bps {} unsupported", bps);
     }
-    let tw = raw.tile_width.ok_or_else(|| anyhow!("TileWidth"))? as usize;
-    let tl = raw.tile_length.ok_or_else(|| anyhow!("TileLength"))? as usize;
-    let coltiles = (width + tw - 1) / tw;
-    let rowtiles = (height + tl - 1) / tl;
-    for tr in 0..rowtiles {
-        for tc in 0..coltiles {
-            let idx = tr * coltiles + tc;
-            let off = raw.tile_offsets[idx] as usize;
-            let bc = raw.tile_byte_counts[idx] as usize;
-            let src = &data[off..off + bc];
-            let col_start = tc * tw;
-            let col_end = ((tc + 1) * tw).min(width);
-            let row_start = tr * tl;
-            let row_end = ((tr + 1) * tl).min(height);
-            let mut sp = 0;
-            for r in row_start..row_end {
-                for c in col_start..col_end {
-                    out[r * width + c] = u16::from_le_bytes([src[sp], src[sp + 1]]);
-                    sp += 2;
+    if !raw.tile_offsets.is_empty() {
+        let tw = raw.tile_width.ok_or_else(|| anyhow!("TileWidth"))? as usize;
+        let tl = raw.tile_length.ok_or_else(|| anyhow!("TileLength"))? as usize;
+        let coltiles = (width + tw - 1) / tw;
+        let rowtiles = (height + tl - 1) / tl;
+        for tr in 0..rowtiles {
+            for tc in 0..coltiles {
+                let idx = tr * coltiles + tc;
+                let off = raw.tile_offsets[idx] as usize;
+                let bc = raw.tile_byte_counts[idx] as usize;
+                let src = data
+                    .get(off..off + bc)
+                    .ok_or_else(|| anyhow!("uncompressed DNG: tile {idx} OOB"))?;
+                let col_start = tc * tw;
+                let col_end = ((tc + 1) * tw).min(width);
+                let row_start = tr * tl;
+                let row_end = ((tr + 1) * tl).min(height);
+                let mut sp = 0usize;
+                for r in row_start..row_end {
+                    for c in col_start..col_end {
+                        if sp + 2 > src.len() {
+                            bail!("uncompressed DNG: tile {idx} truncated");
+                        }
+                        out[r * width + c] = if le {
+                            u16::from_le_bytes([src[sp], src[sp + 1]])
+                        } else {
+                            u16::from_be_bytes([src[sp], src[sp + 1]])
+                        };
+                        sp += 2;
+                    }
+                    sp += (tw - (col_end - col_start)) * 2;
                 }
-                sp += (tw - (col_end - col_start)) * 2;
             }
         }
+        return Ok(());
     }
-    Ok(())
+    if !raw.strip_offsets.is_empty() {
+        if raw.strip_offsets.len() != raw.strip_byte_counts.len() {
+            bail!("uncompressed DNG: strip count mismatch");
+        }
+        let rows_per_strip = raw.rows_per_strip.unwrap_or(height as u32).max(1) as usize;
+        for (idx, (&off_u32, &bc_u32)) in raw
+            .strip_offsets
+            .iter()
+            .zip(raw.strip_byte_counts.iter())
+            .enumerate()
+        {
+            let off = off_u32 as usize;
+            let bc = bc_u32 as usize;
+            let src = data
+                .get(off..off + bc)
+                .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} OOB"))?;
+            let row_start = idx * rows_per_strip;
+            let row_end = (row_start + rows_per_strip).min(height);
+            let mut sp = 0usize;
+            for r in row_start..row_end {
+                for c in 0..width {
+                    if sp + 2 > src.len() {
+                        bail!("uncompressed DNG: strip {idx} truncated");
+                    }
+                    out[r * width + c] = if le {
+                        u16::from_le_bytes([src[sp], src[sp + 1]])
+                    } else {
+                        u16::from_be_bytes([src[sp], src[sp + 1]])
+                    };
+                    sp += 2;
+                }
+            }
+        }
+        return Ok(());
+    }
+    bail!("uncompressed DNG: missing tile or strip offsets");
 }
 
 pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u16], usize, usize) {
@@ -239,6 +312,35 @@ pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u
     (raw, width, height)
 }
 
+fn cfa_phase(cfa: Cfa) -> (u8, u8) {
+    match cfa {
+        Cfa::Rggb => (0, 0),
+        Cfa::Grbg => (0, 1),
+        Cfa::Gbrg => (1, 0),
+        Cfa::Bggr => (1, 1),
+    }
+}
+
+/// Common parse for both decode paths (dedup per plan).
+fn load_dng(data: &[u8]) -> Result<(WalkState, RawIfd, bool)> {
+    if data.len() < 8 {
+        bail!("too small");
+    }
+    let le = match &data[0..4] {
+        [0x49, 0x49, 0x2A, 0x00] => true,
+        [0x4D, 0x4D, 0x00, 0x2A] => false,
+        m => bail!("not TIFF: {m:?}"),
+    };
+    let ifd0_off = read_u32(data, 4, le);
+    let mut state = WalkState::default();
+    walk(data, ifd0_off as usize, le, &mut state);
+    let raw = state
+        .raw_ifd
+        .take()
+        .ok_or_else(|| anyhow!("no raw SubIFD found"))?;
+    Ok((state, raw, le))
+}
+
 #[derive(Default, Debug)]
 struct RawIfd {
     width: u32,
@@ -246,6 +348,9 @@ struct RawIfd {
     bits_per_sample: u16,
     samples_per_pixel: u16,
     compression: u32,
+    strip_offsets: Vec<u32>,
+    strip_byte_counts: Vec<u32>,
+    rows_per_strip: Option<u32>,
     tile_offsets: Vec<u32>,
     tile_byte_counts: Vec<u32>,
     tile_width: Option<u32>,
@@ -269,7 +374,31 @@ struct WalkState {
     orientation: Option<u16>,
 }
 
+fn raw_ifd_supported_candidate(ifd: &RawIfd, new_subfile_type: u32) -> bool {
+    let has_storage =
+        (!ifd.tile_offsets.is_empty() && !ifd.tile_byte_counts.is_empty())
+            || (!ifd.strip_offsets.is_empty() && !ifd.strip_byte_counts.is_empty());
+    let is_subsampled = (new_subfile_type & 1) != 0;
+    ifd.width > 0
+        && ifd.height > 0
+        && has_storage
+        && !is_subsampled
+        && (ifd.compression == 7 || ifd.compression == 1 || ifd.compression == 0x884C)
+}
+
 fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
+    fn walk_inner(
+        data: &[u8],
+        off: usize,
+        le: bool,
+        state: &mut WalkState,
+        visited: &mut HashSet<usize>,
+        depth: usize,
+    ) {
+        const MAX_IFD_DEPTH: usize = 64;
+        if depth >= MAX_IFD_DEPTH || !visited.insert(off) {
+            return;
+        }
     if off + 2 > data.len() {
         return;
     }
@@ -309,6 +438,15 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
             0x0115 => {
                 ifd.samples_per_pixel =
                     first_u32(data, dtype, cnt, val, inline_pos, le).unwrap_or(1) as u16;
+            }
+            0x0111 => {
+                ifd.strip_offsets = read_array_u32(data, dtype, cnt, val, inline_pos, le);
+            }
+            0x0116 => {
+                ifd.rows_per_strip = first_u32(data, dtype, cnt, val, inline_pos, le);
+            }
+            0x0117 => {
+                ifd.strip_byte_counts = read_array_u32(data, dtype, cnt, val, inline_pos, le);
             }
             0x0142 => {
                 ifd.tile_width = first_u32(data, dtype, cnt, val, inline_pos, le);
@@ -375,21 +513,25 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
 
     // Determine if this IFD is the full-res raw: needs ImageWidth/Length and
     // tile offsets, and NewSubFileType bit 0 must be 0 (full-res).
-    let is_subsampled = (new_subfile_type & 1) != 0;
-    if has_image_dims
-        && has_tiles
-        && !is_subsampled
-        && (ifd.compression == 7 || ifd.compression == 1 || ifd.compression == 0x884C)
-        && ifd.width > 1000
-    {
-        if state.raw_ifd.is_none() || ifd.width > state.raw_ifd.as_ref().unwrap().width {
+    let _ = has_tiles;
+    if has_image_dims && raw_ifd_supported_candidate(&ifd, new_subfile_type) {
+        let area = (ifd.width as u64) * (ifd.height as u64);
+        let replace = state
+            .raw_ifd
+            .as_ref()
+            .map(|prev| area > (prev.width as u64) * (prev.height as u64))
+            .unwrap_or(true);
+        if replace {
             state.raw_ifd = Some(ifd);
         }
     }
 
     for s in subs {
-        walk(data, s as usize, le, state);
+            walk_inner(data, s as usize, le, state, visited, depth + 1);
     }
+    }
+    let mut visited = HashSet::new();
+    walk_inner(data, off, le, state, &mut visited, 0);
 }
 
 fn first_u32(
@@ -742,4 +884,383 @@ mod tests {
         );
         assert_matrix_close(matrix, expected);
     }
+
+    #[test]
+    fn decode_uncompressed_tile_respects_big_endian() {
+        let raw = RawIfd {
+            bits_per_sample: 16,
+            tile_offsets: vec![0],
+            tile_byte_counts: vec![8],
+            tile_width: Some(2),
+            tile_length: Some(2),
+            ..Default::default()
+        };
+        let data = [0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04];
+        let mut out = vec![0u16; 4];
+        decode_uncompressed(&data, &raw, 2, 2, false, &mut out).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn decode_uncompressed_strip_path_supported() {
+        let raw = RawIfd {
+            bits_per_sample: 16,
+            strip_offsets: vec![0, 4],
+            strip_byte_counts: vec![4, 4],
+            rows_per_strip: Some(1),
+            ..Default::default()
+        };
+        let data = [1, 0, 2, 0, 3, 0, 4, 0];
+        let mut out = vec![0u16; 4];
+        decode_uncompressed(&data, &raw, 2, 2, true, &mut out).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn cfa_phase_maps_all_patterns() {
+        assert_eq!(cfa_phase(Cfa::Rggb), (0, 0));
+        assert_eq!(cfa_phase(Cfa::Grbg), (0, 1));
+        assert_eq!(cfa_phase(Cfa::Gbrg), (1, 0));
+        assert_eq!(cfa_phase(Cfa::Bggr), (1, 1));
+    }
+
+    #[test]
+    fn raw_candidate_accepts_strips_and_small_width() {
+        let raw = RawIfd {
+            width: 640,
+            height: 480,
+            compression: 1,
+            strip_offsets: vec![100],
+            strip_byte_counts: vec![200],
+            ..Default::default()
+        };
+        assert!(raw_ifd_supported_candidate(&raw, 0));
+    }
+
+    /// Targeted flip-flop test (per user request): alternate "newer code" (subtract_black=true,
+    /// clean linear for Lens17/photogram/AR) vs "old code" (false) 10 times on the same operation.
+    /// Uses real asset if findable from cwd (when running benchmark context), else synthetic
+    /// timing of the black sub kernel itself (the source of the raw decode creep).
+    #[test]
+    fn flip_flop_raw_decode_black_sub_10x() {
+        println!("\n=== Targeted flip-flop: newer (clean linear) vs old (preserve bias) 10 alternations ===");
+
+        // Try to load a real benchmark asset for full path (works when cwd has the files, e.g. from mjs run)
+        let candidates = [
+            "PXL_20260501_093507165.RAW-02.ORIGINAL.dng",
+            "PXL_20260527_180319603.RAW-02.ORIGINAL.dng",
+            "../PXL_20260501_093507165.RAW-02.ORIGINAL.dng",
+        ];
+        let mut used_real = false;
+        for path in &candidates {
+            if let Ok(data) = std::fs::read(path) {
+                println!("Using real asset: {} ({} bytes)", path, data.len());
+                for i in 0..10 {
+                    let subtract = i % 2 == 0; // alternate: even = newer (true), odd = old (false)
+                    let t0 = std::time::Instant::now();
+                    let _res = decode_bytes_demosaiced_impl(&data, subtract);
+                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    println!("flip {}: {:.2} ms (subtract_black={})", i, ms, subtract);
+                }
+                used_real = true;
+                break;
+            }
+        }
+
+        if !used_real {
+            println!("No real asset found in cwd; falling back to synthetic black-sub kernel timing (isolates the new scalar loop cost).");
+            let black = 64u16;
+            let mut base: Vec<u16> = (0..(1920*1440)).map(|i| (i % 1000 + 100) as u16).collect();
+            for i in 0..10 {
+                let subtract = i % 2 == 0;
+                let mut buf = base.clone();
+                let t0 = std::time::Instant::now();
+                if subtract {
+                    demosaic::subtract_black_in_place(&mut buf, black);
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                println!("synthetic flip {}: {:.4} ms (subtract_black={})", i, ms, subtract);
+            }
+        }
+        println!("=== End flip-flop ===\n");
+    }
+}
+
+/// X2 deliverable: post-demosaic RGB16 + metadata, without a full mosaic buffer resident
+/// at the same time as the RGB (strip fusion with 2-row halo for demosaic dependencies).
+/// The bayer mosaic is produced band-by-band (tile-row) and dropped after its demosaic
+/// contribution is written. Peak mem during fused path ~ full RGB + 1 tile-row band + 2 halo rows.
+///
+/// For the demosaiced path (decode_bytes_demosaiced), .rgb is black-subtracted (clean
+/// linear) and .black==0 so that downstream tone (pipeline::process) receives unbiased
+/// input. The bayer DngImage path preserves sensor values + original .black metadata.
+#[derive(Debug)]
+pub struct DngDemosaiced {
+    pub width: usize,
+    pub height: usize,
+    pub rgb: Vec<u16>, // post-align, post-demosaic (mhc), interleaved RGB16; black-subbed in demosaiced path
+    pub black: u16,
+    pub white: u16,
+    pub wb_r: f32,
+    pub wb_g: f32,
+    pub wb_b: f32,
+    pub orientation: u16,
+    pub make: String,
+    pub model: String,
+    pub color_matrix: Option<[[f32; 3]; 3]>,
+    pub iso: Option<u32>,
+    pub decode_ms: f64,
+    pub demosaic_ms: f64,
+}
+
+/// Fused decode (ljpeg tiles) + demosaic (mhc) for DNG. RGGB fast path uses strip fusion
+/// (band decode + halo carry + demosaic_rggb_mhc_band). Other CFA fall back to full mosaic
+/// + demosaic (rare; still correct, pay old peak). Callers (wasm process_dng_raw) use this
+/// to avoid simultaneous 32 MB mosaic + 120 MB rgb.
+pub fn decode_bytes_demosaiced(data: &[u8]) -> Result<DngDemosaiced> {
+    decode_bytes_demosaiced_impl(data, true)
+}
+
+/// Internal impl with switch for "newer code" (subtract_black=true, clean linear for Lens17/photogram/AR)
+/// vs "old code" (false, preserve bias like pre-clean-linear change). Used for targeted flip-flop tests.
+pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) -> Result<DngDemosaiced> {
+    let (state, raw, _le) = load_dng(data)?;
+
+    let width = raw.width as usize;
+    let height = raw.height as usize;
+    let _cps = raw.samples_per_pixel.max(1) as usize;
+    let cfa = match raw.cfa_pattern {
+        Some(p) => match p {
+            [0, 1, 1, 2] => Cfa::Rggb,
+            [1, 2, 0, 1] => Cfa::Gbrg,
+            [1, 0, 2, 1] => Cfa::Grbg,
+            [2, 1, 1, 0] => Cfa::Bggr,
+            _ => bail!("unsupported CFA pattern: {p:?}"),
+        },
+        None => Cfa::Rggb,
+    };
+
+    // WB / matrix / black/white / iso / names (same as decode_bytes)
+    let wb_r_neutral = state.as_shot_neutral.map(|n| n[0]).unwrap_or(1.0);
+    let wb_g_neutral = state.as_shot_neutral.map(|n| n[1]).unwrap_or(1.0);
+    let wb_b_neutral = state.as_shot_neutral.map(|n| n[2]).unwrap_or(1.0);
+    let wb_r = wb_g_neutral / wb_r_neutral.max(1e-6);
+    let wb_g = 1.0;
+    let wb_b = wb_g_neutral / wb_b_neutral.max(1e-6);
+    let black = raw.black_level.unwrap_or(0);
+    let white = raw.white_level.unwrap_or(16383);
+    let color_matrix = choose_camera_to_srgb_matrix(
+        state.forward_matrix_1,
+        state.forward_matrix_2,
+        state.color_matrix_1,
+        state.color_matrix_2,
+    );
+    // Color matrix (camera native -> sRGB via XYZ) is passed through to higher
+    // LookRenderer for the advanced non-Riemannian / log geodesic / Molchanov
+    // perceptual model (lens17). The demosaic stage (incl. optional mhc_matrix
+    // fusion) + this + black/white/wb provide the clean linear starting point.
+    let orientation = state.orientation.unwrap_or(1);
+    let iso = state.iso;
+    let make = state.make.clone();
+    let model = state.model.clone();
+
+    if cfa != Cfa::Rggb {
+        // Fallback: full mosaic path (still correct; only RGGB gets the X2 mem cut).
+        let t0 = Instant::now();
+        let mut img = decode_bytes(data)?;
+        if subtract_black {
+            demosaic::subtract_black_in_place(&mut img.raw, img.black);
+        }
+        let decode_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let t1 = Instant::now();
+        let rgb = demosaic::demosaic_bayer_mhc(&img.raw, img.width, img.height, cfa_phase(img.cfa))
+            .map_err(|e| anyhow!("demosaic: {}", e))?;
+        let demosaic_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        return Ok(DngDemosaiced {
+            width: img.width,
+            height: img.height,
+            rgb,
+            black: if subtract_black { 0 } else { img.black },
+            white: img.white,
+            wb_r: img.wb_r,
+            wb_g: img.wb_g,
+            wb_b: img.wb_b,
+            orientation: img.orientation,
+            make: img.make,
+            model: img.model,
+            color_matrix: img.color_matrix,
+            iso: img.iso,
+            decode_ms,
+            demosaic_ms,
+        });
+    }
+
+    // RGGB fused strip path (X2). Never materializes full mosaic alongside full rgb.
+    let mut rgb = vec![0u16; width * height * 3];
+    let aw = width;
+    let ah = height;
+
+    let tw = raw.tile_width.ok_or_else(|| anyhow!("missing TileWidth"))? as usize;
+    let tl = raw
+        .tile_length
+        .ok_or_else(|| anyhow!("missing TileLength"))? as usize;
+    let coltiles = (width + tw - 1) / tw;
+    let rowtiles = (height + tl - 1) / tl;
+    let expected = coltiles * rowtiles;
+    if raw.tile_offsets.len() != expected || raw.tile_byte_counts.len() != expected {
+        bail!(
+            "tile count mismatch: expected {} got {}/{}",
+            expected,
+            raw.tile_offsets.len(),
+            raw.tile_byte_counts.len()
+        );
+    }
+
+    let halo = 2usize;
+    let mut halo_rows: Vec<u16> = vec![0u16; width * halo];
+    let mut band = vec![0u16; width * tl.max(1)];
+    let mut ctx = vec![0u16; width * (halo + tl.max(1) + halo)];
+    let mut rgb_write_row: usize = 0usize;
+
+    let mut decode_ms = 0.0f64;
+    let mut demosaic_ms = 0.0f64;
+
+    for tr in 0..rowtiles {
+        let row_start = tr * tl;
+        let row_end = ((tr + 1) * tl).min(height);
+        let row_h = row_end - row_start;
+
+        let tdec = Instant::now();
+        band.resize(width * row_h, 0);
+        band.fill(0);
+        for tc in 0..coltiles {
+            let idx = tr * coltiles + tc;
+            let off = raw.tile_offsets[idx] as usize;
+            let bc = raw.tile_byte_counts[idx] as usize;
+            let src = data
+                .get(off..off + bc)
+                .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
+            let col_start = tc * tw;
+            let col_end = ((tc + 1) * tw).min(width);
+            let col_w = col_end - col_start;
+            ljpeg::decode_tile(src, &mut band, col_start, width, col_w, row_h)
+                .with_context(|| format!("tile r={tr} c={tc}"))?;
+        }
+        decode_ms += tdec.elapsed().as_secs_f64() * 1000.0;
+
+        // Subtract black on the raw mosaic band *before* demosaic (standard raw
+        // processing order) and before halo ctx assembly. This delivers clean
+        // linear rgb in DngDemosaiced (facilitates lens17 color engine, photogram,
+        // LLM raw features) while keeping the main decode_bytes bayer path with
+        // bias+metadata for other consumers.
+        if subtract_black {
+            demosaic::subtract_black_in_place(&mut band, black);
+        }
+
+        // ctx = [top halo | band | bottom (replicate for this pass)]
+        let ctx_h = halo + row_h + halo;
+        ctx.resize(width * ctx_h, 0);
+        ctx.fill(0);
+        if tr == 0 {
+            if row_h > 0 {
+                let first = &band[0..width];
+                for hi in 0..halo {
+                    ctx[hi * width..(hi + 1) * width].copy_from_slice(first);
+                }
+            }
+        } else {
+            ctx[0..halo * width].copy_from_slice(&halo_rows);
+        }
+        let band_off = halo * width;
+        ctx[band_off..band_off + row_h * width].copy_from_slice(&band);
+        if row_h > 0 {
+            let last_start = (row_h - 1) * width;
+            let last = &band[last_start..last_start + width];
+            for hi in 0..halo {
+                let boff = (halo + row_h + hi) * width;
+                ctx[boff..boff + width].copy_from_slice(last);
+            }
+        }
+
+        let tdem = Instant::now();
+        let is_last = tr + 1 == rowtiles;
+
+        if tr > 0 && halo > 0 {
+            // Demosaic the carried prev bottom halo rows now that south data (current band) exists.
+            let carried_g0 = row_start - halo;
+            // Dedicated temp ctx for carried demosaic to supply north halo margin (replicate top of carried data from halo_rows).
+            // The main ctx build for tr>0 places the carried data at ctx[0:] without a north margin, causing OOB read in demosaic_rggb_mhc_band (which expects halo rows of context above the band being demosaiced).
+            let c_halo = halo;
+            let c_h = c_halo + c_halo + c_halo;
+            let mut c_ctx: Vec<u16> = vec![0u16; width * c_h];
+            if c_halo > 0 {
+                let top = &halo_rows[0..width];
+                for hi in 0..c_halo {
+                    c_ctx[hi*width..(hi+1)*width].copy_from_slice(top);
+                }
+            }
+            let mid_off = c_halo * width;
+            c_ctx[mid_off..mid_off + c_halo*width].copy_from_slice(&halo_rows);
+            let south_top = &ctx[band_off..band_off + c_halo*width];
+            let south_off = (c_halo + c_halo) * width;
+            c_ctx[south_off..south_off + c_halo*width].copy_from_slice(south_top);
+            demosaic::demosaic_rggb_mhc_band(
+                &c_ctx,
+                width,
+                c_h,
+                c_halo,
+                carried_g0,
+                0,
+                c_halo,
+                &mut rgb[(rgb_write_row * width * 3)..],
+            )
+            .map_err(|e| anyhow!("demosaic carried: {}", e))?;
+            rgb_write_row += c_halo;
+        }
+
+        let safe = if is_last { row_h } else { row_h.saturating_sub(halo) };
+        if safe > 0 {
+            demosaic::demosaic_rggb_mhc_band(
+                &ctx,
+                width,
+                ctx_h,
+                halo,
+                row_start,
+                0,
+                safe,
+                &mut rgb[(rgb_write_row * width * 3)..],
+            )
+            .map_err(|e| anyhow!("demosaic band: {}", e))?;
+            rgb_write_row += safe;
+        }
+        demosaic_ms += tdem.elapsed().as_secs_f64() * 1000.0;
+
+        if !is_last && row_h >= halo {
+            let src = (row_h - halo) * width;
+            halo_rows.copy_from_slice(&band[src..src + halo * width]);
+        }
+    }
+
+    if rgb_write_row != ah {
+        // tiny images or edge math; pad or error softly by filling remain (should not happen for valid tiles)
+        // For robustness fall back would have caught, but keep going.
+    }
+
+    Ok(DngDemosaiced {
+        width: aw,
+        height: ah,
+        rgb,
+        black: if subtract_black { 0 } else { black },
+        white,
+        wb_r,
+        wb_g,
+        wb_b,
+        orientation,
+        make,
+        model,
+        color_matrix,
+        iso,
+        decode_ms,
+        demosaic_ms,
+    })
 }

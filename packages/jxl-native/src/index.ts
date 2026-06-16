@@ -1,17 +1,14 @@
 import { createRequire } from "node:module";
+import { accessSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export class CapabilityMissing extends Error {
   readonly code = "CapabilityMissing";
-  readonly cause?: unknown;
 
   constructor(message: string, cause?: unknown) {
-    super(message);
+    super(message, cause !== undefined ? { cause } : undefined);
     this.name = "CapabilityMissing";
-    if (cause !== undefined) {
-      this.cause = cause;
-    }
   }
 }
 
@@ -87,8 +84,35 @@ export interface ImageInfo {
 
 export type DecodeEvent =
   | { type: "header"; info: ImageInfo; extraChannels?: readonly DecodedExtraChannel[] }
-  | { type: "progress"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; extraChannels?: readonly DecodedExtraChannel[]; extraPlanes?: ArrayBuffer[] }
-  | { type: "final"; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; region?: Region; pixelStride: number; extraChannels?: readonly DecodedExtraChannel[]; extraPlanes?: ArrayBuffer[] }
+  | { 
+      type: "progress"; 
+      stage: DecodeStage; 
+      info: ImageInfo; 
+      pixels: ArrayBuffer | Uint8Array; 
+      format: PixelFormat; 
+      region?: Region; 
+      pixelStride: number; 
+      extraChannels?: readonly DecodedExtraChannel[]; 
+      extraPlanes?: ArrayBuffer[];
+      frameIndex?: number;
+      frameDuration?: number;
+      frameName?: string;
+      animTicksPerSecond?: number;
+    }
+  | { 
+      type: "final"; 
+      info: ImageInfo; 
+      pixels: ArrayBuffer | Uint8Array; 
+      format: PixelFormat; 
+      region?: Region; 
+      pixelStride: number; 
+      extraChannels?: readonly DecodedExtraChannel[]; 
+      extraPlanes?: ArrayBuffer[];
+      frameIndex?: number;
+      frameDuration?: number;
+      frameName?: string;
+      animTicksPerSecond?: number;
+    }
   | { type: "budget_exceeded"; stage: DecodeStage; info: ImageInfo; pixels: ArrayBuffer | Uint8Array; format: PixelFormat; pixelStride: number; extraChannels?: readonly DecodedExtraChannel[] }
   | { type: "error"; code: string; message: string };
 
@@ -98,10 +122,34 @@ export interface DecoderOptions {
   downsample: 1 | 2 | 4 | 8;
   progressionTarget: "header" | "dc" | "pass" | "final";
   emitEveryPass: boolean;
+  progressiveDetail?: "dc" | "lastPasses" | "passes" | "dcProgressive";
   preserveIcc: boolean;
   preserveMetadata: boolean;
+  /** reserved; ignored by native */
   extraChannels?: readonly DecodedExtraChannel[];
+  // decodeExtraChannels is native-only (opt-in for N-20 extra plane extraction); not part of core DecoderOptions.
+  decodeExtraChannels?: boolean;
+  maxPixels?: number;
 }
+
+/**
+ * Memory note for emitEveryPass + progressiveDetail:"passes" (N-15):
+ * Native decoder buffers events in a vector of strong refs. Each "progress" event
+ * holds a full-frame ArrayBuffer (via the iterator snapshot) until .dispose().
+ * With many passes this is N_passes × frame_bytes resident while the consumer
+ * drains events(). (Same batch constraint as the current iterator design.)
+ * Long-term streaming iterator (decode inside push, release between yields) is
+ * future work; see design note at top of native.cc:DecodeAll.
+ */
+
+export interface AnimationOptions { ticksPerSecond: number; loopCount?: number; }
+export interface AnimationFrame {
+  data: ArrayBuffer | Uint8Array;
+  width: number; height: number;
+  duration: number;           // in ticks
+  name?: string;
+}
+export interface CustomBox { type: string; data: ArrayBuffer | Uint8Array; compress?: boolean; }
 
 export interface EncoderOptions {
   format: PixelFormat;
@@ -133,6 +181,24 @@ export interface EncoderOptions {
    */
   advancedFrameSettings?: Array<{ id: number; value: number }>;
   extraChannels?: readonly ExtraChannel[];
+
+  /** Per-alpha-channel distance; 0 = lossless alpha. Forwarded natively (Agent 3). */
+  alphaDistance?: number;
+  /** Brotli effort for modular/metadata streams (0-11). -> JXL_ENC_FRAME_SETTING_BROTLI_EFFORT (id 32). */
+  brotliEffort?: number;
+  /** Top-level progressiveDc convenience. -> id 19 (PROGRESSIVE_DC). */
+  progressiveDc?: 0 | 1 | 2;
+  /** -> id 13 (GROUP_ORDER). */
+  groupOrder?: 0 | 1;
+  /** Force modular (1) / VarDCT (0). -> id 11. */
+  modular?: -1 | 0 | 1;
+  /** -> id 27 (MODULAR_PREDICTOR), id 26 (MODULAR_GROUP_SIZE). */
+  modularOptions?: { predictor?: number; groupSize?: number };
+  /** Plane data, index-aligned with extraChannels. Merged into per-EC `pixels` for native. */
+  extraChannelPlanes?: readonly (ArrayBuffer | Uint8Array)[];
+  animation?: AnimationOptions;
+  frames?: readonly AnimationFrame[];
+  customBoxes?: readonly CustomBox[];
 }
 
 /**
@@ -143,6 +209,32 @@ export interface EncoderOptions {
 export const JxlFrameSetting = {
   /** Enables or disables patches generation. -1 default, 0 disable, 1 enable. */
   PATCHES: 8,
+  /** Force modular (1) vs VarDCT (0 default). Useful via escape hatch for modular experiments. */
+  MODULAR: 11,
+  /** Progressive AC (spectral) layers. */
+  PROGRESSIVE_AC: 17,
+  /** Quantized progressive AC. */
+  QPROGRESSIVE_AC: 18,
+  /** Progressive DC levels (0-2). */
+  PROGRESSIVE_DC: 19,
+  /** Responsive/squeeze progressive for modular. */
+  RESPONSIVE: 16,
+  /** Edge-preserving filter strength (-1..3). */
+  EPF: 9,
+  /** Gaborish filter enable/disable (0/1). */
+  GABORISH: 10,
+  /** Decode speed tier (0-4); trades density for faster decode (Lens 15 lever). */
+  DECODING_SPEED: 1,
+  /** Photon noise ISO simulation amount. */
+  PHOTON_NOISE: 5,
+  /** Group order (0 or 1). */
+  GROUP_ORDER: 13,
+  /** Brotli effort for modular/metadata streams (0-11). */
+  BROTLI_EFFORT: 32,
+  /** Modular group size. */
+  MODULAR_GROUP_SIZE: 26,
+  /** Modular predictor. */
+  MODULAR_PREDICTOR: 27,
 } as const;
 
 export interface NativeDecoder {
@@ -166,10 +258,15 @@ export interface NativeCodecFacade {
   createEncoder(options: EncoderOptions): NativeEncoder;
 }
 
-const require = createRequire(String(import.meta.url));
-const packageRoot = dirname(fileURLToPath(String(import.meta.url)));
+const require = createRequire(import.meta.url);
+const packageRoot = dirname(fileURLToPath(import.meta.url));
+
+let cachedBinding: NativeBinding | null = null;
 
 export function loadNativeBinding(options: NativeLoaderOptions = {}): NativeBinding {
+  const custom = options.prebuiltPath !== undefined || options.sourcePath !== undefined;
+  if (!custom && cachedBinding) return cachedBinding;
+
   const candidates = [
     options.prebuiltPath ?? resolvePrebuiltBinary(),
     options.sourcePath ?? resolveSourceBinary()
@@ -178,15 +275,61 @@ export function loadNativeBinding(options: NativeLoaderOptions = {}): NativeBind
   let lastError: unknown;
   for (const candidate of candidates) {
     try {
-      const binding = require(candidate) as NativeBinding;
-      ensureBindingLoaded(binding, candidate);
-      return binding;
+      const rawBinding = require(candidate) as NativeBinding;
+      ensureBindingLoaded(rawBinding, candidate);
+      // N-16: make probe.path report the actual resolved module path (prebuilt/built .node)
+      // rather than a short identifier from native.cc. Wrap without mutating the required module.
+      if (typeof rawBinding.probe === "function") {
+        const orig = rawBinding.probe;
+        (rawBinding as any).probe = () => {
+          const base = orig();
+          return { loaded: base.loaded, path: candidate };
+        };
+      }
+      const adapted = adaptBindingCreators(rawBinding);
+      if (!custom) cachedBinding = adapted;
+      return adapted;
     } catch (error) {
       lastError = error;
     }
   }
 
   throw new CapabilityMissing("jxl-native addon unavailable; falling back to WASM is required", lastError);
+}
+
+function normalizeEncoderOptions(opts: EncoderOptions): EncoderOptions {
+  const adv = [...(opts.advancedFrameSettings ?? [])];
+  const map: Array<[number | undefined, number]> = [
+    [opts.progressiveDc, 19], // id: 19
+    [opts.groupOrder, 13],    // id: 13
+    [opts.modular, 11],
+    [opts.modularOptions?.predictor, 27], [opts.modularOptions?.groupSize, 26],
+    [opts.brotliEffort, 32],
+  ];
+  for (const [v, id] of map) {
+    if (v !== undefined) {
+      if (!adv.some(x => x.id === id)) {
+        adv.push({ id, value: v });
+      }
+    }
+  }
+  let extraChannels = opts.extraChannels;
+  if (opts.extraChannelPlanes && extraChannels) {
+    extraChannels = extraChannels.map((ec, i) =>
+      opts.extraChannelPlanes![i] ? { ...ec, pixels: opts.extraChannelPlanes![i] } as any : ec);
+  }
+  const res: EncoderOptions = { ...opts };
+  if (adv.length) {
+    res.advancedFrameSettings = adv;
+  } else {
+    delete res.advancedFrameSettings;
+  }
+  if (extraChannels !== undefined) {
+    res.extraChannels = extraChannels;
+  } else {
+    delete res.extraChannels;
+  }
+  return res;
 }
 
 export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFacade {
@@ -196,10 +339,15 @@ export function createNativeCodecFacade(binding: NativeBinding): NativeCodecFaca
   ensureBindingLoaded(binding, "native binding");
   return {
     createDecoder(options) {
-      return binding.createDecoder!(options);
+      const merged = { maxPixels: 1 << 28, decodeExtraChannels: false, ...options };
+      guardDecoderOptions(merged);
+      const raw = binding.createDecoder!(merged);
+      return wrapDecoder(raw);
     },
     createEncoder(options) {
-      return binding.createEncoder!(options);
+      const normalized = normalizeEncoderOptions(options);
+      guardEncoderOptions(normalized);
+      return binding.createEncoder!(normalized);
     },
   };
 }
@@ -210,6 +358,80 @@ export function createDecoder(options: DecoderOptions): NativeDecoder {
 
 export function createEncoder(options: EncoderOptions): NativeEncoder {
   return createNativeCodecFacade(loadNativeBinding()).createEncoder(options);
+}
+
+function guardDecoderOptions(opts: DecoderOptions): void {
+  if (opts.region != null) {
+    const { x, y, w, h } = opts.region;
+    if (w <= 0 || h <= 0 || x < 0 || y < 0) {
+      throw new CapabilityMissing("region must have positive w/h and non-negative x/y");
+    }
+  }
+  // downsample 1|2|4|8 is enforced by the type; native clamps invalid values to 1.
+}
+
+function guardEncoderOptions(_opts: EncoderOptions): void {
+  // iccProfile/exif/xmp are implemented natively (N-17). No capability guards remain.
+}
+
+function wrapDecoder(raw: NativeDecoder): NativeDecoder {
+  if ((raw as any).__jxlWrappedEvents) return raw;
+  let release!: () => void;
+  const inputDone = new Promise<void>((r) => (release = r));
+  const w: any = {
+    push: (chunk: ArrayBuffer | Uint8Array) => raw.push(chunk),
+    close: async () => {
+      try { await raw.close(); } finally { release(); }
+    },
+    cancel: async (reason?: string) => {
+      try { await raw.cancel(reason); } finally { release(); }
+    },
+    dispose: async () => {
+      try { await raw.dispose(); } finally { release(); }
+    },
+    events: async function* () {
+      await inputDone;
+      yield* raw.events ? raw.events() : [];
+    },
+  };
+  // software seek shims for parity with WASM facade and existing .d.ts / tests (native is batch-only)
+  w.seekToFrame = typeof (raw as any).seekToFrame === "function"
+    ? (frameIndex: number) => (raw as any).seekToFrame(frameIndex)
+    : async function* (_frameIndex: number) {
+        await inputDone;
+        yield* (raw as any).events ? (raw as any).events() : [];
+      };
+  w.seekToTime = typeof (raw as any).seekToTime === "function"
+    ? (timeMs: number) => (raw as any).seekToTime(timeMs)
+    : async function* (_timeMs: number) {
+        await inputDone;
+        yield* (raw as any).events ? (raw as any).events() : [];
+      };
+  (w as any).__jxlWrappedEvents = true;
+  return w as NativeDecoder;
+}
+
+function adaptBindingCreators(raw: NativeBinding): NativeBinding {
+  const adapted: any = {
+    version: raw.version ? raw.version.bind(raw) : undefined,
+    probe: raw.probe ? raw.probe.bind(raw) : undefined,
+  };
+  if (raw.createDecoder) {
+    adapted.createDecoder = (options: DecoderOptions) => {
+      const merged = { maxPixels: 1 << 28, decodeExtraChannels: false, ...options };
+      guardDecoderOptions(merged);
+      const rawDec = raw.createDecoder!(merged);
+      return wrapDecoder(rawDec);
+    };
+  }
+  if (raw.createEncoder) {
+    adapted.createEncoder = (options: EncoderOptions) => {
+      const normalized = normalizeEncoderOptions(options);
+      guardEncoderOptions(normalized);
+      return raw.createEncoder!(normalized);
+    };
+  }
+  return adapted as NativeBinding;
 }
 
 function resolvePrebuiltBinary(): string {
@@ -228,7 +450,7 @@ function resolveSourceBinary(): string {
 
 function fileExists(path: string): boolean {
   try {
-    require("node:fs").accessSync(path);
+    accessSync(path);
     return true;
   } catch {
     return false;

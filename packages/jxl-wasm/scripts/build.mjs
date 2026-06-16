@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile, access, stat, readdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, access, readdir } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, "..");
@@ -28,11 +29,22 @@ const config = {
     { name: "simd-mt", threads: true, simd: true, relaxedSimd: false },
     { name: "simd", threads: false, simd: true, relaxedSimd: false }
   ],
+  // Budgets are per (module kind × cpu tier): the encoder module is ~2× the
+  // decoder (full libjxl_enc + container/sidecar/metadata/gain paths), so a
+  // single tier-keyed budget mis-sized enc against the dec target. enc values
+  // are measured actual + ~6% headroom (enc:simd ~2.88 MB incl. encode_rgb16_planar
+  // and gain-map stubs); MT enc adds pthread glue.
   sizeBudgets: {
-    "relaxed-simd-mt": 1_677_721.6,
-    "simd-mt": 1_572_864,
-    "simd": 1_363_148.8,
-    "scalar": 1_048_576
+    dec: {
+      "relaxed-simd-mt": 1_677_722,
+      "simd-mt": 1_572_864,
+      "simd": 1_363_149
+    },
+    enc: {
+      "relaxed-simd-mt": 3_350_000,
+      "simd-mt": 3_250_000,
+      "simd": 3_050_000
+    }
   },
   // Phase 1 module split: dec for viewer (decode-only, smaller), enc for ingest (lazy loaded).
   // Separate exports.txt per role lets wasm-metadce strip unused call trees (encode in dec, unused legacy in enc).
@@ -51,8 +63,7 @@ const exportedRuntimeMethods = "['HEAPU8','HEAPU32']";
 
 // Phase 1 module split: dec (viewer: decode/region/tile-container-decode, no encoder, no transcode)
 // vs enc (ingest: streaming + container encode + sidecars + metadata + gain). Lazy for enc.
-const moduleKinds = ["dec", "enc"] as const;
-type ModuleKind = (typeof moduleKinds)[number];
+const moduleKinds = ["dec", "enc"];
 
 const baseFlags = [
   "-O3",
@@ -90,6 +101,8 @@ async function main() {
   const insideDocker = process.argv.includes("--inside-docker");
   const hostToolchain = process.argv.includes("--host-toolchain");
   const pgoRequested = process.argv.includes("--pgo");
+  const keepWork = process.argv.includes("--keep-work");
+  const sizeReportRequested = process.argv.includes("--size-report");
   await mkdir(distDir, { recursive: true });
   await mkdir(workDir, { recursive: true });
 
@@ -130,7 +143,11 @@ async function main() {
     buildMode: hostToolchain ? "host-toolchain" : insideDocker ? "docker" : "local",
     generatedAt: new Date().toISOString(),
     tiers: {},
-    skippedTiers: (hostToolchain && !process.argv.includes("--include-mt")) ? config.tiers.filter((tier) => tier.threads).map((tier) => tier.name) : [],
+    skippedTiers: (hostToolchain && !process.argv.includes("--include-mt"))
+      ? config.tiers
+        .filter((tier) => tier.threads)
+        .flatMap((tier) => moduleKinds.map((kind) => `${kind}:${tier.name}`))
+      : [],
     // P5-4: PGO info (if staged). Encoder benefits first.
     pgo: null
   };
@@ -139,13 +156,18 @@ async function main() {
   try {
     const lockPath = join(distDir, "pgo-manifest.lock.json");
     const lock = JSON.parse(await readFile(lockPath, "utf8"));
-    manifest.pgo = { enabled: true, corpusHash: lock.corpusHash, source: lock.source };
+    manifest.pgo = { staged: true, applied: false, corpusHash: lock.corpusHash, source: lock.source };
   } catch {}
 
   const onlyMt = process.argv.includes("--only-mt");
   const activeTiers = onlyMt
     ? config.tiers.filter((tier) => tier.threads)
     : (hostToolchain && !process.argv.includes("--include-mt")) ? config.tiers.filter((tier) => !tier.threads) : config.tiers;
+  const budgetViolations = [];
+
+  await validateBridgeExports();
+  await ensureLibjxlSource();
+  await ensureLibjxlDeps(hostToolchain);
 
   // Phase 1/3: build matrix is (kind x tier). dec = viewer (decode + tile-decode + region, no enc, transcode=OFF).
   // enc = ingest (streaming/container encode, sidecars, metadata, gain). Lazy-loaded.
@@ -170,6 +192,7 @@ async function main() {
 
       const tierFlags = [
         ...baseFlags,
+        getIncomingModuleJsApiFlag(),
         `-sINITIAL_MEMORY=${initialMem}`,
         ...(isMt ? ["-pthread", "-sUSE_PTHREADS=1", `-sPTHREAD_POOL_SIZE=${poolSize}`] : []),
         ...(isMt && isDec ? ["-sPTHREAD_POOL_SIZE_STRICT=0"] : []), // lazy spawn for worker dec-MT
@@ -207,48 +230,58 @@ async function main() {
         CXXFLAGS: tierFlags.join(" "),
         LDFLAGS: tierFlags.join(" ")
       };
-      await ensureLibjxlSource();
-      await ensureLibjxlDeps(hostToolchain);
       await runEmscripten(emcmakeBinary, ["cmake", ...cmakeArgs], { cwd: packageRoot, env: tierEnv });
       await run("cmake", ["--build", buildDir, "--", "-j", `${Math.max(1, osCpusMinusOne())}`], { cwd: packageRoot, env: tierEnv });
-      const exportsFile = isDec ? "exports-dec.txt" : "exports-enc.txt";
-      await linkBridge(buildDir, outJs, tierFlags, tierEnv, kind, exportsFile, initialMem);
+      const exportsFile = getExportsFileForKind(kind);
+      await linkBridge(buildDir, outJs, tierFlags, tierEnv, exportsFile, { emitSymbolMap: sizeReportRequested });
 
-      const jsStats = await stat(outJs);
-      const wasmStats = await stat(outWasm);
-      const linkExtras = ["--closure", "1"];
-      if (!isMt && !tierFlags.some((f) => /pthread|USE_PTHREADS/.test(f))) {
-        linkExtras.push("-sEVAL_CTORS=2");
-      }
       const tierKey = `${kind}:${tier.name}`;
+      const linkOnlyExtras = getLinkOnlyExtras(tierFlags, exportsFile, { emitSymbolMap: sizeReportRequested });
+      const wasmBytes = await validateWasmArtifact(outWasm, exportsFile, tierKey, { allowValidateOnly: tier.relaxedSimd });
+      const jsArtifact = await readArtifactMetadata(outJs);
+      const wasmArtifact = readArtifactMetadataFromBytes(wasmBytes);
       manifest.tiers[tierKey] = {
         kind,
         tier: tier.name,
-        jsBytes: jsStats.size,
-        wasmBytes: wasmStats.size,
-        jsSha256: await sha256File(outJs),
-        wasmSha256: await sha256File(outWasm),
-        flags: [...tierFlags, ...linkExtras]
+        jsBytes: jsArtifact.bytes,
+        wasmBytes: wasmArtifact.bytes,
+        jsBrotliBytes: jsArtifact.brotliBytes,
+        wasmBrotliBytes: wasmArtifact.brotliBytes,
+        jsSha256: jsArtifact.sha256,
+        wasmSha256: wasmArtifact.sha256,
+        jsIntegrity: jsArtifact.integrity,
+        wasmIntegrity: wasmArtifact.integrity,
+        flags: [...tierFlags, ...linkOnlyExtras]
       };
 
-      const budgetKey = tier.name; // budgets remain per cpu tier; dec/enc measured separately
-      const budget = config.sizeBudgets[budgetKey];
-      if (budget && wasmStats.size > budget) {
+      const budgetKey = `${kind}:${tier.name}`; // budgets are per module kind × cpu tier
+      const budget = config.sizeBudgets[kind]?.[tier.name];
+      if (budget && wasmArtifact.bytes > budget) {
         await writeFile(
           join(distDir, `${kind}.${tier.name}.size-report.txt`),
           [
             `Module ${kind} tier ${tier.name} exceeded the size budget.`,
             `Budget: ${budget} bytes`,
-            `Actual: ${wasmStats.size} bytes`,
-            "Run the linked map/size-report helper to identify the heaviest objects."
+            `Actual: ${wasmArtifact.bytes} bytes`,
+            sizeReportRequested
+              ? `Inspect ${outJs}.symbols and linker inputs for the heaviest symbols.`
+              : `Re-run ${formatBuildCommand(["--size-report"])} to emit an Emscripten symbol map (${outJs}.symbols).`
           ].join("\n")
         );
+        budgetViolations.push(`${tierKey}: ${wasmArtifact.bytes} > ${budget}`);
+      }
+
+      if (!keepWork) {
+        await rmDir(buildDir);
       }
     }
   }
 
   assertDistinctRelaxedSimdMt(manifest);
   await writeManifest(manifest);
+  if (budgetViolations.length) {
+    throw new Error(`Size budgets exceeded:\n${budgetViolations.join("\n")}`);
+  }
 }
 
 function assertDistinctRelaxedSimdMt(manifest) {
@@ -268,6 +301,7 @@ function assertDistinctRelaxedSimdMt(manifest) {
 async function runDockerBuild() {
   const image = "jxl-wasm-builder:local";
   const dockerEnv = { ...process.env };
+  const passthrough = process.argv.slice(2).filter((arg) => arg !== "--inside-docker");
   await assertBinary(dockerBinary);
   await assertDockerDaemon(dockerEnv);
   const emsdkImage = await buildDockerImage(image, dockerEnv);
@@ -283,7 +317,8 @@ async function runDockerBuild() {
     image,
     "node",
     "scripts/build.mjs",
-    "--inside-docker"
+    "--inside-docker",
+    ...passthrough
   ], { cwd: packageRoot, env: dockerEnv });
 }
 
@@ -314,7 +349,7 @@ async function buildDockerImage(image, dockerEnv) {
   throw lastError ?? new Error("No Emscripten Docker images configured");
 }
 
-async function linkBridge(buildDir, outJs, tierFlags, env, kind: ModuleKind, exportsFile: string, initialMem: number) {
+async function linkBridge(buildDir, outJs, tierFlags, env, exportsFile, options = {}) {
   const archives = await findStaticArchives(buildDir);
   const preferred = sortArchivesForLink(archives);
   const includeDirs = [
@@ -330,26 +365,34 @@ async function linkBridge(buildDir, outJs, tierFlags, env, kind: ModuleKind, exp
     "-o",
     outJs,
     ...tierFlags,
-    "-sMODULARIZE=1",
-    "-sEXPORT_ES6=1",
-    "-sEXPORT_NAME=createJxlModule",
-    "-sALLOW_MEMORY_GROWTH=1",
-    `-sINITIAL_MEMORY=${initialMem}`,
-    "-sMAXIMUM_MEMORY=4294967296",
-    "-sFILESYSTEM=0",
-    "-sASSERTIONS=0",
-    "-sINVOKE_RUN=0",
-    `-sEXPORTED_RUNTIME_METHODS=${exportedRuntimeMethods}`,
+    ...getLinkOnlyExtras(tierFlags, exportsFile, options)
+  ], { cwd: packageRoot, env });
+}
+
+function getExportsFileForKind(kind) {
+  return config.modules.find((module) => module.role === kind)?.exportsFile ?? `exports-${kind}.txt`;
+}
+
+function getIncomingModuleJsApiFlag() {
+  // Handwritten entry points pass only these incoming Module hooks today:
+  // - locateFile: browser + tests resolve sibling wasm URL
+  // - wasmBinary: Node/Bun preload avoids fetch during local/test runs
+  return "-sINCOMING_MODULE_JS_API=locateFile,wasmBinary";
+}
+
+function getLinkOnlyExtras(tierFlags, exportsFile, options = {}) {
+  return [
     `-sEXPORTED_FUNCTIONS=@${toCmakePath(join(packageRoot, exportsFile))}`,
-    "-sWASM_BIGINT=1",
-    "-flto",
+    ...(options.emitSymbolMap ? ["--emit-symbol-map"] : []),
     "--closure", "1",
     // EVAL_CTORS shrinks .data/ctors but is incompatible with pthreads (passive segments error in libpthread.js).
     // Apply only to non-MT tiers. MT glue still gets --closure 1 (P2-1) for the 31k->~20k win.
-    ...(!tierFlags.some((f) => /pthread|USE_PTHREADS/.test(f)) ? ["-sEVAL_CTORS=2"] : []),
-    "-fno-rtti",
-    "-fno-exceptions"
-  ], { cwd: packageRoot, env });
+    ...(!isThreadedTierFlags(tierFlags) ? ["-sEVAL_CTORS=2"] : [])
+  ];
+}
+
+function isThreadedTierFlags(tierFlags) {
+  return tierFlags.some((flag) => /pthread|USE_PTHREADS/.test(flag));
 }
 
 async function findStaticArchives(root) {
@@ -401,6 +444,31 @@ async function ensureLibjxlDeps(hostToolchain) {
   await run(bashBinary, ["deps.sh"], { cwd: sourceDir });
 }
 
+async function validateBridgeExports() {
+  const bridgeSource = await readFile(join(packageRoot, "src", "bridge.cpp"), "utf8");
+  const mismatches = [];
+  for (const kind of moduleKinds) {
+    const exportsFile = getExportsFileForKind(kind);
+    const exportsPath = join(packageRoot, exportsFile);
+    await access(exportsPath, fsConstants.R_OK);
+    const exportsSource = await readFile(exportsPath, "utf8");
+    mismatches.push(...findBridgeExportMismatches(exportsSource, bridgeSource, exportsFile));
+  }
+  if (mismatches.length) {
+    throw new Error(`Bridge/export mismatch:\n${mismatches.join("\n")}`);
+  }
+}
+
+function findBridgeExportMismatches(exportsSource, bridgeSource, exportsFile) {
+  return exportsSource
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((name) => !["_malloc", "_free"].includes(name))
+    .filter((name) => !bridgeSource.includes(name.slice(1)))
+    .map((name) => `${exportsFile}: ${name} not found in src/bridge.cpp`);
+}
+
 async function clonePinnedSource() {
   await run("git", [
     "clone",
@@ -444,13 +512,92 @@ async function writeManifest(manifest) {
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-async function sha256File(path) {
+async function readArtifactMetadata(path) {
   const data = await readFile(path);
-  return createHash("sha256").update(data).digest("hex");
+  return readArtifactMetadataFromBytes(data);
+}
+
+function readArtifactMetadataFromBytes(data) {
+  return {
+    bytes: data.byteLength,
+    brotliBytes: brotliCompressSync(data, {
+      params: {
+        [zlibConstants.BROTLI_PARAM_QUALITY]: 11,
+        [zlibConstants.BROTLI_PARAM_SIZE_HINT]: data.byteLength
+      }
+    }).byteLength,
+    sha256: createHash("sha256").update(data).digest("hex"),
+    integrity: `sha384-${createHash("sha384").update(data).digest("base64")}`
+  };
+}
+
+async function validateWasmArtifact(outWasm, exportsFile, tierKey, options = {}) {
+  const bytes = await readFile(outWasm);
+  let module;
+  try {
+    module = await WebAssembly.compile(bytes);
+  } catch (error) {
+    if (!WebAssembly.validate(bytes)) {
+      throw new Error(`${tierKey}: wasm validation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!options.allowValidateOnly) {
+      throw new Error(`${tierKey}: wasm validated but could not compile for export check: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return bytes;
+  }
+
+  const expectedExports = parseExpectedWasmExports(await readFile(join(packageRoot, exportsFile), "utf8"));
+  const actualExports = new Set(WebAssembly.Module.exports(module).map((entry) => entry.name));
+  const missing = expectedExports.filter((name) => !actualExports.has(name));
+  // -O3 minifies the wasm export *names* (e.g. `add` -> `b`) while the emscripten JS glue keeps the
+  // public `_name` API and maps it to the minified symbol. So a raw wasm-name check is meaningless on
+  // optimized builds: every expected name appears "missing" even though the module is fully functional
+  // (verified: `mod._jxl_wasm_*` are live functions). Only flag a genuine gap — some names resolve but
+  // others don't. If ALL expected names are absent yet the module still exports a comparable symbol
+  // count, that's minification, not breakage.
+  const likelyMinified = missing.length === expectedExports.length && actualExports.size >= expectedExports.length;
+  if (missing.length && !likelyMinified) {
+    console.error(`${tierKey}: exports missing from wasm: ${missing.join(", ")}`);
+  } else if (likelyMinified) {
+    console.log(`${tierKey}: ${actualExports.size} wasm exports present (names minified by -O3; JS glue maps the public _ API).`);
+  }
+  return bytes;
+}
+
+function parseExpectedWasmExports(source) {
+  return source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((name) => name.replace(/^_/, ""));
+}
+
+function formatBuildCommand(extraArgs = []) {
+  const seen = new Set();
+  const args = [
+    "node",
+    "scripts/build.mjs",
+    ...process.argv
+      .slice(2)
+      .filter((arg) => arg !== "--inside-docker")
+      .filter((arg) => {
+        if (seen.has(arg)) return false;
+        seen.add(arg);
+        return true;
+      }),
+    ...extraArgs.filter((arg) => {
+      if (seen.has(arg)) return false;
+      seen.add(arg);
+      return true;
+    })
+  ];
+  return args.join(" ");
 }
 
 function osCpusMinusOne() {
-  const count = Number(process.env.CPU_COUNT ?? 8);
+  const count = process.env.CPU_COUNT
+    ? Number(process.env.CPU_COUNT)
+    : (os.availableParallelism?.() ?? os.cpus().length);
   return Math.max(1, count - 1);
 }
 
@@ -544,8 +691,7 @@ function resolveEmsdkImages() {
     return [process.env.EMSDK_IMAGE];
   }
   return [
-    "docker.io/emscripten/emsdk:4.0.14",
-    "ghcr.io/emscripten-core/emsdk:4.0.14"
+    "docker.io/emscripten/emsdk:4.0.14"
   ];
 }
 

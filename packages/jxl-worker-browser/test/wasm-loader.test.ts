@@ -3,6 +3,27 @@ import { existsSync, readFileSync } from "node:fs";
 import { loadWasmModule } from "../src/wasm-loader.js";
 import { expect } from "./expect.js";
 
+function withMockSelf(search: string, fn: () => void | Promise<void>): () => Promise<void> {
+  return async () => {
+    const desc = Object.getOwnPropertyDescriptor(globalThis, "self");
+    Object.defineProperty(globalThis, "self", {
+      value: { location: { search } },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      await fn();
+    } finally {
+      if (desc) {
+        Object.defineProperty(globalThis, "self", desc);
+      } else {
+        // @ts-ignore
+        delete globalThis.self;
+      }
+    }
+  };
+}
+
 describe("loadWasmModule", () => {
   test("returns an imported codec facade without fetching wasm bytes", async () => {
     let fetched = false;
@@ -20,7 +41,7 @@ describe("loadWasmModule", () => {
     expect(fetched).toBe(false);
   });
 
-  test("forces non-threaded simd tier for browser worker codec facade", async () => {
+  test("explicit simd query forces non-threaded tier (override honored)", async () => {
     const forcedTiers: string[] = [];
     const facade = {
       ...fakeFacade(),
@@ -29,6 +50,30 @@ describe("loadWasmModule", () => {
       },
     };
 
+    const run = withMockSelf("?jxlWorkerTier=simd", async () => {
+      const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
+        importWasm: async () => facade,
+        fetchImpl: async () => {
+          throw new Error("not used");
+        },
+      });
+
+      expect(module).toBe(facade);
+      expect(forcedTiers).toEqual(["simd"]);
+    });
+    await run();
+  });
+
+  test("no query string defaults to auto (no forceWorkerSafeTier) — locks W-1 default choice", async () => {
+    const forcedTiers: string[] = [];
+    const facade = {
+      ...fakeFacade(),
+      setForcedTier(tier: string) {
+        forcedTiers.push(tier);
+      },
+    };
+
+    // no self.location override — readWorkerLocationSearch returns "", readWorkerTierOverride now returns "auto"
     const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
       importWasm: async () => facade,
       fetchImpl: async () => {
@@ -37,12 +82,10 @@ describe("loadWasmModule", () => {
     });
 
     expect(module).toBe(facade);
-    expect(forcedTiers).toEqual(["simd"]);
+    expect(forcedTiers).toEqual([]);
   });
 
   test("worker tier auto query leaves codec tier unforced", async () => {
-    const globalWithSelf = globalThis as unknown as { self: { location?: { search?: string } } | undefined };
-    const originalSelf = globalWithSelf.self;
     const forcedTiers: string[] = [];
     const facade = {
       ...fakeFacade(),
@@ -51,8 +94,7 @@ describe("loadWasmModule", () => {
       },
     };
 
-    try {
-      globalWithSelf.self = { location: { search: "?jxlWorkerTier=auto" } };
+    const run = withMockSelf("?jxlWorkerTier=auto", async () => {
       const module = await loadWasmModule("https://example.invalid/jxl.wasm", {
         importWasm: async () => facade,
         fetchImpl: async () => {
@@ -62,9 +104,8 @@ describe("loadWasmModule", () => {
 
       expect(module).toBe(facade);
       expect(forcedTiers).toEqual([]);
-    } finally {
-      globalWithSelf.self = originalSelf;
-    }
+    });
+    await run();
   });
 
   test("default import resolves the built jxl-wasm facade from browser package layout", async () => {

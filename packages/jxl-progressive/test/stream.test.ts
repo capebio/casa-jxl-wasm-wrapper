@@ -5,7 +5,10 @@ import assert from "node:assert/strict";
 import {
   fetchTier,
   fetchFull,
+  fetchTierWithPrefix,
   streamTierFrames,
+  HttpError,
+  RangeNotSupportedError,
 } from "../src/progressive-stream.js";
 import type { ManifestTier } from "../src/progressive-manifest.js";
 import type { DecodeSession, DecodeFrameEvent, ImageInfo } from "@casabio/jxl-session";
@@ -19,21 +22,23 @@ function makeFakeSession(frames: DecodeFrameEvent[] = []): DecodeSession & {
   pushes: number[];
   closed: boolean;
   cancelled: boolean;
+  cancelReason?: string | undefined;
 } {
   const session = {
     id: "test",
     pushes: [] as number[],
     closed: false,
     cancelled: false,
+    cancelReason: undefined as string | undefined,
     async push(chunk: ArrayBuffer | Uint8Array) {
       session.pushes.push(chunk instanceof ArrayBuffer ? chunk.byteLength : (chunk as Uint8Array).byteLength);
     },
     async close() { session.closed = true; },
-    async cancel() { session.cancelled = true; },
+    async cancel(reason?: string) { session.cancelled = true; session.cancelReason = reason; },
     async done() { return fakeInfo; },
     async *frames() { yield* frames; },
   };
-  return session;
+  return session as any;
 }
 
 function makeBody(byteLength: number, status = 206): Response {
@@ -116,7 +121,7 @@ describe("fetchFull", () => {
       fetchFull("https://example.com/img.jxl", session, {
         fetchImpl: async () => new Response(null, { status: 503, statusText: "Service Unavailable" }),
       }),
-      (e: unknown) => e instanceof Error && /503/.test((e as Error).message),
+      (e: unknown) => e instanceof HttpError && e.status === 503 && /503/.test(e.message),
     );
   });
 });
@@ -144,5 +149,100 @@ describe("streamTierFrames", () => {
       collected.push(f);
     }
     assert.equal(collected.length, 0);
+  });
+});
+
+function makeDeltaBody(start: number, deltaLen: number, total: number): Response {
+  const data = new Uint8Array(deltaLen).fill(0xcd);
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(data); c.close(); },
+    }),
+    {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${start + deltaLen - 1}/${total}` },
+    },
+  );
+}
+
+describe("fetchTierWithPrefix", () => {
+  const higherTier: ManifestTier = {
+    ...dcTier,
+    byteEnd: 5000,
+  };
+
+  it("closes immediately when prefix.length >= tier.byteEnd (no fetch)", async () => {
+    const session = makeFakeSession();
+    const prefix = new Uint8Array(6000); // covers
+    await fetchTierWithPrefix("https://example.com/img.jxl", higherTier, prefix, session);
+    assert.equal(session.closed, true);
+    assert.equal(session.cancelled, false);
+    assert.equal(session.pushes.length, 0);
+  });
+
+  it("fetches delta only, validates matching Content-Range start, pushes delta, closes", async () => {
+    const session = makeFakeSession();
+    const prefix = new Uint8Array(1000);
+    const delta = 4000;
+    await fetchTierWithPrefix("https://example.com/img.jxl", higherTier, prefix, session, {
+      fetchImpl: async (_u: any, init?: any) => {
+        // verify Range header was sent for the delta
+        const h = new Headers(init?.headers);
+        assert.equal(h.get("Range"), "bytes=1000-4999");
+        return makeDeltaBody(1000, delta, 10000);
+      },
+    });
+    const totalPushed = session.pushes.reduce((s, n) => s + n, 0);
+    assert.equal(totalPushed, delta);
+    assert.equal(session.closed, true);
+    assert.equal(session.cancelled, false);
+  });
+
+  it("cancels and throws RangeNotSupportedError on Content-Range start mismatch", async () => {
+    const session = makeFakeSession();
+    const prefix = new Uint8Array(1000);
+    await assert.rejects(
+      fetchTierWithPrefix("https://example.com/img.jxl", higherTier, prefix, session, {
+        fetchImpl: async () => makeDeltaBody(0, 4000, 10000), // lies, claims start 0
+      }),
+      (e: unknown) => e instanceof RangeNotSupportedError,
+    );
+    assert.equal(session.cancelled, true);
+    assert.match(session.cancelReason || "", /Content-Range mismatch/);
+  });
+
+  it("cancels and throws RangeNotSupportedError when server returns non-206 (e.g. 200)", async () => {
+    const session = makeFakeSession();
+    const prefix = new Uint8Array(1000);
+    await assert.rejects(
+      fetchTierWithPrefix("https://example.com/img.jxl", higherTier, prefix, session, {
+        fetchImpl: async () => makeBody(5000, 200), // ignores Range
+      }),
+      (e: unknown) => e instanceof RangeNotSupportedError,
+    );
+    assert.equal(session.cancelled, true);
+    assert.match(session.cancelReason || "", /not supported/);
+  });
+
+  it("propagates AbortSignal before and during (prefix cover and fetch paths)", async () => {
+    const ctrl = new AbortController();
+    const session = makeFakeSession();
+
+    // cover path abort
+    const prefixCover = new Uint8Array(6000);
+    ctrl.abort();
+    await assert.rejects(
+      fetchTierWithPrefix("https://example.com/img.jxl", higherTier, prefixCover, session, { signal: ctrl.signal }),
+    );
+    // reset for fetch path
+    const ctrl2 = new AbortController();
+    const slowFetch: typeof fetch = () =>
+      new Promise((resolve) => setTimeout(() => resolve(makeDeltaBody(1000, 100, 10000)), 50)) as Promise<Response>;
+    const p = fetchTierWithPrefix("https://example.com/img.jxl", higherTier, new Uint8Array(1000), session, {
+      fetchImpl: slowFetch,
+      signal: ctrl2.signal,
+    });
+    ctrl2.abort();
+    await assert.rejects(p);
   });
 });

@@ -8,11 +8,11 @@ const originalWebAssemblyInstantiate = WebAssembly.instantiate;
 const originalSelf = globalAny.self;
 
 describe("@casabio/jxl-capabilities tiering", () => {
-  test("threaded WASM eligibility requires threads, SharedArrayBuffer, and cross-origin isolation", () => {
-    assert.equal(canUseThreadedWasm(true, true, true), true);
-    assert.equal(canUseThreadedWasm(true, true, false), false);
-    assert.equal(canUseThreadedWasm(true, false, true), false);
-    assert.equal(canUseThreadedWasm(false, true, true), false);
+  test("threaded WASM eligibility requires SharedArrayBuffer and cross-origin isolation (wasmThreads term dropped per policy; sab+coi matches detectTier)", () => {
+    assert.equal(canUseThreadedWasm(true, true), true);
+    assert.equal(canUseThreadedWasm(true, false), false);
+    assert.equal(canUseThreadedWasm(false, true), false);
+    assert.equal(canUseThreadedWasm(false, false), false);
   });
 
   test("detectTier and selectedWasmBuild both avoid threaded tiers when crossOriginIsolated is false", async () => {

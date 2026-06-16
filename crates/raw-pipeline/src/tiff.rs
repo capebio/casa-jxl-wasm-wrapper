@@ -813,3 +813,108 @@ pub fn bench_decode_orf(data: &[u8]) -> Result<DecodeBench> {
         height: info.height,
     })
 }
+
+/// Per-stage timing for the full ORF → RGB8 pipeline (decompress + demosaic +
+/// tone). For end-to-end profiling to locate the real cost center.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PipelineBench {
+    pub decompress_ms: f64,
+    pub demosaic_ms: f64,
+    pub tone_ms: f64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Time decompress + demosaic + tone (pipeline::process) for one ORF.
+pub fn bench_pipeline_orf(data: &[u8]) -> Result<PipelineBench> {
+    let info = parse(data)?;
+    if info.compression != 1 {
+        bail!("compression {} not supported for bench", info.compression);
+    }
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    let strip = &data[info.strip_offset as usize..strip_end];
+
+    let t = std::time::Instant::now();
+    let raw = crate::decompress::decompress(strip, w, h)?;
+    let decompress_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = std::time::Instant::now();
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let demosaic_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let params = crate::pipeline::PipelineParams::default_olympus();
+    let t = std::time::Instant::now();
+    let _rgb8 = crate::pipeline::process(&rgb16, &params);
+    let tone_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(PipelineBench {
+        decompress_ms,
+        demosaic_ms,
+        tone_ms,
+        width: info.width,
+        height: info.height,
+    })
+}
+
+/// Decode an ORF to rgb16, then sub-profile the tone pass: returns
+/// (tone_full_ms, tone_lut_only_ms). full − lut_only = the per-pixel
+/// apply_tone_math (matrix + sat/vibrance) cost; lut_only = LUT gather + store.
+pub fn bench_tone_split_orf(data: &[u8]) -> Result<(f64, f64)> {
+    let info = parse(data)?;
+    if info.compression != 1 {
+        bail!("compression {} not supported for bench", info.compression);
+    }
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    let strip = &data[info.strip_offset as usize..strip_end];
+    let raw = crate::decompress::decompress(strip, w, h)?;
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let params = crate::pipeline::PipelineParams::default_olympus();
+    Ok(crate::pipeline::bench_tone_split(&rgb16, &params))
+}
+
+/// End-to-end tone comparison on a real ORF: times scalar `process_into` vs SIMD
+/// `process_into_simd` (full tone+LUT, parallel) AND checks output parity.
+/// Returns (scalar_ms, simd_ms, max_byte_diff, num_pixels_differing).
+pub fn bench_tone_e2e_orf(data: &[u8]) -> Result<(f64, f64, u8, usize)> {
+    let info = parse(data)?;
+    if info.compression != 1 {
+        bail!("compression {} not supported for bench", info.compression);
+    }
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    let strip = &data[info.strip_offset as usize..strip_end];
+    let raw = crate::decompress::decompress(strip, w, h)?;
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let params = crate::pipeline::PipelineParams::default_olympus();
+    let n = rgb16.len();
+    let mut a = vec![0u8; n];
+    let mut b = vec![0u8; n];
+
+    crate::pipeline::process_into(&rgb16, &params, &mut a); // warmup
+    let t = std::time::Instant::now();
+    crate::pipeline::process_into(&rgb16, &params, &mut a);
+    let scalar_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    crate::pipeline::process_into_simd(&rgb16, &params, &mut b); // warmup
+    let t = std::time::Instant::now();
+    crate::pipeline::process_into_simd(&rgb16, &params, &mut b);
+    let simd_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let mut max_diff = 0u8;
+    let mut ndiff = 0usize;
+    for i in 0..n {
+        let d = a[i].abs_diff(b[i]);
+        if d > 0 {
+            ndiff += 1;
+            if d > max_diff {
+                max_diff = d;
+            }
+        }
+    }
+    Ok((scalar_ms, simd_ms, max_diff, ndiff))
+}

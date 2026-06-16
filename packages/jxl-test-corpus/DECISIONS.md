@@ -1,4 +1,12 @@
-# Decisions - jxl-test-corpus
+# Decisions — jxl-test-corpus
 
 - **Unified Loader**: Decided to design the loader to return a `Uint8Array` for the bytes, making it platform-agnostic once the bytes are loaded.
-- **Fixture Storage**: Fixtures will be stored in `src/fixtures` and included in the build.
+- **Procedural Fixture Storage & Generation**: Runtime `.jxl` test fixtures are not checked into source control (avoiding large binary blobs in Git). Instead, they are procedurally and deterministically generated at build/pack time using `@casabio/jxl-wasm` into `fixtures/` and `dist/fixtures/` via the `generate:fixtures` script.
+- **Fixture Integrity Verification**: The loader validates both local and remote fetched fixtures using SHA-256 integrity hashing to catch corruption, silent SPA-fallback HTML serves, or generation drifts. Format/magic-byte validation belongs strictly to libjxl (project invariant); the corpus uses SHA-256 for validation.
+- **Dual Corpus**: The `@casabio/jxl-test-corpus` package serves a dual role: hosting the runtime decode corpus and the PGO training corpus, using shared types in `types.ts` (e.g., `PgoScenarioManifest`).
+- **PGO Scenario Weights**: The scenario weights (0.6 for gallery-scroll, 0.25 for pyramid-ladder, 0.1 for metadata-sidecars, 0.05 for hiquality-archival) model the production operation mix. The weights represent the invocation-based share, which translates to scenario repetitions in `pgo-train.mjs` via `Math.max(1, Math.round(weight * 12))`.
+- **PGO default effort=3**: effort=3 is the production choice based on speed and filesize measurements; the PGO training profile is intentionally skewed to overwhelmingly favor these fast paths.
+- **PGO Manifest Generation**: `pgo-manifest.json` is generated output of `generate-pgo-fixtures.mjs`. It should never be hand-edited as those changes will be overwritten.
+- **PPM as PGO Interchange**: Portable Pixmap (PPM, P6) is used as the intermediate PGO training image format. It is header-trivial, dependency-free, and lossless, avoiding the introduction of complex codec dependencies (e.g. PNG/sharp) into the trainer.
+- **Checked-in PGO PPMs**: Generated PPM training outputs are checked into Git so PGO/Docker builds can run without needing the author's original raw sources. Regenerating them requires raw source images and the `PGO_SOURCE_DIR` environment variable.
+- **Documented PGO Training Gaps**: Decode training paths and 16-bit training paths are current gaps. `decodeRawToRgba` in the benchmark tools only exposes 8-bit output, and the instrumented trainer currently does not support decode ops or 16-bit PPM inputs.

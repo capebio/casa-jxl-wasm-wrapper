@@ -6,7 +6,8 @@
 // spawn, reserve, bind, release, recycle, reap, shutdown.
 // Scheduling policy — priority, preemption, dedupe, fairness — belongs in Scheduler.
 import { CoreBudget } from "./budget.js";
-const DEV = typeof process !== "undefined" ? process.env["NODE_ENV"] !== "production" : false;
+const DEV = (typeof process !== "undefined" && process.env["NODE_ENV"] !== "production") ||
+    (typeof process === "undefined" && typeof globalThis.__JXL_DEV__ !== "undefined");
 const DEFAULT_SPAWN_TIMEOUT_MS = 15_000;
 const RECYCLE_SHUTDOWN_TIMEOUT_MS = 1_000;
 const POOL_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -30,9 +31,9 @@ export class WorkerPool {
     lastSpawnFailureMs = 0;
     consecutiveSpawnFailures = 0;
     coreBudget;
-    workerCost = 1;
+    workerCost;
     static PREWARM_STAGGER_MS = 16;
-    budgetedWorkerIds = new Set();
+    budgetedCosts = new Map();
     metrics = {
         spawned: 0,
         spawnFailed: 0,
@@ -52,6 +53,7 @@ export class WorkerPool {
         this.spawnTimeoutMs = opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
         this.minIdle = Math.max(0, Math.min(opts.minIdle ?? 0, this.maxSize));
         this.coreBudget = opts.coreBudget ?? null;
+        this.workerCost = Math.max(1, Math.floor(opts.workerCost ?? 1));
     }
     get size() {
         return this.workers.size;
@@ -326,9 +328,14 @@ export class WorkerPool {
     }
     async spawn() {
         let acquiredBudget = false;
+        let actualCost = this.workerCost;
         if (this.coreBudget) {
+            // For workerCost > 1 (MT pools) we acquire full declared cost (queues in FIFO if needed).
+            // Dynamic fallback to ST (cost 1 + tier switch) is done by callers via budget.acquireWithFallback
+            // before selecting worker script URL / factory variant.
             await this.coreBudget.acquire(this.workerCost);
             acquiredBudget = true;
+            actualCost = this.workerCost;
         }
         this.spawning++;
         this.noteSize();
@@ -338,17 +345,17 @@ export class WorkerPool {
             const worker = await promise;
             if (acquiredBudget) {
                 if (this.workers.has(worker.id)) {
-                    this.budgetedWorkerIds.add(worker.id);
+                    this.budgetedCosts.set(worker.id, actualCost);
                 }
                 else {
-                    this.coreBudget.release(this.workerCost);
+                    this.coreBudget.release(actualCost);
                 }
             }
             return worker;
         }
         catch (err) {
             if (acquiredBudget) {
-                this.coreBudget.release(this.workerCost);
+                this.coreBudget.release(actualCost);
             }
             throw err;
         }
@@ -381,11 +388,19 @@ export class WorkerPool {
     }
     async createWorkerWithTimeout() {
         let timeout;
+        let timedOut = false;
+        const factoryPromise = this.factory();
+        // Late arrival after timeout: shut the orphan down instead of leaking it (P1).
+        factoryPromise.then((h) => { if (timedOut)
+            void h.shutdown(RECYCLE_SHUTDOWN_TIMEOUT_MS).catch(() => undefined); }, () => undefined);
         try {
             return await Promise.race([
-                this.factory(),
+                factoryPromise,
                 new Promise((_, reject) => {
-                    timeout = globalThis.setTimeout(() => reject(new Error(`[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`)), this.spawnTimeoutMs);
+                    timeout = globalThis.setTimeout(() => {
+                        timedOut = true;
+                        reject(new Error(`[jxl-scheduler] Worker spawn timed out after ${this.spawnTimeoutMs}ms`));
+                    }, this.spawnTimeoutMs);
                 }),
             ]);
         }
@@ -507,8 +522,9 @@ export class WorkerPool {
         this.workers.delete(worker.id);
         worker.activeSessionId = null;
         worker.cancelling = false;
-        if (this.budgetedWorkerIds.delete(worker.id) && this.coreBudget) {
-            this.coreBudget.release(this.workerCost);
+        const cost = this.budgetedCosts.get(worker.id) ?? this.workerCost;
+        if (this.budgetedCosts.delete(worker.id) && this.coreBudget) {
+            this.coreBudget.release(cost);
         }
         if (shouldShutdown && !worker.handle.terminated) {
             return worker.handle.shutdown(shutdownTimeoutMs).catch(() => undefined);

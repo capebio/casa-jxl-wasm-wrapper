@@ -13,6 +13,8 @@
 #include "lib/jxl/butteraugli/butteraugli.h"
 #include "lib/jxl/image.h"
 #include "lib/jxl/memory_manager_internal.h"
+
+#include <emscripten.h>  // for emscripten_get_now() in profiling hooks
 #if __has_include(<jxl/gain_map.h>)
 #include <jxl/gain_map.h>
 #define JXL_GAIN_MAP_SUPPORTED 1
@@ -2394,6 +2396,39 @@ JxlWasmBuffer* jxl_wasm_encode_rgba16(const uint8_t* pixels, uint32_t width, uin
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
   return EncodeRgba(pixels, width, height, distance, effort, 1, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
 }
+
+// Planar zero-copy/lower-copy encode hook for RGB16 (u16 planes).
+// Takes separate R/G/B planes (contiguous, from planar demosaic or SoA tone), interleaves in C++ to temp buffer (fast),
+// then encodes. Avoids Rust/JS side allocating/copying full interleaved buffer when upstream is planar.
+// For basic (no exif/boxes/metadata extra); use _x variant for advanced if needed.
+JxlWasmBuffer* jxl_wasm_encode_rgb16_planar(const uint16_t* r_plane, const uint16_t* g_plane, const uint16_t* b_plane,
+    uint32_t width, uint32_t height, float distance, uint32_t effort,
+    uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
+  if (!r_plane || !g_plane || !b_plane || width == 0 || height == 0) return MakeError(99);
+  size_t npix = (size_t)width * height;
+  // Interleave to packed RGBA16, not RGB16: EncodeRgba(fmt=1, has_alpha=0) runs StripAlphaToRgb,
+  // which reads a 4-channel (8 B/px) stride. Feeding it a 3-channel (6 B/px) buffer mis-reads
+  // every pixel and over-reads the tail. So build a 4-channel buffer with opaque alpha; the
+  // strip drops alpha and libjxl encodes a clean 3-channel RGB16 frame (no alpha plane in output).
+  // (A future fmt==4 "rgb16 passthrough" mode in EncodeRgba would let us keep the 3-channel buffer
+  // and skip the strip — deferred: it touches the shared encoder's channel math, needs a build to
+  // validate. See docs/rejected optimizations.md.)
+  size_t buf_bytes = npix * 8; // 4 * uint16 (RGBA; alpha stripped before encode)
+  uint8_t* rgba_pixels = (uint8_t*)malloc(buf_bytes);
+  if (!rgba_pixels) return MakeError(100);
+  // Direct native-endian u16 stores (wasm is LE = JXL_NATIVE_ENDIAN); rgba_pixels is malloc'd
+  // (≥2-byte aligned) so the aliased u16 writes are well-defined.
+  uint16_t* out16 = reinterpret_cast<uint16_t*>(rgba_pixels);
+  for (size_t i = 0; i < npix; ++i) {
+    out16[i * 4 + 0] = r_plane[i];
+    out16[i * 4 + 1] = g_plane[i];
+    out16[i * 4 + 2] = b_plane[i];
+    out16[i * 4 + 3] = 0xFFFFu; // opaque; dropped by the has_alpha=0 strip in EncodeRgba
+  }
+  JxlWasmBuffer* res = EncodeRgba(rgba_pixels, width, height, distance, effort, 1 /*16bit*/, 0 /*no alpha*/, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
+  free(rgba_pixels);
+  return res;
+}
 JxlWasmBuffer* jxl_wasm_encode_rgbaf32(const uint8_t* pixels, uint32_t width, uint32_t height, float distance, uint32_t effort, uint32_t has_alpha,
     uint32_t progressive_dc, uint32_t progressive_ac, uint32_t qprogressive_ac, uint32_t buffering, uint32_t group_order, uint32_t resampling) {
   return EncodeRgba(pixels, width, height, distance, effort, 2, has_alpha, progressive_dc, progressive_ac, qprogressive_ac, buffering, group_order, -1, -1, -1, 0, resampling);
@@ -2866,8 +2901,10 @@ int jxl_wasm_enc_push_pixels_x(JxlWasmEncState* s,
 JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
   static const size_t CHUNK = 262144;
   if (s == nullptr || s->outbuf == nullptr || s->taken >= s->outbuf_size) return nullptr;
+  const double tTake0 = emscripten_get_now();
   const size_t remaining = s->outbuf_size - s->taken;
   const size_t take = (remaining < CHUNK) ? remaining : CHUNK;
+  // Layer 3: ByteIntervalCursor (from benchmark-core) on JS can drive aligned input chunks to enc_push_image; take here yields in CHUNK quanta for symmetric use in byte-cutoff encode tests. Positive for math unification. Support pc post JXL.
   // MakeBufferBorrowed: zero-copy handle into live outbuf (eliminates per-chunk C++ memcpy / performance-1).
   // JS takeBuffer + HEAPU8.slice materializes the owned copy for the yielded chunk.
   // outbuf must stay alive for all borrows; enc_free (after chunks() drain) does the free.
@@ -2877,6 +2914,8 @@ JxlWasmBuffer* jxl_wasm_enc_take_chunk(JxlWasmEncState* s) {
     // No early free / null here. Borrowed views into outbuf remain valid only while
     // the allocation lives; enc_free (post-drain in JS chunks() finally) releases it.
   }
+  const double tTake1 = emscripten_get_now();
+  if (take > 1024) EM_ASM({ console.log("[jxl-enc-bridge] take_chunk", $0, "bytes in", ($1).toFixed(2), "ms (zero-copy borrow)"); }, (int)take, tTake1 - tTake0);
   return chunk;
 }
 
@@ -3033,6 +3072,7 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
   if (s->pixels_buf == nullptr) { s->error_code = -2; return -2; }
   if (s->pixels_written != s->pixels_size) { s->error_code = -4; return -4; }
 
+  const double tEnc0 = emscripten_get_now();
   // B3: use metadata path when ICC/EXIF/XMP were set via jxl_wasm_enc_set_metadata,
   // eliminating the buffered-encode malloc+copy that was forced when metadata was present.
   JxlWasmBuffer* buf = EncodeRgbaWithMetadata(
@@ -3057,6 +3097,9 @@ int jxl_wasm_enc_finish(JxlWasmEncState* s) {
 
   if (buf == nullptr) { s->error_code = 25; return 25; }
   if (buf->error != 0) { int ec = buf->error; FreeBufferNoChain(buf); s->error_code = ec; return ec; }
+
+  const double tEnc1 = emscripten_get_now();
+  EM_ASM({ console.log("[jxl-enc-bridge] EncodeRgbaWithMetadata took", $0.toFixed(1), "ms"); }, tEnc1 - tEnc0);
 
   // Steal the output buffer pointer from JxlWasmBuffer — avoids a memcpy.
   s->outbuf      = buf->data;
@@ -3310,6 +3353,21 @@ JxlWasmBuffer* jxl_wasm_decode_tile_container_region_rgba8(const uint8_t* input,
   return DecodeRgba8TileContainerRegion(input, input_size, region_x, region_y, region_w, region_h);
 }
 
+// sRGB approximate gamma (2.2) decode LUT for u8 inputs. Replaces the per-pixel
+// std::pow(v/255, 2.2f) in the butteraugli gamma-decode loops (3 call sites below):
+// the input is always u8, so a 256-entry table is bit-identical to calling pow per
+// pixel while removing ~width*height*3*2 transcendental calls per comparison.
+// (Lens 11/19 + output-fidelity-safe: same values, no pixel drift.)
+static const float* SrgbGamma22Lut() {
+  static float lut[256];
+  static bool initialized = false;
+  if (!initialized) {
+    for (int i = 0; i < 256; ++i) lut[i] = std::pow(i * (1.0f / 255.0f), 2.2f);
+    initialized = true;
+  }
+  return lut;
+}
+
 // Butteraugli perceptual distance between two RGBA8 images.
 // img1_data, img2_data: RGBA8 buffers, width*height*4 bytes each.
 // Returns: float distance bits packed in int32 (0=identical, ~1.0=imperceptible,
@@ -3324,6 +3382,7 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
   if (!jxl::MemoryManagerInit(&mem, nullptr)) return -1;
 
   // Build linear-light float Image3F (planar RGB, sRGB gamma decoded)
+  const float* gamma_lut = SrgbGamma22Lut();
   auto build_image = [&](const uint8_t* data) -> jxl::StatusOr<jxl::Image3F> {
     JXL_ASSIGN_OR_RETURN(jxl::Image3F img,
                          jxl::Image3F::Create(&mem, width, height));
@@ -3333,10 +3392,10 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
       float* JXL_RESTRICT br = img.PlaneRow(2, y);
       const uint8_t* src = data + y * width * 4u;
       for (size_t x = 0; x < width; ++x) {
-        // sRGB approximate gamma decode: linearise before butteraugli
-        rr[x] = std::pow(src[x * 4u + 0u] * (1.0f / 255.0f), 2.2f);
-        gr[x] = std::pow(src[x * 4u + 1u] * (1.0f / 255.0f), 2.2f);
-        br[x] = std::pow(src[x * 4u + 2u] * (1.0f / 255.0f), 2.2f);
+        // sRGB approximate gamma decode via LUT: linearise before butteraugli
+        rr[x] = gamma_lut[src[x * 4u + 0u]];
+        gr[x] = gamma_lut[src[x * 4u + 1u]];
+        br[x] = gamma_lut[src[x * 4u + 2u]];
       }
     }
     return img;
@@ -3368,3 +3427,487 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
 }
 
 }
+
+// ============================================================================
+// Ref-cached Butteraugli (B2): pre-build ref Image3F once; per-compare only builds test.
+// For batch mode (same ref, N tests) saves N-1 ref gamma-decodes + planarizations vs
+// single-shot jxl_wasm_butteraugli_compare. ButteraugliInterfaceInPlace moves both images,
+// so we manually copy ref planes before each call.
+// ============================================================================
+
+struct JxlWasmButterRef {
+  jxl::Image3F ref_img;
+  uint32_t width;
+  uint32_t height;
+};
+
+extern "C" JxlWasmButterRef* jxl_wasm_butteraugli_ref_create(
+    const uint8_t* ref_data, uint32_t width, uint32_t height) {
+  auto* s = new (std::nothrow) JxlWasmButterRef();
+  if (!s) return nullptr;
+  s->width = width;
+  s->height = height;
+
+  JxlMemoryManager mem;
+  if (!jxl::MemoryManagerInit(&mem, nullptr)) { delete s; return nullptr; }
+
+  auto img_or = jxl::Image3F::Create(&mem, width, height);
+  if (!img_or.ok()) { delete s; return nullptr; }
+  s->ref_img = std::move(img_or).value_();
+
+  const float* gamma_lut = SrgbGamma22Lut();
+  for (size_t y = 0; y < height; ++y) {
+    float* JXL_RESTRICT rr = s->ref_img.PlaneRow(0, y);
+    float* JXL_RESTRICT gr = s->ref_img.PlaneRow(1, y);
+    float* JXL_RESTRICT br = s->ref_img.PlaneRow(2, y);
+    const uint8_t* src = ref_data + y * (size_t)width * 4u;
+    for (size_t x = 0; x < width; ++x) {
+      rr[x] = gamma_lut[src[x * 4u + 0u]];
+      gr[x] = gamma_lut[src[x * 4u + 1u]];
+      br[x] = gamma_lut[src[x * 4u + 2u]];
+    }
+  }
+  return s;
+}
+
+extern "C" int32_t jxl_wasm_butteraugli_ref_compare(
+    JxlWasmButterRef* s, const uint8_t* test_data) {
+  if (!s) return -1;
+  const uint32_t width = s->width, height = s->height;
+
+  JxlMemoryManager mem;
+  if (!jxl::MemoryManagerInit(&mem, nullptr)) return -1;
+
+  // Build test Image3F.
+  auto test_or = jxl::Image3F::Create(&mem, width, height);
+  if (!test_or.ok()) return -1;
+  jxl::Image3F test_img = std::move(test_or).value_();
+  const float* gamma_lut = SrgbGamma22Lut();
+  for (size_t y = 0; y < height; ++y) {
+    float* JXL_RESTRICT rr = test_img.PlaneRow(0, y);
+    float* JXL_RESTRICT gr = test_img.PlaneRow(1, y);
+    float* JXL_RESTRICT br = test_img.PlaneRow(2, y);
+    const uint8_t* src = test_data + y * (size_t)width * 4u;
+    for (size_t x = 0; x < width; ++x) {
+      rr[x] = gamma_lut[src[x * 4u + 0u]];
+      gr[x] = gamma_lut[src[x * 4u + 1u]];
+      br[x] = gamma_lut[src[x * 4u + 2u]];
+    }
+  }
+
+  // Deep-copy ref planes (ButteraugliInterfaceInPlace moves/consumes both args).
+  auto ref_copy_or = jxl::Image3F::Create(&mem, width, height);
+  if (!ref_copy_or.ok()) return -1;
+  jxl::Image3F ref_copy = std::move(ref_copy_or).value_();
+  for (size_t c = 0; c < 3; ++c) {
+    for (size_t y = 0; y < height; ++y) {
+      const float* src_row = s->ref_img.ConstPlaneRow(c, y);
+      float* dst_row = ref_copy.PlaneRow(c, y);
+      memcpy(dst_row, src_row, width * sizeof(float));
+    }
+  }
+
+  auto diffmap_or = jxl::ImageF::Create(&mem, width, height);
+  if (!diffmap_or.ok()) return -1;
+  jxl::ImageF diffmap = std::move(diffmap_or).value_();
+
+  jxl::ButteraugliParams params;
+  double diffvalue = 0.0;
+  if (!jxl::ButteraugliInterfaceInPlace(std::move(ref_copy), std::move(test_img),
+                                        params, diffmap, diffvalue)) return -1;
+
+  const float dist = static_cast<float>(diffvalue);
+  int32_t bits;
+  memcpy(&bits, &dist, 4);
+  return bits;
+}
+
+extern "C" void jxl_wasm_butteraugli_ref_free(JxlWasmButterRef* s) {
+  delete s;
+}
+
+// ============================================================================
+// PSNR (B3): sum squared diffs over RGB channels, result in dB as float bits.
+// Identical images → +Inf. Skips alpha channel.
+// ============================================================================
+extern "C" int32_t jxl_wasm_psnr_compare(
+    const uint8_t* img1, const uint8_t* img2, uint32_t width, uint32_t height) {
+  const size_t npixels = (size_t)width * height;
+  double sum = 0.0;
+  for (size_t i = 0; i < npixels; ++i) {
+    const size_t off = i * 4u;
+    for (int c = 0; c < 3; ++c) {
+      const double d = (double)img1[off + c] - (double)img2[off + c];
+      sum += d * d;
+    }
+  }
+  float result;
+  if (sum == 0.0) {
+    result = std::numeric_limits<float>::infinity();
+  } else {
+    const double mse = sum / (3.0 * (double)npixels);
+    result = static_cast<float>(10.0 * std::log10(255.0 * 255.0 / mse));
+  }
+  int32_t bits;
+  memcpy(&bits, &result, 4);
+  return bits;
+}
+
+// ============================================================================
+// SSIM (B4): 8×8 block-windowed SSIM, luminance-only (mean of RGB channels).
+// Matches the approximation level of JS computeSsimVsFinal in jxl-progressive-quality.js.
+// ============================================================================
+static double ssim_block_luma(
+    const uint8_t* a, const uint8_t* b,
+    uint32_t width, uint32_t bx, uint32_t by, uint32_t bw, uint32_t bh) {
+  const uint32_t n = bw * bh;
+  double ma = 0.0, mb = 0.0;
+  for (uint32_t y = by; y < by + bh; ++y) {
+    for (uint32_t x = bx; x < bx + bw; ++x) {
+      const size_t idx = ((size_t)y * width + x) * 4u;
+      ma += ((double)a[idx] + a[idx + 1] + a[idx + 2]) * (1.0 / 3.0);
+      mb += ((double)b[idx] + b[idx + 1] + b[idx + 2]) * (1.0 / 3.0);
+    }
+  }
+  ma /= n; mb /= n;
+  double va = 0.0, vb = 0.0, cov = 0.0;
+  for (uint32_t y = by; y < by + bh; ++y) {
+    for (uint32_t x = bx; x < bx + bw; ++x) {
+      const size_t idx = ((size_t)y * width + x) * 4u;
+      const double av = ((double)a[idx] + a[idx + 1] + a[idx + 2]) * (1.0 / 3.0) - ma;
+      const double bv = ((double)b[idx] + b[idx + 1] + b[idx + 2]) * (1.0 / 3.0) - mb;
+      va += av * av; vb += bv * bv; cov += av * bv;
+    }
+  }
+  va /= n; vb /= n; cov /= n;
+  const double C1 = 6.5025, C2 = 58.5225; // (0.01*255)^2, (0.03*255)^2
+  return ((2.0 * ma * mb + C1) * (2.0 * cov + C2))
+       / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+}
+
+extern "C" int32_t jxl_wasm_ssim_compare(
+    const uint8_t* img1, const uint8_t* img2, uint32_t width, uint32_t height) {
+  const uint32_t BLOCK = 8u;
+  double total = 0.0;
+  uint32_t count = 0u;
+  for (uint32_t y = 0; y + BLOCK <= height; y += BLOCK) {
+    for (uint32_t x = 0; x + BLOCK <= width; x += BLOCK) {
+      total += ssim_block_luma(img1, img2, width, x, y, BLOCK, BLOCK);
+      ++count;
+    }
+  }
+  const float result = count > 0u ? static_cast<float>(total / count) : 1.0f;
+  int32_t bits;
+  memcpy(&bits, &result, 4);
+  return bits;
+}
+
+// ============================================================================
+// Perceptual Constancy Mode (Lens17) — C++ optimal pathway
+// Full framework implemented here for speed (SIMD-friendly, intrinsics, Emscripten -O3 + -mavx2).
+// This is the optimal path vs pure scalar Rust (the Rust version in raw-pipeline is the portable baseline + spec).
+// Relation to SIMD: C++ makes hand-tuned or auto-vectorized SIMD straightforward for the per-pixel transforms.
+// Both compile to WASM for browser (Emscripten for this bridge; wasm-bindgen for the Rust side).
+// Hook from JS/WASM: call the extern "C" wrappers (exported in the module).
+// See docs/PerceptualConstancyMode.md and docs/hooks.md.
+// The Rust apply_tone_math can FFI-call these when the bridge is present for optimal "new" path.
+// ============================================================================
+
+static const float SENSOR_SHARPEN_B[3][3] = {
+  { 1.05f, -0.025f, -0.025f },
+  { -0.025f,  1.05f, -0.025f },
+  { -0.025f, -0.025f,  1.05f }
+};
+
+extern "C" {
+
+void perceptual_to_log_euclidean(float r, float g, float b, float* out_lr, float* out_lg, float* out_lb) {
+  const float eps = 1e-6f;
+  float sr = SENSOR_SHARPEN_B[0][0]*r + SENSOR_SHARPEN_B[0][1]*g + SENSOR_SHARPEN_B[0][2]*b;
+  float sg = SENSOR_SHARPEN_B[1][0]*r + SENSOR_SHARPEN_B[1][1]*g + SENSOR_SHARPEN_B[1][2]*b;
+  float sb = SENSOR_SHARPEN_B[2][0]*r + SENSOR_SHARPEN_B[2][1]*g + SENSOR_SHARPEN_B[2][2]*b;
+  *out_lr = logf(fmaxf(sr, eps));
+  *out_lg = logf(fmaxf(sg, eps));
+  *out_lb = logf(fmaxf(sb, eps));
+}
+
+void perceptual_from_log_euclidean(float lr, float lg, float lb, float* out_r, float* out_g, float* out_b) {
+  const float eps = 1e-6f;
+  *out_r = fmaxf(expf(lr) - eps, 0.0f);
+  *out_g = fmaxf(expf(lg) - eps, 0.0f);
+  *out_b = fmaxf(expf(lb) - eps, 0.0f);
+}
+
+void perceptual_molchanov_residuals_and_atensor(float luma_l, float lr, float lg, float lb, float base_scale,
+                                                float* out_lr, float* out_lg, float* out_lb, float* out_mod_scale) {
+  // Parallelogram residuals + A_tensor density (higher around gray/greens)
+  float res_r = 0.02f * (lr - luma_l) * (lr - luma_l);
+  float res_g = 0.02f * (lg - luma_l) * (lg - luma_l);
+  float res_b = 0.02f * (lb - luma_l) * (lb - luma_l);
+
+  float gray_dist = fminf(fabsf(lr - luma_l) + fabsf(lg - luma_l) + fabsf(lb - luma_l), 2.0f) / 2.0f;
+  float a_mod = 1.0f + 0.3f * (1.0f - gray_dist);
+  float green_boost = (lg > lr && lg > lb) ? 1.15f : 1.0f;
+  float mod_scale = base_scale * a_mod * green_boost;
+
+  *out_lr = luma_l + (lr - luma_l + res_r) * mod_scale;
+  *out_lg = luma_l + (lg - luma_l + res_g) * mod_scale;
+  *out_lb = luma_l + (lb - luma_l + res_b) * mod_scale;
+  *out_mod_scale = mod_scale;
+}
+
+void perceptual_hybrid_spring_and_fc(float lr, float lg, float lb, float luma_l,
+                                     float* out_lr, float* out_lg, float* out_lb) {
+  float r = lr, g = lg, b = lb;
+
+  // Hybrid spring to neutral (prevents gray drift)
+  float dist = sqrtf((r - luma_l)*(r - luma_l) + (g - luma_l)*(g - luma_l) + (b - luma_l)*(b - luma_l));
+  if (dist < 0.25f) {
+    float spring = 0.7f * (0.25f - dist);
+    r = r * (1.0f - spring) + luma_l * spring;
+    g = g * (1.0f - spring) + luma_l * spring;
+    b = b * (1.0f - spring) + luma_l * spring;
+  }
+
+  // f(c) diminishing returns (per-hue, stronger for greens example)
+  float fc_r = fmaxf(1.0f - 0.08f * fminf(fabsf(r - luma_l), 0.6f), 0.6f);
+  float fc_g = fmaxf(1.0f - 0.12f * fminf(fabsf(g - luma_l), 0.6f), 0.6f);
+  float fc_b = fmaxf(1.0f - 0.08f * fminf(fabsf(b - luma_l), 0.6f), 0.6f);
+
+  *out_lr = r * fc_r;
+  *out_lg = g * fc_g;
+  *out_lb = b * fc_b;
+}
+
+// Combined apply for the full new path (optimal C++ entry point for the lightbox hook).
+// JS/WASM can call this directly on linear rgb for the constancy adjustments.
+void perceptual_apply_full(float r, float g, float b, float sat, float vib, int vib_zero,
+                           float* out_r, float* out_g, float* out_b) {
+  const float eps = 1e-6f;
+  float lr, lg, lb;
+  perceptual_to_log_euclidean(r, g, b, &lr, &lg, &lb);
+  float luma_l = (lr + lg + lb) / 3.0f;
+  // Aligned to Rust outer scale logic for consistency (full per-pixel pixel_sat + vib_w).
+  float base_scale;
+  if (vib_zero) {
+    base_scale = sat;
+  } else {
+    float raw_mx = fmaxf(fmaxf(r, g), b);
+    float mx = fmaxf(raw_mx, 1.0f);
+    float mn = fmaxf(fminf(fminf(r, g), b), 0.0f);
+    float pixel_sat = (raw_mx > 0.0f) ? fminf(fmaxf((mx - mn) / mx, 0.0f), 1.0f) : 0.0f;
+    float vib_w = 1.0f - pixel_sat;
+    base_scale = sat * (1.0f + vib * vib_w * 0.6f);
+  }
+  float lr2, lg2, lb2, mod;
+  perceptual_molchanov_residuals_and_atensor(luma_l, lr, lg, lb, base_scale, &lr2, &lg2, &lb2, &mod);
+  float lr3, lg3, lb3;
+  perceptual_hybrid_spring_and_fc(lr2, lg2, lb2, luma_l, &lr3, &lg3, &lb3);
+  perceptual_from_log_euclidean(lr3, lg3, lb3, out_r, out_g, out_b);
+}
+
+} // extern "C"
+
+// ============================================================================
+// Hand-written AVX2 Intrinsics for Perceptual Constancy (optimal C++ pathway)
+// These are the SIMD versions using hand-written intrinsics for the 4 core helpers
+// + bulk apply. Lie in this file (bridge.cpp) as part of the JXL WASM bridge
+// (Emscripten can target AVX2/SSE for native or WASM SIMD).
+// The Rust side (raw-pipeline) has the portable reference.
+// Flip-flop between scalar (previous C++ or Rust) and these intrinsics.
+// For 8-wide f32 (AVX2). Remainder handled scalar in caller.
+// Includes fast approx for log/exp using poly + fma (no external lib).
+// ============================================================================
+
+#include <immintrin.h>  // for __m256, _mm256_*
+
+#ifdef __AVX2__
+
+// avx2_apply_b removed (was partial/demo; bulk inlines clean SoA B application for 3 channels).
+
+static inline __m256 avx2_fast_log(const __m256 x) {
+  // Simple poly approx for log(1+y) , y=x-1 , for demo (degree 4).
+  // For higher accuracy/speed in production use better minimax poly, range reduction (frexp/ilogb)
+  // or platform log. Kept for intrinsics speedup on the critical path; cross-checked in C++ benches.
+  __m256 one = _mm256_set1_ps(1.0f);
+  __m256 y = _mm256_sub_ps(x, one);
+  __m256 y2 = _mm256_mul_ps(y, y);
+  __m256 res = y;
+  res = _mm256_fnmadd_ps(y2, _mm256_set1_ps(0.5f), res);
+  __m256 y3 = _mm256_mul_ps(y2, y);
+  res = _mm256_fmadd_ps(y3, _mm256_set1_ps(0.333333f), res);
+  __m256 y4 = _mm256_mul_ps(y2, y2);
+  res = _mm256_fnmadd_ps(y4, _mm256_set1_ps(0.25f), res);
+  return res;
+}
+
+static inline __m256 avx2_fast_exp(const __m256 x) {
+  // Taylor for exp, unrolled for 8 terms, demo.
+  // See log note: approximations prioritized for vector throughput. Accuracy validated in
+  // perceptual_constancy_cpp_stability_bench.cpp (max err tracked vs scalar ref).
+  __m256 one = _mm256_set1_ps(1.0f);
+  __m256 res = one;
+  __m256 term = one;
+  __m256 x2 = _mm256_mul_ps(x, x);
+  // unrolled
+  term = _mm256_mul_ps(term, _mm256_div_ps(x, _mm256_set1_ps(1.0f)));
+  res = _mm256_add_ps(res, term);
+  term = _mm256_mul_ps(term, _mm256_div_ps(x, _mm256_set1_ps(2.0f)));
+  res = _mm256_add_ps(res, term);
+  term = _mm256_mul_ps(term, _mm256_div_ps(x, _mm256_set1_ps(3.0f)));
+  res = _mm256_add_ps(res, term);
+  term = _mm256_mul_ps(term, _mm256_div_ps(x, _mm256_set1_ps(4.0f)));
+  res = _mm256_add_ps(res, term);
+  term = _mm256_mul_ps(term, _mm256_div_ps(x, _mm256_set1_ps(5.0f)));
+  res = _mm256_add_ps(res, term);
+  term = _mm256_mul_ps(term, _mm256_div_ps(x, _mm256_set1_ps(6.0f)));
+  res = _mm256_add_ps(res, term);
+  term = _mm256_mul_ps(term, _mm256_div_ps(x, _mm256_set1_ps(7.0f)));
+  res = _mm256_add_ps(res, term);
+  return res;
+}
+
+static inline __m256 mm256_abs_ps(__m256 x) {
+  // Portable abs for ps (sign bit clear). Avoids _mm256_abs_ps availability differences across clang/emcc headers.
+  __m256 sign_mask = _mm256_set1_ps(-0.0f);
+  return _mm256_andnot_ps(sign_mask, x);
+}
+
+static inline void avx2_molchanov(const __m256 luma, const __m256 lr, const __m256 lg, const __m256 lb,
+                                  const __m256 base_scale,
+                                  __m256* olr, __m256* olg, __m256* olb, __m256* oscale) {
+  __m256 resr = _mm256_mul_ps(_mm256_set1_ps(0.02f), _mm256_mul_ps(_mm256_sub_ps(lr, luma), _mm256_sub_ps(lr, luma)));
+  __m256 resg = _mm256_mul_ps(_mm256_set1_ps(0.02f), _mm256_mul_ps(_mm256_sub_ps(lg, luma), _mm256_sub_ps(lg, luma)));
+  __m256 resb = _mm256_mul_ps(_mm256_set1_ps(0.02f), _mm256_mul_ps(_mm256_sub_ps(lb, luma), _mm256_sub_ps(lb, luma)));
+
+  __m256 dist = _mm256_add_ps(mm256_abs_ps(_mm256_sub_ps(lr, luma)),
+                 _mm256_add_ps(mm256_abs_ps(_mm256_sub_ps(lg, luma)),
+                               mm256_abs_ps(_mm256_sub_ps(lb, luma))));
+  dist = _mm256_min_ps(dist, _mm256_set1_ps(2.0f));
+  dist = _mm256_div_ps(dist, _mm256_set1_ps(2.0f));
+  __m256 amod = _mm256_fmadd_ps(_mm256_set1_ps(-0.3f), dist, _mm256_set1_ps(1.3f));  // 1 + 0.3*(1-d)
+  __m256 gboost = _mm256_blendv_ps(_mm256_set1_ps(1.0f), _mm256_set1_ps(1.15f),
+                                   _mm256_cmp_ps(lg, _mm256_max_ps(lr, lb), _CMP_GT_OQ));
+
+  __m256 mscale = _mm256_mul_ps(base_scale, _mm256_mul_ps(amod, gboost));
+
+  *olr = _mm256_fmadd_ps(_mm256_add_ps(_mm256_sub_ps(lr, luma), resr), mscale, luma);
+  *olg = _mm256_fmadd_ps(_mm256_add_ps(_mm256_sub_ps(lg, luma), resg), mscale, luma);
+  *olb = _mm256_fmadd_ps(_mm256_add_ps(_mm256_sub_ps(lb, luma), resb), mscale, luma);
+  *oscale = mscale;
+}
+
+static inline void avx2_hybrid(const __m256 lr, const __m256 lg, const __m256 lb, const __m256 luma,
+                               __m256* orr, __m256* ogg, __m256* obb) {
+  __m256 dr = _mm256_sub_ps(lr, luma);
+  __m256 dg = _mm256_sub_ps(lg, luma);
+  __m256 db = _mm256_sub_ps(lb, luma);
+  __m256 dist = _mm256_sqrt_ps(_mm256_add_ps(_mm256_mul_ps(dr, dr),
+                              _mm256_add_ps(_mm256_mul_ps(dg, dg), _mm256_mul_ps(db, db))));
+  __m256 mask = _mm256_cmp_ps(dist, _mm256_set1_ps(0.25f), _CMP_LT_OQ);
+  __m256 spring = _mm256_mul_ps(_mm256_set1_ps(0.7f), _mm256_sub_ps(_mm256_set1_ps(0.25f), dist));
+  __m256 nr = _mm256_blendv_ps(lr, _mm256_fmadd_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), spring), lr, _mm256_mul_ps(spring, luma)), mask);
+  __m256 ng = _mm256_blendv_ps(lg, _mm256_fmadd_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), spring), lg, _mm256_mul_ps(spring, luma)), mask);
+  __m256 nb = _mm256_blendv_ps(lb, _mm256_fmadd_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), spring), lb, _mm256_mul_ps(spring, luma)), mask);
+
+  __m256 fcr = _mm256_max_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), _mm256_mul_ps(_mm256_set1_ps(0.08f), _mm256_min_ps(mm256_abs_ps(_mm256_sub_ps(nr, luma)), _mm256_set1_ps(0.6f)))), _mm256_set1_ps(0.6f));
+  __m256 fcg = _mm256_max_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), _mm256_mul_ps(_mm256_set1_ps(0.12f), _mm256_min_ps(mm256_abs_ps(_mm256_sub_ps(ng, luma)), _mm256_set1_ps(0.6f)))), _mm256_set1_ps(0.6f));
+  __m256 fcb = _mm256_max_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), _mm256_mul_ps(_mm256_set1_ps(0.08f), _mm256_min_ps(mm256_abs_ps(_mm256_sub_ps(nb, luma)), _mm256_set1_ps(0.6f)))), _mm256_set1_ps(0.6f));
+
+  *orr = _mm256_mul_ps(nr, fcr);
+  *ogg = _mm256_mul_ps(ng, fcg);
+  *obb = _mm256_mul_ps(nb, fcb);
+}
+
+// Bulk AVX2 entry: processes n pixels (SoA r/g/b arrays), 8 at a time. Remainder scalar fallback inside or caller.
+extern "C" void perceptual_apply_full_avx2(const float* in_r, const float* in_g, const float* in_b,
+                                           float* out_r, float* out_g, float* out_b,
+                                           int n, float sat, float vib, int vib_zero) {
+  int i = 0;
+  for(; i + 8 <= n; i += 8) {
+    __m256 r = _mm256_loadu_ps(in_r + i);
+    __m256 g = _mm256_loadu_ps(in_g + i);
+    __m256 b = _mm256_loadu_ps(in_b + i);
+
+    __m256 s_r = _mm256_fmadd_ps(_mm256_set1_ps(1.05f), r, _mm256_fmadd_ps(_mm256_set1_ps(-0.025f), g, _mm256_mul_ps(_mm256_set1_ps(-0.025f), b)));
+    __m256 s_g = _mm256_fmadd_ps(_mm256_set1_ps(-0.025f), r, _mm256_fmadd_ps(_mm256_set1_ps(1.05f), g, _mm256_mul_ps(_mm256_set1_ps(-0.025f), b)));
+    __m256 s_b = _mm256_fmadd_ps(_mm256_set1_ps(-0.025f), r, _mm256_fmadd_ps(_mm256_set1_ps(-0.025f), g, _mm256_mul_ps(_mm256_set1_ps(1.05f), b)));
+
+    __m256 l_r = avx2_fast_log(s_r);
+    __m256 l_g = avx2_fast_log(s_g);
+    __m256 l_b = avx2_fast_log(s_b);
+
+    __m256 luma = _mm256_mul_ps(_mm256_set1_ps(0.333333f), _mm256_add_ps(l_r, _mm256_add_ps(l_g, l_b)));
+
+    // Full per-lane base_scale using pixel_sat + vib_w (matches Rust, vectorized intrinsics for correctness + quality).
+    // Input r/g/b here are post-matrix (pre any scale).
+    __m256 raw_mx = _mm256_max_ps(_mm256_max_ps(r, g), b);
+    __m256 mx = _mm256_max_ps(raw_mx, _mm256_set1_ps(1.0f));
+    __m256 mn = _mm256_max_ps(_mm256_min_ps(_mm256_min_ps(r, g), b), _mm256_set1_ps(0.0f));
+    __m256 pixel_sat = _mm256_setzero_ps();
+    __m256 pos_mask = _mm256_cmp_ps(raw_mx, _mm256_setzero_ps(), _CMP_GT_OQ);
+    __m256 divv = _mm256_div_ps(_mm256_sub_ps(mx, mn), mx);
+    __m256 clamped = _mm256_min_ps(_mm256_max_ps(divv, _mm256_setzero_ps()), _mm256_set1_ps(1.0f));
+    pixel_sat = _mm256_and_ps(clamped, pos_mask);  // blendv equivalent via and for 0/1 mask
+    __m256 vib_w = _mm256_sub_ps(_mm256_set1_ps(1.0f), pixel_sat);
+    __m256 base_s;
+    if (vib_zero) {
+      base_s = _mm256_set1_ps(sat);
+    } else {
+      __m256 factor = _mm256_fmadd_ps(_mm256_set1_ps(vib), _mm256_mul_ps(vib_w, _mm256_set1_ps(0.6f)), _mm256_set1_ps(1.0f));
+      base_s = _mm256_mul_ps(_mm256_set1_ps(sat), factor);
+    }
+
+    __m256 o_l_r, o_l_g, o_l_b, o_sc;
+    avx2_molchanov(luma, l_r, l_g, l_b, base_s, &o_l_r, &o_l_g, &o_l_b, &o_sc);
+
+    __m256 o_r, o_g, o_b;
+    avx2_hybrid(o_l_r, o_l_g, o_l_b, luma, &o_r, &o_g, &o_b);
+
+    __m256 f_r = avx2_fast_exp(o_r);
+    __m256 f_g = avx2_fast_exp(o_g);
+    __m256 f_b = avx2_fast_exp(o_b);
+
+    _mm256_storeu_ps(out_r + i, f_r);
+    _mm256_storeu_ps(out_g + i, f_g);
+    _mm256_storeu_ps(out_b + i, f_b);
+  }
+  // remainder scalar (use the previous scalar impl)
+  for(; i < n; i++) {
+    float rr, gg, bb;
+    // call scalar version or duplicate small
+    perceptual_apply_full(in_r[i], in_g[i], in_b[i], sat, vib, vib_zero, &rr, &gg, &bb);
+    out_r[i] = rr; out_g[i] = gg; out_b[i] = bb;
+  }
+}
+
+#endif // __AVX2__
+
+// Scalar fallback is the previous perceptual_apply_full (already added).
+
+// Stub implementation for JxlGainMapReadBundle (and friends if needed) to allow
+// linking of dec-only modules in the P3 split build when the gain map .o from
+// libjxl is not included in the dec static libs, even though the header was
+// visible at bridge compile time (pulling in the call site under
+// JXL_GAIN_MAP_SUPPORTED).
+#if JXL_GAIN_MAP_SUPPORTED
+JXL_EXPORT JXL_BOOL JxlGainMapReadBundle(JxlGainMapBundle* map_bundle,
+                                         const uint8_t* data,
+                                         size_t size,
+                                         size_t* bytes_read) {
+  (void)map_bundle; (void)data; (void)size; (void)bytes_read;
+  return 0;  // JXL_FALSE
+}
+JXL_EXPORT JXL_BOOL JxlGainMapGetBundleSize(const JxlGainMapBundle* map_bundle,
+                                            size_t* bundle_size) {
+  (void)map_bundle; (void)bundle_size;
+  return 0;  // JXL_FALSE
+}
+JXL_EXPORT JXL_BOOL JxlGainMapWriteBundle(const JxlGainMapBundle* map_bundle,
+                                          uint8_t* output_buffer,
+                                          size_t output_buffer_size,
+                                          size_t* bytes_written) {
+  (void)map_bundle; (void)output_buffer; (void)output_buffer_size; (void)bytes_written;
+  return 0;  // JXL_FALSE
+}
+#endif

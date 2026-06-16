@@ -1,4 +1,3 @@
-/// <reference lib="webworker" />
 import type { JxlModule } from "./wasm-loader.js";
 import type { MsgEncodeStart } from "@casabio/jxl-core/protocol";
 import type { Region } from "@casabio/jxl-core/types";
@@ -14,6 +13,7 @@ export declare class EncodeHandler {
     private pixelQueue;
     private pixelReadIndex;
     private queueDepth;
+    private queuedBytes;
     private cancelled;
     private finished;
     private sessionEnded;
@@ -21,6 +21,16 @@ export declare class EncodeHandler {
     private wakeResolve;
     private lastDrainPostedMs;
     private lastDrainAllowed;
+    private encoder;
+    private disposePromise;
+    private readonly stageStartMs;
+    private createEncoderMs;
+    private totalWaitForPixelsMs;
+    private totalPushPixelsMs;
+    private finishMs;
+    private totalChunkYieldMs;
+    private firstByteMs;
+    private lastPushStart;
     private readonly _drainMsg;
     private readonly _chunkMsg;
     constructor(opts: MsgEncodeStart, wasm: JxlModule, callbacks: EncodeHandlerCallbacks);
@@ -28,10 +38,18 @@ export declare class EncodeHandler {
     onFinish(): void;
     onCancel(reason?: string): Promise<void>;
     private run;
-    private endSession;
+    private postFinalMetrics;
+    private finishSession;
+    private isTerminal;
+    private clearPixelQueue;
+    private wake;
+    private disposeActiveEncoder;
     private waitForPixels;
+    private takeNextPixels;
+    private compactQueue;
     private feedEncoder;
     private maybePostDrain;
+    private postMetric;
     private readEncoderChunks;
     private failSession;
 }

@@ -2,6 +2,19 @@
 
 export type TierName = "dc" | "preview" | "full";
 
+// --- Phase 8 type imports (schema re-exports for FrameSet + capture geometry) ---
+// Data model defined in types.ts per handoff spec; re-exported here so progressive-manifest remains the schema surface.
+import type {
+  CameraPose,
+  Relation,
+  FrameSetMember,
+  FrameSet,
+  AssetChannel,
+  ChannelDescriptor,
+} from "./types.js";
+
+export type { CameraPose, Relation, FrameSetMember, FrameSet, AssetChannel, ChannelDescriptor };
+
 export interface ManifestTier {
   name: TierName;
   byteStart: number;
@@ -34,7 +47,26 @@ export interface ProgressiveManifest {
     confidence: number;
     method: string;
   };
+  /** Optional passthrough for future perceptual / non-Riemannian color engine params
+   *  (e.g. from advanced LookRenderer / LUT / geodesic). Transported via manifest to
+   *  onManifest consumers for illumination-invariant adjustments etc. No cost here.
+   */
+  perceptual?: Record<string, unknown>;
   tiers: ManifestTier[];
+
+  // Phase 8: reserved ingest CV fields + channel semantics (PG2/PG4/PG5/ST8).
+  // Populated for photogrammetry/transect assets; FrameSet groups multiple such manifests.
+  // These are optional and forward-compat; validateManifest passes through unknown optionals.
+  capture?: {
+    pose?: CameraPose;
+    intrinsics?: FrameSetMember["intrinsics"];
+    extrinsics?: FrameSetMember["extrinsics"];
+    depthLayer?: FrameSetMember["depthLayer"];
+    featureSidecar?: FrameSetMember["featureSidecar"];
+  };
+  /** Concurrent loadable channels alongside rgb (PG4). */
+  channels?: AssetChannel[];
+  channelDescriptors?: ChannelDescriptor[];
 }
 
 export class ManifestValidationError extends Error {
@@ -106,6 +138,42 @@ export function validateManifest(json: unknown): ProgressiveManifest {
   assertField(typeof enc["name"] === "string", "encoder.name", "encoder.name must be a string");
   assertField(typeof enc["libjxlVersion"] === "string", "encoder.libjxlVersion", "encoder.libjxlVersion must be a string");
   assertField(Array.isArray(enc["flags"]), "encoder.flags", "encoder.flags must be an array");
+
+  // saliency (optional; tighten ranges when present so scheduler boosts are safe)
+  if (obj["saliency"] !== undefined) {
+    assertField(
+      typeof obj["saliency"] === "object" && obj["saliency"] !== null,
+      "saliency",
+      "saliency must be an object if present"
+    );
+    const s = obj["saliency"] as Record<string, unknown>;
+    assertField(typeof s["enabled"] === "boolean", "saliency.enabled", "saliency.enabled must be a boolean");
+    assertField(
+      typeof s["centerX"] === "number" && (s["centerX"] as number) >= 0 && (s["centerX"] as number) <= 1,
+      "saliency.centerX",
+      "saliency.centerX must be number in [0,1]"
+    );
+    assertField(
+      typeof s["centerY"] === "number" && (s["centerY"] as number) >= 0 && (s["centerY"] as number) <= 1,
+      "saliency.centerY",
+      "saliency.centerY must be number in [0,1]"
+    );
+    assertField(
+      typeof s["confidence"] === "number" && (s["confidence"] as number) >= 0 && (s["confidence"] as number) <= 1,
+      "saliency.confidence",
+      "saliency.confidence must be number in [0,1]"
+    );
+    assertField(typeof s["method"] === "string", "saliency.method", "saliency.method must be a string");
+  }
+
+  // perceptual passthrough (optional, loose for future color science transport)
+  if (obj["perceptual"] !== undefined) {
+    assertField(
+      typeof obj["perceptual"] === "object" && obj["perceptual"] !== null && !Array.isArray(obj["perceptual"]),
+      "perceptual",
+      "perceptual must be an object if present"
+    );
+  }
 
   // tiers
   assertField(Array.isArray(obj["tiers"]), "tiers", "tiers must be an array");

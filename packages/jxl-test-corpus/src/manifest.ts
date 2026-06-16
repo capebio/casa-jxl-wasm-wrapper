@@ -1,6 +1,13 @@
 import { CorpusManifest } from './types.js';
 
+/**
+ * jxl-test-corpus Manifest
+ * 
+ * Note: Corpus binaries are procedurally generated at build time and not checked into git.
+ * Run "npm run generate:fixtures" in packages/jxl-test-corpus to generate local fixtures.
+ */
 export const manifest: CorpusManifest = {
+  version: 1,
   fixtures: [
     {
       id: 'srgb-8bit',
@@ -15,7 +22,9 @@ export const manifest: CorpusManifest = {
       hasExif: false,
       hasXmp: false,
       expectedPass: true,
-      tags: ['basic', 'srgb']
+      tags: ['basic', 'srgb'],
+      sha256: '7806e18bdc3ac323c0f602204fde06544dcc57c2ecbacdcf251dba7bcecbe1cf',
+      description: 'A basic 8-bit sRGB gradient without alpha.'
     },
     {
       id: 'srgb-alpha-8bit',
@@ -30,7 +39,9 @@ export const manifest: CorpusManifest = {
       hasExif: false,
       hasXmp: false,
       expectedPass: true,
-      tags: ['alpha']
+      tags: ['alpha'],
+      sha256: 'ecf549be4e9ee30ed06526c274752fea23262e7027efc239ad792b8e477a0d05',
+      description: 'An 8-bit sRGB gradient with a progressive alpha channel.'
     },
     {
       id: 'adobe-rgb-16bit',
@@ -45,11 +56,97 @@ export const manifest: CorpusManifest = {
       hasExif: true,
       hasXmp: true,
       expectedPass: true,
-      tags: ['scientific', '16bit', 'icc', 'exif']
+      tags: ['scientific', '16bit', 'icc', 'exif'],
+      sha256: 'a66c63e886967da02c2ee8bc0e1bad84583204b771697e25d53faaf27928b08b',
+      attribution: 'Casabio-Internal',
+      occurrenceId: 'urn:lsid:casabio.org:occurrence:12345',
+      description: 'A 16-bit wide-gamut Adobe RGB calibration image with embedded mock ICC, Exif, and Xmp metadata.'
     },
     {
       id: 'truncated-header',
       filename: 'truncated-header.jxl',
+      license: 'CC0',
+      bitsPerSample: 8,
+      colorSpace: 'srgb',
+      hasAlpha: false,
+      hasIcc: false,
+      hasExif: false,
+      hasXmp: false,
+      expectedPass: false,
+      expectedError: 'JXL_DEC_ERROR', // expected fail substring
+      tags: ['truncated', 'malformed'],
+      sha256: '251e78b8141d77bacb5f31b15f797f70373667f49562f0b1e57ca62a6dc109e8',
+      description: 'A malformed JXL file truncated at byte 32 whose headers and dimensions are unknowable.'
+    },
+    {
+      id: 'gray-ramp-16bit',
+      filename: 'gray-ramp-16bit.jxl',
+      license: 'CC0',
+      width: 100,
+      height: 100,
+      bitsPerSample: 16,
+      colorSpace: 'gray',
+      hasAlpha: false,
+      hasIcc: false,
+      hasExif: false,
+      hasXmp: false,
+      expectedPass: true,
+      tags: ['gray-ramp', 'colour-engine', '16bit'],
+      sha256: 'c73a4414b7f593e01d394398796a3e51f9b454d3302297404666d3bb064724fb',
+      description: 'A 16-bit neutral-gray axis calibration ramp for testing non-Riemannian colour engine stability.'
+    },
+    {
+      id: 'saturated-green-16bit',
+      filename: 'saturated-green-16bit.jxl',
+      license: 'CC0',
+      width: 100,
+      height: 100,
+      bitsPerSample: 16,
+      colorSpace: 'adobe-rgb',
+      hasAlpha: false,
+      hasIcc: false,
+      hasExif: false,
+      hasXmp: false,
+      expectedPass: true,
+      tags: ['gamut-green', 'colour-engine', '16bit'],
+      sha256: '5f0e5659c9940853c7c11031badf6fd7e5948acaed87b2bc9cf449b891e77738',
+      description: 'A saturated 16-bit green patch for profiling Molchanov residual density transform boundaries.'
+    },
+    {
+      id: 'progressive-dc-truncated',
+      filename: 'progressive-dc-truncated.jxl',
+      license: 'CC0',
+      bitsPerSample: 8,
+      colorSpace: 'srgb',
+      hasAlpha: false,
+      hasIcc: false,
+      hasExif: false,
+      hasXmp: false,
+      expectedPass: true,
+      tags: ['progressive', 'dc-only', 'ar-latency'],
+      sha256: '2dc0ce4bdf013f331eaad128b8c72038c6734e0d78355ab20b246151bda45ae2',
+      description: 'A progressive JXL bitstream truncated after the DC layer for low-latency AR stream testing.'
+    },
+    {
+      id: 'lossless-16bit',
+      filename: 'lossless-16bit.jxl',
+      license: 'CC0',
+      width: 100,
+      height: 100,
+      bitsPerSample: 16,
+      colorSpace: 'adobe-rgb',
+      hasAlpha: false,
+      hasIcc: false,
+      hasExif: false,
+      hasXmp: false,
+      expectedPass: true,
+      tags: ['lossless', 'archival', 'digital-twin', '16bit'],
+      sha256: '7ed5cfe999aa6438f4aa48388821d09f5522ad44cd51dd7339d7549ad2702e44',
+      description: 'A 16-bit lossless archival/digital-twin specimen calibration frame.'
+    },
+    {
+      id: 'multiview-a',
+      filename: 'multiview-a.jxl',
       license: 'CC0',
       width: 100,
       height: 100,
@@ -59,8 +156,31 @@ export const manifest: CorpusManifest = {
       hasIcc: false,
       hasExif: false,
       hasXmp: false,
-      expectedPass: false,
-      tags: ['truncated', 'malformed']
+      expectedPass: true,
+      tags: ['multiview', 'photogrammetry'],
+      sha256: '6fa5f866f4f6e18190e92704f783bd51028bcfd98f21f03c1423b16fc34e3cbc',
+      groupId: 'multiview-specimen',
+      viewIndex: 0,
+      description: 'Viewpoint A of a multi-view photogrammetry synthetic specimen pair.'
+    },
+    {
+      id: 'multiview-b',
+      filename: 'multiview-b.jxl',
+      license: 'CC0',
+      width: 100,
+      height: 100,
+      bitsPerSample: 8,
+      colorSpace: 'srgb',
+      hasAlpha: false,
+      hasIcc: false,
+      hasExif: false,
+      hasXmp: false,
+      expectedPass: true,
+      tags: ['multiview', 'photogrammetry'],
+      sha256: '1ad32afcd07ecd715125298334c34ffe60851429453d42e46fac4feb3ad81ae3',
+      groupId: 'multiview-specimen',
+      viewIndex: 1,
+      description: 'Viewpoint B of a multi-view photogrammetry synthetic specimen pair.'
     }
   ]
 };

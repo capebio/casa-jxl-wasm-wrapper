@@ -1,0 +1,35 @@
+TestName: cr2-decode-flipflop
+RunTimestamp: 2026-06-30T22-12-04Z
+FileA: C:/Foo/raw-converter/tests/_MG_1744.CR2
+FileB: C:/Foo/raw-converter/tests/ADH 1248.CR2
+ImageDims: 5184x3456
+RawBufMB: 35.8
+CropBufMB: 34.2
+Runs: 10
+
+---
+runs[10]{run|file|total_ms|parse_ms|ljpeg_ms|crop_ms}:
+   1 | A |   369.64 |   0.00 |   358.60 |   3.63
+   2 | B |   454.88 |   0.01 |   438.56 |   4.61
+   3 | A |   360.50 |   0.00 |   349.32 |   3.79
+   4 | B |   457.17 |   0.01 |   440.74 |   5.67
+   5 | A |   361.15 |   0.00 |   349.49 |   4.00
+   6 | B |   451.66 |   0.00 |   436.98 |   4.72
+   7 | A |   360.89 |   0.00 |   349.50 |   3.51
+   8 | B |   433.59 |   0.00 |   417.26 |   5.85
+   9 | A |   374.03 |   0.00 |   363.31 |   3.32
+  10 | B |   447.40 |   0.00 |   430.94 |   5.47
+
+# Aggregates (all 10 runs)
+AvgTotal:  407.09 ms
+MedTotal:  433.59 ms
+MinTotal:  360.50 ms
+MaxTotal:  457.17 ms
+StdDev:    42.44 ms
+AvgParse:  0.00 ms  (0.0%)
+AvgLJPEG:  393.47 ms  (96.7%)
+AvgCrop:   4.46 ms  (1.1%)
+OtherMs:   9.16 ms  (2.2%)
+
+FileA avg: 365.24 ms
+FileB avg: 448.94 ms

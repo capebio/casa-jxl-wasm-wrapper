@@ -121,12 +121,23 @@ fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -
 }
 
 /// Decode JXL bytes via jpegxl-rs. Returns min decode duration over RUNS.
+///
+/// Uses a multi-threaded `ThreadsRunner` so the decode side matches the encode
+/// side (which already threads). The previous single-threaded `decoder_builder()`
+/// left libjxl decode serial — the measured ~270-740ms decode was serial cost.
+/// libjxl MT decode is deterministic => byte-identical reconstruction.
 fn bench_jxl_decode(jxl_bytes: &[u8]) -> Option<Duration> {
     use jpegxl_rs::decode::decoder_builder;
+    use jpegxl_rs::ThreadsRunner;
 
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let mut best = Duration::MAX;
     for _ in 0..RUNS {
-        let decoder = decoder_builder().build().ok()?;
+        // Runner must outlive the decoder; declared first so it drops last.
+        let runner = ThreadsRunner::new(None, Some(threads))?;
+        let decoder = decoder_builder().parallel_runner(&runner).build().ok()?;
         let t = Instant::now();
         let _ = decoder.decode(jxl_bytes).ok()?;
         let elapsed = t.elapsed();
@@ -135,6 +146,17 @@ fn bench_jxl_decode(jxl_bytes: &[u8]) -> Option<Duration> {
         }
     }
     Some(best)
+}
+
+/// Shared JXL encode (direct-4ch preferred) + decode metrics for parity.
+/// Returns (encode_ms, jxl_size_kb, decode_ms). Dedupes the 4-line tail in bench_* fns.
+fn bench_jxl_roundtrip(rgba8: &[u8], rgb8_fb: &[u8], w: u32, h: u32) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let jxl = bench_jxl_encode_with_ch(rgba8, w, h, 4)
+        .or_else(|| bench_jxl_encode_with_ch(rgb8_fb, w, h, 3));
+    let ems = jxl.as_ref().map(|(d, _)| ms(*d));
+    let sz = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
+    let dms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    (ems, sz, dms)
 }
 
 // ─── Result collection ───────────────────────────────────────────────────────
@@ -249,15 +271,12 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4)
-        .or_else(|| bench_jxl_encode_with_ch(&_rgb8, w as u32, h as u32, 3));
-    let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
-    let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
-    let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone_dur;
-    let mpps = mp as f64 / 1e6 / (ms(demosaic_dur) / 1000.0);
+    let demosaic_s = ms(demosaic_dur) / 1000.0;
+    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
     println!("DNG  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -323,15 +342,12 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4)
-        .or_else(|| bench_jxl_encode_with_ch(&_rgb8, w as u32, h as u32, 3));
-    let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
-    let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
-    let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone_dur;
-    let mpps = mp as f64 / 1e6 / (ms(demosaic_dur) / 1000.0);
+    let demosaic_s = ms(demosaic_dur) / 1000.0;
+    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
     println!("CR2  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -382,8 +398,12 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     let w = info.width as usize;
     let h = info.height as usize;
     let mp = w * h;
-    let strip = &data[info.strip_offset as usize
-        ..info.strip_offset as usize + info.strip_byte_count as usize];
+    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
+    if strip_end > data.len() {
+        eprintln!("  [skip] {path} — strip out of bounds ({strip_end} > {})", data.len());
+        return;
+    }
+    let strip = &data[info.strip_offset as usize..strip_end];
 
     let (decomp_dur, raw) = bench(|| decompress::decompress(strip, w, h).expect("ORF decompress"));
     let (demosaic_dur, rgb16) = bench(|| demosaic::demosaic_rggb(&raw, w, h).expect("demosaic"));
@@ -398,15 +418,12 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let jxl = bench_jxl_encode_with_ch(&rgba8, w as u32, h as u32, 4)
-        .or_else(|| bench_jxl_encode_with_ch(&_rgb8, w as u32, h as u32, 3));
-    let encode_ms = jxl.as_ref().map(|(d, _)| ms(*d));
-    let jxl_size_kb = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
-    let decode_ms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = parse_dur + decomp_dur + demosaic_dur + tone_dur;
-    let mpps = mp as f64 / 1e6 / (ms(demosaic_dur) / 1000.0);
+    let demosaic_s = ms(demosaic_dur) / 1000.0;
+    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
     println!("ORF  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -450,7 +467,19 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
 fn main() {
     println!("=== RAW Decode Pipeline Benchmark ===");
     println!("Runs per file: {RUNS} (reporting minimum)");
-    println!("JXL: effort=3 (Falcon), quality={JXL_QUALITY}\n");
+    println!("JXL: effort=3 (Falcon), quality={JXL_QUALITY}");
+    // Loud guard: the tone/demosaic passes only multi-thread when the root
+    // `parallel` feature (-> raw-pipeline/parallel = rayon) is enabled. It is NOT
+    // a default (the root crate is also the WASM cdylib; rayon would break that
+    // build). Built without it, tone/demosaic run the single-threaded scalar path
+    // and timings are ~5-7x slower — which looks like "the optimisation was lost".
+    if cfg!(feature = "parallel") {
+        println!("Pipeline threading: ON (rayon, --features parallel)\n");
+    } else {
+        eprintln!("\n!!! WARNING: built WITHOUT `parallel` — tone/demosaic run SINGLE-THREADED.");
+        eprintln!("!!! Timings will be ~5-7x slower. Re-run with:");
+        eprintln!("!!!   .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\"\n");
+    }
 
     let test_dir = r"C:\Foo\raw-converter\tests";
     let mut rows: Vec<BenchRow> = Vec::new();
@@ -483,10 +512,11 @@ fn main() {
     }
 
     println!("=== Done ===");
-    println!("Tip: use --release + MSVC toolchain for representative numbers:");
-    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode 2>&1 | tee benchmark/results_latest.txt");
+    println!("Tip: use --release + MSVC toolchain for representative numbers.");
+    println!("     `parallel` is REQUIRED for representative tone/demosaic numbers (multi-threaded):");
+    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\" 2>&1 | tee benchmark/results_latest.txt");
     println!("For Tauri/WASM parity ref sets (per HANDOFF-tauri-parity-2026-06-03.md):");
-    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode");
+    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\"");
 
     if rows.is_empty() {
         eprintln!("[warn] no files processed; JSON not written");
@@ -612,25 +642,28 @@ fn env_or_default(key: &str, default: &str) -> String {
 }
 
 fn scan_orf_dir(root: &str, limit: usize, name_filter: Option<&str>) -> Vec<String> {
+    // Collect *all* matches, then sort, then truncate to `limit`. Selecting the
+    // first N in filesystem readdir order (which varies run-to-run) and only
+    // sorting afterwards yielded a non-reproducible file set; sort-then-truncate
+    // makes the benchmark corpus deterministic (lens 27: benchmark integrity).
     let mut files = Vec::new();
+    let filter_lc = name_filter.map(|f| f.to_lowercase()); // hoist out of the loop
     if let Ok(rd) = std::fs::read_dir(root) {
-        for e in rd {
-            if let Ok(e) = e {
-                let p = e.path();
-                if p.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("orf")) {
-                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    if let Some(f) = name_filter {
-                        if !name.to_lowercase().contains(&f.to_lowercase()) { continue; }
-                    }
-                    files.push(p.to_string_lossy().into_owned());
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("orf")) {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if let Some(f) = &filter_lc {
+                    if !name.to_lowercase().contains(f.as_str()) { continue; }
                 }
+                files.push(p.to_string_lossy().into_owned());
             }
-            if files.len() >= limit { break; }
         }
     } else {
         eprintln!("  [scan] root not readable: {root}");
     }
     files.sort();
+    files.truncate(limit);
     files
 }
 

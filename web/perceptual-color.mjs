@@ -1,0 +1,223 @@
+// web/perceptual-color.mjs
+// Pure, DOM-free perceptual-colour maths for the lightbox Perceptual Lens + Colour Probe + Selector.
+// Opponent space = CIELAB (D65) for v1, behind the five canonical operators so XYB/Rust can swap in later.
+// Spec: docs/superpowers/specs/2026-06-11-perceptual-lens-colour-probe-design.md
+
+// --- sRGB transfer function (component in [0,1]) ---
+export function srgbToLinear(c) {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+export function linearToSrgb(l) {
+  const v = l <= 0.0031308 ? 12.92 * l : 1.055 * Math.pow(l, 1 / 2.4) - 0.055;
+  return Math.min(1, Math.max(0, v));
+}
+
+// --- linear sRGB <-> XYZ (D65) ---
+export function linearRgbToXyz([r, g, b]) {
+  return [
+    0.4124564 * r + 0.3575761 * g + 0.1804375 * b,
+    0.2126729 * r + 0.7151522 * g + 0.0721750 * b,
+    0.0193339 * r + 0.1191920 * g + 0.9503041 * b,
+  ];
+}
+export function xyzToLinearRgb([x, y, z]) {
+  return [
+     3.2404542 * x - 1.5371385 * y - 0.4985314 * z,
+    -0.9692660 * x + 1.8760108 * y + 0.0415560 * z,
+     0.0556434 * x - 0.2040259 * y + 1.0572252 * z,
+  ];
+}
+
+// --- XYZ <-> CIELAB (D65 white) ---
+export const D65_XYZ = [0.95047, 1.0, 1.08883];
+const DELTA = 6 / 29;
+const fLab = (t) => (t > DELTA ** 3 ? Math.cbrt(t) : t / (3 * DELTA * DELTA) + 4 / 29);
+const fLabInv = (t) => (t > DELTA ? t ** 3 : 3 * DELTA * DELTA * (t - 4 / 29));
+
+export function xyzToLab([x, y, z]) {
+  const fx = fLab(x / D65_XYZ[0]), fy = fLab(y / D65_XYZ[1]), fz = fLab(z / D65_XYZ[2]);
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+export function labToXyz([L, a, b]) {
+  const fy = (L + 16) / 116, fx = fy + a / 500, fz = fy - b / 200;
+  return [D65_XYZ[0] * fLabInv(fx), D65_XYZ[1] * fLabInv(fy), D65_XYZ[2] * fLabInv(fz)];
+}
+
+// --- XYZ <-> LMS (Bradford cone response, for chromatic adaptation) ---
+export function xyzToLms([x, y, z]) {
+  return [
+     0.8951 * x + 0.2664 * y - 0.1614 * z,
+    -0.7502 * x + 1.7135 * y + 0.0367 * z,
+     0.0389 * x - 0.0685 * y + 1.0296 * z,
+  ];
+}
+export function lmsToXyz([l, m, s]) {
+  return [
+     0.9869929 * l - 0.1470543 * m + 0.1599627 * s,
+     0.4323053 * l + 0.5183603 * m + 0.0492912 * s,
+    -0.0085287 * l + 0.0400428 * m + 0.9684867 * s,
+  ];
+}
+
+export const CANONICAL_WHITE_LMS = xyzToLms(D65_XYZ);
+export const srgbU8ToLinear = (u8) => srgbToLinear(u8 / 255);
+
+// LMS' = LMS * lerp(1, canonical/scene, sigma)  (von Kries diagonal adaptation)
+export function vonKriesAdapt(lms, sceneWhiteLms, sigma) {
+  const out = [0, 0, 0];
+  for (let i = 0; i < 3; i++) {
+    const g = CANONICAL_WHITE_LMS[i] / Math.max(sceneWhiteLms[i], 1e-6);
+    out[i] = lms[i] * ((1 - sigma) + sigma * g);
+  }
+  return out;
+}
+
+// Scene white = blend of gray-world mean LMS and the mean LMS of the brightest non-clipped ~2%.
+export function estimateSceneWhiteLms(rgbaU8, w, h) {
+  const n = w * h;
+  const lumas = new Float32Array(n);
+  const xyzs = new Float32Array(n * 3);
+  let meanX = 0, meanY = 0, meanZ = 0, count = 0;
+  for (let i = 0; i < n; i++) {
+    const r = srgbU8ToLinear(rgbaU8[i * 4]), g = srgbU8ToLinear(rgbaU8[i * 4 + 1]), b = srgbU8ToLinear(rgbaU8[i * 4 + 2]);
+    const [X, Y, Z] = linearRgbToXyz([r, g, b]);
+    xyzs[i * 3] = X; xyzs[i * 3 + 1] = Y; xyzs[i * 3 + 2] = Z; lumas[i] = Y;
+    const clipped = rgbaU8[i * 4] >= 254 || rgbaU8[i * 4 + 1] >= 254 || rgbaU8[i * 4 + 2] >= 254;
+    if (!clipped) { meanX += X; meanY += Y; meanZ += Z; count++; }
+  }
+  count = Math.max(count, 1);
+  const grayWorld = [meanX / count, meanY / count, meanZ / count];
+
+  const idx = Array.from({ length: n }, (_, i) => i)
+    .filter((i) => !(rgbaU8[i * 4] >= 254 || rgbaU8[i * 4 + 1] >= 254 || rgbaU8[i * 4 + 2] >= 254))
+    .sort((a, b) => lumas[b] - lumas[a]);
+  const topN = Math.max(1, Math.floor(idx.length * 0.02));
+  let bX = 0, bY = 0, bZ = 0;
+  for (let k = 0; k < topN; k++) { const i = idx[k]; bX += xyzs[i * 3]; bY += xyzs[i * 3 + 1]; bZ += xyzs[i * 3 + 2]; }
+  const bright = [bX / topN, bY / topN, bZ / topN];
+
+  const blendXyz = [
+    0.5 * grayWorld[0] + 0.5 * bright[0],
+    0.5 * grayWorld[1] + 0.5 * bright[1],
+    0.5 * grayWorld[2] + 0.5 * bright[2],
+  ];
+  return xyzToLms(blendXyz).map((v) => Math.max(v, 1e-4));
+}
+
+// --- non-Riemannian chroma damping (Phi) + the five canonical operators ---
+export const C_KNEE = 30; // Lab chroma units where compression bites (tunable)
+export function phi(c, cKnee = C_KNEE) { return cKnee * Math.log(1 + c / cKnee); }
+
+export function dampChroma(L, a, b, sigma, { cKnee = C_KNEE } = {}) {
+  const c = Math.hypot(a, b);
+  if (c < 1e-9) return { L, a, b };
+  const cOut = (1 - sigma) * c + sigma * phi(c, cKnee);
+  const k = cOut / c;
+  return { L, a: a * k, b: b * k };
+}
+
+export const neutralOf = ([L]) => [L, 0, 0];
+export const hueClassOf = ([, a, b]) => Math.atan2(b, a) * 180 / Math.PI;
+export const saturationOf = ([, a, b]) => phi(Math.hypot(a, b));
+export const lightnessOf = ([L]) => L;
+export function phiDampedDistance(labA, labB) {
+  const d = Math.hypot(labA[0] - labB[0], labA[1] - labB[1], labA[2] - labB[2]);
+  return phi(d);
+}
+
+// --- shoulder-aware lightness spread-compression (never brightens highlights) ---
+function shoulder(L, Lshoulder) {
+  if (L <= Lshoulder) return 1;
+  return Math.max(0, 1 - (L - Lshoulder) / (100 - Lshoulder + 1e-6));
+}
+export function compressLightness(L, { Lmid, Lshoulder, k = 0.3 }, sigma) {
+  return L - sigma * k * (L - Lmid) * shoulder(L, Lshoulder);
+}
+export function estimateLightnessStats(rgbaU8, w, h) {
+  const n = w * h, Ls = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = srgbU8ToLinear(rgbaU8[i * 4]), g = srgbU8ToLinear(rgbaU8[i * 4 + 1]), b = srgbU8ToLinear(rgbaU8[i * 4 + 2]);
+    Ls[i] = xyzToLab(linearRgbToXyz([r, g, b]))[0];
+  }
+  const sorted = Array.from(Ls).sort((a, b) => a - b);
+  const pct = (p) => sorted[Math.min(n - 1, Math.floor(p * n))];
+  return { Lmid: pct(0.5), Lshoulder: pct(0.85), k: 0.3 };
+}
+
+// --- Lens render: sRGB -> linear -> XYZ -> LMS -> von Kries -> Lab -> damp + compress -> sRGB ---
+export function applyLens(rgbaU8, w, h, { strength = 1, lightness = true, cKnee = C_KNEE } = {}) {
+  const sigma = strength;
+  const out = new Uint8ClampedArray(rgbaU8.length);
+  const sceneWhite = estimateSceneWhiteLms(rgbaU8, w, h);
+  const Lstats = estimateLightnessStats(rgbaU8, w, h);
+  const n = w * h;
+  for (let i = 0; i < n; i++) {
+    const r = srgbU8ToLinear(rgbaU8[i * 4]), g = srgbU8ToLinear(rgbaU8[i * 4 + 1]), b = srgbU8ToLinear(rgbaU8[i * 4 + 2]);
+    const lms = vonKriesAdapt(xyzToLms(linearRgbToXyz([r, g, b])), sceneWhite, sigma);
+    const lab = xyzToLab(lmsToXyz(lms));
+    const dc = dampChroma(lab[0], lab[1], lab[2], sigma, { cKnee });
+    const L = lightness ? compressLightness(dc.L, Lstats, sigma) : dc.L;
+    const [R, G, B] = xyzToLinearRgb(labToXyz([L, dc.a, dc.b]));
+    out[i * 4] = Math.round(linearToSrgb(R) * 255);
+    out[i * 4 + 1] = Math.round(linearToSrgb(G) * 255);
+    out[i * 4 + 2] = Math.round(linearToSrgb(B) * 255);
+    out[i * 4 + 3] = rgbaU8[i * 4 + 3];
+  }
+  return out;
+}
+
+// --- selection core (probe + global colour-range selector share labBuf) ---
+export function normalizedLabBuffer(rgbaU8, w, h, sceneWhiteLms) {
+  const n = w * h, buf = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const r = srgbU8ToLinear(rgbaU8[i * 4]), g = srgbU8ToLinear(rgbaU8[i * 4 + 1]), b = srgbU8ToLinear(rgbaU8[i * 4 + 2]);
+    const lms = vonKriesAdapt(xyzToLms(linearRgbToXyz([r, g, b])), sceneWhiteLms, 1);
+    const lab = xyzToLab(lmsToXyz(lms));
+    buf[i * 3] = lab[0]; buf[i * 3 + 1] = lab[1]; buf[i * 3 + 2] = lab[2];
+  }
+  return buf;
+}
+
+export function selectByColour(labBuf, w, h, seedLab, tolerance) {
+  const n = w * h, mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const lab = [labBuf[i * 3], labBuf[i * 3 + 1], labBuf[i * 3 + 2]];
+    if (phiDampedDistance(lab, seedLab) <= tolerance) mask[i] = 1;
+  }
+  return mask;
+}
+
+export function unionMask(a, b) {
+  const out = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = (a[i] || b[i]) ? 1 : 0;
+  return out;
+}
+
+export function maskBorder(mask, w, h) {
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!mask[i]) continue;
+    const up = y > 0 && mask[i - w], dn = y < h - 1 && mask[i + w], lf = x > 0 && mask[i - 1], rt = x < w - 1 && mask[i + 1];
+    if (!(up && dn && lf && rt)) out[i] = 1; // touches an unselected/edge neighbour
+  }
+  return out;
+}
+
+export function maskCoverage(mask) {
+  let count = 0;
+  for (let i = 0; i < mask.length; i++) if (mask[i]) count++;
+  return { fraction: count / Math.max(mask.length, 1), regionCount: count };
+}
+
+// patch-mean probe over labBuf -> operator readout
+export function probe(labBuf, w, h, x, y, radius = 3) {
+  let L = 0, a = 0, b = 0, c = 0;
+  for (let dy = -radius; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) {
+    const px = x + dx, py = y + dy;
+    if (px < 0 || py < 0 || px >= w || py >= h) continue;
+    const i = py * w + px; L += labBuf[i * 3]; a += labBuf[i * 3 + 1]; b += labBuf[i * 3 + 2]; c++;
+  }
+  const lab = [L / c, a / c, b / c];
+  return { hueDeg: hueClassOf(lab), chroma: Math.hypot(lab[1], lab[2]), dampedSaturation: saturationOf(lab), lightness: lightnessOf(lab) };
+}

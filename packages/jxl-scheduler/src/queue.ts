@@ -28,6 +28,7 @@ export class PriorityQueue<T> {
     this._size++;
   }
 
+  /** @internal test support */
   // Peek at the highest-priority pending entry without removing it.
   peek(): QueueEntry<T> | null {
     if (this.visible.length > this._visibleHead) return this.visible[this._visibleHead] ?? null;
@@ -86,7 +87,14 @@ export class PriorityQueue<T> {
   // Swap-delete: O(1) removal by overwriting the target with the lane tail and
   // truncating. This relaxes strict FIFO within a lane for cancelled sessions
   // only — acceptable since cancel is a rare, user-driven path.
-  remove(sessionId: string): boolean {
+  // Priority hint helps bypass linear scan over irrelevant lanes.
+  remove(sessionId: string, priority?: Priority): boolean {
+    if (priority !== undefined) {
+      const head = priority === "visible" ? this._visibleHead
+        : priority === "near" ? this._nearHead : this._backgroundHead;
+      if (this.swapDelete(this.lane(priority), head, sessionId)) { this._size--; return true; }
+      // Hint may be stale (priority escalated after enqueue) — fall through to full scan.
+    }
     if (this.swapDelete(this.visible, this._visibleHead, sessionId)) { this._size--; return true; }
     if (this.swapDelete(this.near, this._nearHead, sessionId)) { this._size--; return true; }
     if (this.swapDelete(this.background, this._backgroundHead, sessionId)) { this._size--; return true; }
@@ -109,10 +117,19 @@ export class PriorityQueue<T> {
     return this._size;
   }
 
+  get laneSizes(): { visible: number; near: number; background: number } {
+    return {
+      visible: this.visible.length - this._visibleHead,
+      near: this.near.length - this._nearHead,
+      background: this.background.length - this._backgroundHead,
+    };
+  }
+
   get isEmpty(): boolean {
     return this._size === 0;
   }
 
+  /** @internal test support */
   backgroundIds(): string[] {
     const ids: string[] = [];
     for (let i = this._backgroundHead; i < this.background.length; i++) {

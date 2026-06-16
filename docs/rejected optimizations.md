@@ -1,238 +1,411 @@
 # Rejected Optimizations
 
-This document records optimization proposals that were evaluated and rejected.
+This document records optimizations proposed during pipeline reviews that were formally analyzed and rejected, along with the technical and empirical rationale.
 
-## `packages/jxl-scheduler/src/scheduler.ts`
-*   **Micro-batched send (1):** Requires protocol inversion; worker lacks `batch` message type.
-*   **Pull-based worker input (2):** Too large for isolated implementation; needs new backpressure model.
-*   **DispatchGroup fan-out collapse (3):** `forEachSubscriber` is zero-alloc. Merged list adds invalidation overhead on every common operation (`subscribe`/`cancelSession`), hurting the common case.
-*   **Numeric priority lanes (4):** The code churn of updating priority comparisons outweighs the marginal branch-prediction gain.
-*   **Smarter preemption victim selection (6) [Superseded]:** Resolved via `createdAt` in SessionRecord refactor.
-*   **Soft preemption via yield message (7):** WASM executes synchronously and cannot yield mid-push. Hard cancel is already soft between chunks. Pause/Resume is implemented structurally without this.
-*   **Promise-per-session alternatives (10):** Premature optimization. Needs profiling to prove promise churn is a bottleneck.
-*   **Worker warmup / adaptive concurrency (11, 12):** Requires real benchmark data to tune heuristics properly.
-*   **Latest-frame coalescing (14):** Speculative addition. Actual message cadence wasn't confirmed.
-*   **Dev-mode transfer guard (15):** Zero performance impact; not worth the complexity.
-*   **Flat merged handler list for dedupe (17):** Same as #3. O(1) per-subscriber lookup is fine; invalidation costs too much.
-*   **onMetrics callback (18):** Replaced by polling (`getMetrics()`). Callbacks add overhead at hot points (worker assignment, preemption).
-*   **Session-level timeoutMs (19):** `AbortSignal.any()` isn't universal. No current caller needs it.
-*   **Third priority lane ("near") (20):** Unused in logic; wiring it through is unjustified without a consumer.
-*   **DrainQueue batch-acquire (21):** Workers free asynchronously; nothing to collapse into a batch.
-*   **Worker reuse hinting (22):** Requires new API and proof that WASM module re-initialization (not cache) is a bottleneck.
-*   **Preemption rate limiting (23):** Not a realistic steady state with typical `maxWorkers` (4-8). Needs benchmarks.
-*   **All-or-Nothing Preemption (10):** Addressed structurally; pause/resume is now handled without abandoning the decode state.
+---
 
-## `packages/jxl-scheduler/src/pool.ts`
-*   **Worker warmup / adaptive concurrency (11, 12):** Same reasoning as above.
-*   **`PoolWorkerState` discriminated union (Round11-3b):** Splitting `activeSessionId` into a separate `state: "idle" | "reserved" | "active" | "cancelling"` field was rejected. The reserved sentinel constant (`RESERVED_SESSION_ID`) achieves the same lifecycle guard with no interface churn. Adding a state field would require updating `PoolWorker` in `types.ts` plus every read site in `scheduler.ts`, for no measurable correctness gain beyond what `bind()` validation already provides.
+## CR2-R1: SIMD for crop compaction (2026-06-15)
 
-## `packages/jxl-wasm/src/facade.ts`
-*   **onDrain callback on JxlDecoder (R1-1, R2-3, DH6-B):** Backpressure is managed at the scheduler/worker boundary. Pushing it into the WASM bridge duplicates logic at the wrong layer.
-*   **Shared pixel buffer pool (R1-2, R2-2, DH-9):** Cannot safely recycle transferred `ArrayBuffer`s without an explicit `release()` lifecycle that consumers don't implement.
-*   **decodeLowResFirst option (R1-3):** Covered by existing `downsample: 8` + `progressionTarget: "dc"` options.
-*   **decodeBatch() on facade (R1-4):** Wrong layer. Batching, dedupe, and preemption belong in the scheduler.
-*   **Adaptive quality/distance via connection (R1-7):** Network state is an application concern. Facade should not acquire it.
-*   **Worker-side header caching (R1-8, DH6-C):** Breaks the stateless worker model. Handled by `DedupeRegistry` in the scheduler.
-*   **ReadableStream/WritableStream APIs (R1-9, R2-5):** Thin ergonomic wrappers with no performance benefit. Better suited as separate utilities.
-*   **Error recovery / partial resume (R1-10):** Not supported by libjxl C API.
-*   **Streaming EncodeEvent from chunks() (R2-1):** Breaking API change. `getStats()` provides this without forcing hot-path unions.
-*   **refineRegion() on JxlDecoder (R2-4):** Requires caching massive compressed inputs post-decode. Caller should create a new session instead.
-*   **DeferredVoid class (R3-3):** Single-slot invariant is structurally guaranteed. Adds unnecessary allocation.
-*   **Pooled WASM input buffer (R3-7):** Unsafe for concurrent sessions sharing a module. Minor malloc savings don't justify the risk.
-*   **Option normalisation into constructor (R3-10):** Adds LOC and interfaces for cheap derivations. No measurable runtime win.
-*   **pushBorrowed() / pushOwned() methods (R3-13):** Bloats public API. The `copyInput` constructor option suffices for production.
-*   **Bounded input queue / async backpressure (R3-14, R3-15):** Redundant in worker path due to scheduler HWM. Deferred until direct-use consumers need it.
-*   **Cap first progressive push to 64 KB (R3-16):** Complicates inner loop for a rare case. Batching throughput outweighs latency in steady state.
-*   **Defensive Slicing (B-2, R4-4):** False claim. The hot path (`ArrayBuffer` from postMessage transfer) wraps with zero copy. `copyInput: false` handles the rest.
+**Target:** `cr2.rs` in-place crop loop (`copy_within` per row).  
+**Proposed:** Vectorize the row-copy loop with SIMD (wasm128 / AVX2) for faster crop.  
+**Rejected:** Crop is 1.0% of total CR2 decode time. LJPEG decode is 97%. Maximum achievable gain from a 10× speedup of the crop loop is 0.9% end-to-end. Thermal noise in benchmarks exceeds this by 50×. **Evidence:** benchmark run 2026-06-15, AvgCrop = 4.18 ms, AvgTotal = 398 ms.
 
-## `packages/jxl-wasm/src/bridge.cpp`
-*   **Redundant Copy (B-1):** False claim. `libjxl` writes directly into the `malloc`'d buffer via `JxlDecoderSetImageOutBuffer`. No intermediate `memcpy` exists.
+## CR2-R2: Concurrency inside CR2 decode (2026-06-15)
 
-## `packages/jxl-worker-browser/src/decode-handler.ts` & `packages/jxl-worker-node/src/decode-handler.ts`
-*   **Worker-side createImageBitmap (R4-2):** Invalid MIME type (`image/x-rgba8`), breaks 16-bit/float formats, and mixes DOM logic into an agnostic worker.
-*   **Pixel buffer pool for output (DH-2):** Transferred buffers detach. No safe return mechanism.
-*   **Progress event throttling (DH-3):** Suppresses intended progressive UX. No data showing message rate is a bottleneck.
-*   **Improved compactQueue() (DH-4):** Inline nulling already handles GC. Lower threshold increases array churn.
-*   **Global + rolling-window budget (DH-5, DH6-5):** `stageStartMs` already measures global elapsed time correctly.
-*   **Pixel dump on pause (DH-6):** Redundant. Last `decode_progress` already delivered the state.
-*   **Metrics expansion (DH-7, DH6-3):** Protocol churn for marginal debug value.
-*   **Error context enrichment (DH-8):** Requires protocol changes. Proposed byte math was incorrect.
-*   **Explicit dispose() method (DH-10):** Ambiguous. `onCancel()` and `finally` blocks already handle full teardown.
-*   **Preemption-aware soft yield (DH6-1):** Structurally unreachable. Pausing handles this cleanly.
-*   **Early header propagation hint (DH6-2):** Duplicates `decode_header` message.
-*   **Adaptive chunk batching (DH6-4):** Semantic no-op for WASM pushes, but degrades backpressure granularity.
-*   **JXL signature check on first chunk (DH6-6):** Duplicates libjxl logic. Fragile due to multiple valid container starts (bare vs BMFF).
-*   **Worker-side decode timeout (DH6-8):** Duplicates scheduler `budgetMs`. Wall-clock timeouts fail on valid slow networks.
-*   **Edge-triggered worker_drain (DH7-7):** Risks stalling if queue starts below HWM and never crosses the threshold.
-*   **compactQueue() threshold lowered to 32 / 0.4 (Grok-R12-1):** Already rejected as DH-4. Lower threshold increases array churn for no GC benefit; `copyWithin` (no-allocation compaction) was adopted but the threshold stays at 64 / 0.5.
-*   **takeNextChunk() compaction inlined (Grok-R12-2):** Missing the "fully-drained reset" path — without the unconditional `compactQueue()` call, queue indices grow unbounded until the 64-slot threshold fires. Non-null assertion on slot value removes the undefined-slot safety check.
-*   **feedDecoder budgetMs hoisting / single check (Grok-R12-3):** Removes the post-push budget check, regressing the fix added in the previous round. Hoisting `budgetMs` and `startMs` outside the loop saves trivial property dereferences.
-*   **AbortController signal to createDecoder (Grok-R12-4):** Requires changes to `wasm-loader.ts`, `facade.ts`, and `bridge.cpp`. `createDecoder` has no `signal` parameter in the current interface. Speculative cross-package change with no bridge support.
-*   **Pre-allocate chunk queue with new Array(32) (Grok-R12-5):** `new Array(32)` creates a sparse array with `length = 32`. The outer loop guard `length > readIndex` would be true on an empty queue; `takeNextChunk` would hit undefined holes immediately and return null incorrectly.
-*   **decode_progress throttling (Grok-R12-6):** Already rejected as DH-3. Suppresses progressive UX for 2–3 messages per decode.
-*   **failSession context / console.error (Grok-R12-7):** Protocol change for `context: any`; loose typing; `console.error` leaks internals. Same class of rejection as DH-8.
-*   **finishSession made async to await disposeActiveDecoder (Grok-R12-8):** Makes a synchronous function async — all callers (`onChunk`, `run` finally, `failSession`, `postBudgetExceeded`, `onCancel`) would need updating. Duplicates the existing disposal handled by `run()`'s `finally`. Introduces a race where `callbacks.onSessionEnd` (synchronous session-map removal in worker.ts) could interleave with async disposal. Rejected as DH-10 in spirit.
-*   **maybePostDrain() 4 ms check-interval gate (Grok-R13-1):** Claims to reduce `performance.now()` calls but still calls it unconditionally to evaluate the gate — net zero savings. Only skips `adaptiveHwm()` (a few arithmetic ops, not a real cost). Adds a second timing constant (`DRAIN_CHECK_INTERVAL = 4 ms`) that interacts confusingly with the existing `DRAIN_MIN_INTERVAL_MS = 8 ms`.
-*   **takeNextChunk() + compactQueue() reorganization (Grok-R13-2):** Threshold lowered from 64 → 48 (same rejection as DH-4 and Grok-R12-1). Moving threshold logic from `compactQueue()` to `takeNextChunk()` and stripping it from `compactQueue()` means the fully-drained reset never fires for sessions consuming fewer than 49 total chunks one-at-a-time — indices accumulate until threshold fires. The `copyWithin` pattern is already implemented; no net gain.
-*   **Hoist budgetMs/startMs in feedDecoder (Grok-R13-3):** V8 JIT caches property accesses on stable hidden classes; `this.opts.budgetMs` and `this.stageStartMs` dereferences are trivially cheap. The inline `budgetMs !== null` also diverges from `checkBudget()`'s `== null` — if `budgetMs` is `undefined`, `!== null` is `true` and the comparison proceeds against `undefined` (accidentally harmless but semantically wrong). Duplicating budget logic outside `checkBudget()` creates divergence risk.
-*   **Inline waitForChunk/waitForResume fast paths (Grok-R13-4):** V8 optimises trivially-resolved `Promise.resolve()` to near-zero cost. Inlining duplicates guard logic across call sites and degrades readability for immeasurable gain.
-*   **Adaptive EMA alpha for push-latency spikes (Grok-R13-5):** A single-spike response (α = 0.6 when pushMs > 1.5× EMA) risks overreacting to GC pauses (common 5–20 ms bumps), dropping HWM and creating unnecessary drain traffic. The scheduler already observes `latencyMs` per drain and adapts its own `pushHwm`; adaptive alpha would fight that signal. No benchmark data shows EMA lag is a real bottleneck.
-*   **Assign drain message to const before postMessage (Grok-R13-6):** Identical to inline object literal — same allocation, same hidden class, same JIT path. "Reuse object shape" is incorrect: a new object is created each call regardless of variable binding; objects sent via `postMessage` are not reused.
-*   **Make readDecoderEvents early exit "more prominent" (Grok-R13-7):** `if (this.isTerminal()) return;` is already the first statement in the `for await` body; all terminal switch branches already use `return`. Purely cosmetic with no behavioral change.
-*   **Dev-mode decode telemetry metric message (ChatGPT-R11-T):** Proposed posting a `{ type: "metric", metric: { name: "decode_queue_status", ... } }` message on every chunk. Same rejection as DH6-3 and DH-7: requires protocol changes (a new `decode_queue_status` name falls outside the closed `CodecMetric` union), and queue depth / latency are already observable from the `worker_drain` stream which now carries `queueDepth`, `queuedBytes`, and `adaptiveHwm` directly.
-*   **attachRegion helper (DH7-12):** Not enough call sites to justify abstraction.
+**Target:** `cr2.rs` LJPEG decode stage.  
+**Proposed:** Split the LJPEG strip into segments for parallel Huffman decode.  
+**Rejected:** Canon CR2 LJPEG is a single-strip stream with a continuous Huffman state. There are no restart markers (`0xFFD0`–`0xFFD7`) in Canon CR2 to define independent restart intervals. Parallel Huffman decode requires known restart boundaries. Without them, any split point is arbitrary and the dependencies between predictor states cross boundaries.  
+**Deferred:** A future pass could analyse whether Canon CR2 files consistently use restart intervals; if so, Rayon parallelism over intervals becomes feasible. Estimate: 3–4× on a 4-core machine, bringing FileA to ~90 ms.
 
-## `packages/jxl-cache/src/browser.ts` & `packages/jxl-cache/src/lru.ts`
-*   **OPFS FileSystemSyncAccessHandle (Cache-9):** Runs in main/shared thread; sync handles are dedicated-worker only.
-*   **Deduplication-Aware Caching (G2-1):** Wrong layer. Scheduler deduplicates; cache should not duplicate storage entries.
-*   **Memory Pressure-Aware Eviction (G2-2):** `performance.memorypressure` is non-standard/unimplemented. LRU limit is the correct mechanism.
-*   **Concurrent Set Coalescing (G2-3):** Inverts semantics. Last caller should win to ensure the freshest data is saved, not the first.
-*   **getStream() Helper (G2-5):** Cross-package coupling for a thin wrapper.
-*   **OPFS Write Retry Loop (G2-6):** Duplicates existing `QuotaExceededError` handling in `setPersistent`.
-*   **Cache-Aware DecodeSession Wrapper (G2-7):** Event-driven sessions cannot be easily faked from a static buffer without knowing protocol internals.
-*   **Persistent Cache Buffer Validation (G2-9):** Cache is content-agnostic. Leave format validation to libjxl.
+## CR2-R3: Per-stage budget resets (2026-06-15)
 
-## `packages/jxl-stream/src/browser.ts`
-*   **Adaptive Prefetch Depth (G2-8):** Multi-ahead prefetch risks queueing beyond worker limits (128MiB cap). The current one-ahead prefetch is correct.
+**Target:** `cr2.rs` decode phases.  
+**Proposed:** Add per-stage budget (timeout) to abort decode partway through.  
+**Rejected:** CR2 has no partial-decode use case in the current stack. The JXL pipeline uses budgets because JXL has a native progressive structure (passes). LJPEG has no such structure; a partial decode yields no usable pixel data.
 
-## `src/lib.rs` / `web/jxl-wrapper-lab.js` / `web/jxl-benchmark.js` (WASM Resizer)
-*   **`fast_image_resize` crate (Gemini spec):** Rejected. The crate's v2 API (`NonZeroU32`, `Image::from_slice_u8`, `Resizer::new(ResizeAlg::...)`) is outdated — v3 changed the interface. Introduces a new build dependency for no quality benefit over a box filter for thumbnails. Existing `downscale_rgb` pattern extended to 4 channels instead.
-*   **`ResizedImage` struct with `unsafe take_rgba` (Gemini spec):** Rejected. `take_rgba(self)` consumes the struct, dropping `self.pixels`; `Uint8Array::view` then points to freed memory — undefined behaviour. Correct pattern (`Vec<u8>` return via wasm-bindgen copy) follows `downscale_rgb` and is used by `downscale_rgba`.
+## CR2-R4: Pre-allocate IFD entry Vec with `Vec::with_capacity` (2026-06-15)
 
-## `packages/jxl-worker-node/src/worker.ts`
-*   **`worker_ready` backendStatus / protocol churn (Node-R1-9):** Extending `worker_ready` with `backendAvailable: boolean` or posting `worker_error` before `worker_ready` on total backend failure is protocol churn not justified by the failure frequency. The `backendPromise` singleton already ensures `backend` is set before `worker_ready` is posted; sessions that subsequently fail backend init report `CapabilityMissing` via the normal session-error channel. Reporting "wasm" as fallback type on total failure is a documented contract, not a misleading claim.
-*   **`cleanupFailedBackendStart(sessionId, isDecode: boolean)` helper (Node-R2-3):** Boolean-flag discriminator over two lines (`pendingDecodeStarts.delete` + `clearQueuedDecode` vs encode equivalent). Boolean-flag helpers are an anti-pattern and the abstraction adds indirection with no semantic gain. Three similar lines are better than a premature abstraction.
-*   **`safePostMessage` for shutdown ack (Node-R2-6):** `safePostMessage` checks `if (shuttingDown) return`. Since `doShutdown` sets `shuttingDown = true` at its first line, routing the ack through `safePostMessage` would silently suppress it — the parent would never receive `worker_shutdown_ack`. The ack must use `port.postMessage` directly.
+**Target:** Old `walk_ifd` → `Vec<(...)>`.  
+**Proposed:** Pre-size the Vec to the IFD entry count to avoid realloc.  
+**Not needed:** The IFD walker was replaced entirely with a zero-allocation visitor pattern (`visit_ifd`). There is no Vec to pre-size.
 
-## `src/lib.rs` — Raw Pipeline / WASM Entry Point (Round-2 batch)
+## D-5: JS-Side Speculative Chunk Coalescing
 
-*   **`Vec<u16>` lightbox/thumb caches (R2-2):** Changing `rgb16_lb` / `rgb16_thumb` from `Vec<u8>` (packed u16 LE) to `Vec<u16>` is an API break — callers receive `Uint8Array` today and would need to migrate to `Uint16Array`. `LookRenderer` (now implemented) unpacks packed bytes once in its constructor, so the wire format stays `Uint8Array` and callers are unaffected. The format change would eliminate `unpack_rgb16_le` inside the constructor but adds no correctness benefit. Deferred.
-*   **`process_orf_for_jxl` / `ExportDepth` enum (R2-5):** Stub that unconditionally delegates to `process_orf` adds a public wasm-bindgen entry point with no new behaviour. `pipeline::process_to_rgb16` (needed for the 16-bit path) does not exist. Deferred until the 16-bit pipeline stage is implemented; add the export function then.
-*   **Precompute downscale x/y ranges (R2-7):** Allocates `Vec<(usize, usize)>` per call; the floating-point work eliminated is O(dw) not O(dw×dh), so the gain is minor. The existing code already hoists y-bounds outside the dx loop. Deferred unless profiling identifies `downscale_rgb16_impl` as a bottleneck.
-*   **Checked allocation in `downscale_rgb16_impl` (R2-8):** `validate_orf_structure` already bounds-checks dimensions before `downscale_rgb16_impl` is called; the function is private and unreachable from unchecked paths. Adding `Result` return changes the internal call sites for marginal robustness gain. Deferred.
-*   **`take_rgba()` on `ProcessResult` (R2-10):** Convenience wrapper that calls `rgb_to_rgba(self.take_rgb())`. Adds a new wasm-bindgen entry point (binary size, glue code) for a one-liner callers can already compose from existing exports. Deferred.
-*   **Rayon feature gate for parallel downscale/demosaic (R2-15):** Correct approach (`#[cfg(feature = "parallel")]`), no action until the host app can set `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp`. SharedArrayBuffer is unavailable without those headers.
+### Proposed Optimization
+Coalesce multiple incoming small chunks using `Buffer.concat` before calling `decoder.push()` when the worker queue depth is high and the total size is under 1 MiB.
 
-## `packages/jxl-wasm/src/bridge.cpp`
-*   **Consume-as-you-go ring buffer for input_buf (A1 "better yet" from 2026-06 handoff):** Geometric capacity growth + separate `input_size`/`input_capacity` (already implemented with A1-labeled comments, initial 64 KiB, doubling with overflow guard) already cures the described O(n²) exact-grow realloc+full-memmove on every push. The optional "better yet" (release consumed prefixes into a ring so capacity stays bounded to the current unconsumed tail rather than image HWM) adds material complexity in the push hot path: either a two-segment view or explicit linearization before every JxlDecoderSetInput, plus extra head/tail accounting, while preserving the exact ReleaseInput + memmove tail compaction + input_generation increments + the opportunistic TryFlushProgressiveImage gate on NEED_MORE_INPUT. Those behaviors are load-bearing for the progressive visible-passes contract (DONOTCHANGE comments in bridge.cpp:2093, source-string assertions in progressive-detail.test.ts and progressive-visible-passes.test.ts). Tail memmove cost is O(remaining) (small for streaming JXL); overall memory is bounded by one codestream's size anyway. Risk of regressing "one non-final flush per input_generation" or the release-before-append guarantee outweighs the win. Geometric (consistent with every other outbuf_cap *= 2 in the same file) is the positive, minimal, already-landed cure. Ring rejected as net-negative.
-*   **Fixed-point Q8 seam blending (A3):** No floating-point "seam" ops in hot paths today. BoxDownscaleRgba8 (sidecar cascade, bridge:1084) is pure integer sum+count divide. Bilinear (facade) is in JS with float weights but no "seams". Animation blend_mode is libjxl JxlBlendMode (already integer enum). No evidence of non-determinism or perf issue on current paths; "seam" term undefined in this context. Adding Q8 would be churn for unclear gain (and would move math from JS where it's already table-hoisted per-axis). Rejected unless a precise site + before/after numbers + determinism requirement is supplied.
-*   **WASM64 static asserts (A6):** Defensive only. Current explicit u32 layouts + comments + HEAPU32/HEAP32 access are the contract. wasm64 not targeted; Emscripten here is 32-bit pointers. Asserts would be dead code or require cfg + dual builds for marginal future-proofing. Low ROI vs. the explicit packing already present.
+### Technical Rationale for Rejection
+1. **Speculative Memory & GC Overhead:** Performing `Buffer.concat` in JS-land introduces an additional heap allocation and an explicit memory-copy pass. For smaller chunk frequencies, the garbage collection pressure and intermediate buffer allocations can easily outweigh the savings of reducing JS-to-native FFI boundary crossings.
+2. **First-Paint Progression Latency:** Coalescing introduces speculative buffering delays, which directly conflicts with progressive JXL stream decoding goals. By delaying the execution of early chunks, we defer first-pixel metrics and progression events, which degrades progressive rendering performance on lossy or slow networks.
+3. **No Empirical Benchmark Support:** In alignment with `CLAUDE.md` foundational directives, heuristic or adaptive performance changes cannot be integrated without rigorous, isolated benchmark evidence proving a clear, net-positive improvement on standard test corpora under realistic constraints.
 
-## `packages/jxl-scheduler/src/scheduler.ts` (Additional)
-*   **Derive/restrict pthread counts (sched-1):** Wrong layer + mixing concerns. JS WorkerPool (maxWorkers, acquire/park/reap for preemption/dedupe) is scheduling. libjxl pthread runner (inside WASM module, sized at build via -sPTHREAD_POOL_SIZE + JxlThreadParallelRunner) is a capability of the decoder/encoder backend. Scheduler has no business reading "WASM pthread pool size" or throttling "parallel ingest pools" — that would duplicate capabilities, break the "stateless worker" model, and create new backpressure/affinity bugs. Bridge already does the right thing for the MT tier.
+---
 
-## `packages/jxl-worker-browser/src/worker.ts`
-*   **Generic `handleSessionStart<T>` with `SessionStartOptions<T>` (Facade-R1-1):** Correctness bug — success path never calls `pendingStarts.delete(sessionId)`. After `onSessionEnd` removes the session from `decodeSessions`, the resolved promise remains in `pendingDecodeStarts`, causing `hasAnySession()` to return `true` and subsequent reconnect attempts to get a false `DuplicateSession` error. Also: `SessionStartOptions<T>` interface adds cognitive overhead for ~20 lines of honest duplication between two clearly distinct functions.
-*   **Generic `queueMessage` / generic `flushQueuedMessages` (Facade-R1-2):** `Map<string, any[]>` parameter and `(handler: T, msg: any) => void` callback regress type safety relative to the existing explicit typed functions. The `instanceof DecodeHandler` check inside the flush callback leaks abstraction internals and signals the generic boundary is wrong.
-*   **`cleanupSession(sessionId)` helper (Facade-R1-3):** Deletes from all 6 maps unconditionally. Breaks `handleReleaseState`, which must retrieve handlers *before* deletion to call `onCancel` on them. Also crosses decode/encode ownership boundaries in per-path error cleanup, where only the relevant side's maps should be touched.
-*   **`cleanupSessionForAll()` for shutdown (Facade-R1-4):** Extracts 6 already-clear `.clear()` calls into a named function. No semantic gain; the existing inline block is self-evident.
-*   **`queuedDecodeMessages`/`queuedEncodeMessages` checks in `hasAnySession` (Facade-R1-5):** Queued message entries only exist while a pending start entry for the same session is present — they are created and deleted together. Adding checks for this impossible orphan state adds noise without enforcing the invariant at the write site. If the invariant can be violated, the fix belongs at the point of mutation.
-*   **Parameterized `errorType` in `queueDecodeMessage`/`queueEncodeMessage` (Facade-R1-6):** These are separate, type-specific functions; the hardcoded strings are correct by construction. Adding an `errorType` parameter adds indirection with no benefit unless the functions are merged into a generic — which was itself rejected.
+## E-1: Cumulative Byte-Boundary Tracking using `sidecarSizes`
 
-## `packages/jxl-session/src/decode-session.ts` (ChatGPT batch — decode-session lifecycle)
+### Proposed Optimization
+Track sidecar cumulative byte offsets in the node worker's `readEncoderChunks` loop by comparing cumulative bytes against `sidecarSizes` boundaries rather than assuming one chunk maps to one sidecar.
 
-Evaluated against `packages/jxl-session/src/decode-session.ts` on branch `Facade-Round1`. All 7 proposals were already implemented or not applicable; no code changes made.
+### Technical Rationale for Rejection
+1. **Conceptual Type/Domain Mismatch:** The proposed fix incorrectly treats `this.opts.sidecarSizes` as an array of *byte sizes*. In our system architecture, `sidecarSizes` represents the *pixel dimensions* (long-edge max pixel size, e.g., `[256, 512, 1024, 2048]`) of the requested thumbnails, not their compressed byte sizes.
+2. **Severe Data Corruption Hazard:** Comparing cumulative output bytes to pixel dimensions (e.g., checking if `totalBytes >= 256` or `512` bytes) would trigger false completions of sidecar offsets at extremely early stages of encoding. This would emit incorrect `sidecarOffsets` (e.g. 256 bytes instead of the actual compressed JXL size of several kilobytes), resulting in truncated/corrupted thumbnail image fetches when clients perform range-prefix requests.
+3. **Architecture Guarantee:** In both our WASM and native bindings, the encoding engine is guaranteed to yield each sidecar thumbnail as a single, discrete, complete JXL container chunk before the main codestream. Thus, tracking the end-of-chunk boundaries of the first `sidecarSizes.length` chunks is the mathematically correct and byte-accurate representation of cumulative sidecar boundaries.
 
-*   **Post-drain re-check in push() (ChatGPT-DS-1):** ALREADY IMPLEMENTED. Lines 103–111: early throw at entry (`terminated || closed`), re-check after `acquirePromise`, re-check after `waitForDrain()` with an inline comment. ChatGPT reviewed a stale version of the file.
-*   **Pre-aborted signal handling (ChatGPT-DS-2):** ALREADY IMPLEMENTED. Constructor checks `this.abortSignal.aborted` immediately (line 88) and calls `abortHandler()` synchronously. Listener registered only for non-aborted signals. `cleanup()` removes it on all terminal paths.
-*   **Unsubscribe scheduler onMessage handler (ChatGPT-DS-3):** NOT APPLICABLE. `Scheduler.onMessage(sessionId, handler)` returns `void` (`dist/scheduler.d.ts`). No unsubscribe function is returned; nothing to store or call.
-*   **Centralise finalisation into finish() / fail() (ChatGPT-DS-4):** ALREADY IMPLEMENTED. `finish()`, `finishWithError()`, and `fail()` all exist and call `cleanup()`. The proposal collapsed `finishWithError()` into `fail()`, which would break `decode_budget_exceeded` semantics — the frame stream must end gracefully (not fail) so consumers receive the partial frame while `done()` rejects.
-*   **Update lastInfo on decode_budget_exceeded (ChatGPT-DS-5):** ALREADY IMPLEMENTED. Line 185: `this.lastInfo = msg.info;` already present.
-*   **Move KNOWN_JXL_ERROR_CODES to module-level ReadonlySet (ChatGPT-DS-6):** ALREADY IMPLEMENTED. Lines 19–22: module-level `ReadonlySet<string>` already exists. ChatGPT reviewed a stale version.
-*   **try/catch on scheduler.send() in close() (ChatGPT-DS-7):** REJECTED. Labeled "optional" by the reviewer and conditional on `scheduler.send()` throwing. `send()` is fire-and-forget by design; no evidence it throws on dead sessions. CLAUDE.md: no error handling for scenarios that cannot happen.
+---
 
-## `packages/jxl-session/src/encode-session.ts` (ChatGPT batch — encode-session lifecycle)
+## RP-2026-06-12: Raw Pipeline Handback Rejections / Deferrals
 
-Evaluated against `packages/jxl-session/src/encode-session.ts` on branch `encoder`. Items 1, 3, 4 were implemented (post-await lifecycle rechecks, abort signal lifecycle, module-level error codes). Items 2, 5, 6, 7 rejected.
+### Proposed Optimization
+`decompress.rs`: add per-row callback / ROI-downsample hook during Olympus raw decompression.
 
-*   **Add comment to finish() explaining acquirePromise invariant (ChatGPT-ES-2):** REJECTED. The WHY is not non-obvious — the `if (this.terminated) return` guard two lines below the await is self-documenting. CLAUDE.md: no comments unless WHY would surprise a reader.
-*   **Immediate cancel() — call cancelSession before awaiting acquirePromise (ChatGPT-ES-5):** REJECTED. `decode-session.cancel()` (the reference implementation) uses the same await-before-cancel ordering. Changing the ordering without verifying scheduler behaviour for sessions mid-acquisition is an unwarranted protocol risk. The scheduler's `cancelSession` already handles all states (queued, running, paused); the await ensures the session is in a defined state before the cancel call, consistent with the established pattern.
-*   **Local variable extraction for iccProfile/exif/xmp before startMsg (ChatGPT-ES-6):** REJECTED. Cosmetic only. CLAUDE.md: no opportunistic refactors.
-*   **try/catch around onMetric callback (ChatGPT-ES-7):** REJECTED. `decode-session.ts` does not guard onMetric. Silent swallow hides user callback bugs without benefit; if onMetric throws, a session error is more informative than silent suppression. Same class of rejection as ChatGPT-DS-7.
+### Technical Rationale for Rejection
+1. **Public API surface too early:** Current callers only need full-frame rows or row-prefix decode. A callback API would freeze semantics around row parity, ownership, and cancellation before there is a proven cross-stage preview contract.
+2. **Pipeline boundary mismatch:** Useful ROI/downsample needs agreement across decompress, demosaic, and DNG metadata. Landing it in `decompress.rs` alone would create a one-off hook instead of a stable pipeline seam.
 
-## `packages/jxl-session/src/encode-session.ts` (Grok batch — encode-session polish)
+### Proposed Optimization
+`demosaic.rs`: fuse matrix math into MHC hot kernels, add SIMD path, add planar / `_into` output APIs, expose saliency as stable public contract, and add half-res crop-policy metadata.
 
-All 7 proposals rejected. No code changes.
+### Technical Rationale for Rejection
+1. **Correctness bug fixed first:** This pass prioritized phase-correct MHC because that fixes real misrendering. Kernel fusion/SIMD/public output-shape expansion are performance and API changes without benchmark evidence in this session.
+2. **API freeze risk:** Planar output, `_into` surfaces, and saliency contract would become long-lived public interfaces. They need explicit downstream consumers and naming decisions, not opportunistic introduction during a correctness pass.
+3. **Half-res policy needs product choice:** `floor`, `ceil`, or explicit crop metadata changes caller-visible behavior. No product decision was provided, so silent policy change would be riskier than deferral.
 
-*   **Abort handler via async cancel() fire-and-forget (Grok-ES-1a):** REJECTED. `decode-session.ts` calls `fail()` directly in the abort handler; async `cancel()` with `.catch(() => {})` adds scheduler cancellation in a fire-and-forget that cannot be awaited by the abort event. Diverges from the reference pattern without correctness benefit. The abort handler is synchronous by contract.
-*   **cancel() post-await recheck + signal-aware error message (Grok-ES-1b):** REJECTED. The updated `cancel()` has a JS operator-precedence bug: `reason ?? this.abortSignal?.aborted ? "Encode aborted by signal" : "Encode cancelled"` parses as `(reason ?? this.abortSignal?.aborted) ? "..." : "..."`, not the intended conditional on `.aborted`. `decode-session.cancel()` does not have the extra post-await recheck either; `scheduler.cancelSession()` on an already-terminated session is a no-op and `terminate()` has its own guard.
-*   **onChunk callback option (Grok-ES-2):** REJECTED. New public API requiring `EncodeOptions` type change in the `@casabio/jxl-core` package. `chunks()` already provides the same data as an `AsyncIterable`. YAGNI; no caller demonstrates the need.
+### Proposed Optimization
+`dng.rs` / `ljpeg.rs`: parsed `LjpegPlan`, shared decode plan across tiles, bounded tile queue / row-band sink, and structured `DngDecodePlan` provenance object.
 
-## `packages/jxl-pyramid` (Grok 5 handoff — observability, validation, API surface)
+### Technical Rationale for Rejection
+1. **Larger architectural refactor:** These changes cross multiple files and would rework tile decode ownership, cache lifetime, and DNG staging together. They are valid directions, but materially larger than the verified correctness fixes completed here.
+2. **Needs dedicated measurement pass:** The existing implementation now has safer truncation handling, strip support, endian correctness, phase-correct demosaic fallback, and scratch reuse. Further decode-plan work should be benchmarked against this new baseline.
+3. **Provenance object incomplete without callers:** `DngDecodePlan { wb_source, matrix_source, crop }` is useful only if surfaced through native/WASM boundary types and consumed by product code. That integration was not in scope here.
 
-**Full proposal REJECTED.** The handoff asked to implement logger + PyramidEvent + onEvent callback + ring buffer, PoolStats (p50/p99 + counts), recentErrors ring, new errors.ts with closed PyramidErrorCode list, Zod schemas + parsePyramidManifest (with caching), devAssert sprinkles in stitch/decode paths, unified `decode(source, region, opts)` entry with 'auto'|'single'|'parallel' strategy (removing the tri-state parallel? boolean), @deprecated wrappers, branded `tiledLevelSource`/`wholeLevelSource`, fixtures.ts move to test/ + CI grep blocker for absolute paths in src, nested pool ctor shape (capacity/timing/observability/lifecycle groups) with overload compat, "stop silent clamping" + RangeError on bad inputs, massive new exports (PyramidWorkerPool class, createPyramidWorkerPool, prewarmDefaultPool, dispose..., canUseParallel..., JxtcHeader, PyramidCache, parse..., PyramidError), and 8 new tests exercising the new surface.
+### Proposed Optimization
+`exif.rs`: add broad provenance/capture geometry fields (`wb_source`, `crop_origin`, pose-ish tags, serials) and string-pooling optimizations.
 
-**Rationale (grounded in project record + current tree state):**
+### Technical Rationale for Rejection
+1. **Upstream data not consistently available:** `OrfInfo` does not currently provide enough trustworthy source data for all of those fields.
+2. **No hot-path evidence:** String pooling / `Cow<'a, str>` would complicate serde-facing types without evidence that EXIF serialization is a real bottleneck.
 
-- Directly repeats multiple **rejected patterns**:
-  - Callbacks + event taxonomies + rings for observability: "onMetrics callback (18)", "Metrics expansion (DH-7, DH6-3)", "Dev-mode decode telemetry", "onMetric callback" — all rejected because "callbacks add overhead at hot points", "protocol churn for marginal debug value", "replaced by polling (getMetrics())".
-  - Pool ctor restructuring + grouped opts + "validate and throw": same class as rejected "Option normalisation into constructor", "Pooled WASM input buffer" risk/complexity, and "abstraction for cheap derivations".
-  - New public surface (unified decode + strategy, branded ctors, onEvent, getStats, recentErrors, many new exports + deprecations): "Breaking API change", "New API and proof that ... is a bottleneck", "bloats public API".
-  - Adding Zod + manifest validation at runtime in the decode package: "Cache is content-agnostic. Leave format validation to libjxl", "Persistent Cache Buffer Validation", "G2-9". Manifests come from controlled pyramid-ingest; this is not the hot decode path.
+### Proposed Optimization
+`ljpeg.rs`: replace current thread-local DHT cache, add planar decode API, and add restart-marker future hook now.
 
-- **Scope and timing**: Pyramid layer already received massive scrutiny (EpicCodeReview - jxl-pyramid.md, HANDOFF docs, Grok3 state machine + Abort work, Grok4 cache/stream-stitch). It is *not* a finished stable surface ready for "make the package shippable as a library, not a function bag." Adding nested ctors, event emission, stats windows, devAsserts, Zod, deprecation shims, and two new .ts files (types + errors) while the primary consumers are still internal web/ gallery code is opportunistic refactor, not surgical.
+### Technical Rationale for Rejection
+1. **Current cache no longer critical path:** This pass did not introduce parsed plans, so replacing the cache alone would be isolated churn with unclear gain.
+2. **Planar decode API premature:** No current caller requires a separate planar LJPEG layout after the completed fixes.
+3. **Restart markers remain corpus-driven:** Existing assets do not require restart-marker support. Carrying speculative parser complexity now would not improve current pipeline behavior.
 
-- Current tree already has partial good parts from prior work (PyramidError + codes live in decode-core.ts and are thrown in pool/decode-level; DecodeOptions comment from Grok4 already anticipated logger; parseWorkerReply is wired; chooseLevelForTarget and plan already do some validation; silent catches exist in exactly the places cited). The proposal wants to *expand* this into full telemetry surface + API unification without demonstrated need or numbers.
+---
 
-- No benchmark data or consumer usage in the handoff for p99 stats, event counts, or the value of the logger/onEvent surface (violates "Adaptive/heuristic changes require benchmark data. Do not add tunables without evidence").
+## 2026-06 RawPipeline Lenses Review (DecompressDemosaicDngExifLjpeg)
 
-- fixtures.ts move + path grep is pure hygiene and could be a 5-line isolated change. Bundling it with the rest makes the whole delta net-negative.
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
 
-**What would have been minimal positive deltas (if isolated, evidence-backed PRs later):**
-- Wire an optional `logger?: PyramidLogger` (no-op default) into the 5-6 most critical bare `catch {}` sites in tiled-decode-pool (the wiring cost is low; the full event taxonomy + rings + stats is the rejected part).
-- Centralize the existing PyramidError into errors.ts (minor).
-- If/when pyramid-ingest changes the manifest shape, add a tiny hand-written validator or keep validation in the ingest tool — do not pull Zod into the runtime package for this.
-- Export PyramidWorkerPool + a couple of already-used factories if real callers outside the package appear.
-- Keep the existing entry points; a `decode()` convenience can be added later if three call sites actually suffer.
+### Rejected from decompress.rs
+- Expose/document a "linearize" / black subtract post step in decompress (or pre in its callers).
+  Rationale: Black subtract is intentionally post-demosaic in pipeline::build_pre_lut (applied to demosaiced rgb16, with highlight shoulder and per-channel WB/gain). Pre-sub on bayer in decompress would require coordinated changes to all ORF paths (wasm src/lib.rs, crate compile tests) to pass black=0, else double-sub dark output. The ingest deliberately hands off "as captured" + metadata for consistency with DNG bayer path. Better as opt-in utility in demosaic (implemented) for advanced consumers. No behavior change here.
 
-The package's job is fast tiled JXTC viewport decode + worker pooling for large images under pan/zoom. Library-ification (branded everything, unified facade, full observability contract, Zod at the boundary) is future work after the mechanics have more bake time and external pressure. Rejected as written.
+- Any fill/alloc micro-opts (D3 one-fill, D6 skip zeroinit via MaybeUninit).
+  Rationale: Already explicitly rejected in the file's own tests (D3/D6 benches showed <1-3% or negative, plus WASM/unsafe/audit risk per project policy in CLAUDE.md). Current batch-fill + vec![0] is sound and sufficient.
 
-(Hand-off evaluated on current post-Grok4 tree: PyramidError exists, fixtures still exported from src, pool ctor flat, many bare catches, no Zod/logger/onEvent/stats, manifest is hand interfaces, createLevelSource is the entry.)
-*   **Throw on both distance+quality provided (Grok-ES-3):** REJECTED. Breaking behavioral change to existing callers. Current silent-precedence (distance wins) is explicit logic, not ambiguity. Requires a spec and explicit user decision.
-*   **state / totalBytes read-only getters (Grok-ES-4):** REJECTED. New public API surface with no current consumer. YAGNI.
-*   **pushPixels fast path via !acquirePromise (Grok-ES-5):** REJECTED. `acquirePromise` is assigned in the constructor and is always a `Promise<unknown>` — never `null` or `undefined`. `if (!this.acquirePromise)` is always `false`; the proposed fast path never executes. Logic bug. Also speculative; no profiling evidence that `acquirePromise` resolution is hot.
-*   **dispose() method (Grok-ES-6):** REJECTED. Matches already-rejected DH-10 ("Explicit dispose() method: Ambiguous. `onCancel()` and `finally` blocks already handle full teardown."). `terminate()` via `cancel()` or abort covers all teardown paths.
-*   **JSDoc class comment + richer error context (Grok-ES-7):** REJECTED. CLAUDE.md: comments only when WHY would surprise a reader. `@see EncodeSession` adds nothing beyond the class declaration. Commented-out `this.scheduler.removeMessageListener(this.id)` is code-smell; `onMessage` returns `void` with no unsubscribe API.
+### Rejected from ljpeg.rs
+- Specialize inner decode loop for cps==1 (CFA DNG common case) to elide comp loop/arrays.
+  Rationale: Marginal win (1-iteration loop, tiny fixed MAX=4 arrays; LLVM already specializes well). Would require near-dupe of the predictor/left/prev_row_first/ store logic for general cps<=4 support. Current hot path (peek/table/get_bits/extend) dominates; no benchmark evidence this is worth the maintenance surface. Rejected per "no speculative without evidence" and simplicity.
 
-## `packages/jxl-session/src/encode-session.ts` (Grok batch 2 — micro-opts)
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
 
-All 5 proposals rejected. No code changes.
+---
 
-*   **Reuse one-element pixelTransferList across pushPixels() calls (Grok-ES2-1):** REJECTED. `scheduler.send()` has a queued path (line 264 of `scheduler.ts`) that stores `{ msg, transfer }` into `record.pending.bufferedChunks` by reference. Reusing the same array means all buffered chunk entries share one reference — a second `pushPixels` call would overwrite `pixelTransferList[0]` and then `length = 0` would empty the array before the first chunk is flushed to the worker. Corrupts transfer lists for any session that pushes pixels before acquiring a worker. The proposal's own acceptance caveat ("only if scheduler.send() does not retain the transfer list") triggers: **it does retain it in the queued path**.
-*   **Post-waitForDrain() recheck (Grok-ES2-2):** ALREADY IMPLEMENTED. Lines 121–122 of `encode-session.ts`: `if (this.terminated || this.finished) return;` already follows `waitForDrain()`. Landed in the ChatGPT batch (suggestion 1).
-*   **switch instead of module-level ReadonlySet in normalizeCode() (Grok-ES2-3):** REJECTED. Module-level `KNOWN_JXL_ERROR_CODES: ReadonlySet<string>` is already in place — allocated once at module load, O(1) hash lookup, matches `decode-session.ts` pattern. Replacing it with a `switch` removes the pattern consistency with `decode-session` without performance benefit; both are O(1) for 10 entries.
-*   **Cache opts.onMetric in a class field (Grok-ES2-4):** REJECTED. Metric path is not hot. V8 hidden-class caching makes `this.opts.onMetric` and `this.onMetric` cost-equivalent. Speculative micro-opt with no profiling data.
-*   **Drop encode_first_byte_ready case (Grok-ES2-5):** REJECTED. The explicit case with its comment documents intentional protocol handling — the message type exists in the wire protocol, its timing data arrives redundantly via the `metric` message, and the comment says why this is correct. Removing it falls to `default: break`, functionally identical, but erases the explanation. CLAUDE.md: keep comments that document non-obvious protocol invariants.
+## F-1: Remove SSIMULACRA2 placeholder field from progressive byte benchmark
 
-## `web/jxl-progressive-decode.js` + `encode-session.ts` + `src/bin/blur_bench.rs` (Grok/GPT combined batch)
+### Proposed Optimization
+Remove the SSIMULACRA2 input/output surface from `web/jxl-progressive-byte-benchmark.js` until a real metric runner exists, or compute an asynchronous sidecar quality score immediately after every target encode.
 
-### `web/jxl-progressive-decode.js`
+### Technical Rationale for Rejection
+1. **Capability Signaling Matters:** The current UI already labels the metric as unavailable. Keeping the field preserves forward compatibility with the preset benchmark and export schema without falsely claiming a measured result.
+2. **No In-Loop Metric Runner Exists:** Computing a real score here would require introducing a new quality pipeline into a benchmark whose primary purpose is byte/timeline instrumentation. That would mix orthogonal concerns and inflate runtime variance.
+3. **Better Future Landing Point:** When a metric runner is added, it should be shared across benchmark surfaces and gated to finalist/post-pass analysis, not bolted onto this page alone.
 
-All 5 proposals ALREADY IMPLEMENTED. No code changes.
+---
 
-*   **AbortSignal support (1.1):** ALREADY IMPLEMENTED. `signal` param (line 9), pre-aborted check (lines 26–28), abort handler registered (lines 79–83), removed in `cleanup()` (line 87).
-*   **onFrame callback (1.2):** ALREADY IMPLEMENTED. `onFrame` param (line 8), called on `decode_progress` (line 104) and `decode_final` (line 112). `wantsProgressFrames` accounts for it (line 30).
-*   **getImageData() on normalizeFrame (1.3):** ALREADY IMPLEMENTED. `normalizeFrame` returns `getImageData()` method (lines 206–213 in current file).
-*   **currentStage / lastInfo exposure (nice-to-haves):** ALREADY IMPLEMENTED. `currentStage` tracked (lines 36, 111); `lastInfo` tracked (lines 35, 99, 110); both exposed as getters on the returned object (lines 145–146).
-*   **Smart default budgetMs:** Already defaults to `null` (line 16), which is the correct "no budget" sentinel — matches spec.
+## F-2: Move entire preset sweep engine into a Worker immediately
 
-### `encode-session.ts`
+### Proposed Optimization
+Move `web/jxl-preset-benchmark.js` sweep execution, resize, encode, decode, IDB restore, and RAW isolation wholesale into a Worker so timings are isolated from UI interference.
 
-All 4 proposals are re-submissions of previously rejected items. No code changes.
+### Technical Rationale for Rejection
+1. **Large Architectural Surface Area:** The current module mixes DOM wiring, IDB restoration, canvas resizing, WASM calls, and chart updates. A correct Worker migration is not a local optimization; it is a subsystem split with non-trivial message protocol design.
+2. **Browser Primitive Gaps:** Several code paths rely on main-thread-only or environment-sensitive primitives (`createImageBitmap`, `OffscreenCanvas`, file picker flows, chart refresh cadence, debug console integration). A rushed move would risk silent feature regressions.
+3. **Need Measured Baseline First:** Before paying migration cost, we need profiler evidence that main-thread interference is dominating current benchmark noise. The changes landed in this pass already remove avoidable cache misses and stale-result errors with much lower risk.
 
-*   **Strengthen AbortSignal / abort handler calls cancel() (2.1):** Re-submission of Grok-ES-1a. See that entry.
-*   **onChunk callback (2.2):** Re-submission of Grok-ES-2. See that entry.
-*   **Throw on both distance+quality (2.3):** Re-submission of Grok-ES-3. See that entry.
-*   **state / totalBytes getters (2.4):** Re-submission of Grok-ES-4. See that entry.
+---
 
-### `src/bin/blur_bench.rs`
+## P-1: Perceptual color model (non-Riemannian / HPCS / Molchanov) field in producedBySchema + makeProducedBy (pyramid-ingest schema.ts / manifest.ts)
 
-`v_pass_clarity` added to bench, benchmarked, and permanently rejected (2026-05-30).
+### Proposed Optimization
+Extend producedBy.encoder with optional `perceptual: { model: string, version: string }` (additive to the zod object) and emit it from makeProducedBy so manifests can record the advanced color science engine version. Intended to prep for the upcoming Schrödinger-geodesic / Los Alamos diminishing-returns / Molchanov tensor flat-space LookRenderer.
 
-*   **v_pass_clarity added to blur_bench.rs (ACCEPTED):** 8-wide unrolled vertical pass with separate scalar tail added as candidate variant. (`src/bin/blur_bench.rs`)
-*   **Production integration of v_pass_clarity (REJECTED — benchmark data 2026-05-30):** `cargo run --bin blur_bench --release` shows `v_pass_clarity` loses at both sizes:
-    - 1024×1024 v-pass only: clarity-8 **268ms** vs tiled-64 **171ms** (56% slower)
-    - 5240×3912 v-pass only: clarity-8 **5518ms** vs tiled-64 **4074ms** (35% slower; also 12% slower than naive 4921ms)
-    - 5240×3912 full round-trip: clarity-8 **10037ms** vs tiled-128 **8362ms** (20% slower)
-    The fixed LANE=8 hypothesis was wrong — LLVM vectorises the larger `[[f32;3]; TILE]` accumulator in `v_pass_tiled::<64/128>` more efficiently. The "8-12% gain" claim was opposite to reality.
-    **Production recommendation for `../raw-converter-tauri/raw-pipeline`:** use `v_pass_tiled::<128>` for `separable_blur` (full round-trip winner at both scales: 420ms at 1 MP, 8362ms at 20.5 MP).
+### Technical Rationale for Rejection (in context of the JPegXL pipeline)
+1. **Wrong layer / creation vs. paint time:** The JPegXL pipeline (jxl-stream/session/scheduler/worker/decode-handler/facade/bridge.cpp + progressive single-pass checkpoints) consumes the pyramids *produced* by this ingest cluster. The described engine (sensor-sharpen B + log transform for flat Euclidean, Molchanov parallelogram residuals + A_tensor, hybrid Riemannian spring + Los Alamos f(c) curves) is explicitly specified to live in `LookRenderer` under the *hot per-pixel apply_tone_math loop* in raw-pipeline for *runtime* illumination-invariant adjustments "during progressive JXL paints" in the lightbox. It is a decode/paint-time concern, not an ingest-time encoder configuration.
+
+2. **producedBy mis-semantics:** producedBy (and its encoder.effort/quality.grid/big/proxy) describes *how the JXL asset bytes were created* at pyramid build time (the ladder + jxl encode settings). Recording a runtime perceptual model here would be factually incorrect for current (and intended) neutral ingest path (ZERO_LOOK for raw, direct transcode for jpg). Current design correctly keeps the base pyramids look-neutral so that the flat-space engine can do correct math at view time without double-applying.
+
+3. **Speculative / premature per project rules:** The lens states "we intend to implement", "for the upcoming phase", "design a highly optimized SIMD or LUT". No implementation exists yet in the Rust/WASM LookRenderer. Adding schema surface, producedBy emission, and (to be useful) wiring through buildManifest now is exactly the class of "speculative abstraction" and "no opportunistic refactors" that the CLAUDE.md / AGENTS.md / rejected-optimizations history repeatedly reject. Surface would need to be maintained forever even if the integration story changes (e.g. the model lives only in JXL metadata or a separate render-intent sidecar).
+
+4. **Additive but still cost:** Although the discriminated manifest schema tolerates extra keys and the field can be omitted today, updating the authoritative producedBySchema + parse paths + makeProducedBy still expands the contract that every manifest reader (rebuild, gc, index, CLI, potentially external tools) must understand. The flexible `metadata?: Record<unknown>` already on Manifest is the correct escape hatch for any per-image render notes until the engine lands and a deliberate ingest-vs-runtime decision is made.
+
+5. **Cross-file and future integration risk:** Realizing the proposal would also require edits in manifest.ts (buildManifest/makeProducedBy call) and potentially callers in ingest.ts. Even within the 5-file rule the change is not self-contained and anticipates an architecture that has not been reviewed against the progressive decode invariants, budget, or LookRenderer hot loop.
+
+Decision: rejected. Do not extend producedBy or the encoder schema for this. When the Rust engine lands and the exact versioning + whether any ingest-time recording/baking is desired is decided, a fresh proposal with benchmarks and layer analysis can be made.
+
+---
+
+## G5-S1: Rename createProgressiveSession / add progressiveContext / full abort+error surface (web/jxl-progressive-session.js)
+
+### Proposed Optimization
+Rename the session factory (name implies progressive but is generic backend/source cache). Add setProgressiveOptions / progressiveContext passthrough, abort support on loadSource, onError hook, make ensureSource resolve to {error?} record instead of reject, and carry AR/ perceptual hints.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **Cosmetic rename + opportunistic churn:** Current name is accurate for its actual role (a thin source+backend holder used by jxl-progressive.js bench variants and thumb encoding). Gallery path uses direct file load + decoder, not this session. Renaming touches creation sites, 3+ test files, docs, and provides zero efficiency/speed/perf/bugfix. Violates "surgical changes; match existing style; no opportunistic refactors".
+2. **Abort / error surface changes contract for callers:** loadSource is supplied by the page (loadRandomSource etc). Adding abort token or forcing {error} record would require edits in jxl-progressive.js + all tests + any future loadSource providers. No observed bug report or race repro in current ensure/reload usage (single session for bench). Per CLAUDE: "no speculative abstractions", "weak verification" if added without failing case.
+3. **Per-file / AR context / perceptual passthrough premature:** This session is not per-file (gallery has N files, one shared for encode policy in bench). The advanced color (Lens17) + AR/LLM surfaces belong on the *display* side (lightbox + pack + draw in gallery) or in Rust LookRenderer, not a source loader for bench encoding. Adding here would be wrong layer. Future when the Rust engine and lightbox usage exist, a deliberate extension can be proposed with the actual call sites.
+4. **Policy integration was the only +ve delta:** We implemented the narrow, high-cohesion piece (optional policy + chooseEncodeBackend used by the single caller in progressive.js). The rest were rejected as scope creep without evidence.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+---
+
+## G5-C1: Full hole-safe next/prev rewrite + onVisibleChange + manifest/tile descriptors + error/partial tracking (web/jxl-progressive-gallery-coordinator.js)
+
+### Proposed Optimization
+Rewrite next/prev to skip holes using maxIndex tracking; accept onVisibleChange callback; add manifest/tile support; track error/partial frames in series entries; unify with lightbox framesByFile.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **next/prev not on hot path + tests assume sequential:** Gallery uses coordinator only for visibleFrames (synced min-count for thumbs) + register/markClosed. next/prev only exercised in its own unit test with sequential 0/1/2 registration (frameIndex++ in push). visibleFrames already does .filter(Boolean). Changing % logic risks test deltas and adds complexity for a non-used API in the actual gallery pipeline (lightbox does its own wrap math on framesByFile arrays).
+2. **onVisibleChange / manifest / tile / error state:** No current consumer (reRenderAll is explicit in gallery.js). Adding would be speculative API. Tile descriptors / manifests are mentioned in charter but belong with decode events or jxl-session layer, not this post-arrival sync counter. Error/partial already surfaced via the decoder 'error' / 'final' paths and logged in gallery; duplicating into coordinator violates "session protocol knowledge must not leak".
+3. **Duplication with lightbox:** framesByFile is intentionally the *full history* (for lightbox full nav), coordinator is the *synced visible count* view. They serve different consumers (thumbs vs modal). Unifying would be larger refactor, not surgical, and not required for the visible sync correctness.
+4. **Cache + priorityTargets delivered the value:** We added the alloc reduction (dirty cache on register/close) and getPriorityTargets() + accessors. These are the efficiency + "manage priority" surfaces without overbuilding.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+---
+
+## G5-F1: Always forceCopy in pack + broad format/16-bit/float/YUV support now (web/jxl-progressive-gallery-frame.js)
+
+### Proposed Optimization
+Default to forceCopy for safety on 0-copy view path (detached buffer hazard); expand pack immediately to support rgb8/16/float/YUV output formats for ML/CV; add tests.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **0-copy view is the documented win (Lens 20 "pointer move"):** The fast path (when stride matches) reuses the buffer view exactly to avoid 60 MiB+ copies on high-res progressive frames. Forcing copy by default would regress perf for the common tight case and for gallery thumbs. We added *optional* forceCopy (and used the view path in wired draw) — the correct balance.
+2. **Format expansion speculative:** Current decoder events + gallery enriched frames are rgba8 (or with stride). No ML/CV consumer, no 16-bit path active in this gallery (see perceptual-color.mjs for other). Adding branches now bloats the hot row loop without callers or benchmarks. pack test only exercises rgba8 stride. Per rules: "adaptive/heuristic... require benchmark data. Do not add tunables without evidence."
+3. **Wiring + ROI + constancy stub landed instead:** We integrated pack into drawFrameToCanvas (fixing latent stride bug in gallery thumbs + lightbox paints, deduping manual view code) and added the options bag + roi + constancy hook. That delivers immediate pipeline correctness + future surface with zero risk.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+---
+
+## G5-L1: Zoom/pan state machine + full cancel/boost emission + reactivity on framesByFile (web/jxl-progressive-gallery-lightbox.js)
+
+### Proposed Optimization
+Add zoom/pan fields + listeners; on open/handle emit cancel/deeper requests or priority to scheduler; make framesByFile reactive so lightbox auto-updates when new frames pushed.
+
+### Technical Rationale for Rejection (in context of the pipeline)
+1. **This gallery/lightbox has no zoom/pan:** Current UI is thumb strips + modal full-frame lightbox with arrow/ctrl-arrow nav only. No canvas pan/scale, no wheel zoom. Adding state/listeners would be dead code + DOM assumptions. The "priority shifts when zooming/panning" in the Group 5 charter is aspirational; actual priority lives in packages/jxl-scheduler (preemption/dedup). Emitting from here would be cross-layer violation without a defined protocol.
+2. **Cancel/boost belongs at scheduler/worker boundary:** Per CLAUDE invariants: "Preemption is scheduler-only", "Backpressure lives at the scheduler/worker boundary". Lightbox open/nav already drives which frames are "attended" (we added getAttended + focusRegion + constancy). Gallery starts all decodes concurrently via the push; there is no "deeper frame request" API exposed from the decoder in use here. Adding would require touching jxl-progressive-decode + decoder, outside the allowed cohesion for this item.
+3. **Reactivity unnecessary:** framesByFile is mutated by the event loop in gallery (push then register + reRender). Lightbox queries on key / open. The max visited fix + perFile map delivers the progressive guarantee. Observers or proxies would add GC/alloc without measured win.
+4. **Core delivered:** The wrap-bug fix (real correctness), constancy/attended/focus surfaces (for Lens 17/12/16), and the return value are in. When a zoom/pan lightbox or priority-aware decode path exists, the attended hook is the attachment point.
+
+If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
+
+## Group 2 (jxl-session tiered contexts) rejections from 2026-06-13 plan implementation pass
+
+### G2-F3: Abortable / wakeable grace window for visible MT/ST fallback (BrowserContextTierEvent.md Agent 1/3 + finding 3)
+
+**Proposed Optimization**  
+Make the visible grace sleep in createTieredSchedulerRouter abortable (tie to session AbortSignal) and/or wake early on pool metric / budget release so visible work does not pay full 16ms when capacity frees during the wait. Pass shutdown signal too.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. The grace is intentionally tiny (16ms default). Benefit is marginal compared to full decode budgets (seconds) and the cost of visible work starving.  
+2. Making the router.pick() promise respect abort requires non-local changes: modify createTieredSchedulerRouter signature or context to accept signal, make the injected sleep cancellable (AbortController race), update TieredJxlContextImpl, and ensure Decode/EncodeSessionImpl ctor + acquirePromise chain correctly short-circuits before scheduler assignment. This risks new races in the admission/acquire path (see scheduler abortAcquisition, cancelledDuringAcquisition sets).  
+3. Current abort handling in decode-session is deliberately pre-acquire for already-aborted (DS-3) and post for handler. Injecting into the pick grace adds complexity across session/context-base layers without touching the core preemption/budget invariants.  
+4. Reassessed as low-ROI vs risk; 16ms pay is acceptable for the contention fallback feature. If grace is ever raised significantly, revisit. Touches more than Group 2 files for full cohesion.
+
+### G2-F4: Runtime enforcement + bounded buffer for AsyncEventStream single-consumer (finding 4, Layer 3)
+
+**Proposed Optimization**  
+Add active iterator guard (throw on second [Symbol.asyncIterator] while one live) and/or max buffer size with drop-oldest or error on overflow for frames/metrics.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. Contract is already explicit and strong in comments (single-consumer, return() clears). Existing guards (returned flag, clear on return, single waiter slot) + compaction hygiene are in place and tested.  
+2. Runtime second-iterator detection is fragile in async (return() timing, multiple microtask iterators). Adding would be new public error mode for misuse.  
+3. Bounding buffer or drop policy is adjacent to previously rejected ideas around pixel buffer pools, compactQueue thresholds <64, and pre-alloc (see R1-2, DH-4, R12-5 in CLAUDE.md and this file). Buffer growth is consumer-driven (UI must drain or cancel); the layer is not the right place for global memory pressure.  
+4. Reassessed: document + contract is sufficient. Changes would be non-surgical and risk perf/compat for legitimate single-consumer progressive use.
+
+### G2-F5: Centralized capability probe + readiness surface (finding 5, Layer 2)
+
+**Proposed Optimization**  
+Move probe out of CapabilityAwareContext per-instance fire-and-forget into shared/cache, expose JxlContext.ready() or probeSettled or capabilities promise so callers (and the tier router) can wait for real SIMD/threads/SAB data before first decode.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. Explicit design decision D-002: capabilities() is sync per spec/contract; async probe is side-effect update. Conservative default is the floor.  
+2. Adding readiness would be additive public API on JxlContext (affects all callers, browser + node), require coordination with @casabio/jxl-capabilities, and change when MT decision in Tiered can prefer real caps vs default.  
+3. Current probe is cheap (one-time dynamic import) and "good enough" for the use (caps used for telemetry/diagnostics more than hard routing). Race is documented.  
+4. Reassessed: not a bug fix, would be feature/API change. Not surgical.
+
+### G2-F6: Smarter (hysteresis/age/saliency) MT routing policy (finding 6, Layer 2)
+
+**Proposed Optimization**  
+Extend shouldUseMtImmediately + router.pick with hysteresis, queued age, work-class hints from DecodeOptions, or saliency to avoid thrashing between MT/ST under varying load.
+
+**Technical Rationale for Rejection (in context of the pipeline)**  
+1. The policy is intentionally minimal and delegates real contention to CoreBudget + scheduler pool metrics / preemption (which already do sophisticated victim selection).  
+2. Adding state (hysteresis counters) or work-class would either live in context-base (dupe across schedulers) or require new fields on ContextOptions/DecodeOptions flowing to router — cross-layer and changes contract.  
+3. "Too binary" was noted as future in the original design doc; any heuristic requires benchmark data per CLAUDE rules ("Do not add tunables without evidence").  
+4. Reassessed: belongs in scheduler or at T-INT caller level once saliency/priority signals are richer. Not positive surgical edit here.
+
+(Grace, stream, probe, and policy rejections recorded after reassessment against full pipeline position and CLAUDE invariants. The two contract items (URL + node) were the only ones passing the "positive change" bar for immediate surgical application.)
+
+---
+
+## 2026-06-15T01:35Z — facade.ts / decode-handler.ts (multi-lens review)
+
+**REJECTED: Wire partial-frame-on-error from facade `events()` to decode-handler.**
+decode-handler already reads `event.partialPixels`/`partialInfo`/`partialPixelStride`/`partialStage`
+on the `error` arm, but facade emits only `{code,message}`, so a truncated progressive decode
+discards all already-flushed passes. Wiring it was rejected:
+1. Safe capture of the last good pass requires a per-pass full-frame **copy** on the hot progressive
+   path (the emitted frame is transferred/detached by the consumer, so it cannot be re-read at error
+   time) — this regresses the deliberate zero-extra-copy design.
+2. The alternative, calling `dec_take_flushed` at error time, runs against a libjxl decoder already
+   in an error state: post-error flush output is undefined and may be corrupt — fails the
+   output-fidelity gate (lens 24). Cannot prove the salvaged pixels are valid.
+   Verdict: genuine latent feature, but blocked on a bridge-level `dec_take_partial` that guarantees
+   a clean last-rendered frame. Documented as a recommendation in `docs/FacadeDecodeHandler - DONE.md`,
+   not shipped.
+
+**REJECTED: Defensive-copy the `takeBufferView` subarray (encode chunk drain) to remove the
+"valid same-tick only" footgun.** By design (documented at the function). Adding a copy regresses
+the encode drain that the zero-copy view exists to optimise; the sole consumer (encode-handler)
+already uses it synchronously before the next bridge call. No change.
+
+**ACCEPTED (for the record, applied this pass):** detectTier crossOriginIsolated gate; module-promise
+poison clear-on-reject; eventsOneShot OOM guard; ptr1 leak fix in computeButteraugli/Psnr/Ssim;
+floatFromI32Bits shared scratch.
+
+---
+
+## 2026-06-15T02:35Z — facade.ts / bridge.cpp (final-optimization multi-lens review)
+
+**REJECTED: Box-filter decode-time downsampling (replace nearest-neighbour in DownsampleRgba +
+applyRegionAndDownsample).** A genuine *quality* improvement (less aliasing on shrunk field images,
+relevant to the biodiversity platform), but it changes pixel output and trades decode speed. Per the
+output-fidelity lens it must be gated on golden-image/SSIM diffs AND the user's own viewer (see
+feedback: RGB-mean parity != user's viewer). Not a silent in-pass edit. Documented as a
+fidelity-gated recommendation in docs/FacadeBridge - DONE.md.
+
+**REJECTED: Fixed-point (8.8) rewrite of bilinearResize rgba16/rgbaf32 branches.** The rgba8 branch
+uses 8.8 fixed-point; extending it to 16-bit/float would change rounding and thus pixel values for
+high-bit-depth output — fidelity risk on exactly the high-bit-depth path the platform cares about,
+for a marginal ALU saving. The float path is correct; left unchanged. (rgba8 got only a pure,
+output-identical weight hoist — F-1.)
+
+**REJECTED: Per-call alloc of x-weight array in bilinearResize as a cross-frame cache.** Considered
+storing the hoisted xtIs[] on the ResizePlan for reuse across frames. Rejected: ResizePlan already
+caches the resize axes; adding a third parallel array widens the plan contract for a sub-percent
+gain and risks staleness if dstW changes. The per-call Int32Array(dstW) is cheap relative to the
+dstW×dstH truncations it removes.
+
+**ACCEPTED (applied this pass):** B-1 Butteraugli sRGB→linear 256-entry LUT (bit-identical, ~9.3×
+on the gamma-decode stage; flip-flop benchmark/butteraugli-gamma-lut.mjs, 0/6.22M mismatches);
+B-2 planar RGB16 direct u16 stores; F-1 bilinearResize rgba8 column-weight hoist.
+
+---
+
+## 2026-06-15T02:54Z — encodeRgb16Planar / jxl_wasm_encode_rgb16_planar (planar seam)
+
+**DEFERRED (recommend, not done): fmt==4 "rgb16 passthrough" in EncodeRgba.** The planar encode
+now interleaves a 4-channel RGBA16 buffer (opaque alpha) so EncodeRgba(fmt=1, has_alpha=0)'s
+StripAlphaToRgb reads the correct 4-channel stride. The zero-extra-copy ideal would be a 3-channel
+RGB16 buffer fed through a no-strip passthrough (like the existing fmt==3 rgb8 path but 16-bit).
+NOT done now: it edits the shared central encoder's channel math (FormatToDataType / FormatToBits /
+bytes_per_channel ternaries repeated across EncodeRgbaWithMetadata, incl. the initial_size calc) and
+there is no way to compile-validate without an emscripten rebuild. Editing the shared encoder blind
+risks silently corrupting every rgba16/rgbaf32 encode on the next build. Do it WITH a build to
+validate; until then the self-contained 4-channel fix is correct.
+
+**FIXED (this pass):** facade.encodeRgb16Planar was dead (undefined ensureU16Heap/takeJxlBuffer →
+ReferenceError); resurrected. bridge.jxl_wasm_encode_rgb16_planar built a 3-channel buffer then let
+EncodeRgba's has_alpha=0 strip read it as 4-channel (mis-read + heap over-read) → now builds a
+4-channel RGBA16 buffer that the strip consumes correctly. Both were required together: the facade
+fix makes the (previously unreachable) bridge bug live.
+
+---
+
+## 2026-06-15 — jxl-progressive-byte-benchmark-core.js + jxl-progressive-byte-metrics.js (multi-lens review)
+
+**Rejected (deferred): Wire WASM `buildSeriesAsync` (psnrFn/ssimFn) into core's sync `buildSeries` call.**
+The "2× free" perceptual path. Requires importing a PerceptualComparer and confirmed WASM perceptual
+exports, not reliably present in the Node benchmark context (cf. encodeRgb16Planar / dist-rebuild gap).
+High-value but blocked on dist rebuild; deferred, not discarded. Timing hooks already in place to measure
+once dist exists.
+
+**Rejected: Apply the `doFull` adaptive skip to SSIM (as already done for butteraugli).**
+Skipping SSIM on a cutoff inserts null; `firstGoodSsimBytes` uses `.find(e => e.ssim != null && e.ssim >= SSIM_GOOD)`.
+A skipped cutoff at the true threshold would push the reported "first good" later — a fidelity regression not
+gated by a golden/SSIM diff (lens 24). Not worth the SSIM cost saved.
+
+**Rejected: Merge `buildSeries` into `buildSeriesAsync` to kill the ~40-line duplication.**
+The sync variant cannot await the WASM hooks and is the hot path core calls; collapsing them would force an
+async boundary into a tight synchronous loop. Divergence accepted.
+
+---
+
+## 2026-06-15 — decode-session.ts + event-stream.ts (multi-lens review)
+
+**Rejected: Bound frame-buffer memory by gating progressive-frame push on `framesConsumed`.**
+Idea was: when no consumer has opened `frames()`, skip pushing/buffering progressive frames (each holds a
+transferred pixel `ArrayBuffer`) to cap the memory peak for `done()`-only callers (the default path, since
+`emitEveryPass` defaults to `true`). **Rejected** — the tested contract (`decode-session.test.ts` "frames()
+yields progress events then a final frame") emits all frames *before* `frames()` is called and expects them
+buffered and replayed (`["dc","pass","final"]`). `end()` deliberately does not clear the buffer, so late
+subscribers still get the full sequence. Gating would drop those frames and break replay. The buffering is
+load-bearing; the memory cost is inherent to the replay contract. `framesConsumed` stays dead.
+
+**Rejected: Add a bounded-buffer cap (drop-oldest / coalesce) inside `AsyncEventStream`.**
+`AsyncEventStream<T>` is generic and content-agnostic; it cannot know "progressive vs final" semantics, so any
+cap would silently drop data the replay contract promises. Wrong layer; would corrupt the single-consumer
+buffer-and-replay guarantee.
+
+**Rejected: Replace the per-call `emit` closure in `emitFoldedMetrics` with a private method to avoid one
+closure allocation per progress/final frame.** Marginal — the closure is only allocated when `onMetric` is set
+(absent in production; present only in benchmarks/parity harnesses) and is dwarfed by the pixel structured-clone
+already in flight. Not worth the readability cost.
+
+**Rejected (cross-file, deferred not rejected): proper terminal signal for early-stop targets.** The clean fix
+for the `done()` hang is for the worker (decode-handler) to always post a terminal message. Implemented instead
+as a self-contained mirror in decode-session (it owns `progressionTarget`/`emitEveryPass`); a worker-side
+terminal message is the better long-term design but is a cross-file protocol change deferred for approval.
+
+---
+
+## 2026-06-15 — raw_decode_bench.rs + crates/raw-pipeline/src/pipeline.rs (multi-lens review)
+
+Targets: `.worktrees/check-368/src/bin/raw_decode_bench.rs`, `.worktrees/check-368/crates/raw-pipeline/src/pipeline.rs`
+
+- **Replicate process_into 4x-unroll into process_rgba/process_16bit (non-parallel branch).** Native bench builds with default `parallel` feature, so it runs the rayon branch, not the scalar 4x-unroll. Zero effect on any measured number; widens scope with no benchmark evidence. Rejected per "no evidence-free perf changes".
+- **Warmup run in bench().** Min-of-3 already discards the cold first-iteration outlier for the reported value; warmup only adds wall time.
+- **Cache process_orf_to_rgba8 re-decode in P2200 ROI scan.** The re-read+re-decode is entirely outside timed regions (produces pixels to crop only). Dedup saves scan wall-time but changes nothing measured; not worth the coupling.
+- **Emit p50/max alongside min in results_native.json.** Schema contract is `"reporting":"minimum"`; widening is a cross-file schema change, out of scope.
+
+---
+
+## 2026-06-16 — R14 lens review: worker.ts, decode-handler.ts, facade.ts (agent findings)
+
+Targets: `packages/jxl-worker-browser/src/worker.ts`, `packages/jxl-worker-browser/src/decode-handler.ts`, `packages/jxl-wasm/src/facade.ts`
+
+**R14-D2: "Add pause check between inner while iterations when push() spans macrotask boundaries."**
+Rejected. `LibjxlDecoder.push()` (facade.ts) returns `void` (strictly synchronous — the inner while loop runs WASM `decPush` to completion with no `await` or microtask yield). The premise that macrotask boundaries exist between inner while iterations is false for any JXL container whose decode fits in a single event-loop turn. The existing pause check at the top of the outer `while (!done && !this.cancelled)` loop (before `waitForQueueItem`) is the correct location — it fires after each chunk boundary where the event loop can actually yield. Adding an inner check would be dead code for the synchronous push path and misleading about where yield points exist. Verified: `push()` in wasm-loader.ts typed `void | Promise<void>`; the concrete `LibjxlDecoder.push()` implementation returns `void`.
+
+**R14-F10: "Eliminate intermediate allocation in computeButteraugliDownsampled."**
+Not applicable — `computeButteraugliDownsampled` does not exist in the current codebase (not in facade.ts, not in any exported symbol). The finding likely referenced a prototype or a different version. No action.
+
+**R14-F14: "Replace `distanceFromQuality(q)` formula with libjxl reference."**
+Deferred pending user sign-off. The proposed formula diverges from the existing implementation's calibrated behavior for this pipeline's encoding quality range. Changing the formula would shift encoded file sizes and visual quality for all callers without a controlled A/B comparison. Requires: (1) user confirmation that behavior change is acceptable, (2) before/after perceptual comparison across the test corpus. Not rejected outright — flagged for future review.

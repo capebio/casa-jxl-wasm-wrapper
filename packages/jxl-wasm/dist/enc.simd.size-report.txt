@@ -1,0 +1,3 @@
+Module enc tier simd is within the size budget.
+Budget: 3050000 bytes
+Actual: 2875969 bytes

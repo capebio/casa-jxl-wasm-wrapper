@@ -29,11 +29,14 @@ const KNOWN_JXL_ERROR_CODES: ReadonlySet<string> = new Set([
   "QueueOverflow",  // task 007-contracts-2d3e4f: was missing, decode side already had it
   "Internal",
 ]);
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return typeof (value as Promise<T>)?.then === "function";
+}
 
 export class EncodeSessionImpl implements EncodeSession {
   readonly id: string;
 
-  private readonly scheduler: Scheduler;
+  private scheduler: Scheduler | null = null;
   private readonly opts: EncodeOptions;
   private readonly chunkStream = new AsyncEventStream<ArrayBuffer>();
   private readonly doneDeferred: Deferred<number> = deferred<number>();
@@ -47,8 +50,7 @@ export class EncodeSessionImpl implements EncodeSession {
   private totalBytesWritten: number | null = null;
   private sidecarOffsets: readonly number[] | undefined = undefined;
 
-  constructor(scheduler: Scheduler, opts: EncodeOptions) {
-    this.scheduler = scheduler;
+  constructor(schedulerOrPromise: Scheduler | Promise<Scheduler>, opts: EncodeOptions) {
     this.opts = opts;
     this.id = newSessionId();
 
@@ -94,16 +96,21 @@ export class EncodeSessionImpl implements EncodeSession {
     // used only chunks()) does not surface as an unhandledRejection.
     void this.doneDeferred.promise.catch(() => undefined);
 
-    this.scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
-
-    this.acquirePromise = this.scheduler
-      .acquireSlot({
+    const initAcquire = (scheduler: Scheduler): Promise<unknown> => {
+      this.scheduler = scheduler;
+      scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
+      return scheduler.acquireSlot({
         sessionId: this.id,
         priority: startMsg.priority,
         startMsg,
         sourceKey: null,
         signal: opts.signal ?? null,
-      })
+      });
+    };
+
+    this.acquirePromise = (isPromiseLike(schedulerOrPromise)
+      ? schedulerOrPromise.then((scheduler) => initAcquire(scheduler))
+      : initAcquire(schedulerOrPromise))
       .catch((err: unknown) => {
         this.terminate(new JxlError("Internal", `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
       });
@@ -116,7 +123,7 @@ export class EncodeSessionImpl implements EncodeSession {
         // Cancel the scheduler slot before terminating so the worker receives
         // encode_cancel and releases its pool slot immediately
         // (task 007-concurrency-a3b4c5d6).
-        this.scheduler.cancelSession(this.id);
+        this.scheduler?.cancelSession(this.id);
         this.terminate(new JxlError("Cancelled", "Encode aborted by signal", { sessionId: this.id }));
       };
       if (this.abortSignal.aborted) {
@@ -139,13 +146,15 @@ export class EncodeSessionImpl implements EncodeSession {
     }
     await this.acquirePromise;
     if (this.terminated || this.finished) return;
-    await this.scheduler.waitForDrain(this.id);
+    const scheduler = this.scheduler;
+    if (scheduler === null) return;
+    await scheduler.waitForDrain(this.id);
     if (this.terminated || this.finished) return;
     const ab = toTransferableBuffer(chunk);
     // Use conditional spread so the object always has the same shape (single
     // hidden class), avoiding a polymorphic scheduler.send() call site
     // (task 007-performance-g3h4i5j6).
-    this.scheduler.send(
+    scheduler.send(
       this.id,
       {
         type: "encode_pixels",
@@ -166,7 +175,7 @@ export class EncodeSessionImpl implements EncodeSession {
     await this.acquirePromise;
     if (this.terminated || this.finished) return;
     this.finished = true;
-    this.scheduler.send(this.id, { type: "encode_finish", sessionId: this.id });
+    this.scheduler?.send(this.id, { type: "encode_finish", sessionId: this.id });
   }
 
   chunks(): AsyncIterable<ArrayBuffer> {
@@ -179,7 +188,7 @@ export class EncodeSessionImpl implements EncodeSession {
 
   getStats(): EncodeStats | null {
     if (this.totalBytesWritten === null) return null;
-    const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : 16;
+    const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : this.opts.format === "rgb8" ? 3 : 16;
     const originalBytes = this.opts.width * this.opts.height * bpp;
     const compressedBytes = this.totalBytesWritten;
     return {
@@ -200,7 +209,7 @@ export class EncodeSessionImpl implements EncodeSession {
     // Re-check after the await: abort handler or encode completion may have
     // run during the suspend, preventing double-cancel (task 007-errors-d4e5f6a7).
     if (this.terminated || this.finished) return;
-    this.scheduler.cancelSession(this.id);
+    this.scheduler?.cancelSession(this.id);
     this.terminate(new JxlError("Cancelled", reason ?? "Encode cancelled", { sessionId: this.id }));
   }
 

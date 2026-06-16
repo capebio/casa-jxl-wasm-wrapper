@@ -6,9 +6,11 @@ import type {
   DecodeOptions,
   DecodeSession,
   DecodeFrameEvent,
+  DecodeStage,
   ImageInfo,
   WorkerToMainMessage,
   MsgDecodeStart,
+  CodecMetric,
 } from "@casabio/jxl-core";
 import { JxlError, type JxlErrorCode } from "@casabio/jxl-core/errors";
 import type { Scheduler } from "@casabio/jxl-scheduler";
@@ -16,19 +18,30 @@ import type { Scheduler } from "@casabio/jxl-scheduler";
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer, type Deferred } from "./util.js";
 
-const KNOWN_JXL_ERROR_CODES: ReadonlySet<string> = new Set([
+const KNOWN_JXL_ERROR_CODES: ReadonlySet<JxlErrorCode> = new Set<JxlErrorCode>([
   "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
   "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError",
   "QueueOverflow", "Internal",
-]);
+] as const);
+
+// Typed literals for JxlError ctor sites (ensures assignability to JxlErrorCode param
+// under all tsconfigs; also provides compile-time check if union removes a code).
+const INTERNAL: JxlErrorCode = "Internal";
+const CANCELLED: JxlErrorCode = "Cancelled";
+const BUDGET_EXCEEDED: JxlErrorCode = "BudgetExceeded";
+const CONFIG_ERROR: JxlErrorCode = "ConfigError";
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return typeof (value as Promise<T>)?.then === "function";
+}
 
 export class DecodeSessionImpl implements DecodeSession {
   readonly id: string;
 
-  private readonly scheduler: Scheduler;
+  private scheduler: Scheduler | null = null;
   private readonly opts: DecodeOptions;
   private readonly frameStream = new AsyncEventStream<DecodeFrameEvent>();
   private readonly doneDeferred: Deferred<ImageInfo> = deferred<ImageInfo>();
+  private readonly headerDeferred: Deferred<ImageInfo> = deferred<ImageInfo>();
   private readonly acquirePromise: Promise<unknown>;
 
   private readonly abortSignal: AbortSignal | null;
@@ -37,10 +50,9 @@ export class DecodeSessionImpl implements DecodeSession {
   private lastInfo: ImageInfo | null = null;
   private closed = false;
   private terminated = false;
-  private framesConsumed = false;
+  private terminalError: JxlError | null = null;
 
-  constructor(scheduler: Scheduler, opts: DecodeOptions) {
-    this.scheduler = scheduler;
+  constructor(schedulerOrPromise: Scheduler | Promise<Scheduler>, opts: DecodeOptions) {
     this.opts = opts;
     this.id = newSessionId();
 
@@ -67,38 +79,51 @@ export class DecodeSessionImpl implements DecodeSession {
     // surface as an unhandledRejection. Callers that do call done() attach
     // their own handler independently.
     void this.doneDeferred.promise.catch(() => undefined);
+    void this.headerDeferred.promise.catch(() => undefined);
 
-    // Register the message handler BEFORE acquireSlot sends decode_start,
-    // so decode_header is never missed.
-    this.scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
+    // DS-3: check aborted BEFORE any scheduler interaction (acquireSlot, onMessage).
+    // Never request slot for an already-aborted decode; no cancelSession on unknown id.
+    this.abortSignal = opts.signal ?? null;
+    if (this.abortSignal !== null && this.abortSignal.aborted) {
+      this.acquirePromise = Promise.resolve();
+      this.abortHandler = null;
+      this.fail(new JxlError(CANCELLED, "Decode aborted by signal", { sessionId: this.id }));
+      return; // ctor done; no listener, no acquire, no cancel for unrequested slot
+    }
 
-    this.acquirePromise = this.scheduler
-      .acquireSlot({
+    const initAcquire = (scheduler: Scheduler): Promise<unknown> => {
+      // R1-1: abort may have fired before the async scheduler promise resolved;
+      // terminated is already set — do not acquire a slot that will never be released.
+      if (this.terminated) return Promise.resolve();
+      this.scheduler = scheduler;
+      // Register the message handler BEFORE acquireSlot sends decode_start,
+      // so decode_header is never missed.
+      scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
+      return scheduler.acquireSlot({
         sessionId: this.id,
         priority: startMsg.priority,
         startMsg,
         sourceKey: null,
         signal: opts.signal ?? null,
-      })
+      });
+    };
+
+    this.acquirePromise = (isPromiseLike(schedulerOrPromise)
+      ? schedulerOrPromise.then((scheduler) => initAcquire(scheduler))
+      : initAcquire(schedulerOrPromise))
       .catch((err: unknown) => {
-        this.fail(new JxlError("Internal", `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
+        this.fail(new JxlError(INTERNAL, `Failed to acquire worker: ${String(err)}`, { sessionId: this.id, cause: err }));
       });
 
-    // Set up abort signal handling. Check aborted immediately to handle signals
-    // that were already triggered before this session was constructed.
-    this.abortSignal = opts.signal ?? null;
+    // Set up abort signal handling (only reached for non-pre-aborted signals).
     if (this.abortSignal !== null) {
       this.abortHandler = () => {
         // Cancel the scheduler slot before failing so the worker is told to stop
         // and the pool slot is released immediately (task 007-concurrency-e7f8a9b0).
-        this.scheduler.cancelSession(this.id);
-        this.fail(new JxlError("Cancelled", "Decode aborted by signal", { sessionId: this.id }));
+        this.scheduler?.cancelSession(this.id);
+        this.fail(new JxlError(CANCELLED, "Decode aborted by signal", { sessionId: this.id }));
       };
-      if (this.abortSignal.aborted) {
-        this.abortHandler();
-      } else {
-        this.abortSignal.addEventListener("abort", this.abortHandler, { once: true });
-      }
+      this.abortSignal.addEventListener("abort", this.abortHandler, { once: true });
     } else {
       this.abortHandler = null;
     }
@@ -110,18 +135,26 @@ export class DecodeSessionImpl implements DecodeSession {
 
   async push(chunk: ArrayBuffer | Uint8Array): Promise<void> {
     if (this.terminated || this.closed) {
-      throw new JxlError("ConfigError", "push() after close/cancel/error", { sessionId: this.id });
+      // DS-7: surface real terminal error (e.g. Cancelled, BudgetExceeded, decode_error)
+      // instead of generic ConfigError. Semantics change: callers see actual cause.
+      // DS-1: concurrent push() ordering depends on scheduler.waitForDrain FIFO
+      // resolution for waiters of one session (scheduler.ts: pendingPushes array +
+      // signalDrain head consumption). Documented dep; no local pushChain needed.
+      throw this.terminalError ?? new JxlError(CONFIG_ERROR, "push() after close/cancel/error", { sessionId: this.id });
     }
+    // Layer 4: ByteIntervalCursor (from benchmark) can generate the chunk passed here for byte-cutoff driven real progressive decode. Same math as synthetic path for fidelity. Positive for unified chunking in tests and prod. Use cursor to decide cutoff snapshots in real path for byte-bench integration.
     await this.acquirePromise;
     // Re-check closed: close() may have set it while we awaited acquirePromise
     // (task 007-concurrency-e5f6a7b8 / 007-errors-f6a7b8c9).
     if (this.terminated || this.closed) return;
     // Backpressure: resolves when the worker queue is below the high-water mark.
-    await this.scheduler.waitForDrain(this.id);
+    const scheduler = this.scheduler;
+    if (scheduler === null) return;
+    await scheduler.waitForDrain(this.id);
     // Re-check: cancellation or worker error may have arrived during drain wait.
     if (this.terminated || this.closed) return;
     const ab = toTransferableBuffer(chunk);
-    this.scheduler.send(this.id, { type: "decode_chunk", sessionId: this.id, chunk: ab }, [ab]);
+    scheduler.send(this.id, { type: "decode_chunk", sessionId: this.id, chunk: ab }, [ab]);
   }
 
   async close(): Promise<void> {
@@ -129,16 +162,34 @@ export class DecodeSessionImpl implements DecodeSession {
     this.closed = true;
     await this.acquirePromise;
     if (this.terminated) return;
-    this.scheduler.send(this.id, { type: "decode_close", sessionId: this.id });
+    this.scheduler?.send(this.id, { type: "decode_close", sessionId: this.id });
   }
 
+  /**
+   * Returns the frame stream.
+   * Contract (DS-2): call frames() BEFORE awaiting done() if you want to
+   * observe progressive or final frames. If only done() is awaited (or frames()
+   * called after done resolves), buffered frames may have been cleared and
+   * will not be replayed.
+   */
   frames(): AsyncIterable<DecodeFrameEvent> {
-    this.framesConsumed = true;
     return this.frameStream;
   }
 
+  /**
+   * Awaits final ImageInfo (success) or rejects with JxlError.
+   * See frames() contract: consume frames before done() to receive them.
+   */
   done(): Promise<ImageInfo> {
     return this.doneDeferred.promise;
+  }
+
+  get info(): ImageInfo | null {
+    return this.lastInfo;
+  }
+
+  header(): Promise<ImageInfo> {
+    return this.headerDeferred.promise;
   }
 
   async cancel(reason?: string): Promise<void> {
@@ -152,73 +203,111 @@ export class DecodeSessionImpl implements DecodeSession {
     await this.acquirePromise.catch(() => undefined);
     // Re-check: abort handler or error may have terminated us during the await.
     if (this.terminated) return;
-    this.scheduler.cancelSession(this.id);
-    this.fail(new JxlError("Cancelled", reason ?? "Decode cancelled", { sessionId: this.id }));
+    this.scheduler?.cancelSession(this.id);
+    this.fail(new JxlError(CANCELLED, reason ?? "Decode cancelled", { sessionId: this.id }));
   }
 
   // ---------------------------------------------------------------------------
   // Worker message handling
   // ---------------------------------------------------------------------------
 
+  // Re-emit metrics folded onto decode_progress / decode_final frames as CodecMetric.
+  // Each field is optional; absent fields (e.g. a Node worker that posts metrics the
+  // old way, or a zero-copy frame) emit nothing — additive, never double-counts.
+  private makeFrame(
+    stage: DecodeFrameEvent["stage"],
+    msg: { info: ImageInfo; pixels: DecodeFrameEvent["pixels"]; format: DecodeFrameEvent["format"]; pixelStride: number; region?: DecodeFrameEvent["region"] },
+  ): DecodeFrameEvent {
+    return {
+      stage,
+      info: msg.info,
+      pixels: msg.pixels,
+      format: msg.format,
+      pixelStride: msg.pixelStride,
+      ...(msg.region !== undefined ? { region: msg.region } : {}),
+    };
+  }
+
+  private emitFoldedMetrics(m: {
+    copyMs?: number;
+    copiedBytes?: number;
+    timeToFirstPixelMs?: number;
+    outputBytes?: number;
+    timeToFinalMs?: number;
+  }): void {
+    const cb = this.opts.onMetric;
+    if (cb === undefined) return;
+    const emit = (name: CodecMetric["name"], value: number | undefined): void => {
+      if (value === undefined) return;
+      try {
+        cb({ name, value } as CodecMetric);
+      } catch (e) {
+        if (typeof process !== "undefined" && process.env?.["NODE_ENV"] === "development") {
+          console.warn(`[jxl-session] onMetric threw`, e);
+        }
+      }
+    };
+    emit("copy_to_transfer_ms", m.copyMs);
+    emit("copied_bytes", m.copiedBytes);
+    emit("time_to_first_pixel_ms", m.timeToFirstPixelMs);
+    emit("output_bytes", m.outputBytes);
+    emit("time_to_final_ms", m.timeToFinalMs);
+  }
+
   private handleMessage(msg: WorkerToMainMessage): void {
     if (this.terminated) return;
+    // All session-routed WorkerToMainMessage variants carry sessionId (worker_* lifecycle
+    // msgs are handled in scheduler/worker, never dispatched to per-session onMessage).
+    // DS-6: single guard; per-case checks removed.
+    if ((msg as { sessionId?: string }).sessionId !== this.id) return;
 
     switch (msg.type) {
       case "decode_header":
-        if (msg.sessionId !== this.id) return;
         this.lastInfo = msg.info;
+        if (!this.headerDeferred.settled) {
+          this.headerDeferred.resolve(msg.info);
+        }
+        // progressionTarget "header" stops the worker right after the header — it
+        // sends no decode_final — so complete here, otherwise done() hangs forever.
+        if ((this.opts.progressionTarget ?? "final") === "header") {
+          this.finish(msg.info);
+        }
         break;
 
       case "decode_progress": {
-        if (msg.sessionId !== this.id) return;
         this.lastInfo = msg.info;
-        // Spread region conditionally so the optional property is always
-        // present-or-absent at construction time rather than added via post-
-        // mutation, keeping all three cases on the same V8 hidden class
-        // (task 007-performance-a1b2c3d4). exactOptionalPropertyTypes prevents
-        // assigning undefined to the optional field directly.
-        const ev: DecodeFrameEvent = {
-          stage: msg.stage,
-          info: msg.info,
-          pixels: msg.pixels,
-          format: msg.format,
-          pixelStride: msg.pixelStride,
-          ...(msg.region !== undefined ? { region: msg.region } : {}),
-        };
+        const ev = this.makeFrame(msg.stage, msg);
         this.frameStream.push(ev);
+        // Folded per-frame metrics ride on the frame to avoid separate metric IPCs;
+        // re-emit them through onMetric so telemetry consumers see them uniformly.
+        this.emitFoldedMetrics(msg);
+        // Mirror the worker's early-finish: for a non-"final" target with
+        // emitEveryPass disabled, the worker stops after the first progress and
+        // sends no decode_final, so complete here or done() would hang.
+        if (
+          (this.opts.progressionTarget ?? "final") !== "final" &&
+          (this.opts.emitEveryPass ?? true) === false
+        ) {
+          this.finish(msg.info);
+        }
         break;
       }
 
       case "decode_final": {
-        if (msg.sessionId !== this.id) return;
         this.lastInfo = msg.info;
-        const ev: DecodeFrameEvent = {
-          stage: "final",
-          info: msg.info,
-          pixels: msg.pixels,
-          format: msg.format,
-          pixelStride: msg.pixelStride,
-          ...(msg.region !== undefined ? { region: msg.region } : {}),
-        };
+        const ev = this.makeFrame("final", msg);
         this.frameStream.push(ev);
+        this.emitFoldedMetrics(msg);
         this.finish(msg.info);
         break;
       }
 
       case "decode_budget_exceeded": {
-        if (msg.sessionId !== this.id) return;
         this.lastInfo = msg.info;
-        const ev: DecodeFrameEvent = {
-          stage: msg.stage,
-          info: msg.info,
-          pixels: msg.pixels,
-          format: msg.format,
-          pixelStride: msg.pixelStride,
-          ...(msg.region !== undefined ? { region: msg.region } : {}),
-        };
+        const ev = this.makeFrame(msg.stage, msg);
         this.frameStream.push(ev);
         this.finishWithError(
-          new JxlError("BudgetExceeded", "Session budget exceeded", {
+          new JxlError(BUDGET_EXCEEDED, "Session budget exceeded", {
             sessionId: this.id,
             partial: ev,
           }),
@@ -227,14 +316,13 @@ export class DecodeSessionImpl implements DecodeSession {
       }
 
       case "decode_error": {
-        if (msg.sessionId !== this.id) return;
         const code = this.normalizeCode(msg.code);
         let partial: DecodeFrameEvent | undefined;
         if (code === "TruncatedStream" && msg.partialPixels !== undefined && msg.partialInfo !== undefined) {
           // partialPixelStride is required whenever partialPixels is present; a
           // stride of 0 would produce a malformed frame (task 007-errors-a7b8c9d0).
           if (msg.partialPixelStride === undefined || msg.partialPixelStride === 0) {
-            this.fail(new JxlError("Internal", "TruncatedStream: worker sent partialPixels without a valid partialPixelStride", { sessionId: this.id }));
+            this.fail(new JxlError(INTERNAL, "TruncatedStream: worker sent partialPixels without a valid partialPixelStride", { sessionId: this.id }));
             return;
           }
           partial = {
@@ -257,13 +345,18 @@ export class DecodeSessionImpl implements DecodeSession {
       }
 
       case "decode_cancelled":
-        if (msg.sessionId !== this.id) return;
-        this.fail(new JxlError("Cancelled", "Decode cancelled by worker", { sessionId: this.id }));
+        this.fail(new JxlError(CANCELLED, "Decode cancelled by worker", { sessionId: this.id }));
         break;
 
       case "metric":
-        if (msg.sessionId === this.id && this.opts.onMetric !== undefined) {
-          this.opts.onMetric(msg.metric);
+        if (this.opts.onMetric !== undefined) {
+          try {
+            this.opts.onMetric(msg.metric);
+          } catch (e) {
+            if (typeof process !== "undefined" && process.env?.["NODE_ENV"] === "development") {
+              console.warn(`[jxl-session] onMetric threw`, e);
+            }
+          }
         }
         break;
 
@@ -296,6 +389,9 @@ export class DecodeSessionImpl implements DecodeSession {
     if (!this.doneDeferred.settled) {
       this.doneDeferred.resolve(info);
     }
+    if (!this.headerDeferred.settled && this.lastInfo) {
+      this.headerDeferred.resolve(this.lastInfo);
+    }
   }
 
   // Frame stream ends gracefully (consumers see all buffered frames), but
@@ -305,17 +401,13 @@ export class DecodeSessionImpl implements DecodeSession {
     if (this.terminated) return;
     this.terminated = true;
     this.cleanup();
-    if (this.framesConsumed) {
-      // Active consumer: end gracefully so all buffered frames are visible.
-      this.frameStream.end();
-    } else {
-      // No consumer ever called frames() — discard the buffered pixel
-      // ArrayBuffers immediately rather than retaining them until GC
-      // (task 007-concurrency-a7b8c9d0).
-      this.frameStream.fail(err);
-    }
+    this.terminalError = err;  // DS-7
+    this.frameStream.end();
     if (!this.doneDeferred.settled) {
       this.doneDeferred.reject(err);
+    }
+    if (!this.headerDeferred.settled) {
+      this.headerDeferred.reject(err);
     }
   }
 
@@ -323,13 +415,39 @@ export class DecodeSessionImpl implements DecodeSession {
     if (this.terminated) return;
     this.terminated = true;
     this.cleanup();
+    this.terminalError = err;  // DS-7
     this.frameStream.fail(err);
     if (!this.doneDeferred.settled) {
       this.doneDeferred.reject(err);
     }
+    if (!this.headerDeferred.settled) {
+      this.headerDeferred.reject(err);
+    }
   }
 
   private normalizeCode(code: string): JxlErrorCode {
-    return KNOWN_JXL_ERROR_CODES.has(code) ? (code as JxlErrorCode) : "Internal";
+    if (KNOWN_JXL_ERROR_CODES.has(code as JxlErrorCode)) return code as JxlErrorCode;
+    return "Internal" as JxlErrorCode;
   }
+}
+
+// stage union verified in jxl-core/src/types.ts: DecodeStage = "header" | "dc" | "pass" | "final"
+// (DS-9)
+const STAGE_RANK: Record<DecodeStage, number> = { header: 0, dc: 1, pass: 2, final: 3 };
+
+function stageRank(s: DecodeStage): number {
+  return STAGE_RANK[s];
+}
+
+export async function firstFrame(
+  session: Pick<DecodeSession, "frames" | "cancel">,
+  opts?: { minStage?: "dc" | "pass" | "final" },
+): Promise<DecodeFrameEvent> {
+  for await (const f of session.frames()) {
+    if (opts?.minStage === undefined || stageRank(f.stage) >= stageRank(opts.minStage)) {
+      void session.cancel("first frame satisfied");
+      return f;
+    }
+  }
+  throw new JxlError(INTERNAL, "stream ended before requested stage", {});
 }

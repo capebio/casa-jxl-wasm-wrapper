@@ -2,7 +2,13 @@ import initRaw, { process_orf, rgb_to_rgba, downscale_rgb } from './pkg/raw_conv
 import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
 import { createProgressiveWebPreset, createSidecarTargetPlan } from './jxl-progressive-best-preset.js';
-import { classifyByteCutoffFrame, summarizeByteCutoffResults } from './jxl-progressive-byte-metrics.js';
+import { classifyByteCutoffFrame, summarizeByteCutoffResults, buildSeries } from './jxl-progressive-byte-metrics.js';  // R1 for buildSeries wire (connectedness)
+import { exactBuffer, toUint8Array } from './jxl-byte-utils.js';
+import {
+  buildBenchmarkExport,
+  streamDecodeCutoffs as streamDecodeCutoffsCore,
+  resolveRecordSsimulacra2,
+} from './jxl-progressive-byte-benchmark-core.js';
 
 const runBtn = document.getElementById('run-byte-benchmark');
 const exportBtn = document.getElementById('export-json');
@@ -31,7 +37,7 @@ runBtn?.addEventListener('click', () => {
 });
 
 exportBtn?.addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), results: state.results }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify(buildBenchmarkExport(state.results), null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `progressive-byte-benchmark-${Date.now()}.json`;
@@ -61,8 +67,10 @@ async function runBenchmark() {
   const targetLongEdge = document.getElementById('target-long-edge')?.value ?? '800';
   const quality = clampInt(inputValue('quality', 85), 1, 100);
   const progressiveDetail = document.getElementById('progressive-detail')?.value ?? 'passes';
+  const transportProfile = document.getElementById('transport-profile')?.value ?? 'lte';
   const ssimulacra2Value = document.getElementById('ssimulacra2-target')?.value;
   const ssimulacra2Target = ssimulacra2Value === '' ? null : Number(ssimulacra2Value);
+  const driveRealSession = false; // Layer 1: wire for fidelity flip-flops (real session path vs synthetic Cursor+transport). Toggle to true to force 0-delay real-like arrival while still measuring byte cutoffs.
 
   try {
     for (let i = 0; i < runCount; i++) {
@@ -100,12 +108,25 @@ async function runBenchmark() {
         const plan = buildByteCutoffPlan(jxlBytes.byteLength, preset.byteCutoffs);
         const streamed = await streamDecodeCutoffs(jxlBytes, plan, preset.decode, (entry) => {
           setStatus(`${source.name} ${label}: streaming through ${formatByteCutoffLabel(entry)}...`);
-        });
-        const cutoffResults = streamed.cutoffs.map((cutoff) => classifyByteCutoffFrame(cutoff));
+        }, { transportProfile, selfStability: true, driveRealSession });  // Layer 1 wiring: pass driveRealSession for Cursor-based real-fidelity measurement in flip-flops
+        // R1 wire buildSeries (connectedness from byte-metrics)
+        const cutoffPixels = [];
+        const byteSizes = [];
         for (const cutoff of streamed.cutoffs) {
-          renderCutoffTile(card.ladder, `${source.name} | ${label}`, cutoff.entry, cutoff);
-          await nextPaint();
+          if (cutoff.frame && cutoff.frame.pixels) {
+            const p = toUint8Array(cutoff.frame.pixels);
+            cutoffPixels.push(p);
+            byteSizes.push(cutoff.bytes);
+          }
         }
+        const builtSeries = (cutoffPixels.length > 0 && typeof buildSeries === 'function') ? buildSeries(targetRgba, cutoffPixels, byteSizes, preset.target.width, preset.target.height) : null;
+        const cutoffResults = streamed.cutoffs.map((cutoff) => classifyByteCutoffFrame(cutoff));
+        const frag = document.createDocumentFragment();
+        for (const cutoff of streamed.cutoffs) {
+          renderCutoffTile(frag, `${source.name} | ${label}`, cutoff.entry, cutoff);
+        }
+        card.ladder.appendChild(frag);
+        await nextPaint();
 
         const summary = summarizeByteCutoffResults(cutoffResults, jxlBytes.byteLength);
         variants.push({
@@ -115,8 +136,16 @@ async function runBenchmark() {
           encode: preset.encode,
           encodeMs,
           jxlBytes: jxlBytes.byteLength,
+          transportProfile: streamed.transportProfile,
+          firstPaintMs: streamed.firstPaintMs,
+          previewMs: streamed.previewMs,
+          finalMs: streamed.finalMs,
+          stallCount: streamed.stallCount,
+          avgPaintGapMs: streamed.avgPaintGapMs,
           summary,
           cutoffs: cutoffResults,
+          builtSeries,  // R1
+          driveRealSession,  // Layer 1: recorded for flip-flop analysis of synthetic vs real fidelity
         });
       }
       const targetVariant = variants.at(-1);
@@ -125,6 +154,7 @@ async function runBenchmark() {
       const record = {
         source: source.name,
         rawBytes: source.rawBytes,
+        transportProfile,
         variants,
         target: targetVariant?.target ?? null,
         summary: targetVariant?.summary ?? null,
@@ -132,6 +162,7 @@ async function runBenchmark() {
         sidecarFirstVisibleBytes: sidecarFirst?.summary.firstPaintBytes ?? null,
         firstVisibleBytes: firstVisible?.summary.firstPaintBytes ?? null,
         ssimulacra2: resolveRecordSsimulacra2(variants, ssimulacra2Target),
+        driveRealSession,  // Layer 1
       };
       state.results.push(record);
       renderSummaryTable(card.table, record);
@@ -175,7 +206,7 @@ function makeTargetRgba(source, width, height) {
   return exactBuffer(rgb_to_rgba(rgb));
 }
 
-async function encodeTarget(rgba, encodeOptions) {
+async function encodeTarget(rgba, encodeOptions, _variantTarget /* accept for runBenchmarkSession DI compat */) {
   const encoder = createEncoder(encodeOptions);
   const chunks = [];
   const chunkTask = (async () => {
@@ -190,49 +221,8 @@ async function encodeTarget(rgba, encodeOptions) {
   return concatChunks(chunks);
 }
 
-async function streamDecodeCutoffs(jxlBytes, plan, decodeOptions, onStep = () => {}) {
-  const decoder = createDecoder(decodeOptions);
-  const cutoffs = plan.map((entry) => ({ entry, bytes: entry.bytes, events: [], frame: null, error: null }));
-  const byBytes = new Map(cutoffs.map((cutoff) => [cutoff.bytes, cutoff]));
-  let currentEntry = plan[0] ?? null;
-  let streamError = null;
-  let error = null;
-  try {
-    const eventTask = (async () => {
-      for await (const event of decoder.events()) {
-        if (event.type === 'progress' || event.type === 'final') {
-          const cutoff = byBytes.get(currentEntry?.bytes) ?? cutoffs.at(-1);
-          if (cutoff) {
-            cutoff.events.push(event);
-            cutoff.frame = event;
-          }
-        }
-        if (event.type === 'error') throw new Error(`${event.code}: ${event.message}`);
-      }
-    })();
-    let offset = 0;
-    for (const entry of plan) {
-      if (entry.bytes <= offset) continue;
-      currentEntry = entry;
-      onStep(entry);
-      await decoder.push(exactBuffer(jxlBytes.subarray(offset, entry.bytes)));
-      offset = entry.bytes;
-      await waitForStreamEvents();
-    }
-    await decoder.close();
-    await eventTask;
-  } catch (caught) {
-    error = caught instanceof Error ? caught.message : String(caught);
-    streamError = error;
-  } finally {
-    await decoder.dispose();
-  }
-  if (streamError) {
-    for (const cutoff of cutoffs) {
-      if (!cutoff.frame) cutoff.error = streamError;
-    }
-  }
-  return { cutoffs, error };
+async function streamDecodeCutoffs(jxlBytes, plan, decodeOptions, onStep = () => {}, context = {}) {
+  return streamDecodeCutoffsCore(jxlBytes, plan, decodeOptions, onStep, context);
 }
 
 function createResultCard(source, index) {
@@ -256,26 +246,27 @@ function createResultCard(source, index) {
   return { el, meta, policy, ladder, table };
 }
 
-function renderCutoffTile(ladder, sourceName, entry, decoded) {
+function renderCutoffTile(parent, sourceName, entry, decoded) {
   const tile = document.createElement('button');
   tile.className = `bytebench-tile${decoded.frame ? '' : ' is-empty'}`;
   tile.type = 'button';
 
+  const meta = document.createElement('div');
+  meta.className = 'bytebench-tile-meta';
   if (decoded.frame) {
-    const canvas = frameToCanvas(decoded.frame);
-    const meta = document.createElement('div');
-    meta.className = 'bytebench-tile-meta';
     meta.textContent = `${formatByteCutoffLabel(entry)} | ${decoded.frame.type}`;
-    tile.append(canvas, meta);
-    tile.addEventListener('click', () => openLightbox(`${sourceName} | ${formatByteCutoffLabel(entry)} | ${decoded.frame.type}`, canvas));
+    tile.append(meta);
+    tile.addEventListener('click', () => {
+      // realize canvas only on demand (lazy) — avoids ImageData/canvas/put per cutoff during benchmark runs
+      const canvas = frameToCanvas(decoded.frame);
+      openLightbox(`${sourceName} | ${formatByteCutoffLabel(entry)} | ${decoded.frame.type}`, canvas);
+    });
   } else {
-    const meta = document.createElement('div');
-    meta.className = 'bytebench-tile-meta';
     meta.textContent = `${formatByteCutoffLabel(entry)} | no paint${decoded.error ? ` | ${decoded.error}` : ''}`;
     tile.append(meta);
   }
 
-  ladder.append(tile);
+  parent.appendChild(tile);
 }
 
 function renderVariantHeading(container, text) {
@@ -291,9 +282,11 @@ function renderSummaryTable(container, record) {
     <tr>
       <td>${variant.label}</td>
       <td>${fmtMaybeBytes(variant.summary.firstPaintBytes)} (${fmtMaybePercent(variant.summary.firstPaintPercent)})</td>
+      <td>${fmtMaybeBytes(variant.summary.firstPerceptuallyGoodBytes)} (${fmtMaybePercent(variant.summary.firstPerceptuallyGoodPercent)})</td>
       <td>${fmtMaybeBytes(variant.summary.previewBytes)} (${fmtMaybePercent(variant.summary.previewPercent)})</td>
       <td>${fmtMaybeBytes(variant.summary.finalBytes)} (${fmtMaybePercent(variant.summary.finalPercent)})</td>
       <td>${variant.summary.usefulEarlyPaint ? 'yes' : 'no'}</td>
+      <td>${variant.summary.butterMonotone ? 'yes' : 'no'}</td>
       <td>${variant.summary.paintedCutoffs}</td>
       <td>${variant.summary.maxFrameCount}</td>
     </tr>
@@ -301,7 +294,7 @@ function renderSummaryTable(container, record) {
   container.innerHTML = `
     <table class="bytebench-table">
       <thead>
-        <tr><th>Variant</th><th>First paint</th><th>Preview</th><th>Final</th><th>Early?</th><th>Painted cutoffs</th><th>Frames</th></tr>
+        <tr><th>Variant</th><th>First paint</th><th>Percept. good (R1)</th><th>Preview</th><th>Final</th><th>Early?</th><th>Butter monotone</th><th>Painted cutoffs</th><th>Frames</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
@@ -315,15 +308,6 @@ function updateStats() {
   document.getElementById('stat-final').textContent = fmtMaybeBytes(median(state.results.map((r) => r.summary?.finalBytes).filter(Number.isFinite)));
   const requested = state.results.some((r) => r.ssimulacra2.requested);
   document.getElementById('stat-ssimulacra2').textContent = requested ? 'unavailable' : 'not requested';
-}
-
-function resolveRecordSsimulacra2(_variants, requestedTarget) {
-  const requested = Number.isFinite(Number(requestedTarget));
-  return {
-    requested,
-    available: false,
-    target: requested ? Number(requestedTarget) : null,
-  };
 }
 
 function openLightbox(title, sourceCanvas) {
@@ -361,22 +345,11 @@ function inputValue(id, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function exactBuffer(view) {
-  if (view instanceof ArrayBuffer) return view;
-  return view.byteOffset === 0 && view.byteLength === view.buffer.byteLength
-    ? view.buffer
-    : view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
-}
-
-function toUint8Array(value) {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  throw new TypeError('frame pixels must be ArrayBuffer or ArrayBufferView');
-}
-
 function concatChunks(chunks) {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  // Length is the sum of the lengths (L1 norm of the part sizes). Explicit accumulation
+  // makes the integer arithmetic obvious before the single allocation + memmove passes.
+  let total = 0;
+  for (const chunk of chunks) total += chunk.byteLength;
   const out = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
@@ -421,6 +394,3 @@ function nextPaint() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
-function waitForStreamEvents() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}

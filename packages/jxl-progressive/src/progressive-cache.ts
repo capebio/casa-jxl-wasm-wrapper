@@ -74,11 +74,9 @@ export class ProgressiveCache {
   ): Promise<void> {
     const entry: ManifestEntry = { manifest, storedAt: Date.now() };
     const text = JSON.stringify(entry);
-    const nodeBuffer = Buffer.from(text);
-    const buf = nodeBuffer.buffer.slice(
-      nodeBuffer.byteOffset,
-      nodeBuffer.byteOffset + nodeBuffer.byteLength,
-    );
+    // Universal (browser + node): TextEncoder always present. Avoids Buffer (node-only)
+    // which would crash pure browser usage of progressive cache + jxl-cache.
+    const buf = new TextEncoder().encode(text).buffer;
     await this.inner.set(MANIFEST_KEY_PREFIX + jxlUrl, buf);
   }
 

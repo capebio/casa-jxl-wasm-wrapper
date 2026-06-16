@@ -10,6 +10,8 @@ export interface LoaderOptions {
   nodeFs?: { readFile(path: string | URL): Promise<Uint8Array> };
   cacheDbName?: string;
   wasmUrl?: string;
+  signal?: AbortSignal;
+  priority?: 'high' | 'low' | 'auto';
 }
 
 const nodeCache = new Map<string, Promise<WebAssembly.Module>>();
@@ -20,14 +22,26 @@ const browserModuleCache = new Map<string, Promise<WebAssembly.Module>>();
 
 export async function loadJxlModule(manifest: JxlWasmManifest, options: LoaderOptions = {}): Promise<WebAssembly.Module> {
   const cacheKey = `${manifest.buildId}:${manifest.wasmSha}`;
+  if (!manifest?.buildId || typeof manifest.buildId !== 'string' ||
+      !manifest?.wasmSha || typeof manifest.wasmSha !== 'string') {
+    throw new Error('[jxl-wasm] manifest requires buildId and wasmSha strings');
+  }
   if (isNode()) {
     if (!nodeCache.has(cacheKey)) {
-      nodeCache.set(cacheKey, loadNodeModule(manifest, options));
+      const p = loadNodeModule(manifest, options).catch((e) => {
+        nodeCache.delete(cacheKey);
+        throw e;
+      });
+      nodeCache.set(cacheKey, p);
     }
     return nodeCache.get(cacheKey)!;
   }
   if (!browserModuleCache.has(cacheKey)) {
-    browserModuleCache.set(cacheKey, loadBrowserModule(manifest, options));
+    const p = loadBrowserModule(manifest, options).catch((e) => {
+      browserModuleCache.delete(cacheKey);
+      throw e;
+    });
+    browserModuleCache.set(cacheKey, p);
   }
   return browserModuleCache.get(cacheKey)!;
 }
@@ -35,7 +49,7 @@ export async function loadJxlModule(manifest: JxlWasmManifest, options: LoaderOp
 async function loadNodeModule(manifest: JxlWasmManifest, options: LoaderOptions): Promise<WebAssembly.Module> {
   const fs = options.nodeFs ?? (await import("node:fs/promises"));
   const wasmUrl = options.wasmUrl ?? manifest.wasmUrl;
-  const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""));
+  const bytes = await (fs.readFile as (p: unknown, o?: unknown) => Promise<Uint8Array>)(await resolveNodeWasmUrl(wasmUrl ?? ""), { signal: options.signal });
   return WebAssembly.compile(bytes as BufferSource);
 }
 
@@ -51,10 +65,15 @@ async function loadBrowserModule(manifest: JxlWasmManifest, options: LoaderOptio
   if (!wasmUrl) {
     throw new Error("jxl-wasm loader needs wasmUrl in browser");
   }
-  const response = await fetchImpl(wasmUrl);
+  const response = await fetchImpl(wasmUrl, {
+    signal: options.signal,
+    priority: options.priority,
+  } as RequestInit);
   // P5-2: pass a refetcher so compile can re-fetch on rare streaming fallback instead of .clone() (avoids doubling 2.7 MB peak mem).
   const module = await compileFromResponse(response, () => fetchImpl(wasmUrl));
-  await writeIndexedDbModule(key, module, options);
+  writeIndexedDbModule(key, module, options).catch(() => {
+    /* best-effort; proceed without IDB persistence (quota/incognito) */
+  });
   return module;
 }
 
@@ -129,7 +148,7 @@ function txComplete(tx: IDBTransaction): Promise<void> {
 }
 
 function isNode(): boolean {
-  return typeof process !== "undefined" && !!process.versions?.node;
+  return typeof process !== "undefined" && !!process.versions?.node && typeof window === "undefined";
 }
 
 async function resolveNodeWasmUrl(wasmUrl: string): Promise<string> {

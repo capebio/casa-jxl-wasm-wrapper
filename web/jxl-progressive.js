@@ -123,6 +123,7 @@ const session = createProgressiveSession({
     initialEncodeBackend: 'libjxl',
     initialDecodeBackend: 'libjxl',
     loadSource: loadRandomSource,
+    policy: { encodeBackendForTarget },
 });
 
 const encodeWorkers = new Map();
@@ -1359,7 +1360,9 @@ async function runVariant(source, target, runId) {
     const stepCount = getProgressiveStepCount();
     const card = cards.find((entry) => entry.slot === target.slot);
     const targetDims = target.longEdge ? sizeForLongEdge(source.width, source.height, target.longEdge) : { width: source.width, height: source.height };
-    const actualEncodeBackend = encodeBackendForTarget(encodeBackend, targetDims.width, targetDims.height);
+    const actualEncodeBackend = typeof session.chooseEncodeBackend === 'function'
+        ? session.chooseEncodeBackend(targetDims.width, targetDims.height)
+        : encodeBackendForTarget(encodeBackend, targetDims.width, targetDims.height);
     const decodeWorker = decodeBackend !== 'libjxl' ? getWorker('decode', decodeBackend, target.slot) : null;
 
     card.el.dataset.state = 'working';

@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { contentHash16, imageIdForPath } from "./hash.js";
@@ -10,6 +10,8 @@ import {
 
 import { detectFormatByMagic, makeProducedBy, parseManifest } from "./schema.js";
 import type { Clock, DecodedMaster, JxlBackend, MasterFormat, Orientation, RawBackend, RawFormat, Telemetry } from "./backends.js";
+
+function now(b?: Backends): number { return b?.clock?.now?.() ?? Date.now(); }
 import { clearCheckpoint, readCheckpoint, writeCheckpoint, type CheckpointState } from "./checkpoint.js";
 import { acquireImageWriteLock, type AdvisoryLock } from "./lock.js";
 
@@ -29,8 +31,11 @@ export interface IngestOptions {
   acceptUnsupported?: boolean; // WU-5: default accept-degraded (Q2)
   profileConvergence?: boolean;
   resume?: boolean;  // F2 WU-6: --resume uses checkpoint to skip completed
+  retryFailed?: boolean; // B6: when true with resume, previously-failed paths are retried (transient errors)
   chaosTest?: boolean;  // K2: random failure injection for recovery tests
   statMap?: Record<string, { size: number; mtimeMs: number }>;  // C1: from upfront collect to avoid re-stat
+  stripGps?: boolean; // F4: privacy for sensitive species (biodiversity)
+  idMap?: Record<string, string>;  // B5/B11 extension: precomputed imageIds to elide re-hash in batch dispatchers (mirrors statMap pattern)
 }
 
 export type IngestOutcome = "written" | "skipped";
@@ -39,6 +44,9 @@ export interface IngestResult {
   outcome: IngestOutcome;
   /** sum of stagedBytes across levels for this image (unlocked copy instrumentation; 0/undef for skipped) */
   stagedBytes?: number;
+  /** present on dryRun (P8) */
+  plan?: IngestPlan;
+  degraded?: boolean; // F5: for batch degraded count when fallback used
 }
 
 export interface BatchResult {
@@ -49,6 +57,7 @@ export interface BatchResult {
   perImage?: Array<{ path: string; outcome: "written" | "skipped" | "failed"; error?: string; stagedBytes?: number }>;
   /** total pixel bytes staged into encoders across all written levels in this batch (unlocked copy instrumentation) */
   totalStagedBytes?: number;
+  degraded?: number; // F5: count of tier3/5 degraded ingests (cheap via events + IngestResult)
 }
 
 export interface IngestPlan {
@@ -57,7 +66,8 @@ export interface IngestPlan {
   orientation: Orientation;
   width: number;
   height: number;
-  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean; convergedByteEnd?: number; stagedBytes?: number }>;
+  levels: Array<{ data: Uint8Array; width: number; height: number; bitsPerSample?: 8 | 16; tiled?: boolean; convergedByteEnd?: number; qualityCurve?: Array<{ bytes: number; ssim?: number; butteraugli?: number }>; stagedBytes?: number }>;
+  entries: LevelEntry[];
   proxy: boolean;
   manifest: Manifest;
 }
@@ -87,9 +97,11 @@ async function withEbusyRetry<T>(op: () => Promise<T>, label = "fs-op", attempts
         await sleep(delayMs);
         continue;
       }
+      if (label && e && typeof e.message === "string") e.message += ` (${label})`;
       throw e;
     }
   }
+  if (last && typeof (last as any).message === "string" && label) (last as any).message += ` (${label})`;
   throw last;
 }
 
@@ -131,47 +143,101 @@ export async function fileExists(p: string): Promise<boolean> {
   }
 }
 
+/** Read a UTF-8 file, returning null if it does not exist. Collapses the fileExists()+readFile()
+ *  double-stat used across the admin commands (cli/validate/migrate/rm) into a single syscall. */
+export async function readFileOrNull(p: string): Promise<string | null> {
+  try {
+    return await readFile(p, "utf8");
+  } catch (err: any) {
+    if (err && err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
 // WU-5 Tier3/5 helpers (dynamic exifr to avoid hard dep at load; ratified Q3 use exifr).
+// F2: cheap JPEG SOF (FFC0/FFC2) long-edge dim probe. No new deps; ~20 lines.
+function getJpegDimensions(bytes: Uint8Array): { w: number; h: number } | null {
+  if (!bytes || bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 8 < bytes.length) {
+    if (bytes[i] !== 0xff) { i++; continue; }
+    const m = bytes[i + 1];
+    if (m === 0xc0 || m === 0xc2) {
+      // SOF0 / SOF2: skip len(2), precision(1), h(2), w(2)
+      const h = (bytes[i + 5] << 8) | bytes[i + 6];
+      const w = (bytes[i + 7] << 8) | bytes[i + 8];
+      if (w > 0 && h > 0) return { w, h };
+      return null;
+    }
+    if (m === 0xda || m === 0xd9) break; // SOS / EOI
+    if (m === 0xff) { i++; continue; }
+    const len = ((bytes[i + 2] << 8) | bytes[i + 3]) + 2;
+    i += len;
+  }
+  return null;
+}
+
+// Deduped exifr orientation probe (used by jpg decode path, computeIngestPlan jpg ladder, and embedded Tier3 fallback).
+// Returns "baked" only for identity (1); "source" otherwise. Dynamic import keeps exifr optional.
+async function probeOrientation(bytes: Uint8Array): Promise<Orientation> {
+  try {
+    const exifrMod: any = await import("exifr").catch(() => null);
+    if (!exifrMod) return "source";
+    const ex = exifrMod.default || exifrMod;
+    const o = await ex.orientation?.(bytes).catch(() => 1);
+    return (o === 1 || o == null) ? "baked" : "source";
+  } catch {
+    return "source";
+  }
+}
+
 async function tryExtractEmbeddedJpeg(bytes: Uint8Array): Promise<Uint8Array | null> {
   try {
     // dynamic so static module load succeeds even if exifr not yet installed in env
     const exifrMod: any = await import("exifr").catch(() => null);
     if (!exifrMod) return null;
     const exifr = exifrMod.default || exifrMod;
-    // thumbnail() yields the embedded preview jpeg (medium/high res on many bodies)
-    let cand: any = await exifr.thumbnail?.(bytes);
-    if (cand) {
-      const u8 = cand instanceof Uint8Array ? cand : new Uint8Array(cand);
-      if (u8.length > 4096) return u8;
-    }
-    // fallback: parse for common preview tags
+    const cands: Uint8Array[] = [];
+    // F1: parse large previews FIRST (JpgFromRaw etc often full-res); thumbnail() last resort.
     const parsed: any = await exifr.parse?.(bytes, {
       tiff: true,
       ifd1: true,
-      pick: ["Thumbnail", "PreviewImage", "JpgFromRaw", "JpegFromRaw"],
+      pick: ["JpgFromRaw", "JpegFromRaw", "PreviewImage", "Thumbnail"],
       translateKeys: false,
     }).catch(() => null);
     if (parsed) {
-      cand = parsed.Thumbnail || parsed.PreviewImage || parsed.JpgFromRaw || parsed.JpegFromRaw;
-      if (cand) {
-        const u8 = cand instanceof Uint8Array ? cand : new Uint8Array(cand);
-        if (u8.length > 4096) return u8;
+      for (const k of ["JpgFromRaw", "JpegFromRaw", "PreviewImage", "Thumbnail"]) {
+        let c = parsed[k];
+        if (c) {
+          const u8 = c instanceof Uint8Array ? c : new Uint8Array(c);
+          if (u8.length > 4096) cands.push(u8);
+        }
       }
     }
+    // thumbnail() last
+    let t: any = await exifr.thumbnail?.(bytes);
+    if (t) {
+      const u8 = t instanceof Uint8Array ? t : new Uint8Array(t);
+      if (u8.length > 4096) cands.push(u8);
+    }
+    if (cands.length === 0) return null;
+    // F1: prefer the *largest* by byte length
+    cands.sort((a, b) => b.length - a.length);
+    return cands[0];
   } catch {
     // exifr absent or corrupt file: fall to Tier5 stub
   }
   return null;
 }
 
-async function extractBasicMetadata(bytes: Uint8Array): Promise<Record<string, unknown>> {
+async function extractBasicMetadata(bytes: Uint8Array, gps = false): Promise<Record<string, unknown>> {
   try {
     const exifrMod: any = await import("exifr").catch(() => null);
     if (!exifrMod) return {};
     const exifr = exifrMod.default || exifrMod;
-    const m: any = await exifr.parse?.(bytes, { tiff: true, gps: false, xmp: false }).catch(() => null);
+    const m: any = await exifr.parse?.(bytes, { tiff: true, gps: !!gps, xmp: false }).catch(() => null);
     if (!m) return {};
-    return {
+    const out: Record<string, unknown> = {
       make: m.Make,
       model: m.Model,
       iso: m.ISO,
@@ -179,6 +245,16 @@ async function extractBasicMetadata(bytes: Uint8Array): Promise<Record<string, u
       fnumber: m.FNumber,
       focal: m.FocalLength,
     };
+    const dt = m.DateTimeOriginal || m.CreateDate || m.DateTime;
+    if (dt) out.datetime = dt;
+    if (gps) {
+      // exifr gps:true yields normalized .latitude/.longitude or .gps
+      const lat = m.latitude ?? (m.gps && m.gps.latitude);
+      const lon = m.longitude ?? (m.gps && m.gps.longitude);
+      if (lat != null && lon != null) out.gps = { latitude: lat, longitude: lon };
+      else if (m.gps) out.gps = m.gps;
+    }
+    return out;
   } catch {
     return {};
   }
@@ -198,7 +274,11 @@ async function decodeMaster(b: Backends, format: MasterFormat, bytes: Uint8Array
   if (format === "jpg") {
     const fullJxl = await b.jxl.transcodeJpeg(bytes);
     const d = await b.jxl.decodeToRgba8(fullJxl);
-    return { rgba: d.rgba, width: d.width, height: d.height, orientation: "source" };
+    // F6: read EXIF Orientation (1-8); map to "baked" only for identity (upright pixels as-stored).
+    // Verification (see verify-f6-orient.mjs): transcode+decodeToRgba8 does NOT bake (lossless JPEG rewrap + stored-layout decode).
+    // Pixels for orient!=1 are sideways; "source" signals that. Ladder edit for plumb deferred (Agent 4/L9).
+    const orient = await probeOrientation(bytes);
+    return { rgba: d.rgba, width: d.width, height: d.height, orientation: orient };
   }
   return b.raw.decode(bytes, format);
 }
@@ -209,15 +289,18 @@ export async function writeLevelFiles(
   masterW: number,
   masterH: number,
   verifyHash = false,
+  preEntries?: LevelEntry[],
+  existingLevels?: Set<string>,
 ): Promise<LevelEntry[]> {
   const levelsDir = join(outDir, "levels");
   await mkdir(levelsDir, { recursive: true });
-  const entries: LevelEntry[] = [];
-  for (const level of levels) {
-    const entry = toEntry(level, masterW, masterH);
+  // P5: parallel + index-by-pos (preserve order); optional existing set (one readdir/batch) replaces per-level access
+  const outEntries: LevelEntry[] = await Promise.all(levels.map(async (level, i) => {
+    const entry = (preEntries && preEntries[i]) ? preEntries[i] : toEntry(level, masterW, masterH);
     const dest = join(levelsDir, `${entry.contenthash}.jxl`);
     let needWrite = true;
-    if (await fileExists(dest)) {
+    const exists = existingLevels ? existingLevels.has(`${entry.contenthash}.jxl`) : await fileExists(dest);
+    if (exists) {
       if (!verifyHash) {
         needWrite = false;
       } else {
@@ -225,15 +308,15 @@ export async function writeLevelFiles(
         if (contentHash16(onDisk) === entry.contenthash) {
           needWrite = false;
         }
-        // else: bad/truncated content; fallthrough to atomic overwrite
+        // else: bad/truncated; overwrite
       }
     }
     if (needWrite) {
       await writeFileAtomic(dest, level.data);
     }
-    entries.push(entry);
-  }
-  return entries;
+    return entry;
+  }));
+  return outEntries;
 }
 
 export async function computeIngestPlan(
@@ -242,6 +325,7 @@ export async function computeIngestPlan(
   backends: Backends,
   identity: { imageId: string; masterName: string; mtimeMs: number },
   opts: IngestOptions,
+  metadata?: Record<string, unknown>,
 ): Promise<IngestPlan> {
   const b = backends;
   const tel = b.telemetry;
@@ -255,7 +339,11 @@ export async function computeIngestPlan(
       b.jxl, decoded.rgba, decoded.width, decoded.height, opts.proxy, decoded.orientation, !!opts.profileConvergence,
     );
   } else if (format === "jpg") {
-    ladder = await buildJpgLadder(b.jxl, bytes, !!opts.profileConvergence);
+    // F6/L9: jpg decode does not bake EXIF rotation (verified); pass "source" (or real EXIF when plumbed in caller)
+    ladder = await buildJpgLadder(b.jxl, bytes, !!opts.profileConvergence, "source");
+    if (await probeOrientation(bytes) === "baked") {
+      (ladder as any).orientation = "baked";
+    }
   } else {
     const decoded = await b.raw.decode(bytes, format);
     tel?.stage("decode-master", { w: decoded.width, h: decoded.height });
@@ -274,6 +362,7 @@ export async function computeIngestPlan(
     levels: entries,
     proxy: opts.proxy !== undefined,
   });
+  if (metadata && Object.keys(metadata).length > 0) (manifest as any).metadata = metadata;
 
   tel?.stage("manifest-built", { levels: entries.length });
 
@@ -284,6 +373,7 @@ export async function computeIngestPlan(
     width: ladder.width,
     height: ladder.height,
     levels: ladder.levels,
+    entries,
     proxy: opts.proxy !== undefined,
     manifest,
   };
@@ -302,7 +392,11 @@ export async function applyIngestPlan(
   await unlink(manifestPath + ".tmp").catch(() => {});
 
   // write levels (idempotent per contenthash)
-  await writeLevelFiles(outDir, plan.levels, plan.width, plan.height, !!opts.verifyHash);
+  // P5: supply existing set (readdir once per image) to elide per-level access(); staleness ok (idempotent writes)
+  const levelsDir = join(outDir, "levels");
+  const exFiles = await readdir(levelsDir).catch(() => [] as string[]);
+  const existing = new Set(exFiles.filter((f) => f.endsWith(".jxl")));
+  await writeLevelFiles(outDir, plan.levels, plan.width, plan.height, !!opts.verifyHash, plan.entries, existing);
 
   // write manifest atomically (with EBUSY retry for Windows durability)
   await mkdir(imageDir, { recursive: true });
@@ -325,10 +419,16 @@ export async function ingestImage(
   const format = formatFromPath(masterPath);
   const accept = opts.acceptUnsupported !== false; // Q2 default accept-degraded
 
-  const imageId = await imageIdForPath(masterPath);
+  // B11: prefer precomputed imageId (passed by batch dispatcher) to avoid duplicate realpath+sha256.
+  // B5: support pre-resolved single entry (from job shaping to avoid cloning full statMap per postMessage)
+  // idMap extension: lookup by masterPath when provided (avoids per-image hash in hot paths for large batches)
+  const anyOpts: any = opts;
+  const imageId = anyOpts.imageId || (anyOpts.idMap && anyOpts.idMap[masterPath]) || await imageIdForPath(masterPath);
   let info: { size: number; mtimeMs: number };
-  if (opts.statMap && opts.statMap[masterPath]) {
-    info = opts.statMap[masterPath];
+  if (anyOpts.statEntry) {
+    info = anyOpts.statEntry;
+  } else if (anyOpts.statMap && anyOpts.statMap[masterPath]) {
+    info = anyOpts.statMap[masterPath];
   } else {
     const s = await stat(masterPath);
     info = { size: s.size, mtimeMs: s.mtimeMs };
@@ -342,63 +442,85 @@ export async function ingestImage(
   // med-manifesttmp-orphan + B2: clear stale tmp from prior crash before any check/write
   await unlink(manifestPath + ".tmp").catch(() => {});
 
-  if (!opts.force && opts.proxy === undefined && (await fileExists(manifestPath))) {
-    const existing = parseManifest(await readFile(manifestPath, "utf8"));
-    const uptodate = isUpToDate(existing, info.mtimeMs) || (existing as any).stub === true && existing.master.mtimeMs === info.mtimeMs;
-    if (uptodate) return { outcome: "skipped" };
+  if (!opts.force) {
+    // ING-5: single read (no fileExists+readFile); a corrupt existing manifest falls through to
+    // a clean re-ingest instead of throwing and failing the image.
+    const existingTxt = await readFileOrNull(manifestPath);
+    if (existingTxt !== null) {
+      try {
+        const existing = parseManifest(existingTxt);
+        const wantProxy = opts.proxy !== undefined;
+        // P7: allow proxy manifests to skip on mtime match (previously guarded out); match proxy flag too (no size recorded yet; schema add deferred)
+        const uptodate = isUpToDate(existing, info.mtimeMs, wantProxy) || ((existing as any).stub === true && existing.master.mtimeMs === info.mtimeMs);
+        if (uptodate) return { outcome: "skipped" };
+      } catch { /* corrupt/unparseable manifest → re-ingest (overwrite) */ }
+    }
   }
 
   const bytes = await readFile(masterPath); // Buffer satisfies Uint8Array; avoids copy (low-readfile)
 
   const identity = { imageId, masterName: basename(masterPath), mtimeMs: info.mtimeMs };
 
-  let plan: IngestPlan | null = null;
+  // F4: extract once on master bytes for every ingest (native/jpg/fallback). Cheap vs encode.
+  const meta = await extractBasicMetadata(bytes, !opts.stripGps);
 
-  const nativeFmt = isNativeRawFormat(format) ? (format as RawFormat) : null;
-  if (nativeFmt) {
-    try {
-      // Tier 1: native via raw-converter-wasm
-      plan = await computeIngestPlan(bytes, nativeFmt, backends, identity, opts);
-    } catch (err) {
-      if (!accept) throw err;
-      plan = await buildFallbackPlan(bytes, format, backends, identity, opts);
-    }
-  } else if (format === "jpg") {
-    plan = await computeIngestPlan(bytes, "jpg", backends, identity, opts);
-  } else if (accept) {
-    // unknown ext or non-native raw: go straight to Tier3/5 (no native attempt)
-    plan = await buildFallbackPlan(bytes, format, backends, identity, opts);
-  } else {
-    throw new Error(`unsupported master format: ${masterPath}`);
-  }
-
-  if (opts.dryRun) {
-    // F7: bypass apply; caller (CLI) prints plan
-    return { outcome: "written" };
-  }
-
-  const execP = applyIngestPlan(plan, backends, opts);
   const timeout = opts.timeoutMs;
-  if (timeout && timeout > 0) {
-    const t = new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`ingest timeout after ${timeout}ms for ${masterPath}`)), timeout));
-    await Promise.race([execP, t]);
-  } else {
-    await execP;
-  }
-  const stagedBytes = (plan.levels || []).reduce((s: number, lv: any) => s + (lv.stagedBytes || 0), 0);
+  let timer: NodeJS.Timeout | undefined;
 
-  // C2: persistent mtime/status cache update on write (for fast future resume/validate without re-stat)
+  const workP = (async (): Promise<IngestResult> => {
+    let plan: IngestPlan | null = null;
+    let usedFallback = false;
+
+    const nativeFmt = isNativeRawFormat(format) ? (format as RawFormat) : null;
+    if (nativeFmt) {
+      try {
+        // Tier 1: native via raw-converter-wasm
+        plan = await computeIngestPlan(bytes, nativeFmt, backends, identity, opts, meta);
+      } catch (err) {
+        if (!accept) throw err;
+        usedFallback = true;
+        plan = await buildFallbackPlan(bytes, format, backends, identity, opts, masterPath, meta);
+      }
+    } else if (format === "jpg") {
+      plan = await computeIngestPlan(bytes, "jpg", backends, identity, opts, meta);
+    } else if (accept) {
+      // unknown ext or non-native raw: go straight to Tier3/5 (no native attempt)
+      usedFallback = true;
+      plan = await buildFallbackPlan(bytes, format, backends, identity, opts, masterPath, meta);
+    } else {
+      throw new Error(`unsupported master format: ${masterPath}`);
+    }
+
+    if (opts.dryRun) {
+      // F7: bypass apply; caller (CLI) prints plan; return plan under dryRun (P8)
+      // Trim heavy level data (the encoded JXL bytes) for memory efficiency on large masters;
+      // entries/manifest/sizes/curves remain for explain output.
+      if (plan) {
+        for (const lv of plan.levels) {
+          (lv as any).data = new Uint8Array(0);
+        }
+      }
+      return { outcome: "written", plan: plan!, degraded: usedFallback || undefined };
+    }
+
+    await applyIngestPlan(plan!, backends, opts);
+    const stagedBytes = (plan!.levels || []).reduce((s: number, lv: any) => s + (lv.stagedBytes || 0), 0);
+
+    // P4: mtimecache deleted (no consumers outside this file; dead RMW race under workers; coordinator epilogue not needed)
+    return { outcome: "written", stagedBytes: stagedBytes || undefined, degraded: usedFallback || undefined };
+  })();
+
   try {
-    const cachePath = join(opts.outDir, ".pyramid-ingest.mtimecache.json");
-    let c: Record<string, number> = {};
-    try { c = JSON.parse(await readFile(cachePath, "utf8") || "{}"); } catch {}
-    c[masterPath] = info.mtimeMs;
-    const tmp = `${cachePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-    await writeFile(tmp, JSON.stringify(c));
-    await rename(tmp, cachePath).catch(async (e: any) => { if (e && e.code === "EEXIST") await unlink(tmp).catch(()=>{}); else throw e; });
-  } catch {}
-
-  return { outcome: "written", stagedBytes: stagedBytes || undefined };
+    if (timeout && timeout > 0) {
+      const t = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`ingest timeout after ${timeout}ms for ${masterPath}`)), timeout); });
+      return await Promise.race([workP, t]);
+    } else {
+      return await workP;
+    }
+  } finally {
+    clearTimeout(timer);
+    workP.catch(() => {}); // detach loser to avoid unhandled after timeout wins
+  }
 }
 
 // WU-5: Tier 3 (embedded JPEG via exifr) or Tier 5 (structured stub manifest, no index entry).
@@ -408,14 +530,36 @@ async function buildFallbackPlan(
   backends: Backends,
   identity: { imageId: string; masterName: string; mtimeMs: number },
   opts: IngestOptions,
+  pathForTel?: string,
+  metadata?: Record<string, unknown>,
 ): Promise<IngestPlan> {
   const b = backends;
+  const tel = b.telemetry;
   const detected = format || detectFormatByMagic(bytes) || "unknown";
 
   // Tier 3
   const jpeg = await tryExtractEmbeddedJpeg(bytes);
   if (jpeg && jpeg.length > 0) {
-    const ladder = await buildJpgLadder(b.jxl, jpeg, !!opts.profileConvergence); // reuse jpg path (transcode + pyramid, may tile)
+    // F5 event (path threaded from ingestImage)
+    tel?.event?.("fallback-tier", { path: pathForTel || "unknown", tier: 3, detected, reason: "embedded-preview" });
+    let ladder: LadderResult;
+    if (opts.proxy !== undefined) {
+      // F3: honor proxy in fallback (native raw failed); decode embedded jpg to rgba then proxy ladder
+      const fullJxl = await b.jxl.transcodeJpeg(jpeg);
+      const dec = await b.jxl.decodeToRgba8(fullJxl);
+      ladder = await buildProxyLadder(b.jxl, dec.rgba, dec.width, dec.height, opts.proxy, "source", !!opts.profileConvergence);
+    } else {
+      ladder = await buildJpgLadder(b.jxl, jpeg, !!opts.profileConvergence);
+      // F6 (embedded path): same map as master jpg; ladder override (deferred full plumb)
+      if (await probeOrientation(jpeg) === "baked") {
+        (ladder as any).orientation = "baked";
+      }
+    }
+    // F2: min-dim gate; if long <1024 mark degraded (proceed; small preview passed 4kB gate)
+    const dims = getJpegDimensions(jpeg);
+    const longEdge = dims ? Math.max(dims.w, dims.h) : 0;
+    const meta: Record<string, unknown> = { ...(metadata || {}) };
+    if (longEdge > 0 && longEdge < 1024) meta.degraded = true;
     const entries = ladder.levels.map((lv) => toEntry(lv, ladder.width, ladder.height));
     const manifest = buildManifest({
       imageId: identity.imageId,
@@ -426,6 +570,7 @@ async function buildFallbackPlan(
       levels: entries,
       proxy: opts.proxy !== undefined,
     });
+    if (Object.keys(meta).length > 0) (manifest as any).metadata = meta;
     return {
       imageId: identity.imageId,
       master: { name: identity.masterName, format: detected as any, mtimeMs: identity.mtimeMs },
@@ -433,13 +578,15 @@ async function buildFallbackPlan(
       width: ladder.width,
       height: ladder.height,
       levels: ladder.levels,
+      entries,
       proxy: opts.proxy !== undefined,
       manifest,
     };
   }
 
-  // Tier 5: structured stub (Q1/Q5). Minimal dummy to satisfy v1 shape; excluded from index.
-  const meta = await extractBasicMetadata(bytes);
+  // Tier 5
+  tel?.event?.("fallback-tier", { path: pathForTel || "unknown", tier: 5, detected, reason: "no-usable-preview" });
+  const meta = metadata && Object.keys(metadata).length ? metadata : await extractBasicMetadata(bytes, !opts.stripGps);
   const stubBase = {
     schema: 1 as const,
     imageId: identity.imageId,
@@ -461,6 +608,7 @@ async function buildFallbackPlan(
     width: 1,
     height: 1,
     levels: [],
+    entries: [],
     proxy: false,
     manifest,
   };
@@ -475,26 +623,55 @@ export async function ingestBatch(
   const tel = backends.telemetry;
   let activeFiles = [...files];
   const total = activeFiles.length;
-  const conc = Math.max(1, Math.min(opts.concurrency ?? 1, activeFiles.length || 1));
 
-  // F2 resume: filter using checkpoint (completed + failed skipped; inFlight will be retried)
+  // F2 resume: filter using checkpoint (completed skipped; failed skipped unless retryFailed; inFlight will be retried)
   let checkpoint: CheckpointState | null = null;
   if (opts.resume) {
     checkpoint = await readCheckpoint(opts.outDir);
     if (checkpoint) {
-      const skip = new Set([...checkpoint.completed.map(c => c.path), ...checkpoint.failed.map(f => f.path)]);
+      const skip = new Set(checkpoint.completed.map(c => c.path));
+      if (!opts.retryFailed) {
+        for (const f of checkpoint.failed) skip.add(f.path);
+      }
       activeFiles = activeFiles.filter(p => !skip.has(p));
       // note: inFlight from prior will be retried by re-entering the loops
     }
   }
+  // B4: compute effective concurrency after resume filter; do not spawn idle workers for a tiny remaining set.
+  const remaining = activeFiles.length;
+  const conc = Math.max(1, Math.min(opts.concurrency ?? 1, remaining || 1));
   const batchId = checkpoint?.batchId || randomUUID();
-  const startedAt = checkpoint?.startedAt || Date.now();
+  const startedAt = checkpoint?.startedAt || now(backends);
   // local working state (merged with loaded on persist)
-  const cpState: CheckpointState = checkpoint || { batchId, startedAt, inFlight: [], completed: [], failed: [] };
+  const cpState: CheckpointState = checkpoint || { version: "1", batchId, startedAt, inFlight: [], completed: [], failed: [] };
+  // B3: inFlight as Set for O(1) includes/add/delete during batch; snapshot to array only on persist.
+  const inFlight = new Set<string>(cpState.inFlight || []);
+  let completedDirty = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
-  async function persistCheckpoint() {
-    // simple persist (plan suggests debounce ~1s; for correctness always write here)
-    await writeCheckpoint(opts.outDir, cpState).catch(() => {});
+  async function doPersist(snapInFlight: string[]) {
+    const toWrite: CheckpointState = { ...cpState, inFlight: snapInFlight };
+    await writeCheckpoint(opts.outDir, toWrite).catch(() => {});
+  }
+  async function persistInFlightImmediate() {
+    // immediate write on inFlight claim: crash recovery value (see F2)
+    await doPersist(Array.from(inFlight)).catch(() => {});
+  }
+  function scheduleCompletedPersist() {
+    completedDirty = true;
+    if (flushTimer) return;
+    flushTimer = setTimeout(async () => {
+      flushTimer = null;
+      if (completedDirty) {
+        completedDirty = false;
+        await doPersist(Array.from(inFlight)).catch(() => {});
+      }
+    }, 1000);
+  }
+  async function forceFlushCheckpoint() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    completedDirty = false;
+    await doPersist(Array.from(inFlight)).catch(() => {});
   }
 
   // Test fakes (synthetic small bytes + patched jxl) must stay in-process; real workers create own backends + force simd.
@@ -509,27 +686,41 @@ export async function ingestBatch(
         const idx = next++;
         if (idx >= activeFiles.length) return;
         const path = activeFiles[idx]!;
-        const imageId = await imageIdForPath(path);
+        const imageId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || await imageIdForPath(path);
         // full L3: acquire per-image write lock only for real mutate (skip in dry-run to avoid side-effect dirs; cross-proc for live runs)
         let imgLock: AdvisoryLock | null = null;
+        let lockOk = true;
         if (!opts.dryRun) {
-          try { imgLock = await acquireImageWriteLock(opts.outDir, imageId); } catch {}
+          try { imgLock = await acquireImageWriteLock(opts.outDir, imageId); } catch (e) {
+            lockOk = false;
+            tel?.event?.("lock-failed", { path, imageId, error: e instanceof Error ? e.message : String(e) });
+          }
         }
-        // F2: track inFlight + persist before work
-        if (!cpState.inFlight.includes(path)) cpState.inFlight.push(path);
-        await persistCheckpoint();
+        if (!lockOk && !opts.dryRun) {
+          // P9: contention after internal retry/timeout; record failed, never write unlocked (lock purpose)
+          const msg = "failed to acquire image write lock";
+          cpState.failed.push({ path, error: msg } as any);
+          tel?.event?.("image-failed", { path, imageId, error: msg });
+          await forceFlushCheckpoint();
+          result.failed.push({ path, error: msg });
+          continue;
+        }
+        // F2: track inFlight + persist before work (immediate for crash safety)
+        if (!inFlight.has(path)) { inFlight.add(path); await persistInFlightImmediate(); }
         tel?.progress(idx + 1, total, path);
-        if (opts.chaosTest && Math.random() < 0.25) {
-          throw new Error("chaos-test injected failure (for K2 resume/GC recovery test)");
-        }
         tel?.event?.("image-start", { path, imageId, idx: idx + 1, total });
-        const t0 = Date.now();
+        const t0 = now(backends);
         try {
-          const res = await ingestImage(path, backends, opts);
+          if (opts.chaosTest && Math.random() < 0.25) {
+            throw new Error("chaos-test injected failure (for K2 resume/GC recovery test)");
+          }
+          const callOpts: any = { ...opts, imageId };
+          const res = await ingestImage(path, backends, callOpts);
           const outcome = res.outcome;
-          const dur = Date.now() - t0;
+          const dur = now(backends) - t0;
+          if (res.degraded) result.degraded = (result.degraded || 0) + 1;
           // move out of inFlight
-          cpState.inFlight = cpState.inFlight.filter(p => p !== path);
+          inFlight.delete(path);
           if (outcome === "written") {
             result.written++;
             cpState.completed.push({ path, outcome: "written", stagedBytes: res.stagedBytes, durationMs: dur });
@@ -538,14 +729,15 @@ export async function ingestBatch(
             cpState.completed.push({ path, outcome: "skipped" });
           }
           tel?.event?.("image-end", { path, imageId, outcome, durationMs: dur });
-          await persistCheckpoint();
+          scheduleCompletedPersist();
         } catch (err) {
-          const dur = Date.now() - t0;
-          cpState.inFlight = cpState.inFlight.filter(p => p !== path);
+          const dur = now(backends) - t0;
+          inFlight.delete(path);
           const msg = err instanceof Error ? err.message : String(err);
-          cpState.failed.push({ path, error: msg });
-          tel?.event?.("image-failed", { path, imageId, error: msg, durationMs: dur });
-          await persistCheckpoint();
+          const code = (err as any)?.code;
+          cpState.failed.push({ path, error: msg, ...(code ? { code: String(code) } : {}) } as any);
+          tel?.event?.("image-failed", { path, imageId, error: msg, code, durationMs: dur });
+          await forceFlushCheckpoint();
           result.failed.push({ path, error: err instanceof Error ? err : String(err) });
         } finally {
           await imgLock?.release().catch(() => {});
@@ -553,13 +745,16 @@ export async function ingestBatch(
       }
     };
     await Promise.all(Array.from({ length: conc }, () => run()));
+    await forceFlushCheckpoint();
     if (!opts.dryRun) await clearCheckpoint(opts.outDir).catch(() => {});
+    // B10: perImage should reflect only this run's activity (post-resume activeFiles), not prior-run completed from loaded cp.
+    const thisRun = new Set(activeFiles);
     result.perImage = [
-      ...cpState.completed,
-      ...cpState.failed.map(f => ({ path: f.path, outcome: "failed" as const, error: f.error })),
+      ...cpState.completed.filter((c: any) => thisRun.has(c.path)),
+      ...cpState.failed.filter((f: any) => thisRun.has(f.path)).map(f => ({ path: f.path, outcome: "failed" as const, error: f.error })),
     ];
     const s = cpState.completed.reduce((sum: number, c: any) => sum + (c.stagedBytes || 0), 0);
-    if (s > 0) (result as any).totalStagedBytes = s;
+    if (s > 0) result.totalStagedBytes = s;
     return result;
   }
 
@@ -567,29 +762,74 @@ export async function ingestBatch(
   // Workers are created with forced 'simd' (see ingest-worker.ts). Exactly 1 core per active worker.
   const { Worker } = await import("node:worker_threads");
   const workers: InstanceType<typeof Worker>[] = [];
-  const pending = new Map<number, { resolve: (o: any) => void; reject: (e: any) => void }>();
+  // B1: per-entry owner + dead set so one worker crash rejects only its jobs and stops dispatching to it.
+  const pending = new Map<number, { resolve: (o: any) => void; reject: (e: any) => void; worker: number }>();
+  const dead = new Set<number>();
   let jobId = 0;
   let nextFile = 0;
 
   for (let i = 0; i < conc; i++) {
-    const w = new Worker(new URL("./ingest-worker.ts", import.meta.url), { type: "module" });
+    const wi = i;
+    // B9: .js extension required for plain tsc emit (dist/ingest.js + dist/ingest-worker.js).
+    // Tests bypass the real worker pool via __testInProcess; production node run of dist/cli.js resolves the sibling .js.
+    // `type: "module"` is the web/bun Worker option; node:worker_threads ignores it (ESM resolved by extension).
+    const w = new Worker(new URL("./ingest-worker.js", import.meta.url), { type: "module" } as any);
     w.on("message", (m: any) => {
       const p = pending.get(m.id);
       if (p) {
         pending.delete(m.id);
         if (m.ok) {
-          p.resolve(m.stagedBytes !== undefined ? { outcome: m.outcome, stagedBytes: m.stagedBytes, durationMs: m.durationMs } : m.outcome);
+          // B8: single object shape on the wire (worker always sends {outcome, stagedBytes?, durationMs?})
+          p.resolve({ outcome: m.outcome, stagedBytes: m.stagedBytes, durationMs: m.durationMs });
         } else {
           p.reject(m.error);
         }
       }
     });
     w.on("error", (e) => {
-      // surface hard worker crash to current pending if any; others will see on next
-      for (const [, p] of pending) p.reject(e);
-      pending.clear();
+      dead.add(wi);
+      for (const [id, p] of pending) {
+        if (p.worker === wi) {
+          pending.delete(id);
+          p.reject(e);
+        }
+      }
     });
+    // Follow-up to B1: catch native/thread exits (terminate, OOM kill, etc.) that may not surface as 'error'.
+    w.on("exit", (code) => {
+      if (code !== 0) {
+        dead.add(wi);
+        for (const [id, p] of pending) {
+          if (p.worker === wi) {
+            pending.delete(id);
+            p.reject(new Error(`worker ${wi} exited with code ${code}`));
+          }
+        }
+      }
+    });
+    // Respawn (original B1 optional) not done: would require re-creating Worker, re-attaching all handlers, replacing slot, + once-guard to avoid loops.
+    // Current dead+pending-reject+dispatcher-break + resume/--retry-failed already gives correct isolation + recovery without extra lifecycle in the dumb pool.
     workers.push(w);
+  }
+
+  // B7: prompt mid-image abort for the worker pool path (in-process polls between images already).
+  if (backends.signal) {
+    const onAbort = () => {
+      forceFlushCheckpoint().catch(() => {}); // best-effort cp durability on cancel (matches force on error paths)
+      for (let wi = 0; wi < workers.length; wi++) {
+        dead.add(wi);
+        const w = workers[wi];
+        if (w) w.terminate().catch(() => {});
+      }
+      for (const [id, p] of pending) {
+        if (dead.has(p.worker)) {
+          pending.delete(id);
+          p.reject(Object.assign(new Error("aborted by signal"), { code: "ABORT_ERR" }));
+        }
+      }
+    };
+    if (backends.signal.aborted) onAbort();
+    else backends.signal.addEventListener("abort", onAbort, { once: true });
   }
 
   const dispatchers: Promise<void>[] = [];
@@ -598,33 +838,53 @@ export async function ingestBatch(
     const runOne = async () => {
       for (;;) {
         if (backends.signal?.aborted) break;
+        if (dead.has(wi)) break;  // B1: stop dispatching to crashed worker; its jobs already rejected in error handler
         const idx = nextFile++;
         if (idx >= activeFiles.length) break;
         const path = activeFiles[idx]!;
-        const imageId = await imageIdForPath(path);
+        const imageId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || await imageIdForPath(path);
         // full L3: per-image write lock held for worker job duration only for real runs (dry-run avoids mkdir side effects)
         let imgLock: AdvisoryLock | null = null;
+        let lockOk = true;
         if (!opts.dryRun) {
-          try { imgLock = await acquireImageWriteLock(opts.outDir, imageId); } catch {}
+          try { imgLock = await acquireImageWriteLock(opts.outDir, imageId); } catch (e) {
+            lockOk = false;
+            tel?.event?.("lock-failed", { path, imageId, error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+        if (!lockOk && !opts.dryRun) {
+          // P9: contention after internal retry/timeout; record failed, never write unlocked (lock purpose)
+          const msg = "failed to acquire image write lock";
+          cpState.failed.push({ path, error: msg } as any);
+          tel?.event?.("image-failed", { path, imageId, error: msg });
+          await forceFlushCheckpoint();
+          result.failed.push({ path, error: msg });
+          continue;
         }
         // F2: inFlight + persist (main coordinator side for worker dispatch)
-        if (!cpState.inFlight.includes(path)) cpState.inFlight.push(path);
-        await persistCheckpoint();
+        if (!inFlight.has(path)) { inFlight.add(path); await persistInFlightImmediate(); }
         tel?.progress(idx + 1, total, path);
-        if (opts.chaosTest && Math.random() < 0.25) {
-          throw new Error("chaos-test injected failure (for K2 resume/GC recovery test)");
-        }
         tel?.event?.("image-start", { path, imageId, idx: idx + 1, total });
-        const id = ++jobId;
-        const p = new Promise<IngestOutcome>((resolve, reject) => pending.set(id, { resolve, reject }));
-        w.postMessage({ id, path, opts });
-        const tJob = Date.now();
+        const tJob = now(backends);
         try {
-          const outcomeOrRes: any = await p;  // may be string (old) or IngestResult (new) with duration from inside worker (C/T)
-          const outcome = typeof outcomeOrRes === "string" ? outcomeOrRes : outcomeOrRes.outcome;
-          const staged = typeof outcomeOrRes === "string" ? undefined : outcomeOrRes.stagedBytes;
-          const dur = typeof outcomeOrRes === "string" ? (Date.now() - tJob) : (outcomeOrRes.durationMs ?? (Date.now() - tJob));
-          cpState.inFlight = cpState.inFlight.filter(pth => pth !== path);
+          if (opts.chaosTest && Math.random() < 0.25) {
+            throw new Error("chaos-test injected failure (for K2 resume/GC recovery test)");
+          }
+          // ING-9: claim job + dispatch only after the chaos gate, so an injected failure models a
+          // real pre-work failure instead of wasting a full worker decode/encode then mislabelling it.
+          const id = ++jobId;
+          const p = new Promise<IngestOutcome>((resolve, reject) => pending.set(id, { resolve, reject, worker: wi }));
+          // B5: send only the per-path stat entry (if any); full statMap Record can be large and is pure waste to clone per job.
+          // B11 + idMap: forward single precomputed imageId; strip idMap to avoid shipping full map across postMessage.
+          const preId = (opts as any).imageId || ((opts as any).idMap && (opts as any).idMap[path]) || imageId;
+          const jobOpts: any = { ...opts, statMap: undefined, statEntry: (opts as any).statMap?.[path], idMap: undefined, imageId: preId };
+          w.postMessage({ id, path, opts: jobOpts });
+          const res: any = await p;
+          const outcome = res.outcome;
+          const staged = res.stagedBytes;
+          const dur = res.durationMs ?? (now(backends) - tJob);
+          if (res && res.degraded) result.degraded = (result.degraded || 0) + 1;
+          inFlight.delete(path);
           if (outcome === "written") {
             result.written++;
             cpState.completed.push({ path, outcome: "written", ...(staged ? {stagedBytes: staged} : {}), durationMs: dur });
@@ -633,14 +893,15 @@ export async function ingestBatch(
             cpState.completed.push({ path, outcome: "skipped" });
           }
           tel?.event?.(outcome === "written" || outcome === "skipped" ? "image-end" : "image-failed", { path, imageId, outcome, durationMs: dur });
-          await persistCheckpoint();
+          scheduleCompletedPersist();
         } catch (err) {
-          const dur = Date.now() - tJob;
-          cpState.inFlight = cpState.inFlight.filter(pth => pth !== path);
+          const dur = now(backends) - tJob;
+          inFlight.delete(path);
           const msg = err instanceof Error ? err.message : String(err);
-          cpState.failed.push({ path, error: msg });
-          tel?.event?.("image-failed", { path, imageId, error: msg, durationMs: dur });
-          await persistCheckpoint();
+          const code = (err as any)?.code;
+          cpState.failed.push({ path, error: msg, ...(code ? { code: String(code) } : {}) } as any);
+          tel?.event?.("image-failed", { path, imageId, error: msg, code, durationMs: dur });
+          await forceFlushCheckpoint();
           result.failed.push({ path, error: err instanceof Error ? err : String(err) });
         } finally {
           await imgLock?.release().catch(() => {});
@@ -653,18 +914,21 @@ export async function ingestBatch(
   await Promise.all(dispatchers);
 
   // cleanup
+  await forceFlushCheckpoint();
   await Promise.all(workers.map((w) => w.terminate().catch(() => {})));
   if (!opts.dryRun) await clearCheckpoint(opts.outDir).catch(() => {});
+  // B10: perImage should reflect only this run's activity (post-resume activeFiles), not prior-run completed from loaded cp.
+  const thisRunW = new Set(activeFiles);
   result.perImage = [
-    ...cpState.completed,
-    ...cpState.failed.map(f => ({ path: f.path, outcome: "failed" as const, error: f.error })),
+    ...cpState.completed.filter((c: any) => thisRunW.has(c.path)),
+    ...cpState.failed.filter((f: any) => thisRunW.has(f.path)).map(f => ({ path: f.path, outcome: "failed" as const, error: f.error })),
   ];
   const s = cpState.completed.reduce((sum: number, c: any) => sum + (c.stagedBytes || 0), 0);
   if (s > 0) (result as any).totalStagedBytes = s;
   return result;
 }
 
-export async function rebuildIndex(outDir: string): Promise<GalleryIndex> {
+export async function rebuildIndex(outDir: string, telemetry?: Telemetry): Promise<GalleryIndex> {
   const imagesDir = join(outDir, "images");
   const index: GalleryIndex = { schema: 1, images: [] };
   let imageIds: string[];
@@ -673,21 +937,26 @@ export async function rebuildIndex(outDir: string): Promise<GalleryIndex> {
   } catch {
     imageIds = [];
   }
-  for (const id of imageIds) {
+  // Parallel bounded for speed on large N (manifest parse is IO+JSON+Zod); sort afterward restores D3 deterministic order.
+  await pMapLimit(imageIds, 8, async (id) => {
     const manifestPath = join(imagesDir, id, "manifest.json");
-    if (!(await fileExists(manifestPath))) continue;
+    if (!(await fileExists(manifestPath))) return;
     let manifest: Manifest;
     try {
       manifest = parseManifest(await readFile(manifestPath, "utf8"));
     } catch (err) {
-      process.stderr.write(
-        `warning: skipping unreadable manifest ${manifestPath}: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-      continue;
+      // P11: route via telemetry when available, stderr fallback (rebuild used from cli + standalone)
+      const msg = `warning: skipping unreadable manifest ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`;
+      if (telemetry?.event) {
+        telemetry.event("warning", { message: msg, manifestPath });
+      } else {
+        process.stderr.write(`${msg}\n`);
+      }
+      return;
     }
-    if (manifest.proxy || (manifest as any).stub) continue; // Q5: stubs excluded from central index
+    if (manifest.proxy || (manifest as any).stub) return; // Q5: stubs excluded from central index
     index.images.push(buildIndexEntry(manifest));
-  }
+  });
   // INVARIANT (D3): index order deterministic across readdir / fs. Do not remove this sort.
   index.images.sort((a, b) => (a.imageId < b.imageId ? -1 : a.imageId > b.imageId ? 1 : 0));
 
@@ -705,6 +974,9 @@ export async function rebuildIndex(outDir: string): Promise<GalleryIndex> {
 export interface GcResult {
   removedLevelFiles: string[];
   removedImageDirs: string[];
+  /** Number of manifests that failed to parse. When > 0, orphan-level deletion is skipped
+   *  (their referenced hashes are unknown, so deleting "unreferenced" blobs could destroy live data). */
+  parseErrors?: number;
 }
 
 export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } = {}): Promise<GcResult> {
@@ -713,29 +985,42 @@ export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } =
   const removedLevelFiles: string[] = [];
   const removedImageDirs: string[] = [];
 
-  // 1. collect all referenced contenthashes from manifests
+  // 1. collect all referenced contenthashes from manifests (parallel bounded for large collections)
   const referenced = new Set<string>();
+  let parseErrors = 0;
   let ids: string[] = [];
   try { ids = await readdir(imagesDir); } catch { ids = []; }
-  for (const id of ids) {
+  await pMapLimit(ids, 8, async (id) => {
     const mp = join(imagesDir, id, "manifest.json");
-    if (!(await fileExists(mp))) continue;
+    const txt = await readFileOrNull(mp);
+    if (txt === null) return;
     try {
-      const m = parseManifest(await readFile(mp, "utf8"));
+      const m = parseManifest(txt);
       for (const lv of (m.levels || [])) {
         if (lv && lv.contenthash) referenced.add(lv.contenthash);
       }
-    } catch { /* skip bad */ }
-  }
+    } catch { parseErrors++; /* DATA-SAFETY: a manifest we can't parse may reference live levels */ }
+  });
+
+  // DATA-SAFETY: if any manifest failed to parse, the `referenced` set is incomplete, so blobs that
+  // are actually live would look orphaned. Refuse to delete any level files in that case.
+  const orphanDeleteSafe = parseErrors === 0;
 
   // 2. scan levels/ for orphans
+  // P6: grace window so levels written by in-flight ingest (pre-manifest-rename) are not GC'd.
+  // manifest rename happens after level writes in applyIngestPlan (atomicity); referenced built only from manifests.
+  const GRACE_MS = 10 * 60 * 1000;
   let levelFiles: string[] = [];
   try { levelFiles = await readdir(levelsDir); } catch { levelFiles = []; }
   for (const f of levelFiles) {
     if (!f.endsWith(".jxl")) continue;
     const h = f.replace(/\.jxl$/, "");
     if (!referenced.has(h)) {
+      if (!orphanDeleteSafe) continue; // unparseable manifest present — cannot trust orphan judgement
       const full = join(levelsDir, f);
+      const st = await stat(full).catch(() => null);
+      if (st && Date.now() - st.mtimeMs < GRACE_MS) continue; // too fresh to judge (in-flight writer)
+      // (optional: also probe images/*/.lock per lock.ts naming for live ingest; read-only, not implemented here to keep GC cheap)
       if (!opts.dryRun) {
         await unlink(full).catch(() => {});
       }
@@ -752,15 +1037,27 @@ export async function removeOrphans(outDir: string, opts: { dryRun?: boolean } =
       // try remove dir (may have partials)
       try {
         if (!opts.dryRun) {
-          // best effort recursive clean
-          const entries = await readdir(idDir).catch(() => [] as string[]);
-          for (const e of entries) await unlink(join(idDir, e)).catch(() => {});
-          await (require("node:fs/promises").rmdir || unlink)(idDir).catch(() => {}); // node 14+ rmdir deprecated but simple
+          await rm(idDir, { recursive: true, force: true }).catch(() => {});
         }
         removedImageDirs.push(id);
       } catch {}
     }
   }
 
-  return { removedLevelFiles, removedImageDirs };
+  return { removedLevelFiles, removedImageDirs, parseErrors };
+}
+
+// Bounded parallel map for large-gallery maintenance ops (rebuildIndex, removeOrphans).
+// N manifests can be 10k+ for biodiversity/photogram collections; serial read+parse is slow wall time.
+// Limit prevents excessive concurrent fd/heap during parse. Pushes are safe (Set or sort-after).
+export async function pMapLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let i = 0;
+  const runners = Array.from({ length: Math.max(1, limit) }, async () => {
+    while (i < items.length) {
+      const cur = i++;
+      if (cur >= items.length) break;
+      await fn(items[cur]).catch(() => {});
+    }
+  });
+  await Promise.all(runners);
 }

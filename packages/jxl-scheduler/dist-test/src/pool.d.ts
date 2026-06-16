@@ -34,7 +34,7 @@ export declare class WorkerPool {
     private readonly coreBudget;
     private readonly workerCost;
     private static readonly PREWARM_STAGGER_MS;
-    private readonly budgetedWorkerIds;
+    private readonly budgetedCosts;
     private readonly metrics;
     constructor(opts: {
         factory: WorkerFactory;
@@ -43,6 +43,7 @@ export declare class WorkerPool {
         spawnTimeoutMs?: number;
         minIdle?: number;
         coreBudget?: CoreBudget;
+        workerCost?: number;
     });
     get size(): number;
     get idleCount(): number;

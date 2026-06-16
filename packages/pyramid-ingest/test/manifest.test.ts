@@ -32,6 +32,42 @@ test("toEntry builds an 8-bit, untiled level entry with a content hash", () => {
   expect(e.contenthash).toHaveLength(16);
 });
 
+test("toEntry passes qualityCurve through and omits it when empty or absent", () => {
+  const curve = [
+    { bytes: 1024, ssim: 0.97, butteraugli: 3.2 },
+    { bytes: 4096, ssim: 0.9996, butteraugli: 1.05 },
+  ];
+  const data = new Uint8Array(8192);
+  const withCurve = toEntry({ data, width: 2048, height: 1536, tiled: true, convergedByteEnd: 4096, qualityCurve: curve }, 4624, 3468);
+  expect(withCurve.qualityCurve).toEqual(curve);
+  expect(withCurve.convergedByteEnd).toBe(4096);
+
+  const without = toEntry({ data, width: 2048, height: 1536, tiled: true }, 4624, 3468);
+  expect("qualityCurve" in without).toBe(false);
+
+  const empty = toEntry({ data, width: 2048, height: 1536, tiled: true, qualityCurve: [] }, 4624, 3468);
+  expect("qualityCurve" in empty).toBe(false);
+});
+
+test("manifest schema accepts qualityCurve points and rejects non-positive bytes", () => {
+  const level: LevelEntry = {
+    size: 2048, w: 2048, h: 1536, bytes: 8192, bitsPerSample: 8,
+    contenthash: "c".repeat(16), tiled: true,
+    qualityCurve: [{ bytes: 1024, butteraugli: 2.5 }, { bytes: 4096, ssim: 0.9996 }],
+  };
+  const m = buildManifest({
+    imageId: "b".repeat(16),
+    master: { name: "x.orf", format: "orf", mtimeMs: 1 },
+    orientation: "baked", width: 4624, height: 3468, levels: [level],
+  });
+  const reparsed = parseManifest(JSON.stringify(m));
+  expect(reparsed.levels?.[0]?.qualityCurve).toEqual(level.qualityCurve);
+
+  const bad = JSON.parse(JSON.stringify(m));
+  bad.levels[0].qualityCurve = [{ bytes: 0, ssim: 0.5 }];
+  expect(() => parseManifest(JSON.stringify(bad))).toThrow();
+});
+
 test("buildManifest sorts levels ascending by pixel count and rounds aspect to 4dp", () => {
   const big: LevelEntry = { size: "full", w: 4624, h: 3468, bytes: 9, bitsPerSample: 8, contenthash: "f".repeat(16), tiled: false };
   const small: LevelEntry = { size: 256, w: 256, h: 192, bytes: 3, bitsPerSample: 8, contenthash: "a".repeat(16), tiled: false };
@@ -63,17 +99,22 @@ test("buildManifest flags proxy and buildIndexEntry inlines L0", () => {
   expect(idx.l0).toEqual({ contenthash: "b".repeat(16), w: 512, h: 384 });
 });
 
-test("isUpToDate requires a matching mtime and a non-proxy manifest", () => {
+test("isUpToDate requires matching mtime and proxy flag alignment (non-proxy or proxy)", () => {
   const base = buildManifest({
     imageId: "b".repeat(16), master: { name: "x.orf", format: "orf", mtimeMs: 1000 },
     orientation: "baked", width: 10, height: 10,
     levels: [{ size: "full", w: 10, h: 10, bytes: 1, bitsPerSample: 8, contenthash: "c".repeat(16), tiled: false }],
   });
   expect(isUpToDate(base, 1000)).toBe(true);
+  expect(isUpToDate(base, 1000, false)).toBe(true);
   // low-mtime-rounding: exact match (dropped round); 1000.4 no longer matches
   expect(isUpToDate(base, 1000.4)).toBe(false);
   expect(isUpToDate(base, 2000)).toBe(false);
   expect(isUpToDate({ ...base, proxy: true }, 1000)).toBe(false);
+  // P7: proxy request matches proxy manifest
+  const pxy = { ...base, proxy: true as const };
+  expect(isUpToDate(pxy, 1000, true)).toBe(true);
+  expect(isUpToDate(pxy, 1000, false)).toBe(false);
 });
 
 test("buildManifest produces producedBy and manifestSchemaV1 roundtrips it", () => {

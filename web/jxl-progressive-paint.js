@@ -5,6 +5,8 @@ import { createFilePicker } from './jxl-file-picker.js';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
 import { computePsnrVsFinal } from './jxl-progressive-quality.js';
+import { classifyByteCutoffFrame, summarizeByteCutoffResults, buildSeriesAsync } from './jxl-progressive-byte-metrics.js';
+import { ButteraugliComparator } from '@casabio/jxl-wasm';
 import { analyzeProgressiveFrame, formatFrameStatsCompact, formatFrameStatsLog } from './jxl-progressive-frame-stats.js';
 
 const { process_orf, rgb_to_rgba } = rawWasm;
@@ -27,6 +29,17 @@ const runMeasurements = [];
 // rAF coalescing state — one-slot pending frame queue; newer replaces older
 let pendingFrame = null;   // { pixels, info, t, passIdx, isFinal, _passes } — one-slot queue; newer replaces older
 let rafPending = false;
+
+// Wheel zoom rAF coalescing
+let _wheelDeltaAccum = 0;
+let _wheelRafPending = false;
+
+// Source preview canvas cache — avoids recreating a full-res canvas on every paintSourcePreview call
+let _sourcePreviewCache = null; // { source, srcCanvas }
+
+// WASM ButteraugliComparator — pre-inited once per ref image; reused across probe calls
+let _butterComparator = null;      // ButteraugliComparator | null
+let _butterComparatorKey = null;   // Uint8Array identity of ref pixels used to build comparator
 
 // No-op: this page has no workflow state UI (unlike wrapper-lab / crop-benchmark)
 function updateWorkflowState() {}
@@ -53,7 +66,6 @@ logBrowserDecodeTier();
 
 // A4: gate O(W×H) frame analysis behind ?stats=1
 const statsEnabled = new URLSearchParams(location.search).get('stats') === '1';
-const STATS_ENABLED = statsEnabled;
 // A3: persistent thumb canvases (80×50) keyed by passIdx; cleared on timeline reset
 let thumbCanvases = new Map();
 // A3: persistent full-res source canvases keyed by slot index; reused across passes
@@ -309,6 +321,9 @@ async function loadFiles(files) {
 
     selectedSources = [];
     selectedSource = null;
+    _sourcePreviewCache = null;
+    if (_butterComparator) { _butterComparator.dispose(); _butterComparator = null; }
+    _butterComparatorKey = null;
     setProgStatus(`Loading ${list.length} file${list.length > 1 ? 's' : ''}…`);
 
     for (const file of list) {
@@ -361,6 +376,9 @@ async function loadRandomImages() {
 
     selectedSources = [];
     selectedSource = null;
+    _sourcePreviewCache = null;
+    if (_butterComparator) { _butterComparator.dispose(); _butterComparator = null; }
+    _butterComparatorKey = null;
     setProgStatus(`Loading ${count} random Gobabeb image${count > 1 ? 's' : ''}…`);
 
     let loaded = 0;
@@ -479,26 +497,35 @@ if (zoomResetBtn) {
 
 // Wheel zoom + drag pan. Only interferes with page scroll when armed or already zoomed in.
 if (viewportTrio) {
+    // Coalesce wheel events into one rAF render — wheel fires 60-120×/s without this.
     viewportTrio.addEventListener('wheel', (e) => {
         if (!zoomArmed && zoomLevel <= 1.0001) return;
         e.preventDefault();
-        const factor = e.deltaY < 0 ? 1.13 : (1 / 1.13);
-        zoomLevel = Math.max(0.4, Math.min(10, zoomLevel * factor));
-        updateZoomReadout();
-        renderAllZoomedViews();
+        _wheelDeltaAccum += e.deltaY;
+        if (_wheelRafPending) return;
+        _wheelRafPending = true;
+        requestAnimationFrame(() => {
+            _wheelRafPending = false;
+            const delta = _wheelDeltaAccum;
+            _wheelDeltaAccum = 0;
+            const factor = delta < 0 ? 1.13 : (1 / 1.13);
+            zoomLevel = Math.max(0.4, Math.min(10, zoomLevel * factor));
+            updateZoomReadout();
+            renderAllZoomedViews();
+        });
     }, { passive: false });
 
     // Drag to pan (only meaningful when zoomed)
     let dragStart = null;
     viewportTrio.addEventListener('mousedown', (e) => {
         if (zoomLevel <= 1.0001) return;
-        dragStart = { x: e.clientX, y: e.clientY, panX, panY };
+        // Cache pan scale at drag start — constant for entire gesture, avoid per-mousemove division.
+        dragStart = { x: e.clientX, y: e.clientY, panX, panY, scale: 1.8 / zoomLevel };
     });
     window.addEventListener('mousemove', (e) => {
         if (!dragStart) return;
-        const scale = 1.8 / zoomLevel; // faster panning at higher zoom
-        panX = dragStart.panX - (e.clientX - dragStart.x) * scale;
-        panY = dragStart.panY - (e.clientY - dragStart.y) * scale;
+        panX = dragStart.panX - (e.clientX - dragStart.x) * dragStart.scale;
+        panY = dragStart.panY - (e.clientY - dragStart.y) * dragStart.scale;
         renderAllZoomedViews();
     });
     window.addEventListener('mouseup', () => { dragStart = null; });
@@ -655,16 +682,20 @@ function paintSourcePreview() {
     const c = document.getElementById('source-preview');
     if (!c || !selectedSource || !wrap) { hideSourcePreview(); return; }
     wrap.style.display = 'inline-block';
+    // Cache source canvas — avoids allocating a full-res canvas + putImageData on every preview repaint.
+    if (!_sourcePreviewCache || _sourcePreviewCache.source !== selectedSource) {
+        const srcC = document.createElement('canvas');
+        srcC.width = selectedSource.width;
+        srcC.height = selectedSource.height;
+        const srcView = selectedSource.rgba;
+        const clamped = new Uint8ClampedArray(srcView.buffer, srcView.byteOffset, srcView.byteLength);
+        srcC.getContext('2d', { willReadFrequently: false }).putImageData(
+            new ImageData(clamped, selectedSource.width, selectedSource.height), 0, 0);
+        _sourcePreviewCache = { source: selectedSource, srcCanvas: srcC };
+    }
+    const srcC = _sourcePreviewCache.srcCanvas;
     const ctx = c.getContext('2d');
     ctx.clearRect(0, 0, c.width, c.height);
-    // draw source rgba (may be large) scaled into the 64x48 preview
-    const srcC = document.createElement('canvas');
-    srcC.width = selectedSource.width;
-    srcC.height = selectedSource.height;
-    const srcCtx = srcC.getContext('2d');
-    const srcView = selectedSource.rgba;
-    const clamped = new Uint8ClampedArray(srcView.buffer, srcView.byteOffset, srcView.byteLength);
-    srcCtx.putImageData(new ImageData(clamped, selectedSource.width, selectedSource.height), 0, 0);
     const scale = Math.min(c.width / selectedSource.width, c.height / selectedSource.height);
     const dw = Math.max(1, Math.round(selectedSource.width * scale));
     const dh = Math.max(1, Math.round(selectedSource.height * scale));
@@ -680,14 +711,59 @@ async function runByteCutoffProbe(jxlBytes, progressiveDetail) {
     ladder.innerHTML = '';
     if (status) status.textContent = `${plan.length} byte cutoffs queued`;
 
+    const classifiedResults = [];
+    const cutoffPixels = [];   // Uint8Array per entry with decoded frame
+    const cutoffBytes = [];    // byte size parallel to cutoffPixels
+    let probeWidth = 0, probeHeight = 0;
     for (const entry of plan) {
         if (status) status.textContent = `Decoding ${formatByteCutoffLabel(entry)}...`;
         const result = await decodeByteCutoff(jxlBytes, entry, progressiveDetail);
         renderByteCutoffTile(ladder, result);
+        const events = result.frame ? [result.frame] : [];
+        classifiedResults.push(classifyByteCutoffFrame({ bytes: entry.bytes, events, error: result.error ?? null }));
+        if (result.frame?.pixels) {
+            const px = result.frame.pixels instanceof Uint8Array ? result.frame.pixels : new Uint8Array(result.frame.pixels);
+            cutoffPixels.push(px);
+            cutoffBytes.push(entry.bytes);
+            if (!probeWidth && result.frame.info) { probeWidth = result.frame.info.width; probeHeight = result.frame.info.height; }
+        }
         await nextPaint();
     }
 
-    if (status) status.textContent = `Decoded ${plan.length} byte cutoffs`;
+    // Build quality/butter/ssim series. Ref = final cutoff (highest byte count).
+    let summary;
+    const refPixels = cutoffPixels.length > 0 ? cutoffPixels[cutoffPixels.length - 1] : null;
+    if (refPixels && probeWidth > 0 && probeHeight > 0 && cutoffPixels.length >= 2) {
+        const testPixels = cutoffPixels.slice(0, -1);
+        const testBytes = cutoffBytes.slice(0, -1);
+        // Lazy-init WASM ButteraugliComparator for this ref image (identity-keyed).
+        if (_butterComparatorKey !== refPixels) {
+            if (_butterComparator) { _butterComparator.dispose(); _butterComparator = null; }
+            _butterComparatorKey = refPixels;
+            const w = probeWidth, h = probeHeight, key = refPixels;
+            ButteraugliComparator.create(refPixels, w, h)
+                .then(cmp => { if (_butterComparatorKey === key) _butterComparator = cmp; })
+                .catch(() => {/* WASM butter unavailable — JS fallback active */});
+        }
+        const { qualitySeries, butterSeries, ssimSeries, timing } = await buildSeriesAsync(
+            refPixels, testPixels, testBytes, probeWidth, probeHeight,
+            { comparator: _butterComparator ?? undefined }
+        );
+        summary = summarizeByteCutoffResults(classifiedResults, jxlBytes.byteLength, { qualitySeries, butterSeries, ssimSeries });
+        if (timing.totalMs > 5) console.log(`[ByteCutoff] buildSeries: psnr=${timing.psnrMs.toFixed(1)}ms butter=${timing.butterMs.toFixed(1)}ms ssim=${timing.ssimMs.toFixed(1)}ms total=${timing.totalMs.toFixed(1)}ms`);
+        cutoffPixels.length = 0; // allow GC of pixel buffers
+    } else {
+        summary = summarizeByteCutoffResults(classifiedResults, jxlBytes.byteLength);
+    }
+
+    if (status) {
+        const parts = [`${summary.paintedCutoffs}/${plan.length} painted`];
+        if (summary.firstPaintBytes != null) parts.push(`first paint ${(summary.firstPaintBytes/1024).toFixed(1)} KB (${summary.firstPaintPercent}%)`);
+        if (summary.previewBytes != null) parts.push(`preview ${(summary.previewBytes/1024).toFixed(1)} KB (${summary.previewPercent}%)`);
+        if (summary.firstRecognizableBytes != null) parts.push(`recognizable ${(summary.firstRecognizableBytes/1024).toFixed(1)} KB (${summary.firstRecognizablePercent}%)`);
+        if (summary.finalPsnr != null) parts.push(`PSNR ${summary.finalPsnr.toFixed(1)} dB`);
+        status.textContent = parts.join(' · ');
+    }
 }
 
 async function decodeByteCutoff(jxlBytes, entry, progressiveDetail) {
@@ -979,10 +1055,13 @@ function splitEncodedBytesIntoSteps(bytes, stepCount) {
 }
 
 async function streamIntoDecoder(decoder, jxlBytes, stepCount) {
-    dbgLog('  local stream', `${(jxlBytes.byteLength / 1024).toFixed(1)} KB in one push; requested steps=${stepCount}`, 'info');
-    await decoder.push(exactBuffer(jxlBytes));
+    const steps = splitEncodedBytesIntoSteps(jxlBytes, stepCount);
+    dbgLog('  local stream', `${(jxlBytes.byteLength / 1024).toFixed(1)} KB in ${steps.length} step(s) (requested=${stepCount})`, 'info');
+    for (const step of steps) {
+        await decoder.push(exactBuffer(step));
+    }
     await decoder.close();
-    return 1;
+    return steps.length;
 }
 
 function renderProgressiveComparison({ requestedPassCount, passCount, progressiveFirstMs, progressiveFinalMs, oneShotFinalMs, fileSizeKB, encodeMs, previewFirst, progressiveDetail, progressiveDc, groupOrder }) {
@@ -1242,6 +1321,8 @@ async function runProgressivePaintTest() {
                     }
                 }
             }
+            // Release pixel buffers — canvas holds the visual state; pixels no longer needed after PSNR.
+            for (const p of passes) p.pixels = null;
 
             let oneShotFinalMs = null;
             if (isLast) {
@@ -1293,6 +1374,7 @@ async function runProgressivePaintTest() {
                 final_psnr_vs_source: finalPsnrVsSource != null ? Number(finalPsnrVsSource.toFixed(2)) : null,
             };
             runMeasurements.push(measurement);
+            if (runMeasurements.length > 200) runMeasurements.splice(0, runMeasurements.length - 200);
 
             if (isLast) {
                 renderProgressiveComparison({
@@ -1377,7 +1459,7 @@ async function exportToGallery() {
     try {
         const storageItems = toExport.map(e => {
             try {
-                const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(e.bytes)));
+                const b64 = uint8ToBase64(new Uint8Array(e.bytes));
                 return {
                     name: e.name,
                     b64,
@@ -1514,6 +1596,16 @@ if (exportFolderBtn) exportFolderBtn.addEventListener('click', exportToFolder);
 
 // ─── Structured measurements export (CSV + JSON) ──────────────────────────────
 
+// Chunked base64 encode — avoids call-stack overflow for large Uint8Arrays via Function.apply.
+function uint8ToBase64(uint8) {
+    let str = '';
+    const CHUNK = 0x8000; // 32 KB — safe for apply on all engines
+    for (let i = 0; i < uint8.length; i += CHUNK) {
+        str += String.fromCharCode.apply(null, uint8.subarray(i, i + CHUNK));
+    }
+    return btoa(str);
+}
+
 function downloadText(filename, text, mime = 'text/plain') {
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
@@ -1602,7 +1694,8 @@ async function exportMeasurementsTOON() {
     if (!runMeasurements.length) return;
 
     const now = new Date().toISOString();
-    
+    // Use array + join to avoid O(n²) string reallocation from repeated string concat.
+    const lines = [];
     const dict = {
         'ti': 'tiny',
         'sm': 'small',
@@ -1617,12 +1710,12 @@ async function exportMeasurementsTOON() {
     const reverseDict = Object.fromEntries(Object.entries(dict).map(([k,v]) => [v,k]));
     const mapVal = (v) => reverseDict[v] || v;
 
-    let out = `Dict: ${Object.entries(dict).map(([k,v]) => `${k}=${v}`).join(', ')}\n`;
-    out += `meta:\n`;
-    out += `  exportedAt: ${now}\n`;
-    out += `  generator: jxl-progressive-paint\n`;
-    out += `  count: ${runMeasurements.length}\n`;
-    out += `  format: progressive-paint-measurements-v1\n`;
+    lines.push(`Dict: ${Object.entries(dict).map(([k,v]) => `${k}=${v}`).join(', ')}\n`);
+    lines.push(`meta:\n`);
+    lines.push(`  exportedAt: ${now}\n`);
+    lines.push(`  generator: jxl-progressive-paint\n`);
+    lines.push(`  count: ${runMeasurements.length}\n`);
+    lines.push(`  format: progressive-paint-measurements-v1\n`);
 
     let rowCount = 0;
     for (const m of runMeasurements) {
@@ -1630,8 +1723,8 @@ async function exportMeasurementsTOON() {
         else rowCount += 1;
     }
 
-    out += `\n---\n`;
-    out += `runs[${rowCount}]{source|size|qual|streamReq|detail|paintsRcv|firstMs|finalMs|oneshotMs|speedup|encMs|sizeKB|pass|t_ms|isFinal|aMin|aMax|aZeroPct|rgbNz|lumaVar|hash}:\n`;
+    lines.push(`\n---\n`);
+    lines.push(`runs[${rowCount}]{source|size|qual|streamReq|detail|paintsRcv|firstMs|finalMs|oneshotMs|speedup|encMs|sizeKB|pass|t_ms|isFinal|aMin|aMax|aZeroPct|rgbNz|lumaVar|hash}:\n`);
 
     let lastSource = '';
     let lastSize = '';
@@ -1675,7 +1768,7 @@ async function exportMeasurementsTOON() {
             const outEnc = encMs === lastEncMs ? '~' : encMs;
             const outKB = sizeKB === lastSizeKB ? '~' : sizeKB;
 
-            out += `  ${outSource} | ${outSize} | ${outQual} | ${outStream} | ${outDetail} | ${outPaints} | ${outFirst} | ${outFinal} | ${outOneshot} | ${outSpeedup} | ${outEnc} | ${outKB}KB | - | - | - | - | - | - | - | - | -\n`;
+            lines.push(`  ${outSource} | ${outSize} | ${outQual} | ${outStream} | ${outDetail} | ${outPaints} | ${outFirst} | ${outFinal} | ${outOneshot} | ${outSpeedup} | ${outEnc} | ${outKB}KB | - | - | - | - | - | - | - | - | -\n`);
 
             lastSource = source; lastSize = size; lastQual = qual; lastStreamReq = streamReq;
             lastDetail = detail; lastPaintsRcv = paintsRcv; lastFirstMs = firstMs; lastFinalMs = finalMs;
@@ -1706,7 +1799,7 @@ async function exportMeasurementsTOON() {
                 const outEnc = encMs === lastEncMs ? '~' : encMs;
                 const outKB = sizeKB === lastSizeKB ? '~' : sizeKB;
 
-                out += `  ${outSource} | ${outSize} | ${outQual} | ${outStream} | ${outDetail} | ${outPaints} | ${outFirst} | ${outFinal} | ${outOneshot} | ${outSpeedup} | ${outEnc} | ${outKB}KB | ${pass} | ${t_ms} | ${isFinal} | ${aMin} | ${aMax} | ${aZero} | ${rgbNz} | ${lumaVar} | ${hash}\n`;
+                lines.push(`  ${outSource} | ${outSize} | ${outQual} | ${outStream} | ${outDetail} | ${outPaints} | ${outFirst} | ${outFinal} | ${outOneshot} | ${outSpeedup} | ${outEnc} | ${outKB}KB | ${pass} | ${t_ms} | ${isFinal} | ${aMin} | ${aMax} | ${aZero} | ${rgbNz} | ${lumaVar} | ${hash}\n`);
 
                 lastSource = source; lastSize = size; lastQual = qual; lastStreamReq = streamReq;
                 lastDetail = detail; lastPaintsRcv = paintsRcv; lastFirstMs = firstMs; lastFinalMs = finalMs;
@@ -1715,6 +1808,7 @@ async function exportMeasurementsTOON() {
         }
     }
 
+    const out = lines.join('');
     let userChoice = prompt("Type 'C' to Copy Only, 'S' to Copy & Save, or hit Cancel.", "S");
     
     if (userChoice !== null) {

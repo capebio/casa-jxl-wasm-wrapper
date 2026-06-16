@@ -14,35 +14,36 @@ export function analyzeProgressiveFrame(pixels, width, height) {
     let lumaSqSum = 0;
     let hash = 0x811c9dc5;
 
-    for (let i = 0; i < limit; i++) {
-        hash ^= data[i];
-        hash = Math.imul(hash, 0x01000193) >>> 0;
-    }
-
-    for (let i = 0, p = 0; p < pixelCount; p++, i += 4) {
-        const r = i < limit ? data[i] : 0;
-        const g = i + 1 < limit ? data[i + 1] : 0;
-        const b = i + 2 < limit ? data[i + 2] : 0;
-        const a = i + 3 < limit ? data[i + 3] : 0;
-
-        if (r !== 0) rgbNonzeroCount++;
-        if (g !== 0) rgbNonzeroCount++;
-        if (b !== 0) rgbNonzeroCount++;
+    // Fused single-pass (hash + stats) + int-luma fastpath for telemetry hot kernel.
+    // See docs/JxlDashboardFrameStats.md (Chapter 1). Hash/return shape identical.
+    const full = limit === expected;
+    let i = 0;
+    for (let p = 0; p < pixelCount; p++, i += 4) {
+        const r = full || i < limit ? data[i] : 0;
+        const g = full || i + 1 < limit ? data[i + 1] : 0;
+        const b = full || i + 2 < limit ? data[i + 2] : 0;
+        const a = full || i + 3 < limit ? data[i + 3] : 0;
+        hash ^= r; hash = Math.imul(hash, 0x01000193) >>> 0;
+        hash ^= g; hash = Math.imul(hash, 0x01000193) >>> 0;
+        hash ^= b; hash = Math.imul(hash, 0x01000193) >>> 0;
+        hash ^= a; hash = Math.imul(hash, 0x01000193) >>> 0;
+        rgbNonzeroCount += (r !== 0) + (g !== 0) + (b !== 0);
         if (a < alphaMin) alphaMin = a;
         if (a > alphaMax) alphaMax = a;
         if (a === 0) alphaZeroCount++;
-
-        const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        lumaSum += luma;
-        lumaSqSum += luma * luma;
+        const lumaInt = 54 * r + 183 * g + 18 * b;
+        lumaSum += lumaInt;
+        lumaSqSum += lumaInt * lumaInt;
     }
 
     if (pixelCount === 0) {
         alphaMin = 0;
     }
 
-    const mean = pixelCount ? lumaSum / pixelCount : 0;
-    const lumaVariance = pixelCount ? Math.max(0, (lumaSqSum / pixelCount) - mean * mean) : 0;
+    const meanInt = pixelCount ? lumaSum / pixelCount : 0;
+    const lumaVariance = pixelCount
+        ? Math.max(0, (lumaSqSum / pixelCount) - meanInt * meanInt) / 65536
+        : 0;
 
     return {
         alphaMin,

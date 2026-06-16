@@ -1,0 +1,65 @@
+warning: variable does not need to be mutable
+   --> src\cr2.rs:304:9
+    |
+304 |     let mut color_matrix: Option<[[f32; 3]; 3]> = None;
+    |         ----^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\cr2.rs:338:9
+    |
+338 |     let mut black: u32 = 0; // fixed dangling ref in BlackLevel arm (remnant from refactor; if does nothing currently)
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `color_matrix`
+   --> src\cr2.rs:304:9
+    |
+304 |     let mut color_matrix: Option<[[f32; 3]; 3]> = None;
+    |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_color_matrix`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `black`
+   --> src\cr2.rs:338:9
+    |
+338 |     let mut black: u32 = 0; // fixed dangling ref in BlackLevel arm (remnant from refactor; if does nothing currently)
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_black`
+
+warning: variable does not need to be mutable
+  --> src\decompress.rs:72:13
+   |
+72 |         let mut cur_row_ptr = cur_row.as_mut_ptr();
+   |             ----^^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+
+warning: unused variable: `post16`
+   --> src\pipeline.rs:965:17
+    |
+965 |             let post16 = c.post16.as_ref().unwrap();
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_post16`
+
+warning: `raw-pipeline` (lib) generated 6 warnings (run `cargo fix --lib -p raw-pipeline` to apply 6 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.37s
+     Running `target\release\examples\perceptual_flipflop.exe`
+perceptual butteraugli flip-flop — 1280x800 (1.02 MP), 30 iters x 10 rounds
+  scalar       20.542 ms  vs  avx2-strict  11.943 ms  | margin 2.189 ms | WINNER avx2-strict (1.72x)
+  avx2-strict  11.209 ms  vs  avx2-rsqrt   11.115 ms  | margin 1.029 ms | TIE (within noise) → keep simpler
+
+--- Task 12: CPU probe + AVX-512 decision ---
+CPU: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+AVX-512: ABSENT (Comet Lake / 10th gen Intel — no avx512f)
+Decision: DEFER AVX-512 implementation. Cannot benchmark on this CPU; project rule requires
+          benchmark evidence before adding SIMD variants. detect_native() correctly falls
+          through to Avx2Strict (prefer_rsqrt=false default) per simd/mod.rs.
+
+Verdict summary:
+  scalar:      ~20.5 ms/pass  (1.02 MP)
+  avx2-strict: ~11.9 ms/pass  → WINNER vs scalar (1.72x)
+  avx2-rsqrt:  ~11.1 ms/pass  → TIE with avx2-strict (within noise margin 1.029 ms)
+  Production default: Avx2Strict (detect_native(false)) — rsqrt shows no measurable gain.

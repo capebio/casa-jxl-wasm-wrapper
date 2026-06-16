@@ -5,21 +5,33 @@ const nodeCache = new Map();
 const browserModuleCache = new Map();
 export async function loadJxlModule(manifest, options = {}) {
     const cacheKey = `${manifest.buildId}:${manifest.wasmSha}`;
+    if (!manifest?.buildId || typeof manifest.buildId !== 'string' ||
+        !manifest?.wasmSha || typeof manifest.wasmSha !== 'string') {
+        throw new Error('[jxl-wasm] manifest requires buildId and wasmSha strings');
+    }
     if (isNode()) {
         if (!nodeCache.has(cacheKey)) {
-            nodeCache.set(cacheKey, loadNodeModule(manifest, options));
+            const p = loadNodeModule(manifest, options).catch((e) => {
+                nodeCache.delete(cacheKey);
+                throw e;
+            });
+            nodeCache.set(cacheKey, p);
         }
         return nodeCache.get(cacheKey);
     }
     if (!browserModuleCache.has(cacheKey)) {
-        browserModuleCache.set(cacheKey, loadBrowserModule(manifest, options));
+        const p = loadBrowserModule(manifest, options).catch((e) => {
+            browserModuleCache.delete(cacheKey);
+            throw e;
+        });
+        browserModuleCache.set(cacheKey, p);
     }
     return browserModuleCache.get(cacheKey);
 }
 async function loadNodeModule(manifest, options) {
     const fs = options.nodeFs ?? (await import("node:fs/promises"));
     const wasmUrl = options.wasmUrl ?? manifest.wasmUrl;
-    const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""));
+    const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""), { signal: options.signal });
     return WebAssembly.compile(bytes);
 }
 async function loadBrowserModule(manifest, options) {
@@ -33,10 +45,15 @@ async function loadBrowserModule(manifest, options) {
     if (!wasmUrl) {
         throw new Error("jxl-wasm loader needs wasmUrl in browser");
     }
-    const response = await fetchImpl(wasmUrl);
+    const response = await fetchImpl(wasmUrl, {
+        signal: options.signal,
+        priority: options.priority,
+    });
     // P5-2: pass a refetcher so compile can re-fetch on rare streaming fallback instead of .clone() (avoids doubling 2.7 MB peak mem).
     const module = await compileFromResponse(response, () => fetchImpl(wasmUrl));
-    await writeIndexedDbModule(key, module, options);
+    writeIndexedDbModule(key, module, options).catch(() => {
+        /* best-effort; proceed without IDB persistence (quota/incognito) */
+    });
     return module;
 }
 async function compileFromResponse(response, getFreshResponse) {
@@ -107,7 +124,7 @@ function txComplete(tx) {
     });
 }
 function isNode() {
-    return typeof process !== "undefined" && !!process.versions?.node;
+    return typeof process !== "undefined" && !!process.versions?.node && typeof window === "undefined";
 }
 async function resolveNodeWasmUrl(wasmUrl) {
     if (!wasmUrl) {

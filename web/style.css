@@ -997,7 +997,7 @@ main { padding: 24px 32px 64px; }
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.95);
-    z-index: 100;
+    z-index: 150;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1009,7 +1009,8 @@ main { padding: 24px 32px 64px; }
 .lightbox-viewport {
     position: relative;
     width: 92vw;
-    height: 80vh;
+    flex: 1 1 0;
+    min-height: 0;
     overflow: hidden;
     display: flex;
     align-items: center;
@@ -1059,7 +1060,7 @@ main { padding: 24px 32px 64px; }
     border-radius: 20px;
     margin-bottom: 8px;
     position: fixed;
-    top: 18px;
+    top: calc(var(--home-bar-height, 0px) - 2px);
     left: 50%;
     transform: translateX(-50%);
     z-index: 102;
@@ -1077,7 +1078,7 @@ main { padding: 24px 32px 64px; }
 .lightbox-filmstrip {
     width: 100%;
     max-width: 100vw;
-    height: 78px;
+    height: var(--filmstrip-h, 120px);
     background: linear-gradient(to top, rgba(0,0,0,0.88), rgba(0,0,0,0.6));
     border-top: 1px solid rgba(255,255,255,0.08);
     z-index: 110;
@@ -1086,7 +1087,21 @@ main { padding: 24px 32px 64px; }
     padding: 4px 8px 6px;
     gap: 4px;
     flex-shrink: 0;
-    margin-top: auto; /* works inside the lightbox column flex */
+    position: relative;
+}
+
+.filmstrip-resize-handle {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 8px;
+    cursor: ns-resize;
+    z-index: 5;
+    background: transparent;
+}
+.filmstrip-resize-handle:hover {
+    background: rgba(255,255,255,0.08);
 }
 
 .lightbox-filmstrip .filmstrip-scroll {
@@ -1104,9 +1119,9 @@ main { padding: 24px 32px 64px; }
 }
 
 .lightbox-filmstrip .filmstrip-thumb {
-    width: 58px;
-    height: 58px;
-    flex: 0 0 58px;
+    width: calc(var(--filmstrip-h, 120px) - 33px);
+    height: calc(var(--filmstrip-h, 120px) - 33px);
+    flex: 0 0 calc(var(--filmstrip-h, 120px) - 33px);
     border-radius: 4px;
     overflow: hidden;
     background: #111;

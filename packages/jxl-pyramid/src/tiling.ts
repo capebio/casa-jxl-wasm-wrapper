@@ -16,8 +16,10 @@ export interface JxtcHeader {
   tilesX: number;
   tilesY: number;
   hasAlpha: boolean;
-  /** 8 or 16. v1 tiled containers are 8-bit; 16-bit available after JXTC-16 rebuild. */
+  /** 8 or 16. Flag in header (v1 and v2). */
   bitsPerSample: 8 | 16;
+  /** 1 or 2. v2 support added for future table/layout extensions (see level-table reader). */
+  version: 1 | 2;
 }
 
 /** True when ingest should replace the whole-frame top level with a JXTC container. */
@@ -38,7 +40,8 @@ export function parseJxtcHeader(bytes: Uint8Array): JxtcHeader {
   if (bytes.byteLength < 32) throw new Error("JXTC container too small for header");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (view.getUint32(0, true) !== JXTC_MAGIC) throw new Error("not a JXTC container");
-  if (view.getUint32(4, true) !== 1) throw new Error("unsupported JXTC version");
+  const version = view.getUint32(4, true) as 1 | 2;
+  if (version !== 1 && version !== 2) throw new Error("unsupported JXTC version");
   const imageW = view.getUint32(8, true);
   const imageH = view.getUint32(12, true);
   const tileSize = view.getUint32(16, true);
@@ -62,7 +65,47 @@ export function parseJxtcHeader(bytes: Uint8Array): JxtcHeader {
     throw new Error("JXTC dimensions exceed safety cap (w*h*bpp > 2^30 or non-finite)");
   }
 
-  return { imageW, imageH, tileSize, tilesX, tilesY, hasAlpha, bitsPerSample };
+  return { imageW, imageH, tileSize, tilesX, tilesY, hasAlpha, bitsPerSample, version };
+}
+
+/** Pre-parsed tile index table for fast O(1) extract (no per-tile DataView).
+ *  Parsed once per container bytes (WeakMap). Major win for dc-then-final progressive
+ *  (decode-level.ts calls extract N times per viewport per pass) and any per-tile paths.
+ *  v2 table reader extension point (different stride/fields can be handled here).
+ */
+export interface JxtcTileIndex {
+  offsets: Uint32Array;
+  lengths: Uint32Array;
+  /** Offset in container where tile data starts (after header + index table). */
+  dataBase: number;
+}
+
+const tileIndexMemo = new WeakMap<Uint8Array, JxtcTileIndex>();
+
+/** Parse (or hit memo) the tile offset/length table after the 32B header.
+ *  Called on first extract per container; subsequent extracts are array lookup + subarray.
+ */
+export function getOrParseJxtcTileIndex(bytes: Uint8Array, header: JxtcHeader): JxtcTileIndex {
+  const hit = tileIndexMemo.get(bytes);
+  if (hit) return hit;
+
+  const numTiles = header.tilesX * header.tilesY;
+  if (bytes.byteLength < 32 + numTiles * 8) {
+    throw new Error('JXTC container too small for index table');
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const offsets = new Uint32Array(numTiles);
+  const lengths = new Uint32Array(numTiles);
+  let off = 32;
+  for (let i = 0; i < numTiles; i++) {
+    offsets[i] = view.getUint32(off, true);
+    lengths[i] = view.getUint32(off + 4, true);
+    off += 8;
+  }
+  const dataBase = 32 + numTiles * 8;
+  const idx: JxtcTileIndex = { offsets, lengths, dataBase };
+  tileIndexMemo.set(bytes, idx);
+  return idx;
 }
 
 export interface ImageRegion {
@@ -119,6 +162,19 @@ export function tilesOverlappingRegion(
   return out;
 }
 
+/** Compat wrapper used by prepareDecodePlan (plan.ts). Delegates to tilesOverlappingRegion. */
+export function tilesForClampedRegion(
+  imageW: number,
+  imageH: number,
+  tileSize: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): ImageRegion[] {
+  return tilesOverlappingRegion(imageW, imageH, tileSize, { x, y, w, h });
+}
+
 type ParallelRuntime = {
   Worker?: unknown;
   crossOriginIsolated?: boolean;
@@ -145,7 +201,12 @@ export function canShareContainerBytes(): boolean {
 /**
  * Extract the standalone JXL bitstream bytes for one tile from a JXTC container.
  * Pure TS (no WASM). Zero-copy subarray view. Used for progressive DC-then-final (F1)
- * and future per-tile createDecoder paths. Index layout per bridge.cpp + parseJxtcHeader.
+ * and future per-tile createDecoder paths.
+ *
+ * Fast path: uses pre-parsed JxtcTileIndex (Uint32Arrays) from getOrParseJxtcTileIndex.
+ * First call per container parses the table once; subsequent are O(1) array + subarray.
+ * This eliminates per-tile DataView cost in hot paths (e.g. dc-then-final viewport pans).
+ * v2: table reader here is the extension point for layout changes.
  */
 export function extractTileBitstream(
   container: Uint8Array,
@@ -153,6 +214,7 @@ export function extractTileBitstream(
   header: JxtcHeader,
 ): Uint8Array {
   if (container.byteLength < 32) throw new Error('JXTC container too small');
+  // Re-validate magic for untrusted input (safety, cheap).
   const view = new DataView(container.buffer, container.byteOffset, container.byteLength);
   if (view.getUint32(0, true) !== JXTC_MAGIC) throw new Error('not a JXTC container');
   const tilesX = header.tilesX;
@@ -164,17 +226,14 @@ export function extractTileBitstream(
   const ty = Math.floor(tile.y / tileSize);
   if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) throw new Error('tile out of JXTC grid');
 
-  const idx = ty * tilesX + tx;
-  const headerBytes = 32;
-  const indexEntrySize = 8;
-  const numTiles = tilesX * tilesY;
-  const indexBytes = numTiles * indexEntrySize;
-  const indexOff = headerBytes + idx * indexEntrySize;
-  if (indexOff + 8 > container.byteLength) throw new Error('tile index OOB');
+  const tileIdx = ty * tilesX + tx;
 
-  const off = view.getUint32(indexOff, true);
-  const len = view.getUint32(indexOff + 4, true);
-  const dataBase = headerBytes + indexBytes + off;
+  // Fast path via pre-parsed table (populated on first extract for this container bytes).
+  const table = getOrParseJxtcTileIndex(container, header);
+  const off = table.offsets[tileIdx]!;
+  const len = table.lengths[tileIdx]!;
+  const dataBase = table.dataBase + off;
+
   if (dataBase + len > container.byteLength || len === 0) throw new Error('tile data OOB or empty');
 
   return container.subarray(dataBase, dataBase + len);
