@@ -4,6 +4,7 @@
 // Group 7: Megatexture Viewport Selection surface (choose-level + grid-layout + plan) for pan/zoom/dpr -> level + tile grids.
 
 export * from "./manifest.js";
+export * from "./manifest-validate.js";
 export * from "./constants.js";
 export * from "./fixtures.js";
 export * from "./tiling.js";

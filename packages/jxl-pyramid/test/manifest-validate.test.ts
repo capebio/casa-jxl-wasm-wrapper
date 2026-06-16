@@ -1,0 +1,248 @@
+import { expect, test, describe } from "bun:test";
+import { parsePyramidManifest, parseGalleryIndex, ManifestValidationError, MANIFEST_SCHEMA_VERSION } from "../src/manifest-validate.js";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function baseManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: 2,
+    imageId: "img-001",
+    master: { name: "shot.orf", format: "orf", mtimeMs: 1700000000000 },
+    orientation: "baked",
+    width: 4608,
+    height: 3456,
+    aspect: 4608 / 3456,
+    levels: [
+      { size: 512, w: 512, h: 384, bytes: 50000, bitsPerSample: 8, contenthash: "aabbcc", tiled: false },
+      { size: "full", w: 4608, h: 3456, bytes: 2000000, bitsPerSample: 8, contenthash: "ddeeff", tiled: false },
+    ],
+    ...overrides,
+  };
+}
+
+function expectValidationError(fn: () => unknown, pathFragment?: string): void {
+  let thrown: unknown;
+  try { fn(); } catch (e) { thrown = e; }
+  expect(thrown).toBeInstanceOf(ManifestValidationError);
+  if (pathFragment) {
+    expect((thrown as ManifestValidationError).path).toContain(pathFragment);
+  }
+}
+
+// ── Schema version handling ──────────────────────────────────────────────────
+
+describe("schema versioning", () => {
+  test("schema 2 parses correctly", () => {
+    const m = parsePyramidManifest(baseManifest());
+    expect(m.schema).toBe(2);
+    expect(m.imageId).toBe("img-001");
+  });
+
+  test("schema 1 normalizes to 2 with stub=false proxy=false defaults", () => {
+    const m = parsePyramidManifest(baseManifest({ schema: 1 }));
+    expect(m.schema).toBe(2);
+    expect(m.stub).toBe(false);
+    expect(m.proxy).toBe(false);
+  });
+
+  test("schema 0 throws ManifestValidationError", () => {
+    expectValidationError(() => parsePyramidManifest(baseManifest({ schema: 0 })), "schema");
+  });
+
+  test(`schema ${MANIFEST_SCHEMA_VERSION + 1} throws with "newer than reader" message`, () => {
+    let thrown: unknown;
+    try { parsePyramidManifest(baseManifest({ schema: MANIFEST_SCHEMA_VERSION + 1 })); } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(ManifestValidationError);
+    expect((thrown as ManifestValidationError).message).toContain("newer than reader");
+  });
+});
+
+// ── Required fields ──────────────────────────────────────────────────────────
+
+describe("required fields", () => {
+  test("missing imageId throws", () => {
+    const m = baseManifest(); delete m["imageId"];
+    expectValidationError(() => parsePyramidManifest(m), "imageId");
+  });
+
+  test("missing master throws", () => {
+    const m = baseManifest(); delete m["master"];
+    expectValidationError(() => parsePyramidManifest(m), "master");
+  });
+
+  test("missing levels throws", () => {
+    const m = baseManifest(); delete m["levels"];
+    expectValidationError(() => parsePyramidManifest(m), "levels");
+  });
+
+  test("empty levels array throws", () => {
+    expectValidationError(() => parsePyramidManifest(baseManifest({ levels: [] })), "levels");
+  });
+
+  test("level with empty contenthash throws", () => {
+    const m = baseManifest({
+      levels: [
+        { size: "full", w: 100, h: 100, bytes: 1000, bitsPerSample: 8, contenthash: "", tiled: false },
+      ],
+    });
+    expectValidationError(() => parsePyramidManifest(m), "contenthash");
+  });
+});
+
+// ── Aspect ratio check ───────────────────────────────────────────────────────
+
+describe("aspect ratio", () => {
+  test("valid aspect passes", () => {
+    const m = parsePyramidManifest(baseManifest());
+    expect(m.aspect).toBeCloseTo(4608 / 3456, 5);
+  });
+
+  test("aspect inconsistent with width/height throws", () => {
+    expectValidationError(() => parsePyramidManifest(baseManifest({ aspect: 2.5 })), "aspect");
+  });
+});
+
+// ── Level ordering ───────────────────────────────────────────────────────────
+
+describe("level ordering", () => {
+  test("non-ascending sizes throw", () => {
+    const m = baseManifest({
+      levels: [
+        { size: 1024, w: 1024, h: 768, bytes: 100000, bitsPerSample: 8, contenthash: "aaa", tiled: false },
+        { size: 512, w: 512, h: 384, bytes: 50000, bitsPerSample: 8, contenthash: "bbb", tiled: false },
+        { size: "full", w: 4608, h: 3456, bytes: 2000000, bitsPerSample: 8, contenthash: "ccc", tiled: false },
+      ],
+    });
+    expectValidationError(() => parsePyramidManifest(m), "levels[1].size");
+  });
+
+  test('"full" not last throws', () => {
+    const m = baseManifest({
+      levels: [
+        { size: "full", w: 4608, h: 3456, bytes: 2000000, bitsPerSample: 8, contenthash: "aaa", tiled: false },
+        { size: 512, w: 512, h: 384, bytes: 50000, bitsPerSample: 8, contenthash: "bbb", tiled: false },
+      ],
+    });
+    expectValidationError(() => parsePyramidManifest(m), "levels[0].size");
+  });
+
+  test("strictly ascending numeric sizes pass", () => {
+    const m = baseManifest({
+      levels: [
+        { size: 256, w: 256, h: 192, bytes: 20000, bitsPerSample: 8, contenthash: "a1", tiled: false },
+        { size: 512, w: 512, h: 384, bytes: 50000, bitsPerSample: 8, contenthash: "b2", tiled: false },
+        { size: "full", w: 4608, h: 3456, bytes: 2000000, bitsPerSample: 8, contenthash: "c3", tiled: false },
+      ],
+    });
+    expect(() => parsePyramidManifest(m)).not.toThrow();
+  });
+});
+
+// ── tiled requires tiling descriptor ────────────────────────────────────────
+
+describe("tiled level", () => {
+  test("tiled=true without tiling descriptor throws", () => {
+    const m = baseManifest({
+      levels: [
+        { size: "full", w: 4608, h: 3456, bytes: 2000000, bitsPerSample: 8, contenthash: "abc", tiled: true },
+        // no tiling field
+      ],
+    });
+    expectValidationError(() => parsePyramidManifest(m), "tiling");
+  });
+
+  test("tiled=true with valid tiling descriptor passes", () => {
+    const m = baseManifest({
+      levels: [
+        {
+          size: "full", w: 4608, h: 3456, bytes: 2000000, bitsPerSample: 8,
+          contenthash: "abc", tiled: true,
+          tiling: { tileSize: 256, cols: 18, rows: 14 },
+        },
+      ],
+    });
+    const result = parsePyramidManifest(m);
+    expect(result.levels[0].tiling).toEqual({ tileSize: 256, cols: 18, rows: 14 });
+  });
+});
+
+// ── convergedByteEnd constraint ──────────────────────────────────────────────
+
+describe("convergedByteEnd", () => {
+  test("convergedByteEnd > bytes throws", () => {
+    const m = baseManifest({
+      levels: [
+        { size: "full", w: 4608, h: 3456, bytes: 1000, bitsPerSample: 8, contenthash: "abc", tiled: false, convergedByteEnd: 2000 },
+      ],
+    });
+    expectValidationError(() => parsePyramidManifest(m), "convergedByteEnd");
+  });
+
+  test("convergedByteEnd <= bytes passes", () => {
+    const m = baseManifest({
+      levels: [
+        { size: "full", w: 4608, h: 3456, bytes: 2000000, bitsPerSample: 8, contenthash: "abc", tiled: false, convergedByteEnd: 1000000 },
+      ],
+    });
+    expect(() => parsePyramidManifest(m)).not.toThrow();
+  });
+});
+
+// ── producedBy typing ────────────────────────────────────────────────────────
+
+test("producedBy is parsed with strong types, not any", () => {
+  const m = parsePyramidManifest(baseManifest({
+    producedBy: { tool: "pyramid-ingest", version: "1.2.3", params: { effort: 7 } },
+  }));
+  expect(m.producedBy?.tool).toBe("pyramid-ingest");
+  expect(m.producedBy?.version).toBe("1.2.3");
+  expect(m.producedBy?.params?.["effort"]).toBe(7);
+});
+
+// ── GalleryIndex ─────────────────────────────────────────────────────────────
+
+describe("parseGalleryIndex", () => {
+  function baseIndex(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schema: 1,
+      images: [
+        { imageId: "img-001", aspect: 1.333, l0: { contenthash: "abc", w: 256, h: 192 } },
+      ],
+      ...overrides,
+    };
+  }
+
+  test("valid index parses", () => {
+    const idx = parseGalleryIndex(baseIndex());
+    expect(idx.schema).toBe(1);
+    expect(idx.images).toHaveLength(1);
+    expect(idx.images[0].imageId).toBe("img-001");
+  });
+
+  test("wrong schema throws", () => {
+    expectValidationError(() => parseGalleryIndex(baseIndex({ schema: 2 })), "schema");
+  });
+
+  test("missing imageId throws", () => {
+    const idx = baseIndex({ images: [{ aspect: 1.0, l0: { contenthash: "x", w: 1, h: 1 } }] });
+    expectValidationError(() => parseGalleryIndex(idx), "imageId");
+  });
+
+  test("empty contenthash in l0 throws", () => {
+    const idx = baseIndex({ images: [{ imageId: "x", aspect: 1.0, l0: { contenthash: "", w: 1, h: 1 } }] });
+    expectValidationError(() => parseGalleryIndex(idx), "contenthash");
+  });
+
+  test("optional thumbhash and group are preserved", () => {
+    const idx = parseGalleryIndex(baseIndex({
+      images: [{ imageId: "x", aspect: 1.0, l0: { contenthash: "abc", w: 1, h: 1 }, thumbhash: "th123", group: "g1" }],
+    }));
+    expect(idx.images[0].thumbhash).toBe("th123");
+    expect(idx.images[0].group).toBe("g1");
+  });
+
+  test("optional next pagination cursor preserved", () => {
+    const idx = parseGalleryIndex(baseIndex({ next: "page2-token" }));
+    expect(idx.next).toBe("page2-token");
+  });
+});
