@@ -69,15 +69,13 @@ export interface MsgDecodeHeader {
   info: ImageInfo;
 }
 
-export interface MsgDecodeProgress {
-  type: "decode_progress";
-  sessionId: string;
-  stage: DecodeStage;
-  info: ImageInfo;
-  pixels: ArrayBuffer;          // transferred
-  format: PixelFormat;
+/**
+ * Visual / frame metadata shared by decode_progress and decode_final frames.
+ * Single source of truth so the two frame messages cannot drift (the handler mirrors
+ * this with assignFrameMeta()).
+ */
+export interface DecodeFrameMeta {
   region?: Region;
-  pixelStride: number;
   sourceScale?: number;
   progressiveRegion?: boolean;
   regionFallback?: "full-frame-then-crop";
@@ -89,29 +87,51 @@ export interface MsgDecodeProgress {
   animTicksPerSecond?: number;
 }
 
-export interface MsgDecodeFinal {
+export interface MsgDecodeProgress extends DecodeFrameMeta {
+  type: "decode_progress";
+  sessionId: string;
+  stage: DecodeStage;
+  info: ImageInfo;
+  pixels: ArrayBuffer;          // transferred
+  format: PixelFormat;
+  pixelStride: number;
+  /**
+   * Folded per-frame metrics — carried on the frame to avoid separate metric IPCs.
+   * The session re-emits each present field as the corresponding CodecMetric via onMetric:
+   *   copyMs → "copy_to_transfer_ms", copiedBytes → "copied_bytes",
+   *   timeToFirstPixelMs → "time_to_first_pixel_ms".
+   * copyMs/copiedBytes are present only when the pixel view had to be copied to become
+   * transferable; timeToFirstPixelMs is present on the first progress frame only.
+   */
+  copyMs?: number;
+  copiedBytes?: number;
+  timeToFirstPixelMs?: number;
+}
+
+export interface MsgDecodeFinal extends DecodeFrameMeta {
   type: "decode_final";
   sessionId: string;
   info: ImageInfo;
   pixels: ArrayBuffer;          // transferred
   format: PixelFormat;
-  region?: Region;
   pixelStride: number;
-  sourceScale?: number;
-  progressiveRegion?: boolean;
-  regionFallback?: "full-frame-then-crop";
-  progressiveSequence?: number;
-  passOrdinal?: number;
-  frameIndex?: number;
-  frameDuration?: number;
-  frameName?: string;
-  animTicksPerSecond?: number;
-  /** Byte length of the transferred pixel buffer (avoids a separate metric IPC). */
+  /**
+   * Folded metrics — carried on the frame to avoid separate metric IPCs. The session
+   * re-emits each present field as the corresponding CodecMetric via onMetric:
+   *   outputBytes → "output_bytes", timeToFirstPixelMs → "time_to_first_pixel_ms",
+   *   timeToFinalMs → "time_to_final_ms", copyMs → "copy_to_transfer_ms",
+   *   copiedBytes → "copied_bytes".
+   */
+  /** Byte length of the transferred pixel buffer. */
   outputBytes?: number;
-  /** Elapsed ms from session start to first pixel (may be set here if no progress event fired). */
+  /** Elapsed ms from session start to first pixel (set here if no progress event fired). */
   timeToFirstPixelMs?: number;
   /** Elapsed ms from session start to final frame. */
   timeToFinalMs?: number;
+  /** Copy-to-transfer duration ms; present only when the pixel view was copied. */
+  copyMs?: number;
+  /** Bytes copied to make pixels transferable; present only when copied. */
+  copiedBytes?: number;
 }
 
 export interface MsgDecodeError {

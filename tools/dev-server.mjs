@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Minimal static dev server for web/ with COOP/COEP headers.
 // Required for SharedArrayBuffer (WASM threads) in browser.
-// Usage: node tools/dev-server.mjs [port=8080] [root=web]
+// Usage: node tools/dev-server.mjs [port=8080] [root=.]
+// Serves from repo root so importmap "../packages/..." paths resolve correctly.
+// Redirects / and /index.html → /web/index.html for convenience.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,7 +13,7 @@ const port = Number(process.argv[2]) || 8080;
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
-  process.argv[3] ?? 'web',
+  process.argv[3] ?? '.',
 );
 
 const MIME = {
@@ -51,6 +53,13 @@ function pickWasmPath(filePath, acceptEncoding) {
 
 http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://localhost:${port}`);
+
+  // Redirect bare root to web/index.html so muscle-memory URLs still work.
+  if (url.pathname === '/' || url.pathname === '/index.html') {
+    res.writeHead(302, { ...SECURITY_HEADERS, Location: '/web/index.html' });
+    res.end(); return;
+  }
+
   let filePath = path.join(root, url.pathname);
 
   // Directory → index.html
@@ -81,5 +90,6 @@ http.createServer((req, res) => {
   fs.createReadStream(picked.path).pipe(res);
 }).listen(port, () => {
   console.log(`Dev server: http://localhost:${port}  (root: ${root})`);
+  console.log(`Home:       http://localhost:${port}/web/index.html`);
   console.log('COOP/COEP active → SharedArrayBuffer available → simd-mt WASM tier');
 });

@@ -3,11 +3,10 @@ import { createDecoder, createEncoder } from '@casabio/jxl-wasm';
 import { buildByteCutoffPlan, formatByteCutoffLabel } from './jxl-byte-cutoff-probe.js';
 import { createProgressiveWebPreset, createSidecarTargetPlan } from './jxl-progressive-best-preset.js';
 import { classifyByteCutoffFrame, summarizeByteCutoffResults, buildSeries } from './jxl-progressive-byte-metrics.js';  // R1 for buildSeries wire (connectedness)
+import { exactBuffer, toUint8Array } from './jxl-byte-utils.js';
 import {
   buildBenchmarkExport,
   streamDecodeCutoffs as streamDecodeCutoffsCore,
-  exactBuffer,
-  toUint8Array,
   resolveRecordSsimulacra2,
 } from './jxl-progressive-byte-benchmark-core.js';
 

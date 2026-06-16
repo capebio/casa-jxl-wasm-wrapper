@@ -31,7 +31,6 @@ export class DecodeSessionImpl {
     lastInfo = null;
     closed = false;
     terminated = false;
-    framesConsumed = false;
     terminalError = null;
     constructor(schedulerOrPromise, opts) {
         this.opts = opts;
@@ -69,6 +68,10 @@ export class DecodeSessionImpl {
             return; // ctor done; no listener, no acquire, no cancel for unrequested slot
         }
         const initAcquire = (scheduler) => {
+            // R1-1: abort may have fired before the async scheduler promise resolved;
+            // terminated is already set — do not acquire a slot that will never be released.
+            if (this.terminated)
+                return Promise.resolve();
             this.scheduler = scheduler;
             // Register the message handler BEFORE acquireSlot sends decode_start,
             // so decode_header is never missed.
@@ -113,6 +116,7 @@ export class DecodeSessionImpl {
             // signalDrain head consumption). Documented dep; no local pushChain needed.
             throw this.terminalError ?? new JxlError(CONFIG_ERROR, "push() after close/cancel/error", { sessionId: this.id });
         }
+        // Layer 4: ByteIntervalCursor (from benchmark) can generate the chunk passed here for byte-cutoff driven real progressive decode. Same math as synthetic path for fidelity. Positive for unified chunking in tests and prod. Use cursor to decide cutoff snapshots in real path for byte-bench integration.
         await this.acquirePromise;
         // Re-check closed: close() may have set it while we awaited acquirePromise
         // (task 007-concurrency-e5f6a7b8 / 007-errors-f6a7b8c9).
@@ -146,7 +150,6 @@ export class DecodeSessionImpl {
      * will not be replayed.
      */
     frames() {
-        this.framesConsumed = true;
         return this.frameStream;
     }
     /**
@@ -181,6 +184,41 @@ export class DecodeSessionImpl {
     // ---------------------------------------------------------------------------
     // Worker message handling
     // ---------------------------------------------------------------------------
+    // Re-emit metrics folded onto decode_progress / decode_final frames as CodecMetric.
+    // Each field is optional; absent fields (e.g. a Node worker that posts metrics the
+    // old way, or a zero-copy frame) emit nothing — additive, never double-counts.
+    makeFrame(stage, msg) {
+        return {
+            stage,
+            info: msg.info,
+            pixels: msg.pixels,
+            format: msg.format,
+            pixelStride: msg.pixelStride,
+            ...(msg.region !== undefined ? { region: msg.region } : {}),
+        };
+    }
+    emitFoldedMetrics(m) {
+        const cb = this.opts.onMetric;
+        if (cb === undefined)
+            return;
+        const emit = (name, value) => {
+            if (value === undefined)
+                return;
+            try {
+                cb({ name, value });
+            }
+            catch (e) {
+                if (typeof process !== "undefined" && process.env?.["NODE_ENV"] === "development") {
+                    console.warn(`[jxl-session] onMetric threw`, e);
+                }
+            }
+        };
+        emit("copy_to_transfer_ms", m.copyMs);
+        emit("copied_bytes", m.copiedBytes);
+        emit("time_to_first_pixel_ms", m.timeToFirstPixelMs);
+        emit("output_bytes", m.outputBytes);
+        emit("time_to_final_ms", m.timeToFinalMs);
+    }
     handleMessage(msg) {
         if (this.terminated)
             return;
@@ -195,49 +233,39 @@ export class DecodeSessionImpl {
                 if (!this.headerDeferred.settled) {
                     this.headerDeferred.resolve(msg.info);
                 }
+                // progressionTarget "header" stops the worker right after the header — it
+                // sends no decode_final — so complete here, otherwise done() hangs forever.
+                if ((this.opts.progressionTarget ?? "final") === "header") {
+                    this.finish(msg.info);
+                }
                 break;
             case "decode_progress": {
                 this.lastInfo = msg.info;
-                // Spread region conditionally so the optional property is always
-                // present-or-absent at construction time rather than added via post-
-                // mutation, keeping all three cases on the same V8 hidden class
-                // (task 007-performance-a1b2c3d4). exactOptionalPropertyTypes prevents
-                // assigning undefined to the optional field directly.
-                const ev = {
-                    stage: msg.stage,
-                    info: msg.info,
-                    pixels: msg.pixels,
-                    format: msg.format,
-                    pixelStride: msg.pixelStride,
-                    ...(msg.region !== undefined ? { region: msg.region } : {}),
-                };
+                const ev = this.makeFrame(msg.stage, msg);
                 this.frameStream.push(ev);
+                // Folded per-frame metrics ride on the frame to avoid separate metric IPCs;
+                // re-emit them through onMetric so telemetry consumers see them uniformly.
+                this.emitFoldedMetrics(msg);
+                // Mirror the worker's early-finish: for a non-"final" target with
+                // emitEveryPass disabled, the worker stops after the first progress and
+                // sends no decode_final, so complete here or done() would hang.
+                if ((this.opts.progressionTarget ?? "final") !== "final" &&
+                    (this.opts.emitEveryPass ?? true) === false) {
+                    this.finish(msg.info);
+                }
                 break;
             }
             case "decode_final": {
                 this.lastInfo = msg.info;
-                const ev = {
-                    stage: "final",
-                    info: msg.info,
-                    pixels: msg.pixels,
-                    format: msg.format,
-                    pixelStride: msg.pixelStride,
-                    ...(msg.region !== undefined ? { region: msg.region } : {}),
-                };
+                const ev = this.makeFrame("final", msg);
                 this.frameStream.push(ev);
+                this.emitFoldedMetrics(msg);
                 this.finish(msg.info);
                 break;
             }
             case "decode_budget_exceeded": {
                 this.lastInfo = msg.info;
-                const ev = {
-                    stage: msg.stage,
-                    info: msg.info,
-                    pixels: msg.pixels,
-                    format: msg.format,
-                    pixelStride: msg.pixelStride,
-                    ...(msg.region !== undefined ? { region: msg.region } : {}),
-                };
+                const ev = this.makeFrame(msg.stage, msg);
                 this.frameStream.push(ev);
                 this.finishWithError(new JxlError(BUDGET_EXCEEDED, "Session budget exceeded", {
                     sessionId: this.id,

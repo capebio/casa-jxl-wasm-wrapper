@@ -789,7 +789,9 @@ fn process_orf_impl(
         // Lens 23/24: use process_into + preallocated buffer to avoid internal Vec alloc
         // inside the tone path (reuses the "into" pattern from demosaic/pipeline).
         let mut rgb8 = vec![0u8; w * h * 3];
-        pipeline::process_into(&rgb16, &params, &mut rgb8);
+        // Chapter 1: SIMD bulk tone on wasm/x86 for the plain path (the 90% case),
+        // scalar parity path only for perceptual_constancy. The big full-res win.
+        pipeline::process_into_auto(&rgb16, &params, &mut rgb8);
         let tonemap_ms = now_ms() - t;
         drop(rgb16);
         let t2 = now_ms();
@@ -1878,7 +1880,8 @@ fn process_dng_impl(
         if params.texture != 0.0 || params.clarity != 0.0 {
             pipeline::apply_unsharp_masks(&mut rgb16, aw, ah, &params);
         }
-        let rgb8 = pipeline::process(&rgb16, &params);
+        // Chapter 1: SIMD bulk tone (DNG + CR2 share this impl). See process_into_auto.
+        let rgb8 = pipeline::process_auto(&rgb16, &params);
         let tonemap_ms = now_ms() - t;
         drop(rgb16);
         let t2 = now_ms();

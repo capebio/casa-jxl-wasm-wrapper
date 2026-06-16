@@ -1,8 +1,46 @@
-Your focus will ONLY be on these files. DO NOT work on any other files other than the ones I specify without asking me first with the exception of the plan and rejection document. I shall be asking you to examine the documents through particular "lenses" and to scrutinize and examine the code *in your memory*, formulate the proposed issues, improvements and fixes. I want you to run this entirely in plan mode. I want you to work as token-efficiently as possible, only handing back the concise issue and fixes. Don't worry about pleasantries, unnecessary text or reporting non-issues. Theoretically there should only be tokens burnt on the reading of the two files and the writing of the final document and final comments.  Thinking is cheap, reading and writing - expensive. 
+Your focus will ONLY be on these files. DO NOT work on any other files other than the ones I specify without asking me first with the exception of the plan and rejection document. I shall be asking you to
 
-  With every lens pass, you will be looking for improvements to 1) efficiency, 2) speed, 3) performance, 4) bugs and 5) existing or opportunities for proposed features. Be thorough. Be meticulous. Be exhaustive. Think broadly then think deeply. Consider well and contemplate what you're looking at from different angles and think for the long term. Integrate your existing knowledge. 
 
-  At the very end, create a cohesive document with duplicate items amalgamated that provides handoffs to five Grok agents to implement. There can be more than 5 sessions. Each agent should only handle one file. This should include suggested code snippets where there is anything ambiguous. The name of the markdown document should comprise an amalgamation of the files that are being assessed. For instance ProgressiveSaliencyCache.md. Each handoff section should begin with the phrase: "If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md"
+
+1) examine the specified documents through particular "lenses", to scrutinize and examine the code *in your memory* and formulate the proposed issues, improvements and fixes. I want you to run this entirely in plan mode. I want you to work as token-efficiently as possible. 
+
+Then
+
+2. make the fixes evaluating them first as to whether they are a positive improvement and if not reject them with appending a comment to c:\Foo\raw-converter-wasm\docs\rejected optimizations.md with the date-time, target filenames, rejection rationale.
+
+3.  repeat 1 then 2
+
+   Then 
+
+   4.Read in the most important file that touches this file.
+
+   5.Repeat this second file with two rounds of lenses and fixes
+
+   then
+
+   6.with a focus on pipelines/seams/interchanges between them run the lenses again. /7.Implement the fixes. 
+
+   8.Report in a single /docs/XXXX.md file where the combined target filenames are used with a numbered suffix if there is already a matching file and the word ''- DONE'
+
+   9.In this document put an introduction explaining the purpose of the files, the changes made, and chapter three a three paragraph conclusion with 
+
+   a) a conclusion for improvements to file(s) 1.
+
+   b) a conclusion for improvements for file(s) 2. 
+
+   c) improvements to the seams/boundaries between the files
+
+   d) a final concluding few paragraphs.
+
+   e) contribute headline findings to c:\Foo\raw-converter-wasm\docs\Headline Features.md as a news feature that includes date-time, target files and major headline features in a news-like format aimed at the barely-computer-literate layman. Don't worry about pleasantries, unnecessary text or reporting non-issues. Theoretically there should only be tokens burnt on the reading of the two (or 3) files and the writing of the final document.  Thinking is cheap, reading and writing - expensive. Be thorough. Be meticulous. Be exhaustive. Think broadly then think deeply. Consider well and contemplate what you're looking at from different angles and think for the long term. Integrate your existing knowledge. 
+
+   f) Run c:\Foo\raw-converter-wasm\StandardMultifileTest.mjs to ascertain whether there have been any regressions in terms of timings.
+
+   g) Include the final timings of this run versus the previous ten runs in a table with exhaustive metrics. This should be just before the conclusion and have its own conclusion about the timings.
+
+   h) For suspected slowdowns/speedups that you wish to test and where it makes sense to do a targeted flip-flop test: alternate with a switch the same operation ten times with the newer code in place vs the old code or with two or three proposed mechanisms. Write this test code as a .mjs file in c:\Foo\raw-converter-wasm\benchmark\ named after the testing method. Run that file and evaluate it. Write the exhaustive timing output to c:\Foo\raw-converter-wasm\docs\outputs\timing tests\ with a unique descriptive name and date-time.toon. Follow the toon instructions in c:\Foo\raw-converter-wasm\docs\ToonInstructions.md. The output should be based on the following with thermals and cpu reported for each run.
+
+With every lens pass, you will be looking for improvements to 1) efficiency, 2) speed, 3) performance, 4) bugs and 5) existing or opportunities for improved features. 
 
 Lens 1: "a strategic view of each file and how they link and the data they pass between them link".
 
@@ -75,26 +113,19 @@ Lens 15: Butteraugli is one of the slowest operations in the JXL pipeline. Can w
 
 Lens 16: One of our visions is for the use of immersive technology to be used in Augmented Reality to look at plants, recognise them, identify them in real-time. How can that process be facilitated via these files?
 
-Lens 17: 1. We are integrating a unified, non-Riemannian perceptual color science model derived from the mathematical synthesis of Schrödinger’s geodesic definitions,
-      Molchanov's anisotropy measures, the Harvard perception-based color space (HPCS), and Los Alamos's chromatic diminishing returns.
-   2. The core of this architecture leverages a sensor-sharpening matrix B and a component-wise log-transform to map Schrödinger's curved, hue-stable geodesics
-      into a flat, 3D Euclidean coordinate space.
-   3. This logarithmic transformation resolves the "Flatness Paradox" of color science, allowing perceptually uniform, illumination-invariant color adjustments to
-      be computed using fast linear algebra instead of complex differential geodesic equations.
-   4. To handle local defects where the flat model diverges from human vision, we incorporate Molchanov’s parallelogram law residuals to adaptively discretize our
-      precomputed metric tensor grid, concentrating density around the neutral gray axis and saturated greens.
-   5. Furthermore, we modulate local slider sensitivities and edge-detection thresholds using Molchanov’s distance structure tensor Aₜₑₙₛₒᵣ to guarantee perfectly
-      uniform, linear visual changes across all hues.
-   6. To prevent mathematical coordinate drift near grays, we apply a hybrid correction that blends the Riemannian geodesic steps with direct non-Riemannian Δ
-      E₂₀₀₀ corrections, functioning as a stabilizing "spring force" pulling coordinates onto the true neutral point.
-   7. Finally, we refine our flat coordinate space using Los Alamos's non-uniform, localized chromatic diminishing returns curves f(c) to calibrate the exact rate
-      of perceptual compression for pinks, greens, oranges, and blues.
-   8. We intend to implement this entire multi-layered color engine directly in our Rust/WASM-resident LookRenderer pipeline (crates/raw-pipeline/src/pipeline.rs)
-      under the hot per-pixel apply_tone_math loop.
-   9. This Rust engine will expose a high-performance "Perceptual Constancy Mode" to our JavaScript lightbox, allowing illumination-invariant exposure, saturation,
-      and white-balance adjustments during progressive JXL paints.
-   10. For the upcoming phase, we need to design a highly optimized, SIMD-accelerated, or precomputed multi-dimensional lookup-table (LUT) structure in Rust to
-       execute these complex logarithmic, exponential, and local spline transformations at sub-millisecond speeds.
+Lens 17: We are integrating a unified, non-Riemannian perceptual color science model derived from the mathematical synthesis of Schrödinger’s geodesic definitions,
+ Molchanov's anisotropy measures, the Harvard perception-based color space (HPCS), and Los Alamos's chromatic diminishing returns.
+
+The core of this architecture leverages a sensor-sharpening matrix B and a component-wise log-transform to map Schrödinger's curved, hue-stable geodesics
+into a flat, 3D Euclidean coordinate space.
+
+This logarithmic transformation resolves the "Flatness Paradox" of color science, allowing perceptually uniform, illumination-invariant color adjustments to
+be computed using fast linear algebra instead of complex differential geodesic equations.
+
+For this upcoming phase, we need to design a highly optimized, SIMD-accelerated, or precomputed multi-dimensional lookup-table (LUT) structure in Rust to
+execute these complex logarithmic, exponential, and local spline transformations at sub-millisecond speeds.
+
+So I need you to look if any of that pipeline surfaces in these files and to improve them if they do otherwise ignore this lens.
 
 Lens 18: Knowing the code and what questions have been asked. What are the gaps? If each question shines a light into the code, what are the three larges parts of the house left unilluminated and unexplored?
 
@@ -120,13 +151,3 @@ Lens 26: Where can mathematics be improved for performance and speed improvement
 
 ---
 
-For suspected slowdowns/speedups where does it make sense to do targeted flip-flop test, where you alternate with a switch the same operation ten times with the newer code in place vs the old code. 
-
-Provide a few paragraphs of overview of what would be achieved by implementing these suggestions at the end.
-
- I want you to review and organise this document into sensible chunks. Each chapter will be an implementation layer focused on related
- things such that a suitably skilled worker can implement it. Again that filename will be /docs/[a name made up of the files assessed].md
-
-Then implement the plan - The agents didn't previously get a chance to examine other files, so examine each item in relation to the files it touches in relation to the pipeline and reassessing before applying it as to whether it is a positive change otherwise rejecting it. You may edit other files connected to the item to create a cohesive improvement. Try to work from memory as much as possible and then apply the changes surgically with minimal feedback to the user to reduce token burn. DON'T give unnecessary feedback inline about the successes and failures. Rather capture it in a "Implemented" chapter at the end of the same .md document.  At the very end of the document tell the last agent to append - DONE to the filename when the file has been implemented in part or in its entirety. 
-
-Then run c:\Foo\raw-converter-wasm\StandardMultifileTest.mjs to ascertain whether there have been any regressions in terms of timings.

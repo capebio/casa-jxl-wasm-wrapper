@@ -1081,21 +1081,21 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
             }
           }
           const run = point.run;
-          const focusRow = "<div class=\"tip-row\"><span>Point</span><strong style=\"color:" + point.metric.color + "\">" + point.metric.label + ": " + fmtMs(run.metrics[point.metric.key]) + "</strong></div>";
+          const focusRow = "<div class=\\"tip-row\\"><span>Point</span><strong style=\\"color:" + point.metric.color + "\\">" + point.metric.label + ": " + fmtMs(run.metrics[point.metric.key]) + "</strong></div>";
           const rows = enabledMetrics().map(function(metric) {
             const value = run.metrics[metric.key];
-            return value == null ? "" : "<div class=\"tip-row\"><span>" + metric.label + "</span><strong style=\"color:" + metric.color + "\">" + fmtMs(value) + "</strong></div>";
+            return value == null ? "" : "<div class=\\"tip-row\\"><span>" + metric.label + "</span><strong style=\\"color:" + metric.color + "\\">" + fmtMs(value) + "</strong></div>";
           }).join("");
-          let content = "<div class=\"stamp\">" + fmtStamp(run.timestampIso) + "</div>" +
-            "<div class=\"tip-row\"><span>Family</span><strong>" + (run.familyLabel ?? run.testName) + "</strong></div>" +
+          let content = "<div class=\\"stamp\\">" + fmtStamp(run.timestampIso) + "</div>" +
+            "<div class=\\"tip-row\\"><span>Family</span><strong>" + (run.familyLabel ?? run.testName) + "</strong></div>" +
             focusRow +
             rows +
-            "<div class=\"tip-row\"><span>CpuActiveLoadPct</span><strong>" + fmtNum(run.telemetry.CpuActiveLoadPct, "%") + "</strong></div>" +
-            "<div class=\"tip-row\"><span>CpuThrottlingPct</span><strong>" + fmtNum(run.telemetry.CpuThrottlingPct, "%") + "</strong></div>" +
-            "<div class=\"tip-row\"><span>CpuClockCurrentGhz</span><strong>" + fmtNum(run.telemetry.CpuClockCurrentGhz, " GHz") + "</strong></div>" +
-            "<div class=\"tip-row\"><span>SystemMemoryFreeGb</span><strong>" + fmtNum(run.telemetry.SystemMemoryFreeGb, " GB") + "</strong></div>";
+            "<div class=\\"tip-row\\"><span>CpuActiveLoadPct</span><strong>" + fmtNum(run.telemetry.CpuActiveLoadPct, "%") + "</strong></div>" +
+            "<div class=\\"tip-row\\"><span>CpuThrottlingPct</span><strong>" + fmtNum(run.telemetry.CpuThrottlingPct, "%") + "</strong></div>" +
+            "<div class=\\"tip-row\\"><span>CpuClockCurrentGhz</span><strong>" + fmtNum(run.telemetry.CpuClockCurrentGhz, " GHz") + "</strong></div>" +
+            "<div class=\\"tip-row\\"><span>SystemMemoryFreeGb</span><strong>" + fmtNum(run.telemetry.SystemMemoryFreeGb, " GB") + "</strong></div>";
           if (frozenPoint) {
-            content += "<div class=\"copy-instruction\">ctrl+c to copy to clipboard</div>";
+            content += "<div class=\\"copy-instruction\\">ctrl+c to copy to clipboard</div>";
           }
           tooltip.innerHTML = content;
           tooltip.classList.remove("hidden");
@@ -1255,8 +1255,8 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
       console.error('[graph] Force render failed', e);
       const svg = document.getElementById('history-chart');
       if (svg) {
-        svg.innerHTML = '<rect x="98" y="38" width="1460" height="830" fill="#0a1a22" stroke="#8de3ff" stroke-width="2" rx="16" />\n' +
-          '<text x="800" y="400" fill="#8de3ff" font-size="24" text-anchor="middle">Render error - see console.</text>\n' +
+        svg.innerHTML = '<rect x="98" y="38" width="1460" height="830" fill="#0a1a22" stroke="#8de3ff" stroke-width="2" rx="16" />\\n' +
+          '<text x="800" y="400" fill="#8de3ff" font-size="24" text-anchor="middle">Render error - see console.</text>\\n' +
           '<text x="800" y="440" fill="#a8c5d3" font-size="16" text-anchor="middle">Click console button for details + data dump.</text>';
       }
     }
@@ -1265,9 +1265,9 @@ export function buildGraphAggregateHtml(model, { launchBadge = null } = {}) {
       const svg = document.getElementById('history-chart');
       if (svg && svg.innerHTML.indexOf('Benchmark History Chart') > -1) {
         console.log('[graph] Still placeholder after force, setting basic visible content');
-        svg.innerHTML = '<rect x="98" y="38" width="1460" height="830" fill="#0a1a22" stroke="#8de3ff" stroke-width="2" rx="16" />\n' +
-          '<text x="800" y="400" fill="#8de3ff" font-size="24" text-anchor="middle">Chart data present but render had issue.</text>\n' +
-          '<text x="800" y="440" fill="#a8c5d3" font-size="16" text-anchor="middle">Click presets or console button. Check DevTools console for errors.</text>\n' +
+        svg.innerHTML = '<rect x="98" y="38" width="1460" height="830" fill="#0a1a22" stroke="#8de3ff" stroke-width="2" rx="16" />\\n' +
+          '<text x="800" y="400" fill="#8de3ff" font-size="24" text-anchor="middle">Chart data present but render had issue.</text>\\n' +
+          '<text x="800" y="440" fill="#a8c5d3" font-size="16" text-anchor="middle">Click presets or console button. Check DevTools console for errors.</text>\\n' +
           '<line x1="98" y1="868" x2="1558" y2="868" stroke="#8de3ff" stroke-opacity="0.4" />';
       }
     }, 300);

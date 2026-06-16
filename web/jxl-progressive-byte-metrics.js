@@ -6,6 +6,7 @@ export const PREVIEW_DB = 30;
 export const GOOD_BUTTER = 1.0;
 export const SSIM_GOOD = 0.8;
 export const BUTTER_MONOTONE_TOL = 0.1;
+export const SSIM_MONOTONE_TOL = 0.01; // SSIM is 0..1, not dB — needs its own tolerance scale
 
 export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   const frames = events.filter((event) => event && (event.type === 'progress' || event.type === 'final'));
@@ -45,10 +46,13 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     previewBytes = pickPreviewCutoffBytesOnly(painted, totalBytes);
   }
 
+  // Sort butterSeries once; reused by both the preview fallback and the perceptual block below.
+  const hasButter = Array.isArray(butterSeries) && butterSeries.length > 0;
+  const sortedButter = hasButter ? ensureSorted(butterSeries) : null;
+
   // perceptual-aware preview if butterSeries present (even without qualitySeries)
-  if (previewBytes == null && Array.isArray(butterSeries) && butterSeries.length > 0) {
-    const ss = ensureSorted(butterSeries);
-    previewBytes = ss.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? ss.at(-1)?.bytes ?? null;
+  if (previewBytes == null && hasButter) {
+    previewBytes = sortedButter.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? sortedButter.at(-1)?.bytes ?? null;
   }
 
   let firstPerceptuallyGoodBytes = null;
@@ -57,12 +61,13 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
   let butterMonotone = null;
   let butterRegressions = [];
 
-  if (Array.isArray(butterSeries) && butterSeries.length > 0) {
-    const ss = ensureSorted(butterSeries);
+  if (hasButter) {
+    const ss = sortedButter;
     firstPerceptuallyGoodBytes = ss.find((e) => e.butter != null && e.butter <= goodButter)?.bytes ?? null;
     firstPerceptuallyGoodPercent = percent(firstPerceptuallyGoodBytes, totalBytes);
     finalButter = ss.at(-1)?.butter ?? null;
-    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, butter: e.butter })), BUTTER_MONOTONE_TOL, { valueKey: 'butter', lowerIsBetter: true });
+    // entries already carry {bytes, butter} — pass directly via valueKey, no array re-materialization
+    const m = detectMonotone(ss, BUTTER_MONOTONE_TOL, { valueKey: 'butter', lowerIsBetter: true });
     butterMonotone = m.monotone;
     butterRegressions = m.regressions;
   }
@@ -73,7 +78,9 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     const ss = ensureSorted(ssimSeries);
     firstGoodSsimBytes = ss.find((e) => e.ssim != null && e.ssim >= SSIM_GOOD)?.bytes ?? null;
     finalSsim = ss.at(-1)?.ssim ?? null;
-    const m = detectMonotone(ss.map((e) => ({ bytes: e.bytes, ssim: e.ssim })));
+    // BUG FIX: ssim is higher-better with key 'ssim'; without valueKey detectMonotone read entry.psnr
+    // (undefined) → every entry skipped → ssimMonotone always trivially true. Pass valueKey + ssim tol.
+    const m = detectMonotone(ss, SSIM_MONOTONE_TOL, { valueKey: 'ssim' });
     ssimMonotone = m.monotone;
     ssimRegressions = m.regressions;
   }
@@ -152,6 +159,7 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
 
   const qualitySeries = [], butterSeries = [], ssimSeries = [];
   const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
+  let prevPsnr = null; // scalar carry — avoids re-indexing qualitySeries[len-1] each iteration (blueprint Ch1)
 
   for (let i = 0; i < cutoffPixelsList.length; i++) {
     let p = cutoffPixelsList[i];
@@ -168,10 +176,10 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
       : computePsnrVsFinal(p, refPixels);
     timing.psnrMs += performance.now() - t;
 
-    const prevPsnr = qualitySeries.length > 0 ? qualitySeries[qualitySeries.length - 1].psnr : null;
     const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
     const doFull = (i % 2 === 0) || (b > 100 * 1024) || psnrDelta > 0.5;
     qualitySeries.push({ bytes: b, psnr: currentPsnr });
+    prevPsnr = currentPsnr;
 
     t = performance.now();
     butterSeries.push({ bytes: b, butter: doFull ? callCmp(p) : null });
@@ -208,6 +216,7 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
   const ssimSeries = [];
   // Per-metric timing accumulators — zero-overhead performance.now() pairs; visible in DevTools Timeline.
   const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
+  let prevPsnr = null; // scalar carry — avoids re-indexing qualitySeries[len-1] each iteration (blueprint Ch1)
   for (let i = 0; i < cutoffPixelsList.length; i++) {
     let p = cutoffPixelsList[i];
     const b = byteSizes[i];
@@ -222,10 +231,10 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
     let t = performance.now();
     const currentPsnr = computePsnrVsFinal(p, refPixels);
     timing.psnrMs += performance.now() - t;
-    const prevPsnr = qualitySeries.length > 0 ? qualitySeries[qualitySeries.length - 1].psnr : null;
     const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
     const doFull = (i % 2 === 0) || (b > 100 * 1024) || psnrDelta > 0.5;
     qualitySeries.push({ bytes: b, psnr: currentPsnr });
+    prevPsnr = currentPsnr;
     t = performance.now();
     butterSeries.push({ bytes: b, butter: doFull ? cmp(p) : null });
     timing.butterMs += performance.now() - t;

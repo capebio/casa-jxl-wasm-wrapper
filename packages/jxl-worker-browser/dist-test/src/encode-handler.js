@@ -26,6 +26,15 @@ export class EncodeHandler {
     lastDrainAllowed = false;
     encoder = null;
     disposePromise = null;
+    // Profiling hooks (accumulated, posted as metrics at key points + end)
+    stageStartMs = performance.now();
+    createEncoderMs = 0;
+    totalWaitForPixelsMs = 0;
+    totalPushPixelsMs = 0;
+    finishMs = 0;
+    totalChunkYieldMs = 0;
+    firstByteMs = 0;
+    lastPushStart = 0;
     // Pre-allocated message objects — mutated in-place before postMessage (safe: structured clone is synchronous).
     _drainMsg = {
         type: "worker_drain",
@@ -127,7 +136,10 @@ export class EncodeHandler {
             codestreamLevel: this.opts.codestreamLevel,
             copyInput: false,
         };
+        const tCreate0 = performance.now();
         const encoder = this.wasm.createEncoder(encoderOpts);
+        this.createEncoderMs = performance.now() - tCreate0;
+        this.postMetric("encode_create_ms", this.createEncoderMs);
         this.encoder = encoder;
         this.state = "configured";
         try {
@@ -140,7 +152,19 @@ export class EncodeHandler {
         finally {
             await this.disposeActiveEncoder();
             this.finishSession(this.state);
+            this.postFinalMetrics();
         }
+    }
+    postFinalMetrics() {
+        const total = performance.now() - this.stageStartMs;
+        this.postMetric("encode_total_ms", total);
+        this.postMetric("encode_create_ms", this.createEncoderMs);
+        this.postMetric("encode_push_pixels_ms", this.totalPushPixelsMs);
+        this.postMetric("encode_wait_pixels_ms", this.totalWaitForPixelsMs);
+        this.postMetric("encode_finish_ms", this.finishMs);
+        this.postMetric("encode_chunk_yield_ms", this.totalChunkYieldMs);
+        if (this.firstByteMs > 0)
+            this.postMetric("encode_time_to_first_byte_ms", this.firstByteMs);
     }
     // ---------------------------------------------------------------------------
     // Helpers
@@ -227,12 +251,16 @@ export class EncodeHandler {
     }
     async feedEncoder(encoder) {
         while (!this.isTerminal()) {
+            const waitStart = performance.now();
             await this.waitForPixels();
+            this.totalWaitForPixelsMs += performance.now() - waitStart;
             while (this.pixelQueue.length > this.pixelReadIndex) {
                 const entry = this.takeNextPixels();
                 if (entry === null)
                     break;
+                const pushStart = performance.now();
                 await encoder.pushPixels(entry.chunk, entry.region);
+                this.totalPushPixelsMs += performance.now() - pushStart;
                 // Re-check state after async pushPixels — cancellation or error may have arrived.
                 // Cast through string to defeat TypeScript's pre-await control-flow narrowing.
                 if (this.isTerminal())
@@ -244,10 +272,13 @@ export class EncodeHandler {
                 if (this.isTerminal())
                     return;
                 this.state = "finalising";
+                const finStart = performance.now();
                 await Promise.race([
                     encoder.finish(),
                     new Promise((_, reject) => setTimeout(() => reject(new Error("encoder.finish() timed out after 30 s")), FINISH_TIMEOUT_MS)),
                 ]);
+                this.finishMs = performance.now() - finStart;
+                this.postMetric("encode_finish_ms", this.finishMs);
                 return;
             }
         }
@@ -267,6 +298,13 @@ export class EncodeHandler {
         this._drainMsg.queuedBytes = this.queuedBytes;
         self.postMessage(this._drainMsg);
     }
+    postMetric(name, value) {
+        self.postMessage({
+            type: "metric",
+            sessionId: this.sessionId,
+            metric: { name, value },
+        });
+    }
     async readEncoderChunks(encoder) {
         let totalBytes = 0;
         const sidecarCount = this.opts.sidecarSizes?.length ?? 0;
@@ -275,9 +313,14 @@ export class EncodeHandler {
         for await (const chunk of encoder.chunks()) {
             if (this.isTerminal())
                 return;
+            const tChunk0 = performance.now();
             const buffer = toArrayBuffer(chunk);
+            const chunkYieldMs = performance.now() - tChunk0;
+            this.totalChunkYieldMs += chunkYieldMs;
             if (!this.firstByteEmitted) {
                 this.firstByteEmitted = true;
+                this.firstByteMs = performance.now() - this.stageStartMs;
+                this.postMetric("encode_time_to_first_byte_ms", this.firstByteMs);
                 const firstByteMsg = {
                     type: "encode_first_byte_ready",
                     sessionId: this.sessionId,
@@ -298,6 +341,8 @@ export class EncodeHandler {
         if (this.isTerminal())
             return;
         this.state = "done";
+        this.postMetric("encode_chunk_yield_total_ms", this.totalChunkYieldMs);
+        this.postMetric("encode_output_bytes", totalBytes);
         const doneMsg = {
             type: "encode_done",
             sessionId: this.sessionId,
@@ -306,6 +351,7 @@ export class EncodeHandler {
         };
         self.postMessage(doneMsg);
         this.finishSession("done");
+        // final summary post already in finally via postFinalMetrics
     }
     failSession(code, message) {
         if (this.isTerminal())

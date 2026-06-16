@@ -13,7 +13,6 @@ export declare class DecodeSessionImpl implements DecodeSession {
     private lastInfo;
     private closed;
     private terminated;
-    private framesConsumed;
     private terminalError;
     constructor(schedulerOrPromise: Scheduler | Promise<Scheduler>, opts: DecodeOptions);
     push(chunk: ArrayBuffer | Uint8Array): Promise<void>;
@@ -34,6 +33,8 @@ export declare class DecodeSessionImpl implements DecodeSession {
     get info(): ImageInfo | null;
     header(): Promise<ImageInfo>;
     cancel(reason?: string): Promise<void>;
+    private makeFrame;
+    private emitFoldedMetrics;
     private handleMessage;
     private cleanup;
     private finish;
