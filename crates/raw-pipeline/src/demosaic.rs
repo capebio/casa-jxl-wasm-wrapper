@@ -235,9 +235,12 @@ pub fn demosaic_rggb_into(raw: &[u16], width: usize, height: usize, out: &mut [u
                 let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
                 out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
 
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                // B site (1,1): R=diag(NW+NE+SW+SE), G=cross(N+S+W+E), B=direct
+                let rv2 = ((north[col] as u32 + north[col+2] as u32
+                          + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+                let gv2 = ((north[col+1] as u32 + south[col+1] as u32
+                          + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+                let bv2 = here[col+1];
                 let o2 = (col + 1) * 3;
                 out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
             }
@@ -364,11 +367,11 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
                     let bv = v128_bitselect(avg4(nm1, np1, sm1, sp1), avg2(n, s), parity);
                     (rv, gv, bv)
                 } else {
-                    // odd row: R = even→avg2(n,s), odd→avg2(hm1,hp1); G = h (all lanes);
-                    //          B = even→avg2(hm1,hp1), odd→avg2(n,s)
-                    let rv = v128_bitselect(avg2(n, s), avg2(hm1, hp1), parity);
-                    let gv = h;
-                    let bv = v128_bitselect(avg2(hm1, hp1), avg2(n, s), parity);
+                    // odd row: even(GB)→R=avg2(n,s), G=h, B=avg2(hm1,hp1)
+                    //          odd(B)→R=avg4(nm1,np1,sm1,sp1), G=avg4(n,s,hm1,hp1), B=h
+                    let rv = v128_bitselect(avg2(n, s), avg4(nm1, np1, sm1, sp1), parity);
+                    let gv = v128_bitselect(h, avg4(n, s, hm1, hp1), parity);
+                    let bv = v128_bitselect(avg2(hm1, hp1), h, parity);
                     (rv, gv, bv)
                 }
             };
@@ -407,9 +410,12 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
                 let gv = here[col];
                 let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
                 out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                // B site (1,1): R=diag, G=cross, B=direct
+                let rv2 = ((north[col] as u32 + north[col+2] as u32
+                          + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+                let gv2 = ((north[col+1] as u32 + south[col+1] as u32
+                          + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+                let bv2 = here[col+1];
                 let o2 = (col+1)*3;
                 out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
             }
@@ -1516,6 +1522,34 @@ mod tests {
             13,13,13,12,13,14,15,15,15,14,16,16,
         ];
         assert_eq!(rgbm, expected_mhc, "mhc 4x4 must match pinned current behaviour");
+    }
+
+    #[test]
+    fn m10a2_bilinear_b_site_interior_correct() {
+        // 6×6 image with Bayer-site-typed values so expected outputs are exact.
+        // R=1000, GR=2000, GB=3000, B=4000. Interior loop runs (w=6 ≥ 6).
+        // For interior B site (odd row, odd col, e.g. row=1 col=3):
+        //   R = diag avg (NW+NE+SW+SE R pixels) = (1000×4)>>2 = 1000
+        //   G = cross avg (N+S GR + W+E GB)     = (2000+2000+3000+3000)>>2 = 2500
+        //   B = direct                           = 4000
+        let w = 6usize;
+        let h = 6usize;
+        let mut raw = vec![0u16; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                raw[r * w + c] = match (r & 1, c & 1) {
+                    (0, 0) => 1000,
+                    (0, 1) => 2000,
+                    (1, 0) => 3000,
+                    _ =>      4000,
+                };
+            }
+        }
+        let rgb = demosaic_rggb(&raw, w, h).unwrap();
+        // B site at (row=1, col=3): offset = (1*6+3)*3 = 27
+        assert_eq!(rgb[27], 1000, "B site interior R must be diagonal avg of R");
+        assert_eq!(rgb[28], 2500, "B site interior G must be cross avg of G");
+        assert_eq!(rgb[29], 4000, "B site interior B must be direct");
     }
 
     #[test]
