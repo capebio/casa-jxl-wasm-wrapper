@@ -588,10 +588,10 @@ class WorkerPool {
         });
     }
     _onJxlDecodeResponse(data) {
+        const isFinal = data.type === 'jxl_decoded' || data.isFinal === true;
+        const isTerminal = data.type === 'jxl_decoded' || data.type === 'decode_error';
         const entry = this._jxlDecodeCallbacks.get(data.decodeId);
         if (entry) {
-            const isFinal = data.type === 'jxl_decoded' || data.isFinal === true;
-            const isTerminal = data.type === 'jxl_decoded' || data.type === 'decode_error';
             for (const listener of entry.listeners) {
                 if (typeof listener.options?.guard === 'function' && !listener.options.guard()) continue;
                 // See the policy note above: cache writes stay centralized here.
@@ -614,7 +614,12 @@ class WorkerPool {
                 jxlFirstProgressCacheSeen.delete(data.decodeId);
             }
         }
-        if (data.type !== 'jxl_progress') {
+        // Release the single decode slot only on a true terminal message.
+        // header / preview / recon_jpeg / progress are mid-decode signals — they
+        // must NOT free the slot, or the next queued decode is dispatched to the
+        // same worker while this one is still running (overlapping decodes,
+        // out-of-order frames, unbounded WASM decoder instances).
+        if (isTerminal) {
             this._jxlDecodeBusy = false;
             this._pumpJxlQueue();
         }
@@ -778,7 +783,23 @@ class WorkerPool {
     setJxlDecodeWorker(w) {
         this._jxlDecodeWorker = w;
         w.addEventListener('message', ({ data }) => this._onJxlDecodeResponse(data));
-        w.addEventListener('error', (ev) => console.error('jxl-decode-worker error:', ev.message));
+        w.addEventListener('error', (ev) => {
+            console.error('jxl-decode-worker error:', ev.message);
+            // A worker crash otherwise wedges the queue forever: `_jxlDecodeBusy`
+            // never clears and pending callbacks never resolve (loaders spin).
+            // Fail every in-flight decode and resume the pump so the UI recovers.
+            const reason = ev.message || 'decode worker crashed';
+            for (const [decodeId, entry] of this._jxlDecodeCallbacks) {
+                for (const listener of entry.listeners) {
+                    try { listener.cb({ type: 'decode_error', decodeId, error: reason }); } catch {}
+                }
+                this._jxlPendingByUrl.delete(entry.url);
+                jxlFirstProgressCacheSeen.delete(decodeId);
+            }
+            this._jxlDecodeCallbacks.clear();
+            this._jxlDecodeBusy = false;
+            this._pumpJxlQueue();
+        });
         w.postMessage({ type: 'preload' });
     }
 

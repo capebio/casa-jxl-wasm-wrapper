@@ -9,11 +9,32 @@ try {
     console.warn('JXL preload failed:', err);
 }
 
-function asTightRgba(pixels) {
-    if (!pixels) return pixels;
-    if (pixels instanceof ArrayBuffer) return new Uint8ClampedArray(pixels);
-    const view = (pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray) ? pixels : new Uint8Array(pixels);
-    return new Uint8ClampedArray(view.buffer, view.byteOffset, view.byteLength);
+// Normalise decoder pixels to a tight, ImageData-ready Uint8ClampedArray whose
+// backing ArrayBuffer holds *only* these bytes — so the main thread can wrap
+// them in `new ImageData(rgba, w, h)` with zero reconversion, and we can
+// transfer the buffer (zero-copy) without detaching anything else.
+//
+// Fast paths avoid the copy:
+//   - already a standalone Uint8ClampedArray  → use as-is
+//   - a tight Uint8Array owning its buffer    → re-wrap that buffer as clamped
+// Slow path copies only when the source is a partial view into a larger/shared
+// buffer (e.g. the WASM heap), where transferring `.buffer` would be unsafe.
+function toClampedTight(pixels) {
+    if (pixels instanceof Uint8ClampedArray
+        && pixels.byteOffset === 0
+        && pixels.byteLength === pixels.buffer.byteLength) {
+        return pixels;
+    }
+    if (pixels instanceof Uint8Array
+        && pixels.byteOffset === 0
+        && pixels.byteLength === pixels.buffer.byteLength) {
+        return new Uint8ClampedArray(pixels.buffer);
+    }
+    return new Uint8ClampedArray(
+        (pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray)
+            ? pixels
+            : new Uint8Array(pixels),
+    );
 }
 
 // Scan JXL container bytes for embedded JPEG bitstreams (SOI..EOI).
@@ -97,29 +118,28 @@ async function decodeProgressive(decodeId, buf, data) {
             await previewDec.push(buf);
             await previewDec.close();
             let psw = 0, psh = 0;
-            for await (const ev of previewDec.events()) {
-                if (ev.type === 'header') {
-                    psw = ev.info.width;
-                    psh = ev.info.height;
+            for await (const event of previewDec.events()) {
+                if (event.type === 'header') {
+                    psw = event.info.width;
+                    psh = event.info.height;
                     self.postMessage({
                         type: 'jxl_header', decodeId,
                         w: psw, h: psh,
-                        hasAnimation: !!ev.info.hasAnimation,
-                        jpegReconstructionAvailable: !!ev.info.jpegReconstructionAvailable,
+                        hasAnimation: !!event.info.hasAnimation,
+                        jpegReconstructionAvailable: !!event.info.jpegReconstructionAvailable,
                     });
-                } else if (ev.type === 'progress' || ev.type === 'final') {
-                    let px = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
-                    if (px.byteOffset !== 0 || px.byteLength !== px.buffer.byteLength) px = new Uint8Array(px);
+                } else if (event.type === 'progress' || event.type === 'final') {
+                    const rgba = toClampedTight(event.pixels);
                     self.postMessage(
                         {
                             type: 'jxl_preview', decodeId,
-                            rgba: px, w: ev.info.width, h: ev.info.height,
+                            rgba, w: event.info.width, h: event.info.height,
                             isFinal: true, sourceW: psw, sourceH: psh,
                             downsample: 2, progressiveDetail: 'dc',
-                            ...buildAnimMeta(ev),
-                            jpegReconstructionAvailable: !!ev.info.jpegReconstructionAvailable,
+                            ...buildAnimMeta(event),
+                            jpegReconstructionAvailable: !!event.info.jpegReconstructionAvailable,
                         },
-                        [px.buffer],
+                        [rgba.buffer],
                     );
                 }
             }
@@ -143,48 +163,56 @@ async function decodeProgressive(decodeId, buf, data) {
         preserveMetadata: true,
     });
 
+    let sourceW = 0, sourceH = 0;
+
+    // Emit one progressive frame as `jxl_progress`. On the final frame we also
+    // emit the terminal `jxl_decoded` carrying an independent copy, because both
+    // messages transfer (and thus detach) their own backing buffer. Pixels are
+    // normalised to a tight Uint8ClampedArray (ImageData-ready) by toClampedTight.
+    const postProgress = (decodeId, event, isFinal) => {
+        const rgba = toClampedTight(event.pixels);
+        const base = {
+            decodeId, w: event.info.width, h: event.info.height,
+            sourceW, sourceH, isFinal,
+            progressiveDetail: progressiveDetail ?? 'lastPasses',
+            frameIndex: frameIndex ?? 0,
+            stage: event.stage,
+            ...buildAnimMeta(event),
+            jpegReconstructionAvailable: !!event.info.jpegReconstructionAvailable,
+            ...(region != null || downsample != null
+                ? { region: region ?? null, downsample: downsample ?? 1 }
+                : {}),
+        };
+
+        if (isFinal) {
+            const copy = new Uint8ClampedArray(rgba);
+            self.postMessage({ type: 'jxl_progress', ...base, rgba },       [rgba.buffer]);
+            self.postMessage({ type: 'jxl_decoded',  ...base, rgba: copy }, [copy.buffer]);
+        } else {
+            self.postMessage({ type: 'jxl_progress', ...base, rgba }, [rgba.buffer]);
+        }
+    };
+
     try {
-        let sourceW = 0, sourceH = 0;
         const events = (async () => {
             let sawFinal = false;
-            for await (const ev of decoder.events()) {
-                if (ev.type === 'header') {
-                    sourceW = ev.info.width;
-                    sourceH = ev.info.height;
+            for await (const event of decoder.events()) {
+                if (event.type === 'header') {
+                    sourceW = event.info.width;
+                    sourceH = event.info.height;
                     self.postMessage({
                         type: 'jxl_header', decodeId,
                         w: sourceW, h: sourceH,
-                        hasAnimation: !!ev.info.hasAnimation,
-                        jpegReconstructionAvailable: !!ev.info.jpegReconstructionAvailable,
+                        hasAnimation: !!event.info.hasAnimation,
+                        jpegReconstructionAvailable: !!event.info.jpegReconstructionAvailable,
                     });
-                } else if (ev.type === 'progress' || ev.type === 'final') {
-                    const isFinal = ev.type === 'final';
-                    let px = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
-                    if (px.byteOffset !== 0 || px.byteLength !== px.buffer.byteLength) px = new Uint8Array(px);
-
-                    const base = {
-                        decodeId, w: ev.info.width, h: ev.info.height,
-                        sourceW, sourceH, isFinal,
-                        progressiveDetail: progressiveDetail ?? 'lastPasses',
-                        frameIndex: frameIndex ?? 0,
-                        stage: ev.stage,
-                        ...buildAnimMeta(ev),
-                        jpegReconstructionAvailable: !!ev.info.jpegReconstructionAvailable,
-                        ...(region != null || downsample != null
-                            ? { region: region ?? null, downsample: downsample ?? 1 }
-                            : {}),
-                    };
-
-                    if (isFinal) {
-                        sawFinal = true;
-                        const copy = new Uint8Array(px);
-                        self.postMessage({ type: 'jxl_progress', ...base, rgba: px },  [px.buffer]);
-                        self.postMessage({ type: 'jxl_decoded',  ...base, rgba: copy }, [copy.buffer]);
-                    } else {
-                        self.postMessage({ type: 'jxl_progress', ...base, rgba: px }, [px.buffer]);
-                    }
-                } else if (ev.type === 'error') {
-                    throw new Error(`${ev.code}: ${ev.message}`);
+                } else if (event.type === 'progress') {
+                    postProgress(decodeId, event, false);
+                } else if (event.type === 'final') {
+                    sawFinal = true;
+                    postProgress(decodeId, event, true);
+                } else if (event.type === 'error') {
+                    throw new Error(`${event.code}: ${event.message}`);
                 }
             }
             if (!sawFinal) throw new Error('No final JXL frame decoded');
