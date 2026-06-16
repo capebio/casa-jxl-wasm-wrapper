@@ -188,7 +188,7 @@ export class EncodeSessionImpl implements EncodeSession {
 
   getStats(): EncodeStats | null {
     if (this.totalBytesWritten === null) return null;
-    const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : 16;
+    const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : this.opts.format === "rgb8" ? 3 : 16;
     const originalBytes = this.opts.width * this.opts.height * bpp;
     const compressedBytes = this.totalBytesWritten;
     return {

@@ -37,9 +37,9 @@ for (const f of files) {
     if (!jpeg) { console.log(`${f}: no jpeg`); continue; }
     let refRgb: Uint8Array;
     try {
-        const m = await sharp(jpeg).metadata();
+        const m = await sharp(jpeg).rotate().metadata();
         const refH = Math.round((m.height! * CMP_W) / m.width!);
-        const r = await sharp(jpeg).resize(CMP_W, refH, { fit: 'fill' }).removeAlpha().raw().toBuffer();
+        const r = await sharp(jpeg).rotate().resize(CMP_W, refH, { fit: 'fill' }).removeAlpha().raw().toBuffer();
         refRgb = new Uint8Array(r);
     } catch (e) {
         refRgb = new Uint8Array(0);
