@@ -76,4 +76,17 @@ fn main() {
     println!("fused tone+LUT vs two-pass — {} MP, median of 7 rounds (single-thread)", np / 1_000_000);
     run("vib_zero (sat only)", &rgb16, &pre, &post, &mut out, np, 1.30, 0.0, true);
     run("vibrance active (div)", &rgb16, &pre, &post, &mut out, np, 1.30, 0.5, false);
+
+    // 12-bit compact LUT (4096 entries) — simulates post-Task-2 cache-resident scenario.
+    // rgb16 values bounded to [0, 4095] and identity pre-LUT has 4096 entries.
+    let pre12: Vec<u16> = (0..4096u32).map(|x| (x * 16) as u16).collect();
+    let mut rgb16_12: Vec<u16> = vec![0u16; np * 3];
+    for i in 0..np {
+        rgb16_12[3 * i]     = (rgb16[3 * i] & 0x0FFF) as u16;
+        rgb16_12[3 * i + 1] = (rgb16[3 * i + 1] & 0x0FFF) as u16;
+        rgb16_12[3 * i + 2] = (rgb16[3 * i + 2] & 0x0FFF) as u16;
+    }
+    println!("\n--- 12-bit compact pre-LUT (4096 entries, L1-resident) ---");
+    run("vib_zero (compact)", &rgb16_12, &pre12, &post, &mut out, np, 1.30, 0.0, true);
+    run("vibrance (compact)", &rgb16_12, &pre12, &post, &mut out, np, 1.30, 0.5, false);
 }

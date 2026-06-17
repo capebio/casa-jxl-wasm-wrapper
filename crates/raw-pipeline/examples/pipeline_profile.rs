@@ -5,7 +5,7 @@
 //!        --example pipeline_profile -- <path-to.orf>
 //! Default file: C:/Foo/raw-converter/tests/P1110226.ORF
 
-use raw_pipeline::tiff::{bench_pipeline_orf, bench_tone_e2e_orf, bench_tone_split_orf};
+use raw_pipeline::tiff::{bench_pipeline_orf, bench_tone_e2e_orf, bench_tone_split_orf, bench_tone_stage_3way_orf};
 use std::fs;
 
 fn med(mut v: Vec<f64>) -> f64 {
@@ -55,6 +55,22 @@ fn main() {
     println!("  LUT gather+store {:9.2} ms  {:5.1}%", l, 100.0 * l / f);
     println!("  apply_tone_math  {:9.2} ms  {:5.1}%  (matrix + sat/vibrance + divide)", math, 100.0 * math / f);
     println!("  tone full        {:9.2} ms", f);
+
+    // 3-stage sub-profile: pre-LUT gather / tone math / post-LUT gather.
+    let _ = bench_tone_stage_3way_orf(&data);
+    let (mut pre, mut math2, mut post) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..runs {
+        let (pr, ma, po) = bench_tone_stage_3way_orf(&data).expect("3way");
+        pre.push(pr); math2.push(ma); post.push(po);
+    }
+    let (pr, ma, po) = (med(pre), med(math2), med(post));
+    let subtotal = pr + ma + po;
+    println!("\ntone 3-stage sub-profile (single-thread, compact pre-LUT, median of {}):", runs);
+    println!("  pre-LUT gather   {:9.2} ms  {:5.1}%", pr, 100.0 * pr / subtotal);
+    println!("  tone math        {:9.2} ms  {:5.1}%", ma, 100.0 * ma / subtotal);
+    println!("  post-LUT gather  {:9.2} ms  {:5.1}%", po, 100.0 * po / subtotal);
+    println!("  ──────────────────────────────────────");
+    println!("  (3-stage total   {:9.2} ms)", subtotal);
 
     // End-to-end tone: scalar process_into vs SIMD process_into_simd (parallel) + parity.
     let (mut sc, mut si, mut md, mut nd) = (Vec::new(), Vec::new(), 0u8, 0usize);
