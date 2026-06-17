@@ -25,7 +25,8 @@ mod compile_tests {
     #[test]
     fn pipeline_params_default_builds() {
         let p = pipeline::PipelineParams::default_olympus();
-        assert_eq!(p.black, 256);
+        // Olympus RAW black level set to 0 (commit 8b269f33; was 256). Keep in sync.
+        assert_eq!(p.black, 0);
         assert_eq!(p.white, 4095);
     }
 
@@ -33,9 +34,10 @@ mod compile_tests {
     fn process_synthetic_black_frame() {
         let w = 4usize;
         let h = 4usize;
-        let raw = vec![256u16; w * h];
-        let rgb16 = demosaic::demosaic_rggb(&raw, w, h).unwrap();
         let params = pipeline::PipelineParams::default_olympus();
+        // A black frame is sensor pixels at the black level → near-black after the pipeline.
+        let raw = vec![params.black as u16; w * h];
+        let rgb16 = demosaic::demosaic_rggb(&raw, w, h).unwrap();
         let rgb8 = pipeline::process(&rgb16, &params);
         assert!(rgb8.iter().all(|&v| v < 50),
             "expected near-black output, got max={}", rgb8.iter().max().unwrap());
