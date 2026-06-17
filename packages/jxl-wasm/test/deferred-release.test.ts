@@ -283,4 +283,64 @@ describe('deferred-release pixel emission mode', () => {
     expect(framesReceived).toBeGreaterThan(0);
     expect(mallocGrowCount).toBeLessThanOrEqual(1);
   });
+
+  it('should emit transferred buffers when deferredRelease=false (backward compatibility)', async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeProgressiveLibjxlModule());
+
+    const decoder = createDecoder({
+      format: 'rgba8',
+      progressionTarget: 'final',
+      emitEveryPass: false,
+      preserveIcc: false,
+      preserveMetadata: false,
+      deferredRelease: false, // Explicit off (default mode)
+    });
+
+    decoder.push(new Uint8Array([1, 2, 3, 4]));
+    decoder.close();
+
+    let finalPixels: ArrayBuffer | Uint8Array | undefined;
+
+    for await (const event of decoder.events()) {
+      if (event.type === 'final') {
+        finalPixels = event.pixels;
+        // Standard backward-compatible mode: pixels should be Uint8Array (transferable, not shared ArrayBuffer)
+        expect(finalPixels).toBeInstanceOf(Uint8Array);
+        expect(finalPixels.byteLength).toBeGreaterThan(0);
+      }
+    }
+
+    // Should have received final event with pixels
+    expect(finalPixels).toBeDefined();
+  });
+
+  it('should emit transferred buffers when deferredRelease is unset (backward compatibility)', async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeProgressiveLibjxlModule());
+
+    const decoder = createDecoder({
+      format: 'rgba8',
+      progressionTarget: 'final',
+      emitEveryPass: false,
+      preserveIcc: false,
+      preserveMetadata: false,
+      // deferredRelease intentionally omitted (undefined = default false)
+    });
+
+    decoder.push(new Uint8Array([1, 2, 3, 4]));
+    decoder.close();
+
+    let finalPixels: ArrayBuffer | Uint8Array | undefined;
+
+    for await (const event of decoder.events()) {
+      if (event.type === 'final') {
+        finalPixels = event.pixels;
+        // Default mode (deferredRelease unset): pixels should be Uint8Array, not shared ArrayBuffer
+        expect(finalPixels).toBeInstanceOf(Uint8Array);
+        expect(finalPixels.byteLength).toBeGreaterThan(0);
+      }
+    }
+
+    // Should have received final event
+    expect(finalPixels).toBeDefined();
+  });
 });
