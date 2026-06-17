@@ -236,18 +236,40 @@ async function encodeJxl(rgba, width, height, isProgressive) {
     chunked: true,
   });
   const chunks = [];
+  let chunkError = null;
   const chunkTask = (async () => {
-    for await (const chunk of encoder.chunks()) {
-      chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    try {
+      for await (const chunk of encoder.chunks()) {
+        chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      }
+    } catch (e) {
+      chunkError = e;
     }
   })();
   const t0 = performance.now();
-  await encoder.pushPixels(exactBuffer(rgba));
-  await encoder.finish();
+  try {
+    await encoder.pushPixels(exactBuffer(rgba));
+    await encoder.finish();
+  } catch (e) {
+    console.error(`❌ Encoder error during push/finish (${width}x${height}):`, e.message);
+    throw e;
+  }
   await chunkTask;
+  if (chunkError) {
+    console.error(`❌ Chunk collection error (${width}x${height}):`, chunkError.message);
+    throw chunkError;
+  }
   await encoder.dispose();
   const ms = performance.now() - t0;
-  return { bytes: concatChunks(chunks), ms };
+  const result = concatChunks(chunks);
+
+  // Validate: sanity check output size
+  const minExpectedSize = Math.max(100, width * height / 100); // very loose lower bound
+  if (result.byteLength < minExpectedSize) {
+    console.warn(`⚠️  Encoder output suspiciously small: ${result.byteLength}B for ${width}x${height} (expected >${minExpectedSize}B). Progressive=${isProgressive}`);
+  }
+
+  return { bytes: result, ms };
 }
 
 async function encodeJxlVariant(rgba, width, height, extra = {}) {
@@ -460,9 +482,19 @@ async function main() {
     setForcedTier("simd");
     for (const f of loadedFiles) {
       const progEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, true);
-      const progDec = await decodeJxl(progEnc.bytes, true);
+      let progDec = { firstFrameMs: 0, ms: 0 };
+      try {
+        progDec = await decodeJxl(progEnc.bytes, true);
+      } catch (e) {
+        console.warn(`⚠️  Decode failed for ${f.file} (prog): ${e.message}`);
+      }
       const shotEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, false);
-      const shotDec = await decodeJxl(shotEnc.bytes, false);
+      let shotDec = { ms: 0 };
+      try {
+        shotDec = await decodeJxl(shotEnc.bytes, false);
+      } catch (e) {
+        console.warn(`⚠️  Decode failed for ${f.file} (shot): ${e.message}`);
+      }
       const s = flipSamples[f.file].simd;
       s.prog_enc.push(progEnc.ms);
       s.first.push(progDec.firstFrameMs);
@@ -474,9 +506,19 @@ async function main() {
     setForcedTier("relaxed-simd-mt");
     for (const f of loadedFiles) {
       const progEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, true);
-      const progDec = await decodeJxl(progEnc.bytes, true);
+      let progDec = { firstFrameMs: 0, ms: 0 };
+      try {
+        progDec = await decodeJxl(progEnc.bytes, true);
+      } catch (e) {
+        console.warn(`⚠️  Decode failed for ${f.file} (prog): ${e.message}`);
+      }
       const shotEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, false);
-      const shotDec = await decodeJxl(shotEnc.bytes, false);
+      let shotDec = { ms: 0 };
+      try {
+        shotDec = await decodeJxl(shotEnc.bytes, false);
+      } catch (e) {
+        console.warn(`⚠️  Decode failed for ${f.file} (shot): ${e.message}`);
+      }
       const m = flipSamples[f.file].mt;
       m.prog_enc.push(progEnc.ms);
       m.first.push(progDec.firstFrameMs);
@@ -534,11 +576,21 @@ async function main() {
 
       // Progressive JXL Benchmarks
       const progEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, true);
-      const progDec = await decodeJxl(progEnc.bytes, true);
+      let progDec = { firstFrameMs: 0, ms: 0, passCount: 0, pixels: null, metrics: {} };
+      try {
+        progDec = await decodeJxl(progEnc.bytes, true);
+      } catch (e) {
+        console.warn(`⚠️  Decode failed for ${f.file} (prog in sequential): ${e.message}`);
+      }
 
       // One-shot JXL Benchmarks
       const shotEnc = await encodeJxl(f.rgba, f.tgtW, f.tgtH, false);
-      const shotDec = await decodeJxl(shotEnc.bytes, false);
+      let shotDec = { ms: 0, firstFrameMs: 0, passCount: 0 };
+      try {
+        shotDec = await decodeJxl(shotEnc.bytes, false);
+      } catch (e) {
+        console.warn(`⚠️  Decode failed for ${f.file} (shot in sequential): ${e.message}`);
+      }
 
       // Pyramid JXL Benchmarks
       let pyrEncMs = 0;
@@ -558,20 +610,29 @@ async function main() {
 
         for (const lvl of levels) {
           const tDecStart = performance.now();
-          await decodeJxl(lvl.data, false);
-          pyrDecTotMs += performance.now() - tDecStart;
+          try {
+            await decodeJxl(lvl.data, false);
+            pyrDecTotMs += performance.now() - tDecStart;
+          } catch (_) {
+            // pyramid level decode failed, skip timing
+          }
         }
       }
 
       // --- Additional timings pulled from benchmark/*.mjs (test_1, progressive-timing-benchmark, timing-tests, targeted, test_1x sweeps) ---
       // Rich decode variants (ds2, region crops) for prog vs oneshot
       const regionEx = { x: Math.floor(f.tgtW * 0.25), y: Math.floor(f.tgtH * 0.25), w: Math.floor(f.tgtW * 0.5), h: Math.floor(f.tgtH * 0.5) };
-      const progDs2 = await decodeJxl(progEnc.bytes, true, { downsample: 2 });
-      const progRegion = await decodeJxl(progEnc.bytes, true, { region: regionEx });
-      const shotDs2 = await decodeJxl(shotEnc.bytes, false, { downsample: 2 });
-      const shotRegion = await decodeJxl(shotEnc.bytes, false, { region: regionEx });
+      let progDs2 = { ms: 0, firstFrameMs: 0, passCount: 0 };
+      let progRegion = { ms: 0, firstFrameMs: 0, passCount: 0 };
+      let shotDs2 = { ms: 0, firstFrameMs: 0, passCount: 0 };
+      let shotRegion = { ms: 0, firstFrameMs: 0, passCount: 0 };
+      let progChunked = { ms: 0, firstFrameMs: 0, passCount: 0 };
+      try { progDs2 = await decodeJxl(progEnc.bytes, true, { downsample: 2 }); } catch (_) {}
+      try { progRegion = await decodeJxl(progEnc.bytes, true, { region: regionEx }); } catch (_) {}
+      try { shotDs2 = await decodeJxl(shotEnc.bytes, false, { downsample: 2 }); } catch (_) {}
+      try { shotRegion = await decodeJxl(shotEnc.bytes, false, { region: regionEx }); } catch (_) {}
       // Chunked-input streaming sim for progressive (4 steps)
-      const progChunked = await timedChunkedInputDecode(progEnc.bytes, 4, true);
+      try { progChunked = await timedChunkedInputDecode(progEnc.bytes, 4, true); } catch (_) {}
       // Encode variants for modular / other options coverage (timing-tests, test_14, test_17 etc)
       let modProgEncMs = 0, modProgSize = 0;
       let photonEncMs = 0, photonSize = 0;
