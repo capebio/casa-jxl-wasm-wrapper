@@ -364,4 +364,5 @@ async function main() {
   console.log(`[timing-tests] wrote ${basename(outPath)}`);
 }
 
-await main();
+await main().catch(err => { console.error(err); process.exit(1); });
+process.exit(0);

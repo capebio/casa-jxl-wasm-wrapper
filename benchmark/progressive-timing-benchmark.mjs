@@ -238,6 +238,7 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace("Z", "Z");
 const outPath = join(OUT_DIR, `${stamp}-progressive-timing.toon`);
 writeFileSync(outPath, lines.join("\n") + "\n");
 console.log(`\n[prog-timing] wrote ${outPath}`);
+process.exit(0);
 
 // --- helpers ---
 

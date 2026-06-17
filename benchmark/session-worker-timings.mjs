@@ -351,5 +351,6 @@ async function main() {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+  await main().catch(err => { console.error(err); process.exit(1); });
+  process.exit(0);
 }

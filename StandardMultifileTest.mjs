@@ -1339,13 +1339,22 @@ async function main() {
   }
 }
 
+// Hard-exit guard fires unconditionally — covers hangs in main() itself (e.g. nodeCtx.shutdown())
+const _hardExitTimer = setTimeout(() => {
+  console.error("\n⏱️  Hard-exit timeout — benchmark exceeded max runtime, forcing exit");
+  process.exit(1);
+}, 10 * 60 * 1000); // 10 minutes
+_hardExitTimer.unref(); // don't keep event loop alive just for this timer
+
 main().then(() => {
-  // Force exit after a timeout to ensure no hanging worker threads
+  clearTimeout(_hardExitTimer);
+  // Force exit after a short grace period to flush output and close any residual WASM workers
   setTimeout(() => {
     console.log("\n⏱️  Force-exit timeout (all workers should be closed by now)");
     process.exit(0);
   }, 2000);
 }).catch(err => {
+  clearTimeout(_hardExitTimer);
   console.error("Benchmark failed:", err);
   setTimeout(() => process.exit(1), 500);
 });

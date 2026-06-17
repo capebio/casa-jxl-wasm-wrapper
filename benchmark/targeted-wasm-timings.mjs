@@ -491,4 +491,5 @@ async function main() {
   }
 }
 
-await main();
+await main().catch(err => { console.error(err); process.exit(1); });
+process.exit(0);
