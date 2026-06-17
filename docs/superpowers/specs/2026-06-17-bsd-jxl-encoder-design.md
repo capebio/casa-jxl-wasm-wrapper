@@ -120,6 +120,7 @@ pub enum ExtraKind { Alpha, Depth, Thermal, Spectral, Optional } // → JxlExtra
 
 - **Interleaved path** (photos): gray/RGB(+alpha) via `JxlEncoderAddImageFrame`.
 - **Planar extra channels** (hyperspectral bands, depth, thermal): each declared with `JxlEncoderSetExtraChannelInfo` *before the first frame* and supplied via `JxlEncoderSetExtraChannelBuffer`. **This generalizes the alpha-extra-channel init fix** already proven in `encode_rgba4_sys`.
+- **Alpha is supplied exactly one way** — interleaved (`Frame.alpha = true`, as the 4th interleaved sample) **or** a planar `ExtraKind::Alpha` channel, **never both**. Photos use interleaved; planar alpha only when other channels are already planar. Validated at encode entry → `EncodeError::Channels` if both are set (a usage error, not UB).
 - *Caveat on record:* JXL stores/transports many extra channels fine, but is not a dedicated HSI compressor — `Spectral` maps to libjxl `Optional`/`Unknown`; correlated-band ratios won't match specialist tooling.
 
 ---
