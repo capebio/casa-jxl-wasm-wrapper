@@ -108,7 +108,13 @@ fn entry_first_u32(data: &[u8], dtype: u16, cnt: u32, val: u32, inline_pos: usiz
 fn read_ascii(data: &[u8], cnt: u32, val: u32, inline_pos: usize) -> String {
     if cnt == 0 { return String::new(); }
     let (p, len) = if cnt <= 4 { (inline_pos, cnt as usize) } else { (val as usize, cnt as usize) };
-    if p + len > data.len() { return String::new(); }
+    // Checked add: on 32-bit/wasm `p + len` (both from file-controlled u32) can wrap below
+    // data.len() and pass an unchecked compare, then `&data[p..p + len]` panics. Same valid
+    // output: in-bounds returns the string; OOB/overflow returns empty (unchanged behaviour).
+    match p.checked_add(len) {
+        Some(end) if end <= data.len() => {}
+        _ => return String::new(),
+    }
     String::from_utf8_lossy(&data[p..p + len])
         .trim_end_matches('\0')
         .to_string()
@@ -151,12 +157,19 @@ fn visit_ifd<F: FnMut(u16, u16, u32, u32, usize)>(
 /// Extract WB multipliers directly from file bytes — no Vec<u16> allocation.
 /// Reads version word then navigates to the AsShot WB index.
 fn extract_wb_from_raw(data: &[u8], off: usize, cnt: u32, le: bool) -> Option<(f32, f32)> {
-    if cnt < 1 || off + 2 > data.len() { return None; }
+    // Checked offset derivation: `off` is file-controlled (val as usize from MakerNote tag).
+    // On 32-bit/wasm `off + 2` and `base + 8` (base = off + wb_index*2) can wrap below
+    // data.len() and defeat the bounds guard, reading unrelated bytes as WB multipliers.
+    // For valid files base is small and in-bounds, so WB is unchanged.
+    if cnt < 1 || off.checked_add(2).map_or(true, |e| e > data.len()) { return None; }
     let version   = read_u16(data, off, le);
     let wb_index: usize = if version >= 6 { 63 } else { 25 };
     if (cnt as usize) < wb_index + 4 { return None; }
-    let base = off + wb_index * 2;
-    if base + 8 > data.len() { return None; }
+    let base = match off.checked_add(wb_index * 2) {
+        Some(b) => b,
+        None => return None,
+    };
+    if base.checked_add(8).map_or(true, |e| e > data.len()) { return None; }
     let r  = read_u16(data, base,     le) as f32;
     let g1 = read_u16(data, base + 2, le) as f32;
     // g2 = read_u16(data, base + 4, le) — not used
@@ -350,7 +363,8 @@ fn decode_impl(
 
     if makernote_off > 0 && makernote_len >= 2 {
         let mn_off = makernote_off as usize;
-        if mn_off + 2 <= data.len() {
+        // Checked add: makernote_off is file-controlled; `mn_off + 2` can wrap on 32-bit.
+        if mn_off.checked_add(2).map_or(false, |e| e <= data.len()) {
             visit_ifd(data, mn_off, le, |tag, dtype, cnt, val, ip| {
                 if tag == 0x4001 && dtype == 3 && cnt > 0 {
                     let bytes = 2 * cnt as usize;
@@ -451,6 +465,20 @@ fn decode_impl(
     // LJPEG decode — single allocation, in-place crop eliminates second Vec
     // -----------------------------------------------------------------------
     let stride        = sof_w * ncomp;
+
+    // The decode buffer's true row length is `stride` (decode_tile is called with
+    // stride_pixels = stride below); the crop steps source addresses by `stride` while
+    // bounds-checking/centering against `decoded_width`. For valid CR2 files the CR2Slices
+    // triple satisfies n*nw + lw == sof_w*ncomp, so these are equal. If they differ the
+    // file is inconsistent and the stride-stepped crop would shear/garble (or panic);
+    // fail explicitly instead of emitting corrupt pixels. Guard-only — no valid output change.
+    if decoded_width != stride {
+        bail!(
+            "CR2: CR2Slices width {} disagrees with LJPEG stride {} (sof_w={} ncomp={})",
+            decoded_width, stride, sof_w, ncomp
+        );
+    }
+
     let total_pixels  = stride * sof_h;
     let raw_buf_bytes = total_pixels * 2;
 
@@ -475,6 +503,10 @@ fn decode_impl(
     let (mut black, white) = match precision {
         14 => (2048u16, 15300u16),
         12 => (512u16,  4095u16),
+        // precision is an unchecked u8 from the LJPEG SOF3 marker. `1u16 << precision`
+        // overflows (panic in debug, wrong value in release) for precision >= 16. Guard:
+        // precision >= 16 saturates white to u16::MAX; valid 8/10-bit paths are unchanged.
+        _ if precision >= 16 => (0u16, u16::MAX),
         _  => (0u16, (1u16 << precision).saturating_sub(1)),
     };
     if black_from_ifd > 0 && black_from_ifd < white {

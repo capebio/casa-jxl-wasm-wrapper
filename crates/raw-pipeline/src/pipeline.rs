@@ -543,13 +543,14 @@ fn separable_blur_into(src: &[u16], width: usize, _height: usize,
 
     iter.for_each(|(y, row)| {
         // Left border — kernel window reaches outside left edge; clamp xi.
+        let row_base = y * width; // per-row invariant; hoisted out of the tap loop.
         for x in 0..int_start.min(width) {
             let mut acc = [0f32; 3];
             for ki in 0..kernel.len() {
                 let kv = kernel[ki];
                 let xi = (x as isize + ki as isize - half as isize)
                     .clamp(0, width as isize - 1) as usize;
-                let b = (y * width + xi) * 3;
+                let b = (row_base + xi) * 3;
                 acc[0] += src[b]   as f32 * kv;
                 acc[1] += src[b+1] as f32 * kv;
                 acc[2] += src[b+2] as f32 * kv;
@@ -564,7 +565,7 @@ fn separable_blur_into(src: &[u16], width: usize, _height: usize,
             let mut acc_r = 0f32;
             let mut acc_g = 0f32;
             let mut acc_b = 0f32;
-            let b0 = (y * width + x - half) * 3;
+            let b0 = (row_base + x - half) * 3;
             for ki in 0..kernel.len() {
                 let kv = kernel[ki];
                 let b = b0 + ki * 3;
@@ -584,7 +585,7 @@ fn separable_blur_into(src: &[u16], width: usize, _height: usize,
                 let kv = kernel[ki];
                 let xi = (x as isize + ki as isize - half as isize)
                     .clamp(0, width as isize - 1) as usize;
-                let b = (y * width + xi) * 3;
+                let b = (row_base + xi) * 3;
                 acc[0] += src[b]   as f32 * kv;
                 acc[1] += src[b+1] as f32 * kv;
                 acc[2] += src[b+2] as f32 * kv;
@@ -788,7 +789,6 @@ pub fn perceptual_apply_bulk(
     if n == 0 {
         return;
     }
-    let start = std::time::Instant::now();
     unsafe {
         perceptual_apply_full_avx2(
             r.as_ptr(),
@@ -803,9 +803,10 @@ pub fn perceptual_apply_bulk(
             if vib_zero { 1 } else { 0 },
         );
     }
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-    // Hook for benchmarking the SoA bulk (C++ AVX2 or scalar) vs old per-pixel path.
-    eprintln!("perceptual_bulk_ms: {:.3}", elapsed_ms);
+    // NOTE: this is the per-tile bulk call (TILE=64 in process_into), invoked
+    // ~width*height/64 times per frame. Any timing/telemetry here would take a
+    // global stderr lock + run the formatter on every tile and serialize threads,
+    // so benchmarking must be done at the whole-frame caller, never in this loop.
 }
 
 #[inline(always)]
@@ -1279,7 +1280,17 @@ pub fn bench_tone_split(rgb16: &[u16], params: &PipelineParams) -> (f64, f64) {
 /// Callers that must retain RGB (e.g. rotation, further CPU processing) should
 /// continue to use `process` + manual convert or the WASM `rgb_to_rgba` helper.
 pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
-    debug_assert_eq!(rgb16.len() % 3, 0);
+    // Hard contract: input must be interleaved RGB16 (len divisible by 3).
+    // A release-mode assert (not debug_assert) so a 4-channel RGBA16 buffer
+    // accidentally passed here fails loudly instead of being silently
+    // truncated/mis-paired into n = len/3 garbage. See project's RGBA-as-RGB
+    // boundary concern. Valid RGB16 (len%3==0) behaviour is unchanged.
+    assert_eq!(
+        rgb16.len() % 3,
+        0,
+        "process_rgba: input must be interleaved RGB16 (len multiple of 3), got len {}",
+        rgb16.len()
+    );
     let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);

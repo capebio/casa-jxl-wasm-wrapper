@@ -482,6 +482,32 @@ pub fn decode_tile(
         );
     }
 
+    // Validate the caller-supplied output geometry against the real buffer
+    // length before any write. The hot loop writes out[base + row*stride_pixels
+    // + raw_col] guarded only by raw_col < out_pixel_cols; row_base bounds were
+    // never checked, so a too-small `out` or a stride_pixels that doesn't match
+    // the real buffer width would index OOB (panic / silent corruption). The
+    // max index written is at row=out_rows-1, raw_col=out_pixel_cols-1; require
+    // it to be in-bounds. Skipped when nothing is emitted (no writes occur).
+    if out_rows > 0 && out_pixel_cols > 0 {
+        let max_idx = base
+            .checked_add((out_rows - 1).checked_mul(stride_pixels).unwrap_or(usize::MAX))
+            .and_then(|v| v.checked_add(out_pixel_cols - 1))
+            .unwrap_or(usize::MAX);
+        if max_idx >= out.len() {
+            bail!(
+                "ljpeg: output buffer too small: max write index {} >= out.len() {} \
+                 (base={}, stride_pixels={}, out_pixel_cols={}, out_rows={})",
+                max_idx,
+                out.len(),
+                base,
+                stride_pixels,
+                out_pixel_cols,
+                out_rows
+            );
+        }
+    }
+
     let base_pred = 1i32 << (sof.precision - sos.point_transform - 1);
     let mut br = BitReader::new(&src[pos..]);
 
@@ -688,6 +714,26 @@ pub fn decode_tile_stats(
     if raw_cols < out_pixel_cols { bail!("ljpeg: SOF raw cols {} < output width {}", raw_cols, out_pixel_cols); }
     let sof_h = sof.height as usize;
     if sof_h < out_rows { bail!("ljpeg: SOF height {} < output rows {}", sof_h, out_rows); }
+
+    // Same output-geometry bounds check as decode_tile (identical write path).
+    if out_rows > 0 && out_pixel_cols > 0 {
+        let max_idx = base
+            .checked_add((out_rows - 1).checked_mul(stride_pixels).unwrap_or(usize::MAX))
+            .and_then(|v| v.checked_add(out_pixel_cols - 1))
+            .unwrap_or(usize::MAX);
+        if max_idx >= out.len() {
+            bail!(
+                "ljpeg: output buffer too small: max write index {} >= out.len() {} \
+                 (base={}, stride_pixels={}, out_pixel_cols={}, out_rows={})",
+                max_idx,
+                out.len(),
+                base,
+                stride_pixels,
+                out_pixel_cols,
+                out_rows
+            );
+        }
+    }
 
     let base_pred = 1i32 << (sof.precision - sos.point_transform - 1);
     let mut br = BitReader::new(&src[pos..]);

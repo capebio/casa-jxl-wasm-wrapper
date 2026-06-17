@@ -1005,6 +1005,18 @@ pub fn demosaic_bayer_mhc_band(
     if num_rows == 0 {
         return Ok(());
     }
+    if width == 0 || ctx_h == 0 {
+        return Err(format!("demosaic: band zero dimension {}×{}", width, ctx_h));
+    }
+    // Security: at()/get_unchecked is indexed by row*width+col with row clamped to
+    // ctx_h-1 and col to width-1, so the max read is ctx_h*width-1. Validate the
+    // caller-supplied ctx covers that span; a too-small ctx would OOB-read in release.
+    let ctx_min = width
+        .checked_mul(ctx_h)
+        .ok_or_else(|| format!("demosaic: band {}×{} overflows usize", width, ctx_h))?;
+    if ctx.len() < ctx_min {
+        return Err(format!("demosaic: band ctx too small ({} < {}×{})", ctx.len(), width, ctx_h));
+    }
     let out_len = num_rows * width * 3;
     if rgb_out.len() < out_len {
         return Err(format!("demosaic: band rgb_out too small ({} < {})", rgb_out.len(), out_len));
@@ -1251,6 +1263,18 @@ pub fn demosaic_rggb_mhc_band(
 ) -> Result<(), String> {
     if num_rows == 0 {
         return Ok(());
+    }
+    if width == 0 || ctx_h == 0 {
+        return Err(format!("demosaic: band zero dimension {}×{}", width, ctx_h));
+    }
+    // Security: at()/get_unchecked is indexed by row*width+col with row clamped to
+    // ctx_h-1 and col to width-1, so the max read is ctx_h*width-1. Validate the
+    // caller-supplied ctx covers that span; a too-small ctx would OOB-read in release.
+    let ctx_min = width
+        .checked_mul(ctx_h)
+        .ok_or_else(|| format!("demosaic: band {}×{} overflows usize", width, ctx_h))?;
+    if ctx.len() < ctx_min {
+        return Err(format!("demosaic: band ctx too small ({} < {}×{})", ctx.len(), width, ctx_h));
     }
     let out_len = num_rows * width * 3;
     if rgb_out.len() < out_len {

@@ -57,6 +57,13 @@ pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
 
     let width = raw.width as usize;
     let height = raw.height as usize;
+    // Decompression-bomb guard: width/height are file-controlled (IFD tags
+    // 0x0100/0x0101). Cap at 200 MP (matches cr2.rs) and use u64 so width*height
+    // cannot under-allocate via usize overflow on wasm32 (000-security-10 / 000-errors-12).
+    // Only rejects implausible/corrupt files; valid DNGs are unaffected.
+    if (width as u64).saturating_mul(height as u64) > 200_000_000 {
+        bail!("DNG: implausible dimensions {width}×{height}");
+    }
     let cps = raw.samples_per_pixel.max(1) as usize;
     let cfa = match raw.cfa_pattern {
         Some(p) => match p {
@@ -127,9 +134,18 @@ fn decode_tiles(
     let tl = raw
         .tile_length
         .ok_or_else(|| anyhow!("missing TileLength"))? as usize;
+    // TileWidth/TileLength are file-supplied; zero would div-by-zero below
+    // (000-errors-6). Only triggers on malformed input.
+    if tw == 0 || tl == 0 {
+        bail!("DNG: zero TileWidth/TileLength");
+    }
     let coltiles = (width + tw - 1) / tw;
     let rowtiles = (height + tl - 1) / tl;
-    let expected = coltiles * rowtiles;
+    // Overflow guard on the tile grid (000-security-12): crafted tw=tl=1 with
+    // large dims could overflow usize on wasm32.
+    let expected = coltiles
+        .checked_mul(rowtiles)
+        .ok_or_else(|| anyhow!("DNG: tile grid overflow"))?;
     if raw.tile_offsets.len() != expected || raw.tile_byte_counts.len() != expected {
         bail!(
             "tile count mismatch: expected {} got {}/{}",
@@ -165,8 +181,11 @@ fn decode_tiles(
         let active_w = col_end - col_start;
         let off = raw.tile_offsets[idx] as usize;
         let bc = raw.tile_byte_counts[idx] as usize;
+        // checked_add: off+bc are file-controlled and can wrap usize on wasm32,
+        // defeating the OOB guard (000-security-11).
+        let end = off.checked_add(bc).ok_or_else(|| anyhow!("tile {idx} OOB"))?;
         let src = data
-            .get(off..off + bc)
+            .get(off..end)
             .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
         let info = ljpeg::probe_tile(src).with_context(|| format!("probe tile {idx}"))?;
         let bw = info.width as usize;
@@ -223,6 +242,10 @@ fn decode_uncompressed(
     if !raw.tile_offsets.is_empty() {
         let tw = raw.tile_width.ok_or_else(|| anyhow!("TileWidth"))? as usize;
         let tl = raw.tile_length.ok_or_else(|| anyhow!("TileLength"))? as usize;
+        // Zero tile dims would div-by-zero / underflow below (000-errors-6).
+        if tw == 0 || tl == 0 {
+            bail!("uncompressed DNG: zero TileWidth/TileLength");
+        }
         let coltiles = (width + tw - 1) / tw;
         let rowtiles = (height + tl - 1) / tl;
         for tr in 0..rowtiles {
@@ -230,8 +253,12 @@ fn decode_uncompressed(
                 let idx = tr * coltiles + tc;
                 let off = raw.tile_offsets[idx] as usize;
                 let bc = raw.tile_byte_counts[idx] as usize;
+                // checked_add (000-security-11): off+bc can wrap usize on wasm32.
+                let end = off
+                    .checked_add(bc)
+                    .ok_or_else(|| anyhow!("uncompressed DNG: tile {idx} OOB"))?;
                 let src = data
-                    .get(off..off + bc)
+                    .get(off..end)
                     .ok_or_else(|| anyhow!("uncompressed DNG: tile {idx} OOB"))?;
                 let col_start = tc * tw;
                 let col_end = ((tc + 1) * tw).min(width);
@@ -250,7 +277,10 @@ fn decode_uncompressed(
                         };
                         sp += 2;
                     }
-                    sp += (tw - (col_end - col_start)) * 2;
+                    // saturating: for valid tiles (col_end-col_start) <= tw, so this is
+                    // output-identical; guards the underflow on hostile tw/width
+                    // (000-security-27).
+                    sp += tw.saturating_sub(col_end.saturating_sub(col_start)) * 2;
                 }
             }
         }
@@ -269,8 +299,12 @@ fn decode_uncompressed(
         {
             let off = off_u32 as usize;
             let bc = bc_u32 as usize;
+            // checked_add (000-security-11): off+bc can wrap usize on wasm32.
+            let end = off
+                .checked_add(bc)
+                .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} OOB"))?;
             let src = data
-                .get(off..off + bc)
+                .get(off..end)
                 .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} OOB"))?;
             let row_start = idx * rows_per_strip;
             let row_end = (row_start + rows_per_strip).min(height);
@@ -607,7 +641,13 @@ fn read_array_u32(
     }
     let bytes = ts * cnt as usize;
     let p = if bytes <= 4 { inline_pos } else { val as usize };
-    let mut out = Vec::with_capacity(cnt as usize);
+    // Cap the up-front reservation: cnt is file-controlled (up to u32::MAX) and the
+    // loop below already breaks on OOB, so the real element count can never exceed
+    // data.len()/ts. Reserving `cnt` directly would let a crafted count force a
+    // multi-GB allocation (000-security-12). Output-identical: only the reserve hint
+    // changes, the pushed values are unchanged.
+    let max_elems = data.len() / ts;
+    let mut out = Vec::with_capacity((cnt as usize).min(max_elems));
     for k in 0..cnt as usize {
         let off = p + k * ts;
         if off + ts > data.len() {
@@ -661,11 +701,23 @@ fn read_as_shot_neutral(data: &[u8], dtype: u16, cnt: u32, val: u32, le: bool) -
 }
 
 fn read_i32(data: &[u8], off: usize, le: bool) -> i32 {
-    let b = &data[off..off + 4];
-    if le {
-        i32::from_le_bytes([b[0], b[1], b[2], b[3]])
-    } else {
-        i32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    // Bounds-safe: file-controlled offsets (via first_u32/first_f32 `val as usize`)
+    // can point past the buffer; return 0 instead of panicking. For valid files the
+    // offset is always in range, so this is output-identical and only affects
+    // malformed input (000-security-9 / 000-errors-5).
+    let end = match off.checked_add(4) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match data.get(off..end) {
+        Some(b) => {
+            if le {
+                i32::from_le_bytes([b[0], b[1], b[2], b[3]])
+            } else {
+                i32::from_be_bytes([b[0], b[1], b[2], b[3]])
+            }
+        }
+        None => 0,
     }
 }
 
@@ -803,20 +855,40 @@ fn type_size(t: u16) -> usize {
 }
 
 fn read_u16(data: &[u8], off: usize, le: bool) -> u16 {
-    let b = &data[off..off + 2];
-    if le {
-        u16::from_le_bytes([b[0], b[1]])
-    } else {
-        u16::from_be_bytes([b[0], b[1]])
+    // Bounds-safe (see read_i32). Returns 0 on OOB; for valid files the offset is
+    // always in range so this is output-identical (000-security-9 / 000-errors-5).
+    let end = match off.checked_add(2) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match data.get(off..end) {
+        Some(b) => {
+            if le {
+                u16::from_le_bytes([b[0], b[1]])
+            } else {
+                u16::from_be_bytes([b[0], b[1]])
+            }
+        }
+        None => 0,
     }
 }
 
 fn read_u32(data: &[u8], off: usize, le: bool) -> u32 {
-    let b = &data[off..off + 4];
-    if le {
-        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-    } else {
-        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    // Bounds-safe (see read_i32). Returns 0 on OOB; for valid files the offset is
+    // always in range so this is output-identical (000-security-9 / 000-errors-5).
+    let end = match off.checked_add(4) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match data.get(off..end) {
+        Some(b) => {
+            if le {
+                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+            } else {
+                u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+            }
+        }
+        None => 0,
     }
 }
 
@@ -1028,6 +1100,12 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
 
     let width = raw.width as usize;
     let height = raw.height as usize;
+    // Decompression-bomb guard (see decode_bytes): cap at 200 MP via u64 so
+    // width*height*3 cannot under-allocate via usize overflow on wasm32
+    // (000-security-10 / 000-errors-12). Only rejects implausible/corrupt files.
+    if (width as u64).saturating_mul(height as u64) > 200_000_000 {
+        bail!("DNG: implausible dimensions {width}×{height}");
+    }
     let _cps = raw.samples_per_pixel.max(1) as usize;
     let cfa = match raw.cfa_pattern {
         Some(p) => match p {
@@ -1104,9 +1182,17 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
     let tl = raw
         .tile_length
         .ok_or_else(|| anyhow!("missing TileLength"))? as usize;
+    // TileWidth/TileLength are file-supplied; zero would div-by-zero below
+    // (000-errors-6). Only triggers on malformed input.
+    if tw == 0 || tl == 0 {
+        bail!("DNG: zero TileWidth/TileLength");
+    }
     let coltiles = (width + tw - 1) / tw;
     let rowtiles = (height + tl - 1) / tl;
-    let expected = coltiles * rowtiles;
+    // Overflow guard on the tile grid (000-security-12).
+    let expected = coltiles
+        .checked_mul(rowtiles)
+        .ok_or_else(|| anyhow!("DNG: tile grid overflow"))?;
     if raw.tile_offsets.len() != expected || raw.tile_byte_counts.len() != expected {
         bail!(
             "tile count mismatch: expected {} got {}/{}",
@@ -1120,6 +1206,10 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
     let mut halo_rows: Vec<u16> = vec![0u16; width * halo];
     let mut band = vec![0u16; width * tl.max(1)];
     let mut ctx = vec![0u16; width * (halo + tl.max(1) + halo)];
+    // Hoisted carried-halo context (000-performance-10). c_h = 3*halo is constant
+    // across tile rows; the tr>0 branch fully overwrites all 3*halo rows before use,
+    // so reusing one allocation is output-identical to the prior per-iteration vec.
+    let mut c_ctx: Vec<u16> = vec![0u16; width * (halo + halo + halo)];
     let mut rgb_write_row: usize = 0usize;
 
     let mut decode_ms = 0.0f64;
@@ -1137,8 +1227,10 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
             let idx = tr * coltiles + tc;
             let off = raw.tile_offsets[idx] as usize;
             let bc = raw.tile_byte_counts[idx] as usize;
+            // checked_add (000-security-11): off+bc can wrap usize on wasm32.
+            let end = off.checked_add(bc).ok_or_else(|| anyhow!("tile {idx} OOB"))?;
             let src = data
-                .get(off..off + bc)
+                .get(off..end)
                 .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
             let col_start = tc * tw;
             let col_end = ((tc + 1) * tw).min(width);
@@ -1192,7 +1284,8 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
             // The main ctx build for tr>0 places the carried data at ctx[0:] without a north margin, causing OOB read in demosaic_rggb_mhc_band (which expects halo rows of context above the band being demosaiced).
             let c_halo = halo;
             let c_h = c_halo + c_halo + c_halo;
-            let mut c_ctx: Vec<u16> = vec![0u16; width * c_h];
+            // c_ctx reused from the hoisted buffer; fully overwritten below
+            // (000-performance-10).
             if c_halo > 0 {
                 let top = &halo_rows[0..width];
                 for hi in 0..c_halo {

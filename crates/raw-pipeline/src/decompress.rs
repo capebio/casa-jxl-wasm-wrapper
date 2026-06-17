@@ -27,6 +27,18 @@ pub fn decompress_rows(compressed: &[u8], width: usize, height: usize, max_rows:
     Ok(out)
 }
 
+/// Decode `min(max_rows, height)` full-width rows directly into a caller-owned `out`.
+///
+/// # Return-value contract (read it — the result is the only signal of validity)
+/// On success returns `rows`, the number of rows actually written. Exactly
+/// `out[0 .. rows * width]` holds fresh decoded pixels; **the tail
+/// `out[rows * width ..]` is left untouched** (it keeps whatever the caller put
+/// there — typically stale data from a previous decode, or zero). This function
+/// never clears the tail. Callers MUST use the returned `rows` to bound reads:
+/// do not assume `out.len() / width` rows are valid, and do not ignore the count.
+/// See [`decompress_rows`] for a wrapper that allocates and truncates for you.
+///
+/// `out` must be at least `width * min(max_rows, height)` long, else `Err`.
 pub fn decompress_rows_into(
     compressed: &[u8],
     width: usize,

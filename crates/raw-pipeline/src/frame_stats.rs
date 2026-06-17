@@ -49,6 +49,10 @@ impl FrameStats {
 
 /// Portable scalar kernel. 8-lane word-hash (matches AVX2). Tail-safe.
 pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
+    // Bounds guard: clamp pixel count so we never index past the slice.
+    // For valid full-length input (d.len() >= px*4) this is a no-op; only
+    // undersized/malformed input is affected (avoids an OOB index panic).
+    let px = px.min(d.len() / 4);
     let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
     let mut lanes = [
