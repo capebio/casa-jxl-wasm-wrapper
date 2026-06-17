@@ -39,49 +39,44 @@ export class PriorityQueue<T> {
 
   // Remove and return the highest-priority entry.
   dequeue(): QueueEntry<T> | null {
-    // Try visible first
-    if (this.visible.length > this._visibleHead) {
-      const entry = this.visible[this._visibleHead++];
-      if (this._visibleHead >= this.visible.length) {
-        this.visible.length = 0;
-        this._visibleHead = 0;
-      } else if (this._visibleHead > 64 && this._visibleHead * 2 > this.visible.length) {
-        this.visible.copyWithin(0, this._visibleHead);
-        this.visible.length -= this._visibleHead;
-        this._visibleHead = 0;
-      }
+    let entry: QueueEntry<T> | null;
+    if ((entry = this.popLane(this.visible, this._visibleHead)) !== null) {
+      this._visibleHead = PriorityQueue.compactLane(this.visible, this._visibleHead + 1);
       this._size--;
-      return entry ?? null;
+      return entry;
     }
-    // Then near
-    if (this.near.length > this._nearHead) {
-      const entry = this.near[this._nearHead++];
-      if (this._nearHead >= this.near.length) {
-        this.near.length = 0;
-        this._nearHead = 0;
-      } else if (this._nearHead > 64 && this._nearHead * 2 > this.near.length) {
-        this.near.copyWithin(0, this._nearHead);
-        this.near.length -= this._nearHead;
-        this._nearHead = 0;
-      }
+    if ((entry = this.popLane(this.near, this._nearHead)) !== null) {
+      this._nearHead = PriorityQueue.compactLane(this.near, this._nearHead + 1);
       this._size--;
-      return entry ?? null;
+      return entry;
     }
-    // Then background
-    if (this.background.length > this._backgroundHead) {
-      const entry = this.background[this._backgroundHead++];
-      if (this._backgroundHead >= this.background.length) {
-        this.background.length = 0;
-        this._backgroundHead = 0;
-      } else if (this._backgroundHead > 64 && this._backgroundHead * 2 > this.background.length) {
-        this.background.copyWithin(0, this._backgroundHead);
-        this.background.length -= this._backgroundHead;
-        this._backgroundHead = 0;
-      }
+    if ((entry = this.popLane(this.background, this._backgroundHead)) !== null) {
+      this._backgroundHead = PriorityQueue.compactLane(this.background, this._backgroundHead + 1);
       this._size--;
-      return entry ?? null;
+      return entry;
     }
     return null;
+  }
+
+  // Read the front element of a lane without advancing the head.
+  private popLane(lane: QueueEntry<T>[], head: number): QueueEntry<T> | null {
+    return lane.length > head ? (lane[head] ?? null) : null;
+  }
+
+  // Amortised O(1) compaction: clears the array once fully consumed, or
+  // copyWithin-compacts when head > 64 AND head ≥ half the array length.
+  // Returns the new head index (always 0 after compaction, else unchanged).
+  private static compactLane<U>(lane: U[], head: number): number {
+    if (head >= lane.length) {
+      lane.length = 0;
+      return 0;
+    }
+    if (head > 64 && head * 2 > lane.length) {
+      lane.copyWithin(0, head);
+      lane.length -= head;
+      return 0;
+    }
+    return head;
   }
 
   // Swap-delete: O(1) removal by overwriting the target with the lane tail and
