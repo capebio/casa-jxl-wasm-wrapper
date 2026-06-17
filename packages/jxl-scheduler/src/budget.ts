@@ -9,12 +9,17 @@ export class CoreBudget {
   private tokens: number;
   private readonly waiters: Array<{ needed: number; resolve: () => void }> = [];
   private _waitersHead = 0;
+  // Cached once at construction — release() is a hot path (called on every worker
+  // completion) and env-sniffing on every call adds measurable overhead at high
+  // worker-turnover rates.
+  private readonly _devMode: boolean;
 
   constructor(public readonly capacity: number) {
     if (!Number.isFinite(capacity) || capacity < 0) {
       throw new Error("[jxl-scheduler] CoreBudget capacity must be finite >= 0");
     }
     this.tokens = capacity;
+    this._devMode = !CoreBudget._isProduction();
   }
 
   get available(): number {
@@ -43,7 +48,7 @@ export class CoreBudget {
   release(cost = 1): void {
     if (cost <= 0) return;
     const next = this.tokens + cost;
-    if (next > this.capacity && !CoreBudget._isProduction()) {
+    if (next > this.capacity && this._devMode) {
       console.warn(`[jxl-scheduler] CoreBudget over-release: ${this.tokens}+${cost} > ${this.capacity}`);
     }
     this.tokens = Math.min(this.capacity, next);
@@ -86,7 +91,11 @@ export class CoreBudget {
     }
   }
 
-  /** Non-blocking: deduct cost if available, else false. Never queues. */
+  /**
+   * Non-blocking: deduct cost if available, else return false. Never queues.
+   * Unlike acquire(), cost > capacity returns false rather than throwing —
+   * callers using this path should check capacity themselves if needed.
+   */
   tryAcquire(cost = 1): boolean {
     if (cost <= 0) return true;
     if (cost > this.capacity) {
