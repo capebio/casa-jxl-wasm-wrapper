@@ -593,6 +593,27 @@ async function main() {
         console.warn(`⚠️  Decode failed for ${f.file} (shot in sequential): ${e.message}`);
       }
 
+      // JXTC Tile-Container Encode Benchmark (mirrors pyramid-ingest ladder.ts jxtcEncodeMs/jxtcKb per level)
+      // Measures: single-level JXTC encode of the target-size rgba at effort=3/distance=1.0 (same params as ingest).
+      // Compare jxtc_enc_ms vs shot_enc_ms to quantify JXTC container overhead vs plain one-shot JXL.
+      let jxtcEncMs = 0;
+      let jxtcKb = 0;
+      if (typeof encodeTileContainerRgba8 === "function") {
+        try {
+          const tJxtc = performance.now();
+          const jxtcOut = await encodeTileContainerRgba8(exactBuffer(f.rgba), f.tgtW, f.tgtH, {
+            tileSize: 256,
+            distance: 1.0,
+            effort: 3,
+            hasAlpha: false,
+          });
+          jxtcEncMs = performance.now() - tJxtc;
+          jxtcKb = jxtcOut.byteLength / 1024;
+        } catch (e) {
+          console.warn(`⚠️  JXTC encode failed for ${f.file}: ${e.message}`);
+        }
+      }
+
       // Pyramid JXL Benchmarks
       let pyrEncMs = 0;
       let pyrDecTotMs = 0;
@@ -702,8 +723,14 @@ async function main() {
         prog_frame_count: progDec.metrics?.prog_frame_count ?? 0,
         shot_wasm_ms: Math.round(shotDec.metrics?.shot_wasm_ms ?? 0),
         shot_transform_ms: Math.round(shotDec.metrics?.shot_transform_ms ?? 0),
+        // JXTC tile-container encode metrics (mirrors pyramid-ingest ladder.ts jxtcEncodeMs/jxtcKb)
+        jxtc_enc_ms: Math.round(jxtcEncMs),
+        jxtc_kb: parseFloat(jxtcKb.toFixed(1)),
       });
-      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | body=${Math.round(bodyMs)}ms | planar16_shot=${Math.round(planar16ShotMs)} | +ds2/region/chunked/mod/photon +planar16 variants`);
+      const jxtcRatioStr = (shotEnc.ms > 0 && jxtcEncMs > 0)
+        ? ` jxtc=${Math.round(jxtcEncMs)}ms/${jxtcKb.toFixed(0)}KB ratio=${(jxtcEncMs / shotEnc.ms).toFixed(2)}x`
+        : (jxtcEncMs > 0 ? ` jxtc=${Math.round(jxtcEncMs)}ms/${jxtcKb.toFixed(0)}KB` : " jxtc=N/A");
+      console.log(`  ➔ ${f.file}: prog_enc=${Math.round(progEnc.ms)}ms first_paint=${Math.round(progDec.firstFrameMs)}ms final_paint=${Math.round(progDec.ms)}ms | shot_dec=${Math.round(shotDec.ms)}ms | pyr_dec=${Math.round(pyrDecTotMs)}ms | body=${Math.round(bodyMs)}ms | planar16_shot=${Math.round(planar16ShotMs)} |${jxtcRatioStr} | +ds2/region/chunked/mod/photon +planar16 variants`);
     }
     console.log("");
     return results;
@@ -1144,14 +1171,14 @@ async function main() {
 
     "",
     "---",
-    `runs[${loadedFiles.length}]{file|raw_ms|scale_ms|raw_decompress_ms|raw_demosaic_ms|raw_tonemap_ms|prog_enc_simd_ms|prog_enc_mt_ms|prog_first_simd_ms|prog_first_mt_ms|prog_final_simd_ms|prog_final_mt_ms|shot_enc_simd_ms|shot_enc_mt_ms|shot_dec_simd_ms|shot_dec_mt_ms|pyr_enc_simd_ms|pyr_enc_mt_ms|pyr_dec_simd_ms|pyr_dec_mt_ms|prog_ds2_first_simd_ms|prog_ds2_final_simd_ms|prog_region_simd_ms|shot_ds2_simd_ms|shot_region_simd_ms|prog_chunked4_first_simd_ms|mod_prog_enc_simd_ms|photon_prog_enc_simd_ms|body_wall_ms}:`
+    `runs[${loadedFiles.length}]{file|raw_ms|scale_ms|raw_decompress_ms|raw_demosaic_ms|raw_tonemap_ms|prog_enc_simd_ms|prog_enc_mt_ms|prog_first_simd_ms|prog_first_mt_ms|prog_final_simd_ms|prog_final_mt_ms|shot_enc_simd_ms|shot_enc_mt_ms|shot_dec_simd_ms|shot_dec_mt_ms|pyr_enc_simd_ms|pyr_enc_mt_ms|pyr_dec_simd_ms|pyr_dec_mt_ms|prog_ds2_first_simd_ms|prog_ds2_final_simd_ms|prog_region_simd_ms|shot_ds2_simd_ms|shot_region_simd_ms|prog_chunked4_first_simd_ms|mod_prog_enc_simd_ms|photon_prog_enc_simd_ms|body_wall_ms|jxtc_enc_simd_ms|jxtc_kb_simd}:`
   ];
 
   for (let i = 0; i < loadedFiles.length; i++) {
     const f = loadedFiles[i];
     const s = simdResults[i];
     const m = mtResults[i];
-    toonLines.push(`  ${f.file} | ${Math.round(f.rawMs)} | ${Math.round(f.scaleMs)} | ${Math.round(f.rawDecompress||0)} | ${Math.round(f.rawDemosaic||0)} | ${Math.round(f.rawTonemap||0)} | ${s.prog_enc_ms} | ${m.prog_enc_ms} | ${s.prog_first_ms} | ${m.prog_first_ms} | ${s.prog_final_ms} | ${m.prog_final_ms} | ${s.shot_enc_ms} | ${m.shot_enc_ms} | ${s.shot_dec_ms} | ${m.shot_dec_ms} | ${s.pyr_enc_ms} | ${m.pyr_enc_ms} | ${s.pyr_dec_tot_ms} | ${m.pyr_dec_tot_ms} | ${s.prog_ds2_first_ms||0} | ${s.prog_ds2_final_ms||0} | ${s.prog_region_ms||0} | ${s.shot_ds2_ms||0} | ${s.shot_region_ms||0} | ${s.prog_chunked4_first_ms||0} | ${s.mod_prog_enc_ms||0} | ${s.photon_prog_enc_ms||0} | ${s.body_wall_ms||0}`);
+    toonLines.push(`  ${f.file} | ${Math.round(f.rawMs)} | ${Math.round(f.scaleMs)} | ${Math.round(f.rawDecompress||0)} | ${Math.round(f.rawDemosaic||0)} | ${Math.round(f.rawTonemap||0)} | ${s.prog_enc_ms} | ${m.prog_enc_ms} | ${s.prog_first_ms} | ${m.prog_first_ms} | ${s.prog_final_ms} | ${m.prog_final_ms} | ${s.shot_enc_ms} | ${m.shot_enc_ms} | ${s.shot_dec_ms} | ${m.shot_dec_ms} | ${s.pyr_enc_ms} | ${m.pyr_enc_ms} | ${s.pyr_dec_tot_ms} | ${m.pyr_dec_tot_ms} | ${s.prog_ds2_first_ms||0} | ${s.prog_ds2_final_ms||0} | ${s.prog_region_ms||0} | ${s.shot_ds2_ms||0} | ${s.shot_region_ms||0} | ${s.prog_chunked4_first_ms||0} | ${s.mod_prog_enc_ms||0} | ${s.photon_prog_enc_ms||0} | ${s.body_wall_ms||0} | ${s.jxtc_enc_ms||0} | ${s.jxtc_kb||0}`);
   }
 
   // Compute Averages
@@ -1187,6 +1214,34 @@ async function main() {
   const avgModProgEnc = Math.round(simdResults.reduce((s, r) => s + (r.mod_prog_enc_ms||0), 0) / loadedFiles.length);
   const avgPhotonProgEnc = Math.round(simdResults.reduce((s, r) => s + (r.photon_prog_enc_ms||0), 0) / loadedFiles.length);
   const avgPlanar16ShotEncSimd = Math.round(simdResults.reduce((s, r) => s + (r.planar16_shot_enc_ms||0), 0) / loadedFiles.length);
+
+  // JXTC per-file encode metrics (mirrors pyramid-ingest ladder.ts jxtcEncodeMs/jxtcKb)
+  const avgJxtcEncSimd = Math.round(simdResults.reduce((s, r) => s + (r.jxtc_enc_ms||0), 0) / loadedFiles.length);
+  const avgJxtcEncMt   = Math.round(mtResults.reduce((s, r) => s + (r.jxtc_enc_ms||0), 0) / loadedFiles.length);
+  const avgJxtcKbSimd  = parseFloat((simdResults.reduce((s, r) => s + (r.jxtc_kb||0), 0) / loadedFiles.length).toFixed(1));
+  const jxtcVsShotRatioSimd = avgShotEncSimd > 0 && avgJxtcEncSimd > 0
+    ? parseFloat((avgJxtcEncSimd / avgShotEncSimd).toFixed(2))
+    : null;
+
+  // JXTC per-file summary: print to console for immediate visibility
+  if (avgJxtcEncSimd > 0) {
+    console.log(`--- JXTC Encode Overhead Summary ---`);
+    console.log(`  avg JXL one-shot (simd):  ${avgShotEncSimd}ms`);
+    console.log(`  avg JXTC encode (simd):   ${avgJxtcEncSimd}ms  avg size: ${avgJxtcKbSimd}KB`);
+    if (jxtcVsShotRatioSimd !== null) {
+      console.log(`  JXTC overhead ratio:      ${jxtcVsShotRatioSimd}x (vs one-shot JXL)`);
+    }
+    console.log(`  Per-file breakdown (simd):`);
+    for (let i = 0; i < loadedFiles.length; i++) {
+      const sf = loadedFiles[i];
+      const sr = simdResults[i] || {};
+      const ratio = (sr.shot_enc_ms||0) > 0 && (sr.jxtc_enc_ms||0) > 0
+        ? ` ratio=${((sr.jxtc_enc_ms||0) / (sr.shot_enc_ms||1)).toFixed(2)}x`
+        : "";
+      console.log(`    ${sf.file}: JXL=${sr.shot_enc_ms||0}ms JXTC=${sr.jxtc_enc_ms||0}ms/${(sr.jxtc_kb||0).toFixed(0)}KB${ratio}`);
+    }
+    console.log("");
+  }
 
   toonLines.push("", "# Aggregates");
   toonLines.push(`TotalRecords: ${loadedFiles.length}`);
@@ -1237,6 +1292,20 @@ async function main() {
   toonLines.push(`AvgModProgEncSimdMs: ${avgModProgEnc}`);
   toonLines.push(`AvgPhotonProgEncSimdMs: ${avgPhotonProgEnc}`);
   toonLines.push(`AvgPlanar16ShotEncSimdMs: ${avgPlanar16ShotEncSimd} (planar16 low-copy encode path vs rgba8 baseline for the target encodes)`);
+  toonLines.push(`AvgJxtcEncSimdMs: ${avgJxtcEncSimd} | AvgJxtcEncMtMs: ${avgJxtcEncMt} | AvgJxtcKbSimd: ${avgJxtcKbSimd} | JxtcVsShotRatioSimd: ${jxtcVsShotRatioSimd !== null ? jxtcVsShotRatioSimd + 'x' : 'N/A'} (JXTC tile-container encode overhead vs one-shot JXL)`);
+
+  // JXTC per-file detail in TOON
+  if (avgJxtcEncSimd > 0) {
+    toonLines.push("", "# JXTC Encode Per-File (simd: JXL one-shot ms vs JXTC ms + KB + ratio)");
+    for (let i = 0; i < loadedFiles.length; i++) {
+      const sf = loadedFiles[i];
+      const sr = simdResults[i] || {};
+      const ratio = (sr.shot_enc_ms||0) > 0 && (sr.jxtc_enc_ms||0) > 0
+        ? ((sr.jxtc_enc_ms||0) / (sr.shot_enc_ms||1)).toFixed(2) + "x"
+        : "N/A";
+      toonLines.push(`  ${sf.file}: JXL=${sr.shot_enc_ms||0}ms JXTC=${sr.jxtc_enc_ms||0}ms/${(sr.jxtc_kb||0).toFixed(0)}KB ratio=${ratio}`);
+    }
+  }
 
   // flip-flop avgs (medians of the stable interleaved samples)
   if (flipFlopResults && flipFlopResults.length) {
