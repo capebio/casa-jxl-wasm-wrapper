@@ -805,4 +805,42 @@ mod tests {
             "encoded 4ch variants must be non-empty"
         );
     }
+
+    // The real question: does the 4ch encode actually PRESERVE alpha through a full
+    // encode->decode round-trip, or does the high-level path silently drop it (which
+    // would mean the jxl-lowlevel gate was guarding a real correctness gap)?
+    // Encode an alpha pattern, decode back to RGBA8, assert the low-alpha pixels survive.
+    #[cfg(feature = "jxl-lowlevel")]
+    #[test]
+    fn encode_4ch_alpha_roundtrips_preserves_alpha() {
+        let (w, h) = (64u32, 64u32);
+        let n = (w * h) as usize;
+        let mut rgba = vec![0u8; n * 4];
+        for i in 0..n {
+            rgba[i * 4] = 180;
+            rgba[i * 4 + 1] = 90;
+            rgba[i * 4 + 2] = 40;
+            rgba[i * 4 + 3] = if i % 3 == 0 { 100 } else { 255 }; // ~1/3 pixels alpha=100
+        }
+        let vs = encode_variants_with_progressive(&rgba, w, h, SourceType::Other, false, 0, 0)
+            .expect("4ch alpha encode failed");
+        assert!(vs.has_alpha);
+
+        // Decode the full variant back to RGBA8 (forces 4ch output; alpha=255 if absent).
+        let (px, dw, dh) = crate::jxl_lowlevel::decode_jxl_rgba8(&vs.full)
+            .expect("decode of 4ch-alpha JXL returned None (invalid/undecodable output)");
+        assert_eq!((dw, dh), (w, h), "decoded dims mismatch");
+        assert_eq!(px.len(), n * 4, "decoded buffer wrong size");
+
+        // If alpha was preserved, ~1/3 of pixels should still read alpha<200.
+        // If the encoder dropped alpha, every decoded alpha would be 255 → count 0.
+        let low_alpha = px.chunks_exact(4).filter(|p| p[3] < 200).count();
+        let expected = n / 3;
+        assert!(
+            low_alpha as f64 > expected as f64 * 0.7,
+            "ALPHA NOT PRESERVED through encode->decode: {} of ~{} pixels have alpha<200 \
+             (encoder likely flattened alpha to 255)",
+            low_alpha, expected
+        );
+    }
 }
