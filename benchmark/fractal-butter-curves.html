@@ -1,0 +1,198 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Standardized Laboratory • Fractal Compression Analysis</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+body{background:#0b0d14;color:#e2e8f0;font:15px system-ui;margin:0;padding:20px}
+h1{font-size:1.55rem;margin:0}
+.card{background:#161b26;border-radius:10px;padding:14px 16px;margin:14px 0}
+canvas{width:100%!important;height:310px!important}
+.controls{display:flex;gap:14px;align-items:center;background:#161b26;padding:10px;border-radius:8px;margin:10px 0;flex-wrap:wrap}
+.metric-btn{padding:4px 10px;border:1px solid #334155;background:#222a3a;color:#e2e8f0;margin-right:4px;cursor:pointer}
+.metric-btn.active{background:#334155;border-color:#60a5fa}
+table{font-size:13px;border-collapse:collapse}
+th,td{padding:4px 8px;border-bottom:1px solid #2a3142}
+.note{font-size:12px;color:#94a3b8;margin-top:10px}
+</style></head><body>
+<h1>Standardized Laboratory for Image Compression Analysis</h1>
+<div style="color:#64748b">Scale-invariant fractals • Butteraugli / SSIM / PSNR • Small proxy → Large image decisions</div>
+
+<div class="controls">
+  <label>Fractal: <select id="fsel" onchange="rerender()"></select></label>
+  <div>
+    <button class="metric-btn active" onclick="setMetric('butter')">Butteraugli</button>
+    <button class="metric-btn" onclick="setMetric('ssim')">SSIM</button>
+    <button class="metric-btn" onclick="setMetric('psnr')">PSNR</button>
+  </div>
+  <div id="resbox"></div>
+  <button onclick="demoSmallToLarge()">Demo: Small → Large Proxy</button>
+</div>
+
+<div class="card">
+  <h3 id="mainTitle">Metric vs Bytes — multi-resolution</h3>
+  <canvas id="main"></canvas>
+</div>
+
+<div class="card">
+  <h3>Adaptive vs Dense + Prediction (one resolution)</h3>
+  <select id="resel" onchange="renderDetail()"></select>
+  <canvas id="detail"></canvas>
+  <div id="dinfo" style="font-size:12px;color:#94a3b8;margin-top:4px"></div>
+</div>
+
+<div class="card">
+  <h3>Butter Call Savings &amp; Curve Similarity (vs 256)</h3>
+  <table id="tbl"></table>
+</div>
+
+<div class="note">
+Butteraugli is the only metric that uses the real adaptive skip logic from jxl-progressive-byte-metrics.js. PSNR/SSIM are always dense. The fractals are generated with fixed math so their perceptual curves are directly comparable across resolutions.
+</div>
+
+<script>
+const R = {"mandel":{"256":{"full":[{"bytes":2000,"butter":2.5645869736948406,"psnr":14.8898159335765,"ssim":0.5648241923338021},{"bytes":6490,"butter":1.4665427260097588,"psnr":18.5017124341969,"ssim":0.7076517621794154},{"bytes":19959,"butter":0.9431160940752108,"psnr":21.545866912383616,"ssim":0.8037063400787691},{"bytes":42408,"butter":0.6172131117615752,"psnr":24.506113010079478,"ssim":0.872135281620038},{"bytes":73837,"butter":0.4042318596807504,"psnr":27.674741336561162,"ssim":0.9225094743330917},{"bytes":114245,"butter":0.2751157219738462,"psnr":30.841207415894655,"ssim":0.9542944321416577},{"bytes":163633,"butter":0.17446735766131166,"psnr":35.14645040815979,"ssim":0.9795990760174957},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":2.5645869736948406},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0.4042318596807504},{"bytes":114245,"butter":0.2751157219738462},{"bytes":163633,"butter":0.17446735766131166},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.5648241923338021},{"bytes":6490,"ssim":0.7076517621794154},{"bytes":19959,"ssim":0.8037063400787691},{"bytes":42408,"ssim":0.872135281620038},{"bytes":73837,"ssim":0.9225094743330917},{"bytes":114245,"ssim":0.9542944321416577},{"bytes":163633,"ssim":0.9795990760174957},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":14.8898159335765},{"bytes":6490,"psnr":18.5017124341969},{"bytes":19959,"psnr":21.545866912383616},{"bytes":42408,"psnr":24.506113010079478},{"bytes":73837,"psnr":27.674741336561162},{"bytes":114245,"psnr":30.841207415894655},{"bytes":163633,"psnr":35.14645040815979},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":null,"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"512":{"full":[{"bytes":2000,"butter":2.5799033782302416,"psnr":14.886825272869435,"ssim":0.564839849386721},{"bytes":6490,"butter":1.4770081812402194,"psnr":18.493105757417545,"ssim":0.707576243474248},{"bytes":19959,"butter":0.9543560594472913,"psnr":21.51270423876497,"ssim":0.8025026627286477},{"bytes":42408,"butter":0.6306292961012048,"psnr":24.45475302099373,"ssim":0.8729728153990671},{"bytes":73837,"butter":0.4128303813554621,"psnr":27.6838602539636,"ssim":0.9244247875849715},{"bytes":114245,"butter":0.27818151319993467,"psnr":30.93930893878997,"ssim":0.9563671214433302},{"bytes":163633,"butter":0.1764096547522526,"psnr":35.49696427921297,"ssim":0.9816899188181948},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":2.5799033782302416},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0.4128303813554621},{"bytes":114245,"butter":0.27818151319993467},{"bytes":163633,"butter":0.1764096547522526},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.564839849386721},{"bytes":6490,"ssim":0.707576243474248},{"bytes":19959,"ssim":0.8025026627286477},{"bytes":42408,"ssim":0.8729728153990671},{"bytes":73837,"ssim":0.9244247875849715},{"bytes":114245,"ssim":0.9563671214433302},{"bytes":163633,"ssim":0.9816899188181948},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":14.886825272869435},{"bytes":6490,"psnr":18.493105757417545},{"bytes":19959,"psnr":21.51270423876497},{"bytes":42408,"psnr":24.45475302099373},{"bytes":73837,"psnr":27.6838602539636},{"bytes":114245,"psnr":30.93930893878997},{"bytes":163633,"psnr":35.49696427921297},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":[{"bytes":2000,"butter":2.5645869736948406,"psnr":14.8898159335765,"ssim":0.5648241923338021},{"bytes":6490,"butter":1.4665427260097588,"psnr":18.5017124341969,"ssim":0.7076517621794154},{"bytes":19959,"butter":0.9431160940752108,"psnr":21.545866912383616,"ssim":0.8037063400787691},{"bytes":42408,"butter":0.6172131117615752,"psnr":24.506113010079478,"ssim":0.872135281620038},{"bytes":73837,"butter":0.4042318596807504,"psnr":27.674741336561162,"ssim":0.9225094743330917},{"bytes":114245,"butter":0.2751157219738462,"psnr":30.841207415894655,"ssim":0.9542944321416577},{"bytes":163633,"butter":0.17446735766131166,"psnr":35.14645040815979,"ssim":0.9795990760174957},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"1024":{"full":[{"bytes":2000,"butter":2.6428835810980584,"psnr":14.875871378426115,"ssim":0.5646402389333867},{"bytes":6490,"butter":1.5049494072879699,"psnr":18.482184085273794,"ssim":0.7071335687014638},{"bytes":19959,"butter":0.9657512241543512,"psnr":21.496966318245924,"ssim":0.8020072610156243},{"bytes":42408,"butter":0.6331018921713314,"psnr":24.418737939886196,"ssim":0.8716267539596689},{"bytes":73837,"butter":0.41197346663712114,"psnr":27.614265043066638,"ssim":0.9232778854169},{"bytes":114245,"butter":0.27552201596979475,"psnr":30.957775918789046,"ssim":0.9572258269004043},{"bytes":163633,"butter":0.17127432177476493,"psnr":35.31905028359442,"ssim":0.9809476409104363},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":2.6428835810980584},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0.41197346663712114},{"bytes":114245,"butter":0.27552201596979475},{"bytes":163633,"butter":0.17127432177476493},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.5646402389333867},{"bytes":6490,"ssim":0.7071335687014638},{"bytes":19959,"ssim":0.8020072610156243},{"bytes":42408,"ssim":0.8716267539596689},{"bytes":73837,"ssim":0.9232778854169},{"bytes":114245,"ssim":0.9572258269004043},{"bytes":163633,"ssim":0.9809476409104363},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":14.875871378426115},{"bytes":6490,"psnr":18.482184085273794},{"bytes":19959,"psnr":21.496966318245924},{"bytes":42408,"psnr":24.418737939886196},{"bytes":73837,"psnr":27.614265043066638},{"bytes":114245,"psnr":30.957775918789046},{"bytes":163633,"psnr":35.31905028359442},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":[{"bytes":2000,"butter":2.5645869736948406,"psnr":14.8898159335765,"ssim":0.5648241923338021},{"bytes":6490,"butter":1.4665427260097588,"psnr":18.5017124341969,"ssim":0.7076517621794154},{"bytes":19959,"butter":0.9431160940752108,"psnr":21.545866912383616,"ssim":0.8037063400787691},{"bytes":42408,"butter":0.6172131117615752,"psnr":24.506113010079478,"ssim":0.872135281620038},{"bytes":73837,"butter":0.4042318596807504,"psnr":27.674741336561162,"ssim":0.9225094743330917},{"bytes":114245,"butter":0.2751157219738462,"psnr":30.841207415894655,"ssim":0.9542944321416577},{"bytes":163633,"butter":0.17446735766131166,"psnr":35.14645040815979,"ssim":0.9795990760174957},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"2048":{"full":[{"bytes":2000,"butter":2.703859298249198,"psnr":14.877460876293691,"ssim":0.5647770879605304},{"bytes":15750,"butter":1.0499322755419194,"psnr":20.95200779826744,"ssim":0.7864969875942321},{"bytes":57000,"butter":0.5098598040693642,"psnr":26.001637714964325,"ssim":0.8990250907600105},{"bytes":125750,"butter":0.23418331306006349,"psnr":31.802720570927026,"ssim":0.9624764965204742},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":2.703859298249198},{"bytes":15750,"butter":null},{"bytes":57000,"butter":0.5098598040693642},{"bytes":125750,"butter":0.23418331306006349},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.5647770879605304},{"bytes":15750,"ssim":0.7864969875942321},{"bytes":57000,"ssim":0.8990250907600105},{"bytes":125750,"ssim":0.9624764965204742},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":14.877460876293691},{"bytes":15750,"psnr":20.95200779826744},{"bytes":57000,"psnr":26.001637714964325},{"bytes":125750,"psnr":31.802720570927026},{"bytes":222000,"psnr":null}],"nonNullButter":4},"predicted":[{"bytes":2000,"butter":2.5645869736948406,"psnr":14.8898159335765,"ssim":0.5648241923338021},{"bytes":15750,"butter":0.9431160940752108,"psnr":21.545866912383616,"ssim":0.8037063400787691},{"bytes":57000,"butter":0.6172131117615752,"psnr":24.506113010079478,"ssim":0.872135281620038},{"bytes":125750,"butter":0.2751157219738462,"psnr":30.841207415894655,"ssim":0.9542944321416577},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":4,"total":5,"bytesList":[2000,15750,57000,125750,222000]},"4096":{"full":[{"bytes":2000,"butter":2.7541042661055952,"psnr":14.875150441625426,"ssim":0.5647037414026558},{"bytes":15750,"butter":1.06301360946036,"psnr":20.94797734856487,"ssim":0.7865343788077047},{"bytes":57000,"butter":0.5074053032404414,"psnr":25.998521810380826,"ssim":0.8991259906475229},{"bytes":125750,"butter":0.22631646987056392,"psnr":31.7922141497621,"ssim":0.9623731705478057},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":2.7541042661055952},{"bytes":15750,"butter":null},{"bytes":57000,"butter":0.5074053032404414},{"bytes":125750,"butter":0.22631646987056392},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.5647037414026558},{"bytes":15750,"ssim":0.7865343788077047},{"bytes":57000,"ssim":0.8991259906475229},{"bytes":125750,"ssim":0.9623731705478057},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":14.875150441625426},{"bytes":15750,"psnr":20.94797734856487},{"bytes":57000,"psnr":25.998521810380826},{"bytes":125750,"psnr":31.7922141497621},{"bytes":222000,"psnr":null}],"nonNullButter":4},"predicted":[{"bytes":2000,"butter":2.5645869736948406,"psnr":14.8898159335765,"ssim":0.5648241923338021},{"bytes":15750,"butter":0.9431160940752108,"psnr":21.545866912383616,"ssim":0.8037063400787691},{"bytes":57000,"butter":0.6172131117615752,"psnr":24.506113010079478,"ssim":0.872135281620038},{"bytes":125750,"butter":0.2751157219738462,"psnr":30.841207415894655,"ssim":0.9542944321416577},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":4,"total":5,"bytesList":[2000,15750,57000,125750,222000]}},"fbm":{"256":{"full":[{"bytes":2000,"butter":0.12072351465624798,"psnr":42.71208017683813,"ssim":0.9998040340641768},{"bytes":6490,"butter":0,"psnr":null,"ssim":1},{"bytes":19959,"butter":0,"psnr":null,"ssim":1},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.12072351465624798},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0},{"bytes":114245,"butter":0},{"bytes":163633,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9998040340641768},{"bytes":6490,"ssim":1},{"bytes":19959,"ssim":1},{"bytes":42408,"ssim":1},{"bytes":73837,"ssim":1},{"bytes":114245,"ssim":1},{"bytes":163633,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":42.71208017683813},{"bytes":6490,"psnr":null},{"bytes":19959,"psnr":null},{"bytes":42408,"psnr":null},{"bytes":73837,"psnr":null},{"bytes":114245,"psnr":null},{"bytes":163633,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":null,"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"512":{"full":[{"bytes":2000,"butter":0.15836497616912495,"psnr":39.701780220198316,"ssim":0.9996080686587083},{"bytes":6490,"butter":0,"psnr":null,"ssim":1},{"bytes":19959,"butter":0,"psnr":null,"ssim":1},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.15836497616912495},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0},{"bytes":114245,"butter":0},{"bytes":163633,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9996080686587083},{"bytes":6490,"ssim":1},{"bytes":19959,"ssim":1},{"bytes":42408,"ssim":1},{"bytes":73837,"ssim":1},{"bytes":114245,"ssim":1},{"bytes":163633,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":39.701780220198316},{"bytes":6490,"psnr":null},{"bytes":19959,"psnr":null},{"bytes":42408,"psnr":null},{"bytes":73837,"psnr":null},{"bytes":114245,"psnr":null},{"bytes":163633,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":[{"bytes":2000,"butter":0.12072351465624798,"psnr":42.71208017683813,"ssim":0.9998040340641768},{"bytes":6490,"butter":0,"psnr":null,"ssim":1},{"bytes":19959,"butter":0,"psnr":null,"ssim":1},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"1024":{"full":[{"bytes":2000,"butter":0.1758576205594443,"psnr":39.76033766668884,"ssim":0.9996133225462412},{"bytes":6490,"butter":0,"psnr":null,"ssim":1},{"bytes":19959,"butter":0,"psnr":null,"ssim":1},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.1758576205594443},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0},{"bytes":114245,"butter":0},{"bytes":163633,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9996133225462412},{"bytes":6490,"ssim":1},{"bytes":19959,"ssim":1},{"bytes":42408,"ssim":1},{"bytes":73837,"ssim":1},{"bytes":114245,"ssim":1},{"bytes":163633,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":39.76033766668884},{"bytes":6490,"psnr":null},{"bytes":19959,"psnr":null},{"bytes":42408,"psnr":null},{"bytes":73837,"psnr":null},{"bytes":114245,"psnr":null},{"bytes":163633,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":[{"bytes":2000,"butter":0.12072351465624798,"psnr":42.71208017683813,"ssim":0.9998040340641768},{"bytes":6490,"butter":0,"psnr":null,"ssim":1},{"bytes":19959,"butter":0,"psnr":null,"ssim":1},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"2048":{"full":[{"bytes":2000,"butter":0.34035270739760654,"psnr":39.87482880228303,"ssim":0.9996233820402848},{"bytes":15750,"butter":0,"psnr":null,"ssim":1},{"bytes":57000,"butter":0,"psnr":null,"ssim":1},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.34035270739760654},{"bytes":15750,"butter":null},{"bytes":57000,"butter":0},{"bytes":125750,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9996233820402848},{"bytes":15750,"ssim":1},{"bytes":57000,"ssim":1},{"bytes":125750,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":39.87482880228303},{"bytes":15750,"psnr":null},{"bytes":57000,"psnr":null},{"bytes":125750,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":4},"predicted":[{"bytes":2000,"butter":0.12072351465624798,"psnr":42.71208017683813,"ssim":0.9998040340641768},{"bytes":15750,"butter":0,"psnr":null,"ssim":1},{"bytes":57000,"butter":0,"psnr":null,"ssim":1},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":4,"total":5,"bytesList":[2000,15750,57000,125750,222000]},"4096":{"full":[{"bytes":2000,"butter":0.4238398931704753,"psnr":39.81714012041102,"ssim":0.9996167441751221},{"bytes":15750,"butter":0,"psnr":null,"ssim":1},{"bytes":57000,"butter":0,"psnr":null,"ssim":1},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.4238398931704753},{"bytes":15750,"butter":null},{"bytes":57000,"butter":0},{"bytes":125750,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9996167441751221},{"bytes":15750,"ssim":1},{"bytes":57000,"ssim":1},{"bytes":125750,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":39.81714012041102},{"bytes":15750,"psnr":null},{"bytes":57000,"psnr":null},{"bytes":125750,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":4},"predicted":[{"bytes":2000,"butter":0.12072351465624798,"psnr":42.71208017683813,"ssim":0.9998040340641768},{"bytes":15750,"butter":0,"psnr":null,"ssim":1},{"bytes":57000,"butter":0,"psnr":null,"ssim":1},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":4,"total":5,"bytesList":[2000,15750,57000,125750,222000]}},"branch":{"256":{"full":[{"bytes":2000,"butter":0.05620735613723996,"psnr":42.34768138205273,"ssim":0.9995667571646086},{"bytes":6490,"butter":0.003140313963152203,"psnr":76.08370992421672,"ssim":0.9999997864574582},{"bytes":19959,"butter":0.0002748020906605407,"psnr":97.54499028099909,"ssim":0.9999999984018674},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.05620735613723996},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0},{"bytes":114245,"butter":0},{"bytes":163633,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9995667571646086},{"bytes":6490,"ssim":0.9999997864574582},{"bytes":19959,"ssim":0.9999999984018674},{"bytes":42408,"ssim":1},{"bytes":73837,"ssim":1},{"bytes":114245,"ssim":1},{"bytes":163633,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":42.34768138205273},{"bytes":6490,"psnr":76.08370992421672},{"bytes":19959,"psnr":97.54499028099909},{"bytes":42408,"psnr":null},{"bytes":73837,"psnr":null},{"bytes":114245,"psnr":null},{"bytes":163633,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":null,"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"512":{"full":[{"bytes":2000,"butter":0.05771255752876308,"psnr":41.94038024610038,"ssim":0.9995241830406748},{"bytes":6490,"butter":0.014107752123724334,"psnr":60.10995796129427,"ssim":0.9999927405460262},{"bytes":19959,"butter":0.0007394247347834769,"psnr":92.20896417427798,"ssim":0.9999999947941426},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.05771255752876308},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0},{"bytes":114245,"butter":0},{"bytes":163633,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9995241830406748},{"bytes":6490,"ssim":0.9999927405460262},{"bytes":19959,"ssim":0.9999999947941426},{"bytes":42408,"ssim":1},{"bytes":73837,"ssim":1},{"bytes":114245,"ssim":1},{"bytes":163633,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":41.94038024610038},{"bytes":6490,"psnr":60.10995796129427},{"bytes":19959,"psnr":92.20896417427798},{"bytes":42408,"psnr":null},{"bytes":73837,"psnr":null},{"bytes":114245,"psnr":null},{"bytes":163633,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":[{"bytes":2000,"butter":0.05620735613723996,"psnr":42.34768138205273,"ssim":0.9995667571646086},{"bytes":6490,"butter":0.003140313963152203,"psnr":76.08370992421672,"ssim":0.9999997864574582},{"bytes":19959,"butter":0.0002748020906605407,"psnr":97.54499028099909,"ssim":0.9999999984018674},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"1024":{"full":[{"bytes":2000,"butter":0.06237207825028547,"psnr":41.15712730462861,"ssim":0.9994304190579287},{"bytes":6490,"butter":0.018432775182858917,"psnr":57.145811683933296,"ssim":0.9999856601493787},{"bytes":19959,"butter":0.0007298195174263814,"psnr":94.91257593325328,"ssim":0.9999999972056631},{"bytes":42408,"butter":0.00010226318792136866,"psnr":109.58619010755834,"ssim":0.999999999900103},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.06237207825028547},{"bytes":6490,"butter":null},{"bytes":19959,"butter":null},{"bytes":42408,"butter":null},{"bytes":73837,"butter":0},{"bytes":114245,"butter":0},{"bytes":163633,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9994304190579287},{"bytes":6490,"ssim":0.9999856601493787},{"bytes":19959,"ssim":0.9999999972056631},{"bytes":42408,"ssim":0.999999999900103},{"bytes":73837,"ssim":1},{"bytes":114245,"ssim":1},{"bytes":163633,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":41.15712730462861},{"bytes":6490,"psnr":57.145811683933296},{"bytes":19959,"psnr":94.91257593325328},{"bytes":42408,"psnr":109.58619010755834},{"bytes":73837,"psnr":null},{"bytes":114245,"psnr":null},{"bytes":163633,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":5},"predicted":[{"bytes":2000,"butter":0.05620735613723996,"psnr":42.34768138205273,"ssim":0.9995667571646086},{"bytes":6490,"butter":0.003140313963152203,"psnr":76.08370992421672,"ssim":0.9999997864574582},{"bytes":19959,"butter":0.0002748020906605407,"psnr":97.54499028099909,"ssim":0.9999999984018674},{"bytes":42408,"butter":0,"psnr":null,"ssim":1},{"bytes":73837,"butter":0,"psnr":null,"ssim":1},{"bytes":114245,"butter":0,"psnr":null,"ssim":1},{"bytes":163633,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":5,"total":8,"bytesList":[2000,6490,19959,42408,73837,114245,163633,222000]},"2048":{"full":[{"bytes":2000,"butter":0.06556783016063591,"psnr":41.0011952987103,"ssim":0.9994096117677739},{"bytes":15750,"butter":0.0069175178930055686,"psnr":69.19952494747928,"ssim":0.9999991066908294},{"bytes":57000,"butter":0,"psnr":null,"ssim":1},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.06556783016063591},{"bytes":15750,"butter":null},{"bytes":57000,"butter":0},{"bytes":125750,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9994096117677739},{"bytes":15750,"ssim":0.9999991066908294},{"bytes":57000,"ssim":1},{"bytes":125750,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":41.0011952987103},{"bytes":15750,"psnr":69.19952494747928},{"bytes":57000,"psnr":null},{"bytes":125750,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":4},"predicted":[{"bytes":2000,"butter":0.05620735613723996,"psnr":42.34768138205273,"ssim":0.9995667571646086},{"bytes":15750,"butter":0.0002748020906605407,"psnr":97.54499028099909,"ssim":0.9999999984018674},{"bytes":57000,"butter":0,"psnr":null,"ssim":1},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":4,"total":5,"bytesList":[2000,15750,57000,125750,222000]},"4096":{"full":[{"bytes":2000,"butter":0.06944431097901396,"psnr":41.01679584142704,"ssim":0.9994117262266515},{"bytes":15750,"butter":0.006987867652844556,"psnr":69.76965540847856,"ssim":0.9999992163328432},{"bytes":57000,"butter":0.00007426248804531604,"psnr":114.6376898907574,"ssim":0.9999999999699251},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"adaptive":{"butterSeries":[{"bytes":2000,"butter":0.06944431097901396},{"bytes":15750,"butter":null},{"bytes":57000,"butter":0.00007426248804531604},{"bytes":125750,"butter":0},{"bytes":222000,"butter":0}],"ssimSeries":[{"bytes":2000,"ssim":0.9994117262266515},{"bytes":15750,"ssim":0.9999992163328432},{"bytes":57000,"ssim":0.9999999999699251},{"bytes":125750,"ssim":1},{"bytes":222000,"ssim":1}],"qualitySeries":[{"bytes":2000,"psnr":41.01679584142704},{"bytes":15750,"psnr":69.76965540847856},{"bytes":57000,"psnr":114.6376898907574},{"bytes":125750,"psnr":null},{"bytes":222000,"psnr":null}],"nonNullButter":4},"predicted":[{"bytes":2000,"butter":0.05620735613723996,"psnr":42.34768138205273,"ssim":0.9995667571646086},{"bytes":15750,"butter":0.0002748020906605407,"psnr":97.54499028099909,"ssim":0.9999999984018674},{"bytes":57000,"butter":0,"psnr":null,"ssim":1},{"bytes":125750,"butter":0,"psnr":null,"ssim":1},{"bytes":222000,"butter":0,"psnr":null,"ssim":1}],"nonNullButter":4,"total":5,"bytesList":[2000,15750,57000,125750,222000]}}};
+const SCALES = [256,512,1024,2048,4096];
+let curF = Object.keys(R)[0];
+let curM = 'butter';
+let mainC, detC;
+
+function getVal(p, m){ return m==='butter'?p.butter : m==='ssim'?p.ssim : p.psnr; }
+function getLabel(m){ return m==='butter'?'Butteraugli (↓)' : m==='ssim'?'SSIM (↑)' : 'PSNR dB (↑)'; }
+
+function setMetric(m){
+  curM = m;
+  document.querySelectorAll('.metric-btn').forEach(b=>b.classList.toggle('active', b.textContent.toLowerCase().includes(m)));
+  rerender();
+}
+
+function rerender(){
+  curF = document.getElementById('fsel').value;
+  renderMain();
+  renderDetail();
+  renderTable();
+}
+
+function checkedScales(){
+  return Array.from(document.querySelectorAll('#resbox input:checked')).map(i=>+i.value);
+}
+
+function renderMain(){
+  const fr = R[curF];
+  const checked = checkedScales();
+  const ds = [];
+  let ci=0;
+  checked.forEach(res=>{
+    const f = fr[res];
+    if(!f) return;
+    const pts = f.full.map((p,i)=>({x:f.bytesList[i], y:getVal(p,curM)}));
+    ds.push({label:res+'px', data:pts, borderColor:['#60a5fa','#34d399','#f472b6','#fbbf24','#a78bfa'][ci++], borderWidth:2, tension:0.25, pointRadius:0});
+  });
+  if(mainC) mainC.destroy();
+  mainC = new Chart(document.getElementById('main'), {
+    type:'line',
+    data:{datasets:ds},
+    options:{responsive:true, scales:{x:{type:'linear',title:{text:'bytes'}}, y:{title:{text:getLabel(curM)}}}, plugins:{legend:{position:'bottom'}}}
+  });
+}
+
+function renderDetail(){
+  const res = +document.getElementById('resel').value;
+  const f = R[curF][res];
+  if(!f) return;
+  const bytes = f.bytesList;
+  const fullD = f.full.map(p=>getVal(p,curM));
+  const ad = curM==='butter' ? f.adaptive.butterSeries.map(e=>e.butter||null) :
+             curM==='ssim' ? (f.adaptive.ssimSeries||[]).map(e=>e.ssim) : (f.adaptive.qualitySeries||[]).map(e=>e.psnr);
+  if(detC) detC.destroy();
+  detC = new Chart(document.getElementById('detail'),{
+    type:'line',
+    data:{
+      labels: bytes.map(b=>(b/1024).toFixed(0)+'k'),
+      datasets:[
+        {label:'Full',data:fullD,borderColor:'#60a5fa',tension:.2,pointRadius:0},
+        {label:'Adaptive',data:ad,borderColor:'#34d399',tension:.1,pointRadius: c=>c.raw==null?0:3}
+      ]
+    },
+    options:{responsive:true,scales:{y:{title:{text:getLabel(curM)}}}}
+  });
+  const pred = f.predicted ? ' | proxy err shown in demo' : '';
+  document.getElementById('dinfo').innerHTML = 'Butter calls: <b>'+f.nonNullButter+'/'+f.total+'</b>'+pred;
+}
+
+function renderTable(){
+  const fr = R[curF];
+  let h = '<tr><th>Res</th><th>Butter calls</th><th>Saved</th><th>Shape corr vs 256 (Butter)</th></tr>';
+  SCALES.forEach(s=>{
+    const r = fr[s]; if(!r) return;
+    const saved = r.total - r.nonNullButter;
+    let corr = '—';
+    if(s !== 256 && fr[256]){
+      const a = fr[256].full.map(p=>p.butter);
+      const b = r.full.map(p=>p.butter);
+      const n=Math.min(a.length,b.length);
+      corr = pearson(a.slice(0,n), b.slice(0,n)).toFixed(3);
+    }
+    h += '<tr><td>'+s+'²</td><td>'+r.nonNullButter+'/'+r.total+'</td><td style="color:#34d399">−'+saved+'</td><td>'+corr+'</td></tr>';
+  });
+  document.getElementById('tbl').innerHTML = h;
+}
+
+function pearson(x,y){
+  const n=x.length; let sx=0,sy=0,sxy=0,sx2=0,sy2=0;
+  for(let i=0;i<n;i++){sx+=x[i];sy+=y[i];sxy+=x[i]*y[i];sx2+=x[i]*x[i];sy2+=y[i]*y[i];}
+  const num = n*sxy - sx*sy;
+  const den = Math.sqrt((n*sx2-sx*sx)*(n*sy2-sy*sy));
+  return den? num/den : 0;
+}
+
+function demoSmallToLarge(){
+  const big = Math.max(...SCALES.filter(s=>R[curF][s]));
+  const pr = R[curF][big].predicted;
+  if(!pr){ alert('No prediction for this size'); return; }
+  const fu = R[curF][big].full;
+  let maxe=0;
+  for(let i=0;i<fu.length;i++){
+    const e = Math.abs((pr[i].butter||0) - (fu[i].butter||0));
+    if(e>maxe) maxe=e;
+  }
+  alert('Small-proxy (256) vs actual '+big+'² Butter max error: '+maxe.toFixed(3)+'
+This is why tiny fractal runs are useful in the lab.');
+}
+
+function init(){
+  const fsel = document.getElementById('fsel');
+  Object.keys(R).forEach(k=>{
+    const o=document.createElement('option'); o.value=k; o.text=k; fsel.appendChild(o);
+  });
+  fsel.onchange = ()=>{ 
+    document.getElementById('resel').innerHTML='';
+    SCALES.forEach(s=>{ if(R[fsel.value][s]){const o=document.createElement('option');o.value=s;o.text=s+'²';document.getElementById('resel').appendChild(o);}});
+    rerender(); 
+  };
+  fsel.value = curF;
+
+  const box = document.getElementById('resbox');
+  SCALES.forEach(s=>{
+    const l = document.createElement('label');
+    l.innerHTML = '<input type="checkbox" value="'+s+'" checked> '+s+'²';
+    l.querySelector('input').onchange = ()=>{rerender(); if(document.getElementById('resel').value==s) renderDetail();};
+    box.appendChild(l);
+  });
+
+  const rsel = document.getElementById('resel');
+  SCALES.forEach(s=>{if(R[curF][s]){const o=document.createElement('option');o.value=s;o.text=s+'²';rsel.appendChild(o);}});
+  rsel.onchange=renderDetail;
+
+  document.querySelectorAll('.metric-btn').forEach(b=>b.onclick=()=>setMetric(b.textContent.toLowerCase().includes('ssim')?'ssim':b.textContent.toLowerCase().includes('psnr')?'psnr':'butter'));
+
+  rerender();
+  // pick a mid res for detail
+  setTimeout(()=>{ 
+    const rs = document.getElementById('resel'); 
+    if(rs.options.length>1) rs.selectedIndex=1; 
+    renderDetail(); 
+  },30);
+}
+init();
+</script>
+</body></html>
