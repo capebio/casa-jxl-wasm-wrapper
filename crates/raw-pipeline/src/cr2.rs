@@ -203,6 +203,42 @@ fn parse_ljpeg_sof(data: &[u8], strip_off: usize, strip_len: usize) -> Option<(u
 }
 
 // ---------------------------------------------------------------------------
+// Per-model camera colour matrices (CR2 has no DNG ColorMatrix tag)
+// ---------------------------------------------------------------------------
+
+/// dcraw/libraw-style camera characterisation matrices (XYZ -> camera RGB, scaled *10000),
+/// keyed on the EXIF Model string. Values are taken VERBATIM from dcraw `adobe_coeff`
+/// (the canonical published source) — never transcribed from memory (a wrong coefficient
+/// degrades colour worse than the generic fallback). Add the bodies actually shot here;
+/// unknown models return None and the pipeline keeps the generic `CAM_TO_SRGB` fallback
+/// (no regression). Format: row-major [r0g0b0, r1g1b1, r2g2b2].
+fn canon_cam_xyz(model: &str) -> Option<[i32; 9]> {
+    Some(match model.trim() {
+        // Populate from dcraw adobe_coeff once the body is confirmed, e.g.:
+        // "Canon EOS 5D Mark II" => [4716, 603, -830, -7798, 15474, 2480, -1496, 1937, 6651],
+        _ => return None,
+    })
+}
+
+/// Camera->sRGB matrix for a Canon body, or None (→ pipeline uses the generic CAM_TO_SRGB
+/// fallback). Mirrors the DNG path (dng::choose_camera_to_srgb_matrix): treat the published
+/// XYZ->cam like a DNG ColorMatrix, invert to camera->XYZ, then apply XYZ_D50_TO_SRGB. This
+/// keeps CR2 colour consistent with how DNG colour is rendered in this pipeline.
+fn canon_color_matrix(make: &str, model: &str) -> Option<[[f32; 3]; 3]> {
+    if !make.to_ascii_lowercase().contains("canon") {
+        return None;
+    }
+    let raw = canon_cam_xyz(model)?;
+    let cam_xyz = [
+        [raw[0] as f32 / 10000.0, raw[1] as f32 / 10000.0, raw[2] as f32 / 10000.0],
+        [raw[3] as f32 / 10000.0, raw[4] as f32 / 10000.0, raw[5] as f32 / 10000.0],
+        [raw[6] as f32 / 10000.0, raw[7] as f32 / 10000.0, raw[8] as f32 / 10000.0],
+    ];
+    let cam_to_xyz = crate::dng::invert3x3(cam_xyz)?;
+    Some(crate::dng::mul3x3(crate::dng::XYZ_D50_TO_SRGB, cam_to_xyz))
+}
+
+// ---------------------------------------------------------------------------
 // Decode entry points
 // ---------------------------------------------------------------------------
 
@@ -505,7 +541,7 @@ fn decode_impl(
         wb_g:         1.0,
         wb_b,
         iso,
-        color_matrix: None,
+        color_matrix: canon_color_matrix(&make, &model),
         make,
         model,
         orientation,

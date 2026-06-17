@@ -1,20 +1,17 @@
-//! Native frame-stats telemetry kernel (server path). RGBA8 single-pass reduction:
-//! alpha min/max, alpha-zero count, rgb-nonzero count, luma mean/variance accumulators,
-//! and an 8-lane word-hash (content-sensitive change id). Mirrors the wasm `frame_stats`
-//! kernel in raw-converter-wasm/src/lib.rs, but here the server can use AVX2 (256-bit).
+//! Native frame-stats telemetry kernel (server / batch path; e.g. time-lapse triage).
+//! RGBA8 single-pass reduction: alpha min/max, alpha-zero count, rgb-nonzero count,
+//! luma mean/variance accumulators, and an 8-lane word-hash (content-change id).
+//! Mirrors the wasm `frame_stats` kernel in raw-converter-wasm/src/lib.rs; here the
+//! server can use AVX2 (256-bit). scalar and avx2 produce bit-identical results.
 //!
-//! The hash is a de-serialized word-hash (8 independent lanes by pixel index % 8) — the
-//! audit of frameHash consumers showed the value never escapes a single run, so the
-//! algorithm is free; this form vectorizes (one xor + one mul per 8 px on AVX2).
-//!
-//! scalar and avx2 produce bit-identical results (the bench asserts it).
+//! Use for batch/time-lapse: frameHash (near-duplicate / change detection), mean_luma
+//! (exposure/lighting trajectory), luma_variance (detail/contrast over time).
 
 const PRIME: u32 = 0x0100_0193;
 const OFFSET: u32 = 0x811c_9dc5;
 
 #[inline]
 fn lane_seed(k: u32) -> u32 {
-    // 8 distinct, well-spread seeds.
     OFFSET ^ k.wrapping_mul(0x9e37_79b9)
 }
 
@@ -92,21 +89,18 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     let (mut a_zero, mut rgb_nz) = (0u32, 0u32);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
 
-    // 8-lane word-hash, fully vectorized (lane k accumulates pixels where p%8==k).
     let mut hv = _mm256_setr_epi32(
         lane_seed(0) as i32, lane_seed(1) as i32, lane_seed(2) as i32, lane_seed(3) as i32,
         lane_seed(4) as i32, lane_seed(5) as i32, lane_seed(6) as i32, lane_seed(7) as i32,
     );
     let prime_v = _mm256_set1_epi32(PRIME as i32);
 
-    // alpha min/max via masked u8 reductions; RGB lanes neutralized.
-    let rgb_or = _mm256_set1_epi32(0x00FF_FFFFu32 as i32);  // bytes r,g,b -> 0xff, a -> 0x00
+    let rgb_or = _mm256_set1_epi32(0x00FF_FFFFu32 as i32);  // r,g,b -> 0xff, a -> 0x00
     let alpha_and = _mm256_set1_epi32(0xFF00_0000u32 as i32); // a kept, r,g,b -> 0
     let mut vmin = _mm256_set1_epi8(-1); // 0xff
     let mut vmax = _mm256_setzero_si256();
     let zero = _mm256_setzero_si256();
 
-    // luma weights [54,183,18,0] repeated; madd_epi16 over u16-extended pixels.
     let wv = _mm256_set_epi16(
         0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54,
     );
@@ -117,24 +111,19 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     for c in 0..chunks {
         let pv = _mm256_loadu_si256(d.as_ptr().add(c * 32) as *const __m256i);
 
-        // hash: lanes ^= pixel_words; lanes *= prime
         hv = _mm256_mullo_epi32(_mm256_xor_si256(hv, pv), prime_v);
 
-        // alpha min/max
         vmin = _mm256_min_epu8(vmin, _mm256_or_si256(pv, rgb_or));
         vmax = _mm256_max_epu8(vmax, _mm256_and_si256(pv, alpha_and));
 
-        // zero bytes -> 32-bit mask
         let zmask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(pv, zero)) as u32;
-        a_zero += (zmask & 0x8888_8888).count_ones();          // alpha bytes (3,7,...,31)
-        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones();     // 24 rgb bytes / 8 px
+        a_zero += (zmask & 0x8888_8888).count_ones();
+        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones();
 
-        // luma: widen 2x4px halves to u16, madd by weights -> i32 pairs, combine
-        let lo16 = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(pv));     // first 4 px
-        let hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(pv, 1)); // next 4 px
+        let lo16 = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(pv));
+        let hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(pv, 1));
         _mm256_storeu_si256(arr_lo.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(lo16, wv));
         _mm256_storeu_si256(arr_hi.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(hi16, wv));
-        // each pixel = two adjacent i32 lanes summed
         let luma = [
             arr_lo[0] + arr_lo[1], arr_lo[2] + arr_lo[3], arr_lo[4] + arr_lo[5], arr_lo[6] + arr_lo[7],
             arr_hi[0] + arr_hi[1], arr_hi[2] + arr_hi[3], arr_hi[4] + arr_hi[5], arr_hi[6] + arr_hi[7],
@@ -146,7 +135,6 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         }
     }
 
-    // reduce alpha min/max over alpha lanes only
     let mut mins = [0u8; 32];
     let mut maxs = [0u8; 32];
     _mm256_storeu_si256(mins.as_mut_ptr() as *mut __m256i, vmin);
@@ -160,7 +148,6 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         k += 4;
     }
 
-    // hash lanes back to scalar; fold tail pixels in
     let mut lanes = [0u32; 8];
     _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, hv);
 
@@ -194,8 +181,6 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
 pub fn analyze(pixels: &[u8], width: usize, height: usize) -> FrameStats {
     let px = width.saturating_mul(height);
     let limit = pixels.len().min(px * 4);
-    // Truncated buffers fall back to scalar (zero-fill semantics not needed server-side;
-    // a complete frame is the norm). Guard against under-length to avoid OOB.
     if limit < px * 4 {
         return analyze_scalar(&zero_padded(pixels, px * 4), px);
     }
@@ -208,14 +193,6 @@ pub fn analyze(pixels: &[u8], width: usize, height: usize) -> FrameStats {
     analyze_scalar(pixels, px)
 }
 
-#[cfg(target_arch = "x86_64")]
-fn zero_padded(src: &[u8], len: usize) -> Vec<u8> {
-    let mut v = vec![0u8; len];
-    let n = src.len().min(len);
-    v[..n].copy_from_slice(&src[..n]);
-    v
-}
-#[cfg(not(target_arch = "x86_64"))]
 fn zero_padded(src: &[u8], len: usize) -> Vec<u8> {
     let mut v = vec![0u8; len];
     let n = src.len().min(len);
@@ -252,15 +229,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // run explicitly: cargo test --no-default-features --release -- --ignored --nocapture native_bench
+    #[ignore] // run: cargo test --no-default-features --release -- --ignored --nocapture native_bench
     fn native_bench() {
         let sizes = [(1920usize, 1280usize, "2.46MP"), (1024, 1024, "1.05MP")];
-        println!("\n=== NATIVE frame-stats: scalar vs AVX2 (min ms/call over trials) ===");
         #[cfg(target_arch = "x86_64")]
         let has_avx2 = is_x86_feature_detected!("avx2");
         #[cfg(not(target_arch = "x86_64"))]
         let has_avx2 = false;
-        println!("avx2 available: {}", has_avx2);
+        println!("\n=== NATIVE frame-stats: scalar vs AVX2 (min ms/call) === avx2={}", has_avx2);
         for (w, h, label) in sizes {
             let px = w * h;
             let buf = mkbuf(px, 7);
@@ -280,10 +256,7 @@ mod tests {
             let av = if has_avx2 { bench(&|| unsafe { analyze_avx2(&buf, px) }) } else { f64::NAN };
             #[cfg(not(target_arch = "x86_64"))]
             let av = f64::NAN;
-            println!(
-                "{}: scalar {:.3} ms   avx2 {:.3} ms   speedup {:.2}x",
-                label, sc, av, sc / av
-            );
+            println!("{}: scalar {:.3} ms   avx2 {:.3} ms   speedup {:.2}x", label, sc, av, sc / av);
         }
     }
 }

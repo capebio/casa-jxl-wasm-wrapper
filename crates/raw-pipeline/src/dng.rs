@@ -41,7 +41,7 @@ const TAG_COLOR_MATRIX_2: u16 = 0xC622;
 const TAG_FORWARD_MATRIX_1: u16 = 0xC714;
 const TAG_FORWARD_MATRIX_2: u16 = 0xC715;
 
-const XYZ_D50_TO_SRGB: [[f32; 3]; 3] = [
+pub(crate) const XYZ_D50_TO_SRGB: [[f32; 3]; 3] = [
     [3.133_856_1, -1.616_866_7, -0.490_614_6],
     [-0.978_768_4, 1.916_141_5, 0.033_454_0],
     [0.071_945_3, -0.228_991_4, 1.405_242_7],
@@ -725,7 +725,7 @@ fn read_matrix3x3(data: &[u8], dtype: u16, cnt: u32, val: u32, le: bool) -> Opti
     }
 }
 
-fn mul3x3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+pub(crate) fn mul3x3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
     let mut out = [[0f32; 3]; 3];
     for row in 0..3 {
         for col in 0..3 {
@@ -735,7 +735,7 @@ fn mul3x3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
     out
 }
 
-fn invert3x3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+pub(crate) fn invert3x3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);

@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod tiff;
 pub mod perceptual;
 pub mod tone_simd;
+pub mod frame_stats;
 
 // Re-export the stable B4 metadata-only public API for convenience
 pub use tiff::{parse_orf_metadata, bench_decode_orf, OrfMetadata, DecodeBench};
