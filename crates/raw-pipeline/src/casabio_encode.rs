@@ -199,13 +199,11 @@ fn encode_one(
     opts: ProgressiveOpts,
     speed: jpegxl_rs::encode::EncoderSpeed,
 ) -> Result<Vec<u8>, EncodeError> {
-    // `quality` on the builder is a Butteraugli distance (lower = higher quality);
-    // `set_jpeg_quality` accepts a 0..100 JPEG-style factor and maps it via libjxl.
-    let mut builder = encoder_builder();
-    builder.speed(speed);
-    builder.set_jpeg_quality(quality as f32);
-    builder.has_alpha(true);
-    let mut enc = builder
+    // `jpeg_quality` accepts a 0..100 JPEG-style factor and maps it to Butteraugli distance.
+    let mut enc = encoder_builder()
+        .speed(speed)
+        .has_alpha(true)
+        .jpeg_quality(quality as f32)
         .build()
         .map_err(|e| EncodeError::Jxl(e.to_string()))?;
 
@@ -380,10 +378,9 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
 }
 
 fn encode_one_distance(pixels: &[u8], w: u32, h: u32, distance: f32, effort: u32) -> Result<Vec<u8>, EncodeError> {
-    let mut builder = encoder_builder();
-    builder.speed(map_effort_to_speed(effort));
-    builder.set_jpeg_quality(jpeg_quality_for_distance(distance));
-    let mut enc = builder
+    let mut enc = encoder_builder()
+        .speed(map_effort_to_speed(effort))
+        .jpeg_quality(jpeg_quality_for_distance(distance))
         .build()
         .map_err(|e| EncodeError::Jxl(e.to_string()))?;
     let result: EncoderResult<u8> = enc

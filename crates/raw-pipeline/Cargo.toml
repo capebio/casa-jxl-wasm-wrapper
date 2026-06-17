@@ -17,7 +17,7 @@ jxl-lowlevel = ["dep:jpegxl-sys", "dep:rayon"]  # PR-10b tiled decode uses rayon
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 rayon = { version = "1", optional = true }
-jpegxl-rs = { version = "0.10", features = ["vendored"], optional = true }
+jpegxl-rs = { version = "0.14", features = ["vendored"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "avif"] }
 thiserror = "1"
 anyhow = "1"
@@ -27,7 +27,7 @@ anyhow = "1"
 # on native succeeds; WASM builds keep default-features=false and never request this feature.
 # (Vendored libjxl cross to wasm32 requires Emscripten and is not supported here; see root CLAUDE.md.)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-jpegxl-sys = { version = "0.10", features = ["vendored"], optional = true }
+jpegxl-sys = { version = "0.12.1", features = ["vendored"], optional = true }
 
 [dev-dependencies]
 jxl-oxide = "0.11"

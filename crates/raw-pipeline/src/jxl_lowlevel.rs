@@ -28,11 +28,11 @@
 use std::time::{Duration, Instant};
 
 #[cfg(not(target_arch = "wasm32"))]
-unsafe fn make_rgba8_pixel_format(channels: u32) -> jpegxl_sys::types::JxlPixelFormat {
-    jpegxl_sys::types::JxlPixelFormat {
+unsafe fn make_rgba8_pixel_format(channels: u32) -> jpegxl_sys::common::types::JxlPixelFormat {
+    jpegxl_sys::common::types::JxlPixelFormat {
         num_channels: channels,
-        data_type: jpegxl_sys::types::JxlDataType::Uint8,
-        endianness: jpegxl_sys::types::JxlEndianness::Native,
+        data_type: jpegxl_sys::common::types::JxlDataType::Uint8,
+        endianness: jpegxl_sys::common::types::JxlEndianness::Native,
         align: 0,
     }
 }
@@ -46,7 +46,7 @@ fn ms(d: Duration) -> f64 {
 /// Single execution; caller typically takes min over runs for benchmarks.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn decode_full(jxl_bytes: &[u8]) -> Option<Duration> {
-    use jpegxl_sys::codestream_header::JxlBasicInfo;
+    use jpegxl_sys::metadata::codestream_header::JxlBasicInfo;
     use jpegxl_sys::decode::*;
     use std::mem::MaybeUninit;
 
@@ -149,7 +149,7 @@ pub fn decode_progressive_frames_borrowed<F>(
 where
     F: FnMut(DecodeProgressiveEvent<'_>),
 {
-    use jpegxl_sys::codestream_header::JxlBasicInfo;
+    use jpegxl_sys::metadata::codestream_header::JxlBasicInfo;
     use jpegxl_sys::decode::*;
     use std::mem::MaybeUninit;
 
@@ -434,7 +434,7 @@ fn compute_tile_copy_rects(
 pub fn decode_jxl_rgba8(jxl_bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     use std::mem::MaybeUninit;
     use jpegxl_sys::decode::*;
-    use jpegxl_sys::codestream_header::JxlBasicInfo;
+    use jpegxl_sys::metadata::codestream_header::JxlBasicInfo;
 
     unsafe {
         let dec = JxlDecoderCreate(std::ptr::null());
@@ -499,7 +499,7 @@ pub fn decode_jxl_rgba8(jxl_bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 pub fn decode_jxl_rgba16(jxl_bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     use std::mem::MaybeUninit;
     use jpegxl_sys::decode::*;
-    use jpegxl_sys::codestream_header::JxlBasicInfo;
+    use jpegxl_sys::metadata::codestream_header::JxlBasicInfo;
 
     unsafe {
         let dec = JxlDecoderCreate(std::ptr::null());
@@ -518,10 +518,10 @@ pub fn decode_jxl_rgba16(jxl_bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         }
 
         let mut info: MaybeUninit<JxlBasicInfo> = MaybeUninit::uninit();
-        let mut pf = jpegxl_sys::types::JxlPixelFormat {
+        let mut pf = jpegxl_sys::common::types::JxlPixelFormat {
             num_channels: 4,
-            data_type: jpegxl_sys::types::JxlDataType::Uint16,
-            endianness: jpegxl_sys::types::JxlEndianness::Native,
+            data_type: jpegxl_sys::common::types::JxlDataType::Uint16,
+            endianness: jpegxl_sys::common::types::JxlEndianness::Native,
             align: 0,
         };
         let mut out_buf: Vec<u8> = Vec::new();

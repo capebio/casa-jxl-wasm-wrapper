@@ -4,3 +4,4 @@ rustflags = ["-C", "target-feature=+simd128"]
 [env]
 LLVMInstallDir = "C:/Program Files/LLVM"
 LLVMToolsVersion = "22"
+DEP_JXL_PATH = "C:/Foo/raw-converter-wasm/external/libjxl"

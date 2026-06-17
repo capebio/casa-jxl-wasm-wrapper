@@ -53,7 +53,7 @@ function boxBlurInto(src, dst, tmp, w, h, r) {
     for (let y = 0; y < h; y++) {
         const base = y * w;
         let sum = src[base] * (r + 1);
-        for (let k = 1; k <= r; k++) sum += src[base + k];
+        for (let k = 1; k <= r; k++) sum += src[base + Math.min(k, w - 1)];
         for (let x = 0; x < w; x++) {
             tmp[base + x] = sum * inv;
             sum += src[base + Math.min(x + r + 1, w - 1)]
@@ -64,7 +64,7 @@ function boxBlurInto(src, dst, tmp, w, h, r) {
     // Vertical pass — sliding window
     for (let x = 0; x < w; x++) {
         let sum = tmp[x] * (r + 1);
-        for (let k = 1; k <= r; k++) sum += tmp[k * w + x];
+        for (let k = 1; k <= r; k++) sum += tmp[Math.min(k, h - 1) * w + x];
         for (let y = 0; y < h; y++) {
             dst[y * w + x] = sum * inv;
             sum += tmp[Math.min(y + r + 1, h - 1) * w + x]

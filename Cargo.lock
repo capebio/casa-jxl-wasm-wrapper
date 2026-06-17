@@ -129,6 +129,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "bon"
+version = "3.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a602c73c7b0148ec6d12af6fd5cc7a46e2eacc8878271a999abac56eed12f561"
+dependencies = [
+ "bon-macros",
+ "rustversion",
+]
+
+[[package]]
+name = "bon-macros"
+version = "3.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dee98b0db6a962de883bf5d20362dee4d7ca0d12fe39a7c6c73c844e1cd7c1f"
+dependencies = [
+ "darling",
+ "ident_case",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn",
+]
+
+[[package]]
 name = "built"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -266,37 +291,6 @@ checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
 dependencies = [
  "darling_core",
  "quote",
- "syn",
-]
-
-[[package]]
-name = "derive_builder"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947"
-dependencies = [
- "derive_builder_macro",
-]
-
-[[package]]
-name = "derive_builder_core"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
-dependencies = [
- "darling",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "derive_builder_macro"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
-dependencies = [
- "derive_builder_core",
  "syn",
 ]
 
@@ -483,32 +477,32 @@ dependencies = [
 
 [[package]]
 name = "jpegxl-rs"
-version = "0.10.4+libjxl-0.10.3"
+version = "0.14.0+libjxl-0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1052dcf751c8df05c3b2dc07cf584dfda99c3f83090483c527bada9be6fb934"
+checksum = "9b7d16fe73fb6d2e16b986392b716409c6ae6fabd35769d66bea391b016cdbc9"
 dependencies = [
+ "bon",
  "byteorder",
- "derive_builder",
  "half",
  "image",
  "jpegxl-sys",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "jpegxl-src"
-version = "0.10.5"
+version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70c58789939a9c46b13020c15ddfd0d9f5fb326b685ae35dece42e639126d43b"
+checksum = "902ce3ffcd089c3c02a74a44bdd4fd01ad18ecc63ec582b9c84b12418cdeba1e"
 dependencies = [
  "cmake",
 ]
 
 [[package]]
 name = "jpegxl-sys"
-version = "0.10.4+libjxl-0.10.3"
+version = "0.12.1+libjxl-0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8b759db2808767bb744dc780ceb76a235759855e94ff59d98372065abd6ac01"
+checksum = "00cb4f7ffb45ee4327e9ec6ca1a732f3abef470ee008f7d4be3afb414075cd7d"
 dependencies = [
  "jpegxl-src",
  "pkg-config",
@@ -722,6 +716,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "prettyplease"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+dependencies = [
+ "proc-macro2",
+ "syn",
 ]
 
 [[package]]

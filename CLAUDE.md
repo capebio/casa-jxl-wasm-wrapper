@@ -104,3 +104,15 @@ Add under `packages/jxl-worker-browser/test/`:
 1. Confirm which layer the change belongs to.
 2. Check `docs/rejected optimizations.md` — the change may already be documented as rejected.
 3. Adaptive/heuristic changes require benchmark data. Do not add tunables without evidence.
+
+## Branch Management
+
+**Never create a branch from `main` when `main` is behind active development.**
+
+Active work happens on named branches (e.g. `AfternoonWork15Jun`). Creating a new branch from `main` silently misses all commits on those branches.
+
+Before `git branch <name>` or `git checkout -b <name>`:
+1. Run `git log --oneline main..AfternoonWork15Jun` (or the active branch) — if it shows commits, branch from the active branch, not `main`.
+2. Or: `git branch <name> <active-branch>` to branch from the right point.
+
+If a branch was accidentally cut from stale `main`, merge the active branch in before continuing work (`git merge <active-branch> --no-commit`, resolve conflicts, commit).

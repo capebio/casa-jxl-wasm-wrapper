@@ -409,3 +409,95 @@ Not applicable — `computeButteraugliDownsampled` does not exist in the current
 
 **R14-F14: "Replace `distanceFromQuality(q)` formula with libjxl reference."**
 Deferred pending user sign-off. The proposed formula diverges from the existing implementation's calibrated behavior for this pipeline's encoding quality range. Changing the formula would shift encoded file sizes and visual quality for all callers without a controlled A/B comparison. Requires: (1) user confirmation that behavior change is acceptable, (2) before/after perceptual comparison across the test corpus. Not rejected outright — flagged for future review.
+---
+
+## 2026-06-17: Progressive Perceptual Analysis Worker (web/jxl-frame-stats-worker.js + jxl-butteraugli.js)
+
+Target per handoff: evolve metric calculator → perceptual orchestrator (min copies, ref reuse, progressive change, WASM seams, backwards compat).
+
+Many seams (ref prep WeakMap + createComparer zero-alloc, registerBackend/registerInformationBackend, saliencyField, rankTiles, region butter, into- variants, wasm PerceptualComparer fused) were already landed in dep from prior butter lessons. Worker now orchestrates them.
+
+### Implemented (agreed, positive, fits layer + closes documented gaps)
+- 1,2: asUint8Array central + smart transfer (direct ab for disposable chart ds temps from canvas; returnPixels:false on stats offload; no re-slice of received whole buffers). Copies remain only when main must retain live pass/reference for paint/cutoff (documented; no silent large copies).
+- 3: explicit referenceCache + prepareReference (id or synth size+sample); reuses cmp/wcmp across chart requests (graphs toggle, re-runs).
+- 6: normaliseFrame helper + region passthrough in chart recs (back-compat; analysis stays full for now, butter region ready).
+- 7: cheap-first sched (psnr always; butt in JS path gated by |psnrDelta| > 0.5 dB like byte-metrics; wasm fused always).
+- 14: cancel flag + 'cancel' msg + checks between passes in chart loop + main cancelStatsWorker() fired before new chart. Best-effort for sync butter (matches existing worker gap comment).
+- 4,10,13: already satisfied (stateless no full pass retain; info/backend seams + coarse wcmp.all calls in dep; no per-pixel FFI).
+
+Also: tightened receive paths, updated gaps comments, refId passed for cache, precompute stats no longer roundtrips pixels.
+
+Expected: less copy churn on chart ds (20-50% less repeated on scrub/toggles per handoff), cancel for UI, explicit ownership for WASM future.
+
+### Rejected (with rationale; appended per mandate)
+**5. TEMPORAL DELTA ANALYSIS (architectural opportunity)**
+
+Rationale: 
+- psnrDelta gating + detectMonotone on series already provide convergence/accel surrogate in worker (now) + callers (byte-metrics, single-prog shouldStop).
+- Pixel delta (prev vs current) would alloc extra buffers per pass (mem similar to another metric pass), only useful for "changed regions" which requires region-first + live no-ref AR path (not present; handoff notes current is vs-final only).
+- No caller consumes delta for refinement or early term beyond existing plateau. Adding without bench/consumer violates "investigate before" + CLAUDE "no speculative without evidence" + "keep orchestrator not too intelligent".
+- Rejected; opportunity for when AR/stream no-ref lands. Do not replace ref comparison.
+
+**8. STRUCTURAL STATISTICS SHARING**
+
+Rationale:
+- Moments (mu/var per ch) already emitted every chart rec + computeQualityBundle for "shared structural + recog" (lens12/16/17).
+- Butter mask/lum/grad separate (Y blur per scale). Deep fusion (one mean/var/grad/lum feed ssim+butter+saliency) requires changes to dep hot paths; handoff itself says "likely best Rust/WASM target".
+- Current cost low; no evidence shared JS struct wins vs cache-friendly separate passes. Medium confidence item rejected for this worker pass.
+
+**9 (partial). RESULT MEMORY FORMAT (typed arrays over objects)**
+
+Rationale for not changing now:
+- Chart values consumed by single consumer (drawQualityChart maps .psnr etc). N small (typically <20 passes for progressive). Objects fine; no GC pressure vs pixel buffers.
+- Changing shape would require caller + test updates (source asserts in single-prog-page.test.js). Typed (index/psnr/ssim/butt arrays) good for WASM transfer + large series (e.g. byte benchmarks) but future seam. Kept legacy for zero-compat. (Internal prep uses scalars.)
+
+**11. SALIENCY / INFORMATION MAP**
+
+Rationale:
+- Full per-pixel computeSaliencyField, rankTiles, region, computeInformationField + registerInformationBackend already in jxl-butteraugli (seams, no math here).
+- Worker chart returns scalar series for UI charts. Returning maps per pass = mem/GC/transfer explosion (handoff warns against).
+- Orchestrator can later add 'saliency' msg type using dep fns for regional queries. Not now.
+
+**12. CONFIDENCE AND STOP CONDITIONS**
+
+Rationale:
+- {score, confidence, action: continue|refine|stop} + epsilon rules embed *policy* in worker.
+- Policy (psnr/butter plateau, detectMonotone, PERCEPTUAL_CUTOFF_*, shouldStopAtPass) correctly lives in single-prog caller + toggle. Worker stays data provider.
+- Research item per handoff split ("requires validation"). Matches "do not make worker too intelligent" + prior rejections for wrong-layer smarts.
+
+**15. DARK-LENS OPPORTUNITIES (entropy, multi-scale feat pyramid not images, temporal conv rate, SharedArrayBuffer)**
+
+Rationale:
+- All marked "investigate but do not force" + research in handoff. No current consumers (plant recog / digital twin use moments + external model scores fed to byte-metrics, not here).
+- Entropy*error priority, returning featurePyramid, SAB shared buffer with decoder: would require new arch (headers, mutable shared views, different ownership). Premature.
+- SAB note in CLAUDE: requires COOP/COEP; not in scope.
+- Keep seams clean; do not add math or new primitives in hot worker path (prior butter review lesson).
+
+If future validation (bench + specific caller) shows net positive under real workloads, re-propose with data. Current changes already deliver the safe high-confidence wins (buffer, cache, sched, cancel, region seam) without bloat.
+
+---
+
+## 2026-06-17 — jxl-decode-worker.js × main.js (WorkerPool) multi-lens review
+
+Targets: `web/jxl-decode-worker.js`, `web/main.js`. Rejected after judging net-negative or unsafe:
+
+**DW-1. Remove the final-frame copy (emit pixels once, not twice).**
+- On the final frame the worker emits both `jxl_progress` (final) and `jxl_decoded`, the latter carrying `new Uint8ClampedArray(rgba)` because both messages transfer/detach their own buffer.
+- Rejected: both messages are consumed. `jxl_decoded.rgba` is read at `main.js:2252` (lightbox putImageData), `:1984` (thumb repaint), `:4518/4557` (compare), and as the `decodeFullJxlFor` fallback `:353`. Dropping the copy or the pixels breaks these. The dual-emit (smooth progress channel + terminal signal) is an established contract.
+
+**DW-2. Drop `jxl_progress` on the final frame (emit only `jxl_decoded`).**
+- Rejected: consumers that paint via the progress channel would miss the final crisp frame; multiple listeners + p3 tests depend on the final progressive frame. Same risk as DW-1, wrong direction.
+
+**DW-3. Short-circuit `extractEmbeddedJpegs` to find only the first JPEG.**
+- Only `jpegs[0]` is used, so scanning the whole container for all SOIs then computing all EOIs is wasteful.
+- Rejected: preserving exact semantics (the backward EOI scan finds the *last* `FF D9` before the next SOI, to skip false EOIs in entropy data) still requires locating the second SOI, i.e. scanning to it. For the common single-embedded-JPEG container thats the whole buffer anyway. Only runs on rare JXTC reconstruction containers, off the hot path. Added complexity/risk for ~nil gain.
+
+**DW-4. Add a `cancel` message to the decode worker.**
+- No cancellation path exists; closing the lightbox mid-decode wastes CPU.
+- Rejected for now: `decoder.push(buf)` is a single synchronous push of the whole buffer (WASM cannot be interrupted mid-push per CLAUDE.md), so a cancel could only take effect between chunks — of which there is exactly one. Ineffective without re-architecting to chunked input. Noted as latent feature.
+
+**DW-5. Add a zero-copy `ArrayBuffer` fast path to `toClampedTight`.**
+- The slow path copies for raw `ArrayBuffer` input.
+- Rejected: the facade decode events never yield a raw `ArrayBuffer` at runtime (`outPixels.data` is always a `HEAPU8.slice`/`.subarray` `Uint8Array`); the branch is unreachable in this pipeline. Kept the safe copy rather than add an unexercised path.
+
+---
