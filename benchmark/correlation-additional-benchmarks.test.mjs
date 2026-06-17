@@ -36,6 +36,8 @@ test("additional correlation-matrix benchmarks use allowed settings and TOON led
     assert.match(source, /previewFirst:\s*false/);
     assert.match(source, /raw_ms/);
     assert.match(source, /rgba_ms/);
+    assert.match(source, /encode_ms/);
+    assert.match(source, /decode_ms/);
     assert.match(source, /total_ms/);
     for (const banned of excluded) assert.doesNotMatch(source, new RegExp(`\\b${banned}\\b`));
   }
