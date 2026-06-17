@@ -506,15 +506,10 @@ export class WorkerPool {
   }
 
   private wireWorker(worker: PoolWorker): void {
-    // Forward-compatible: recycles worker on error/exit if the handle supports it.
-    // WorkerHandle does not expose these today; optional chaining is a safe noop.
-    const handle = worker.handle as typeof worker.handle & {
-      onError?: (handler: (err: unknown) => void) => void;
-      onExit?: (handler: () => void) => void;
-    };
-
-    handle.onError?.(() => this.recycle(worker));
-    handle.onExit?.(() => this.recycle(worker));
+    // Optional hooks: recycle worker on crash/exit. WorkerHandle declares these
+    // as optional so implementations that don't fire them are still valid.
+    worker.handle.onError?.(() => this.recycle(worker));
+    worker.handle.onExit?.(() => this.recycle(worker));
   }
 
   private takeIdleWorker(): PoolWorker | null {

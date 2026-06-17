@@ -7,6 +7,9 @@ export type Priority = "visible" | "near" | "background";
 
 export type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 
+/** Release callback returned by AdmissionGate.admit(). Call exactly once to free the slot. */
+export type AdmissionRelease = () => void;
+
 // A worker slot in the pool.
 export interface PoolWorker {
   id: number;
@@ -43,5 +46,5 @@ export interface AdmissionGate {
    * Implementations should resolve promptly and must tolerate the release being
    * the first and only interaction.
    */
-  admit(sessionId: string, priority: Priority): Promise<() => void>;
+  admit(sessionId: string, priority: Priority): Promise<AdmissionRelease>;
 }

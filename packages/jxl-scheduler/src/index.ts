@@ -6,4 +6,4 @@ export { WorkerPool } from "./pool.js";
 export { PriorityQueue } from "./queue.js";
 export { DedupeRegistry } from "./dedupe.js";
 export { CoreBudget, defaultCoreBudgetCapacity, globalCoreBudget } from "./budget.js";
-export type { Priority, PoolWorker, WorkerHandle, WorkerFactory } from "./types.js";
+export type { Priority, PoolWorker, WorkerHandle, WorkerFactory, AdmissionRelease } from "./types.js";
