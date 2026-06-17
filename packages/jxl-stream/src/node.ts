@@ -20,13 +20,15 @@ export async function fromNodeReadable(
   }
 
   const onAbort = () => {
-    void session.cancel(ABORT_REASON);
-    readable.destroy(new Error('Aborted'));
+    // Sequence teardown: cancel the session first, then destroy the readable.
+    // Pass no error arg to avoid an unhandled 'error' event on the stream —
+    // this is an intentional abort, not a stream fault.
+    void session.cancel(ABORT_REASON).finally(() => { readable.destroy(); });
   };
 
   if (signal?.aborted) {
-    readable.destroy(new Error('Aborted'));
     await session.cancel(ABORT_REASON);   // P1-6: awaited, no floating promise
+    readable.destroy();                   // no error arg — intentional cutoff, not a stream fault
     return 0;
   }
   signal?.addEventListener('abort', onAbort, { once: true });
@@ -36,9 +38,11 @@ export async function fromNodeReadable(
     const it = readable[Symbol.asyncIterator]();
     let pending = it.next();
     while (true) {
+      // Check abort before awaiting the next chunk so we don't receive a chunk
+      // and then silently discard it without pushing it to the session.
+      if (signal?.aborted) break;
       const { done, value } = await pending;
       if (done) break;
-      if (signal?.aborted) break;
       if (typeof value === 'string') {
         throw new TypeError('[jxl-stream] fromNodeReadable requires a binary stream (do not call setEncoding)');
       }
@@ -84,7 +88,9 @@ export function toNodeReadable(
       for await (const chunk of session.chunks()) yield Buffer.from(chunk);
       finished = true;
     } finally {
-      if (!finished) void session.cancel('stream destroyed');
+      // Guard against double-fire with the 'close' event handler below.
+      // Set finished = true before the async cancel so both paths see it.
+      if (!finished) { finished = true; void session.cancel('stream destroyed'); }
     }
   }
   const stream = Readable.from(buffers(), { signal, objectMode: false });

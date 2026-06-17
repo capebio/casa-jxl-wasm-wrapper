@@ -620,3 +620,68 @@ unchanged. cargo test --no-default-features --lib green: 104 passed, 7 ignored i
 - Issue: After `completeSession()` removes the scheduler record, the worker hosting the session is still alive and continues decoding. It never receives a `decode_cancel` message. Late messages from it are discarded by the scheduler's stale-session guard (discard set), so no correctness issue, but the worker burns CPU on work nobody wants until it naturally completes.
 - Constraint: `scheduler.send()` is fire-and-forget and safe to call after `completeSession()` even though the session record is removed — it will be a no-op (CLAUDE.md contract). But `completeSession()` may have already re-assigned the worker to another session; sending `decode_cancel` to a recycled worker slot would cancel the new session. The right fix is a scheduler-side "retire this worker slot without waiting for a terminal ack" path that also dispatches `decode_cancel` before re-assigning — scheduler-side change → defer.
 - Suggested: Add a `Scheduler.earlyCompleteSession(sessionId)` method that (1) sends `decode_cancel` to the worker before removing the record, (2) registers the sessionId in `discardSessions` so the late terminal ack is dropped, (3) then calls `cleanupSession()`. The session would call this instead of `completeSession()` on the `localEarlyFinish` path.
+
+---
+
+### Section 012 — jxl-stream (deferred)
+
+**012-contracts-abort — `fromNodeReadable` abort contract diverges from `fromReadableStream`**
+
+- File: `packages/jxl-stream/src/node.ts` (L38–74) vs `packages/jxl-stream/src/browser.ts` (L115–121)
+- Finding: On mid-stream abort, `fromNodeReadable` exits the loop via `break`, then falls through
+  to `if (signal?.aborted) { await session.cancel(...); }` and **returns** `delivered` (the byte
+  count up to the abort point). By contrast, `fromReadableStream` (browser) **throws** a
+  `DOMException('Aborted', 'AbortError')` from `if (signal?.aborted) throw …` at the top of its
+  loop, which causes the `catch` block to run `cancelBoth()` and rethrow, so callers receive a
+  rejection.
+- Why deferred: aligning them changes a public-API behavior — callers that `await fromNodeReadable`
+  and handle a normal return on abort would break if it starts rejecting, and browser callers that
+  currently catch the AbortError would break if it starts resolving with a count. Which is
+  canonical (reject-on-abort, matching the Fetch/ReadableStream web convention, or resolve-with-count
+  as a Node-friendly "partial delivery" model) is a product decision that needs explicit sign-off.
+  The mechanical teardown bugs (racy onAbort, unhandled stream error, inconsistent abort-check
+  position) are fixed in Section 012 independently of this contract question.
+- Question: **Which behavior is canonical for abort mid-stream?**
+  1. **Reject with AbortError** (matches browser `fromReadableStream` and web conventions) — callers
+     must catch on abort to read partial `delivered`; partial byte count is lost unless surfaced
+     another way (e.g. via a separate callback or error property).
+  2. **Resolve with partial count** (current Node behavior) — callers can distinguish abort from
+     error by checking `signal.aborted` after the await; partial bytes are visible in the return
+     value without a try/catch.
+  Choose one and apply it to both `fromNodeReadable` (node.ts) and verify `fromReadableStream`
+  (browser.ts) matches. Update CLAUDE.md stream-layer contract docs accordingly.
+
+### Section 012 — jxl-stream (deferred)
+
+Fixer scope was ONE file: `packages/jxl-stream/src/browser.ts`. The following
+section-012 tasks are deferred because they require editing other files (node.ts,
+test files) or are test/ADR drafts. All confirmed; none masked.
+
+#### DEFERRED 012-contracts-7d3f1a02 (high) + 012-contracts-3a91c5e7 (med) + 012-concurrency-4c8b2d88 (low) + 012-concurrency-7f1d3e99 (low) + 012-errors-a91f5e73 (low) — node.ts abort parity & teardown
+- File: `packages/jxl-stream/src/node.ts` (out of scope — fixer limited to browser.ts).
+- Issues: (a) `fromNodeReadable` RESOLVES on mid-stream abort while browser `fromReadableStream` REJECTS (public-surface divergence); (b) node abort check happens AFTER awaiting the chunk but BEFORE pushing (ordering differs from browser pump); (c) `onAbort` destroys readable + cancels session concurrently with pending `it.next()`/push, then the aborted-break path cancels again (double-cancel — same shape now fixed in browser via the idempotent `cancelBoth` guard); (d) `toNodeReadable` generator `finally` and the `'close'` handler can both fire `session.cancel()` (the `finally` never sets `finished=true`); (e) `readable.destroy(new Error('Aborted'))` can surface as an unhandled `'error'` event for consumers with no error handler.
+- Why deferred: all in node.ts. Recommended: mirror the browser fixes — idempotent single-cancel flag shared by `onAbort` + post-loop + the generator `finally`/`'close'`; decide the abort contract (resolve vs reject) and align both pumps (this is the *browser-node-parity* root — pick one and pin it with the parity test below); use `readable.destroy()` with no error on abort (matching the maxBytes cutoff) or attach a no-op error handler.
+
+#### DEFERRED 012-contracts-c4517f9a (med, adr_draft) — no cross-impl parity test
+- File: `packages/jxl-stream/test/node.test.ts`.
+- A parity table asserting identical (delivered, pushes[], closed, cancelled, resolve-vs-reject) outcomes across `fromNodeReadable` and `fromReadableStream`. This is exactly the gap that let the resolve/reject abort divergence above go unnoticed. Deferred: test-file edit + depends on first picking the unified abort contract.
+
+#### DEFERRED 012-performance-3c1a9d42 (low, adr_draft) — no prefetch-overlap regression test
+- File: `packages/jxl-stream/test/node.test.ts`.
+- A test using a session whose `push()` blocks on a deferred while a flag records whether the next `reader.read()`/`it.next()` was already dispatched, locking the one-ahead overlap contract. Deferred: test-file edit. (Note: the browser-side `inflight` mirror added in this fix keeps the one-ahead prefetch intact; a regression test would guard it.)
+
+#### DEFERRED 012-contracts-9f2a1b6d (low, adr_draft) — no 200-fallback-short-resource test
+- File: `packages/jxl-stream/test/range.test.ts`.
+- Test for a 200 response whose body ends DURING the skip phase (resource shorter than `start`). The browser fix now flags this via `RangeNegotiation.underDelivered`; a test should assert `underDelivered === true` and `delivered === 0`. Deferred: test-file edit.
+
+#### DEFERRED 012-logic-e81b3f57 (info, adr_draft) — no round-trip resume-window invariant test
+- File: `packages/jxl-stream/test/range.test.ts`.
+- Property/round-trip test asserting `createByteRangeResumeState` + resume reconstructs exactly `[start+delivered, endExclusive)` with no gap/overlap, including the DEFAULT path (originalStart omitted, `absoluteStart` threaded). The browser fix now threads `absoluteStart` and bounds the end by `fullSize`; a generative test would lock the inclusive-range math. Deferred: test-file edit.
+
+#### DEFERRED 012-logic-4a7d2c81 (info, adr_draft) — no resume-200-no-ETag test
+- File: `packages/jxl-stream/test/range.test.ts`.
+- Negative test: resume + 200 fallback + NO ETag header must fail (the version-skew guard hole). The browser fix now fails ANY 200 fallback while resuming (the `resuming` flag), regardless of ETag presence; a test should assert this rejects with `/resource changed/`. Deferred: test-file edit.
+
+#### NOTED (already deferred by the verifier, recorded for completeness)
+- 012-errors-3f1a8c20 (missing fetch timeout) — verdict UNCERTAIN; deliberate design (caller owns cancellation via signal). Not implemented.
+- 012-security-1d7b3e64 (SSRF surface) — verdict UNCERTAIN; exploitability depends on untrusted-URL callers outside this layer. Not implemented.
