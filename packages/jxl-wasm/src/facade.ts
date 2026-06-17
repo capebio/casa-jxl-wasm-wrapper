@@ -128,6 +128,8 @@ export interface DecoderOptions {
   targetHeight?: number | null;
   fitMode?: "contain" | "cover" | "stretch" | null;
   onMetric?: (name: string, value: number) => void;
+  /** Optional: pre-allocate chunk buffer at session start if file size is known upfront. Improves first-batch latency. */
+  expectedBytes?: number;
 }
 
 export interface EncoderOptions {
@@ -1385,6 +1387,16 @@ class LibjxlDecoder implements JxlDecoder {
     const decFree         = module._jxl_wasm_dec_free!;
     let chunkBufPtr = 0;
     let chunkBufCap = 0;
+    // Rank #6: Pre-allocate chunk buffer upfront if expectedBytes provided.
+    if (this.options.expectedBytes != null && this.options.expectedBytes > 0) {
+      const tMalloc0 = performance.now();
+      chunkBufPtr = module._malloc(this.options.expectedBytes);
+      if (chunkBufPtr === 0) {
+        throw new Error("WASM Memory Allocation OOM during pre-allocation for progressive stream");
+      }
+      chunkBufCap = this.options.expectedBytes;
+      this.options.onMetric?.("malloc_prealloc_ms", performance.now() - tMalloc0);
+    }
     try {
       let headerEmitted = false;
       let info: ImageInfo | undefined;
@@ -1462,14 +1474,17 @@ class LibjxlDecoder implements JxlDecoder {
           const batchBytes = this.queuedBytes;
           if (batchBytes <= 0) continue;
           if (batchBytes > chunkBufCap) {
+            const tMalloc0 = performance.now();
             if (chunkBufPtr !== 0) module._free(chunkBufPtr);
             chunkBufPtr = module._malloc(batchBytes);
             if (chunkBufPtr === 0) {
               throw new Error("WASM Memory Allocation OOM during progressive stream push");
             }
             chunkBufCap = batchBytes;
+            this.options.onMetric?.("malloc_grow_ms", performance.now() - tMalloc0);
           }
           let woff = 0;
+          const tHeapSet0 = performance.now();
           while (this.chunkQueue.length > this.readIndex && this.chunkQueue[this.readIndex] !== null) {
             const chunk = this.chunkQueue[this.readIndex] as Uint8Array;
             // Null slot immediately so GC can reclaim the Uint8Array after the HEAPU8.set copy.
@@ -1478,6 +1493,7 @@ class LibjxlDecoder implements JxlDecoder {
             module.HEAPU8.set(chunk, chunkBufPtr + woff);
             woff += chunk.byteLength;
           }
+          this.options.onMetric?.("heap_set_ms", performance.now() - tHeapSet0);
           this.compactQueue();
           result = decPush(dec, chunkBufPtr, batchBytes);
           if (result < 0) throw new Error(`JXL decode error: ${decError(dec)}`);
@@ -1523,7 +1539,9 @@ class LibjxlDecoder implements JxlDecoder {
             continue;
           }
           const tFramePrep0 = performance.now();
+          const tTake0 = performance.now();
           const wrapped = takeAndWrap(decTakeFlushed(dec));
+          this.options.onMetric?.("take_frame_ms", performance.now() - tTake0);
           if (wrapped !== null) {
             const { pixels: rawPixels, evInfo } = wrapped;
 
@@ -1854,7 +1872,9 @@ class LibjxlEncoder implements JxlEncoder {
           const t0 = performance.now();
           const ptr = module._jxl_wasm_enc_pixels_ptr(this.wasmEncState, view.byteLength);
           if (ptr === 0) throw new Error("JXL streaming pixel push failed (0)");
+          const tEncHeapSet0 = performance.now();
           module.HEAPU8.set(view, ptr);
+          this.options.onMetric?.("enc_heap_set_ms", performance.now() - tEncHeapSet0);
           const rc = module._jxl_wasm_enc_advance_written(this.wasmEncState, view.byteLength);
           if (rc !== 0) throw new Error(`JXL streaming pixel push failed (${rc})`);
           this.tMallocCopy += performance.now() - t0;
