@@ -20,6 +20,14 @@ pub fn scale_err_wasm(
     tx: &[f32], ty: &[f32], tb: &[f32], n: usize,
     kx: f32, ky: f32, kb: f32,
 ) -> f32 {
+    // All seven slices are read via v128_load up to index `lanes < n` and indexed
+    // up to `n-1` in the scalar tail. Encode the caller's >= n length invariant so
+    // a desynced level size traps in debug instead of OOB-reading wasm memory.
+    debug_assert!(
+        mask.len() >= n && rx.len() >= n && ry.len() >= n && rb.len() >= n
+            && tx.len() >= n && ty.len() >= n && tb.len() >= n,
+        "scale_err_wasm: a slice is shorter than n"
+    );
     let vkx = f32x4_splat(kx);
     let vky = f32x4_splat(ky);
     let vkb = f32x4_splat(kb);
@@ -63,6 +71,13 @@ pub fn scale_err_wasm(
 
 /// wasm v128 RGBA→planar XYB. Scalar LUT loads (no wasm gather) + vector arithmetic.
 pub fn pixels_to_xyb_wasm(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
+    // Reads px via get_unchecked up to (n-1)*4+2 and v128_store/index x/y/b up to
+    // n-1. Encode the caller's length invariant so a wrapped/mismatched n (wasm32
+    // usize is 32-bit) traps in debug instead of OOB-reading/writing wasm memory.
+    debug_assert!(
+        px.len() >= n * 4 && x.len() >= n && y.len() >= n && b.len() >= n,
+        "pixels_to_xyb_wasm: px shorter than n*4 or an output plane shorter than n"
+    );
     let half = f32x4_splat(0.5);
     let lanes = n / 4 * 4;
     let mut i = 0;

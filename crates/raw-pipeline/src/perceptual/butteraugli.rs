@@ -23,6 +23,12 @@ pub(crate) fn scale_err(
     n: usize,
     k: &Kweights,
 ) -> f32 {
+    // Empty input has no samples; dividing 0.0/0.0 below would yield NaN and
+    // poison the weighted butteraugli total. Guard the degenerate case (valid
+    // n > 0 inputs are unaffected). Mirrors the np == 0 guards in ssim.rs.
+    if n == 0 {
+        return 0.0;
+    }
     let mut sum = 0f64;
     for i in 0..n {
         let m = (mask[i] * 2.0 + 0.15).max(0.15);
@@ -38,6 +44,14 @@ pub(crate) fn scale_err(
 
 /// 2× area downsample (box) of one plane → (dst, dw, dh). Port of `dn2`.
 pub(crate) fn dn2(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
+    // A 0-extent source has no pixels to sample. The `.max(1)` below would still
+    // claim a 1x1 destination, and `h - 1` / `w - 1` would underflow usize and
+    // panic on the empty `src` index. Return an empty plane for degenerate input
+    // (the sole real caller is guarded by `w > 1 && h > 1`, so valid downsamples
+    // are unaffected).
+    if w == 0 || h == 0 {
+        return (Vec::new(), 0, 0);
+    }
     let dw = (w >> 1).max(1);
     let dh = (h >> 1).max(1);
     let mut dst = vec![0f32; dw * dh];

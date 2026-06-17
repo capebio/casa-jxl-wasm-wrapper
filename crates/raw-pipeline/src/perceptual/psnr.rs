@@ -4,6 +4,14 @@
 /// match the legacy JS `computePsnrVsFinal`). Returns +inf for identical inputs.
 pub(crate) fn psnr(a: &[u8], b: &[u8]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
+    // Length-equality guard: prevents an out-of-bounds panic (or silent
+    // truncation) on mismatched buffers in release builds, where the
+    // debug_assert above is a no-op. Mirrors the NAN-on-bad-dimensions
+    // convention used by Comparer::psnr/ssim. Equal-length (valid) inputs
+    // are unaffected, so no valid PSNR value changes.
+    if a.len() != b.len() {
+        return f32::NAN;
+    }
     let mut sum_sq: u64 = 0;
     for i in 0..a.len() {
         let d = a[i] as i32 - b[i] as i32;

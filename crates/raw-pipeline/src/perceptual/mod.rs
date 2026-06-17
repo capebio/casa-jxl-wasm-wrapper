@@ -86,7 +86,12 @@ pub struct Comparer {
 
 impl Comparer {
     pub fn new(ref_rgba: &[u8], width: usize, height: usize, opts: Opts) -> Self {
-        let n = width * height;
+        // Reject overflowing dimensions before they wrap `n` (the master bound the
+        // unsafe SIMD kernels trust). On wasm32 usize is 32-bit, so this is reachable.
+        let n = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4).map(|_| n))
+            .expect("width*height*4 overflows usize");
         assert_eq!(ref_rgba.len(), n * 4, "ref must be RGBA");
         // Build reference XYB pyramid + masks (3 scales, blur radius ~w/64 clamped 1..8).
         let (mut rx, mut ry, mut rb) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
@@ -108,13 +113,12 @@ impl Comparer {
         let (ssim_sb, ssim_sbb) = ssim::ref_moments(ref_rgba, n, 4);
         let backend = match opts.backend {
             BackendChoice::ForceScalar => Backend::Scalar,
-            BackendChoice::Force(id) => match id {
-                1 => Backend::Avx2Strict,
-                2 => Backend::Avx2Rsqrt,
-                3 => Backend::Avx512Strict,
-                5 => Backend::Avx512Rsqrt,
-                _ => Backend::Scalar,
-            },
+            // A forced SIMD id is honoured only if this CPU actually supports the
+            // required target features; otherwise dispatching a #[target_feature]
+            // kernel is UB/SIGILL. Fall back to the next-best supported backend
+            // (avx512 -> avx2 -> scalar). For a CPU that HAS the feature this is a
+            // no-op; it only guards CPUs that lack it.
+            BackendChoice::Force(id) => resolve_forced_backend(id),
             // rsqrt variant stays opt-in (Force(2)) until the flip-flop bench
             // promotes it; Auto picks strict sqrt for now. Target-aware.
             BackendChoice::Auto => {
@@ -284,8 +288,51 @@ impl Comparer {
         let butteraugli = self.butteraugli(test);
         let ssim = self.ssim(test);
         let psnr = self.psnr(test);
-        let (mus, vars, ch) = ssim::channel_moments(test, self.n, 4, 3);
-        Metrics { butteraugli, ssim, psnr, moments: ChannelMoments { mus, vars, ch } }
+        // Match the per-metric graceful path: a short buffer makes the three calls
+        // above return NaN, so do not let channel_moments index OOB and panic.
+        let moments = if test.len() == self.n * 4 {
+            let (mus, vars, ch) = ssim::channel_moments(test, self.n, 4, 3);
+            ChannelMoments { mus, vars, ch }
+        } else {
+            ChannelMoments::default()
+        };
+        Metrics { butteraugli, ssim, psnr, moments }
+    }
+}
+
+/// Resolve a forced backend id to a backend this CPU can actually execute.
+///
+/// The SIMD kernels are `#[target_feature(...)]` `unsafe` fns: invoking one on a
+/// CPU that lacks the feature is undefined behaviour (typically SIGILL). Only the
+/// `Auto` arm runs through `detect_native`, so `Force(id)` must do its own runtime
+/// check here and degrade to the next-best supported backend
+/// (avx512 -> avx2 -> scalar). Unknown ids fall through to `Scalar`.
+///
+/// Note: the AVX-512 SSIM/PSNR paths reuse the `#[target_feature(enable="avx2,fma")]`
+/// kernels, so an AVX-512 id additionally requires avx2+fma (true on all shipping
+/// AVX-512 hardware, but verified here rather than assumed).
+fn resolve_forced_backend(id: u8) -> Backend {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let has_avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+        let has_avx512 = has_avx2
+            && std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw");
+        return match id {
+            1 if has_avx2 => Backend::Avx2Strict,
+            2 if has_avx2 => Backend::Avx2Rsqrt,
+            3 if has_avx512 => Backend::Avx512Strict,
+            5 if has_avx512 => Backend::Avx512Rsqrt,
+            // Forced AVX-512 on a CPU without it: fall back to AVX2 if available.
+            3 if has_avx2 => Backend::Avx2Strict,
+            5 if has_avx2 => Backend::Avx2Rsqrt,
+            _ => Backend::Scalar,
+        };
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = id;
+        Backend::Scalar
     }
 }
 

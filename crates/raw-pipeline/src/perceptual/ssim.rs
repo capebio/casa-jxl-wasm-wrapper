@@ -7,6 +7,14 @@ const C2: f64 = (0.03 * 255.0) * (0.03 * 255.0); // 58.5225
 /// Per-channel raw moments of a reference buffer: (sum, sum_sq) for c in 0..3.
 /// Precomputed once per reference. `ch` is the channel stride (4 for RGBA).
 pub(crate) fn ref_moments(b: &[u8], np: usize, ch: usize) -> ([u64; 3], [u64; 3]) {
+    // Length precondition: the loop reads b[j+c] with j up to (np-1)*ch and
+    // c in 0..ch.min(3); a short buffer would otherwise index-OOB with no
+    // descriptive message. No-op for the sized caller (b.len()==np*4, ch==4).
+    // Mirrors the assert in ssim_moments_avx2 (simd/avx2.rs).
+    assert!(
+        ch == 0 || np == 0 || b.len() >= (np - 1) * ch + ch.min(3),
+        "ref_moments: b.len() must hold np pixels of stride ch"
+    );
     let wch = ch.min(3);
     let mut sb = [0u64; 3];
     let mut sbb = [0u64; 3];
@@ -35,6 +43,14 @@ pub(crate) fn ssim_with_ref(
     if np == 0 {
         return 0.0;
     }
+    // Length precondition: both buffers must hold np pixels of stride ch. The
+    // loop reads a[j+c]/b[j+c] with j up to (np-1)*ch and c in 0..ch.min(3);
+    // a short buffer would otherwise index-OOB with no descriptive message.
+    // No-op for the sized caller (len==np*4, ch==4). Mirrors ssim_moments_avx2.
+    assert!(
+        ch == 0 || (a.len() >= (np - 1) * ch + ch.min(3) && b.len() >= (np - 1) * ch + ch.min(3)),
+        "ssim_with_ref: a.len()/b.len() must hold np pixels of stride ch"
+    );
     let wch = ch.min(3);
     let mut sa = [0u64; 3];
     let mut saa = [0u64; 3];
@@ -90,6 +106,14 @@ pub(crate) fn channel_moments(px: &[u8], np: usize, ch: usize, max_ch: usize) ->
     if np == 0 {
         return (mus, vars, 0);
     }
+    // Length precondition: px must hold np pixels of stride ch. The loop reads
+    // px[j] with j up to (np-1)*ch + (nch-1); a short buffer would otherwise
+    // index-OOB with no descriptive message. No-op for the sized caller
+    // (px.len()==np*4, ch==4). Mirrors the assert in ssim_moments_avx2.
+    assert!(
+        nch == 0 || px.len() >= (np - 1) * ch + nch,
+        "channel_moments: px.len() must hold np pixels of stride ch"
+    );
     let n = np as f64;
     for c in 0..nch {
         let mut sum = 0u64;

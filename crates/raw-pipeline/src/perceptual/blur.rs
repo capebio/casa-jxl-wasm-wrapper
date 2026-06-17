@@ -3,6 +3,11 @@
 /// Box blur of `src` (w×h) with radius `r` into a fresh Vec.
 pub(crate) fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let n = w * h;
+    // Zero-extent plane is a no-op: with w==0 (or h==0) the passes would index
+    // an empty buffer (src[0]) and underflow `w - 1`/`h - 1` to usize::MAX.
+    if n == 0 {
+        return Vec::new();
+    }
     let mut tmp = vec![0f32; n];
     let mut dst = vec![0f32; n];
     let inv = 1.0 / (2 * r + 1) as f32;

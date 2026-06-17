@@ -20,6 +20,14 @@ pub unsafe fn scale_err_avx512(
     kx: f32, ky: f32, kb: f32,
     rsqrt_path: bool,
 ) -> f32 {
+    // All seven slices are read via _mm512_loadu_ps up to index `lanes < n` and
+    // indexed up to `n-1` in the scalar tail. Encode the caller's >= n length
+    // invariant so a desynced level size traps in debug instead of OOB-reading.
+    debug_assert!(
+        mask.len() >= n && rx.len() >= n && ry.len() >= n && rb.len() >= n
+            && tx.len() >= n && ty.len() >= n && tb.len() >= n,
+        "scale_err_avx512: a slice is shorter than n"
+    );
     let vkx = _mm512_set1_ps(kx);
     let vky = _mm512_set1_ps(ky);
     let vkb = _mm512_set1_ps(kb);
@@ -78,6 +86,13 @@ pub unsafe fn scale_err_avx512(
 /// LUT. This is the fast-gather path that motivates AVX-512 here.
 #[target_feature(enable = "avx512f")]
 pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: *const f32, x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
+    // px is read at indices up to (n-1)*4 + 2 (RGBA stride); x/y/b are written up
+    // to n-1. Encode the caller's length invariant so a wrapped/desynced geometry
+    // traps in debug instead of OOB-reading px or OOB-writing the X/Y/B planes.
+    debug_assert!(
+        px.len() >= n * 4 && x.len() >= n && y.len() >= n && b.len() >= n,
+        "pixels_to_xyb_avx512: px or an output plane is shorter than required for n"
+    );
     let half = _mm512_set1_ps(0.5);
     let lanes = n / 16 * 16;
     let mut i = 0;

@@ -27,6 +27,16 @@ pub unsafe fn scale_err_avx2(
     kx: f32, ky: f32, kb: f32,
     rsqrt_path: bool,
 ) -> f32 {
+    // Length precondition: every input plane must cover all n elements. The
+    // loadu/scalar-tail reads index up to n-1 via raw pointer add, so a short
+    // slice would read past its allocation (UB). For the in-call-graph caller
+    // all slices are sized to n, so this is a no-op; it converts an adversarial
+    // desync into a defined panic instead of OOB.
+    assert!(
+        mask.len() >= n && rx.len() >= n && ry.len() >= n && rb.len() >= n
+            && tx.len() >= n && ty.len() >= n && tb.len() >= n,
+        "scale_err_avx2: all input slices must have len >= n"
+    );
     let vkx = _mm256_set1_ps(kx);
     let vky = _mm256_set1_ps(ky);
     let vkb = _mm256_set1_ps(kb);
@@ -88,13 +98,25 @@ pub unsafe fn scale_err_avx2(
 
 /// AVX2 PSNR sum-of-squared-diffs over packed u8. Returns the integer sum (exact
 /// for buffers up to ~2^53/255^2 ≈ 1.4e11 elements). Caller computes dB.
+///
+/// The per-chunk partials live in an `__m256i` of eight i32 lanes (`acc`). Each
+/// `_mm256_madd_epi16` partial is at most 2·255² = 130050, so a lane overflows
+/// i32 after ⌊(2³¹−1)/130050⌋ ≈ 16511 accumulations. To match the scalar u64
+/// oracle (psnr.rs) on megapixel buffers we drain `acc` into a u64 `sum` and
+/// reset every `FLUSH_CHUNKS` iterations, well under that limit. Small buffers
+/// hit the flush at most once at the end, so their result is bit-identical.
 #[target_feature(enable = "avx2")]
 pub unsafe fn ssd_avx2(a: &[u8], b: &[u8]) -> u64 {
     debug_assert_eq!(a.len(), b.len());
     let len = a.len();
+    // Drain the i32 lane accumulator into u64 before any lane can wrap.
+    // 130050 · 16000 = 2.0808e9 < 2³¹−1 (2.1475e9), with margin.
+    const FLUSH_EVERY: usize = 16000;
     let mut acc = _mm256_setzero_si256();
+    let mut sum: u64 = 0;
     let chunks = len / 16 * 16;
     let mut i = 0;
+    let mut since_flush = 0usize;
     while i < chunks {
         // 16 bytes each → widen to i16 diffs, square via madd
         let va = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
@@ -105,17 +127,29 @@ pub unsafe fn ssd_avx2(a: &[u8], b: &[u8]) -> u64 {
         let sq = _mm256_madd_epi16(d, d); // 8 × i32 partial sums of pairs
         acc = _mm256_add_epi32(acc, sq);
         i += 16;
+        since_flush += 1;
+        if since_flush == FLUSH_EVERY {
+            sum += hsum256i_u64(acc);
+            acc = _mm256_setzero_si256();
+            since_flush = 0;
+        }
     }
-    // horizontal sum of 8 i32 lanes
-    let mut tmp = [0i32; 8];
-    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
-    let mut sum: u64 = tmp.iter().map(|&v| v as u64).sum();
+    // drain remaining lanes
+    sum += hsum256i_u64(acc);
     while i < len {
         let d = a[i] as i64 - b[i] as i64;
         sum += (d * d) as u64;
         i += 1;
     }
     sum
+}
+
+/// Horizontal sum of eight i32 lanes (all non-negative here) widened to u64.
+#[inline]
+unsafe fn hsum256i_u64(acc: __m256i) -> u64 {
+    let mut tmp = [0i32; 8];
+    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
+    tmp.iter().map(|&v| v as u64).sum()
 }
 
 /// SSIM moment accumulation over RGBA test+ref. Produces three per-channel sums
@@ -131,6 +165,14 @@ pub unsafe fn ssd_avx2(a: &[u8], b: &[u8]) -> u64 {
 pub unsafe fn ssim_moments_avx2(
     a: &[u8], b: &[u8], np: usize,
 ) -> ([u64; 3], [u64; 3], [u64; 3]) {
+    // Length precondition: both buffers must hold np RGBA pixels (np*4 bytes).
+    // The loop reads a[j+c]/b[j+c] with j up to (np-1)*4 and c in 0..3; a short
+    // buffer would otherwise index-OOB with no descriptive message. No-op for
+    // the sized caller.
+    assert!(
+        a.len() >= np * 4 && b.len() >= np * 4,
+        "ssim_moments_avx2: a.len() and b.len() must be >= np*4"
+    );
     // Scalar-clean deinterleave is hard to beat for correctness here; use a
     // tight scalar loop with u64 accumulators (madd-based SIMD over a deinterleaved
     // temp gave no measured win — see flip-flop). Kept in the avx2 module so the
@@ -158,6 +200,14 @@ pub unsafe fn pixels_to_xyb_avx2(
     y: &mut [f32],
     b: &mut [f32],
 ) {
+    // Length precondition: px must hold n RGBA pixels (n*4 bytes) and each
+    // planar output must hold n floats. get_unchecked reads (i+l)*4+2 and the
+    // bulk storeu writes index up to n-1, so a short px / x / y / b would be an
+    // OOB read/write (UB). No-op for the sized caller; defined panic otherwise.
+    assert!(
+        px.len() >= n * 4 && x.len() >= n && y.len() >= n && b.len() >= n,
+        "pixels_to_xyb_avx2: px.len() must be >= n*4 and x/y/b len >= n"
+    );
     let half = _mm256_set1_ps(0.5);
     let lanes = n / 8 * 8;
     let mut i = 0;
@@ -210,6 +260,15 @@ pub unsafe fn downsample_avx2(
     dw: usize,
     dh: usize,
 ) {
+    // Length precondition: src must cover the w×h source plane and dst the
+    // dw×dh destination. Interior loadu reads src[row1 + 2x + 15] and the
+    // bulk/scalar stores write dst[drow + x] up to dw*dh-1; a dimension desync
+    // (e.g. dst too small) would be an OOB write (UB). No-op for the sized
+    // caller; defined panic on mismatch.
+    assert!(
+        src.len() >= w * h && dst.len() >= dw * dh,
+        "downsample_avx2: src.len() must be >= w*h and dst.len() >= dw*dh"
+    );
     let quarter = _mm256_set1_ps(0.25);
     // Index vectors for _mm256_permutevar8x32_ps to extract even/odd lanes
     // from a 16-float pair of 256-bit registers.
