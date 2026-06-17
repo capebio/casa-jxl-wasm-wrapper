@@ -41,6 +41,14 @@ jpegxl-rs = { version = "0.14", features = ["vendored"] }
 # and ROI crop (JxlDecoderSetCropEnabled + SetImageOutBuffer) in parity harness / Tauri paths.
 jpegxl-sys = { version = "0.12.1", features = ["vendored"] }
 
+# Route jpegxl-src through the in-repo vendor copy so we can force MSVC Release
+# optimization. Upstream jpegxl-src 0.11.4's build path under the ClangCL multi-config
+# generator drops CMake's default /O2 from CMAKE_CXX_FLAGS_RELEASE, producing an
+# UNOPTIMIZED (~30x slower, both encode and decode) libjxl. The vendor build script
+# re-adds /O2 /Ob2 for release. See vendor/jpegxl-src/src/lib.rs.
+[patch.crates-io]
+jpegxl-src = { path = "vendor/jpegxl-src" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
