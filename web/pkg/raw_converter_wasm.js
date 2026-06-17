@@ -1065,6 +1065,91 @@ export function downscale_rgba(src, src_w, src_h, dst_w, dst_h) {
 }
 
 /**
+ * PRODUCTION export. Returns the same numeric fields the JS analyzeProgressiveFrame
+ * produces (the JS wrapper adds the hex frameHash, byteLength, truncated, validPixels).
+ * frameHashInt is the exact FNV-1a value — bit-identical to the shipped JS hash.
+ *
+ * Uses the hand-v128 word-hash kernel (~4.7x over JS). An audit of every frameHash
+ * consumer (web/jxl-single-progressive.js, jxl-progressive-paint.js; nothing in packages/
+ * or the cache) confirmed the hash never escapes a single run — it drives only within-run
+ * pass-dedup, unique-frame counts, per-session cache keys, and current-run exports, and is
+ * always a hex string. So the algorithm is free to change; the 4-lane word-hash is stable
+ * and content-sensitive (tail pixels included), which is all those consumers require.
+ * frameHashInt therefore differs from the JS FNV value (by design, post-audit).
+ * @param {Uint8Array} pixels
+ * @param {number} width
+ * @param {number} height
+ * @returns {any}
+ */
+export function frame_stats(pixels, width, height) {
+    const ptr0 = passArray8ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.frame_stats(ptr0, len0, width, height);
+    return ret;
+}
+
+/**
+ * Exact byte-FNV kernel over a buffer passed across the boundary (wasm-bindgen copies
+ * `pixels` into wasm linear memory on every call). Isolates the copy cost vs resident.
+ * @param {Uint8Array} pixels
+ * @param {number} width
+ * @param {number} height
+ * @returns {any}
+ */
+export function fstats_copy(pixels, width, height) {
+    const ptr0 = passArray8ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.fstats_copy(ptr0, len0, width, height);
+    return ret;
+}
+
+/**
+ * Scan the resident buffer with the fast word-hash + ILP kernel (no per-call copy).
+ * @returns {any}
+ */
+export function fstats_fast() {
+    const ret = wasm.fstats_fast();
+    return ret;
+}
+
+/**
+ * Fill the resident buffer with the same LCG byte stream the JS harness uses:
+ *   s = s*1103515245 + 12345 (wrapping u32); byte = s & 0xff
+ * @param {number} w
+ * @param {number} h
+ */
+export function fstats_prepare(w, h) {
+    wasm.fstats_prepare(w, h);
+}
+
+/**
+ * Scan the resident buffer with the exact byte-FNV kernel (no per-call copy).
+ * @returns {any}
+ */
+export function fstats_scalar() {
+    const ret = wasm.fstats_scalar();
+    return ret;
+}
+
+/**
+ * Scan the resident buffer with the hand-written v128 kernel (no per-call copy).
+ * @returns {any}
+ */
+export function fstats_simd() {
+    const ret = wasm.fstats_simd();
+    return ret;
+}
+
+/**
+ * Bench probe for the production exact-hash SIMD kernel (resident buffer, no copy).
+ * @returns {any}
+ */
+export function fstats_simd_exact() {
+    const ret = wasm.fstats_simd_exact();
+    return ret;
+}
+
+/**
  * @param {number} num_threads
  * @returns {Promise<any>}
  */

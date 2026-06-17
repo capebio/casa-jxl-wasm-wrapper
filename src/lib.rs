@@ -2311,3 +2311,528 @@ fn metrics_to_js(m: &Metrics) -> JsValue {
     let _ = js_sys::Reflect::set(&o, &"psnr".into(), &JsValue::from_f64(m.psnr as f64));
     o.into()
 }
+
+// =====================================================================================
+// frame-stats telemetry flip-flop (bench-only; driven by tools/frame-stats-flipflop.mjs)
+//
+// Diagnosis (JS): analyzeProgressiveFrame is COMPUTE-bound, not bandwidth-bound. ~32% of
+// the time is the serial FNV hash dependency chain; the rest is the per-pixel stats math.
+// These exports let us A/B, on a wasm-resident RGBA buffer (no per-call copy), the cost of:
+//   - exact byte-wise FNV (parity-identical to the shipped JS)        -> fstats_scalar
+//   - a de-serialized word-hash + 4-pixel ILP unrolled stats          -> fstats_fast
+//   - the wasm-bindgen &[u8] copy overhead vs the resident path       -> fstats_copy
+// The buffer is filled by the SAME LCG the JS harness uses, so results are byte-comparable.
+// =====================================================================================
+
+thread_local! {
+    static FS_BENCH: RefCell<(Vec<u8>, usize, usize)> = const { RefCell::new((Vec::new(), 0, 0)) };
+}
+
+const FS_FNV_PRIME: u32 = 0x0100_0193;
+const FS_FNV_OFFSET: u32 = 0x811c_9dc5;
+
+/// Fill the resident buffer with the same LCG byte stream the JS harness uses:
+///   s = s*1103515245 + 12345 (wrapping u32); byte = s & 0xff
+#[wasm_bindgen]
+pub fn fstats_prepare(w: usize, h: usize) {
+    let len = w * h * 4;
+    let mut buf = vec![0u8; len];
+    let mut s: u32 = 12345;
+    for slot in buf.iter_mut() {
+        s = s.wrapping_mul(1103515245).wrapping_add(12345);
+        *slot = (s & 0xff) as u8;
+    }
+    FS_BENCH.with(|b| *b.borrow_mut() = (buf, w, h));
+}
+
+struct FsRaw {
+    a_min: u32,
+    a_max: u32,
+    a_zero: u32,
+    rgb_nz: u32,
+    l_sum: f64,
+    l_sq: f64,
+    hash: u32,
+}
+
+fn fs_to_js(r: &FsRaw, px: usize) -> JsValue {
+    let a_min = if px == 0 { 0 } else { r.a_min };
+    let mean = if px > 0 { r.l_sum / px as f64 } else { 0.0 };
+    let var = if px > 0 {
+        ((r.l_sq / px as f64) - mean * mean).max(0.0) / 65536.0
+    } else {
+        0.0
+    };
+    let o = js_sys::Object::new();
+    let set = |k: &str, v: f64| {
+        let _ = js_sys::Reflect::set(&o, &k.into(), &JsValue::from_f64(v));
+    };
+    set("alphaMin", a_min as f64);
+    set("alphaMax", r.a_max as f64);
+    set("alphaZeroPct", if px > 0 { (r.a_zero as f64 / px as f64) * 100.0 } else { 0.0 });
+    set("rgbNonzeroCount", r.rgb_nz as f64);
+    set("lumaVariance", var);
+    set("meanLuma", mean / 256.0);
+    set("frameHashInt", (r.hash) as f64);
+    set("pixelCount", px as f64);
+    o.into()
+}
+
+/// Exact byte-wise FNV (identical hash + stats to the shipped JS analyzeProgressiveFrame).
+fn fs_core_scalar(d: &[u8], px: usize) -> FsRaw {
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    let mut hash = FS_FNV_OFFSET;
+    for p in 0..px {
+        let i = p * 4;
+        let r = d[i] as u32;
+        let g = d[i + 1] as u32;
+        let b = d[i + 2] as u32;
+        let a = d[i + 3] as u32;
+        hash ^= r; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= g; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= b; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= a; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        if a < a_min { a_min = a; }
+        if a > a_max { a_max = a; }
+        if a == 0 { a_zero += 1; }
+        let l = 54 * r + 183 * g + 18 * b;
+        let lf = l as f64;
+        l_sum += lf;
+        l_sq += lf * lf;
+    }
+    FsRaw { a_min, a_max, a_zero, rgb_nz, l_sum, l_sq, hash }
+}
+
+/// De-serialized word-hash + 4-pixel-unrolled stats. The hash mixes the whole 32-bit
+/// pixel word with 4 independent lanes (ILP), breaking FNV's serial dependency chain.
+/// Hash identity differs from byte-FNV (migration-allowed); all other stats are identical.
+fn fs_core_fast(d: &[u8], px: usize) -> FsRaw {
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    let mut h0 = FS_FNV_OFFSET;
+    let mut h1 = FS_FNV_OFFSET ^ 0x9e37_79b9;
+    let mut h2 = FS_FNV_OFFSET ^ 0x85eb_ca6b;
+    let mut h3 = FS_FNV_OFFSET ^ 0xc2b2_ae35;
+    let chunks = px / 4;
+    for c in 0..chunks {
+        let i = c * 16;
+        let w0 = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+        let w1 = u32::from_le_bytes([d[i + 4], d[i + 5], d[i + 6], d[i + 7]]);
+        let w2 = u32::from_le_bytes([d[i + 8], d[i + 9], d[i + 10], d[i + 11]]);
+        let w3 = u32::from_le_bytes([d[i + 12], d[i + 13], d[i + 14], d[i + 15]]);
+        h0 = (h0 ^ w0).wrapping_mul(FS_FNV_PRIME);
+        h1 = (h1 ^ w1).wrapping_mul(FS_FNV_PRIME);
+        h2 = (h2 ^ w2).wrapping_mul(FS_FNV_PRIME);
+        h3 = (h3 ^ w3).wrapping_mul(FS_FNV_PRIME);
+        for &w in &[w0, w1, w2, w3] {
+            let r = w & 0xff;
+            let g = (w >> 8) & 0xff;
+            let b = (w >> 16) & 0xff;
+            let a = w >> 24;
+            rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+            if a < a_min { a_min = a; }
+            if a > a_max { a_max = a; }
+            if a == 0 { a_zero += 1; }
+            let l = 54 * r + 183 * g + 18 * b;
+            let lf = l as f64;
+            l_sum += lf;
+            l_sq += lf * lf;
+        }
+    }
+    // tail
+    for p in (chunks * 4)..px {
+        let i = p * 4;
+        let r = d[i] as u32;
+        let g = d[i + 1] as u32;
+        let b = d[i + 2] as u32;
+        let a = d[i + 3] as u32;
+        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        if a < a_min { a_min = a; }
+        if a > a_max { a_max = a; }
+        if a == 0 { a_zero += 1; }
+        let l = 54 * r + 183 * g + 18 * b;
+        let lf = l as f64;
+        l_sum += lf;
+        l_sq += lf * lf;
+    }
+    let hash = (h0 ^ h1).wrapping_mul(FS_FNV_PRIME) ^ (h2 ^ h3).wrapping_mul(FS_FNV_PRIME);
+    FsRaw { a_min, a_max, a_zero, rgb_nz, l_sum, l_sq, hash }
+}
+
+/// Scan the resident buffer with the exact byte-FNV kernel (no per-call copy).
+#[wasm_bindgen]
+pub fn fstats_scalar() -> JsValue {
+    FS_BENCH.with(|b| {
+        let g = b.borrow();
+        let px = g.1 * g.2;
+        fs_to_js(&fs_core_scalar(&g.0, px), px)
+    })
+}
+
+/// Scan the resident buffer with the fast word-hash + ILP kernel (no per-call copy).
+#[wasm_bindgen]
+pub fn fstats_fast() -> JsValue {
+    FS_BENCH.with(|b| {
+        let g = b.borrow();
+        let px = g.1 * g.2;
+        fs_to_js(&fs_core_fast(&g.0, px), px)
+    })
+}
+
+/// Exact byte-FNV kernel over a buffer passed across the boundary (wasm-bindgen copies
+/// `pixels` into wasm linear memory on every call). Isolates the copy cost vs resident.
+#[wasm_bindgen]
+pub fn fstats_copy(pixels: &[u8], width: usize, height: usize) -> JsValue {
+    let px = width * height;
+    fs_to_js(&fs_core_scalar(pixels, px), px)
+}
+
+/// Hand-written wasm128 v128 kernel. Vectorizes the whole per-pixel reduction across
+/// 4 pixels (16 bytes) per load:
+///   - alpha min/max: masked u8x16_min/max accumulators (RGB lanes neutralized)
+///   - alpha-zero + rgb-nonzero: u8x16_eq(0) -> i8x16_bitmask -> popcount on lane masks
+///   - luma 54r+183g+18b: u16x8 widen + i16x8_mul by weight vector + extadd_pairwise -> i32x4
+/// Hash uses the de-serialized 4-lane word-hash (identity migration allowed). The luma
+/// sum/sq are flushed to f64 per chunk to stay numerically identical to the scalar path.
+#[cfg(target_arch = "wasm32")]
+fn fs_core_simd(d: &[u8], px: usize) -> FsRaw {
+    use core::arch::wasm32::*;
+    let (mut a_zero, mut rgb_nz) = (0u32, 0u32);
+    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    let mut h0 = FS_FNV_OFFSET;
+    let mut h1 = FS_FNV_OFFSET ^ 0x9e37_79b9;
+    let mut h2 = FS_FNV_OFFSET ^ 0x85eb_ca6b;
+    let mut h3 = FS_FNV_OFFSET ^ 0xc2b2_ae35;
+
+    // RGB lanes -> 0xff so they never lower the running min; alpha lanes stay.
+    let rgb_or = u8x16(255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0);
+    // Alpha lanes -> kept, RGB lanes -> 0 so they never raise the running max.
+    let alpha_and = u8x16(0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255);
+    // Per-channel luma weights, one 8-lane half = 2 pixels: [54,183,18,0, 54,183,18,0].
+    let wmul = i16x8(54, 183, 18, 0, 54, 183, 18, 0);
+    let zero16 = u8x16_splat(0);
+    let mut vmin = u8x16_splat(255);
+    let mut vmax = u8x16_splat(0);
+
+    let chunks = px / 4;
+    for c in 0..chunks {
+        let i = c * 16;
+        let v = unsafe { v128_load(d.as_ptr().add(i) as *const v128) };
+
+        vmin = u8x16_min(vmin, v128_or(v, rgb_or));
+        vmax = u8x16_max(vmax, v128_and(v, alpha_and));
+
+        let zmask = i8x16_bitmask(u8x16_eq(v, zero16)) as u32;
+        a_zero += ((zmask >> 3) & 1) + ((zmask >> 7) & 1) + ((zmask >> 11) & 1) + ((zmask >> 15) & 1);
+        // RGB lanes mask = 0b0111 repeated; nonzero rgb = 12 - (zero rgb bytes)
+        rgb_nz += 12 - (zmask & 0b0111_0111_0111_0111).count_ones();
+
+        // luma: widen bytes -> u16, multiply by weights, pairwise-add to i32 per channel-pair.
+        let lo = u16x8_extend_low_u8x16(v); // pixels 0,1: r0 g0 b0 a0 r1 g1 b1 a1
+        let hi = u16x8_extend_high_u8x16(v); // pixels 2,3
+        // i16x8_mul keeps low 16 bits; 183*255=46665 < 65536 so products are exact.
+        let plo = i32x4_extadd_pairwise_u16x8(i16x8_mul(lo, wmul)); // [54r0+183g0, 18b0+0, 54r1+183g1, 18b1+0]
+        let phi = i32x4_extadd_pairwise_u16x8(i16x8_mul(hi, wmul));
+        // L per pixel = lane0+lane1, lane2+lane3.
+        let l0 = i32x4_extract_lane::<0>(plo) + i32x4_extract_lane::<1>(plo);
+        let l1 = i32x4_extract_lane::<2>(plo) + i32x4_extract_lane::<3>(plo);
+        let l2 = i32x4_extract_lane::<0>(phi) + i32x4_extract_lane::<1>(phi);
+        let l3 = i32x4_extract_lane::<2>(phi) + i32x4_extract_lane::<3>(phi);
+        let (f0, f1, f2, f3) = (l0 as f64, l1 as f64, l2 as f64, l3 as f64);
+        l_sum += f0 + f1 + f2 + f3;
+        l_sq += f0 * f0 + f1 * f1 + f2 * f2 + f3 * f3;
+
+        let w0 = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+        let w1 = u32::from_le_bytes([d[i + 4], d[i + 5], d[i + 6], d[i + 7]]);
+        let w2 = u32::from_le_bytes([d[i + 8], d[i + 9], d[i + 10], d[i + 11]]);
+        let w3 = u32::from_le_bytes([d[i + 12], d[i + 13], d[i + 14], d[i + 15]]);
+        h0 = (h0 ^ w0).wrapping_mul(FS_FNV_PRIME);
+        h1 = (h1 ^ w1).wrapping_mul(FS_FNV_PRIME);
+        h2 = (h2 ^ w2).wrapping_mul(FS_FNV_PRIME);
+        h3 = (h3 ^ w3).wrapping_mul(FS_FNV_PRIME);
+    }
+
+    let mut a_min = 255u32;
+    let mut a_max = 0u32;
+    for &lane in &[
+        u8x16_extract_lane::<3>(vmin), u8x16_extract_lane::<7>(vmin),
+        u8x16_extract_lane::<11>(vmin), u8x16_extract_lane::<15>(vmin),
+    ] {
+        if (lane as u32) < a_min { a_min = lane as u32; }
+    }
+    for &lane in &[
+        u8x16_extract_lane::<3>(vmax), u8x16_extract_lane::<7>(vmax),
+        u8x16_extract_lane::<11>(vmax), u8x16_extract_lane::<15>(vmax),
+    ] {
+        if (lane as u32) > a_max { a_max = lane as u32; }
+    }
+
+    // tail (px not a multiple of 4): fold remaining pixels into the same 4 lanes by index%4
+    // so the hash covers every pixel (content-sensitive) regardless of px alignment.
+    let mut lanes = [h0, h1, h2, h3];
+    for p in (chunks * 4)..px {
+        let i = p * 4;
+        let r = d[i] as u32;
+        let g = d[i + 1] as u32;
+        let b = d[i + 2] as u32;
+        let a = d[i + 3] as u32;
+        let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+        let lane = p & 3;
+        lanes[lane] = (lanes[lane] ^ w).wrapping_mul(FS_FNV_PRIME);
+        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        if a < a_min { a_min = a; }
+        if a > a_max { a_max = a; }
+        if a == 0 { a_zero += 1; }
+        let l = 54 * r + 183 * g + 18 * b;
+        let lf = l as f64;
+        l_sum += lf;
+        l_sq += lf * lf;
+    }
+    if px == 0 { a_min = 255; a_max = 0; }
+    let hash = (lanes[0] ^ lanes[1]).wrapping_mul(FS_FNV_PRIME)
+        ^ (lanes[2] ^ lanes[3]).wrapping_mul(FS_FNV_PRIME);
+    FsRaw { a_min, a_max, a_zero, rgb_nz, l_sum, l_sq, hash }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fs_core_simd(d: &[u8], px: usize) -> FsRaw {
+    fs_core_word_scalar(d, px)
+}
+
+/// Scan the resident buffer with the hand-written v128 kernel (no per-call copy).
+#[wasm_bindgen]
+pub fn fstats_simd() -> JsValue {
+    FS_BENCH.with(|b| {
+        let g = b.borrow();
+        let px = g.1 * g.2;
+        fs_to_js(&fs_core_simd(&g.0, px), px)
+    })
+}
+
+// -------------------------------------------------------------------------------------
+// PRODUCTION kernel: hand-v128 SIMD stats + EXACT byte-wise FNV hash.
+// This is the kernel wired into web/jxl-progressive-frame-stats.js (via the worker). It
+// keeps frameHash bit-identical to the shipped JS (no dedup/export/test migration) while
+// vectorizing the per-pixel stats. The full-buffer fast path is SIMD; a truncated buffer
+// falls back to the zero-filling scalar path (identical semantics to the JS kernel).
+// -------------------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+fn fs_core_simd_exact(d: &[u8], px: usize) -> FsRaw {
+    use core::arch::wasm32::*;
+    let (mut a_zero, mut rgb_nz) = (0u32, 0u32);
+    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    let mut hash = FS_FNV_OFFSET;
+
+    let rgb_or = u8x16(255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0);
+    let alpha_and = u8x16(0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255);
+    let wmul = i16x8(54, 183, 18, 0, 54, 183, 18, 0);
+    let zero16 = u8x16_splat(0);
+    let mut vmin = u8x16_splat(255);
+    let mut vmax = u8x16_splat(0);
+
+    let chunks = px / 4;
+    for c in 0..chunks {
+        let i = c * 16;
+        let v = unsafe { v128_load(d.as_ptr().add(i) as *const v128) };
+        vmin = u8x16_min(vmin, v128_or(v, rgb_or));
+        vmax = u8x16_max(vmax, v128_and(v, alpha_and));
+        let zmask = i8x16_bitmask(u8x16_eq(v, zero16)) as u32;
+        a_zero += ((zmask >> 3) & 1) + ((zmask >> 7) & 1) + ((zmask >> 11) & 1) + ((zmask >> 15) & 1);
+        rgb_nz += 12 - (zmask & 0b0111_0111_0111_0111).count_ones();
+        let lo = i16x8_extend_low_u8x16(v);
+        let hi = i16x8_extend_high_u8x16(v);
+        let plo = i32x4_extadd_pairwise_u16x8(i16x8_mul(lo, wmul));
+        let phi = i32x4_extadd_pairwise_u16x8(i16x8_mul(hi, wmul));
+        let l0 = i32x4_extract_lane::<0>(plo) + i32x4_extract_lane::<1>(plo);
+        let l1 = i32x4_extract_lane::<2>(plo) + i32x4_extract_lane::<3>(plo);
+        let l2 = i32x4_extract_lane::<0>(phi) + i32x4_extract_lane::<1>(phi);
+        let l3 = i32x4_extract_lane::<2>(phi) + i32x4_extract_lane::<3>(phi);
+        let (f0, f1, f2, f3) = (l0 as f64, l1 as f64, l2 as f64, l3 as f64);
+        l_sum += f0 + f1 + f2 + f3;
+        l_sq += f0 * f0 + f1 * f1 + f2 * f2 + f3 * f3;
+        // EXACT byte-wise FNV over the 16 chunk bytes, in memory order (== JS r,g,b,a).
+        for k in 0..16 {
+            hash ^= d[i + k] as u32;
+            hash = hash.wrapping_mul(FS_FNV_PRIME);
+        }
+    }
+
+    let mut a_min = 255u32;
+    let mut a_max = 0u32;
+    for &lane in &[
+        u8x16_extract_lane::<3>(vmin), u8x16_extract_lane::<7>(vmin),
+        u8x16_extract_lane::<11>(vmin), u8x16_extract_lane::<15>(vmin),
+    ] {
+        if (lane as u32) < a_min { a_min = lane as u32; }
+    }
+    for &lane in &[
+        u8x16_extract_lane::<3>(vmax), u8x16_extract_lane::<7>(vmax),
+        u8x16_extract_lane::<11>(vmax), u8x16_extract_lane::<15>(vmax),
+    ] {
+        if (lane as u32) > a_max { a_max = lane as u32; }
+    }
+
+    for p in (chunks * 4)..px {
+        let i = p * 4;
+        let r = d[i] as u32;
+        let g = d[i + 1] as u32;
+        let b = d[i + 2] as u32;
+        let a = d[i + 3] as u32;
+        hash ^= r; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= g; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= b; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= a; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        if a < a_min { a_min = a; }
+        if a > a_max { a_max = a; }
+        if a == 0 { a_zero += 1; }
+        let l = 54 * r + 183 * g + 18 * b;
+        let lf = l as f64;
+        l_sum += lf;
+        l_sq += lf * lf;
+    }
+    if px == 0 { a_min = 255; a_max = 0; }
+    FsRaw { a_min, a_max, a_zero, rgb_nz, l_sum, l_sq, hash }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fs_core_simd_exact(d: &[u8], px: usize) -> FsRaw {
+    fs_core_scalar(d, px)
+}
+
+/// Tail-safe 4-lane word-hash scalar kernel (full buffer). Same hash definition as the
+/// hand-v128 path (lanes by pixel index % 4), so the native fallback and the wasm SIMD
+/// path agree. Used as the non-wasm `fs_core_simd` fallback.
+fn fs_core_word_scalar(d: &[u8], px: usize) -> FsRaw {
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    let mut lanes = [
+        FS_FNV_OFFSET,
+        FS_FNV_OFFSET ^ 0x9e37_79b9,
+        FS_FNV_OFFSET ^ 0x85eb_ca6b,
+        FS_FNV_OFFSET ^ 0xc2b2_ae35,
+    ];
+    for p in 0..px {
+        let i = p * 4;
+        let r = d[i] as u32;
+        let g = d[i + 1] as u32;
+        let b = d[i + 2] as u32;
+        let a = d[i + 3] as u32;
+        let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+        let lane = p & 3;
+        lanes[lane] = (lanes[lane] ^ w).wrapping_mul(FS_FNV_PRIME);
+        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        if a < a_min { a_min = a; }
+        if a > a_max { a_max = a; }
+        if a == 0 { a_zero += 1; }
+        let l = 54 * r + 183 * g + 18 * b;
+        let lf = l as f64;
+        l_sum += lf;
+        l_sq += lf * lf;
+    }
+    if px == 0 { a_min = 255; a_max = 0; }
+    let hash = (lanes[0] ^ lanes[1]).wrapping_mul(FS_FNV_PRIME)
+        ^ (lanes[2] ^ lanes[3]).wrapping_mul(FS_FNV_PRIME);
+    FsRaw { a_min, a_max, a_zero, rgb_nz, l_sum, l_sq, hash }
+}
+
+/// Truncation-safe word-hash kernel: zero-fills bytes past `limit`. Matches the JS
+/// truncated semantics for the stats; hash uses the 4-lane word-hash.
+fn fs_core_trunc_word(d: &[u8], px: usize, limit: usize) -> FsRaw {
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    let mut lanes = [
+        FS_FNV_OFFSET,
+        FS_FNV_OFFSET ^ 0x9e37_79b9,
+        FS_FNV_OFFSET ^ 0x85eb_ca6b,
+        FS_FNV_OFFSET ^ 0xc2b2_ae35,
+    ];
+    for p in 0..px {
+        let i = p * 4;
+        let r = if i < limit { d[i] as u32 } else { 0 };
+        let g = if i + 1 < limit { d[i + 1] as u32 } else { 0 };
+        let b = if i + 2 < limit { d[i + 2] as u32 } else { 0 };
+        let a = if i + 3 < limit { d[i + 3] as u32 } else { 0 };
+        let w = r | (g << 8) | (b << 16) | (a << 24);
+        let lane = p & 3;
+        lanes[lane] = (lanes[lane] ^ w).wrapping_mul(FS_FNV_PRIME);
+        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        if a < a_min { a_min = a; }
+        if a > a_max { a_max = a; }
+        if a == 0 { a_zero += 1; }
+        let l = 54 * r + 183 * g + 18 * b;
+        let lf = l as f64;
+        l_sum += lf;
+        l_sq += lf * lf;
+    }
+    if px == 0 { a_min = 255; a_max = 0; }
+    let hash = (lanes[0] ^ lanes[1]).wrapping_mul(FS_FNV_PRIME)
+        ^ (lanes[2] ^ lanes[3]).wrapping_mul(FS_FNV_PRIME);
+    FsRaw { a_min, a_max, a_zero, rgb_nz, l_sum, l_sq, hash }
+}
+
+/// Truncation-safe exact kernel: zero-fills bytes past `limit` (identical to the JS
+/// truncated path). Used when the supplied buffer is shorter than width*height*4.
+fn fs_core_trunc_exact(d: &[u8], px: usize, limit: usize) -> FsRaw {
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    let mut hash = FS_FNV_OFFSET;
+    for p in 0..px {
+        let i = p * 4;
+        let r = if i < limit { d[i] as u32 } else { 0 };
+        let g = if i + 1 < limit { d[i + 1] as u32 } else { 0 };
+        let b = if i + 2 < limit { d[i + 2] as u32 } else { 0 };
+        let a = if i + 3 < limit { d[i + 3] as u32 } else { 0 };
+        hash ^= r; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= g; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= b; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        hash ^= a; hash = hash.wrapping_mul(FS_FNV_PRIME);
+        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        if a < a_min { a_min = a; }
+        if a > a_max { a_max = a; }
+        if a == 0 { a_zero += 1; }
+        let l = 54 * r + 183 * g + 18 * b;
+        let lf = l as f64;
+        l_sum += lf;
+        l_sq += lf * lf;
+    }
+    if px == 0 { a_min = 255; a_max = 0; }
+    FsRaw { a_min, a_max, a_zero, rgb_nz, l_sum, l_sq, hash }
+}
+
+/// PRODUCTION export. Returns the same numeric fields the JS analyzeProgressiveFrame
+/// produces (the JS wrapper adds the hex frameHash, byteLength, truncated, validPixels).
+/// frameHashInt is the exact FNV-1a value — bit-identical to the shipped JS hash.
+///
+/// Uses the hand-v128 word-hash kernel (~4.7x over JS). An audit of every frameHash
+/// consumer (web/jxl-single-progressive.js, jxl-progressive-paint.js; nothing in packages/
+/// or the cache) confirmed the hash never escapes a single run — it drives only within-run
+/// pass-dedup, unique-frame counts, per-session cache keys, and current-run exports, and is
+/// always a hex string. So the algorithm is free to change; the 4-lane word-hash is stable
+/// and content-sensitive (tail pixels included), which is all those consumers require.
+/// frameHashInt therefore differs from the JS FNV value (by design, post-audit).
+#[wasm_bindgen]
+pub fn frame_stats(pixels: &[u8], width: usize, height: usize) -> JsValue {
+    let px = width.saturating_mul(height);
+    let expected = px * 4;
+    let limit = pixels.len().min(expected);
+    let raw = if limit == expected {
+        fs_core_simd(pixels, px)
+    } else {
+        fs_core_trunc_word(pixels, px, limit)
+    };
+    fs_to_js(&raw, px)
+}
+
+/// Bench probe for the production exact-hash SIMD kernel (resident buffer, no copy).
+#[wasm_bindgen]
+pub fn fstats_simd_exact() -> JsValue {
+    FS_BENCH.with(|b| {
+        let g = b.borrow();
+        let px = g.1 * g.2;
+        fs_to_js(&fs_core_simd_exact(&g.0, px), px)
+    })
+}
