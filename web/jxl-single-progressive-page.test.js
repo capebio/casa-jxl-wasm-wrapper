@@ -231,7 +231,7 @@ test('single progressive chart-worker failure draws empty charts, no main-thread
 });
 
 test('single progressive block-border overlay uses fast cached tile diff', () => {
-    expect(source).toContain("new URLSearchParams(location.search).get('bordersStrict') === '1'");
+    expect(source).toContain("QUERY_PARAMS.get('bordersStrict') === '1'");
     expect(source).toContain('const BBOX_STRIDE = 10;');
     expect(source).toContain('function toUint32View(u8arr)');
     expect(source).toContain('toUint32View(pass.pixels)');
@@ -248,7 +248,7 @@ test('single progressive timing mode can force block borders off', () => {
 });
 
 test('single progressive page respects ?borders=0 query param to force borders off', () => {
-    expect(source).toContain("new URLSearchParams(location.search).get('borders') === '0'");
+    expect(source).toContain("QUERY_PARAMS.get('borders') === '0'");
     expect(source).toContain('bordersOverride');
     expect(source).toContain('if (bordersOverride) return false;');
 });

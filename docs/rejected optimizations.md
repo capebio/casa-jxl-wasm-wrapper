@@ -501,3 +501,72 @@ Targets: `web/jxl-decode-worker.js`, `web/main.js`. Rejected after judging net-n
 - Rejected: the facade decode events never yield a raw `ArrayBuffer` at runtime (`outPixels.data` is always a `HEAPU8.slice`/`.subarray` `Uint8Array`); the branch is unreachable in this pipeline. Kept the safe copy rather than add an unexercised path.
 
 ---
+
+## 2026-06-17 — ChatGPT+Claude Outputs / jxl-single-progressive.js review (00-05 corpus)
+
+Applied (agreed, seams-checked against full upstream/downstream):
+
+- QUERY_PARAMS singleton (was 4+ new URLSearchParams in web/jxl-single-progressive.js:198,269,291,505).
+- analysisRepresentation + WeakMap cache for downsamplePixelsForChart (called redundantly in shouldStopAtPass ~1345 and computeChartsInWorker ~354).
+- getButteraugliComparer + WeakMap memo (createButteraugliComparer rebuilds refXyb+prepRef every cutoff; see web/jxl-butteraugli.js:172).
+- skip re-assign of pass.pixels from stats worker return (analyzeFrameInWorker always slices copy @web/jxl-single-progressive.js:346; worker returns dup per jxl-frame-stats-worker.js:48).
+- exactView collapse + comment (both arms identical; deliberate copy for DONOTCHANGE(worker-transfer) at pushDecodeChunk:1427).
+- FF flags + __jxlPerf harness (05 protocol) + perf* wrappers for measurement of the above.
+
+These respect:
+- DONOTCHANGE(progressive-checkpoints) and (worker-transfer) comments/lines 1424,1434.
+- test expectations (updated 2 literal expects in web/jxl-single-progressive-page.test.js:234,251 for new QUERY form; behavior unchanged).
+- No change to bridge.cpp, scheduler, decode-handler, jxl-session, packages/.
+- WeakMap + FF guard keep retention/compat.
+
+### Rejected (appended reasons; ChatGPT lacked full seams)
+
+## single-prog-R1: "exactBuffer always copies"
+**Target:** web/jxl-single-progressive.js exactBuffer
+**Proposed (prior review):** treat as always-copy, optimize around it.
+**Rejected:** 
+```js
+// web/jxl-single-progressive.js:2364
+if (view.byteOffset === 0 && view.byteLength === view.buffer.byteLength) return view.buffer;
+```
+Zero-copy hot path on encode (exactBuffer(rgba) from targetRgba etc). The review's cost model was fictional; confirmed by full read + upstream encode paths. See also 00-corpus "What the source contradicted".
+
+## single-prog-R2: "concatChunks makes N copies"
+**Target:** concatChunks
+**Proposed:** rewrite for fewer copies.
+**Rejected:** pre-sizes once + single set(); per-chunk new only if not already Uint8Array (which encode path avoids). Optimal and off hot path for main encode (slices chunks[0]/last directly). See current:2373. No win.
+
+## single-prog-R3: "changed-block rescans every pixel every pass"
+**Target:** computeChangedBlocks / scanChangedTileGrid
+**Proposed:** CRC-per-tile or dedup rescan.
+**Rejected:** already caches by pass._changedBlocksKey; uses 32-bit toUint32View + BBOX_STRIDE pre-scan + tile early-exit (web/jxl-single-progressive.js:1705+). Competent; adding would churn without data. Per 02 methodology: cite+measure first.
+
+## single-prog-R4: "cutoff runs expensive metrics on every pass"
+**Target:** shouldStopAtPass
+**Proposed:** add cheap gates.
+**Rejected:** already: hash-eq (1327), low-kbps (1332), intendedRatio<=1 gate (1340) before psnr/butter. Cheap admission existed. The "new" was already present; review missed on snippet.
+
+## single-prog-R5: "Decode serialised behind paint everywhere"
+**Target:** decode paths
+**Proposed:** decouple.
+**Rejected:** worker path (decodeProgressivelyViaWorker) already concurrent (feedTask vs frameTask). Only main-thread fallback serialises (event loop). See 00. Production default is worker; no global fix here.
+
+## single-prog-R6: implement full "products not pass objects" / info-gain deltaScore / changedPixels first-class now
+**Target:** this file + callers
+**Proposed (03 redesign):** split render/analysis/metrics/telemetry; add delta per pass; info-gain retention.
+**Rejected:** 
+- Rank 2+ in 04 remaining: "Instrument before more cuts". No per-pass changedPixels counters or deltaScore artifact yet (would be O(passes) without proof of Pareto).
+- Crosses many seams ChatGPT lacked: jxl-progressive-gallery-*.js, byte-metrics, frame-stats, session, scheduler (dedup lives there per CLAUDE), thinRetainedPassPixels policy.
+- Violates "no speculative without evidence" + AGENTS "before touching scheduler...". The 5 applied + harness give the measurement surface (cutoff.checkMs etc). Full decomp is direction, not this change.
+- Would break test strings + DONOTCHANGE notes without net win.
+
+## single-prog-R7: re-introduce checksum/frame-hash dedup or prev_flush style in orchestration
+**Target:** progressive feed / shouldStop
+**Rejected (per AGENTS.md strict):** "Do not reintroduce checksum/frame-hash dedup (prev_flush_checksum style) unless behind an explicit runtime experiment flag." The suppress-dup-progress toggle is the flag; opportunistic flushes + one input_generation per nonfinal must stay for visible passes. This file is consumer; bridge.cpp untouched.
+
+## single-prog-R8: WeakMap cache without FF guard / always-on
+**Rejected:** FF + URL default allows A/B and perf counters per 05 protocol. Always-on would hide regression and violate "toggle for measurement". Also: memory not budgeted by thinRetained (gotcha in 05) — cache win CPU vs mem; toggle lets measure.
+
+All rejections grounded in full file reads + grep of call sites (upstream jxl-butteraugli:169 create, worker:41 returnPixels, session create, page.test:5 source read). ChatGPT operated from "snippets" (00: "after reading the full 2459-line" was the fix in corpus).
+
+---

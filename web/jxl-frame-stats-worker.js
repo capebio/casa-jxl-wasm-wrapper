@@ -38,26 +38,14 @@ self.onmessage = (event) => {
 };
 
 function handleFrameStats(id, data) {
-    const { pixels, width, height, returnPixels = true } = data ?? {};
+    const { pixels, width, height } = data ?? {};
+    // returnPixels dropped entirely (was always redundant: main slices+transfers copy,
+    // so no detach of caller's buffer; return leg was pure waste of transfer+GC).
+    // One-way offload only now. See precomputePassStatsInWorker + analyzeFrameInWorker.
     try {
         const input = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels ?? new ArrayBuffer(0));
         const stats = analyzeProgressiveFrame(input, width, height);
-        let pixField = undefined;
-        const xfer = [];
-        if (returnPixels) {
-            const ab = input.buffer;
-            const off = input.byteOffset;
-            const len = input.byteLength;
-            if (off === 0 && len === ab.byteLength) {
-                pixField = ab;
-                xfer.push(ab);
-            } else {
-                const output = ab.slice(off, off + len);
-                pixField = output;
-                xfer.push(output);
-            }
-        }
-        self.postMessage({ id, ok: true, stats, pixels: pixField }, xfer);
+        self.postMessage({ id, ok: true, stats });
     } catch (error) {
         self.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
     }

@@ -14,6 +14,54 @@ const DEFAULT_PROGRESSIVE_DETAIL = 'lastPasses';
 const SNEYERS_PROGRESSIVE_DETAIL = 'passes';
 const PROGRESSIVE_DETAILS = new Set(['dc', 'lastPasses', 'passes']);
 
+// Control-plane config is immutable for the page lifetime: parse location.search once
+// and share the read-only view rather than reconstructing URLSearchParams on every read.
+const QUERY_PARAMS = new URLSearchParams(location.search);
+
+// ---------------------------------------------------------------------------
+// Optimisation flip-flops + timing harness (from reviewed corpus, adapted to seams)
+// ---------------------------------------------------------------------------
+// Mutate live then Rerun (no reload, keeps same source). Or URL ?ffAnalysisCache=0
+//   __jxlFF.analysisCache = false; __jxlPerf.report();
+// All default true (new paths). Harness only in this lab file.
+// (skipStatsPixelReturn removed after worker-side drop of returnPixels; verified safe.)
+const FF = {
+    analysisCache:        QUERY_PARAMS.get('ffAnalysisCache') !== '0',
+    butterMemo:           QUERY_PARAMS.get('ffButterMemo') !== '0',
+};
+globalThis.__jxlFF = FF;
+
+const _perfTimings = new Map();
+const _perfCounters = new Map();
+function perfRecord(label, ms) {
+    let e = _perfTimings.get(label);
+    if (!e) { e = { count: 0, totalMs: 0 }; _perfTimings.set(label, e); }
+    e.count++; e.totalMs += ms;
+}
+function perfCount(label, n = 1) { _perfCounters.set(label, (_perfCounters.get(label) ?? 0) + n); }
+function perfTime(label, fn) {
+    const t0 = performance.now();
+    const r = fn();
+    perfRecord(label, performance.now() - t0);
+    return r;
+}
+async function perfTimeAsync(label, fn) {
+    const t0 = performance.now();
+    const r = await fn();
+    perfRecord(label, performance.now() - t0);
+    return r;
+}
+function perfReset() { _perfTimings.clear(); _perfCounters.clear(); }
+function perfReport() {
+    const timings = {};
+    for (const [k, e] of _perfTimings) {
+        timings[k] = { count: e.count, totalMs: +e.totalMs.toFixed(2), avgMs: +(e.totalMs / Math.max(1, e.count)).toFixed(3) };
+    }
+    const report = { flags: { ...FF }, timings, counters: Object.fromEntries(_perfCounters) };
+    return report;
+}
+globalThis.__jxlPerf = { report: perfReport, reset: perfReset };
+
 // Match jxl-decode-worker.js: emit flushed progressive frames for lastPasses/passes;
 // DC-only mode suppresses intermediate AC passes (preview + final only).
 function emitEveryPassForDetail(progressiveDetail) {
@@ -195,7 +243,7 @@ const BLOCK_BORDER_TILE_SIZE = 256;
 const BBOX_STRIDE = 10;
 const BLOCK_BORDER_SIZE = 2;
 const BLOCK_BORDER_COLOR = '#ff2d2d';
-const BLOCK_BORDERS_STRICT = new URLSearchParams(location.search).get('bordersStrict') === '1';
+const BLOCK_BORDERS_STRICT = QUERY_PARAMS.get('bordersStrict') === '1';
 const WORKER_DECODE_TIMEOUT_MS = 90_000;
 const DEFAULT_WORKER_PUSH_HWM = 64;
 const DEFAULT_WORKER_POOL_SIZE = 1;
@@ -229,6 +277,44 @@ function downsamplePixelsForChart(pixels, width, height) {
     dstCtx.drawImage(src, 0, 0, dw, dh);
     const out = dstCtx.getImageData(0, 0, dw, dh).data;
     return { pixels: new Uint8Array(out.buffer, out.byteOffset, out.byteLength), width: dw, height: dh };
+}
+
+// Derived-data cache for the chart/cutoff "analysis representation" (≤1 MP downsample).
+// Replaces repeated canvas round-trips for same source buffer (cutoff re-uses ref+last+prev;
+// charts re-derives every pass). WeakMap by buffer identity: released with thinRetainedPassPixels.
+// FF guard allows A/B. Perf counters under 'downsample.*'.
+// Identity passthrough for ≤1 MP is preserved.
+const _analysisReprCache = new WeakMap();
+function analysisRepresentation(pixels, width, height) {
+    if (!pixels) return null;
+    if (FF.analysisCache) {
+        const cached = _analysisReprCache.get(pixels);
+        if (cached && cached.srcW === width && cached.srcH === height) {
+            perfCount('downsample.cacheHit');
+            return cached.repr;
+        }
+    }
+    perfCount('downsample.compute');
+    const repr = perfTime('downsample.computeMs', () => downsamplePixelsForChart(pixels, width, height));
+    if (FF.analysisCache) _analysisReprCache.set(pixels, { srcW: width, srcH: height, repr });
+    return repr;
+}
+
+// Butter memo: ref side (pixelsToXyb + prepRef) done once per final target, not per cutoff check.
+// Key stable via analysisRepresentation for downsamples. FF guard + perf.
+const _butteraugliComparerCache = new WeakMap();
+function getButteraugliComparer(refPixels, refW, refH) {
+    if (FF.butterMemo) {
+        const cached = _butteraugliComparerCache.get(refPixels);
+        if (cached && cached.w === refW && cached.h === refH) {
+            perfCount('butterComparer.memoHit');
+            return cached.cmp;
+        }
+    }
+    perfCount('butterComparer.build');
+    const cmp = perfTime('butterComparer.buildMs', () => createButteraugliComparer(refPixels, refW, refH));
+    if (FF.butterMemo) _butteraugliComparerCache.set(refPixels, { w: refW, h: refH, cmp });
+    return cmp;
 }
 
 // Size presets define output long-edge in pixels. "original" preserves source dims.
@@ -266,7 +352,7 @@ function getSessionCtx() {
 }
 
 function readWorkerExperimentConfig() {
-    const params = new URLSearchParams(location.search);
+    const params = QUERY_PARAMS;
     const pushHwm = readBoundedIntParam(params, 'workerPushHwm', DEFAULT_WORKER_PUSH_HWM, 1, 256);
     const poolRaw = params.get('workerPool');
     const poolSize = poolRaw === 'default'
@@ -288,7 +374,7 @@ function readBoundedIntParam(params, name, fallback, min, max) {
 }
 
 function readBoolParam(name, fallback) {
-    const raw = new URLSearchParams(location.search).get(name);
+    const raw = QUERY_PARAMS.get(name);
     if (raw === null || raw === '') return fallback;
     if (raw === '1' || raw === 'true') return true;
     if (raw === '0' || raw === 'false') return false;
@@ -346,17 +432,19 @@ async function analyzeFrameInWorker(pixels, width, height) {
     const buffer = pixels.buffer.slice(pixels.byteOffset, pixels.byteOffset + pixels.byteLength);
     return new Promise((resolve, reject) => {
         _statsPending.set(id, { resolve, reject });
+        // returnPixels omitted / false: worker no longer returns pixels (dropped roundtrip).
+        // The sent buffer is a sliced copy so caller pixels stay valid.
         worker.postMessage({ id, pixels: buffer, width, height }, [buffer]);
     });
 }
 
 async function computeChartsInWorker(passes, reference, pw, ph) {
-    const { pixels: refDs, width: dsW, height: dsH } = downsamplePixelsForChart(reference, pw, ph);
+    const { pixels: refDs, width: dsW, height: dsH } = analysisRepresentation(reference, pw, ph);
     const needsDs = dsW !== pw;
     const refBuf = refDs.buffer.slice(refDs.byteOffset, refDs.byteOffset + refDs.byteLength);
     const passEntries = passes.map((pass, i) => {
         if (!pass.pixels || pass.pixels.byteLength !== reference.byteLength) return null;
-        const px = needsDs ? downsamplePixelsForChart(pass.pixels, pw, ph).pixels : pass.pixels;
+        const px = needsDs ? analysisRepresentation(pass.pixels, pw, ph).pixels : pass.pixels;
         return { index: i, buf: px.buffer.slice(px.byteOffset, px.byteOffset + px.byteLength) };
     });
     const id = ++_statsId;
@@ -376,7 +464,7 @@ async function computeAndDrawChartsAsync(passes, targetRgba) {
     const reference = targetRgba ?? finalPass?.pixels ?? null;
     if (!reference) return;
     try {
-        const { values } = await computeChartsInWorker(passes, reference, pw, ph);
+        const { values } = await perfTimeAsync('charts.workerMs', () => computeChartsInWorker(passes, reference, pw, ph));
         const psnrVals = values.map(v => v?.psnr ?? null);
         const ssimVals = values.map(v => v?.ssim ?? null);
         const buttVals = values.map(v => v?.butt ?? null);
@@ -502,7 +590,7 @@ function eagerComputeCutoffStats(passes) {
     computeAndCachePassStats(passes.at(-2));
   }
 }
-const bordersOverride = new URLSearchParams(location.search).get('borders') === '0';
+const bordersOverride = QUERY_PARAMS.get('borders') === '0';
 
 const runMeasurements = [];
 let rawReady = false;
@@ -1122,7 +1210,7 @@ async function decodeProgressively({ jxlBytes, width, height, throttleKbPerSec, 
                     computeAndCachePassStats(passes.at(-2));
                 }
                 if (cutoffEnabled && !pass.isFinal) {
-                    const verdict = shouldStopAtPass(passes, targetRgba);
+                    const verdict = perfTime('cutoff.checkMs', () => shouldStopAtPass(passes, targetRgba));
                     if (verdict) {
                         setStatus(`Perceptual cutoff: ${verdict.reason} after pass ${pass.pass}. Cancelling.`);
                         dbgLog('Perceptual cutoff', JSON.stringify(verdict), 'info');
@@ -1210,7 +1298,7 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
                 eagerComputeCutoffStats(passes);
             }
             if (cutoffEnabled && !(frame.stage === 'final' || frame.isFinal)) {
-                const verdict = shouldStopAtPass(passes, targetRgba);
+                const verdict = perfTime('cutoff.checkMs', () => shouldStopAtPass(passes, targetRgba));
                 if (verdict) {
                     stoppedEarlyReason = verdict.reason;
                     setStatus(`Perceptual cutoff: ${verdict.reason} after pass ${pass.pass}. Cancelling.`);
@@ -1342,16 +1430,33 @@ function shouldStopAtPass(passes, targetRgba) {
             let cmpRef = targetRgba, cmpW = last.width ?? 0, cmpH = last.height ?? 0;
             let cmpLastP = last.pixels, cmpPrevP = prev.pixels;
             if ((last.width * last.height) > CHART_MAX_PIXELS) {
-                const dsRef = downsamplePixelsForChart(targetRgba, last.width, last.height);
+                const dsRef = analysisRepresentation(targetRgba, last.width, last.height);
                 cmpRef = dsRef.pixels; cmpW = dsRef.width; cmpH = dsRef.height;
-                cmpLastP = downsamplePixelsForChart(last.pixels, last.width, last.height).pixels;
-                cmpPrevP = downsamplePixelsForChart(prev.pixels, prev.width, prev.height).pixels;
+                cmpLastP = analysisRepresentation(last.pixels, last.width, last.height).pixels;
+                cmpPrevP = analysisRepresentation(prev.pixels, prev.width, prev.height).pixels;
+                last.downsampleComputes = 3;  // ref + last + prev (for Pareto accounting)
+            } else {
+                last.downsampleComputes = 0;
             }
             const psnrLast = computePsnrVsFinal(cmpRef, cmpLastP);
             const psnrPrev = computePsnrVsFinal(cmpRef, cmpPrevP);
-            const cmp = createButteraugliComparer(cmpRef, cmpW, cmpH);
+            const cmp = getButteraugliComparer(cmpRef, cmpW, cmpH);
             const buttLast = cmp(cmpLastP);
             const buttPrev = cmp(cmpPrevP);
+
+            // Instrumentation for Pareto: changedPixels (bytes that actually differed) + attach deltas.
+            // Only in the expensive plateau path (already >CHART or full res); cheap triggers bypass.
+            let changedPixels = 0;
+            if (last.pixels && prev.pixels && last.pixels.length === prev.pixels.length) {
+                const la = last.pixels, pr = prev.pixels;
+                for (let i = 0; i < la.length; i += 4) {
+                    if (la[i] !== pr[i] || la[i+1] !== pr[i+1] || la[i+2] !== pr[i+2]) changedPixels++;
+                }
+            }
+            last.changedPixels = changedPixels;
+            last.psnrDelta = Math.abs(psnrLast - psnrPrev);
+            last.buttDelta = Math.abs(buttLast - buttPrev);
+
             const smallSeries = [
                 { bytes: 0, psnr: psnrPrev, butter: buttPrev },
                 { bytes: 1, psnr: psnrLast, butter: buttLast },
@@ -1360,7 +1465,7 @@ function shouldStopAtPass(passes, targetRgba) {
             const monoButter = detectMonotone(smallSeries, 0.05, { valueKey: 'butter', lowerIsBetter: true });
             if ((Number.isFinite(psnrLast) && Number.isFinite(psnrPrev) && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB)
                 || monoButter.monotone) {
-                return { reason: 'psnr-butter-plateau', last: last.pass, deltaDb: Math.abs(psnrLast - psnrPrev), buttDelta: Math.abs(buttLast - buttPrev) };
+                return { reason: 'psnr-butter-plateau', last: last.pass, deltaDb: last.psnrDelta, buttDelta: last.buttDelta, changedPixels };
             }
         }
     }
@@ -1371,13 +1476,19 @@ function shouldStopAtPass(passes, targetRgba) {
 async function precomputePassStatsInWorker(passes) {
     for (const pass of passes) {
         if (pass.stats || !pass.pixels) continue;
+        const t0 = performance.now();
         try {
-            const { stats, pixels } = await analyzeFrameInWorker(pass.pixels, pass.width, pass.height);
+            // Worker frame-stats path now one-way only (no returnPixels, no pixels in response).
+            // analyze sends sliced copy; worker computes stats and drops the buffer.
+            const { stats } = await perfTimeAsync('stats.analyzeMs',
+                () => analyzeFrameInWorker(pass.pixels, pass.width, pass.height));
+            perfCount('stats.workerCalls');
             if (!pass.stats) pass.stats = stats;
-            if (pixels) pass.pixels = pixels;
+            pass.analysisCostMs = performance.now() - t0;  // per-pass instrumentation (for Pareto + cutoff cost scaling)
         } catch (error) {
             console.warn('[stats] worker failed; falling back to main thread', error);
             pass.stats = computeAndCachePassStats(pass);
+            pass.analysisCostMs = performance.now() - t0;
         }
     }
 }
@@ -2367,7 +2478,11 @@ function exactBuffer(view) {
 }
 
 function exactView(view) {
-    return view instanceof Uint8Array ? new Uint8Array(view) : new Uint8Array(view);
+    // Deliberate copy: callers (pushDecodeChunk with copyChunk=true) need the source
+    // bytes to stay valid after the decoder transfers/neuters its pushed buffer, so that
+    // encodeBytes/jxlBytes remain usable for one-shot compare + exports.
+    // (Old ternary arms were identical.)
+    return new Uint8Array(view);
 }
 
 function concatChunks(chunks) {

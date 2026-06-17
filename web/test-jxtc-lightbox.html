@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" href="data:," />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JXTC Lightbox — decode proof-of-concept</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; margin: 0; padding: 24px; }
+    h1 { font-size: 1.25rem; margin: 0 0 4px; }
+    p.sub { color: #94a3b8; margin: 0 0 24px; font-size: 0.875rem; }
+    .card { background: #1e2535; border: 1px solid #2d3748; border-radius: 10px; padding: 20px; max-width: 640px; }
+    .status { font-size: 0.8rem; color: #64748b; margin-bottom: 16px; }
+    .status.ok  { color: #4ade80; }
+    .status.err { color: #f87171; }
+    canvas { display: block; border: 1px solid #2d3748; border-radius: 4px; margin-top: 12px; }
+    .metrics { margin-top: 12px; font-size: 0.8rem; font-family: monospace; color: #94a3b8; }
+    .metrics b { color: #e2e8f0; }
+    button { margin-top: 16px; padding: 8px 18px; background: #3b82f6; color: #fff; border: none;
+             border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "@casabio/jxl-wasm": "../packages/jxl-wasm/dist/index.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <h1>JXTC Lightbox — end-to-end decode proof-of-concept</h1>
+  <p class="sub">Encodes a 512×512 synthetic RGBA8 gradient to a JXTC tile container (256px tiles),
+  then decodes a centred 128×128 region and paints it to canvas.</p>
+
+  <div class="card">
+    <div id="status" class="status">Initialising…</div>
+    <button id="btn" disabled>Run JXTC encode + decode</button>
+    <canvas id="canvas" width="128" height="128" hidden></canvas>
+    <div id="metrics" class="metrics" hidden></div>
+  </div>
+
+  <script type="module">
+    import {
+      encodeTileContainerRgba8,
+      decodeTileContainerRegionRgba8,
+      setForcedTier,
+    } from '@casabio/jxl-wasm';
+
+    const statusEl  = document.getElementById('status');
+    const btn       = document.getElementById('btn');
+    const canvas    = document.getElementById('canvas');
+    const metricsEl = document.getElementById('metrics');
+
+    function setStatus(msg, cls = '') {
+      statusEl.textContent = msg;
+      statusEl.className   = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    // Force simd tier so we get the enc bundle (encode + decode) without SAB.
+    setForcedTier('simd');
+    setStatus('WASM ready — click Run to start', 'ok');
+    btn.disabled = false;
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      canvas.hidden = true;
+      metricsEl.hidden = true;
+
+      const W = 512, H = 512, TILE = 256;
+
+      // Generate a synthetic RGBA8 gradient (same pattern as tiling tests).
+      const pixels = new Uint8Array(W * H * 4);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const o = (y * W + x) * 4;
+          pixels[o]     = (x * 31 + y * 17) & 0xff;
+          pixels[o + 1] = (x * 7  + y * 53) & 0xff;
+          pixels[o + 2] = (x * 13 + y * 29) & 0xff;
+          pixels[o + 3] = 255;
+        }
+      }
+
+      // --- encode ---
+      setStatus('Encoding JXTC container…');
+      let containerBytes;
+      const t0enc = performance.now();
+      try {
+        containerBytes = await encodeTileContainerRgba8(pixels, W, H, {
+          tileSize: TILE, distance: 1.0, effort: 3, hasAlpha: true,
+        });
+      } catch (e) {
+        setStatus('Encode failed: ' + e.message, 'err');
+        btn.disabled = false;
+        return;
+      }
+      const encMs = performance.now() - t0enc;
+
+      // Verify JXTC magic bytes ('JXTC' LE = 0x4354_584a).
+      const magic = new DataView(containerBytes.buffer, containerBytes.byteOffset).getUint32(0, true);
+      if (magic !== 0x4354584a) {
+        setStatus(`Wrong magic: 0x${magic.toString(16)} (expected 0x4354584a)`, 'err');
+        btn.disabled = false;
+        return;
+      }
+
+      // --- decode 128×128 centred region ---
+      setStatus('Decoding 128×128 JXTC region…');
+      const RW = 128, RH = 128;
+      const rx = (W - RW) >> 1, ry = (H - RH) >> 1;
+
+      const timings = {};
+      let decoded;
+      const t0dec = performance.now();
+      try {
+        decoded = await decodeTileContainerRegionRgba8(containerBytes, {
+          x: rx, y: ry, w: RW, h: RH,
+          onMetric: (name, value) => { timings[name] = value; },
+        });
+      } catch (e) {
+        setStatus('Decode failed: ' + e.message, 'err');
+        btn.disabled = false;
+        return;
+      }
+      const decMs = performance.now() - t0dec;
+
+      // Paint result.
+      const ctx = canvas.getContext('2d');
+      const clamped = new Uint8ClampedArray(
+        decoded.pixels.buffer,
+        decoded.pixels.byteOffset,
+        decoded.pixels.byteLength,
+      );
+      ctx.putImageData(new ImageData(clamped, decoded.width, decoded.height), 0, 0);
+      canvas.hidden = false;
+
+      // Report metrics.
+      const containerKb = (containerBytes.byteLength / 1024).toFixed(1);
+      const tilesX = Math.ceil(W / TILE), tilesY = Math.ceil(H / TILE);
+      metricsEl.innerHTML = [
+        `<b>Encode:</b>  ${encMs.toFixed(1)} ms  →  ${containerKb} KB  (${tilesX}×${tilesY} tiles of ${TILE}px)`,
+        `<b>Decode:</b>  ${decMs.toFixed(1)} ms  →  ${decoded.width}×${decoded.height} px`,
+        `<b>JXTC wasmDecode:</b>  ${(timings['jxtc_wasm_decode'] ?? 0).toFixed(1)} ms`,
+        `<b>JXTC total (incl. heap copy):</b>  ${(timings['jxtc_total'] ?? 0).toFixed(1)} ms`,
+        `<b>Magic check:</b>  0x${magic.toString(16).toUpperCase()}  ✓`,
+      ].join('<br>');
+      metricsEl.hidden = false;
+
+      setStatus(
+        `Done — JXTC decode ${decMs.toFixed(1)} ms for 128×128 region (target < 100 ms)`,
+        decMs < 100 ? 'ok' : 'err',
+      );
+      btn.disabled = false;
+    });
+  </script>
+</body>
+</html>

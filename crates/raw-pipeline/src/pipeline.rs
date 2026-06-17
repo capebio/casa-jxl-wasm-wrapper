@@ -123,7 +123,7 @@ pub struct PipelineParams {
 impl PipelineParams {
     pub fn default_olympus() -> Self {
         Self {
-            black: 256,
+            black: 0,
             white: 4095,
             wb_r: 1.78,
             wb_g: 1.00,
