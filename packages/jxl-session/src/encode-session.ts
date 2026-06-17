@@ -16,7 +16,7 @@ import type { Scheduler } from "@casabio/jxl-scheduler";
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer, type Deferred } from "./util.js";
 
-const KNOWN_JXL_ERROR_CODES: ReadonlySet<string> = new Set([
+const KNOWN_JXL_ERROR_CODES: ReadonlySet<JxlErrorCode> = new Set<JxlErrorCode>([
   "MalformedCodestream",
   "TruncatedStream",
   "UnsupportedFeature",
@@ -28,7 +28,7 @@ const KNOWN_JXL_ERROR_CODES: ReadonlySet<string> = new Set([
   "ConfigError",
   "QueueOverflow",  // task 007-contracts-2d3e4f: was missing, decode side already had it
   "Internal",
-]);
+] as const);
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return typeof (value as Promise<T>)?.then === "function";
 }
@@ -84,6 +84,9 @@ export class EncodeSessionImpl implements EncodeSession {
     // (the ? in protocol + exact mode dislikes explicit undefined in the literal from opts?: )
     if (opts.progressiveDc != null) (startMsg as any).progressiveDc = opts.progressiveDc;
     if (opts.groupOrder != null) (startMsg as any).groupOrder = opts.groupOrder;
+    if (opts.progressiveFlavor != null) (startMsg as any).progressiveFlavor = opts.progressiveFlavor;
+    if (opts.progressiveAc != null) (startMsg as any).progressiveAc = opts.progressiveAc;
+    if (opts.qProgressiveAc != null) (startMsg as any).qProgressiveAc = opts.qProgressiveAc;
     if (opts.sidecarSizes !== undefined) startMsg.sidecarSizes = opts.sidecarSizes;
     if (opts.orientation != null) startMsg.orientation = opts.orientation;
     if (opts.centerX != null) startMsg.centerX = opts.centerX;
@@ -97,6 +100,9 @@ export class EncodeSessionImpl implements EncodeSession {
     void this.doneDeferred.promise.catch(() => undefined);
 
     const initAcquire = (scheduler: Scheduler): Promise<unknown> => {
+      // Mirror decode-session: abort may fire before the async scheduler promise resolved;
+      // terminated is already set — do not acquire a slot that will never be released.
+      if (this.terminated) return Promise.resolve();
       this.scheduler = scheduler;
       scheduler.onMessage(this.id, (msg) => this.handleMessage(msg));
       return scheduler.acquireSlot({
@@ -189,7 +195,10 @@ export class EncodeSessionImpl implements EncodeSession {
   getStats(): EncodeStats | null {
     if (this.totalBytesWritten === null) return null;
     const bpp = this.opts.format === "rgba8" ? 4 : this.opts.format === "rgba16" ? 8 : this.opts.format === "rgb8" ? 3 : 16;
-    const originalBytes = this.opts.width * this.opts.height * bpp;
+    const rawProduct = this.opts.width * this.opts.height * bpp;
+    // Guard against non-finite or unsafe-integer result from hostile/huge dims
+    // (width*height*bpp can exceed Number.MAX_SAFE_INTEGER for very large images).
+    const originalBytes = Number.isFinite(rawProduct) && rawProduct <= Number.MAX_SAFE_INTEGER ? rawProduct : 0;
     const compressedBytes = this.totalBytesWritten;
     return {
       originalBytes,
@@ -219,20 +228,21 @@ export class EncodeSessionImpl implements EncodeSession {
 
   private handleMessage(msg: WorkerToMainMessage): void {
     if (this.terminated) return;
+    // Top-level sessionId guard (mirrors decode-session DS-6 pattern) so any
+    // future message type added without an inline check is safe by default.
+    if ((msg as { sessionId?: string }).sessionId !== this.id) return;
 
     switch (msg.type) {
       case "encode_chunk":
-        if (msg.sessionId !== this.id) return;
+        if (msg.chunk == null) break; // defensive: malformed worker message
         this.chunkStream.push(msg.chunk);
         break;
 
       case "encode_first_byte_ready":
         // Informational only; time_to_first_byte_ms arrives via a metric message.
-        if (msg.sessionId !== this.id) return;
         break;
 
       case "encode_done":
-        if (msg.sessionId !== this.id) return;
         // Capture sidecarOffsets before calling complete() so getStats() can
         // return them (task 007-contracts-1a2b3c).
         this.sidecarOffsets = msg.sidecarOffsets;
@@ -240,19 +250,21 @@ export class EncodeSessionImpl implements EncodeSession {
         break;
 
       case "encode_error": {
-        if (msg.sessionId !== this.id) return;
-        this.terminate(new JxlError(this.normalizeCode(msg.code), msg.message, { sessionId: this.id }));
+        this.terminate(new JxlError(this.normalizeCode(msg.code), String(msg.message).slice(0, 512), { sessionId: this.id }));
         break;
       }
 
       case "encode_cancelled":
-        if (msg.sessionId !== this.id) return;
         this.terminate(new JxlError("Cancelled", "Encode cancelled by worker", { sessionId: this.id }));
         break;
 
       case "metric":
-        if (msg.sessionId === this.id && this.opts.onMetric !== undefined) {
-          this.opts.onMetric(msg.metric);
+        if (this.opts.onMetric !== undefined) {
+          try {
+            this.opts.onMetric(msg.metric);
+          } catch {
+            // Consumer callback must not break this session's message pump.
+          }
         }
         break;
 
@@ -294,6 +306,9 @@ export class EncodeSessionImpl implements EncodeSession {
   }
 
   private normalizeCode(code: string): JxlErrorCode {
-    return KNOWN_JXL_ERROR_CODES.has(code) ? (code as JxlErrorCode) : "Internal";
+    // Cast to any for the has() call: Set<JxlErrorCode> rejects a plain string
+    // parameter under strict typing, but we deliberately receive an untyped wire
+    // string here and want the compile-time check on the Set's element type only.
+    return KNOWN_JXL_ERROR_CODES.has(code as JxlErrorCode) ? (code as JxlErrorCode) : "Internal";
   }
 }

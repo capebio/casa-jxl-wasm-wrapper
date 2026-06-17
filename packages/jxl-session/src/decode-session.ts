@@ -11,6 +11,7 @@ import type {
   WorkerToMainMessage,
   MsgDecodeStart,
   CodecMetric,
+  DecodeFrameMeta,
 } from "@casabio/jxl-core";
 import { JxlError, type JxlErrorCode } from "@casabio/jxl-core/errors";
 import type { Scheduler } from "@casabio/jxl-scheduler";
@@ -216,7 +217,7 @@ export class DecodeSessionImpl implements DecodeSession {
   // old way, or a zero-copy frame) emit nothing — additive, never double-counts.
   private makeFrame(
     stage: DecodeFrameEvent["stage"],
-    msg: { info: ImageInfo; pixels: DecodeFrameEvent["pixels"]; format: DecodeFrameEvent["format"]; pixelStride: number; region?: DecodeFrameEvent["region"] },
+    msg: { info: ImageInfo; pixels: DecodeFrameEvent["pixels"]; format: DecodeFrameEvent["format"]; pixelStride: number } & DecodeFrameMeta,
   ): DecodeFrameEvent {
     return {
       stage,
@@ -225,6 +226,15 @@ export class DecodeSessionImpl implements DecodeSession {
       format: msg.format,
       pixelStride: msg.pixelStride,
       ...(msg.region !== undefined ? { region: msg.region } : {}),
+      ...(msg.sourceScale !== undefined ? { sourceScale: msg.sourceScale } : {}),
+      ...(msg.progressiveRegion !== undefined ? { progressiveRegion: msg.progressiveRegion } : {}),
+      ...(msg.regionFallback !== undefined ? { regionFallback: msg.regionFallback } : {}),
+      ...(msg.progressiveSequence !== undefined ? { progressiveSequence: msg.progressiveSequence } : {}),
+      ...(msg.passOrdinal !== undefined ? { passOrdinal: msg.passOrdinal } : {}),
+      ...(msg.frameIndex !== undefined ? { frameIndex: msg.frameIndex } : {}),
+      ...(msg.frameDuration !== undefined ? { frameDuration: msg.frameDuration } : {}),
+      ...(msg.frameName !== undefined ? { frameName: msg.frameName } : {}),
+      ...(msg.animTicksPerSecond !== undefined ? { animTicksPerSecond: msg.animTicksPerSecond } : {}),
     };
   }
 
@@ -269,8 +279,9 @@ export class DecodeSessionImpl implements DecodeSession {
         }
         // progressionTarget "header" stops the worker right after the header — it
         // sends no decode_final — so complete here, otherwise done() hangs forever.
+        // localEarlyFinish=true: no terminal ack arrives, release the scheduler slot now.
         if ((this.opts.progressionTarget ?? "final") === "header") {
-          this.finish(msg.info);
+          this.finish(msg.info, true);
         }
         break;
 
@@ -284,11 +295,12 @@ export class DecodeSessionImpl implements DecodeSession {
         // Mirror the worker's early-finish: for a non-"final" target with
         // emitEveryPass disabled, the worker stops after the first progress and
         // sends no decode_final, so complete here or done() would hang.
+        // localEarlyFinish=true: no terminal ack arrives, release the scheduler slot now.
         if (
           (this.opts.progressionTarget ?? "final") !== "final" &&
           (this.opts.emitEveryPass ?? true) === false
         ) {
-          this.finish(msg.info);
+          this.finish(msg.info, true);
         }
         break;
       }
@@ -316,7 +328,7 @@ export class DecodeSessionImpl implements DecodeSession {
       }
 
       case "decode_error": {
-        const code = this.normalizeCode(msg.code);
+        const { code, originalCode } = this.normalizeCode(msg.code);
         let partial: DecodeFrameEvent | undefined;
         if (code === "TruncatedStream" && msg.partialPixels !== undefined && msg.partialInfo !== undefined) {
           // partialPixelStride is required whenever partialPixels is present; a
@@ -335,7 +347,17 @@ export class DecodeSessionImpl implements DecodeSession {
         }
         // Truncate worker-supplied message to prevent unbounded strings in
         // error objects (task 007-security-i9j0k1l2).
-        const safeMessage = String(msg.message).slice(0, 512);
+        // Guard String() coercion — msg.message may be an odd object whose toString() throws.
+        let safeMessage: string;
+        try {
+          safeMessage = String(msg.message).slice(0, 512);
+        } catch {
+          safeMessage = "(non-stringifiable message)";
+        }
+        // When the wire code was unrecognised, append it so the real cause isn't lost.
+        if (originalCode !== undefined) {
+          safeMessage = `[wire code: ${originalCode}] ${safeMessage}`.slice(0, 512);
+        }
         const err = new JxlError(code, safeMessage, {
           sessionId: this.id,
           ...(partial !== undefined ? { partial } : {}),
@@ -381,10 +403,23 @@ export class DecodeSessionImpl implements DecodeSession {
     }
   }
 
-  private finish(info: ImageInfo): void {
+  /**
+   * @param localEarlyFinish - true when the session completes locally without a terminal
+   *   worker message (progressionTarget="header" or emitEveryPass=false non-final target).
+   *   In those cases no decode_final/decode_cancelled ack arrives, so the scheduler slot
+   *   and onMessage handler are never released by the normal terminal path — we must
+   *   release them here via completeSession().
+   *   False/absent on the normal decode_final path where the scheduler cleans up itself.
+   */
+  private finish(info: ImageInfo, localEarlyFinish = false): void {
     if (this.terminated) return;
     this.terminated = true;
     this.cleanup();
+    // Release the scheduler slot when we finished locally (no worker terminal ack coming).
+    // completeSession() is idempotent on unknown sessionIds — safe to call once here.
+    if (localEarlyFinish) {
+      this.scheduler?.completeSession(this.id);
+    }
     this.frameStream.end();
     if (!this.doneDeferred.settled) {
       this.doneDeferred.resolve(info);
@@ -425,9 +460,10 @@ export class DecodeSessionImpl implements DecodeSession {
     }
   }
 
-  private normalizeCode(code: string): JxlErrorCode {
-    if (KNOWN_JXL_ERROR_CODES.has(code as JxlErrorCode)) return code as JxlErrorCode;
-    return "Internal" as JxlErrorCode;
+  private normalizeCode(code: string): { code: JxlErrorCode; originalCode: string | undefined } {
+    if (KNOWN_JXL_ERROR_CODES.has(code as JxlErrorCode)) return { code: code as JxlErrorCode, originalCode: undefined };
+    // Unknown wire code: map to Internal but preserve original so it isn't silently lost.
+    return { code: "Internal", originalCode: code };
   }
 }
 

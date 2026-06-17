@@ -135,8 +135,9 @@ abstract class CapabilityAwareContext implements JxlContext {
         if (validated !== null && !this.shuttingDown) {
           this.caps = validated;
         }
-      } catch {
+      } catch (e) {
         // Probe unavailable - keep the conservative default.
+        console.warn("[jxl-session] probeCapabilities failed (using defaults):", e);
       } finally {
         this.probeSettled = true;
       }

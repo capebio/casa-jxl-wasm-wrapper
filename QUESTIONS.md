@@ -584,3 +584,39 @@ unchanged. cargo test --no-default-features --lib green: 104 passed, 7 ignored i
 - File: crates/raw-pipeline/src/perceptual/blur.rs:4-8
 - Why: Removing the two per-call w*h f32 Vecs requires either a caller-owned scratch arena or an `_into` variant — a signature change plus a matching edit in Comparer::new (mod.rs:104), outside the single-file safe scope. No correctness impact (one-time reference-side cost: 3 separate tmp+dst allocations per reference, masks recomputed per reference not per test). Policy: DEFER signature changes.
 - Suggested: add `box_blur_into(src, w, h, r, tmp: &mut Vec<f32>, dst: &mut Vec<f32>)` that resizes both scratch buffers to w*h (or early-returns when n==0) and writes the blurred plane into dst; keep the existing `box_blur` as a thin wrapper. Have Comparer::new (or the future fused per-test pass, if blur ever moves there) reuse a single tmp scratch across scales. Keep the n==0 guard already added for 001-errors-4.
+
+### Section 010 — jxl-session (deferred)
+
+#### DEFERRED 010-contracts-7a1c0e22-0002 + 010-logic-7a1c9e02-0003 — ~12 EncodeOptions knobs with no MsgEncodeStart wire field (cross-package)
+- File: `packages/jxl-session/src/encode-session.ts` (field copy site), `packages/jxl-core/src/protocol.ts` (MsgEncodeStart), worker encode-handler(s)
+- Fields missing wire representation: `modular`, `brotliEffort`, `decodingSpeed`, `photonNoiseIso`, `buffering`, `advancedControls`, `jpegReconstruction`, `alreadyDownsampled`, `upsamplingMode`, `ecResampling`, `frameIndexing`, `allowExpertOptions` (EncodeOptions types.ts:161–300).
+- Why deferred: cannot forward from encode-session.ts alone — requires (1) new optional fields on MsgEncodeStart in `jxl-core/protocol.ts`, (2) copy in encode-session.ts constructor, (3) consumption in the worker encode-handler(s). Three-package coordinated change; adding wire fields to protocol.ts changes the contract surface for all encode-handler implementations.
+- Suggested approach: add the fields as optional on MsgEncodeStart; encode-session copies them with the same `if (opts.x != null) (startMsg as any).x = opts.x` pattern; worker encode-handler reads and passes through to libjxl encoder options.
+
+#### DEFERRED 010-logic-7a1c9e02-0005 + 010-errors-c9d0e1f2-0009 — abort-order asymmetry (acquire before pre-aborted check)
+- File: `packages/jxl-session/src/encode-session.ts:111–136`
+- Issue: On the synchronous (non-Promise) scheduler path, `initAcquire` (and thus `acquireSlot`) runs before the pre-aborted check at line 135. DecodeSessionImpl checks `abortSignal.aborted` FIRST and bails before any acquire. The `if (this.terminated) return` guard added in Fix 2 covers the async (Promise) scheduler path; the synchronous path still races.
+- Why deferred: Reordering requires restructuring the constructor so the abort check runs before the `isPromiseLike` branch, and `acquirePromise` is assigned to `Promise.resolve()` in the pre-aborted case — functionally equivalent to what decode-session.ts:87–92 does. Low severity (cancelSession is expected to release the just-acquired slot), but the fix requires moving the `abortHandler` setup above the `acquirePromise` assignment block, crossing the `acquirePromise` field initialisation. Scope requires careful ordering to avoid a regression on the `acquirePromise` no-op catch (line 100).
+
+#### DEFERRED 010-contracts-7a1c0e22-0006 — No shared EncodeOptions→MsgEncodeStart mapper (adr_draft)
+- File: `packages/jxl-session/src/encode-session.ts:65–96`
+- Issue: The projection is open-coded with mixed literal and ad-hoc conditional assigns and no exhaustiveness check. Finding 0001 (dropped progressive AC fields) was a direct consequence of this pattern.
+- Suggested: Extract a `buildEncodeStart(id, opts): MsgEncodeStart` function (or mapper object) with a field-coverage unit test that enumerates every forwarded key. Coordinate with the 12-field wire gap above.
+
+#### DEFERRED DS-SPREAD-01 — makeFrame conditional-spread allocates a temporary object per meta field per frame
+- File: `packages/jxl-session/src/decode-session.ts` — `makeFrame()` (lines ~222–238 after section 010 fix)
+- Issue: each `...(field !== undefined ? { field } : {})` spread creates a short-lived object literal (~9 per frame). The frame rate for JXL progressive is low (<30fps), so this is negligible in profiling. Collapsing to a single-result-object mutation loop over a `FRAME_META_KEYS` array would be allocation-free but changes code structure and needs a benchmark before adoption.
+- Why deferred: performance micro-optimization with no benchmark evidence; current pattern is idiomatic TS.
+- Suggested: build base result object, iterate `const FRAME_META_KEYS: ReadonlyArray<keyof DecodeFrameMeta> = [...]`, assign each key to result only when defined.
+
+#### DEFERRED DS-BUDGETEXCEEDED-META-01 — MsgDecodeBudgetExceeded missing 8 of 9 DecodeFrameMeta fields
+- File: `packages/jxl-core/src/protocol.ts` — `MsgDecodeBudgetExceeded` (and `decode-handler.ts` emit site)
+- Issue: `MsgDecodeBudgetExceeded` only carries `region?` from `DecodeFrameMeta`; the other 8 fields (`sourceScale`, `progressiveSequence`, `passOrdinal`, `frameIndex`, `frameDuration`, `frameName`, `animTicksPerSecond`, `progressiveRegion`, `regionFallback`) are absent. After the makeFrame fix, decode-session.ts will correctly pass those fields through IF the wire message carries them — but it never will until the protocol is extended.
+- Why deferred: protocol change in jxl-core (extend MsgDecodeBudgetExceeded with `extends DecodeFrameMeta`) + decode-handler.ts change to call `assignFrameMeta()` on the budget-exceeded emission. Cross-package change → defer.
+- Suggested: change `MsgDecodeBudgetExceeded` to extend `DecodeFrameMeta` in protocol.ts; update decode-handler `postBudgetExceeded()` to call `assignFrameMeta(msg, state)` before posting (same pattern as `decode_progress`/`decode_final`).
+
+#### DEFERRED DS-SINGLEPASS-SLOT-01 — worker continues decoding after local early-finish (header/single-pass mode)
+- File: `packages/jxl-session/src/decode-session.ts` — `finish(info, localEarlyFinish=true)` paths
+- Issue: After `completeSession()` removes the scheduler record, the worker hosting the session is still alive and continues decoding. It never receives a `decode_cancel` message. Late messages from it are discarded by the scheduler's stale-session guard (discard set), so no correctness issue, but the worker burns CPU on work nobody wants until it naturally completes.
+- Constraint: `scheduler.send()` is fire-and-forget and safe to call after `completeSession()` even though the session record is removed — it will be a no-op (CLAUDE.md contract). But `completeSession()` may have already re-assigned the worker to another session; sending `decode_cancel` to a recycled worker slot would cancel the new session. The right fix is a scheduler-side "retire this worker slot without waiting for a terminal ack" path that also dispatches `decode_cancel` before re-assigning — scheduler-side change → defer.
+- Suggested: Add a `Scheduler.earlyCompleteSession(sessionId)` method that (1) sends `decode_cancel` to the worker before removing the record, (2) registers the sessionId in `discardSessions` so the late terminal ack is dropped, (3) then calls `cleanupSession()`. The session would call this instead of `completeSession()` on the `localEarlyFinish` path.
