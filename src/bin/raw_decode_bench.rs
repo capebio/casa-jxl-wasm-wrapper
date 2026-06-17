@@ -47,7 +47,10 @@ use raw_pipeline::jxl_lowlevel::{
     bench_jxl_decode_lowlevel_progressive as bench_jxl_decode_lowlevel_progressive,
 };
 
-#[cfg(all(feature = "jxl-lowlevel", feature = "jxl-encode"))]
+// Import cfg must match the usage cfg (encode_full_proxy_jxl is gated on jxl-encode
+// alone, line ~788). Was all(jxl-lowlevel, jxl-encode), which broke `--features
+// jxl-encode` builds: usage compiled but the import did not → unresolved SourceType.
+#[cfg(feature = "jxl-encode")]
 use raw_pipeline::casabio_encode::{encode_variants_with_progressive, SourceType};
 
 static SMALL_CROP_TIMES: Mutex<Vec<(String, usize, f64)>> = Mutex::new(Vec::new());
