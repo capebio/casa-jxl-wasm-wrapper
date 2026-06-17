@@ -324,10 +324,6 @@ export class WorkerPool {
   reapIdle({ preserveMinIdle = true } = {}): number {
     let count = 0;
     for (const worker of this.idle) {
-      if (this.parked.has(worker)) {
-        this.parked.delete(worker);
-        continue;
-      }
       if (preserveMinIdle && this.idle.size <= this.minIdle) break;
       this.recycle(worker);
       count++;
@@ -514,10 +510,6 @@ export class WorkerPool {
 
   private takeIdleWorker(): PoolWorker | null {
     for (const worker of this.idle) {
-      if (this.parked.has(worker)) {
-        this.parked.delete(worker);
-        continue;
-      }
       if (
         this.workers.has(worker.id) &&
         worker.activeSessionId === null &&
