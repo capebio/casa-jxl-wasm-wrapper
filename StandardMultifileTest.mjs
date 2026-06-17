@@ -229,7 +229,7 @@ function median(arr) {
 // 5. JXL Encoding Helper (Progressive or One-shot)
 async function encodeJxl(rgba, width, height, isProgressive) {
   const encoder = createEncoder({
-    format: "rgba8", width, height, hasAlpha: false,
+    format: "rgba8", width, height, hasAlpha: true,
     iccProfile: null, exif: null, xmp: null,
     distance: 1.0, quality: 85, effort: 3,
     progressive: isProgressive, progressiveFlavor: "ac", previewFirst: false,
@@ -266,7 +266,8 @@ async function encodeJxl(rgba, width, height, isProgressive) {
   // Validate: sanity check output size
   const minExpectedSize = Math.max(100, width * height / 100); // very loose lower bound
   if (result.byteLength < minExpectedSize) {
-    console.warn(`⚠️  Encoder output suspiciously small: ${result.byteLength}B for ${width}x${height} (expected >${minExpectedSize}B). Progressive=${isProgressive}`);
+    const chunkInfo = chunks.map(c => c.byteLength).join('+');
+    console.warn(`⚠️  Encoder output suspiciously small: ${result.byteLength}B for ${width}x${height} (${chunkInfo}). Expected >${minExpectedSize}B. Progressive=${isProgressive}`);
   }
 
   return { bytes: result, ms };
@@ -274,7 +275,7 @@ async function encodeJxl(rgba, width, height, isProgressive) {
 
 async function encodeJxlVariant(rgba, width, height, extra = {}) {
   const encoder = createEncoder({
-    format: "rgba8", width, height, hasAlpha: false,
+    format: "rgba8", width, height, hasAlpha: true,
     iccProfile: null, exif: null, xmp: null,
     distance: 1.0, quality: 85, effort: 3,
     progressive: false, progressiveFlavor: "ac", previewFirst: false,
