@@ -74,7 +74,7 @@ Record the borders state alongside every timing result (borders=off / borders=on
   - target size ladder
   - source format sweep
   - modular plus lossless matrix
-- [ ] Tests 18 + 20 validation batch (planned 2026-06-06):
+- [x] Tests 18 + 20 validation batch (completed via 2026-06-06 sweep):
   - progressive toggle
   - target size ladder
 
