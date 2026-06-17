@@ -666,6 +666,20 @@ mod tests {
         v
     }
 
+    // Uniform opaque RGBA helper (alpha=255 → stays on the 3ch RAW path).
+    // Was referenced by the progressive smokes but never defined → pre-existing
+    // `cargo test --features jxl-encode` compile break (predates the stash recovery).
+    fn solid(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0u8; (w * h * 4) as usize];
+        for px in v.chunks_exact_mut(4) {
+            px[0] = 120;
+            px[1] = 120;
+            px[2] = 120;
+            px[3] = 255;
+        }
+        v
+    }
+
     #[test]
     fn encodes_three_variants_with_jxl_magic() {
         let rgba = gradient(2000, 1500);
@@ -767,5 +781,28 @@ mod tests {
         assert_eq!(last.width, 4);
         assert_eq!(last.height, 4);
         assert_eq!(last.bits_per_sample, 8);
+    }
+
+    // Open-thread reproduction: does the 4-channel (alpha<255) path actually encode
+    // under jxl-encode alone, or error at libjxl's extra-channel init (encode.cc)?
+    // RGB16 smokes above only hit the alpha=255 → 3ch path; this forces 4ch.
+    #[test]
+    fn encode_4ch_alpha_does_not_error() {
+        let (w, h) = (48u32, 48u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for i in 0..(w * h) as usize {
+            rgba[i * 4] = 180;
+            rgba[i * 4 + 1] = 90;
+            rgba[i * 4 + 2] = 40;
+            rgba[i * 4 + 3] = if i % 3 == 0 { 100 } else { 255 }; // some alpha<255 → 4ch path
+        }
+        let res = encode_variants_with_progressive(&rgba, w, h, SourceType::Other, false, 0, 0);
+        assert!(res.is_ok(), "4ch alpha encode errored: {:?}", res.err());
+        let vs = res.unwrap();
+        assert!(vs.has_alpha, "expected has_alpha=true for alpha<255 input");
+        assert!(
+            !vs.full.is_empty() && !vs.thumb_300.is_empty() && !vs.preview_1080.is_empty(),
+            "encoded 4ch variants must be non-empty"
+        );
     }
 }
