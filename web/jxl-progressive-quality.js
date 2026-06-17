@@ -81,6 +81,71 @@ export function computeSsimVsFinal(cutoffPixels, finalPixels, width, height) {
   return windowChannels === 0 ? 0 : sumSsim / windowChannels;
 }
 
+/**
+ * Fused single-pass PSNR + SSIM. Scans the pixel buffer once, accumulating
+ * PSNR sumSq (all channels) and SSIM raw moments (RGB, ≤3 ch) simultaneously.
+ * Blueprint Ch6 kernel fusion — replaces two full-buffer traversals with one.
+ * RGBA path is fully unrolled. General path handles arbitrary channel counts.
+ * SSIM semantics match computeSsimVsFinal exactly (C1/C2, alpha dropped, global moments).
+ */
+export function computePsnrSsimFused(cutoffPixels, finalPixels, width, height, peak = 255) {
+  if (cutoffPixels.length !== finalPixels.length) {
+    throw new Error(`PSNR/SSIM length mismatch: ${cutoffPixels.length} vs ${finalPixels.length}`);
+  }
+  const np = width * height;
+  if (np === 0) return { psnr: Infinity, ssim: 0 };
+  const channels = cutoffPixels.length / np;
+  if (!Number.isInteger(channels)) {
+    throw new Error(`Fused pixel count not divisible by ${width}*${height}`);
+  }
+  const wch = Math.min(channels, 3); // SSIM uses RGB only
+  let sumSq = 0;
+  let sA0 = 0, sB0 = 0, sAA0 = 0, sBB0 = 0, sAB0 = 0;
+  let sA1 = 0, sB1 = 0, sAA1 = 0, sBB1 = 0, sAB1 = 0;
+  let sA2 = 0, sB2 = 0, sAA2 = 0, sBB2 = 0, sAB2 = 0;
+  if (channels === 4) {
+    // Common RGBA fast path: unrolled 4-ch PSNR + 3-ch SSIM moments in one pass.
+    for (let j = 0; j < cutoffPixels.length; j += 4) {
+      const a0 = cutoffPixels[j],   b0 = finalPixels[j];
+      const a1 = cutoffPixels[j+1], b1 = finalPixels[j+1];
+      const a2 = cutoffPixels[j+2], b2 = finalPixels[j+2];
+      const a3 = cutoffPixels[j+3], b3 = finalPixels[j+3];
+      const d0 = a0-b0, d1 = a1-b1, d2 = a2-b2, d3 = a3-b3;
+      sumSq += d0*d0 + d1*d1 + d2*d2 + d3*d3;
+      sA0+=a0; sB0+=b0; sAA0+=a0*a0; sBB0+=b0*b0; sAB0+=a0*b0;
+      sA1+=a1; sB1+=b1; sAA1+=a1*a1; sBB1+=b1*b1; sAB1+=a1*b1;
+      sA2+=a2; sB2+=b2; sAA2+=a2*a2; sBB2+=b2*b2; sAB2+=a2*b2;
+    }
+  } else {
+    // General path: each pixel read exactly once for both PSNR and SSIM moments.
+    for (let i = 0, j = 0; i < np; i++, j += channels) {
+      if (wch >= 1) { const a=cutoffPixels[j],   b=finalPixels[j];   const d=a-b; sumSq+=d*d; sA0+=a; sB0+=b; sAA0+=a*a; sBB0+=b*b; sAB0+=a*b; }
+      if (wch >= 2) { const a=cutoffPixels[j+1], b=finalPixels[j+1]; const d=a-b; sumSq+=d*d; sA1+=a; sB1+=b; sAA1+=a*a; sBB1+=b*b; sAB1+=a*b; }
+      if (wch >= 3) { const a=cutoffPixels[j+2], b=finalPixels[j+2]; const d=a-b; sumSq+=d*d; sA2+=a; sB2+=b; sAA2+=a*a; sBB2+=b*b; sAB2+=a*b; }
+      for (let c = wch; c < channels; c++) { const d=cutoffPixels[j+c]-finalPixels[j+c]; sumSq+=d*d; }
+    }
+  }
+  const psnr = sumSq === 0 ? Infinity : 10 * Math.log10((peak * peak) / (sumSq / (np * channels)));
+  // Per-channel SSIM — unrolled to avoid allocating temp arrays in the hot path.
+  let ssimSum = 0;
+  if (wch >= 1) {
+    const muA = sA0/np, muB = sB0/np;
+    const varA = sAA0/np - muA*muA, varB = sBB0/np - muB*muB, cov = sAB0/np - muA*muB;
+    ssimSum += (2*muA*muB + C1) * (2*cov + C2) / ((muA*muA + muB*muB + C1) * (varA + varB + C2));
+  }
+  if (wch >= 2) {
+    const muA = sA1/np, muB = sB1/np;
+    const varA = sAA1/np - muA*muA, varB = sBB1/np - muB*muB, cov = sAB1/np - muA*muB;
+    ssimSum += (2*muA*muB + C1) * (2*cov + C2) / ((muA*muA + muB*muB + C1) * (varA + varB + C2));
+  }
+  if (wch >= 3) {
+    const muA = sA2/np, muB = sB2/np;
+    const varA = sAA2/np - muA*muA, varB = sBB2/np - muB*muB, cov = sAB2/np - muA*muB;
+    ssimSum += (2*muA*muB + C1) * (2*cov + C2) / ((muA*muA + muB*muB + C1) * (varA + varB + C2));
+  }
+  return { psnr, ssim: wch === 0 ? 0 : ssimSum / wch };
+}
+
 export const MONOTONE_TOLERANCE_DB = 0.5;
 
 export function detectMonotone(series, toleranceDb = MONOTONE_TOLERANCE_DB, opts = {}) {
@@ -136,9 +201,8 @@ export function computeChannelMoments(pixels, width, height, maxCh = 3, outs) {
 // Returns same shape as separate calls. Callers (profiling/AR gate) get psnr+ssim+moments for "cutoff quality + recog features".
 // No behavior change to prior exports. Wire in callers outside this file only if positive on re-assess.
 export function computeQualityBundle(cutoffPixels, finalPixels, width, height) {
-  const psnr = computePsnrVsFinal(cutoffPixels, finalPixels);
-  const ssim = computeSsimVsFinal(cutoffPixels, finalPixels, width, height);
-  const moments = computeChannelMoments(cutoffPixels, width, height); // or fuse accumulators internally if hotter needed
+  const { psnr, ssim } = computePsnrSsimFused(cutoffPixels, finalPixels, width, height);
+  const moments = computeChannelMoments(cutoffPixels, width, height);
   return { psnr, ssim, moments };
 }
 

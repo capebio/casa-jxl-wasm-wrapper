@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { computePsnrVsFinal, computeSsimVsFinal, detectMonotone, MONOTONE_TOLERANCE_DB, computeChannelMoments, computeQualityBundle, isQualityPlateau } from './jxl-progressive-quality.js';
+import { computePsnrVsFinal, computeSsimVsFinal, computePsnrSsimFused, detectMonotone, MONOTONE_TOLERANCE_DB, computeChannelMoments, computeQualityBundle, isQualityPlateau } from './jxl-progressive-quality.js';
 import { pixelsToXyb, computeButteraugliVsFinal, createButteraugliComparer, computeButteraugliApproxVsFinal } from './jxl-butteraugli.js';
 
 test('PSNR of identical buffers is +Infinity', () => {
@@ -158,7 +158,7 @@ test('moments outs path reuses arrays no extra alloc shape', () => {
 test('bundle returns all three', () => {
   const w=2,h=2; const p=new Uint8Array(w*h*4).fill(90); const f=new Uint8Array(w*h*4).fill(90);
   const b = computeQualityBundle(p, f, w, h);
-  expect(Number.isFinite(b.psnr)).toBe(true);
+  expect(b.psnr).toBe(Infinity); // identical pixels → Infinity (correct; Number.isFinite(Infinity) is false)
   expect(b.ssim).toBe(1);
   expect(b.moments.ch).toBeGreaterThan(0);
 });
@@ -179,6 +179,48 @@ test('psnr peak param', () => {
   const a = new Uint8Array([0]); const b = new Uint8Array([255]);
   expect(computePsnrVsFinal(a, b, 255)).toBeLessThan(1);
   // peak=1 would be different scale but default keeps 255 compat
+});
+
+// computePsnrSsimFused: parity tests vs separate calls + edge cases.
+test('fused identical pixels → psnr Infinity, ssim 1', () => {
+  const w = 4, h = 4;
+  const a = new Uint8Array(w * h * 4).fill(128);
+  const { psnr, ssim } = computePsnrSsimFused(a, a, w, h);
+  expect(psnr).toBe(Infinity);
+  expect(ssim).toBe(1);
+});
+
+test('fused PSNR matches computePsnrVsFinal', () => {
+  const w = 8, h = 8;
+  const a = new Uint8Array(w * h * 4).map((_, i) => i % 256);
+  const b = new Uint8Array(w * h * 4).map((_, i) => (i * 3 + 7) % 256);
+  expect(computePsnrSsimFused(a, b, w, h).psnr).toBeCloseTo(computePsnrVsFinal(a, b), 10);
+});
+
+test('fused SSIM matches computeSsimVsFinal', () => {
+  const w = 8, h = 8;
+  const a = new Uint8Array(w * h * 4).map((_, i) => i % 256);
+  const b = new Uint8Array(w * h * 4).map((_, i) => (i * 3 + 7) % 256);
+  expect(computePsnrSsimFused(a, b, w, h).ssim).toBeCloseTo(computeSsimVsFinal(a, b, w, h), 10);
+});
+
+test('fused mismatched lengths throws', () => {
+  expect(() => computePsnrSsimFused(new Uint8Array(4), new Uint8Array(8), 1, 1)).toThrow();
+});
+
+test('fused 0x0 → { psnr: Infinity, ssim: 0 }', () => {
+  const r = computePsnrSsimFused(new Uint8Array(0), new Uint8Array(0), 0, 0);
+  expect(r.psnr).toBe(Infinity);
+  expect(r.ssim).toBe(0);
+});
+
+test('fused 3ch parity with separate calls', () => {
+  const w = 4, h = 4;
+  const a = new Uint8Array(w * h * 3).fill(80);
+  const b = new Uint8Array(w * h * 3).fill(160);
+  const fused = computePsnrSsimFused(a, b, w, h);
+  expect(fused.psnr).toBeCloseTo(computePsnrVsFinal(a, b), 10);
+  expect(fused.ssim).toBeCloseTo(computeSsimVsFinal(a, b, w, h), 10);
 });
 
 // flipFlop harness (layer5, advanced Q): alternate A/B 10x on same op, medians for targeted speedup/regression guard on hot kernels.

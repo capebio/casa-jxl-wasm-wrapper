@@ -1,4 +1,4 @@
-import { detectMonotone, computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
+import { detectMonotone, computePsnrVsFinal, computeSsimVsFinal, computePsnrSsimFused } from './jxl-progressive-quality.js';
 import { createButteraugliComparer } from './jxl-butteraugli.js';  // for buildSeries helper (cohesion)
 
 export const RECOGNIZABLE_DB = 20;
@@ -191,8 +191,9 @@ function percent(bytes, totalBytes) {
  * when opts.comparator not provided. Supports WASM PSNR/SSIM hooks via opts.psnrFn/ssimFn.
  *
  * opts.comparator  — object with .compare(pixels) → number (sync)
- * opts.psnrFn      — async (test, ref, w, h) → number | null  (WASM PSNR if available)
- * opts.ssimFn      — async (test, ref, w, h) → number | null  (WASM SSIM if available)
+ * opts.fusedFn     — async (test, ref, w, h) → { psnr, ssim } | null  (WASM fused PSNR+SSIM; preferred over psnrFn+ssimFn)
+ * opts.psnrFn      — async (test, ref, w, h) → number | null  (WASM PSNR; used only when fusedFn absent)
+ * opts.ssimFn      — async (test, ref, w, h) → number | null  (WASM SSIM; used only when fusedFn absent)
  * opts.postDecodeTransform — same signature as buildSeries
  *
  * Memory: same contract as buildSeries. WASM comparator path further reduces per-compare JS-side floats.
@@ -205,13 +206,13 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
   if (!n || refPixels.length !== n * 4) return { qualitySeries: [], butterSeries: [], ssimSeries: [], timing: { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 } };
 
   performance.mark('buildSeriesAsync-start');
-  const { comparator = null, postDecodeTransform = null, psnrFn = null, ssimFn = null } = opts;
+  const { comparator = null, postDecodeTransform = null, psnrFn = null, ssimFn = null, fusedFn = null } = opts;
   // comparator: ButteraugliComparator (has .compare method) or null → fall back to JS createButteraugliComparer (returns callable)
   const cmp = comparator ?? createButteraugliComparer(refPixels, width, height);
   const callCmp = typeof cmp === 'function' ? cmp : (p) => cmp.compare(p);
 
   const qualitySeries = [], butterSeries = [], ssimSeries = [];
-  const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
+  const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, fusedMs: 0, totalMs: 0 };
   let prevPsnr = null; // scalar carry — avoids re-indexing qualitySeries[len-1] each iteration (blueprint Ch1)
   const measuredButters = []; // for trajectory prediction inside decideButterCompute
 
@@ -224,18 +225,36 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
       if (transformed && transformed.length === p.length) p = transformed;
     }
 
-    let t = performance.now();
-    const currentPsnr = psnrFn
-      ? (await psnrFn(p, refPixels, width, height) ?? computePsnrVsFinal(p, refPixels))
-      : computePsnrVsFinal(p, refPixels);
-    timing.psnrMs += performance.now() - t;
+    // PSNR + SSIM: fused hook (WASM) → per-metric hooks → JS fused fallback (one scan, Blueprint Ch6).
+    let currentPsnr, currentSsim;
+    if (fusedFn) {
+      const t0 = performance.now();
+      const fused = (await fusedFn(p, refPixels, width, height)) ?? computePsnrSsimFused(p, refPixels, width, height);
+      timing.fusedMs += performance.now() - t0;
+      currentPsnr = fused.psnr; currentSsim = fused.ssim;
+    } else if (psnrFn || ssimFn) {
+      let t0 = performance.now();
+      currentPsnr = psnrFn
+        ? (await psnrFn(p, refPixels, width, height) ?? computePsnrVsFinal(p, refPixels))
+        : computePsnrVsFinal(p, refPixels);
+      timing.psnrMs += performance.now() - t0;
+      t0 = performance.now();
+      currentSsim = ssimFn
+        ? (await ssimFn(p, refPixels, width, height) ?? computeSsimVsFinal(p, refPixels, width, height))
+        : computeSsimVsFinal(p, refPixels, width, height);
+      timing.ssimMs += performance.now() - t0;
+    } else {
+      const t0 = performance.now();
+      ({ psnr: currentPsnr, ssim: currentSsim } = computePsnrSsimFused(p, refPixels, width, height));
+      timing.fusedMs += performance.now() - t0;
+    }
 
     const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
     const doFull = decideButterCompute(i, b, byteSizes, psnrDelta, measuredButters);
     qualitySeries.push({ bytes: b, psnr: currentPsnr });
     prevPsnr = currentPsnr;
 
-    t = performance.now();
+    const t = performance.now();
     let butterVal = null;
     if (doFull) {
       butterVal = callCmp(p);
@@ -243,16 +262,10 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
     }
     butterSeries.push({ bytes: b, butter: butterVal });
     timing.butterMs += performance.now() - t;
-
-    t = performance.now();
-    const currentSsim = ssimFn
-      ? (await ssimFn(p, refPixels, width, height) ?? computeSsimVsFinal(p, refPixels, width, height))
-      : computeSsimVsFinal(p, refPixels, width, height);
-    timing.ssimMs += performance.now() - t;
     ssimSeries.push({ bytes: b, ssim: currentSsim });
   }
   performance.measure('buildSeriesAsync', 'buildSeriesAsync-start');
-  timing.totalMs = timing.psnrMs + timing.butterMs + timing.ssimMs;
+  timing.totalMs = timing.psnrMs + timing.butterMs + timing.ssimMs + timing.fusedMs;
   return { qualitySeries, butterSeries, ssimSeries, timing };
 }
 
@@ -281,7 +294,7 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
   const butterSeries = [];
   const ssimSeries = [];
   // Per-metric timing accumulators — zero-overhead performance.now() pairs; visible in DevTools Timeline.
-  const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
+  const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, fusedMs: 0, totalMs: 0 };
   let prevPsnr = null; // scalar carry — avoids re-indexing qualitySeries[len-1] each iteration (blueprint Ch1)
   const measuredButters = []; // for trajectory prediction inside decideButterCompute
   for (let i = 0; i < cutoffPixelsList.length; i++) {
@@ -294,10 +307,10 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
       const transformed = postDecodeTransform(p, { bytes: b, width, height, index: i, layer: i >> 1 });
       if (transformed && transformed.length === p.length) p = transformed;
     }
-    // Adaptive butter skip: if PSNR delta from previous entry < 0.5 dB, perceptual score won't change significantly.
+    // Fused single-pass PSNR + SSIM (Blueprint Ch6): one pixel scan instead of two.
     let t = performance.now();
-    const currentPsnr = computePsnrVsFinal(p, refPixels);
-    timing.psnrMs += performance.now() - t;
+    const { psnr: currentPsnr, ssim: currentSsim } = computePsnrSsimFused(p, refPixels, width, height);
+    timing.fusedMs += performance.now() - t;
     const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
     const doFull = decideButterCompute(i, b, byteSizes, psnrDelta, measuredButters);
     qualitySeries.push({ bytes: b, psnr: currentPsnr });
@@ -310,12 +323,10 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
     }
     butterSeries.push({ bytes: b, butter: butterVal });
     timing.butterMs += performance.now() - t;
-    t = performance.now();
-    ssimSeries.push({ bytes: b, ssim: computeSsimVsFinal(p, refPixels, width, height) });
-    timing.ssimMs += performance.now() - t;
+    ssimSeries.push({ bytes: b, ssim: currentSsim });
   }
   performance.measure('buildSeries', 'buildSeries-start');
-  timing.totalMs = timing.psnrMs + timing.butterMs + timing.ssimMs;
+  timing.totalMs = timing.psnrMs + timing.butterMs + timing.ssimMs + timing.fusedMs;
   return { qualitySeries, butterSeries, ssimSeries, timing };
 }
 
