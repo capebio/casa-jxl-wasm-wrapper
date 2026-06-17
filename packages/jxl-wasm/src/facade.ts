@@ -130,6 +130,8 @@ export interface DecoderOptions {
   onMetric?: (name: string, value: number) => void;
   /** Optional: pre-allocate chunk buffer at session start if file size is known upfront. Improves first-batch latency. */
   expectedBytes?: number;
+  /** When true, emit pixel buffers without transferring ownership (decoder reuses buffer across frames). Default false. */
+  deferredRelease?: boolean;
 }
 
 export interface EncoderOptions {
