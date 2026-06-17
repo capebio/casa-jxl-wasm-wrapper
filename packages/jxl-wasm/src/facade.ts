@@ -1403,9 +1403,9 @@ class LibjxlDecoder implements JxlDecoder {
     let reusablePixelBuf: ArrayBuffer | null = null;
     let reusablePixelCap = 0; // capacity in bytes
     // Rank #2: Pre-allocate reusable pixel buffer if deferredRelease enabled.
-    // Start with max expected size (frame width * height * bytes-per-sample * channels).
+    // Start with typical HD size (1920×1080×4 ≈ 8 MB).
     if (this.options.deferredRelease) {
-      const estimatedPixelBytes = 16384 * 16384 * 4; // Upper bound: WASM heap limit friendly
+      const estimatedPixelBytes = 1920 * 1080 * 4; // ~8 MB, typical HD size
       try {
         reusablePixelBuf = new ArrayBuffer(estimatedPixelBytes);
         reusablePixelCap = estimatedPixelBytes;
@@ -1673,16 +1673,11 @@ class LibjxlDecoder implements JxlDecoder {
 
           if (!gotRealFlush && (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass")) {
             const stage: DecodeStage = this.options.progressionTarget === "dc" ? "dc" : "pass";
-            // When deferredRelease is off and progressionTarget is "final", use slice() for final (consumed once)
-            // Otherwise prepare with deferredRelease aware path
-            const pixelsToEmit = this.options.progressionTarget !== "final"
-              ? preparePixelsForEmit(outPixels.data)
-              : (this.options.deferredRelease ? preparePixelsForEmit(outPixels.data) : outPixels.data.slice());
             const ev: Extract<DecodeEvent, { type: "progress" }> = {
               type: "progress",
               stage,
               info: outInfo,
-              pixels: pixelsToEmit,
+              pixels: preparePixelsForEmit(outPixels.data),
               format: fmt,
               pixelStride,
               sourceScale: resolvedDownsample,
@@ -1735,6 +1730,34 @@ class LibjxlDecoder implements JxlDecoder {
     const fmt = this.options.format;
     const bpc = fmt === "rgbaf32" ? 4 : fmt === "rgba16" ? 2 : 1;
     const pixelStride = 4 * bpc;
+    // Rank #2: Pre-allocate reusable pixel buffer if deferredRelease enabled (symmetric with eventsProgressive).
+    let reusablePixelBuf: ArrayBuffer | null = null;
+    let reusablePixelCap = 0; // capacity in bytes
+    if (this.options.deferredRelease) {
+      const estimatedPixelBytes = 1920 * 1080 * 4; // ~8 MB, typical HD size
+      try {
+        reusablePixelBuf = new ArrayBuffer(estimatedPixelBytes);
+        reusablePixelCap = estimatedPixelBytes;
+        this.options.onMetric?.("deferred_release_prealloc_bytes_oneshot", estimatedPixelBytes);
+      } catch (e) {
+        throw new Error("Failed to pre-allocate reusable pixel buffer in one-shot mode: " + (e instanceof Error ? e.message : String(e)));
+      }
+    }
+    // Helper: emit with deferred-release or normal transfer
+    const preparePixelsForEmit = (pixData: Uint8Array): ArrayBuffer | Uint8Array => {
+      if (this.options.deferredRelease && reusablePixelBuf !== null) {
+        // Copy from source array into reusable buffer.
+        if (pixData.byteLength > reusablePixelCap) {
+          throw new Error(
+            `Pixel data (${pixData.byteLength} bytes) exceeds reusable buffer capacity (${reusablePixelCap} bytes)`
+          );
+        }
+        const dstView = new Uint8Array(reusablePixelBuf, 0, pixData.byteLength);
+        dstView.set(pixData);
+        return reusablePixelBuf; // shared reference, not transferred
+      }
+      return pixData; // standard transfer (will be detached by postMessage if used)
+    };
     // Write all chunks directly into a single WASM heap buffer — no intermediate JS allocation.
     const totalSize = allChunks.reduce((s, c) => s + c.byteLength, 0);
     const inputPtr = module._malloc(totalSize);
@@ -1815,16 +1838,11 @@ class LibjxlDecoder implements JxlDecoder {
       yield { type: "header", info };
       if (this.options.progressionTarget === "header") return;
       if (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass") {
-        // When deferredRelease is off and progressionTarget is "final", use slice() for final (consumed once)
-        // Otherwise prepare with deferredRelease aware path
-        const pixelsToEmit = this.options.progressionTarget !== "final"
-          ? preparePixelsForEmit(outPixels.data)
-          : (this.options.deferredRelease ? preparePixelsForEmit(outPixels.data) : outPixels.data.slice());
         const ev: Extract<DecodeEvent, { type: "progress" }> = {
           type: "progress",
           stage: this.options.progressionTarget === "dc" ? "dc" : "pass",
           info,
-          pixels: pixelsToEmit,
+          pixels: preparePixelsForEmit(outPixels.data),
           format: fmt,
           pixelStride,
           sourceScale: actualScale,
