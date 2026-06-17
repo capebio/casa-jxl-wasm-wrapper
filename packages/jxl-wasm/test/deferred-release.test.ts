@@ -239,4 +239,48 @@ describe('deferred-release pixel emission mode', () => {
       expect(finalEvent.pixels.byteLength).toBeGreaterThan(0);
     }
   });
+
+  it('should reuse pixel buffer across frames when deferredRelease=true', async () => {
+    setJxlModuleFactoryForTesting(async () => createFakeProgressiveLibjxlModule());
+
+    let mallocGrowCount = 0;
+
+    const decoder = createDecoder({
+      format: 'rgba8',
+      progressionTarget: 'final',
+      emitEveryPass: true, // Request progressive frames
+      preserveIcc: false,
+      preserveMetadata: false,
+      deferredRelease: true,
+      onMetric: (name, value) => {
+        if (name === 'malloc_grow_ms') {
+          mallocGrowCount++;
+        }
+      },
+    });
+
+    // Push test data in two chunks to simulate multi-pass decode
+    decoder.push(new Uint8Array([1, 2, 3, 4]));
+    decoder.push(new Uint8Array([5, 6, 7, 8]));
+    decoder.close();
+
+    let framesReceived = 0;
+    const events = [];
+
+    for await (const event of decoder.events()) {
+      events.push(event);
+      if (event.type === 'progress' || event.type === 'final') {
+        framesReceived++;
+        // In deferredRelease mode, pixels should be an ArrayBuffer (shared reference)
+        expect(event.pixels).toBeInstanceOf(ArrayBuffer);
+      }
+    }
+
+    // With deferredRelease enabled, malloc_grow_ms should fire at most once.
+    // The initial pre-allocation should be sufficient for the test data.
+    // (If it fires more than once, it means the buffer is being reallocated across frames,
+    // which defeats the purpose of deferred release.)
+    expect(framesReceived).toBeGreaterThan(0);
+    expect(mallocGrowCount).toBeLessThanOrEqual(1);
+  });
 });
