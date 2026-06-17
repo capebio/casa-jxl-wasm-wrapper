@@ -1436,6 +1436,26 @@ class LibjxlDecoder implements JxlDecoder {
       let progressiveSequence = 0;
       let progFramePrepMs = 0;
       let progFrameCount = 0;
+
+      // Helper: emit with deferred-release or normal transfer
+      // Modifies pixData in-place: when deferredRelease=true, copies into reusablePixelBuf.
+      // Returns the pixels to emit (shared ref if deferredRelease, otherwise original array).
+      const preparePixelsForEmit = (pixData: Uint8Array): ArrayBuffer | Uint8Array => {
+        if (this.options.deferredRelease && reusablePixelBuf !== null) {
+          // Copy from source array into reusable buffer.
+          // Caller will copy again if needed; transparent to session layer.
+          if (pixData.byteLength > reusablePixelCap) {
+            throw new Error(
+              `Pixel data (${pixData.byteLength} bytes) exceeds reusable buffer capacity (${reusablePixelCap} bytes)`
+            );
+          }
+          const dstView = new Uint8Array(reusablePixelBuf, 0, pixData.byteLength);
+          dstView.set(pixData);
+          return reusablePixelBuf; // shared reference, not transferred
+        }
+        return pixData; // standard transfer (will be detached by postMessage if used)
+      };
+
       const takeAndWrap = (handle: number): { pixels: { data: Uint8Array; width: number; height: number; region?: Region }; evInfo: ImageInfo } | null => {
         if (handle === 0) return null;
         const buf = retainBufferView(module, handle, "decode");
@@ -1588,7 +1608,7 @@ class LibjxlDecoder implements JxlDecoder {
               type: "progress",
               stage,
               info: outInfo,
-              pixels: outPixels.data,
+              pixels: preparePixelsForEmit(outPixels.data),
               format: fmt,
               pixelStride,
               sourceScale: resolvedDownsample,
@@ -1653,11 +1673,16 @@ class LibjxlDecoder implements JxlDecoder {
 
           if (!gotRealFlush && (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass")) {
             const stage: DecodeStage = this.options.progressionTarget === "dc" ? "dc" : "pass";
+            // When deferredRelease is off and progressionTarget is "final", use slice() for final (consumed once)
+            // Otherwise prepare with deferredRelease aware path
+            const pixelsToEmit = this.options.progressionTarget !== "final"
+              ? preparePixelsForEmit(outPixels.data)
+              : (this.options.deferredRelease ? preparePixelsForEmit(outPixels.data) : outPixels.data.slice());
             const ev: Extract<DecodeEvent, { type: "progress" }> = {
               type: "progress",
               stage,
               info: outInfo,
-              pixels: this.options.progressionTarget !== "final" ? outPixels.data : outPixels.data.slice(),
+              pixels: pixelsToEmit,
               format: fmt,
               pixelStride,
               sourceScale: resolvedDownsample,
@@ -1674,7 +1699,7 @@ class LibjxlDecoder implements JxlDecoder {
           const ev: Extract<DecodeEvent, { type: "final" }> = {
             type: "final",
             info: outInfo,
-            pixels: outPixels.data,
+            pixels: preparePixelsForEmit(outPixels.data),
             format: fmt,
             pixelStride,
             sourceScale: resolvedDownsample,
@@ -1790,11 +1815,16 @@ class LibjxlDecoder implements JxlDecoder {
       yield { type: "header", info };
       if (this.options.progressionTarget === "header") return;
       if (this.options.emitEveryPass || this.options.progressionTarget === "dc" || this.options.progressionTarget === "pass") {
+        // When deferredRelease is off and progressionTarget is "final", use slice() for final (consumed once)
+        // Otherwise prepare with deferredRelease aware path
+        const pixelsToEmit = this.options.progressionTarget !== "final"
+          ? preparePixelsForEmit(outPixels.data)
+          : (this.options.deferredRelease ? preparePixelsForEmit(outPixels.data) : outPixels.data.slice());
         const ev: Extract<DecodeEvent, { type: "progress" }> = {
           type: "progress",
           stage: this.options.progressionTarget === "dc" ? "dc" : "pass",
           info,
-          pixels: this.options.progressionTarget !== "final" ? outPixels.data : outPixels.data.slice(),
+          pixels: pixelsToEmit,
           format: fmt,
           pixelStride,
           sourceScale: actualScale,
@@ -1807,7 +1837,7 @@ class LibjxlDecoder implements JxlDecoder {
       const ev: Extract<DecodeEvent, { type: "final" }> = {
         type: "final",
         info,
-        pixels: outPixels.data,
+        pixels: preparePixelsForEmit(outPixels.data),
         format: fmt,
         pixelStride,
         sourceScale: actualScale,
