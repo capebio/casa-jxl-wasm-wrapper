@@ -8,7 +8,7 @@
 
 ## Strategic shape (the one idea)
 
-> **One owned object holds the warm libjxl codec. Feed it `Frame`s, get JXL bytes back.**
+> **One owned object holds the libjxl encoder handle. Feed it `Frame`s, get JXL bytes back.**
 > No hidden state. No buffer-lifecycle puzzles. Explicit lifetime. Reuse is visible.
 
 Everything below is detail hung off that sentence.
@@ -35,7 +35,7 @@ Everything below is detail hung off that sentence.
 encode_rgba8(px, w, h, &opts)        ← thin sugar for the dominant photo path
    = Encoder::new(opts)?.encode(&Frame::rgba8(px, w, h))
 
-Encoder                              ← THE object. Owns the warm *JxlEncoder handle.
+Encoder                              ← THE object. Owns the *JxlEncoder handle (RAII; Drop destroys).
    .encode(&Frame<S>) -> Vec<u8>       reset between encodes; reset-on-error.
    .set_raw(FrameSettingId, i64)       all control + future features live here.
    │
@@ -43,7 +43,9 @@ Encoder                              ← THE object. Owns the warm *JxlEncoder h
 jpegxl-sys  →  libjxl (BSD-3)
 ```
 
-- **Reuse is explicit, not magic.** The 3-variant set and the ingest loop each hold *one* `Encoder` and call `.encode()` repeatedly. The expensive thing (codec init) is paid once per held `Encoder`; `JxlEncoderReset` cleans state between encodes.
+- **Reuse is explicit, not magic.** The 3-variant set and the ingest loop each hold *one* `Encoder` and call `.encode()` repeatedly. `JxlEncoderCreate` (a cheap malloc + struct init) is paid once per held `Encoder`; `JxlEncoderReset` cleans state between encodes.
+- **Nothing is "kept warm."** The handle is a passive heap object — no traffic, no heartbeat, no idle cost, no decay. Its lifetime is exactly the Rust value's lexical scope (RAII): when the orchestrator's `Encoder` drops (end of variant set / ingest loop / fn), `Drop` → `JxlEncoderDestroy`. **No timeout** — and a timeout would be wrong: timeouts manage *shared/pooled* resources with no clear owner (the thread-local pool we deleted). Single explicit ownership = deterministic destruction by scope.
+- **The reuse win is minor.** Create/destroy is microseconds vs tens-to-hundreds of ms per encode; holding one `Encoder` is mostly a cleanliness / fewer-allocations win. The *genuinely* costly resource appears only if a parallel runner (thread pool) is later attached for throughput — spawning OS threads per encode is real cost. That pool would then be held across encodes too, still scope-bound, never timeout-bound. (Encode is single-threaded today, so moot.)
 - **No thread-local pool** — rejected as hidden state. Orchestrator ownership is clearer and gives the control we want. Under rayon, each worker constructs its own `Encoder` (normal owned-value semantics).
 - **No persistent output buffer** — JXL bytes are *retained* (saved), so grow-then-move-out beats reuse-then-copy. Per-encode `Vec`, sized by the grow loop, truncated to exact, moved out.
 
@@ -166,7 +168,7 @@ pub enum ExtraKind { Alpha, Depth, Thermal, Spectral, Optional } // → JxlExtra
 1. `jpegxl-rs` absent from tree, `Cargo.toml`, and `Cargo.lock`; `vendor/jpegxl-rs` deleted.
 2. `cargo build` + `cargo test` green for `raw-pipeline` (both relevant feature sets).
 3. Variant-set + pyramid-sidecar encode output matches pre-change (byte / tolerance).
-4. One warm `Encoder` reused across a variant set and across an ingest loop — no per-call codec create/destroy.
+4. One `Encoder` reused across a variant set and across an ingest loop — no per-call create/destroy.
 5. u8/u16/f16/f32 + interleaved + planar-extra all encode correctly (unit-tested).
 6. No `transmute` for frame-setting IDs; lossless/distance bug structurally impossible.
 
@@ -186,6 +188,6 @@ This encoder is deliberately ready ahead of them and will not be the blocker.
 ## Design rationale — simplifications adopted (bird's-eye pass)
 
 1. **Dropped the thread-local encoder pool.** Reuse happens in explicit loops we already edit; orchestrator ownership is clearer and avoids hidden per-thread state.
-2. **Dropped the persistent output buffer.** Output is retained (saved as files), so grow-then-move-out is strictly cheaper than reuse-then-copy. Encoder's only persistent state is the warm codec handle — the genuinely expensive resource.
+2. **Dropped the persistent output buffer.** Output is retained (saved as files), so grow-then-move-out is strictly cheaper than reuse-then-copy. Encoder's only persistent state is the encoder handle; its lifetime is its Rust scope (RAII) — no pool, no keep-alive, no timeout. (Create/destroy is cheap; the reuse win is minor — see §2.)
 3. **Collapsed the method family to one generic `encode(&Frame<S>)`** + one `encode_rgba8` sugar. `Sample` trait + `Frame` carry the variation.
 4. **`Rate` enum makes the lossless bug unrepresentable** rather than guarding against it at runtime.
