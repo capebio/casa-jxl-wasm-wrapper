@@ -322,3 +322,265 @@ If unbounded, add `maxWaiters?: number` to the constructor and reject in `acquir
 - `packages/jxl-scheduler/src/scheduler.ts:556-562` — promotion subscriber→primary counter assumes promotedRecord.state is final (task `008-errors-a1f3c2d0-0020-...`). DEFERRED: verifier verdict is "currently-correct-but-fragile" — the worker-transfer branch never sets `promotedRecord.state='running'` but subscribers are always created with `state:'running'`, so the L560-562 dispatch coincidentally lands correct. Not a live bug. Direction: an explicit invariant assertion (DEV-only) or normalising `promotedRecord.state` in the transfer branches before the counter dispatch — but this is hardening, not a confirmed defect, and overlaps the broader counter-reconciliation ADR (`008-logic-a1c3e7d2-0010`).
 
 - `packages/jxl-scheduler/src/scheduler.ts:417-421` (send) / 465-466 (bufferedChunks) — per-session bufferedChunks queue is unbounded for a queued session under worker starvation (task `008-security-2e8a6f44-5c77-4b1d-9e3a-6f4b2c1d8e04`). DEFERRED: a hard cap is a behavioral policy decision, not a mechanical fix — when the cap is hit the scheduler must either drop chunks (silent data loss) or fail/error the queued session, both of which change the queued-`send()` contract that jxl-session relies on. Backpressure for queued (pre-assignment) sessions is a genuine gap but the correct layer/semantics (e.g. surface a `decode_error`/queue-overflow event vs. apply waitForDrain-style blocking to queued sessions) needs a contract decision. Direction: decide the overflow policy with the jxl-session owner, then enforce at the scheduler layer (not facade/session).
+
+---
+
+## Section perceptual — crates/raw-pipeline/src/perceptual/simd/avx512.rs
+
+### DEFERRED 001-security-7 — downsample_avx512 OOB-write on unvalidated w/h/dw/dh
+- File: crates/raw-pipeline/src/perceptual/simd/avx512.rs (downsample_avx512, ~L118-149)
+- Why: Out of fixer scope for this file's task allotment (only pixels_to_xyb_avx512
+  and scale_err_avx512 were assigned as SAFE). Same class of fix as the two applied
+  (an entry debug_assert on src.len()>=w*h && dst.len()>=dw*dh && dw==(w+1)/2 && dh==(h+1)/2),
+  but the dw/dh halving relation is a real precondition worth confirming against the
+  caller (dn2 / dispatcher) before asserting, to avoid a false trap. Defer to a pass
+  that can see the caller. Sibling downsample_avx2 has the same unenforced invariant.
+- Suggested patch: at fn entry,
+  `debug_assert!(src.len() >= w * h && dst.len() >= dw * dh, "downsample_avx512: src/dst shorter than dims");`
+  (omit the dw/dh==halved assertion unless the caller contract is confirmed).
+
+### DEFERRED 001-logic-2 — scale_err_avx512 f32-accumulator precision divergence vs scalar f64 oracle
+- File: crates/raw-pipeline/src/perceptual/simd/avx512.rs (scale_err_avx512, ~L32/L60/L63)
+- Why: This is a metric-value concern (could change reference numbers) and tail-math
+  cleanup — explicitly DEFER per fixer policy. The 16-wide f32 accumulator +
+  _mm512_reduce_add_ps tree reduction rounds differently from the scalar f64 sum and
+  from the AVX2 path, so the three backends can disagree on large images. Any change
+  here alters output values and needs ADR sign-off + AVX-512 hardware to verify (dev
+  machine lacks AVX-512; parity test is skipped, only n=1000).
+- Suggested patch (for review, not applied): widen accumulation to f64 (e.g. accumulate
+  e2*root per-lane into an f64 running sum, or split-add the reduced f32 partials less
+  often), matching the scalar oracle — but this is a deliberate accuracy/perf tradeoff,
+  not a no-op, so it must not land as a "safe" fix.
+
+---
+
+## DEFERRED 001-logic-1 — SIMD scale_err f32 accumulator vs scalar f64 oracle
+- File: crates/raw-pipeline/src/perceptual/simd/avx2.rs:38,71,86 (scale_err_avx2 `acc`)
+- Why: The scalar oracle (butteraugli.rs) sums each `e2*sqrt(e2+eps)` term in f64; the AVX2 path accumulates in an f32 `_mm256` register and only widens at `hsum256`. Promoting the lane accumulator to f64 (e.g. two f64x4 accumulators or periodic reduce) CHANGES the valid-input metric value — the parity test (n=1000, rel<1e-4) passes today, and the magnitude of drift at full resolution is unverified. Out of FIXER SAFE policy (must not change valid-input metric values). Also mirrored in avx512.rs / wasm.rs — a uniform change is an architecture decision.
+- Suggested patch: replace single f32 `acc` with two f64x4 accumulators (`_mm256_cvtps_pd` the term, add into f64 lanes) or periodically reduce the f32 acc into an f64 running sum; apply consistently across avx2/avx512/wasm and re-tighten the parity tolerance with a full-resolution validation.
+
+## Section perceptual — crates/raw-pipeline/src/perceptual/simd/wasm.rs
+
+Applied 2 safe guard-only fixes (no valid-input value change), mirroring the
+established `scale_err_avx512` debug_assert pattern:
+- 001-security-9: entry `debug_assert!` on `scale_err_wasm` tying the seven f32
+  slices' lengths to `n` (v128_load OOB guard, debug-only, release no-op).
+- 001-security-8: entry `debug_assert!` on `pixels_to_xyb_wasm` requiring
+  `px.len() >= n*4` and each output plane `>= n` (get_unchecked / v128_store OOB
+  guard; matters most on wasm32 where usize is 32-bit and width*height can wrap).
+Verified: wasm32-unknown-unknown +simd128 build compiles clean; native
+`cargo test --no-default-features --lib` stays green (104 passed, 7 ignored).
+wasm intrinsics are not exercised under cargo test (module is cfg(wasm32)).
+
+## DEFERRED 001-logic-3 — scale_err_wasm f32 v128 accumulator vs scalar f64 oracle
+- File: crates/raw-pipeline/src/perceptual/simd/wasm.rs:35,51,55 (scale_err_wasm `acc`)
+- Why: Same precision-divergence class as 001-logic-1 (avx2) and 001-logic-2 (avx512).
+  The wasm path accumulates `e2*root` into an f32x4 v128 lane accumulator and only
+  widens at `hsum` before the f64 tail. Promoting to an f64 accumulation CHANGES the
+  valid-input metric value and would diverge from the avx2/avx512 siblings (which keep
+  the f32 accumulator). Per fixer policy the overflow/precision change is only SAFE if
+  it RESTORES scalar parity — here it would instead become a new numeric path that the
+  in-tree tests cannot verify (wasm intrinsics can't run under `cargo test`; the module
+  is verified only against the JS reference in Node). A uniform f32→f64 change across
+  avx2/avx512/wasm is an ADR-level architecture decision, not a no-op. DEFER.
+- Suggested patch: apply the same fix proposed in 001-logic-1 (two f64 lane
+  accumulators, or periodic reduce of the f32 acc into an f64 running sum) consistently
+  across avx2/avx512/wasm, then re-tighten the parity tolerance with a full-resolution
+  validation in Node for the wasm path.
+
+## DEFERRED 001-contracts-9 — pixels_to_xyb LUT raw `*const f32` leaks the 256-entry invariant
+- File: crates/raw-pipeline/src/perceptual/simd/avx2.rs:150-188 (and avx512.rs:80-102)
+- Why: `pixels_to_xyb_avx2`/`_avx512` take `lut: *const f32`, gather with u8-derived indices 0..255, and reconstruct `from_raw_parts(lut, 256)` in the tail. The 256-entry requirement is documented only in a comment. Encoding it as `&[f32; 256]` (as wasm.rs:65 already does) is a SIGNATURE CHANGE that also touches the avx512 mirror and the `sqrt_lin_lut_ptr()` caller — outside the single-file SAFE scope.
+- Suggested patch: change both x86 signatures to `lut: &[f32; 256]`, drop the `from_raw_parts`, and update `xyb::sqrt_lin_lut_ptr()`/callers to pass the array reference.
+
+## DEFERRED 001-architecture-11 — ssim_moments_avx2 is scalar; name + target_feature mislead
+- File: crates/raw-pipeline/src/perceptual/simd/avx2.rs:130-148
+- Why: `ssim_moments_avx2` contains no AVX2 intrinsics (a tight scalar u64 loop) yet carries `#[target_feature(enable="avx2")]` "purely for call-site uniformity". Renaming/moving it beside the scalar SSIM in ssim.rs and repointing the dispatcher is a multi-file refactor (touches mod.rs dispatch + ssim.rs) — outside single-file scope and not a correctness change.
+- Suggested patch: move to ssim.rs as `ssim_moments` (drop the feature gate), and have the x86 dispatch arm call the shared scalar fn directly.
+
+## DEFERRED 001-performance-10 — AVX2 XYB gather built from a scalar 8-iteration byte loop
+- File: crates/raw-pipeline/src/perceptual/simd/avx2.rs:165-177
+- Why: `pixels_to_xyb_avx2` scalar-loads 24 bytes into ri/gi/bi then issues three `_mm256_i32gather_ps`. Replacing the gather with shuffle-deinterleave + arithmetic sRGB decode (or a cache-resident LUT) is a complex perf rework that risks changing valid-input float values; flagged low-priority given documented memory-bound profiling.
+- Suggested patch: benchmark a shuffle-based deinterleave that decodes sRGB arithmetically (no gather); only adopt if it both wins on the bench AND holds the <1e-6 parity tolerance.
+
+## DEFERRED 001-contracts-5 — PSNR includes alpha channel while SSIM/butteraugli ignore it
+- File: crates/raw-pipeline/src/perceptual/psnr.rs (and mod.rs:242-247 SIMD ssd_avx2)
+- Why: The doc comment documents an explicit contract — "alpha included, to match the legacy JS `computePsnrVsFinal`". Dropping alpha from the MSE would change the PSNR value for every valid non-identical RGBA input (e.g. constant-alpha buffers shift ~25%). That is a MAX-value / cross-metric-contract change, which policy says to DEFER. Also requires a matching change in the SIMD path (mod.rs ssd_avx2, outside this file's scope) to keep scalar/SIMD parity.
+- Suggested patch (if the cross-metric 3-channel contract is desired): iterate only the RGB bytes (skip every 4th byte) and divide sum_sq by `3 * (a.len()/4)` in BOTH psnr::psnr and the SIMD ssd path; update the doc comment and the `known_mse_matches_formula` test. Confirm with the user whether legacy-JS parity must be preserved before changing.
+
+## DEFERRED 001-errors-8 — psnr returns +inf for two empty buffers (conflates "identical" with "no data")
+- File: crates/raw-pipeline/src/perceptual/psnr.rs:12-13 (and mod.rs:243 SIMD branch)
+- Why: For `a.len()==0` the loop never runs, sum_sq stays 0, and the `sum_sq==0` branch returns f32::INFINITY. Changing the empty-buffer return (e.g. to NaN) is a sentinel-contract change: the `sum_sq==0 -> INFINITY` branch is the documented "identical inputs" contract (test `identical_is_infinite`), and distinguishing empty from identical would require either a separate `a.is_empty()` check returning a different sentinel or reworking the contract. Policy classifies sentinel-contract changes as DEFER; in practice n==0 is only reachable via a zero-extent image (Comparer has no width/height>0 check).
+- Suggested patch: add `if a.is_empty() { return f32::NAN; }` before the `sum_sq==0` check in psnr::psnr, and the equivalent guard in mod.rs::psnr before the SIMD `sum_sq==0` branch; OR add a `width>0 && height>0` check in `Comparer::new`. Confirm desired empty-buffer semantics (NaN vs error vs current +inf) with the user.
+
+## DEFERRED 001-performance-2 — channel_moments recomputes per-channel sum/sum-of-squares already produced by the SSIM moment pass
+- File: crates/raw-pipeline/src/perceptual/ssim.rs:94-113 (channel_moments) + mod.rs:287-293 (all)
+- Why: The reuse cannot be done within ssim.rs without value-neutral fusion across two metric paths and a signature change. The SSIM sums sa[c]/saa[c] are accumulated inside ssim_with_ref (scalar) / ssim_moments_avx2 (SIMD) and consumed by finalize_ssim, then discarded — they are never returned to `all()`. Deriving mus=sa/np and vars=saa/np-mu*mu would require: (a) returning sa/saa from the ssim path (signature change), and (b) rewiring `all()` in mod.rs (out-of-target file). FIXER policy classifies signature changes and fusion-across-metrics (architecture) as DEFER. The math is provably identical (both use f64 sum/np - mu*mu), so this is a safe perf win once the plumbing is approved.
+- Suggested patch: Have `ssim()`/`ssim_moments_avx2` optionally surface (sa, saa) for channels 0..3, and in `Comparer::all()` derive ChannelMoments from those instead of calling channel_moments — eliminating one full-image read. Keep channel_moments as the standalone fallback. Verify `all_matches_individual_calls` still passes within 1e-6.
+
+## DEFERRED 001-contracts-8 — ssim_with_ref returns 0.0 for np==0 while psnr returns +inf and butteraugli returns NaN (divergent empty-input contract)
+- File: crates/raw-pipeline/src/perceptual/ssim.rs:35-37 (np==0 -> 0.0)
+- Why: Changing the np==0 return value is a value-changing edge-case + cross-metric contract decision. The current `0.0` guard already prevents div-by-zero/panic for empty input; it just disagrees with psnr (+inf) and butteraugli (NaN) on what "empty" means. Harmonising the three is an architecture/contract call (which sentinel: NaN, error, or current per-metric values), not a localised safety fix. Policy: value-changing + cross-metric → DEFER.
+- Suggested patch: Decide a single empty-input contract (recommend NaN = "no data", reserving the existing best/worst values for genuine identical/degenerate non-empty input) and apply consistently across ssim/psnr/butteraugli; OR reject zero-extent images in Comparer::new. Confirm desired semantics with the user.
+
+## DEFERRED 001-contracts-13 — SSIM correctness depends on an unenforced call-order pairing between ref_moments and ssim_with_ref/finalize_ssim
+- File: crates/raw-pipeline/src/perceptual/ssim.rs:9-23 (ref_moments), :27-54 (ssim_with_ref), :58-83 (finalize_ssim)
+- Why: Marked `complex`. The contract that ref_moments(b, np, ch) must be paired with ssim_with_ref/finalize_ssim using the same np, the same reference buffer, and a compatible ch (the AVX2 path deliberately precomputes ch=4 then finalizes wch=3, valid only because 0..3 is a prefix) is implicit and unenforced. Enforcing it requires a type/contract change (e.g. a RefMoments newtype carrying np/ch, or finalize taking np/ch from the precompute) — a signature/architecture change beyond the SAFE-task scope.
+- Suggested patch: Introduce a `struct RefMoments { sb, sbb, np, ch }` returned by ref_moments and consumed by ssim_with_ref/finalize_ssim, with a debug_assert that the finalize np/wch match the precompute. Wire through Comparer fields. Verify ssim parity tests + scalar_avx2_parity remain green.
+
+---
+
+### Section 015 — jxl-worker-browser (deferred)
+
+**D-015-1 — MAX_OUTPUT_BYTES_GUARD ceiling is a conservative default, not a validated policy limit**
+- File: `packages/jxl-worker-browser/src/decode-handler.ts`, new constant `MAX_OUTPUT_BYTES_GUARD`
+- The 1 GiB ceiling (at 1 byte/pixel minimum = ~1 billion pixels) was chosen as a clearly-generous overflow guard, not a policy resolution. If the platform legitimately needs to decode images larger than ~32K×32K, this constant must be raised. A future policy decision should align the ceiling with the actual maximum supported canvas size (which may vary by platform/browser and is not currently documented in CLAUDE.md).
+- Suggested action: Document the intended maximum decode resolution in CLAUDE.md or a capabilities doc, and set `MAX_OUTPUT_BYTES_GUARD` to `maxWidth * maxHeight * maxBytesPerPixel` rather than the current conservative 1 GiB floor.
+
+**D-015-2 — output_bytes vs copied_bytes metric semantics are inconsistent across budget paths**
+- File: `packages/jxl-worker-browser/src/decode-handler.ts`, budget arms
+- The progress/final budget-check-2 arms post `copied_bytes` (only when `transfer.copied`) AND let `postBudgetExceeded` post `output_bytes` (always). The codec-emitted `budget_exceeded` arm (after this fix) only posts `output_bytes` via `postBudgetExceeded`. A consumer cannot tell whether `copied_bytes` or `output_bytes` is the canonical metric for buffer size on the budget path — two names, sometimes one present, sometimes both. Consider unifying to a single `output_bytes` metric posted by `postBudgetExceeded` for all paths, and removing `copied_bytes` from the check-2 arms as well, or documenting the semantics difference explicitly.
+
+**D-015-3 — pre-existing typecheck failures in encode-handler.ts and worker.ts**
+- `encode-handler.ts:365` — `finishPromise.catch()` called on `void | Promise<void>` (introduced by another section's fix to the finish-timeout/unhandled-rejection bugs)
+- `worker.ts:588` — `Location` type not found (from the worker_ready tier-handshake fix)
+- These must be resolved in their respective section fix passes, not here. They do not affect decode-handler.ts typecheck correctness.
+
+### Section 015 — jxl-worker-browser (deferred)
+
+Single-file fixer scope: packages/jxl-worker-browser/src/encode-handler.ts. The
+following pending tasks were deferred (perf/info nicety, not mirrorable without
+behavior risk). All confirmed-bug tasks for this file were fixed.
+
+## DEFERRED 015-performance-...006fa2b6c406 — onPixels allocates a wrapper object per inbound pixel chunk
+- File: packages/jxl-worker-browser/src/encode-handler.ts:113-118 (onPixels)
+- Why: severity=info. The encode input queue is a plain `Array<{chunk, region?} | undefined>`
+  with a read index + compactQueue, NOT the decode handler's pre-allocated power-of-two
+  ChunkRing. Each chunk must carry an optional `region`, so a flat `ArrayBuffer` ring (as in
+  decode) cannot represent the pair without a parallel region ring or an object wrapper. The
+  guardrail says fix only if mirrorable WITHOUT behavior change; converting to a paired ring is
+  a structural refactor of the queue (region pairing, compaction, takeNextPixels/drain math) with
+  real behavior risk and no benchmark evidence. Deferred per "else DEFER (perf nicety, not worth risk)".
+
+## DEFERRED 015-performance-...003fa2b6c403 — takeNextPixels calls compactQueue on every drained chunk
+- File: packages/jxl-worker-browser/src/encode-handler.ts:271-293 (takeNextPixels / compactQueue)
+- Why: severity=low. Same root cause as above — the array+read-index queue compacts per drained
+  chunk where decode's ChunkRing is O(1) shift with no compaction. Eliminating the per-chunk
+  compaction means replacing the queue data structure with a ring (paired with region), the same
+  structural refactor deferred above. compactQueue already uses no-alloc copyWithin and only
+  compacts past index 64, so the hot-loop cost is bounded. Deferred to avoid behavior risk.
+
+## DEFERRED 015-performance-...004fa2b6c404 — feedEncoder takes two performance.now() per loop for wait-timing
+- File: packages/jxl-worker-browser/src/encode-handler.ts:295-328 (feedEncoder)
+- Why: severity=info. The decode handler reuses one post-push timestamp for both push-latency and
+  drain coalescing because its drain gate is driven from inside the push loop with `now` passed in.
+  The encode handler's maybePostDrain() reads its own `performance.now()` (it is called without a
+  timestamp argument, also from onPixels-adjacent paths). Threading a single timestamp through
+  maybePostDrain would change its signature/call sites and the drain interval semantics slightly;
+  micro-optimization with no benchmark evidence. Deferred per "else DEFER".
+
+Note: 015-errors-...2c4e6a8b0c13 (feedEncoder maybePostDrain after await / drain-after-terminal)
+was NOT deferred — it is already adequately guarded: feedEncoder returns early via
+`if (this.isTerminal()) return;` immediately before maybePostDrain(), and maybePostDrain only
+emits an advisory worker_drain (no state mutation, no terminal interaction). No change needed.
+
+## Section perceptual — crates/raw-pipeline/src/perceptual/mod.rs
+
+Applied 3 safe guard-only fixes (no valid-input metric-value change): 001-security-1/001-errors-3
+(checked_mul overflow guard on width*height and *4 in Comparer::new), 001-concurrency-1 +
+001-concurrency-2 (runtime is_x86_feature_detected! gate on BackendChoice::Force(id) via a new
+resolve_forced_backend free fn, falling back avx512->avx2->scalar; the AVX-512 backends additionally
+require avx2+fma since their SSIM/PSNR reuse the avx2 kernels), and 001-errors-6 (length guard in
+all() so a short test buffer no longer panics OOB in channel_moments after the three metrics already
+degraded to NaN). For a supported CPU on valid input, backend selection and every metric value are
+unchanged. cargo test --no-default-features --lib green: 104 passed, 7 ignored incl scalar_avx2_parity.
+
+## DEFERRED 001-contracts-1 — Comparer assumes 8-bit (0..255) RGBA, no range contract
+- File: crates/raw-pipeline/src/perceptual/mod.rs:88-93
+- Why: Fixing needs an API/doc contract decision. The 0..255 domain is baked into three independent constants (256-entry LUT in xyb.rs, PSNR 255.0, SSIM C1/C2). Feeding 16-bit-derived bytes yields silently meaningless scores. No runtime check can distinguish valid 8-bit from packed 16-bit without changing the signature/contract.
+- Suggested: ADR — document the 0..255 invariant on Comparer::new/metric methods, or add a bit-depth parameter and parameterize the LUT/PSNR-max/SSIM-C constants.
+
+## DEFERRED 001-contracts-3 — Metrics return bare f32 with NaN/Inf as undocumented sentinels
+- File: crates/raw-pipeline/src/perceptual/mod.rs:202-251 (butteraugli/ssim/psnr/all)
+- Why: f32::NAN overloads "size-mismatch error"; psnr also returns f32::INFINITY for a legitimate perfect score. Forcing callers to handle both needs a Result/Option (or newtype) return — a public API/signature change.
+- Suggested: ADR — return Result<f32, MetricError> / Option<f32>, or at minimum document the sentinel semantics on each pub method.
+
+## DEFERRED 001-contracts-2 — SSIM SIMD path hardcodes RGBA stride 4 / 3 channels vs scalar ch param
+- File: crates/raw-pipeline/src/perceptual/mod.rs:221-233
+- Why: ssim_moments_avx2 unconditionally uses stride 4 / channels 0..3 while scalar ssim_with_ref honors an explicit ch. Masked today: Comparer is always constructed RGBA, so no value divergence on valid input. A structural fix (plumb ch into the AVX2 entry point) is an API change; no guard applied since the divergence is unreachable under the RGBA-only construction.
+- Suggested: ADR — restrict the AVX2 entry point contract to RGBA explicitly, or add a ch parameter to match the scalar contract before SSIM is wired for grayscale/RGB stride.
+
+## DEFERRED 001-performance-1 — Comparer::all() walks the test buffer ~4 times
+- File: crates/raw-pipeline/src/perceptual/mod.rs:283-289
+- Why: Perf restructure (fuse XYB/SSIM/PSNR/channel-moments into one deinterleave pass). Needs benchmark data per CLAUDE.md; the doc comment already notes the fused SIMD override is deferred to a later task.
+- Suggested: fused single-read kernel computing SSD + 5 SSIM moments + channel mus/vars off one test+ref read; gate on benchmark.
+
+## DEFERRED 001-performance-3 — downsample_dispatch copies planes back into tx/ty/tb each scale
+- File: crates/raw-pipeline/src/perceptual/mod.rs:196-198
+- Why: Pure memory-traffic perf change (mem::swap the (tx,dx)/(ty,dy)/(tb,db) roles instead of copy_from_slice). No value change, but it restructures the downsample dataflow + scale_err read source; needs benchmark and care that scale_err_dispatch reads the right buffer.
+- Suggested: ping-pong buffers (index toggle or mem::swap); benchmark before/after.
+
+## DEFERRED 001-performance-6 — Reference pyramid clones 3 planes per level + fresh dn2 allocs
+- File: crates/raw-pipeline/src/perceptual/mod.rs:97-107
+- Why: One-time reference-side allocation cost (low severity). Removing the clone-into-Level / preallocating dn2 outputs is a perf restructure of the pyramid build.
+- Suggested: move buffers into Level when no longer needed for the next downsample; have dn2 write into preallocated level storage.
+
+## DEFERRED 001-performance-12 — ssim() and psnr() each stream test+ref independently
+- File: crates/raw-pipeline/src/perceptual/mod.rs:221-251
+- Why: Perf fusion (SSD + SSIM moments in one paired pass), compounds with perf-1. Needs benchmark.
+- Suggested: single fused pass over paired RGBA bytes for both metrics in all().
+
+## DEFERRED 001-errors-2 — Comparer::new panics (assert_eq!) on bad ref buffer instead of Result
+- File: crates/raw-pipeline/src/perceptual/mod.rs:88-90
+- Why: Constructor hard-panics on caller data while metric methods return NaN — inconsistent. Making it recoverable requires changing new to return Result, a public API/signature change. (The overflow root cause IS fixed via checked_mul under 001-security-1; an oversized-dims input now gets a clear panic message rather than a wrapped length.)
+- Suggested: ADR — Comparer::new(...) -> Result<Self, ComparerError>; unify the bad-length convention with the metric methods.
+
+## DEFERRED 001-architecture-8 — Comparer::new is a god-method (XYB+pyramid+blur+ssim+backend)
+- File: crates/raw-pipeline/src/perceptual/mod.rs:88-142
+- Why: Refactor — extract build_reference_pyramid and resolve_backend. Partially started (resolve_forced_backend extracted under 001-concurrency-1), but the full pyramid decomposition is an architecture change with no behavior delta.
+- Suggested: ADR — extract build_reference_pyramid(rgba,w,h,scales) -> Vec<Level>; constructor reads as compose(pyramid, ref_moments, backend).
+
+## DEFERRED 001-architecture-5 — AVX-512 SSIM/PSNR route through avx2 module (misplaced coupling)
+- File: crates/raw-pipeline/src/perceptual/mod.rs:225-251
+- Why: ssim/psnr fold Avx512 backends into the avx2 arm calling simd::avx2::ssd_avx2 / ssim_moments_avx2 (no avx512 impl exists). Results correct; relocating the byte-reduction kernels to a backend-neutral reduce submodule is an architecture change touching other files. (The runtime-safety side — avx2 must be present when an AVX-512 backend is selected — IS now guarded via resolve_forced_backend, see 001-concurrency-2.)
+- Suggested: ADR — move ssd/ssim_moments into a backend-neutral module; stop naming the SSE2-width kernel "avx2".
+
+## DEFERRED 001-contracts-6 — butteraugli() mutates tx/ty/tb scratch; call-order invariant only in a doc line
+- File: crates/raw-pipeline/src/perceptual/mod.rs:202-233
+- Why: Latent leaky invariant — no current bug (ssim/psnr read raw bytes + ref, not the XYB scratch). Enforcing it structurally is a design change with no value impact today.
+- Suggested: ADR — give butteraugli its own scratch, or encode the call-order ordering.
+
+## DEFERRED 001-logic-8 — butteraugli divides by hard-coded 7.0, ignoring Opts.weights
+- File: crates/raw-pipeline/src/perceptual/mod.rs:210-218
+- Why: 7.0 == sum of default weights [4,2,1]; the divisor is not derived from weights. Changing it to weights.iter().sum() WOULD change valid metric values for any caller supplying non-default weights — a valid-input output change. DEFER per policy (when unsure whether valid metric values change -> DEFER), even though it is arguably a normalization bug. Low real-world reach (WASM/example only pass Opts::default()).
+- Suggested: divisor = self.opts.weights.iter().sum() (fallback to 7.0 when sum==0). Confirm no downstream baseline depends on the literal 7.0 before applying.
+
+## DEFERRED 001-contracts-7 — Avx512 SSIM/PSNR contract is "whatever AVX2 does", asymmetric dispatch
+- File: crates/raw-pipeline/src/perceptual/mod.rs:226-251
+- Why: butteraugli has distinct avx512 arms; ssim/psnr group avx512 into the avx2 arm. Results equal by construction — no value change. Fixing the asymmetry is structural (overlaps 001-architecture-5).
+- Suggested: ADR — same as architecture-5; or add a doc note that SSIM/PSNR intentionally share the 256-wide reduction across AVX2/AVX-512.
+
+## DEFERRED 001-contracts-12 — Force(id) silently maps unknown/WasmSimd ids to Scalar
+- File: crates/raw-pipeline/src/perceptual/mod.rs:109-117 (now resolve_forced_backend)
+- Why: The unguarded-feature UB aspect IS fixed (001-concurrency-1). What remains is the "silent fallback is invisible" reporting — surfacing an error/warning on an invalid forced id requires the constructor to return an error/log (an API change, ties into 001-errors-2 Result return).
+- Suggested: ADR — return Result or log a warning on unknown/unsupported forced ids so a typo'd bench id is visible.
+
+## DEFERRED 001-logic-10 — reference XYB always scalar while test XYB uses SIMD backend
+- File: crates/raw-pipeline/src/perceptual/mod.rs:144-167 (test) vs :93 (ref)
+- Why: Reference built with scalar pixels_to_xyb; test routed through SIMD (FMA Y-channel) — injects a tiny (<tolerance) nonzero butteraugli on an identical image under a SIMD backend. Building the reference with the same backend changes valid metric values (the identical-image score shifts toward exact 0) -> valid-input output change. Also a structural change to Comparer::new.
+- Suggested: ADR — route ref XYB through the same fill_*_xyb backend, or document the scalar/SIMD reference asymmetry as intentional within tolerance.
+
+## DEFERRED 001-performance-8 — dn2 allocates a fresh output Vec on every call
+- File: crates/raw-pipeline/src/perceptual/butteraugli.rs:40-43 (caller: mod.rs:102-110 Comparer::new)
+- Why: Eliminating the per-call `vec![0f32; dw*dh]` requires an in-place / caller-owned-scratch variant — a signature change to the pub(crate) `dn2` plus a matching edit in Comparer::new (outside this single-file safe scope). No correctness impact (one-time reference-pyramid cost: 3 planes × 2 levels = 6 allocs per reference). Policy: DEFER signature changes / restructure.
+- Suggested: add `dn2_into(src, w, h, dst: &mut Vec<f32>) -> (usize, usize)` (mirroring the existing downsample_inplace at mod.rs:293) that resizes `dst` to dw*dh and writes box-averaged samples; have Comparer::new reuse a preallocated level buffer instead of the clone-and-reassign move. Keep the 0-extent guard from 001-errors-5.
+
+## DEFERRED 001-performance-4 — box_blur vertical pass column-walks a row-major buffer (cache anti-pattern)
+- File: crates/raw-pipeline/src/perceptual/blur.rs:26-37
+- Why: The vertical pass has x outer / y inner, touching tmp[y*w+x] and dst[y*w+x] with stride w (one cache line miss per step for w beyond a line). A tiled/transposed or column-block sliding-window rewrite restructures memory access and is a parallelization/perf change needing benchmark evidence; it also risks subtly changing float accumulation/output. Policy: DEFER restructure-needing-benchmark / when-unsure-output-changes. Impact is reference-build-only (3 scales, Comparer::new mod.rs:104), so one-time, not a per-test hot loop.
+- Suggested: transpose tmp→a column-major scratch, run the horizontal sliding-window kernel on it, transpose back into dst; OR process columns in cache-friendly blocks (e.g. 8/16-wide column tiles) so each sliding-window step touches contiguous lines. Must prove bit-identical against scalar reference (the sliding-window add/sub order per output pixel is unchanged, only iteration order differs) and benchmark before landing.
+
+## DEFERRED 001-performance-5 — box_blur heap-allocates tmp + dst per call with no reuse
+- File: crates/raw-pipeline/src/perceptual/blur.rs:4-8
+- Why: Removing the two per-call w*h f32 Vecs requires either a caller-owned scratch arena or an `_into` variant — a signature change plus a matching edit in Comparer::new (mod.rs:104), outside the single-file safe scope. No correctness impact (one-time reference-side cost: 3 separate tmp+dst allocations per reference, masks recomputed per reference not per test). Policy: DEFER signature changes.
+- Suggested: add `box_blur_into(src, w, h, r, tmp: &mut Vec<f32>, dst: &mut Vec<f32>)` that resizes both scratch buffers to w*h (or early-returns when n==0) and writes the blurred plane into dst; keep the existing `box_blur` as a thin wrapper. Have Comparer::new (or the future fused per-test pass, if blur ever moves there) reuse a single tmp scratch across scales. Keep the n==0 guard already added for 001-errors-4.

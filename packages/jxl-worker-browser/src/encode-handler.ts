@@ -34,6 +34,11 @@ const CHUNK_HWM = 4;
 const DRAIN_MIN_INTERVAL_MS = 8;
 const FINISH_TIMEOUT_MS = 30_000;
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024;
+// EMA smoothing for push-latency (mirrors decode-handler HWM_EMA_ALPHA).
+const PUSH_EMA_ALPHA = 0.25;
+// Byte-level secondary drain gate — mirrors decode-handler BYTE_DRAIN_HWM so
+// multi-MB pixel chunks apply byte backpressure even when queueDepth is low.
+const BYTE_DRAIN_HWM = 2 * 1024 * 1024; // 2 MiB
 
 export class EncodeHandler {
   private readonly sessionId: string;
@@ -53,6 +58,11 @@ export class EncodeHandler {
   private wakeResolve: (() => void) | null = null;
   private lastDrainPostedMs = 0;
   private lastDrainAllowed = false;
+  // EMA of encoder.pushPixels() latency (ms); reported as worker_drain.latencyMs.
+  private pushLatencyEma = 0;
+  // Set true once summary metrics have been posted (just before the terminal
+  // message) so the run() finally never double-posts droppable metrics.
+  private finalMetricsPosted = false;
   private encoder: BrowserEncoder | null = null;
   private disposePromise: Promise<void> | null = null;
 
@@ -180,7 +190,8 @@ export class EncodeHandler {
     const tCreate0 = performance.now();
     const encoder = this.wasm.createEncoder(encoderOpts);
     this.createEncoderMs = performance.now() - tCreate0;
-    this.postMetric("encode_create_ms", this.createEncoderMs);
+    // encode_create_ms is posted once via postFinalMetrics() before the terminal
+    // message (was previously double-posted here and in the final summary).
     this.encoder = encoder;
     this.state = "configured";
     try {
@@ -191,11 +202,22 @@ export class EncodeHandler {
     } finally {
       await this.disposeActiveEncoder();
       this.finishSession(this.state);
-      this.postFinalMetrics();
+      // Cleanup only. Summary metrics are posted by postFinalMetrics() BEFORE the
+      // terminal message (encode_done / encode_error). The scheduler deletes the
+      // session on the terminal message, so anything posted here would be dropped.
+      // Skip on the cancel path (encode_cancelled already terminated the session);
+      // otherwise post idempotently to cover the rare throw-before-any-terminal edge
+      // (finalMetricsPosted makes the normal done/error paths a no-op here).
+      if (!this.cancelled) this.postFinalMetrics();
     }
   }
 
+  // Posts the accumulated summary metrics exactly once. Must be called BEFORE the
+  // terminal message (encode_done / encode_error) — the scheduler treats those as
+  // terminal and drops any metric that arrives afterwards.
   private postFinalMetrics(): void {
+    if (this.finalMetricsPosted) return;
+    this.finalMetricsPosted = true;
     const total = performance.now() - this.stageStartMs;
     this.postMetric("encode_total_ms", total);
     this.postMetric("encode_create_ms", this.createEncoderMs);
@@ -203,7 +225,8 @@ export class EncodeHandler {
     this.postMetric("encode_wait_pixels_ms", this.totalWaitForPixelsMs);
     this.postMetric("encode_finish_ms", this.finishMs);
     this.postMetric("encode_chunk_yield_ms", this.totalChunkYieldMs);
-    if (this.firstByteMs > 0) this.postMetric("encode_time_to_first_byte_ms", this.firstByteMs);
+    // encode_time_to_first_byte_ms is posted live (once) when the first chunk is
+    // emitted in readEncoderChunks; not re-posted here to avoid a duplicate.
   }
 
   // ---------------------------------------------------------------------------
@@ -304,7 +327,10 @@ export class EncodeHandler {
 
         const pushStart = performance.now();
         await encoder.pushPixels(entry.chunk, entry.region);
-        this.totalPushPixelsMs += performance.now() - pushStart;
+        const pushMs = performance.now() - pushStart;
+        this.totalPushPixelsMs += pushMs;
+        // EMA of push latency feeds worker_drain.latencyMs (mirrors decode handler).
+        this.pushLatencyEma = PUSH_EMA_ALPHA * pushMs + (1 - PUSH_EMA_ALPHA) * this.pushLatencyEma;
 
         // Re-check state after async pushPixels — cancellation or error may have arrived.
         // Cast through string to defeat TypeScript's pre-await control-flow narrowing.
@@ -316,14 +342,37 @@ export class EncodeHandler {
         if (this.isTerminal()) return;
         this.state = "finalising";
         const finStart = performance.now();
-        await Promise.race([
-          encoder.finish(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("encoder.finish() timed out after 30 s")), FINISH_TIMEOUT_MS),
-          ),
-        ]);
+        // Race finish() against a 30 s timeout. On timeout: (a) cancel the still-
+        // running native encoder so it stops working (mirrors onCancel's cancelFirst),
+        // and (b) attach a no-op .catch to the losing finish() promise so a later
+        // rejection does not surface as a spurious global worker_error. Clear the
+        // timer on the winning path to avoid a dangling timeout.
+        let finishTimer: ReturnType<typeof setTimeout> | undefined;
+        // finish() may return void or Promise<void>; normalise so we can attach a
+        // no-op .catch to the losing promise on the timeout path.
+        const finishPromise = Promise.resolve(encoder.finish());
+        try {
+          await Promise.race([
+            finishPromise,
+            new Promise<never>((_, reject) => {
+              finishTimer = setTimeout(
+                () => reject(new Error("encoder.finish() timed out after 30 s")),
+                FINISH_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } catch (err) {
+          // The timeout (or finish itself) rejected. Cancel + dispose the encoder so
+          // the native side stops, and swallow the orphaned finish() rejection.
+          finishPromise.catch(() => {});
+          void this.disposeActiveEncoder(undefined, true);
+          throw err;
+        } finally {
+          if (finishTimer !== undefined) clearTimeout(finishTimer);
+        }
         this.finishMs = performance.now() - finStart;
-        this.postMetric("encode_finish_ms", this.finishMs);
+        // encode_finish_ms is posted once via postFinalMetrics() before the terminal
+        // message (was previously double-posted here and in the final summary).
         return;
       }
     }
@@ -331,7 +380,9 @@ export class EncodeHandler {
 
   private maybePostDrain(): void {
     const now = performance.now();
-    const drainAllowed = this.queueDepth < CHUNK_HWM;
+    // Byte-level secondary gate (mirrors decode-handler): multi-MB pixel chunks
+    // apply byte backpressure even when the chunk count is below CHUNK_HWM.
+    const drainAllowed = this.queueDepth < CHUNK_HWM && this.queuedBytes < BYTE_DRAIN_HWM;
 
     const crossedIntoDrain = drainAllowed && !this.lastDrainAllowed;
     const intervalElapsed = now - this.lastDrainPostedMs >= DRAIN_MIN_INTERVAL_MS;
@@ -343,6 +394,7 @@ export class EncodeHandler {
 
     this.lastDrainPostedMs = now;
 
+    this._drainMsg.latencyMs = Math.round(this.pushLatencyEma);
     this._drainMsg.queueDepth = this.queueDepth;
     this._drainMsg.queuedBytes = this.queuedBytes;
     self.postMessage(this._drainMsg);
@@ -395,20 +447,41 @@ export class EncodeHandler {
     this.state = "done";
     this.postMetric("encode_chunk_yield_total_ms", this.totalChunkYieldMs);
     this.postMetric("encode_output_bytes", totalBytes);
+    // Post the summary metrics BEFORE the terminal encode_done. The scheduler
+    // treats encode_done as terminal and deletes the session, dropping any metric
+    // that arrives afterwards (this is why postFinalMetrics() used to be a no-op
+    // when invoked from run()'s finally). Mirrors the decode handler folding its
+    // final metrics onto / just before decode_final.
+    this.postFinalMetrics();
+
+    // Validate the chunk↔sidecar mapping. Protocol contract (types.ts): the leading
+    // sidecarSizes.length chunks are the thumbnails — exactly one chunk per sidecar.
+    // If the codec yielded a different number of pre-image chunks the recorded
+    // boundaries would be wrong, so drop sidecarOffsets rather than emit bad offsets.
+    const sidecarOffsetsValid = sidecarOffsets.length === sidecarCount;
+    if (!sidecarOffsetsValid && sidecarCount > 0) {
+      console.warn(
+        `[jxl-worker] sidecar offset count ${sidecarOffsets.length} != sidecarSizes ${sidecarCount}; dropping sidecarOffsets`,
+      );
+    }
 
     const doneMsg: MsgEncodeDone = {
       type: "encode_done",
       sessionId: this.sessionId,
       totalBytes,
-      ...(sidecarOffsets.length > 0 ? { sidecarOffsets } : {}),
+      ...(sidecarOffsetsValid && sidecarOffsets.length > 0 ? { sidecarOffsets } : {}),
     };
     self.postMessage(doneMsg);
     this.finishSession("done");
-    // final summary post already in finally via postFinalMetrics
   }
 
   private failSession(code: string, message: string): void {
     if (this.isTerminal()) return;
+
+    // Post the accumulated summary metrics before the terminal encode_error — the
+    // scheduler drops metrics arriving after a terminal message (idempotent: a no-op
+    // if already posted before encode_done).
+    this.postFinalMetrics();
 
     const msg: MsgEncodeError = {
       type: "encode_error",

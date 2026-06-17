@@ -136,7 +136,7 @@ export function spawnWorker(workerUrl?: string, opts: SpawnOptions = {}): Promis
       _settled = true;
       _terminated = true;
       clearTimeout(startupTimer);
-      reject(new Error(`[jxl-worker-browser] Worker error: ${ev.message}`));
+      reject(new Error(`[jxl-worker-browser] Worker error: ${ev.message ?? "unknown"}`));
     };
 
     // S-4: onmessageerror uses the same post-startup crash path (reason "messageerror").

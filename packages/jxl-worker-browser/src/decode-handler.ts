@@ -40,6 +40,11 @@ const HWM_EMA_ALPHA = 0.25;
 // Safety cap on total queued bytes. Scheduler's adaptive HWM keeps queued bytes well
 // below this (~2 MiB) in normal use; cap only fires for scheduler-free or buggy callers.
 const MAX_QUEUED_BYTES = 128 * 1024 * 1024; // 128 MiB
+// Sanity ceiling on uncompressed output size. Rejects absurd/crafted dimensions before
+// the WASM heap grows to match them. This is an overflow/DoS guard, NOT a policy limit
+// on maximum decode resolution — raise via session opts if needed for legitimate huge files.
+// At 4 bytes/pixel (rgba8): 1 GiB = 256 million pixels (≈ 16384×16384).
+const MAX_OUTPUT_BYTES_GUARD = 1024 * 1024 * 1024; // 1 GiB
 const DRAIN_MIN_INTERVAL_MS = 8;
 const BYTE_DRAIN_HWM = 2 * 1024 * 1024; // 2 MiB — byte-level secondary drain gate
 
@@ -406,6 +411,20 @@ export class DecodeHandler {
       switch (event.type) {
         case "header": {
           this.state = "headers";
+          // Overflow / absurd-size guard: reject before the WASM heap ever needs to hold
+          // the pixel buffer. width*height*bytesPerPixel can overflow to Infinity for a
+          // crafted codestream; MAX_OUTPUT_BYTES_GUARD is a conservative ceiling.
+          // Do NOT gate on format-specific calculations alone — use the conservative
+          // minimum (1 byte/px) so any format that would exceed the cap is caught.
+          const { width, height } = event.info;
+          const minOutputBytes = width * height; // minimum 1 byte/pixel (most restrictive)
+          if (!Number.isFinite(minOutputBytes) || minOutputBytes > MAX_OUTPUT_BYTES_GUARD) {
+            this.failSession(
+              "InvalidInput",
+              `Output dimensions too large: ${width}×${height} exceeds sanity limit`,
+            );
+            return;
+          }
           const msg: MsgDecodeHeader = { type: "decode_header", sessionId: this.sessionId, info: event.info };
           self.postMessage(msg);
           this.postMetric("time_to_header_ms", performance.now() - this.stageStartMs);
@@ -521,10 +540,13 @@ export class DecodeHandler {
           return;
         }
         case "budget_exceeded": {
+          // Measure copy time the same way the progress/final budget arms do.
+          // postBudgetExceeded posts output_bytes for ALL paths; do NOT also post
+          // copied_bytes here — that would double-count the same buffer under two names.
+          const t0 = performance.now();
           const transfer = toTransferablePixels(event.pixels);
           if (transfer.copied) {
-            this.postMetric("copy_to_transfer_ms", 0);
-            this.postMetric("copied_bytes", transfer.buffer.byteLength);
+            this.postMetric("copy_to_transfer_ms", performance.now() - t0);
           }
           this.postMetric("dropped_due_to_budget", 1);
           this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event.region);
