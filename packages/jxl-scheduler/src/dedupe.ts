@@ -73,8 +73,22 @@ export class DedupeRegistry {
 
     if (isPrimary) {
       // Fan-out subscribers still alive. Promote the subscriber chosen by the callback, or the first remaining.
-      const newPrimaryId = pickPromoted?.(subs) ?? subs.values().next().value;
-      
+      // Guard: if no real candidate is available (pickPromoted returned undefined and the iterator
+      // also produced undefined — possible per TypeScript's IteratorResult typing), treat it as
+      // all-cancelled and clean up rather than registering undefined as a primary.
+      const newPrimaryId: string | undefined =
+        pickPromoted?.(subs) ?? subs.values().next().value;
+
+      if (newPrimaryId === undefined) {
+        // No promotable subscriber; clear the entry entirely.
+        this.sessionToSubscribers.delete(primaryId);
+        const key = this.sessionToKey.get(primaryId);
+        if (key !== undefined) this.keyToSession.delete(key);
+        this.sessionToKey.delete(primaryId);
+        for (const sub of subs) this.subscriberToPrimary.delete(sub);
+        return { cancelWorker: true };
+      }
+
       const key = this.sessionToKey.get(primaryId);
       if (key !== undefined) {
         this.keyToSession.set(key, newPrimaryId);

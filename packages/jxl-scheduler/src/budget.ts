@@ -8,6 +8,7 @@
 export class CoreBudget {
   private tokens: number;
   private readonly waiters: Array<{ needed: number; resolve: () => void }> = [];
+  private _waitersHead = 0;
 
   constructor(public readonly capacity: number) {
     if (!Number.isFinite(capacity) || capacity < 0) {
@@ -21,7 +22,7 @@ export class CoreBudget {
   }
 
   get pendingCount(): number {
-    return this.waiters.length;
+    return this.waiters.length - this._waitersHead;
   }
 
   /** FIFO acquire. Blocks until cost tokens free. */
@@ -42,19 +43,42 @@ export class CoreBudget {
   release(cost = 1): void {
     if (cost <= 0) return;
     const next = this.tokens + cost;
-    if (next > this.capacity && typeof process !== "undefined" && process.env["NODE_ENV"] !== "production") {
+    if (next > this.capacity && !CoreBudget._isProduction()) {
       console.warn(`[jxl-scheduler] CoreBudget over-release: ${this.tokens}+${cost} > ${this.capacity}`);
     }
     this.tokens = Math.min(this.capacity, next);
     this.drainWaiters();
   }
 
+  /**
+   * Returns true when running in production mode. Checks both Node.js and
+   * browser/bundler conventions so DEV-mode warnings fire in all environments.
+   */
+  private static _isProduction(): boolean {
+    // Node.js
+    if (typeof process !== "undefined" && process.env["NODE_ENV"] === "production") return true;
+    // Vite / webpack DefinePlugin / similar bundlers expose __DEV__
+    if (typeof (globalThis as { __DEV__?: boolean }).__DEV__ === "boolean") {
+      return !(globalThis as { __DEV__?: boolean }).__DEV__;
+    }
+    return false;
+  }
+
   private drainWaiters(): void {
-    while (this.waiters.length > 0) {
-      const w = this.waiters[0]!;
+    while (this._waitersHead < this.waiters.length) {
+      const w = this.waiters[this._waitersHead]!;
       if (this.tokens >= w.needed) {
-        this.waiters.shift();
+        this._waitersHead++;
         this.tokens -= w.needed;
+        // Compact when fully consumed or head passes the halfway mark (mirrors queue.ts).
+        if (this._waitersHead >= this.waiters.length) {
+          this.waiters.length = 0;
+          this._waitersHead = 0;
+        } else if (this._waitersHead > 64 && this._waitersHead * 2 > this.waiters.length) {
+          this.waiters.copyWithin(0, this._waitersHead);
+          this.waiters.length -= this._waitersHead;
+          this._waitersHead = 0;
+        }
         w.resolve();
       } else {
         break;

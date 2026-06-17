@@ -50,6 +50,7 @@ export class WorkerPool {
   private generation = 0;
   private nextWorkerId = 0;
   private shutdownPromise: Promise<void> | null = null;
+  private staggerTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 
   private lastSpawnFailureMs = 0;
   private consecutiveSpawnFailures = 0;
@@ -300,11 +301,21 @@ export class WorkerPool {
       try {
         const worker = await this.spawn();
         this.handlePrewarmSuccess(worker);
-      } catch {
-        // spawn already accounts failure; continue stagger
+      } catch (err) {
+        // prewarm is best-effort; record failure so backoff + metrics are correct
+        this.noteSpawnFailure();
+        if (DEV) {
+          console.warn("[jxl-scheduler] prewarm spawn failed", err);
+        }
       }
       if (i < n - 1) {
-        await new Promise((r) => setTimeout(r, WorkerPool.PREWARM_STAGGER_MS));
+        await new Promise<void>((r) => {
+          this.staggerTimer = globalThis.setTimeout(() => {
+            this.staggerTimer = null;
+            r();
+          }, WorkerPool.PREWARM_STAGGER_MS);
+        });
+        if (this.destroyed) break;
       }
     }
   }
@@ -337,6 +348,12 @@ export class WorkerPool {
   private async shutdownInner(): Promise<void> {
     this.destroyed = true;
     this.generation++;
+
+    // Cancel any pending inter-spawn stagger timer so it cannot fire after shutdown.
+    if (this.staggerTimer !== null) {
+      globalThis.clearTimeout(this.staggerTimer);
+      this.staggerTimer = null;
+    }
 
     // Wait for in-flight spawns so no worker escapes cleanup.
     await Promise.allSettled([...this.spawnPromises]);
