@@ -1,8 +1,10 @@
 # BSD JXL Encoder — Design Spec
 
 **Date:** 2026-06-17
-**Status:** Design approved, pending spec review → implementation plan
+**Status:** Design approved. **FOUNDATION SUPERSEDED** — see banner.
 **Author:** David (brainstormed w/ Claude)
+
+> ⚠️ **Foundation correction (2026-06-17):** This spec assumed `jpegxl-sys` is BSD and reusable. It is **not** — `jpegxl-sys`, `jpegxl-rs`, and `jpegxl-src` are **all GPL-3.0-or-later**. Keeping `jpegxl-sys` removes no GPL, and the decode path (`jxl_lowlevel.rs`) is GPL too. The encoder **design below is still valid**, but it now sits on our **own bindgen FFI over BSD libjxl headers** (`external/libjxl`), not on `jpegxl-sys`. Implementation direction + steps: **`docs/HANDOFF-bsd-jxl-ffi-2026-06-17.md`**. Treat §1 (decode "already BSD") and §6 ("verify jpegxl-sys = BSD-3") as corrected by that handoff.
 
 ---
 
