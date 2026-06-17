@@ -24,6 +24,9 @@ pub struct VariantSet {
     pub preview_w: u32,
     pub preview_h: u32,
     pub full_quality: u8,
+    /// True if the input RGBA had any pixel with alpha < 255.
+    /// When false the three encoded variants are RGB (no extra channel).
+    pub has_alpha: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -96,6 +99,10 @@ pub fn encode_variants_cancellable(
         return Err(EncodeError::Input { expected: width as usize * height as usize * 4, got: rgba.len() });
     }
 
+    // Detect alpha once from the full-res input; all variant encode calls use this result.
+    // RAW images always have alpha=255 → false → 3ch RGB encode path (fast, no extra-channel issues).
+    let has_alpha = has_meaningful_alpha(rgba);
+
     let full_quality: u8 = if hq_override {
         95
     } else if source == SourceType::Raw {
@@ -143,16 +150,16 @@ pub fn encode_variants_cancellable(
         let (thumb_res, (preview_res, full_res)) = rayon::join(
             || {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(EncodeError::Cancelled); }
-                encode_one(thumb_src, width, height, tw, th, 85, thumb_opts, jpegxl_rs::encode::EncoderSpeed::Lightning)
+                encode_one(thumb_src, width, height, tw, th, 85, thumb_opts, jpegxl_rs::encode::EncoderSpeed::Lightning, has_alpha)
             },
             || rayon::join(
                 || {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(EncodeError::Cancelled); }
-                    encode_one(preview_src, width, height, pw, ph, 85, preview_opts, jpegxl_rs::encode::EncoderSpeed::Falcon)
+                    encode_one(preview_src, width, height, pw, ph, 85, preview_opts, jpegxl_rs::encode::EncoderSpeed::Falcon, has_alpha)
                 },
                 || {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(EncodeError::Cancelled); }
-                    encode_one(rgba, width, height, width, height, full_quality, opts, jpegxl_rs::encode::EncoderSpeed::Falcon)
+                    encode_one(rgba, width, height, width, height, full_quality, opts, jpegxl_rs::encode::EncoderSpeed::Falcon, has_alpha)
                 }
             )
         );
@@ -161,11 +168,11 @@ pub fn encode_variants_cancellable(
 
     #[cfg(not(feature = "parallel"))]
     let (thumb_300, preview_1080, full) = {
-        let t = encode_one(thumb_src, width, height, tw, th, 85, thumb_opts, jpegxl_rs::encode::EncoderSpeed::Lightning)?;
+        let t = encode_one(thumb_src, width, height, tw, th, 85, thumb_opts, jpegxl_rs::encode::EncoderSpeed::Lightning, has_alpha)?;
         if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(EncodeError::Cancelled); }
-        let p = encode_one(preview_src, width, height, pw, ph, 85, preview_opts, jpegxl_rs::encode::EncoderSpeed::Falcon)?;
+        let p = encode_one(preview_src, width, height, pw, ph, 85, preview_opts, jpegxl_rs::encode::EncoderSpeed::Falcon, has_alpha)?;
         if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(EncodeError::Cancelled); }
-        let f = encode_one(rgba, width, height, width, height, full_quality, opts, jpegxl_rs::encode::EncoderSpeed::Falcon)?;
+        let f = encode_one(rgba, width, height, width, height, full_quality, opts, jpegxl_rs::encode::EncoderSpeed::Falcon, has_alpha)?;
         (t, p, f)
     };
 
@@ -180,6 +187,7 @@ pub fn encode_variants_cancellable(
         preview_w: pw,
         preview_h: ph,
         full_quality,
+        has_alpha,
     })
 }
 
@@ -198,17 +206,41 @@ fn encode_one(
     quality: u8,
     opts: ProgressiveOpts,
     speed: jpegxl_rs::encode::EncoderSpeed,
+    has_alpha: bool,
 ) -> Result<Vec<u8>, EncodeError> {
-    // `jpeg_quality` accepts a 0..100 JPEG-style factor and maps it to Butteraugli distance.
+    let (pixels_ref, num_channels): (&[u8], u32) = if has_alpha {
+        (pixels, 4)
+    } else {
+        // RAW images always have alpha=255; strip to RGB for smaller output + no extra-channel setup.
+        // Caller retains the RGBA buffer so we allocate here.
+        let rgb = rgba_to_rgb(pixels);
+        // SAFETY: we need a longer lifetime; encode_one is the owner for the scope below.
+        // Use a local Vec bound to this function body.
+        return encode_one_inner(rgb.as_slice(), w, h, 3, quality, opts, speed, orig_w, orig_h);
+    };
+    encode_one_inner(pixels_ref, w, h, num_channels, quality, opts, speed, orig_w, orig_h)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_one_inner(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    num_channels: u32,
+    quality: u8,
+    opts: ProgressiveOpts,
+    speed: jpegxl_rs::encode::EncoderSpeed,
+    orig_w: u32,
+    orig_h: u32,
+) -> Result<Vec<u8>, EncodeError> {
     let mut enc = encoder_builder()
         .speed(speed)
-        .has_alpha(true)
+        .has_alpha(num_channels == 4)
         .jpeg_quality(quality as f32)
         .build()
         .map_err(|e| EncodeError::Jxl(e.to_string()))?;
 
     // Wire progressive for Tauri/raw-pipeline direct encode parity (predator).
-    // Uses the public set_frame_option on the encoder (id values match libjxl FrameSetting).
     if opts.progressive_dc > 0 {
         let opt = unsafe { std::mem::transmute(JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC) };
         enc.set_frame_option(opt, opts.progressive_dc as i64)
@@ -223,14 +255,13 @@ fn encode_one(
             let scale_y = h as f32 / orig_h as f32;
             let cx_scaled = (cx as f32 * scale_x) as i64;
             let cy_scaled = (cy as f32 * scale_y) as i64;
-            // Fallback: transmuting for GroupOrderCenterX/Y if not in enum (14 and 15)
             let _ = enc.set_frame_option(unsafe { std::mem::transmute(14i32) }, cx_scaled);
             let _ = enc.set_frame_option(unsafe { std::mem::transmute(15i32) }, cy_scaled);
         }
     }
 
     use jpegxl_rs::encode::EncoderFrame;
-    let frame = EncoderFrame::new(pixels).num_channels(4);
+    let frame = EncoderFrame::new(pixels).num_channels(num_channels);
     let result: EncoderResult<u8> = enc
         .encode_frame(&frame, w, h)
         .map_err(|e| EncodeError::Jxl(e.to_string()))?;
@@ -300,6 +331,147 @@ pub struct PyramidLevel {
 
 fn jpeg_quality_for_distance(d: f32) -> f32 {
     if d <= 0.01 { 100.0 } else { (100.0 - (d - 0.1) / 0.09).clamp(30.0, 100.0) }
+}
+
+/// Returns true if any pixel has alpha < 255.
+/// RAW images always have alpha=255 → returns false → fast 3ch RGB path.
+fn has_meaningful_alpha(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).any(|px| px[3] < 255)
+}
+
+/// Strip alpha: RGBA8 interleaved → RGB8 interleaved.
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    let n = rgba.len() / 4;
+    let mut rgb = Vec::with_capacity(n * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.push(px[0]);
+        rgb.push(px[1]);
+        rgb.push(px[2]);
+    }
+    rgb
+}
+
+/// Encode RGBA8 (4ch) directly via jpegxl-sys, calling JxlEncoderSetExtraChannelInfo
+/// to satisfy encode.cc:864 strict extra-channel init check.
+/// Reference sys path; jpegxl-rs now patched to call this internally.
+/// Only compiled when jxl-lowlevel is active (jpegxl-sys dep is available).
+#[cfg(feature = "jxl-lowlevel")]
+#[allow(dead_code)]
+fn encode_rgba4_sys(
+    pixels: &[u8],     // RGBA8, exactly w×h×4 bytes (already sized for target dims)
+    w: u32,
+    h: u32,
+    distance: f32,     // butteraugli distance
+    effort: i64,       // 1..10 libjxl speed/effort
+    progressive_dc: i64,
+    group_order: i64,
+    center: Option<(i64, i64)>,
+) -> Result<Vec<u8>, EncodeError> {
+    use std::ffi::c_void;
+    use std::mem::MaybeUninit;
+    use jpegxl_sys::encoder::encode::{
+        JxlEncoderAddImageFrame, JxlEncoderCloseInput, JxlEncoderCreate,
+        JxlEncoderDestroy, JxlEncoderFrameSettingId, JxlEncoderFrameSettingsCreate,
+        JxlEncoderFrameSettingsSetOption, JxlEncoderInitBasicInfo,
+        JxlEncoderInitExtraChannelInfo, JxlEncoderProcessOutput, JxlEncoderSetBasicInfo,
+        JxlEncoderSetExtraChannelInfo, JxlEncoderSetFrameDistance, JxlEncoderSetFrameLossless,
+        JxlEncoderStatus,
+    };
+    use jpegxl_sys::metadata::codestream_header::{JxlExtraChannelInfo, JxlExtraChannelType};
+    use jpegxl_sys::common::types::{JxlBool, JxlDataType, JxlEndianness, JxlPixelFormat};
+
+    unsafe {
+        let enc = JxlEncoderCreate(std::ptr::null());
+        if enc.is_null() {
+            return Err(EncodeError::Jxl("JxlEncoderCreate failed".into()));
+        }
+
+        // Basic info: RGB + 1 alpha extra channel
+        let mut info = MaybeUninit::uninit();
+        JxlEncoderInitBasicInfo(info.as_mut_ptr());
+        let mut info = info.assume_init();
+        info.xsize = w;
+        info.ysize = h;
+        info.bits_per_sample = 8;
+        info.exponent_bits_per_sample = 0;
+        info.num_extra_channels = 1;
+        info.alpha_bits = 8;
+        info.alpha_exponent_bits = 0;
+        info.alpha_premultiplied = JxlBool::False;
+
+        if JxlEncoderSetBasicInfo(enc, &info) != JxlEncoderStatus::Success {
+            JxlEncoderDestroy(enc);
+            return Err(EncodeError::Jxl("JxlEncoderSetBasicInfo failed".into()));
+        }
+
+        // Extra channel init — satisfies David's encode.cc:864 check
+        let mut ch_info = MaybeUninit::<JxlExtraChannelInfo>::uninit();
+        JxlEncoderInitExtraChannelInfo(JxlExtraChannelType::Alpha, ch_info.as_mut_ptr());
+        let ch_info = ch_info.assume_init();
+        if JxlEncoderSetExtraChannelInfo(enc, 0, &ch_info) != JxlEncoderStatus::Success {
+            JxlEncoderDestroy(enc);
+            return Err(EncodeError::Jxl("JxlEncoderSetExtraChannelInfo failed".into()));
+        }
+
+        // Frame settings
+        let fs = JxlEncoderFrameSettingsCreate(enc, std::ptr::null());
+        if fs.is_null() {
+            JxlEncoderDestroy(enc);
+            return Err(EncodeError::Jxl("JxlEncoderFrameSettingsCreate failed".into()));
+        }
+        JxlEncoderSetFrameLossless(fs, JxlBool::False);
+        JxlEncoderSetFrameDistance(fs, distance);
+        JxlEncoderFrameSettingsSetOption(fs, JxlEncoderFrameSettingId::Effort, effort);
+        if progressive_dc > 0 {
+            JxlEncoderFrameSettingsSetOption(fs, JxlEncoderFrameSettingId::ProgressiveDc, progressive_dc);
+        }
+        if group_order > 0 {
+            JxlEncoderFrameSettingsSetOption(fs, JxlEncoderFrameSettingId::GroupOrder, group_order);
+            if let Some((cx, cy)) = center {
+                JxlEncoderFrameSettingsSetOption(fs, JxlEncoderFrameSettingId::GroupOrderCenterX, cx);
+                JxlEncoderFrameSettingsSetOption(fs, JxlEncoderFrameSettingId::GroupOrderCenterY, cy);
+            }
+        }
+
+        // Add frame (RGBA8)
+        let pf = JxlPixelFormat {
+            num_channels: 4,
+            data_type: JxlDataType::Uint8,
+            endianness: JxlEndianness::Native,
+            align: 0,
+        };
+        if JxlEncoderAddImageFrame(fs, &pf, pixels.as_ptr() as *const c_void, pixels.len())
+            != JxlEncoderStatus::Success
+        {
+            JxlEncoderDestroy(enc);
+            return Err(EncodeError::Jxl("JxlEncoderAddImageFrame failed".into()));
+        }
+        JxlEncoderCloseInput(enc);
+
+        // Drain output
+        let mut out = Vec::<u8>::new();
+        let mut buf = vec![0u8; 1 << 17]; // 128 KiB
+        loop {
+            let mut next = buf.as_mut_ptr();
+            let mut avail = buf.len();
+            match JxlEncoderProcessOutput(enc, &mut next, &mut avail) {
+                JxlEncoderStatus::Success => {
+                    out.extend_from_slice(&buf[..buf.len() - avail]);
+                    break;
+                }
+                JxlEncoderStatus::NeedMoreOutput => {
+                    out.extend_from_slice(&buf[..buf.len() - avail]);
+                }
+                JxlEncoderStatus::Error => {
+                    JxlEncoderDestroy(enc);
+                    return Err(EncodeError::Jxl("JxlEncoderProcessOutput error".into()));
+                }
+            }
+        }
+
+        JxlEncoderDestroy(enc);
+        Ok(out)
+    }
 }
 
 fn map_effort_to_speed(effort: u32) -> jpegxl_rs::encode::EncoderSpeed {
@@ -377,14 +549,30 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
     }
 }
 
-fn encode_one_distance(pixels: &[u8], w: u32, h: u32, distance: f32, effort: u32) -> Result<Vec<u8>, EncodeError> {
+fn encode_one_distance(pixels: &[u8], w: u32, h: u32, distance: f32, effort: u32, has_alpha: bool) -> Result<Vec<u8>, EncodeError> {
+    use jpegxl_rs::encode::EncoderFrame;
+    if has_alpha {
+        let mut enc = encoder_builder()
+            .speed(map_effort_to_speed(effort))
+            .has_alpha(true)
+            .jpeg_quality(jpeg_quality_for_distance(distance))
+            .build()
+            .map_err(|e| EncodeError::Jxl(e.to_string()))?;
+        let frame = EncoderFrame::new(pixels).num_channels(4);
+        let result: EncoderResult<u8> = enc
+            .encode_frame(&frame, w, h)
+            .map_err(|e| EncodeError::Jxl(e.to_string()))?;
+        return Ok(result.data);
+    }
+    let rgb = rgba_to_rgb(pixels);
     let mut enc = encoder_builder()
         .speed(map_effort_to_speed(effort))
         .jpeg_quality(jpeg_quality_for_distance(distance))
         .build()
         .map_err(|e| EncodeError::Jxl(e.to_string()))?;
+    let frame = EncoderFrame::new(&rgb).num_channels(3);
     let result: EncoderResult<u8> = enc
-        .encode(pixels, w, h)
+        .encode_frame(&frame, w, h)
         .map_err(|e| EncodeError::Jxl(e.to_string()))?;
     Ok(result.data)
 }
@@ -424,6 +612,7 @@ pub fn encode_rgba8_pyramid(
         scs.push(Sc { tw, th, dist: sidecar_distances[i] });
     }
 
+    let has_alpha = has_meaningful_alpha(rgba);
     let mut current = rgba.to_vec();
     let mut cw = width;
     let mut ch = height;
@@ -431,7 +620,7 @@ pub fn encode_rgba8_pyramid(
     for sc in scs.iter().rev() {
         let mut thumb = vec![0u8; sc.tw as usize * sc.th as usize * 4];
         box_downscale_rgba8(&current, cw, ch, &mut thumb, sc.tw, sc.th);
-        let data = encode_one_distance(&thumb, sc.tw, sc.th, sc.dist, effort)?;
+        let data = encode_one_distance(&thumb, sc.tw, sc.th, sc.dist, effort, has_alpha)?;
         sides.push(PyramidLevel { data, width: sc.tw, height: sc.th, bits_per_sample: 8 });
         current = thumb;
         cw = sc.tw;
@@ -439,7 +628,7 @@ pub fn encode_rgba8_pyramid(
     }
     sides.reverse();
 
-    let full = encode_one_distance(rgba, width, height, full_distance, effort)?;
+    let full = encode_one_distance(rgba, width, height, full_distance, effort, has_alpha)?;
     sides.push(PyramidLevel { data: full, width, height, bits_per_sample: 8 });
     Ok(sides)
 }

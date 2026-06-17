@@ -235,9 +235,12 @@ pub fn demosaic_rggb_into(raw: &[u16], width: usize, height: usize, out: &mut [u
                 let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
                 out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
 
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                // col+1 is the (odd,odd) BLUE site: R = avg of 4 diagonal reds,
+                // G = avg of 4 green neighbours (N,S,W,E), B = raw. (Was a
+                // copy-paste of the even-row green-red formula → pink veil.)
+                let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+                let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+                let bv2 = here[col+1];
                 let o2 = (col + 1) * 3;
                 out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
             }
@@ -364,11 +367,12 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
                     let bv = v128_bitselect(avg4(nm1, np1, sm1, sp1), avg2(n, s), parity);
                     (rv, gv, bv)
                 } else {
-                    // odd row: R = even→avg2(n,s), odd→avg2(hm1,hp1); G = h (all lanes);
-                    //          B = even→avg2(hm1,hp1), odd→avg2(n,s)
-                    let rv = v128_bitselect(avg2(n, s), avg2(hm1, hp1), parity);
-                    let gv = h;
-                    let bv = v128_bitselect(avg2(hm1, hp1), avg2(n, s), parity);
+                    // even lane = (1,0) G-blue site: R=avg(N,S), G=raw, B=avg(W,E).
+                    // odd  lane = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4
+                    // greens N,S,W,E), B=raw. (Odd lane was wrongly G=h → pink veil.)
+                    let rv = v128_bitselect(avg2(n, s), avg4(nm1, np1, sm1, sp1), parity);
+                    let gv = v128_bitselect(h, avg4(n, s, hm1, hp1), parity);
+                    let bv = v128_bitselect(avg2(hm1, hp1), h, parity);
                     (rv, gv, bv)
                 }
             };
@@ -407,9 +411,10 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
                 let gv = here[col];
                 let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
                 out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                // col+1 = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4 greens), B=raw.
+                let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+                let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+                let bv2 = here[col+1];
                 let o2 = (col+1)*3;
                 out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
             }
@@ -573,9 +578,12 @@ pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Re
                     let bv = v128_bitselect(avg4(nm1, np1, sm1, sp1), avg2(n, s), parity);
                     (rv, gv, bv)
                 } else {
-                    let rv = v128_bitselect(avg2(n, s), avg2(hm1, hp1), parity);
-                    let gv = h;
-                    let bv = v128_bitselect(avg2(hm1, hp1), avg2(n, s), parity);
+                    // even lane = (1,0) G-blue site: R=avg(N,S), G=raw, B=avg(W,E).
+                    // odd  lane = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4
+                    // greens N,S,W,E), B=raw. (Odd lane was wrongly G=h → pink veil.)
+                    let rv = v128_bitselect(avg2(n, s), avg4(nm1, np1, sm1, sp1), parity);
+                    let gv = v128_bitselect(h, avg4(n, s, hm1, hp1), parity);
+                    let bv = v128_bitselect(avg2(hm1, hp1), h, parity);
                     (rv, gv, bv)
                 }
             };
@@ -607,9 +615,10 @@ pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Re
                 let gv = here[col];
                 let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
                 r_plane[o] = rv; g_plane[o] = gv; b_plane[o] = bv;
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                // col+1 = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4 greens), B=raw.
+                let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+                let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+                let bv2 = here[col+1];
                 let o2 = row * width + (col + 1);
                 r_plane[o2] = rv2; g_plane[o2] = gv2; b_plane[o2] = bv2;
             }
@@ -707,9 +716,12 @@ pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> R
                     let bv = v128_bitselect(avg4(nm1, np1, sm1, sp1), avg2(n, s), parity);
                     (rv, gv, bv)
                 } else {
-                    let rv = v128_bitselect(avg2(n, s), avg2(hm1, hp1), parity);
-                    let gv = h;
-                    let bv = v128_bitselect(avg2(hm1, hp1), avg2(n, s), parity);
+                    // even lane = (1,0) G-blue site: R=avg(N,S), G=raw, B=avg(W,E).
+                    // odd  lane = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4
+                    // greens N,S,W,E), B=raw. (Odd lane was wrongly G=h → pink veil.)
+                    let rv = v128_bitselect(avg2(n, s), avg4(nm1, np1, sm1, sp1), parity);
+                    let gv = v128_bitselect(h, avg4(n, s, hm1, hp1), parity);
+                    let bv = v128_bitselect(avg2(hm1, hp1), h, parity);
                     (rv, gv, bv)
                 }
             };
@@ -750,9 +762,10 @@ pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> R
                 let gv = here[col];
                 let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
                 out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+                // col+1 = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4 greens), B=raw.
+                let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+                let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+                let bv2 = here[col+1];
                 let o2 = (col + 1) * 3;
                 out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
             }
@@ -1529,6 +1542,44 @@ mod tests {
         assert!(rgbm.iter().all(|&v| v == 65535));
         // Spot: R site keeps 65535, B site keeps 65535, G sites are averages <=65535
         // (no underflow from the MHC laplacian terms either).
+    }
+
+    #[test]
+    fn blue_site_no_pink_cast() {
+        // Regression for the "pink veil": the unrolled RGGB interior must
+        // reconstruct a blue-site pixel (odd row, odd col) correctly. A
+        // copy-paste fault made the odd-row second pixel use the *green-red*
+        // formula, so blue-site pixels came out green=blue, red/blue=green
+        // → a magenta cast on a 2px lattice. A flat field hides it (all
+        // samples equal), so use a constant-per-channel CFA: every correctly
+        // demosaiced interior pixel must equal (R,G,B) exactly. Width >= 5 so
+        // the fast unrolled interior (not bayer_pixel) is exercised.
+        const R: u16 = 1000;
+        const G: u16 = 2000;
+        const B: u16 = 500;
+        let (w, h) = (8usize, 8usize);
+        let mut raw = vec![0u16; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                raw[r * w + c] = match (r & 1, c & 1) {
+                    (0, 0) => R, // red site
+                    (1, 1) => B, // blue site
+                    _ => G,      // green sites
+                };
+            }
+        }
+        let rgb = demosaic_rggb(&raw, w, h).unwrap();
+        let px = |r: usize, c: usize| {
+            let o = (r * w + c) * 3;
+            (rgb[o], rgb[o + 1], rgb[o + 2])
+        };
+        assert_eq!(px(4, 4), (R, G, B), "interior R site");
+        assert_eq!(px(4, 5), (R, G, B), "interior G-red site");
+        assert_eq!(px(5, 4), (R, G, B), "interior G-blue site");
+        assert_eq!(px(5, 5), (R, G, B), "interior B site (pink-veil regression)");
+        // SIMD path (delegates to scalar on native) must agree byte-for-byte.
+        let rgb_simd = demosaic_rggb_simd(&raw, w, h).unwrap();
+        assert_eq!(rgb, rgb_simd, "simd path must match scalar");
     }
 
     #[test]
