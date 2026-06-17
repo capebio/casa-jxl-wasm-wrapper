@@ -34,6 +34,7 @@ test('summarizeByteCutoffResults reports first paint, preview, final and counts'
     regressions: [],
     firstPerceptuallyGoodBytes: null,
     firstPerceptuallyGoodPercent: null,
+    firstPerceptuallyGoodConfidence: null,
     finalButter: null,
     butterMonotone: null,
     butterRegressions: [],

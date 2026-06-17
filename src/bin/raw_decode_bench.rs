@@ -94,14 +94,12 @@ fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -
     for _ in 0..RUNS {
         // Runner must outlive encoder; declared first so it drops last.
         let runner = ThreadsRunner::new(None, Some(threads))?;
-        let mut builder = encoder_builder();
-        builder.parallel_runner(&runner).speed(EncoderSpeed::Falcon);
-        builder.set_jpeg_quality(JXL_QUALITY);
-        if num_ch == 4 {
-            // Required for 4ch RGBA direct path (native/Tauri encode parity); matches casabio_encode + jpegxl-rs test usage.
-            builder.has_alpha(true);
-        }
-        let mut encoder = builder.build().ok()?;
+        let mut encoder = encoder_builder()
+            .parallel_runner(&runner)
+            .speed(EncoderSpeed::Falcon)
+            .has_alpha(num_ch == 4)
+            .jpeg_quality(JXL_QUALITY)
+            .build().ok()?;
         let t = Instant::now();
         // Use high-level .encode for 4ch (direct rgba) -- proven in casabio_encode + ORF runs.
         // Falls back to explicit frame for 3ch. Avoids "buffer too small" / extra-ch alpha mismatches seen on some DNGs with frame path.
@@ -770,11 +768,10 @@ fn process_orf_to_rgba8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
 
 fn encode_small_rgba_jxl(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     use jpegxl_rs::encode::{encoder_builder, EncoderSpeed};
-    let mut builder = encoder_builder();
-    builder.speed(EncoderSpeed::Falcon);
-    builder.set_jpeg_quality(85.0);
-    // Do not set has_alpha here; the high-level encode(&rgba4, w, h) in casabio works without it for 4ch input.
-    let mut enc = builder.build().ok()?;
+    let mut enc = encoder_builder()
+        .speed(EncoderSpeed::Falcon)
+        .jpeg_quality(85.0)
+        .build().ok()?;
     let result: jpegxl_rs::encode::EncoderResult<u8> = enc.encode(rgba, width, height).ok()?;
     Some(result.data)
 }

@@ -8,6 +8,42 @@ export const SSIM_GOOD = 0.8;
 export const BUTTER_MONOTONE_TOL = 0.1;
 export const SSIM_MONOTONE_TOL = 0.01; // SSIM is 0..1, not dB — needs its own tolerance scale
 
+/**
+ * Decide whether to invoke Butteraugli (expensive) for this cutoff index/bytes.
+ * Reduces calls vs pure reactive (i%2 || >100k || psnrDelta>0.5).
+ * Phase 1: safe early skip (<25% bytes, post-first).
+ * Phase 2/3: use sparse measured samples for linear slope + curvature to predict crossings.
+ * Never skips i=0 or final. Nulls remain valid for summarize.
+ */
+function decideButterCompute(i, b, byteSizes, psnrDelta, measuredButters) {
+  const n = byteSizes.length;
+  if (!n) return false;
+  const lastB = byteSizes[n - 1] || b;
+  const isLast = i === n - 1;
+  if (i === 0 || isLast) return true;
+  if (b < lastB * 0.25) return false;
+  if ((i % 2 === 0) || b > 100 * 1024 || psnrDelta > 0.5) return true;
+  if (measuredButters.length >= 2) {
+    const m = measuredButters;
+    const l = m[m.length - 1];
+    const p = m[m.length - 2];
+    const dx = Math.max(1, l.bytes - p.bytes);
+    const slope = (l.butter - p.butter) / dx;
+    const predB = l.butter + slope * (b - l.bytes);
+    if (measuredButters.length >= 3) {
+      const p2 = m[m.length - 3];
+      const dx0 = Math.max(1, p.bytes - p2.bytes);
+      const slope0 = (p.butter - p2.butter) / dx0;
+      const curv = Math.abs(slope - slope0) / Math.max(1, (dx0 + dx) / 2);
+      if (predB < GOOD_BUTTER - 0.2 && curv < 5e-6 && Math.abs(slope) < 5e-5) return false;
+    } else if (predB < GOOD_BUTTER - 0.3 && Math.abs(slope) < 1e-4) {
+      return false;
+    }
+    if (Math.abs(predB - GOOD_BUTTER) < 0.5) return true;
+  }
+  return false;
+}
+
 export function classifyByteCutoffFrame({ bytes, events = [], error = null }) {
   const frames = events.filter((event) => event && (event.type === 'progress' || event.type === 'final'));
   const last = frames.at(-1);
@@ -57,6 +93,7 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
 
   let firstPerceptuallyGoodBytes = null;
   let firstPerceptuallyGoodPercent = null;
+  let firstPerceptuallyGoodConfidence = null;
   let finalButter = null;
   let butterMonotone = null;
   let butterRegressions = [];
@@ -70,6 +107,19 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     const m = detectMonotone(ss, BUTTER_MONOTONE_TOL, { valueKey: 'butter', lowerIsBetter: true });
     butterMonotone = m.monotone;
     butterRegressions = m.regressions;
+    // Confidence model (handoff item 4): rough proxy from sample density near threshold + distance to GOOD_BUTTER.
+    // 1.0 = dense samples + on/below threshold; lower when sparse or far extrapolation.
+    if (firstPerceptuallyGoodBytes != null) {
+      const cross = ss.find((e) => e.bytes === firstPerceptuallyGoodBytes && e.butter != null) ||
+                    ss.find((e) => e.butter != null && e.butter <= goodButter);
+      const nearCount = ss.filter((e) => e.butter != null && Math.abs((e.bytes || 0) - (firstPerceptuallyGoodBytes || 0)) <= totalBytes * 0.15).length;
+      let c = 0.65;
+      if (cross && typeof cross.butter === 'number') {
+        const dist = Math.abs(cross.butter - goodButter);
+        c = Math.max(0.55, Math.min(0.97, 0.88 - dist * 0.25 + Math.min(0.12, nearCount * 0.04)));
+      }
+      firstPerceptuallyGoodConfidence = Number(c.toFixed(2));
+    }
   }
 
   // ssimSeries support for symmetry (higher-better like psnr); fields added if present
@@ -103,6 +153,7 @@ export function summarizeByteCutoffResults(results, totalBytes, { qualitySeries 
     regressions,
     firstPerceptuallyGoodBytes,
     firstPerceptuallyGoodPercent,
+    firstPerceptuallyGoodConfidence,
     finalButter,
     butterMonotone,
     butterRegressions,
@@ -143,6 +194,8 @@ function percent(bytes, totalBytes) {
  * opts.psnrFn      — async (test, ref, w, h) → number | null  (WASM PSNR if available)
  * opts.ssimFn      — async (test, ref, w, h) → number | null  (WASM SSIM if available)
  * opts.postDecodeTransform — same signature as buildSeries
+ *
+ * Memory: same contract as buildSeries. WASM comparator path further reduces per-compare JS-side floats.
  */
 export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, width, height, opts = {}) {
   if (!Array.isArray(cutoffPixelsList) || !Array.isArray(byteSizes) || cutoffPixelsList.length !== byteSizes.length) {
@@ -160,6 +213,7 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
   const qualitySeries = [], butterSeries = [], ssimSeries = [];
   const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
   let prevPsnr = null; // scalar carry — avoids re-indexing qualitySeries[len-1] each iteration (blueprint Ch1)
+  const measuredButters = []; // for trajectory prediction inside decideButterCompute
 
   for (let i = 0; i < cutoffPixelsList.length; i++) {
     let p = cutoffPixelsList[i];
@@ -177,12 +231,17 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
     timing.psnrMs += performance.now() - t;
 
     const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
-    const doFull = (i % 2 === 0) || (b > 100 * 1024) || psnrDelta > 0.5;
+    const doFull = decideButterCompute(i, b, byteSizes, psnrDelta, measuredButters);
     qualitySeries.push({ bytes: b, psnr: currentPsnr });
     prevPsnr = currentPsnr;
 
     t = performance.now();
-    butterSeries.push({ bytes: b, butter: doFull ? callCmp(p) : null });
+    let butterVal = null;
+    if (doFull) {
+      butterVal = callCmp(p);
+      measuredButters.push({ bytes: b, butter: butterVal });
+    }
+    butterSeries.push({ bytes: b, butter: butterVal });
     timing.butterMs += performance.now() - t;
 
     t = performance.now();
@@ -203,6 +262,13 @@ export async function buildSeriesAsync(refPixels, cutoffPixelsList, byteSizes, w
 
 // buildSeries: auto producer helper. ref + list of cutoff pixel bufs + parallel byteSizes -> ready series for summarize.
 // Uses comparer for butter speed (layer1/2 cohesion win). No final needed if using self-stability or external.
+//
+// Memory contract (audit per handoff):
+// - cutoffPixelsList: caller owns the Uint8Array RGBA buffers. We read-only scan + pass views into cmp/psnr/ssim.
+// - No additional full-frame copies inside (except postDecodeTransform result if provided and same length).
+// - Comparer (JS) allocates ref XYB + small per-call test XYB once on create; reused across the list.
+// - For large images (e.g. 6k×4k ~96 MB/frame) keep list lifetime short; callers clear after summarize.
+// - Preferring views/reuse: we use scalar carry for prevPsnr, shared measuredButters, no per-iter alloc in decide.
 export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, height, postDecodeTransform = null) {
   if (!Array.isArray(cutoffPixelsList) || !Array.isArray(byteSizes) || cutoffPixelsList.length !== byteSizes.length) {
     throw new Error('cutoffPixelsList and byteSizes must be parallel arrays');
@@ -217,6 +283,7 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
   // Per-metric timing accumulators — zero-overhead performance.now() pairs; visible in DevTools Timeline.
   const timing = { psnrMs: 0, butterMs: 0, ssimMs: 0, totalMs: 0 };
   let prevPsnr = null; // scalar carry — avoids re-indexing qualitySeries[len-1] each iteration (blueprint Ch1)
+  const measuredButters = []; // for trajectory prediction inside decideButterCompute
   for (let i = 0; i < cutoffPixelsList.length; i++) {
     let p = cutoffPixelsList[i];
     const b = byteSizes[i];
@@ -232,11 +299,16 @@ export function buildSeries(refPixels, cutoffPixelsList, byteSizes, width, heigh
     const currentPsnr = computePsnrVsFinal(p, refPixels);
     timing.psnrMs += performance.now() - t;
     const psnrDelta = prevPsnr != null ? Math.abs(currentPsnr - prevPsnr) : Infinity;
-    const doFull = (i % 2 === 0) || (b > 100 * 1024) || psnrDelta > 0.5;
+    const doFull = decideButterCompute(i, b, byteSizes, psnrDelta, measuredButters);
     qualitySeries.push({ bytes: b, psnr: currentPsnr });
     prevPsnr = currentPsnr;
     t = performance.now();
-    butterSeries.push({ bytes: b, butter: doFull ? cmp(p) : null });
+    let butterVal = null;
+    if (doFull) {
+      butterVal = cmp(p);
+      measuredButters.push({ bytes: b, butter: butterVal });
+    }
+    butterSeries.push({ bytes: b, butter: butterVal });
     timing.butterMs += performance.now() - t;
     t = performance.now();
     ssimSeries.push({ bytes: b, ssim: computeSsimVsFinal(p, refPixels, width, height) });
