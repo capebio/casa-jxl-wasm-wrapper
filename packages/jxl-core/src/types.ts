@@ -199,13 +199,7 @@ export interface EncodeOptions {
    * strategy -1..3 per cjxl (see JSDoc or cjxl --help for exact semantics).
    * lowMemoryMode / preferChunkedAPI promote to strategy=3 (least memory) when no explicit strategy (smart wiring, Phase 3).
    */
-  buffering?: {
-    strategy?: -1 | 0 | 1 | 2 | 3;
-    streamingInput?: boolean;
-    streamingOutput?: boolean;
-    lowMemoryMode?: boolean;
-    preferChunkedAPI?: boolean;
-  };
+  buffering?: BufferingControls;
 
   advancedControls?: AdvancedEncoderControls;
   chunked?: boolean;                // use JxlEncoderAddChunkedFrame for large inputs (legacy alias for buffering.strategy=2-ish)
