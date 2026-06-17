@@ -1399,6 +1399,21 @@ class LibjxlDecoder implements JxlDecoder {
       chunkBufCap = this.options.expectedBytes;
       this.options.onMetric?.("malloc_prealloc_ms", performance.now() - tMalloc0);
     }
+    // Rank #2: Deferred-release buffer reuse (zero-copy pixel emission).
+    let reusablePixelBuf: ArrayBuffer | null = null;
+    let reusablePixelCap = 0; // capacity in bytes
+    // Rank #2: Pre-allocate reusable pixel buffer if deferredRelease enabled.
+    // Start with max expected size (frame width * height * bytes-per-sample * channels).
+    if (this.options.deferredRelease) {
+      const estimatedPixelBytes = 16384 * 16384 * 4; // Upper bound: WASM heap limit friendly
+      try {
+        reusablePixelBuf = new ArrayBuffer(estimatedPixelBytes);
+        reusablePixelCap = estimatedPixelBytes;
+        this.options.onMetric?.("deferred_release_prealloc_bytes", estimatedPixelBytes);
+      } catch (e) {
+        throw new Error("Failed to pre-allocate reusable pixel buffer for deferredRelease mode: " + (e instanceof Error ? e.message : String(e)));
+      }
+    }
     try {
       let headerEmitted = false;
       let info: ImageInfo | undefined;
