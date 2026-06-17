@@ -136,19 +136,25 @@ export class DedupeRegistry {
     }
   }
 
-  /** @internal — prefer forEachSubscriber for zero-allocation iteration */
+  /** @internal — prefer forEachSubscriber for bounded-allocation iteration */
   // Returns all subscriber IDs for a primary (including itself).
   // Note: The primary session registers itself as a subscriber, so the primary's ID is included in this list.
   subscribers(primaryId: string): string[] {
     return [...(this.sessionToSubscribers.get(primaryId) ?? [])];
   }
 
-  // Iterates subscriber IDs without allocating an intermediate array.
+  // Iterates subscriber IDs, snapshotting the Set before iteration.
+  // Snapshot cost is one array of N subscriber IDs (typically 0–3 entries).
+  // Required for correctness: fn may call cancelSubscriber, which deletes from the
+  // live Set mid-iteration — without a snapshot, JS Set's forward-iterator spec
+  // causes unvisited-but-deleted entries to be silently skipped (a message-loss bug
+  // when a subscriber's handler synchronously cancels another subscriber).
   // Note: The primary session registers itself as a subscriber, so the callback is invoked for the primary's ID as well.
   forEachSubscriber(primaryId: string, fn: (subId: string) => void): void {
     const subs = this.sessionToSubscribers.get(primaryId);
     if (subs === undefined) return;
-    for (const sub of subs) fn(sub);
+    // Spread into a local array so mutations to the Set during fn() don't skip entries.
+    for (const sub of [...subs]) fn(sub);
   }
 
 }
