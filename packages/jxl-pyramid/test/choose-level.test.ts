@@ -70,8 +70,10 @@ test("chooseLevelForTarget property: mixed aspect ratios (fast-check)", () => {
             }
           }
         } else {
-          // must be the last (largest)
-          expect(pick).toBe(genLevels[genLevels.length - 1]);
+          // no level meets target; pick must be the one with the largest long edge
+          const maxLong = Math.max(...genLevels.map((l) => Math.max(l.w, l.h)));
+          const candidates = genLevels.filter((l) => Math.max(l.w, l.h) === maxLong);
+          expect(candidates).toContain(pick);
         }
         return true;
       }
