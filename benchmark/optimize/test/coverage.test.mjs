@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyLedger, recordSweep, gaps, saturated, underVisited, matrix } from '../coverage.mjs';
+import { emptyLedger, recordSweep, gaps, saturated, underVisited, matrix, lensStats } from '../coverage.mjs';
 
 test('recordSweep bumps visits for every examined file, even zero-finding', () => {
   let L = emptyLedger();
@@ -46,6 +46,23 @@ test('underVisited: pairs below minVisits', () => {
   const u = underVisited(L, ['a.ts'], ['seam'], 2);
   assert.equal(u.length, 1);
   assert.equal(u[0].visits, 1);
+});
+
+test('lensStats rolls up per-lens productivity (files, findings, rate, dry)', () => {
+  let L = emptyLedger();
+  L = recordSweep(L, { run: 'r1', lens: 'seam', examined: ['a.ts', 'b.ts'], findingsByFile: { 'a.ts': 3 } });
+  L = recordSweep(L, { run: 'r1', lens: 'tactical', examined: ['a.ts'], findingsByFile: {} });
+  const s = lensStats(L);
+  const seam = s.find(x => x.lens === 'seam');
+  assert.equal(seam.files_examined, 2);
+  assert.equal(seam.visits, 2);
+  assert.equal(seam.total_findings, 3);
+  assert.equal(seam.findings_per_visit, 1.5);
+  assert.equal(seam.dry_files, 1);
+  const tac = s.find(x => x.lens === 'tactical');
+  assert.equal(tac.total_findings, 0);
+  assert.equal(tac.findings_per_visit, 0);
+  assert.equal(s[0].lens, 'seam');
 });
 
 test('matrix renders file x lens visit counts', () => {

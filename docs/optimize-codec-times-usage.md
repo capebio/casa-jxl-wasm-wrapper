@@ -30,6 +30,8 @@ COVERAGE LEDGER (folder mode): docs/outputs/optimize/coverage-ledger.json record
 how many times an agent EXAMINED it (examined-but-clean ≠ never-looked). The report names:
 - gaps — (file,lens) pairs never examined → re-run to fill them.
 - saturated — pairs examined ≥2× whose last sweep found nothing → dry, stop sweeping.
+- lensStats — per-lens productivity (files_examined, total_findings, findings_per_visit, dry_files),
+  sorted most-productive first → shows which lens earns its keep.
 Re-running folder mode on the same path accumulates visits, so you can sweep until coverage is
 complete AND the last sweep is dry. Inspect anytime:
   node -e "import('./benchmark/optimize/coverage.mjs').then(async m=>{const {readFileSync}=await import('node:fs');const L=m.loadLedger('docs/outputs/optimize/coverage-ledger.json');console.log(m.matrix(L,Object.keys(L.files),['aerial','seam','architecture','tactical']))})"

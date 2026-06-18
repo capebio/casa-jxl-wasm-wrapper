@@ -154,9 +154,11 @@ if (cfg.targetPath) {
     `1) COVERAGE: update the ledger docs/outputs/optimize/coverage-ledger.json with ` +
     `benchmark/optimize/coverage.mjs — loadLedger, then recordSweep once per lens with a fresh run id ` +
     `(ISO timestamp), then saveLedger. Sweep data: ${sweepData}.\n` +
-    `2) GAPS: call gaps(ledger, ${crawledPaths}, ${JSON.stringify(cfg.lenses)}) and saturated(ledger, 2). ` +
-    `Report the coverage matrix, the (file×lens) gaps that were never examined, and which pairs are ` +
-    `saturated (dry — stop sweeping) vs need another sweep.\n` +
+    `2) GAPS + PRODUCTIVITY: call gaps(ledger, ${crawledPaths}, ${JSON.stringify(cfg.lenses)}), ` +
+    `saturated(ledger, 2), and lensStats(ledger). Report: the coverage matrix; the (file×lens) gaps ` +
+    `never examined; which pairs are saturated (dry — stop sweeping) vs need another sweep; and the ` +
+    `per-lens productivity table (lens, files_examined, total_findings, findings_per_visit, dry_files) ` +
+    `so we can see which lens earns its keep.\n` +
     `3) Write a revert manifest (benchmark/optimize/manifest.mjs, one isolated diff per banked change).\n` +
     `Return a markdown report path + the gaps list + the re-sweep recommendation.`,
     { phase: 'Crawl' }

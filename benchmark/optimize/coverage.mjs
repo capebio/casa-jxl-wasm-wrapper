@@ -52,6 +52,24 @@ export function underVisited(ledger, files, lenses, minVisits = 2) {
   return out;
 }
 
+// Per-lens productivity rollup — how productive each lens is across everything it examined.
+// Sorted most-productive first (by findings_per_visit, then total_findings).
+export function lensStats(ledger) {
+  const acc = {};
+  for (const byLens of Object.values(ledger.files)) {
+    for (const [lens, e] of Object.entries(byLens)) {
+      const a = acc[lens] ??= { lens, files_examined: 0, visits: 0, total_findings: 0, dry_files: 0 };
+      a.files_examined += 1;
+      a.visits += e.visits;
+      a.total_findings += e.totalFindings;
+      if (e.lastFindings === 0) a.dry_files += 1;
+    }
+  }
+  return Object.values(acc)
+    .map(a => ({ ...a, findings_per_visit: a.visits ? +(a.total_findings / a.visits).toFixed(2) : 0 }))
+    .sort((x, y) => y.findings_per_visit - x.findings_per_visit || y.total_findings - x.total_findings);
+}
+
 export function matrix(ledger, files, lenses) {
   return files.map(file => {
     const row = { file };

@@ -135,7 +135,10 @@ per (file × lens): `visits`, `lastFindings`, `totalFindings`. This distinguishe
 alone cannot. Queries:
 - `gaps(files, lenses)` — (file,lens) never examined → what was missed; re-run to fill.
 - `saturated(minVisits)` — examined ≥N× with last sweep empty → dry, stop sweeping.
-The completeness critic reads the ledger to report the coverage matrix + recommend a re-sweep.
+- `lensStats()` — per-lens productivity rollup (files_examined, total_findings,
+  findings_per_visit, dry_files), sorted most-productive first → shows which lens earns its keep.
+The completeness critic reads the ledger to report the coverage matrix + per-lens productivity +
+recommend a re-sweep.
 Re-running accumulates visits → sweep until coverage is complete AND the last pass is dry
 (concrete loop-until-dry termination).
 
