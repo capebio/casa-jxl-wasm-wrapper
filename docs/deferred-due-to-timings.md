@@ -34,13 +34,13 @@ When submitting results, include: **baseline (ms), optimized (ms), improvement (
 
 ### crates/raw-pipeline/src/ljpeg.rs
 
-**[3] RP-2026-06-12: Replace thread-local DHT cache** ☐
+**[3] RP-2026-06-12: Replace thread-local DHT cache** ☐ (blocked: no CR2 corpus in bench)
 - **Proposed:** Current thread-local DHT cache. Proposed: replace it + add planar decode API + restart-marker hook.
 - **Deferred reason:** "Current cache no longer critical path." Current cache rebuild is <1% of CR2 time per CR2-R2 baseline. No benchmark proving the cache is the bottleneck.
 - **Verify:** Profile CR2 decode on real Canon files. Confirm DHT rebuild+search is detectable (>1% of LJPEG time).
 - **Acceptance:** Bench shows DHT hot spot >1%, then measure cache-replacement proposal.
 
-**[4] PR-7c: DHT linear scan optimization** ☐
+**[4] PR-7c: DHT linear scan optimization** ☐ (blocked: no CR2 corpus in bench)
 - **Proposed:** Optimize DHT table rebuild + linear scan per segment.
 - **Deferred reason:** No bench proving DHT cache/scan on critical path. Huffman table rebuild <1% of CR2 time per baseline.
 - **Verify:** Same as [3]. Use `raw_decode_bench` CR2 file with thermal baseline (3 runs, discard cold, take min).
@@ -50,13 +50,13 @@ When submitting results, include: **baseline (ms), optimized (ms), improvement (
 
 ### crates/raw-pipeline/src/demosaic.rs
 
-**[5] RP-2026-06-12: Fuse matrix math into MHC hot kernels + add SIMD + planar APIs** ☐
+**[5] RP-2026-06-12: Fuse matrix math into MHC hot kernels + add SIMD + planar APIs** ☐ (low priority: demosaic 68ms vs clarity 1167ms warm on ORF; matrix math is in tone step not demosaic)
 - **Proposed:** Fuse matrix math into bilinear MHC kernel, add SIMD path (AVX2/wasm128), expose planar/_into output APIs, expose saliency contract.
 - **Deferred reason:** "Correctness bug fixed first: Kernel fusion/SIMD/public output-shape expansion are performance and API changes without benchmark evidence in this session."
 - **Verify:** Profile DNG file demosaic step in isolation. Confirm matrix math + bilinear interior loop >10% of total demosaic time.
 - **Acceptance:** Isolated demosaic bench shows kernel fusion >5% improvement, then API expansion (on separate branch).
 
-**[6] PR-3: WASM SIMD scatter fix (interior-loop scatter, line ~379)** ☐
+**[6] PR-3: WASM SIMD scatter fix (interior-loop scatter, line ~379)** ☐ (blocked: WASM profiler needed)
 - **Proposed:** Fix 8-wide SIMD vector followed by 24 scalar stores (scatter eats SIMD win).
 - **Deferred reason:** Valid finding; no corpus-level measurement showing it is on the critical path for primary WASM demosaic workload.
 - **Verify:** WASM decode of ORF/DNG via web/pkg + profiler or `__jxlPerf` harness. Confirm scatter loop >2% of demosaic time.

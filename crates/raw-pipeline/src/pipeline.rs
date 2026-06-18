@@ -720,29 +720,43 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
     #[cfg(feature = "parallel")]
     {
         const VTILE: usize = 128;
+        let klen = kernel.len();
         let temp_slice = temp.as_slice();
         out.par_chunks_mut(width * 3).enumerate().for_each(|(y, row)| {
+            let mut acc_r = [0f32; VTILE];
+            let mut acc_g = [0f32; VTILE];
+            let mut acc_b = [0f32; VTILE];
+            let mut r_tap = [0f32; VTILE];
+            let mut g_tap = [0f32; VTILE];
+            let mut b_tap = [0f32; VTILE];
             for x0 in (0..width).step_by(VTILE) {
                 let x1 = (x0 + VTILE).min(width);
                 let tile = x1 - x0;
-                let mut acc = [[0f32; 3]; VTILE];
-                for ki in 0..kernel.len() {
+                for xi in 0..tile { acc_r[xi] = 0.0; acc_g[xi] = 0.0; acc_b[xi] = 0.0; }
+                for ki in 0..klen {
                     let kv = kernel[ki];
                     let yi = (y as isize + ki as isize - half as isize)
                         .clamp(0, height as isize - 1) as usize;
                     let row_base = yi * width * 3;
+                    // De-interleave tap row: stride-3 reads → stride-1 planar writes.
                     for xi in 0..tile {
                         let b = row_base + (x0 + xi) * 3;
-                        acc[xi][0] += temp_slice[b]   as f32 * kv;
-                        acc[xi][1] += temp_slice[b+1] as f32 * kv;
-                        acc[xi][2] += temp_slice[b+2] as f32 * kv;
+                        r_tap[xi] = temp_slice[b]     as f32;
+                        g_tap[xi] = temp_slice[b + 1] as f32;
+                        b_tap[xi] = temp_slice[b + 2] as f32;
+                    }
+                    // Accumulate: stride-1 reads + writes → LLVM auto-vectorises.
+                    for xi in 0..tile {
+                        acc_r[xi] = r_tap[xi].mul_add(kv, acc_r[xi]);
+                        acc_g[xi] = g_tap[xi].mul_add(kv, acc_g[xi]);
+                        acc_b[xi] = b_tap[xi].mul_add(kv, acc_b[xi]);
                     }
                 }
                 for xi in 0..tile {
                     let o = (x0 + xi) * 3;
-                    row[o]   = acc[xi][0].round() as u16;
-                    row[o+1] = acc[xi][1].round() as u16;
-                    row[o+2] = acc[xi][2].round() as u16;
+                    row[o]     = acc_r[xi].round() as u16;
+                    row[o + 1] = acc_g[xi].round() as u16;
+                    row[o + 2] = acc_b[xi].round() as u16;
                 }
             }
         });
@@ -754,28 +768,40 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
         // VTILE=128, k13: 128*13*6 ~= 10 KB -- fits in L1, giving ~38% speedup
         // over naive column-by-column access on a 20 MP image (117 MB rgb16).
         const VTILE: usize = 128;
+        let klen = kernel.len();
+        let mut acc_r = [0f32; VTILE];
+        let mut acc_g = [0f32; VTILE];
+        let mut acc_b = [0f32; VTILE];
+        let mut r_tap = [0f32; VTILE];
+        let mut g_tap = [0f32; VTILE];
+        let mut b_tap = [0f32; VTILE];
         for y in 0..height {
             for x0 in (0..width).step_by(VTILE) {
                 let x1   = (x0 + VTILE).min(width);
                 let tile = x1 - x0;
-                let mut acc = [[0f32; 3]; VTILE];
-                for ki in 0..kernel.len() {
+                for xi in 0..tile { acc_r[xi] = 0.0; acc_g[xi] = 0.0; acc_b[xi] = 0.0; }
+                for ki in 0..klen {
                     let kv = kernel[ki];
                     let yi = (y as isize + ki as isize - half as isize)
                         .clamp(0, height as isize - 1) as usize;
                     let row_base = yi * width * 3;
                     for xi in 0..tile {
                         let b = row_base + (x0 + xi) * 3;
-                        acc[xi][0] += temp[b]   as f32 * kv;
-                        acc[xi][1] += temp[b+1] as f32 * kv;
-                        acc[xi][2] += temp[b+2] as f32 * kv;
+                        r_tap[xi] = temp[b]     as f32;
+                        g_tap[xi] = temp[b + 1] as f32;
+                        b_tap[xi] = temp[b + 2] as f32;
+                    }
+                    for xi in 0..tile {
+                        acc_r[xi] = r_tap[xi].mul_add(kv, acc_r[xi]);
+                        acc_g[xi] = g_tap[xi].mul_add(kv, acc_g[xi]);
+                        acc_b[xi] = b_tap[xi].mul_add(kv, acc_b[xi]);
                     }
                 }
                 for xi in 0..tile {
                     let b = (y * width + x0 + xi) * 3;
-                    out[b]   = acc[xi][0].round() as u16;
-                    out[b+1] = acc[xi][1].round() as u16;
-                    out[b+2] = acc[xi][2].round() as u16;
+                    out[b]     = acc_r[xi].round() as u16;
+                    out[b + 1] = acc_g[xi].round() as u16;
+                    out[b + 2] = acc_b[xi].round() as u16;
                 }
             }
         }
