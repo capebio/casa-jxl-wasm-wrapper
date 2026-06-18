@@ -231,3 +231,47 @@ export function toToonMetrics(telemetry) {
     StorageTemperatureCelsius: telemetry.storageTemperatureCelsius,
   };
 }
+
+// Standalone execution
+(async () => {
+  const filename = new URL(import.meta.url).pathname;
+  const argv1 = process.argv[1];
+  const isMain = filename.endsWith('hardware-telemetry.mjs') || argv1.endsWith('hardware-telemetry.mjs');
+
+  if (isMain) {
+    const { writeFileSync, mkdirSync } = await import('fs');
+    const { join } = await import('path');
+
+    const telemetry = collectHardwareTelemetry();
+
+    // Console output
+    console.log('\n' + formatTelemetryReport(telemetry));
+
+    // TOON file output
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    const outDir = join(process.cwd(), '..', 'docs', 'outputs', 'timing tests');
+    try {
+      mkdirSync(outDir, { recursive: true });
+    } catch (_) {}
+
+    const toonLines = [
+      `TestName: hardware-telemetry`,
+      `RunTimestamp: ${new Date().toISOString()}`,
+      `Agent: hardware-telemetry-standalone`,
+      `Platform: ${telemetry.platform}`,
+      `CpuModel: ${telemetry.cpuModel}`,
+      `Cores: ${telemetry.cores}`,
+      '',
+      '# Hardware Telemetry',
+    ];
+
+    const metrics = toToonMetrics(telemetry);
+    Object.entries(metrics).forEach(([key, val]) => {
+      toonLines.push(`${key}: ${val}`);
+    });
+
+    const outPath = join(outDir, `${timestamp}-hardware-telemetry.toon`);
+    writeFileSync(outPath, toonLines.join('\n'));
+    console.log(`\n✅ TOON written to: ${outPath}\n`);
+  }
+})();
