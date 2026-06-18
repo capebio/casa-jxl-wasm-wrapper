@@ -1,13 +1,13 @@
 /**
- * Hardware Telemetry Utility for LibreHardwareMonitor
- * Collects CPU/GPU/System metrics via Windows WMI
+ * Hardware Telemetry Utility via systeminformation
+ * Collects CPU/GPU/System metrics on Windows/Linux/macOS
  * Reusable across all benchmark tests
  */
 
-import { execSync } from 'child_process';
+import si from 'systeminformation';
 import os from 'os';
 
-export function collectHardwareTelemetry() {
+export async function collectHardwareTelemetry() {
   const telemetry = {
     platform: `${process.platform} (${process.arch})`,
     cpuModel: os.cpus()[0]?.model || 'Unknown',
@@ -16,7 +16,6 @@ export function collectHardwareTelemetry() {
     memoryTotalGb: (os.totalmem() / (1024 ** 3)).toFixed(1),
     nodeHeapMb: (process.memoryUsage().heapUsed / (1024 ** 2)).toFixed(1),
 
-    // CPU metrics
     cpuLoadPct: 'N/A',
     cpuClockCurrentGhz: 'N/A',
     cpuClockMaxGhz: 'N/A',
@@ -24,167 +23,90 @@ export function collectHardwareTelemetry() {
     cpuThrottlingState: 'Optimal',
     cpuVoltageMv: 'N/A',
     cpuPowerW: 'N/A',
-
-    // Thermal
     cpuTemperatureCelsius: 'N/A',
-    gpuTemperatureCelsius: 'N/A',
-    storageTemperatureCelsius: 'N/A',
+    cpuFanRpm: 'N/A',
+    cpuFanDutyPct: 'N/A',
 
-    // GPU metrics
     gpuClockMhz: 'N/A',
     gpuMemoryMhz: 'N/A',
     gpuMemoryUsedMb: 'N/A',
     gpuMemoryTotalMb: 'N/A',
     gpuLoadPct: 'N/A',
     gpuPowerW: 'N/A',
+    gpuTemperatureCelsius: 'N/A',
 
-    // System power
     systemPowerW: 'N/A',
-
-    // Fans
-    cpuFanRpm: 'N/A',
-    cpuFanDutyPct: 'N/A',
+    storageTemperatureCelsius: 'N/A',
     caseAirflowRpm: 'N/A',
   };
 
-  if (process.platform !== 'win32') {
-    return telemetry;
-  }
-
-  // Get CPU info via CIM
   try {
-    const psCommand = 'powershell.exe -NoProfile -Command "Get-CimInstance -ClassName Win32_Processor | Select-Object CurrentClockSpeed, MaxClockSpeed, LoadPercentage | ConvertTo-Json"';
-    const output = execSync(psCommand, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-    const cpuData = JSON.parse(output);
-    const data = Array.isArray(cpuData) ? cpuData[0] : cpuData;
-
-    if (data && data.MaxClockSpeed) {
-      const currentSpeedGhz = (data.CurrentClockSpeed / 1000).toFixed(2);
-      const maxSpeedGhz = (data.MaxClockSpeed / 1000).toFixed(2);
-      const throttleRatio = data.CurrentClockSpeed / data.MaxClockSpeed;
-
-      telemetry.cpuLoadPct = data.LoadPercentage;
-      telemetry.cpuClockCurrentGhz = currentSpeedGhz;
-      telemetry.cpuClockMaxGhz = maxSpeedGhz;
-      telemetry.cpuThrottlingPct = (throttleRatio * 100).toFixed(1);
-      telemetry.cpuThrottlingState = throttleRatio < 0.95 ? 'Throttled' : 'Optimal';
+    // CPU speed
+    const cpu = await si.cpu();
+    if (cpu.speedMin && cpu.speedMax) {
+      telemetry.cpuClockCurrentGhz = (cpu.speed || cpu.speedMin).toFixed(2);
+      telemetry.cpuClockMaxGhz = cpu.speedMax.toFixed(2);
     }
-  } catch (_) {
-    // CIM query failed
-  }
 
-  // Get LibreHardwareMonitor sensor data via WMI
-  try {
-    const hwCommand = 'powershell.exe -NoProfile -Command "Get-WmiObject -Namespace \'root\\LibreHardwareMonitor\' -Class Sensor 2>$null | Where-Object {$_.SensorType -match \'Temperature|Voltage|Load|Power|Clock|Fan\'} | Select-Object Name, Value, Parent, SensorType | ConvertTo-Json"';
-    const hwOutput = execSync(hwCommand, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    // CPU load
+    const load = await si.currentLoad();
+    if (load.currentLoad >= 0) {
+      telemetry.cpuLoadPct = load.currentLoad.toFixed(1);
+    }
 
-    if (hwOutput) {
-      try {
-        const sensors = JSON.parse(hwOutput);
-        const sensorArray = Array.isArray(sensors) ? sensors : [sensors];
+    // CPU temperature
+    const temps = await si.cpuTemperature();
+    if (temps.main) {
+      telemetry.cpuTemperatureCelsius = temps.main.toFixed(1);
+    }
 
-        for (const sensor of sensorArray) {
-          if (!sensor || !sensor.Name || sensor.Value === null) continue;
-
-          const name = sensor.Name.toLowerCase();
-          const parent = (sensor.Parent || '').toLowerCase();
-          const type = (sensor.SensorType || '').toLowerCase();
-          const value = parseFloat(sensor.Value);
-
-          // Temperature sensors
-          if (type.includes('temperature')) {
-            if (!telemetry.cpuTemperatureCelsius || telemetry.cpuTemperatureCelsius === 'N/A') {
-              if (name.includes('package') || name.includes('die') || parent.includes('cpu')) {
-                telemetry.cpuTemperatureCelsius = value.toFixed(1);
-              }
-            }
-            if (!telemetry.gpuTemperatureCelsius || telemetry.gpuTemperatureCelsius === 'N/A') {
-              if (parent.includes('gpu') || parent.includes('nvidia') || parent.includes('amd') || parent.includes('intel graphics')) {
-                telemetry.gpuTemperatureCelsius = value.toFixed(1);
-              }
-            }
-            if (!telemetry.storageTemperatureCelsius || telemetry.storageTemperatureCelsius === 'N/A') {
-              if (parent.includes('drive') || parent.includes('disk') || parent.includes('ssd') || parent.includes('hdd')) {
-                telemetry.storageTemperatureCelsius = value.toFixed(1);
-              }
-            }
-          }
-
-          // Voltage sensors (CPU core voltage)
-          if (type.includes('voltage') && parent.includes('cpu') && !telemetry.cpuVoltageMv.includes('N/A')) {
-            if (name.includes('vdd') || name.includes('core') || name.includes('cpu')) {
-              telemetry.cpuVoltageMv = (value * 1000).toFixed(0);
-            }
-          }
-
-          // Power sensors
-          if (type.includes('power')) {
-            if (parent.includes('cpu') && (telemetry.cpuPowerW === 'N/A' || !telemetry.cpuPowerW)) {
-              telemetry.cpuPowerW = value.toFixed(1);
-            }
-            if (parent.includes('gpu') && (telemetry.gpuPowerW === 'N/A' || !telemetry.gpuPowerW)) {
-              telemetry.gpuPowerW = value.toFixed(1);
-            }
-            if ((parent.includes('system') || name.includes('total')) && (telemetry.systemPowerW === 'N/A' || !telemetry.systemPowerW)) {
-              telemetry.systemPowerW = value.toFixed(1);
-            }
-          }
-
-          // Clock/Frequency sensors
-          if (type.includes('clock') || type.includes('frequency')) {
-            if (parent.includes('gpu')) {
-              if (name.includes('core') && (telemetry.gpuClockMhz === 'N/A' || !telemetry.gpuClockMhz)) {
-                telemetry.gpuClockMhz = Math.round(value).toString();
-              }
-              if (name.includes('memory') && (telemetry.gpuMemoryMhz === 'N/A' || !telemetry.gpuMemoryMhz)) {
-                telemetry.gpuMemoryMhz = Math.round(value).toString();
-              }
-            }
-          }
-
-          // Load sensors
-          if (type.includes('load')) {
-            if (parent.includes('gpu') && (telemetry.gpuLoadPct === 'N/A' || !telemetry.gpuLoadPct)) {
-              telemetry.gpuLoadPct = value.toFixed(1);
-            }
-          }
-
-          // Fan sensors
-          if (type.includes('fan')) {
-            if (name.includes('cpu') && (telemetry.cpuFanRpm === 'N/A' || !telemetry.cpuFanRpm)) {
-              telemetry.cpuFanRpm = Math.round(value).toString();
-            }
-            if ((name.includes('case') || name.includes('system')) && (telemetry.caseAirflowRpm === 'N/A' || !telemetry.caseAirflowRpm)) {
-              telemetry.caseAirflowRpm = Math.round(value).toString();
-            }
-          }
-
-          // Fan duty cycle
-          if (type.includes('level') && name.includes('fan') && parent.includes('cpu')) {
-            telemetry.cpuFanDutyPct = (value * 100).toFixed(1);
-          }
-        }
-
-        // GPU memory (from dedicated sensors if available)
-        if ((telemetry.gpuMemoryUsedMb === 'N/A' || !telemetry.gpuMemoryUsedMb) && sensorArray.length > 0) {
-          for (const sensor of sensorArray) {
-            if (!sensor) continue;
-            const name = sensor.Name.toLowerCase();
-            const parent = (sensor.Parent || '').toLowerCase();
-            if (parent.includes('gpu') && name.includes('memory') && name.includes('used')) {
-              telemetry.gpuMemoryUsedMb = Math.round(parseFloat(sensor.Value)).toString();
-            }
-            if (parent.includes('gpu') && name.includes('memory') && name.includes('total')) {
-              telemetry.gpuMemoryTotalMb = Math.round(parseFloat(sensor.Value)).toString();
-            }
-          }
-        }
-      } catch (_) {
-        // WMI parse error
+    // Power profiles (CPU power if available)
+    try {
+      const powerData = await si.powerProfiles();
+      if (powerData) {
+        telemetry.cpuThrottlingState = powerData.active || 'Optimal';
       }
-    }
+    } catch (_) {}
+
+    // GPU info
+    try {
+      const graphics = await si.graphics();
+      if (graphics.controllers && graphics.controllers.length > 0) {
+        const gpu = graphics.controllers[0];
+        if (gpu.temperatureGpu) {
+          telemetry.gpuTemperatureCelsius = gpu.temperatureGpu.toFixed(1);
+        }
+        if (gpu.memoryUsed && gpu.memoryTotal) {
+          telemetry.gpuMemoryUsedMb = gpu.memoryUsed;
+          telemetry.gpuMemoryTotalMb = gpu.memoryTotal;
+        }
+      }
+    } catch (_) {}
+
+    // Cooling fans
+    try {
+      const fans = await si.fans();
+      if (fans && fans.length > 0) {
+        const cpuFan = fans.find(f => f.label?.toLowerCase().includes('cpu')) || fans[0];
+        if (cpuFan) {
+          telemetry.cpuFanRpm = Math.round(cpuFan.speed || 0).toString();
+        }
+      }
+    } catch (_) {}
+
+    // Storage temps
+    try {
+      const disks = await si.disksIO();
+      if (disks && disks.length > 0) {
+        const diskTemp = await si.diskLayout();
+        if (diskTemp && diskTemp.length > 0 && diskTemp[0].temperature) {
+          telemetry.storageTemperatureCelsius = diskTemp[0].temperature.toFixed(1);
+        }
+      }
+    } catch (_) {}
+
   } catch (_) {
-    // WMI query failed (LibreHardwareMonitor not installed)
+    // Graceful fallback if systeminformation fails
   }
 
   return telemetry;
@@ -202,7 +124,7 @@ export function formatTelemetryReport(telemetry, compact = false) {
   return [
     `🧠 Memory: ${telemetry.memoryFreeGb}GB free / ${telemetry.memoryTotalGb}GB total`,
     `📦 Node Heap: ${telemetry.nodeHeapMb}MB active`,
-    `🔥 CPU: ${telemetry.cpuClockCurrentGhz}/${telemetry.cpuClockMaxGhz} GHz | Load: ${telemetry.cpuLoadPct}% | Throttle: ${telemetry.cpuThrottlingState}`,
+    `🔥 CPU: ${telemetry.cpuClockCurrentGhz}/${telemetry.cpuClockMaxGhz} GHz | Load: ${telemetry.cpuLoadPct}% | State: ${telemetry.cpuThrottlingState}`,
     `🌡️ CPU Temp: ${telemetry.cpuTemperatureCelsius}°C | Fan: ${telemetry.cpuFanRpm} RPM (${telemetry.cpuFanDutyPct}%)`,
     `⚡ Power: CPU=${telemetry.cpuPowerW}W | GPU=${telemetry.gpuPowerW}W | System=${telemetry.systemPowerW}W`,
     telemetry.gpuClockMhz !== 'N/A' ? `🎮 GPU: Core=${telemetry.gpuClockMhz} MHz | Mem=${telemetry.gpuMemoryMhz} MHz | Load=${telemetry.gpuLoadPct}% | ${telemetry.gpuTemperatureCelsius}°C` : null,
@@ -212,9 +134,9 @@ export function formatTelemetryReport(telemetry, compact = false) {
 
 export function toToonMetrics(telemetry) {
   return {
+    CpuLoadPct: telemetry.cpuLoadPct,
     CpuClockCurrentGhz: telemetry.cpuClockCurrentGhz,
     CpuClockMaxGhz: telemetry.cpuClockMaxGhz,
-    CpuLoadPct: telemetry.cpuLoadPct,
     CpuThrottlingState: telemetry.cpuThrottlingState,
     CpuTemperatureCelsius: telemetry.cpuTemperatureCelsius,
     CpuVoltageMv: telemetry.cpuVoltageMv,
@@ -242,7 +164,7 @@ export function toToonMetrics(telemetry) {
     const { writeFileSync, mkdirSync } = await import('fs');
     const { join } = await import('path');
 
-    const telemetry = collectHardwareTelemetry();
+    const telemetry = await collectHardwareTelemetry();
 
     // Console output
     console.log('\n' + formatTelemetryReport(telemetry));
@@ -257,7 +179,7 @@ export function toToonMetrics(telemetry) {
     const toonLines = [
       `TestName: hardware-telemetry`,
       `RunTimestamp: ${new Date().toISOString()}`,
-      `Agent: hardware-telemetry-standalone`,
+      `Agent: hardware-telemetry-systeminformation`,
       `Platform: ${telemetry.platform}`,
       `CpuModel: ${telemetry.cpuModel}`,
       `Cores: ${telemetry.cores}`,
