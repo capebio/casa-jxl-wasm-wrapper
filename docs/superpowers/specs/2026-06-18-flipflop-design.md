@@ -252,7 +252,7 @@ node [--expose-gc] flipflop.mjs <test-file> [options]
 %TEMP%/flipflop-corpus/         # cmd-mode TIFF cache (per machine)
 ```
 
-**Tracked vs ignored (this repo):** repo-root engine `.mjs` are **tracked** (matches existing tracked root benchmarks). `.flipflop/tests/` and `%TEMP%/flipflop-corpus/` are **git-ignored**. The journal under `docs/outputs/` is **tracked** — the kept record. The skill's `engine/` is the portable canonical copy used to seed other repos.
+**Tracked vs ignored (this repo):** repo-root engine `.mjs` are **tracked** (matches existing tracked root benchmarks). `.flipflop/tests/` (force-add individual fixtures worth keeping) and `%TEMP%/flipflop-corpus/` are **git-ignored**. The journal lives under `docs/outputs/`, which is **already git-ignored repo-wide** (the repo's scratch outputs dir, alongside other local timing `.toon` files) — so the journal is an intentionally **local, untracked** running record, not committed on every run. The skill's `engine/` is the portable canonical copy used to seed other repos.
 
 ## 13. Edge cases & error handling
 
