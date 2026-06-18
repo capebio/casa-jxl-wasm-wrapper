@@ -1,0 +1,793 @@
+//! BSD-clean JPEG XL **encoder** built on our own `jxl-ffi` bindings to libjxl.
+//!
+//! Replaces the GPL-3.0 `jpegxl-rs` encoder. The strategic shape (per the design
+//! spec): **one owned [`Encoder`] holds the `*JxlEncoder` handle; feed it
+//! [`Frame`]s, get JXL bytes back.** No hidden state, explicit lifetime (RAII),
+//! reuse is visible (`JxlEncoderReset` between encodes).
+//!
+//! Native only (the WASM JXL path stays on `web/pkg` + `bridge.cpp`).
+//!
+//! Correctness baked in:
+//! - **Reset on every error path**, not just success — a reused [`Encoder`] can
+//!   never be poisoned by a prior failure.
+//! - **Lossless can't be un-set**: [`Rate::Lossless`] is a distinct variant and
+//!   never calls `SetFrameDistance`.
+//! - **Extra-channel init is mandatory**: every planar extra channel is declared
+//!   with `JxlEncoderSetExtraChannelInfo` before the first frame.
+//! - **Alpha is supplied exactly one way** — interleaved (`Frame.alpha`) *or* a
+//!   planar `ExtraKind::Alpha`, never both (validated → [`EncodeError::Channels`]).
+//! - `Send` but not `Sync`.
+
+#![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
+
+use std::os::raw::{c_int, c_void};
+use std::ptr;
+
+use jxl_ffi as ffi;
+
+const JXL_TRUE: c_int = 1;
+const JXL_FALSE: c_int = 0;
+
+#[derive(thiserror::Error, Debug)]
+pub enum EncodeError {
+    #[error("libjxl encoder error: {0}")]
+    Jxl(String),
+    #[error("invalid channels: {0}")]
+    Channels(String),
+    #[error("buffer size mismatch: expected {expected} samples, got {got}")]
+    Size { expected: usize, got: usize },
+    #[error("JxlEncoderCreate returned null")]
+    Create,
+}
+
+// ─── Sample types ────────────────────────────────────────────────────────────
+
+/// A pixel sample type libjxl can ingest. Clean-room trait (BSD).
+pub trait Sample: Copy {
+    /// libjxl pixel data type for this sample.
+    fn data_type() -> ffi::JxlDataType;
+    /// `(bits_per_sample, exponent_bits_per_sample)` — exponent > 0 means float.
+    fn bits_per_sample() -> (u32, u32);
+    /// True for floating-point sample types (f16/f32).
+    fn is_float() -> bool {
+        Self::bits_per_sample().1 > 0
+    }
+}
+
+impl Sample for u8 {
+    fn data_type() -> ffi::JxlDataType {
+        ffi::JxlDataType::JXL_TYPE_UINT8
+    }
+    fn bits_per_sample() -> (u32, u32) {
+        (8, 0)
+    }
+}
+impl Sample for u16 {
+    fn data_type() -> ffi::JxlDataType {
+        ffi::JxlDataType::JXL_TYPE_UINT16
+    }
+    fn bits_per_sample() -> (u32, u32) {
+        (16, 0)
+    }
+}
+impl Sample for half::f16 {
+    fn data_type() -> ffi::JxlDataType {
+        ffi::JxlDataType::JXL_TYPE_FLOAT16
+    }
+    fn bits_per_sample() -> (u32, u32) {
+        (16, 5)
+    }
+}
+impl Sample for f32 {
+    fn data_type() -> ffi::JxlDataType {
+        ffi::JxlDataType::JXL_TYPE_FLOAT
+    }
+    fn bits_per_sample() -> (u32, u32) {
+        (32, 8)
+    }
+}
+
+// ─── Channels ────────────────────────────────────────────────────────────────
+
+/// Kind of a planar extra channel → libjxl `JxlExtraChannelType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtraKind {
+    Alpha,
+    Depth,
+    Thermal,
+    /// Hyperspectral band. libjxl has no dedicated HSI type → maps to `Optional`.
+    Spectral,
+    Optional,
+}
+
+impl ExtraKind {
+    fn to_ffi(self) -> ffi::JxlExtraChannelType {
+        match self {
+            ExtraKind::Alpha => ffi::JxlExtraChannelType::JXL_CHANNEL_ALPHA,
+            ExtraKind::Depth => ffi::JxlExtraChannelType::JXL_CHANNEL_DEPTH,
+            ExtraKind::Thermal => ffi::JxlExtraChannelType::JXL_CHANNEL_THERMAL,
+            ExtraKind::Spectral | ExtraKind::Optional => {
+                ffi::JxlExtraChannelType::JXL_CHANNEL_OPTIONAL
+            }
+        }
+    }
+}
+
+/// A planar extra channel (hyperspectral band, depth, thermal, …). `data` is
+/// `width * height` samples, borrowed (zero-copy).
+pub struct ExtraChannel<'a, S: Sample> {
+    pub kind: ExtraKind,
+    pub data: &'a [S],
+}
+
+/// One image to encode. `color` is interleaved and borrowed (zero-copy in).
+pub struct Frame<'a, S: Sample> {
+    /// Interleaved color (+ interleaved alpha when `alpha`); borrowed.
+    pub color: &'a [S],
+    pub width: u32,
+    pub height: u32,
+    /// 1 (gray) or 3 (RGB).
+    pub color_channels: u32,
+    /// Interleaved alpha → color stride is `color_channels + 1`.
+    pub alpha: bool,
+    pub endianness: ffi::JxlEndianness,
+    /// Planar extra channels (hyperspectral / depth / thermal).
+    pub extra: &'a [ExtraChannel<'a, S>],
+}
+
+impl<'a, S: Sample> Frame<'a, S> {
+    fn base(color: &'a [S], width: u32, height: u32, color_channels: u32, alpha: bool) -> Self {
+        Frame {
+            color,
+            width,
+            height,
+            color_channels,
+            alpha,
+            endianness: ffi::JxlEndianness::JXL_NATIVE_ENDIAN,
+            extra: &[],
+        }
+    }
+    /// Interleaved RGB (3ch).
+    pub fn rgb(color: &'a [S], width: u32, height: u32) -> Self {
+        Self::base(color, width, height, 3, false)
+    }
+    /// Interleaved RGBA (3ch + interleaved alpha).
+    pub fn rgba(color: &'a [S], width: u32, height: u32) -> Self {
+        Self::base(color, width, height, 3, true)
+    }
+    /// Single-channel grayscale.
+    pub fn gray(color: &'a [S], width: u32, height: u32) -> Self {
+        Self::base(color, width, height, 1, false)
+    }
+    /// Stride of the interleaved color buffer (color channels + interleaved alpha).
+    fn interleaved_channels(&self) -> u32 {
+        self.color_channels + if self.alpha { 1 } else { 0 }
+    }
+}
+
+impl<'a> Frame<'a, u8> {
+    /// Thin sugar for the dominant photo path: interleaved RGBA8.
+    pub fn rgba8(px: &'a [u8], width: u32, height: u32) -> Self {
+        Self::rgba(px, width, height)
+    }
+}
+
+// ─── Options ─────────────────────────────────────────────────────────────────
+
+/// Mutually-exclusive rate control. Makes the upstream "set distance after
+/// lossless un-lossless's it" bug structurally impossible.
+#[derive(Clone, Copy, Debug)]
+pub enum Rate {
+    /// JPEG-style quality 0..100 → `JxlEncoderDistanceFromQuality`.
+    Quality(f32),
+    /// Butteraugli distance, 0..15 (0 = mathematically lossless).
+    Distance(f32),
+    /// True (modular) lossless via `JxlEncoderSetFrameLossless(true)`.
+    Lossless,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GroupOrder {
+    pub center: Option<(i64, i64)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ColorEncoding {
+    Srgb,
+    LinearSrgb,
+}
+
+/// Typed mirror of `JxlEncoderFrameSettingId` — deletes the `transmute(14i32)`
+/// hack. `Raw(i32)` is the escape hatch for any id not enumerated here.
+#[derive(Clone, Copy, Debug)]
+pub enum FrameSettingId {
+    Effort,
+    DecodingSpeed,
+    GroupOrder,
+    GroupOrderCenterX,
+    GroupOrderCenterY,
+    ProgressiveDc,
+    ProgressiveAc,
+    QprogressiveAc,
+    Responsive,
+    Modular,
+    Gaborish,
+    Epf,
+    Raw(i32),
+}
+
+impl FrameSettingId {
+    fn to_ffi(self) -> ffi::JxlEncoderFrameSettingId {
+        use ffi::JxlEncoderFrameSettingId as F;
+        match self {
+            FrameSettingId::Effort => F::JXL_ENC_FRAME_SETTING_EFFORT,
+            FrameSettingId::DecodingSpeed => F::JXL_ENC_FRAME_SETTING_DECODING_SPEED,
+            FrameSettingId::GroupOrder => F::JXL_ENC_FRAME_SETTING_GROUP_ORDER,
+            FrameSettingId::GroupOrderCenterX => F::JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_X,
+            FrameSettingId::GroupOrderCenterY => F::JXL_ENC_FRAME_SETTING_GROUP_ORDER_CENTER_Y,
+            FrameSettingId::ProgressiveDc => F::JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC,
+            FrameSettingId::ProgressiveAc => F::JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC,
+            FrameSettingId::QprogressiveAc => F::JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC,
+            FrameSettingId::Responsive => F::JXL_ENC_FRAME_SETTING_RESPONSIVE,
+            FrameSettingId::Modular => F::JXL_ENC_FRAME_SETTING_MODULAR,
+            FrameSettingId::Gaborish => F::JXL_ENC_FRAME_SETTING_GABORISH,
+            FrameSettingId::Epf => F::JXL_ENC_FRAME_SETTING_EPF,
+            FrameSettingId::Raw(v) => ffi::JxlEncoderFrameSettingId(v),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EncodeOptions {
+    pub rate: Rate,
+    /// libjxl Effort, 1..=10.
+    pub effort: u8,
+    pub progressive_dc: Option<i64>,
+    pub group_order: Option<GroupOrder>,
+    /// `None` = auto: sRGB for integer samples, linear sRGB for float.
+    pub color: Option<ColorEncoding>,
+    pub use_container: bool,
+    pub uses_original_profile: bool,
+    /// Escape hatch: any present/future libjxl frame-setting knob.
+    pub extra: Vec<(FrameSettingId, i64)>,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        EncodeOptions {
+            rate: Rate::Quality(90.0),
+            effort: 3,
+            progressive_dc: None,
+            group_order: None,
+            color: None,
+            use_container: false,
+            uses_original_profile: false,
+            extra: Vec::new(),
+        }
+    }
+}
+
+impl EncodeOptions {
+    pub fn quality(q: f32) -> Self {
+        EncodeOptions {
+            rate: Rate::Quality(q),
+            ..Default::default()
+        }
+    }
+    pub fn distance(d: f32) -> Self {
+        EncodeOptions {
+            rate: Rate::Distance(d),
+            ..Default::default()
+        }
+    }
+    pub fn lossless() -> Self {
+        EncodeOptions {
+            rate: Rate::Lossless,
+            ..Default::default()
+        }
+    }
+    pub fn with_effort(mut self, effort: u8) -> Self {
+        self.effort = effort;
+        self
+    }
+}
+
+// ─── Encoder ─────────────────────────────────────────────────────────────────
+
+/// Owns the `*JxlEncoder` handle (RAII; `Drop` → `JxlEncoderDestroy`). Reused
+/// across encodes via `JxlEncoderReset`. `Send`, not `Sync`.
+pub struct Encoder {
+    enc: *mut ffi::JxlEncoder,
+    /// Optional thread-parallel runner, owned; null when single-threaded.
+    runner: *mut c_void,
+    opts: EncodeOptions,
+}
+
+// libjxl looks up its LCMS context per-use (not stored), same justification as
+// upstream: safe to move across threads, not to share.
+unsafe impl Send for Encoder {}
+
+impl Encoder {
+    /// Construct an encoder. Cheap (`JxlEncoderCreate` = malloc + struct init).
+    pub fn new(opts: EncodeOptions) -> Result<Self, EncodeError> {
+        let enc = unsafe { ffi::JxlEncoderCreate(ptr::null()) };
+        if enc.is_null() {
+            return Err(EncodeError::Create);
+        }
+        Ok(Encoder {
+            enc,
+            runner: ptr::null_mut(),
+            opts,
+        })
+    }
+
+    /// Construct an encoder with a multi-threaded parallel runner
+    /// (`num_threads` worker threads). The runner is held for the encoder's
+    /// lifetime and re-applied on every `encode()` (after each `Reset`).
+    pub fn with_threads(opts: EncodeOptions, num_threads: usize) -> Result<Self, EncodeError> {
+        let mut e = Self::new(opts)?;
+        if num_threads > 1 {
+            let runner =
+                unsafe { ffi::JxlThreadParallelRunnerCreate(ptr::null(), num_threads) };
+            if runner.is_null() {
+                return Err(EncodeError::Jxl("JxlThreadParallelRunnerCreate failed".into()));
+            }
+            e.runner = runner;
+        }
+        Ok(e)
+    }
+
+    /// Add an ad-hoc frame-setting for subsequent encodes. Persists (visible reuse).
+    pub fn set_raw(&mut self, id: FrameSettingId, val: i64) {
+        self.opts.extra.push((id, val));
+    }
+
+    /// Replace the options used by subsequent encodes. Lets one held handle be
+    /// reused across a variant set / ingest loop whose levels differ in
+    /// quality/effort/progressive — the handle is reused, only options change.
+    pub fn set_options(&mut self, opts: EncodeOptions) {
+        self.opts = opts;
+    }
+
+    /// Borrow the current options (e.g. to tweak before the next encode).
+    pub fn options_mut(&mut self) -> &mut EncodeOptions {
+        &mut self.opts
+    }
+
+    /// Encode one frame to JXL bytes. Resets the handle afterward (on success
+    /// *and* on every error path) so the encoder is clean for the next call.
+    pub fn encode<S: Sample>(&mut self, frame: &Frame<S>) -> Result<Vec<u8>, EncodeError> {
+        let r = unsafe { self.encode_inner(frame) };
+        // Reset on every path: a reused Encoder is never poisoned by a failure.
+        unsafe { ffi::JxlEncoderReset(self.enc) };
+        r
+    }
+
+    unsafe fn encode_inner<S: Sample>(&self, frame: &Frame<S>) -> Result<Vec<u8>, EncodeError> {
+        // ── validate ──────────────────────────────────────────────────────
+        if frame.color_channels != 1 && frame.color_channels != 3 {
+            return Err(EncodeError::Channels(format!(
+                "color_channels must be 1 or 3, got {}",
+                frame.color_channels
+            )));
+        }
+        let planar_alpha = frame.extra.iter().any(|e| e.kind == ExtraKind::Alpha);
+        if frame.alpha && planar_alpha {
+            return Err(EncodeError::Channels(
+                "alpha supplied both interleaved and as a planar channel".into(),
+            ));
+        }
+        let px = frame.width as usize * frame.height as usize;
+        let expected_color = px * frame.interleaved_channels() as usize;
+        if frame.color.len() != expected_color {
+            return Err(EncodeError::Size {
+                expected: expected_color,
+                got: frame.color.len(),
+            });
+        }
+        for e in frame.extra {
+            if e.data.len() != px {
+                return Err(EncodeError::Size {
+                    expected: px,
+                    got: e.data.len(),
+                });
+            }
+        }
+
+        let enc = self.enc;
+
+        // ── parallel runner (must precede basic info / first frame) ────────
+        if !self.runner.is_null() {
+            let st = ffi::JxlEncoderSetParallelRunner(
+                enc,
+                Some(ffi::JxlThreadParallelRunner),
+                self.runner,
+            );
+            check(st, "JxlEncoderSetParallelRunner")?;
+        }
+
+        if self.opts.use_container {
+            let st = ffi::JxlEncoderUseContainer(enc, JXL_TRUE);
+            check(st, "JxlEncoderUseContainer")?;
+        }
+
+        // ── basic info ─────────────────────────────────────────────────────
+        let (bits, exp_bits) = S::bits_per_sample();
+        let lossless = matches!(self.opts.rate, Rate::Lossless);
+        // interleaved alpha occupies one extra channel slot (index 0).
+        let alpha_extra = if frame.alpha { 1 } else { 0 };
+        let num_extra = alpha_extra + frame.extra.len() as u32;
+
+        let mut info = std::mem::MaybeUninit::<ffi::JxlBasicInfo>::uninit();
+        ffi::JxlEncoderInitBasicInfo(info.as_mut_ptr());
+        let mut info = info.assume_init();
+        info.xsize = frame.width;
+        info.ysize = frame.height;
+        info.bits_per_sample = bits;
+        info.exponent_bits_per_sample = exp_bits;
+        info.num_color_channels = frame.color_channels;
+        info.num_extra_channels = num_extra;
+        if frame.alpha || planar_alpha {
+            info.alpha_bits = bits;
+            info.alpha_exponent_bits = exp_bits;
+            info.alpha_premultiplied = JXL_FALSE;
+        }
+        // Lossless requires the original profile to be preserved bit-exact.
+        info.uses_original_profile =
+            if lossless || self.opts.uses_original_profile { JXL_TRUE } else { JXL_FALSE };
+        check(ffi::JxlEncoderSetBasicInfo(enc, &info), "JxlEncoderSetBasicInfo")?;
+
+        // ── declare planar extra channels (mandatory init) ─────────────────
+        // Interleaved alpha is handled by libjxl from alpha_bits + the 4th
+        // interleaved sample, so it is not declared here. Planar extras start
+        // after the interleaved-alpha slot.
+        for (i, e) in frame.extra.iter().enumerate() {
+            let idx = alpha_extra as usize + i;
+            let mut ci = std::mem::MaybeUninit::<ffi::JxlExtraChannelInfo>::uninit();
+            ffi::JxlEncoderInitExtraChannelInfo(e.kind.to_ffi(), ci.as_mut_ptr());
+            let mut ci = ci.assume_init();
+            ci.bits_per_sample = bits;
+            ci.exponent_bits_per_sample = exp_bits;
+            check(
+                ffi::JxlEncoderSetExtraChannelInfo(enc, idx, &ci),
+                "JxlEncoderSetExtraChannelInfo",
+            )?;
+        }
+
+        // ── color encoding ─────────────────────────────────────────────────
+        let is_gray = frame.color_channels == 1;
+        let want = self.opts.color.unwrap_or(if S::is_float() {
+            ColorEncoding::LinearSrgb
+        } else {
+            ColorEncoding::Srgb
+        });
+        let mut ce = std::mem::MaybeUninit::<ffi::JxlColorEncoding>::uninit();
+        match want {
+            ColorEncoding::Srgb => {
+                ffi::JxlColorEncodingSetToSRGB(ce.as_mut_ptr(), is_gray as c_int)
+            }
+            ColorEncoding::LinearSrgb => {
+                ffi::JxlColorEncodingSetToLinearSRGB(ce.as_mut_ptr(), is_gray as c_int)
+            }
+        }
+        let ce = ce.assume_init();
+        check(ffi::JxlEncoderSetColorEncoding(enc, &ce), "JxlEncoderSetColorEncoding")?;
+
+        // ── frame settings ─────────────────────────────────────────────────
+        let fs = ffi::JxlEncoderFrameSettingsCreate(enc, ptr::null());
+        if fs.is_null() {
+            return Err(EncodeError::Jxl("JxlEncoderFrameSettingsCreate failed".into()));
+        }
+        set_opt(fs, FrameSettingId::Effort, self.opts.effort as i64)?;
+        match self.opts.rate {
+            Rate::Lossless => {
+                check(
+                    ffi::JxlEncoderSetFrameLossless(fs, JXL_TRUE),
+                    "JxlEncoderSetFrameLossless",
+                )?;
+            }
+            Rate::Distance(d) => {
+                check(ffi::JxlEncoderSetFrameDistance(fs, d), "JxlEncoderSetFrameDistance")?;
+            }
+            Rate::Quality(q) => {
+                let d = ffi::JxlEncoderDistanceFromQuality(q);
+                check(ffi::JxlEncoderSetFrameDistance(fs, d), "JxlEncoderSetFrameDistance")?;
+            }
+        }
+        if let Some(dc) = self.opts.progressive_dc {
+            set_opt(fs, FrameSettingId::ProgressiveDc, dc)?;
+        }
+        if let Some(go) = self.opts.group_order {
+            set_opt(fs, FrameSettingId::GroupOrder, 1)?;
+            if let Some((cx, cy)) = go.center {
+                set_opt(fs, FrameSettingId::GroupOrderCenterX, cx)?;
+                set_opt(fs, FrameSettingId::GroupOrderCenterY, cy)?;
+            }
+        }
+        for &(id, val) in &self.opts.extra {
+            set_opt(fs, id, val)?;
+        }
+
+        // ── add interleaved color frame (zero-copy) ────────────────────────
+        let pf = ffi::JxlPixelFormat {
+            num_channels: frame.interleaved_channels(),
+            data_type: S::data_type(),
+            endianness: frame.endianness,
+            align: 0,
+        };
+        let color_bytes = std::mem::size_of_val(frame.color);
+        check(
+            ffi::JxlEncoderAddImageFrame(
+                fs,
+                &pf,
+                frame.color.as_ptr() as *const c_void,
+                color_bytes,
+            ),
+            "JxlEncoderAddImageFrame",
+        )?;
+
+        // ── supply planar extra-channel buffers (zero-copy) ────────────────
+        let pf1 = ffi::JxlPixelFormat {
+            num_channels: 1,
+            data_type: S::data_type(),
+            endianness: frame.endianness,
+            align: 0,
+        };
+        for (i, e) in frame.extra.iter().enumerate() {
+            let idx = (alpha_extra as usize + i) as u32;
+            check(
+                ffi::JxlEncoderSetExtraChannelBuffer(
+                    fs,
+                    &pf1,
+                    e.data.as_ptr() as *const c_void,
+                    std::mem::size_of_val(e.data),
+                    idx,
+                ),
+                "JxlEncoderSetExtraChannelBuffer",
+            )?;
+        }
+
+        ffi::JxlEncoderCloseInput(enc);
+
+        // ── drain output (grow loop, double on NeedMoreOutput) ─────────────
+        let mut out = vec![0u8; 1 << 16];
+        let mut pos = 0usize;
+        loop {
+            let mut next = out.as_mut_ptr().add(pos);
+            let mut avail = out.len() - pos;
+            let st = ffi::JxlEncoderProcessOutput(enc, &mut next, &mut avail);
+            let written = (out.len() - pos) - avail;
+            pos += written;
+            if st == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
+                out.truncate(pos);
+                break;
+            } else if st == ffi::JxlEncoderStatus::JXL_ENC_NEED_MORE_OUTPUT {
+                let grow = out.len().max(1 << 16);
+                out.resize(out.len() + grow, 0);
+            } else {
+                return Err(EncodeError::Jxl(format!(
+                    "JxlEncoderProcessOutput error (code {})",
+                    encoder_error_code(enc)
+                )));
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::JxlEncoderDestroy(self.enc);
+            if !self.runner.is_null() {
+                ffi::JxlThreadParallelRunnerDestroy(self.runner);
+            }
+        }
+    }
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+fn check(status: ffi::JxlEncoderStatus, what: &str) -> Result<(), EncodeError> {
+    if status == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
+        Ok(())
+    } else {
+        Err(EncodeError::Jxl(format!("{what} failed")))
+    }
+}
+
+unsafe fn set_opt(
+    fs: *mut ffi::JxlEncoderFrameSettings,
+    id: FrameSettingId,
+    val: i64,
+) -> Result<(), EncodeError> {
+    check(
+        ffi::JxlEncoderFrameSettingsSetOption(fs, id.to_ffi(), val),
+        "JxlEncoderFrameSettingsSetOption",
+    )
+}
+
+unsafe fn encoder_error_code(enc: *mut ffi::JxlEncoder) -> i32 {
+    ffi::JxlEncoderGetError(enc).0
+}
+
+// ─── free-fn sugar ───────────────────────────────────────────────────────────
+
+/// Thin sugar for the dominant photo path: encode interleaved RGBA8.
+pub fn encode_rgba8(
+    px: &[u8],
+    w: u32,
+    h: u32,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    Encoder::new(opts.clone())?.encode(&Frame::rgba8(px, w, h))
+}
+
+/// Encode interleaved RGB8 (no alpha).
+pub fn encode_rgb8(
+    px: &[u8],
+    w: u32,
+    h: u32,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    Encoder::new(opts.clone())?.encode(&Frame::rgb(px, w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jxl_decode::decode_interleaved;
+
+    const W: u32 = 32;
+    const H: u32 = 24;
+
+    fn has_jxl_magic(b: &[u8]) -> bool {
+        (b.len() >= 2 && b[0] == 0xFF && b[1] == 0x0A)
+            || (b.len() >= 8 && b[0] == 0 && b[3] == 0x0C && &b[4..8] == b"JXL ")
+    }
+
+    fn ramp_u8(channels: u32) -> Vec<u8> {
+        let n = (W * H * channels) as usize;
+        (0..n).map(|i| (i % 251) as u8).collect()
+    }
+
+    // ── per-sample-type lossless round-trips (bit-exact for int) ────────────
+
+    #[test]
+    fn u8_rgb_lossless_roundtrip_exact() {
+        let src = ramp_u8(3);
+        let jxl = encode_rgb8(&src, W, H, &EncodeOptions::lossless()).unwrap();
+        assert!(has_jxl_magic(&jxl));
+        let (px, w, h) = decode_interleaved::<u8>(&jxl, 3).unwrap();
+        assert_eq!((w, h), (W, H));
+        assert_eq!(px, src, "u8 RGB lossless not bit-exact");
+    }
+
+    #[test]
+    fn u8_rgba_lossless_preserves_alpha() {
+        // Distinct alpha pattern so a dropped/flattened alpha is detectable.
+        let mut src = vec![0u8; (W * H * 4) as usize];
+        for (i, px) in src.chunks_exact_mut(4).enumerate() {
+            px[0] = (i % 200) as u8;
+            px[1] = 90;
+            px[2] = 40;
+            px[3] = if i % 3 == 0 { 100 } else { 255 };
+        }
+        let jxl = encode_rgba8(&src, W, H, &EncodeOptions::lossless()).unwrap();
+        let (px, _, _) = decode_interleaved::<u8>(&jxl, 4).unwrap();
+        assert_eq!(px, src, "u8 RGBA lossless not bit-exact (alpha?)");
+    }
+
+    #[test]
+    fn u16_gray_lossless_roundtrip_exact() {
+        let src: Vec<u16> = (0..(W * H) as usize).map(|i| (i as u16).wrapping_mul(257)).collect();
+        let mut enc = Encoder::new(EncodeOptions::lossless()).unwrap();
+        let jxl = enc.encode(&Frame::gray(&src, W, H)).unwrap();
+        let (px, w, h) = decode_interleaved::<u16>(&jxl, 1).unwrap();
+        assert_eq!((w, h), (W, H));
+        assert_eq!(px, src, "u16 gray lossless not bit-exact");
+    }
+
+    #[test]
+    fn f16_rgb_lossless_roundtrip() {
+        let src: Vec<half::f16> = (0..(W * H * 3) as usize)
+            .map(|i| half::f16::from_f32((i % 97) as f32 / 97.0))
+            .collect();
+        let mut enc = Encoder::new(EncodeOptions::lossless()).unwrap();
+        let jxl = enc.encode(&Frame::rgb(&src, W, H)).unwrap();
+        let (px, _, _) = decode_interleaved::<half::f16>(&jxl, 3).unwrap();
+        assert_eq!(px.len(), src.len());
+        for (a, b) in px.iter().zip(&src) {
+            assert!(
+                (a.to_f32() - b.to_f32()).abs() <= 1e-3,
+                "f16 lossless drift: {} vs {}",
+                a.to_f32(),
+                b.to_f32()
+            );
+        }
+    }
+
+    #[test]
+    fn f32_rgb_lossless_roundtrip() {
+        let src: Vec<f32> = (0..(W * H * 3) as usize).map(|i| (i % 131) as f32 / 131.0).collect();
+        let mut enc = Encoder::new(EncodeOptions::lossless()).unwrap();
+        let jxl = enc.encode(&Frame::rgb(&src, W, H)).unwrap();
+        let (px, _, _) = decode_interleaved::<f32>(&jxl, 3).unwrap();
+        assert_eq!(px.len(), src.len());
+        for (a, b) in px.iter().zip(&src) {
+            assert!((a - b).abs() <= 1e-4, "f32 lossless drift: {a} vs {b}");
+        }
+    }
+
+    // ── planar extra channel ────────────────────────────────────────────────
+
+    #[test]
+    fn planar_extra_channel_encodes() {
+        let color = ramp_u8(3);
+        let depth: Vec<u8> = (0..(W * H) as usize).map(|i| (i % 255) as u8).collect();
+        let extra = [ExtraChannel { kind: ExtraKind::Depth, data: &depth }];
+        let frame = Frame {
+            extra: &extra,
+            ..Frame::rgb(&color, W, H)
+        };
+        let mut enc = Encoder::new(EncodeOptions::lossless()).unwrap();
+        let jxl = enc.encode(&frame).unwrap();
+        assert!(has_jxl_magic(&jxl));
+        // Color still round-trips bit-exact alongside the extra channel.
+        let (px, _, _) = decode_interleaved::<u8>(&jxl, 3).unwrap();
+        assert_eq!(px, color);
+    }
+
+    // ── correctness contracts ───────────────────────────────────────────────
+
+    #[test]
+    fn error_path_leaves_encoder_reusable() {
+        let mut enc = Encoder::new(EncodeOptions::quality(90.0)).unwrap();
+        // Wrong-sized buffer → Size error.
+        let bad = vec![0u8; 10];
+        let err = enc.encode(&Frame::rgb(&bad, W, H));
+        assert!(matches!(err, Err(EncodeError::Size { .. })));
+        // The same handle must still encode a valid frame (reset-on-error).
+        let good = ramp_u8(3);
+        let ok = enc.encode(&Frame::rgb(&good, W, H));
+        assert!(ok.is_ok(), "encoder poisoned after error: {:?}", ok.err());
+    }
+
+    #[test]
+    fn alpha_supplied_twice_is_rejected() {
+        let color = vec![0u8; (W * H * 4) as usize];
+        let a = vec![0u8; (W * H) as usize];
+        let extra = [ExtraChannel { kind: ExtraKind::Alpha, data: &a }];
+        let frame = Frame {
+            extra: &extra,
+            ..Frame::rgba(&color, W, H)
+        };
+        let mut enc = Encoder::new(EncodeOptions::lossless()).unwrap();
+        assert!(matches!(enc.encode(&frame), Err(EncodeError::Channels(_))));
+    }
+
+    #[test]
+    fn one_encoder_reused_across_many_encodes() {
+        // Mirrors the variant-set / ingest-loop reuse pattern: one handle, many encodes.
+        let src = ramp_u8(3);
+        let mut enc = Encoder::new(EncodeOptions::quality(85.0)).unwrap();
+        for _ in 0..3 {
+            let jxl = enc.encode(&Frame::rgb(&src, W, H)).unwrap();
+            assert!(has_jxl_magic(&jxl));
+        }
+    }
+
+    #[test]
+    fn quality_and_distance_produce_valid_jxl() {
+        let src = ramp_u8(3);
+        for opts in [
+            EncodeOptions::quality(90.0),
+            EncodeOptions::distance(1.0),
+            EncodeOptions::lossless(),
+        ] {
+            let jxl = encode_rgb8(&src, W, H, &opts).unwrap();
+            assert!(has_jxl_magic(&jxl));
+            assert!(decode_interleaved::<u8>(&jxl, 3).is_some());
+        }
+    }
+}

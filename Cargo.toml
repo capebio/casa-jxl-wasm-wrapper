@@ -10,11 +10,10 @@ crate-type = ["cdylib", "rlib"]
 # A2: enable rayon parallelism in the RAW pipeline for WASM (requires COOP/COEP, already required by libjxl MT)
 parallel-wasm = ["raw-pipeline/parallel", "dep:wasm-bindgen-rayon"]
 
-# Forwarders so that `cargo run --bin raw_decode_bench --features jxl-lowlevel` (and/or jxl-encode)
-# pulls the optional pieces into the raw-pipeline dep (whose declaration hardcodes default-features=false).
-# Use when building the native bench or other native tools that want the shared low-level decoder model.
-jxl-encode = ["raw-pipeline/jxl-encode"]
-jxl-lowlevel = ["raw-pipeline/jxl-lowlevel"]
+# Native bench/tools: forward the BSD own-FFI JXL codec (encode + decode).
+# (Always enabled natively via the target dep below; this forwarder keeps the
+# `--features jxl-codec` invocation valid.)
+jxl-codec = ["raw-pipeline/jxl-codec"]
 c-perceptual = ["raw-pipeline/c-perceptual"]
 
 # Native rayon forwarder (no wasm-bindgen-rayon). The native bench builds
@@ -32,22 +31,13 @@ web-sys = { version = "0.3", features = ["Window", "Performance", "WorkerGlobalS
 raw-pipeline = { path = "crates/raw-pipeline", default-features = false }
 wasm-bindgen-rayon = { version = "1", optional = true }
 
-# Native-only: JXL encode+decode for raw_decode_bench. Excluded from WASM builds
-# via target guard (wasm-pack only builds the [lib] cdylib, not [[bin]] targets,
-# but the guard prevents any accidental wasm32 compilation of vendored libjxl).
+# Native-only: force the BSD own-FFI JXL codec (encode + decode) + rayon into the
+# raw-pipeline dep so the raw_decode_bench binary always has it. WASM builds use
+# the [dependencies] entry above (default-features = false, no JXL — the WASM JXL
+# path stays on web/pkg + bridge.cpp). jxl-ffi builds external/libjxl itself, so
+# wasm32 never compiles it (target-gated dependency).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-jpegxl-rs = { version = "0.14", features = ["vendored"] }
-# Low-level libjxl for native progressive (FRAME_PROGRESSION / FlushImage / SetProgressiveDetail)
-# and ROI crop (JxlDecoderSetCropEnabled + SetImageOutBuffer) in parity harness / Tauri paths.
-jpegxl-sys = { version = "0.12.1", features = ["vendored"] }
-
-# Route jpegxl-src through the in-repo vendor copy so we can force MSVC Release
-# optimization. Upstream jpegxl-src 0.11.4's build path under the ClangCL multi-config
-# generator drops CMake's default /O2 from CMAKE_CXX_FLAGS_RELEASE, producing an
-# UNOPTIMIZED (~30x slower, both encode and decode) libjxl. The vendor build script
-# re-adds /O2 /Ob2 for release. See vendor/jpegxl-src/src/lib.rs.
-[patch.crates-io]
-jpegxl-src = { path = "vendor/jpegxl-src" }
+raw-pipeline = { path = "crates/raw-pipeline", default-features = false, features = ["jxl-codec", "parallel"] }
 
 [profile.release]
 opt-level = 3

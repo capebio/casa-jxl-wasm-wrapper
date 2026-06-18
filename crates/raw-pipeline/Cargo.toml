@@ -4,30 +4,25 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["parallel", "jxl-encode"]
+default = ["parallel", "jxl-codec"]
 parallel = ["dep:rayon"]
-jxl-encode = ["dep:jpegxl-rs"]
+# jxl-codec: BSD-clean own-FFI JXL encode + decode (jxl-ffi crate). Native only.
+# Replaces the GPL jpegxl-rs / jpegxl-sys path entirely (encode + decode).
+jxl-codec = ["dep:jxl-ffi", "dep:half", "dep:rayon"]
 c-perceptual = []
-# jxl-lowlevel: stateful jpegxl-sys decoder (FRAME_PROGRESSION, FlushImage, SetProgressiveDetail, SetCropEnabled when avail).
-# Provides the reference implementation for Tauri native progressive + ROI decode (no high-level one-shot).
-# Native only; enable when depending from Tauri desktop crate or native bench.
-# Usage: raw-pipeline = { path = "...", default-features = false, features = ["jxl-lowlevel"] }
-jxl-lowlevel = ["dep:jpegxl-sys", "dep:rayon"]  # PR-10b tiled decode uses rayon for parallel per-tile JXL decode + stitch (native M4)
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 rayon = { version = "1", optional = true }
-jpegxl-rs = { version = "0.14", features = ["vendored"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "avif"] }
 thiserror = "1"
 anyhow = "1"
 
-# Low-level libjxl FFI (jpegxl-sys) gated behind jxl-lowlevel feature.
-# Declared at crate root level (optional) so that `cargo build -p raw-pipeline --features jxl-lowlevel`
-# on native succeeds; WASM builds keep default-features=false and never request this feature.
-# (Vendored libjxl cross to wasm32 requires Emscripten and is not supported here; see root CLAUDE.md.)
+# BSD-clean own FFI (bindgen over external/libjxl headers). Native only — WASM
+# builds keep default-features = false and the JXL path stays on web/pkg + bridge.cpp.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-jpegxl-sys = { version = "0.12.1", features = ["vendored"], optional = true }
+jxl-ffi = { path = "../jxl-ffi", optional = true }
+half = { version = "2", optional = true }
 
 [dev-dependencies]
 jxl-oxide = "0.11"

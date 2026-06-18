@@ -1,11 +1,7 @@
-#![cfg(all(
-    feature = "jxl-lowlevel",
-    feature = "jxl-encode",
-    not(target_arch = "wasm32")
-))]
+#![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
 
 use raw_pipeline::casabio_encode::{encode_variants_with_progressive, SourceType};
-use raw_pipeline::jxl_lowlevel::{
+use raw_pipeline::jxl_decode::{
     decode_progressive_frames, decode_progressive_frames_borrowed, DecodeProgressiveEvent,
     ProgressiveFrame,
 };

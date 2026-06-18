@@ -570,3 +570,60 @@ Zero-copy hot path on encode (exactBuffer(rgba) from targetRgba etc). The review
 All rejections grounded in full file reads + grep of call sites (upstream jxl-butteraugli:169 create, worker:41 returnPixels, session create, page.test:5 source read). ChatGPT operated from "snippets" (00: "after reading the full 2459-line" was the fix in corpus).
 
 ---
+
+## 2026-06-18 — EpicCodeReviewNew: Performance Roadmap Deferrals (raw-pipeline)
+
+Source: EpicCodeReviewNew.md §"Performance roadmap (deferred — need benchmark evidence)". All 7 items confirmed-real by the EpicCodeReview finders but not applied in that run. **Rejected from this pass for the same reason:** each changes parallelism, algorithm, or heuristic without benchmark data. CLAUDE.md guardrail: "Adaptive/heuristic changes require benchmark data. Do not add tunables without evidence."
+
+**PR-1: `pipeline.rs:701` clarity pass rayon-row + SIMD.**
+The unsharp clarity pass is single-threaded scalar over the whole RGB16 buffer. No benchmark run establishes a baseline for this path in isolation; thermal variance in prior sessions exceeded the measured gains on similar passes. Reject until a dedicated bench run (e.g. `raw_decode_bench --features jxl-codec` with clarity enabled) shows the clarity step on the critical path.
+
+**PR-2: `pipeline.rs:888` LUT for `apply_perceptual_constancy`.**
+The dormant `PerceptualGrid` stub exists but no end-to-end timing isolates this call. This is the same item tracked in the open ToneSimd-LUT plan (docs/superpowers/plans/2026-06-16-tone-simd-lut-gather-jsWasm.md Task 2/3); implement there with the planned benchmarks, not opportunistically here.
+
+**PR-3: `demosaic.rs:379` WASM SIMD scatter fix.**
+8-wide SIMD vector then 24 scalar stores — scatter eats the SIMD win. Valid finding; no corpus-level measurement showing it is on the critical path for the primary WASM demosaic workload. Reject until profiler evidence from a real ORF/DNG WASM decode.
+
+**PR-4: `demosaic.rs:838` CFA `match` + border-clamp hoist.**
+Interior-loop per-pixel 4-way CFA dispatch. Hoist is output-identical but changes instruction mix. Reject until a demosaic-level bench confirms the interior `match` is the dominant cost (LJPEG decode has historically been 97% of CR2 time; DNG tile decode is the likely bottleneck before this branch).
+
+**PR-5: `dng.rs:228` uncompressed tile/strip parallel + hoisted byte-order.**
+Fully serial with per-pixel endianness branch. Rayon parallelism + hoisted swap would help — but uncompressed DNG tiles are uncommon in the current corpus (primary targets are LJPEG-compressed DNGs and ORFs). Reject until we have a corpus of uncompressed DNGs and a bench showing this path dominates.
+
+**PR-6: `pipeline.rs:1393/1503/1493` luminance NR + downscale parallelism.**
+`apply_luminance_nr` and the integer/box downscale paths are single-threaded under `parallel`. These are provably on the critical path only after the tone/apply_tone_math kernel (70% cost center, already SIMD). Reject from this pass: profiler data needed to confirm these sit outside the tone kernel and are independently worthwhile.
+
+**PR-7: `frame_stats.rs:127` AVX2 f64 lane drop; `ljpeg.rs:388` DHT linear scan; `dng.rs:174` per-tile Vec alloc.**
+Three micro-optimisations: (a) AVX2 luma accumulation falls back to scalar f64 per lane — output-changing (accumulator precision), needs ADR sign-off per deferred f32→f64 item; (b) DHT cache rebuilt+linear-searched per segment — no bench proving this on the critical path (Huffman table rebuild is <1% of CR2 time per CR2-R2 baseline); (c) per-tile `Vec` inside a parallel rayon map — small fixed-size alloc, likely amortised. All three need isolated measurements before touching.
+
+---
+
+## 2026-06-18 — EpicCodeReviewNew: Architecture Roadmap — Deferred, Need TDD Plan
+
+Source: EpicCodeReviewNew.md §"Architecture & elegance roadmap". All 6 items are valid architectural directions. **None applied this pass.** The review doc itself states: "None of these were applied — they're cross-cutting refactors that touch public shapes and need your sign-off." CLAUDE.md spec mandate requires a valid spec (goal, constraints, edge cases, success criteria) before any non-trivial implementation. These are week-scale refactors; implementing them without a TDD plan risks entangling correctness fixes with structural changes in a codebase that has no pixel-exact output tests in the default suite.
+
+**AR-1: One shared TIFF/IFD reader.**
+`tiff.rs`, `cr2.rs`, `dng.rs` each hand-roll IFD walking — the EpicCodeReview just patched identical OOB bugs 3× independently, proving the duplication is dangerous. **Approved in principle; rejected from this pass.** Requires: (1) a `tiff::Reader` visitor/iterator spec with error contract, (2) CR2/DNG migration plan tested file-by-file, (3) success criterion: all OOB fixes exist exactly once. Start with a TDD plan (#1 in sequence per review doc).
+
+**AR-2: Unified `RawImage` + `RawDecoder` trait.**
+The missing spine — `Cr2Image`, `DngImage`, `OrfInfo+raw`, `DngDemosaiced` carry the same fields with no shared contract. **Approved in principle; rejected from this pass.** Changes the public API surface (`process_into`, `lib.rs` WASM entry points). Requires spec covering: field mapping per format, `color_matrix None` semantics (currently conflated with identity), and how orientation integrates. Sequence after AR-1 (depends on a unified reader).
+
+**AR-3: `Demosaic` enum/trait seam.**
+The bilinear RGGB interior + SIMD body is copy-pasted across 5 functions; the pink-veil fix had to land in every copy. **Approved in principle; rejected from this pass.** Enables clean kernel benchmarking (PR-3/PR-4 above). Requires spec for the dispatch shape and a pixel-exact parity test before/after for each format. Sequence after AR-2 (needs `RawImage` as the input type).
+
+**AR-4: Decompose `process_into` and `decode_bytes_demosaiced_impl`.**
+`process_into` fuses LUT-cache + cfg dispatch + raw-pointer loop + 4-wide + AVX2 tile path; `decode_bytes_demosaiced_impl` is ~240 lines. `decode_tile` vs `decode_tile_stats` are ~250 duplicated lines. **Approved in principle; rejected from this pass.** Splitting helps the optimiser (LLVM inlines smaller units) and maintainability. Requires zero observable change to pixel output — needs parity tests on real files (the 7 currently-ignored tests) before touching the hot path.
+
+**AR-5: One `RawError` + orientation module.**
+Error handling mixes `String`, real `anyhow`, a fake local `anyhow!` macro in `tiff.rs`, and `thiserror`. EXIF orientation 2/4/5/7 silently no-ops (a deferred colour bug). **Approved in principle; rejected from this pass.** `RawError` collapse is mechanical but touches every `?` site across 6+ files — needs a dedicated branch. Orientation move requires the deferred `align_to_rggb` Grbg/Bggr fix and real-file verification first (per QUESTIONS.md).
+
+**AR-6: Collapse AVX2/AVX-512/wasm SIMD triplication in `perceptual/simd/`.**
+`scale_err`, `pixels_to_xyb`, `downsample` are the same kernel copy-pasted 3× with different intrinsic names; the scalar tail is also duplicated. The deferred f32→f64 accumulator fix must land in 4 places or they drift. **Approved in principle; rejected from this pass.** Requires: either `std::simd` (nightly) or a minimal SIMD trait macro, plus the f32→f64 ADR sign-off (output-changing — deferred to QUESTIONS.md). Cannot be done without also resolving the accumulator question.
+
+**Lower-leverage sub-items (also deferred):**
+- `apply_look_params` 12 positional `f32` args → `LookParams` struct (kills transposition bugs): approved; needs caller update + WASM boundary update.
+- Generic LUT-build + `downscale_rgb8/16/rgba` helpers: approved; pure deduplication, low risk, but surgical scope only (no free performance).
+- One camera-matrix colour helper shared by cr2/dng (cr2 reaches into dng internals): approved; depends on AR-1/AR-2.
+- Metric-result newtype (PSNR(dB) vs SSIM(0..1) can't be mixed): approved; requires perceptual/ public API change.
+
+All architecture items will be revisited once a TDD plan is written and the user signs off on sequencing.

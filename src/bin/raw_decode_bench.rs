@@ -1,7 +1,7 @@
 //! RAW decode pipeline benchmark: ORF, DNG, and CR2.
 //!
 //! Run: `cargo run --bin raw_decode_bench --release`
-//!   or via MSVC toolchain: `.\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode`
+//!   or via MSVC toolchain: `.\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-codec,parallel`
 //!
 //! Measures each stage independently:
 //!   - File I/O (excluded from timing)
@@ -9,7 +9,7 @@
 //!   - Demosaic (RGGB MHC)
 //!   - Tonemap (black/WB/matrix/curve → RGB8)
 //!   - JXL encode (effort=3/Falcon, quality=90, native threads)
-//!   - JXL decode (jpegxl-rs full decode)
+//!   - JXL decode (BSD jxl_decode full decode)
 //!   - Total end-to-end (RAW stages only; JXL is additive)
 //!
 //! Results are written to stdout and to `benchmark/results_native.json`.
@@ -28,12 +28,12 @@
 //!   Emits decode_buffer_extract_ms (0 in native), decode_region_downsample_ms, source_pixels_decoded,
 //!   decode_strategy for apples-to-apples with WASM onMetric + crop-benchmark reports.
 //!
-//! Low-level progressive/ROI decode model lives in `raw_pipeline::jxl_lowlevel` (feature "jxl-lowlevel").
-//! For the full-load lowlevel progressive demo to use *progressively-encoded* assets (realistic early
-//! first-pixel via Dc/groupOrder), also enable "jxl-encode":
-//!   cargo ... --features jxl-lowlevel,jxl-encode
-//!   or: .\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-lowlevel,jxl-encode
-//! This lets the bench and (future) Tauri app share the exact same jpegxl-sys state machine + encode variants.
+//! Low-level progressive/ROI decode model lives in `raw_pipeline::jxl_decode` (BSD own-FFI codec).
+//! For the full-load progressive demo to use *progressively-encoded* assets (realistic early
+//! first-pixel via Dc/groupOrder), enable "jxl-codec":
+//!   cargo ... --features jxl-codec,parallel
+//!   or: .\build-msvc.ps1 run --bin raw_decode_bench --release --features jxl-codec,parallel
+//! This lets the bench and (future) Tauri app share the same libjxl state machine + encode variants.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -41,16 +41,10 @@ use std::time::{Duration, Instant};
 
 use raw_pipeline::{cr2, demosaic, dng, pipeline};
 
-#[cfg(feature = "jxl-lowlevel")]
-use raw_pipeline::jxl_lowlevel::{
-    bench_jxl_decode_lowlevel_full as bench_jxl_decode_lowlevel_full,
-    bench_jxl_decode_lowlevel_progressive as bench_jxl_decode_lowlevel_progressive,
-};
+#[cfg(feature = "jxl-codec")]
+use raw_pipeline::jxl_decode::{bench_jxl_decode_lowlevel_full, bench_jxl_decode_lowlevel_progressive};
 
-// Import cfg must match the usage cfg (encode_full_proxy_jxl is gated on jxl-encode
-// alone, line ~788). Was all(jxl-lowlevel, jxl-encode), which broke `--features
-// jxl-encode` builds: usage compiled but the import did not → unresolved SourceType.
-#[cfg(feature = "jxl-encode")]
+#[cfg(feature = "jxl-codec")]
 use raw_pipeline::casabio_encode::{encode_variants_with_progressive, SourceType};
 
 static SMALL_CROP_TIMES: Mutex<Vec<(String, usize, f64)>> = Mutex::new(Vec::new());
@@ -86,8 +80,7 @@ fn bench<F: Fn() -> T, T>(f: F) -> (Duration, T) {
 /// Used for the direct-RGBA (native parity) encode path: tone directly to 4ch
 /// and feed encoder without ever materializing a retained 3ch RGB8.
 fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -> Option<(Duration, Vec<u8>)> {
-    use jpegxl_rs::encode::{encoder_builder, EncoderFrame, EncoderResult, EncoderSpeed};
-    use jpegxl_rs::ThreadsRunner;
+    use raw_pipeline::jxl_encode::{EncodeOptions, Encoder, Frame};
 
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -95,52 +88,46 @@ fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -
     let mut best = Duration::MAX;
     let mut last_bytes: Vec<u8> = Vec::new();
     for _ in 0..RUNS {
-        // Runner must outlive encoder; declared first so it drops last.
-        let runner = ThreadsRunner::new(None, Some(threads))?;
-        let mut encoder = encoder_builder()
-            .parallel_runner(&runner)
-            .speed(EncoderSpeed::Falcon)
-            .has_alpha(num_ch == 4)
-            .jpeg_quality(JXL_QUALITY)
-            .build().ok()?;
+        // Effort 3 = Falcon (matches WASM bench). Multi-threaded for representative numbers.
+        let mut encoder =
+            Encoder::with_threads(EncodeOptions::quality(JXL_QUALITY).with_effort(3), threads).ok()?;
         let t = Instant::now();
-        // Use high-level .encode for 4ch (direct rgba) -- proven in casabio_encode + ORF runs.
-        // Falls back to explicit frame for 3ch. Avoids "buffer too small" / extra-ch alpha mismatches seen on some DNGs with frame path.
-        let result: EncoderResult<u8> = if num_ch == 4 {
-            encoder.encode(data, width, height).ok()?
+        let bytes = if num_ch == 4 {
+            encoder.encode(&Frame::rgba8(data, width, height)).ok()?
         } else {
-            let frame = EncoderFrame::new(data).num_channels(num_ch);
-            encoder.encode_frame::<u8, u8>(&frame, width, height).ok()?
+            encoder.encode(&Frame::rgb(data, width, height)).ok()?
         };
         let elapsed = t.elapsed();
         if elapsed < best {
             best = elapsed;
         }
-        last_bytes = result.data;
+        last_bytes = bytes;
     }
     Some((best, last_bytes))
 }
 
-/// Decode JXL bytes via jpegxl-rs. Returns min decode duration over RUNS.
+/// Decode JXL bytes via the BSD `jxl_decode` layer. Returns min decode duration
+/// over RUNS.
 ///
-/// Uses a multi-threaded `ThreadsRunner` so the decode side matches the encode
-/// side (which already threads). The previous single-threaded `decoder_builder()`
-/// left libjxl decode serial — the measured ~270-740ms decode was serial cost.
-/// libjxl MT decode is deterministic => byte-identical reconstruction.
+/// Uses a multi-threaded runner so the decode side matches the encode side
+/// (which already threads). libjxl MT decode is deterministic => byte-identical
+/// reconstruction.
+///
+/// Holds ONE `Decoder` (handle + thread runner created once) and ONE output
+/// buffer, reused across all RUNS — no per-iteration create/destroy or
+/// allocation on the measured hot path (spec §8 criterion 4; `decode_into` =
+/// zero-copy out, zero per-decode alloc).
 fn bench_jxl_decode(jxl_bytes: &[u8]) -> Option<Duration> {
-    use jpegxl_rs::decode::decoder_builder;
-    use jpegxl_rs::ThreadsRunner;
-
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    use raw_pipeline::jxl_decode::{Channels, DecodeOptions, Decoder};
+    let mut dec = Decoder::new(DecodeOptions {
+        parallel: true,
+        ..Default::default()
+    })?;
+    let mut buf: Vec<u8> = Vec::new();
     let mut best = Duration::MAX;
     for _ in 0..RUNS {
-        // Runner must outlive the decoder; declared first so it drops last.
-        let runner = ThreadsRunner::new(None, Some(threads))?;
-        let decoder = decoder_builder().parallel_runner(&runner).build().ok()?;
         let t = Instant::now();
-        let _ = decoder.decode(jxl_bytes).ok()?;
+        dec.decode_into::<u8>(jxl_bytes, Channels::Rgba, &mut buf).ok()?;
         let elapsed = t.elapsed();
         if elapsed < best {
             best = elapsed;
@@ -479,7 +466,7 @@ fn main() {
     } else {
         eprintln!("\n!!! WARNING: built WITHOUT `parallel` — tone/demosaic run SINGLE-THREADED.");
         eprintln!("!!! Timings will be ~5-7x slower. Re-run with:");
-        eprintln!("!!!   .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\"\n");
+        eprintln!("!!!   .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-codec,parallel\"\n");
     }
 
     let test_dir = r"C:\Foo\raw-converter\tests";
@@ -515,9 +502,9 @@ fn main() {
     println!("=== Done ===");
     println!("Tip: use --release + MSVC toolchain for representative numbers.");
     println!("     `parallel` is REQUIRED for representative tone/demosaic numbers (multi-threaded):");
-    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\" 2>&1 | tee benchmark/results_latest.txt");
+    println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-codec,parallel\" 2>&1 | tee benchmark/results_latest.txt");
     println!("For Tauri/WASM parity ref sets (per HANDOFF-tauri-parity-2026-06-03.md):");
-    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-lowlevel,jxl-encode,parallel\"");
+    println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-codec,parallel\"");
 
     if rows.is_empty() {
         eprintln!("[warn] no files processed; JSON not written");
@@ -709,7 +696,7 @@ fn run_p2200_decode_roi_scan(rows: &mut Vec<BenchRow>, limit: usize) {
                     // Real low-level stateful progressive decode (the continuation target for full loads + ROI assets).
                     // Exercises FRAME_PROGRESSION + FlushImage + SetProgressiveDetail. Emits first-pixel timing.
                     // Only available when bench built with --features jxl-lowlevel (shared impl in raw-pipeline).
-                    #[cfg(feature = "jxl-lowlevel")]
+                    #[cfg(feature = "jxl-codec")]
                     if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl) {
                         println!("  lowlevel-prog (stateful) {}px: first={:.1}ms total={:.1}ms", sz, first_ms, total_ms);
                     }
@@ -718,10 +705,10 @@ fn run_p2200_decode_roi_scan(rows: &mut Vec<BenchRow>, limit: usize) {
             }
             // Demo real low-level progressive for a "full load" using the file's rgba (proxy for produced JXL variant in Tauri ingest).
             // Gated: requires --features jxl-lowlevel at bench build time (pulls the shared jxl_lowlevel impl).
-            #[cfg(feature = "jxl-lowlevel")]
+            #[cfg(feature = "jxl-codec")]
             if let Some(jxl_full) = encode_full_proxy_jxl(&rgba, w as u32, h as u32) {
                 if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl_full) {
-                    let prog_note = if cfg!(feature = "jxl-encode") { ", progressive asset" } else { "" };
+                    let prog_note = if cfg!(feature = "jxl-codec") { ", progressive asset" } else { "" };
                     println!(
                         "  lowlevel-prog full-load ({}x{}): first={:.1}ms total={:.1}ms (model for Tauri direct-to-texture{})",
                         w, h, first_ms, total_ms, prog_note
@@ -770,13 +757,8 @@ fn process_orf_to_rgba8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
 }
 
 fn encode_small_rgba_jxl(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    use jpegxl_rs::encode::{encoder_builder, EncoderSpeed};
-    let mut enc = encoder_builder()
-        .speed(EncoderSpeed::Falcon)
-        .jpeg_quality(85.0)
-        .build().ok()?;
-    let result: jpegxl_rs::encode::EncoderResult<u8> = enc.encode(rgba, width, height).ok()?;
-    Some(result.data)
+    use raw_pipeline::jxl_encode::{encode_rgba8, EncodeOptions};
+    encode_rgba8(rgba, width, height, &EncodeOptions::quality(85.0).with_effort(3)).ok()
 }
 
 /// Returns bytes for a full-size JXL to feed the low-level progressive decoder demo
@@ -788,7 +770,7 @@ fn encode_small_rgba_jxl(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>
 /// for gallery/lightbox full progressive loads.
 /// Falls back to the basic encoder otherwise (so `--features jxl-lowlevel` alone still works).
 fn encode_full_proxy_jxl(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
-    #[cfg(feature = "jxl-encode")]
+    #[cfg(feature = "jxl-codec")]
     {
         match encode_variants_with_progressive(rgba, w, h, SourceType::Raw, false, 2, 1) {
             Ok(variants) => return Some(variants.full),

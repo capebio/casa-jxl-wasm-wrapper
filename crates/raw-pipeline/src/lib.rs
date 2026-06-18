@@ -1,7 +1,14 @@
-#[cfg(feature = "jxl-encode")]
+// BSD-clean own-FFI JXL codec (replaces GPL jpegxl-rs/jpegxl-sys). Native only.
+#[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
+pub mod jxl_encode;
+#[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
+pub mod jxl_casadecoder;
+// Back-compat alias: the BSD decoder's canonical home is `jxl_casadecoder`
+// (JXL-CASADECODER); existing call sites (`crate::jxl_decode::…`) resolve unchanged.
+#[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
+pub use jxl_casadecoder as jxl_decode;
+#[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
 pub mod casabio_encode;
-#[cfg(feature = "jxl-lowlevel")]
-pub mod jxl_lowlevel;
 pub mod cr2;
 pub mod decompress;
 pub mod demosaic;
