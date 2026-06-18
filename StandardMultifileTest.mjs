@@ -10,7 +10,7 @@ function runSystemTelemetry() {
   const totalMemGb = (os.totalmem() / (1024 ** 3)).toFixed(1);
   const freeMemGb = (os.freemem() / (1024 ** 3)).toFixed(1);
   const nodeMemMb = (process.memoryUsage().heapUsed / (1024 ** 2)).toFixed(1);
-  
+
   let telemetry = {
     platform: `${process.platform} (${process.arch})`,
     cpuModel: os.cpus()[0]?.model || 'Unknown',
@@ -22,7 +22,10 @@ function runSystemTelemetry() {
     cpuClockGhz: 'N/A',
     cpuMaxClockGhz: 'N/A',
     cpuThrottlingPct: '100.0',
-    cpuThrottlingState: 'Optimal (Maximum Performance)'
+    cpuThrottlingState: 'Optimal (Maximum Performance)',
+    cpuTemperatureCelsius: 'N/A',
+    gpuTemperatureCelsius: 'N/A',
+    storageTemperatureCelsius: 'N/A'
   };
 
   console.log(`  🧠 OS Memory:     ${freeMemGb} GB Free / ${totalMemGb} GB Total`);
@@ -39,7 +42,7 @@ function runSystemTelemetry() {
         const currentSpeedGhz = (data.CurrentClockSpeed / 1000).toFixed(2);
         const maxSpeedGhz = (data.MaxClockSpeed / 1000).toFixed(2);
         const throttleRatio = data.CurrentClockSpeed / data.MaxClockSpeed;
-        
+
         let throttleState = 'Optimal (Maximum Performance)';
         if (throttleRatio < 0.95) {
           throttleState = `⚠️ Throttled / Power-Saving (${(throttleRatio * 100).toFixed(1)}% of Max Speed)`;
@@ -57,6 +60,61 @@ function runSystemTelemetry() {
       }
     } catch (err) {
       console.log(`  ⚠️  Hardware sensor query failed (PowerShell/CIM blocked)`);
+    }
+
+    // Attempt to fetch temperature data from LibreHardwareMonitor if available
+    try {
+      const hwCommand = 'powershell.exe -NoProfile -Command "Get-WmiObject -Namespace \'root\\LibreHardwareMonitor\' -Class Sensor 2>$null | Where-Object {$_.SensorType -match \'Temperature\'} | Select-Object Name, Value, Parent | ConvertTo-Json"';
+      const hwOutput = execSync(hwCommand, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+
+      if (hwOutput) {
+        try {
+          const sensors = JSON.parse(hwOutput);
+          const sensorArray = Array.isArray(sensors) ? sensors : [sensors];
+
+          let cpuTemp = null, gpuTemp = null, storageTemp = null;
+
+          for (const sensor of sensorArray) {
+            if (!sensor || !sensor.Name || !sensor.Value) continue;
+
+            const name = sensor.Name.toLowerCase();
+            const parent = (sensor.Parent || '').toLowerCase();
+            const value = parseFloat(sensor.Value);
+
+            // CPU temperature (prefer Package/Die temp)
+            if (!cpuTemp && (name.includes('package') || name.includes('die') || (parent.includes('cpu') && name.includes('temperature')))) {
+              cpuTemp = value.toFixed(1);
+            }
+
+            // GPU temperature
+            if (!gpuTemp && (parent.includes('gpu') || parent.includes('nvidia') || parent.includes('amd') || parent.includes('intel graphics'))) {
+              gpuTemp = value.toFixed(1);
+            }
+
+            // Storage temperature (HDD/SSD)
+            if (!storageTemp && (parent.includes('drive') || parent.includes('disk') || parent.includes('ssd') || parent.includes('hdd'))) {
+              storageTemp = value.toFixed(1);
+            }
+          }
+
+          if (cpuTemp) {
+            telemetry.cpuTemperatureCelsius = cpuTemp;
+            console.log(`  🌡️  CPU Temperature:     ${cpuTemp}°C`);
+          }
+          if (gpuTemp) {
+            telemetry.gpuTemperatureCelsius = gpuTemp;
+            console.log(`  🌡️  GPU Temperature:     ${gpuTemp}°C`);
+          }
+          if (storageTemp) {
+            telemetry.storageTemperatureCelsius = storageTemp;
+            console.log(`  🌡️  Storage Temperature: ${storageTemp}°C`);
+          }
+        } catch (parseErr) {
+          // WMI sensor data may be empty or invalid JSON
+        }
+      }
+    } catch (hwErr) {
+      // LibreHardwareMonitor WMI not available or query failed
     }
   } else {
     console.log(`  ℹ️  Detailed throttling sensors only implemented for win32`);
@@ -745,6 +803,16 @@ async function main() {
   console.log(`--- [3/6] Executing Multi-Threaded Sequential (relaxed-simd-mt) ---`);
   const mtResults = await runSequentialSuite("relaxed-simd-mt");
 
+  // Optional baseline dump for optimize-codec-times workflow (opt-in via --json).
+  {
+    const jsonIdx = process.argv.indexOf('--json');
+    if (jsonIdx !== -1 && process.argv[jsonIdx + 1]) {
+      const { writeDump } = await import('./benchmark/optimize/harness-dump.mjs');
+      writeDump(process.argv[jsonIdx + 1], { loadedFiles, simdResults, mtResults, telemetry: globalThis.systemTelemetry });
+      console.log(`  baseline dump → ${process.argv[jsonIdx + 1]}`);
+    }
+  }
+
   // --- Combined: Flip-Flop Core (new, stable interleaved medians + speedups) + Rich headlines + observed body (old full diagnostic run) ---
   // This directly merges the flip-flop A/B results (for trustworthy core tier comparison on the 4 headline metrics)
   // with the rich per-iteration numbers (prog/shot + the body= wall time that explains the "4s per file" count).
@@ -1167,6 +1235,9 @@ async function main() {
     `CpuClockMaxGhz: ${globalThis.systemTelemetry?.cpuMaxClockGhz || 'N/A'}`,
     `CpuThrottlingPct: ${globalThis.systemTelemetry?.cpuThrottlingPct || '100.0'}`,
     `CpuThrottlingState: ${globalThis.systemTelemetry?.cpuThrottlingState || 'Optimal'}`,
+    `CpuTemperatureCelsius: ${globalThis.systemTelemetry?.cpuTemperatureCelsius || 'N/A'}`,
+    `GpuTemperatureCelsius: ${globalThis.systemTelemetry?.gpuTemperatureCelsius || 'N/A'}`,
+    `StorageTemperatureCelsius: ${globalThis.systemTelemetry?.storageTemperatureCelsius || 'N/A'}`,
     "",
 
     "",
