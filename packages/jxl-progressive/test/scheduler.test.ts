@@ -119,7 +119,7 @@ function makeJob(overrides: Partial<ProgressiveImageJob> = {}): ProgressiveImage
     errorCount: 0,
     nextRetryAt: 0,
     manifestChecked: false,
-    prefixChunks: [],
+    prefixAccum: null,
     prefixBytes: 0,
     manifestDispatched: false,
     ...overrides,
@@ -380,7 +380,7 @@ describe("ProgressiveGallery", () => {
     job.currentTier = "dc";
     job.targetTier = "full";
     job.manifest = null;
-    job.prefixChunks = [];
+    job.prefixAccum = null;
     job.prefixBytes = 0;
     job.manifestChecked = false;
     job.manifestDispatched = false;

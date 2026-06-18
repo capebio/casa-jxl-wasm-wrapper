@@ -20,6 +20,15 @@ export interface ProfileOptions {
   signal?: AbortSignal;
 }
 
+/** Options for profileJxlFile, extending ProfileOptions with a filesystem side-effect flag. */
+export interface ProfileFileOptions extends ProfileOptions {
+  /**
+   * When true (default), writes the manifest as `${path}.json` beside the .jxl file.
+   * Pass false to skip the write and return the manifest only.
+   */
+  writeManifest?: boolean;
+}
+
 interface ProgressionEvent {
   byteOffset: number;
   stage: string;
@@ -47,7 +56,7 @@ function selectTiers(
 ): ManifestTier[] {
   const tiers: ManifestTier[] = [];
 
-  if (events.length === 0) {
+  if (events.length === 0 || totalBytes === 0) {
     tiers.push({
       name: "full",
       byteStart: 0,
@@ -64,7 +73,8 @@ function selectTiers(
     events.find((e) => e.byteOffset < totalBytes * 0.25) ??
     events[0];
 
-  if (dcEvent !== undefined) {
+  // Only emit the dc tier if byteEnd > 0; a zero byteEnd is unusable.
+  if (dcEvent !== undefined && dcEvent.byteOffset > 0) {
     tiers.push({
       name: "dc",
       byteStart: 0,
@@ -75,9 +85,15 @@ function selectTiers(
   }
 
   // Preview tier: last event before 70% of file, distinct from dc.
-  const before70 = events.filter((e) => e.byteOffset < totalBytes * 0.7);
-  const previewEvent =
-    before70.length > 0 ? before70[before70.length - 1] : undefined;
+  // Use a reverse scan to avoid allocating a filtered array.
+  const threshold70 = totalBytes * 0.7;
+  let previewEvent: ProgressionEvent | undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if ((events[i] as ProgressionEvent).byteOffset < threshold70) {
+      previewEvent = events[i];
+      break;
+    }
+  }
 
   if (
     previewEvent !== undefined &&
@@ -150,18 +166,24 @@ export async function profileJxl(
   const pushTask = (async () => {
     const total = jxlBytes.byteLength;
     let offset = 0;
-    while (offset < total) {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      const end = Math.min(offset + chunkSize, total);
-      await session.push(jxlBytes.slice(offset, end));
-      bytesPushed = end;
-      // Yield a microtask tick so frame events triggered by this push
-      // can be picked up by the frames task with the correct bytesPushed.
-      await Promise.resolve();
-      onProgress?.(end, total);
-      offset = end;
+    try {
+      while (offset < total) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const end = Math.min(offset + chunkSize, total);
+        // Set bytesPushed before push() so frames emitted synchronously inside
+        // push() (before the promise resolves) capture the correct byte offset.
+        bytesPushed = end;
+        await session.push(jxlBytes.slice(offset, end));
+        onProgress?.(end, total);
+        offset = end;
+      }
+      await session.close();
+    } catch (e) {
+      // Cancel the session so framesTask's frames() generator terminates
+      // rather than hanging indefinitely waiting for more frames.
+      await session.cancel().catch(() => { /* ignore cancel errors */ });
+      throw e;
     }
-    await session.close();
   })();
 
   await Promise.all([pushTask, framesTask]);
@@ -196,7 +218,7 @@ export async function profileJxlFile(
   path: string,
   sessionFactory: SessionFactory,
   source: { width: number; height: number; hasAlpha: boolean; orientation?: number },
-  opts: ProfileOptions & { writeManifest?: boolean } = {},
+  opts: ProfileFileOptions = {},
 ): Promise<ProgressiveManifest> {
   const { readFile, writeFile } = await import("node:fs/promises");
   const buf = await readFile(path);

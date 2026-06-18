@@ -103,7 +103,7 @@ export function fairnessScore(job: ProgressiveImageJob, now: number): number {
 }
 
 function concatUint8Arrays(chunks: readonly Uint8Array[]): Uint8Array {
-  const valid = chunks.filter((c): c is Uint8Array => c instanceof Uint8Array && c.byteLength > 0);
+  const valid = chunks.filter((c) => c.byteLength > 0);
   if (valid.length === 0) return new Uint8Array(0);
   if (valid.length === 1) return valid[0]!;
   const total = valid.reduce((n, c) => n + c.byteLength, 0);
@@ -209,7 +209,10 @@ export class ProgressiveGallery {
   /** Register an image. `jxlUrl` is the .jxl resource URL. */
   observe(element: Element, id: string, jxlUrl: string): void {
     if (this.destroyed) return;
-    if (this.jobs.size >= this.opts.maxQueuedJobs) return;
+    if (this.jobs.size >= this.opts.maxQueuedJobs) {
+      this.opts.onError(id, new Error(`Gallery at capacity (maxQueuedJobs=${this.opts.maxQueuedJobs}); image will not be displayed`));
+      return;
+    }
     if (this.jobs.has(id)) this.unobserve(id);
     const job: ProgressiveImageJob = {
       id,
@@ -227,7 +230,6 @@ export class ProgressiveGallery {
       bytesLoaded: 0,
       prefixAccum: null,
       prefixBytes: 0,
-      lastProgressEmit: undefined,
       manifest: null,
       manifestDispatched: false,
       decoderAbort: null,
@@ -398,10 +400,9 @@ export class ProgressiveGallery {
   private armEarliestRetryTimer(now: number): void {
     let earliest: number | null = null;
     for (const j of this.jobs.values()) {
+      if (!j.nextRetryAt || j.nextRetryAt <= now) continue;
       const t = j.nextRetryAt;
-      if (typeof t === "number" && t > now && (earliest === null || t < earliest)) {
-        earliest = t;
-      }
+      if (earliest === null || t < earliest) earliest = t;
     }
     if (earliest === null) {
       if (this.retryTimerId !== null) {
@@ -430,9 +431,17 @@ export class ProgressiveGallery {
     this.inFlightManifestFetches++;
     void this.fetchAndCacheManifest(job)
       .then((m) => {
-        if (m !== null && job.manifest === null) job.manifest = m;
+        if (m !== null && job.manifest === null) {
+          job.manifest = m;
+          if (!job.manifestDispatched) {
+            job.manifestDispatched = true;
+            this.opts.onManifest(job.id, m);
+          }
+        }
       })
-      .catch(() => {})
+      .catch((e: unknown) => {
+        this.opts.onError(job.id, e instanceof Error ? e : new Error(String(e)));
+      })
       .finally(() => {
         this.inFlightManifestFetches = Math.max(0, this.inFlightManifestFetches - 1);
       });
@@ -450,14 +459,18 @@ export class ProgressiveGallery {
       const [toDecoder, toCapture] = resp.body.tee();
       pump = (async () => {
         const r = toCapture.getReader();
-        for (;;) {
-          const { done, value } = await r.read();
-          if (done) break;
-          onChunk(value);
+        try {
+          for (;;) {
+            const { done, value } = await r.read();
+            if (done) break;
+            onChunk(value);
+          }
+        } catch {
+          /* abort/network: partial is valid prefix for resume */
+        } finally {
+          r.cancel().catch(() => {});
         }
-      })().catch(() => {
-        /* abort/network: partial is valid prefix for resume */
-      });
+      })();
       return new Response(toDecoder, resp);
     };
     return { fetchImpl, settled: () => pump };
@@ -468,18 +481,23 @@ export class ProgressiveGallery {
     const now =
       typeof performance !== "undefined" ? performance.now() : Date.now();
     this.armEarliestRetryTimer(now);
-    const candidates = [...this.jobs.values()]
-      .filter((j) => j.visible || j.nearViewport || j.selected)
-      .filter((j) => tierRank(j.currentTier) < tierRank(j.targetTier))
-      .filter((j) => j.decoderAbort === null)
-      .filter((j) => !j.nextRetryAt || now >= j.nextRetryAt)
-      .map((j) => ({ job: j, score: fairnessScore(j, now) }))
-      .sort((a, b) => b.score - a.score)
-      .map((p) => p.job);
+    const candidates: Array<{ job: ProgressiveImageJob; score: number }> = [];
+    for (const j of this.jobs.values()) {
+      if (!j.visible && !j.nearViewport && !j.selected) continue;
+      if (j.decoderAbort !== null) continue;
+      if (j.nextRetryAt && now < j.nextRetryAt) continue;
+      const curRank = tierRank(j.currentTier);
+      const tgtRank = tierRank(j.targetTier);
+      if (curRank >= tgtRank) continue;
+      candidates.push({ job: j, score: fairnessScore(j, now) });
+    }
+    candidates.sort((a, b) => b.score - a.score);
 
-    for (const job of candidates) {
+    for (const { job } of candidates) {
       if (this.activeDecoders >= this.opts.maxActiveDecoders) break;
-      void this.startDecode(job);
+      this.startDecode(job).catch((e: unknown) => {
+        this.opts.onError(job.id, e instanceof Error ? e : new Error(String(e)));
+      });
     }
   }
 
@@ -500,10 +518,12 @@ export class ProgressiveGallery {
       if (job.manifest === null) {
         job.manifest = await this.cache.getManifest(job.jxlUrl);
       }
+      if (abort.signal.aborted) return;
       if (job.manifest === null && !job.manifestChecked) {
-        job.manifest = await this.fetchAndCacheManifest(job);
+        job.manifest = await this.fetchAndCacheManifest(job, abort.signal);
         job.manifestChecked = true;
       }
+      if (abort.signal.aborted) return;
       if (job.manifest && !job.manifestDispatched) {
         job.manifestDispatched = true;
         this.opts.onManifest(job.id, job.manifest);
@@ -530,6 +550,7 @@ export class ProgressiveGallery {
         try {
           const bm = await this.cache.getBitmap(job.jxlUrl, target as TierName);
           if (bm) {
+            if (abort.signal.aborted) return;
             job.currentTier = target;
             this.opts.onTier(job.id, target);
             this.opts.onProgress(job.id, manifestTier.byteEnd, manifestTier.byteEnd);
@@ -569,7 +590,7 @@ export class ProgressiveGallery {
       }
 
       if (startingPrefix && startingPrefix.byteLength > 0) {
-        (session as any).push(startingPrefix);
+        await (session as any).push(startingPrefix);
       }
 
       const ft: any = this.testFetchTier ?? fetchTier;
@@ -582,8 +603,7 @@ export class ProgressiveGallery {
       this.opts.onProgress(job.id, job.bytesLoaded, byteTarget);
 
       const onChunk = (c: Uint8Array) => {
-        const chunk = new Uint8Array(c);
-        const needed = job.prefixBytes + chunk.byteLength;
+        const needed = job.prefixBytes + c.byteLength;
         if (!job.prefixAccum || job.prefixAccum.byteLength < needed) {
           const oldCap = job.prefixAccum ? job.prefixAccum.byteLength : 0;
           const newCap = Math.max(needed, oldCap * 2 || 4096);
@@ -593,13 +613,13 @@ export class ProgressiveGallery {
           }
           job.prefixAccum = grown;
         }
-        job.prefixAccum.set(chunk, job.prefixBytes);
-        job.prefixBytes += chunk.byteLength;
-        capturedBytes += chunk.byteLength;
+        job.prefixAccum.set(c, job.prefixBytes);
+        job.prefixBytes += c.byteLength;
+        capturedBytes += c.byteLength;
         job.bytesLoaded = job.prefixBytes;
-        const now = Date.now();
-        if (now - (job.lastProgressEmit || 0) > 50) {
-          job.lastProgressEmit = now;
+        const emitNow = Date.now();
+        if (emitNow - (job.lastProgressEmit || 0) > 50) {
+          job.lastProgressEmit = emitNow;
           this.opts.onProgress(job.id, job.bytesLoaded, byteTarget);
         }
       };
@@ -631,7 +651,9 @@ export class ProgressiveGallery {
             return ft(job.jxlUrl, manifestTier, session, {
               signal: abort.signal,
               fetchImpl: t2.fetchImpl,
-            }).catch((e2: unknown) => { fetchError = e2; });
+            }).catch((e2: unknown) => {
+              if (!abort.signal.aborted) fetchError = e2;
+            });
           }
           fetchError = e;
         });
@@ -661,7 +683,7 @@ export class ProgressiveGallery {
       }
 
       if (!abort.signal.aborted) {
-        const achieved = manifestTier !== undefined ? target : job.targetTier;
+        const achieved = target;
         job.currentTier = achieved;
         this.opts.onTier(job.id, achieved);
         job.errorCount = 0;
@@ -671,7 +693,7 @@ export class ProgressiveGallery {
         if (capture) {
           await capture.settled().catch(() => {});
           if (job.prefixAccum && job.prefixBytes > 0) {
-            const fullPrefix = job.prefixAccum.slice(0, job.prefixBytes);
+            const fullPrefix = job.prefixAccum.subarray(0, job.prefixBytes);
             if (fullPrefix.byteLength > 0) {
               const buffer = fullPrefix.buffer.slice(
                 fullPrefix.byteOffset,
@@ -726,16 +748,26 @@ export class ProgressiveGallery {
 
   private async fetchAndCacheManifest(
     job: ProgressiveImageJob,
+    signal?: AbortSignal,
   ): Promise<ProgressiveManifest | null> {
+    const timeoutMs = 10_000;
+    const timeoutController = new AbortController();
+    const timer = this.setTimeoutFn(() => timeoutController.abort("manifest-timeout"), timeoutMs);
+    if (signal) {
+      signal.addEventListener("abort", () => timeoutController.abort(signal.reason), { once: true });
+    }
     try {
-      const resp = await fetch(job.manifestUrl);
+      const resp = await fetch(job.manifestUrl, { signal: timeoutController.signal });
       if (!resp.ok) return null;
       const json: unknown = await resp.json();
       const manifest = validateManifest(json);
       await this.cache.setManifest(job.jxlUrl, manifest);
       return manifest;
-    } catch {
-      return null;
+    } catch (e) {
+      if (signal?.aborted || timeoutController.signal.aborted) return null;
+      throw e;
+    } finally {
+      this.clearTimeoutFn(timer);
     }
   }
 }

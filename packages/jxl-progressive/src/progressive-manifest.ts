@@ -136,8 +136,11 @@ export function validateManifest(json: unknown): ProgressiveManifest {
   );
   const enc = obj["encoder"] as Record<string, unknown>;
   assertField(typeof enc["name"] === "string", "encoder.name", "encoder.name must be a string");
+  assertField((enc["name"] as string).length <= 256, "encoder.name", "encoder.name must be <= 256 chars");
   assertField(typeof enc["libjxlVersion"] === "string", "encoder.libjxlVersion", "encoder.libjxlVersion must be a string");
+  assertField((enc["libjxlVersion"] as string).length <= 64, "encoder.libjxlVersion", "encoder.libjxlVersion must be <= 64 chars");
   assertField(Array.isArray(enc["flags"]), "encoder.flags", "encoder.flags must be an array");
+  assertField((enc["flags"] as unknown[]).length <= 64, "encoder.flags", "encoder.flags must have <= 64 entries");
 
   // saliency (optional; tighten ranges when present so scheduler boosts are safe)
   if (obj["saliency"] !== undefined) {
@@ -173,6 +176,11 @@ export function validateManifest(json: unknown): ProgressiveManifest {
       "perceptual",
       "perceptual must be an object if present"
     );
+    assertField(
+      Object.keys(obj["perceptual"] as object).length <= 32,
+      "perceptual",
+      "perceptual must have <= 32 keys"
+    );
   }
 
   // tiers
@@ -186,7 +194,22 @@ export function validateManifest(json: unknown): ProgressiveManifest {
     assertField(typeof t === "object" && t !== null, f, `${f} must be an object`);
     assertField(VALID_TIER_NAMES.has(t["name"] as string), `${f}.name`, `${f}.name must be dc|preview|full`);
     assertField(typeof t["byteStart"] === "number", `${f}.byteStart`, `${f}.byteStart must be a number`);
+    assertField(
+      Number.isFinite(t["byteStart"] as number) && (t["byteStart"] as number) >= 0,
+      `${f}.byteStart`,
+      `${f}.byteStart must be a finite non-negative number`
+    );
     assertField(typeof t["byteEnd"] === "number", `${f}.byteEnd`, `${f}.byteEnd must be a number`);
+    assertField(
+      Number.isFinite(t["byteEnd"] as number) && (t["byteEnd"] as number) > 0,
+      `${f}.byteEnd`,
+      `${f}.byteEnd must be a finite positive number`
+    );
+    assertField(
+      (t["byteEnd"] as number) > (t["byteStart"] as number),
+      `${f}.byteEnd`,
+      `${f}.byteEnd must be greater than ${f}.byteStart`
+    );
     assertField(
       typeof t["progressionIndex"] === "number" || t["progressionIndex"] === "final",
       `${f}.progressionIndex`,
@@ -216,9 +239,12 @@ export async function checkHash(
     typeof globalThis.crypto.subtle?.digest === "function"
   ) {
     const hashBuf = await globalThis.crypto.subtle.digest("SHA-256", jxlBytes);
-    hashHex = Array.from(new Uint8Array(hashBuf))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const hashBytes = new Uint8Array(hashBuf);
+    let hex = "";
+    for (let i = 0; i < hashBytes.length; i++) {
+      hex += hashBytes[i]!.toString(16).padStart(2, "0");
+    }
+    hashHex = hex;
   } else {
     // Node.js fallback (crypto.subtle not available or not cross-origin-isolated)
     const { createHash } = await import("node:crypto");

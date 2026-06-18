@@ -52,7 +52,8 @@ export function normaliseCenter(
   if (!(imageWidth > 0) || !(imageHeight > 0)) {
     throw new RangeError(`[saliency-policy] invalid image dimensions ${imageWidth}x${imageHeight}`);
   }
-  return { x: cx / imageWidth, y: cy / imageHeight };
+  const clamp = (v: number) => Math.min(1, Math.max(0, v));
+  return { x: clamp(cx / imageWidth), y: clamp(cy / imageHeight) };
 }
 
 /**
@@ -80,7 +81,7 @@ export interface Saliency {
   centerY: number;
   enabled: boolean;
   method: string;
-  confidence?: number;
+  confidence: number;
 }
 
 /** Map pixel centre to manifest {centerX, centerY}. */
@@ -123,6 +124,6 @@ export function toSaliency(
     centerY: cy,
     enabled: opts.enabled ?? true,
     method,
-    ...(opts.confidence !== undefined ? { confidence: opts.confidence } : {}),
+    confidence: opts.confidence ?? 0,
   };
 }

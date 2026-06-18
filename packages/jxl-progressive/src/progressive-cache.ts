@@ -22,6 +22,11 @@ const BYTES_KEY_PREFIX = "jxl-progressive:bytes:";
 // Bitmap cache is in-memory only (ImageBitmap is not serialisable to OPFS).
 const BITMAP_KEY_PREFIX = "jxl-progressive:bitmap:";
 
+// Null byte is never valid in a URL or tier name, making it a safe separator.
+const TIER_SEP = "\0";
+
+const _textDecoder = new TextDecoder();
+
 const DEFAULT_MANIFEST_TTL_MS = 3_600_000; // 1 hour
 
 /**
@@ -29,7 +34,7 @@ const DEFAULT_MANIFEST_TTL_MS = 3_600_000; // 1 hour
  *
  * Key conventions:
  *   Manifests  — "jxl-progressive:manifest:{jxlUrl}"
- *   Byte ranges — "jxl-progressive:bytes:{jxlUrl}#{tierName}"
+ *   Byte ranges — "jxl-progressive:bytes:{jxlUrl}\0{tierName}"
  *
  * Manifests are stored as UTF-8 JSON (ArrayBuffer). Byte ranges are stored raw.
  */
@@ -55,15 +60,17 @@ export class ProgressiveCache {
     const buf = await this.inner.get(key);
     if (buf === undefined || buf.byteLength === 0) return null;
     try {
-      const text = new TextDecoder().decode(buf);
+      const text = _textDecoder.decode(buf);
       const entry = JSON.parse(text) as ManifestEntry;
       if (Date.now() - entry.storedAt > this.manifestTtlMs) {
-        // Expired — remove and return null
-        void this.inner.set(key, new ArrayBuffer(0)); // empty = sentinel for eviction; jxl-cache LRU will drop it
+        // Expired — delete the entry so subsequent reads miss cleanly.
+        await this.inner.delete(key);
         return null;
       }
       return validateManifest(entry.manifest);
     } catch {
+      // Corrupt entry — evict it so the cache self-heals on next setManifest.
+      await this.inner.delete(key).catch(() => undefined);
       return null;
     }
   }
@@ -81,9 +88,7 @@ export class ProgressiveCache {
   }
 
   async invalidateManifest(jxlUrl: string): Promise<void> {
-    // Store empty ArrayBuffer to evict — jxl-cache will overwrite the slot.
-    // On next get() the empty buffer triggers the parse failure path → returns null.
-    await this.inner.set(MANIFEST_KEY_PREFIX + jxlUrl, new ArrayBuffer(0));
+    await this.inner.delete(MANIFEST_KEY_PREFIX + jxlUrl);
   }
 
   // ---------------------------------------------------------------------------
@@ -94,7 +99,7 @@ export class ProgressiveCache {
     jxlUrl: string,
     tier: TierName,
   ): Promise<ArrayBuffer | null> {
-    const buf = await this.inner.get(BYTES_KEY_PREFIX + jxlUrl + "#" + tier);
+    const buf = await this.inner.get(BYTES_KEY_PREFIX + jxlUrl + TIER_SEP + tier);
     if (buf === undefined || buf.byteLength === 0) return null;
     return buf;
   }
@@ -104,7 +109,7 @@ export class ProgressiveCache {
     tier: TierName,
     bytes: ArrayBuffer,
   ): Promise<void> {
-    await this.inner.set(BYTES_KEY_PREFIX + jxlUrl + "#" + tier, bytes);
+    await this.inner.set(BYTES_KEY_PREFIX + jxlUrl + TIER_SEP + tier, bytes);
   }
 
   // ---------------------------------------------------------------------------
@@ -115,7 +120,7 @@ export class ProgressiveCache {
     jxlUrl: string,
     tier: TierName,
   ): Promise<ImageBitmap | null> {
-    return this.bitmapStore.get(BITMAP_KEY_PREFIX + jxlUrl + "#" + tier) ?? null;
+    return this.bitmapStore.get(BITMAP_KEY_PREFIX + jxlUrl + TIER_SEP + tier) ?? null;
   }
 
   async setBitmap(
@@ -123,7 +128,7 @@ export class ProgressiveCache {
     tier: TierName,
     bitmap: ImageBitmap,
   ): Promise<void> {
-    this.bitmapStore.set(BITMAP_KEY_PREFIX + jxlUrl + "#" + tier, bitmap);
+    this.bitmapStore.set(BITMAP_KEY_PREFIX + jxlUrl + TIER_SEP + tier, bitmap);
   }
 
   /**
@@ -132,11 +137,12 @@ export class ProgressiveCache {
    */
   evictBitmaps(exceptJxlUrls: string[] = []): void {
     const keep = new Set(
-      exceptJxlUrls.map((u) => BITMAP_KEY_PREFIX + u),
+      exceptJxlUrls.map((u) => BITMAP_KEY_PREFIX + u + TIER_SEP),
     );
     for (const key of this.bitmapStore.keys()) {
-      // key format: "jxl-progressive:bitmap:{jxlUrl}#{tier}"
-      const urlPart = key.slice(0, key.lastIndexOf("#"));
+      // key format: "jxl-progressive:bitmap:{jxlUrl}\0{tier}"
+      const sepIdx = key.indexOf(TIER_SEP);
+      const urlPart = sepIdx === -1 ? key : key.slice(0, sepIdx + 1);
       if (!keep.has(urlPart)) {
         this.bitmapStore.delete(key);
       }
@@ -151,13 +157,11 @@ export class ProgressiveCache {
   async invalidate(jxlUrl: string): Promise<void> {
     await this.invalidateManifest(jxlUrl);
     for (const tier of ["dc", "preview", "full"] as TierName[]) {
-      await this.inner.set(
-        BYTES_KEY_PREFIX + jxlUrl + "#" + tier,
-        new ArrayBuffer(0),
-      );
+      await this.inner.delete(BYTES_KEY_PREFIX + jxlUrl + TIER_SEP + tier);
     }
-    for (const key of [...this.bitmapStore.keys()]) {
-      if (key.includes(jxlUrl)) this.bitmapStore.delete(key);
+    const bitmapPrefix = BITMAP_KEY_PREFIX + jxlUrl + TIER_SEP;
+    for (const key of this.bitmapStore.keys()) {
+      if (key.startsWith(bitmapPrefix)) this.bitmapStore.delete(key);
     }
   }
 }

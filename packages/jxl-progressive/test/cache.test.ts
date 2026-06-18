@@ -9,6 +9,7 @@ import type { ProgressiveManifest } from "../src/progressive-manifest.js";
 function makeInnerCache(): {
   get(key: string): Promise<ArrayBuffer | undefined>;
   set(key: string, buf: ArrayBuffer): Promise<void>;
+  delete(key: string): Promise<void>;
   store: Map<string, ArrayBuffer>;
 } {
   const store = new Map<string, ArrayBuffer>();
@@ -16,6 +17,7 @@ function makeInnerCache(): {
     store,
     async get(key) { return store.get(key); },
     async set(key, buf) { store.set(key, buf); },
+    async delete(key) { store.delete(key); },
   };
 }
 
