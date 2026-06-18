@@ -25,3 +25,36 @@ export type WorkerReply =
   | { v: 1; type: 'decode-reply'; id: number; ok: false; error: { code: WorkerErrorCode; message: string; stack?: string } };
 
 export type WorkerErrorCode = 'JXTC_PARSE' | 'BAD_REGION' | 'OOM' | 'INTERNAL' | 'TIMEOUT' | 'UNKNOWN_BYTES_ID';
+
+const _DEV = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+
+/** Dev-mode assertion mirroring parseWorkerReply. Throws on malformed outbound requests in dev. No-op in production. */
+export function validateWorkerRequest(req: unknown): void {
+  if (!_DEV) return;
+  if (!req || typeof req !== 'object') throw new Error('[pyramid] WorkerRequest: not an object');
+  const r: any = req;
+  if (r.v !== 1) throw new Error(`[pyramid] WorkerRequest: expected v=1, got v=${r.v}`);
+  if (r.type === 'load') {
+    if (typeof r.bytesId !== 'number') throw new Error('[pyramid] WorkerRequest load: bytesId not a number');
+    if (r.sab !== undefined) {
+      if (typeof SharedArrayBuffer === 'undefined' || !(r.sab instanceof SharedArrayBuffer))
+        throw new Error('[pyramid] WorkerRequest load: sab is not a SharedArrayBuffer');
+      if (typeof r.byteLength !== 'number' || r.byteLength <= 0)
+        throw new Error('[pyramid] WorkerRequest load: byteLength must be positive number');
+    } else if (!(r.bytes instanceof Uint8Array)) {
+      throw new Error('[pyramid] WorkerRequest load: bytes must be a Uint8Array');
+    }
+  } else if (r.type === 'decode') {
+    if (typeof r.id !== 'number') throw new Error('[pyramid] WorkerRequest decode: id not a number');
+    if (typeof r.bytesId !== 'number') throw new Error('[pyramid] WorkerRequest decode: bytesId not a number');
+    if (!r.region || typeof r.region.x !== 'number' || typeof r.region.y !== 'number' ||
+        typeof r.region.w !== 'number' || typeof r.region.h !== 'number')
+      throw new Error('[pyramid] WorkerRequest decode: region must have numeric x,y,w,h');
+    if (r.format !== 'rgba8' && r.format !== 'rgba16')
+      throw new Error(`[pyramid] WorkerRequest decode: unknown format ${r.format}`);
+  } else if (r.type === 'cancel') {
+    if (typeof r.id !== 'number') throw new Error('[pyramid] WorkerRequest cancel: id not a number');
+  } else {
+    throw new Error(`[pyramid] WorkerRequest: unknown type '${r.type}'`);
+  }
+}

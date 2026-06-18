@@ -61,6 +61,23 @@ function requireArray(v: unknown, path: string): unknown[] {
   return v as unknown[];
 }
 
+function sanitizeOpaqueObject(v: Record<string, unknown>, path: string, depth = 0): Record<string, unknown> {
+  if (depth > MAX_OPAQUE_DEPTH) fail(path, `opaque object exceeds maximum nesting depth ${MAX_OPAQUE_DEPTH}`);
+  const keys = Object.keys(v);
+  if (keys.length > MAX_OPAQUE_KEYS) fail(path, `opaque object exceeds maximum key count ${MAX_OPAQUE_KEYS}, got ${keys.length}`);
+  const out: Record<string, unknown> = Object.create(null);
+  for (const k of keys) {
+    if (k.length > MAX_OPAQUE_KEY_LENGTH) fail(path, `key "${k.slice(0, 32)}…" exceeds maximum length ${MAX_OPAQUE_KEY_LENGTH}`);
+    const child = v[k];
+    if (child !== null && typeof child === "object" && !Array.isArray(child)) {
+      out[k] = sanitizeOpaqueObject(child as Record<string, unknown>, `${path}.${k}`, depth + 1);
+    } else {
+      out[k] = child;
+    }
+  }
+  return out;
+}
+
 function validateMasterMetadata(v: unknown, path: string): MasterMetadata {
   const o = requireObject(v, path);
   const name = requireString(o["name"], `${path}.name`);
@@ -83,8 +100,7 @@ function validateProducedBy(v: unknown, path: string): ProducedBy {
   const version = requireString(o["version"], `${path}.version`);
   const result: ProducedBy = { tool, version };
   if (o["params"] !== undefined) {
-    requireObject(o["params"], `${path}.params`);
-    result.params = o["params"] as Record<string, unknown>;
+    result.params = sanitizeOpaqueObject(requireObject(o["params"], `${path}.params`), `${path}.params`);
   }
   return result;
 }
@@ -225,7 +241,7 @@ export function parsePyramidManifest(json: unknown): PyramidManifest {
   };
 
   if (o["producedBy"] !== undefined) result.producedBy = validateProducedBy(o["producedBy"], "manifest.producedBy");
-  if (o["metadata"] !== undefined) { requireObject(o["metadata"], "manifest.metadata"); result.metadata = o["metadata"] as Record<string, unknown>; }
+  if (o["metadata"] !== undefined) { result.metadata = sanitizeOpaqueObject(requireObject(o["metadata"], "manifest.metadata"), "manifest.metadata"); }
   if (o["convergedByteEnd"] !== undefined) result.convergedByteEnd = requireNumber(o["convergedByteEnd"], "manifest.convergedByteEnd");
 
   return result;

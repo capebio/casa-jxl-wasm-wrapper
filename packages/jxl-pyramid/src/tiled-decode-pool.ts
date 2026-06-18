@@ -1349,17 +1349,12 @@ export async function decodeTiledViewportPooled(
           dcOpts.cacheDcTiles = options.cacheDcTiles;
         }
         await decodeTilesParallel(bytesId, plan.format, orderedMisses, usable, outBuffer, vp, bpp, dcOpts, deadlineMs, p.requestTimeout, source.tileSize, source.level ?? 0);
-        
-        let finalCompleted = orderedMisses.length + prewarmCompleted;
-        for (const item of hits) {
-          finalCompleted += 1;
-          onTile?.(item.region, finalCompleted, { id: item.id, key: tileKey(item.id), stage: 'final', completed: finalCompleted, total });
-        }
-        
+
+        const finBase = orderedMisses.length + prewarmCompleted;
         const finOpts: any = {
           ...baseTileOpts,
           progressiveStage: 'final' as const,
-          progressBase: finalCompleted,
+          progressBase: finBase,
           progressTotal: total,
           sourceW: source.width,
           sourceH: source.height,
@@ -1369,6 +1364,12 @@ export async function decodeTiledViewportPooled(
           finOpts.sourceLevelId = levelId;
         }
         await decodeTilesParallel(bytesId, plan.format, orderedMisses, usable, outBuffer, vp, bpp, finOpts, deadlineMs, p.requestTimeout, source.tileSize, source.level ?? 0);
+
+        let finalCompleted = finBase + orderedMisses.length;
+        for (const item of hits) {
+          finalCompleted += 1;
+          onTile?.(item.region, finalCompleted, { id: item.id, key: tileKey(item.id), stage: 'final', completed: finalCompleted, total });
+        }
       } else {
         const tileOpts: any = {
           ...baseTileOpts,
