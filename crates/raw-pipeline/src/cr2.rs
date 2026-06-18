@@ -18,6 +18,7 @@
 //! - Multi-lens review: overflow guard on decoded dimensions; vestigial Cfa re-export removed.
 
 use crate::ljpeg;
+use crate::tiff::{visit_ifd, RawImageMeta};
 use anyhow::{anyhow, bail, Context, Result};
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,22 @@ pub struct Cr2Image {
     pub make:         String,
     pub model:        String,
     pub orientation:  u16,
+}
+
+impl Cr2Image {
+    pub fn meta(&self) -> RawImageMeta {
+        RawImageMeta {
+            width: self.width,
+            height: self.height,
+            wb_r: self.wb_r,
+            wb_g: self.wb_g,
+            wb_b: self.wb_b,
+            color_matrix: self.color_matrix,
+            orientation: self.orientation,
+            make: self.make.clone(),
+            model: self.model.clone(),
+        }
+    }
 }
 
 /// Per-phase decode timing. Zero-cost when `time_phases` is false.
@@ -121,36 +138,6 @@ fn read_ascii(data: &[u8], cnt: u32, val: u32, inline_pos: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Zero-allocation IFD visitor  (Response 1 item 4)
-// ---------------------------------------------------------------------------
-
-/// Walk TIFF IFD at `off`, calling `visitor(tag, dtype, cnt, val, inline_pos)` for each
-/// entry. Returns the next-IFD offset (0 on error). Entry count capped at 512 to guard
-/// against corrupt-file infinite traversal.
-fn visit_ifd<F: FnMut(u16, u16, u32, u32, usize)>(
-    data: &[u8],
-    off: usize,
-    le: bool,
-    mut visitor: F,
-) -> u32 {
-    if off + 2 > data.len() { return 0; }
-    let count = read_u16(data, off, le) as usize;
-    if count > 512 { return 0; } // corruption guard (item 14)
-    for i in 0..count {
-        let e = off + 2 + i * 12;
-        if e + 12 > data.len() { break; }
-        let tag        = read_u16(data, e,     le);
-        let dtype      = read_u16(data, e + 2, le);
-        let cnt        = read_u32(data, e + 4, le);
-        let val        = read_u32(data, e + 8, le);
-        let inline_pos = e + 8;
-        visitor(tag, dtype, cnt, val, inline_pos);
-    }
-    let next_pos = off + 2 + count * 12;
-    if next_pos + 4 <= data.len() { read_u32(data, next_pos, le) } else { 0 }
-}
-
-// ---------------------------------------------------------------------------
 // Zero-alloc ColorData WB extraction  (Response 1 item 5)
 // ---------------------------------------------------------------------------
 
@@ -219,22 +206,17 @@ fn parse_ljpeg_sof(data: &[u8], strip_off: usize, strip_len: usize) -> Option<(u
 // Per-model camera colour matrices (CR2 has no DNG ColorMatrix tag)
 // ---------------------------------------------------------------------------
 
-/// dcraw/libraw-style camera characterisation matrices (XYZ -> camera RGB, scaled *10000),
-/// keyed on the EXIF Model string. Values are taken VERBATIM from dcraw `adobe_coeff`
-/// (the canonical published source) — never transcribed from memory (a wrong coefficient
-/// degrades colour worse than the generic fallback). Add the bodies actually shot here;
-/// unknown models return None and the pipeline keeps the generic `CAM_TO_SRGB` fallback
-/// (no regression). Format: row-major [r0g0b0, r1g1b1, r2g2b2].
-fn canon_cam_xyz(model: &str) -> Option<[i32; 9]> {
-    Some(match model.trim() {
-        // EOS 550D == Kiss X4 == Rebel T2i (one body, regional names).
-        // Source: dcraw / libraw adobe_coeff (XYZ->cam *10000), cross-checked.
-        "Canon EOS 550D" | "Canon EOS Kiss X4" | "Canon EOS REBEL T2i" =>
-            [6941, -1164, -857, -3825, 11597, 2534, -416, 1540, 6039],
-        "Canon EOS M5" =>
-            [8532, -701, -1167, -4095, 11879, 2508, -797, 2424, 7010],
-        _ => return None,
-    })
+/// dcraw/libraw-style camera characterisation matrices (XYZ -> camera RGB, scaled *10000).
+///
+/// DISABLED: direct use of adobe_coeff XYZ→cam matrices in CasaWASM's WB-first pipeline
+/// produces severely imbalanced output. The matrices assume un-WB-normalised camera values;
+/// CasaWASM's pre-LUT applies WB gain before the matrix, causing channel collapse (e.g. G→0
+/// on the 550D with r_mult≈2.2). Proper use requires scene-relative WB correction derived
+/// from the matrix's implied D65 neutral — a non-trivial change deferred for a dedicated fix.
+/// Until then, all bodies fall through to the generic CANON_CAM_TO_SRGB fallback.
+#[allow(dead_code)]
+fn canon_cam_xyz(_model: &str) -> Option<[i32; 9]> {
+    None
 }
 
 /// Camera->sRGB matrix for a Canon body, or None (→ pipeline uses the generic CAM_TO_SRGB
@@ -744,20 +726,13 @@ mod tests {
     }
 
     #[test]
-    fn canon_color_matrix_resolves_for_known_bodies() {
-        for model in ["Canon EOS 550D", "Canon EOS Kiss X4", "Canon EOS M5"] {
-            let m = canon_color_matrix("Canon", model)
-                .unwrap_or_else(|| panic!("no camera matrix for {model}"));
-            for row in &m {
-                for v in row {
-                    assert!(v.is_finite(), "non-finite coeff in matrix for {model}");
-                }
-            }
-            // sane camera->sRGB: green->green dominant and in a believable range
-            assert!(m[1][1] > 0.3 && m[1][1] < 2.0, "G->G out of range for {model}: {}", m[1][1]);
+    fn canon_color_matrix_disabled_until_neutral_correction_implemented() {
+        // Per-model matrices are temporarily disabled: direct adobe_coeff use in
+        // CasaWASM's WB-first pipeline produces channel collapse (see canon_cam_xyz comment).
+        // All bodies fall through to the generic CANON_CAM_TO_SRGB fallback.
+        for model in ["Canon EOS 550D", "Canon EOS Kiss X4", "Canon EOS M5", "Canon EOS 9999X"] {
+            assert!(canon_color_matrix("Canon", model).is_none(), "expected None for {model}");
         }
-        // unknown / non-Canon → None (pipeline keeps the generic CAM_TO_SRGB fallback)
-        assert!(canon_color_matrix("Canon", "Canon EOS 9999X").is_none());
         assert!(canon_color_matrix("OM Digital Solutions", "OM-5").is_none());
     }
 }

@@ -479,6 +479,30 @@ fn build_pre_lut_compact(black: u16, white: u16, wb_eff: f32, exp_gain: f32, lut
     lut
 }
 
+// 4096-entry strided pre-LUT: each entry covers 16 raw values (stride 16).
+// Access via `raw_value >> COMPACT_LUT_SHIFT`. L1-resident (~8 KB/ch) vs up to
+// 128 KB/ch for the full table. Precision loss: ≤ 1 u16 LSB on linearised output.
+const COMPACT_LUT_LEN: usize = 4096;
+const COMPACT_LUT_SHIFT: u32 = 4; // 65536 / 4096 = 16 = 1 << 4
+
+fn build_pre_lut_strided(black: u16, white: u16, wb_eff: f32, exp_gain: f32) -> Vec<u16> {
+    let mut lut = vec![0u16; COMPACT_LUT_LEN];
+    let denom = (white.saturating_sub(black)).max(1) as f32;
+    let gain = wb_eff * exp_gain;
+    let norm_gain = gain / denom;
+    let fill = |i: usize, o: &mut u16| {
+        let raw_input = (i << COMPACT_LUT_SHIFT) as i32;
+        let centered = (raw_input - black as i32).max(0) as f32;
+        let n = highlight_shoulder(centered * norm_gain);
+        *o = (n * 65535.0 + 0.5).min(65535.0) as u16;
+    };
+    #[cfg(feature = "parallel")]
+    lut.par_iter_mut().enumerate().for_each(|(i, o)| fill(i, o));
+    #[cfg(not(feature = "parallel"))]
+    lut.iter_mut().enumerate().for_each(|(i, o)| fill(i, o));
+    lut
+}
+
 struct LutCache {
     black: u16, white: u16,
     wb_r_bits: u32, wb_g_bits: u32, wb_b_bits: u32, exp_gain_bits: u32,
@@ -488,12 +512,15 @@ struct LutCache {
     post: std::sync::Arc<Vec<u8>>,
     post16: Option<std::sync::Arc<Vec<u16>>>,
     pre_lut_len: usize,
+    pre_lut_shift: u32,
+    compact_lut: bool,
 }
 
 impl LutCache {
     fn matches(&self, black: u16, white: u16, wb_r: f32, wb_g: f32, wb_b: f32,
-               exp_gain: f32, tone: &TonePost) -> bool {
+               exp_gain: f32, tone: &TonePost, compact: bool) -> bool {
         self.black == black && self.white == white
+            && self.compact_lut == compact
             && self.wb_r_bits    == wb_r.to_bits()
             && self.wb_g_bits    == wb_g.to_bits()
             && self.wb_b_bits    == wb_b.to_bits()
@@ -1034,8 +1061,26 @@ fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
 
 fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneInputs, need16: bool) {
     if cache.as_ref().map_or(true, |c| {
-        !c.matches(params.black, params.white, ti.wb_r, ti.wb_g, ti.wb_b, ti.exp_gain, &ti.tone)
+        !c.matches(params.black, params.white, ti.wb_r, ti.wb_g, ti.wb_b, ti.exp_gain, &ti.tone, params.compact_lut)
     }) {
+        let (pre_r, pre_g, pre_b, pre_lut_len, pre_lut_shift) = if params.compact_lut {
+            (
+                std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_r, ti.exp_gain)),
+                std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_g, ti.exp_gain)),
+                std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_b, ti.exp_gain)),
+                COMPACT_LUT_LEN,
+                COMPACT_LUT_SHIFT,
+            )
+        } else {
+            let lut_len = (params.white as usize + 1).next_power_of_two().min(65536);
+            (
+                std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, lut_len)),
+                std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, lut_len)),
+                std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_b, ti.exp_gain, lut_len)),
+                lut_len,
+                0u32,
+            )
+        };
         *cache = Some(LutCache {
             black: params.black, white: params.white,
             wb_r_bits: ti.wb_r.to_bits(), wb_g_bits: ti.wb_g.to_bits(),
@@ -1045,12 +1090,12 @@ fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneIn
             highlights_bits: ti.tone.highlights.to_bits(),
             whites_bits:     ti.tone.whites.to_bits(),
             blacks_bits:     ti.tone.blacks.to_bits(),
-            pre_r: std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, (params.white as usize + 1).next_power_of_two().min(65536))),
-            pre_g: std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, (params.white as usize + 1).next_power_of_two().min(65536))),
-            pre_b: std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_b, ti.exp_gain, (params.white as usize + 1).next_power_of_two().min(65536))),
+            pre_r, pre_g, pre_b,
             post: std::sync::Arc::new(build_post_lut(&ti.tone)),
             post16: if need16 { Some(std::sync::Arc::new(build_post16_lut(&ti.tone))) } else { None },
-            pre_lut_len: (params.white as usize + 1).next_power_of_two().min(65536),
+            pre_lut_len,
+            pre_lut_shift,
+            compact_lut: params.compact_lut,
         });
     } else if need16 {
         let c = cache.as_mut().unwrap();
@@ -1085,6 +1130,7 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
             let cache = cache_cell.borrow();
             let c = cache.as_ref().unwrap();
             let pre_lut_mask = c.pre_lut_len - 1;
+            let pre_lut_shift = c.pre_lut_shift;
 
             // Lens 22/23/25: pointer move (raw ptr advance) instead of index arithmetic + casts.
             // unsafe: in-bounds by construction — *src & pre_lut_mask < pre_lut_len = pre_r.len(); src/dst
@@ -1120,9 +1166,9 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
                         while src < src_end {
                             let mut t = 0usize;
                             while t < TILE && src < src_end {
-                                tr[t] = *pre_r.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                                tg[t] = *pre_g.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                                tb[t] = *pre_b.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
+                                tr[t] = *pre_r.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                                tg[t] = *pre_g.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                                tb[t] = *pre_b.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                                 t += 1;
                             }
                             if t > 0 {
@@ -1150,9 +1196,9 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
                         let mut cnt = 0usize;
                         for k in 0..4 {
                             if src >= src_end { break; }
-                            rs[k] = *pre_r.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                            gs[k] = *pre_g.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                            bs[k] = *pre_b.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
+                            rs[k] = *pre_r.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                            gs[k] = *pre_g.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                            bs[k] = *pre_b.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                             cnt += 1;
                         }
                         if cnt == 0 { break; }
@@ -1170,16 +1216,16 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
 
     #[cfg(feature = "parallel")]
     {
-        let (pre_r, pre_g, pre_b, post, pre_lut_mask) = LUT_CACHE.with(|cache_cell| {
+        let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
             ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
             let c = cache_cell.borrow();
             let cr = c.as_ref().unwrap();
-            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone(), cr.pre_lut_len - 1)
+            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone(), cr.pre_lut_len - 1, cr.pre_lut_shift)
         });
         out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).with_min_len(4096).for_each(|(out_px, in_px)| {
-            let r = pre_r[in_px[0] as usize & pre_lut_mask] as f32;
-            let g = pre_g[in_px[1] as usize & pre_lut_mask] as f32;
-            let b = pre_b[in_px[2] as usize & pre_lut_mask] as f32;
+            let r = pre_r[(in_px[0] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            let g = pre_g[(in_px[1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            let b = pre_b[(in_px[2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
             out_px[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
@@ -1200,11 +1246,11 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
     debug_assert!(!ti.perceptual_constancy, "process_into_simd is the plain ingest path only");
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
-    let (pre_r, pre_g, pre_b, post, pre_lut_mask) = LUT_CACHE.with(|cache_cell| {
+    let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
         ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
         let c = cache_cell.borrow();
         let cr = c.as_ref().unwrap();
-        (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone(), cr.pre_lut_len - 1)
+        (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone(), cr.pre_lut_len - 1, cr.pre_lut_shift)
     });
 
     const BLK: usize = 2048;
@@ -1214,9 +1260,9 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
         let mut g = [0f32; BLK];
         let mut b = [0f32; BLK];
         for i in 0..np {
-            r[i] = pre_r[ib[i * 3]     as usize & pre_lut_mask] as f32;
-            g[i] = pre_g[ib[i * 3 + 1] as usize & pre_lut_mask] as f32;
-            b[i] = pre_b[ib[i * 3 + 2] as usize & pre_lut_mask] as f32;
+            r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
         }
         crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
         for i in 0..np {
@@ -1413,6 +1459,7 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             let cache = cache_cell.borrow();
             let c = cache.as_ref().unwrap();
             let pre_lut_mask = c.pre_lut_len - 1;
+            let pre_lut_shift = c.pre_lut_shift;
 
             // Lens 23 pointer advance version (consistent with process_into).
             // unsafe: same in-bounds invariant as process_into (out is n*4; dst advances n*4).
@@ -1428,9 +1475,9 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
                 let pre_b = c.pre_b.as_ptr();
                 let post = c.post.as_ptr();
                 while src < src_end {
-                    let r = *pre_r.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                    let g = *pre_g.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                    let b = *pre_b.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
+                    let r = *pre_r.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                    let g = *pre_g.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                    let b = *pre_b.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                     let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
                     *dst = *post.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
                     *dst = *post.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
@@ -1443,16 +1490,16 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
 
     #[cfg(feature = "parallel")]
     {
-        let (pre_r, pre_g, pre_b, post, pre_lut_mask) = LUT_CACHE.with(|cache_cell| {
+        let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
             ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
             let c = cache_cell.borrow();
             let cr = c.as_ref().unwrap();
-            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone(), cr.pre_lut_len - 1)
+            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post.clone(), cr.pre_lut_len - 1, cr.pre_lut_shift)
         });
         out.par_chunks_mut(4).zip(rgb16.par_chunks(3)).with_min_len(4096).for_each(|(out_px, in_px)| {
-            let r = pre_r[in_px[0] as usize & pre_lut_mask] as f32;
-            let g = pre_g[in_px[1] as usize & pre_lut_mask] as f32;
-            let b = pre_b[in_px[2] as usize & pre_lut_mask] as f32;
+            let r = pre_r[(in_px[0] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            let g = pre_g[(in_px[1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            let b = pre_b[(in_px[2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
             out_px[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
@@ -1548,6 +1595,7 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
             let cache = cache_cell.borrow();
             let c = cache.as_ref().unwrap();
             let pre_lut_mask = c.pre_lut_len - 1;
+            let pre_lut_shift = c.pre_lut_shift;
             let post16 = c.post16.as_ref().unwrap();
             // Lens 23 pointer version for 16bit path too.
             // unsafe: same in-bounds invariant as process_into (out is n*3 u16; dst advances n*3).
@@ -1563,9 +1611,9 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
                 let pre_b = c.pre_b.as_ptr();
                 let post16 = c.post16.as_ref().unwrap().as_ptr();
                 while src < src_end {
-                    let r = *pre_r.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                    let g = *pre_g.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
-                    let b = *pre_b.add(*src as usize & pre_lut_mask) as f32; src = src.add(1);
+                    let r = *pre_r.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                    let g = *pre_g.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
+                    let b = *pre_b.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                     let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
                     *dst = *post16.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
                     *dst = *post16.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
@@ -1577,16 +1625,16 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
 
     #[cfg(feature = "parallel")]
     {
-        let (pre_r, pre_g, pre_b, post16, pre_lut_mask) = LUT_CACHE.with(|cache_cell| {
+        let (pre_r, pre_g, pre_b, post16, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
             ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, true);
             let c = cache_cell.borrow();
             let cr = c.as_ref().unwrap();
-            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post16.as_ref().unwrap().clone(), cr.pre_lut_len - 1)
+            (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post16.as_ref().unwrap().clone(), cr.pre_lut_len - 1, cr.pre_lut_shift)
         });
         out.par_chunks_mut(3).zip(rgb16.par_chunks(3)).with_min_len(4096).for_each(|(out_px, in_px)| {
-            let r = pre_r[in_px[0] as usize & pre_lut_mask] as f32;
-            let g = pre_g[in_px[1] as usize & pre_lut_mask] as f32;
-            let b = pre_b[in_px[2] as usize & pre_lut_mask] as f32;
+            let r = pre_r[(in_px[0] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            let g = pre_g[(in_px[1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            let b = pre_b[(in_px[2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
             out_px[0] = post16[r2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[1] = post16[g2.clamp(0.0, 65535.0) as u16 as usize];
@@ -1827,8 +1875,6 @@ pub fn apply_look_params(
 /// Apply EXIF orientation tag to a packed RGB8 image.
 ///
 /// Handles orientations 3 (180°), 6 (90° CW), 8 (90° CCW).
-/// Orientations 1 (normal), 2, 4, 5, 7 are passed through as-is.
-/// Mirror/transpose variants (2, 4, 5, 7) are rare in Olympus ORF and not implemented.
 pub fn apply_orientation(
     rgb: Vec<u8>,
     width: usize,
@@ -1836,8 +1882,12 @@ pub fn apply_orientation(
     orientation: u16,
 ) -> (Vec<u8>, usize, usize) {
     match orientation {
+        2 => (flip_horizontal(&rgb, width, height), width, height),
         3 => (rotate_180(&rgb, width, height), width, height),
+        4 => (flip_vertical(&rgb, width, height), width, height),
+        5 => (transpose(&rgb, width, height), height, width),
         6 => (rotate_90_cw(&rgb, width, height), height, width),
+        7 => (anti_transpose(&rgb, width, height), height, width),
         8 => (rotate_90_ccw(&rgb, width, height), height, width),
         _ => (rgb, width, height), // orientation 1 + unknowns: zero-copy move
     }
@@ -1941,6 +1991,65 @@ pub fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     dst.par_chunks_mut(row_bytes).enumerate().for_each(body);
     #[cfg(not(feature = "parallel"))]
     dst.chunks_mut(row_bytes).enumerate().for_each(body);
+    dst
+}
+
+/// Mirror each row left-right (EXIF orientation 2).
+pub fn flip_horizontal(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let row_bytes = w * 3;
+    let mut dst = src.to_vec();
+    for r in 0..h {
+        let row = &mut dst[r * row_bytes..(r + 1) * row_bytes];
+        for c in 0..w / 2 {
+            let a = c * 3;
+            let b = (w - 1 - c) * 3;
+            row.swap(a, b);
+            row.swap(a + 1, b + 1);
+            row.swap(a + 2, b + 2);
+        }
+    }
+    dst
+}
+
+/// Mirror rows top-bottom (EXIF orientation 4).
+pub fn flip_vertical(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let row_bytes = w * 3;
+    let mut dst = vec![0u8; src.len()];
+    for r in 0..h {
+        let src_row = r * row_bytes;
+        let dst_row = (h - 1 - r) * row_bytes;
+        dst[dst_row..dst_row + row_bytes].copy_from_slice(&src[src_row..src_row + row_bytes]);
+    }
+    dst
+}
+
+/// Transpose along the main diagonal: dst[c, r] = src[r, c]. Output dims: (h, w). (EXIF 5)
+pub fn transpose(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut dst = vec![0u8; src.len()];
+    for r in 0..h {
+        for c in 0..w {
+            let si = (r * w + c) * 3;
+            let di = (c * h + r) * 3;
+            dst[di]     = src[si];
+            dst[di + 1] = src[si + 1];
+            dst[di + 2] = src[si + 2];
+        }
+    }
+    dst
+}
+
+/// Transpose along the anti-diagonal: dst[w-1-c, h-1-r] = src[r, c]. Output dims: (h, w). (EXIF 7)
+pub fn anti_transpose(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut dst = vec![0u8; src.len()];
+    for r in 0..h {
+        for c in 0..w {
+            let si = (r * w + c) * 3;
+            let di = ((w - 1 - c) * h + (h - 1 - r)) * 3;
+            dst[di]     = src[si];
+            dst[di + 1] = src[si + 1];
+            dst[di + 2] = src[si + 2];
+        }
+    }
     dst
 }
 
@@ -2174,6 +2283,7 @@ mod tonemap_flip_flops {
             texture: 0.0,
             clarity: 0.0,
             perceptual_constancy: false,
+            compact_lut: false,
         };
 
         // Support graphing stabilization: print CSV + running stats. 30 is often excessive; bench shows signal settles ~8-12.

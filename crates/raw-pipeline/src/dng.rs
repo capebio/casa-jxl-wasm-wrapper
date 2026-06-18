@@ -5,6 +5,7 @@
 
 use crate::demosaic;
 use crate::ljpeg;
+use crate::tiff::{visit_ifd, RawImageMeta};
 use anyhow::{anyhow, bail, Context, Result};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -34,6 +35,22 @@ pub struct DngImage {
     pub make: String,
     pub model: String,
     pub orientation: u16,
+}
+
+impl DngImage {
+    pub fn meta(&self) -> RawImageMeta {
+        RawImageMeta {
+            width: self.width,
+            height: self.height,
+            wb_r: self.wb_r,
+            wb_g: self.wb_g,
+            wb_b: self.wb_b,
+            color_matrix: self.color_matrix,
+            orientation: self.orientation,
+            make: self.make.clone(),
+            model: self.model.clone(),
+        }
+    }
 }
 
 const TAG_COLOR_MATRIX_1: u16 = 0xC621;
@@ -368,6 +385,27 @@ fn load_dng(data: &[u8]) -> Result<(WalkState, RawIfd, bool)> {
     let ifd0_off = read_u32(data, 4, le);
     let mut state = WalkState::default();
     walk(data, ifd0_off as usize, le, &mut state);
+    // Derive AsShotNeutral from AsShotWhiteXY (tag 0xC629) when tag 0xC628 is absent.
+    // Pixel phone DNGs store only xy chromaticity coordinates.
+    // Formula: XYZ_white = [x/y, 1, (1-x-y)/y]; cam_neutral = ColorMatrix × XYZ_white.
+    if state.as_shot_neutral.is_none() {
+        if let (Some(xy), Some(cm)) = (
+            state.as_shot_white_xy,
+            state.color_matrix_2.or(state.color_matrix_1),
+        ) {
+            let x = xy[0];
+            let y = xy[1];
+            if y > 1e-6 {
+                let xyz = [x / y, 1.0f32, (1.0 - x - y) / y];
+                let r = cm[0][0] * xyz[0] + cm[0][1] * xyz[1] + cm[0][2] * xyz[2];
+                let g = cm[1][0] * xyz[0] + cm[1][1] * xyz[1] + cm[1][2] * xyz[2];
+                let b = cm[2][0] * xyz[0] + cm[2][1] * xyz[1] + cm[2][2] * xyz[2];
+                if r > 0.0 && g > 0.0 && b > 0.0 {
+                    state.as_shot_neutral = Some([r, g, b]);
+                }
+            }
+        }
+    }
     let raw = state
         .raw_ifd
         .take()
@@ -398,6 +436,7 @@ struct RawIfd {
 struct WalkState {
     raw_ifd: Option<RawIfd>,
     as_shot_neutral: Option<[f32; 3]>,
+    as_shot_white_xy: Option<[f32; 2]>,
     color_matrix_1: Option<[[f32; 3]; 3]>,
     color_matrix_2: Option<[[f32; 3]; 3]>,
     forward_matrix_1: Option<[[f32; 3]; 3]>,
@@ -433,27 +472,13 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
         if depth >= MAX_IFD_DEPTH || !visited.insert(off) {
             return;
         }
-    if off + 2 > data.len() {
-        return;
-    }
-    let count = read_u16(data, off, le) as usize;
     let mut subs = Vec::new();
     let mut ifd = RawIfd::default();
     let mut new_subfile_type: u32 = 0;
     let mut has_image_dims = false;
     let mut has_tiles = false;
 
-    for i in 0..count {
-        let e = off + 2 + i * 12;
-        if e + 12 > data.len() {
-            return;
-        }
-        let tag = read_u16(data, e, le);
-        let dtype = read_u16(data, e + 2, le);
-        let cnt = read_u32(data, e + 4, le);
-        let val = read_u32(data, e + 8, le);
-        let inline_pos = e + 8;
-        match tag {
+    visit_ifd(data, off, le, |tag, dtype, cnt, val, inline_pos| match tag {
             0x00FE => new_subfile_type = val,
             0x0100 => {
                 ifd.width = first_u32(data, dtype, cnt, val, inline_pos, le).unwrap_or(0);
@@ -529,6 +554,9 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
             0xC628 => {
                 state.as_shot_neutral = read_as_shot_neutral(data, dtype, cnt, val, le);
             }
+            0xC629 => {
+                state.as_shot_white_xy = read_as_shot_white_xy(data, dtype, cnt, val, le);
+            }
             TAG_COLOR_MATRIX_1 => {
                 state.color_matrix_1 = read_matrix3x3(data, dtype, cnt, val, le);
             }
@@ -542,8 +570,7 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
                 state.forward_matrix_2 = read_matrix3x3(data, dtype, cnt, val, le);
             }
             _ => {}
-        }
-    }
+        });
 
     // Determine if this IFD is the full-res raw: needs ImageWidth/Length and
     // tile offsets, and NewSubFileType bit 0 must be 0 (full-res).
@@ -719,6 +746,23 @@ fn read_i32(data: &[u8], off: usize, le: bool) -> i32 {
         }
         None => 0,
     }
+}
+
+fn read_as_shot_white_xy(data: &[u8], dtype: u16, cnt: u32, val: u32, le: bool) -> Option<[f32; 2]> {
+    if cnt < 2 || dtype != 5 {
+        return None;
+    }
+    let p = val as usize;
+    if p + 16 > data.len() {
+        return None;
+    }
+    let mut out = [0f32; 2];
+    for k in 0..2 {
+        let num = read_u32(data, p + k * 8, le) as f32;
+        let den = read_u32(data, p + k * 8 + 4, le) as f32;
+        out[k] = if den > 0.0 { num / den } else { 0.0 };
+    }
+    Some(out)
 }
 
 fn read_matrix3x3(data: &[u8], dtype: u16, cnt: u32, val: u32, le: bool) -> Option<[[f32; 3]; 3]> {
