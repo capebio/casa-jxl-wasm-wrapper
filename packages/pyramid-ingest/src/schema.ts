@@ -173,7 +173,17 @@ export function parseManifest(text: string | Uint8Array): Manifest {
   return manifestSchema.parse(JSON.parse(text)) as Manifest;
 }
 
-export function parseGalleryIndex(text: string): GalleryIndex {
+export function parseGalleryIndex(text: string | Uint8Array): GalleryIndex {
+  // Auto-detect binary format (first byte != '{') or JSON
+  if (text instanceof Uint8Array) {
+    if (text[0] !== 123) {
+      // Binary format: lazy-import to avoid circular dep
+      const { binaryToGalleryIndex } = require("./manifest.js");
+      return binaryToGalleryIndex(text);
+    }
+    text = new TextDecoder().decode(text);
+  }
+
   return galleryIndexSchema.parse(JSON.parse(text));
 }
 

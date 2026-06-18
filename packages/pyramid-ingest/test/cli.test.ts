@@ -10,7 +10,7 @@ import {
 import type { Backends } from "../src/ingest";
 import { imageIdForPath } from "../src/hash";
 import type { GalleryIndex, Manifest } from "../src/manifest";
-import { parseManifest } from "../src/schema";
+import { parseManifest, parseGalleryIndex } from "../src/schema";
 import { loadScalarModule, scalarFactory } from "./scalar";
 
 afterEach(() => setJxlModuleFactoryForTesting(null));
@@ -64,7 +64,8 @@ test("main ingests a directory and writes a gallery index (RAW path via fake bac
   const code = await main(["--out", out, src], await scalarBackends());
   expect(code).toBe(0);
 
-  const index = JSON.parse(await readFile(join(out, "index.json"), "utf8")) as GalleryIndex;
+  // Binary format; read as binary to support both JSON and binary indexes
+  const index = parseGalleryIndex(await readFile(join(out, "index.json"))) as GalleryIndex;
   expect(index.images).toHaveLength(2);
   expect(index.images.map((e) => e.imageId)).toContain(await imageIdForPath(join(src, "one.orf")));
 

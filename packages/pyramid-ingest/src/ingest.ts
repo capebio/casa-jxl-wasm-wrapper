@@ -5,6 +5,7 @@ import { contentHash16, imageIdForPath } from "./hash.js";
 import { buildJpgLadder, buildProxyLadder, buildRawLadder, type LadderResult } from "./ladder.js";
 import {
   buildIndexEntry, buildManifest, isUpToDate, toEntry, manifestToBinary, binaryToManifest,
+  indexToBinary, binaryToGalleryIndex,
   type GalleryIndex, type LevelEntry, type Manifest,
 } from "./manifest.js";
 
@@ -963,10 +964,12 @@ export async function rebuildIndex(outDir: string, telemetry?: Telemetry): Promi
   // INVARIANT (D3): index order deterministic across readdir / fs. Do not remove this sort.
   index.images.sort((a, b) => (a.imageId < b.imageId ? -1 : a.imageId > b.imageId ? 1 : 0));
 
-  // high-atomic-writes + B9: tmp + rename for index.json (reader never sees partial/truncated JSON)
+  // high-atomic-writes + B9: tmp + rename for index.json (reader never sees partial/truncated binary)
+  // Binary format (−71% vs JSON) auto-detected by parseGalleryIndex
   const indexPath = join(outDir, "index.json");
   const tmp = `${indexPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  await withEbusyRetry(() => writeFile(tmp, JSON.stringify(index, null, 2)), "write-index-tmp");
+  const binary = indexToBinary(index);
+  await withEbusyRetry(() => writeFile(tmp, binary), "write-index-tmp");
   await withEbusyRetry(() => rename(tmp, indexPath), "rename-index");
   return index;
 }

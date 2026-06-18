@@ -268,3 +268,57 @@ export function binaryToManifest(data: Uint8Array): Manifest {
 
   return manifestSchema.parse(base) as any;
 }
+
+/** Encode gallery index to tight binary format (−71% vs JSON). Record layout:
+ * [u32 version][u32 numImages]
+ * [foreach image: u8(16) imageId, f64 aspect, u8(16) l0.contenthash, u16 l0.w, u16 l0.h]
+ */
+export function indexToBinary(index: GalleryIndex): Uint8Array {
+  let cap = 8; // version + count
+  cap += index.images.length * (16 + 8 + 16 + 2 + 2);
+
+  const out = new Uint8Array(cap);
+  const dv = new DataView(out.buffer);
+  let p = 0;
+
+  dv.setUint32(p, index.version, true); p += 4;
+  dv.setUint32(p, index.images.length, true); p += 4;
+
+  for (const img of index.images) {
+    const idEnc = enc.encodeInto(img.imageId, out.subarray(p));
+    p += 16;
+    dv.setFloat64(p, img.aspect, true); p += 8;
+    const chEnc = enc.encodeInto(img.l0.contenthash, out.subarray(p));
+    p += 16;
+    dv.setUint16(p, img.l0.w, true); p += 2;
+    dv.setUint16(p, img.l0.h, true); p += 2;
+  }
+
+  return out;
+}
+
+/** Decode binary gallery index format back to GalleryIndex. Inverse of indexToBinary. */
+export function binaryToGalleryIndex(data: Uint8Array): GalleryIndex {
+  const dv = new DataView(data.buffer, data.byteOffset, data.length);
+  let p = 0;
+
+  const version = dv.getUint32(p, true); p += 4;
+  const numImages = dv.getUint32(p, true); p += 4;
+
+  const images: IndexEntry[] = [];
+  for (let i = 0; i < numImages; i++) {
+    const imageId = dec.decode(data.subarray(p, p + 16)); p += 16;
+    const aspect = dv.getFloat64(p, true); p += 8;
+    const contenthash = dec.decode(data.subarray(p, p + 16)); p += 16;
+    const w = dv.getUint16(p, true); p += 2;
+    const h = dv.getUint16(p, true); p += 2;
+
+    images.push({
+      imageId,
+      aspect,
+      l0: { contenthash, w, h },
+    });
+  }
+
+  return { version, images };
+}
