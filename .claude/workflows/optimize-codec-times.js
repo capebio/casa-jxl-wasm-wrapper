@@ -3,6 +3,7 @@ export const meta = {
   description: 'Cut JXL enc/dec + RAW-decode times across all layers; flipflop-verified, quality-gated',
   whenToUse: 'Reduce encode/decode time in raw-converter-wasm with pixel-exact/Butteraugli safety',
   phases: [
+    { title: 'Crawl' },
     { title: 'Profile' },
     { title: 'Params' },
     { title: 'Rust' },
@@ -10,6 +11,10 @@ export const meta = {
     { title: 'Synthesis' },
   ],
 }
+
+const CRAWL_SCHEMA = { type: 'object', required: ['files'], properties: { files: { type: 'array',
+  items: { type: 'object', required: ['path','layer'],
+    properties: { path:{type:'string'}, layer:{enum:['rust','ts','cpp','js','other']} } } } } }
 
 const BASELINE_SCHEMA = { type: 'object', required: ['rows'], properties: { rows: { type: 'array',
   items: { type: 'object', required: ['file','metric','median_ms','bound_class','trust'],
@@ -67,6 +72,8 @@ const FLIPFLOP_NOTE =
 const cfg = {
   targetMetrics: args?.targetMetrics ?? ['photon_prog_enc','mod_prog_enc','raw_decode'],
   fileSubset: args?.fileSubset ?? null,
+  targetPath: args?.targetPath ?? null,      // folder mode: crawl this dir instead of hot-files seed
+  inputs: args?.inputs ?? null,              // flipflop --inputs glob for the corpus (else fractal/defaults)
   layersEnabled: args?.layersEnabled ?? ['params','rust','cpp'],
   lenses: args?.lenses ?? LENSES.map(l => l.id),
   butteraugliThreshold: args?.butteraugliThreshold ?? 1.0,
@@ -76,6 +83,65 @@ const cfg = {
 }
 const gateOpts = `{butteraugliThreshold:${cfg.butteraugliThreshold},slowdownEpsilon:${cfg.slowdownEpsilon}}`
 const ffNote = FLIPFLOP_NOTE.replace('BT', cfg.butteraugliThreshold).replace('SE', cfg.slowdownEpsilon)
+const inputsFlag = cfg.inputs ? `--inputs ${cfg.inputs}` : ''
+
+// Generic flipflop-verify note for folder mode (bespoke test wrapping the changed unit).
+const GENERIC_FF = (file, layer) =>
+  `Verify via flipflop: author a bespoke test (benchmark/optimize/flipflop-testgen.mjs) wrapping the ` +
+  `changed unit in ${file}. Variant A=current impl, B=candidate, async closures returning the output. ` +
+  `If the change is behavior-preserving → equal() exact-output (pixel/byte); if it alters output → ` +
+  `quality()=Butteraugli. ${layer === 'rust' || layer === 'cpp'
+    ? `Build in a worktree (rust: build-parallel-wasm.ps1 -Features parallel-wasm; cpp: jxl-wasm scripts/build.mjs), flip baseline↔candidate artifact.`
+    : `No rebuild — flip configs/impls in-process.`} ` +
+  `Run node flipflop.mjs <test> ${inputsFlag} --print; read saved_pct/quality/quality_ok/trust ` +
+  `(rss_mb from journal flips for leaner). trust:low → re-run. Then gate.mjs with ${gateOpts}. Return VERDICT.`
+
+// ---- FOLDER MODE: crawl a target dir, lens-tournament, generic flipflop verify ----
+if (cfg.targetPath) {
+  phase('Crawl')
+  const crawl = await agent(
+    `Recursively list source files under ${cfg.targetPath} (skip tests, dist, node_modules, target, pkg). ` +
+    `Classify each file's layer: rust|ts|cpp|js|other. Return up to 200 most relevant (largest/hottest) files.`,
+    { phase: 'Crawl', schema: CRAWL_SCHEMA }
+  )
+  const crawled = (crawl?.files ?? []).filter(f => f.layer !== 'other')
+  log(`crawl: ${crawled.length} source files under ${cfg.targetPath}`)
+
+  // One optimizer per lens crawls the file list applying its altitude.
+  const findings = (await parallel(
+    cfg.lenses.map(lensId => () => {
+      const lens = LENSES.find(l => l.id === lensId)
+      return agent(
+        `LENS=${lensId}. ${lens.charter}\n` +
+        `Crawl these files under ${cfg.targetPath} and apply THIS lens only: ${JSON.stringify(crawled)}.\n` +
+        `Return concrete speed/memory/dedup findings (each names the file + location).`,
+        { label: `crawl:${lensId}`, phase: 'Crawl', schema: FINDING_SCHEMA }
+      )
+    })
+  )).filter(Boolean).flatMap(r => r.findings ?? [])
+  log(`crawl findings: ${findings.length}`)
+
+  const verdicts = await pipeline(
+    findings,
+    f => agent(
+      `Implement candidate for finding: ${JSON.stringify(f)}.\n` + GENERIC_FF(f.file, f.layer),
+      { label: `verify:${f.lens}`, phase: 'Crawl',
+        isolation: (f.layer === 'rust' || f.layer === 'cpp') ? 'worktree' : undefined,
+        schema: VERDICT_SCHEMA }
+    )
+  )
+  const wins = verdicts.filter(Boolean).filter(v => v.accepted)
+  log(`folder banked: ${wins.length}/${verdicts.filter(Boolean).length}`)
+
+  const folderReport = await agent(
+    `Synthesize the folder optimization of ${cfg.targetPath}. Banked: ${JSON.stringify(wins)}. ` +
+    `Write a revert manifest (benchmark/optimize/manifest.mjs, one isolated diff per change). ` +
+    `Then a completeness critic pass: which lens×file gaps were not explored, what regressed, what is deferred. ` +
+    `Return a markdown report path + the deferred-work list.`,
+    { phase: 'Crawl' }
+  )
+  return { mode: 'folder', target: cfg.targetPath, banked: wins.length, report: folderReport }
+}
 
 // ---- Phase 0: Profile ----
 phase('Profile')

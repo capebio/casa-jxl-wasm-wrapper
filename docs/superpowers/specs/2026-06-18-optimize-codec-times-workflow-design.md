@@ -238,7 +238,15 @@ candidates (cheap, no rebuild, safe) bank before Architecture rewrites that need
 
 ## 8. Reusability (`args`)
 
-`{ targetMetrics?, fileSubset?, layersEnabled?, lenses?, butteraugliThreshold?, rounds?, slowdownEpsilon?, allowFallbacks? }`
+`{ targetMetrics?, fileSubset?, targetPath?, inputs?, layersEnabled?, lenses?, butteraugliThreshold?, rounds?, slowdownEpsilon?, allowFallbacks? }`
+
+**Folder mode:** when `targetPath` is set the metric phases are skipped and the workflow runs a
+crawl phase instead — finders recursively list + layer-classify the dir's source files, the
+lens tournament applies across them, and each candidate is verified by a *bespoke* flipflop test
+wrapping the changed unit (rebuild only for rust/cpp files). `inputs` is a flipflop `--inputs`
+glob (your own corpus); absent → fractal/default corpus. This generalizes the workflow from the
+3 fixed metrics to any code folder.
+
 Defaults: 3 headline metrics + general enc/dec; all layers; all 6 lenses incl. seamhunter (§4.5); threshold 1.0;
 rounds 10; `slowdownEpsilon` 3% (the ε in §5b); `allowFallbacks` true (permit added alternative pathways).
 Each run reads a fresh baseline and banks only verified diffs → safe to re-run.
