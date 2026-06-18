@@ -9,15 +9,24 @@ One metric:  args: { targetMetrics: ['raw_decode'] }
 Lens subset: args: { lenses: ['aerial','seam'] }
 Cheap smoke: args: { targetMetrics: ['photon_prog_enc'], layersEnabled: ['params'], lenses: ['tactical'], rounds: 2 }
 
-FOLDER MODE — crawl a target dir, lens-tournament every source file, flipflop-verify each change:
-  args: { targetPath: 'crates/raw-pipeline/src' }
-  args: { targetPath: 'packages/jxl-wasm/src', lenses: ['seam','tactical'], inputs: 'C:/995/**/*.ORF' }
-When targetPath is set the metric phases are skipped; finders crawl the folder (classifying each
-file's layer), the optimizer authors a bespoke flipflop test wrapping the changed unit, and rebuild
-happens only for rust/cpp files. inputs = a flipflop --inputs glob (your own corpus); else defaults.
+FOLDER MODE — crawl a target (DIR or single FILE), lens-tournament, flipflop-verify each change:
+  Dir:          args: { targetPath: 'crates/raw-pipeline/src' }
+  Single file:  args: { targetPath: 'packages/jxl-wasm/src/bridge.cpp' }   // + surrounding/related files for cross-file lenses
+  Find-only:    args: { targetPath: '.../bridge.cpp', lenses: ['aerial'], findOnly: true }  // READ-ONLY: finders+coverage, NO build/mutation/git
 
-args: { targetMetrics?, fileSubset?, targetPath?, inputs?, layersEnabled?, lenses?,
-        butteraugliThreshold?, rounds?, slowdownEpsilon?, allowFallbacks? }
+LENS LEVEL SELECTION:
+  Run only X,Y,Z:   args: { lenses: ['aerial','seam'] }
+  Run all except:   args: { excludeLenses: ['mathematical','operational'] }
+  Exclusively one:  args: { lenses: ['aerial'] }
+(effective lenses = whitelist minus blacklist, kept in altitude-ladder order.)
+
+When targetPath is set the metric phases are skipped; finders crawl the target (single files pull in
+surrounding/related files so aerial/seam have graph context), the optimizer authors a bespoke flipflop
+test wrapping the changed unit, rebuild only for rust/cpp. findOnly stops after the read-only finder
+pass (no build, no edits, no git) — the safe way to scout a file. inputs = flipflop --inputs corpus glob.
+
+args: { targetMetrics?, fileSubset?, targetPath?, inputs?, layersEnabled?, lenses?, excludeLenses?,
+        findOnly?, surrounding?, butteraugliThreshold?, rounds?, slowdownEpsilon?, allowFallbacks? }
 
 Lenses (altitude ladder, widest first): aerial, seam, architecture, operational, mathematical,
 tactical. Seamhunter (seam) runs every phase. Verification fast-track banks cheap seam/tactical

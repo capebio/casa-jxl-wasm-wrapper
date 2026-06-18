@@ -79,18 +79,24 @@ const FLIPFLOP_NOTE =
   `  node -e "import('./benchmark/optimize/gate.mjs').then(m=>console.log(JSON.stringify(` +
   `m.evaluate(<verdict>, {butteraugliThreshold:BT,slowdownEpsilon:SE}))))"\nReturn the VERDICT.`
 
+const ALL_LENSES = LENSES.map(l => l.id)
 const cfg = {
   targetMetrics: args?.targetMetrics ?? ['photon_prog_enc','mod_prog_enc','raw_decode'],
   fileSubset: args?.fileSubset ?? null,
-  targetPath: args?.targetPath ?? null,      // folder mode: crawl this dir instead of hot-files seed
+  targetPath: args?.targetPath ?? null,      // folder mode: a DIR or a single FILE to crawl
   inputs: args?.inputs ?? null,              // flipflop --inputs glob for the corpus (else fractal/defaults)
   layersEnabled: args?.layersEnabled ?? ['params','rust','cpp'],
-  lenses: args?.lenses ?? LENSES.map(l => l.id),
+  lenses: args?.lenses ?? ALL_LENSES,        // whitelist: run ONLY these levels (X,Y,Z)
+  excludeLenses: args?.excludeLenses ?? [],  // blacklist: run all EXCEPT these levels
+  findOnly: args?.findOnly ?? false,         // read-only: finders + coverage only, NO verify/rebuild/mutation
+  surrounding: args?.surrounding ?? true,    // single-file target: also pull in neighbouring/related files for cross-file lenses
   butteraugliThreshold: args?.butteraugliThreshold ?? 1.0,
   rounds: args?.rounds ?? 10,
   slowdownEpsilon: args?.slowdownEpsilon ?? 3,
   allowFallbacks: args?.allowFallbacks ?? true,
 }
+// Effective lenses = whitelist minus blacklist, preserving the altitude ladder order.
+const effLenses = ALL_LENSES.filter(l => cfg.lenses.includes(l) && !cfg.excludeLenses.includes(l))
 const gateOpts = `{butteraugliThreshold:${cfg.butteraugliThreshold},slowdownEpsilon:${cfg.slowdownEpsilon}}`
 const ffNote = FLIPFLOP_NOTE.replace('BT', cfg.butteraugliThreshold).replace('SE', cfg.slowdownEpsilon)
 const inputsFlag = cfg.inputs ? `--inputs ${cfg.inputs}` : ''
@@ -109,22 +115,28 @@ const GENERIC_FF = (file, layer) =>
 // ---- FOLDER MODE: crawl a target dir, lens-tournament, generic flipflop verify ----
 if (cfg.targetPath) {
   phase('Crawl')
+  log(`folder mode: target=${cfg.targetPath} lenses=[${effLenses.join(',')}]${cfg.findOnly ? ' FIND-ONLY (read-only)' : ''}`)
   const crawl = await agent(
-    `Recursively list source files under ${cfg.targetPath} (skip tests, dist, node_modules, target, pkg). ` +
-    `Classify each file's layer: rust|ts|cpp|js|other. Return up to 200 most relevant (largest/hottest) files.`,
+    `READ-ONLY. The target ${cfg.targetPath} may be a single FILE or a DIRECTORY.\n` +
+    `- If a directory: recursively list its source files (skip tests, dist, node_modules, target, pkg).\n` +
+    `- If a single file: include that file AS THE FOCUS, and${cfg.surrounding
+      ? ` ALSO its surrounding/related files (same directory siblings + the files it #includes/imports and the files that include/import it) so cross-file lenses (aerial/seam) have graph context. Mark the focus file vs context files.`
+      : ` only that file.`}\n` +
+    `Classify each file's layer: rust|ts|cpp|js|other. Return up to 200 most relevant files.`,
     { phase: 'Crawl', schema: CRAWL_SCHEMA }
   )
   const crawled = (crawl?.files ?? []).filter(f => f.layer !== 'other')
-  log(`crawl: ${crawled.length} source files under ${cfg.targetPath}`)
+  log(`crawl: ${crawled.length} files in scope (focus=${cfg.targetPath})`)
 
   // One optimizer per lens crawls the file list applying its altitude.
   // Each returns `examined` (every file it looked at) + `findings` → feeds the coverage ledger.
   const sweeps = (await parallel(
-    cfg.lenses.map(lensId => () => {
+    effLenses.map(lensId => () => {
       const lens = LENSES.find(l => l.id === lensId)
       return agent(
         `LENS=${lensId}. ${lens.charter}\n` +
-        `Crawl these files under ${cfg.targetPath} and apply THIS lens only: ${JSON.stringify(crawled)}.\n` +
+        `READ-ONLY — do NOT modify, build, or run git. Apply THIS lens only across these files ` +
+        `(focus on ${cfg.targetPath}): ${JSON.stringify(crawled)}.\n` +
         `Return BOTH: \`examined\` = every file path you actually looked at (even if you found nothing — ` +
         `this is the coverage record), and \`findings\` = concrete speed/memory/dedup wins (each names file + location).`,
         { label: `crawl:${lensId}`, phase: 'Crawl', schema: SWEEP_SCHEMA }
@@ -134,32 +146,45 @@ if (cfg.targetPath) {
   const findings = sweeps.flatMap(s => s.findings)
   log(`crawl findings: ${findings.length} across ${sweeps.length} lens sweeps`)
 
+  const crawledPaths = JSON.stringify(crawled.map(f => f.path))
+  const sweepData = JSON.stringify(sweeps.map(s => ({ lens: s.lens, examined: s.examined,
+    findingsByFile: s.findings.reduce((m, f) => ((m[f.file] = (m[f.file] || 0) + 1), m), {}) })))
+  const COVERAGE_STEP =
+    `COVERAGE: update docs/outputs/optimize/coverage-ledger.json with benchmark/optimize/coverage.mjs ` +
+    `(loadLedger → recordSweep once per lens with a fresh ISO-timestamp run id → saveLedger). Sweep data: ${sweepData}.\n` +
+    `GAPS + PRODUCTIVITY: gaps(ledger, ${crawledPaths}, ${JSON.stringify(effLenses)}), saturated(ledger, 2), ` +
+    `lensStats(ledger). Report the coverage matrix, the (file×lens) gaps never examined, saturated (dry) vs ` +
+    `needs-another-sweep, and the per-lens productivity table (files_examined, total_findings, findings_per_visit, dry_files).`
+
+  // FIND-ONLY: read-only finder pass — record coverage + report findings, NO verify/build/mutation.
+  if (cfg.findOnly) {
+    const findReport = await agent(
+      `Read-only find pass on ${cfg.targetPath} (lenses ${effLenses.join(',')}). ${findings.length} findings: ` +
+      `${JSON.stringify(findings)}.\n${COVERAGE_STEP}\nRank findings by predicted_gain_pct. Do NOT implement, build, ` +
+      `or run git. Return a markdown report path + the ranked findings + the gaps/re-sweep recommendation.`,
+      { phase: 'Crawl' }
+    )
+    return { mode: 'folder-find', target: cfg.targetPath, findings: findings.length, report: findReport }
+  }
+
   const verdicts = await pipeline(
     findings,
     f => agent(
-      `Implement candidate for finding: ${JSON.stringify(f)}.\n` + GENERIC_FF(f.file, f.layer),
+      `Implement candidate for finding: ${JSON.stringify(f)}.\n` +
+      `SAFETY: work ONLY inside your isolated worktree; write scratch only under .work/optimize/. ` +
+      `NEVER run git add/commit/stash/checkout/reset and NEVER edit the measurement harness ` +
+      `(StandardMultifileTest.mjs). Edit the production caller, not the benchmark.\n` + GENERIC_FF(f.file, f.layer),
       { label: `verify:${f.lens}`, phase: 'Crawl',
-        isolation: (f.layer === 'rust' || f.layer === 'cpp') ? 'worktree' : undefined,
+        isolation: 'worktree',
         schema: VERDICT_SCHEMA }
     )
   )
   const wins = verdicts.filter(Boolean).filter(v => v.accepted)
   log(`folder banked: ${wins.length}/${verdicts.filter(Boolean).length}`)
-
-  const crawledPaths = JSON.stringify(crawled.map(f => f.path))
-  const sweepData = JSON.stringify(sweeps.map(s => ({ lens: s.lens, examined: s.examined,
-    findingsByFile: s.findings.reduce((m, f) => ((m[f.file] = (m[f.file] || 0) + 1), m), {}) })))
   const folderReport = await agent(
     `Synthesize the folder optimization of ${cfg.targetPath}. Banked: ${JSON.stringify(wins)}.\n` +
-    `1) COVERAGE: update the ledger docs/outputs/optimize/coverage-ledger.json with ` +
-    `benchmark/optimize/coverage.mjs — loadLedger, then recordSweep once per lens with a fresh run id ` +
-    `(ISO timestamp), then saveLedger. Sweep data: ${sweepData}.\n` +
-    `2) GAPS + PRODUCTIVITY: call gaps(ledger, ${crawledPaths}, ${JSON.stringify(cfg.lenses)}), ` +
-    `saturated(ledger, 2), and lensStats(ledger). Report: the coverage matrix; the (file×lens) gaps ` +
-    `never examined; which pairs are saturated (dry — stop sweeping) vs need another sweep; and the ` +
-    `per-lens productivity table (lens, files_examined, total_findings, findings_per_visit, dry_files) ` +
-    `so we can see which lens earns its keep.\n` +
-    `3) Write a revert manifest (benchmark/optimize/manifest.mjs, one isolated diff per banked change).\n` +
+    `${COVERAGE_STEP}\n` +
+    `Write a revert manifest (benchmark/optimize/manifest.mjs, one isolated diff per banked change).\n` +
     `Return a markdown report path + the gaps list + the re-sweep recommendation.`,
     { phase: 'Crawl' }
   )
@@ -185,7 +210,7 @@ log(`baseline: ${rows.length} metric rows; ${rows.filter(r=>r.trust==='low').len
 // ---- Phase 1: Params (no rebuild) ----
 phase('Params')
 // Seam first (marshalling boundaries), then math/tactical for param-space.
-const paramLenses = cfg.lenses.filter(l => ['seam','mathematical','tactical'].includes(l))
+const paramLenses = effLenses.filter(l => ['seam','mathematical','tactical'].includes(l))
 const paramFindings = (await parallel(
   cfg.targetMetrics.filter(m => m !== 'raw_decode').flatMap(metric =>
     paramLenses.map(lensId => () => {
@@ -218,7 +243,7 @@ phase('Rust')
 let rustWins = []
 if (cfg.layersEnabled.includes('rust')) {
   const rustFindings = (await parallel(
-    cfg.lenses.map(lensId => () => {
+    effLenses.map(lensId => () => {
       const lens = LENSES.find(l => l.id === lensId)
       return agent(
         `LENS=${lensId}. ${lens.charter}\n` +
@@ -253,7 +278,7 @@ phase('CPP')
 let cppWins = []
 const codecBound = rows.some(r => cfg.targetMetrics.includes(r.metric) && r.bound_class === 'codec-kernel')
 if (cfg.layersEnabled.includes('cpp') && codecBound) {
-  const cppLenses = cfg.lenses.filter(l => ['seam','architecture','operational','tactical','mathematical'].includes(l))
+  const cppLenses = effLenses.filter(l => ['seam','architecture','operational','tactical','mathematical'].includes(l))
   const cppFindings = (await parallel(
     cppLenses.map(lensId => () => {
       const lens = LENSES.find(l => l.id === lensId)
