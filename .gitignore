@@ -4,6 +4,10 @@ tmp/
 .codex-tmp/
 **/__pycache__/
 
+# flipflop timing vehicle
+.flipflop/
+flipflop-corpus/
+
 # ============================================================================
 # Build artifacts, dependencies, and runtime profiles
 # (These were accidentally committed in the past; this .gitignore + rm --cached
