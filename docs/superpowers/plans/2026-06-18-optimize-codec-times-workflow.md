@@ -4,7 +4,7 @@
 
 **Goal:** Build a reusable Opus-xhigh `Workflow` (`optimize-codec-times`) that cuts JXL encode/decode and RAW-decode times across all layers, banking only changes that pass a quality gate (pixel-exact lossless / Butteraugli lossy) plus an acceptance test (faster, or equal/slightly-slower with a verified memory/dedup/feature gain), verified by the `flipflop` skill.
 
-**Architecture:** Layered escalation (profile → params → Rust → gated C++ → synthesis) with a 5-lens tournament (Aerial/Architecture/Operational/Tactical/Mathematical) as the diversity axis. The Workflow runtime is pure orchestration (no fs/Node); all I/O-bearing logic lives in standalone node **helpers** that workflow agents invoke via Bash/Write. flipflop is the A/B timing oracle.
+**Architecture:** Layered escalation (profile → params → Rust → gated C++ → synthesis) with a 6-lens tournament (Seamhunter/Architecture/Aerial/Operational/Mathematical/Tactical, applied in that impact-descending ladder) as the diversity axis. Seamhunter (boundary/edge/IO auditor) runs in every phase. The Workflow runtime is pure orchestration (no fs/Node); all I/O-bearing logic lives in standalone node **helpers** that workflow agents invoke via Bash/Write. flipflop is the A/B timing oracle.
 
 **Tech Stack:** Node `.mjs` (zero npm deps, `node --test`), the `Workflow` tool (JS orchestration script), the `flipflop` skill, existing `crates/raw-pipeline` perceptual kernel, `StandardMultifileTest.mjs`.
 
@@ -598,7 +598,7 @@ const BASELINE_SCHEMA = { type: 'object', required: ['rows'], properties: { rows
 
 const FINDING_SCHEMA = { type: 'object', required: ['findings'], properties: { findings: { type: 'array',
   items: { type: 'object', required: ['lens','layer','file','location','hypothesis','predicted_gain_pct'],
-    properties: { lens:{enum:['aerial','architecture','operational','tactical','mathematical']},
+    properties: { lens:{enum:['seam','aerial','architecture','operational','tactical','mathematical']},
       layer:{type:'string'}, file:{type:'string'}, location:{type:'string'},
       hypothesis:{type:'string'}, predicted_gain_pct:{type:'number'} } } } } }
 
@@ -609,12 +609,25 @@ const VERDICT_SCHEMA = { type: 'object',
     pixel_exact:{type:'boolean'}, butteraugli_delta:{type:'number'}, bytes_delta:{type:'number'},
     trust:{type:'string'}, reason:{type:'string'} } }
 
+// Ordering ladder (impact-descending): seam → architecture → aerial → operational → mathematical → tactical.
+// Seam findings verify FIRST (cheapest, safest, often bank via §5b memory/dedup).
 const LENSES = [
-  { id:'aerial',        charter:'Whole-layout/cross-file. Find redundant marshalling across layer boundaries, buffers copied→detached→re-materialized, passes fusible across files.' },
-  { id:'architecture',  charter:'Strategic/radical surgery. Propose a STRUCTURALLY different solution: swap memory model (ring buffer, arena, planar↔interleaved), replace a subsystem, change algorithm class.' },
-  { id:'operational',   charter:'Loops/nests/functions. Loop fusion, tiling/blocking for cache, invariant hoisting, pass reduction.' },
-  { id:'tactical',      charter:'Low-level. SIMD lane width, branch removal, LUT, alloc removal, bounds-check elision, fixed-point.' },
-  { id:'mathematical',  charter:'Different math. Closed-form vs iterative, polynomial/rational approx, separable kernels, integral images, differential/Newton steps, transform-domain. NOTE: lossy — must pass Butteraugli, never claim pixel-exact unless algebraically proven.' },
+  { id:'seam',          charter:'Seamhunter (cross-cutting, runs every phase). Audit every crossing JS↔WASM, worker↔main, Rust↔JS, file↔mem, RAW→JXL. Classify each Copy/Transfer/View/Alias; count allocs/copies/traversals; verify transfer lists; check malloc/free reuse. Build Boundary/Buffer-lifecycle/Traversal maps. Every copy guilty until measured. Grep: _malloc _free HEAPU8.set memory.grow "new Uint8Array(" "slice(" Array.from structuredClone "postMessage(" take_rgb rgb_to_rgba toArrayBuffer toClampedTight.' },
+  { id:'architecture',  charter:'Radical surgery / memory model. Propose a STRUCTURALLY different solution: ring buffer (allocate-once/reuse-forever), arena/batching, SoA↔AoS, single-owner zero-copy, producer→queue→consumer decouple, event-centric vs object-centric, persistent runtime/pool reuse.' },
+  { id:'aerial',        charter:'Whole dataflow graph. Redundant pipelines; shared-artifact coupling (one RGBA frame forcing viewer reqs on all consumers); passes fusible across files; split measurement/visualization/export pipelines.' },
+  { id:'operational',   charter:'Loops/nests/tiles. Kernel fusion (decode→transform→output, no intermediate buffer), tiling/blocking for cache, pass reduction (one-pass-many-outputs), invariant hoisting.' },
+  { id:'mathematical',  charter:'Different math. Complexity/linear-algebra/numerical-methods + perceptual colour science (apply_tone_math LUT). Polynomial/rational approx, separable kernels, integral images, symmetry/invariants (compose not recompute), closed-form vs iterative. NOTE: lossy — must pass Butteraugli, never claim pixel-exact unless algebraically proven.' },
+  { id:'tactical',      charter:'Micro / fast-path. Specialize dominant concrete type (rgba8/stride4, bpc1), exact integer ratio / power-of-two, integer stepping vs f32, manual tight loop vs iterator chain, defer copy to uncommon path, branch removal, SIMD lane width, bounds-check elision; leave breadcrumb comment.' },
+]
+
+// Hot-files seed (Core Hot Files.md + boundary-cost-audit.md) — finders point here first.
+const HOT_FILES = [
+  'crates/raw-pipeline/src/lib.rs (process_*, process_rgba fused, take_rgb/rgb_to_rgba)',
+  'crates/raw-pipeline/src/perceptual/* (gate kernel AND apply_tone_math cost center)',
+  'packages/jxl-wasm/src/facade.ts (toArrayBuffer, takeBuffer, input marshal)',
+  'packages/jxl-wasm/src/bridge.cpp (malloc, HEAPU8 views, FFI)',
+  'packages/jxl-worker-browser/src/decode-handler.ts (toArrayBuffer, JXTC routing)',
+  'web/jxl-decode-worker.js (toClampedTight, progressive transfers)',
 ]
 ```
 
@@ -653,7 +666,8 @@ log(`baseline: ${rows.length} metric rows; ${rows.filter(r=>r.trust==='low').len
 
 ```js
 phase('Params')
-const paramLenses = cfg.lenses.filter(l => ['mathematical','tactical'].includes(l))
+// Seam first (marshalling boundaries), then math/tactical for param-space.
+const paramLenses = cfg.lenses.filter(l => ['seam','mathematical','tactical'].includes(l))
 const paramFindings = (await parallel(
   cfg.targetMetrics.filter(m => m !== 'raw_decode').flatMap(metric =>
     paramLenses.map(lensId => () => {
@@ -702,6 +716,7 @@ if (cfg.layersEnabled.includes('rust')) {
       return agent(
         `LENS=${lensId}. ${lens.charter}\n` +
         `Layer: crates/raw-pipeline (RAW decode). Baseline rows: ${JSON.stringify(rows.filter(r=>r.metric==='raw_decode'))}.\n` +
+        `Hot-files seed (start here): ${HOT_FILES.join('; ')}.\n` +
         `Target the dominant substage per file. Known low-hanging (tactical): wire ` +
         `tone_simd::apply_tone_bulk into process_into (exists on a branch, not wired).\n` +
         `Return findings for THIS lens only.`,
@@ -735,7 +750,7 @@ phase('CPP')
 let cppWins = []
 const codecBound = rows.some(r => cfg.targetMetrics.includes(r.metric) && r.bound_class === 'codec-kernel')
 if (cfg.layersEnabled.includes('cpp') && codecBound) {
-  const cppLenses = cfg.lenses.filter(l => ['architecture','operational','tactical','mathematical'].includes(l))
+  const cppLenses = cfg.lenses.filter(l => ['seam','architecture','operational','tactical','mathematical'].includes(l))
   const cppFindings = (await parallel(
     cppLenses.map(lensId => () => {
       const lens = LENSES.find(l => l.id === lensId)
@@ -797,7 +812,7 @@ return { banked: allWins.length, report, deferred: critic }
 
 ```bash
 git add .claude/workflows/optimize-codec-times.js
-git commit -m "feat(optimize): optimize-codec-times Workflow (5-lens tournament, flipflop-gated)"
+git commit -m "feat(optimize): optimize-codec-times Workflow (6-lens tournament + seamhunter, flipflop-gated)"
 ```
 
 ---
@@ -856,7 +871,9 @@ git commit -m "docs(optimize): usage + flipflop-gated smoke checklist"
 
 **Spec coverage:**
 - §3 oracle (flipflop, async/quality/byo-input/role) → Tasks 4,5 templates + Task 6 agent prompts. ✓
-- §4.5 lenses (5, one per optimizer) → Task 6 LENSES + per-lens fan-out (Steps 3,4,5). ✓
+- §4.5 lenses (6 incl. seamhunter, one per optimizer, ordering ladder) → Task 6 LENSES + per-lens fan-out (Steps 3,4,5). ✓
+- §4.6 hot-files seed → Task 6 HOT_FILES const + finder prompts. ✓
+- Seamhunter every phase → paramLenses/cppLenses include 'seam', Rust uses all cfg.lenses. ✓
 - §5a/§5b gate → Task 3 `gate.mjs` (7 tests). ✓
 - Phase 0 baseline + bound_class → Tasks 1,2. ✓
 - Phase 1 params no-rebuild → Task 6 Step 3. ✓

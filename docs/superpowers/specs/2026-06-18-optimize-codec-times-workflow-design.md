@@ -82,25 +82,49 @@ architecture-level ideas) is guaranteed by construction, not luck.
 
 A **lens** is a mandated viewing altitude. Each tournament optimizer is assigned exactly one
 lens and must return findings *from that altitude only*. This forces architecture-level
-proposals to exist (the Architecture/Aerial lenses are the **generators** of structurally
-different solutions) instead of emerging by accident. flipflop arbitrates which survive.
+proposals to exist (Architecture/Aerial are the **generators** of structurally different
+solutions) instead of emerging by accident. flipflop arbitrates which survive. The taxonomy
+integrates David's lens-investigating corpus, `docs/0 Architecture Optimization.md` (Strategic/
+Operational/Tactical levels + the optimization ladder), `docs/0 boundary-cost-audit.md` +
+`docs/0 ChatGPT Lens II` (the seam/boundary family), and `docs/fast-path-principles.md`.
 
-| Lens | Altitude | Hunts for | Banks via |
-|------|----------|-----------|-----------|
-| **Aerial** | cross-file / whole-layout | pathways between files & layer sets; redundant marshalling across boundaries; buffer copied→detached→re-materialized; passes fusible across files | speed + §5b dedup/memory |
-| **Architecture** | strategic; gross/radical surgery; data & memory model | replace a subsystem; swap memory model (ring buffer, arena, planar↔interleaved); change algorithm *class* | speed or §5b memory/feature |
-| **Operational** | loops, nests, algorithms, functions | loop fusion, tiling/blocking for cache, invariant hoisting, pass reduction | speed |
-| **Tactical** | low-level code | SIMD lane width, branch removal, LUT, alloc removal, bounds-check elision, fixed-point | speed |
-| **Mathematical** | different mathematics | closed-form vs iterative, polynomial/rational approx, separable kernels, integral images, differential/Newton steps, transform-domain (FFT/DCT) | speed (watch §5a quality — approximations are lossy) |
+| Lens | Altitude | Hunts for | Grep / signal | Banks via |
+|------|----------|-----------|---------------|-----------|
+| **Seamhunter** *(cross-cutting)* | edges / threads / IO of a file | every crossing JS↔WASM, worker↔main, Rust↔JS, file↔mem, RAW→JXL — classify each **Copy/Transfer/View/Alias**, count allocs/copies/traversals, verify transfer lists, malloc/free reuse; build Boundary/Buffer-lifecycle/Traversal maps. *Every copy guilty until measured.* | `_malloc` `_free` `HEAPU8.set` `memory.grow` `new Uint8Array(` `slice(` `Array.from` `structuredClone` `postMessage(` `take_rgb` `rgb_to_rgba` `toArrayBuffer` `toClampedTight` | mostly §5b leaner/simpler |
+| **Aerial** | whole dataflow graph | redundant pipelines; shared-artifact coupling (one RGBA frame forcing viewer reqs on all consumers); passes fusible *across files*; split measurement/visualization/export pipelines | file-link graph; same buffer consumed by 3+ subsystems | speed + §5b dedup |
+| **Architecture** | radical surgery; memory model | ring buffer (allocate-once/reuse-forever), arena/batching, SoA↔AoS, single-owner zero-copy, producer→queue→consumer decouple, event-centric vs object-centric, persistent runtime/pool reuse | per-call `malloc`; create-use-dispose churn | speed or §5b memory/feature |
+| **Operational** | loops / nests / tiles | kernel fusion (decode→transform→output, no intermediate buffer), tiling/blocking for cache, pass reduction (one-pass-many-outputs), invariant hoisting | multiple passes over one buffer; intermediate Vecs | speed |
+| **Mathematical** | different mathematics | complexity/linear-algebra/numerical-methods (Lens 18) + perceptual colour science (Lens 17, `apply_tone_math` LUT); polynomial/rational approx, separable kernels, integral images, symmetry/invariants (compose not recompute), closed-form vs iterative | `div`/`exp`/`log`/`gamma` in hot loops; recomputed invariants | speed (lossy → §5a Butteraugli) |
+| **Tactical** | micro / fast-path | specialize dominant concrete type (rgba8/stride4, bpc1), exact integer ratio / power-of-two, integer stepping vs f32, manual tight loop vs iterator chain, defer copy to uncommon path, branch elimination, SIMD lane width, bounds-check elision; leave breadcrumb comment | `as f32 /` in pixel loops; `.map/.collect/.zip` on buffers; `memcpy(…,3)` in loops | speed |
+
+**Ordering ladder** (apply per layer, impact-descending — "further left = bigger impact",
+"remove movement before computing faster"):
+
+> **Seamhunter → Architecture → Aerial → Operational → Mathematical → Tactical**
+
+Seam wins are cheap+safe+high (zero-copy flips, no quality risk, bank via memory/dedup) → verify
+first. Architecture is biggest-but-riskiest → second. Micro/tactical last. The tournament is a
+*staircase*, not a flat fan-out.
 
 Rules:
-- One lens per optimizer agent; the agent's prompt states the lens charter + its example hunts.
-- A phase's tournament spins the lenses relevant to that layer (params phase ≈ Mathematical +
-  Tactical; Rust/C++ phases ≈ all five; harness ≈ Aerial + Architecture).
-- Lenses are **orthogonal to phases**: the same Architecture lens can fire in Rust *and* C++.
-- Mathematical-lens outputs are lossy by nature → §5a routes them through the Butteraugli gate,
-  never pixel-exact, unless the agent proves algebraic equivalence.
-- Lens set is parameterizable via `args.lenses` (default: all five).
+- One lens per optimizer agent; the prompt states the lens charter + its grep/signal hunts.
+- **Seamhunter runs in EVERY phase** (params = marshalling boundaries; Rust = RAW→JXL +
+  `take_rgb`/`rgb_to_rgba`; C++ = `HEAPU8`/`malloc` reuse) — the seams *are* the wins.
+- Other lenses are orthogonal to phases (Architecture fires in Rust *and* C++).
+- Mathematical outputs are lossy → §5a routes them through Butteraugli, never pixel-exact,
+  unless algebraic equivalence is proven.
+- Lens set parameterizable via `args.lenses` (default: all six).
+
+### 4.6 Hot-files seed
+
+Finders point here first (from `docs/0 Core Hot Files.md` + `docs/0 boundary-cost-audit.md`)
+instead of cold-scanning:
+- `crates/raw-pipeline/src/lib.rs` — `process_*`, `process_rgba` (fused tone→RGBA8), `take_rgb`/`rgb_to_rgba`
+- `crates/raw-pipeline/src/perceptual/*` — the gate kernel **and** `apply_tone_math` cost center (the quality-gate engine is itself a hot file)
+- `packages/jxl-wasm/src/facade.ts` — `toArrayBuffer`, `takeBuffer`, input marshal
+- `packages/jxl-wasm/src/bridge.cpp` — `malloc`, `HEAPU8` views, FFI glue
+- `packages/jxl-worker-browser/src/decode-handler.ts` — `toArrayBuffer`, JXTC routing
+- `web/jxl-decode-worker.js` — `toClampedTight`, progressive transfers
 
 ### Phase 0 — Profile & Baseline  *(cheap; run freely)*
 - Run StandardMultifileTest (full flip-flop). Parse RICH/FLIP lines + history JSON.
@@ -183,22 +207,25 @@ A pure regression (slower, no memory/dedup/feature gain) is rejected.
 | Phase | Agents |
 |-------|--------|
 | 0 | 1 profiler (parses bench, writes baseline.json, seeds flipflop inputs) |
-| 1 | 1 param finder → tournament optimizers, **one per lens** (per high-var metric) → verifiers |
-| 2 | 1 Rust finder → worktree tournament optimizers, **one per lens** (all 5) → 1 integrator → verifiers |
-| 3 | 1 C++ finder → ≤3 worktree optimizers (lens-assigned) → verifiers (gated) |
+| 1 | 1 param finder → tournament optimizers, **one per lens incl. seamhunter** (per high-var metric) → verifiers |
+| 2 | 1 Rust finder → worktree tournament optimizers, **one per lens incl. seamhunter** (all 6) → 1 integrator → verifiers |
+| 3 | 1 C++ finder → ≤3 worktree optimizers (lens-assigned, **seamhunter always seeded**) → verifiers (gated) |
 | 4 | 1 synthesis + 1 completeness critic |
+
+Lenses fire in the §4.5 **ordering ladder** (Seamhunter→Architecture→Aerial→Operational→
+Mathematical→Tactical); seam findings verify first (cheapest, safest, often bank via §5b).
 
 ## 7. Schemas (StructuredOutput)
 
 - `BASELINE` — `{file, metric, median_ms, dominant_substage, bound_class, baseline_butteraugli, pixel_hash}`
-- `FINDING` — `{lens:'aerial'|'architecture'|'operational'|'tactical'|'mathematical', layer, file, location, hypothesis, predicted_gain_pct}`
+- `FINDING` — `{lens:'seam'|'aerial'|'architecture'|'operational'|'tactical'|'mathematical', layer, file, location, hypothesis, predicted_gain_pct}`
 - `CANDIDATE` — `{diff|config, lossless, role:'primary'|'fallback', predicted_ms, predicted_bytes, claimed_gain:'speed'|'memory'|'dedup'|'feature'}`
 - `VERDICT` — `{accepted, accept_reason:'faster'|'leaner'|'simpler'|'feature', flipflop_ms_baseline, flipflop_ms_candidate, saved_pct, rss_delta_mb, quality_ok, pixel_exact, butteraugli_delta, bytes_delta, trust, reason}`
 
 ## 8. Reusability (`args`)
 
 `{ targetMetrics?, fileSubset?, layersEnabled?, lenses?, butteraugliThreshold?, rounds?, slowdownEpsilon?, allowFallbacks? }`
-Defaults: 3 headline metrics + general enc/dec; all layers; all 5 lenses (§4.5); threshold 1.0;
+Defaults: 3 headline metrics + general enc/dec; all layers; all 6 lenses incl. seamhunter (§4.5); threshold 1.0;
 rounds 10; `slowdownEpsilon` 3% (the ε in §5b); `allowFallbacks` true (permit added alternative pathways).
 Each run reads a fresh baseline and banks only verified diffs → safe to re-run.
 
