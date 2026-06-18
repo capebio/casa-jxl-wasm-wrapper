@@ -89,6 +89,32 @@ function makeStorage(estimateQuota: number | undefined) {
   };
 }
 
+describe("JxlCacheBrowser SharedArrayBuffer memory cache", () => {
+  it("get() returns a SharedArrayBuffer with correct data", async () => {
+    const cache = new JxlCacheBrowser({ memoryLimit: 1024 * 1024, persistentLimit: 0 });
+    await cache.init();
+
+    const data = new Uint8Array([10, 20, 30, 40]);
+    await cache.set("buf", data.buffer);
+
+    const result = await cache.get("buf");
+    assert.ok(result instanceof SharedArrayBuffer, "should return SharedArrayBuffer");
+    assert.deepEqual(Array.from(new Uint8Array(result)), [10, 20, 30, 40]);
+  });
+
+  it("repeated gets return the same SAB instance (zero-copy)", async () => {
+    const cache = new JxlCacheBrowser({ memoryLimit: 1024 * 1024, persistentLimit: 0 });
+    await cache.init();
+
+    await cache.set("tile", new Uint8Array([1, 2, 3]).buffer);
+
+    const a = await cache.get("tile");
+    const b = await cache.get("tile");
+    assert.ok(a !== undefined && b !== undefined);
+    assert.strictEqual(a, b, "same SAB reference on both gets");
+  });
+});
+
 describe("JxlCacheBrowser quota sizing", () => {
   beforeEach(() => {
     delete (globalThis as { navigator?: Navigator }).navigator;
