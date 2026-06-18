@@ -627,3 +627,24 @@ Error handling mixes `String`, real `anyhow`, a fake local `anyhow!` macro in `t
 - Metric-result newtype (PSNR(dB) vs SSIM(0..1) can't be mixed): approved; requires perceptual/ public API change.
 
 All architecture items will be revisited once a TDD plan is written and the user signs off on sequencing.
+
+---
+
+## 2026-06-18 — jxl-scheduler review: Deferred Improvements
+
+Source: `packages/jxl-scheduler/jxl-scheduler Improvements.md` §"##Opportunities" (branch `jxl-scheduler-20260618`). All 5 items are valid directions; none applied this pass. The P0/P1 bugs and cleanups were applied; the following are architectural or tuning changes that require design decisions or benchmark evidence.
+
+**JS-1: Enforce `cleanupSession` as the single deletion path.**
+`scheduler.ts` has at least 3 direct `sessions.delete(sessionId)` call sites outside `cleanupSession`. Each must manually call `releaseAdmission`, `adjustSessionCount`, `unblockBackpressure`, `abortCleanup`, and `dedupe.complete`. The P0 bugs found in this pass (both missing `unblockBackpressure`) were caused by exactly this pattern. **Approved in principle; rejected from this pass.** Requires: audit of all `sessions.delete` sites, refactor to route through `cleanupSession` or a typed wrapper, and a lint/comment rule to prevent regression. Cross-cutting change; needs a dedicated branch.
+
+**JS-2: Observable session lifecycle (`onSessionStateChange` / EventTarget).**
+No hook exists for external observers to watch state transitions (queued → running → paused → cancelled). The backpressure regression tests rely on `setTimeout(res, 10)` timing to detect state changes — a correctness smell. **Approved in principle; rejected from this pass.** Adding a lifecycle hook changes the public API shape; needs a spec covering callback signature, timing guarantees (sync vs microtask), and whether it is developer-only or production-facing. Low urgency — tests pass without it.
+
+**JS-3: Backpressure EMA faster warm-up.**
+`drainLatencyEma` initialises at 50 ms; α = 0.2 → converges slowly under burst load on a fresh scheduler. A two-phase α (0.5 for first 5 samples, then 0.2) would make adaptive HWM responsive to real system behaviour sooner. **Rejected without benchmark evidence.** CLAUDE.md guardrail: adaptive/heuristic changes require benchmark data. Needs a flipflop test comparing burst-start latency with α-fixed vs α-two-phase before touching.
+
+**JS-4: Size-aware parked-session eviction.**
+`maxParkedSessions` evicts the oldest parked session (S15). If newest sessions are larger (4K frame) than oldest (thumbnail), memory use under the cap can still be high. A pixel-footprint eviction policy would be more efficient. **Rejected from this pass.** Requires the scheduler to track `targetWidth × targetHeight` from `MsgDecodeStart` per session, and a policy decision about whether eviction is max-size-first or LRU-by-size. Needs a spec and an OOM reproduction case before implementing.
+
+**JS-5: Copy-on-write DedupeRegistry subscriber list.**
+`forEachSubscriber` now snapshots via `[...subs]` (bounded allocation, typically 0–3 items). For the common zero-subscriber case this is a no-op. If a single primary ever accumulates many subscribers (e.g. a gallery tile viewed by 10 consumers), a copy-on-write list would be more allocation-efficient. **Rejected: not needed at current scale.** Revisit if profiling shows `forEachSubscriber` on the hot path with subscriber counts > 10.
