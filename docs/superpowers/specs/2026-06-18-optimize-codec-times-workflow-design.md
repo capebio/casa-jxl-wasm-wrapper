@@ -73,8 +73,34 @@ memory drops" rule is measured.
 ## 4. Architecture: layered escalation (A) + tournament graft (C)
 
 Phases ordered by edit→verify cost. Profile data gates the expensive phases. The 3
-high-variance metrics get **tournament** optimizers (N agents, distinct angles) where
-variance signals headroom; everything else gets a single optimizer per finding.
+high-variance metrics get **tournament** optimizers where variance signals headroom;
+everything else gets a single optimizer per finding. The tournament's **diversity axis is
+the lens panel (§4.5)** — not ad-hoc "angles" — so altitude coverage (including
+architecture-level ideas) is guaranteed by construction, not luck.
+
+### 4.5 Optimization lenses (tournament diversity axis)
+
+A **lens** is a mandated viewing altitude. Each tournament optimizer is assigned exactly one
+lens and must return findings *from that altitude only*. This forces architecture-level
+proposals to exist (the Architecture/Aerial lenses are the **generators** of structurally
+different solutions) instead of emerging by accident. flipflop arbitrates which survive.
+
+| Lens | Altitude | Hunts for | Banks via |
+|------|----------|-----------|-----------|
+| **Aerial** | cross-file / whole-layout | pathways between files & layer sets; redundant marshalling across boundaries; buffer copied→detached→re-materialized; passes fusible across files | speed + §5b dedup/memory |
+| **Architecture** | strategic; gross/radical surgery; data & memory model | replace a subsystem; swap memory model (ring buffer, arena, planar↔interleaved); change algorithm *class* | speed or §5b memory/feature |
+| **Operational** | loops, nests, algorithms, functions | loop fusion, tiling/blocking for cache, invariant hoisting, pass reduction | speed |
+| **Tactical** | low-level code | SIMD lane width, branch removal, LUT, alloc removal, bounds-check elision, fixed-point | speed |
+| **Mathematical** | different mathematics | closed-form vs iterative, polynomial/rational approx, separable kernels, integral images, differential/Newton steps, transform-domain (FFT/DCT) | speed (watch §5a quality — approximations are lossy) |
+
+Rules:
+- One lens per optimizer agent; the agent's prompt states the lens charter + its example hunts.
+- A phase's tournament spins the lenses relevant to that layer (params phase ≈ Mathematical +
+  Tactical; Rust/C++ phases ≈ all five; harness ≈ Aerial + Architecture).
+- Lenses are **orthogonal to phases**: the same Architecture lens can fire in Rust *and* C++.
+- Mathematical-lens outputs are lossy by nature → §5a routes them through the Butteraugli gate,
+  never pixel-exact, unless the agent proves algebraic equivalence.
+- Lens set is parameterizable via `args.lenses` (default: all five).
 
 ### Phase 0 — Profile & Baseline  *(cheap; run freely)*
 - Run StandardMultifileTest (full flip-flop). Parse RICH/FLIP lines + history JSON.
@@ -156,24 +182,24 @@ A pure regression (slower, no memory/dedup/feature gain) is rejected.
 
 | Phase | Agents |
 |-------|--------|
-| 0 | 1 profiler (parses bench, writes baseline.json + bench-focused.mjs) |
-| 1 | 1 param finder → N tournament optimizers (per high-var metric) → verifiers |
-| 2 | 1 Rust finder → N worktree tournament optimizers → 1 integrator → verifiers |
-| 3 | 1 C++ finder → ≤3 worktree optimizers → verifiers (gated) |
+| 0 | 1 profiler (parses bench, writes baseline.json, seeds flipflop inputs) |
+| 1 | 1 param finder → tournament optimizers, **one per lens** (per high-var metric) → verifiers |
+| 2 | 1 Rust finder → worktree tournament optimizers, **one per lens** (all 5) → 1 integrator → verifiers |
+| 3 | 1 C++ finder → ≤3 worktree optimizers (lens-assigned) → verifiers (gated) |
 | 4 | 1 synthesis + 1 completeness critic |
 
 ## 7. Schemas (StructuredOutput)
 
 - `BASELINE` — `{file, metric, median_ms, dominant_substage, bound_class, baseline_butteraugli, pixel_hash}`
-- `FINDING` — `{layer, file, location, hypothesis, predicted_gain_pct}`
+- `FINDING` — `{lens:'aerial'|'architecture'|'operational'|'tactical'|'mathematical', layer, file, location, hypothesis, predicted_gain_pct}`
 - `CANDIDATE` — `{diff|config, lossless, role:'primary'|'fallback', predicted_ms, predicted_bytes, claimed_gain:'speed'|'memory'|'dedup'|'feature'}`
 - `VERDICT` — `{accepted, accept_reason:'faster'|'leaner'|'simpler'|'feature', flipflop_ms_baseline, flipflop_ms_candidate, saved_pct, rss_delta_mb, quality_ok, pixel_exact, butteraugli_delta, bytes_delta, trust, reason}`
 
 ## 8. Reusability (`args`)
 
-`{ targetMetrics?, fileSubset?, layersEnabled?, butteraugliThreshold?, rounds?, slowdownEpsilon?, allowFallbacks? }`
-Defaults: 3 headline metrics + general enc/dec; all layers; threshold 1.0; rounds 10;
-`slowdownEpsilon` 3% (the ε in §5b); `allowFallbacks` true (permit added alternative pathways).
+`{ targetMetrics?, fileSubset?, layersEnabled?, lenses?, butteraugliThreshold?, rounds?, slowdownEpsilon?, allowFallbacks? }`
+Defaults: 3 headline metrics + general enc/dec; all layers; all 5 lenses (§4.5); threshold 1.0;
+rounds 10; `slowdownEpsilon` 3% (the ε in §5b); `allowFallbacks` true (permit added alternative pathways).
 Each run reads a fresh baseline and banks only verified diffs → safe to re-run.
 
 ## 9. Risks → mitigations
