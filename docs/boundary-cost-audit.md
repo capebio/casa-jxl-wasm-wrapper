@@ -715,6 +715,8 @@ The following Tier 1 items were implemented and verified:
 
 **Verification**: Tier 1 tests pass; Gobabeb/P2200 datasets show consistent 10–50× crop speedup. No regressions in full-image decode paths.
 
+**Independent corroboration (2026-06-18)**: rebuilt as a thermally-corrected, interleaved `flipflop` A/B (`.flipflop/tests/jxtc-vs-full-decode.mjs`, report `docs/outputs/jxtc-diagnostic-report-2026-06-18.md`). Same-container "full decode + JS crop" vs "decode only the ROI tile", pixel-exact `equal()` guarded: 1.0× at 256² (ROI = full, sanity floor) → 4.1× (512²) → 15.2× (1024²) → **61.5× (2048²)**. Confirms and extends the "10–50×" claim — ROI decode is flat (~11 ms, one tile) while full decode scales with area. Supersedes §13's single-shot crop-benchmark numbers as the rigorous record for this boundary.
+
 ---
 
 ## 15. Next Tier 1 Decision Summary (June 2026)
@@ -751,7 +753,7 @@ Evidence: §13 WASM crop benchmark (10-50x win); §13.1 native (10-30x win, 0.8 
 
 **Animation marshaling**: Estimated 4–6 full buffer copies (malloc+set per frame). Batching into a single large allocation with an index table (one malloc for all pixel data + one for descriptors) would reduce allocator pressure. Not measured; only relevant for multi-frame JXL workflows (rare for RAW/JPEG sources). Deferred until animation workflows are a measured bottleneck.
 
-**Worker `toArrayBuffer` copy**: The `slice()` path in `decode-handler.ts:526` is only taken when the underlying buffer's byteOffset or length doesn't match exactly. Code audit shows most pixel handoffs go through the direct ownership path. Not measured in the harness. Can be quantified by adding `toArrayBufferMs` to DecodeHandler and comparing slice vs transfer call counts in a `wasm-pack` debug build.
+**Worker `toArrayBuffer` copy**: The slice (copy) path is only taken when the underlying buffer's byteOffset or length doesn't match exactly. Code audit shows most pixel handoffs go through the direct ownership path. **Update 2026-06-18**: the boundary is now self-measuring — hot paths use `toTransferablePixels` (`decode-handler.ts:676`), which returns a `{ buffer, copied }` pair and emits `copy_to_transfer_ms`/`copied_bytes` (folded as `copyMs`/`copiedBytes` on each frame), with `copyLatencyEma` driving adaptive HWM and SAB handled zero-copy. `toArrayBuffer` (`:700`) is now a thin wrapper used only on the cold error-partial path. The Tier 2 audit item is closed as already-implemented; a facade-side "return clean buffers" change (Tier 2 Option B) stays gated behind that metric reporting frequent copies, which it currently does not.
 
 ### What this closes from INCOMPLETE PLANS
 

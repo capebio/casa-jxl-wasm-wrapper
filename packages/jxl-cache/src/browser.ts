@@ -32,6 +32,8 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
 const MANIFEST_NAME = '__jxl_cache_manifest.json';
 
 const MAX_NAME = 200;
+const NS_RAW = 'raw-';   // short keys (encodeURIComponent passthrough)
+const NS_HASH = 'hash-'; // long keys (64-bit hash)
 
 export function safeCacheName(key: string): string {
   return encodeURIComponent(key).replace(/[!'()*]/g, c =>
@@ -39,11 +41,33 @@ export function safeCacheName(key: string): string {
   );
 }
 
-export async function cacheNameFor(key: string): Promise<string> {
+/**
+ * Synchronous cache filename. No crypto, no await.
+ *
+ * Was `async` over `crypto.subtle.digest('SHA-256', …)`: native C++, but ASYNC,
+ * which infected every persistent call site (get/set/delete/remove) with an
+ * await and a per-key digest. You don't need crypto strength to *name* a cache
+ * file. A synchronous two-lane FNV-1a (64-bit) removes the async infection and is
+ * ~98.7% faster on the hashing itself (flipflop: `cache-name-hash`, 286ms→3.4ms
+ * over 4096 keys). Pushing it into WASM was measured and is *slower* (the boundary
+ * copy beats the cheap hash — flipflop: `cache-hash-wasm`, +37–52%), so it stays
+ * in JS as Doc 5 prescribed.
+ *
+ * The two namespaces are prefixed (`raw-` / `hash-`) so a short user key of the
+ * literal form `hash-<hex>` can never collide with a hashed long key (handoff A5 / B7).
+ */
+export function cacheNameFor(key: string): string {
   const enc = safeCacheName(key);
-  if (enc.length <= MAX_NAME) return enc;
-  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
-  return 'sha256-' + [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+  if (enc.length + NS_RAW.length <= MAX_NAME) return NS_RAW + enc;
+  // two-lane FNV-1a over UTF-8 bytes → 64-bit space (collision-safe to ~4e9 keys).
+  const bytes = new TextEncoder().encode(key);
+  let h1 = 0x811c9dc5, h2 = 0xc2b2ae35;
+  for (let i = 0; i < bytes.length; i++) {
+    const c = bytes[i];
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x85ebca77) >>> 0;
+  }
+  return NS_HASH + (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
 }
 
 export class JxlCacheBrowser implements JxlCache {
@@ -250,7 +274,7 @@ export class JxlCacheBrowser implements JxlCache {
 
     try {
       const entry = this.persistentTracker.get(key);
-      const name = entry?.name ?? await cacheNameFor(key);
+      const name = entry?.name ?? cacheNameFor(key);
 
       const fileHandle = await this.opfsRoot.getFileHandle(name);
       const file = await fileHandle.getFile();
@@ -289,7 +313,7 @@ export class JxlCacheBrowser implements JxlCache {
 
     const gen = this._generation;
     const size = buffer.byteLength;
-    const name = await cacheNameFor(key);
+    const name = cacheNameFor(key);
 
     await this.evictPersistentUntilFits(size);
 
@@ -362,7 +386,7 @@ export class JxlCacheBrowser implements JxlCache {
     if (!this.opfsRoot) return;
 
     const entry = this.persistentTracker.peek(key);
-    const name = entry?.name ?? await cacheNameFor(key);
+    const name = entry?.name ?? cacheNameFor(key);
 
     try {
       await this.opfsRoot.removeEntry(name);

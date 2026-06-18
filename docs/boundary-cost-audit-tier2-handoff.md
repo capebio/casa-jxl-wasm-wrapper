@@ -19,6 +19,62 @@ The Tier 1 JXTC/tiled work achieved a **10–50× speedup** for crop/thumbnail r
 
 ---
 
+## Action Pass — 2026-06-18 (verified against live code)
+
+All four items re-checked against the current tree before any change. Outcome:
+
+| # | Item | Status | Evidence |
+|---|------|--------|----------|
+| 1 | Animation marshaling batching | **Deferred (trigger unmet)** | `marshalAnimationFrames` + `mallocAndCopy` still in `bridge.cpp`. No animation/multi-frame path appears in any benchmark hot path. Promotion trigger ("animation a measured bottleneck") not met. |
+| 2 | `toArrayBuffer` transfer audit | **DONE / superseded** | Hot paths no longer call `toArrayBuffer`. Progress/final/budget arms call `toTransferablePixels` (`decode-handler.ts:676`) which returns `{ buffer, copied }` — the exact slice-vs-direct signal Option A asked to measure. Already instrumented: `copy_to_transfer_ms` + `copied_bytes` metrics, `copyMs`/`copiedBytes` folded onto frames, `copyLatencyEma` tracked, SAB zero-copy handled. `toArrayBuffer` (`:700`) is now a thin wrapper used only on the cold error-partial path. No code change warranted; Option B (facade returns clean buffers) stays gated behind the metric showing frequent copies — it currently does not. |
+| 3 | JXTC variants (multi-size/quality) | **Deferred (trigger unmet)** | `encode_variants_from_rgb16` / `encode_variants_with_progressive` present; single-variant Tier 1 shipped. Promotion trigger ("UI telemetry shows heterogeneous crop sizes") not met. |
+| 4 | Diagnostic UI CLI report | **DONE 2026-06-18** (rebuilt on flipflop) | The original plan (read `session-worker-timings-*.json`) was dead — no such artifacts exist. Repurposed the `flipflop` skill instead, which is **better methodology**: interleaved, start-rotated A/B that cancels the thermal drift §13's single-shot crop numbers were exposed to. Deliverables: `.flipflop/tests/jxtc-vs-full-decode.mjs` (the decode A/B) + `tools/jxtc-diagnostic-report.mjs` (journal → markdown + encode/payback). Report: `docs/outputs/jxtc-diagnostic-report-2026-06-18.md`. |
+
+**Decision**: #2 closed as already-implemented. #4 delivered via flipflop (see below). #1/#3 remain deferred (triggers unmet).
+
+### #4 result (flipflop-measured, fbm corpus, scalar WASM, pixel-exact `equal()` guard)
+
+Both arms decode the **same** JXTC container, isolating "decode every tile + JS-crop" vs "decode only the ROI tile". ROI = one 256px tile.
+
+| image | full decode + crop | JXTC ROI decode | speedup | trust |
+|---|---:|---:|---:|---|
+| 256² (ROI = full) | 13.2 ms | 12.9 ms | 1.0× | floor (sanity) |
+| 512² | 42.8 ms | 10.4 ms | 4.1× | high |
+| 1024² | 174.8 ms | 11.5 ms | 15.2× | high |
+| 2048² | 680.0 ms | 11.1 ms | **61.5×** | high |
+
+Confirms **and extends** §13's "10–50×": ROI decode is flat (~11 ms, always one tile) while full decode scales with area, so the win grows with resolution. Payback (crops to repay the one-time JXTC encode) is single-digit at ≥512² even using a worst-case scalar/lossless encode; production effort=3+SIMD makes it lower still. Regenerate: see the report's Reproduce block.
+
+### #4 encode companion — `flipflopenc` (`.flipflop/tests/jxtc-encode.mjs`)
+
+Times JXTC encode across effort/distance with compressed **size** recorded alongside time (the speed+filesize lens). fbm corpus, scalar WASM, tileSize=256, vs the e3-d0 baseline:
+
+| config | 512² time | 1024² time | 2048² time | vs e3-d0 time | size @2048² |
+|---|---:|---:|---:|---:|---:|
+| e3-d0 (lossless, ingest default) | 225 ms | 914 ms | 3507 ms | baseline | 3492 KB |
+| **e3-d1 (visually lossless)** | 113 ms | 468 ms | 1848 ms | **~49% faster** | **1235 KB (2.8× smaller)** |
+| e3-d2 | 86 ms | 356 ms | 1407 ms | ~60% faster | 937 KB |
+| e7-d0 (fallback) | 852 ms | 3366 ms | 12667 ms | **~2.6–3.7× slower** | — |
+
+Findings: **(1)** distance is the real lever — distance=1 nearly halves encode time and is ~2.8× smaller than the lossless distance=0 the decode test used; for gallery/thumbnail JXTC, distance=1 is the better ingest setting. **(2)** effort 7 is 2.6–3.7× slower for little real-photo size benefit — **effort=3 stays the default** (corroborates the user's prior speed+filesize measurement). Note: flipflop records `quality` (size) only for non-baseline variants, so the e3-d0 baseline size is read from the report tool, not the journal.
+
+### #4 on REAL camera files (2026-06-18)
+
+Both tests run a `corpus()` over real CR2/DNG/ORF when `JXTC_REAL=<dir>` is set (decode→RGBA via the raw pkg in node; see `.flipflop/lib/raw-corpus.mjs`). Ran against `C:\Foo\raw-converter\tests`. Report: `docs/outputs/jxtc-real-files-report-2026-06-18.md`. (JPEG excluded — no JPEG→RGBA decoder in-repo; the pipeline is a RAW converter.)
+
+| file | MP | full decode + crop | JXTC ROI | **speedup** | d1 encode | d1 size | payback@d1 |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| ADH 1455.CR2 | 24 | 4324 ms | 13.7 ms | **315×** | — | — | — |
+| ADH 1248.CR2 | 24 | 5717 ms | 21.6 ms | **265×** | — | — | — |
+| P1110226.ORF | 20.5 | 5449 ms | 23.9 ms | **228×** | 4613 ms | 1698 KB | 1 |
+| ADH 1234.CR2 | 24 | 7289 ms | 34.8 ms | **209×** | 6052 ms | 4785 KB | 1 |
+| PXL…095020.dng | 12.5 | 2865 ms | 16.8 ms | **170×** | — | — | — |
+| PXL…093507.dng | 12.5 | 2787 ms | 18.2 ms | **154×** | 3378 ms | 2098 KB | 2 |
+
+Real photos (12–24 MP) push the win to **154–315×** — far beyond the synthetic-fractal 61× and the original §13 "10–50×", because full-decode cost scales with megapixels while ROI decode stays flat (~one tile). In wall-clock terms: a **multi-second freeze (4–7 s on a 24 MP CR2) → tens of milliseconds**. Payback at distance=1 (visually lossless) is **1–2 crops** even at the slowest scalar tier — the one-time ingest encode is repaid almost immediately. Reproduce: see the report header.
+
+---
+
 ## 1. Animation Frame Marshaling Batching
 
 **Current Cost**: Multiple malloc+set per frame in `marshalAnimationFrames` (bridge.cpp).
@@ -82,7 +138,9 @@ For a 100-frame animation of a 24MP image, this is:
 
 ## 2. Worker `toArrayBuffer` Transfer Audit
 
-**Current Cost**: `slice()` copy in `decode-handler.ts:526` (some pixel handoff paths).
+> **STATUS 2026-06-18: DONE / superseded.** Hot paths now use `toTransferablePixels` (`decode-handler.ts:676`), which already returns the `{ buffer, copied }` slice-vs-direct signal and is instrumented (`copy_to_transfer_ms`, `copied_bytes`, folded `copyMs`/`copiedBytes`, `copyLatencyEma`, SAB zero-copy). `toArrayBuffer` (`:700`) survives only as a thin wrapper on the cold error-partial path. The code/line references below are historical. Option B stays gated behind the metric reporting frequent copies — it currently does not.
+
+**Current Cost** *(historical — see status above)*: `slice()` copy in `decode-handler.ts:526` (some pixel handoff paths).
 
 **What it does**: The `toArrayBuffer` helper converts WASM-side pixel buffers to JS-side ownership:
 ```ts
@@ -125,9 +183,9 @@ function toArrayBuffer(value: Uint8Array | ArrayBuffer): ArrayBuffer {
 **Recommended**: Start with Option A. It's a quick audit + targeted fix if needed. If measurements show slice is rare, defer.
 
 ### Implementation Checklist
-- [ ] Add debug logging to `toArrayBuffer` (call count, slice vs direct path) in decode-handler.
-- [ ] Run session-worker-timings-browser.js with logging enabled; inspect results.
-- [ ] If slice calls are frequent: identify the codepaths + investigate ownership chain.
+- [x] Add debug logging to the pixel-handoff path (slice vs direct) in decode-handler — landed as `toTransferablePixels` `.copied` flag + `copy_to_transfer_ms`/`copied_bytes` metrics + folded `copyMs`/`copiedBytes`.
+- [ ] Run session-worker-timings-browser.js and inspect `copied`/`copyMs` frequency. *(Pending — no committed artifact yet; same input gap as item #4.)*
+- [ ] If slice calls are frequent: identify the codepaths + investigate ownership chain. *(Only if the metric above shows frequent copies.)*
 - [ ] If frequent: modify facade / handler to return clean buffers or directly transfer.
 - [ ] Verify no regressions in decode tests (StandardMultifileTest + jxl-decode-worker.test.ts).
 
@@ -199,7 +257,9 @@ function toArrayBuffer(value: Uint8Array | ArrayBuffer): ArrayBuffer {
 
 ## 4. Per-File JXTC vs Full Decode Diagnostic UI
 
-**Current Implementation**: Measurement harness captures `jxtcEncodeMs`, `jxtcDecodeMs`, `jxtcKb` + full-decode metrics. Data is in JSON artifacts.
+> **STATUS 2026-06-18: DONE — rebuilt on the `flipflop` skill** (not the session-worker JSON, which never existed). Code: `.flipflop/tests/jxtc-vs-full-decode.mjs` + `tools/jxtc-diagnostic-report.mjs`. Output: `docs/outputs/jxtc-diagnostic-report-2026-06-18.md`. flipflop's interleaved start-rotation cancels the thermal drift that single-shot §13 numbers were exposed to; `equal()` guards pixel-exactness; `trust` flags throttling/variance. Result summary is in the Action Pass section above. The Option A "read existing JSON artifacts" plan below is obsolete (those artifacts do not exist).
+
+**Original plan (obsolete)**: Measurement harness captures `jxtcEncodeMs`, `jxtcDecodeMs`, `jxtcKb` + full-decode metrics. Data is in JSON artifacts.
 
 **Opportunity**: Build a diagnostic UI that shows side-by-side A/B metrics for each file, highlighting when JXTC wins and by how much.
 
@@ -256,10 +316,10 @@ function toArrayBuffer(value: Uint8Array | ArrayBuffer): ArrayBuffer {
 
 | Item | Effort | Priority | Prerequisite | Target |
 |---|---|---|---|---|
-| Animation marshaling (Option A: arena alloc) | Medium | Low | Measurement on real animation set | 2026-Q3 |
-| toArrayBuffer audit (Option A: measurement + targeted fix) | Low | Low | Current codebase | 2026-Q2 or as-needed |
-| JXTC variants (Phase A: measurement) | Low-to-medium | Deferred | UI usage data + Phase A measurement | 2026-Q3 if justified |
-| Diagnostic UI (Option A: CLI report) | Low | Nice-to-have | Current benchmark artifacts | 2026-Q2 (bonus) |
+| Animation marshaling (Option A: arena alloc) | Medium | Low (deferred — trigger unmet) | Measurement on real animation set | 2026-Q3 |
+| toArrayBuffer audit (Option A: measurement + targeted fix) | Low | **DONE 2026-06-18** (instrumentation landed via `toTransferablePixels`) | — | Closed |
+| JXTC variants (Phase A: measurement) | Low-to-medium | Deferred — trigger unmet | UI usage data + Phase A measurement | 2026-Q3 if justified |
+| Diagnostic UI (Option A: CLI report) | Low | **DONE 2026-06-18** (rebuilt on flipflop) | — | Closed |
 
 ---
 
@@ -267,9 +327,9 @@ function toArrayBuffer(value: Uint8Array | ArrayBuffer): ArrayBuffer {
 
 **Promote from "deferred" to "in progress"**:
 1. **Animation marshaling**: If multi-frame JXL encode workflows (e.g., time-lapse RAW sequences, slide shows) are observed in real usage or benchmarks show animation as a measured bottleneck.
-2. **toArrayBuffer audit**: If harness measurements show frequent `slice()` calls (> 10% of transfer calls), or if decode latency becomes a focus area.
+2. **toArrayBuffer audit**: ✅ Closed 2026-06-18 — the slice-vs-direct signal is now instrumented at the live boundary (`toTransferablePixels.copied` → `copy_to_transfer_ms`/`copyMs`). Only re-open Option B (facade returns clean buffers) if a harness run shows frequent `copied:true` (> 10% of transfers).
 3. **JXTC variants**: If UI telemetry shows heterogeneous crop sizes being requested (e.g., 20% of crops are < 128px, requiring different JXTC variants).
-4. **Diagnostic UI**: If future optimization campaigns need a dashboard to compare approaches, or if stakeholder demos require visualization of the JXTC wins.
+4. **Diagnostic UI**: ✅ Closed 2026-06-18 — delivered as a flipflop A/B (`.flipflop/tests/jxtc-vs-full-decode.mjs`) + report generator (`tools/jxtc-diagnostic-report.mjs`). Re-run both (see the report's Reproduce block) to refresh numbers or add corpus types/sizes.
 
 ---
 

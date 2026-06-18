@@ -156,8 +156,20 @@ export type CliEvent =
   | { type: "stage"; runId: string; name: string; ts: number; fields?: Record<string, unknown> }
   | { type: "gc-result" | "validate-result" | "rm-result" | "migrate-result"; [k: string]: unknown };
 
-export function parseManifest(text: string): Manifest {
-  // V3: accepts v1 or v2 (additive fields tolerated)
+export function parseManifest(text: string | Uint8Array): Manifest {
+  // V3: accepts v1/v2 JSON or binary format (−73% size via manifestToBinary)
+  // Binary format detected: buffer not starting with '{' (Uint8Array first byte != '{'.charCodeAt(0) = 123)
+  if (text instanceof Uint8Array) {
+    if (text[0] !== 123) {
+      // Binary format: lazy-import to avoid circular dep with manifest.ts
+      const { binaryToManifest } = require("./manifest.js");
+      return binaryToManifest(text);
+    }
+    // Fallback: treat as UTF-8 JSON if somehow starts with '{'
+    text = new TextDecoder().decode(text);
+  }
+
+  // JSON path: text[0] should be '{' for valid manifests
   return manifestSchema.parse(JSON.parse(text)) as Manifest;
 }
 

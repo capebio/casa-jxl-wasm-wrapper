@@ -6,6 +6,7 @@ import { setJxlModuleFactoryForTesting } from "@casabio/jxl-wasm";
 import type { Backends, IngestPlan } from "../src/ingest";
 import type { DecodedMaster, RawBackend, RawFormat } from "../src/backends";
 import type { GalleryIndex, Manifest } from "../src/manifest";
+import { parseManifest } from "../src/schema";
 import { loadScalarModule, scalarFactory } from "./scalar";
 
 // Install fs mock *before* any import of the SUT modules so their static
@@ -107,7 +108,7 @@ test("ingestImage emits 16-bit big levels when rgb16 is present", { timeout: WAS
   const master = await writeMaster(out, "HDR.orf");
   expect((await ingestImage(master, b, { outDir: out })).outcome).toBe("written");
   const imageId = await await imageIdForPath(master);
-  const manifest = JSON.parse(await readFile(join(out, "images", imageId, "manifest.json"), "utf8")) as Manifest;
+  const manifest = parseManifest(await readFile(join(out, "images", imageId, "manifest.json"))) as Manifest;
   const grid = manifest.levels.filter((l) => l.size === 256 || l.size === 512 || l.size === 1024);
   const big = manifest.levels.filter((l) => l.size === 2048 || l.size === "full");
   for (const l of grid) expect(l.bitsPerSample).toBe(8);
@@ -123,7 +124,7 @@ test("ingestImage writes a full RAW pyramid + manifest, then skips on re-run", {
 
   const imageId = await await imageIdForPath(master);
   const manifestPath = join(out, "images", imageId, "manifest.json");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Manifest;
+  const manifest = parseManifest(await readFile(manifestPath)) as Manifest;
   expect(manifest.schema).toBe(2);
   expect(manifest.orientation).toBe("baked");
   expect(manifest.proxy).toBeUndefined();
@@ -156,8 +157,8 @@ test("identical level content across masters is stored once (content-addressed d
   await ingestImage(m1, b, { outDir: out });
   await ingestImage(m2, b, { outDir: out });
 
-  const man1 = JSON.parse(await readFile(join(out, "images", await imageIdForPath(m1), "manifest.json"), "utf8")) as Manifest;
-  const man2 = JSON.parse(await readFile(join(out, "images", await imageIdForPath(m2), "manifest.json"), "utf8")) as Manifest;
+  const man1 = parseManifest(await readFile(join(out, "images", await imageIdForPath(m1), "manifest.json"), "utf8")) as Manifest;
+  const man2 = parseManifest(await readFile(join(out, "images", await imageIdForPath(m2), "manifest.json"), "utf8")) as Manifest;
   expect(man1.levels.map((l) => l.contenthash)).toEqual(man2.levels.map((l) => l.contenthash));
 
   const levelFiles = await readdir(join(out, "levels"));
@@ -260,7 +261,7 @@ test("ingestBatch isolates failures; rebuildIndex inlines L0 for non-proxy image
   expect(g1.l0.w).toBe(256);
   expect([...ids].sort()).toEqual(ids);
 
-  const onDisk = JSON.parse(await readFile(join(out, "index.json"), "utf8")) as GalleryIndex;
+  const onDisk = parseManifest(await readFile(join(out, "index.json"), "utf8")) as GalleryIndex;
   expect(onDisk.images.length).toBe(index.images.length);
 });
 
@@ -351,7 +352,7 @@ test("F10 --verify-hash: corrupt level is overwritten on re-ingest with flag; wi
   await ingestImage(master, b, { outDir: out });
 
   const imageId = await await imageIdForPath(master);
-  const man = JSON.parse(await readFile(join(out, "images", imageId, "manifest.json"), "utf8")) as Manifest;
+  const man = parseManifest(await readFile(join(out, "images", imageId, "manifest.json"))) as Manifest;
   const full = man.levels.find((l) => l.size === "full") || man.levels[man.levels.length - 1];
   const dest = join(out, "levels", `${full.contenthash}.jxl`);
 

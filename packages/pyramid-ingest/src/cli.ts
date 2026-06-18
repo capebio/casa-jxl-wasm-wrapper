@@ -160,7 +160,8 @@ export async function main(argv: string[], backendsOverride?: Backends): Promise
       const manifestPath = join(parsed.out, "images", expl, "manifest.json");
       let manifest: ReturnType<typeof parseManifest> | null = null;
       try {
-        manifest = parseManifest(await readFile(manifestPath, "utf8"));
+        // Binary format; read as binary to support both JSON and binary manifests
+        manifest = parseManifest(await readFile(manifestPath));
       } catch {
         // not found or bad
       }

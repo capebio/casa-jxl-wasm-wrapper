@@ -10,6 +10,7 @@ import {
 import type { Backends } from "../src/ingest";
 import { imageIdForPath } from "../src/hash";
 import type { GalleryIndex, Manifest } from "../src/manifest";
+import { parseManifest } from "../src/schema";
 import { loadScalarModule, scalarFactory } from "./scalar";
 
 afterEach(() => setJxlModuleFactoryForTesting(null));
@@ -79,9 +80,10 @@ test("main --proxy writes single-level proxy manifests and skips index rebuild",
   const code = await main(["--out", out, "--proxy", "256", src], await scalarBackends());
   expect(code).toBe(0);
 
-  const manifest = JSON.parse(
-    await readFile(join(out, "images", await imageIdForPath(join(src, "one.orf")), "manifest.json"), "utf8"),
-  ) as Manifest;
+  // Binary manifest format; parseManifest auto-detects
+  const { parseManifest } = await import("../src/schema.js");
+  const manifestBuf = await readFile(join(out, "images", await imageIdForPath(join(src, "one.orf")), "manifest.json"));
+  const manifest = parseManifest(manifestBuf) as Manifest;
   expect(manifest.proxy).toBe(true);
   expect(manifest.levels).toHaveLength(1);
 
@@ -182,7 +184,7 @@ test("main migrate --dry-run (unlocked V3 re-emit path) reports without writing"
   const code = await main(["--out", out, "migrate", "--dry-run"], b);
   expect(code).toBe(0);
   // dry: no change to manifest
-  const after = JSON.parse(await readFile(join(imgDir, "manifest.json"), "utf8"));
+  const after = parseManifest(await readFile(join(imgDir, "manifest.json")));
   expect(after.schema).toBe(1); // dry no write
   expect(after.producedBy).toBeUndefined();
 });

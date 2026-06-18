@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { contentHash16, imageIdForPath } from "./hash.js";
 import { buildJpgLadder, buildProxyLadder, buildRawLadder, type LadderResult } from "./ladder.js";
 import {
-  buildIndexEntry, buildManifest, isUpToDate, toEntry,
+  buildIndexEntry, buildManifest, isUpToDate, toEntry, manifestToBinary, binaryToManifest,
   type GalleryIndex, type LevelEntry, type Manifest,
 } from "./manifest.js";
 
@@ -399,10 +399,12 @@ export async function applyIngestPlan(
   await writeLevelFiles(outDir, plan.levels, plan.width, plan.height, !!opts.verifyHash, plan.entries, existing);
 
   // write manifest atomically (with EBUSY retry for Windows durability)
+  // Binary format (−73% vs JSON) shipped with v1 magic byte; parseManifest auto-detects
   await mkdir(imageDir, { recursive: true });
   const manifestTmp = `${manifestPath}.tmp`;
   try {
-    await withEbusyRetry(() => writeFile(manifestTmp, JSON.stringify(plan.manifest, null, 2)), "manifest-tmp");
+    const binary = manifestToBinary(plan.manifest);
+    await withEbusyRetry(() => writeFile(manifestTmp, binary), "manifest-tmp");
     await withEbusyRetry(() => rename(manifestTmp, manifestPath), "manifest-rename");
   } catch (e) {
     await unlink(manifestTmp).catch(() => {});
@@ -445,16 +447,16 @@ export async function ingestImage(
   if (!opts.force) {
     // ING-5: single read (no fileExists+readFile); a corrupt existing manifest falls through to
     // a clean re-ingest instead of throwing and failing the image.
-    const existingTxt = await readFileOrNull(manifestPath);
-    if (existingTxt !== null) {
-      try {
-        const existing = parseManifest(existingTxt);
+    // Binary format (−73%) auto-detected by parseManifest; read as binary to support both formats
+    try {
+      const existing = await readFile(manifestPath).then(buf => parseManifest(buf)).catch(() => null);
+      if (existing) {
         const wantProxy = opts.proxy !== undefined;
         // P7: allow proxy manifests to skip on mtime match (previously guarded out); match proxy flag too (no size recorded yet; schema add deferred)
         const uptodate = isUpToDate(existing, info.mtimeMs, wantProxy) || ((existing as any).stub === true && existing.master.mtimeMs === info.mtimeMs);
         if (uptodate) return { outcome: "skipped" };
-      } catch { /* corrupt/unparseable manifest → re-ingest (overwrite) */ }
-    }
+      }
+    } catch { /* corrupt/unparseable manifest → re-ingest (overwrite) */ }
   }
 
   const bytes = await readFile(masterPath); // Buffer satisfies Uint8Array; avoids copy (low-readfile)
@@ -943,7 +945,8 @@ export async function rebuildIndex(outDir: string, telemetry?: Telemetry): Promi
     if (!(await fileExists(manifestPath))) return;
     let manifest: Manifest;
     try {
-      manifest = parseManifest(await readFile(manifestPath, "utf8"));
+      // Read as binary to support both JSON and binary formats; parseManifest auto-detects
+      manifest = parseManifest(await readFile(manifestPath));
     } catch (err) {
       // P11: route via telemetry when available, stderr fallback (rebuild used from cli + standalone)
       const msg = `warning: skipping unreadable manifest ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`;
