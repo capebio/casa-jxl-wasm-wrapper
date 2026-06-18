@@ -149,11 +149,11 @@ export async function decodeTiledViewport(
   if (outBuf) {
     if (outBuf.byteLength < need) throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${outBuf.byteLength} < ${need})`);
     if (buffersInFlight.has(outBuf)) throw new PyramidError('BUFFER_IN_USE', 'outBuffer is already in use by another decode');
+    buffersInFlight.add(outBuf);
     // L5-2: 16-bit (bpp=8) requires even offset for safe Uint16Array(underlying, byteOffset) views downstream.
     if (plan.bpp === 8 && (outBuf.byteOffset % 2) !== 0) {
       throw new PyramidError('INVALID_BUFFER_ALIGNMENT', 'outBuffer.byteOffset must be even for 16-bit (bpp=8) pixels');
     }
-    buffersInFlight.add(outBuf);
   }
 
   try {
@@ -182,7 +182,6 @@ export async function decodeTiledViewport(
     const skipTiles = options?.skipTiles;
     const startMs = budgetMs != null ? performance.now() : 0;
     const deadline = budgetMs != null ? startMs + budgetMs : null;
-    let failedTiles: TileId[] = [];
 
     let target: Uint8Array | undefined;
     // Progressive DC-then-final (F1 + L3-1): Phase 1 all DC, Phase 2 all final.
@@ -205,27 +204,33 @@ export async function decodeTiledViewport(
       };
       const n = plan.tiles.length;
       const total = progressive === 'dc-only' ? n : n * 2;
-      // Pre-extract for efficiency (L3-1).
-      const tileBytesList: Uint8Array[] = plan.tiles.map((t) => extractTileBitstream(source.bytes, t, exHeader));
-
-      const tilesWithBytes = plan.tiles.map((t, idx) => ({
-        tile: t,
-        bytes: tileBytesList[idx]!,
-        idx
-      }));
-
-      // DL-8 (UX/AR/gaming, medium): center-out tile ordering.
+      const tileSize = source.tileSize;
       const cx = vp.x + vp.w / 2;
       const cy = vp.y + vp.h / 2;
-      const ordered = tilesWithBytes.slice().sort((a, b) => {
-        const da = (a.tile.x + a.tile.w / 2 - cx) ** 2 + (a.tile.y + a.tile.h / 2 - cy) ** 2;
-        const db = (b.tile.x + b.tile.w / 2 - cx) ** 2 + (b.tile.y + b.tile.h / 2 - cy) ** 2;
-        return da - db;
+      const levelId = getLevelId(source);
+      const tilesWithBytes = plan.tiles.map((t, idx) => {
+        const tx = Math.floor(t.x / tileSize);
+        const ty = Math.floor(t.y / tileSize);
+        const dist = (t.x + t.w / 2 - cx) ** 2 + (t.y + t.h / 2 - cy) ** 2;
+        const id = tileIdOf(t, source.tileSize, source.level ?? 0);
+        return {
+          tile: t,
+          bytes: extractTileBitstream(source.bytes, t, exHeader),
+          idx,
+          tileGeom: { tx, ty, srcOriginX: tx * tileSize, srcOriginY: ty * tileSize },
+          dist,
+          id,
+          dcKey: `${makeTileCacheKey(levelId, id)}:${plan.format}:dc`,
+          finalKey: `${makeTileCacheKey(levelId, id)}:${plan.format}:final`
+        };
       });
 
-      const levelId = getLevelId(source);
+      // DL-8 (UX/AR/gaming, medium): center-out tile ordering.
+      const ordered = tilesWithBytes.slice().sort((a, b) => a.dist - b.dist);
+
       let deadlineHit = false;
       const stitchedFinal = new Set<string>();
+      const failedTileKeys = new Set<string>();
 
       // Phase 1: all DC (coarse first paint for entire viewport) with bounded fallback concurrency DL-7(b)
       await runWithBoundedConcurrency(ordered, 3, async (item) => {
@@ -239,7 +244,7 @@ export async function decodeTiledViewport(
           throw new PyramidError('TIMEOUT', 'budgetMs deadline exceeded during progressive decode');
         }
         const t = item.tile;
-        const id = tileIdOf(t, source.tileSize, source.level ?? 0);
+        const { id, dcKey, finalKey } = item;
         const key = tileKey(id);
         if (skipTiles?.has(key)) {
           completed += 1;
@@ -248,17 +253,12 @@ export async function decodeTiledViewport(
           return;
         }
 
-        const tileSize = source.tileSize;
-        const tx = Math.floor(t.x / tileSize);
-        const ty = Math.floor(t.y / tileSize);
-        const srcOriginX = tx * tileSize;
-        const srcOriginY = ty * tileSize;
+        const { srcOriginX, srcOriginY } = item.tileGeom;
         const decodedW = Math.min(tileSize, source.width - srcOriginX);
         const decodedH = Math.min(tileSize, source.height - srcOriginY);
         const expectedLen = decodedW * decodedH * plan.bpp;
 
         // Check for final cache hit first to skip DC phase
-        const finalKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:final`;
         const finalHit = cache?.get(finalKey);
         if (finalHit && finalHit.byteLength === expectedLen) {
           stitchTileIntoViewport(target!, vp, t, finalHit, source, plan.bpp);
@@ -270,7 +270,6 @@ export async function decodeTiledViewport(
         }
 
         // Check for DC cache hit
-        const dcKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:dc`;
         if (options?.cacheDcTiles) {
           const dcHit = cache?.get(dcKey);
           if (dcHit && dcHit.byteLength === expectedLen) {
@@ -299,13 +298,14 @@ export async function decodeTiledViewport(
         } catch (e) {
           if (errorPolicy === 'skip-tile') {
             zeroFillRect(target!, vp, t, plan.bpp);
-            failedTiles.push(id);
+            failedTileKeys.add(key);
             completed += 1;
             const prog: TileProgress = { id, key, stage: 'dc', completed, total };
             onTile?.(t, completed, prog);
             return;
           }
-          throw e;
+          if (e instanceof PyramidError) throw e;
+          throw new PyramidError('JXTC_PARSE', `tile progressive dc: ${e instanceof Error ? e.message : String(e)}`, e);
         }
       });
 
@@ -322,7 +322,7 @@ export async function decodeTiledViewport(
             throw new PyramidError('TIMEOUT', 'budgetMs deadline exceeded during progressive decode');
           }
           const t = item.tile;
-          const id = tileIdOf(t, source.tileSize, source.level ?? 0);
+          const { id, finalKey } = item;
           const key = tileKey(id);
           if (skipTiles?.has(key)) {
             completed += 1;
@@ -338,17 +338,12 @@ export async function decodeTiledViewport(
             return;
           }
 
-          const tileSize = source.tileSize;
-          const tx = Math.floor(t.x / tileSize);
-          const ty = Math.floor(t.y / tileSize);
-          const srcOriginX = tx * tileSize;
-          const srcOriginY = ty * tileSize;
+          const { srcOriginX, srcOriginY } = item.tileGeom;
           const decodedW = Math.min(tileSize, source.width - srcOriginX);
           const decodedH = Math.min(tileSize, source.height - srcOriginY);
           const expectedLen = decodedW * decodedH * plan.bpp;
 
           // Check for final cache hit
-          const finalKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:final`;
           const finalHit = cache?.get(finalKey);
           if (finalHit && finalHit.byteLength === expectedLen) {
             stitchTileIntoViewport(target!, vp, t, finalHit, source, plan.bpp);
@@ -377,13 +372,14 @@ export async function decodeTiledViewport(
           } catch (e) {
             if (errorPolicy === 'skip-tile') {
               zeroFillRect(target!, vp, t, plan.bpp);
-              failedTiles.push(id);
+              failedTileKeys.add(key);
               completed += 1;
               const prog: TileProgress = { id, key, stage: 'final', completed, total };
               onTile?.(t, completed, prog);
               return;
             }
-            throw e;
+            if (e instanceof PyramidError) throw e;
+            throw new PyramidError('JXTC_PARSE', `tile progressive final: ${e instanceof Error ? e.message : String(e)}`, e);
           }
         });
       }
@@ -392,28 +388,27 @@ export async function decodeTiledViewport(
       if (deadlineHit) {
         for (let i = 0; i < n; i++) {
           const t = plan.tiles[i]!;
-          const id = tileIdOf(t, source.tileSize, 0);
+          const id = tileIdOf(t, source.tileSize, source.level ?? 0);
           const k = tileKey(id);
           if (!stitchedFinal.has(k)) {
-            failedTiles.push(id);
+            failedTileKeys.add(k);
           }
         }
       }
 
       const pixels = target!.byteLength === need ? target! : target!.subarray(0, need);
       const result: DecodedLevel = { pixels, width: vp.w, height: vp.h, format: plan.format };
-      if (failedTiles.length > 0) {
-        // dedup by key (a tile may error in both phases)
-        const seen = new Set<string>();
-        const uniq: TileId[] = [];
-        for (const id of failedTiles) {
-          const k = tileKey(id);
-          if (!seen.has(k)) { seen.add(k); uniq.push(id); }
+      if (failedTileKeys.size > 0) {
+        const failedIds: TileId[] = [];
+        for (const item of tilesWithBytes) {
+          if (failedTileKeys.has(tileKey(item.id))) {
+            failedIds.push(item.id);
+          }
         }
-        result.failedTiles = uniq;
+        result.failedTiles = failedIds;
       }
 
-      const complete = !deadlineHit && failedTiles.length === 0 && !(skipTiles && skipTiles.size > 0);
+      const complete = !deadlineHit && failedTileKeys.size === 0 && !(skipTiles && skipTiles.size > 0);
       if (complete) {
         cacheStore(cache, cacheKey, target!, need);
       }
@@ -455,7 +450,7 @@ export async function decodeTiledViewport(
     // Agent6-4
     if (options?.preserveMetadata) {
       const icc = await ensureIccProfile(source, options);
-      if (icc) (result as any).iccProfile = icc;
+      if (icc) result.iccProfile = icc;
     }
     return result;
   } finally {

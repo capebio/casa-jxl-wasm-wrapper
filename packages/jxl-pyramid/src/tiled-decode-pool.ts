@@ -52,16 +52,17 @@ export enum HandleState {
 const DEV = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
 
 // Grok3 #16 single transition fn with table. Invalid throws in dev.
+const ALLOWED_TRANSITIONS: Record<HandleState, Record<HandleState, boolean>> = {
+  [HandleState.WarmFloor]: { [HandleState.Active]: true, [HandleState.Bad]: true, [HandleState.Terminated]: true },
+  [HandleState.WarmReapable]: { [HandleState.Active]: true, [HandleState.Bad]: true, [HandleState.Terminated]: true },
+  [HandleState.Active]: { [HandleState.WarmReapable]: true, [HandleState.Bad]: true, [HandleState.Terminated]: true },
+  [HandleState.Bad]: { [HandleState.Terminated]: true },
+  [HandleState.Terminated]: {},
+};
+
 function setHandleState(h: WorkerHandle, next: HandleState, failureInfo?: { code: WorkerErrorCode; message: string; at: number; count: number }) {
   const cur = h.state;
-  const allowed: Record<HandleState, HandleState[]> = {
-    [HandleState.WarmFloor]: [HandleState.Active, HandleState.Bad, HandleState.Terminated],
-    [HandleState.WarmReapable]: [HandleState.Active, HandleState.Bad, HandleState.Terminated],
-    [HandleState.Active]: [HandleState.WarmReapable, HandleState.Bad, HandleState.Terminated],
-    [HandleState.Bad]: [HandleState.Terminated],
-    [HandleState.Terminated]: [],
-  };
-  if (DEV && !allowed[cur]?.includes(next) && cur !== next) {
+  if (DEV && !ALLOWED_TRANSITIONS[cur]?.[next] && cur !== next) {
     throw new Error(`invalid handle state transition ${cur} -> ${next}`);
   }
   h.state = next;
@@ -236,6 +237,7 @@ type WorkerHandle = {
   readySettled?: boolean;
   failure?: { code: WorkerErrorCode; message: string; at: number; count: number };
   budgetCharged?: boolean;
+  inIdle?: boolean; // tracks if in idle list (Grok3 #38)
 };
 
 export class PyramidWorkerPool {
@@ -264,7 +266,7 @@ export class PyramidWorkerPool {
   private nextBytesId = 0;
 
   // waiter queue for over-cap (Grok3 #26-29)
-  private readonly waiters: Array<{ want: number; resolve: (handles: WorkerHandle[]) => void; expiresAt?: number }> = [];
+  private readonly waiters: Array<{ want: number; resolve: (handles: WorkerHandle[]) => void; expiresAt?: number; timer?: ReturnType<typeof globalThis.setTimeout> }> = [];
   private visibilityDocument: { addEventListener?: (type: string, listener: () => void) => void; removeEventListener?: (type: string, listener: () => void) => void; visibilityState?: string } | null = null;
   private visibilityListener: (() => void) | null = null;
 
@@ -307,7 +309,9 @@ export class PyramidWorkerPool {
     // Note: 'freeze'/'resume' Page Lifecycle would be added similarly if document has the events.
 
     if (this.prewarmMode === 'eager') {
-      void this.prewarmAsync(this.minIdle);
+      void this.prewarmAsync(this.minIdle).catch(e => {
+        if (DEV) console.warn('[pyramid] eager prewarm failed:', e);
+      });
     }
   }
 
@@ -345,11 +349,13 @@ export class PyramidWorkerPool {
   /** prewarm becomes async, resolves when spawned workers are ready (Grok3 #34). */
   async prewarmAsync(count: number): Promise<void> {
     if (this.state === PoolState.Destroyed || this.state === PoolState.Draining) return;
+    if (this.state === PoolState.Prewarming || this.state === PoolState.Active) return;
     this.state = PoolState.Prewarming;
     const n = Math.min(count, this.maxSize - this.all.size);
     const spawned: WorkerHandle[] = [];
     for (let i = 0; i < n; i++) {
       const h = this.spawnOne();
+      h.inIdle = true;
       this.idle.push(h);
       this.armIdleTimer(h);
       spawned.push(h);
@@ -382,7 +388,7 @@ export class PyramidWorkerPool {
 
     // reject all inflight with POOL_DESTROYED
     for (const h of this.all) {
-      for (const job of Array.from(h.pending.values())) {
+      for (const job of h.pending.values()) {
         try { job.reject(new PyramidError('POOL_DESTROYED', 'pool destroyed')); } catch {}
       }
     }
@@ -394,12 +400,14 @@ export class PyramidWorkerPool {
     this.idle.length = 0;
 
     // wait for active to drain or grace
+    let iv: ReturnType<typeof globalThis.setInterval> | null = null;
     const drained = new Promise<void>(r => {
-      const iv = globalThis.setInterval(() => {
-        if (this.active.size === 0) { globalThis.clearInterval(iv); r(); }
+      iv = globalThis.setInterval(() => {
+        if (this.active.size === 0) { if (iv) globalThis.clearInterval(iv); r(); }
       }, 10);
     });
     await Promise.race([drained, new Promise(r => globalThis.setTimeout(r, graceMs))]);
+    if (iv) globalThis.clearInterval(iv);
 
     // force remaining
     for (const h of [...this.active]) {
@@ -436,8 +444,11 @@ export class PyramidWorkerPool {
     setHandleState(h, HandleState.Terminated);
     this.clearIdleTimer(h);
     this.active.delete(h);
-    const ii = this.idle.indexOf(h);
-    if (ii >= 0) this.idle.splice(ii, 1);
+    if (h.inIdle) {
+      const ii = this.idle.indexOf(h);
+      if (ii >= 0) this.idle.splice(ii, 1);
+      h.inIdle = false;
+    }
     this.all.delete(h);
     this.bytesIdByWorker.delete(h.worker);
     try { h.worker.terminate(); } catch {}
@@ -445,7 +456,10 @@ export class PyramidWorkerPool {
 
   /** reap all idle (for visibility hidden etc) */
   private reapAllIdle() {
-    for (const h of [...this.idle]) this.destroyHandle(h, 'reap all');
+    for (const h of [...this.idle]) {
+      h.inIdle = false;
+      this.destroyHandle(h, 'reap all');
+    }
     this.idle.length = 0;
   }
 
@@ -482,6 +496,7 @@ export class PyramidWorkerPool {
     // LIFO drain (pop hottest) (Grok3 #18)
     while (got.length < activeLimit && this.idle.length > 0) {
       const h = this.idle.pop()!;
+      h.inIdle = false;
       this.clearIdleTimer(h);
       if (h.state !== HandleState.WarmReapable && h.state !== HandleState.WarmFloor) {
         this.destroyHandle(h, 'stale on acquire');
@@ -505,7 +520,10 @@ export class PyramidWorkerPool {
           h.budgetCharged = true;
         }
         got.push(h);
-      } catch { break; }
+      } catch (e) {
+        if (DEV) console.warn('[pyramid] spawnOne failed during acquire:', e);
+        break;
+      }
     }
 
     // waiter queue if still short (Grok3 #26-29)
@@ -513,18 +531,25 @@ export class PyramidWorkerPool {
       const need = count - got.length;
       if (this.all.size >= this.maxSize) {
         return new Promise<WorkerHandle[]>((resolve) => {
-          const waiter = {
+          const waiter: any = {
             want: need,
-            resolve: (hs: WorkerHandle[]) => resolve([...got, ...hs]),
+            resolve: (hs: WorkerHandle[]) => {
+              if (waiter.timer) globalThis.clearTimeout(waiter.timer);
+              resolve([...got, ...hs]);
+            },
           };
-          this.waiters.push(waiter);
-          globalThis.setTimeout(() => {
+          waiter.timer = globalThis.setTimeout(() => {
             const idx = this.waiters.indexOf(waiter);
             if (idx >= 0) {
               this.waiters.splice(idx, 1);
+              waiter.timer = undefined;
+              if (DEV && got.length < count) {
+                console.warn(`[pyramid] acquire timeout: requested ${count}, got ${got.length}, pool at max ${this.maxSize}`);
+              }
               resolve(got);
             }
           }, maxWait);
+          this.waiters.push(waiter);
         });
       }
     }
@@ -547,26 +572,30 @@ export class PyramidWorkerPool {
       }
       this.releaseBudget(h);
       setHandleState(h, HandleState.WarmReapable);
+      h.inIdle = true;
       this.idle.push(h); // LIFO push
     }
 
     // drain waiters before re-arm (Grok3)
     while (this.waiters.length > 0 && this.idle.length > 0) {
       const w = this.waiters.shift()!;
+      if (w.timer) globalThis.clearTimeout(w.timer);
       const give: WorkerHandle[] = [];
       while (give.length < w.want && this.idle.length > 0) {
         const h = this.idle.pop()!;
+        h.inIdle = false;
         this.clearIdleTimer(h);
-        
+
         if (this.coreBudget) {
           if (this.coreBudget.tryAcquire(this.workerCost)) {
             h.budgetCharged = true;
           } else {
             this.idle.push(h);
+            h.inIdle = true;
             break;
           }
         }
-        
+
         setHandleState(h, HandleState.Active);
         this.active.add(h);
         give.push(h);
@@ -582,6 +611,7 @@ export class PyramidWorkerPool {
     if (this.idleTimeoutMs <= 0) {
       while (this.idle.length > this.minIdle) {
         const h = this.idle.pop()!;
+        h.inIdle = false;
         this.destroyHandle(h, 'excess idle');
       }
       return;
@@ -620,7 +650,8 @@ export class PyramidWorkerPool {
     try {
       worker.addEventListener("error", onDeath);
       worker.addEventListener("messageerror", onDeath);
-    } catch {
+    } catch (e) {
+      if (DEV) console.warn('[pyramid] addEventListener failed:', e);
       wiringOk = false; /* test doubles */
     }
 
@@ -664,7 +695,8 @@ export class PyramidWorkerPool {
         return;
       }
       this.cleanupPendingJob(h, job);
-      job.resolve({ pixels, width: reply.w, height: reply.h });
+      const format: PixelFormat = job.bytesPerPixel === 8 ? 'rgba16' : 'rgba8';
+      job.resolve({ pixels, width: reply.w, height: reply.h, format });
     };
     try {
       worker.addEventListener("message", onMessage);
@@ -684,7 +716,7 @@ export class PyramidWorkerPool {
   }
   // Pre-bound for setTimeout( fn, ms, arg ) passthrough (Grok4).
   private readonly _reapBound = (h: WorkerHandle) => {
-    if (this.idle.includes(h) && this.idle.length > this.minIdle) {
+    if (h.inIdle && this.idle.length > this.minIdle) {
       this.destroyHandle(h, 'idle reaped');
     }
   };
@@ -755,7 +787,9 @@ export class PyramidWorkerPool {
           h.worker.postMessage({ v: 1, type: 'load', bytesId, bytes });
         }
         set.add(bytesId);
-      } catch {}
+      } catch (e) {
+        if (DEV) console.warn(`[pyramid] ensureLoaded postMessage failed for bytesId ${bytesId}:`, e);
+      }
     }
   }
 }
@@ -782,7 +816,9 @@ function getOrCreatePool(factory: () => WorkerLike, coreBudget?: { acquire(cost?
       if (pool.activeCount > 0) {
         throw new PyramidError('FACTORY_CONFLICT', 'cannot swap workerFactory while pool has active decodes');
       }
-      void pool.destroy(0);
+      void pool.destroy(0).catch(e => {
+        if (DEV) console.warn('[pyramid] pool.destroy during factory swap failed:', e);
+      });
       pool = null;
       poolFactory = null;
     }
@@ -798,7 +834,9 @@ function getOrCreatePool(factory: () => WorkerLike, coreBudget?: { acquire(cost?
     minIdle: 2,
     coreBudget,
   });
-  void p.prewarmAsync(2);
+  void p.prewarmAsync(2).catch(e => {
+    if (DEV) console.warn('[pyramid] getOrCreatePool prewarm failed:', e);
+  });
   pool = p;
   poolFactory = factory;
   return p;
@@ -828,7 +866,8 @@ function parseWorkerReply(data: unknown): WorkerReply | null {
   if (d.type === 'decode-reply' && typeof d.id === 'number') {
     if (d.ok === true) {
       if ((d.pixels instanceof Uint8Array || d.pixels instanceof ArrayBuffer) &&
-          typeof d.w === 'number' && typeof d.h === 'number') {
+          typeof d.w === 'number' && typeof d.h === 'number' &&
+          d.w > 0 && d.w <= 1000000 && d.h > 0 && d.h <= 1000000) {
         return { v: 1, type: 'decode-reply', id: d.id, ok: true, pixels: d.pixels as any, w: d.w, h: d.h };
       }
       return null;
@@ -950,6 +989,7 @@ async function decodeTilesParallel(
       }
       const idx = next++;
       if (idx >= tiles.length) break;
+      if (failed || controller.signal.aborted) break;
       const region = tiles[idx]!;
       const gridTile = (tileSize != null && opts.sourceW != null && opts.sourceH != null)
         ? {
@@ -1059,6 +1099,7 @@ export async function decodeTiledViewportPooled(
     signal?: AbortSignal;
     /** Opt-in SAB zero-copy for the load message when crossOriginIsolated. */
     useSAB?: boolean;
+    pool?: PyramidWorkerPool;
   },
 ): Promise<DecodedLevel>;
 
@@ -1071,6 +1112,7 @@ export async function decodeTiledViewportPooled(
     workerFactory?: () => WorkerLike;
     signal?: AbortSignal;
     useSAB?: boolean;
+    pool?: PyramidWorkerPool;
   },
 ): Promise<DecodedLevel>;
 
@@ -1164,13 +1206,13 @@ export async function decodeTiledViewportPooled(
 
     const levelId = getLevelId(source);
     const misses: ImageRegion[] = [];
-    const hits: Array<{ region: ImageRegion; pixels: Uint8Array; id: TileId }> = [];
-    
+    const hits: Array<{ region: ImageRegion; pixels: Uint8Array; id: TileId; gridTileW: number; gridTileH: number; gridTileX: number; gridTileY: number }> = [];
+
     if (cache) {
       for (const tile of plan.tiles) {
         const id = tileIdOf(tile, source.tileSize, source.level ?? 0);
         const finalKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:final`;
-        
+
         const col = Math.floor(tile.x / source.tileSize);
         const row = Math.floor(tile.y / source.tileSize);
         const gridTileX = col * source.tileSize;
@@ -1178,10 +1220,10 @@ export async function decodeTiledViewportPooled(
         const gridTileW = Math.min(source.tileSize, source.width - gridTileX);
         const gridTileH = Math.min(source.tileSize, source.height - gridTileY);
         const expectedLen = gridTileW * gridTileH * bpp;
-        
+
         const hit = cache.get(finalKey);
         if (hit && hit.byteLength === expectedLen) {
-          hits.push({ region: tile, pixels: hit, id });
+          hits.push({ region: tile, pixels: hit, id, gridTileW, gridTileH, gridTileX, gridTileY });
         } else {
           misses.push(tile);
         }
@@ -1196,15 +1238,8 @@ export async function decodeTiledViewportPooled(
     if (cache && misses.length === 0) {
       let completed = 0;
       for (const item of hits) {
-        const col = Math.floor(item.region.x / source.tileSize);
-        const row = Math.floor(item.region.y / source.tileSize);
-        const gridTileX = col * source.tileSize;
-        const gridTileY = row * source.tileSize;
-        const gridTileW = Math.min(source.tileSize, source.width - gridTileX);
-        const gridTileH = Math.min(source.tileSize, source.height - gridTileY);
-        
-        stitchCropped(outBuffer, vp, item.region, item.pixels, gridTileW, gridTileH, gridTileX, gridTileY, bpp);
-        
+        stitchCropped(outBuffer, vp, item.region, item.pixels, item.gridTileW, item.gridTileH, item.gridTileX, item.gridTileY, bpp);
+
         if (prog === 'dc-then-final') {
           completed += 1;
           onTile?.(item.region, completed, { id: item.id, key: tileKey(item.id), stage: 'dc', completed, total });
@@ -1213,7 +1248,7 @@ export async function decodeTiledViewportPooled(
           onTile?.(item.region, completed, { id: item.id, key: tileKey(item.id), stage: 'final', completed, total });
         }
       }
-      
+
       if (prog === 'dc-then-final') {
         for (const item of hits) {
           completed += 1;
@@ -1277,15 +1312,8 @@ export async function decodeTiledViewportPooled(
       let prewarmCompleted = 0;
       if (hits.length > 0) {
         for (const item of hits) {
-          const col = Math.floor(item.region.x / source.tileSize);
-          const row = Math.floor(item.region.y / source.tileSize);
-          const gridTileX = col * source.tileSize;
-          const gridTileY = row * source.tileSize;
-          const gridTileW = Math.min(source.tileSize, source.width - gridTileX);
-          const gridTileH = Math.min(source.tileSize, source.height - gridTileY);
-          
-          stitchCropped(outBuffer, vp, item.region, item.pixels, gridTileW, gridTileH, gridTileX, gridTileY, bpp);
-          
+          stitchCropped(outBuffer, vp, item.region, item.pixels, item.gridTileW, item.gridTileH, item.gridTileX, item.gridTileY, bpp);
+
           if (prog === 'dc-then-final') {
             prewarmCompleted += 1;
             onTile?.(item.region, prewarmCompleted, { id: item.id, key: tileKey(item.id), stage: 'dc', completed: prewarmCompleted, total });
@@ -1298,11 +1326,10 @@ export async function decodeTiledViewportPooled(
 
       const cx = vp.x + vp.w / 2;
       const cy = vp.y + vp.h / 2;
-      const orderedMisses = misses.slice().sort((a, b) => {
-        const da = (a.x + a.w / 2 - cx) ** 2 + (a.y + a.h / 2 - cy) ** 2;
-        const db = (b.x + b.w / 2 - cx) ** 2 + (b.y + b.h / 2 - cy) ** 2;
-        return da - db;
-      });
+      const orderedMisses = misses.map((tile, idx) => ({
+        tile,
+        dist: (tile.x + tile.w / 2 - cx) ** 2 + (tile.y + tile.h / 2 - cy) ** 2,
+      })).sort((a, b) => a.dist - b.dist).map(item => item.tile);
 
       if (prog === 'dc-then-final') {
         const dcOpts: any = {

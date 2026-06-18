@@ -21,6 +21,13 @@ const queuedEncodeMessages = new Map();
 const queuedDecodeBytes = new Map();
 const queuedEncodeBytes = new Map();
 const abortedStarts = new Set();
+// Per-start ownership tokens — keyed by sessionId, value is the epoch counter
+// at the time the start IIFE was launched. Only the IIFE whose epoch matches
+// the current entry may delete/resolve its pending slot, preventing a stale
+// IIFE from clobbering a newer start for the same reused sessionId.
+const decodeStartEpoch = new Map();
+const encodeStartEpoch = new Map();
+let _nextStartEpoch = 0;
 let wasmModule = null;
 let wasmLoadPromise = null;
 let shuttingDown = false;
@@ -28,19 +35,34 @@ let shutdownPromise = null;
 // Cap per session to avoid unbounded cold-start buffering.
 const MAX_QUEUED_MESSAGES_PER_SESSION = 256;
 const MAX_QUEUED_BYTES_PER_SESSION = 128 * 1024 * 1024;
+// Match spawn.ts S-3 watchdog default (opts.startupTimeoutMs ?? 30_000).
+const WASM_LOAD_TIMEOUT_MS = 30_000;
 // ---------------------------------------------------------------------------
 // WASM acquisition (lazy, singleton; resets on failure to allow retry)
+// Wraps loadWasmModule in a per-call timeout so that a hung dynamic import
+// does not stall every decode/encode start indefinitely after worker_ready.
 // ---------------------------------------------------------------------------
 async function getWasm() {
     if (wasmModule !== null)
         return wasmModule;
     if (wasmLoadPromise === null) {
-        wasmLoadPromise = loadWasmModule(resolvedWasmUrl())
+        let timeoutHandle;
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutHandle = setTimeout(() => {
+                reject(new Error(`[jxl-worker-browser] WASM load timed out after ${WASM_LOAD_TIMEOUT_MS}ms`));
+            }, WASM_LOAD_TIMEOUT_MS);
+        });
+        wasmLoadPromise = Promise.race([
+            loadWasmModule(resolvedWasmUrl()),
+            timeoutPromise,
+        ])
             .then((m) => {
+            clearTimeout(timeoutHandle);
             wasmModule = m;
             return m;
         })
             .catch((err) => {
+            clearTimeout(timeoutHandle);
             wasmLoadPromise = null;
             throw err;
         });
@@ -213,6 +235,10 @@ function handleReleaseState(sessionId) {
     }
     pendingDecodeStarts.delete(sessionId);
     pendingEncodeStarts.delete(sessionId);
+    // Invalidate ownership tokens so any in-flight start IIFEs for this sessionId
+    // will see a mismatched epoch and skip their pending-slot delete.
+    decodeStartEpoch.delete(sessionId);
+    encodeStartEpoch.delete(sessionId);
     clearQueuedDecode(sessionId);
     clearQueuedEncode(sessionId);
 }
@@ -274,25 +300,39 @@ async function handleDecodeStart(msg) {
     let resolveStartPromise;
     const startPromise = new Promise((resolve) => { resolveStartPromise = resolve; });
     pendingDecodeStarts.set(msg.sessionId, startPromise);
+    // Ownership token: captured at start time, checked before clearing the pending
+    // slot. If the sessionId is reused (release_state → new decode_start) before
+    // this IIFE resumes, the epoch will have advanced and the stale IIFE's delete
+    // will be a no-op, leaving the new start's entry intact.
+    const myEpoch = _nextStartEpoch++;
+    decodeStartEpoch.set(msg.sessionId, myEpoch);
     (async () => {
         let wasm;
         try {
             wasm = await getWasm();
         }
         catch (err) {
-            pendingDecodeStarts.delete(msg.sessionId);
-            clearQueuedDecode(msg.sessionId);
-            resolveStartPromise();
-            if (!abortedStarts.delete(msg.sessionId)) {
-                self.postMessage({
-                    type: "decode_error",
-                    sessionId: msg.sessionId,
-                    code: "CapabilityMissing",
-                    message: `WASM module failed to load: ${String(err)}`,
-                });
+            // Only clear our own pending slot; a newer start may have replaced it.
+            if (decodeStartEpoch.get(msg.sessionId) === myEpoch) {
+                decodeStartEpoch.delete(msg.sessionId);
+                pendingDecodeStarts.delete(msg.sessionId);
+                clearQueuedDecode(msg.sessionId);
+                resolveStartPromise();
+                if (!abortedStarts.delete(msg.sessionId)) {
+                    self.postMessage({
+                        type: "decode_error",
+                        sessionId: msg.sessionId,
+                        code: "CapabilityMissing",
+                        message: `WASM module failed to load: ${String(err)}`,
+                    });
+                }
             }
             return;
         }
+        // Bail if a newer start has taken ownership of this sessionId.
+        if (decodeStartEpoch.get(msg.sessionId) !== myEpoch)
+            return;
+        decodeStartEpoch.delete(msg.sessionId);
         pendingDecodeStarts.delete(msg.sessionId);
         if (abortedStarts.delete(msg.sessionId) || shuttingDown) {
             clearQueuedDecode(msg.sessionId);
@@ -306,16 +346,19 @@ async function handleDecodeStart(msg) {
         flushQueuedDecodeMessages(msg.sessionId, handler);
         resolveStartPromise();
     })().catch((err) => {
-        pendingDecodeStarts.delete(msg.sessionId);
-        clearQueuedDecode(msg.sessionId);
-        resolveStartPromise();
-        if (!abortedStarts.delete(msg.sessionId)) {
-            self.postMessage({
-                type: "decode_error",
-                sessionId: msg.sessionId,
-                code: "Internal",
-                message: `Unexpected error starting decode session: ${String(err)}`,
-            });
+        if (decodeStartEpoch.get(msg.sessionId) === myEpoch) {
+            decodeStartEpoch.delete(msg.sessionId);
+            pendingDecodeStarts.delete(msg.sessionId);
+            clearQueuedDecode(msg.sessionId);
+            resolveStartPromise();
+            if (!abortedStarts.delete(msg.sessionId)) {
+                self.postMessage({
+                    type: "decode_error",
+                    sessionId: msg.sessionId,
+                    code: "Internal",
+                    message: `Unexpected error starting decode session: ${String(err)}`,
+                });
+            }
         }
     });
 }
@@ -338,25 +381,34 @@ async function handleEncodeStart(msg) {
     let resolveStartPromise;
     const startPromise = new Promise((resolve) => { resolveStartPromise = resolve; });
     pendingEncodeStarts.set(msg.sessionId, startPromise);
+    // Ownership token — same stale-start guard as handleDecodeStart.
+    const myEpoch = _nextStartEpoch++;
+    encodeStartEpoch.set(msg.sessionId, myEpoch);
     (async () => {
         let wasm;
         try {
             wasm = await getWasm();
         }
         catch (err) {
-            pendingEncodeStarts.delete(msg.sessionId);
-            clearQueuedEncode(msg.sessionId);
-            resolveStartPromise();
-            if (!abortedStarts.delete(msg.sessionId)) {
-                self.postMessage({
-                    type: "encode_error",
-                    sessionId: msg.sessionId,
-                    code: "CapabilityMissing",
-                    message: `WASM module failed to load: ${String(err)}`,
-                });
+            if (encodeStartEpoch.get(msg.sessionId) === myEpoch) {
+                encodeStartEpoch.delete(msg.sessionId);
+                pendingEncodeStarts.delete(msg.sessionId);
+                clearQueuedEncode(msg.sessionId);
+                resolveStartPromise();
+                if (!abortedStarts.delete(msg.sessionId)) {
+                    self.postMessage({
+                        type: "encode_error",
+                        sessionId: msg.sessionId,
+                        code: "CapabilityMissing",
+                        message: `WASM module failed to load: ${String(err)}`,
+                    });
+                }
             }
             return;
         }
+        if (encodeStartEpoch.get(msg.sessionId) !== myEpoch)
+            return;
+        encodeStartEpoch.delete(msg.sessionId);
         pendingEncodeStarts.delete(msg.sessionId);
         if (abortedStarts.delete(msg.sessionId) || shuttingDown) {
             clearQueuedEncode(msg.sessionId);
@@ -370,16 +422,19 @@ async function handleEncodeStart(msg) {
         flushQueuedEncodeMessages(msg.sessionId, handler);
         resolveStartPromise();
     })().catch((err) => {
-        pendingEncodeStarts.delete(msg.sessionId);
-        clearQueuedEncode(msg.sessionId);
-        resolveStartPromise();
-        if (!abortedStarts.delete(msg.sessionId)) {
-            self.postMessage({
-                type: "encode_error",
-                sessionId: msg.sessionId,
-                code: "Internal",
-                message: `Unexpected error starting encode session: ${String(err)}`,
-            });
+        if (encodeStartEpoch.get(msg.sessionId) === myEpoch) {
+            encodeStartEpoch.delete(msg.sessionId);
+            pendingEncodeStarts.delete(msg.sessionId);
+            clearQueuedEncode(msg.sessionId);
+            resolveStartPromise();
+            if (!abortedStarts.delete(msg.sessionId)) {
+                self.postMessage({
+                    type: "encode_error",
+                    sessionId: msg.sessionId,
+                    code: "Internal",
+                    message: `Unexpected error starting encode session: ${String(err)}`,
+                });
+            }
         }
     });
 }
@@ -411,6 +466,8 @@ async function doShutdown() {
     encodeSessions.clear();
     pendingDecodeStarts.clear();
     pendingEncodeStarts.clear();
+    decodeStartEpoch.clear();
+    encodeStartEpoch.clear();
     queuedDecodeMessages.clear();
     queuedEncodeMessages.clear();
     queuedDecodeBytes.clear();
@@ -449,6 +506,31 @@ self.addEventListener("messageerror", () => {
 // ---------------------------------------------------------------------------
 // Startup announcement
 // ---------------------------------------------------------------------------
-const ready = { type: "worker_ready", backend: "wasm", wasmBuild: detectTier() };
+// Report the ACTUAL effective tier: if a ?jxlWorkerTier= override is present
+// on the worker's URL (as injected by forceWorkerSafeTier in loadWasmModule),
+// use it; otherwise fall back to detectTier() from the environment probes.
+// This keeps the scheduler's MT-cost accounting correct when a tier override
+// has been forced (e.g. forceWorkerSafeTier / ?jxlWorkerTier=simd).
+function resolvedWasmBuild() {
+    try {
+        const globalSelf = globalThis;
+        const rawSearch = globalSelf.self?.location?.search;
+        const search = typeof rawSearch === "string" ? rawSearch : "";
+        if (search !== "") {
+            const tier = new URLSearchParams(search).get("jxlWorkerTier");
+            if (tier === "relaxed-simd-mt" ||
+                tier === "simd-mt" ||
+                tier === "simd" ||
+                tier === "scalar") {
+                return tier;
+            }
+        }
+    }
+    catch {
+        // URL parsing failed; fall through to detectTier().
+    }
+    return detectTier();
+}
+const ready = { type: "worker_ready", backend: "wasm", wasmBuild: resolvedWasmBuild() };
 self.postMessage(ready);
 //# sourceMappingURL=worker.js.map

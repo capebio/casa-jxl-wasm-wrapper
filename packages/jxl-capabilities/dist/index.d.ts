@@ -8,7 +8,7 @@ export declare function canUseThreadedWasm(sharedArrayBuffer: boolean, crossOrig
  */
 export declare function detectTier(): Tier;
 /** Heuristic; thresholds untuned — benchmark before relying on it (CLAUDE.md rule). */
-export declare function recommendedEffort(hwConcurrency?: number): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+export declare function recommendedEffort(hwConcurrency?: number): 4 | 6 | 7;
 /** Heuristic; thresholds untuned — benchmark before relying on it (CLAUDE.md rule). */
 export declare function recommendedQualitySearch(hwConcurrency?: number): "full" | "fast" | "none";
 export interface Capabilities {
@@ -28,11 +28,12 @@ export interface Capabilities {
     imageBitmap: boolean;
     nativeJxlDecoder: boolean;
     selectedWasmBuild: Tier | "none";
-    libjxlVersion: string;
+    libjxlVersion: string | null;
     webgpu: boolean;
     webnn: boolean;
     hardwareConcurrency: number;
     deviceMemory: number | null;
+    /** WebCodecs ImageDecoder class exists in this environment. Does NOT imply JXL support — use nativeJxlDecoder for that. */
     imageDecoder: boolean;
     wasmExceptions: boolean;
 }

@@ -1,124 +1,16 @@
 
 import { execSync, spawn } from 'child_process';
 import os from 'os';
+import { collectHardwareTelemetry, formatTelemetryReport, toToonMetrics } from './benchmark/hardware-telemetry.mjs';
 
 function runSystemTelemetry() {
   console.log('\n=========================================');
   console.log('💻 SYSTEM TELEMETRY & HARDWARE SENTINEL');
   console.log('=========================================');
 
-  const totalMemGb = (os.totalmem() / (1024 ** 3)).toFixed(1);
-  const freeMemGb = (os.freemem() / (1024 ** 3)).toFixed(1);
-  const nodeMemMb = (process.memoryUsage().heapUsed / (1024 ** 2)).toFixed(1);
+  const telemetry = collectHardwareTelemetry();
+  console.log(formatTelemetryReport(telemetry));
 
-  let telemetry = {
-    platform: `${process.platform} (${process.arch})`,
-    cpuModel: os.cpus()[0]?.model || 'Unknown',
-    cores: os.cpus().length,
-    memoryFreeGb: freeMemGb,
-    memoryTotalGb: totalMemGb,
-    nodeHeapMb: nodeMemMb,
-    cpuLoadPct: 'N/A',
-    cpuClockGhz: 'N/A',
-    cpuMaxClockGhz: 'N/A',
-    cpuThrottlingPct: '100.0',
-    cpuThrottlingState: 'Optimal (Maximum Performance)',
-    cpuTemperatureCelsius: 'N/A',
-    gpuTemperatureCelsius: 'N/A',
-    storageTemperatureCelsius: 'N/A'
-  };
-
-  console.log(`  🧠 OS Memory:     ${freeMemGb} GB Free / ${totalMemGb} GB Total`);
-  console.log(`  📦 Node Heap:     ${nodeMemMb} MB Active`);
-
-  if (process.platform === 'win32') {
-    try {
-      const psCommand = 'powershell.exe -NoProfile -Command "Get-CimInstance -ClassName Win32_Processor | Select-Object CurrentClockSpeed, MaxClockSpeed, LoadPercentage | ConvertTo-Json"';
-      const output = execSync(psCommand, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-      const cpuData = JSON.parse(output);
-      const data = Array.isArray(cpuData) ? cpuData[0] : cpuData;
-
-      if (data && data.MaxClockSpeed) {
-        const currentSpeedGhz = (data.CurrentClockSpeed / 1000).toFixed(2);
-        const maxSpeedGhz = (data.MaxClockSpeed / 1000).toFixed(2);
-        const throttleRatio = data.CurrentClockSpeed / data.MaxClockSpeed;
-
-        let throttleState = 'Optimal (Maximum Performance)';
-        if (throttleRatio < 0.95) {
-          throttleState = `⚠️ Throttled / Power-Saving (${(throttleRatio * 100).toFixed(1)}% of Max Speed)`;
-        }
-
-        telemetry.cpuLoadPct = data.LoadPercentage;
-        telemetry.cpuClockGhz = currentSpeedGhz;
-        telemetry.cpuMaxClockGhz = maxSpeedGhz;
-        telemetry.cpuThrottlingPct = (throttleRatio * 100).toFixed(1);
-        telemetry.cpuThrottlingState = throttleState;
-
-        console.log(`  🔥 CPU Active Load: ${data.LoadPercentage}%`);
-        console.log(`  ⏱️ CPU Clock Speed: ${currentSpeedGhz} GHz (Max: ${maxSpeedGhz} GHz)`);
-        console.log(`  ⚡ Throttling State: ${throttleState}`);
-      }
-    } catch (err) {
-      console.log(`  ⚠️  Hardware sensor query failed (PowerShell/CIM blocked)`);
-    }
-
-    // Attempt to fetch temperature data from LibreHardwareMonitor if available
-    try {
-      const hwCommand = 'powershell.exe -NoProfile -Command "Get-WmiObject -Namespace \'root\\LibreHardwareMonitor\' -Class Sensor 2>$null | Where-Object {$_.SensorType -match \'Temperature\'} | Select-Object Name, Value, Parent | ConvertTo-Json"';
-      const hwOutput = execSync(hwCommand, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
-
-      if (hwOutput) {
-        try {
-          const sensors = JSON.parse(hwOutput);
-          const sensorArray = Array.isArray(sensors) ? sensors : [sensors];
-
-          let cpuTemp = null, gpuTemp = null, storageTemp = null;
-
-          for (const sensor of sensorArray) {
-            if (!sensor || !sensor.Name || !sensor.Value) continue;
-
-            const name = sensor.Name.toLowerCase();
-            const parent = (sensor.Parent || '').toLowerCase();
-            const value = parseFloat(sensor.Value);
-
-            // CPU temperature (prefer Package/Die temp)
-            if (!cpuTemp && (name.includes('package') || name.includes('die') || (parent.includes('cpu') && name.includes('temperature')))) {
-              cpuTemp = value.toFixed(1);
-            }
-
-            // GPU temperature
-            if (!gpuTemp && (parent.includes('gpu') || parent.includes('nvidia') || parent.includes('amd') || parent.includes('intel graphics'))) {
-              gpuTemp = value.toFixed(1);
-            }
-
-            // Storage temperature (HDD/SSD)
-            if (!storageTemp && (parent.includes('drive') || parent.includes('disk') || parent.includes('ssd') || parent.includes('hdd'))) {
-              storageTemp = value.toFixed(1);
-            }
-          }
-
-          if (cpuTemp) {
-            telemetry.cpuTemperatureCelsius = cpuTemp;
-            console.log(`  🌡️  CPU Temperature:     ${cpuTemp}°C`);
-          }
-          if (gpuTemp) {
-            telemetry.gpuTemperatureCelsius = gpuTemp;
-            console.log(`  🌡️  GPU Temperature:     ${gpuTemp}°C`);
-          }
-          if (storageTemp) {
-            telemetry.storageTemperatureCelsius = storageTemp;
-            console.log(`  🌡️  Storage Temperature: ${storageTemp}°C`);
-          }
-        } catch (parseErr) {
-          // WMI sensor data may be empty or invalid JSON
-        }
-      }
-    } catch (hwErr) {
-      // LibreHardwareMonitor WMI not available or query failed
-    }
-  } else {
-    console.log(`  ℹ️  Detailed throttling sensors only implemented for win32`);
-  }
   console.log('=========================================\n');
   return telemetry;
 }
@@ -1230,13 +1122,29 @@ async function main() {
     `SystemMemoryFreeGb: ${globalThis.systemTelemetry?.memoryFreeGb || 'N/A'}`,
     `SystemMemoryTotalGb: ${globalThis.systemTelemetry?.memoryTotalGb || 'N/A'}`,
     `NodeHeapActiveMb: ${globalThis.systemTelemetry?.nodeHeapMb || 'N/A'}`,
-    `CpuActiveLoadPct: ${globalThis.systemTelemetry?.cpuLoadPct || 'N/A'}`,
-    `CpuClockCurrentGhz: ${globalThis.systemTelemetry?.cpuClockGhz || 'N/A'}`,
-    `CpuClockMaxGhz: ${globalThis.systemTelemetry?.cpuMaxClockGhz || 'N/A'}`,
-    `CpuThrottlingPct: ${globalThis.systemTelemetry?.cpuThrottlingPct || '100.0'}`,
+    "",
+    "# CPU Metrics",
+    `CpuLoadPct: ${globalThis.systemTelemetry?.cpuLoadPct || 'N/A'}`,
+    `CpuClockCurrentGhz: ${globalThis.systemTelemetry?.cpuClockCurrentGhz || 'N/A'}`,
+    `CpuClockMaxGhz: ${globalThis.systemTelemetry?.cpuClockMaxGhz || 'N/A'}`,
     `CpuThrottlingState: ${globalThis.systemTelemetry?.cpuThrottlingState || 'Optimal'}`,
     `CpuTemperatureCelsius: ${globalThis.systemTelemetry?.cpuTemperatureCelsius || 'N/A'}`,
+    `CpuVoltageMv: ${globalThis.systemTelemetry?.cpuVoltageMv || 'N/A'}`,
+    `CpuPowerW: ${globalThis.systemTelemetry?.cpuPowerW || 'N/A'}`,
+    `CpuFanRpm: ${globalThis.systemTelemetry?.cpuFanRpm || 'N/A'}`,
+    `CpuFanDutyPct: ${globalThis.systemTelemetry?.cpuFanDutyPct || 'N/A'}`,
+    "",
+    "# GPU Metrics",
+    `GpuClockMhz: ${globalThis.systemTelemetry?.gpuClockMhz || 'N/A'}`,
+    `GpuMemoryMhz: ${globalThis.systemTelemetry?.gpuMemoryMhz || 'N/A'}`,
+    `GpuMemoryUsedMb: ${globalThis.systemTelemetry?.gpuMemoryUsedMb || 'N/A'}`,
+    `GpuMemoryTotalMb: ${globalThis.systemTelemetry?.gpuMemoryTotalMb || 'N/A'}`,
+    `GpuLoadPct: ${globalThis.systemTelemetry?.gpuLoadPct || 'N/A'}`,
     `GpuTemperatureCelsius: ${globalThis.systemTelemetry?.gpuTemperatureCelsius || 'N/A'}`,
+    `GpuPowerW: ${globalThis.systemTelemetry?.gpuPowerW || 'N/A'}`,
+    "",
+    "# System Power & Storage",
+    `SystemPowerW: ${globalThis.systemTelemetry?.systemPowerW || 'N/A'}`,
     `StorageTemperatureCelsius: ${globalThis.systemTelemetry?.storageTemperatureCelsius || 'N/A'}`,
     "",
 

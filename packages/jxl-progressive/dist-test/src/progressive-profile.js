@@ -14,7 +14,7 @@ async function computeSha256(buffer) {
 }
 function selectTiers(events, totalBytes) {
     const tiers = [];
-    if (events.length === 0) {
+    if (events.length === 0 || totalBytes === 0) {
         tiers.push({
             name: "full",
             byteStart: 0,
@@ -28,7 +28,8 @@ function selectTiers(events, totalBytes) {
     const dcEvent = events.find((e) => e.stage === "dc") ??
         events.find((e) => e.byteOffset < totalBytes * 0.25) ??
         events[0];
-    if (dcEvent !== undefined) {
+    // Only emit the dc tier if byteEnd > 0; a zero byteEnd is unusable.
+    if (dcEvent !== undefined && dcEvent.byteOffset > 0) {
         tiers.push({
             name: "dc",
             byteStart: 0,
@@ -38,8 +39,15 @@ function selectTiers(events, totalBytes) {
         });
     }
     // Preview tier: last event before 70% of file, distinct from dc.
-    const before70 = events.filter((e) => e.byteOffset < totalBytes * 0.7);
-    const previewEvent = before70.length > 0 ? before70[before70.length - 1] : undefined;
+    // Use a reverse scan to avoid allocating a filtered array.
+    const threshold70 = totalBytes * 0.7;
+    let previewEvent;
+    for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].byteOffset < threshold70) {
+            previewEvent = events[i];
+            break;
+        }
+    }
     if (previewEvent !== undefined &&
         previewEvent !== dcEvent &&
         previewEvent.byteOffset > (dcEvent?.byteOffset ?? 0)) {
@@ -90,19 +98,26 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
     const pushTask = (async () => {
         const total = jxlBytes.byteLength;
         let offset = 0;
-        while (offset < total) {
-            if (signal?.aborted)
-                throw new DOMException("Aborted", "AbortError");
-            const end = Math.min(offset + chunkSize, total);
-            await session.push(jxlBytes.slice(offset, end));
-            bytesPushed = end;
-            // Yield a microtask tick so frame events triggered by this push
-            // can be picked up by the frames task with the correct bytesPushed.
-            await Promise.resolve();
-            onProgress?.(end, total);
-            offset = end;
+        try {
+            while (offset < total) {
+                if (signal?.aborted)
+                    throw new DOMException("Aborted", "AbortError");
+                const end = Math.min(offset + chunkSize, total);
+                // Set bytesPushed before push() so frames emitted synchronously inside
+                // push() (before the promise resolves) capture the correct byte offset.
+                bytesPushed = end;
+                await session.push(jxlBytes.slice(offset, end));
+                onProgress?.(end, total);
+                offset = end;
+            }
+            await session.close();
         }
-        await session.close();
+        catch (e) {
+            // Cancel the session so framesTask's frames() generator terminates
+            // rather than hanging indefinitely waiting for more frames.
+            await session.cancel().catch(() => { });
+            throw e;
+        }
     })();
     await Promise.all([pushTask, framesTask]);
     const sha256 = await computeSha256(jxlBytes);
@@ -130,7 +145,11 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
 export async function profileJxlFile(path, sessionFactory, source, opts = {}) {
     const { readFile, writeFile } = await import("node:fs/promises");
     const buf = await readFile(path);
-    const manifest = await profileJxl(buf.buffer, sessionFactory, source, opts);
+    // Slice to exact bytes: node Buffer.buffer is often a larger slab from the fs pool.
+    // Passing the full backing ArrayBuffer causes sha256 + profile push to ingest garbage,
+    // leading to hash mismatches downstream (F8).
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    const manifest = await profileJxl(ab, sessionFactory, source, opts);
     if (opts.writeManifest !== false) {
         await writeFile(`${path}.json`, JSON.stringify(manifest, null, 2), "utf-8");
     }

@@ -323,14 +323,17 @@ fn read_u8(src: &[u8], pos: &mut usize) -> Result<u8> {
 /// Decode one self-contained LJPEG bitstream. Output buffer must be writable
 /// at `[base + r * stride + c * cps + comp]` for r in 0..sof.height,
 /// c in 0..sof.width, comp in 0..sof.cps.
-pub fn decode_tile(
+/// Shared LJPEG decode implementation. `COLLECT_STATS=false` compiles away all
+/// counter increments at monomorphisation time (dead-code eliminated in release).
+#[inline(always)]
+fn decode_tile_impl<const COLLECT_STATS: bool>(
     src: &[u8],
     out: &mut [u16],
     base: usize,
     stride_pixels: usize,
     out_pixel_cols: usize,
     out_rows: usize,
-) -> Result<()> {
+) -> Result<LjpegStats> {
     if src.len() < 4 || src[0] != 0xFF || src[1] != 0xD8 {
         bail!("ljpeg: missing SOI");
     }
@@ -528,6 +531,14 @@ pub fn decode_tile(
     // left-neighbour during decode.
     let mut prev_row_first = vec![0i32; cps];
 
+    // Stat counters — zero-cost when COLLECT_STATS=false (dead-code eliminated
+    // at monomorphisation time by the compiler in release mode).
+    let mut total_symbols = 0u64;
+    let mut fast8_hits = 0u64;
+    let mut slow_huffman_hits = 0u64;
+    let mut get_bits_calls = 0u64;
+    let mut get_bits_total_bits = 0u64;
+
     for row in 0..sof_h {
         let row_base = base + row * stride_pixels;
         let emit_row = row < out_rows;
@@ -549,8 +560,10 @@ pub fn decode_tile(
                 let peek8 = br.peek(8);
                 let fast_entry = table.fast8[peek8 as usize];
                 let (consume, t) = if fast_entry != 0 {
+                    if COLLECT_STATS { fast8_hits += 1; }
                     ((fast_entry & 0xFF) as u8, ((fast_entry >> 8) & 0xFF) as u8)
                 } else {
+                    if COLLECT_STATS { slow_huffman_hits += 1; }
                     let peek_full = br.peek(table.max_bits as u32);
                     let entry = table.lookup[peek_full as usize];
                     if entry.0 == 0 {
@@ -558,6 +571,7 @@ pub fn decode_tile(
                     }
                     entry
                 };
+                if COLLECT_STATS { total_symbols += 1; }
                 br.consume(consume as u32);
                 if br.truncated {
                     bail!("ljpeg: entropy bitstream exhausted at row={row} col={col} comp={comp}");
@@ -576,6 +590,10 @@ pub fn decode_tile(
                     // with no additional bits read.
                     -32768i32
                 } else {
+                    if COLLECT_STATS {
+                        get_bits_calls += 1;
+                        get_bits_total_bits += t as u64;
+                    }
                     let bits = br.get_bits(t as u32) as i32;
                     if br.truncated {
                         bail!("ljpeg: entropy bitstream exhausted at row={row} col={col} comp={comp}");
@@ -588,230 +606,6 @@ pub fn decode_tile(
                 if col == 0 {
                     prev_row_first[comp] = val;
                 }
-
-                if emit_row {
-                    let raw_col = col * cps + comp;
-                    if raw_col < out_pixel_cols {
-                        out[row_base + raw_col] = ((val << sos.point_transform) & 0xFFFF) as u16;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Decode one LJPEG tile and return per-stage statistics for profiling.
-/// Identical decode path as `decode_tile` plus lightweight counters.
-pub fn decode_tile_stats(
-    src: &[u8],
-    out: &mut [u16],
-    base: usize,
-    stride_pixels: usize,
-    out_pixel_cols: usize,
-    out_rows: usize,
-) -> Result<LjpegStats> {
-    if src.len() < 4 || src[0] != 0xFF || src[1] != 0xD8 {
-        bail!("ljpeg: missing SOI");
-    }
-    let mut pos = 2usize;
-    let mut sof = Sof::default();
-    let mut sos = Sos::default();
-    let mut dhts: [Option<Rc<HuffTable>>; 4] = [None, None, None, None];
-    let mut have_sof = false;
-    let mut have_sos = false;
-
-    while !have_sos {
-        let marker = read_marker(src, &mut pos)?;
-        match marker {
-            0xC3 => {
-                let _seg_len = read_u16_be(src, &mut pos)?;
-                sof.precision = read_u8(src, &mut pos)?;
-                sof.height = read_u16_be(src, &mut pos)? as u32;
-                sof.width = read_u16_be(src, &mut pos)? as u32;
-                sof.cps = read_u8(src, &mut pos)?;
-                if sof.cps as usize > MAX_COMPONENTS { bail!("ljpeg: too many components"); }
-                for i in 0..sof.cps as usize {
-                    sof.comp_ids[i] = read_u8(src, &mut pos)?;
-                    let _ = read_u8(src, &mut pos)?;
-                    let _ = read_u8(src, &mut pos)?;
-                }
-                have_sof = true;
-            }
-            0xC4 => {
-                let seg_len = read_u16_be(src, &mut pos)? as usize;
-                if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
-                let end = (pos + seg_len - 2).min(src.len());
-                while pos < end {
-                    let tcth = read_u8(src, &mut pos)?;
-                    let tc = tcth >> 4; let th = tcth & 0x0F;
-                    if tc != 0 { bail!("ljpeg: DHT non-DC table class {}", tc); }
-                    if th >= 4 { bail!("ljpeg: DHT id {} out of range", th); }
-                    let mut bits = [0u8; 16];
-                    for b in &mut bits { *b = read_u8(src, &mut pos)?; }
-                    let total: usize = bits.iter().map(|&b| b as usize).sum();
-                    if pos + total > src.len() { bail!("ljpeg: DHT values EOF"); }
-                    let values = &src[pos..pos + total]; pos += total;
-                    let key: Vec<u8> = bits.iter().copied().chain(values.iter().copied()).collect();
-                    let cached = DHT_CACHE.with(|c| {
-                        let cache = c.borrow();
-                        cache.iter().find(|(k, _)| k == &key).map(|(_, t)| t.clone())
-                    });
-                    let tbl = if let Some(t) = cached { t } else {
-                        let t = Rc::new(HuffTable::build(&bits, values)?);
-                        DHT_CACHE.with(|c| {
-                            let mut cache = c.borrow_mut();
-                            cache.push((key, t.clone()));
-                            if cache.len() > 8 { cache.remove(0); }
-                        });
-                        t
-                    };
-                    dhts[th as usize] = Some(tbl);
-                }
-            }
-            0xDA => {
-                let _seg_len = read_u16_be(src, &mut pos)?;
-                let ns = read_u8(src, &mut pos)? as usize;
-                if !have_sof { bail!("ljpeg: SOS before SOF"); }
-                if ns != sof.cps as usize { bail!("ljpeg: SOS component count mismatch"); }
-                for i in 0..ns {
-                    let cs = read_u8(src, &mut pos)?;
-                    let tdta = read_u8(src, &mut pos)?;
-                    let td = tdta >> 4;
-                    let comp_idx = (0..sof.cps as usize).find(|&k| sof.comp_ids[k] == cs).unwrap_or(i);
-                    sos.dht_id[comp_idx] = td;
-                }
-                sos.predictor = read_u8(src, &mut pos)?;
-                let _ = read_u8(src, &mut pos)?;
-                let ahal = read_u8(src, &mut pos)?;
-                sos.point_transform = ahal & 0x0F;
-                have_sos = true;
-            }
-            0xD9 => bail!("ljpeg: EOI before SOS"),
-            0xDD => {
-                let seg_len = read_u16_be(src, &mut pos)? as usize;
-                if seg_len != 4 { bail!("ljpeg: bad DRI length {}", seg_len); }
-                let interval = read_u16_be(src, &mut pos)?;
-                if interval != 0 { bail!("ljpeg: restart markers unsupported"); }
-            }
-            _ => {
-                let seg_len = read_u16_be(src, &mut pos)? as usize;
-                if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
-                pos += seg_len - 2;
-            }
-        }
-    }
-
-    if sos.predictor != 1 { bail!("ljpeg: predictor {} not supported", sos.predictor); }
-    if sof.precision < 2 || sof.precision > 16 { bail!("ljpeg: precision {} unsupported", sof.precision); }
-    if sos.point_transform >= sof.precision { bail!("ljpeg: point transform {} >= precision {}", sos.point_transform, sof.precision); }
-
-    let cps = sof.cps as usize;
-    if cps == 0 || cps > MAX_COMPONENTS { bail!("ljpeg: bad component count"); }
-    let sof_w = sof.width as usize;
-    let raw_cols = sof_w * cps;
-    if raw_cols < out_pixel_cols { bail!("ljpeg: SOF raw cols {} < output width {}", raw_cols, out_pixel_cols); }
-    let sof_h = sof.height as usize;
-    if sof_h < out_rows { bail!("ljpeg: SOF height {} < output rows {}", sof_h, out_rows); }
-
-    // Same output-geometry bounds check as decode_tile (identical write path).
-    if out_rows > 0 && out_pixel_cols > 0 {
-        let max_idx = base
-            .checked_add((out_rows - 1).checked_mul(stride_pixels).unwrap_or(usize::MAX))
-            .and_then(|v| v.checked_add(out_pixel_cols - 1))
-            .unwrap_or(usize::MAX);
-        if max_idx >= out.len() {
-            bail!(
-                "ljpeg: output buffer too small: max write index {} >= out.len() {} \
-                 (base={}, stride_pixels={}, out_pixel_cols={}, out_rows={})",
-                max_idx,
-                out.len(),
-                base,
-                stride_pixels,
-                out_pixel_cols,
-                out_rows
-            );
-        }
-    }
-
-    let base_pred = 1i32 << (sof.precision - sos.point_transform - 1);
-    let mut br = BitReader::new(&src[pos..]);
-
-    let mut comp_tables: [Option<&HuffTable>; MAX_COMPONENTS] = [None; MAX_COMPONENTS];
-    for c in 0..cps {
-        let id = sos.dht_id[c] as usize;
-        let tbl: &HuffTable = match dhts[id].as_deref() {
-            Some(t) if t.max_bits > 0 => t,
-            _ => bail!("ljpeg: missing huffman table {}", id),
-        };
-        comp_tables[c] = Some(tbl);
-    }
-
-    let mut prev_row_first = vec![0i32; cps];
-
-    // Per-symbol stat counters (L2–L5).
-    let mut total_symbols = 0u64;
-    let mut fast8_hits = 0u64;
-    let mut slow_huffman_hits = 0u64;
-    let mut get_bits_calls = 0u64;
-    let mut get_bits_total_bits = 0u64;
-
-    for row in 0..sof_h {
-        let row_base = base + row * stride_pixels;
-        let emit_row = row < out_rows;
-        let mut left = [0i32; MAX_COMPONENTS];
-        for col in 0..sof_w {
-            for comp in 0..cps {
-                let predictor = if col == 0 {
-                    if row == 0 { base_pred } else { prev_row_first[comp] }
-                } else {
-                    left[comp]
-                };
-
-                let table = comp_tables[comp].unwrap();
-
-                let peek8 = br.peek(8);
-                let fast_entry = table.fast8[peek8 as usize];
-                let (consume, t) = if fast_entry != 0 {
-                    fast8_hits += 1;
-                    ((fast_entry & 0xFF) as u8, ((fast_entry >> 8) & 0xFF) as u8)
-                } else {
-                    slow_huffman_hits += 1;
-                    let peek_full = br.peek(table.max_bits as u32);
-                    let entry = table.lookup[peek_full as usize];
-                    if entry.0 == 0 {
-                        bail!("ljpeg: invalid huffman code at row={row} col={col} comp={comp}");
-                    }
-                    entry
-                };
-                total_symbols += 1;
-                br.consume(consume as u32);
-                if br.truncated {
-                    bail!("ljpeg: entropy bitstream exhausted at row={row} col={col} comp={comp}");
-                }
-                if t == 16 {
-                    if sof.precision != 16 { bail!("ljpeg: category 16 exceeds precision {}", sof.precision); }
-                } else if t > sof.precision {
-                    bail!("ljpeg: category {} exceeds precision {}", t, sof.precision);
-                }
-                let diff = if t == 0 {
-                    0
-                } else if t == 16 {
-                    -32768i32
-                } else {
-                    get_bits_calls += 1;
-                    get_bits_total_bits += t as u64;
-                    let bits = br.get_bits(t as u32) as i32;
-                    if br.truncated {
-                        bail!("ljpeg: entropy bitstream exhausted at row={row} col={col} comp={comp}");
-                    }
-                    extend(bits, t as u32)
-                };
-
-                let val = predictor.wrapping_add(diff);
-                left[comp] = val;
-                if col == 0 { prev_row_first[comp] = val; }
 
                 if emit_row {
                     let raw_col = col * cps + comp;
@@ -837,6 +631,31 @@ pub fn decode_tile_stats(
         get_bits_calls,
         get_bits_total_bits,
     })
+}
+
+pub fn decode_tile(
+    src: &[u8],
+    out: &mut [u16],
+    base: usize,
+    stride_pixels: usize,
+    out_pixel_cols: usize,
+    out_rows: usize,
+) -> Result<()> {
+    decode_tile_impl::<false>(src, out, base, stride_pixels, out_pixel_cols, out_rows)?;
+    Ok(())
+}
+
+/// Decode one LJPEG tile and return per-stage statistics for profiling.
+/// Identical decode path as `decode_tile` plus lightweight counters.
+pub fn decode_tile_stats(
+    src: &[u8],
+    out: &mut [u16],
+    base: usize,
+    stride_pixels: usize,
+    out_pixel_cols: usize,
+    out_rows: usize,
+) -> Result<LjpegStats> {
+    decode_tile_impl::<true>(src, out, base, stride_pixels, out_pixel_cols, out_rows)
 }
 
 /// Decode into a caller-provided compact tile buffer (tile_w * tile_h * cps u16s).

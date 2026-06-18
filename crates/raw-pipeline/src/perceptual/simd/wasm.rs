@@ -4,6 +4,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use core::arch::wasm32::*;
+use super::scalar::scale_err_tail;
 
 /// 4-wide horizontal sum.
 #[inline]
@@ -36,6 +37,10 @@ pub fn scale_err_wasm(
     let veps = f32x4_splat(1e-12);
     let one = f32x4_splat(1.0);
     let mut acc = f32x4_splat(0.0);
+    // Drain f32 accumulator to f64 every FLUSH iterations (same strategy as avx2).
+    const FLUSH: usize = 4096;
+    let mut flush_count = 0usize;
+    let mut sum = 0f64;
     let lanes = n / 4 * 4;
     let mut i = 0;
     unsafe {
@@ -53,19 +58,16 @@ pub fn scale_err_wasm(
             let root = f32x4_sqrt(f32x4_add(e2, veps));
             acc = f32x4_add(acc, f32x4_mul(e2, root));
             i += 4;
+            flush_count += 1;
+            if flush_count == FLUSH {
+                sum += hsum(acc) as f64;
+                acc = f32x4_splat(0.0);
+                flush_count = 0;
+            }
         }
     }
-    let mut sum = hsum(acc) as f64;
-    while i < n {
-        let m = (mask[i] * 2.0 + 0.15).max(0.15);
-        let inv = 1.0 / m;
-        let ex = (rx[i] - tx[i]) * inv;
-        let ey = (ry[i] - ty[i]) * inv;
-        let eb = (rb[i] - tb[i]) * inv;
-        let e2 = kx * ex * ex + ky * ey * ey + kb * eb * eb;
-        sum += (e2 * (e2 + 1e-12).sqrt()) as f64;
-        i += 1;
-    }
+    sum += hsum(acc) as f64;
+    sum = scale_err_tail(mask, rx, ry, rb, tx, ty, tb, n, kx, ky, kb, i, sum);
     ((sum / n as f64).powf(1.0 / 3.0)) as f32
 }
 

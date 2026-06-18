@@ -1,18 +1,13 @@
-Main Gemini - gemini --resume "d7f09e93-741a-412d-89b0-d42ce1891107" 
-node StandardMultifileTest.mjs
-
-
-
 If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md
 
 --------
 
-Your focus will ONLY be on these files. DO NOT work on any other files than the ones I specify without asking me first. Enter Plan mode. I shall be asking you to examine the documents through particular "lenses" and to scrutinize and examine the code *in your memory*, formulate the proposed issues, improvements and fixes. I want you to work as token-efficiently as possible, only handing back the concise issue and fixes. Don't worry about pleasantries, unneccesary text or reporting non-issues. Theoretically there should only be tokens burnt on the reading of the two files and the writing of the final document and final comments.  Thinking is cheap, reading and writing - expensive. 
+Your focus will ONLY be on these files. DO NOT work on any other files than the ones I specify without asking me first. I shall be asking you to examine the documents through particular "lenses" and to scrutinize and examine the code *in your memory*, formulate the proposed issues, improvements and fixes. I want you to work as token-efficiently as possible, only handing back the concise issue and fixes. Don't worry about pleasantries, unneccesary text or reporting non-issues. Theoretically there should only be tokens burnt on the reading of the two files and the writing of the final document and final comments.  Thinking is cheap, reading and writing - expensive. 
   
   With every lens pass, you will be
-  looking for improvements to 1) efficiency, 2) speed, 3) performance, 4) bugs and 5) existing or opportunities for proposed features. Be thorough. Be meticulous. Be exhaustive. Think broadly then think deeply. Consider well and contemplate what you're looking at from different angles and think for the long term. Integrate your existing knowledge. 
+  looking for improvements to 1) efficiency, 2) speed, 3) performance, 4) bugs, 5) robustness and safety and 6) opportunities for existing or future features. Be thorough. Be meticulous. Be exhaustive. Think broadly then think deeply. Consider well and contemplate what you're looking at from different angles and think for the long term. Integrate your existing knowledge. 
   
-  At the very end, create a cohesive document with duplicate items amalgamated that provides handoffs to five Grok agents to implement. There can be more than 5 sessions. Each agent should only handle one file but may extend the search beyond the file for information and may defer editing other files till the end and after requesting approval. This should include suggested code snippets where there is anything ambiguous. Name the .md document with an appropriately descriptive name, preferably named after the files that you're examining. Each handoff section should begin with the phrase: "If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md". Each agent handoff should be self-contained having all the information the agent needs to implement the item and each agent handoff will include the words: "You may reference files outside your ambit if necessary, but if you want to change them, request to do so at the end of everything else. If there are any unusually important novel features or highlights, add them to the file c:\Foo\raw-converter-wasm\docs\Headline Features.md providing two or three paragraphs about it as if it were a news article. "
+  At the very end, create a cohesive document with duplicate items amalgamated that provides handoffs to five Claude agents to implement. There can be more than 5 sessions. Each agent should only handle one file but may extend the search beyond the file for information and may defer editing other files till the end and after requesting approval. This should include suggested code snippets where there is anything ambiguous. Name the .md document with an appropriately descriptive name, preferably named after the files that you're examining. Each handoff section should begin with the phrase: "If you agree that the contribution is positive in the context of the pipeline, implement it, otherwise reject it with your reasons in C:\Foo\raw-converter-wasm\docs\rejected optimizations.md". Each agent handoff should be self-contained having all the information the agent needs to implement the item and each agent handoff will include the words: "You may reference files outside your ambit if necessary, but if you want to change them, request to do so at the end of everything else. If there are any unusually important novel features or highlights, add them to the file c:\Foo\raw-converter-wasm\docs\Headline Features.md providing two or three paragraphs about it as if it were a news article. "
   
  
 Lens 1: "a strategic view of each file and how they link and the data they pass between them link".
@@ -79,25 +74,25 @@ Lens 15: Butteraugli is one of the slowest operations in the JXL pipeline. Can w
 
 Lens 16: One of our visions is for the use of immersive technology to be used in Augmented Reality to look at plants, recognise them, identify them in real-time. How can that process be facilitated via these files?
 
-Lens 17: 1. We are integrating a unified, non-Riemannian perceptual color science model derived from the mathematical synthesis of Schrödinger’s geodesic definitions,
+Lens 17: I. We are integrating a unified, non-Riemannian perceptual color science model derived from the mathematical synthesis of Schrödinger’s geodesic definitions,
       Molchanov's anisotropy measures, the Harvard perception-based color space (HPCS), and Los Alamos's chromatic diminishing returns.
-   2. The core of this architecture leverages a sensor-sharpening matrix B and a component-wise log-transform to map Schrödinger's curved, hue-stable geodesics
+   II. The core of this architecture leverages a sensor-sharpening matrix B and a component-wise log-transform to map Schrödinger's curved, hue-stable geodesics
       into a flat, 3D Euclidean coordinate space.
-   3. This logarithmic transformation resolves the "Flatness Paradox" of color science, allowing perceptually uniform, illumination-invariant color adjustments to
+   III. This logarithmic transformation resolves the "Flatness Paradox" of color science, allowing perceptually uniform, illumination-invariant color adjustments to
       be computed using fast linear algebra instead of complex differential geodesic equations.
-   4. To handle local defects where the flat model diverges from human vision, we incorporate Molchanov’s parallelogram law residuals to adaptively discretize our
+   IV. To handle local defects where the flat model diverges from human vision, we incorporate Molchanov’s parallelogram law residuals to adaptively discretize our
       precomputed metric tensor grid, concentrating density around the neutral gray axis and saturated greens.
-   5. Furthermore, we modulate local slider sensitivities and edge-detection thresholds using Molchanov’s distance structure tensor Aₜₑₙₛₒᵣ to guarantee perfectly
+   V. Furthermore, we modulate local slider sensitivities and edge-detection thresholds using Molchanov’s distance structure tensor Aₜₑₙₛₒᵣ to guarantee perfectly
       uniform, linear visual changes across all hues.
-   6. To prevent mathematical coordinate drift near grays, we apply a hybrid correction that blends the Riemannian geodesic steps with direct non-Riemannian Δ
+   VI. To prevent mathematical coordinate drift near grays, we apply a hybrid correction that blends the Riemannian geodesic steps with direct non-Riemannian Δ
       E₂₀₀₀ corrections, functioning as a stabilizing "spring force" pulling coordinates onto the true neutral point.
-   7. Finally, we refine our flat coordinate space using Los Alamos's non-uniform, localized chromatic diminishing returns curves f(c) to calibrate the exact rate
+   VII. Finally, we refine our flat coordinate space using Los Alamos's non-uniform, localized chromatic diminishing returns curves f(c) to calibrate the exact rate
       of perceptual compression for pinks, greens, oranges, and blues.
-   8. We intend to implement this entire multi-layered color engine directly in our Rust/WASM-resident LookRenderer pipeline (crates/raw-pipeline/src/pipeline.rs)
+   VIII. We intend to implement this entire multi-layered color engine directly in our Rust/WASM-resident LookRenderer pipeline (crates/raw-pipeline/src/pipeline.rs)
       under the hot per-pixel apply_tone_math loop.
-   9. This Rust engine will expose a high-performance "Perceptual Constancy Mode" to our JavaScript lightbox, allowing illumination-invariant exposure, saturation,
+   VIV. This Rust engine will expose a high-performance "Perceptual Constancy Mode" to our JavaScript lightbox, allowing illumination-invariant exposure, saturation,
       and white-balance adjustments during progressive JXL paints.
-   10. For the upcoming phase, we need to design a highly optimized, SIMD-accelerated, or precomputed multi-dimensional lookup-table (LUT) structure in Rust to
+   D. For the upcoming phase, we need to design a highly optimized, SIMD-accelerated, or precomputed multi-dimensional lookup-table (LUT) structure in Rust to
        execute these complex logarithmic, exponential, and local spline transformations at sub-millisecond speeds.
 	   
 Lens 18: Pure mathematics - algorithmic optimization and discrete mathematics, with emphasis on asymptotic complexity, graph theory, combinatorics, linear algebra, numerical methods, and formal simplification
@@ -117,93 +112,8 @@ Lens 20: Do it again from a slightly different perspective
 
 Lens 21: Knowing the code and what questions have been asked. What are the gaps? If each question shines a light into the code, what are the three larges parts of the house left unilluminated and unexplored?
 
-Lens 21: Do this again from a different perspective.
+Lens 22: Do this again from a different perspective.
 
-Lens 22: Step back with a defocused eye. Cast a feeling eye over the whole setup. A birds eye view. What do you see. What stands out. What do you notice about their connectivity. Any last improvements to be made?	   
+Lens 23: Step back with a defocused eye. Cast a feeling eye over the whole setup. A birds eye view. What do you see. What stands out. What do you notice about their connectivity. Any last improvements to be made?	   
 
 Provide a three or four paragaph overview of what would be achieved by implementing these suggestions at the end.
-
-
-
-
-===========
- I want you to review and organise this large and piecemeal document into sensible chunks. Each chapter will be an implementation layer focused on related
-   things such that a suitably skilled worker can implement it.
-
-
---------
-  Handoff written: docs/Grok-Handoff-NoSharpMtLeak.md.
-
-  Production wiring vs nosharp leak — difference
-
-  nosharp leak (option 3, next handoff):
-  - Bug. Existing code path hangs under MT in Node.
-  - Diagnostic + surgical fix in packages/jxl-scheduler/ or packages/jxl-wasm/.
-  - Affects: bench harness completeness, any browser caller that does transcode-then-decode under MT.
-  - Outcome: nosharp pipeline runs to completion. No user-visible product change.
-
-  Production wiring (option 4, later):
-  - Feature ship. Plug fast-jpeg into real product code paths.
-  - Today: any consumer that needs a JPEG thumbnail goes through libjxl transcode (~850ms) + libjxl decode (~310ms) = 1160ms.
-  - After: same consumer calls decode_scaled(buf, 2) = ~150ms. 710ms shaved off thumbnail time.
-  - Concrete files likely touched:
-    - web/main.js and web/jxl-progressive-paint.js — wherever embedded JPEG previews get decoded for display
-    - packages/jxl-session/ or packages/jxl-wasm/src/facade.ts — possibly add a sibling API decodeJpegToRgba(buf, denom) so consumers swap one call
-    - Build: ship crates/fast-jpeg/pkg/ with --target web (not nodejs) so browsers can load it
-  - Risk: introduces second WASM blob (~110KB) into the page. Lazy-load via dynamic import to avoid bundle bloat.
-  - Outcome: end users get faster thumbnails. Real product win.
-
-  Both worth doing. Sequence: fix leak first (smaller, restores benchmark coverage), then production wire (bigger, ships the win).
-
-  Fresh start ready. Handoff at docs/Grok-Handoff-NoSharpMtLeak.md. Skim it, hand to Grok.
------------
-
-
-
-
-Follow c:\Foo\raw-converter-wasm\docs\Optimal-settings.md and c:\Foo\raw-converter-wasm\docs\ToonInstructions.md to create a set of timings. The aim of this is to set optimal timings form our findings such that we come to an optimal set of different sized images or different quality images for different situations. Also for streaming vs on own computer. When you begin add the chosen test to c:\Foo\raw-converter-wasm\docs\Tested-settings.md and when you finish tick it off and commit and push. Provide the analysis to c:\Foo\raw-converter-wasm\docs\Optimal-settings.md and the summary of the settings to c:\Foo\raw-converter-wasm\docs\Timing Test Summary.md  
-
-  Do next:
-
-  1. Add Tests 18-22.
-  2. Exclude these knobs: decodingSpeed, groupOrder, progressiveDc, epf, gaborish, brotliEffort, resampling.
-  3. Use remaining useful JXL/correlation settings only.
-  4. Write one .toon file per benchmark run to docs/outputs/timing tests/.
-  5. Include full timings per row:
-      - raw_ms
-      - rgba_ms
-      - encode_ms
-      - decode_ms
-      - total_ms
-      - size
-      - varied setting columns
-      - timestamp column t
-
-  6. Keep locked defaults unless sweep axis requires change:
-      - target=1600
-      - effort=3
-      - quality=85
-      - progressive=true
-      - progressiveFlavor="ac"
-      - previewFirst=false
-      - chunked=true
-
-  Recommended 5 new tests:
-
-  - Test_18: progressive on/off at locked defaults. Measures whether progressive encode still costs extra when first-paint is not being tested.
-  - Test_19: effort narrow sweep 1,2,3,4 at quality=85. Different from old broad effort test; focus shipping window near effort 3.
-  - Test_20: target ladder 400,800,1600,2400. Measures target-size scaling with locked quality/effort.
-  - Test_21: source-format sweep .ORF,.DNG,.CR2 if fixtures exist. Same encode settings, compare raw decode + full pipeline.
-  - Test_22: modular + lossless combined matrix: lossy VarDCT/auto vs lossless Modular, with full timing columns.
-
-  Implementation notes:
-
-  - For plain quality, effort, target, progressive, normal encodeJxl(...) helper is OK.
-  - For low-level matrix knobs such as modular, use encodeJxlMatrix(...) from benchmark/correlation-matrix-benchmark-utils.mjs.
-  - Update benchmark/correlation-additional-benchmarks.test.mjs to include Tests 18-22 and require full timing columns.
-  - Update docs/Optimal-settings.md with usage blocks.
-  - Run:
-      - rtk proxy node --test benchmark/correlation-additional-benchmarks.test.mjs
-      - rtk proxy node --check benchmark/test_18_*.mjs through test_22_*.mjs
-      - one tiny synthetic smoke if low-level helper used.
-      - scoped git diff --check -- <changed files>

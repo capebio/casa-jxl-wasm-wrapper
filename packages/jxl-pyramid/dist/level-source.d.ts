@@ -1,6 +1,7 @@
 import type { PyramidLevel } from "./manifest.js";
+import { type PixelFormat } from "./decode-core.js";
 /** Uniform handle for whole-frame JXL or tiled JXTC top levels.
- * bytesId is attached lazily by the pool (Grok 2) for the load/decode protocol to avoid N-clones.
+ * Instances are safe to share across concurrent decodes; treat all fields as frozen after creation.
  */
 export type LevelSource = {
     kind: "whole";
@@ -8,7 +9,9 @@ export type LevelSource = {
     width: number;
     height: number;
     bitsPerSample: 8 | 16;
-    bytesId?: number;
+    format: PixelFormat;
+    bpp: 4 | 8;
+    level?: number;
 } | {
     kind: "tiled";
     bytes: Uint8Array;
@@ -16,16 +19,14 @@ export type LevelSource = {
     height: number;
     tileSize: number;
     bitsPerSample: 8 | 16;
-    bytesId?: number;
+    format: PixelFormat;
+    bpp: 4 | 8;
+    version: 1 | 2;
+    level?: number;
+    tilesX: number;
+    tilesY: number;
 };
 export declare function createLevelSource(entry: Pick<PyramidLevel, "w" | "h" | "tiled"> & {
     bitsPerSample?: 8 | 16;
-}, bytes: Uint8Array): LevelSource;
-/**
- * Ensure the LevelSource is "prepared" for worker protocol use (Grok2).
- * Attaches bytesId lazily (the actual numeric value is assigned by the PyramidWorkerPool
- * instance using its own counter so ids are scoped to the pool, not global module).
- * Safe to call multiple times; idempotent on the source object identity.
- */
-export declare function prepareLevelSource(source: LevelSource): LevelSource;
+}, bytes: Uint8Array, levelIndex?: number): LevelSource;
 //# sourceMappingURL=level-source.d.ts.map

@@ -13,12 +13,14 @@ describe("@casabio/jxl-capabilities tiering", () => {
         assert.equal(canUseThreadedWasm(false, false), false);
     });
     test("detectTier and selectedWasmBuild both avoid threaded tiers when crossOriginIsolated is false", async () => {
+        // Import the module first so the global stub is not active during the import() await.
+        const mod = await import(`../src/index.js?no-mt=${Date.now()}`);
         const selfStub = { crossOriginIsolated: false };
+        const isThreadProbe = (view) => view.includes(0xfe) && view.includes(0x10);
+        const isRelaxedProbe = (view) => view.includes(0xfd) && view.includes(0x80) && view.includes(0x02);
+        const isSimdProbe = (view) => view.includes(0xfd) && view.includes(0x0f);
         try {
             globalAny.self = selfStub;
-            const isThreadProbe = (view) => view.includes(0xfe) && view.includes(0x10);
-            const isRelaxedProbe = (view) => view.includes(0xfd) && view.includes(0x80) && view.includes(0x02);
-            const isSimdProbe = (view) => view.includes(0xfd) && view.includes(0x0f);
             WebAssembly.validate = (bytes) => {
                 const view = ArrayBuffer.isView(bytes)
                     ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -46,7 +48,7 @@ describe("@casabio/jxl-capabilities tiering", () => {
                 }
                 throw new Error("unexpected wasm probe");
             };
-            const mod = await import(`../src/index.js?no-mt=${Date.now()}`);
+            mod._resetCache();
             const tier = mod.detectTier();
             const capabilities = await mod.getCapabilities();
             assert.equal(tier, "simd");
@@ -56,6 +58,7 @@ describe("@casabio/jxl-capabilities tiering", () => {
             WebAssembly.validate = originalWebAssemblyValidate;
             WebAssembly.instantiate = originalWebAssemblyInstantiate;
             globalAny.self = originalSelf;
+            mod._resetCache();
         }
     });
 });

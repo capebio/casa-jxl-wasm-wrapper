@@ -35,7 +35,17 @@ interface CacheEntry { v: Uint8Array; len: number }
 
 const levelIdBySource = new WeakMap<LevelSource, string>();
 const bufIdByBuffer = new WeakMap<ArrayBufferLike, string>();
+const bytesIdCache = new WeakMap<Uint8Array, string>();
 let idCounter = 0;
+
+// Defensive check: cache module assumes single-realm execution (main thread only).
+// If this is imported in a worker or shared across realms, idCounter and WeakMaps will be unsynchronized.
+// Use makeLevelCacheKey(contenthash) for multi-realm scenarios.
+if (typeof WorkerGlobalScope !== "undefined") {
+  console.warn(
+    "cache.ts loaded in worker context; level IDs may conflict. Use contenthash-based cache keys instead.",
+  );
+}
 
 /**
  * Key by underlying buffer + view window instead of view identity.
@@ -43,12 +53,18 @@ let idCounter = 0;
  * Assumption: level bytes are immutable post-ingest.
  */
 export function bytesId(view: Uint8Array): string {
+  // Cache the full composite string to avoid template-literal construction on every call.
+  let id = bytesIdCache.get(view);
+  if (id != null) return id;
+
   let b = bufIdByBuffer.get(view.buffer);
   if (b == null) {
     b = `B${++idCounter}`;
     bufIdByBuffer.set(view.buffer, b);
   }
-  return `${b}:${view.byteOffset}:${view.byteLength}`;
+  id = `${b}:${view.byteOffset}:${view.byteLength}`;
+  bytesIdCache.set(view, id);
+  return id;
 }
 
 /**

@@ -88,12 +88,19 @@ export async function loadWasmModule(wasmUrl, options = {}) {
     try {
         const fetchImpl = options.fetchImpl ?? (typeof fetch !== "undefined" ? fetch : null);
         if (fetchImpl !== null) {
-            let resp = await fetchImpl(wasmUrl, { method: "HEAD" });
-            if (resp.status === 405) {
-                resp = await fetchImpl(wasmUrl);
-                await resp.body?.cancel();
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), 5_000);
+            try {
+                let resp = await fetchImpl(wasmUrl, { method: "HEAD", signal: ac.signal });
+                if (resp.status === 405) {
+                    resp = await fetchImpl(wasmUrl, { signal: ac.signal });
+                    await resp.body?.cancel();
+                }
+                probeStatus = resp.status;
             }
-            probeStatus = resp.status;
+            finally {
+                clearTimeout(timer);
+            }
         }
     }
     catch {

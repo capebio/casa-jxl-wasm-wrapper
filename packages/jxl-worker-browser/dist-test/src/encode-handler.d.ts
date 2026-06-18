@@ -21,6 +21,8 @@ export declare class EncodeHandler {
     private wakeResolve;
     private lastDrainPostedMs;
     private lastDrainAllowed;
+    private pushLatencyEma;
+    private finalMetricsPosted;
     private encoder;
     private disposePromise;
     private readonly stageStartMs;

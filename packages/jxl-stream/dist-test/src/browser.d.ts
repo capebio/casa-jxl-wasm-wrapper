@@ -55,6 +55,26 @@ export interface RangeNegotiation {
     fullSize?: number;
     /** ETag from the response, if present. Useful for safe resumable Range with If-Range. */
     etag?: string;
+    /**
+     * Last-Modified from the response, if present. Used as an If-Range validator
+     * when no (strong) ETag is available, so a resume can still pin the version.
+     */
+    lastModified?: string;
+    /**
+     * The absolute byte offset the window started at in *this* request
+     * (the `start` passed to fromByteRange; 0 for prefix fetches). Lets
+     * createByteRangeResumeState reconstruct the absolute resume cursor without
+     * the caller re-supplying it.
+     */
+    absoluteStart?: number;
+    /**
+     * True if the transfer ended before the expected window was fully delivered
+     * (delivered < requested) AND that shortfall is not explained by reaching the
+     * known end of the resource. A truncated transfer the caller should not treat
+     * as a complete window. (A legitimately short resource — body ends at fullSize —
+     * is NOT flagged.)
+     */
+    underDelivered?: boolean;
     /** Milliseconds from fetch dispatch to response headers (TTFB). */
     ttfbMs?: number;
     /** Milliseconds from headers to transfer end (success or failure). */
@@ -89,6 +109,17 @@ export interface RangePrefixOptions {
      * by resumeFromByteRange.
      */
     expectEtag?: string;
+    /**
+     * Marks this fetch as a *resume continuation* (the session already holds bytes
+     * from an earlier request for the same window). Set automatically by
+     * resumeFromByteRange. When true, a 200 fallback (the server ignored Range and
+     * is sending the whole — possibly changed — resource) is treated as a hard
+     * failure regardless of whether a validator was present: splicing offset-skipped
+     * bytes of an unverified body onto an old prefix would silently corrupt the
+     * stitched result. Also makes a 206 re-validate the response ETag against
+     * expectEtag (a misbehaving cache may 206 a newer object).
+     */
+    resuming?: boolean;
 }
 /**
  * Serializable state for resuming a previous byte-range fetch.
@@ -101,15 +132,22 @@ export interface ByteRangeResumeState {
     start: number;
     endExclusive: number;
     etag?: string;
+    lastModified?: string;
     fullSize?: number;
 }
 /**
  * Create a resume state from a previous negotiation (typically the one returned
  * by fromByteRange or fromRangePrefix).
  *
- * originalStart: the `start` you used in the *first* fromByteRange call
- *   (usually 0 for prefix/tile fetches). This lets us correctly compute the
- *   original endExclusive for the resume request.
+ * originalStart: the absolute `start` you used in the *first* fromByteRange call
+ *   (usually 0 for prefix/tile fetches). If omitted, it is recovered from
+ *   `previous.absoluteStart` (threaded through by fromByteRange), so callers no
+ *   longer have to re-supply it for non-zero-based tile/window fetches. An
+ *   explicit argument always wins (back-compat).
+ *
+ * The resume window end is bounded by the known resource size (`fullSize`) when
+ * available, so resuming a short/truncated transfer never requests bytes past
+ * EOF (which would 416 / RangeError).
  */
 export declare function createByteRangeResumeState(url: string, previous: RangeNegotiation, originalStart?: number): ByteRangeResumeState;
 /**
@@ -168,8 +206,13 @@ export declare function fromRangePrefix(url: string, byteCount: number, session:
  * createByteRangeResumeState from an earlier RangeNegotiation).
  *
  * This is the ergonomic entry point for SB-10 resumable Range.
- * - If the state has an etag, automatically adds `If-Range: <etag>` for safe resume
- *   (server will 412 if the resource changed).
+ * - If the state has a strong ETag, adds `If-Range: <etag>`; otherwise falls back
+ *   to `If-Range: <Last-Modified>` when a date validator is available, so the
+ *   resume can still pin the resource version.
+ * - This is always flagged as a resume continuation: a 200 fallback (server ignored
+ *   Range, sending the whole — possibly changed — resource) is treated as a hard
+ *   failure rather than splicing offset-skipped bytes of an unverified body onto the
+ *   old prefix. This closes the no-validator / weak-validator version-skew hole.
  * - Still supports all the normal RangePrefixOptions (extra headers are merged,
  *   signal, custom fetchImpl, onRangeNegotiated).
  * - The underlying fromByteRange skip/206/200 logic handles the continuation.

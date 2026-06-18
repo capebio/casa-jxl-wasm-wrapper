@@ -1,4 +1,5 @@
 export * from "./manifest.js";
+export * from "./manifest-validate.js";
 export * from "./constants.js";
 export * from "./fixtures.js";
 export * from "./tiling.js";
@@ -10,5 +11,6 @@ export * from "./tiled-decode-pool.js";
 export * from "./decode-core.js";
 export * from "./cache.js";
 export * from "./worker-protocol.js";
+export { prepareDecodePlan, expandRegionByTiles, type DecodePlan, type JxtcHeader } from "./plan.js";
 export { PoolState, HandleState } from "./tiled-decode-pool.js";
 //# sourceMappingURL=index.d.ts.map

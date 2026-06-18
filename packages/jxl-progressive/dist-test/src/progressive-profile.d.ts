@@ -12,6 +12,14 @@ export interface ProfileOptions {
     onProgress?: (byteOffset: number, total: number) => void;
     signal?: AbortSignal;
 }
+/** Options for profileJxlFile, extending ProfileOptions with a filesystem side-effect flag. */
+export interface ProfileFileOptions extends ProfileOptions {
+    /**
+     * When true (default), writes the manifest as `${path}.json` beside the .jxl file.
+     * Pass false to skip the write and return the manifest only.
+     */
+    writeManifest?: boolean;
+}
 /**
  * Drive a throw-away DecodeSession in small byte increments,
  * record progression events, and return a ProgressiveManifest.
@@ -34,7 +42,5 @@ export declare function profileJxlFile(path: string, sessionFactory: SessionFact
     height: number;
     hasAlpha: boolean;
     orientation?: number;
-}, opts?: ProfileOptions & {
-    writeManifest?: boolean;
-}): Promise<ProgressiveManifest>;
+}, opts?: ProfileFileOptions): Promise<ProgressiveManifest>;
 //# sourceMappingURL=progressive-profile.d.ts.map

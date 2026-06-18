@@ -16,6 +16,8 @@ export declare class PriorityQueue<T> {
     /** @internal test support */
     peek(): QueueEntry<T> | null;
     dequeue(): QueueEntry<T> | null;
+    private popLane;
+    private static compactLane;
     remove(sessionId: string, priority?: Priority): boolean;
     private swapDelete;
     get size(): number;

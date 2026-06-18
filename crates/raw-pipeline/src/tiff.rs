@@ -4,9 +4,7 @@
 //! We walk IFD0 to find image dimensions, strip offset, compression mode, and
 //! descend into Exif IFD → Olympus MakerNote IFD for white balance and black level.
 
-pub type Result<T> = std::result::Result<T, String>;
-macro_rules! bail { ($($t:tt)*) => { return Err(format!($($t)*)) }; }
-macro_rules! anyhow { ($($t:tt)*) => { format!($($t)*) }; }
+use anyhow::{anyhow, bail, Result};
 
 #[derive(Debug, Clone)]
 pub struct OrfInfo {
@@ -42,6 +40,37 @@ pub struct OrfInfo {
     pub gps_lon: Option<f64>,
     pub gps_alt: Option<f64>,
     pub quality: Option<u16>,
+}
+
+/// Common metadata extracted from any supported RAW format. Normalizes
+/// per-format field types (u32→usize for dims, Option<f32>→f32 for WB).
+#[derive(Debug, Clone)]
+pub struct RawImageMeta {
+    pub width: usize,
+    pub height: usize,
+    pub wb_r: f32,
+    pub wb_g: f32,
+    pub wb_b: f32,
+    pub color_matrix: Option<[[f32; 3]; 3]>,
+    pub orientation: u16,
+    pub make: String,
+    pub model: String,
+}
+
+impl OrfInfo {
+    pub fn meta(&self) -> RawImageMeta {
+        RawImageMeta {
+            width: self.width as usize,
+            height: self.height as usize,
+            wb_r: self.wb_r.unwrap_or(1.0),
+            wb_g: 1.0,
+            wb_b: self.wb_b.unwrap_or(1.0),
+            color_matrix: self.color_matrix,
+            orientation: self.orientation,
+            make: self.make.clone(),
+            model: self.model.clone(),
+        }
+    }
 }
 
 /// Scan the first 3 MB of `data` for JPEG SOI markers (0xFF 0xD8 0xFF) and
@@ -474,6 +503,51 @@ fn read_ifd(r: &Reader, offset: u32) -> Result<Vec<IfdEntry>> {
     Ok(entries)
 }
 
+/// Bounds-safe u16 read for IFD walking (LE or BE). Returns 0 on OOB.
+#[inline]
+fn ifd_u16(data: &[u8], off: usize, le: bool) -> u16 {
+    match data.get(off..off.wrapping_add(2)) {
+        Some(b) => if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) },
+        None => 0,
+    }
+}
+
+/// Bounds-safe u32 read for IFD walking (LE or BE). Returns 0 on OOB.
+#[inline]
+fn ifd_u32(data: &[u8], off: usize, le: bool) -> u32 {
+    match data.get(off..off.wrapping_add(4)) {
+        Some(b) => if le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) },
+        None => 0,
+    }
+}
+
+/// Zero-allocation IFD entry visitor shared by ORF, CR2, and DNG parsers.
+///
+/// Iterates entries at `off` (up to 512, as a corrupt-file guard), calling
+/// `visitor(tag, dtype, cnt, val, inline_pos)` for each. `inline_pos` is the
+/// byte offset of the 4-byte value field for callers that need in-place reads.
+/// Returns the next-IFD offset (0 on OOB or when there is none).
+pub(crate) fn visit_ifd<F: FnMut(u16, u16, u32, u32, usize)>(
+    data: &[u8], off: usize, le: bool, mut visitor: F,
+) -> u32 {
+    if off.checked_add(2).map_or(true, |e| e > data.len()) { return 0; }
+    let count = (ifd_u16(data, off, le) as usize).min(512);
+    for i in 0..count {
+        let e = off + 2 + i * 12;
+        if e.checked_add(12).map_or(true, |end| end > data.len()) { break; }
+        visitor(
+            ifd_u16(data, e,     le),
+            ifd_u16(data, e + 2, le),
+            ifd_u32(data, e + 4, le),
+            ifd_u32(data, e + 8, le),
+            e + 8,
+        );
+    }
+    let next_pos = off + 2 + count * 12;
+    if next_pos.checked_add(4).map_or(true, |end| end > data.len()) { 0 }
+    else { ifd_u32(data, next_pos, le) }
+}
+
 /// Olympus MakerNote header variants:
 ///   "OLYMP\0II\x03\0" + ...  (legacy)
 ///   "OLYMPUS\0II\x03\0" + ...  (E-system, modern; offsets are absolute in file)
@@ -799,11 +873,11 @@ pub fn bench_decode_orf(data: &[u8]) -> Result<DecodeBench> {
     let strip = &data[info.strip_offset as usize..strip_end];
 
     let t = std::time::Instant::now();
-    let raw = crate::decompress::decompress(strip, w, h)?;
+    let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
     let decompress_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = std::time::Instant::now();
-    let _rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let _rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let demosaic_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     Ok(DecodeBench {
@@ -837,11 +911,11 @@ pub fn bench_pipeline_orf(data: &[u8]) -> Result<PipelineBench> {
     let strip = &data[info.strip_offset as usize..strip_end];
 
     let t = std::time::Instant::now();
-    let raw = crate::decompress::decompress(strip, w, h)?;
+    let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
     let decompress_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = std::time::Instant::now();
-    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let demosaic_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let params = crate::pipeline::PipelineParams::default_olympus();
@@ -870,8 +944,8 @@ pub fn bench_tone_split_orf(data: &[u8]) -> Result<(f64, f64)> {
     let h = info.height as usize;
     let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
     let strip = &data[info.strip_offset as usize..strip_end];
-    let raw = crate::decompress::decompress(strip, w, h)?;
-    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let params = crate::pipeline::PipelineParams::default_olympus();
     Ok(crate::pipeline::bench_tone_split(&rgb16, &params))
 }
@@ -888,8 +962,8 @@ pub fn bench_tone_e2e_orf(data: &[u8]) -> Result<(f64, f64, u8, usize)> {
     let h = info.height as usize;
     let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
     let strip = &data[info.strip_offset as usize..strip_end];
-    let raw = crate::decompress::decompress(strip, w, h)?;
-    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let params = crate::pipeline::PipelineParams::default_olympus();
     let n = rgb16.len();
     let mut a = vec![0u8; n];
@@ -931,8 +1005,8 @@ pub fn bench_tone_stage_3way_orf(data: &[u8]) -> Result<(f64, f64, f64)> {
     let h = info.height as usize;
     let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
     let strip = &data[info.strip_offset as usize..strip_end];
-    let raw = crate::decompress::decompress(strip, w, h)?;
-    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h)?;
+    let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
+    let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let params = crate::pipeline::PipelineParams::default_olympus();
     Ok(crate::pipeline::bench_tone_stage_3way(&rgb16, &params))
 }

@@ -2,10 +2,14 @@ export type Tier = "relaxed-simd-mt" | "simd-mt" | "simd" | "scalar";
 
 let _cachedTier: Tier | undefined;
 let _gpuAdapterPromise: Promise<boolean> | undefined;
+let _resetGen = 0;
 
 export function _resetCache(): void {
+  _resetGen++;
   _cachedTier = undefined;
   _capsPromise = undefined;
+  // Clear GPU promise only when no call is pending; concurrent GPU probes are harmless but wasteful.
+  // Incrementing _resetGen ensures any in-flight computeCapabilities discards its result.
   _gpuAdapterPromise = undefined;
 }
 
@@ -115,12 +119,13 @@ export function detectTier(): Tier {
 }
 
 /** Heuristic; thresholds untuned — benchmark before relying on it (CLAUDE.md rule). */
-export function recommendedEffort(hwConcurrency?: number): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 {
+export function recommendedEffort(hwConcurrency?: number): 4 | 6 | 7 {
   const tier = detectTier();
   if (tier === "scalar") return 4;
   if (tier === "simd") return 6;
   const hwc = hwConcurrency ?? (typeof navigator !== "undefined" ? navigator.hardwareConcurrency ?? 0 : 0);
-  return hwc > 0 && hwc <= 2 ? 6 : 7; // MT tier on a 2-core device: don't pay effort-7 (CAP-7)
+  // hwc===0 means unknown (hardwareConcurrency unavailable) — treat conservatively like low-core (CAP-7)
+  return hwc > 0 && hwc > 2 ? 7 : 6;
 }
 
 /** Heuristic; thresholds untuned — benchmark before relying on it (CLAUDE.md rule). */
@@ -128,7 +133,8 @@ export function recommendedQualitySearch(hwConcurrency?: number): "full" | "fast
   const t = detectTier();
   if (t === "scalar") return "none";
   const hwc = hwConcurrency ?? (typeof navigator !== "undefined" ? navigator.hardwareConcurrency ?? 0 : 0);
-  if (t === "simd" || (hwc > 0 && hwc <= 2)) return "fast";
+  // hwc===0 means unknown (hardwareConcurrency unavailable) — treat conservatively like low-core
+  if (t === "simd" || hwc === 0 || hwc <= 2) return "fast";
   return "full";
 }
 
@@ -149,15 +155,29 @@ export interface Capabilities {
   imageBitmap: boolean;
   nativeJxlDecoder: boolean;
   selectedWasmBuild: Tier | "none";
-  libjxlVersion: string;
+  libjxlVersion: string | null;
   // Additive platform features (C-7)
   webgpu: boolean;
   webnn: boolean;
   hardwareConcurrency: number;
   deviceMemory: number | null;
   // Additive platform features (CAP-6 / CAP-8)
+  /** WebCodecs ImageDecoder class exists in this environment. Does NOT imply JXL support — use nativeJxlDecoder for that. */
   imageDecoder: boolean;
   wasmExceptions: boolean;
+}
+
+/**
+ * Race a promise against a timeout, resolving to `fallback` if `ms` elapses first.
+ * Used to bound async capability probes so a single stalled probe cannot permanently
+ * block the memoized getCapabilities() result (errors-2 / errors-8).
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -187,7 +207,10 @@ async function probeNativeJxl(): Promise<boolean> {
   if (typeof createImageBitmap !== 'undefined' && typeof Blob !== 'undefined') {
     try {
       const blob = new Blob([minimalJxl], { type: 'image/jxl' });
-      const bm = await createImageBitmap(blob);
+      // errors-2: bound the probe — some environments may never resolve createImageBitmap for an
+      // unrecognised MIME type. A single hung probe would otherwise permanently block _capsPromise.
+      const bm = await withTimeout(createImageBitmap(blob), 500, null);
+      if (!bm) return false;
       const ok = bm.width === 1 && bm.height === 1; // CAP-5: reject decoders that return garbage for 1x1
       bm.close();
       return ok;
@@ -201,17 +224,25 @@ async function probeNativeJxl(): Promise<boolean> {
 let _capsPromise: Promise<Capabilities> | undefined;
 
 export function getCapabilities(): Promise<Capabilities> {
-  return (_capsPromise ??= computeCapabilities());
+  return (_capsPromise ??= computeCapabilities(_resetGen));
 }
 
-async function computeCapabilities(): Promise<Capabilities> {
+async function computeCapabilities(gen: number): Promise<Capabilities> {
   const isBrowser = typeof window !== 'undefined' || typeof self !== 'undefined';
   const isNode = _isNode();
 
   let wasm = false;
   try {
     wasm = typeof WebAssembly !== 'undefined' && !!WebAssembly.compile;
-  } catch {}
+  } catch (e) {
+    // Silently treat as no-wasm; this is expected under strict CSP (C-9).
+    // Unexpected errors (SecurityError, TypeError) are indistinguishable here — see errors-7 for a
+    // future diagnostic channel proposal.
+  }
+
+  // C-3/performance-1: call detectTier() first so it caches _cachedTier before the individual probes below.
+  // This prevents _probeSimd()/_probeRelaxedSimd() from running twice when wasm=true.
+  const selectedWasmBuild: Capabilities["selectedWasmBuild"] = wasm ? detectTier() : "none";
 
   let wasmSimd = false;
   let wasmThreads = false;
@@ -219,6 +250,7 @@ async function computeCapabilities(): Promise<Capabilities> {
   let wasmExceptions = false;
   if (wasm) {
     // C-5: call the direct _probe* sync functions (wrappers deleted).
+    // detectTier() already ran these; results are synchronous constants so re-calling is safe and cheap.
     wasmSimd = _probeSimd();
     wasmThreads = _probeWasmThreads();
     wasmRelaxedSimd = wasmSimd && _probeRelaxedSimd();
@@ -244,16 +276,24 @@ async function computeCapabilities(): Promise<Capabilities> {
       // @ts-ignore
       await import('@casabio/jxl-native');
       nativeJxlDecoder = true;
-    } catch { /* fall through to browser probe if also browser-ish */ }
+    } catch (e: any) {
+      // Only swallow "package not installed" errors. Other failures (SyntaxError, ABI mismatch, I/O)
+      // indicate a broken installation and should surface — re-throw them.
+      const code = e?.code ?? "";
+      if (code !== "ERR_MODULE_NOT_FOUND" && code !== "MODULE_NOT_FOUND") throw e;
+      /* fall through to browser probe if also browser-ish */
+    }
   }
   if (!nativeJxlDecoder && isBrowser) {
     nativeJxlDecoder = await probeNativeJxl();
   }
 
-  // C-3: derive selectedWasmBuild from detectTier (central policy).
-  // detectTier() uses identical COI+SAB predicate for MT tiers. Matches old selectWasmBuild behavior for
-  // all combos when wasm=true. "none" only when !wasm.
-  const selectedWasmBuild: Capabilities["selectedWasmBuild"] = wasm ? detectTier() : "none";
+  // concurrency-1: if _resetCache() was called while we were awaiting, our result is stale.
+  // Discard it so the next getCapabilities() call starts a fresh computation.
+  if (gen !== _resetGen) {
+    _capsPromise = undefined;
+    return getCapabilities();
+  }
 
   return {
     wasm,
@@ -266,7 +306,7 @@ async function computeCapabilities(): Promise<Capabilities> {
     imageBitmap,
     nativeJxlDecoder,
     selectedWasmBuild,
-    libjxlVersion: "unknown", // TODO(packages/jxl-wasm/scripts/build.mjs): emit consumable libjxl version const (build-manifest has commit/tag but no generated version.ts / export; C-6 requires build-script edit + approval)
+    libjxlVersion: null, // TODO(packages/jxl-wasm/scripts/build.mjs): emit consumable libjxl version const (build-manifest has commit/tag but no generated version.ts / export; C-6 requires build-script edit + approval)
     webgpu,
     webnn,
     hardwareConcurrency,
@@ -282,7 +322,9 @@ export function probeWebGpuAdapter(): Promise<boolean> {
     try {
       const gpu = (navigator as any)?.gpu;
       if (!gpu) return false;
-      return (await gpu.requestAdapter()) !== null;
+      // errors-3: bound requestAdapter — driver enumeration can stall for seconds on some systems,
+      // and the memoized _gpuAdapterPromise would block all callers for that duration.
+      return (await withTimeout(gpu.requestAdapter(), 2000, null)) !== null;
     } catch { return false; }
   })());
 }

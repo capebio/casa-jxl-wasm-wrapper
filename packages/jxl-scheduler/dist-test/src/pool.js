@@ -28,6 +28,7 @@ export class WorkerPool {
     generation = 0;
     nextWorkerId = 0;
     shutdownPromise = null;
+    staggerTimer = null;
     lastSpawnFailureMs = 0;
     consecutiveSpawnFailures = 0;
     coreBudget;
@@ -242,11 +243,22 @@ export class WorkerPool {
                 const worker = await this.spawn();
                 this.handlePrewarmSuccess(worker);
             }
-            catch {
-                // spawn already accounts failure; continue stagger
+            catch (err) {
+                // prewarm is best-effort; record failure so backoff + metrics are correct
+                this.noteSpawnFailure();
+                if (DEV) {
+                    console.warn("[jxl-scheduler] prewarm spawn failed", err);
+                }
             }
             if (i < n - 1) {
-                await new Promise((r) => setTimeout(r, WorkerPool.PREWARM_STAGGER_MS));
+                await new Promise((r) => {
+                    this.staggerTimer = globalThis.setTimeout(() => {
+                        this.staggerTimer = null;
+                        r();
+                    }, WorkerPool.PREWARM_STAGGER_MS);
+                });
+                if (this.destroyed)
+                    break;
             }
         }
     }
@@ -254,10 +266,6 @@ export class WorkerPool {
     reapIdle({ preserveMinIdle = true } = {}) {
         let count = 0;
         for (const worker of this.idle) {
-            if (this.parked.has(worker)) {
-                this.parked.delete(worker);
-                continue;
-            }
             if (preserveMinIdle && this.idle.size <= this.minIdle)
                 break;
             this.recycle(worker);
@@ -277,6 +285,11 @@ export class WorkerPool {
     async shutdownInner() {
         this.destroyed = true;
         this.generation++;
+        // Cancel any pending inter-spawn stagger timer so it cannot fire after shutdown.
+        if (this.staggerTimer !== null) {
+            globalThis.clearTimeout(this.staggerTimer);
+            this.staggerTimer = null;
+        }
         // Wait for in-flight spawns so no worker escapes cleanup.
         await Promise.allSettled([...this.spawnPromises]);
         const shutdownPromises = Array.from(this.workers.values(), (worker) => this.cleanupAndRemove(worker, true, POOL_SHUTDOWN_TIMEOUT_MS));
@@ -410,18 +423,13 @@ export class WorkerPool {
         }
     }
     wireWorker(worker) {
-        // Forward-compatible: recycles worker on error/exit if the handle supports it.
-        // WorkerHandle does not expose these today; optional chaining is a safe noop.
-        const handle = worker.handle;
-        handle.onError?.(() => this.recycle(worker));
-        handle.onExit?.(() => this.recycle(worker));
+        // Optional hooks: recycle worker on crash/exit. WorkerHandle declares these
+        // as optional so implementations that don't fire them are still valid.
+        worker.handle.onError?.(() => this.recycle(worker));
+        worker.handle.onExit?.(() => this.recycle(worker));
     }
     takeIdleWorker() {
         for (const worker of this.idle) {
-            if (this.parked.has(worker)) {
-                this.parked.delete(worker);
-                continue;
-            }
             if (this.workers.has(worker.id) &&
                 worker.activeSessionId === null &&
                 !worker.cancelling &&

@@ -1,82 +1,67 @@
-import { clampRegion } from "./decode-core.js";
-import { parseJxtcHeader, tilesOverlappingRegion } from "./tiling.js";
-import { pickRegionDecoder, REGION_DECODER_RGBA8, REGION_DECODER_RGBA16 } from "./decode-core.js";
-// Memoized header parse: WeakMap by containerBytes identity (Grok1)
+import { clampRegion, PyramidError } from "./decode-core.js";
+import { parseJxtcHeader, tilesForClampedRegion } from "./tiling.js";
+import { REGION_DECODER_RGBA8, REGION_DECODER_RGBA16, formatFromBits, bppOfFormat } from "./decode-core.js";
+function sameRegion(a, b) {
+    return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+// P3: header memo by bytes identity; frozen and shared (no per-call copies, uniform identity).
 const headerMemo = new WeakMap();
 function memoParseHeader(bytes) {
     const hit = headerMemo.get(bytes);
     if (hit)
         return hit;
-    const th = parseJxtcHeader(bytes);
-    const h = {
-        imageW: th.imageW,
-        imageH: th.imageH,
-        tileSize: th.tileSize,
-        bitsPerSample: th.bitsPerSample,
-        version: 1,
-    };
+    const parsed = parseJxtcHeader(bytes);
+    const h = Object.freeze({ ...parsed, version: parsed.version });
     headerMemo.set(bytes, h);
     return h;
 }
-// Memoized tile grid by (W,H,T) triple. Key as string for simplicity (small).
-const gridMemo = new Map();
-export function precomputeTileGrid(W, H, T) {
-    const key = `${W}:${H}:${T}`;
-    const hit = gridMemo.get(key);
-    if (hit)
-        return hit;
-    // Delegate to existing (validated) tilesOverlappingRegion with full rect to get grid? 
-    // But for plan we want the grid tiles for the (clamped) viewport only; precompute full? 
-    // Per spec: precomputeTileGrid(W, H, T) — used inside prepare for the viewport.
-    // Implement as the tiles for a full-image region request (or memo helper).
-    const fullRegion = { x: 0, y: 0, w: W, h: H };
-    const tiles = tilesOverlappingRegion(W, H, T, fullRegion);
-    gridMemo.set(key, tiles);
-    return tiles;
-}
-// Memoized per LevelSource (identity of source object)
-const planMemo = new WeakMap();
+const coreMemo = new WeakMap();
 export function prepareDecodePlan(source, region) {
     if (source.kind !== "tiled") {
-        throw new Error("prepareDecodePlan requires tiled LevelSource");
+        throw new PyramidError('BAD_MANIFEST', 'prepareDecodePlan requires tiled LevelSource'); // P2: PyramidError uniformly
     }
-    // WeakMap hit on source ref
-    const cached = planMemo.get(source);
-    if (cached) {
-        // Still clamp per-call region (viewport can vary); header/decoder/grid stable per source
-        const clamped = clampRegion(region, source.width, source.height);
-        if (clamped.w <= 0 || clamped.h <= 0) {
-            throw new RangeError("empty region after clamp");
+    let core = coreMemo.get(source);
+    if (core === undefined) {
+        const header = memoParseHeader(source.bytes);
+        // P1: hand-built sources (decode-level L18-2) may disagree with container bytes → wrong-tile decode. Cross-check.
+        if (header.imageW !== source.width || header.imageH !== source.height || header.tileSize !== source.tileSize) {
+            throw new PyramidError('DIM_MISMATCH', `source ${source.width}x${source.height}/T${source.tileSize} != container ${header.imageW}x${header.imageH}/T${header.tileSize}`);
         }
-        // derive tiles for this viewport (grid precompute can be used for full but we use direct for ROI)
-        const tiles = tilesOverlappingRegion(source.width, source.height, source.tileSize, clamped);
-        return {
-            viewport: clamped,
-            tiles,
-            header: cached.header,
-            bits: cached.bits,
-            bpp: cached.bpp,
-            format: cached.format,
-            decodeRegion: cached.decodeRegion,
+        const bits = header.bitsPerSample;
+        const format = formatFromBits(bits);
+        core = {
+            header, bits, format, bpp: bppOfFormat(format),
+            decodeRegion: bits === 16 ? REGION_DECODER_RGBA16 : REGION_DECODER_RGBA8, // F6 unchanged
+            lastRegion: undefined,
+            lastPlan: undefined,
         };
+        coreMemo.set(source, core);
     }
-    if (!Number.isFinite(region.x) || !Number.isFinite(region.y) || !Number.isFinite(region.w) || !Number.isFinite(region.h)) {
-        throw new RangeError("region x,y,w,h must be finite");
-    }
-    const headerRaw = memoParseHeader(source.bytes);
-    const header = { ...headerRaw };
-    const bits = header.bitsPerSample;
-    const format = bits === 16 ? 'rgba16' : 'rgba8';
-    // Inline choice at site where format/bits known (Grok4); pickRegionDecoder kept for overrides/callers.
-    const decodeRegion = bits === 16 ? REGION_DECODER_RGBA16 : REGION_DECODER_RGBA8;
-    const bpp = bits === 16 ? 8 : 4;
+    // P2: clampRegion asserts finite (PyramidError BAD_REGION) — one validation path for first and repeat calls.
     const viewport = clampRegion(region, source.width, source.height);
     if (viewport.w <= 0 || viewport.h <= 0) {
-        throw new RangeError("empty region after clamp");
+        throw new PyramidError('BAD_REGION', 'empty region after clamp');
     }
-    const tiles = tilesOverlappingRegion(source.width, source.height, source.tileSize, viewport);
-    const plan = { viewport, tiles, header, bits, bpp, format, decodeRegion };
-    planMemo.set(source, plan);
+    if (core.lastRegion && sameRegion(core.lastRegion, viewport)) {
+        // fast path for identical viewport (panning, settle, AR predictive reuse)
+        // single retention per source (P3 discipline, no history growth, no alias of caller region)
+        return core.lastPlan;
+    }
+    // P5: already clamped — skip re-validate/re-clamp (T7 core walk).
+    const tiles = tilesForClampedRegion(source.width, source.height, source.tileSize, viewport.x, viewport.y, viewport.w, viewport.h);
+    const plan = { viewport, tiles, header: core.header, bits: core.bits, bpp: core.bpp, format: core.format, decodeRegion: core.decodeRegion };
+    core.lastRegion = viewport; // owned clamped viewport
+    core.lastPlan = plan;
     return plan;
+}
+/** P6: prefetch ring — expand a viewport by whole tiles, clamped to the image (gaming/AR predictive fetch).
+ *  Pure; pass the result to prepareDecodePlan/decode as a normal region. */
+export function expandRegionByTiles(region, tileSize, marginTiles, imageW, imageH) {
+    const m = Math.max(0, Math.floor(marginTiles)) * tileSize;
+    const x0 = Math.max(0, region.x - m);
+    const y0 = Math.max(0, region.y - m);
+    const x1 = Math.min(imageW, region.x + region.w + m);
+    const y1 = Math.min(imageH, region.y + region.h + m);
+    return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
 }
 //# sourceMappingURL=plan.js.map

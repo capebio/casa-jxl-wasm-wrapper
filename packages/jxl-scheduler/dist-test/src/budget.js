@@ -8,18 +8,24 @@ export class CoreBudget {
     capacity;
     tokens;
     waiters = [];
+    _waitersHead = 0;
+    // Cached once at construction — release() is a hot path (called on every worker
+    // completion) and env-sniffing on every call adds measurable overhead at high
+    // worker-turnover rates.
+    _devMode;
     constructor(capacity) {
         this.capacity = capacity;
         if (!Number.isFinite(capacity) || capacity < 0) {
             throw new Error("[jxl-scheduler] CoreBudget capacity must be finite >= 0");
         }
         this.tokens = capacity;
+        this._devMode = !CoreBudget._isProduction();
     }
     get available() {
         return this.tokens;
     }
     get pendingCount() {
-        return this.waiters.length;
+        return this.waiters.length - this._waitersHead;
     }
     /** FIFO acquire. Blocks until cost tokens free. */
     async acquire(cost = 1) {
@@ -40,18 +46,42 @@ export class CoreBudget {
         if (cost <= 0)
             return;
         const next = this.tokens + cost;
-        if (next > this.capacity && typeof process !== "undefined" && process.env["NODE_ENV"] !== "production") {
+        if (next > this.capacity && this._devMode) {
             console.warn(`[jxl-scheduler] CoreBudget over-release: ${this.tokens}+${cost} > ${this.capacity}`);
         }
         this.tokens = Math.min(this.capacity, next);
         this.drainWaiters();
     }
+    /**
+     * Returns true when running in production mode. Checks both Node.js and
+     * browser/bundler conventions so DEV-mode warnings fire in all environments.
+     */
+    static _isProduction() {
+        // Node.js
+        if (typeof process !== "undefined" && process.env["NODE_ENV"] === "production")
+            return true;
+        // Vite / webpack DefinePlugin / similar bundlers expose __DEV__
+        if (typeof globalThis.__DEV__ === "boolean") {
+            return !globalThis.__DEV__;
+        }
+        return false;
+    }
     drainWaiters() {
-        while (this.waiters.length > 0) {
-            const w = this.waiters[0];
+        while (this._waitersHead < this.waiters.length) {
+            const w = this.waiters[this._waitersHead];
             if (this.tokens >= w.needed) {
-                this.waiters.shift();
+                this._waitersHead++;
                 this.tokens -= w.needed;
+                // Compact when fully consumed or head passes the halfway mark (mirrors queue.ts).
+                if (this._waitersHead >= this.waiters.length) {
+                    this.waiters.length = 0;
+                    this._waitersHead = 0;
+                }
+                else if (this._waitersHead > 64 && this._waitersHead * 2 > this.waiters.length) {
+                    this.waiters.copyWithin(0, this._waitersHead);
+                    this.waiters.length -= this._waitersHead;
+                    this._waitersHead = 0;
+                }
                 w.resolve();
             }
             else {
@@ -59,7 +89,11 @@ export class CoreBudget {
             }
         }
     }
-    /** Non-blocking: deduct cost if available, else false. Never queues. */
+    /**
+     * Non-blocking: deduct cost if available, else return false. Never queues.
+     * Unlike acquire(), cost > capacity returns false rather than throwing —
+     * callers using this path should check capacity themselves if needed.
+     */
     tryAcquire(cost = 1) {
         if (cost <= 0)
             return true;

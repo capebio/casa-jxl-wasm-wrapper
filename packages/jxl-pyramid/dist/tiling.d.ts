@@ -12,14 +12,31 @@ export interface JxtcHeader {
     tilesX: number;
     tilesY: number;
     hasAlpha: boolean;
-    /** 8 or 16. v1 tiled containers are 8-bit; 16-bit available after JXTC-16 rebuild. */
+    /** 8 or 16. Flag in header (v1 and v2). */
     bitsPerSample: 8 | 16;
+    /** 1 or 2. v2 support added for future table/layout extensions (see level-table reader). */
+    version: 1 | 2;
 }
 /** True when ingest should replace the whole-frame top level with a JXTC container. */
 export declare function shouldTileTopLevel(width: number, height: number): boolean;
 export declare function isJxtcContainer(bytes: Uint8Array): boolean;
 /** Parse the 32-byte JXTC container header (little-endian u32 fields). */
 export declare function parseJxtcHeader(bytes: Uint8Array): JxtcHeader;
+/** Pre-parsed tile index table for fast O(1) extract (no per-tile DataView).
+ *  Parsed once per container bytes (WeakMap). Major win for dc-then-final progressive
+ *  (decode-level.ts calls extract N times per viewport per pass) and any per-tile paths.
+ *  v2 table reader extension point (different stride/fields can be handled here).
+ */
+export interface JxtcTileIndex {
+    offsets: Uint32Array;
+    lengths: Uint32Array;
+    /** Offset in container where tile data starts (after header + index table). */
+    dataBase: number;
+}
+/** Parse (or hit memo) the tile offset/length table after the 32B header.
+ *  Called on first extract per container; subsequent extracts are array lookup + subarray.
+ */
+export declare function getOrParseJxtcTileIndex(bytes: Uint8Array, header: JxtcHeader): JxtcTileIndex;
 export interface ImageRegion {
     x: number;
     y: number;
@@ -28,8 +45,21 @@ export interface ImageRegion {
 }
 /** Tile-aligned intersections between a viewport region and the JXTC grid. */
 export declare function tilesOverlappingRegion(imageW: number, imageH: number, tileSize: number, region: ImageRegion): ImageRegion[];
+/** Compat wrapper used by prepareDecodePlan (plan.ts). Delegates to tilesOverlappingRegion. */
+export declare function tilesForClampedRegion(imageW: number, imageH: number, tileSize: number, x: number, y: number, w: number, h: number): ImageRegion[];
 /** COOP/COEP + Worker availability — parallel tile workers are viable. */
 export declare function canUseParallelTileWorkers(): boolean;
 /** Whether SharedArrayBuffer + crossOriginIsolated allows SAB-backed container bytes for zero-copy fanout to workers (Grok2 SAB opt-in). Split from canUseParallelTileWorkers. */
 export declare function canShareContainerBytes(): boolean;
+/**
+ * Extract the standalone JXL bitstream bytes for one tile from a JXTC container.
+ * Pure TS (no WASM). Zero-copy subarray view. Used for progressive DC-then-final (F1)
+ * and future per-tile createDecoder paths.
+ *
+ * Fast path: uses pre-parsed JxtcTileIndex (Uint32Arrays) from getOrParseJxtcTileIndex.
+ * First call per container parses the table once; subsequent are O(1) array + subarray.
+ * This eliminates per-tile DataView cost in hot paths (e.g. dc-then-final viewport pans).
+ * v2: table reader here is the extension point for layout changes.
+ */
+export declare function extractTileBitstream(container: Uint8Array, tile: ImageRegion, header: JxtcHeader): Uint8Array;
 //# sourceMappingURL=tiling.d.ts.map

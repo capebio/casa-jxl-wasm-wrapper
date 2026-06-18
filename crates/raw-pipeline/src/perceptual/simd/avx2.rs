@@ -4,6 +4,7 @@
 #![cfg(target_arch = "x86_64")]
 
 use core::arch::x86_64::*;
+use super::scalar::{scale_err_tail, xyb_tail, downsample_row_tail};
 
 #[inline]
 unsafe fn hsum256(v: __m256) -> f32 {
@@ -46,6 +47,12 @@ pub unsafe fn scale_err_avx2(
     let half = _mm256_set1_ps(0.5); // loop-invariant rsqrt Newton constants
     let threehalf = _mm256_set1_ps(1.5);
     let mut acc = _mm256_setzero_ps();
+    // Drain the f32 lane accumulator to f64 every FLUSH iterations to prevent
+    // precision loss when summing > ~4096 values (f32 exact range ≈ 2^24).
+    // Keeps SIMD throughput while achieving f64 accumulation precision end-to-end.
+    const FLUSH: usize = 4096;
+    let mut flush_count = 0usize;
+    let mut sum = 0f64;
 
     let lanes = n / 8 * 8;
     let mut i = 0;
@@ -80,19 +87,15 @@ pub unsafe fn scale_err_avx2(
         };
         acc = _mm256_fmadd_ps(e2, root, acc);
         i += 8;
+        flush_count += 1;
+        if flush_count == FLUSH {
+            sum += hsum256(acc) as f64;
+            acc = _mm256_setzero_ps();
+            flush_count = 0;
+        }
     }
-    let mut sum = hsum256(acc) as f64;
-    // scalar tail
-    while i < n {
-        let m = (mask[i] * 2.0 + 0.15).max(0.15);
-        let inv = 1.0 / m;
-        let ex = (rx[i] - tx[i]) * inv;
-        let ey = (ry[i] - ty[i]) * inv;
-        let eb = (rb[i] - tb[i]) * inv;
-        let e2 = kx * ex * ex + ky * ey * ey + kb * eb * eb;
-        sum += (e2 * (e2 + 1e-12).sqrt()) as f64;
-        i += 1;
-    }
+    sum += hsum256(acc) as f64;
+    sum = scale_err_tail(mask, rx, ry, rb, tx, ty, tb, n, kx, ky, kb, i, sum);
     ((sum / n as f64).powf(1.0 / 3.0)) as f32
 }
 
@@ -234,18 +237,8 @@ pub unsafe fn pixels_to_xyb_avx2(
         _mm256_storeu_ps(b.as_mut_ptr().add(i), bb);
         i += 8;
     }
-    // scalar tail
-    let lut_s = core::slice::from_raw_parts(lut, 256);
-    while i < n {
-        let j = i * 4;
-        let r = lut_s[px[j] as usize];
-        let g = lut_s[px[j + 1] as usize];
-        let bb = lut_s[px[j + 2] as usize];
-        x[i] = (r - bb) * 0.5;
-        y[i] = (r + bb) * 0.5 + g;
-        b[i] = bb;
-        i += 1;
-    }
+    let lut_s: &[f32; 256] = &*(lut as *const [f32; 256]);
+    xyb_tail(px, lut_s, n, i, x, y, b);
 }
 
 /// AVX2 2× box downsample of a single plane (w×h) into `dst` (dw×dh).
@@ -340,16 +333,7 @@ pub unsafe fn downsample_avx2(
             x += 8;
         }
         // scalar remainder + clamped last column
-        while x < dw {
-            let sx0 = x << 1;
-            let sx1 = if sx0 + 1 < w { sx0 + 1 } else { w - 1 };
-            dst[drow + x] = (src[row0 + sx0]
-                + src[row0 + sx1]
-                + src[row1 + sx0]
-                + src[row1 + sx1])
-                * 0.25;
-            x += 1;
-        }
+        downsample_row_tail(src, w, h, &mut dst[drow..drow + dw], dw, y, x);
     }
 }
 

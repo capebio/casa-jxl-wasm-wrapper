@@ -1,3 +1,5 @@
+import { PyramidError } from './decode-core.js';
+
 /** Long-edge threshold for tiled top-level ingest (spec §4 / M4). */
 export const MASSIVE_LONG_EDGE_THRESHOLD = 8000;
 
@@ -37,11 +39,11 @@ export function isJxtcContainer(bytes: Uint8Array): boolean {
 
 /** Parse the 32-byte JXTC container header (little-endian u32 fields). */
 export function parseJxtcHeader(bytes: Uint8Array): JxtcHeader {
-  if (bytes.byteLength < 32) throw new Error("JXTC container too small for header");
+  if (bytes.byteLength < 32) throw new PyramidError("JXTC_PARSE", "JXTC container too small for header");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (view.getUint32(0, true) !== JXTC_MAGIC) throw new Error("not a JXTC container");
+  if (view.getUint32(0, true) !== JXTC_MAGIC) throw new PyramidError("JXTC_PARSE", "not a JXTC container");
   const version = view.getUint32(4, true) as 1 | 2;
-  if (version !== 1 && version !== 2) throw new Error("unsupported JXTC version");
+  if (version !== 1 && version !== 2) throw new PyramidError("JXTC_PARSE", "unsupported JXTC version");
   const imageW = view.getUint32(8, true);
   const imageH = view.getUint32(12, true);
   const tileSize = view.getUint32(16, true);
@@ -53,16 +55,16 @@ export function parseJxtcHeader(bytes: Uint8Array): JxtcHeader {
 
   // G4-A: strict boundary validation for untrusted JXTC (adversarial dims/tileSize)
   if (imageW <= 0 || imageH <= 0 || tileSize <= 0) {
-    throw new Error("JXTC header has non-positive imageW/H or tileSize");
+    throw new PyramidError("JXTC_PARSE", "JXTC header has non-positive imageW/H or tileSize");
   }
   if (bitsPerSample !== 8 && bitsPerSample !== 16) {
-    throw new Error("JXTC bitsPerSample must be 8 or 16");
+    throw new PyramidError("JXTC_PARSE", "JXTC bitsPerSample must be 8 or 16");
   }
   const bytesPerPixel = bitsPerSample === 16 ? 8 : 4;
   // safe total byte size cap ~1GB (2^30); prevent OOM on malicious header
   const totalBytes = imageW * imageH * bytesPerPixel;
   if (!Number.isFinite(totalBytes) || totalBytes > (1 << 30) || imageW > (1 << 24) || imageH > (1 << 24)) {
-    throw new Error("JXTC dimensions exceed safety cap (w*h*bpp > 2^30 or non-finite)");
+    throw new PyramidError("JXTC_PARSE", "JXTC dimensions exceed safety cap (w*h*bpp > 2^30 or non-finite)");
   }
 
   return { imageW, imageH, tileSize, tilesX, tilesY, hasAlpha, bitsPerSample, version };
@@ -89,9 +91,17 @@ export function getOrParseJxtcTileIndex(bytes: Uint8Array, header: JxtcHeader): 
   const hit = tileIndexMemo.get(bytes);
   if (hit) return hit;
 
+  // Cap numTiles to prevent overflow and OOM on untrusted tilesX/tilesY
+  const MAX_TILES = (1 << 24); // 16M tiles (128GB at 8B/tile)
+  if (header.tilesX > MAX_TILES || header.tilesY > MAX_TILES) {
+    throw new PyramidError('JXTC_PARSE', 'JXTC tilesX or tilesY exceeds safety cap');
+  }
   const numTiles = header.tilesX * header.tilesY;
+  if (numTiles > MAX_TILES) {
+    throw new PyramidError('JXTC_PARSE', 'JXTC total tiles exceeds safety cap');
+  }
   if (bytes.byteLength < 32 + numTiles * 8) {
-    throw new Error('JXTC container too small for index table');
+    throw new PyramidError('JXTC_PARSE', 'JXTC container too small for index table');
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const offsets = new Uint32Array(numTiles);
@@ -129,9 +139,9 @@ export function tilesOverlappingRegion(
     !Number.isFinite(region.w) || region.w < 0 ||
     !Number.isFinite(region.h) || region.h < 0
   ) {
-    throw new Error("region must have finite non-negative x, y, w, h");
+    throw new PyramidError("JXTC_PARSE", "region must have finite non-negative x, y, w, h");
   }
-  if (tileSize <= 0) throw new Error("tileSize must be positive");
+  if (tileSize <= 0) throw new PyramidError("JXTC_PARSE", "tileSize must be positive");
   const rx = Math.min(Math.max(0, region.x), imageW);
   const ry = Math.min(Math.max(0, region.y), imageH);
   const rw = Math.min(region.w, imageW - rx);
@@ -213,18 +223,18 @@ export function extractTileBitstream(
   tile: ImageRegion,
   header: JxtcHeader,
 ): Uint8Array {
-  if (container.byteLength < 32) throw new Error('JXTC container too small');
+  if (container.byteLength < 32) throw new PyramidError('JXTC_PARSE', 'JXTC container too small');
   // Re-validate magic for untrusted input (safety, cheap).
   const view = new DataView(container.buffer, container.byteOffset, container.byteLength);
-  if (view.getUint32(0, true) !== JXTC_MAGIC) throw new Error('not a JXTC container');
+  if (view.getUint32(0, true) !== JXTC_MAGIC) throw new PyramidError('JXTC_PARSE', 'not a JXTC container');
   const tilesX = header.tilesX;
   const tilesY = header.tilesY;
   const tileSize = header.tileSize;
-  if (tilesX <= 0 || tilesY <= 0 || tileSize <= 0) throw new Error('bad JXTC header dims');
+  if (tilesX <= 0 || tilesY <= 0 || tileSize <= 0) throw new PyramidError('JXTC_PARSE', 'bad JXTC header dims');
 
   const tx = Math.floor(tile.x / tileSize);
   const ty = Math.floor(tile.y / tileSize);
-  if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) throw new Error('tile out of JXTC grid');
+  if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) throw new PyramidError('JXTC_PARSE', 'tile out of JXTC grid');
 
   const tileIdx = ty * tilesX + tx;
 
@@ -234,7 +244,7 @@ export function extractTileBitstream(
   const len = table.lengths[tileIdx]!;
   const dataBase = table.dataBase + off;
 
-  if (dataBase + len > container.byteLength || len === 0) throw new Error('tile data OOB or empty');
+  if (dataBase + len > container.byteLength || len === 0) throw new PyramidError('JXTC_PARSE', 'tile data OOB or empty');
 
   return container.subarray(dataBase, dataBase + len);
 }

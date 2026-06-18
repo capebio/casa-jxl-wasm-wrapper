@@ -46,15 +46,13 @@ pub fn decode_scaled(jpeg: &[u8], denom: u8) -> Result<DecodeResult, JsValue> {
         .info()
         .ok_or_else(|| JsValue::from_str("no image info after read_info"))?;
 
-    let (out_w, out_h) = if scale > 1 {
+    if scale > 1 {
         let target_w = (info.width as u32 / scale).max(1) as u16;
         let target_h = (info.height as u32 / scale).max(1) as u16;
         decoder
             .scale(target_w, target_h)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?
-    } else {
-        (info.width, info.height)
-    };
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    }
 
     let pixels = decoder
         .decode()
@@ -68,8 +66,8 @@ pub fn decode_scaled(jpeg: &[u8], denom: u8) -> Result<DecodeResult, JsValue> {
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(DecodeResult {
-        width: out_w as u32,
-        height: out_h as u32,
+        width: decoded.width as u32,
+        height: decoded.height as u32,
         data: rgba,
     })
 }

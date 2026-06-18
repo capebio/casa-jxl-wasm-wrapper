@@ -15,8 +15,12 @@ function isRelaxedProbe(view) {
 function isSimdProbe(view) {
     return view.includes(0xfd) && view.includes(0x0f);
 }
+function isEhProbe(view) {
+    // PROBE_EH_BYTES contains 0x19 (catch_all opcode); not present in any other probe
+    return view.includes(0x19) && !view.includes(0xfd) && !view.includes(0xfe);
+}
 function installProbeStubs(options) {
-    const { simd = true, relaxed = false, threads = false } = options;
+    const { simd = true, relaxed = false, threads = false, exceptions = false } = options;
     globalAny.WebAssembly.validate = (bytes) => {
         const view = ArrayBuffer.isView(bytes)
             ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -27,6 +31,8 @@ function installProbeStubs(options) {
             return relaxed;
         if (isSimdProbe(view))
             return simd;
+        if (isEhProbe(view))
+            return exceptions;
         return false;
     };
 }
@@ -53,18 +59,31 @@ function setNoWasm() {
 }
 async function freshCapsAndTier() {
     const mod = await import(`../src/index.js?matrix=${Date.now()}`);
+    if (mod && typeof mod._resetCache === "function") {
+        mod._resetCache();
+    }
     const tier = mod.detectTier();
     const caps = await mod.getCapabilities();
     return { mod, tier, caps };
 }
 describe("@casabio/jxl-capabilities tier matrix (X-1)", () => {
-    beforeEach(() => {
+    beforeEach(async () => {
         // ensure clean starting point
         restoreProbes();
         globalAny.self = originalSelf;
         if (originalSharedArrayBuffer) {
             globalAny.SharedArrayBuffer = originalSharedArrayBuffer;
         }
+        else {
+            delete globalAny.SharedArrayBuffer;
+        }
+        try {
+            const mod = await import("../src/index.js");
+            if (mod && typeof mod._resetCache === "function") {
+                mod._resetCache();
+            }
+        }
+        catch { }
     });
     afterEach(() => {
         restoreProbes();
@@ -128,6 +147,13 @@ describe("@casabio/jxl-capabilities tier matrix (X-1)", () => {
         assert.equal(tier, "relaxed-simd-mt");
         assert.equal(caps.selectedWasmBuild, "relaxed-simd-mt");
         assert.equal(caps.wasmRelaxedSimd, true);
+    });
+    test("wasm + simd + sab + coi + exceptions probe → wasmExceptions=true", async () => {
+        installProbeStubs({ simd: true, relaxed: false, threads: false, exceptions: true });
+        setSAB(true);
+        setCOI(true);
+        const { caps } = await freshCapsAndTier();
+        assert.equal(caps.wasmExceptions, true);
     });
     test("memoization: second getCapabilities returns same promise, no re-probe side effects", async () => {
         installProbeStubs({ simd: true, relaxed: false });

@@ -92,6 +92,8 @@ test("tilesOverlappingRegion properties (random)", () => {
     }
     // at least some coverage for non-empty
     if (w > 0 && h > 0) expect(covered).toBeGreaterThan(0);
+    // verify full coverage with no gaps
+    expect(covered).toBe(region.w * region.h);
   }
 });
 

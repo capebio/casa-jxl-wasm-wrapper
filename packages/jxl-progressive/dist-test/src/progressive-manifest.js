@@ -38,8 +38,26 @@ export function validateManifest(json) {
     assertField(typeof obj["encoder"] === "object" && obj["encoder"] !== null, "encoder", "encoder must be an object");
     const enc = obj["encoder"];
     assertField(typeof enc["name"] === "string", "encoder.name", "encoder.name must be a string");
+    assertField(enc["name"].length <= 256, "encoder.name", "encoder.name must be <= 256 chars");
     assertField(typeof enc["libjxlVersion"] === "string", "encoder.libjxlVersion", "encoder.libjxlVersion must be a string");
+    assertField(enc["libjxlVersion"].length <= 64, "encoder.libjxlVersion", "encoder.libjxlVersion must be <= 64 chars");
     assertField(Array.isArray(enc["flags"]), "encoder.flags", "encoder.flags must be an array");
+    assertField(enc["flags"].length <= 64, "encoder.flags", "encoder.flags must have <= 64 entries");
+    // saliency (optional; tighten ranges when present so scheduler boosts are safe)
+    if (obj["saliency"] !== undefined) {
+        assertField(typeof obj["saliency"] === "object" && obj["saliency"] !== null, "saliency", "saliency must be an object if present");
+        const s = obj["saliency"];
+        assertField(typeof s["enabled"] === "boolean", "saliency.enabled", "saliency.enabled must be a boolean");
+        assertField(typeof s["centerX"] === "number" && s["centerX"] >= 0 && s["centerX"] <= 1, "saliency.centerX", "saliency.centerX must be number in [0,1]");
+        assertField(typeof s["centerY"] === "number" && s["centerY"] >= 0 && s["centerY"] <= 1, "saliency.centerY", "saliency.centerY must be number in [0,1]");
+        assertField(typeof s["confidence"] === "number" && s["confidence"] >= 0 && s["confidence"] <= 1, "saliency.confidence", "saliency.confidence must be number in [0,1]");
+        assertField(typeof s["method"] === "string", "saliency.method", "saliency.method must be a string");
+    }
+    // perceptual passthrough (optional, loose for future color science transport)
+    if (obj["perceptual"] !== undefined) {
+        assertField(typeof obj["perceptual"] === "object" && obj["perceptual"] !== null && !Array.isArray(obj["perceptual"]), "perceptual", "perceptual must be an object if present");
+        assertField(Object.keys(obj["perceptual"]).length <= 32, "perceptual", "perceptual must have <= 32 keys");
+    }
     // tiers
     assertField(Array.isArray(obj["tiers"]), "tiers", "tiers must be an array");
     const tiersArr = obj["tiers"];
@@ -50,7 +68,10 @@ export function validateManifest(json) {
         assertField(typeof t === "object" && t !== null, f, `${f} must be an object`);
         assertField(VALID_TIER_NAMES.has(t["name"]), `${f}.name`, `${f}.name must be dc|preview|full`);
         assertField(typeof t["byteStart"] === "number", `${f}.byteStart`, `${f}.byteStart must be a number`);
+        assertField(Number.isFinite(t["byteStart"]) && t["byteStart"] >= 0, `${f}.byteStart`, `${f}.byteStart must be a finite non-negative number`);
         assertField(typeof t["byteEnd"] === "number", `${f}.byteEnd`, `${f}.byteEnd must be a number`);
+        assertField(Number.isFinite(t["byteEnd"]) && t["byteEnd"] > 0, `${f}.byteEnd`, `${f}.byteEnd must be a finite positive number`);
+        assertField(t["byteEnd"] > t["byteStart"], `${f}.byteEnd`, `${f}.byteEnd must be greater than ${f}.byteStart`);
         assertField(typeof t["progressionIndex"] === "number" || t["progressionIndex"] === "final", `${f}.progressionIndex`, `${f}.progressionIndex must be number or "final"`);
         assertField(typeof t["intendedUse"] === "string", `${f}.intendedUse`, `${f}.intendedUse must be a string`);
     }
@@ -64,9 +85,12 @@ export async function checkHash(manifest, jxlBytes) {
     if (typeof globalThis.crypto !== "undefined" &&
         typeof globalThis.crypto.subtle?.digest === "function") {
         const hashBuf = await globalThis.crypto.subtle.digest("SHA-256", jxlBytes);
-        hashHex = Array.from(new Uint8Array(hashBuf))
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join("");
+        const hashBytes = new Uint8Array(hashBuf);
+        let hex = "";
+        for (let i = 0; i < hashBytes.length; i++) {
+            hex += hashBytes[i].toString(16).padStart(2, "0");
+        }
+        hashHex = hex;
     }
     else {
         // Node.js fallback (crypto.subtle not available or not cross-origin-isolated)

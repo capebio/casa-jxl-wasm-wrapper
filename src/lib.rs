@@ -599,7 +599,7 @@ struct OrfDecoded {
 /// Shared ORF decode path: parse → validate → decompress → demosaic → NR → WB/matrix setup.
 /// Returns pre-tonemapped RGB16 and all metadata.  Called by process_orf_impl.
 fn decode_orf_raw(data: &[u8]) -> Result<OrfDecoded, JsError> {
-    let info = tiff::parse(data).map_err(|e| JsError::new(&e))?;
+    let info = tiff::parse(data).map_err(|e| JsError::new(&e.to_string()))?;
 
     if info.compression != 1 {
         return Err(JsError::new(&format!(
@@ -1648,7 +1648,7 @@ impl OrfMetadata {
 /// Returns camera, lens, exposure, GPS for batch ingest and gallery views.
 #[wasm_bindgen]
 pub fn parse_orf_metadata(data: &[u8]) -> Result<OrfMetadata, JsError> {
-    let info = tiff::parse(data).map_err(|e| JsError::new(&e))?;
+    let info = tiff::parse(data).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(OrfMetadata {
         make: info.make,
         model: info.model,
@@ -1682,7 +1682,7 @@ pub struct DecodeBench {
 /// Use to measure decoder cost in isolation when tuning WASM flags or algorithms.
 #[wasm_bindgen]
 pub fn bench_decode_orf(data: &[u8]) -> Result<DecodeBench, JsError> {
-    let info = tiff::parse(data).map_err(|e| JsError::new(&e))?;
+    let info = tiff::parse(data).map_err(|e| JsError::new(&e.to_string()))?;
     validate_orf_structure(data, &info)?;
     let w = info.width as usize;
     let h = info.height as usize;

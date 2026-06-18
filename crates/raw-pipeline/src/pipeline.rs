@@ -876,7 +876,7 @@ pub fn perceptual_apply_bulk(
 }
 
 #[inline(always)]
-pub(crate) fn apply_tone_math(
+pub fn apply_tone_math(
     r: f32,
     g: f32,
     b: f32,

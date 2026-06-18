@@ -532,6 +532,63 @@ describe("browser codec handlers", () => {
         expect(messages.some((msg) => msg.type === "encode_cancelled")).toBe(false);
         expect(ended).toEqual(["encode-release-state"]);
     });
+    test("decode handler emits frames transparently with deferredRelease=true", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        const info = {
+            width: 2, height: 2, bitsPerSample: 8,
+            hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+        };
+        // deferredRelease=true means the decoder reuses the same buffer across frames.
+        // The handler must transparently forward pixels without detachment issues.
+        const sharedBuffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]).buffer;
+        const codec = {
+            createDecoder() {
+                return {
+                    push() { },
+                    close() { },
+                    cancel() { },
+                    dispose() { },
+                    async *events() {
+                        yield { type: "header", info };
+                        // First progress: emit view into shared buffer
+                        yield {
+                            type: "progress",
+                            stage: "dc",
+                            info,
+                            pixels: new Uint8Array(sharedBuffer, 0, 4),
+                            format: "rgba8",
+                            pixelStride: 4,
+                        };
+                        // Final: reuse buffer (simulating deferredRelease behavior)
+                        yield {
+                            type: "final",
+                            info,
+                            pixels: new Uint8Array(sharedBuffer, 0, 16),
+                            format: "rgba8",
+                            pixelStride: 4,
+                        };
+                    },
+                };
+            },
+        };
+        const handler = new DecodeHandler({ ...baseDecodeStart, sessionId: "deferred-release-test" }, codec, { onSessionEnd: (sessionId) => ended.push(sessionId) });
+        handler.onChunk(new Uint8Array([0xff]).buffer);
+        handler.onClose();
+        await waitFor(() => ended.length === 1);
+        // Verify handler forwarded header, progress, and final
+        const decodeMsgs = messages.filter((msg) => msg.type.startsWith("decode_")).map((msg) => msg.type);
+        expect(decodeMsgs).toEqual(["decode_header", "decode_progress", "decode_final"]);
+        // Verify pixels are present in both frames
+        const progress = messages.find((msg) => msg.type === "decode_progress");
+        const final = messages.find((msg) => msg.type === "decode_final");
+        expect(progress?.pixels).toBeDefined();
+        expect(final?.pixels).toBeDefined();
+        expect(progress.pixels.byteLength).toBeGreaterThan(0);
+        expect(final.pixels.byteLength).toBeGreaterThan(0);
+        expect(ended).toEqual(["deferred-release-test"]);
+    });
 });
 function installWorkerPostMessage(messages) {
     Object.defineProperty(globalThis, "self", {

@@ -158,6 +158,42 @@ pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16
     Ok(rgb)
 }
 
+/// One 2-column step of the RGGB bilinear interior: computes (col, col+1) and writes
+/// interleaved RGB into `out_row`. Shared by demosaic_rggb_into and SIMD scalar tails.
+/// Caller guarantees `col >= 2` and `col + 1 < w_max` (so col+2 is a valid index).
+#[inline(always)]
+fn bilinear_interleaved_pair(
+    north: &[u16], here: &[u16], south: &[u16],
+    col: usize, row_par: usize,
+    out_row: &mut [u16],
+) {
+    let o = col * 3;
+    if row_par == 0 {
+        // even row — col: R site, col+1: G-red site
+        let rv = here[col];
+        let gv = ((north[col] as u32 + south[col] as u32 + here[col-1] as u32 + here[col+1] as u32) >> 2) as u16;
+        let bv = ((north[col-1] as u32 + north[col+1] as u32 + south[col-1] as u32 + south[col+1] as u32) >> 2) as u16;
+        out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
+        let o2 = o + 3;
+        let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
+        let gv2 = here[col+1];
+        let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+        out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
+    } else {
+        // odd row — col: G-blue site, col+1: B site
+        let rv = ((north[col] as u32 + south[col] as u32) >> 1) as u16;
+        let gv = here[col];
+        let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
+        out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
+        // col+1 = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4 greens N/S/W/E), B=raw.
+        let o2 = o + 3;
+        let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+        let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+        let bv2 = here[col+1];
+        out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
+    }
+}
+
 /// T3: like `demosaic_rggb` but writes into a caller-owned buffer (must be width*height*3 u16s).
 /// Lets callers reuse one RGB16 buffer across frames instead of allocating + zeroing 3N u16 each call.
 /// Output is bit-identical to `demosaic_rggb`.
@@ -209,41 +245,10 @@ pub fn demosaic_rggb_into(raw: &[u16], width: usize, height: usize, out: &mut [u
             out_row[o] = r; out_row[o+1] = g; out_row[o+2] = b;
         }
 
-        // 2-col unrolled interior starting at col 2. Branch row parity *once* per row.
-        // Straight-line code per phase, no per-pixel 4-way match. Slices + const width
-        // enable bounds-check elision + autovectorization.
         let row_par = row & 1;
         let mut col = 2usize;
         while col + 1 < w_max {
-            let o = col * 3;
-            if row_par == 0 {
-                // even row: col even=(0,0) R, col+1 odd=(0,1) G-red
-                let rv = here[col];
-                let gv = ((north[col] as u32 + south[col] as u32 + here[col-1] as u32 + here[col+1] as u32) >> 2) as u16;
-                let bv = ((north[col-1] as u32 + north[col+1] as u32 + south[col-1] as u32 + south[col+1] as u32) >> 2) as u16;
-                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
-                let o2 = (col + 1) * 3;
-                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
-            } else {
-                // odd row: col even=(1,0) G-blue, col+1 odd=(1,1) B
-                let rv = ((north[col] as u32 + south[col] as u32) >> 1) as u16;
-                let gv = here[col];
-                let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
-                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-
-                // col+1 is the (odd,odd) BLUE site: R = avg of 4 diagonal reds,
-                // G = avg of 4 green neighbours (N,S,W,E), B = raw. (Was a
-                // copy-paste of the even-row green-red formula → pink veil.)
-                let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
-                let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
-                let bv2 = here[col+1];
-                let o2 = (col + 1) * 3;
-                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
-            }
+            bilinear_interleaved_pair(north, here, south, col, row_par, out_row);
             col += 2;
         }
 
@@ -390,34 +395,9 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
             }
             col += 8;
         }
-        // Tail: continue with demosaic_rggb's EXACT unrolled pair loop so the SIMD↔scalar boundary is
-        // seamless (the SIMD block above produces identical values). bayer_pixel is used only for the
-        // final leftover odd column + borders, exactly as demosaic_rggb does — its (1,1)-site R uses a
-        // 4-diagonal average that differs from the unrolled horizontal form, so it must NOT cover interior.
+        // Tail: scalar pair loop — SIMD↔scalar boundary seamless (bit-identical values).
         while col + 1 < w_max {
-            let o = col * 3;
-            if row_par == 0 {
-                let rv = here[col];
-                let gv = ((north[col] as u32 + south[col] as u32 + here[col-1] as u32 + here[col+1] as u32) >> 2) as u16;
-                let bv = ((north[col-1] as u32 + north[col+1] as u32 + south[col-1] as u32 + south[col+1] as u32) >> 2) as u16;
-                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
-                let o2 = (col+1)*3;
-                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
-            } else {
-                let rv = ((north[col] as u32 + south[col] as u32) >> 1) as u16;
-                let gv = here[col];
-                let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
-                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-                // col+1 = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4 greens), B=raw.
-                let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
-                let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
-                let bv2 = here[col+1];
-                let o2 = (col+1)*3;
-                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
-            }
+            bilinear_interleaved_pair(north, here, south, col, row_par, out_row);
             col += 2;
         }
         if col < w_max {
@@ -744,31 +724,9 @@ pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> R
             }
             col += 8;
         }
-        // Tail unrolled (exact match to demosaic_rggb / current simd).
+        // Tail unrolled — exact match to demosaic_rggb_simd.
         while col + 1 < w_max {
-            let o = col * 3;
-            if row_par == 0 {
-                let rv = here[col];
-                let gv = ((north[col] as u32 + south[col] as u32 + here[col-1] as u32 + here[col+1] as u32) >> 2) as u16;
-                let bv = ((north[col-1] as u32 + north[col+1] as u32 + south[col-1] as u32 + south[col+1] as u32) >> 2) as u16;
-                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-                let rv2 = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
-                let gv2 = here[col+1];
-                let bv2 = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
-                let o2 = (col + 1) * 3;
-                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
-            } else {
-                let rv = ((north[col] as u32 + south[col] as u32) >> 1) as u16;
-                let gv = here[col];
-                let bv = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
-                out_row[o] = rv; out_row[o+1] = gv; out_row[o+2] = bv;
-                // col+1 = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4 greens), B=raw.
-                let rv2 = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
-                let gv2 = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
-                let bv2 = here[col+1];
-                let o2 = (col + 1) * 3;
-                out_row[o2] = rv2; out_row[o2+1] = gv2; out_row[o2+2] = bv2;
-            }
+            bilinear_interleaved_pair(north, here, south, col, row_par, out_row);
             col += 2;
         }
         if col < w_max {

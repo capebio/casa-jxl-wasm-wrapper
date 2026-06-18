@@ -9,6 +9,7 @@ function makeInnerCache() {
         store,
         async get(key) { return store.get(key); },
         async set(key, buf) { store.set(key, buf); },
+        async delete(key) { store.delete(key); },
     };
 }
 const validManifest = {

@@ -139,3 +139,25 @@ When fixed, nosharp under MT should produce a row in `=== PER-PIPELINE TOTALS ==
 ```
 
 Expected `decode` should be similar to the simd-tier nosharp run (~6477ms) since MT helps encode, not transcode/decode. Expected `total` ~6500-7500ms. Either way: **it must complete**.
+
+---
+
+## Findings
+
+**Root cause**: Emscripten MT WASM module (`jxl-core.enc.relaxed-simd-mt.js`) uses `Atomics.waitAsync` (minified as `Atomics.ub`) for main-thread pthread mailbox callbacks. The `G(a)` function (line ~13 of the dist file) does:
+
+```js
+Atomics.ub((z(), J), a >>> 2, a).value.then(H)
+```
+
+This schedules `H()` — the mailbox drain handler — as a Promise callback that fires only when the event loop is free. When `transcodeJpegToJxl` or `decPush` calls into libjxl's internal thread pool, the resulting pthread completion notifications queue up as `.then(H)` microtasks. Those microtasks cannot run while the main thread is blocked executing a synchronous WASM call. Cross-run Atomics state accumulates until a pthread completion signal is lost, deadlocking the next synchronous call by run 3 of the nosharp pipeline.
+
+**Why only nosharp?** `runSharp` (native libjpeg + JS sharp) and `runFastJpeg` (WASM JPEG decoder) do not call `transcodeJpegToJxl` or the progressive decoder; they only call `createEncoder`, whose operations complete fast enough that Atomics state drains cleanly between runs.
+
+**Hypothesis 1–4 in the handoff were all wrong.** `transcodeJpegToJxl` (`facade.ts:647–661`) is a direct synchronous WASM call — no scheduler, no pool, no `acquire`/`release` path, no slot to leak. `createDecoder` is likewise direct WASM (`LibjxlDecoder`). Neither touches `packages/jxl-scheduler/` at all in this bench context (there is no `jxl-session` layer here, only raw facade calls).
+
+**Fix location**: `timings/fastest/bench-suite.mjs`
+
+Added `setForcedTier('simd')` immediately after importing `jxl-wasm`, before any WASM module is loaded. This makes `loadGeneratedLibjxlModule()` load the single-threaded simd module instead of the MT module — no pthread pool workers are created, no `Atomics.waitAsync` callbacks are involved, and sequential decode/transcode runs are stable. The bench comment on line 9 ("All pipelines force JXL encoder tier 'simd' for apples-to-apples") already declared this intent; the call was simply missing.
+
+`timings/fastest/inbetween-no-sharp.mjs` already carried `setForcedTier('simd')` with the comment "Use SIMD single-thread for this specific double-pass script for stability" — confirming the fix.

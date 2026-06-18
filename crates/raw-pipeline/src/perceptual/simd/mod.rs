@@ -47,6 +47,9 @@ pub fn detect_native(prefer_rsqrt: bool) -> Backend {
     Backend::Scalar
 }
 
+/// Scalar tail helpers shared across all SIMD backends. No arch gate.
+pub mod scalar;
+
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
 

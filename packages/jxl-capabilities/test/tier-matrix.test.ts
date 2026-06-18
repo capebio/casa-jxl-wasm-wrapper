@@ -23,13 +23,18 @@ function isRelaxedProbe(view: Uint8Array): boolean {
 function isSimdProbe(view: Uint8Array): boolean {
   return view.includes(0xfd) && view.includes(0x0f);
 }
+function isEhProbe(view: Uint8Array): boolean {
+  // PROBE_EH_BYTES contains 0x19 (catch_all opcode); not present in any other probe
+  return view.includes(0x19) && !view.includes(0xfd) && !view.includes(0xfe);
+}
 
 function installProbeStubs(options: {
   simd?: boolean;
   relaxed?: boolean;
   threads?: boolean;
+  exceptions?: boolean;
 }) {
-  const { simd = true, relaxed = false, threads = false } = options;
+  const { simd = true, relaxed = false, threads = false, exceptions = false } = options;
   (globalAny.WebAssembly as any).validate = (bytes: BufferSource) => {
     const view = ArrayBuffer.isView(bytes)
       ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -37,6 +42,7 @@ function installProbeStubs(options: {
     if (isThreadProbe(view)) return threads;
     if (isRelaxedProbe(view)) return relaxed;
     if (isSimdProbe(view)) return simd;
+    if (isEhProbe(view)) return exceptions;
     return false;
   };
 }
@@ -82,6 +88,8 @@ describe("@casabio/jxl-capabilities tier matrix (X-1)", () => {
     globalAny.self = originalSelf;
     if (originalSharedArrayBuffer) {
       (globalAny as any).SharedArrayBuffer = originalSharedArrayBuffer;
+    } else {
+      delete (globalAny as any).SharedArrayBuffer;
     }
     try {
       const mod = await import("../src/index.js");
@@ -156,6 +164,14 @@ describe("@casabio/jxl-capabilities tier matrix (X-1)", () => {
     assert.equal(tier, "relaxed-simd-mt");
     assert.equal(caps.selectedWasmBuild, "relaxed-simd-mt");
     assert.equal(caps.wasmRelaxedSimd, true);
+  });
+
+  test("wasm + simd + sab + coi + exceptions probe → wasmExceptions=true", async () => {
+    installProbeStubs({ simd: true, relaxed: false, threads: false, exceptions: true });
+    setSAB(true);
+    setCOI(true);
+    const { caps } = await freshCapsAndTier();
+    assert.equal(caps.wasmExceptions, true);
   });
 
   test("memoization: second getCapabilities returns same promise, no re-probe side effects", async () => {

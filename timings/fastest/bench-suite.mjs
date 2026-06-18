@@ -45,10 +45,18 @@ const {
     createDecoder,
     transcodeJpegToJxl,
     detectTier,
+    setForcedTier,
 } = await import('../../packages/jxl-wasm/dist/index.js');
 const { decode_scaled } = await import('../../crates/fast-jpeg/pkg/fast_jpeg.js');
 
-console.log(`Detected tier: ${detectTier?.() ?? '(unknown)'}`);
+// MT tier (relaxed-simd-mt) deadlocks on Node.js main thread: Emscripten uses
+// Atomics.waitAsync for pthread mailbox callbacks (G() in jxl-core.enc.relaxed-simd-mt.js),
+// but those .then(H) microtasks can't fire while the main thread is blocked in a
+// synchronous WASM call (transcodeJpegToJxl / decPush). Cross-run state accumulates
+// → deadlock by run 3 of nosharp. inbetween-no-sharp.mjs carries the same guard.
+setForcedTier('simd');
+
+console.log(`Detected tier: ${detectTier?.() ?? '(unknown)'} (forced: simd)`);
 
 const FILES = [
     String.raw`c:\995\2026-02-20 Gobabeb To Windhoek\P2200476 Pogonospermum cleomoides.ORF`,

@@ -1,8 +1,8 @@
 import { canUseParallelTileWorkers, canShareContainerBytes, parseJxtcHeader, } from "./tiling.js";
-import { prepareLevelSource } from "./level-source.js";
-import { clampRegion, stitch, pickRegionDecoder, PyramidError, longEdge, } from "./decode-core.js";
-import { getLevelId } from "./cache.js";
+import { stitch, PyramidError, viewportCacheKey, bppOfFormat, ensureIccProfile, validateDecodedOutput, tileKey, tileIdOf, buffersInFlight, raceWithAbort, cacheStore, assertFiniteRegion, snapRegionToIntegers, stitchCropped, } from "./decode-core.js";
+import { getLevelId, makeTileCacheKey } from "./cache.js";
 import { prepareDecodePlan } from "./plan.js";
+// CoreBudget shape (from jxl-scheduler) for opt-in cross-pool limiting (Agent6-1). Loose to avoid package dep in tsc.
 // Grok 3 state enums
 export var PoolState;
 (function (PoolState) {
@@ -20,6 +20,7 @@ export var HandleState;
     HandleState["Bad"] = "bad";
     HandleState["Terminated"] = "terminated";
 })(HandleState || (HandleState = {}));
+const DEV = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
 // Grok3 #16 single transition fn with table. Invalid throws in dev.
 function setHandleState(h, next, failureInfo) {
     const cur = h.state;
@@ -30,26 +31,22 @@ function setHandleState(h, next, failureInfo) {
         [HandleState.Bad]: [HandleState.Terminated],
         [HandleState.Terminated]: [],
     };
-    if (process.env.NODE_ENV !== 'production' && !allowed[cur]?.includes(next) && cur !== next) {
+    if (DEV && !allowed[cur]?.includes(next) && cur !== next) {
         throw new Error(`invalid handle state transition ${cur} -> ${next}`);
     }
     h.state = next;
     if (failureInfo)
         h.failure = { ...failureInfo, count: (h.failure?.count || 0) + 1 };
 }
-function decodeTileWithWorker(h, bytesId, region, format, deadlineMs, signal, requestTimeoutMs) {
+function decodeTileWithWorker(h, bytesId, region, format, deadlineMs, signal, requestTimeoutMs, progressiveStage) {
     setHandleState(h, HandleState.Active);
     const id = ++h.nextId;
-    const inflightEntry = { id, reject: (e) => { } };
-    h.inflight.add(inflightEntry);
     return new Promise((resolve, reject) => {
-        inflightEntry.reject = reject; // capture for destroyHandle
         let settled = false;
         const doResolve = (d) => {
             if (settled)
                 return;
             settled = true;
-            h.inflight.delete(inflightEntry);
             cleanup();
             resolve(d);
         };
@@ -57,23 +54,26 @@ function decodeTileWithWorker(h, bytesId, region, format, deadlineMs, signal, re
             if (settled)
                 return;
             settled = true;
-            h.inflight.delete(inflightEntry);
             cleanup();
             reject(e);
         };
         const job = {
+            id,
             resolve: doResolve,
             reject: doReject,
-            region: { ...region },
             timer: null,
+            requestTimer: null,
+            abortSignal: signal,
+            abortListener: null,
+            expectedBytes: region.w * region.h * bppOfFormat(format),
+            bytesPerPixel: bppOfFormat(format),
         };
         h.pending.set(id, job);
         // request timeout (Grok3 #23)
-        let reqTimer = null;
         if (requestTimeoutMs && requestTimeoutMs > 0) {
-            reqTimer = globalThis.setTimeout(() => {
-                if (h.pending.delete(id)) {
-                    h.inflight.delete(inflightEntry);
+            job.requestTimer = globalThis.setTimeout(() => {
+                if (h.pending.has(id)) {
+                    cleanup();
                     setHandleState(h, HandleState.Bad, { code: 'TIMEOUT', message: 'request timeout', at: Date.now(), count: 1 });
                     try {
                         h.worker.terminate();
@@ -83,64 +83,42 @@ function decodeTileWithWorker(h, bytesId, region, format, deadlineMs, signal, re
                 }
             }, requestTimeoutMs);
         }
-        // watchdog + timeout
-        job.timer = globalThis.setTimeout(() => {
-            if (h.pending.delete(id)) {
-                h.inflight.delete(inflightEntry);
-                if (reqTimer)
-                    globalThis.clearTimeout(reqTimer);
-                setHandleState(h, HandleState.Bad);
-                try {
-                    h.worker.terminate();
+        // watchdog + timeout (only arm if requestTimer does not exist)
+        if (!job.requestTimer) {
+            const watchdogMs = Math.max(10_000, (requestTimeoutMs ?? 0) * 1.5);
+            job.timer = globalThis.setTimeout(() => {
+                if (h.pending.has(id)) {
+                    cleanup();
+                    setHandleState(h, HandleState.Bad);
+                    try {
+                        h.worker.terminate();
+                    }
+                    catch { }
+                    doReject(new PyramidError('TIMEOUT', `worker watchdog timeout for tile ${id}`));
                 }
-                catch { }
-                doReject(new PyramidError('TIMEOUT', `worker watchdog timeout for tile ${id}`));
-            }
-        }, 10_000);
+            }, watchdogMs);
+        }
         if (signal) {
             if (signal.aborted) {
-                h.pending.delete(id);
-                h.inflight.delete(inflightEntry);
-                if (job.timer != null) {
-                    globalThis.clearTimeout(job.timer);
-                    job.timer = null;
-                }
-                if (reqTimer)
-                    globalThis.clearTimeout(reqTimer);
+                cleanup();
                 try {
                     h.worker.postMessage({ v: 1, type: 'cancel', id });
-                }
-                catch { }
-                setHandleState(h, HandleState.Terminated);
-                try {
-                    h.worker.terminate();
                 }
                 catch { }
                 doReject(new PyramidError('ABORTED', 'decode aborted before start'));
                 return;
             }
-            const onAbort = () => {
-                if (h.pending.delete(id)) {
-                    h.inflight.delete(inflightEntry);
-                    if (job.timer != null) {
-                        globalThis.clearTimeout(job.timer);
-                        job.timer = null;
-                    }
-                    if (reqTimer)
-                        globalThis.clearTimeout(reqTimer);
+            job.abortListener = () => {
+                if (h.pending.has(id)) {
+                    cleanup();
                     try {
                         h.worker.postMessage({ v: 1, type: 'cancel', id });
-                    }
-                    catch { }
-                    setHandleState(h, HandleState.Terminated);
-                    try {
-                        h.worker.terminate();
                     }
                     catch { }
                     doReject(new PyramidError('ABORTED', 'decode aborted'));
                 }
             };
-            signal.addEventListener("abort", onAbort, { once: true });
+            signal.addEventListener("abort", job.abortListener, { once: true });
         }
         const req = {
             v: 1,
@@ -150,19 +128,13 @@ function decodeTileWithWorker(h, bytesId, region, format, deadlineMs, signal, re
             region,
             format,
             ...(deadlineMs != null ? { deadlineMs } : {}),
+            ...(progressiveStage ? { progressiveStage } : {}),
         };
         try {
             h.worker.postMessage(req);
         }
         catch (postErr) {
-            h.pending.delete(id);
-            h.inflight.delete(inflightEntry);
-            if (job.timer != null) {
-                globalThis.clearTimeout(job.timer);
-                job.timer = null;
-            }
-            if (reqTimer)
-                globalThis.clearTimeout(reqTimer);
+            cleanup();
             setHandleState(h, HandleState.Bad);
             try {
                 h.worker.terminate();
@@ -173,20 +145,31 @@ function decodeTileWithWorker(h, bytesId, region, format, deadlineMs, signal, re
     });
     function cleanup() {
         const j = h.pending.get(id);
+        if (j?.abortSignal && j.abortListener) {
+            j.abortSignal.removeEventListener('abort', j.abortListener);
+            j.abortListener = null;
+        }
         if (j && j.timer != null) {
             globalThis.clearTimeout(j.timer);
             j.timer = null;
         }
+        if (j && j.requestTimer != null) {
+            globalThis.clearTimeout(j.requestTimer);
+            j.requestTimer = null;
+        }
         h.pending.delete(id);
     }
 }
-class PyramidWorkerPool {
+export class PyramidWorkerPool {
     factory;
     maxSize;
     idleTimeoutMs;
     minIdle;
     requestTimeoutMs;
     lifecycle;
+    /** Optional CoreBudget for cross-pool core limiting (with scheduler). Acquire around handle batch (Agent6-1). */
+    coreBudget = null;
+    workerCost = 1;
     state = PoolState.Created;
     all = new Set();
     idle = []; // LIFO for hottest caches (Grok3 #18)
@@ -194,10 +177,14 @@ class PyramidWorkerPool {
     handleByWorker = new WeakMap();
     // bytesId tracking per worker (for load-once)
     bytesIdByWorker = new WeakMap();
+    bytesIdBySource = new WeakMap();
+    sabByBytesId = new Map();
     // instance-scoped (not module) per Grok2/3
     nextBytesId = 0;
     // waiter queue for over-cap (Grok3 #26-29)
     waiters = [];
+    visibilityDocument = null;
+    visibilityListener = null;
     // module consts evaluated once (Grok3 #38-39)
     // (HWC / CAN_PARALLEL live at module scope below)
     constructor(opts) {
@@ -208,19 +195,26 @@ class PyramidWorkerPool {
         this.requestTimeoutMs = opts.requestTimeoutMs;
         this.lifecycle = { hookVisibility: true, hookFreeze: true, ...(opts.lifecycle || {}) };
         this.prewarmMode = opts.prewarm || 'eager';
+        this.coreBudget = opts.coreBudget ?? null;
+        this.workerCost = Math.max(1, opts.workerCost ?? 1);
         // browser cooperation hooks (Grok3 #30-33)
         const doc = globalThis.document;
         if (doc && this.lifecycle.hookVisibility) {
-            doc.addEventListener('visibilitychange', () => {
+            this.visibilityDocument = doc;
+            this.visibilityListener = () => {
                 if (doc.visibilityState === 'hidden')
                     this.reapAllIdle();
                 else
                     this.prewarm(this.minIdle);
-            });
+            };
+            doc.addEventListener?.('visibilitychange', this.visibilityListener);
         }
         // Note: 'freeze'/'resume' Page Lifecycle would be added similarly if document has the events.
         if (this.prewarmMode === 'eager') {
-            void this.prewarmAsync(this.minIdle);
+            void this.prewarmAsync(this.minIdle).catch(e => {
+                if (DEV)
+                    console.warn('[pyramid] eager prewarm failed:', e);
+            });
         }
     }
     prewarmMode = 'eager';
@@ -233,20 +227,26 @@ class PyramidWorkerPool {
     get size() {
         return this.all.size;
     }
+    get activeCount() {
+        return this.active.size;
+    }
     get requestTimeout() {
         return this.requestTimeoutMs;
     }
     /** Allocate a bytesId for a LevelSource (lazily attached). */
     allocateBytesId(source) {
-        if (source.bytesId != null)
-            return source.bytesId;
+        const existing = this.bytesIdBySource.get(source);
+        if (existing != null)
+            return existing;
         const id = this.nextBytesId++;
-        source.bytesId = id;
+        this.bytesIdBySource.set(source, id);
         return id;
     }
     /** prewarm becomes async, resolves when spawned workers are ready (Grok3 #34). */
     async prewarmAsync(count) {
         if (this.state === PoolState.Destroyed || this.state === PoolState.Draining)
+            return;
+        if (this.state === PoolState.Prewarming || this.state === PoolState.Active)
             return;
         this.state = PoolState.Prewarming;
         const n = Math.min(count, this.maxSize - this.all.size);
@@ -270,33 +270,29 @@ class PyramidWorkerPool {
     }
     /** whenReady for UI "warming" (Grok3 #36) */
     whenReady() {
-        // simple: resolve when we have at least minIdle ready or active
-        if (this.idle.length + this.active.size >= this.minIdle)
+        const have = () => this.idle.length + this.active.size;
+        if (have() >= this.minIdle)
             return Promise.resolve();
-        return new Promise(resolve => {
-            const check = () => {
-                if (this.idle.length + this.active.size >= this.minIdle)
-                    resolve();
-            };
-            // crude: poll a bit, real impl would use a readiness event
-            const t = globalThis.setTimeout(check, 0);
-            // also hook on next release/prewarm but for minimal ok
-        });
+        const pending = [...this.all]
+            .filter((h) => !h.readySettled)
+            .map((h) => h.ready.catch(() => { }));
+        return Promise.all(pending).then(() => { });
     }
     /** Full destroy per Grok3 #9. */
     async destroy(graceMs = 5000) {
         if (this.state === PoolState.Destroyed)
             return;
         this.state = PoolState.Draining;
+        for (const waiter of this.waiters.splice(0))
+            waiter.resolve([]);
         // reject all inflight with POOL_DESTROYED
         for (const h of this.all) {
-            for (const entry of Array.from(h.inflight)) {
+            for (const job of Array.from(h.pending.values())) {
                 try {
-                    entry.reject(new PyramidError('POOL_DESTROYED', 'pool destroyed'));
+                    job.reject(new PyramidError('POOL_DESTROYED', 'pool destroyed'));
                 }
                 catch { }
             }
-            h.inflight.clear();
         }
         // destroy idles (ignore minIdle floor)
         for (const h of [...this.idle]) {
@@ -304,32 +300,52 @@ class PyramidWorkerPool {
         }
         this.idle.length = 0;
         // wait for active to drain or grace
+        let iv = null;
         const drained = new Promise(r => {
-            const iv = globalThis.setInterval(() => {
+            iv = globalThis.setInterval(() => {
                 if (this.active.size === 0) {
-                    globalThis.clearInterval(iv);
+                    if (iv)
+                        globalThis.clearInterval(iv);
                     r();
                 }
             }, 10);
         });
         await Promise.race([drained, new Promise(r => globalThis.setTimeout(r, graceMs))]);
+        if (iv)
+            globalThis.clearInterval(iv);
         // force remaining
         for (const h of [...this.active]) {
             this.destroyHandle(h, 'pool destroy grace');
         }
         this.state = PoolState.Destroyed;
+        this.sabByBytesId.clear();
+        if (this.visibilityDocument && this.visibilityListener) {
+            this.visibilityDocument.removeEventListener?.('visibilitychange', this.visibilityListener);
+        }
+        this.visibilityDocument = null;
+        this.visibilityListener = null;
+    }
+    releaseBudget(h) {
+        if (h.budgetCharged && this.coreBudget) {
+            this.coreBudget.release(this.workerCost);
+            h.budgetCharged = false;
+        }
     }
     destroyHandle(h, reason) {
         if (h.state === HandleState.Terminated)
             return;
-        // reject inflight (Grok3 #20)
-        for (const entry of Array.from(h.inflight)) {
+        this.releaseBudget(h);
+        if (!h.readySettled) {
+            h.readySettled = true;
+            h._readyResolve?.();
+        }
+        for (const job of Array.from(h.pending.values())) {
+            this.cleanupPendingJob(h, job);
             try {
-                entry.reject(new PyramidError('POOL_DESTROYED', reason));
+                job.reject(new PyramidError('POOL_DESTROYED', reason));
             }
             catch { }
         }
-        h.inflight.clear();
         setHandleState(h, HandleState.Terminated);
         this.clearIdleTimer(h);
         this.active.delete(h);
@@ -360,8 +376,26 @@ class PyramidWorkerPool {
         }
         const maxWait = opts?.maxWaitMs ?? 60;
         const got = [];
+        let activeLimit = count;
+        if (this.coreBudget) {
+            const c = this.workerCost;
+            let granted = 0;
+            for (let i = 0; i < count; i++) {
+                if (this.coreBudget.tryAcquire(c)) {
+                    granted++;
+                }
+                else {
+                    break;
+                }
+            }
+            if (granted === 0 && (this.idle.length > 0 || this.all.size < this.maxSize)) {
+                await this.coreBudget.acquire(c);
+                granted = 1;
+            }
+            activeLimit = granted;
+        }
         // LIFO drain (pop hottest) (Grok3 #18)
-        while (got.length < count && this.idle.length > 0) {
+        while (got.length < activeLimit && this.idle.length > 0) {
             const h = this.idle.pop();
             this.clearIdleTimer(h);
             if (h.state !== HandleState.WarmReapable && h.state !== HandleState.WarmFloor) {
@@ -370,17 +404,25 @@ class PyramidWorkerPool {
             }
             setHandleState(h, HandleState.Active);
             this.active.add(h);
+            if (this.coreBudget) {
+                h.budgetCharged = true;
+            }
             got.push(h);
         }
         // spawn under cap
-        while (got.length < count && this.all.size < this.maxSize) {
+        while (got.length < activeLimit && this.all.size < this.maxSize) {
             try {
                 const h = this.spawnOne();
                 setHandleState(h, HandleState.Active);
                 this.active.add(h);
+                if (this.coreBudget) {
+                    h.budgetCharged = true;
+                }
                 got.push(h);
             }
-            catch {
+            catch (e) {
+                if (DEV)
+                    console.warn('[pyramid] spawnOne failed during acquire:', e);
                 break;
             }
         }
@@ -388,40 +430,32 @@ class PyramidWorkerPool {
         if (got.length < count) {
             const need = count - got.length;
             if (this.all.size >= this.maxSize) {
-                // enqueue
                 return new Promise((resolve) => {
-                    const expiresAt = Date.now() + maxWait;
-                    this.waiters.push({ want: need, resolve: (hs) => resolve(hs), expiresAt });
-                    // timeout drain
-                    globalThis.setTimeout(() => {
-                        const idx = this.waiters.findIndex(w => w.resolve === resolve);
+                    const waiter = {
+                        want: need,
+                        resolve: (hs) => {
+                            if (waiter.timer)
+                                globalThis.clearTimeout(waiter.timer);
+                            resolve([...got, ...hs]);
+                        },
+                    };
+                    waiter.timer = globalThis.setTimeout(() => {
+                        const idx = this.waiters.indexOf(waiter);
                         if (idx >= 0) {
-                            const w = this.waiters.splice(idx, 1)[0];
-                            resolve([]); // fewer than wanted, caller falls back
+                            this.waiters.splice(idx, 1);
+                            waiter.timer = undefined;
+                            resolve(got);
                         }
                     }, maxWait);
+                    this.waiters.push(waiter);
                 });
             }
         }
-        // ready filter (existing + state)
-        const readyOrWait = [];
-        for (const h of got) {
-            if (h.readySettled || h.state === HandleState.Active) {
-                readyOrWait.push(h);
-                continue;
-            }
-            try {
-                await Promise.race([h.ready, new Promise(r => globalThis.setTimeout(r, maxWait))]);
-                if (h.readySettled)
-                    readyOrWait.push(h);
-                else
-                    readyOrWait.push(h);
-            }
-            catch {
-                readyOrWait.push(h);
-            }
-        }
-        return readyOrWait;
+        await Promise.race([
+            Promise.all(got.map((h) => h.ready.catch(() => { }))),
+            new Promise((resolve) => globalThis.setTimeout(resolve, maxWait)),
+        ]);
+        return got;
     }
     /** Return to idle (LIFO), drain waiters, arm all excess (Grok3 #19, #28). */
     release(handles) {
@@ -431,16 +465,28 @@ class PyramidWorkerPool {
                 this.destroyHandle(h, 'release of dead/inflight');
                 continue;
             }
+            this.releaseBudget(h);
             setHandleState(h, HandleState.WarmReapable);
             this.idle.push(h); // LIFO push
         }
         // drain waiters before re-arm (Grok3)
         while (this.waiters.length > 0 && this.idle.length > 0) {
             const w = this.waiters.shift();
+            if (w.timer)
+                globalThis.clearTimeout(w.timer);
             const give = [];
             while (give.length < w.want && this.idle.length > 0) {
                 const h = this.idle.pop();
                 this.clearIdleTimer(h);
+                if (this.coreBudget) {
+                    if (this.coreBudget.tryAcquire(this.workerCost)) {
+                        h.budgetCharged = true;
+                    }
+                    else {
+                        this.idle.push(h);
+                        break;
+                    }
+                }
                 setHandleState(h, HandleState.Active);
                 this.active.add(h);
                 give.push(h);
@@ -483,7 +529,6 @@ class PyramidWorkerPool {
             ready,
             _readyResolve: readyResolve,
             readySettled: false,
-            inflight: new Set(),
         };
         // Permanent lifecycle listeners - wire first
         const onDeath = () => this.destroyHandle(h, "worker error");
@@ -492,7 +537,9 @@ class PyramidWorkerPool {
             worker.addEventListener("error", onDeath);
             worker.addEventListener("messageerror", onDeath);
         }
-        catch {
+        catch (e) {
+            if (DEV)
+                console.warn('[pyramid] addEventListener failed:', e);
             wiringOk = false; /* test doubles */
         }
         // onMessage ...
@@ -515,21 +562,14 @@ class PyramidWorkerPool {
             const job = h.pending.get(reply.id);
             if (!job)
                 return;
-            h.pending.delete(reply.id);
-            if (job.timer != null) {
-                globalThis.clearTimeout(job.timer);
-                job.timer = null;
-            }
-            const entry = Array.from(h.inflight).find(e => e.id === reply.id);
-            if (entry)
-                h.inflight.delete(entry);
             if (!reply.ok) {
+                this.cleanupPendingJob(h, job);
                 const e = new PyramidError(reply.error?.code || 'INTERNAL', reply.error?.message || 'worker error');
                 job.reject(e);
                 if (reply.error?.code === 'OOM' || reply.error?.code === 'INTERNAL') {
                     setHandleState(h, HandleState.Bad, { code: reply.error.code, message: reply.error.message || '', at: Date.now(), count: 1 });
+                    this.destroyHandle(h, `worker error ${reply.error?.code || ''}`);
                 }
-                this.destroyHandle(h, `worker error ${reply.error?.code || ''}`);
                 return;
             }
             let pixels;
@@ -540,6 +580,13 @@ class PyramidWorkerPool {
                 pixels = new Uint8Array(p);
             else
                 pixels = new Uint8Array(p);
+            const minBytes = reply.w * reply.h * (job.bytesPerPixel ?? 0);
+            if (!Number.isFinite(minBytes) || pixels.byteLength < minBytes) {
+                this.cleanupPendingJob(h, job);
+                job.reject(new PyramidError('INVALID_REPLY', `worker pixels too short (${pixels.byteLength} < ${minBytes})`));
+                return;
+            }
+            this.cleanupPendingJob(h, job);
             job.resolve({ pixels, width: reply.w, height: reply.h });
         };
         try {
@@ -561,7 +608,6 @@ class PyramidWorkerPool {
         this.bytesIdByWorker.set(worker, new Set());
         return h;
     }
-    killHandle(h, reason) { this.destroyHandle(h, reason); } // compat shim
     // Pre-bound for setTimeout( fn, ms, arg ) passthrough (Grok4).
     _reapBound = (h) => {
         if (this.idle.includes(h) && this.idle.length > this.minIdle) {
@@ -586,6 +632,61 @@ class PyramidWorkerPool {
             h.idleTimer = null;
         }
     }
+    cleanupPendingJob(h, job) {
+        if (job.abortSignal && job.abortListener) {
+            job.abortSignal.removeEventListener('abort', job.abortListener);
+            job.abortListener = null;
+        }
+        if (job.timer != null) {
+            globalThis.clearTimeout(job.timer);
+            job.timer = null;
+        }
+        if (job.requestTimer != null) {
+            globalThis.clearTimeout(job.requestTimer);
+            job.requestTimer = null;
+        }
+        h.pending.delete(job.id);
+    }
+    ensureLoaded(handles, bytesId, bytes, useSAB) {
+        for (const h of handles) {
+            let set = this.bytesIdByWorker.get(h.worker);
+            if (!set) {
+                set = new Set();
+                this.bytesIdByWorker.set(h.worker, set);
+            }
+            if (set.has(bytesId))
+                continue;
+            try {
+                if (useSAB && typeof SharedArrayBuffer !== 'undefined') {
+                    let sab = this.sabByBytesId.get(bytesId);
+                    if (!sab) {
+                        sab = new SharedArrayBuffer(bytes.byteLength);
+                        new Uint8Array(sab).set(bytes);
+                        if (this.sabByBytesId.size >= 8) {
+                            const oldestBytesId = this.sabByBytesId.keys().next().value;
+                            this.sabByBytesId.delete(oldestBytesId);
+                            for (const wh of this.all) {
+                                const wSet = this.bytesIdByWorker.get(wh.worker);
+                                if (wSet) {
+                                    wSet.delete(oldestBytesId);
+                                }
+                            }
+                        }
+                        this.sabByBytesId.set(bytesId, sab);
+                    }
+                    h.worker.postMessage({ v: 1, type: 'load', bytesId, sab, byteLength: bytes.byteLength });
+                }
+                else {
+                    h.worker.postMessage({ v: 1, type: 'load', bytesId, bytes });
+                }
+                set.add(bytesId);
+            }
+            catch (e) {
+                if (DEV)
+                    console.warn(`[pyramid] ensureLoaded postMessage failed for bytesId ${bytesId}:`, e);
+            }
+        }
+    }
 }
 // Grok3 #38-39 module-level consts (evaluated once)
 const HWC = globalThis.navigator?.hardwareConcurrency ?? 4;
@@ -595,18 +696,23 @@ export function shouldUseParallel(opts, numTiles, envCanParallel) {
     return (opts?.parallel !== false) && envCanParallel && numTiles > 1 && !!(opts?.workerFactory || opts?.pool);
 }
 let pool = null;
-function getOrCreatePool(factory) {
+let poolFactory = null;
+function getOrCreatePool(factory, coreBudget) {
     if (pool && (pool.poolState === PoolState.Active || pool.poolState === PoolState.Prewarming || pool.poolState === PoolState.Created)) {
-        // factory identity check per Grok3 #12
+        if (poolFactory && poolFactory !== factory) {
+            if (pool.activeCount > 0) {
+                throw new PyramidError('FACTORY_CONFLICT', 'cannot swap workerFactory while pool has active decodes');
+            }
+            void pool.destroy(0).catch(e => {
+                if (DEV)
+                    console.warn('[pyramid] pool.destroy during factory swap failed:', e);
+            });
+            pool = null;
+            poolFactory = null;
+        }
+    }
+    if (pool && poolFactory === factory) {
         return pool;
-    }
-    if (pool && pool.poolState !== PoolState.Destroyed && pool.poolState !== PoolState.Draining) {
-        // active>0 and different factory -> conflict (caller should pass explicit pool)
-        throw new PyramidError('FACTORY_CONFLICT', 'cannot swap workerFactory while pool has active decodes');
-    }
-    if (pool) {
-        // previous destroyed or empty -> rebuild
-        // (dispose would have nulled, but for safety)
     }
     const maxSize = Math.min(HWC, 8);
     const p = new PyramidWorkerPool({
@@ -614,17 +720,27 @@ function getOrCreatePool(factory) {
         maxSize,
         idleTimeoutMs: 5000,
         minIdle: 2,
+        coreBudget,
     });
-    void p.prewarmAsync(2);
+    void p.prewarmAsync(2).catch(e => {
+        if (DEV)
+            console.warn('[pyramid] getOrCreatePool prewarm failed:', e);
+    });
     pool = p;
+    poolFactory = factory;
     return p;
 }
 export async function disposeDefaultPool() {
     if (pool) {
         await pool.destroy();
         pool = null;
+        poolFactory = null;
     }
 }
+export const __testing = {
+    decodeTilesParallel,
+    getOrCreatePool,
+};
 /** Runtime validation for worker replies (Grok2). Returns null on mismatch -> caller logs + INVALID_REPLY. */
 function parseWorkerReply(data) {
     if (!data || typeof data !== 'object')
@@ -638,7 +754,8 @@ function parseWorkerReply(data) {
     if (d.type === 'decode-reply' && typeof d.id === 'number') {
         if (d.ok === true) {
             if ((d.pixels instanceof Uint8Array || d.pixels instanceof ArrayBuffer) &&
-                typeof d.w === 'number' && typeof d.h === 'number') {
+                typeof d.w === 'number' && typeof d.h === 'number' &&
+                d.w > 0 && d.w <= 1000000 && d.h > 0 && d.h <= 1000000) {
                 return { v: 1, type: 'decode-reply', id: d.id, ok: true, pixels: d.pixels, w: d.w, h: d.h };
             }
             return null;
@@ -652,24 +769,62 @@ function parseWorkerReply(data) {
     }
     return null;
 }
-async function decodeTilesParallel(bytesId, format, tiles, handles, outBuffer, viewport, bpp, opts = {}, deadlineMs, requestTimeoutMs) {
+function finalizeDirectDecode(direct, vp, bpp, outBuffer, need, format, cache, cacheKeyFinal, tileSize, tileLevel, onTile) {
+    validateDecodedOutput(direct, vp, bpp);
+    outBuffer.set(direct.pixels);
+    const pixels = outBuffer.byteLength === need ? outBuffer : outBuffer.subarray(0, need);
+    const result = { pixels, width: vp.w, height: vp.h, format };
+    cacheStore(cache, cacheKeyFinal, pixels, need);
+    if (onTile) {
+        const id = tileIdOf(vp, tileSize, tileLevel);
+        const prog = { id, key: tileKey(id), stage: 'final', completed: 1, total: 1 };
+        onTile(vp, 1, prog);
+    }
+    return result;
+}
+async function decodeTilesParallel(bytesId, format, tiles, handles, outBuffer, viewport, bpp, opts = {}, 
+// Keep trailing params as fully backward-compatible fallbacks for tests or older callers:
+deadlineMsFallback, requestTimeoutMsFallback, tileSizeFallback, tileLevelFallback) {
     if (handles.length === 0)
         return;
     if (opts.signal?.aborted) {
         throw new PyramidError('ABORTED', 'decode aborted before start');
     }
+    const deadlineMs = opts.deadlineMs ?? deadlineMsFallback;
+    const requestTimeoutMs = opts.requestTimeoutMs ?? requestTimeoutMsFallback;
+    const tileSize = opts.tileSize ?? tileSizeFallback;
+    const tileLevel = opts.tileLevel ?? tileLevelFallback ?? 0;
     const controller = new AbortController();
     const effectiveSignal = opts.signal || controller.signal;
+    let outerAbortListener = null;
     if (opts.signal) {
         if (opts.signal.aborted)
             controller.abort();
-        opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+        outerAbortListener = () => controller.abort();
+        opts.signal.addEventListener('abort', outerAbortListener, { once: true });
     }
     // Stream-stitch: no results[] retention. Write on arrival, drop decoded ref immediately.
     let next = 0;
     let failed = false;
     let firstErr = null;
     let completedCount = 0;
+    const total = opts.progressTotal ?? (tiles.length * (opts.progressiveStage ? 2 : 1));
+    const base = opts.progressBase ?? 0;
+    const decodeOne = async (handle, gridTile) => {
+        try {
+            return await decodeTileWithWorker(handle, bytesId, gridTile, format, deadlineMs, effectiveSignal, requestTimeoutMs, opts.progressiveStage);
+        }
+        catch (error) {
+            if (controller.signal.aborted || (opts.signal?.aborted ?? false))
+                throw error;
+            const retryHandle = handles.find((candidate) => candidate !== handle &&
+                candidate.state !== HandleState.Terminated &&
+                candidate.state !== HandleState.Bad);
+            if (!retryHandle)
+                throw error;
+            return decodeTileWithWorker(retryHandle, bytesId, gridTile, format, deadlineMs, effectiveSignal, requestTimeoutMs, opts.progressiveStage);
+        }
+    };
     const coros = handles.map(async (h) => {
         while (true) {
             if (failed || controller.signal.aborted)
@@ -684,15 +839,62 @@ async function decodeTilesParallel(bytesId, format, tiles, handles, outBuffer, v
             const idx = next++;
             if (idx >= tiles.length)
                 break;
+            if (failed || controller.signal.aborted)
+                break;
             const region = tiles[idx];
+            const gridTile = (tileSize != null && opts.sourceW != null && opts.sourceH != null)
+                ? {
+                    x: Math.floor(region.x / tileSize) * tileSize,
+                    y: Math.floor(region.y / tileSize) * tileSize,
+                    w: Math.min(tileSize, opts.sourceW - Math.floor(region.x / tileSize) * tileSize),
+                    h: Math.min(tileSize, opts.sourceH - Math.floor(region.y / tileSize) * tileSize),
+                }
+                : region;
             try {
-                const decoded = await decodeTileWithWorker(h, bytesId, region, format, deadlineMs, effectiveSignal, requestTimeoutMs);
+                const decoded = await decodeOne(h, gridTile);
                 if (!failed) {
-                    stitch(outBuffer, viewport, region, decoded, bpp);
-                    // Drop ref after write (stream-stitch; aids GC of per-tile buffers).
-                    decoded.pixels = null;
+                    if (gridTile === region) {
+                        validateDecodedOutput(decoded, region, bpp);
+                        stitch(outBuffer, viewport, region, decoded, bpp);
+                    }
+                    else {
+                        validateDecodedOutput(decoded, gridTile, bpp);
+                        stitchCropped(outBuffer, viewport, region, decoded.pixels, gridTile.w, gridTile.h, gridTile.x, gridTile.y, bpp);
+                    }
                     completedCount += 1;
-                    opts.onTile?.(region, completedCount);
+                    const absoluteCompleted = base + completedCount;
+                    const tId = tileSize != null ? tileIdOf(region, tileSize, tileLevel) : undefined;
+                    if (opts.tileCache && tId && opts.sourceLevelId) {
+                        const cap = opts.tileCache.capacityBytes;
+                        if (opts.progressiveStage === 'dc') {
+                            if (opts.cacheDcTiles) {
+                                const dcKey = `${makeTileCacheKey(opts.sourceLevelId, tId)}:${format}:dc`;
+                                if (cap === undefined || decoded.pixels.byteLength <= cap) {
+                                    opts.tileCache.set(dcKey, decoded.pixels);
+                                }
+                            }
+                        }
+                        else if (opts.progressiveStage === 'final' || opts.progressiveStage === undefined) {
+                            const finalKey = `${makeTileCacheKey(opts.sourceLevelId, tId)}:${format}:final`;
+                            if (cap === undefined || decoded.pixels.byteLength <= cap) {
+                                opts.tileCache.set(finalKey, decoded.pixels);
+                            }
+                        }
+                    }
+                    if (!opts.tileCache) {
+                        // Drop ref after write (stream-stitch; aids GC of per-tile buffers).
+                        decoded.pixels = null;
+                    }
+                    if (opts.onTile) {
+                        const prog = tId ? {
+                            id: tId,
+                            key: tileKey(tId),
+                            stage: opts.progressiveStage ?? 'final',
+                            completed: absoluteCompleted,
+                            total,
+                        } : undefined;
+                        opts.onTile(region, absoluteCompleted, prog);
+                    }
                 }
             }
             catch (e) {
@@ -702,21 +904,28 @@ async function decodeTilesParallel(bytesId, format, tiles, handles, outBuffer, v
                     controller.abort();
                 }
                 for (const hh of handles) {
-                    if (hh.state !== HandleState.Terminated && hh.state !== HandleState.Bad) {
-                        setHandleState(hh, HandleState.Terminated);
-                        for (const [iid, job] of Array.from(hh.pending.entries())) {
-                            hh.pending.delete(iid);
-                            if (job.timer != null) {
-                                globalThis.clearTimeout(job.timer);
-                                job.timer = null;
-                            }
-                            try {
-                                job.reject(new PyramidError('ABORTED', `batch tile failure`));
-                            }
-                            catch { }
+                    if (hh.state === HandleState.Terminated || hh.state === HandleState.Bad)
+                        continue;
+                    for (const [iid, job] of Array.from(hh.pending.entries())) {
+                        hh.pending.delete(iid);
+                        if (job.timer != null) {
+                            globalThis.clearTimeout(job.timer);
+                            job.timer = null;
+                        }
+                        if (job.requestTimer != null) {
+                            globalThis.clearTimeout(job.requestTimer);
+                            job.requestTimer = null;
+                        }
+                        if (job.abortSignal && job.abortListener) {
+                            job.abortSignal.removeEventListener('abort', job.abortListener);
+                            job.abortListener = null;
                         }
                         try {
-                            hh.worker.terminate();
+                            job.reject(new PyramidError('ABORTED', `batch tile failure`));
+                        }
+                        catch { }
+                        try {
+                            hh.worker.postMessage({ v: 1, type: 'cancel', id: iid });
                         }
                         catch { }
                     }
@@ -725,11 +934,22 @@ async function decodeTilesParallel(bytesId, format, tiles, handles, outBuffer, v
             }
         }
     });
-    await Promise.all(coros);
-    if (failed) {
-        if (controller.signal.aborted || (opts.signal && opts.signal.aborted))
-            throw new PyramidError('ABORTED', 'decode aborted');
-        throw firstErr instanceof Error ? firstErr : new PyramidError('INTERNAL', String(firstErr));
+    try {
+        await Promise.all(coros);
+        if (failed) {
+            if ((opts.signal && opts.signal.aborted) && firstErr instanceof PyramidError && firstErr.code === 'ABORTED') {
+                throw firstErr;
+            }
+            if ((opts.signal && opts.signal.aborted) || (controller.signal.aborted && firstErr instanceof PyramidError && firstErr.code === 'ABORTED')) {
+                throw new PyramidError('ABORTED', 'decode aborted');
+            }
+            throw firstErr instanceof Error ? firstErr : new PyramidError('INTERNAL', String(firstErr));
+        }
+    }
+    finally {
+        if (opts.signal && outerAbortListener) {
+            opts.signal.removeEventListener('abort', outerAbortListener);
+        }
     }
 }
 export async function decodeTiledViewportPooled(arg1, region, options) {
@@ -739,6 +959,7 @@ export async function decodeTiledViewportPooled(arg1, region, options) {
     let source;
     if (arg1 instanceof Uint8Array) {
         const header = parseJxtcHeader(arg1);
+        const fmt = header.bitsPerSample === 16 ? 'rgba16' : 'rgba8';
         source = {
             kind: "tiled",
             bytes: arg1,
@@ -746,42 +967,56 @@ export async function decodeTiledViewportPooled(arg1, region, options) {
             height: header.imageH,
             tileSize: header.tileSize,
             bitsPerSample: header.bitsPerSample,
+            format: fmt,
+            bpp: bppOfFormat(fmt),
+            version: header.version,
+            tilesX: header.tilesX,
+            tilesY: header.tilesY,
         };
     }
     else {
         source = arg1;
     }
-    prepareLevelSource(source);
-    if (!Number.isFinite(region.x) || !Number.isFinite(region.y) || !Number.isFinite(region.w) || !Number.isFinite(region.h)) {
-        throw new RangeError("region must have finite x,y,w,h");
-    }
+    assertFiniteRegion(region);
+    region = snapRegionToIntegers(region);
     const plan = prepareDecodePlan(source, region);
     const decodeRegion = options?.decodeRegion ?? plan.decodeRegion;
     const vp = plan.viewport;
     const bpp = plan.bpp;
     const need = vp.w * vp.h * bpp;
+    const deadlineMs = options?.budgetMs != null ? performance.now() + options.budgetMs : undefined;
+    const zeroCopyHits = !!options?.zeroCopyCacheHits;
     // Cache check at decode entry (viewport rect granularity for this levelId).
     const cache = options?.cache;
-    if (cache) {
-        const levelId = getLevelId(source);
-        const key = `${levelId}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`;
-        const cached = cache.get(key);
+    const cacheKeyFinal = cache ? viewportCacheKey(getLevelId(source.bytes), vp, plan.format, 'final') : undefined;
+    if (cache && cacheKeyFinal) {
+        const cached = cache.get(cacheKeyFinal);
         if (cached) {
             if (options?.outBuffer) {
                 const ob = options.outBuffer;
-                if (ob.length < need)
-                    throw new RangeError(`outBuffer too small (${ob.length} < ${need})`);
-                ob.set(cached);
-                return { pixels: ob, width: vp.w, height: vp.h };
+                if (ob.byteLength < need)
+                    throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${ob.byteLength} < ${need})`);
+                if (cached.length >= need && cached.length <= ob.byteLength) {
+                    ob.set(cached.subarray(0, need));
+                    return { pixels: ob.byteLength === need ? ob : ob.subarray(0, need), width: vp.w, height: vp.h, format: plan.format };
+                }
             }
-            return { pixels: cached, width: vp.w, height: vp.h };
+            else if (cached.length >= need) {
+                return { pixels: zeroCopyHits ? cached : new Uint8Array(cached), width: vp.w, height: vp.h, format: plan.format };
+            }
         }
     }
     // Allocate or validate caller outBuffer once (stream-stitch / direct paths reuse it).
     let outBuffer;
     if (options?.outBuffer) {
-        if (options.outBuffer.length < need) {
-            throw new RangeError(`outBuffer too small (${options.outBuffer.length} < ${need})`);
+        if (options.outBuffer.byteLength < need) {
+            throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${options.outBuffer.byteLength} < ${need})`);
+        }
+        if (buffersInFlight.has(options.outBuffer)) {
+            throw new PyramidError('BUFFER_IN_USE', 'outBuffer is already in use by another decode');
+        }
+        if (bpp === 8 && (options.outBuffer.byteOffset % 2) !== 0) {
+            throw new PyramidError('INVALID_BUFFER_ALIGNMENT', 'outBuffer.byteOffset must be even for 16-bit (bpp=8) pixels');
         }
         outBuffer = options.outBuffer;
     }
@@ -789,90 +1024,194 @@ export async function decodeTiledViewportPooled(arg1, region, options) {
         outBuffer = new Uint8Array(need);
     }
     const onTile = options?.onTile;
-    const wantParallel = shouldUseParallel(options, plan.tiles.length, CAN_PARALLEL);
-    if (!wantParallel) {
-        const p = decodeRegion(source.bytes, vp);
-        let direct;
-        if (signal) {
-            if (signal.aborted)
-                throw new PyramidError('ABORTED', 'decode aborted before start');
-            const ac = new AbortController();
-            signal.addEventListener('abort', () => ac.abort(), { once: true });
-            direct = await Promise.race([p, new Promise((_, rej) => ac.signal.addEventListener('abort', () => rej(new PyramidError('ABORTED', 'decode aborted')), { once: true }))]);
+    if (options?.outBuffer)
+        buffersInFlight.add(options.outBuffer);
+    try {
+        const wantParallel = (options?.pool != null)
+            ? (options?.parallel !== false) && plan.tiles.length > 1
+            : shouldUseParallel(options, plan.tiles.length, CAN_PARALLEL);
+        if (!wantParallel) {
+            const direct = signal ? await raceWithAbort(decodeRegion(source.bytes, vp), signal) : await decodeRegion(source.bytes, vp);
+            return finalizeDirectDecode(direct, vp, bpp, outBuffer, need, plan.format, cache, cacheKeyFinal, source.tileSize, source.level ?? 0, onTile);
         }
-        else {
-            direct = await p;
-        }
-        outBuffer.set(direct.pixels);
-        const result = { pixels: outBuffer, width: vp.w, height: vp.h };
-        cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
-        onTile?.(vp, 1);
-        return result;
-    }
-    // #41: pool from caller opts.pool (preferred) or module singleton (created once outside hot path via getOrCreate when factory provided)
-    let p;
-    if (options?.pool) {
-        p = options.pool;
-    }
-    else if (options?.workerFactory) {
-        p = getOrCreatePool(options.workerFactory);
-    }
-    else {
-        // fallback direct into outBuffer
-        const direct = await decodeRegion(source.bytes, vp);
-        outBuffer.set(direct.pixels);
-        const result = { pixels: outBuffer, width: vp.w, height: vp.h };
-        cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
-        onTile?.(vp, 1);
-        return result;
-    }
-    const bytesId = p.allocateBytesId(source);
-    const useSAB = options?.useSAB === true && canShareContainerBytes();
-    const desired = Math.min(HWC, plan.tiles.length);
-    const liveHandles = await p.acquire(desired);
-    if (liveHandles.length === 0) {
-        const direct = await decodeRegion(source.bytes, vp);
-        outBuffer.set(direct.pixels);
-        const result = { pixels: outBuffer, width: vp.w, height: vp.h };
-        cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
-        onTile?.(vp, 1);
-        return result;
-    }
-    // load once per worker
-    for (const h of liveHandles) {
-        let set = p.bytesIdByWorker.get(h.worker);
-        if (!set) {
-            set = new Set();
-            p.bytesIdByWorker.set(h.worker, set);
-        }
-        if (!set.has(bytesId)) {
-            try {
-                if (useSAB && globalThis.SharedArrayBuffer) {
-                    const sab = new globalThis.SharedArrayBuffer(source.bytes.byteLength);
-                    new Uint8Array(sab).set(source.bytes);
-                    h.worker.postMessage({ v: 1, type: 'load', bytesId, sab, byteLength: source.bytes.byteLength });
+        const levelId = getLevelId(source);
+        const misses = [];
+        const hits = [];
+        if (cache) {
+            for (const tile of plan.tiles) {
+                const id = tileIdOf(tile, source.tileSize, source.level ?? 0);
+                const finalKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:final`;
+                const col = Math.floor(tile.x / source.tileSize);
+                const row = Math.floor(tile.y / source.tileSize);
+                const gridTileX = col * source.tileSize;
+                const gridTileY = row * source.tileSize;
+                const gridTileW = Math.min(source.tileSize, source.width - gridTileX);
+                const gridTileH = Math.min(source.tileSize, source.height - gridTileY);
+                const expectedLen = gridTileW * gridTileH * bpp;
+                const hit = cache.get(finalKey);
+                if (hit && hit.byteLength === expectedLen) {
+                    hits.push({ region: tile, pixels: hit, id, gridTileW, gridTileH, gridTileX, gridTileY });
                 }
                 else {
-                    h.worker.postMessage({ v: 1, type: 'load', bytesId, bytes: source.bytes });
+                    misses.push(tile);
                 }
-                set.add(bytesId);
             }
-            catch { }
+        }
+        else {
+            misses.push(...plan.tiles);
+        }
+        const prog = options?.progressive;
+        const total = plan.tiles.length * (prog === 'dc-then-final' ? 2 : 1);
+        if (cache && misses.length === 0) {
+            let completed = 0;
+            for (const item of hits) {
+                stitchCropped(outBuffer, vp, item.region, item.pixels, item.gridTileW, item.gridTileH, item.gridTileX, item.gridTileY, bpp);
+                if (prog === 'dc-then-final') {
+                    completed += 1;
+                    onTile?.(item.region, completed, { id: item.id, key: tileKey(item.id), stage: 'dc', completed, total });
+                }
+                else {
+                    completed += 1;
+                    onTile?.(item.region, completed, { id: item.id, key: tileKey(item.id), stage: 'final', completed, total });
+                }
+            }
+            if (prog === 'dc-then-final') {
+                for (const item of hits) {
+                    completed += 1;
+                    onTile?.(item.region, completed, { id: item.id, key: tileKey(item.id), stage: 'final', completed, total });
+                }
+            }
+            const pixels = outBuffer.byteLength === need ? outBuffer : outBuffer.subarray(0, need);
+            const result = { pixels, width: vp.w, height: vp.h, format: plan.format };
+            cacheStore(cache, cacheKeyFinal, pixels, need);
+            if (options?.preserveMetadata) {
+                const icc = await ensureIccProfile(source, options);
+                if (icc)
+                    result.iccProfile = icc;
+            }
+            return result;
+        }
+        // #41: pool from caller opts.pool (preferred) or module singleton (created once outside hot path via getOrCreate when factory provided)
+        let p;
+        if (options?.pool) {
+            p = options.pool;
+        }
+        else if (options?.workerFactory) {
+            p = getOrCreatePool(options.workerFactory, options.coreBudget);
+        }
+        else {
+            const direct = signal ? await raceWithAbort(decodeRegion(source.bytes, vp), signal) : await decodeRegion(source.bytes, vp);
+            return finalizeDirectDecode(direct, vp, bpp, outBuffer, need, plan.format, cache, cacheKeyFinal, source.tileSize, source.level ?? 0, onTile);
+        }
+        const bytesId = p.allocateBytesId(source);
+        const useSAB = options?.useSAB === true && typeof SharedArrayBuffer !== 'undefined';
+        const desired = Math.min(HWC, misses.length);
+        const liveHandles = await p.acquire(desired);
+        if (liveHandles.length === 0) {
+            const direct = signal ? await raceWithAbort(decodeRegion(source.bytes, vp), signal) : await decodeRegion(source.bytes, vp);
+            return finalizeDirectDecode(direct, vp, bpp, outBuffer, need, plan.format, cache, cacheKeyFinal, source.tileSize, source.level ?? 0, onTile);
+        }
+        await Promise.all(liveHandles.map((h) => h.ready));
+        const usable = liveHandles.filter(h => h.state !== HandleState.Terminated && h.state !== HandleState.Bad);
+        if (usable.length === 0) {
+            p.release(liveHandles);
+            const direct = signal ? await raceWithAbort(decodeRegion(source.bytes, vp), signal) : await decodeRegion(source.bytes, vp);
+            return finalizeDirectDecode(direct, vp, bpp, outBuffer, need, plan.format, cache, cacheKeyFinal, source.tileSize, source.level ?? 0, onTile);
+        }
+        p.ensureLoaded(usable, bytesId, source.bytes, useSAB);
+        try {
+            const baseTileOpts = {};
+            if (signal != null)
+                baseTileOpts.signal = signal;
+            if (onTile)
+                baseTileOpts.onTile = onTile;
+            let prewarmCompleted = 0;
+            if (hits.length > 0) {
+                for (const item of hits) {
+                    stitchCropped(outBuffer, vp, item.region, item.pixels, item.gridTileW, item.gridTileH, item.gridTileX, item.gridTileY, bpp);
+                    if (prog === 'dc-then-final') {
+                        prewarmCompleted += 1;
+                        onTile?.(item.region, prewarmCompleted, { id: item.id, key: tileKey(item.id), stage: 'dc', completed: prewarmCompleted, total });
+                    }
+                    else {
+                        prewarmCompleted += 1;
+                        onTile?.(item.region, prewarmCompleted, { id: item.id, key: tileKey(item.id), stage: 'final', completed: prewarmCompleted, total });
+                    }
+                }
+            }
+            const cx = vp.x + vp.w / 2;
+            const cy = vp.y + vp.h / 2;
+            const orderedMisses = misses.map((tile, idx) => ({
+                tile,
+                dist: (tile.x + tile.w / 2 - cx) ** 2 + (tile.y + tile.h / 2 - cy) ** 2,
+            })).sort((a, b) => a.dist - b.dist).map(item => item.tile);
+            if (prog === 'dc-then-final') {
+                const dcOpts = {
+                    ...baseTileOpts,
+                    progressiveStage: 'dc',
+                    progressBase: prewarmCompleted,
+                    progressTotal: total,
+                    sourceW: source.width,
+                    sourceH: source.height,
+                };
+                if (cache) {
+                    dcOpts.tileCache = cache;
+                    dcOpts.sourceLevelId = levelId;
+                }
+                if (options?.cacheDcTiles !== undefined) {
+                    dcOpts.cacheDcTiles = options.cacheDcTiles;
+                }
+                await decodeTilesParallel(bytesId, plan.format, orderedMisses, usable, outBuffer, vp, bpp, dcOpts, deadlineMs, p.requestTimeout, source.tileSize, source.level ?? 0);
+                let finalCompleted = orderedMisses.length + prewarmCompleted;
+                for (const item of hits) {
+                    finalCompleted += 1;
+                    onTile?.(item.region, finalCompleted, { id: item.id, key: tileKey(item.id), stage: 'final', completed: finalCompleted, total });
+                }
+                const finOpts = {
+                    ...baseTileOpts,
+                    progressiveStage: 'final',
+                    progressBase: finalCompleted,
+                    progressTotal: total,
+                    sourceW: source.width,
+                    sourceH: source.height,
+                };
+                if (cache) {
+                    finOpts.tileCache = cache;
+                    finOpts.sourceLevelId = levelId;
+                }
+                await decodeTilesParallel(bytesId, plan.format, orderedMisses, usable, outBuffer, vp, bpp, finOpts, deadlineMs, p.requestTimeout, source.tileSize, source.level ?? 0);
+            }
+            else {
+                const tileOpts = {
+                    ...baseTileOpts,
+                    progressBase: prewarmCompleted,
+                    progressTotal: total,
+                    sourceW: source.width,
+                    sourceH: source.height,
+                };
+                if (cache) {
+                    tileOpts.tileCache = cache;
+                    tileOpts.sourceLevelId = levelId;
+                }
+                await decodeTilesParallel(bytesId, plan.format, orderedMisses, usable, outBuffer, vp, bpp, tileOpts, deadlineMs, p.requestTimeout, source.tileSize, source.level ?? 0);
+            }
+            const pixels = outBuffer.byteLength === need ? outBuffer : outBuffer.subarray(0, need);
+            const result = { pixels, width: vp.w, height: vp.h, format: plan.format };
+            cacheStore(cache, cacheKeyFinal, pixels, need);
+            if (options?.preserveMetadata) {
+                const icc = await ensureIccProfile(source, options);
+                if (icc)
+                    result.iccProfile = icc;
+            }
+            return result;
+        }
+        finally {
+            p.release(liveHandles);
         }
     }
-    try {
-        const tileOpts = {};
-        if (signal != null)
-            tileOpts.signal = signal;
-        if (onTile)
-            tileOpts.onTile = onTile;
-        await decodeTilesParallel(bytesId, plan.format, plan.tiles, liveHandles, outBuffer, vp, bpp, tileOpts, undefined, p.requestTimeout);
-        const result = { pixels: outBuffer, width: vp.w, height: vp.h };
-        cache?.set(`${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`, new Uint8Array(outBuffer));
-        return result;
-    }
     finally {
-        p.release(liveHandles);
+        if (options?.outBuffer)
+            buffersInFlight.delete(options.outBuffer);
     }
 }
 //# sourceMappingURL=tiled-decode-pool.js.map

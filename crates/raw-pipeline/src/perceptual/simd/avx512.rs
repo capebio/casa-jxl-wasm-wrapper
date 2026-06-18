@@ -8,6 +8,7 @@
 #![cfg(target_arch = "x86_64")]
 
 use core::arch::x86_64::*;
+use super::scalar::{scale_err_tail, xyb_tail, downsample_row_tail};
 
 /// AVX-512 strict scale error (p=3). `rsqrt_path` swaps `1/m` and `sqrt(e2)` for
 /// refined rcp14/rsqrt14 approximations. Mirrors `avx2::scale_err_avx2`.
@@ -38,6 +39,11 @@ pub unsafe fn scale_err_avx512(
     let half = _mm512_set1_ps(0.5);
     let threehalf = _mm512_set1_ps(1.5);
     let mut acc = _mm512_setzero_ps();
+    // Drain the f32 lane accumulator to f64 every FLUSH iterations — same strategy
+    // as avx2.rs — prevents f32 precision loss at > ~4096 accumulated values.
+    const FLUSH: usize = 4096;
+    let mut flush_count = 0usize;
+    let mut sum = 0f64;
 
     let lanes = n / 16 * 16;
     let mut i = 0;
@@ -67,18 +73,15 @@ pub unsafe fn scale_err_avx512(
         };
         acc = _mm512_fmadd_ps(e2, root, acc);
         i += 16;
+        flush_count += 1;
+        if flush_count == FLUSH {
+            sum += _mm512_reduce_add_ps(acc) as f64;
+            acc = _mm512_setzero_ps();
+            flush_count = 0;
+        }
     }
-    let mut sum = _mm512_reduce_add_ps(acc) as f64;
-    while i < n {
-        let m = (mask[i] * 2.0 + 0.15).max(0.15);
-        let inv = 1.0 / m;
-        let ex = (rx[i] - tx[i]) * inv;
-        let ey = (ry[i] - ty[i]) * inv;
-        let eb = (rb[i] - tb[i]) * inv;
-        let e2 = kx * ex * ex + ky * ey * ey + kb * eb * eb;
-        sum += (e2 * (e2 + 1e-12).sqrt()) as f64;
-        i += 1;
-    }
+    sum += _mm512_reduce_add_ps(acc) as f64;
+    sum = scale_err_tail(mask, rx, ry, rb, tx, ty, tb, n, kx, ky, kb, i, sum);
     ((sum / n as f64).powf(1.0 / 3.0)) as f32
 }
 
@@ -114,17 +117,8 @@ pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: *const f32, x: &mut
         _mm512_storeu_ps(b.as_mut_ptr().add(i), bb);
         i += 16;
     }
-    let lut_s = core::slice::from_raw_parts(lut, 256);
-    while i < n {
-        let j = i * 4;
-        let r = lut_s[px[j] as usize];
-        let g = lut_s[px[j + 1] as usize];
-        let bb = lut_s[px[j + 2] as usize];
-        x[i] = (r - bb) * 0.5;
-        y[i] = (r + bb) * 0.5 + g;
-        b[i] = bb;
-        i += 1;
-    }
+    let lut_s: &[f32; 256] = &*(lut as *const [f32; 256]);
+    xyb_tail(px, lut_s, n, i, x, y, b);
 }
 
 /// AVX-512 2× box downsample (16 output px/iter interior, scalar edge). Uses
@@ -155,12 +149,7 @@ pub unsafe fn downsample_avx512(src: &[f32], dst: &mut [f32], w: usize, h: usize
             _mm512_storeu_ps(dst.as_mut_ptr().add(drow + xx), _mm512_mul_ps(sum, quarter));
             xx += 16;
         }
-        while xx < dw {
-            let sx0 = xx << 1;
-            let sx1 = if sx0 + 1 < w { sx0 + 1 } else { w - 1 };
-            dst[drow + xx] = (src[row0 + sx0] + src[row0 + sx1] + src[row1 + sx0] + src[row1 + sx1]) * 0.25;
-            xx += 1;
-        }
+        downsample_row_tail(src, w, h, &mut dst[drow..drow + dw], dw, yy, xx);
     }
 }
 

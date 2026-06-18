@@ -27,10 +27,25 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
         await session.cancel(String(e));
         throw e;
     }
+    // Idempotent teardown: onAbort and the catch/abort exit paths may both request a
+    // cancel; cancel the session at most once so a second cancel can't hit torn-down state.
+    let cancelled = false;
     const cancelBoth = (reason) => {
+        if (cancelled)
+            return Promise.resolve();
+        cancelled = true;
         // SB-2: ensure string (defensive)
         const r = typeof reason === 'string' ? reason : String(reason);
         return Promise.allSettled([session.cancel(r), reader.cancel(r)]);
+    };
+    // Supervised reader-only cancel for intentional, non-error cutoffs (maxBytes).
+    // The returned promise is awaited on exit so close() never races an unsettled cancel.
+    let readerCancel = null;
+    const cancelReader = (reason) => {
+        if (readerCancel !== null)
+            return;
+        readerCancel = reader.cancel(reason);
+        void readerCancel.catch(() => { });
     };
     const onAbort = () => { void cancelBoth(ABORT_REASON); };
     if (signal?.aborted) {
@@ -39,11 +54,15 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
     }
     signal?.addEventListener('abort', onAbort, { once: true });
     let delivered = 0;
+    // Mirror of the in-flight prefetched read, typed loosely so the finally can settle it
+    // without inducing the 'value' self-reference cycle that an annotated `pending` causes.
+    let inflight = null;
     try {
         // Mark prefetch rejections as handled; the loop still awaits and surfaces them.
         const read = () => {
             const p = reader.read();
             void p.catch(() => { });
+            inflight = p;
             return p;
         };
         // SB-3 / maxBytes: no type anno on let (prevents cycle through ReadResult.value); cast only the null branch on reassign.
@@ -53,10 +72,11 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
                 throw new DOMException('Aborted', 'AbortError');
             if (pending === null) {
                 if (maxBytes != null)
-                    void reader.cancel('maxBytes satisfied');
+                    cancelReader('maxBytes satisfied');
                 break;
             }
             const { done, value } = await pending;
+            inflight = null;
             if (done)
                 break;
             if (value.byteLength === 0) {
@@ -65,7 +85,7 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
             }
             const remaining = maxBytes != null ? maxBytes - delivered : Infinity;
             if (remaining <= 0) {
-                void reader.cancel('maxBytes satisfied');
+                cancelReader('maxBytes satisfied');
                 break;
             }
             pending = remaining > value.byteLength ? read() : null;
@@ -73,12 +93,12 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
             delivered += chunk.byteLength;
             await session.push(chunk);
             if (maxBytes != null && delivered >= maxBytes) {
-                void reader.cancel('maxBytes satisfied');
+                cancelReader('maxBytes satisfied');
                 break;
             }
         }
         if (signal?.aborted) {
-            await session.cancel(ABORT_REASON);
+            await cancelBoth(ABORT_REASON);
             return delivered;
         }
         await session.close();
@@ -91,6 +111,20 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
     }
     finally {
         signal?.removeEventListener('abort', onAbort);
+        // Settle the in-flight prefetched read (and any supervised reader cancel) before
+        // releasing the lock, so teardown ordering is deterministic on every exit path.
+        if (inflight !== null) {
+            try {
+                await inflight;
+            }
+            catch { /* swallowed; loop already handled/surfaced */ }
+        }
+        if (readerCancel !== null) {
+            try {
+                await readerCancel;
+            }
+            catch { /* unsupervised cancel rejection */ }
+        }
         try {
             reader.releaseLock();
         }
@@ -103,6 +137,15 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
 export function toReadableStream(session, signal) {
     const iterator = session.chunks()[Symbol.asyncIterator]();
     let abortHandler = null;
+    // Idempotent: the abort handler and the underlying-source cancel() can both fire
+    // (near-simultaneous signal-abort + stream-cancel); cancel the session at most once.
+    let sessionCancelled = false;
+    const cancelSession = (reason) => {
+        if (sessionCancelled)
+            return Promise.resolve();
+        sessionCancelled = true;
+        return Promise.resolve(session.cancel(reason));
+    };
     const removeAbortHandler = () => {
         if (abortHandler !== null && signal !== undefined) {
             signal.removeEventListener('abort', abortHandler);
@@ -114,7 +157,7 @@ export function toReadableStream(session, signal) {
             if (signal === undefined)
                 return;
             abortHandler = () => {
-                void session.cancel(ABORT_REASON);
+                void cancelSession(ABORT_REASON);
                 controller.error(new DOMException('Aborted', 'AbortError'));
             };
             if (signal.aborted) {
@@ -159,7 +202,7 @@ export function toReadableStream(session, signal) {
                 }
             }
             finally {
-                await session.cancel(r);
+                await cancelSession(r);
             }
         },
     });
@@ -197,17 +240,35 @@ export async function fromBlobRange(blob, start, endExclusive, session, signalOr
  * Create a resume state from a previous negotiation (typically the one returned
  * by fromByteRange or fromRangePrefix).
  *
- * originalStart: the `start` you used in the *first* fromByteRange call
- *   (usually 0 for prefix/tile fetches). This lets us correctly compute the
- *   original endExclusive for the resume request.
+ * originalStart: the absolute `start` you used in the *first* fromByteRange call
+ *   (usually 0 for prefix/tile fetches). If omitted, it is recovered from
+ *   `previous.absoluteStart` (threaded through by fromByteRange), so callers no
+ *   longer have to re-supply it for non-zero-based tile/window fetches. An
+ *   explicit argument always wins (back-compat).
+ *
+ * The resume window end is bounded by the known resource size (`fullSize`) when
+ * available, so resuming a short/truncated transfer never requests bytes past
+ * EOF (which would 416 / RangeError).
  */
-export function createByteRangeResumeState(url, previous, originalStart = 0) {
-    const originalEnd = originalStart + previous.requested;
+export function createByteRangeResumeState(url, previous, originalStart) {
+    // Prefer the absolute start the request actually used; fall back to an
+    // explicit caller value, else 0 (legacy zero-based default).
+    const absStart = originalStart ?? previous.absoluteStart ?? 0;
+    let originalEnd = absStart + previous.requested;
+    // Bound the window end by the known EOF: a short resource means the window
+    // really ended at fullSize, so never resume for bytes that do not exist.
+    if (previous.fullSize !== undefined && originalEnd > previous.fullSize) {
+        originalEnd = previous.fullSize;
+    }
+    const resumeStart = absStart + previous.delivered;
     return {
         url,
-        start: originalStart + previous.delivered,
+        // Clamp so start never exceeds end (a fully-delivered short window collapses
+        // to start === endExclusive, which resumeFromByteRange treats as complete).
+        start: resumeStart > originalEnd ? originalEnd : resumeStart,
         endExclusive: originalEnd,
         etag: previous.etag,
+        lastModified: previous.lastModified,
         fullSize: previous.fullSize,
     };
 }
@@ -234,16 +295,19 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
     let honored = false;
     let fullSize;
     let etagFromResponse;
+    let lastModifiedFromResponse;
     let info;
     let t0 = undefined;
     let tHeaders = undefined;
     const makeInfo = (d) => {
         if (!info) {
-            info = { requested, honored, delivered: d };
+            info = { requested, honored, delivered: d, absoluteStart: start };
             if (fullSize !== undefined)
                 info.fullSize = fullSize;
             if (etagFromResponse)
                 info.etag = etagFromResponse;
+            if (lastModifiedFromResponse)
+                info.lastModified = lastModifiedFromResponse;
             if (t0 !== undefined && tHeaders !== undefined) {
                 info.ttfbMs = tHeaders - t0;
             }
@@ -280,10 +344,27 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
     // P0-4: on 206, Content-Length is the PART size, not the full resource — only fall back on 200.
     fullSize = cr.total ?? (!honored ? parseNonNegativeInt(resp.headers.get('Content-Length')) : undefined);
     etagFromResponse = resp.headers.get('ETag') || undefined;
+    lastModifiedFromResponse = resp.headers.get('Last-Modified') || undefined;
+    // SB-5/abort: idempotent teardown. Both onAbort and the catch/abort exit paths
+    // can request a cancel; cancel the session at most once, and supervise the
+    // reader cancel rather than firing it and walking away.
+    let cancelled = false;
     const cancelBoth = (reason) => {
+        if (cancelled)
+            return Promise.resolve();
+        cancelled = true;
         // SB-2: ensure string (defensive)
         const r = typeof reason === 'string' ? reason : String(reason);
         return Promise.allSettled([session.cancel(r), reader.cancel(r)]);
+    };
+    // Cancel only the reader (intentional, non-error cutoffs like "range satisfied").
+    // Supervised: the returned promise is awaited on exit so close() never races it.
+    let readerCancel = null;
+    const cancelReader = (reason) => {
+        if (readerCancel !== null)
+            return;
+        readerCancel = reader.cancel(reason);
+        void readerCancel.catch(() => { });
     };
     const onAbort = () => { void cancelBoth(ABORT_REASON); };
     if (signal?.aborted) {
@@ -291,8 +372,23 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
         return makeInfo(0);
     }
     signal?.addEventListener('abort', onAbort, { once: true });
-    if (opts.expectEtag && !honored && etagFromResponse && etagFromResponse !== opts.expectEtag) {
-        const err = new Error('[jxl-stream] resource changed during resume (ETag mismatch); restart from byte 0');
+    // Resume integrity (ROOT 2): a 200 fallback means the server ignored Range and is
+    // streaming the whole (possibly changed) resource. During a resume the session
+    // already holds an old prefix; splicing offset-skipped new bytes onto it corrupts
+    // the stitched result. Fail on ANY 200 fallback while resuming — even with no/weak
+    // validator (the no-ETag hole) — rather than blindly splice.
+    if ((opts.resuming || opts.expectEtag) && !honored) {
+        const why = opts.expectEtag && etagFromResponse && etagFromResponse !== opts.expectEtag
+            ? 'ETag mismatch'
+            : 'Range ignored (200) on resume; version cannot be confirmed';
+        const err = new Error(`[jxl-stream] resource changed during resume (${why}); restart from byte 0`);
+        await cancelBoth(err.message);
+        throw err;
+    }
+    // Resume integrity (ROOT 2): even an honored 206 can come from a misbehaving cache
+    // serving a newer object. If we pinned a validator, re-check it on the 206 too.
+    if (opts.expectEtag && honored && etagFromResponse && etagFromResponse !== opts.expectEtag) {
+        const err = new Error('[jxl-stream] resource changed during resume (ETag mismatch on 206); restart from byte 0');
         await cancelBoth(err.message);
         throw err;
     }
@@ -302,26 +398,61 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
         await cancelBoth(err.message);
         throw err;
     }
-    onHeaders?.(makeInfo(0));
+    // Content-Range end validation (ROOT 3): inclusive ranges. A fully-honored window
+    // [start, endExclusive) has cr.end === endExclusive-1. Two cases are tolerated and
+    // NOT errors: (a) a SHORTER end because the resource ends early (short-resource), and
+    // (b) a WIDER end because a server coalesced/rounded the range (RFC 7233 permits this)
+    // — the body loop caps delivery to the requested window, so the byte count stays correct.
+    // What IS rejected here is a structurally impossible part: an end below the start, which
+    // would mean a negative-length window and a server we cannot trust to align bytes.
+    if (honored && cr.end !== undefined && cr.start !== undefined && cr.end < cr.start) {
+        const err = new Error(`[jxl-stream] server returned malformed Content-Range end ${cr.end} < start ${cr.start}: ${url}`);
+        await cancelBoth(err.message);
+        throw err;
+    }
+    // onHeaders may throw; if it does, tear down the reader+session and surface it
+    // (otherwise the body reader stays locked and the consumer never settles).
+    try {
+        onHeaders?.(makeInfo(0));
+    }
+    catch (e) {
+        await cancelBoth(e instanceof Error ? e.message : String(e));
+        signal?.removeEventListener('abort', onAbort);
+        try {
+            reader.releaseLock();
+        }
+        catch { /* already released by cancel() */ }
+        throw e;
+    }
+    // Expected bytes for this window, bounded by the known EOF (short-resource aware).
+    // `available` is how many of the requested bytes actually exist in the resource:
+    // the full window when EOF is unknown, else the portion before fullSize (>= 0).
+    const target = endExclusive - start;
+    const available = fullSize !== undefined ? Math.max(0, fullSize - start) : target;
+    const expected = Math.min(target, available);
+    // Mirror of the in-flight prefetched read, typed loosely so the finally can settle it
+    // without inducing the 'value' self-reference cycle that an annotated `pending` causes.
+    let inflight = null;
     try {
         // Mark prefetch rejections as handled; the loop still awaits and surfaces them.
         const read = () => {
             const p = reader.read();
             void p.catch(() => { });
+            inflight = p;
             return p;
         };
         // SB-3: no type anno on let (lets inference from read() init); cast only null branch. Avoids 'value' cycle in reassign.
         let pending = read();
         let skipped = 0;
-        const target = endExclusive - start;
         while (true) {
             if (signal?.aborted)
                 throw new DOMException('Aborted', 'AbortError');
             if (pending === null) {
-                void reader.cancel('range satisfied');
+                cancelReader('range satisfied');
                 break;
             }
             const { done, value } = await pending;
+            inflight = null;
             if (done)
                 break;
             if (value.byteLength === 0) {
@@ -342,7 +473,7 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
             }
             const remaining = target - delivered;
             if (remaining <= 0) {
-                void reader.cancel('range satisfied');
+                cancelReader('range satisfied');
                 break;
             }
             pending = remaining > current.byteLength ? read() : null;
@@ -350,12 +481,12 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
             delivered += chunk.byteLength;
             await session.push(chunk);
             if (delivered >= target) {
-                void reader.cancel('range satisfied');
+                cancelReader('range satisfied');
                 break;
             }
         }
         if (signal?.aborted) {
-            await session.cancel(ABORT_REASON);
+            await cancelBoth(ABORT_REASON);
             return makeInfo(delivered);
         }
         await session.close();
@@ -368,6 +499,20 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
     }
     finally {
         signal?.removeEventListener('abort', onAbort);
+        // Settle the in-flight prefetched read (and any supervised reader cancel) before
+        // releasing the lock, so teardown ordering is deterministic on every exit path.
+        if (inflight !== null) {
+            try {
+                await inflight;
+            }
+            catch { /* swallowed; loop already handled/surfaced */ }
+        }
+        if (readerCancel !== null) {
+            try {
+                await readerCancel;
+            }
+            catch { /* unsupervised cancel rejection */ }
+        }
         try {
             reader.releaseLock();
         }
@@ -375,6 +520,17 @@ export async function fromByteRange(url, start, endExclusive, session, opts = {}
         const finalInfo = makeInfo(delivered);
         if (tHeaders !== undefined) {
             finalInfo.transferMs = performance.now() - tHeaders;
+        }
+        // Completeness (ROOT 4): flag a transfer that did not deliver the bytes that
+        // should exist, so callers distinguish truncation from a legitimately complete
+        // window. Two cases: (a) fewer bytes than the EOF-bounded available portion
+        // (truncated/short connection), or (b) the requested window lies entirely past
+        // EOF (available === 0 but the caller asked for a non-empty window — e.g. a 200
+        // fallback whose body ended before `start`). A legitimately short resource whose
+        // available portion was fully delivered (delivered === expected, available > 0)
+        // is NOT flagged. cancelled transfers already reject, so they are excluded.
+        if (!cancelled && (delivered < expected || (available === 0 && target > 0 && fullSize !== undefined))) {
+            finalInfo.underDelivered = true;
         }
         // SB-5: fire onRangeNegotiated from finally (error paths report delivered too); build info once.
         onRangeNegotiated?.(finalInfo);
@@ -427,8 +583,13 @@ export async function fromRangePrefix(url, byteCount, session, opts = {}) {
  * createByteRangeResumeState from an earlier RangeNegotiation).
  *
  * This is the ergonomic entry point for SB-10 resumable Range.
- * - If the state has an etag, automatically adds `If-Range: <etag>` for safe resume
- *   (server will 412 if the resource changed).
+ * - If the state has a strong ETag, adds `If-Range: <etag>`; otherwise falls back
+ *   to `If-Range: <Last-Modified>` when a date validator is available, so the
+ *   resume can still pin the resource version.
+ * - This is always flagged as a resume continuation: a 200 fallback (server ignored
+ *   Range, sending the whole — possibly changed — resource) is treated as a hard
+ *   failure rather than splicing offset-skipped bytes of an unverified body onto the
+ *   old prefix. This closes the no-validator / weak-validator version-skew hole.
  * - Still supports all the normal RangePrefixOptions (extra headers are merged,
  *   signal, custom fetchImpl, onRangeNegotiated).
  * - The underlying fromByteRange skip/206/200 logic handles the continuation.
@@ -449,13 +610,22 @@ export async function resumeFromByteRange(state, session, opts = {}) {
         state.start < 0 || state.start >= state.endExclusive) {
         throw new RangeError('[jxl-stream] resume state has invalid start/endExclusive');
     }
-    const resumeOpts = { ...opts };
+    // Always a resume continuation: the session may already hold an earlier prefix,
+    // so a 200 fallback must fail rather than splice offset-skipped new-version bytes.
+    const resumeOpts = { ...opts, resuming: true };
     const strongEtag = state.etag && !state.etag.startsWith('W/') ? state.etag : undefined;
-    if (strongEtag) {
+    // If-Range validator: prefer a strong ETag; otherwise fall back to Last-Modified
+    // (an HTTP-date validator is valid in If-Range). A weak ETag is never used for
+    // If-Range (RFC 7232: If-Range requires a strong validator for the ETag form).
+    const ifRange = strongEtag ?? state.lastModified;
+    if (ifRange) {
         const merged = new Headers(opts.headers);
-        // on ETag mismatch the server ignores Range and returns 200 with the full new resource; expectEtag detects this and fails fast
-        merged.set('If-Range', strongEtag);
+        // On validator mismatch the server ignores Range and returns 200 with the full
+        // new resource; expectEtag (strong) and the resuming flag both detect this and fail fast.
+        merged.set('If-Range', ifRange);
         resumeOpts.headers = merged;
+    }
+    if (strongEtag) {
         resumeOpts.expectEtag = strongEtag;
     }
     return fromByteRange(state.url, state.start, state.endExclusive, session, resumeOpts);

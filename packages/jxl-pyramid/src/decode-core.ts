@@ -8,7 +8,7 @@ export interface DecodedLevel {
   pixels: Uint8Array;
   width: number;
   height: number;
-  format?: PixelFormat;
+  format: PixelFormat;
   /**
    * When errorPolicy='skip-tile' and tile decodes failed, lists the grid tiles that were zero-filled (L20-1).
    * See DecodeOptions.errorPolicy for the viewport cache contract: do not cache a DecodedLevel with failedTiles
@@ -410,7 +410,8 @@ export function ensureIccProfile(
       if (icc) icc = new Uint8Array(icc); // own the bytes
       await Promise.resolve((dec as any).dispose()).catch(() => {});
       return icc || null;
-    } catch {
+    } catch (err) {
+      console.error('ensureIccProfile failed:', err);
       return null;
     }
   })();
@@ -479,7 +480,7 @@ export function cacheStore(cache: PyramidCache | undefined, key: string | undefi
   if (!cache || !key) return;
   const cap = cache.capacityBytes;
   if (cap !== undefined && need > cap) return;
-  cache.set(key, pixels.byteLength > need ? pixels.slice(0, need) : pixels.slice());
+  cache.set(key, pixels.byteLength === need ? pixels : pixels.slice(0, need));
 }
 
 export function sortCenterOut<T>(

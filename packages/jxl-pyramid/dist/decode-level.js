@@ -1,7 +1,45 @@
 import { createDecoder } from "@casabio/jxl-wasm";
-import { WHOLE_DECODE_OPTS, PyramidError, } from "./decode-core.js";
+import { extractTileBitstream, canUseParallelTileWorkers } from "./tiling.js";
+import { WHOLE_DECODE_OPTS, stitch, PyramidError, stitchCropped, assertFiniteRegion, snapRegionToIntegers, formatFromBits, bppOfFormat, viewportCacheKey, tileIdOf, tileKey, tileKeyPacked, validateDecodedOutput, raceWithAbort, ensureIccProfile, buffersInFlight, cacheStore, clampRegion, } from "./decode-core.js";
 import { prepareDecodePlan } from "./plan.js";
-import { getLevelId } from "./cache.js";
+import { getLevelId, makeTileCacheKey } from "./cache.js";
+import { shouldUseParallel, decodeTiledViewportPooled } from "./tiled-decode-pool.js";
+export { PyramidError, formatFromBits, bppOfFormat, viewportCacheKey, tileIdOf, tileKey, tileKeyPacked } from "./decode-core.js";
+function stitchTileIntoViewport(outBuffer, viewport, tile, decodedPixels, source, bpp) {
+    const tileSize = source.tileSize;
+    const tx = Math.floor(tile.x / tileSize);
+    const ty = Math.floor(tile.y / tileSize);
+    const srcOriginX = tx * tileSize;
+    const srcOriginY = ty * tileSize;
+    const decodedW = Math.min(tileSize, source.width - srcOriginX);
+    const decodedH = Math.min(tileSize, source.height - srcOriginY);
+    stitchCropped(outBuffer, viewport, tile, decodedPixels, decodedW, decodedH, srcOriginX, srcOriginY, bpp);
+}
+/** Zero a rectangular sub-region inside the viewport outBuffer (used for skip-tile error policy). */
+function zeroFillRect(outBuffer, viewport, rect, bpp) {
+    const dx = rect.x - viewport.x;
+    const dy = rect.y - viewport.y;
+    if (dx < 0 || dy < 0 || dx + rect.w > viewport.w || dy + rect.h > viewport.h)
+        return; // defensive
+    const stride = viewport.w * bpp;
+    const rowBytes = rect.w * bpp;
+    let off = (dy * viewport.w + dx) * bpp;
+    for (let r = 0; r < rect.h; r++) {
+        outBuffer.fill(0, off, off + rowBytes);
+        off += stride;
+    }
+}
+/** Bounded concurrency utility for fallback paths */
+async function runWithBoundedConcurrency(items, limit, fn) {
+    let index = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (index < items.length) {
+            const currIndex = index++;
+            await fn(items[currIndex], currIndex);
+        }
+    });
+    await Promise.all(workers);
+}
 /**
  * Decode a rectangular viewport from a tiled JXTC level.
  * Uses per-tile parallel decode when workers + COOP/COEP are available; otherwise one WASM call.
@@ -10,121 +48,525 @@ export async function decodeTiledViewport(source, region, options) {
     const signal = options?.signal;
     if (signal?.aborted)
         throw new PyramidError('ABORTED', 'decode aborted before start');
-    if (!Number.isFinite(region.x) || !Number.isFinite(region.y) || !Number.isFinite(region.w) || !Number.isFinite(region.h)) {
-        throw new RangeError("region must have finite x,y,w,h");
+    // L18-2: hand-built tiled sources (bypassing createLevelSource/parseJxtcHeader) must still be sane.
+    if (!Number.isInteger(source.tileSize) || source.tileSize <= 0 ||
+        !Number.isInteger(source.width) || source.width <= 0 ||
+        !Number.isInteger(source.height) || source.height <= 0) {
+        throw new PyramidError('BAD_MANIFEST', 'tiled source tileSize/width/height must be positive integers');
     }
-    const plan = prepareDecodePlan(source, region);
+    assertFiniteRegion(region);
+    const snappedRegion = snapRegionToIntegers(region);
+    let plan;
+    try {
+        plan = prepareDecodePlan(source, snappedRegion);
+    }
+    catch (e) {
+        if (e instanceof PyramidError)
+            throw e;
+        throw new PyramidError('BAD_REGION', 'degenerate region after prepare', e);
+    }
     const decodeRegion = options?.decodeRegion ?? plan.decodeRegion;
     const vp = plan.viewport;
     const bpp = plan.bpp;
     const need = vp.w * vp.h * bpp;
+    // Hoist delegation decision ABOVE outBuffer registration (P1-A fix)
+    const canParallel = canUseParallelTileWorkers();
+    const progressive = options?.progressive;
+    const parallelEligible = !options?.decodeRegion
+        && shouldUseParallel(options, plan.tiles.length, canParallel)
+        && options?.errorPolicy !== 'skip-tile' && !options?.skipTiles;
+    if (parallelEligible && (progressive === 'dc-then-final' || progressive === undefined)) {
+        return decodeTiledViewportPooled(source, snappedRegion, options);
+    }
     // Cache + outBuffer + onTile for direct (non-pooled) path.
     const cache = options?.cache;
-    if (cache) {
-        const key = `${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`;
-        const cached = cache.get(key);
-        if (cached) {
-            if (options?.outBuffer) {
-                const ob = options.outBuffer;
-                if (ob.length < need)
-                    throw new RangeError(`outBuffer too small (${ob.length} < ${need})`);
-                ob.set(cached);
-                return { pixels: ob, width: vp.w, height: vp.h };
-            }
-            return { pixels: cached, width: vp.w, height: vp.h };
+    const outBuf = options?.outBuffer;
+    const zeroCopyHits = !!options?.zeroCopyCacheHits;
+    if (outBuf) {
+        if (outBuf.byteLength < need)
+            throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${outBuf.byteLength} < ${need})`);
+        if (buffersInFlight.has(outBuf))
+            throw new PyramidError('BUFFER_IN_USE', 'outBuffer is already in use by another decode');
+        buffersInFlight.add(outBuf);
+        // L5-2: 16-bit (bpp=8) requires even offset for safe Uint16Array(underlying, byteOffset) views downstream.
+        if (plan.bpp === 8 && (outBuf.byteOffset % 2) !== 0) {
+            throw new PyramidError('INVALID_BUFFER_ALIGNMENT', 'outBuffer.byteOffset must be even for 16-bit (bpp=8) pixels');
         }
     }
-    let target;
-    if (options?.outBuffer) {
-        if (options.outBuffer.length < need)
-            throw new RangeError(`outBuffer too small (${options.outBuffer.length} < ${need})`);
-        target = options.outBuffer;
+    try {
+        const cacheQuality = progressive === 'dc-only' ? 'dc' : 'final';
+        const cacheKey = cache ? viewportCacheKey(getLevelId(source), vp, plan.format, cacheQuality) : undefined;
+        if (cache && cacheKey) {
+            const cached = cache.get(cacheKey);
+            if (cached) {
+                if (outBuf) {
+                    if (cached.length >= need) {
+                        outBuf.set(cached.subarray(0, need));
+                        return { pixels: outBuf.byteLength === need ? outBuf : outBuf.subarray(0, need), width: vp.w, height: vp.h, format: plan.format };
+                    }
+                }
+                else {
+                    const pixels = zeroCopyHits ? cached : new Uint8Array(cached);
+                    return { pixels, width: vp.w, height: vp.h, format: plan.format };
+                }
+            }
+        }
+        const onTile = options?.onTile;
+        // L20-1/L20-2/L4-4: policy, budget, resume support (scoped to progressive per-tile direct path).
+        const errorPolicy = options?.errorPolicy ?? 'fail-fast';
+        const budgetMs = options?.budgetMs;
+        const skipTiles = options?.skipTiles;
+        const startMs = budgetMs != null ? performance.now() : 0;
+        const deadline = budgetMs != null ? startMs + budgetMs : null;
+        let failedTiles = [];
+        let target;
+        // Progressive DC-then-final (F1 + L3-1): Phase 1 all DC, Phase 2 all final.
+        // Delivers onTile twice per tile (DC first for full coarse paint, then final). Stream-stitch friendly.
+        // Only when no custom decodeRegion (tests use mocks for the one-shot path).
+        if ((progressive === 'dc-then-final' || progressive === 'dc-only') && !options?.decodeRegion) {
+            target = outBuf ? outBuf : new Uint8Array(need);
+            let completed = 0;
+            const tilesX = Math.ceil(source.width / source.tileSize);
+            const tilesY = Math.ceil(source.height / source.tileSize);
+            const exHeader = {
+                imageW: source.width,
+                imageH: source.height,
+                tileSize: source.tileSize,
+                tilesX,
+                tilesY,
+                hasAlpha: true, // Provably insensitive: extractTileBitstream does not utilize hasAlpha
+                bitsPerSample: source.bitsPerSample,
+                version: source.version ?? 1,
+            };
+            const n = plan.tiles.length;
+            const total = progressive === 'dc-only' ? n : n * 2;
+            const tileSize = source.tileSize;
+            const cx = vp.x + vp.w / 2;
+            const cy = vp.y + vp.h / 2;
+            const levelId = getLevelId(source);
+            const tilesWithBytes = plan.tiles.map((t, idx) => {
+                const tx = Math.floor(t.x / tileSize);
+                const ty = Math.floor(t.y / tileSize);
+                const dist = (t.x + t.w / 2 - cx) ** 2 + (t.y + t.h / 2 - cy) ** 2;
+                const id = tileIdOf(t, source.tileSize, source.level ?? 0);
+                return {
+                    tile: t,
+                    bytes: extractTileBitstream(source.bytes, t, exHeader),
+                    idx,
+                    tileGeom: { tx, ty, srcOriginX: tx * tileSize, srcOriginY: ty * tileSize },
+                    dist,
+                    id,
+                    dcKey: `${makeTileCacheKey(levelId, id)}:${plan.format}:dc`,
+                    finalKey: `${makeTileCacheKey(levelId, id)}:${plan.format}:final`
+                };
+            });
+            // DL-8 (UX/AR/gaming, medium): center-out tile ordering.
+            const ordered = tilesWithBytes.slice().sort((a, b) => a.dist - b.dist);
+            let deadlineHit = false;
+            const stitchedFinal = new Set();
+            // Phase 1: all DC (coarse first paint for entire viewport) with bounded fallback concurrency DL-7(b)
+            await runWithBoundedConcurrency(ordered, 3, async (item) => {
+                if (signal?.aborted)
+                    throw new PyramidError('ABORTED', 'decode aborted');
+                if (deadlineHit)
+                    return;
+                if (deadline != null && performance.now() > deadline) {
+                    if (errorPolicy === 'skip-tile') {
+                        deadlineHit = true;
+                        return;
+                    }
+                    throw new PyramidError('TIMEOUT', 'budgetMs deadline exceeded during progressive decode');
+                }
+                const t = item.tile;
+                const { id, dcKey, finalKey } = item;
+                const key = tileKey(id);
+                if (skipTiles?.has(key)) {
+                    completed += 1;
+                    const prog = { id, key, stage: 'dc', completed, total };
+                    onTile?.(t, completed, prog);
+                    return;
+                }
+                const { srcOriginX, srcOriginY } = item.tileGeom;
+                const decodedW = Math.min(tileSize, source.width - srcOriginX);
+                const decodedH = Math.min(tileSize, source.height - srcOriginY);
+                const expectedLen = decodedW * decodedH * plan.bpp;
+                // Check for final cache hit first to skip DC phase
+                const finalHit = cache?.get(finalKey);
+                if (finalHit && finalHit.byteLength === expectedLen) {
+                    stitchTileIntoViewport(target, vp, t, finalHit, source, plan.bpp);
+                    stitchedFinal.add(key);
+                    completed += 1;
+                    const prog = { id, key, stage: 'dc', completed, total };
+                    onTile?.(t, completed, prog);
+                    return;
+                }
+                // Check for DC cache hit
+                if (options?.cacheDcTiles) {
+                    const dcHit = cache?.get(dcKey);
+                    if (dcHit && dcHit.byteLength === expectedLen) {
+                        stitchTileIntoViewport(target, vp, t, dcHit, source, plan.bpp);
+                        completed += 1;
+                        const prog = { id, key, stage: 'dc', completed, total };
+                        onTile?.(t, completed, prog);
+                        return;
+                    }
+                }
+                try {
+                    const t0 = performance.now();
+                    const dcPixels = await decodeTileBytesProgressive(item.bytes, plan.format, 'dc');
+                    const decodeMs = performance.now() - t0;
+                    if (options?.cacheDcTiles && cache) {
+                        const cap = cache.capacityBytes;
+                        if (cap === undefined || dcPixels.byteLength <= cap) {
+                            cache.set(dcKey, dcPixels);
+                        }
+                    }
+                    stitchTileIntoViewport(target, vp, t, dcPixels, source, plan.bpp);
+                    completed += 1;
+                    const prog = { id, key, stage: 'dc', completed, total, decodeMs, bytesDecoded: item.bytes.byteLength };
+                    onTile?.(t, completed, prog);
+                }
+                catch (e) {
+                    if (errorPolicy === 'skip-tile') {
+                        zeroFillRect(target, vp, t, plan.bpp);
+                        failedTiles.push(id);
+                        completed += 1;
+                        const prog = { id, key, stage: 'dc', completed, total };
+                        onTile?.(t, completed, prog);
+                        return;
+                    }
+                    throw e;
+                }
+            });
+            if (progressive !== 'dc-only') {
+                // Phase 2: all final (refine) with bounded fallback concurrency DL-7(b)
+                await runWithBoundedConcurrency(ordered, 3, async (item) => {
+                    if (signal?.aborted)
+                        throw new PyramidError('ABORTED', 'decode aborted');
+                    if (deadlineHit)
+                        return;
+                    if (deadline != null && performance.now() > deadline) {
+                        if (errorPolicy === 'skip-tile') {
+                            deadlineHit = true;
+                            return;
+                        }
+                        throw new PyramidError('TIMEOUT', 'budgetMs deadline exceeded during progressive decode');
+                    }
+                    const t = item.tile;
+                    const id = tileIdOf(t, source.tileSize, source.level ?? 0);
+                    const key = tileKey(id);
+                    if (skipTiles?.has(key)) {
+                        completed += 1;
+                        const prog = { id, key, stage: 'final', completed, total };
+                        onTile?.(t, completed, prog);
+                        return;
+                    }
+                    if (stitchedFinal.has(key)) {
+                        completed += 1;
+                        const prog = { id, key, stage: 'final', completed, total };
+                        onTile?.(t, completed, prog);
+                        return;
+                    }
+                    const { srcOriginX, srcOriginY } = item.tileGeom;
+                    const decodedW = Math.min(tileSize, source.width - srcOriginX);
+                    const decodedH = Math.min(tileSize, source.height - srcOriginY);
+                    const expectedLen = decodedW * decodedH * plan.bpp;
+                    // Check for final cache hit
+                    const finalKey = `${makeTileCacheKey(levelId, id)}:${plan.format}:final`;
+                    const finalHit = cache?.get(finalKey);
+                    if (finalHit && finalHit.byteLength === expectedLen) {
+                        stitchTileIntoViewport(target, vp, t, finalHit, source, plan.bpp);
+                        stitchedFinal.add(key);
+                        completed += 1;
+                        const prog = { id, key, stage: 'final', completed, total };
+                        onTile?.(t, completed, prog);
+                        return;
+                    }
+                    try {
+                        const t0 = performance.now();
+                        const finalPixels = await decodeTileBytesProgressive(item.bytes, plan.format, 'final');
+                        const decodeMs = performance.now() - t0;
+                        if (cache) {
+                            const cap = cache.capacityBytes;
+                            if (cap === undefined || finalPixels.byteLength <= cap) {
+                                cache.set(finalKey, finalPixels);
+                            }
+                        }
+                        stitchTileIntoViewport(target, vp, t, finalPixels, source, plan.bpp);
+                        stitchedFinal.add(key);
+                        completed += 1;
+                        const prog = { id, key, stage: 'final', completed, total, decodeMs, bytesDecoded: item.bytes.byteLength };
+                        onTile?.(t, completed, prog);
+                    }
+                    catch (e) {
+                        if (errorPolicy === 'skip-tile') {
+                            zeroFillRect(target, vp, t, plan.bpp);
+                            failedTiles.push(id);
+                            completed += 1;
+                            const prog = { id, key, stage: 'final', completed, total };
+                            onTile?.(t, completed, prog);
+                            return;
+                        }
+                        throw e;
+                    }
+                });
+            }
+            // DL-1 (bug, high): budget-break / skipTiles can cache an incomplete viewport as 'final'.
+            if (deadlineHit) {
+                for (let i = 0; i < n; i++) {
+                    const t = plan.tiles[i];
+                    const id = tileIdOf(t, source.tileSize, 0);
+                    const k = tileKey(id);
+                    if (!stitchedFinal.has(k)) {
+                        failedTiles.push(id);
+                    }
+                }
+            }
+            const pixels = target.byteLength === need ? target : target.subarray(0, need);
+            const result = { pixels, width: vp.w, height: vp.h, format: plan.format };
+            if (failedTiles.length > 0) {
+                // dedup by key (a tile may error in both phases)
+                const seen = new Set();
+                const uniq = [];
+                for (const id of failedTiles) {
+                    const k = tileKey(id);
+                    if (!seen.has(k)) {
+                        seen.add(k);
+                        uniq.push(id);
+                    }
+                }
+                result.failedTiles = uniq;
+            }
+            const complete = !deadlineHit && failedTiles.length === 0 && !(skipTiles && skipTiles.size > 0);
+            if (complete) {
+                cacheStore(cache, cacheKey, target, need);
+            }
+            // Agent6-4: attach ICC (shared ref) if requested. ensure is lazy + cached on source.
+            if (options?.preserveMetadata) {
+                const icc = await ensureIccProfile(source, options);
+                if (icc)
+                    result.iccProfile = icc;
+            }
+            return result;
+        }
+        // Non-pooled direct (libjxl ROI handles tiles internally). L3-3 zero-copy when no outBuffer.
+        // Signal checked at entry; in-flight best-effort (WASM not cancellable mid-call).
+        // For fanout coroutine pattern see pooled path (decodeTilesParallel).
+        const p = decodeRegion(source.bytes, vp);
+        const direct = signal
+            ? await raceWithAbort(p, signal)
+            : await p;
+        // L10-R4: reverse trust — decoder must have returned exactly the requested viewport region.
+        validateDecodedOutput(direct, vp, bpp);
+        let pixels;
+        if (outBuf) {
+            outBuf.set(direct.pixels);
+            pixels = outBuf.byteLength === need ? outBuf : outBuf.subarray(0, need);
+        }
+        else {
+            pixels = direct.pixels; // zero-copy handoff (L3-3)
+        }
+        const result = { pixels, width: vp.w, height: vp.h, format: plan.format };
+        // DL-9 / DL-5: Uses extracted local cacheStore helper
+        cacheStore(cache, cacheKey, pixels, need);
+        const dirId = tileIdOf(vp, source.tileSize, 0);
+        const dirKey = tileKey(dirId);
+        const dirProg = { id: dirId, key: dirKey, stage: 'final', completed: 1, total: 1 };
+        onTile?.(vp, 1, dirProg);
+        // Agent6-4
+        if (options?.preserveMetadata) {
+            const icc = await ensureIccProfile(source, options);
+            if (icc)
+                result.iccProfile = icc;
+        }
+        return result;
     }
-    else {
-        target = new Uint8Array(need);
+    finally {
+        if (outBuf)
+            buffersInFlight.delete(outBuf);
     }
-    const onTile = options?.onTile;
-    // Non-pooled: direct (libjxl ROI handles tiles internally). Signal checked at entry; in-flight best-effort (WASM not cancellable mid-call).
-    // For fanout coroutine pattern see pooled path (decodeTilesParallel).
-    const p = decodeRegion(source.bytes, vp);
-    let direct;
-    if (signal) {
-        if (signal.aborted)
-            throw new PyramidError('ABORTED', 'decode aborted before start');
-        const ac = new AbortController();
-        signal.addEventListener('abort', () => ac.abort(), { once: true });
-        direct = await Promise.race([
-            p,
-            new Promise((_, rej) => {
-                ac.signal.addEventListener('abort', () => rej(new PyramidError('ABORTED', 'decode aborted')), { once: true });
-            })
-        ]);
+}
+/** Small helper: drive createDecoder on a standalone tile bitstream (from JXTC extract) for one stage. */
+async function decodeTileBytesProgressive(tileBytes, format, stage) {
+    const decoder = createDecoder({
+        format,
+        progressionTarget: stage === 'dc' ? 'dc' : 'final',
+        emitEveryPass: false,
+        preserveIcc: false,
+        preserveMetadata: false,
+    });
+    const drainOutcome = (async () => {
+        for await (const ev of decoder.events()) {
+            if (ev.type === 'final' || ev.type === 'progress' || ev.type === 'preview') {
+                const p = ev.pixels;
+                if (p) {
+                    const px = p instanceof Uint8Array ? p : new Uint8Array(p);
+                    // For dc target we accept first progress with pixels; for final the final event.
+                    if (stage === 'final' && ev.type === 'final')
+                        return { ok: true, px };
+                    if (stage === 'dc')
+                        return { ok: true, px };
+                }
+            }
+            if (ev.type === 'error') {
+                return { ok: false, err: new PyramidError('JXTC_PARSE', `tile progressive ${stage}: ${ev.message}`) };
+            }
+        }
+        return { ok: false, err: new PyramidError('INTERNAL', `tile progressive ${stage} produced no pixels`) };
+    })();
+    try {
+        await decoder.push(tileBytes);
+        await decoder.close();
+        const out = await drainOutcome;
+        if (!out.ok)
+            throw out.err;
+        return out.px;
     }
-    else {
-        direct = await p;
+    finally {
+        await Promise.resolve(decoder.dispose()).catch(() => { });
     }
-    target.set(direct.pixels);
-    const result = { pixels: target, width: vp.w, height: vp.h };
-    if (cache) {
-        const key = `${getLevelId(source)}-${vp.x}-${vp.y}-${vp.w}-${vp.h}-${plan.format}-preview`;
-        cache.set(key, new Uint8Array(target));
-    }
-    onTile?.(vp, 1);
-    return result;
 }
 /** Decode a pyramid level: whole-frame in one shot, or a viewport slice from JXTC. */
 export async function decodeLevel(source, region, options) {
     const signal = options?.signal;
     if (signal?.aborted)
         throw new PyramidError('ABORTED', 'decode aborted before start');
-    // Hoist bitsPerSample read once (Grok4).
-    const bits = source.bitsPerSample;
     if (source.kind === "whole") {
         if (region !== undefined) {
-            throw new Error("region decode requires a tiled level source");
+            throw new PyramidError('BAD_REGION', 'region decode requires a tiled level source');
         }
-        return decodeWhole(source.bytes, bits);
+        return decodeWhole(source.bytes, source.format, options, source);
     }
     if (region === undefined) {
-        throw new Error("tiled level decode requires explicit region (use decodeLevel(source, region) or full viewport region)");
-    }
-    if (!Number.isFinite(region.x) || !Number.isFinite(region.y) || !Number.isFinite(region.w) || !Number.isFinite(region.h)) {
-        throw new RangeError("region must have finite x,y,w,h");
+        throw new PyramidError('BAD_REGION', 'tiled level decode requires explicit region (use decodeLevel(source, region) or full viewport region)');
     }
     return decodeTiledViewport(source, region, options);
 }
-async function decodeWhole(bytes, bits) {
-    const format = bits === 16 ? "rgba16" : "rgba8";
-    const decoder = createDecoder({ ...WHOLE_DECODE_OPTS, format });
-    // Capture drain at IIFE start (Grok1). Use .catch to consume to avoid unhandled rejection escape on error path.
-    let drainError = null;
-    const drainPromise = (async () => {
-        for await (const ev of decoder.events()) {
-            if (ev.type === "final") {
-                const px = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
-                return { pixels: px, width: ev.info.width, height: ev.info.height };
-            }
-            else if (ev.type === "error") {
-                const err = new Error(`decode ${ev.code}: ${ev.message}`);
-                drainError = err;
-                throw err;
+async function decodeWhole(bytes, format, options, nominalSource) {
+    const signal = options?.signal;
+    if (signal?.aborted)
+        throw new PyramidError('ABORTED', 'decode aborted before start');
+    const cache = options?.cache;
+    const outBuf = options?.outBuffer;
+    const bpp = bppOfFormat(format);
+    // For whole we use nominal dims (from LevelSource) for cache key / outBuffer sizing / validation when available.
+    const nomW = nominalSource?.width;
+    const nomH = nominalSource?.height;
+    const haveNominal = Number.isFinite(nomW) && Number.isFinite(nomH) && nomW > 0 && nomH > 0;
+    if (outBuf) {
+        if (haveNominal) {
+            const need = nomW * nomH * bpp;
+            if (outBuf.byteLength < need)
+                throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${outBuf.byteLength} < ${need})`);
+        }
+        if (buffersInFlight.has(outBuf)) {
+            throw new PyramidError('BUFFER_IN_USE', 'outBuffer is already in use by another decode');
+        }
+        if (bpp === 8 && (outBuf.byteOffset % 2) !== 0) {
+            throw new PyramidError('INVALID_BUFFER_ALIGNMENT', 'outBuffer.byteOffset must be even for 16-bit (bpp=8) pixels');
+        }
+        buffersInFlight.add(outBuf);
+    }
+    try {
+        // DL-2 (bug, high): decodeWhole cache hit returns the cache-owned buffer zero-copy, unconditionally.
+        // DL-2 outBuf hit path: treat cached.length < need as a cache miss.
+        if (cache && haveNominal) {
+            const key = `${getLevelId(bytes)}-${nomW}x${nomH}-${format}-whole`;
+            const cached = cache.get(key);
+            if (cached) {
+                const need = nomW * nomH * bpp;
+                if (outBuf) {
+                    if (cached.length >= need) {
+                        outBuf.set(cached.subarray(0, need));
+                        return { pixels: outBuf.byteLength === need ? outBuf : outBuf.subarray(0, need), width: nomW, height: nomH, format };
+                    }
+                }
+                else {
+                    const pixels = options?.zeroCopyCacheHits ? cached : new Uint8Array(cached);
+                    return { pixels, width: nomW, height: nomH, format };
+                }
             }
         }
-        throw new Error("whole-frame decode produced no final frame");
-    })().catch((e) => {
-        drainError = e;
-        throw e;
-    });
-    try {
-        await decoder.push(bytes);
-        await decoder.close();
-        const res = await drainPromise;
-        if (drainError)
-            throw drainError;
-        return res;
+        const decoder = createDecoder({ ...WHOLE_DECODE_OPTS, format });
+        const drainOutcome = (async () => {
+            for await (const ev of decoder.events()) {
+                if (ev.type === "final") {
+                    const px = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
+                    return { ok: true, res: { pixels: px, width: ev.info.width, height: ev.info.height, format } };
+                }
+                else if (ev.type === "error") {
+                    return { ok: false, err: new PyramidError('JXTC_PARSE', `decode ${ev.code}: ${ev.message}`) };
+                }
+            }
+            return { ok: false, err: new PyramidError('INTERNAL', 'whole-frame decode produced no final frame') };
+        })();
+        try {
+            await decoder.push(bytes);
+            await decoder.close();
+            // DL-6 (robustness, low): decodeWhole ignores signal after start. Wrap the drain with raceWithAbort helper.
+            const out = signal ? await raceWithAbort(drainOutcome, signal) : await drainOutcome;
+            if (!out.ok)
+                throw out.err;
+            let res = out.res;
+            // L10-R4: validate decoder output against nominal (if known) or self-reported size.
+            if (haveNominal) {
+                validateDecodedOutput(res, { x: 0, y: 0, w: nomW, h: nomH }, bpp);
+            }
+            else {
+                const expectedBytes = res.width * res.height * bpp;
+                if (res.pixels.byteLength !== expectedBytes) {
+                    throw new PyramidError('DECODER_OUTPUT_MISMATCH', `whole decoded bytes ${res.pixels.byteLength} != ${expectedBytes}`);
+                }
+            }
+            // DL-3 (bug, medium): decodeWhole outBuf path returns the whole outBuf, not subarray(0, need).
+            if (outBuf) {
+                const need = res.width * res.height * bpp;
+                if (outBuf.byteLength < need)
+                    throw new PyramidError('INVALID_BUFFER_SIZE', `outBuffer too small (${outBuf.byteLength} < ${need})`);
+                outBuf.set(res.pixels);
+                res = { pixels: outBuf.byteLength === need ? outBuf : outBuf.subarray(0, need), width: res.width, height: res.height, format };
+            }
+            // DL-9 / DL-5: Uses extracted local cacheStore helper
+            if (cache) {
+                const w = haveNominal ? nomW : res.width;
+                const h = haveNominal ? nomH : res.height;
+                const key = `${getLevelId(bytes)}-${w}x${h}-${format}-whole`;
+                const sz = w * h * bpp;
+                cacheStore(cache, key, res.pixels, sz);
+            }
+            // Agent6-4
+            if (options?.preserveMetadata) {
+                const icc = await ensureIccProfile(nominalSource || { kind: 'whole', bytes, width: res.width, height: res.height, bitsPerSample: format === 'rgba16' ? 16 : 8, format, bpp }, options);
+                if (icc)
+                    res.iccProfile = icc;
+            }
+            return res;
+        }
+        finally {
+            await Promise.resolve(decoder.dispose()).catch(() => { });
+        }
     }
     finally {
-        await Promise.resolve(decoder.dispose()).catch(() => { });
+        if (outBuf) {
+            buffersInFlight.delete(outBuf);
+        }
+    }
+}
+/** Pure helper: extrapolate the viewport along its velocity. leadMs ~ one decode round-trip. */
+export function predictRegion(vp, velXPxPerMs, velYPxPerMs, leadMs) {
+    return { x: vp.x + velXPxPerMs * leadMs, y: vp.y + velYPxPerMs * leadMs, w: vp.w, h: vp.h };
+}
+/** Warm the tile cache for a (predicted) region. Never throws; resolves when done or aborted. */
+export async function prefetchViewport(source, region, options) {
+    if (!options.cache)
+        return;
+    try {
+        const clamped = clampRegion(region, source.width, source.height);
+        const { progressive, ...rest } = options;
+        await decodeTiledViewport(source, clamped, { ...rest, errorPolicy: 'skip-tile' });
+    }
+    catch {
+        // prefetch is best-effort by definition
     }
 }
 //# sourceMappingURL=decode-level.js.map

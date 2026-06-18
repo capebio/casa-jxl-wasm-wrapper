@@ -25,6 +25,19 @@ import { PriorityQueue } from "./queue.js";
 import { DedupeRegistry } from "./dedupe.js";
 const DEFAULT_PUSH_HWM = 4;
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+// Upper bound on the cancel-before-acquire tombstone set and per-worker discard set.
+// These are pruned on the normal acquire/terminal-ack paths; the cap is a safety net for
+// the abnormal paths (stray cancel, recycled worker that never acks) so neither set can
+// grow without limit over a long-lived scheduler. Evicts oldest (FIFO) when exceeded.
+const MAX_CANCELLED_DURING_ACQUISITION = 1024;
+const MAX_DISCARD_SESSIONS_PER_WORKER = 256;
+// Max consecutive async-drain retry attempts before the wedged queue head is rejected
+// instead of being retried forever (errors-0004). Backoff doubles from 50ms up to 2s.
+const MAX_DRAIN_RETRIES = 6;
+// Minimum consumed-prefix length before signalDrain copyWithin-compacts the pendingPushes
+// ring under steady partial drain (logic-0005). Matches queue.ts's small floor; kept >=64 so
+// we never churn the array on tiny backpressure bursts (CLAUDE.md: no compactQueue threshold <64).
+const PENDING_PUSHES_COMPACT_MIN = 64;
 // Shared empty array — avoids per-message allocation when no handlers registered.
 const EMPTY_HANDLERS = [];
 // ---------------------------------------------------------------------------
@@ -62,6 +75,8 @@ export class Scheduler {
     maxParkedSessions;
     destroyed = false;
     drainingQueue = false;
+    // Consecutive async-drain failures, for bounded exponential backoff (errors-0004).
+    drainRetryCount = 0;
     preemptionCount = 0;
     totalSessionCount = 0;
     _runningCount = 0;
@@ -165,6 +180,10 @@ export class Scheduler {
                 });
                 this._subscriberCount++;
                 this.totalSessionCount++;
+                // Wire the subscriber's AbortSignal too — every other acquisition exit does this, and
+                // without it signal.abort() on a deduped session is a silent no-op (the subscriber stays
+                // subscribed, counted, and leaking until the primary finishes) (concurrency-a1f6c2e0).
+                this.setupSignalAbort(params.sessionId, params.signal);
                 return { workerId: primaryRecord?.worker?.id ?? -1 };
             }
             this.dedupe.register(params.sessionId, params.sourceKey);
@@ -324,6 +343,21 @@ export class Scheduler {
         const record = this.sessions.get(sessionId);
         if (record === undefined) {
             this.dedupe.cancelSubscriber(sessionId);
+            // Cancel-before-acquire: a still-pending acquireSlot will consume this entry at its
+            // post-await ghost guards. A handler registered via onMessage() before acquireSlot is
+            // also orphaned here, so drop it now to avoid an unbounded pendingHandlers leak for
+            // sessions that never acquire (errors-0002 / security-7a2d4c19).
+            this.pendingHandlers.delete(sessionId);
+            // Bound the tombstone set so a stray/duplicate/post-completion cancel for a sessionId
+            // that never (re)enters acquireSlot cannot grow it without limit (errors-0001 /
+            // security-3f1c8e2a / concurrency-29de5068). FIFO-evict the oldest tombstone; the
+            // worst case is that an evicted ghost is no longer suppressed, which only re-raises the
+            // pre-existing benign-race window, never corrupts live state.
+            if (this.cancelledDuringAcquisition.size >= MAX_CANCELLED_DURING_ACQUISITION) {
+                const oldest = this.cancelledDuringAcquisition.values().next().value;
+                if (oldest !== undefined)
+                    this.cancelledDuringAcquisition.delete(oldest);
+            }
             this.cancelledDuringAcquisition.add(sessionId);
             return false;
         }
@@ -395,6 +429,7 @@ export class Scheduler {
                 else if (promotedRecord.state === "paused")
                     this._pausedCount++;
             }
+            record.abortCleanup?.(); // remove the old primary's abort listener (concurrency-b2d7e3f1)
             this.sessions.delete(sessionId);
             return true;
         }
@@ -402,6 +437,7 @@ export class Scheduler {
         if (!cancelWorker) {
             this.releaseAdmission(sessionId);
             this.adjustSessionCount(record, -1);
+            record.abortCleanup?.(); // detach abort listener on lone-subscriber cancel (concurrency-b2d7e3f1)
             this.sessions.delete(sessionId);
             return true;
         }
@@ -414,6 +450,17 @@ export class Scheduler {
                 ds = new Set();
                 this.discardSessions.set(w.id, ds);
             }
+            // Stale ids are normally removed when the worker's terminal ack reaches the wire filter
+            // (ensureWorkerWired). If the worker is recycled/terminated before acking, that entry can
+            // never be pruned and the per-worker Set would grow without limit (errors-0008 /
+            // security-6b3f9d22). Cap it: FIFO-evict the oldest discarded id. Worst case an evicted id
+            // is no longer suppressed at the wire, but activeSessionId / RESERVED gating downstream
+            // already drops traffic for non-active sessions, so this cannot resurrect a dead session.
+            if (ds.size >= MAX_DISCARD_SESSIONS_PER_WORKER) {
+                const oldest = ds.values().next().value;
+                if (oldest !== undefined)
+                    ds.delete(oldest);
+            }
             ds.add(sessionId);
             this.workerPausedSession.delete(w.id);
             w.handle.send({ type: "decode_cancel", sessionId });
@@ -422,20 +469,26 @@ export class Scheduler {
                 h({ type: "decode_cancelled", sessionId });
             this.releaseAdmission(sessionId);
             this._pausedCount--;
+            this.unblockBackpressure(record); // unblock any waitForDrain callers (paused sessions can hold pending pushes)
+            record.abortCleanup?.(); // detach abort listener on paused-session cancel (concurrency-b2d7e3f1)
             this.sessions.delete(sessionId);
             return true;
         }
         // Queued: remove from queue and reject the pending promise (S4).
         if (record.state === "queued" && record.pending !== undefined) {
-            const removed = this.queue.remove(sessionId, record.priority);
-            if (removed) {
-                this.unblockBackpressure(record);
-                record.pending.reject(new Error("[jxl-scheduler] Session cancelled."));
-                this.releaseAdmission(sessionId);
-                this._queuedCount--;
-                this.sessions.delete(sessionId);
-                return true;
-            }
+            // queue.remove() may return false if a stale priority hint left the entry under a different
+            // lane; the pending promise still must be rejected and the record torn down regardless,
+            // otherwise the queued branch falls through to the running/orphan handling below — which
+            // never rejects record.pending, hanging the caller while still decrementing the counter
+            // (logic-0006). Reject + clean up unconditionally for any queued record.
+            this.unblockBackpressure(record);
+            this.queue.remove(sessionId, record.priority);
+            record.pending.reject(new Error("[jxl-scheduler] Session cancelled."));
+            this.releaseAdmission(sessionId);
+            this._queuedCount--;
+            record.abortCleanup?.(); // detach abort listener on queued-session cancel (concurrency-b2d7e3f1)
+            this.sessions.delete(sessionId);
+            return true;
         }
         // Running primary: send cancel to worker. Keep record until worker acks
         // (terminal message arrives in handleWorkerMessage → cleanupSession).
@@ -455,6 +508,7 @@ export class Scheduler {
             // No worker, no pending — orphaned. Clean up.
             this.releaseAdmission(sessionId);
             this.adjustSessionCount(record, -1);
+            record.abortCleanup?.(); // detach abort listener on orphan cleanup (concurrency-b2d7e3f1)
             this.sessions.delete(sessionId);
         }
         return true;
@@ -501,7 +555,12 @@ export class Scheduler {
             bp.pendingPushes.length = 0;
             bp.pendingHead = 0;
         }
-        else if (bp.pendingHead >= 1024) {
+        else if (bp.pendingHead >= PENDING_PUSHES_COMPACT_MIN && bp.pendingHead * 2 >= bp.pendingPushes.length) {
+            // Steady partial drain never reaches the full-consume branch above, so the old
+            // head>=1024 trigger let up to ~1023 resolved waiter objects stay pinned (logic-0005).
+            // Mirror the queue.ts amortised heuristic: once the consumed prefix is past a small floor
+            // AND at least half the array, copyWithin-compact (no-alloc, the contract-preserved move
+            // CLAUDE.md keeps) so retention stays O(live waiters) instead of O(total pushes seen).
             bp.pendingPushes.copyWithin(0, bp.pendingHead);
             bp.pendingPushes.length -= bp.pendingHead;
             bp.pendingHead = 0;
@@ -617,7 +676,19 @@ export class Scheduler {
         backgroundWorker.cancelling = true;
         const prevHandlers = victimRecord?.handlers ?? [];
         let ackResolved = false;
+        // Remove our ack handler by identity, not position. The previous code unshifted onto index 0
+        // and shifted index 0 off on match/timeout; unshift made handleWorkerMessage's for..of skip
+        // the victim's first real handler when the ack handler shifted itself out mid-dispatch
+        // (logic-0002), and positional shift() could remove the wrong handler if the array was mutated
+        // by a concurrent cancel/promote (errors-0006). Appending (push) keeps it last so self-removal
+        // during dispatch only ends the for..of cleanly, and identity splice removes exactly this one.
+        const removeAckHandler = (handler) => {
+            const i = prevHandlers.indexOf(handler);
+            if (i !== -1)
+                prevHandlers.splice(i, 1);
+        };
         let resolvedKind = null;
+        let ackHandler;
         const ack = new Promise((resolve) => {
             const handler = (msg) => {
                 // Match terminal messages in the pause branch too (S2)
@@ -636,11 +707,12 @@ export class Scheduler {
                         resolvedKind = "terminal";
                     resolve();
                     if (victimRecord)
-                        prevHandlers.shift();
+                        removeAckHandler(handler);
                 }
             };
+            ackHandler = handler;
             if (victimRecord)
-                prevHandlers.unshift(handler);
+                prevHandlers.push(handler);
             if (usePause) {
                 backgroundWorker.handle.send({ type: "decode_pause", sessionId: victimSessionId });
             }
@@ -662,8 +734,8 @@ export class Scheduler {
             ]);
         }
         catch {
-            if (victimRecord)
-                prevHandlers.shift();
+            if (victimRecord && ackHandler !== undefined)
+                removeAckHandler(ackHandler);
             this.pool.recycle(backgroundWorker);
         }
         finally {
@@ -951,39 +1023,61 @@ export class Scheduler {
         final: 0.95,
     };
     handleWorkerMessage(sessionId, worker, rawMsg) {
-        // Re-stamp the message with the scheduler's current active session ID.
-        // This is critical if the worker was promoted to a new primary, as the worker
-        // itself is unaware of the JS-side session ID change.
-        // Guard the spread: only allocate when the embedded id differs (hot path optimisation).
-        const msg = rawMsg.sessionId === sessionId
-            ? rawMsg
-            : { ...rawMsg, sessionId };
+        // The worker re-stamps nothing — it emits its original embedded sessionId, which can lag
+        // the JS-side `sessionId` (worker.activeSessionId) after a dedupe promotion. Dispatch goes
+        // through protectMetricForDispatch(rawMsg, target), which re-stamps per target, and the
+        // local control-flow checks below compare against the `sessionId` variable directly (the
+        // re-stamp made the old `msg.sessionId === sessionId` test unconditionally true), so the
+        // previously-allocated `{ ...rawMsg, sessionId }` spread was never actually needed for
+        // dispatch — dropped to avoid the per-message allocation on the promotion path (perf-2a7b1d33).
+        const msgType = rawMsg.type;
         const record = this.sessions.get(sessionId);
         const handlers = record?.handlers ?? EMPTY_HANDLERS;
-        for (const h of handlers)
-            h(this.protectMetricForDispatch(rawMsg, sessionId));
+        // Compute the protected (frozen, re-stamped) payload once per target sessionId rather than
+        // once per handler — protectMetricForDispatch clones+freezes for type:"metric", which was
+        // being repeated for every handler of the same target (perf-1f3a9c20). All handlers of one
+        // target can share the same frozen object (sched-4 contract preserved).
+        // Handlers must not be able to abort dispatch: a throwing consumer would propagate out of
+        // the worker.handle.onMessage callback and skip the terminal-cleanup block below, leaking
+        // the worker and stalling the drain (errors-0013). Guard each call.
+        if (handlers.length > 0) {
+            const protectedMsg = this.protectMetricForDispatch(rawMsg, sessionId);
+            for (const h of handlers) {
+                try {
+                    h(protectedMsg);
+                }
+                catch { /* handler must not throw */ }
+            }
+        }
         // Fan out to dedupe subscribers.
         this.dedupe.forEachSubscriber(sessionId, (subId) => {
             if (subId === sessionId)
                 return;
             const subRecord = this.sessions.get(subId);
             const subHandlers = subRecord?.handlers ?? EMPTY_HANDLERS;
-            for (const h of subHandlers)
-                h(this.protectMetricForDispatch(rawMsg, subId));
+            if (subHandlers.length === 0)
+                return;
+            const protectedSubMsg = this.protectMetricForDispatch(rawMsg, subId);
+            for (const h of subHandlers) {
+                try {
+                    h(protectedSubMsg);
+                }
+                catch { /* handler must not throw */ }
+            }
         });
         // Track decode progress for victim scoring. The stage is used as a proxy for
         // fractional completion so that nearly-done sessions are spared from preemption.
-        if (record !== undefined && msg.type === "decode_progress") {
-            const p = Scheduler.STAGE_PROGRESS[msg.stage];
+        if (record !== undefined && msgType === "decode_progress") {
+            const p = Scheduler.STAGE_PROGRESS[rawMsg.stage];
             if (p !== undefined)
                 record.progress = Math.max(record.progress, p);
         }
-        if (msg.type === "worker_drain" && msg.sessionId === sessionId) {
+        if (msgType === "worker_drain") {
             this.signalDrain(sessionId);
         }
         // On completion: clean up, then either resume a parked session on this worker
         // or release it to the pool for the queue drain.
-        if (this.isTerminalMessage(msg) && msg.sessionId === sessionId) {
+        if (this.isTerminalMessage(rawMsg)) {
             this.cleanupSession(sessionId);
             const pausedId = this.workerPausedSession.get(worker.id);
             if (pausedId !== undefined) {
@@ -1097,12 +1191,33 @@ export class Scheduler {
                 break;
             }
             const { payload: pending } = entry;
-            this.assignWorker(worker, pending.sessionId, pending.startMsg);
-            this.setupSignalAbort(pending.sessionId, pending.signal);
-            for (const { msg, transfer } of pending.bufferedChunks) {
-                worker.handle.send(msg, transfer);
+            // assignWorker → pool.bind can throw (terminated/non-reserved worker). This sync section
+            // is not inside the async try/catch below, so an unguarded throw would leave the dequeued
+            // pending un-rejected, the worker un-released, and drainingQueue stuck true — permanently
+            // wedging the drain (errors-0005). Guard each iteration: reject the pending, recycle the
+            // worker, reset the guard, and stop (the failing head is consumed so we don't spin on it).
+            try {
+                this.assignWorker(worker, pending.sessionId, pending.startMsg);
+                this.setupSignalAbort(pending.sessionId, pending.signal);
+                for (const { msg, transfer } of pending.bufferedChunks) {
+                    worker.handle.send(msg, transfer);
+                }
+                pending.resolve();
             }
-            pending.resolve();
+            catch (err) {
+                // Bad head: reject it and recycle the worker, but continue draining —
+                // stopping here would leave remaining queued sessions waiting for the
+                // next unrelated worker completion (slow recovery on a quiet pool).
+                try {
+                    pending.reject(err);
+                }
+                catch { /* reject must not propagate */ }
+                try {
+                    this.pool.recycle(worker);
+                }
+                catch { /* recycle must not propagate */ }
+                // Fall through to next iteration: try another idle worker if available.
+            }
         }
         if (this.queue.isEmpty) {
             this.drainingQueue = false;
@@ -1128,10 +1243,31 @@ export class Scheduler {
                     }
                     pending.resolve();
                 }
+                // Drained without error — clear the backoff counter.
+                this.drainRetryCount = 0;
             }
             catch (err) {
                 console.error("[jxl-scheduler] drainQueue error:", err);
-                setTimeout(() => this.drainQueue(), 50);
+                // Bounded exponential backoff. The previous unconditional setTimeout(...,50) retried
+                // forever at a fixed 50ms with no escalation, so a persistently faulting queue head
+                // (e.g. pool.bind throwing) became an unbounded busy-retry loop while its pending
+                // promise never settled (errors-0004). Cap the attempts; once exhausted, reject the
+                // wedged head so its caller stops hanging and the queue can make progress.
+                if (this.drainRetryCount < MAX_DRAIN_RETRIES && !this.destroyed) {
+                    this.drainRetryCount++;
+                    const delayMs = Math.min(2000, 50 * 2 ** (this.drainRetryCount - 1));
+                    setTimeout(() => this.drainQueue(), delayMs);
+                }
+                else {
+                    this.drainRetryCount = 0;
+                    const head = this.queue.dequeue();
+                    if (head !== null) {
+                        try {
+                            head.payload.reject(err);
+                        }
+                        catch { /* reject must not propagate */ }
+                    }
+                }
             }
             finally {
                 this.drainingQueue = false;
@@ -1152,11 +1288,13 @@ export class Scheduler {
             }
             else if (record.state === "paused") {
                 // Notify paused-session callers with a synthetic cancelled message.
+                this.unblockBackpressure(record); // unblock any pending waitForDrain promises (backpressure)
                 for (const h of record.handlers)
                     h({ type: "decode_cancelled", sessionId: record.sessionId });
             }
             else if (record.state === "running" || record.state === "cancelling") {
                 // Running sessions lose their workers on pool.shutdown(); synthesize terminal so callers do not hang.
+                this.unblockBackpressure(record); // unblock any pending waitForDrain promises (backpressure)
                 const t = record.kind === "encode" ? "encode_cancelled" : "decode_cancelled";
                 for (const h of record.handlers) {
                     try {

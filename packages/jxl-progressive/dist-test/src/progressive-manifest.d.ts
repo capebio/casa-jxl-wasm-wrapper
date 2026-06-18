@@ -1,4 +1,6 @@
 export type TierName = "dc" | "preview" | "full";
+import type { CameraPose, Relation, FrameSetMember, FrameSet, AssetChannel, ChannelDescriptor } from "./types.js";
+export type { CameraPose, Relation, FrameSetMember, FrameSet, AssetChannel, ChannelDescriptor };
 export interface ManifestTier {
     name: TierName;
     byteStart: number;
@@ -30,7 +32,22 @@ export interface ProgressiveManifest {
         confidence: number;
         method: string;
     };
+    /** Optional passthrough for future perceptual / non-Riemannian color engine params
+     *  (e.g. from advanced LookRenderer / LUT / geodesic). Transported via manifest to
+     *  onManifest consumers for illumination-invariant adjustments etc. No cost here.
+     */
+    perceptual?: Record<string, unknown>;
     tiers: ManifestTier[];
+    capture?: {
+        pose?: CameraPose;
+        intrinsics?: FrameSetMember["intrinsics"];
+        extrinsics?: FrameSetMember["extrinsics"];
+        depthLayer?: FrameSetMember["depthLayer"];
+        featureSidecar?: FrameSetMember["featureSidecar"];
+    };
+    /** Concurrent loadable channels alongside rgb (PG4). */
+    channels?: AssetChannel[];
+    channelDescriptors?: ChannelDescriptor[];
 }
 export declare class ManifestValidationError extends Error {
     readonly field: string;

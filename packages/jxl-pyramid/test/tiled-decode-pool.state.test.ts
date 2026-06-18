@@ -120,6 +120,8 @@ function makeTiledSource(width = 64, height = 32, tileSize = 32): Extract<LevelS
     format: "rgba8",
     bpp: 4,
     version: 1,
+    tilesX: 2,
+    tilesY: 1,
   };
 }
 
