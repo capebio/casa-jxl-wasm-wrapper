@@ -79,29 +79,35 @@ const FLIPFLOP_NOTE =
   `  node -e "import('./benchmark/optimize/gate.mjs').then(m=>console.log(JSON.stringify(` +
   `m.evaluate(<verdict>, {butteraugliThreshold:BT,slowdownEpsilon:SE}))))"\nReturn the VERDICT.`
 
-// PROBE: near-instant arg-binding test. `Workflow({name, args:{__probe:true, ...}})` returns
-// immediately echoing what the script actually received — 0 agents, 0 cost. Diagnoses whether
-// `args` binds for named workflows (both 5h runs ran the full default = args never arrived).
-if (typeof args !== 'undefined' && args && args.__probe) {
-  log(`PROBE: argsSeen=${JSON.stringify(args)}`)
-  return { probe: true, argsSeen: args ?? null, argsType: typeof args }
+// CRITICAL: the runtime delivers `args` as a JSON STRING, not an object (verified 2026-06-18 —
+// both prior 5h runs ignored all config because `args?.X` on a string is undefined → full default).
+// Parse it once here. Everything below reads from the parsed `A`.
+const A = (() => {
+  try { return typeof args === 'string' ? JSON.parse(args) : (args || {}) }
+  catch { return {} }
+})()
+
+// PROBE: near-instant config echo — `Workflow({args:{__probe:true,...}})` returns 0-agent.
+if (A.__probe) {
+  log(`PROBE: A=${JSON.stringify(A)} rawType=${typeof args}`)
+  return { probe: true, parsed: A, rawType: typeof args }
 }
 
 const ALL_LENSES = LENSES.map(l => l.id)
 const cfg = {
-  targetMetrics: args?.targetMetrics ?? ['photon_prog_enc','mod_prog_enc','raw_decode'],
-  fileSubset: args?.fileSubset ?? null,
-  targetPath: args?.targetPath ?? null,      // folder mode: a DIR or a single FILE to crawl
-  inputs: args?.inputs ?? null,              // flipflop --inputs glob for the corpus (else fractal/defaults)
-  layersEnabled: args?.layersEnabled ?? ['params','rust','cpp'],
-  lenses: args?.lenses ?? ALL_LENSES,        // whitelist: run ONLY these levels (X,Y,Z)
-  excludeLenses: args?.excludeLenses ?? [],  // blacklist: run all EXCEPT these levels
-  findOnly: args?.findOnly ?? false,         // read-only: finders + coverage only, NO verify/rebuild/mutation
-  surrounding: args?.surrounding ?? true,    // single-file target: also pull in neighbouring/related files for cross-file lenses
-  butteraugliThreshold: args?.butteraugliThreshold ?? 1.0,
-  rounds: args?.rounds ?? 10,
-  slowdownEpsilon: args?.slowdownEpsilon ?? 3,
-  allowFallbacks: args?.allowFallbacks ?? true,
+  targetMetrics: A.targetMetrics ?? ['photon_prog_enc','mod_prog_enc','raw_decode'],
+  fileSubset: A.fileSubset ?? null,
+  targetPath: A.targetPath ?? null,      // folder mode: a DIR or a single FILE to crawl
+  inputs: A.inputs ?? null,              // flipflop --inputs glob for the corpus (else fractal/defaults)
+  layersEnabled: A.layersEnabled ?? ['params','rust','cpp'],
+  lenses: A.lenses ?? ALL_LENSES,        // whitelist: run ONLY these levels (X,Y,Z)
+  excludeLenses: A.excludeLenses ?? [],  // blacklist: run all EXCEPT these levels
+  findOnly: A.findOnly ?? false,         // read-only: finders + coverage only, NO verify/rebuild/mutation
+  surrounding: A.surrounding ?? true,    // single-file target: also pull in neighbouring/related files for cross-file lenses
+  butteraugliThreshold: A.butteraugliThreshold ?? 1.0,
+  rounds: A.rounds ?? 10,
+  slowdownEpsilon: A.slowdownEpsilon ?? 3,
+  allowFallbacks: A.allowFallbacks ?? true,
 }
 // Effective lenses = whitelist minus blacklist, preserving the altitude ladder order.
 const effLenses = ALL_LENSES.filter(l => cfg.lenses.includes(l) && !cfg.excludeLenses.includes(l))
