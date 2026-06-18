@@ -648,3 +648,17 @@ No hook exists for external observers to watch state transitions (queued → run
 
 **JS-5: Copy-on-write DedupeRegistry subscriber list.**
 `forEachSubscriber` now snapshots via `[...subs]` (bounded allocation, typically 0–3 items). For the common zero-subscriber case this is a no-op. If a single primary ever accumulates many subscribers (e.g. a gallery tile viewed by 10 consumers), a copy-on-write list would be more allocation-efficient. **Rejected: not needed at current scale.** Revisit if profiling shows `forEachSubscriber` on the hot path with subscriber counts > 10.
+
+---
+
+## 2026-06-18 — EpicCodeReview perf items 3 and 6 — flipflop verdict
+
+Source: EpicCodeReview-20260617T203437Z.md items 3 ("Comparer::all() 4-pass") and 6 ("DNG tile decode serial endianness branch"). Validated with pre-built release binaries + flipflop interleaved timing (binary paths, `--reps` auto-calibration, full rounds, 3 fractal types × 5 sizes × 5-10 rounds).
+
+**Item 3 — Fuse psnr + channel_moments into one buffer pass in Comparer::all().**
+Claim: "4 separate full-buffer reads; fusing psnr+channel_moments eliminates one read ≈ 25% faster".
+**Measured: onepass 9.3% SLOWER than twopasses (geomean, 15 inputs).** Worst case: 29% slower (branch@256). Direction consistent across all sizes. At small sizes data fits in L2/L3 so there is no DRAM bandwidth saving. At large sizes (4096×4096) the gap narrows (0.9–2.2%) but never inverts. Root cause: the fused inner loop carries more accumulators (MSE acc + 3 channel sums + the inner `c in 0..3` loop), increasing register pressure and reducing the compiler's ability to auto-vectorize. The separate `psnr_pass` and `means_pass` loops are simpler and vectorize independently. **Permanently rejected. Do not fuse.**
+
+**Item 6 — Hoist DNG tile decode endianness branch outside the inner loop.**
+Claim: "per-pixel `if le` + per-pixel bounds guard prevents compiler auto-vectorization; hoisting pre-validates size + splits into two tight loops for the compiler to vectorize".
+**Measured: hoisted 0.5% faster (geomean, 15 inputs, trust:low).** Individual results span −7% to +15% with no consistent direction. LLVM already strength-reduces the branched version: the `if sp + 2 > src.len() { break }` guard, despite appearing to be an unpredictable early-exit, is optimized by LLVM because the pre-loop allocation (`vec![0u16; rows * cols]`) guarantees `out` is exactly the right size, and `src.len() == rows * cols * 2` in all real inputs. Measured throughput for both variants: ≈ 2 ns/pixel (not the ~0.3 ns/pixel expected from SIMD). SIMD-level gains require explicit intrinsics or `target_feature = "+avx2"` — not obtainable from loop restructuring alone. **Rejected. Not worth restructuring dng.rs. Real vectorization requires SIMD intrinsics.**
