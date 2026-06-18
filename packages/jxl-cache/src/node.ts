@@ -14,9 +14,9 @@ function fileNameFor(key: string): string {
 let tmpCounter = 0;
 
 export class JxlCacheNode implements JxlCache {
-  private readonly memoryCache: LRUCache<ArrayBuffer>;
+  private readonly memoryCache: LRUCache<SharedArrayBuffer>;
   private readonly persistentTracker: LRUCache<true>;
-  private readonly inflightGets = new Map<string, Promise<ArrayBuffer | undefined>>();
+  private readonly inflightGets = new Map<string, Promise<SharedArrayBuffer | undefined>>();
   private readonly inflightSets = new Map<string, Promise<void>>();
   private _generation = 0;
   private evictionsCount = 0;
@@ -60,7 +60,7 @@ export class JxlCacheNode implements JxlCache {
     }
   }
 
-  async get(key: string): Promise<ArrayBuffer | undefined> {
+  async get(key: string): Promise<SharedArrayBuffer | undefined> {
     if (this.initPromise) await this.initPromise.catch(() => undefined);
 
     const mem = this.memoryCache.get(key);
@@ -68,7 +68,7 @@ export class JxlCacheNode implements JxlCache {
       const name = fileNameFor(key);
       this.persistentTracker.get(name);
       this.hitCount++;
-      return mem.slice(0);
+      return mem;  // SAB: shared reference, no copy
     }
 
     if (!this.opts.persistent || !this.opts.basePath) {
@@ -95,7 +95,7 @@ export class JxlCacheNode implements JxlCache {
     }
   }
 
-  private async getPersistent(key: string): Promise<ArrayBuffer | undefined> {
+  private async getPersistent(key: string): Promise<SharedArrayBuffer | undefined> {
     if (!this.opts.persistent || !this.opts.basePath) return undefined;
 
     const name = fileNameFor(key);
@@ -103,11 +103,11 @@ export class JxlCacheNode implements JxlCache {
 
     try {
       const buffer = await fs.readFile(filePath);
-      const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-      const master = arrayBuffer.slice(0);
-      this.memoryCache.set(key, master, master.byteLength);
+      const sab = new SharedArrayBuffer(buffer.byteLength);
+      new Uint8Array(sab).set(buffer);
+      this.memoryCache.set(key, sab, sab.byteLength);
       this.persistentTracker.set(name, true, buffer.byteLength);
-      return master;
+      return sab;
     } catch {
       this.persistentTracker.delete(name);
       return undefined;
@@ -127,8 +127,9 @@ export class JxlCacheNode implements JxlCache {
   async set(key: string, buffer: ArrayBuffer): Promise<void> {
     if (this.initPromise) await this.initPromise.catch(() => undefined);
     const size = buffer.byteLength;
-    const master = buffer.slice(0);
-    this.memoryCache.set(key, master, size);
+    const sab = new SharedArrayBuffer(size);
+    new Uint8Array(sab).set(new Uint8Array(buffer));
+    this.memoryCache.set(key, sab, size);
 
     if (this.opts.persistent && this.opts.basePath) {
       const name = fileNameFor(key);
@@ -156,7 +157,7 @@ export class JxlCacheNode implements JxlCache {
 
         try {
           const tmp = filePath + `.tmp-${process.pid}-${tmpCounter++}`;
-          await fs.writeFile(tmp, Buffer.from(master));
+          await fs.writeFile(tmp, Buffer.from(sab));
           await fs.rename(tmp, filePath);
           this.persistentTracker.set(name, true, size);
         } catch (e) {
