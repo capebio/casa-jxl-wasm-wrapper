@@ -2001,6 +2001,14 @@ class LibjxlEncoder implements JxlEncoder {
 
       const o = this.options;
       const resampling = o.resampling ?? 1;
+      // Photon-noise progressive path: the JXL Noise frame feature is a VarDCT-only
+      // tool (it has no representation in the Modular sub-codec). When photonNoiseIso>0
+      // the encoder can only emit VarDCT, so pin modular=0 explicitly instead of leaving
+      // it at -1 (auto). This removes the rejected-Modular auto-trial the encoder would
+      // otherwise evaluate per decision point, and guarantees bridge.cpp:644
+      // JXL_ENC_FRAME_SETTING_PHOTON_NOISE is actually honored (Modular ignores it).
+      const photonActive = (o.photonNoiseIso ?? 0) > 0;
+      const modularDefault = photonActive ? 0 : -1;
       const needsY = caps.streamingInputY && (o.epf != null || o.gaborish != null || o.dots != null || o.colorTransform != null);
       const needsX = !needsY && caps.streamingInputX && (o.modular != null || o.brotliEffort != null || o.decodingSpeed != null || o.photonNoiseIso != null);
       const needsAdv = !needsY && !needsX && !!module._jxl_wasm_enc_create_image_adv && !!o.advancedFrameSettings?.length;
@@ -2010,7 +2018,7 @@ class LibjxlEncoder implements JxlEncoder {
           o.width, o.height, distance, o.effort,
           fmtIndex, o.hasAlpha ? 1 : 0,
           progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder,
-          o.modular ?? -1, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
+          o.modular ?? modularDefault, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
           o.epf ?? -1, o.gaborish ?? -1, o.dots ?? -1, 0, o.colorTransform ?? -1,
           0, 0, 0, 0, 0, 0, 0, -1
         );
@@ -2019,7 +2027,7 @@ class LibjxlEncoder implements JxlEncoder {
           o.width, o.height, distance, o.effort,
           fmtIndex, o.hasAlpha ? 1 : 0,
           progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder,
-          o.modular ?? -1, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
+          o.modular ?? modularDefault, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
           0, 0, 0, 0, 0, -1
         );
       } else if (needsAdv) {

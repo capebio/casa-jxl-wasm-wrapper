@@ -1,0 +1,17 @@
+[
+  {
+    "id": "performance-1",
+    "detector": "performance",
+    "finding_type": "issue",
+    "category": "use-after-free / missing defensive copy",
+    "severity": "high",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 18,
+    "line_end": 25,
+    "title": "r.data returned to caller after r.free() — WASM backing memory freed before caller can copy",
+    "description": "decodeJpegScaled returns r.data directly and then calls r.free() in the finally block. If the WASM binding allocates the pixel buffer on the WASM heap and r.data is a view into that heap region, calling r.free() before the caller has a chance to copy the data leaves the returned Uint8Array pointing at freed (possibly zeroed or re-used) WASM memory. The fix is to copy the buffer before freeing: `const data = r.data.slice()` — one allocation here prevents every call site from having to defensively copy and eliminates silent corruption for call sites that do not copy.",
+    "code_excerpt": "export function decodeJpegScaled(jpeg: Uint8Array, denom: Denom = 1): JpegDecodeResult {\n  const r = _decode(jpeg, denom);\n  try {\n    return { data: r.data, width: r.width, height: r.height };\n  } finally {\n    r.free();\n  }\n}",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  }
+]

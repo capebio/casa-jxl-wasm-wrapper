@@ -11,6 +11,10 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "node-wmi": "^0.0.5",
     "systeminformation": "^5.31.7"
+  },
+  "devDependencies": {
+    "node-gyp": "^12.4.0"
   }
 }

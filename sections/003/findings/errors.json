@@ -1,0 +1,62 @@
+[
+  {
+    "id": "errors-1",
+    "detector": "errors",
+    "finding_type": "issue",
+    "category": "swallowed exception / error propagation",
+    "severity": "high",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 19,
+    "line_end": 24,
+    "title": "WASM exception thrown by _decode escapes before r.free() is called, leaking the WASM object",
+    "description": "If `_decode(jpeg, denom)` throws (malformed JPEG, allocation failure, WASM trap), the `try` block is never entered so `r` is never assigned and `r.free()` in `finally` cannot run — but more importantly if `_decode` returns successfully yet `r.data`, `r.width`, or `r.height` property access throws (e.g. WASM returns null/undefined), the `finally` still runs fine. The real gap is that a throw inside `_decode` itself means no cleanup is possible because `r` is not in scope. Additionally, any error thrown by `_decode` propagates as an untyped WASM RuntimeError with no context about which JPEG caused it, giving callers no actionable information. Consider wrapping the `_decode` call in the try block and providing a structured error message.",
+    "code_excerpt": "export function decodeJpegScaled(jpeg: Uint8Array, denom: Denom = 1): JpegDecodeResult {\n  const r = _decode(jpeg, denom);\n  try {\n    return { data: r.data, width: r.width, height: r.height };\n  } finally {\n    r.free();\n  }\n}",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "errors-2",
+    "detector": "errors",
+    "finding_type": "issue",
+    "category": "missing null/undefined check",
+    "severity": "medium",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 19,
+    "line_end": 24,
+    "title": "No guard against _decode returning null/undefined before property access",
+    "description": "The WASM binding `_decode` is typed as `any`. If the underlying Rust function returns `None` or panics in a way that wasm-bindgen maps to `undefined`, the call `r.data` on line 21 will throw `TypeError: Cannot read properties of undefined`, and `r.free()` in `finally` will also throw `TypeError`, masking the original error. A null/undefined check on `r` before destructuring would produce a clear error instead of a confusing secondary exception.",
+    "code_excerpt": "const r = _decode(jpeg, denom);\ntry {\n  return { data: r.data, width: r.width, height: r.height };\n} finally {\n  r.free();\n}",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "errors-3",
+    "detector": "errors",
+    "finding_type": "issue",
+    "category": "unbounded input",
+    "severity": "low",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 18,
+    "line_end": 19,
+    "title": "No size guard on jpeg input — arbitrarily large buffers passed directly to WASM",
+    "description": "The `jpeg` parameter is passed to WASM without any length check. A caller passing a multi-hundred-MB buffer will cause WASM memory allocation to fail or the WASM heap to grow unboundedly. This is especially relevant in a Node environment where the buffer may come from untrusted sources. A simple max-size guard (e.g. 64 MB) would prevent runaway WASM memory growth and provide a clear error to callers.",
+    "code_excerpt": "export function decodeJpegScaled(jpeg: Uint8Array, denom: Denom = 1): JpegDecodeResult {\n  const r = _decode(jpeg, denom);",
+    "confidence_self_reported": "low",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "errors-4",
+    "detector": "errors",
+    "finding_type": "opportunity",
+    "category": "no structured error taxonomy",
+    "severity": "info",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 18,
+    "line_end": 25,
+    "title": "No typed error class for JPEG decode failures — callers cannot distinguish decode errors from programming errors",
+    "description": "All errors from `decodeJpegScaled` propagate as raw WASM RuntimeError or TypeError objects. Callers have no reliable way to distinguish a malformed-JPEG error (recoverable) from a programming error like passing wrong types. A `JpegDecodeError` class wrapping the WASM error with `cause` and a `code` field would let the scheduler or session layer handle decode failures selectively without catching all errors.",
+    "code_excerpt": "export function decodeJpegScaled(jpeg: Uint8Array, denom: Denom = 1): JpegDecodeResult {\n  const r = _decode(jpeg, denom);\n  try {\n    return { data: r.data, width: r.width, height: r.height };\n  } finally {\n    r.free();\n  }\n}",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  }
+]

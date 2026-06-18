@@ -1,0 +1,62 @@
+[
+  {
+    "id": "security-1",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "untrusted-global-injection",
+    "severity": "low",
+    "file": "packages/jxl-scheduler/src/pool.ts",
+    "line_start": 12,
+    "line_end": 14,
+    "title": "__JXL_DEV__ global flag read from globalThis without origin guard, injectable by co-page scripts",
+    "description": "The DEV flag is computed at module load via `typeof (globalThis as any).__JXL_DEV__ !== 'undefined'`. Any script running in the same browsing context (e.g. a third-party ad or analytics script on the same origin) can set `window.__JXL_DEV__ = true` before the module loads and permanently enable verbose console.warn output in production. While this does not directly leak secrets or enable privilege escalation, it can be used to force DEV-mode assertion throws (`assertInvariants`) that are suppressed in production, potentially causing unhandled rejections or unexpected pool shutdowns. The Node.js branch correctly gates on `process.env.NODE_ENV !== 'production'`, but the browser branch is a plain global lookup with no namespacing or integrity check.",
+    "code_excerpt": "const DEV =\n  (typeof process !== \"undefined\" && process.env[\"NODE_ENV\"] !== \"production\") ||\n  (typeof process === \"undefined\" && typeof (globalThis as any).__JXL_DEV__ !== \"undefined\");",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-2",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "missing-input-validation",
+    "severity": "low",
+    "file": "packages/jxl-scheduler/src/scheduler.ts",
+    "line_start": 291,
+    "line_end": 337,
+    "title": "sourceKey parameter accepted with no length or content validation, enabling memory pressure via large key strings",
+    "description": "The `sourceKey` parameter in `acquireSlot` is stored as-is as a Map key in `DedupeRegistry.keyToSession` and `sessionToKey`. There is no length cap or character validation. A caller passing a multi-megabyte string as `sourceKey` would pin that allocation in two Maps for the duration of the session plus the time until `dedupe.complete()` is called. In a scenario where jxl-session is exposed to partially-untrusted input (e.g. URLs derived from user-supplied content without prior normalization), this could be used to inflate scheduler memory. The `sessionId` field has the same issue but is typically generated internally.",
+    "code_excerpt": "async acquireSlot(params: {\n    sessionId: string;\n    priority: Priority;\n    startMsg: MsgDecodeStart | MsgEncodeStart;\n    sourceKey: string | null;\n    signal: AbortSignal | null;\n  }): Promise<{ workerId: number }> {\n    if (this.destroyed) throw new Error(\"[jxl-scheduler] Scheduler is shut down.\");\n\n    // Dedupe check: if a session for this sourceKey already exists, fan out.\n    if (params.sourceKey !== null) {\n      const primaryId = this.dedupe.findPrimary(params.sourceKey);",
+    "confidence_self_reported": "low",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-3",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "missing-input-validation",
+    "severity": "low",
+    "file": "packages/jxl-scheduler/src/budget.ts",
+    "line_start": 17,
+    "line_end": 22,
+    "title": "CoreBudget allows capacity=0, causing all acquire() calls to throw unconditionally",
+    "description": "The constructor validates `capacity >= 0` (not `> 0`), so `new CoreBudget(0)` is accepted. Any subsequent `acquire(cost)` where `cost > 0` will hit the `cost > this.capacity` guard and throw `[jxl-scheduler] CoreBudget: cost N exceeds capacity 0`. This means a misconfigured or maliciously-crafted `coreBudget` option can permanently disable worker spawning across all schedulers sharing that budget instance without any warning at construction time. The `globalCoreBudget` is safe (uses `Math.max(1, ...)`), but library consumers passing a custom `CoreBudget` with capacity derived from unreliable input (e.g. `navigator.hardwareConcurrency` on unsupported browsers returning 0) will get a broken pool with no diagnostic.",
+    "code_excerpt": "constructor(public readonly capacity: number) {\n    if (!Number.isFinite(capacity) || capacity < 0) {\n      throw new Error(\"[jxl-scheduler] CoreBudget capacity must be finite >= 0\");\n    }\n    this.tokens = capacity;\n    this._devMode = !CoreBudget._isProduction();\n  }",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-4",
+    "detector": "security",
+    "finding_type": "opportunity",
+    "category": "no-input-validation-schema",
+    "severity": "info",
+    "file": "packages/jxl-scheduler/src/scheduler.ts",
+    "line_start": 291,
+    "line_end": 297,
+    "title": "No schema validation on acquireSlot parameters at the public API boundary",
+    "description": "The `acquireSlot` method is a public API surface that accepts caller-supplied `sessionId`, `sourceKey`, `priority`, and `startMsg` without any type-narrowing validation at runtime. TypeScript types are erased at runtime, so a JavaScript caller (or a TypeScript caller with an `as any` cast) can pass unexpected values. For example, a non-string `priority` would pass through to `PriorityQueue.lane()` and hit the switch's implicit undefined return, causing a silent push to `undefined` (TypeError). Adding a lightweight guard (e.g. asserting `priority` is one of the three known strings) would harden the boundary against integration bugs and malformed protocol messages.",
+    "code_excerpt": "async acquireSlot(params: {\n    sessionId: string;\n    priority: Priority;\n    startMsg: MsgDecodeStart | MsgEncodeStart;\n    sourceKey: string | null;\n    signal: AbortSignal | null;\n  }): Promise<{ workerId: number }> {\n    if (this.destroyed) throw new Error(\"[jxl-scheduler] Scheduler is shut down.\");",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  }
+]

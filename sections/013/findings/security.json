@@ -1,0 +1,62 @@
+[
+  {
+    "id": "security-1",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "SSRF",
+    "severity": "medium",
+    "file": "packages/jxl-stream/src/browser.ts",
+    "line_start": 431,
+    "line_end": 483,
+    "title": "fromByteRange and resumeFromByteRange accept arbitrary URLs with no scheme/host validation, enabling SSRF in server-side or Electron contexts",
+    "description": "The `url` parameter in `fromByteRange` (and transitively `fromRangePrefix`, `resumeFromByteRange`) is passed directly to `fetchImpl` (defaulting to `globalThis.fetch`) without any validation of the URL scheme or host. In Node.js/Electron/Bun environments `fetch` honours `file://` and can reach localhost services; a caller that passes a user-controlled or manifest-sourced URL would allow reading arbitrary local files or hitting internal network endpoints. The `ByteRangeResumeState.url` field is serialised (intended for persistence) and later passed to `fromByteRange` via `resumeFromByteRange` at line 795 — a tampered or malicious resume state is a second injection vector. There is no allowlist/blocklist, no scheme check (`https:`-only), and no hostname validation.",
+    "code_excerpt": "export async function fromByteRange(\n  url: string,\n  start: number,\n  endExclusive: number,\n  session: DecodeSession,\n  opts: RangePrefixOptions = {},\n): Promise<RangeNegotiation> {\n  ...\n  resp = await fetchImpl(url, { headers: mergedHeaders, signal, priority } as RequestInit);\n  if (resp.status === 416) throw new RangeError(`[jxl-stream] 416 Range Not Satisfiable: ${url}`);\n  if (!resp.ok) throw new Error(`[jxl-stream] HTTP ${resp.status} ${resp.statusText}: ${url}`);",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "security-2",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "information-disclosure",
+    "severity": "low",
+    "file": "packages/jxl-stream/src/browser.ts",
+    "line_start": 481,
+    "line_end": 483,
+    "title": "Full URL included verbatim in thrown error messages, leaking credentials/tokens embedded in query strings",
+    "description": "Error messages on lines 481-483 (and line 551, 564) embed the raw `url` string: `[jxl-stream] 416 Range Not Satisfiable: ${url}` and `[jxl-stream] HTTP ${resp.status} ${resp.statusText}: ${url}`. If the URL contains authentication tokens or API keys in the query string (e.g. signed S3 URLs, CDN tokens), those secrets are exposed in the thrown Error object which may be logged, sent to error-tracking services, or surfaced in UI. The same pattern appears for the Content-Range mismatch error at line 551.",
+    "code_excerpt": "    if (resp.status === 416) throw new RangeError(`[jxl-stream] 416 Range Not Satisfiable: ${url}`);\n    if (!resp.ok) throw new Error(`[jxl-stream] HTTP ${resp.status} ${resp.statusText}: ${url}`);\n    if (!resp.body) throw new Error('[jxl-stream] Response has no body');",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-3",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "unsafe-deserialization",
+    "severity": "low",
+    "file": "packages/jxl-stream/src/browser.ts",
+    "line_start": 759,
+    "line_end": 795,
+    "title": "resumeFromByteRange trusts ByteRangeResumeState without schema validation, allowing a tampered persisted state to reach fetch",
+    "description": "`resumeFromByteRange` reads `state.url`, `state.start`, `state.endExclusive`, `state.etag`, and `state.lastModified` directly from the supplied object and uses them in HTTP requests without any structural validation beyond the `start < endExclusive` numeric check. When `ByteRangeResumeState` objects are persisted to storage (jxl-cache, IndexedDB, localStorage) and later deserialised, a tampered `url` field could redirect the fetch to an attacker-controlled host, and a crafted `etag` or `lastModified` value could inject arbitrary `If-Range` header content. The `If-Range` header value at line 788 is set from `state.etag` or `state.lastModified` with no sanitisation for newlines or special characters.",
+    "code_excerpt": "  const ifRange = strongEtag ?? state.lastModified;\n  if (ifRange) {\n    const merged = new Headers(opts.headers);\n    merged.set('If-Range', ifRange);\n    resumeOpts.headers = merged;\n  }\n  ...\n  return fromByteRange(state.url, state.start, state.endExclusive, session, resumeOpts);",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "security-4",
+    "detector": "security",
+    "finding_type": "opportunity",
+    "category": "input-validation",
+    "severity": "info",
+    "file": "packages/jxl-stream/src/browser.ts",
+    "line_start": 431,
+    "line_end": 435,
+    "title": "No URL scheme allowlist on fromByteRange — opportunity to add an explicit https-only (or configurable) validator",
+    "description": "The library currently performs no validation of the URL scheme passed to `fromByteRange` / `fromRangePrefix` / `resumeFromByteRange`. Adding an optional `allowedSchemes` option (defaulting to `['https:']` in production, `['https:', 'http:', 'blob:']` for tests) would make SSRF exploitation require explicit opt-in and would document the security expectation clearly. The `fetchImpl` escape hatch already exists for test injection; a scheme guard would be a low-cost hardening layer without breaking the API.",
+    "code_excerpt": "export async function fromByteRange(\n  url: string,\n  start: number,\n  endExclusive: number,\n  session: DecodeSession,\n  opts: RangePrefixOptions = {},\n): Promise<RangeNegotiation> {\n  if (!Number.isFinite(start) || !Number.isFinite(endExclusive) || start < 0 || start >= endExclusive) {\n    throw new RangeError('[jxl-stream] start and endExclusive must satisfy 0 <= start < endExclusive and be finite');\n  }",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  }
+]

@@ -1,0 +1,98 @@
+[
+  {
+    "id": "logic-1",
+    "type": "issue",
+    "severity": "critical",
+    "file": "crates/raw-pipeline/src/casabio_encode.rs",
+    "line": 539,
+    "title": "Pyramid cascade assumes sidecar_sizes are in ascending order; unsorted input causes upscaling from wrong source",
+    "description": "encode_rgba8_pyramid iterates `scs.iter().rev()` to cascade from large to small, relying on the caller having provided sidecar_sizes in ascending order. If sizes are unsorted (e.g. [512, 1024, 256]), the reversed iterator processes 256 first, then attempts to downscale that 256px thumbnail to 1024px — an upscale from the wrong source image, producing a garbled pyramid level. The `scs` Vec is built from sidecar_sizes iteration order and is never sorted before the cascade loop.",
+    "evidence": "Line 539: `for sc in scs.iter().rev()`. The cascade chain sets `current = thumb; cw = sc.tw; ch = sc.th;` at line 544-546, so each iteration downscales from the previous iteration's output. Without a prior sort on `tw` descending, any out-of-order input inverts the chain.",
+    "fix": "Sort `scs` by `tw` descending (or `tw` ascending then use `.rev()`, which is equivalent) before the loop: `scs.sort_by(|a, b| a.tw.cmp(&b.tw));` (then `.iter().rev()` works correctly). Or sort descending and iterate forward.",
+    "tags": ["sort", "ordering", "cascade"]
+  },
+  {
+    "id": "logic-2",
+    "type": "issue",
+    "severity": "medium",
+    "file": "crates/raw-pipeline/src/tiff.rs",
+    "line": 422,
+    "title": "IfdEntry::as_ascii silently drops inline ASCII strings (count <= 4)",
+    "description": "TIFF stores short string values (count <= 4 bytes) inline in the `value_offset` field rather than at an offset. `as_ascii` guards `if self.count > 4 { ... }` and returns `String::new()` for the inline case. Any Make/Model/Copyright string that fits in 4 bytes (e.g. \"OM\\0\", \"DNG\", single-char model codes) is silently discarded, making the field appear absent downstream.",
+    "evidence": "The inline value bytes are available in `self.value_off` (treated as a little-endian u32 blob) but are never read when `count <= 4`. The guard inverts the expected behavior — it should also handle the inline path.",
+    "fix": "For `count <= 4`, read `count` bytes from `self.value_off` (stored as little-endian bytes in the u32) and decode as ASCII, dropping the trailing null. For `count > 4`, read from the offset as before.",
+    "tags": ["tiff", "inline-value", "off-by-one", "string-parsing"]
+  },
+  {
+    "id": "logic-3",
+    "type": "issue",
+    "severity": "high",
+    "file": "crates/raw-pipeline/src/pipeline.rs",
+    "line": 971,
+    "title": "apply_perceptual_constancy applies layer_scale in log-euclidean space, producing nonlinear hue distortion",
+    "description": "`apply_perceptual_constancy` computes constancy-corrected log-euclidean coordinates (lr3, lg3, lb3), then multiplies each by `layer_scale` before calling `from_log_euclidean`. Since `from_log_euclidean(x * k) = exp(x * k) != exp(x) * k`, scaling in log space is not a linear blend — it exponentiates the scaling factor into the values, producing hue rotation and nonlinear lightness distortion rather than a simple fade-back toward the original. The intent (weaker correction for higher layers / earlier progressive frames) requires applying the blend in linear space after `from_log_euclidean`.",
+    "evidence": "Line 971: `let (rr, gg, bb) = from_log_euclidean(lr3 * layer_scale, lg3 * layer_scale, lb3 * layer_scale);`. For layer=0, layer_scale=1.0 (correct). For layer=5, layer_scale=0.5: the output is exp(lr3*0.5) not exp(lr3)*0.5 — the latter would be the correct linear 50% blend toward black. Full correction requires converting back first: `let (rr0,gg0,bb0)=from_log_euclidean(lr3,lg3,lb3); let rr=r.lerp(rr0, layer_scale);` etc.",
+    "fix": "Move the layer_scale blend to after from_log_euclidean: compute corrected = from_log_euclidean(lr3,lg3,lb3), then linearly interpolate back toward the original (r,g,b) by (1-layer_scale). This matches the intent documented in the comment 'early low layer less aggressive'.",
+    "tags": ["log-euclidean", "colour", "arithmetic", "perceptual-constancy"]
+  },
+  {
+    "id": "logic-4",
+    "type": "issue",
+    "severity": "high",
+    "file": "crates/raw-pipeline/src/dng.rs",
+    "line": 345,
+    "title": "align_to_rggb incomplete: Grbg (col_off=1) and Bggr (row_off=1, col_off=1) fall through without column alignment",
+    "description": "align_to_rggb correctly handles Rggb (no-op) and Gbrg (trim top row). For Grbg (row_off=0, col_off=1) and Bggr (row_off=1, col_off=1), the column offset is non-zero. The function's only branch checks `if col_off == 0` for the row-trim; if col_off != 0, it falls through to `return (raw, width, height)` — returning the buffer untouched. Downstream MHC demosaic then processes the data at RGGB phase when the actual CFA phase is shifted by one column, producing systematic colour errors (R↔G, G↔B swaps) across the entire image.",
+    "evidence": "Lines 341-346: `if col_off == 0 { ... return; } (raw, width, height)`. Note that a column trim also requires adjusting width and is more complex (must produce a contiguous slice or copy), which may be why it was deferred. The Bggr case additionally needs both row and column trim. This is noted in MEMORY.md as 'high-risk deferred colour bugs: align_to_rggb Grbg/Bggr'.",
+    "fix": "For col_off != 0: copy or rebuild a new buffer with each row starting at index col_off and ending at width-1 (width becomes width-col_off). For Bggr, apply row trim first then column trim. Add `#[cfg(test)]` property tests verifying that the returned slice always begins with an R pixel.",
+    "tags": ["cfa", "alignment", "colour", "demosaic", "incomplete-implementation"]
+  },
+  {
+    "id": "logic-5",
+    "type": "issue",
+    "severity": "low",
+    "file": "crates/raw-pipeline/examples/cr2_bench.rs",
+    "line": 203,
+    "title": "median() returns upper-middle element, not true median, for even-length arrays",
+    "description": "The local `median` function sorts the vector then returns `v[v.len() / 2]`. For a 10-element array, `10/2 = 5`, which is the 6th element (0-indexed), not the average of the 5th and 6th. The same pattern appears in cr2_baseline.rs (line 38) and tone_fused_bench.rs (line 42) and pipeline_profile.rs (line 13). This systematically overestimates the median for even-length runs, biasing all benchmark results upward by roughly the gap between the middle two values.",
+    "evidence": "Line 203 in cr2_bench.rs: `v[v.len() / 2]` on a 10-run sorted vec selects index 5 (6th element). True median = (v[4]+v[5])/2. Same bug appears in all four benchmark files.",
+    "fix": "For even-length vectors: `(v[n/2-1] + v[n/2]) / 2.0`. Or use odd run counts (7 runs, already done in tone_fused_bench and pipeline_profile) which makes `v[v.len()/2]` correct.",
+    "tags": ["statistics", "benchmark", "off-by-one", "median"]
+  },
+  {
+    "id": "logic-6",
+    "type": "issue",
+    "severity": "low",
+    "file": "crates/raw-pipeline/examples/cr2_bench.rs",
+    "line": 209,
+    "title": "stddev() uses population variance (divides by N), not sample variance (N-1)",
+    "description": "`stddev` in cr2_bench.rs computes `sum_sq / v.len()` for variance, which is population variance. For small N (e.g. 10 benchmark runs), the correct estimator is Bessel-corrected: `sum_sq / (v.len() - 1)`. The current code underestimates the true spread, potentially masking jitter in benchmark results.",
+    "evidence": "Lines 205-212: `let variance = (sum_sq / v.len() as f64).max(0.0);` — should be `/ (v.len() - 1)` for a sample.",
+    "fix": "Change to `sum_sq / (v.len() - 1) as f64`. Guard against `v.len() < 2` to avoid division by zero.",
+    "tags": ["statistics", "benchmark", "stddev", "arithmetic"]
+  },
+  {
+    "id": "logic-7",
+    "type": "opportunity",
+    "severity": "medium",
+    "file": "crates/raw-pipeline/src/demosaic.rs",
+    "line": null,
+    "title": "No property-based tests for demosaic CFA phase invariants or tone math monotonicity",
+    "description": "The demosaic functions (bilinear, MHC) have no property-based tests verifying: (1) a 2×2 uniform RGGB patch round-trips correctly for all four CFA phases; (2) a constant-hue input through apply_tone_math preserves hue; (3) the pipeline is monotone (brighter input → brighter output) for all WB gain combinations. These invariants are easy to check with proptest/quickcheck and would have caught the align_to_rggb Grbg/Bggr gap as well as the log-space layer_scale distortion.",
+    "evidence": "Existing tests in lib.rs (compile_tests) are integration smoke tests only. No demosaic unit tests. No tests for perceptual_constancy output invariants.",
+    "fix": "Add proptest tests in demosaic.rs: forall CFA phase, forall uniform patch → output converges to correct colour; forall WB gains in [0.8,4.0] → pipeline output is non-NaN and in [0,255].",
+    "tags": ["testing", "property-based", "invariant", "demosaic"]
+  },
+  {
+    "id": "logic-8",
+    "type": "opportunity",
+    "severity": "low",
+    "file": "crates/raw-pipeline/src/pipeline.rs",
+    "line": null,
+    "title": "No shared pixel-buffer dimension validation utility; each decode path validates independently",
+    "description": "dng.rs, cr2.rs, tiff.rs, pipeline.rs and lib.rs each contain ad-hoc dimension/length assertions (`assert_eq!(raw.len(), w*h)`, `bail!(...)` checks). pipeline.rs has `validate_pixel_buffer` and `validate_pixel_buffer_u16` helpers but they are only used in the downscale functions. The decode paths in dng.rs and tiff.rs use direct `bail!` calls with slightly different error message formats. A shared utility would enforce consistent checks and reduce the risk of a decode path silently accepting a mismatched buffer.",
+    "evidence": "validate_pixel_buffer defined in pipeline.rs (lines ~1664, ~1742) but not imported or used in dng.rs or cr2.rs. lib.rs line ~110: `assert_eq!(raw.len(), w * h)` (panic vs bail inconsistency).",
+    "fix": "Expose validate_pixel_buffer from pipeline.rs as pub(crate) and call it at the start of decode_dng, decode_cr2, and process_orf in lib.rs. Standardise error type (Result<_, anyhow::Error>) across all call sites.",
+    "tags": ["validation", "shared-utility", "consistency", "error-handling"]
+  }
+]

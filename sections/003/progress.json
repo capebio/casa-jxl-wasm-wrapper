@@ -1,0 +1,32 @@
+[
+  {
+    "task_id": "003-T01",
+    "status": "confirmed",
+    "evidence": "index.ts: _decode moved inside try (line 46), r declared with let before try (line 44), finally uses r?.free() null-guard (line 52), catch wraps in JpegDecodeError. TypeError-masking failure mode gone."
+  },
+  {
+    "task_id": "003-T02",
+    "status": "incomplete",
+    "evidence": "No runtime assertion data.length === width * height * 4 added inside decodeJpegScaled before the return (line 47). The test in T05 covers this invariant but the source-level guard the task asked for is absent."
+  },
+  {
+    "task_id": "003-T03",
+    "status": "confirmed",
+    "evidence": "JpegDecodeError class present at lines 31-40 with code='decode_failed' and cause fields. Wired into catch at lines 48-51. Callers can now instanceof-check JpegDecodeError vs other errors."
+  },
+  {
+    "task_id": "003-T04",
+    "status": "confirmed",
+    "evidence": "lib.rs lines 68-72: DecodeResult now uses decoded.width/decoded.height (post-decode info) not the pre-decode out_w/out_h. Dimension/buffer mismatch failure mode addressed."
+  },
+  {
+    "task_id": "003-T05",
+    "status": "confirmed",
+    "evidence": "test/index.test.ts exists with 5 contract tests: field presence, buffer length invariant, invariant across denoms, JpegDecodeError thrown for bad input (with code+cause checks), and buffer durability after free."
+  },
+  {
+    "task_id": "003-T06",
+    "status": "deferred_adr",
+    "evidence": "Plan marked adr_draft/deferred. No CI audit step added; no fix expected."
+  }
+]

@@ -1,0 +1,987 @@
+=== flipflop 2026-06-18T05:47:21Z modular-no-dc-frame ===
+schema: flipflop/v1
+ts: "2026-06-18T05:47:21Z"
+name: modular-no-dc-frame
+description: "Modular progressive encode (modular:1, flavor ac): skip DC-frame setup by forcing progressiveDc:0/progressiveAc:0/qProgressiveAc:0 vs default (1/1/1); distance 1.0"
+first_paint_of_day: true
+env:
+  commit: 178138b8
+  host: DESKTOP-UKOTMMU
+  cpu: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+  cores: 12
+  node: v24.14.0
+  gc_exposed: true
+  os: win32-x64
+config:
+  variants: "modular-dc-frame-default,modular-no-dc-frame"
+  baseline: modular-dc-frame-default
+  timing_mode: async
+  input_source: corpus()
+  rounds: default
+  min_sample_ms: 2
+  sampler_ms: 500
+summary[4]{input,variant,role,median_warm_ms,median_all_ms,min_ms,stdev_ms,saved_pct,quality,quality_ok,trust}:
+  test256.rgba,modular-dc-frame-default,primary,113.558,117.162,108.104,31.994,0,n/a,true,low
+  test256.rgba,modular-no-dc-frame,primary,123.035,123.527,108.234,13.029,-8.3,0,true,low
+  out256.rgba,modular-dc-frame-default,primary,124.778,124.569,114.621,8.067,0,n/a,true,high
+  out256.rgba,modular-no-dc-frame,primary,108.47,115.678,90.64,16.919,13.1,0,true,low
+marks[4]{input,variant,label,median_ms}:
+  test256.rgba,modular-dc-frame-default,enc_ms,78.644
+  test256.rgba,modular-no-dc-frame,enc_ms,76.516
+  out256.rgba,modular-dc-frame-default,enc_ms,80.603
+  out256.rgba,modular-no-dc-frame,enc_ms,75.111
+flips[32]{input,round,variant,ms,rss_mb,temp_c,freq_ratio,first_paint}:
+  test256.rgba,0,modular-dc-frame-default,568.702,109.4,n/a,n/a,true
+  test256.rgba,0,modular-no-dc-frame,161.272,115.4,n/a,n/a,true
+  test256.rgba,1,modular-no-dc-frame,145.504,78.2,n/a,n/a,false
+  test256.rgba,1,modular-dc-frame-default,111.396,77.8,n/a,n/a,false
+  test256.rgba,2,modular-dc-frame-default,113.558,78.3,n/a,n/a,false
+  test256.rgba,2,modular-no-dc-frame,123.035,77.7,n/a,n/a,false
+  test256.rgba,3,modular-no-dc-frame,124.019,77.9,n/a,n/a,false
+  test256.rgba,3,modular-dc-frame-default,120.765,78,n/a,n/a,false
+  test256.rgba,4,modular-dc-frame-default,194.81,94.9,n/a,n/a,false
+  test256.rgba,4,modular-no-dc-frame,124.943,104,n/a,n/a,false
+  test256.rgba,5,modular-no-dc-frame,111.343,78.8,n/a,n/a,false
+  test256.rgba,5,modular-dc-frame-default,108.677,78.8,n/a,n/a,false
+  test256.rgba,6,modular-dc-frame-default,147.59,79.2,n/a,n/a,false
+  test256.rgba,6,modular-no-dc-frame,108.234,77.6,n/a,n/a,false
+  test256.rgba,7,modular-no-dc-frame,109.461,77.7,n/a,n/a,false
+  test256.rgba,7,modular-dc-frame-default,108.104,77.9,n/a,n/a,false
+  out256.rgba,0,modular-dc-frame-default,114.621,81.7,n/a,n/a,true
+  out256.rgba,0,modular-no-dc-frame,128.66,78.1,n/a,n/a,true
+  out256.rgba,1,modular-no-dc-frame,108.47,78.4,n/a,n/a,false
+  out256.rgba,1,modular-dc-frame-default,120.711,78.7,n/a,n/a,false
+  out256.rgba,2,modular-dc-frame-default,141.56,78.8,n/a,n/a,false
+  out256.rgba,2,modular-no-dc-frame,94.667,79.1,n/a,n/a,false
+  out256.rgba,3,modular-no-dc-frame,90.64,78.2,n/a,n/a,false
+  out256.rgba,3,modular-dc-frame-default,132.381,78.4,n/a,n/a,false
+  out256.rgba,4,modular-dc-frame-default,117.971,78.4,n/a,n/a,false
+  out256.rgba,4,modular-no-dc-frame,128.065,78.4,n/a,n/a,false
+  out256.rgba,5,modular-no-dc-frame,122.886,78.4,n/a,n/a,false
+  out256.rgba,5,modular-dc-frame-default,131.354,78.4,n/a,n/a,false
+  out256.rgba,6,modular-dc-frame-default,124.36,78.3,n/a,n/a,false
+  out256.rgba,6,modular-no-dc-frame,133.571,78.4,n/a,n/a,false
+  out256.rgba,7,modular-no-dc-frame,101.561,78.4,n/a,n/a,false
+  out256.rgba,7,modular-dc-frame-default,124.778,78.4,n/a,n/a,false
+thermal:
+  temp_c_start: n/a
+  temp_c_end: n/a
+  temp_c_max: n/a
+  freq_ratio_min: n/a
+  throttled: unknown
+  variance_flag: true
+verdict: "modular-no-dc-frame 3% faster vs modular-dc-frame-default (geomean median_warm); thermal unknown; trust:low"
+
+=== flipflop 2026-06-18T05:48:19Z modular-no-dc-frame ===
+schema: flipflop/v1
+ts: "2026-06-18T05:48:19Z"
+name: modular-no-dc-frame
+description: "Modular progressive encode (modular:1, flavor ac): skip DC-frame setup by forcing progressiveDc:0/progressiveAc:0/qProgressiveAc:0 vs default (1/1/1); distance 1.0"
+first_paint_of_day: true
+env:
+  commit: 178138b8
+  host: DESKTOP-UKOTMMU
+  cpu: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+  cores: 12
+  node: v24.14.0
+  gc_exposed: true
+  os: win32-x64
+config:
+  variants: "modular-dc-frame-default,modular-no-dc-frame"
+  baseline: modular-dc-frame-default
+  timing_mode: async
+  input_source: corpus()
+  rounds: default
+  min_sample_ms: 2
+  sampler_ms: 500
+summary[4]{input,variant,role,median_warm_ms,median_all_ms,min_ms,stdev_ms,saved_pct,quality,quality_ok,trust}:
+  test256.rgba,modular-dc-frame-default,primary,206.229,210.317,115.022,52.692,0,n/a,true,low
+  test256.rgba,modular-no-dc-frame,primary,201.594,201.658,114.058,57.774,2.2,0,true,low
+  out256.rgba,modular-dc-frame-default,primary,206.625,228.695,130.105,79.918,0,n/a,true,low
+  out256.rgba,modular-no-dc-frame,primary,195.186,194.344,142.929,72.558,5.5,0,true,low
+marks[4]{input,variant,label,median_ms}:
+  test256.rgba,modular-dc-frame-default,enc_ms,95.929
+  test256.rgba,modular-no-dc-frame,enc_ms,114.706
+  out256.rgba,modular-dc-frame-default,enc_ms,163.283
+  out256.rgba,modular-no-dc-frame,enc_ms,153.845
+flips[32]{input,round,variant,ms,rss_mb,temp_c,freq_ratio,first_paint}:
+  test256.rgba,0,modular-dc-frame-default,709.61,115.6,n/a,n/a,true
+  test256.rgba,0,modular-no-dc-frame,201.722,77.1,n/a,n/a,true
+  test256.rgba,1,modular-no-dc-frame,201.594,77.8,n/a,n/a,false
+  test256.rgba,1,modular-dc-frame-default,120.164,78.1,n/a,n/a,false
+  test256.rgba,2,modular-dc-frame-default,206.229,78.3,n/a,n/a,false
+  test256.rgba,2,modular-no-dc-frame,136.512,77.6,n/a,n/a,false
+  test256.rgba,3,modular-no-dc-frame,205.559,77.7,n/a,n/a,false
+  test256.rgba,3,modular-dc-frame-default,115.022,77.9,n/a,n/a,false
+  test256.rgba,4,modular-dc-frame-default,231.64,94.7,n/a,n/a,false
+  test256.rgba,4,modular-no-dc-frame,164.819,102.3,n/a,n/a,false
+  test256.rgba,5,modular-no-dc-frame,249.793,77,n/a,n/a,false
+  test256.rgba,5,modular-dc-frame-default,227.578,77.4,n/a,n/a,false
+  test256.rgba,6,modular-dc-frame-default,134.507,77.1,n/a,n/a,false
+  test256.rgba,6,modular-no-dc-frame,272.737,77.5,n/a,n/a,false
+  test256.rgba,7,modular-no-dc-frame,114.058,77.1,n/a,n/a,false
+  test256.rgba,7,modular-dc-frame-default,214.406,77.4,n/a,n/a,false
+  out256.rgba,0,modular-dc-frame-default,250.765,81.5,n/a,n/a,true
+  out256.rgba,0,modular-no-dc-frame,176.097,77.4,n/a,n/a,true
+  out256.rgba,1,modular-no-dc-frame,342.144,77.7,n/a,n/a,false
+  out256.rgba,1,modular-dc-frame-default,317.525,78,n/a,n/a,false
+  out256.rgba,2,modular-dc-frame-default,206.625,78,n/a,n/a,false
+  out256.rgba,2,modular-no-dc-frame,142.929,78.3,n/a,n/a,false
+  out256.rgba,3,modular-no-dc-frame,174.593,77.9,n/a,n/a,false
+  out256.rgba,3,modular-dc-frame-default,142.586,78.1,n/a,n/a,false
+  out256.rgba,4,modular-dc-frame-default,301.413,78.1,n/a,n/a,false
+  out256.rgba,4,modular-no-dc-frame,193.503,78.1,n/a,n/a,false
+  out256.rgba,5,modular-no-dc-frame,195.186,78.1,n/a,n/a,false
+  out256.rgba,5,modular-dc-frame-default,273.193,78.2,n/a,n/a,false
+  out256.rgba,6,modular-dc-frame-default,130.105,78,n/a,n/a,false
+  out256.rgba,6,modular-no-dc-frame,227.414,78.1,n/a,n/a,false
+  out256.rgba,7,modular-no-dc-frame,306.918,78.1,n/a,n/a,false
+  out256.rgba,7,modular-dc-frame-default,148.172,78.1,n/a,n/a,false
+thermal:
+  temp_c_start: n/a
+  temp_c_end: n/a
+  temp_c_max: n/a
+  freq_ratio_min: n/a
+  throttled: unknown
+  variance_flag: true
+verdict: "modular-no-dc-frame 3.9% faster vs modular-dc-frame-default (geomean median_warm); thermal unknown; trust:low"
+
+=== flipflop 2026-06-18T05:49:36Z modular-no-dc-frame ===
+schema: flipflop/v1
+ts: "2026-06-18T05:49:36Z"
+name: modular-no-dc-frame
+description: "Modular progressive encode (modular:1, flavor ac): skip DC-frame setup by forcing progressiveDc:0/progressiveAc:0/qProgressiveAc:0 vs default (1/1/1); distance 1.0"
+first_paint_of_day: true
+env:
+  commit: 178138b8
+  host: DESKTOP-UKOTMMU
+  cpu: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+  cores: 12
+  node: v24.14.0
+  gc_exposed: true
+  os: win32-x64
+config:
+  variants: "modular-dc-frame-default,modular-no-dc-frame"
+  baseline: modular-dc-frame-default
+  timing_mode: async
+  input_source: corpus()
+  rounds: 9
+  min_sample_ms: 4
+  sampler_ms: 500
+summary[4]{input,variant,role,median_warm_ms,median_all_ms,min_ms,stdev_ms,saved_pct,quality,quality_ok,trust}:
+  test256.rgba,modular-dc-frame-default,primary,246.593,271.745,170.917,74.421,0,n/a,true,low
+  test256.rgba,modular-no-dc-frame,primary,307.687,305.515,226.612,55.118,-24.8,0,true,low
+  out256.rgba,modular-dc-frame-default,primary,315.821,305.701,168.937,87.098,0,n/a,true,low
+  out256.rgba,modular-no-dc-frame,primary,300.743,293.672,214.11,51.614,4.8,0,true,low
+marks[4]{input,variant,label,median_ms}:
+  test256.rgba,modular-dc-frame-default,enc_ms,176.424
+  test256.rgba,modular-no-dc-frame,enc_ms,174.596
+  out256.rgba,modular-dc-frame-default,enc_ms,185.942
+  out256.rgba,modular-no-dc-frame,enc_ms,181.225
+flips[36]{input,round,variant,ms,rss_mb,temp_c,freq_ratio,first_paint}:
+  test256.rgba,0,modular-dc-frame-default,705.184,104.8,n/a,n/a,true
+  test256.rgba,0,modular-no-dc-frame,305.515,97.6,n/a,n/a,true
+  test256.rgba,1,modular-no-dc-frame,272.012,113.8,n/a,n/a,false
+  test256.rgba,1,modular-dc-frame-default,216.313,85.4,n/a,n/a,false
+  test256.rgba,2,modular-dc-frame-default,170.917,77.8,n/a,n/a,false
+  test256.rgba,2,modular-no-dc-frame,292.469,77.9,n/a,n/a,false
+  test256.rgba,3,modular-no-dc-frame,348.601,77.9,n/a,n/a,false
+  test256.rgba,3,modular-dc-frame-default,271.745,78,n/a,n/a,false
+  test256.rgba,4,modular-dc-frame-default,221.441,84.5,n/a,n/a,false
+  test256.rgba,4,modular-no-dc-frame,322.904,95.2,n/a,n/a,false
+  test256.rgba,5,modular-no-dc-frame,226.612,96.3,n/a,n/a,false
+  test256.rgba,5,modular-dc-frame-default,295.914,103.6,n/a,n/a,false
+  test256.rgba,6,modular-dc-frame-default,192.589,78.4,n/a,n/a,false
+  test256.rgba,6,modular-no-dc-frame,289.758,78.5,n/a,n/a,false
+  test256.rgba,7,modular-no-dc-frame,334.413,78.5,n/a,n/a,false
+  test256.rgba,7,modular-dc-frame-default,301.311,77.4,n/a,n/a,false
+  test256.rgba,8,modular-dc-frame-default,400.608,77.5,n/a,n/a,false
+  test256.rgba,8,modular-no-dc-frame,409.665,77.7,n/a,n/a,false
+  out256.rgba,0,modular-dc-frame-default,187.224,81.8,n/a,n/a,true
+  out256.rgba,0,modular-no-dc-frame,218.077,77.3,n/a,n/a,true
+  out256.rgba,1,modular-no-dc-frame,293.672,77.8,n/a,n/a,false
+  out256.rgba,1,modular-dc-frame-default,459.329,78.4,n/a,n/a,false
+  out256.rgba,2,modular-dc-frame-default,168.937,78.1,n/a,n/a,false
+  out256.rgba,2,modular-no-dc-frame,346.661,78,n/a,n/a,false
+  out256.rgba,3,modular-no-dc-frame,307.813,78.1,n/a,n/a,false
+  out256.rgba,3,modular-dc-frame-default,365.648,78.1,n/a,n/a,false
+  out256.rgba,4,modular-dc-frame-default,305.701,78.1,n/a,n/a,false
+  out256.rgba,4,modular-no-dc-frame,332.471,78.2,n/a,n/a,false
+  out256.rgba,5,modular-no-dc-frame,348.443,78.1,n/a,n/a,false
+  out256.rgba,5,modular-dc-frame-default,351.376,78.2,n/a,n/a,false
+  out256.rgba,6,modular-dc-frame-default,325.941,78.2,n/a,n/a,false
+  out256.rgba,6,modular-no-dc-frame,214.11,78.2,n/a,n/a,false
+  out256.rgba,7,modular-no-dc-frame,227.837,78.2,n/a,n/a,false
+  out256.rgba,7,modular-dc-frame-default,266.047,78.3,n/a,n/a,false
+  out256.rgba,8,modular-dc-frame-default,247.507,78.3,n/a,n/a,false
+  out256.rgba,8,modular-no-dc-frame,271.861,78.3,n/a,n/a,false
+thermal:
+  temp_c_start: n/a
+  temp_c_end: n/a
+  temp_c_max: n/a
+  freq_ratio_min: n/a
+  throttled: unknown
+  variance_flag: true
+verdict: "modular-no-dc-frame 9% slower vs modular-dc-frame-default (geomean median_warm); thermal unknown; trust:low"
+
+=== flipflop 2026-06-18T05:55:58Z modular-effort5 ===
+schema: flipflop/v1
+ts: "2026-06-18T05:55:58Z"
+name: modular-effort5
+description: "mod_prog_enc LOSSLESS (progressive:true, modular:1, distance:0): effort=5 (candidate, the rate/time knee) vs effort=7 (recommendedEffort simd-mt default); pixel-exact"
+first_paint_of_day: true
+env:
+  commit: 178138b8
+  host: DESKTOP-UKOTMMU
+  cpu: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+  cores: 12
+  node: v24.14.0
+  gc_exposed: false
+  os: win32-x64
+config:
+  variants: "modular-effort7,modular-effort5"
+  baseline: modular-effort7
+  timing_mode: async
+  input_source: fractal
+  rounds: default
+  min_sample_ms: 2
+  sampler_ms: 500
+summary[30]{input,variant,role,median_warm_ms,median_all_ms,min_ms,stdev_ms,saved_pct,quality,quality_ok,trust}:
+  mandel@256,modular-effort7,primary,396.752,423.526,305.197,79.499,0,n/a,true,low
+  mandel@256,modular-effort5,primary,277.346,288.865,218.052,46.745,30.1,n/a,true,low
+  mandel@512,modular-effort7,primary,1178.508,1176.541,1038.414,166.735,0,n/a,true,low
+  mandel@512,modular-effort5,primary,944.457,947.138,793.791,156.512,19.9,n/a,true,low
+  mandel@1024,modular-effort7,primary,4467.19,4550.087,3641.482,553.763,0,n/a,true,low
+  mandel@1024,modular-effort5,primary,3962.18,3939.351,3195.529,362.022,11.3,n/a,true,high
+  mandel@2048,modular-effort7,primary,16338.781,16673.094,14408.141,1682.06,0,n/a,true,low
+  mandel@2048,modular-effort5,primary,13079.408,13716.138,11537.411,2045.648,19.9,n/a,true,low
+  mandel@4096,modular-effort7,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  mandel@4096,modular-effort5,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  fbm@256,modular-effort7,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  fbm@256,modular-effort5,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  fbm@512,modular-effort7,primary,1142.087,1142.087,964.203,242.575,0,n/a,true,low
+  fbm@512,modular-effort5,primary,1039.847,1039.847,743.139,264.004,9,n/a,true,low
+  fbm@1024,modular-effort7,primary,3639.024,3678.852,3279.877,287.577,0,n/a,true,high
+  fbm@1024,modular-effort5,primary,3423.603,3279.597,2947.505,508.805,5.9,n/a,true,low
+  fbm@2048,modular-effort7,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  fbm@2048,modular-effort5,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  fbm@4096,modular-effort7,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  fbm@4096,modular-effort5,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  branch@256,modular-effort7,primary,483.318,483.318,397.027,69.161,0,n/a,true,low
+  branch@256,modular-effort5,primary,329.947,329.947,272.138,54.082,31.7,n/a,true,low
+  branch@512,modular-effort7,primary,1244.231,1229.943,1086.784,257.585,0,n/a,true,low
+  branch@512,modular-effort5,primary,834.222,830.255,760.759,185.537,33,n/a,true,low
+  branch@1024,modular-effort7,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  branch@1024,modular-effort5,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  branch@2048,modular-effort7,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  branch@2048,modular-effort5,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  branch@4096,modular-effort7,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+  branch@4096,modular-effort5,primary,n/a,n/a,n/a,n/a,n/a,n/a,false,low
+marks[16]{input,variant,label,median_ms}:
+  mandel@256,modular-effort7,enc_ms,381.571
+  mandel@256,modular-effort5,enc_ms,250.358
+  mandel@512,modular-effort7,enc_ms,1059.818
+  mandel@512,modular-effort5,enc_ms,847.21
+  mandel@1024,modular-effort7,enc_ms,3941.313
+  mandel@1024,modular-effort5,enc_ms,3414.249
+  mandel@2048,modular-effort7,enc_ms,14506.384
+  mandel@2048,modular-effort5,enc_ms,12342.941
+  fbm@512,modular-effort7,enc_ms,1003.982
+  fbm@512,modular-effort5,enc_ms,888.794
+  fbm@1024,modular-effort7,enc_ms,3171.239
+  fbm@1024,modular-effort5,enc_ms,2837.323
+  branch@256,modular-effort7,enc_ms,437.807
+  branch@256,modular-effort5,enc_ms,299.172
+  branch@512,modular-effort7,enc_ms,1073.893
+  branch@512,modular-effort5,enc_ms,711.612
+flips[240]{input,round,variant,ms,rss_mb,temp_c,freq_ratio,first_paint}:
+  mandel@256,0,modular-effort7,1089.745,88.6,n/a,n/a,true
+  mandel@256,0,modular-effort5,489.538,120,n/a,n/a,true
+  mandel@256,1,modular-effort5,218.052,87.1,n/a,n/a,false
+  mandel@256,1,modular-effort7,305.197,86.8,n/a,n/a,false
+  mandel@256,2,modular-effort7,322.326,87.1,n/a,n/a,false
+  mandel@256,2,modular-effort5,258.305,87.7,n/a,n/a,false
+  mandel@256,3,modular-effort5,306.75,88.1,n/a,n/a,false
+  mandel@256,3,modular-effort7,387.537,88.5,n/a,n/a,false
+  mandel@256,4,modular-effort7,475.337,102,n/a,n/a,false
+  mandel@256,4,modular-effort5,300.383,115.7,n/a,n/a,false
+  mandel@256,5,modular-effort5,277.346,89.3,n/a,n/a,false
+  mandel@256,5,modular-effort7,396.752,90.1,n/a,n/a,false
+  mandel@256,6,modular-effort7,342.651,90.5,n/a,n/a,false
+  mandel@256,6,modular-effort5,257.782,90.8,n/a,n/a,false
+  mandel@256,7,modular-effort5,359.203,91,n/a,n/a,false
+  mandel@256,7,modular-effort7,465.529,91.3,n/a,n/a,false
+  mandel@256,8,modular-effort7,543.036,91.7,n/a,n/a,false
+  mandel@256,8,modular-effort5,354.608,92,n/a,n/a,false
+  mandel@256,9,modular-effort5,262.136,92.3,n/a,n/a,false
+  mandel@256,9,modular-effort7,450.3,92.6,n/a,n/a,false
+  mandel@512,0,modular-effort7,1174.573,140.8,n/a,n/a,true
+  mandel@512,0,modular-effort5,1019.762,142.2,n/a,n/a,true
+  mandel@512,1,modular-effort5,944.457,143.4,n/a,n/a,false
+  mandel@512,1,modular-effort7,1339.271,144.7,n/a,n/a,false
+  mandel@512,2,modular-effort7,1371.32,145.9,n/a,n/a,false
+  mandel@512,2,modular-effort5,938.323,147.2,n/a,n/a,false
+  mandel@512,3,modular-effort5,876.099,148.1,n/a,n/a,false
+  mandel@512,3,modular-effort7,1123.634,149.3,n/a,n/a,false
+  mandel@512,4,modular-effort7,1356.637,150.6,n/a,n/a,false
+  mandel@512,4,modular-effort5,1314.244,151.9,n/a,n/a,false
+  mandel@512,5,modular-effort5,1041.244,153.9,n/a,n/a,false
+  mandel@512,5,modular-effort7,1178.508,155.1,n/a,n/a,false
+  mandel@512,6,modular-effort7,1047.527,156.4,n/a,n/a,false
+  mandel@512,6,modular-effort5,1156.048,157.7,n/a,n/a,false
+  mandel@512,7,modular-effort5,793.791,159,n/a,n/a,false
+  mandel@512,7,modular-effort7,1038.414,160.3,n/a,n/a,false
+  mandel@512,8,modular-effort7,1106.542,162.3,n/a,n/a,false
+  mandel@512,8,modular-effort5,949.818,162.3,n/a,n/a,false
+  mandel@512,9,modular-effort5,935.428,163.8,n/a,n/a,false
+  mandel@512,9,modular-effort7,1504.318,165.1,n/a,n/a,false
+  mandel@1024,0,modular-effort7,4990.947,321.4,n/a,n/a,true
+  mandel@1024,0,modular-effort5,3916.523,326.1,n/a,n/a,true
+  mandel@1024,1,modular-effort5,3975.205,331,n/a,n/a,false
+  mandel@1024,1,modular-effort7,4804.343,335.8,n/a,n/a,false
+  mandel@1024,2,modular-effort7,4632.984,340.6,n/a,n/a,false
+  mandel@1024,2,modular-effort5,3826.004,345.4,n/a,n/a,false
+  mandel@1024,3,modular-effort5,3555.831,350.1,n/a,n/a,false
+  mandel@1024,3,modular-effort7,5019.164,354.8,n/a,n/a,false
+  mandel@1024,4,modular-effort7,4467.19,359.5,n/a,n/a,false
+  mandel@1024,4,modular-effort5,4290.242,364.3,n/a,n/a,false
+  mandel@1024,5,modular-effort5,4146.744,369,n/a,n/a,false
+  mandel@1024,5,modular-effort7,4066.43,373.7,n/a,n/a,false
+  mandel@1024,6,modular-effort7,3641.482,378.4,n/a,n/a,false
+  mandel@1024,6,modular-effort5,3195.529,383.2,n/a,n/a,false
+  mandel@1024,7,modular-effort5,4351.984,334.6,n/a,n/a,false
+  mandel@1024,7,modular-effort7,3694.703,339.3,n/a,n/a,false
+  mandel@1024,8,modular-effort7,3651.331,343.9,n/a,n/a,false
+  mandel@1024,8,modular-effort5,3962.18,348.7,n/a,n/a,false
+  mandel@1024,9,modular-effort5,3858.505,353.4,n/a,n/a,false
+  mandel@1024,9,modular-effort7,4818.168,358.2,n/a,n/a,false
+  mandel@2048,0,modular-effort7,18781.214,1082,n/a,n/a,true
+  mandel@2048,0,modular-effort5,16313.897,1100.2,n/a,n/a,true
+  mandel@2048,1,modular-effort5,16245.627,1118.7,n/a,n/a,false
+  mandel@2048,1,modular-effort7,18471.211,1136.8,n/a,n/a,false
+  mandel@2048,2,modular-effort7,16673.094,1133.4,n/a,n/a,false
+  mandel@2048,2,modular-effort5,13716.138,1151.4,n/a,n/a,false
+  mandel@2048,3,modular-effort5,12442.678,1169.7,n/a,n/a,false
+  mandel@2048,3,modular-effort7,16004.468,1187.8,n/a,n/a,false
+  mandel@2048,4,modular-effort7,14408.141,1133.4,n/a,n/a,false
+  mandel@2048,4,modular-effort5,11537.411,1151.7,n/a,n/a,false
+  mandel@4096,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  mandel@4096,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  mandel@4096,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  mandel@4096,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  mandel@4096,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  mandel@4096,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  mandel@4096,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  mandel@4096,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  mandel@4096,4,modular-effort7,n/a,n/a,n/a,n/a,false
+  mandel@4096,4,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  fbm@256,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  fbm@256,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,4,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,4,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,5,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,5,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,6,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,6,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,7,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,7,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,8,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@256,8,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,9,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@256,9,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@512,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  fbm@512,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  fbm@512,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@512,1,modular-effort7,1601.866,4114.6,n/a,n/a,false
+  fbm@512,2,modular-effort7,1540.053,4116.2,n/a,n/a,false
+  fbm@512,2,modular-effort5,743.268,4119.3,n/a,n/a,false
+  fbm@512,3,modular-effort5,1423.807,4119.9,n/a,n/a,false
+  fbm@512,3,modular-effort7,974.378,4121.4,n/a,n/a,false
+  fbm@512,4,modular-effort7,1074.055,4122.8,n/a,n/a,false
+  fbm@512,4,modular-effort5,1190.517,4124.2,n/a,n/a,false
+  fbm@512,5,modular-effort5,1039.25,4126.1,n/a,n/a,false
+  fbm@512,5,modular-effort7,964.203,4127.6,n/a,n/a,false
+  fbm@512,6,modular-effort7,991.545,4132.6,n/a,n/a,false
+  fbm@512,6,modular-effort5,858.094,4130.2,n/a,n/a,false
+  fbm@512,7,modular-effort5,1040.445,4131.7,n/a,n/a,false
+  fbm@512,7,modular-effort7,1350.327,4133.2,n/a,n/a,false
+  fbm@512,8,modular-effort7,1157.14,4134.7,n/a,n/a,false
+  fbm@512,8,modular-effort5,743.139,4136.3,n/a,n/a,false
+  fbm@512,9,modular-effort5,1371.155,4137.9,n/a,n/a,false
+  fbm@512,9,modular-effort7,1142.087,4140,n/a,n/a,false
+  fbm@1024,0,modular-effort7,4272.694,4149.3,n/a,n/a,true
+  fbm@1024,0,modular-effort5,3087.002,4154.8,n/a,n/a,true
+  fbm@1024,1,modular-effort5,3423.603,4160.3,n/a,n/a,false
+  fbm@1024,1,modular-effort7,4191.645,4165.6,n/a,n/a,false
+  fbm@1024,2,modular-effort7,3304.828,4170.9,n/a,n/a,false
+  fbm@1024,2,modular-effort5,2947.505,4176.5,n/a,n/a,false
+  fbm@1024,3,modular-effort5,2960.265,4182,n/a,n/a,false
+  fbm@1024,3,modular-effort7,3601.809,4055.8,n/a,n/a,false
+  fbm@1024,4,modular-effort7,3570.522,4061.1,n/a,n/a,false
+  fbm@1024,4,modular-effort5,3426.239,4066.8,n/a,n/a,false
+  fbm@1024,5,modular-effort5,3135.591,4072.2,n/a,n/a,false
+  fbm@1024,5,modular-effort7,3759.17,4077.7,n/a,n/a,false
+  fbm@1024,6,modular-effort7,3718.681,4083,n/a,n/a,false
+  fbm@1024,6,modular-effort5,3848.799,4088.5,n/a,n/a,false
+  fbm@1024,7,modular-effort5,2975.46,4094,n/a,n/a,false
+  fbm@1024,7,modular-effort7,3279.877,4099.2,n/a,n/a,false
+  fbm@1024,8,modular-effort7,3639.024,4105.4,n/a,n/a,false
+  fbm@1024,8,modular-effort5,4499.978,4110.8,n/a,n/a,false
+  fbm@1024,9,modular-effort5,3509.393,4116,n/a,n/a,false
+  fbm@1024,9,modular-effort7,3949.543,4121.4,n/a,n/a,false
+  fbm@2048,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  fbm@2048,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  fbm@2048,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@2048,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@2048,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@2048,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@2048,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@2048,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@2048,4,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@2048,4,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@4096,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  fbm@4096,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  fbm@4096,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@4096,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@4096,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@4096,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@4096,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  fbm@4096,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@4096,4,modular-effort7,n/a,n/a,n/a,n/a,false
+  fbm@4096,4,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@256,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  branch@256,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  branch@256,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@256,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@256,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@256,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@256,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@256,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@256,4,modular-effort7,453.264,4207.2,n/a,n/a,false
+  branch@256,4,modular-effort5,272.138,4208.1,n/a,n/a,false
+  branch@256,5,modular-effort5,361.656,4208.4,n/a,n/a,false
+  branch@256,5,modular-effort7,480.111,4208.8,n/a,n/a,false
+  branch@256,6,modular-effort7,504.042,4209.2,n/a,n/a,false
+  branch@256,6,modular-effort5,306.01,4209.8,n/a,n/a,false
+  branch@256,7,modular-effort5,277.962,4213.7,n/a,n/a,false
+  branch@256,7,modular-effort7,486.525,4210.5,n/a,n/a,false
+  branch@256,8,modular-effort7,606.792,4210.9,n/a,n/a,false
+  branch@256,8,modular-effort5,353.883,4211.3,n/a,n/a,false
+  branch@256,9,modular-effort5,410.131,4211.8,n/a,n/a,false
+  branch@256,9,modular-effort7,397.027,4212.2,n/a,n/a,false
+  branch@512,0,modular-effort7,1169.375,4209.8,n/a,n/a,true
+  branch@512,0,modular-effort5,760.759,4211.4,n/a,n/a,true
+  branch@512,1,modular-effort5,768.076,4213.3,n/a,n/a,false
+  branch@512,1,modular-effort7,1915.906,4214.9,n/a,n/a,false
+  branch@512,2,modular-effort7,1093.985,4216.4,n/a,n/a,false
+  branch@512,2,modular-effort5,826.288,4218,n/a,n/a,false
+  branch@512,3,modular-effort5,795.15,4219.6,n/a,n/a,false
+  branch@512,3,modular-effort7,1328.427,4221.1,n/a,n/a,false
+  branch@512,4,modular-effort7,1399.596,4222.6,n/a,n/a,false
+  branch@512,4,modular-effort5,1376.253,4224.2,n/a,n/a,false
+  branch@512,5,modular-effort5,805.953,4225.8,n/a,n/a,false
+  branch@512,5,modular-effort7,1086.784,4227.4,n/a,n/a,false
+  branch@512,6,modular-effort7,1215.654,4229,n/a,n/a,false
+  branch@512,6,modular-effort5,834.222,4230.6,n/a,n/a,false
+  branch@512,7,modular-effort5,884.629,4232.2,n/a,n/a,false
+  branch@512,7,modular-effort7,1244.231,4233.8,n/a,n/a,false
+  branch@512,8,modular-effort7,1418.567,4235.6,n/a,n/a,false
+  branch@512,8,modular-effort5,926.87,4237.2,n/a,n/a,false
+  branch@512,9,modular-effort5,875.097,4238.7,n/a,n/a,false
+  branch@512,9,modular-effort7,1125.673,4241.4,n/a,n/a,false
+  branch@1024,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  branch@1024,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  branch@1024,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,4,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,4,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,5,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,5,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,6,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,6,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,7,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,7,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,8,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@1024,8,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,9,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@1024,9,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@2048,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  branch@2048,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  branch@2048,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@2048,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@2048,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@2048,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@2048,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@2048,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@2048,4,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@2048,4,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@4096,0,modular-effort7,n/a,n/a,n/a,n/a,true
+  branch@4096,0,modular-effort5,n/a,n/a,n/a,n/a,true
+  branch@4096,1,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@4096,1,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@4096,2,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@4096,2,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@4096,3,modular-effort5,n/a,n/a,n/a,n/a,false
+  branch@4096,3,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@4096,4,modular-effort7,n/a,n/a,n/a,n/a,false
+  branch@4096,4,modular-effort5,n/a,n/a,n/a,n/a,false
+thermal:
+  temp_c_start: n/a
+  temp_c_end: n/a
+  temp_c_max: n/a
+  freq_ratio_min: n/a
+  throttled: unknown
+  variance_flag: true
+verdict: "modular-effort5 20.7% faster vs modular-effort7 (geomean median_warm); QUALITY BREACH: modular-effort7,modular-effort5; thermal unknown; trust:low"
+
+=== flipflop 2026-06-18T06:03:08Z modular-prog-effort5-lossy ===
+schema: flipflop/v1
+ts: "2026-06-18T06:03:08Z"
+name: modular-prog-effort5-lossy
+description: "mod_prog_enc LOSSY (progressive:true, modular:1, distance:1.0): effort=5 (candidate, rate/time knee) vs effort=7 (recommendedEffort simd-mt default); Butteraugli gate"
+first_paint_of_day: true
+env:
+  commit: 178138b8
+  host: DESKTOP-UKOTMMU
+  cpu: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+  cores: 12
+  node: v24.14.0
+  gc_exposed: false
+  os: win32-x64
+config:
+  variants: "modular-prog-effort7,modular-prog-effort5"
+  baseline: modular-prog-effort7
+  timing_mode: async
+  input_source: fractal
+  rounds: default
+  min_sample_ms: 2
+  sampler_ms: 500
+summary[12]{input,variant,role,median_warm_ms,median_all_ms,min_ms,stdev_ms,saved_pct,quality,quality_ok,trust}:
+  mandel@256,modular-prog-effort7,primary,239.2,240.916,182.608,160.876,0,n/a,true,low
+  mandel@256,modular-prog-effort5,primary,237,240.375,158.486,64.632,0.9,0,true,low
+  mandel@512,modular-prog-effort7,primary,853.106,871.663,753.019,643.517,0,n/a,true,low
+  mandel@512,modular-prog-effort5,primary,831.715,862.587,742.264,190.851,2.5,0,true,low
+  mandel@1024,modular-prog-effort7,primary,3823.781,3918.513,3470.262,588.84,0,n/a,true,low
+  mandel@1024,modular-prog-effort5,primary,3521.181,3560.294,2935.675,616.405,7.9,0,true,low
+  fbm@256,modular-prog-effort7,primary,240.704,326.113,198.463,197.024,0,n/a,true,low
+  fbm@256,modular-prog-effort5,primary,184.623,193.53,160.109,156.41,23.3,0,true,low
+  fbm@512,modular-prog-effort7,primary,931.435,965.02,791.675,321.692,0,n/a,true,low
+  fbm@512,modular-prog-effort5,primary,1088.685,1131.237,730.703,282.832,-16.9,0,true,low
+  fbm@1024,modular-prog-effort7,primary,2907.636,2906.355,2761.13,215.503,0,n/a,true,high
+  fbm@1024,modular-prog-effort5,primary,2604.062,2689.962,2300.415,400.749,10.4,0,true,low
+marks[12]{input,variant,label,median_ms}:
+  mandel@256,modular-prog-effort7,enc_ms,214.783
+  mandel@256,modular-prog-effort5,enc_ms,189.755
+  mandel@512,modular-prog-effort7,enc_ms,778.273
+  mandel@512,modular-prog-effort5,enc_ms,785.489
+  mandel@1024,modular-prog-effort7,enc_ms,3380.873
+  mandel@1024,modular-prog-effort5,enc_ms,3068.119
+  fbm@256,modular-prog-effort7,enc_ms,285.034
+  fbm@256,modular-prog-effort5,enc_ms,166.29
+  fbm@512,modular-prog-effort7,enc_ms,831.115
+  fbm@512,modular-prog-effort5,enc_ms,1016.999
+  fbm@1024,modular-prog-effort7,enc_ms,2646.253
+  fbm@1024,modular-prog-effort5,enc_ms,2444.819
+flips[120]{input,round,variant,ms,rss_mb,temp_c,freq_ratio,first_paint}:
+  mandel@256,0,modular-prog-effort7,1023.872,100.5,n/a,n/a,true
+  mandel@256,0,modular-prog-effort5,300.768,84.5,n/a,n/a,true
+  mandel@256,1,modular-prog-effort5,237,85.4,n/a,n/a,false
+  mandel@256,1,modular-prog-effort7,242.632,85,n/a,n/a,false
+  mandel@256,2,modular-prog-effort7,192.148,85.3,n/a,n/a,false
+  mandel@256,2,modular-prog-effort5,186.497,85.5,n/a,n/a,false
+  mandel@256,3,modular-prog-effort5,163.987,85.9,n/a,n/a,false
+  mandel@256,3,modular-prog-effort7,182.608,86,n/a,n/a,false
+  mandel@256,4,modular-prog-effort7,194.745,92.7,n/a,n/a,false
+  mandel@256,4,modular-prog-effort5,243.751,106.6,n/a,n/a,false
+  mandel@256,5,modular-prog-effort5,360.962,86.5,n/a,n/a,false
+  mandel@256,5,modular-prog-effort7,286.763,86.7,n/a,n/a,false
+  mandel@256,6,modular-prog-effort7,354.938,86.9,n/a,n/a,false
+  mandel@256,6,modular-prog-effort5,211.287,87.2,n/a,n/a,false
+  mandel@256,7,modular-prog-effort5,158.486,87.4,n/a,n/a,false
+  mandel@256,7,modular-prog-effort7,194.874,87.7,n/a,n/a,false
+  mandel@256,8,modular-prog-effort7,239.2,88.2,n/a,n/a,false
+  mandel@256,8,modular-prog-effort5,292.156,88.3,n/a,n/a,false
+  mandel@256,9,modular-prog-effort5,254.913,89,n/a,n/a,false
+  mandel@256,9,modular-prog-effort7,688.611,89.3,n/a,n/a,false
+  mandel@512,0,modular-prog-effort7,2800.912,135.9,n/a,n/a,true
+  mandel@512,0,modular-prog-effort5,2539.169,136.9,n/a,n/a,true
+  mandel@512,1,modular-prog-effort5,742.264,137.9,n/a,n/a,false
+  mandel@512,1,modular-prog-effort7,753.019,138.9,n/a,n/a,false
+  mandel@512,2,modular-prog-effort7,805.53,140,n/a,n/a,false
+  mandel@512,2,modular-prog-effort5,768.265,141.5,n/a,n/a,false
+  mandel@512,3,modular-prog-effort5,831.715,142.5,n/a,n/a,false
+  mandel@512,3,modular-prog-effort7,803.654,143.5,n/a,n/a,false
+  mandel@512,4,modular-prog-effort7,853.106,144.5,n/a,n/a,false
+  mandel@512,4,modular-prog-effort5,778.952,145.1,n/a,n/a,false
+  mandel@512,5,modular-prog-effort5,746.57,146.1,n/a,n/a,false
+  mandel@512,5,modular-prog-effort7,813.948,147.2,n/a,n/a,false
+  mandel@512,6,modular-prog-effort7,2770.426,148.6,n/a,n/a,false
+  mandel@512,6,modular-prog-effort5,1272.629,149.6,n/a,n/a,false
+  mandel@512,7,modular-prog-effort5,1073.469,150.6,n/a,n/a,false
+  mandel@512,7,modular-prog-effort7,890.22,151.6,n/a,n/a,false
+  mandel@512,8,modular-prog-effort7,1001.177,152.5,n/a,n/a,false
+  mandel@512,8,modular-prog-effort5,1096.234,153.6,n/a,n/a,false
+  mandel@512,9,modular-prog-effort5,893.459,154.9,n/a,n/a,false
+  mandel@512,9,modular-prog-effort7,894.916,155.9,n/a,n/a,false
+  mandel@1024,0,modular-prog-effort7,6889.667,320.3,n/a,n/a,true
+  mandel@1024,0,modular-prog-effort5,3688.148,324.5,n/a,n/a,true
+  mandel@1024,1,modular-prog-effort5,3521.181,328.8,n/a,n/a,false
+  mandel@1024,1,modular-prog-effort7,3823.781,333,n/a,n/a,false
+  mandel@1024,2,modular-prog-effort7,3624.418,337.2,n/a,n/a,false
+  mandel@1024,2,modular-prog-effort5,3953.143,341,n/a,n/a,false
+  mandel@1024,3,modular-prog-effort5,3872.865,345.1,n/a,n/a,false
+  mandel@1024,3,modular-prog-effort7,4031.656,349.2,n/a,n/a,false
+  mandel@1024,4,modular-prog-effort7,3705.716,353.3,n/a,n/a,false
+  mandel@1024,4,modular-prog-effort5,3599.407,357.4,n/a,n/a,false
+  mandel@1024,5,modular-prog-effort5,3349.447,361.6,n/a,n/a,false
+  mandel@1024,5,modular-prog-effort7,5278.999,365.7,n/a,n/a,false
+  mandel@1024,6,modular-prog-effort7,3770.324,369.9,n/a,n/a,false
+  mandel@1024,6,modular-prog-effort5,3167.323,374.1,n/a,n/a,false
+  mandel@1024,7,modular-prog-effort5,3177.766,378.2,n/a,n/a,false
+  mandel@1024,7,modular-prog-effort7,4754.734,382.4,n/a,n/a,false
+  mandel@1024,8,modular-prog-effort7,4013.245,332.7,n/a,n/a,false
+  mandel@1024,8,modular-prog-effort5,5002.945,336.8,n/a,n/a,false
+  mandel@1024,9,modular-prog-effort5,2935.675,340.9,n/a,n/a,false
+  mandel@1024,9,modular-prog-effort7,3470.262,345,n/a,n/a,false
+  fbm@256,0,modular-prog-effort7,486.141,374.1,n/a,n/a,true
+  fbm@256,0,modular-prog-effort5,202.438,374.4,n/a,n/a,true
+  fbm@256,1,modular-prog-effort5,160.109,374.7,n/a,n/a,false
+  fbm@256,1,modular-prog-effort7,240.704,375,n/a,n/a,false
+  fbm@256,2,modular-prog-effort7,200.463,375.2,n/a,n/a,false
+  fbm@256,2,modular-prog-effort5,337.035,375.6,n/a,n/a,false
+  fbm@256,3,modular-prog-effort5,374.216,375.8,n/a,n/a,false
+  fbm@256,3,modular-prog-effort7,532.825,376.1,n/a,n/a,false
+  fbm@256,4,modular-prog-effort7,411.522,376.3,n/a,n/a,false
+  fbm@256,4,modular-prog-effort5,534.168,376.6,n/a,n/a,false
+  fbm@256,5,modular-prog-effort5,526.228,376.8,n/a,n/a,false
+  fbm@256,5,modular-prog-effort7,760.086,377.1,n/a,n/a,false
+  fbm@256,6,modular-prog-effort7,450.006,377.4,n/a,n/a,false
+  fbm@256,6,modular-prog-effort5,163.403,377.6,n/a,n/a,false
+  fbm@256,7,modular-prog-effort5,184.623,377.9,n/a,n/a,false
+  fbm@256,7,modular-prog-effort7,209.956,378.2,n/a,n/a,false
+  fbm@256,8,modular-prog-effort7,198.463,378.5,n/a,n/a,false
+  fbm@256,8,modular-prog-effort5,172.352,378.8,n/a,n/a,false
+  fbm@256,9,modular-prog-effort5,175.215,379.5,n/a,n/a,false
+  fbm@256,9,modular-prog-effort7,212.95,379.8,n/a,n/a,false
+  fbm@512,0,modular-prog-effort7,2180.829,385.2,n/a,n/a,true
+  fbm@512,0,modular-prog-effort5,1772.033,315.4,n/a,n/a,true
+  fbm@512,1,modular-prog-effort5,1504.303,317.7,n/a,n/a,false
+  fbm@512,1,modular-prog-effort7,931.435,318.5,n/a,n/a,false
+  fbm@512,2,modular-prog-effort7,1014.069,319.7,n/a,n/a,false
+  fbm@512,2,modular-prog-effort5,868.787,321,n/a,n/a,false
+  fbm@512,3,modular-prog-effort5,1088.685,321.8,n/a,n/a,false
+  fbm@512,3,modular-prog-effort7,902.257,323,n/a,n/a,false
+  fbm@512,4,modular-prog-effort7,804.37,324.2,n/a,n/a,false
+  fbm@512,4,modular-prog-effort5,730.703,330.7,n/a,n/a,false
+  fbm@512,5,modular-prog-effort5,1434.624,326,n/a,n/a,false
+  fbm@512,5,modular-prog-effort7,998.605,327.2,n/a,n/a,false
+  fbm@512,6,modular-prog-effort7,899.572,328.4,n/a,n/a,false
+  fbm@512,6,modular-prog-effort5,786.103,329.7,n/a,n/a,false
+  fbm@512,7,modular-prog-effort5,846.589,330.9,n/a,n/a,false
+  fbm@512,7,modular-prog-effort7,1024.764,332.2,n/a,n/a,false
+  fbm@512,8,modular-prog-effort7,1852.288,333.8,n/a,n/a,false
+  fbm@512,8,modular-prog-effort5,1215.534,335,n/a,n/a,false
+  fbm@512,9,modular-prog-effort5,1173.789,336.1,n/a,n/a,false
+  fbm@512,9,modular-prog-effort7,791.675,337.3,n/a,n/a,false
+  fbm@1024,0,modular-prog-effort7,2829.28,334.5,n/a,n/a,true
+  fbm@1024,0,modular-prog-effort5,3362.819,339,n/a,n/a,true
+  fbm@1024,1,modular-prog-effort5,3071.183,343.5,n/a,n/a,false
+  fbm@1024,1,modular-prog-effort7,3174.577,347.9,n/a,n/a,false
+  fbm@1024,2,modular-prog-effort7,3111.609,352.3,n/a,n/a,false
+  fbm@1024,2,modular-prog-effort5,2775.862,356.8,n/a,n/a,false
+  fbm@1024,3,modular-prog-effort5,3564.942,361.4,n/a,n/a,false
+  fbm@1024,3,modular-prog-effort7,2761.13,365.9,n/a,n/a,false
+  fbm@1024,4,modular-prog-effort7,2857.918,370.3,n/a,n/a,false
+  fbm@1024,4,modular-prog-effort5,2327.136,374.8,n/a,n/a,false
+  fbm@1024,5,modular-prog-effort5,2300.415,379.5,n/a,n/a,false
+  fbm@1024,5,modular-prog-effort7,2907.636,334.5,n/a,n/a,false
+  fbm@1024,6,modular-prog-effort7,2905.074,338.9,n/a,n/a,false
+  fbm@1024,6,modular-prog-effort5,2604.062,343.4,n/a,n/a,false
+  fbm@1024,7,modular-prog-effort5,2901.161,348,n/a,n/a,false
+  fbm@1024,7,modular-prog-effort7,3409.765,352.6,n/a,n/a,false
+  fbm@1024,8,modular-prog-effort7,3177.567,357,n/a,n/a,false
+  fbm@1024,8,modular-prog-effort5,2527.757,361.5,n/a,n/a,false
+  fbm@1024,9,modular-prog-effort5,2539.069,365.9,n/a,n/a,false
+  fbm@1024,9,modular-prog-effort7,2810.621,370.4,n/a,n/a,false
+thermal:
+  temp_c_start: n/a
+  temp_c_end: n/a
+  temp_c_max: n/a
+  freq_ratio_min: n/a
+  throttled: unknown
+  variance_flag: true
+verdict: "modular-prog-effort5 5.5% faster vs modular-prog-effort7 (geomean median_warm); thermal unknown; trust:low"
+
+=== flipflop 2026-06-18T06:07:40Z modular-prog-effort5-lossy ===
+schema: flipflop/v1
+ts: "2026-06-18T06:07:40Z"
+name: modular-prog-effort5-lossy
+description: "mod_prog_enc LOSSY (progressive:true, modular:1, distance:1.0): effort=5 (candidate, rate/time knee) vs effort=7 (recommendedEffort simd-mt default); Butteraugli gate"
+first_paint_of_day: true
+env:
+  commit: 178138b8
+  host: DESKTOP-UKOTMMU
+  cpu: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+  cores: 12
+  node: v24.14.0
+  gc_exposed: false
+  os: win32-x64
+config:
+  variants: "modular-prog-effort7,modular-prog-effort5"
+  baseline: modular-prog-effort7
+  timing_mode: async
+  input_source: fractal
+  rounds: 12
+  min_sample_ms: 2
+  sampler_ms: 500
+summary[8]{input,variant,role,median_warm_ms,median_all_ms,min_ms,stdev_ms,saved_pct,quality,quality_ok,trust}:
+  mandel@512,modular-prog-effort7,primary,749.916,765.689,705.323,393.762,0,n/a,true,low
+  mandel@512,modular-prog-effort5,primary,812.309,813.835,658.257,76.2,-8.3,0,true,high
+  mandel@1024,modular-prog-effort7,primary,3158.545,3167.865,2727.314,232.123,0,n/a,true,high
+  mandel@1024,modular-prog-effort5,primary,2871.867,2890.442,2546.153,208.714,9.1,0,true,high
+  fbm@512,modular-prog-effort7,primary,869.117,872.059,815.416,116.692,0,n/a,true,low
+  fbm@512,modular-prog-effort5,primary,713.234,714.319,660.916,111.602,17.9,0,true,low
+  fbm@1024,modular-prog-effort7,primary,3189.113,3209.369,2920.685,532.562,0,n/a,true,low
+  fbm@1024,modular-prog-effort5,primary,2876.987,2940.75,2667.744,692.997,9.8,0,true,low
+marks[8]{input,variant,label,median_ms}:
+  mandel@512,modular-prog-effort7,enc_ms,685.657
+  mandel@512,modular-prog-effort5,enc_ms,692.968
+  mandel@1024,modular-prog-effort7,enc_ms,2814.984
+  mandel@1024,modular-prog-effort5,enc_ms,2584.88
+  fbm@512,modular-prog-effort7,enc_ms,791.266
+  fbm@512,modular-prog-effort5,enc_ms,640.892
+  fbm@1024,modular-prog-effort7,enc_ms,2890.503
+  fbm@1024,modular-prog-effort5,enc_ms,2673.827
+flips[96]{input,round,variant,ms,rss_mb,temp_c,freq_ratio,first_paint}:
+  mandel@512,0,modular-prog-effort7,2278.189,133,n/a,n/a,true
+  mandel@512,0,modular-prog-effort5,1775.959,131.9,n/a,n/a,true
+  mandel@512,1,modular-prog-effort5,897.422,134,n/a,n/a,false
+  mandel@512,1,modular-prog-effort7,1084.958,134.1,n/a,n/a,false
+  mandel@512,2,modular-prog-effort7,1040.068,135.4,n/a,n/a,false
+  mandel@512,2,modular-prog-effort5,658.257,136.5,n/a,n/a,false
+  mandel@512,3,modular-prog-effort5,762.693,137.5,n/a,n/a,false
+  mandel@512,3,modular-prog-effort7,734.692,137.7,n/a,n/a,false
+  mandel@512,4,modular-prog-effort7,705.323,155.9,n/a,n/a,false
+  mandel@512,4,modular-prog-effort5,831.973,140.4,n/a,n/a,false
+  mandel@512,5,modular-prog-effort5,812.309,141.2,n/a,n/a,false
+  mandel@512,5,modular-prog-effort7,722.622,142.2,n/a,n/a,false
+  mandel@512,6,modular-prog-effort7,721.813,143.3,n/a,n/a,false
+  mandel@512,6,modular-prog-effort5,757.427,144.5,n/a,n/a,false
+  mandel@512,7,modular-prog-effort5,699.468,145.5,n/a,n/a,false
+  mandel@512,7,modular-prog-effort7,749.916,146.6,n/a,n/a,false
+  mandel@512,8,modular-prog-effort7,730.676,147.3,n/a,n/a,false
+  mandel@512,8,modular-prog-effort5,815.362,148.5,n/a,n/a,false
+  mandel@512,9,modular-prog-effort5,909.752,149.7,n/a,n/a,false
+  mandel@512,9,modular-prog-effort7,2044.444,150.7,n/a,n/a,false
+  mandel@512,10,modular-prog-effort7,781.463,151.8,n/a,n/a,false
+  mandel@512,10,modular-prog-effort5,832.689,152.8,n/a,n/a,false
+  mandel@512,11,modular-prog-effort5,770.025,153.8,n/a,n/a,false
+  mandel@512,11,modular-prog-effort7,872.257,154.9,n/a,n/a,false
+  mandel@1024,0,modular-prog-effort7,3556.732,319.9,n/a,n/a,true
+  mandel@1024,0,modular-prog-effort5,3388.286,324.2,n/a,n/a,true
+  mandel@1024,1,modular-prog-effort5,2871.123,327.8,n/a,n/a,false
+  mandel@1024,1,modular-prog-effort7,3576.962,332,n/a,n/a,false
+  mandel@1024,2,modular-prog-effort7,3177.184,336.1,n/a,n/a,false
+  mandel@1024,2,modular-prog-effort5,2871.867,340.3,n/a,n/a,false
+  mandel@1024,3,modular-prog-effort5,2993.036,344.5,n/a,n/a,false
+  mandel@1024,3,modular-prog-effort7,3078.869,348.7,n/a,n/a,false
+  mandel@1024,4,modular-prog-effort7,3317.296,352.9,n/a,n/a,false
+  mandel@1024,4,modular-prog-effort5,3311.747,357,n/a,n/a,false
+  mandel@1024,5,modular-prog-effort5,2802.379,361,n/a,n/a,false
+  mandel@1024,5,modular-prog-effort7,2936.014,365.1,n/a,n/a,false
+  mandel@1024,6,modular-prog-effort7,3200.53,369.3,n/a,n/a,false
+  mandel@1024,6,modular-prog-effort5,2546.153,373.4,n/a,n/a,false
+  mandel@1024,7,modular-prog-effort5,3241.811,377.4,n/a,n/a,false
+  mandel@1024,7,modular-prog-effort7,2884.733,381.6,n/a,n/a,false
+  mandel@1024,8,modular-prog-effort7,3066.464,332.1,n/a,n/a,false
+  mandel@1024,8,modular-prog-effort5,2838.997,336.2,n/a,n/a,false
+  mandel@1024,9,modular-prog-effort5,2857.496,340.3,n/a,n/a,false
+  mandel@1024,9,modular-prog-effort7,2727.314,344.4,n/a,n/a,false
+  mandel@1024,10,modular-prog-effort7,3301.319,348.4,n/a,n/a,false
+  mandel@1024,10,modular-prog-effort5,2995.114,353,n/a,n/a,false
+  mandel@1024,11,modular-prog-effort5,2909.017,357,n/a,n/a,false
+  mandel@1024,11,modular-prog-effort7,3158.545,361.1,n/a,n/a,false
+  fbm@512,0,modular-prog-effort7,1048.057,365.8,n/a,n/a,true
+  fbm@512,0,modular-prog-effort5,733.891,367,n/a,n/a,true
+  fbm@512,1,modular-prog-effort5,710.729,369.9,n/a,n/a,false
+  fbm@512,1,modular-prog-effort7,869.117,369.5,n/a,n/a,false
+  fbm@512,2,modular-prog-effort7,815.416,370.7,n/a,n/a,false
+  fbm@512,2,modular-prog-effort5,698.832,372.2,n/a,n/a,false
+  fbm@512,3,modular-prog-effort5,660.916,373.7,n/a,n/a,false
+  fbm@512,3,modular-prog-effort7,853.604,374.7,n/a,n/a,false
+  fbm@512,4,modular-prog-effort7,841.99,375.8,n/a,n/a,false
+  fbm@512,4,modular-prog-effort5,789.071,376.9,n/a,n/a,false
+  fbm@512,5,modular-prog-effort5,1063.854,377.9,n/a,n/a,false
+  fbm@512,5,modular-prog-effort7,971.654,379.1,n/a,n/a,false
+  fbm@512,6,modular-prog-effort7,1200.899,379.7,n/a,n/a,false
+  fbm@512,6,modular-prog-effort5,722.924,379,n/a,n/a,false
+  fbm@512,7,modular-prog-effort5,729.522,380.1,n/a,n/a,false
+  fbm@512,7,modular-prog-effort7,1055.697,381.6,n/a,n/a,false
+  fbm@512,8,modular-prog-effort7,855.877,383,n/a,n/a,false
+  fbm@512,8,modular-prog-effort5,664.561,384.3,n/a,n/a,false
+  fbm@512,9,modular-prog-effort5,715.403,385.4,n/a,n/a,false
+  fbm@512,9,modular-prog-effort7,907.798,386.6,n/a,n/a,false
+  fbm@512,10,modular-prog-effort7,875.001,387.8,n/a,n/a,false
+  fbm@512,10,modular-prog-effort5,713.234,389,n/a,n/a,false
+  fbm@512,11,modular-prog-effort5,706.044,390.2,n/a,n/a,false
+  fbm@512,11,modular-prog-effort7,842.797,391.3,n/a,n/a,false
+  fbm@1024,0,modular-prog-effort7,3229.626,397.5,n/a,n/a,true
+  fbm@1024,0,modular-prog-effort5,3876.489,402.1,n/a,n/a,true
+  fbm@1024,1,modular-prog-effort5,4312.169,406.6,n/a,n/a,false
+  fbm@1024,1,modular-prog-effort7,3565.592,411,n/a,n/a,false
+  fbm@1024,2,modular-prog-effort7,2920.685,415.4,n/a,n/a,false
+  fbm@1024,2,modular-prog-effort5,2714.76,419.9,n/a,n/a,false
+  fbm@1024,3,modular-prog-effort5,2876.987,424.4,n/a,n/a,false
+  fbm@1024,3,modular-prog-effort7,3543.902,428.4,n/a,n/a,false
+  fbm@1024,4,modular-prog-effort7,3142.159,333.5,n/a,n/a,false
+  fbm@1024,4,modular-prog-effort5,3441.061,338.4,n/a,n/a,false
+  fbm@1024,5,modular-prog-effort5,2667.744,342.8,n/a,n/a,false
+  fbm@1024,5,modular-prog-effort7,2989.095,347.3,n/a,n/a,false
+  fbm@1024,6,modular-prog-effort7,3060.386,351.7,n/a,n/a,false
+  fbm@1024,6,modular-prog-effort5,4749.925,356.1,n/a,n/a,false
+  fbm@1024,7,modular-prog-effort5,2814.949,360.6,n/a,n/a,false
+  fbm@1024,7,modular-prog-effort7,3023.177,365,n/a,n/a,false
+  fbm@1024,8,modular-prog-effort7,3189.113,369.4,n/a,n/a,false
+  fbm@1024,8,modular-prog-effort5,3221.221,373.9,n/a,n/a,false
+  fbm@1024,9,modular-prog-effort5,3004.513,378.4,n/a,n/a,false
+  fbm@1024,9,modular-prog-effort7,3347.077,382.8,n/a,n/a,false
+  fbm@1024,10,modular-prog-effort7,4234.257,387.4,n/a,n/a,false
+  fbm@1024,10,modular-prog-effort5,2769.606,391.9,n/a,n/a,false
+  fbm@1024,11,modular-prog-effort5,2861.07,396.4,n/a,n/a,false
+  fbm@1024,11,modular-prog-effort7,4551.068,333.5,n/a,n/a,false
+thermal:
+  temp_c_start: n/a
+  temp_c_end: n/a
+  temp_c_max: n/a
+  freq_ratio_min: n/a
+  throttled: unknown
+  variance_flag: true
+verdict: "modular-prog-effort5 7.6% faster vs modular-prog-effort7 (geomean median_warm); thermal unknown; trust:low"
+
+=== flipflop 2026-06-18T06:12:36Z modular-prog-effort5-lossy ===
+schema: flipflop/v1
+ts: "2026-06-18T06:12:36Z"
+name: modular-prog-effort5-lossy
+description: "mod_prog_enc LOSSY (progressive:true, modular:1, distance:1.0): effort=5 (candidate, rate/time knee) vs effort=7 (recommendedEffort simd-mt default); Butteraugli gate"
+first_paint_of_day: true
+env:
+  commit: 178138b8
+  host: DESKTOP-UKOTMMU
+  cpu: Intel(R) Core(TM) i7-10850H CPU @ 2.70GHz
+  cores: 12
+  node: v24.14.0
+  gc_exposed: false
+  os: win32-x64
+config:
+  variants: "modular-prog-effort7,modular-prog-effort5"
+  baseline: modular-prog-effort7
+  timing_mode: async
+  input_source: fractal
+  rounds: 12
+  min_sample_ms: 2
+  sampler_ms: 500
+summary[6]{input,variant,role,median_warm_ms,median_all_ms,min_ms,stdev_ms,saved_pct,quality,quality_ok,trust}:
+  mandel@1024,modular-prog-effort7,primary,3402.729,3422.051,3108.612,419.218,0,n/a,true,low
+  mandel@1024,modular-prog-effort5,primary,3180.781,3187.465,2984.704,181.669,6.5,0,true,high
+  fbm@1024,modular-prog-effort7,primary,3202.359,3196.125,2595.34,324.017,0,n/a,true,low
+  fbm@1024,modular-prog-effort5,primary,2824.088,2803.297,2176.072,270.757,11.8,0,true,high
+  branch@1024,modular-prog-effort7,primary,2868.113,2838.679,2521.845,253.187,0,n/a,true,high
+  branch@1024,modular-prog-effort5,primary,2658.051,2642.045,2393.543,178.941,7.3,0,true,high
+marks[6]{input,variant,label,median_ms}:
+  mandel@1024,modular-prog-effort7,enc_ms,2973.62
+  mandel@1024,modular-prog-effort5,enc_ms,2697.864
+  fbm@1024,modular-prog-effort7,enc_ms,2851.028
+  fbm@1024,modular-prog-effort5,enc_ms,2525.051
+  branch@1024,modular-prog-effort7,enc_ms,2505.632
+  branch@1024,modular-prog-effort5,enc_ms,2318.722
+flips[72]{input,round,variant,ms,rss_mb,temp_c,freq_ratio,first_paint}:
+  mandel@1024,0,modular-prog-effort7,7412.673,320.4,n/a,n/a,true
+  mandel@1024,0,modular-prog-effort5,3897.441,325.1,n/a,n/a,true
+  mandel@1024,1,modular-prog-effort5,3014.696,329.1,n/a,n/a,false
+  mandel@1024,1,modular-prog-effort7,3321.904,333.1,n/a,n/a,false
+  mandel@1024,2,modular-prog-effort7,3280.061,337.4,n/a,n/a,false
+  mandel@1024,2,modular-prog-effort5,2984.704,341.4,n/a,n/a,false
+  mandel@1024,3,modular-prog-effort5,3466.562,345.2,n/a,n/a,false
+  mandel@1024,3,modular-prog-effort7,3323.44,349.8,n/a,n/a,false
+  mandel@1024,4,modular-prog-effort7,3402.729,354.1,n/a,n/a,false
+  mandel@1024,4,modular-prog-effort5,3180.781,357.4,n/a,n/a,false
+  mandel@1024,5,modular-prog-effort5,3077.777,361.5,n/a,n/a,false
+  mandel@1024,5,modular-prog-effort7,3970.521,365.6,n/a,n/a,false
+  mandel@1024,6,modular-prog-effort7,3818.298,369.7,n/a,n/a,false
+  mandel@1024,6,modular-prog-effort5,3213.827,374,n/a,n/a,false
+  mandel@1024,7,modular-prog-effort5,3279.263,378.5,n/a,n/a,false
+  mandel@1024,7,modular-prog-effort7,3108.612,382.7,n/a,n/a,false
+  mandel@1024,8,modular-prog-effort7,4488.514,332.6,n/a,n/a,false
+  mandel@1024,8,modular-prog-effort5,3519.382,336.9,n/a,n/a,false
+  mandel@1024,9,modular-prog-effort5,3046.436,341,n/a,n/a,false
+  mandel@1024,9,modular-prog-effort7,3441.374,345.4,n/a,n/a,false
+  mandel@1024,10,modular-prog-effort7,3925.95,328.8,n/a,n/a,false
+  mandel@1024,10,modular-prog-effort5,3194.149,333.1,n/a,n/a,false
+  mandel@1024,11,modular-prog-effort5,3013.28,337.2,n/a,n/a,false
+  mandel@1024,11,modular-prog-effort7,3251.336,341,n/a,n/a,false
+  fbm@1024,0,modular-prog-effort7,3189.891,378.2,n/a,n/a,true
+  fbm@1024,0,modular-prog-effort5,2782.506,384.3,n/a,n/a,true
+  fbm@1024,1,modular-prog-effort5,2637.052,386.9,n/a,n/a,false
+  fbm@1024,1,modular-prog-effort7,3169.084,391.3,n/a,n/a,false
+  fbm@1024,2,modular-prog-effort7,3444.683,395.7,n/a,n/a,false
+  fbm@1024,2,modular-prog-effort5,2989.979,400.7,n/a,n/a,false
+  fbm@1024,3,modular-prog-effort5,2583.943,405.6,n/a,n/a,false
+  fbm@1024,3,modular-prog-effort7,3275.691,338.6,n/a,n/a,false
+  fbm@1024,4,modular-prog-effort7,3202.359,343,n/a,n/a,false
+  fbm@1024,4,modular-prog-effort5,2824.088,347.7,n/a,n/a,false
+  fbm@1024,5,modular-prog-effort5,3077.499,352.2,n/a,n/a,false
+  fbm@1024,5,modular-prog-effort7,3221.689,356.7,n/a,n/a,false
+  fbm@1024,6,modular-prog-effort7,2926.453,361.1,n/a,n/a,false
+  fbm@1024,6,modular-prog-effort5,2853.728,365.6,n/a,n/a,false
+  fbm@1024,7,modular-prog-effort5,3090.63,370,n/a,n/a,false
+  fbm@1024,7,modular-prog-effort7,3641.216,374.6,n/a,n/a,false
+  fbm@1024,8,modular-prog-effort7,3215.071,379.1,n/a,n/a,false
+  fbm@1024,8,modular-prog-effort5,2826.436,383.5,n/a,n/a,false
+  fbm@1024,9,modular-prog-effort5,2771.485,388,n/a,n/a,false
+  fbm@1024,9,modular-prog-effort7,2903.126,392.4,n/a,n/a,false
+  fbm@1024,10,modular-prog-effort7,2595.34,396.3,n/a,n/a,false
+  fbm@1024,10,modular-prog-effort5,2176.072,401.1,n/a,n/a,false
+  fbm@1024,11,modular-prog-effort5,2503.843,338.5,n/a,n/a,false
+  fbm@1024,11,modular-prog-effort7,2608.682,342.9,n/a,n/a,false
+  branch@1024,0,modular-prog-effort7,2521.845,387.8,n/a,n/a,true
+  branch@1024,0,modular-prog-effort5,2393.543,391.9,n/a,n/a,true
+  branch@1024,1,modular-prog-effort5,2751.323,334,n/a,n/a,false
+  branch@1024,1,modular-prog-effort7,2588.104,338.3,n/a,n/a,false
+  branch@1024,2,modular-prog-effort7,2790.738,342.4,n/a,n/a,false
+  branch@1024,2,modular-prog-effort5,2545.557,346.5,n/a,n/a,false
+  branch@1024,3,modular-prog-effort5,2626.039,350.5,n/a,n/a,false
+  branch@1024,3,modular-prog-effort7,2702.27,354.6,n/a,n/a,false
+  branch@1024,4,modular-prog-effort7,2868.113,358.7,n/a,n/a,false
+  branch@1024,4,modular-prog-effort5,2687.69,362.7,n/a,n/a,false
+  branch@1024,5,modular-prog-effort5,2963.963,366.8,n/a,n/a,false
+  branch@1024,5,modular-prog-effort7,3189.649,370.9,n/a,n/a,false
+  branch@1024,6,modular-prog-effort7,2793.266,374.9,n/a,n/a,false
+  branch@1024,6,modular-prog-effort5,2658.051,379.4,n/a,n/a,false
+  branch@1024,7,modular-prog-effort5,2568.549,383.5,n/a,n/a,false
+  branch@1024,7,modular-prog-effort7,2914.711,387.5,n/a,n/a,false
+  branch@1024,8,modular-prog-effort7,2809.245,391.5,n/a,n/a,false
+  branch@1024,8,modular-prog-effort5,2432.479,395.5,n/a,n/a,false
+  branch@1024,9,modular-prog-effort5,2555.048,337.9,n/a,n/a,false
+  branch@1024,9,modular-prog-effort7,3510.461,342,n/a,n/a,false
+  branch@1024,10,modular-prog-effort7,2988.146,346.4,n/a,n/a,false
+  branch@1024,10,modular-prog-effort5,3031.335,350.4,n/a,n/a,false
+  branch@1024,11,modular-prog-effort5,2665.406,354.4,n/a,n/a,false
+  branch@1024,11,modular-prog-effort7,3019.958,358.4,n/a,n/a,false
+thermal:
+  temp_c_start: n/a
+  temp_c_end: n/a
+  temp_c_max: n/a
+  freq_ratio_min: n/a
+  throttled: unknown
+  variance_flag: true
+verdict: "modular-prog-effort5 8.6% faster vs modular-prog-effort7 (geomean median_warm); thermal unknown; trust:low"

@@ -21,6 +21,7 @@
     "playwright": "^1.59.1",
     "sharp": "^0.34.5",
     "ssim.js": "^3.5.0",
+    "systeminformation": "^5.22.0",
     "vitest": "^4.1.7"
   }
 }

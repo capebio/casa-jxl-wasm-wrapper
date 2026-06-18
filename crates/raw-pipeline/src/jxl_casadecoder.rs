@@ -1,5 +1,5 @@
 //! **JXL CasaDecoder** — BSD-clean native JPEG XL decoder on our own `jxl-ffi`
-//! bindings to libjxl. Sister to `jxl_encode.rs`; replaces the GPL
+//! bindings to libjxl. Sister to `jxl_casaencoder.rs`; replaces the GPL
 //! `jxl_lowlevel.rs` (which sat on `jpegxl-sys`).
 //!
 //! Strategic shape (design spec §2): **one owned [`Decoder`] holds the
@@ -42,8 +42,8 @@ use rayon::prelude::*;
 use jxl_ffi as ffi;
 
 // The `Sample` trait + sample/pixel-format mapping are shared with the encoder
-// (defined once in `jxl_encode.rs`, per spec §6 — do not duplicate).
-pub use crate::jxl_encode::Sample;
+// (defined once in `jxl_casaencoder.rs`, per spec §6 — do not duplicate).
+pub use crate::jxl_casaencoder::Sample;
 
 // ── Typed status aliases (bindgen NewType assoc consts; no `transmute`) ───────
 type St = ffi::JxlDecoderStatus;
@@ -1165,13 +1165,13 @@ pub use overlapping_tile_indices as jxtc_overlapping_tile_indices;
 pub use parse_jxtc_header as jxtc_parse_header;
 
 // ── tests ─────────────────────────────────────────────────────────────────────
-// Fixtures are minted with the sister BSD encoder (`jxl_encode`) in **lossless**
+// Fixtures are minted with the sister BSD encoder (`jxl_casaencoder`) in **lossless**
 // mode, so every round-trip assert is bit-exact. `half` is a crate dependency
 // (jxl-codec), so f16 is exercised here without a dev-dependency.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jxl_encode::{EncodeOptions, Encoder, ExtraChannel, ExtraKind, Frame};
+    use crate::jxl_casaencoder::{EncodeOptions, Encoder, ExtraChannel, ExtraKind, Frame};
 
     fn enc_lossless<S: Sample>(frame: &Frame<S>) -> Vec<u8> {
         let mut enc = Encoder::new(EncodeOptions::lossless()).expect("encoder");

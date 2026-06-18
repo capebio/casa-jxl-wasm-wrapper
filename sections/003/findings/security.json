@@ -1,0 +1,47 @@
+[
+  {
+    "id": "security-1",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "missing input validation",
+    "severity": "medium",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 18,
+    "line_end": 25,
+    "title": "No runtime validation of `denom` allows out-of-contract values to reach WASM",
+    "description": "The `Denom` type is a TypeScript compile-time union (1|2|4|8) with no runtime enforcement. A JavaScript caller (or any cast via `as any`) can pass 0, 3, 16, or NaN directly into `_decode`. Passing an unexpected denominator to the WASM DCT decoder may trigger undefined behavior, a panic/trap, or a memory-safety violation inside the WASM sandbox. The WASM sandbox limits blast radius but a trap surfaces as an unhandled exception that can crash the Node process.",
+    "code_excerpt": "export function decodeJpegScaled(jpeg: Uint8Array, denom: Denom = 1): JpegDecodeResult {\n  const r = _decode(jpeg, denom);\n  try {\n    return { data: r.data, width: r.width, height: r.height };\n  } finally {\n    r.free();\n  }\n}",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-2",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "missing input validation",
+    "severity": "low",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 18,
+    "line_end": 25,
+    "title": "No size or null guard on `jpeg` input before passing to WASM",
+    "description": "An empty Uint8Array or a very large buffer is passed directly to the WASM decoder without any length check. An empty buffer will likely cause an immediate WASM trap; an extremely large buffer (e.g. >2 GB) may exceed WASM heap limits and produce an opaque OOM trap. Neither case is documented or caught with a useful error message. Adding a minimum-length check (e.g. >= 2 bytes for the JFIF/EXIF SOI marker) and an optional maximum-size guard would surface actionable errors before touching WASM.",
+    "code_excerpt": "export function decodeJpegScaled(jpeg: Uint8Array, denom: Denom = 1): JpegDecodeResult {\n  const r = _decode(jpeg, denom);",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "security-3",
+    "detector": "security",
+    "finding_type": "opportunity",
+    "category": "dependency audit",
+    "severity": "info",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 7,
+    "line_end": 7,
+    "title": "No CI dependency-audit step for the compiled WASM binary or its Rust crate supply chain",
+    "description": "The package ships a pre-built WASM binary from `crates/fast-jpeg/pkg/`. There is no evidence of `cargo audit` or `cargo deny` in CI to flag known CVEs in the libjxl/libjpeg-turbo or image-decoding crates that the fast-jpeg crate may transitively pull in. A dependency-audit job (`cargo audit --deny warnings`) would catch supply-chain vulnerabilities automatically.",
+    "code_excerpt": "const { decode_scaled: _decode } = _require('../../../crates/fast-jpeg/pkg/fast_jpeg.js') as any;",
+    "confidence_self_reported": "low",
+    "fix_difficulty_hint": "straightforward"
+  }
+]

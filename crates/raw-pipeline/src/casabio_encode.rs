@@ -2,16 +2,16 @@
 //! Inputs RGBA8 + dimensions + source type + HQ override.
 //! Outputs three JXL byte buffers plus the chosen fullsize quality.
 //!
-//! Built on the BSD-clean `jxl_encode` layer (own FFI over libjxl), replacing
+//! Built on the BSD-clean `jxl_casaencoder` layer (own FFI over libjxl), replacing
 //! the GPL `jpegxl-rs` encoder and the `transmute`-based frame-setting hacks.
 //! Reuse is explicit: the sequential variant path and the pyramid loop each hold
-//! **one** [`Encoder`](crate::jxl_encode::Encoder) and call `.encode()` per level
+//! **one** [`Encoder`](crate::jxl_casaencoder::Encoder) and call `.encode()` per level
 //! (only the options change between levels). Under rayon, each parallel branch
 //! owns its own `Encoder` (normal owned-value semantics).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::jxl_encode::{Encoder, EncodeOptions, Frame, GroupOrder};
+use crate::jxl_casaencoder::{Encoder, EncodeOptions, Frame, GroupOrder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceType {
@@ -49,8 +49,8 @@ pub enum EncodeError {
     Cancelled,
 }
 
-impl From<crate::jxl_encode::EncodeError> for EncodeError {
-    fn from(e: crate::jxl_encode::EncodeError) -> Self {
+impl From<crate::jxl_casaencoder::EncodeError> for EncodeError {
+    fn from(e: crate::jxl_casaencoder::EncodeError) -> Self {
         EncodeError::Jxl(e.to_string())
     }
 }

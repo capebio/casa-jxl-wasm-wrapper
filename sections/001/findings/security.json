@@ -1,0 +1,47 @@
+[
+  {
+    "id": "security-1",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "build-time supply-chain / path injection",
+    "severity": "low",
+    "file": "crates/jxl-ffi/build.rs",
+    "line_start": 28,
+    "line_end": 36,
+    "title": "DEP_JXL_PATH is used unsanitized as a cmake source directory with no path normalisation",
+    "description": "The env var DEP_JXL_PATH is accepted verbatim and passed to cmake::Config::new() without canonicalisation or any check that it stays inside the repository tree. In a CI/CD pipeline where an attacker can inject environment variables (e.g. via a compromised dependency that emits cargo:DEP_JXL_PATH=... in its own build script), this lets them redirect the cmake build to an arbitrary path, potentially compiling and statically linking malicious C code into the final binary. The only guard is the CMakeLists.txt existence check, which the attacker controls if they control the path.",
+    "code_excerpt": "    let source = PathBuf::from(\n        env::var(\"DEP_JXL_PATH\")\n            .expect(\"DEP_JXL_PATH must point at external/libjxl (set in .cargo/config.toml)\"),\n    );\n    assert!(\n        source.join(\"CMakeLists.txt\").exists(),\n        \"libjxl source not found at {} (CMakeLists.txt missing)\",\n        source.display()\n    );",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "security-2",
+    "detector": "security",
+    "finding_type": "opportunity",
+    "category": "dependency audit / supply-chain",
+    "severity": "info",
+    "file": "crates/jxl-ffi/build.rs",
+    "line_start": 1,
+    "line_end": 134,
+    "title": "No cargo-deny or dependency-audit CI step to catch transitive supply-chain issues in bindgen / cmake-rs",
+    "description": "The build script pulls in bindgen and cmake as build dependencies. bindgen transitively depends on libclang and a significant portion of the LLVM ecosystem. There is no evidence of a cargo deny or cargo audit step in CI. A compromised version of these build-time crates could exfiltrate source code or inject code into generated bindings at build time. Adding cargo-deny with an advisory database check would catch known-vulnerable transitive dependencies before they enter the build.",
+    "code_excerpt": "// build.rs — build-dependencies used:\n// bindgen::Builder::default() ... .generate()\n// cmake::Config::new(&source) ... .build()",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "security-3",
+    "detector": "security",
+    "finding_type": "issue",
+    "category": "unsafe FFI / memory safety",
+    "severity": "low",
+    "file": "crates/jxl-ffi/src/lib.rs",
+    "line_start": 16,
+    "line_end": 17,
+    "title": "Entire bindgen-generated binding surface is included with a blanket unsafe allow and no documented safety invariants",
+    "description": "The include! of the generated bindings exposes raw C function pointers, mutable global state (if any JXL globals exist), and pointer-typed parameters to any caller in the same crate with no safety documentation. The lint suppression `#[allow(dead_code)]` means unused but potentially dangerous symbols (e.g. functions that mutate global JXL state) are silently retained. While the crate's doc comment says 'safe wrappers live in raw-pipeline', there is no `#[doc(hidden)]` or visibility restriction preventing downstream crates from calling raw FFI functions directly, bypassing any safety invariants the wrappers enforce.",
+    "code_excerpt": "#![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code)]\n\n#[cfg(not(target_arch = \"wasm32\"))]\ninclude!(concat!(env!(\"OUT_DIR\"), \"/bindings.rs\"));",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "straightforward"
+  }
+]

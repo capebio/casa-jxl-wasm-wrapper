@@ -1,0 +1,62 @@
+[
+  {
+    "id": "concurrency-1",
+    "detector": "concurrency",
+    "finding_type": "issue",
+    "category": "TOCTOU / stale-promise after reset",
+    "severity": "low",
+    "file": "packages/jxl-capabilities/src/index.ts",
+    "line_start": 6,
+    "line_end": 10,
+    "title": "_resetCache() races with in-flight computeCapabilities() producing two simultaneous probes",
+    "description": "_resetCache() sets _capsPromise = undefined synchronously. If computeCapabilities() is already in-flight (awaiting probeNativeJxl), a concurrent getCapabilities() call after reset will call computeCapabilities() again and start a second parallel probe run. Both resolve independently; callers holding the first promise get the old result while new callers get new results, but both have triggered an import() and possibly a requestAdapter(). In tests this happens every beforeEach cycle; in production it could happen if a host calls getCapabilities() then resets and calls again before resolution. The real risk is double GPU adapter requests and double @casabio/jxl-native imports.",
+    "code_excerpt": "export function _resetCache(): void {\n  _cachedTier = undefined;\n  _capsPromise = undefined;\n  _gpuAdapterPromise = undefined;\n}",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "concurrency-2",
+    "detector": "concurrency",
+    "finding_type": "issue",
+    "category": "global mutation / missing async isolation in tests",
+    "severity": "medium",
+    "file": "packages/jxl-capabilities/test/tier.test.ts",
+    "line_start": 26,
+    "line_end": 50,
+    "title": "Test patches WebAssembly.validate on the shared global before an await without async-scoped isolation, exposing a window where concurrent test infrastructure reads the stub",
+    "description": "The test at line 18 assigns to (WebAssembly as any).validate synchronously, then calls await import(...) which yields the event loop before the try/finally restores the original. Any code (e.g. node:test's own timer callbacks, the beforeEach of tier-matrix.test.ts if the two test files run in the same worker) that calls WebAssembly.validate during that await window will observe the test stub. While node:test serializes tests within a file by default, cross-file parallelism (--test-concurrency or future tooling) would cause flaky failures or silently wrong tier detection in sibling tests.",
+    "code_excerpt": "      (WebAssembly as any).validate = (bytes: BufferSource) => {\n        ...\n        if (isSimdProbe(view)) return true;\n        return false;\n      };\n      (WebAssembly as any).instantiate = async (bytes: BufferSource) => { ... };\n\n      const mod = await import(`../src/index.js?no-mt=${Date.now()}`);\n      const tier = mod.detectTier();\n      ...\n    } finally {\n      (WebAssembly as any).validate = originalWebAssemblyValidate;\n      (WebAssembly as any).instantiate = originalWebAssemblyInstantiate;\n      globalAny.self = originalSelf;\n    }",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "concurrency-3",
+    "detector": "concurrency",
+    "finding_type": "issue",
+    "category": "double-invocation / memoization gap",
+    "severity": "low",
+    "file": "packages/jxl-capabilities/src/index.ts",
+    "line_start": 280,
+    "line_end": 288,
+    "title": "probeWebGpuAdapter() memoization via _gpuAdapterPromise is cleared by _resetCache(), allowing a second requestAdapter() call while the first is still in-flight",
+    "description": "If a caller holds a reference to the promise returned by an initial probeWebGpuAdapter() call, and _resetCache() is called while gpu.requestAdapter() is awaiting, a new call to probeWebGpuAdapter() will start a second requestAdapter() call concurrently. The GPU adapter API has no documented issue with concurrent calls but the double probe wastes resources and could produce divergent results if the GPU state changes between calls. The fix is for _resetCache() to await the in-flight promise before clearing, or to document that callers must not hold references across a reset.",
+    "code_excerpt": "export function probeWebGpuAdapter(): Promise<boolean> {\n  return (_gpuAdapterPromise ??= (async () => {\n    try {\n      const gpu = (navigator as any)?.gpu;\n      if (!gpu) return false;\n      return (await gpu.requestAdapter()) !== null;\n    } catch { return false; }\n  })());\n}",
+    "confidence_self_reported": "low",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "concurrency-4",
+    "detector": "concurrency",
+    "finding_type": "opportunity",
+    "category": "cancellation / AbortSignal support",
+    "severity": "info",
+    "file": "packages/jxl-capabilities/src/index.ts",
+    "line_start": 166,
+    "line_end": 199,
+    "title": "probeNativeJxl() and probeWebGpuAdapter() have no timeout or AbortSignal, so a hung GPU adapter or import() hangs getCapabilities() forever",
+    "description": "gpu.requestAdapter() and the dynamic import('@casabio/jxl-native') inside computeCapabilities() can theoretically hang indefinitely if the GPU driver or module resolution stalls. There is no timeout wrapper or AbortSignal. Callers of getCapabilities() could block forever with no recourse. Adding a Promise.race with a timeout (e.g. 3s) and resolving false on timeout would make the memoized capabilities safe to use in time-sensitive startup paths.",
+    "code_excerpt": "async function probeNativeJxl(): Promise<boolean> {\n  ...\n  if (typeof createImageBitmap !== 'undefined' && typeof Blob !== 'undefined') {\n    try {\n      const blob = new Blob([minimalJxl], { type: 'image/jxl' });\n      const bm = await createImageBitmap(blob);\n      ...\n    } catch {\n      return false;\n    }\n  }\n  return false;\n}",
+    "confidence_self_reported": "low",
+    "fix_difficulty_hint": "straightforward"
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "concurrency-1",
+    "detector": "concurrency",
+    "finding_type": "issue",
+    "category": "resource-leak",
+    "severity": "medium",
+    "file": "crates/fast-jpeg/src/lib.rs",
+    "line_start": 25,
+    "line_end": 28,
+    "title": "data() getter clones the entire pixel buffer on every JS call, doubling peak heap under WASM memory limits",
+    "description": "The #[wasm_bindgen(getter)] for `data` does `self.data.clone()`, allocating a full copy of the decoded RGBA buffer each time JS reads the property. For a full-resolution JPEG this can be several MB. Because WASM memory never shrinks, repeated reads (e.g. in a loop or accidental double-access) cause the WASM heap to grow monotonically. The correct pattern is to expose a zero-copy view via `js_sys::Uint8Array::view` or to move ownership out once with an `into_data() -> Vec<u8>` method that consumes self.",
+    "code_excerpt": "    #[wasm_bindgen(getter)]\n    pub fn data(&self) -> Vec<u8> {\n        self.data.clone()\n    }",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "concurrency-2",
+    "detector": "concurrency",
+    "finding_type": "opportunity",
+    "category": "cancellation",
+    "severity": "low",
+    "file": "crates/fast-jpeg/src/lib.rs",
+    "line_start": 34,
+    "line_end": 75,
+    "title": "decode_scaled has no cancellation path; long decodes on the WASM thread block the entire JS event loop",
+    "description": "WASM executes synchronously on the JS thread. A large JPEG passed to decode_scaled will block the browser main thread (or worker) for the entire decode duration with no way for the caller to cancel or time-box the operation. Because jpeg_decoder processes the image in a single synchronous call, there is no natural yield point. The opportunity is to move decode_scaled calls into a dedicated Web Worker (already present in the architecture) so the main thread is never blocked, or to document that callers must always invoke this from a worker context.",
+    "code_excerpt": "pub fn decode_scaled(jpeg: &[u8], denom: u8) -> Result<DecodeResult, JsValue> {\n    let mut decoder = Decoder::new(Cursor::new(jpeg));\n    decoder.read_info()...;\n    ...decoder.decode()...;\n}",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "complex"
+  }
+]

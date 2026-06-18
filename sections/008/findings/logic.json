@@ -1,0 +1,62 @@
+[
+  {
+    "id": "logic-1",
+    "detector": "logic",
+    "finding_type": "issue",
+    "category": "arithmetic",
+    "severity": "low",
+    "file": "packages/jxl-policy/src/index.ts",
+    "line_start": 127,
+    "line_end": 131,
+    "title": "downsampleForContainer: bitwise `ratio | 0` truncation can under-select downsample factor when floating-point division yields a value just below a power-of-two",
+    "description": "The expression `ratio | 0` converts the float ratio to an int32 by truncation (floor toward zero). For integer image and container dimensions that are exact multiples, JS division is exact (e.g., 4000/1000 = 4.0). However for non-multiple integer pairs the result is an IEEE 754 float that could be just below a power-of-two (e.g., a ratio mathematically equal to 4.0 but computed as 3.99999... in extended precision before rounding). In that case `(3.999|0) = 3`, `floor(log2(3)) = 1`, `1<<1 = 2` — returning downsample 2 instead of 4. The correct guard is `Math.floor(ratio)` which gives the same result for exact values and avoids surprise for near-integer ratios. In practice integer pixel dimensions make this unlikely but not impossible for dimensions like 4001px image in 1000px container where ratio=4.001 should give 4.",
+    "code_excerpt": "  const ratio = Math.min(imageW / containerW, imageH / containerH);\n  if (ratio < 2) return 1;\n  // floor(log2(ratio)) via clz32 — ratio >= 2 here so (ratio|0) >= 2\n  const log2 = 31 - Math.clz32(ratio | 0);\n  return (1 << Math.min(log2, 3)) as Downsample;",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "logic-2",
+    "detector": "logic",
+    "finding_type": "issue",
+    "category": "dead-branch",
+    "severity": "info",
+    "file": "packages/jxl-policy/src/index.ts",
+    "line_start": 57,
+    "line_end": 59,
+    "title": "applyDecodePolicy and applyEncodePolicy: `if (!p)` guard is unreachable dead code for typed callers and misleading for untyped callers",
+    "description": "The functions take a `DecodePolicyName`/`EncodePolicyName` parameter, so TypeScript prevents invalid names at compile time. The `decodePolicies` and `encodePolicies` objects are `as const`, so every valid key lookup returns a non-nullish object — `p` can never be falsy at runtime for any name satisfying the type. The guard fires only when called from untyped JS with an invalid string, but in that path the lookup on an `as const` object returns `undefined`, making `if (!p)` technically correct but confusing since it appears the check is necessary. The real issue is that the same guard is absent from `isDecodePolicyName`/`isEncodePolicyName` call sites, so callers who use the guard functions would never reach `applyDecodePolicy` with a bad name anyway. This is cosmetically dead code that could mislead reviewers into thinking the `as const` lookup can fail.",
+    "code_excerpt": "  const p: DecodePolicy = decodePolicies[name];\n  if (!p) {\n    throw new RangeError(`Unknown decode policy \"${name}\" (valid: ${Object.keys(decodePolicies).join(\", \")})`);\n  }",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "logic-3",
+    "detector": "logic",
+    "finding_type": "opportunity",
+    "category": "test-coverage",
+    "severity": "low",
+    "file": "packages/jxl-policy/test/policy.test.ts",
+    "line_start": 133,
+    "line_end": 154,
+    "title": "downsampleForContainer test suite missing: mismatched-aspect-ratio case, ratio-exactly-3 boundary, and non-square containers",
+    "description": "The test suite covers square-ratio cases (4:3 image in 4:3 container so both axes tie) and zero/negative guards. It does not test the case where the two axes produce different ratios and the min picks the limiting dimension (e.g., 4000×3000 image in 500×1500 container — width ratio 8 but height ratio 2 forces return 2). It also does not test ratio=3 (not a power-of-two): imageW=3000, containerW=1000 → ratio=3 → log2=1 → return 2, which may surprise callers expecting 4. Adding these cases would pin the floor-log2 behavior and catch any future regression from a change to the clamping logic.",
+    "code_excerpt": "    // 1. (4000,3000,200,150) -> 8 (ratio 20, log2(20)=4, min(4,3)=3, 1<<3=8)\n    assert.equal(downsampleForContainer(4000, 3000, 200, 150), 8);\n\n    // 2. (4000,3000,1000,750) -> 4 (ratio 4, log2(4)=2, min(2,3)=2, 1<<2=4)\n    assert.equal(downsampleForContainer(4000, 3000, 1000, 750), 4);",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "logic-4",
+    "detector": "logic",
+    "finding_type": "opportunity",
+    "category": "invariant-checking",
+    "severity": "low",
+    "file": "packages/jxl-policy/src/index.ts",
+    "line_start": 122,
+    "line_end": 132,
+    "title": "downsampleForContainer return type is structurally unchecked: no assertion that result is 1|2|4|8",
+    "description": "The function returns `(1 << Math.min(log2, 3)) as Downsample`. The `as Downsample` is a type assertion, not a runtime check. If `log2` were ever negative (which cannot happen given the `ratio >= 2` guard above, but could happen if the guard logic changed), `1 << negative` produces 0 in JS due to unsigned-right-shift semantics mapping negative shifts to large positives modulo 32 — actually `1 << -1 = -2147483648` in JS. A small runtime assertion `const result = ...; if (result !== 1 && result !== 2 && result !== 4 && result !== 8) throw new RangeError(...)` or a unit-test checking the type invariant would catch this class of regression.",
+    "code_excerpt": "  const log2 = 31 - Math.clz32(ratio | 0);\n  return (1 << Math.min(log2, 3)) as Downsample;",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  }
+]

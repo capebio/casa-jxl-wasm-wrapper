@@ -19,6 +19,8 @@ const cfg = {
   maxFindings: A.maxFindings ?? 3,            // cap before the finder stops + reports
   workerModel: A.workerModel ?? 'haiku',      // Haiku finders/fixers (cheap test phase)
   comptrollerModel: A.comptrollerModel ?? 'sonnet', // Sonnet supervisor (validate + decide)
+  requireApproval: A.requireApproval ?? true, // pause after VALIDATE for user permission
+  approved: A.approved ?? false,              // set true on resume to proceed past gate
 }
 const sanBranch = `fix/${cfg.targetPath.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '')}`
 
@@ -71,6 +73,13 @@ const valid = (validated?.items ?? []).filter(v => v.valid)
 log(`VALIDATE (comptroller/${cfg.comptrollerModel}): ${valid.length}/${(validated?.items ?? []).length} confirmed`)
 for (const v of (validated?.items ?? [])) log(`  • ${v.valid ? '✓' : '✗ rejected'} ${v.location} — ${v.verdict}`)
 if (!valid.length) { log('Comptroller rejected all — no fixes this batch.'); return { target: cfg.targetPath, found: findings.length, fixed: 0 } }
+
+// ---- 2b. APPROVAL GATE — returns to main loop; resume with approved:true ----
+if (cfg.requireApproval && !cfg.approved) {
+  log(`AWAITING APPROVAL — ${valid.length} fix(es) validated. Resume with approved:true to proceed.`)
+  return { awaitingApproval: true, target: cfg.targetPath, found: findings.length,
+    validated: valid.length, validatedItems: valid }
+}
 
 // ---- 3. FIX (Haiku fixer, ONE worktree, ONE per-file branch, all valid issues) ----
 phase('Fix')

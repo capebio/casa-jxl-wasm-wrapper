@@ -1,0 +1,62 @@
+[
+  {
+    "id": "logic-1",
+    "detector": "logic",
+    "finding_type": "issue",
+    "category": "error-masking",
+    "severity": "high",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 18,
+    "line_end": 25,
+    "title": "If _decode throws, finally block calls r.free() on undefined, masking the original error with TypeError",
+    "description": "The Rust function decode_scaled returns Result<DecodeResult, JsValue>; wasm-bindgen converts Err into a thrown JS exception. If _decode(jpeg, denom) throws, r is undefined. The finally block then executes r.free(), which throws TypeError: Cannot read properties of undefined (reading 'free'), replacing the original meaningful error with an uninformative one. Callers lose the actual decode failure reason.",
+    "code_excerpt": "export function decodeJpegScaled(jpeg: Uint8Array, denom: Denom = 1): JpegDecodeResult {\n  const r = _decode(jpeg, denom);\n  try {\n    return { data: r.data, width: r.width, height: r.height };\n  } finally {\n    r.free();\n  }\n}",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "logic-2",
+    "detector": "logic",
+    "finding_type": "issue",
+    "category": "wrong-state-transition-order",
+    "severity": "medium",
+    "file": "crates/fast-jpeg/src/lib.rs",
+    "line_start": 49,
+    "line_end": 72,
+    "title": "Returned width/height use pre-decode scale() result, not post-decode info(), so dimensions may not match actual decoded pixel buffer",
+    "description": "out_w and out_h are taken from decoder.scale() at lines 53-54 (the requested target dimensions). After decoder.decode() completes, decoder.info() is called again (line 64) into decoded, but decoded.width/.height are never used for the return value — out_w/out_h are returned instead (lines 71-72). If the jpeg-decoder crate's DCT scaler adjusts dimensions (e.g., rounding to a multiple of 8), the returned width/height could disagree with the actual pixel count in data, leading callers to read out-of-bounds or leave pixels unread.",
+    "code_excerpt": "    let (out_w, out_h) = if scale > 1 {\n        let target_w = (info.width as u32 / scale).max(1) as u16;\n        let target_h = (info.height as u32 / scale).max(1) as u16;\n        decoder\n            .scale(target_w, target_h)\n            .map_err(|e| JsValue::from_str(&e.to_string()))?\n    } else {\n        (info.width, info.height)\n    };\n    // ... decode ...\n    Ok(DecodeResult {\n        width: out_w as u32,\n        height: out_h as u32,\n        data: rgba,\n    })",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "logic-3",
+    "detector": "logic",
+    "finding_type": "issue",
+    "category": "operator-precedence",
+    "severity": "low",
+    "file": "crates/fast-jpeg/src/lib.rs",
+    "line_start": 50,
+    "line_end": 51,
+    "title": "Cast-before-max pattern: (info.width as u32 / scale).max(1) as u16 silently truncates dimensions > 65535",
+    "description": "info.width is u16, cast to u32 for division, then .max(1) applied, then cast back to u16. For inputs where info.width > 65535 this truncation would silently corrupt the dimension, though u16 info.width makes this unreachable in practice. More practically the cast chain is fragile: if jpeg-decoder ever widens info.width to u32, the final as u16 becomes a silent truncation bug. The fix is to use u32 throughout and only clamp at the end.",
+    "code_excerpt": "        let target_w = (info.width as u32 / scale).max(1) as u16;\n        let target_h = (info.height as u32 / scale).max(1) as u16;",
+    "confidence_self_reported": "low",
+    "fix_difficulty_hint": "trivial"
+  },
+  {
+    "id": "logic-4",
+    "detector": "logic",
+    "finding_type": "opportunity",
+    "category": "missing-validation",
+    "severity": "medium",
+    "file": "packages/fast-jpeg/src/index.ts",
+    "line_start": 18,
+    "line_end": 25,
+    "title": "No runtime assertion that data.length == width * height * 4 before returning, leaving dimension/buffer mismatches undetected",
+    "description": "The TypeScript wrapper returns r.data, r.width, r.height without verifying r.data.length === r.width * r.height * 4. If a Rust-side dimension/pixel format bug produces a mismatched buffer, callers (e.g., ImageData constructors) will throw with an opaque size mismatch error rather than a clear assertion at the decode boundary. Adding a single length check here would catch logic-2 class bugs immediately.",
+    "code_excerpt": "  try {\n    return { data: r.data, width: r.width, height: r.height };\n  } finally {\n    r.free();\n  }",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  }
+]

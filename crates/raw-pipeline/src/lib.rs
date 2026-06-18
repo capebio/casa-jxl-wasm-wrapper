@@ -1,6 +1,6 @@
 // BSD-clean own-FFI JXL codec (replaces GPL jpegxl-rs/jpegxl-sys). Native only.
 #[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
-pub mod jxl_encode;
+pub mod jxl_casaencoder;
 #[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
 pub mod jxl_casadecoder;
 // Back-compat alias: the BSD decoder's canonical home is `jxl_casadecoder`

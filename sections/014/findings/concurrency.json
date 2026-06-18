@@ -1,0 +1,62 @@
+[
+  {
+    "id": "concurrency-1",
+    "detector": "concurrency",
+    "finding_type": "issue",
+    "category": "unhandled-rejection / task-leak",
+    "severity": "medium",
+    "file": "packages/jxl-test-corpus/scripts/generate-fixtures.mjs",
+    "line_start": 20,
+    "line_end": 30,
+    "title": "chunkPromise leaks as unobserved rejection if encoder.finish() throws",
+    "description": "In encodeJxl, the async iterator consumer chunkPromise is started as a floating promise on line 21 and only awaited on line 29 after encoder.finish() succeeds on line 28. If encoder.pushPixels() (line 27) or encoder.finish() (line 28) throws, execution jumps out of encodeJxl before reaching line 29, leaving chunkPromise as an unhandled rejected or permanently-pending promise. Node.js will emit an UnhandledPromiseRejection or the process will hang on the async iterator not being consumed. The fix is a try/finally that awaits or cancels chunkPromise before propagating the error.",
+    "code_excerpt": "  const chunkPromise = (async () => {\n    for await (const chunk of encoder.chunks()) {\n      chunks.push(chunk);\n    }\n  })();\n  \n  await encoder.pushPixels(rgbaBytes);\n  await encoder.finish();\n  await chunkPromise;\n  await encoder.dispose();",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "concurrency-2",
+    "detector": "concurrency",
+    "finding_type": "issue",
+    "category": "negative-cache / retry-blocked",
+    "severity": "medium",
+    "file": "packages/jxl-test-corpus/src/loader.ts",
+    "line_start": 42,
+    "line_end": 91,
+    "title": "Rejected promises are stored in the fixture cache, permanently blocking retries",
+    "description": "loadFixture stores the promise p in cache before it settles (line 90). If the promise later rejects — for example because the fixture file is missing (ENOENT) — the rejected promise stays in the cache map. Every subsequent call for the same id immediately returns the same rejected promise without re-attempting the file read. In test workflows that call generate:fixtures and then re-run tests without restarting the process, the first ENOENT permanently poisons subsequent loads. The fix is to remove the entry from cache inside a .catch or on rejection before re-throwing, so the next call can retry.",
+    "code_excerpt": "  const p = (async () => {\n    const fixture = byId.get(id);\n    if (!fixture) {\n      throw new Error(`Fixture not found: ${id}`);\n    }\n    ...\n  })();\n\n  cache.set(id, p);\n  return p;",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "concurrency-3",
+    "detector": "concurrency",
+    "finding_type": "opportunity",
+    "category": "missing-deduplication",
+    "severity": "low",
+    "file": "packages/jxl-test-corpus/src/loader.ts",
+    "line_start": 98,
+    "line_end": 147,
+    "title": "fetchLargeFixture has no in-flight deduplication, allowing parallel callers to double-fetch",
+    "description": "Unlike loadFixture which stores the in-flight promise in a cache map, fetchLargeFixture fires a fresh fetch for every call. Two concurrent callers requesting the same large remote fixture will each issue independent HTTP requests and each perform the full SHA-256 verification pass. For large PGO fixtures this wastes bandwidth and CPU. Adding the same promise-cache pattern used in loadFixture (keyed on id, evicted on rejection) would prevent duplicate fetches without changing the API surface.",
+    "code_excerpt": "export async function fetchLargeFixture(\n  id: string,\n  options?: FetchLargeFixtureOptions\n): Promise<{ bytes: Uint8Array, fixture: FixtureManifest, manifest: FixtureManifest }> {\n  const fixture = byId.get(id);\n  if (!fixture) throw new Error(`Fixture not found: ${id}`);\n  if (!fixture.url) throw new Error(`Fixture ${id} has no remote URL`);\n\n  const response = await fetch(fixture.url);",
+    "confidence_self_reported": "medium",
+    "fix_difficulty_hint": "straightforward"
+  },
+  {
+    "id": "concurrency-4",
+    "detector": "concurrency",
+    "finding_type": "issue",
+    "category": "missing-await / unawaited-promise",
+    "severity": "low",
+    "file": "packages/jxl-test-corpus/test/loader.test.ts",
+    "line_start": 29,
+    "line_end": 31,
+    "title": "expect(...).rejects.toThrow() call is not awaited, masking assertion failures",
+    "description": "On line 30, the expression loadFixture(\"non-existent\") is passed directly to expect(...).rejects.toThrow() but the resulting promise is not awaited. In Bun's test runner, an unawaited rejection assertion promise means the test completes synchronously before the assertion resolves; if the assertion fails it becomes an unhandled rejection rather than a test failure. The fix is to prepend await so the assertion is properly chained into the test's async result.",
+    "code_excerpt": "  it(\"throws a clear error when file is missing or not found\", async () => {\n    expect(loadFixture(\"non-existent\")).rejects.toThrow(\"Fixture not found: non-existent\");\n  });",
+    "confidence_self_reported": "high",
+    "fix_difficulty_hint": "trivial"
+  }
+]
