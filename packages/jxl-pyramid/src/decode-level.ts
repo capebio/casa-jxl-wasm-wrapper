@@ -495,6 +495,7 @@ async function decodeTileBytesProgressive(
     if (!out.ok) throw out.err;
     return out.px;
   } finally {
+    await drainOutcome.catch(() => {});
     await Promise.resolve(decoder.dispose()).catch(() => {});
   }
 }

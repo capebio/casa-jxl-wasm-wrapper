@@ -20,6 +20,11 @@ const MAX_DIMENSION = 1 << 24; // 16777216 — matches libjxl JXTC header caps
 const MAX_BYTES = 1 << 30; // 1073741824 — 1 GiB safety cap
 const MAX_TILE_SIZE = 1 << 16; // 65536 — reasonable tile limit
 
+// Opaque-dict sanitization caps
+const MAX_OPAQUE_KEYS = 64;
+const MAX_OPAQUE_DEPTH = 4;
+const MAX_OPAQUE_KEY_LENGTH = 128;
+
 export class ManifestValidationError extends Error {
   constructor(message: string, public readonly path: string) {
     super(`${path}: ${message}`);

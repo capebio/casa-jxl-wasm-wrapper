@@ -617,7 +617,8 @@ export class PyramidWorkerPool {
       return;
     }
     if (this.idle.length <= this.minIdle) return;
-    for (let i = this.idle.length - 1; i >= this.minIdle; i--) {
+    const excessEnd = this.idle.length - this.minIdle;
+    for (let i = 0; i < excessEnd; i++) {
       const h = this.idle[i];
       if (h) this.armIdleTimerFor(h);
     }
@@ -782,7 +783,7 @@ export class PyramidWorkerPool {
             }
             this.sabByBytesId.set(bytesId, sab);
           }
-          h.worker.postMessage({ v: 1, type: 'load', bytesId, sab, byteLength: bytes.byteLength } as any);
+          h.worker.postMessage({ v: 1, type: 'load', bytesId, sab, byteLength: bytes.byteLength });
         } else {
           h.worker.postMessage({ v: 1, type: 'load', bytesId, bytes });
         }

@@ -15,6 +15,7 @@ export type { ImageRegion } from "./tiling.js";
 
 export type WorkerRequest =
   | { v: 1; type: 'load'; bytesId: number; bytes: Uint8Array }
+  | { v: 1; type: 'load'; bytesId: number; sab: SharedArrayBuffer; byteLength: number }
   | { v: 1; type: 'decode'; id: number; bytesId: number; region: ImageRegion; format: 'rgba8' | 'rgba16'; deadlineMs?: number; progressiveStage?: 'dc' | 'final'; priority?: number }
   | { v: 1; type: 'cancel'; id: number };
 

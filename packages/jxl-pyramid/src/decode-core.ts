@@ -384,13 +384,15 @@ export type ProgressiveMode = 'dc-then-final' | 'dc-only' | undefined;
  *  Caches on the source object (like bytesId). Shared reference stamped to results (no per-tile copies).
  *  Only runs if options.preserveMetadata. For JXTC the profile lives in the codestream(s); header target is cheap.
  */
+const _iccCache = new WeakMap<object, Promise<Uint8Array | null>>();
+
 export function ensureIccProfile(
-  source: { bytes: Uint8Array; [k: string]: any },
+  source: { bytes: Uint8Array },
   opts?: { preserveMetadata?: boolean },
 ): Promise<Uint8Array | null> {
   if (!opts?.preserveMetadata) return Promise.resolve(null);
-  const key = '_iccProfile';
-  if (key in (source as any)) return (source as any)[key];
+  const cached = _iccCache.get(source);
+  if (cached !== undefined) return cached;
   const p = (async () => {
     try {
       // Dynamic import avoids any potential cycle; facade has the getIccProfile (added for decode states).
@@ -415,7 +417,7 @@ export function ensureIccProfile(
       return null;
     }
   })();
-  (source as any)[key] = p;
+  _iccCache.set(source, p);
   return p;
 }
 
