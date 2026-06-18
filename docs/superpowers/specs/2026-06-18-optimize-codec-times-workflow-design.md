@@ -49,7 +49,12 @@ Consequence: the verify stage needs **no** variance-band heuristics or "re-run 3
 Verify = author one flipflop **test file** with variant A = baseline, variant B = candidate,
 run it, read the journal verdict. Keep iff §5 passes.
 
-This design **assumes flipflop grants the codec-role capabilities** requested 2026-06-18:
+**Verified 2026-06-18** (read `flipflop.mjs`): flipflop **provides all four** codec-role
+capabilities below. Interface: `test.quality(out, baselineOut, ctx)` + `qualityThreshold`/
+`qualityDirection:'lower'` → `quality_ok`; `v.role` ('primary'|'fallback'); `--inputs <glob>` →
+rgba/bytes via `loadItem`; async auto-detected (`AsyncFunction`) or `test.isAsync`. `saved_pct`
+positive = faster (matches §5b); per-flip `rss_mb` lives in the `flips` table (parse journal for
+leaner-candidate rss delta); `trust` per summary row.
 1. **async variants** — timed region `await`s the variant (codec encode/decode is async); await
    overhead hits both arms equally so the interleave still cancels it.
 2. **quality-magnitude hook** — a per-variant `quality(out, baselineOut) → number` (Butteraugli
