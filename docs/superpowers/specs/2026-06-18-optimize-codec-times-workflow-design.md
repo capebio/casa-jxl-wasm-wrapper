@@ -201,6 +201,9 @@ A pure regression (slower, no memory/dedup/feature gain) is rejected.
 - Verifier agents are **adversarial**: default to reject. They confirm the asserted offsetting
   gain is real (rss delta from the journal, dedup visible in the diff, fallback truly off the
   hot path) before accepting a non-faster candidate.
+- **Trust gate:** if flipflop marks the run `trust:low` (throttled — now detected reliably via its
+  LibreHardwareMonitor integration), the verdict is **not** banked; the verifier re-runs the flip
+  once the throttle clears. A hot-run number is never accepted.
 
 ## 6. Agent roles
 
@@ -233,7 +236,7 @@ Each run reads a fresh baseline and banks only verified diffs → safe to re-run
 
 | Risk | Mitigation |
 |------|-----------|
-| Thermal / measurement noise (real ~1.5× thermal artifact seen before) | flip-flop interleaving is the control; same-process A/B for params; pin power plan |
+| Thermal / measurement noise (real ~1.5× thermal artifact seen before) | flip-flop interleaving is the control; same-process A/B for params; pin power plan. **flipflop now integrates LibreHardwareMonitor → reliable per-flip temp/throttle**, so a `trust:low` (throttled) flip is dependably flagged → verifier **re-runs** that flip rather than banking a hot-run number |
 | Rebuild cost dominates wall time | C++ phase gated by bound_class; Rust diffs batched to one rebuild |
 | Parallel diffs conflict | worktree isolation + integrator dedup; sequential fallback |
 | Pixel drift in RAW decode | pixel-exact gate hashes decoded RGBA |
