@@ -9,11 +9,11 @@ export const variants = [
   {
     name: 'scalar',
     baseline: true,
-    cmd: 'cd crates/raw-pipeline && cargo run --example tone-bench --release -- --variant scalar --in {input} --out {output}',
+    cmd: 'crates\\raw-pipeline\\target\\release\\examples\\tone-bench.exe --variant scalar --in {input} --out {output}',
   },
   {
     name: 'simd',
-    cmd: 'cd crates/raw-pipeline && cargo run --example tone-bench --release -- --variant simd --in {input} --out {output}',
+    cmd: 'crates\\raw-pipeline\\target\\release\\examples\\tone-bench.exe --variant simd --in {input} --out {output}',
   },
 ];
 

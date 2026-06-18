@@ -4,8 +4,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::path::Path;
+use std::io;
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -46,23 +45,23 @@ fn main() -> io::Result<()> {
     let mut b: Vec<f32> = (0..n).map(|i| rgba[i * 4 + 2] as f32 / 255.0).collect();
 
     // Fixed tone params (no perceptual_constancy for baseline fairness)
-    let m = 1.0;
+    let m = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]; // identity matrix
     let sat = 1.0;
     let vib = 0.0;
-    let vib_zero = 0.5;
+    let vib_zero = false;
 
     // Dispatch
     match variant {
         "scalar" => {
             for i in 0..n {
-                let (r2, g2, b2) = raw_pipeline::apply_tone_math(r[i], g[i], b[i], m, sat, vib, vib_zero, false);
+                let (r2, g2, b2) = raw_pipeline::pipeline::apply_tone_math(r[i], g[i], b[i], &m, sat, vib, vib_zero, false);
                 r[i] = r2;
                 g[i] = g2;
                 b[i] = b2;
             }
         }
         "simd" => {
-            raw_pipeline::tone_simd::apply_tone_bulk(&mut r, &mut g, &mut b, m, sat, vib, vib_zero);
+            raw_pipeline::tone_simd::apply_tone_bulk(&mut r, &mut g, &mut b, &m, sat, vib, vib_zero);
         }
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "variant must be scalar or simd")),
     }
