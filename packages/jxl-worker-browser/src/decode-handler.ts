@@ -482,7 +482,7 @@ export class DecodeHandler {
             this.firstPixelMetricPosted = true;
             msg.timeToFirstPixelMs = performance.now() - this.stageStartMs;
           }
-          self.postMessage(msg, [transfer.buffer]);
+          self.postMessage(msg, transferList(transfer.buffer));
           if (this.opts.progressionTarget !== "final" && !this.opts.emitEveryPass) {
             this.finishSession("final");
             return;
@@ -535,7 +535,7 @@ export class DecodeHandler {
             this.firstPixelMetricPosted = true;
             msg.timeToFirstPixelMs = now - this.stageStartMs;
           }
-          self.postMessage(msg, [transfer.buffer]);
+          self.postMessage(msg, transferList(transfer.buffer));
           this.finishSession("final");
           return;
         }
@@ -602,7 +602,7 @@ export class DecodeHandler {
       msg.partialInfo = partialInfo;
       if (partialPixelStride !== undefined) msg.partialPixelStride = partialPixelStride;
       if (partialStage !== undefined) msg.partialStage = partialStage;
-      transfers.push(partialPixels);
+      transfers.push(...transferList(partialPixels));
     }
     self.postMessage(msg, transfers);
     this.finishSession("error");
@@ -630,7 +630,7 @@ export class DecodeHandler {
     };
     if (region !== undefined) msg.region = region;
     this.postMetric("output_bytes", pixels.byteLength);
-    self.postMessage(msg, [pixels]);
+    self.postMessage(msg, transferList(pixels));
     this.finishSession("budget_exceeded");
     // Best-effort unblock of decoder.events().
     void this.disposeActiveDecoder();
@@ -676,12 +676,11 @@ function assignFrameMeta(msg: MsgDecodeProgress | MsgDecodeFinal, src: FrameMeta
 function toTransferablePixels(value: ArrayBuffer | Uint8Array): { buffer: ArrayBuffer; copied: boolean } {
   if (value instanceof ArrayBuffer) return { buffer: value, copied: false };
   const buf = value.buffer;
-  // SharedArrayBuffer (threaded / SIMD-MT WASM builds) cannot be transferred via
-  // postMessage — the transfer list rejects it and the post throws. Copy the view's
-  // bytes into a fresh, transferable ArrayBuffer instead of returning the SAB.
-  // %TypedArray%.prototype.slice() allocates a non-shared ArrayBuffer for the copy.
+  // SharedArrayBuffer (threaded / SIMD-MT WASM builds) cannot appear in a postMessage
+  // transfer list — return the SAB reference directly (zero-copy). Callers must use
+  // transferList() so the SAB is omitted from the transfer list (shared, not transferred).
   if (typeof SharedArrayBuffer !== "undefined" && buf instanceof SharedArrayBuffer) {
-    return { buffer: value.slice().buffer as ArrayBuffer, copied: true };
+    return { buffer: buf as unknown as ArrayBuffer, copied: false };
   }
   if (value.byteOffset === 0 && value.byteLength === buf.byteLength) {
     return { buffer: buf as ArrayBuffer, copied: false };
@@ -690,6 +689,12 @@ function toTransferablePixels(value: ArrayBuffer | Uint8Array): { buffer: ArrayB
     buffer: buf.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer,
     copied: true,
   };
+}
+
+// SAB cannot be in a transfer list — postMessage shares it by reference instead.
+function transferList(buf: ArrayBuffer): ArrayBuffer[] {
+  if (typeof SharedArrayBuffer !== "undefined" && (buf as unknown) instanceof SharedArrayBuffer) return [];
+  return [buf];
 }
 
 function toArrayBuffer(value: ArrayBuffer | Uint8Array): ArrayBuffer {
