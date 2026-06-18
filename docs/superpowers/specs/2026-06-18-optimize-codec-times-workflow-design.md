@@ -88,28 +88,33 @@ integrates David's lens-investigating corpus, `docs/0 Architecture Optimization.
 Operational/Tactical levels + the optimization ladder), `docs/0 boundary-cost-audit.md` +
 `docs/0 ChatGPT Lens II` (the seam/boundary family), and `docs/fast-path-principles.md`.
 
-| Lens | Altitude | Hunts for | Grep / signal | Banks via |
-|------|----------|-----------|---------------|-----------|
-| **Seamhunter** *(cross-cutting)* | edges / threads / IO of a file | every crossing JS↔WASM, worker↔main, Rust↔JS, file↔mem, RAW→JXL — classify each **Copy/Transfer/View/Alias**, count allocs/copies/traversals, verify transfer lists, malloc/free reuse; build Boundary/Buffer-lifecycle/Traversal maps. *Every copy guilty until measured.* | `_malloc` `_free` `HEAPU8.set` `memory.grow` `new Uint8Array(` `slice(` `Array.from` `structuredClone` `postMessage(` `take_rgb` `rgb_to_rgba` `toArrayBuffer` `toClampedTight` | mostly §5b leaner/simpler |
-| **Aerial** | whole dataflow graph | redundant pipelines; shared-artifact coupling (one RGBA frame forcing viewer reqs on all consumers); passes fusible *across files*; split measurement/visualization/export pipelines | file-link graph; same buffer consumed by 3+ subsystems | speed + §5b dedup |
-| **Architecture** | radical surgery; memory model | ring buffer (allocate-once/reuse-forever), arena/batching, SoA↔AoS, single-owner zero-copy, producer→queue→consumer decouple, event-centric vs object-centric, persistent runtime/pool reuse | per-call `malloc`; create-use-dispose churn | speed or §5b memory/feature |
+Lenses rank by **breadth of view** (widest first). Aerial sees the whole dataflow graph;
+Seamhunter spans scopes on the boundary axis; Architecture is bounded to a module/subsystem;
+the rest narrow from there.
+
+| Lens | View scope | Hunts for | Grep / signal | Banks via |
+|------|-----------|-----------|---------------|-----------|
+| **Aerial** | whole dataflow graph (all files) | redundant pipelines; shared-artifact coupling (one RGBA frame forcing viewer reqs on all consumers); passes fusible *across files*; split measurement/visualization/export pipelines | file-link graph; same buffer consumed by 3+ subsystems | speed + §5b dedup |
+| **Seamhunter** *(spans scopes — within AND across files)* | every boundary at any scope: JS↔WASM, worker↔main, Rust↔JS, file↔mem, RAW→JXL **and intra-file function↔function buffer handoffs** | classify each crossing **Copy/Transfer/View/Alias**, count allocs/copies/traversals, verify transfer lists, malloc/free reuse; build Boundary/Buffer-lifecycle/Traversal maps. *Every copy guilty until measured.* | `_malloc` `_free` `HEAPU8.set` `memory.grow` `new Uint8Array(` `slice(` `Array.from` `structuredClone` `postMessage(` `take_rgb` `rgb_to_rgba` `toArrayBuffer` `toClampedTight` | mostly §5b leaner/simpler |
+| **Architecture** | within a module/subsystem | structural + memory-model patterns *inside* a unit: ring buffer (allocate-once/reuse-forever), arena/batching, SoA↔AoS, single-owner zero-copy, producer→queue→consumer decouple, event-centric vs object-centric, persistent runtime/pool reuse | per-call `malloc`; create-use-dispose churn | speed or §5b memory/feature |
 | **Operational** | loops / nests / tiles | kernel fusion (decode→transform→output, no intermediate buffer), tiling/blocking for cache, pass reduction (one-pass-many-outputs), invariant hoisting | multiple passes over one buffer; intermediate Vecs | speed |
-| **Mathematical** | different mathematics | complexity/linear-algebra/numerical-methods (Lens 18) + perceptual colour science (Lens 17, `apply_tone_math` LUT); polynomial/rational approx, separable kernels, integral images, symmetry/invariants (compose not recompute), closed-form vs iterative | `div`/`exp`/`log`/`gamma` in hot loops; recomputed invariants | speed (lossy → §5a Butteraugli) |
-| **Tactical** | micro / fast-path | specialize dominant concrete type (rgba8/stride4, bpc1), exact integer ratio / power-of-two, integer stepping vs f32, manual tight loop vs iterator chain, defer copy to uncommon path, branch elimination, SIMD lane width, bounds-check elision; leave breadcrumb comment | `as f32 /` in pixel loops; `.map/.collect/.zip` on buffers; `memcpy(…,3)` in loops | speed |
+| **Mathematical** | a calculation | complexity/linear-algebra/numerical-methods (Lens 18) + perceptual colour science (Lens 17, `apply_tone_math` LUT); polynomial/rational approx, separable kernels, integral images, symmetry/invariants (compose not recompute), closed-form vs iterative | `div`/`exp`/`log`/`gamma` in hot loops; recomputed invariants | speed (lossy → §5a Butteraugli) |
+| **Tactical** | a statement / instruction | specialize dominant concrete type (rgba8/stride4, bpc1), exact integer ratio / power-of-two, integer stepping vs f32, manual tight loop vs iterator chain, defer copy to uncommon path, branch elimination, SIMD lane width, bounds-check elision; leave breadcrumb comment | `as f32 /` in pixel loops; `.map/.collect/.zip` on buffers; `memcpy(…,3)` in loops | speed |
 
-**Ordering ladder** (apply per layer, impact-descending — "further left = bigger impact",
-"remove movement before computing faster"):
+**Altitude (discovery) ladder** — widest view first, so the map exists before the details
+("see the graph before you know which seams are load-bearing"):
 
-> **Seamhunter → Architecture → Aerial → Operational → Mathematical → Tactical**
+> **Aerial → Seamhunter → Architecture → Operational → Mathematical → Tactical**
 
-Seam wins are cheap+safe+high (zero-copy flips, no quality risk, bank via memory/dedup) → verify
-first. Architecture is biggest-but-riskiest → second. Micro/tactical last. The tournament is a
-*staircase*, not a flat fan-out.
+**Verification fast-track** (separate axis — scheduling, not altitude): seam + tactical
+candidates are cheap + safe (zero-copy flips, no rebuild, no quality risk) → bank them *before*
+an Architecture rewrite that needs a rebuild. Wide view finds the work; cheap-safe banks first.
 
 Rules:
 - One lens per optimizer agent; the prompt states the lens charter + its grep/signal hunts.
-- **Seamhunter runs in EVERY phase** (params = marshalling boundaries; Rust = RAW→JXL +
-  `take_rgb`/`rgb_to_rgba`; C++ = `HEAPU8`/`malloc` reuse) — the seams *are* the wins.
+- **Seamhunter runs in EVERY phase** and at **both scopes** — across boundaries (params =
+  marshalling; Rust = RAW→JXL + `take_rgb`/`rgb_to_rgba`; C++ = `HEAPU8`/`malloc`) *and* within a
+  file (function↔function buffer handoffs). The seams *are* the wins.
 - Other lenses are orthogonal to phases (Architecture fires in Rust *and* C++).
 - Mathematical outputs are lossy → §5a routes them through Butteraugli, never pixel-exact,
   unless algebraic equivalence is proven.
@@ -215,8 +220,9 @@ A pure regression (slower, no memory/dedup/feature gain) is rejected.
 | 3 | 1 C++ finder → ≤3 worktree optimizers (lens-assigned, **seamhunter always seeded**) → verifiers (gated) |
 | 4 | 1 synthesis + 1 completeness critic |
 
-Lenses fire in the §4.5 **ordering ladder** (Seamhunter→Architecture→Aerial→Operational→
-Mathematical→Tactical); seam findings verify first (cheapest, safest, often bank via §5b).
+Lenses fire in the §4.5 **altitude ladder** (Aerial→Seamhunter→Architecture→Operational→
+Mathematical→Tactical, widest view first). Separate **verification fast-track**: seam + tactical
+candidates (cheap, no rebuild, safe) bank before Architecture rewrites that need a rebuild.
 
 ## 7. Schemas (StructuredOutput)
 
