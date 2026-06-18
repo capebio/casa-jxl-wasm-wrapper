@@ -829,8 +829,8 @@ Expected: prints usage. If "Cannot find module", STOP — flipflop skill not yet
 
 - [ ] **Step 2: Helper self-check (all green)**
 
-Run: `node --test benchmark/optimize/test/`
-Expected: PASS — all unit suites (harness-dump, baseline-parse, gate, flipflop-testgen, manifest).
+Run: `node --test benchmark/optimize/test/*.test.mjs` (Node 24 needs a glob, not a bare dir — a directory path is treated as a module and errors).
+Expected: PASS — all unit suites (harness-dump, baseline-parse, gate, flipflop-testgen, manifest); 17 tests.
 
 - [ ] **Step 3: Single-lens dry run**
 
