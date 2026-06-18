@@ -617,6 +617,7 @@ export class Scheduler {
       for (const h of record.handlers) h({ type: "decode_cancelled", sessionId });
       this.releaseAdmission(sessionId);
       this._pausedCount--;
+      this.unblockBackpressure(record); // unblock any waitForDrain callers (paused sessions can hold pending pushes)
       record.abortCleanup?.(); // detach abort listener on paused-session cancel (concurrency-b2d7e3f1)
       this.sessions.delete(sessionId);
       return true;
@@ -1344,10 +1345,12 @@ export class Scheduler {
         }
         pending.resolve();
       } catch (err: unknown) {
+        // Bad head: reject it and recycle the worker, but continue draining —
+        // stopping here would leave remaining queued sessions waiting for the
+        // next unrelated worker completion (slow recovery on a quiet pool).
         try { pending.reject(err); } catch { /* reject must not propagate */ }
         try { this.pool.recycle(worker); } catch { /* recycle must not propagate */ }
-        this.drainingQueue = false;
-        return;
+        // Fall through to next iteration: try another idle worker if available.
       }
     }
 
@@ -1416,9 +1419,11 @@ export class Scheduler {
         record.pending.reject(shutdownErr);
       } else if (record.state === "paused") {
         // Notify paused-session callers with a synthetic cancelled message.
+        this.unblockBackpressure(record); // unblock any pending waitForDrain promises (backpressure)
         for (const h of record.handlers) h({ type: "decode_cancelled", sessionId: record.sessionId });
       } else if (record.state === "running" || record.state === "cancelling") {
         // Running sessions lose their workers on pool.shutdown(); synthesize terminal so callers do not hang.
+        this.unblockBackpressure(record); // unblock any pending waitForDrain promises (backpressure)
         const t = record.kind === "encode" ? "encode_cancelled" : "decode_cancelled";
         for (const h of record.handlers) { try { h({ type: t, sessionId: record.sessionId } as WorkerToMainMessage); } catch {} }
       }
