@@ -27,7 +27,7 @@ The Workflow (Tasks 6–7) cannot be **run** until the `flipflop` skill is insta
 | `benchmark/optimize/manifest.mjs` | Append a banked change to a revert manifest (isolated diff + verdict). Pure. |
 | `benchmark/optimize/test/*.test.mjs` | `node --test` unit tests for each helper. |
 | `.claude/workflows/optimize-codec-times.js` | The Workflow script: meta, phases, lens-charter agent prompts, schemas, gating. Orchestration only. |
-| `.flipflop/tests/templates/{photon,modular,raw-decode}.mjs` | Per-metric flipflop test templates the param/Rust agents clone. |
+| `benchmark/optimize/templates/{photon,modular,raw-decode}.mjs` | Per-metric flipflop test templates the param/Rust agents clone. |
 
 ---
 
@@ -471,9 +471,9 @@ git commit -m "feat(optimize): flipflop test-file generator (async variants + qu
 
 **Files:**
 - Create: `benchmark/optimize/manifest.mjs`
-- Create: `.flipflop/tests/templates/photon.mjs`
-- Create: `.flipflop/tests/templates/modular.mjs`
-- Create: `.flipflop/tests/templates/raw-decode.mjs`
+- Create: `benchmark/optimize/templates/photon.mjs`
+- Create: `benchmark/optimize/templates/modular.mjs`
+- Create: `benchmark/optimize/templates/raw-decode.mjs`
 - Test: `benchmark/optimize/test/manifest.test.mjs`
 
 - [ ] **Step 1: Write the failing test**
@@ -536,7 +536,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Write the three metric templates**
 
 ```js
-// .flipflop/tests/templates/photon.mjs
+// benchmark/optimize/templates/photon.mjs
 // Photon-noise progressive encode. Lossy → quality() = Butteraugli.
 // Agent appends: import { createEncoder } from the jxl-wasm dist; an encodePhoton(input, iso)
 // async helper wrapping encodeJxlVariant({progressive:true, photonNoiseIso:iso}); a butteraugli(a,b).
@@ -545,14 +545,14 @@ export const photonNotes = 'baseline iso800; candidate = optimizer-proposed iso/
 ```
 
 ```js
-// .flipflop/tests/templates/modular.mjs
+// benchmark/optimize/templates/modular.mjs
 // Modular progressive encode. modular:1 lossless variant → equal() pixel-exact;
 // modular lossy (distance>0) → quality() Butteraugli. Agent picks per candidate config.
 export const modularNotes = 'classify lossless via distance===0 / modular-lossless flag (spec §5a)';
 ```
 
 ```js
-// .flipflop/tests/templates/raw-decode.mjs
+// benchmark/optimize/templates/raw-decode.mjs
 // RAW decode (process_{orf,cr2,dng}_with_flags). Deterministic → equal() pixel-exact, zero tol.
 // Input = raw camera bytes (flipflop --inputs over the ORF/CR2/DNG assets), NOT fractal corpus.
 export const rawNotes = 'pixel-exact mandatory; substage targeted per baseline.dominant_substage';
@@ -561,7 +561,7 @@ export const rawNotes = 'pixel-exact mandatory; substage targeted per baseline.d
 - [ ] **Step 6: Commit**
 
 ```bash
-git add benchmark/optimize/manifest.mjs benchmark/optimize/test/manifest.test.mjs ".flipflop/tests/templates"
+git add benchmark/optimize/manifest.mjs benchmark/optimize/test/manifest.test.mjs "benchmark/optimize/templates"
 git commit -m "feat(optimize): revert manifest + per-metric flipflop templates"
 ```
 
@@ -690,7 +690,7 @@ const paramVerdicts = await pipeline(
   paramFindings,
   f => agent(
     `Implement param candidate (config-only, no rebuild) for finding: ${JSON.stringify(f)}.\n` +
-    `Author a flipflop test using benchmark/optimize/flipflop-testgen.mjs (clone .flipflop/tests/templates/` +
+    `Author a flipflop test using benchmark/optimize/flipflop-testgen.mjs (clone benchmark/optimize/templates/` +
     `${f.file.includes('modular')?'modular':'photon'}.mjs), variant A=baseline config, B=candidate.\n` +
     `Run: node flipflop.mjs .flipflop/tests/<name>.mjs --inputs <8 assets>.\n` +
     `Read the journal. Then run the gate:\n` +
