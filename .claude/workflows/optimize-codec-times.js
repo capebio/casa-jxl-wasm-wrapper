@@ -79,6 +79,14 @@ const FLIPFLOP_NOTE =
   `  node -e "import('./benchmark/optimize/gate.mjs').then(m=>console.log(JSON.stringify(` +
   `m.evaluate(<verdict>, {butteraugliThreshold:BT,slowdownEpsilon:SE}))))"\nReturn the VERDICT.`
 
+// PROBE: near-instant arg-binding test. `Workflow({name, args:{__probe:true, ...}})` returns
+// immediately echoing what the script actually received — 0 agents, 0 cost. Diagnoses whether
+// `args` binds for named workflows (both 5h runs ran the full default = args never arrived).
+if (typeof args !== 'undefined' && args && args.__probe) {
+  log(`PROBE: argsSeen=${JSON.stringify(args)}`)
+  return { probe: true, argsSeen: args ?? null, argsType: typeof args }
+}
+
 const ALL_LENSES = LENSES.map(l => l.id)
 const cfg = {
   targetMetrics: args?.targetMetrics ?? ['photon_prog_enc','mod_prog_enc','raw_decode'],
