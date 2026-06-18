@@ -848,6 +848,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "raw-pipeline",
+ "rayon",
  "wasm-bindgen",
  "wasm-bindgen-rayon",
  "web-sys",

@@ -450,6 +450,196 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     });
 }
 
+// ─── Perf flipflop benches ────────────────────────────────────────────────────
+
+fn median_dur(v: &mut Vec<Duration>) -> Duration {
+    v.sort_unstable();
+    let n = v.len();
+    if n == 0 { return Duration::ZERO; }
+    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2 }
+}
+
+/// Alternating flip (current serial impl) / flop (parallel candidate) rounds.
+/// No separate baseline needed — the flip side IS the baseline.
+fn bench_perf_flipflop() {
+    const ROUNDS: usize = 8; // 4 flip + 4 flop per experiment
+
+    println!("=== Perf Flipflop Bench (serial vs parallel candidates) ===\n");
+
+    // ── 1. apply_luminance_nr blend loop ─────────────────────────────────────
+    // 4000×3000×3 ch ≈ 12 MP (representative ORF size)
+    let w = 4000usize;
+    let h = 3000usize;
+    let n = w * h * 3;
+    // Synthetic data — we're timing the blend arithmetic, not the blur itself.
+    let mut rgb16: Vec<u16> = (0..n).map(|i| ((i.wrapping_mul(37).wrapping_add(13)) % 65536) as u16).collect();
+    let blurred: Vec<u16>  = (0..n).map(|i| ((i.wrapping_mul(17).wrapping_add(7))  % 65536) as u16).collect();
+    let s = 0.3f32;
+
+    let mut flip_times: Vec<Duration> = Vec::new();
+    let mut flop_times: Vec<Duration> = Vec::new();
+
+    for round in 0..ROUNDS {
+        if round % 2 == 0 {
+            // flip — serial while loop (current impl in pipeline.rs:1507-1514)
+            let t = Instant::now();
+            let mut i = 0;
+            while i < n {
+                let o = rgb16[i] as f32;
+                let b = blurred[i] as f32;
+                rgb16[i] = (o + (b - o) * s).round().clamp(0.0, 65535.0) as u16;
+                i += 1;
+            }
+            flip_times.push(t.elapsed());
+        } else {
+            // flop — par_iter_mut (candidate)
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let t = Instant::now();
+                rgb16.par_iter_mut().zip(blurred.par_iter()).for_each(|(o, &b)| {
+                    let ov = *o as f32;
+                    *o = (ov + (b as f32 - ov) * s).round().clamp(0.0, 65535.0) as u16;
+                });
+                flop_times.push(t.elapsed());
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                // rayon unavailable — flop mirrors flip so verdict prints "keep serial"
+                let t = Instant::now();
+                let mut i = 0;
+                while i < n {
+                    let o = rgb16[i] as f32;
+                    let b = blurred[i] as f32;
+                    rgb16[i] = (o + (b - o) * s).round().clamp(0.0, 65535.0) as u16;
+                    i += 1;
+                }
+                flop_times.push(t.elapsed());
+            }
+        }
+    }
+
+    let flip_med = median_dur(&mut flip_times);
+    let flop_med = median_dur(&mut flop_times);
+    let speedup = if ms(flop_med) > 0.001 { ms(flip_med) / ms(flop_med) } else { 0.0 };
+    println!("apply_luminance_nr blend loop  ({w}×{h}×3ch, strength={s})");
+    println!("  flip (serial):   {:.2}ms", ms(flip_med));
+    println!("  flop (parallel): {:.2}ms", ms(flop_med));
+    println!("  speedup: {speedup:.2}×  →  {}",
+        if speedup > 1.15 { "PARALLEL WINS — apply in pipeline.rs" }
+        else              { "keep serial (overhead dominates)" });
+    println!();
+
+    // ── 2. downscale_rgb16_into exact-factor path ─────────────────────────────
+    // 4000×3000 → 800×600 (5× exact — most common thumbnail ratio)
+    let sw = 4000usize;
+    let sh = 3000usize;
+    let dw = 800usize;
+    let dh = 600usize;
+    let xstep = sw / dw; // 5
+    let ystep = sh / dh; // 5
+    let n_src = sw * sh * 3;
+    let n_dst = dw * dh * 3;
+    let src: Vec<u16> = (0..n_src).map(|i| ((i.wrapping_mul(37).wrapping_add(13)) % 65536) as u16).collect();
+    let mut out_a = vec![0u16; n_dst];
+    let mut out_b = vec![0u16; n_dst];
+
+    let mut flip_times2: Vec<Duration> = Vec::new();
+    let mut flop_times2: Vec<Duration> = Vec::new();
+
+    for round in 0..ROUNDS {
+        if round % 2 == 0 {
+            // flip — serial for dy (current impl in pipeline.rs:1612-1634)
+            let n_px = (xstep * ystep) as u32;
+            let t = Instant::now();
+            for dy in 0..dh {
+                let row = &mut out_a[dy * dw * 3..(dy + 1) * dw * 3];
+                for dx in 0..dw {
+                    let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                    for yy in 0..ystep {
+                        let y = dy * ystep + yy;
+                        let base = (y * sw + dx * xstep) * 3;
+                        for xx in 0..xstep {
+                            let i = base + xx * 3;
+                            rr += src[i] as u32;
+                            gg += src[i + 1] as u32;
+                            bb += src[i + 2] as u32;
+                        }
+                    }
+                    let o = dx * 3;
+                    row[o] = (rr / n_px) as u16;
+                    row[o + 1] = (gg / n_px) as u16;
+                    row[o + 2] = (bb / n_px) as u16;
+                }
+            }
+            flip_times2.push(t.elapsed());
+        } else {
+            // flop — par_chunks_mut (candidate)
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let n_px = (xstep * ystep) as u32;
+                let t = Instant::now();
+                out_b.par_chunks_mut(dw * 3).enumerate().for_each(|(dy, row)| {
+                    for dx in 0..dw {
+                        let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                        for yy in 0..ystep {
+                            let y = dy * ystep + yy;
+                            let base = (y * sw + dx * xstep) * 3;
+                            for xx in 0..xstep {
+                                let i = base + xx * 3;
+                                rr += src[i] as u32;
+                                gg += src[i + 1] as u32;
+                                bb += src[i + 2] as u32;
+                            }
+                        }
+                        let o = dx * 3;
+                        row[o] = (rr / n_px) as u16;
+                        row[o + 1] = (gg / n_px) as u16;
+                        row[o + 2] = (bb / n_px) as u16;
+                    }
+                });
+                flop_times2.push(t.elapsed());
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                let n_px = (xstep * ystep) as u32;
+                let t = Instant::now();
+                for dy in 0..dh {
+                    let row = &mut out_b[dy * dw * 3..(dy + 1) * dw * 3];
+                    for dx in 0..dw {
+                        let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                        for yy in 0..ystep {
+                            let y = dy * ystep + yy;
+                            let base = (y * sw + dx * xstep) * 3;
+                            for xx in 0..xstep {
+                                let i = base + xx * 3;
+                                rr += src[i] as u32; gg += src[i+1] as u32; bb += src[i+2] as u32;
+                            }
+                        }
+                        let o = dx * 3;
+                        row[o] = (rr / n_px) as u16; row[o+1] = (gg / n_px) as u16; row[o+2] = (bb / n_px) as u16;
+                    }
+                }
+                flop_times2.push(t.elapsed());
+            }
+        }
+    }
+
+    let flip_med2 = median_dur(&mut flip_times2);
+    let flop_med2 = median_dur(&mut flop_times2);
+    let speedup2 = if ms(flop_med2) > 0.001 { ms(flip_med2) / ms(flop_med2) } else { 0.0 };
+    println!("downscale_rgb16_into exact 5×  ({sw}×{sh} → {dw}×{dh})");
+    println!("  flip (serial):   {:.2}ms", ms(flip_med2));
+    println!("  flop (parallel): {:.2}ms", ms(flop_med2));
+    println!("  speedup: {speedup2:.2}×  →  {}",
+        if speedup2 > 1.15 { "PARALLEL WINS — apply in pipeline.rs" }
+        else               { "keep serial (overhead dominates)" });
+    println!();
+
+    println!("=== End Flipflop ===\n");
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -467,6 +657,12 @@ fn main() {
         eprintln!("\n!!! WARNING: built WITHOUT `parallel` — tone/demosaic run SINGLE-THREADED.");
         eprintln!("!!! Timings will be ~5-7x slower. Re-run with:");
         eprintln!("!!!   .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-codec,parallel\"\n");
+    }
+
+    // Flipflop perf bench — runs before heavy file benches while CPU is cool.
+    // Skip with env SKIP_FLIPFLOP=1.
+    if std::env::var("SKIP_FLIPFLOP").unwrap_or_default() != "1" {
+        bench_perf_flipflop();
     }
 
     let test_dir = r"C:\Foo\raw-converter\tests";

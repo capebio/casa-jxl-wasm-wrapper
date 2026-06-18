@@ -22,7 +22,7 @@ c-perceptual = ["raw-pipeline/c-perceptual"]
 # scalar branch. Measurement showed tone as the dominant cost (~600-790ms/24MP)
 # precisely because of this. rayon par_chunks is per-pixel deterministic =>
 # byte-identical output. Use for representative native numbers.
-parallel = ["raw-pipeline/parallel"]
+parallel = ["raw-pipeline/parallel", "dep:rayon"]
 
 [dependencies]
 wasm-bindgen = "0.2"
@@ -30,6 +30,7 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Performance", "WorkerGlobalScope"] }
 raw-pipeline = { path = "crates/raw-pipeline", default-features = false }
 wasm-bindgen-rayon = { version = "1", optional = true }
+rayon = { version = "1", optional = true }
 
 # Native-only: force the BSD own-FFI JXL codec (encode + decode) + rayon into the
 # raw-pipeline dep so the raw_decode_bench binary always has it. WASM builds use
