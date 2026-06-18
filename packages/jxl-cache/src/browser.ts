@@ -9,7 +9,7 @@ export interface CacheOptions {
 
 export interface JxlCache {
   init(): Promise<void>;
-  get(key: string): Promise<ArrayBuffer | undefined>;
+  get(key: string): Promise<ArrayBuffer | SharedArrayBuffer | undefined>;
   set(key: string, buffer: ArrayBuffer): Promise<void>;
   delete(key: string): Promise<void>;
   has(key: string): Promise<boolean>;
@@ -47,9 +47,9 @@ export async function cacheNameFor(key: string): Promise<string> {
 }
 
 export class JxlCacheBrowser implements JxlCache {
-  private readonly memoryCache: LRUCache<ArrayBuffer>;
+  private readonly memoryCache: LRUCache<SharedArrayBuffer>;
   private readonly persistentTracker: LRUCache<PersistentEntry>;
-  private readonly inflightGets = new Map<string, Promise<ArrayBuffer | undefined>>();
+  private readonly inflightGets = new Map<string, Promise<SharedArrayBuffer | undefined>>();
   private readonly inflightSets = new Map<string, Promise<void>>();
   private readonly _encoder = new TextEncoder();
 
@@ -97,14 +97,14 @@ export class JxlCacheBrowser implements JxlCache {
     }
   }
 
-  async get(key: string): Promise<ArrayBuffer | undefined> {
+  async get(key: string): Promise<SharedArrayBuffer | undefined> {
     if (this.initPromise) await this.initPromise.catch(() => undefined);
 
     const mem = this.memoryCache.get(key);
     if (mem !== undefined) {
       this.persistentTracker.get(key);
       this.hitCount++;
-      return mem.slice(0);
+      return mem;   // SAB: shared reference, never detaches on postMessage
     }
 
     if (!this.opfsRoot) {
@@ -144,8 +144,9 @@ export class JxlCacheBrowser implements JxlCache {
   async set(key: string, buffer: ArrayBuffer): Promise<void> {
     if (this.initPromise) await this.initPromise.catch(() => undefined);
     const size = buffer.byteLength;
-    const master = buffer.slice(0);
-    this.memoryCache.set(key, master, size);
+    const sab = new SharedArrayBuffer(size);
+    new Uint8Array(sab).set(new Uint8Array(buffer));
+    this.memoryCache.set(key, sab, size);
 
     if (!this.opfsRoot || size > this.persistentLimit) {
       if (this.opfsRoot) {
@@ -169,7 +170,9 @@ export class JxlCacheBrowser implements JxlCache {
     const pending = (async () => {
       try { await previous; } catch { /* proceed */ }
       if (this._generation !== gen) return;
-      await this.setPersistent(key, master);
+      // Pass a Uint8Array view of the SAB to OPFS — avoids a second copy and is safe
+      // because SAB cannot be transferred/detached, so the async write always reads valid data.
+      await this.setPersistent(key, new Uint8Array(sab));
     })();
 
     this.inflightSets.set(key, pending);
@@ -240,7 +243,7 @@ export class JxlCacheBrowser implements JxlCache {
     };
   }
 
-  private async getPersistent(key: string): Promise<ArrayBuffer | undefined> {
+  private async getPersistent(key: string): Promise<SharedArrayBuffer | undefined> {
     if (!this.opfsRoot) return undefined;
 
     const gen = this._generation;
@@ -258,17 +261,19 @@ export class JxlCacheBrowser implements JxlCache {
         return undefined;
       }
 
-      const buffer = await file.arrayBuffer();
+      const raw = await file.arrayBuffer();
 
       if (this._generation !== gen) return undefined;
 
-      this.memoryCache.set(key, buffer, buffer.byteLength);
+      const sab = new SharedArrayBuffer(raw.byteLength);
+      new Uint8Array(sab).set(new Uint8Array(raw));
+      this.memoryCache.set(key, sab, sab.byteLength);
 
       if (entry === undefined) {
-        this.persistentTracker.set(key, { name }, buffer.byteLength);
+        this.persistentTracker.set(key, { name }, sab.byteLength);
       }
 
-      return buffer.slice(0);
+      return sab;
     } catch (e) {
       if (e instanceof DOMException && e.name === 'NotFoundError') {
         this.persistentTracker.delete(key);
@@ -279,7 +284,7 @@ export class JxlCacheBrowser implements JxlCache {
     }
   }
 
-  private async setPersistent(key: string, buffer: ArrayBuffer): Promise<void> {
+  private async setPersistent(key: string, buffer: ArrayBuffer | Uint8Array): Promise<void> {
     if (!this.opfsRoot) return;
 
     const gen = this._generation;
