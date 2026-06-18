@@ -685,3 +685,63 @@ test files) or are test/ADR drafts. All confirmed; none masked.
 #### NOTED (already deferred by the verifier, recorded for completeness)
 - 012-errors-3f1a8c20 (missing fetch timeout) — verdict UNCERTAIN; deliberate design (caller owns cancellation via signal). Not implemented.
 - 012-security-1d7b3e64 (SSRF surface) — verdict UNCERTAIN; exploitability depends on untrusted-URL callers outside this layer. Not implemented.
+
+---
+
+## Section 014 — jxl-wasm (facade.ts + bridge.cpp)
+
+**Environment limit:** the WASM build is Docker/emsdk-gated and CANNOT be compiled or
+behaviorally tested in this environment (only `tsc` type-checks facade.ts). Therefore only
+*type-checkable, additive, can't-make-worse* facade.ts fixes were applied this pass; every
+ABI-coupled change and ALL bridge.cpp (C++) fixes are deferred for the user to apply **with a
+real WASM build + the facade.test/vitest suite** — an un-built FFI/heap change can silently
+corrupt encodes or the WASM heap.
+
+### Applied this pass (facade.ts, tsc-gated — baseline 1 error → 0)
+- Added `onMetric` to `EncoderOptions` (fixes the pre-existing `facade.ts:1942` TS error;
+  `LibjxlEncoder` already reads it).
+- Added `if (ptr === 0) throw` OOM guards to 4 unchecked `_malloc` sites (transcodeJpegToJxl,
+  back-compat streaming push, buffered-encode pixels, sidecar dims) — matching the file's
+  existing guarded pattern (L902/944/1095/1152).
+
+### A. facade.ts ABI/contract bugs — fix surface is TS but UNTESTABLE here (apply + rebuild + test)
+1. **HIGH — `encode_rgba8_with_metadata` arg-shift** (facade.ts:~340 call vs bridge.cpp:2456):
+   the bridge inserts `group_order`+`resampling` after `buffering`; the facade TS call omits both,
+   shifting ALL ICC/EXIF/XMP pointer args by 2 on the buffered-metadata encode path → metadata
+   corruption. Fix = add the 2 args in the correct ABI position; rebuild + round-trip ICC+EXIF.
+2. **HIGH — 6 encoder options dropped by the facade** (`orientation, intrinsicSize,
+   disablePerceptualHeuristics, codestreamLevel, centerX, centerY`): callers forward them and the
+   bridge supports them (`enc_create_image_z`:3019 + setters), but `EncoderOptions` (facade.ts:137)
+   declares none and never calls the setters → silent no-ops.
+3. **MED (latent) — ExtraChannel struct stride mismatch**: TS serializer 72-byte stride vs 20-byte
+   C++ `WasmExtraChannel`. No call site yet (latent) — corrupts `num_ec >= 2` encodes once wired.
+4. **MED — `perceptualConstancyApplyBulk` scalar fallback returns identity** (facade.ts:~3152):
+   copies input→output, reports success, never applies the transform; also passes JS Float32Arrays
+   where the C symbol wants `float*`. NOTE: `_perceptual_apply_full` is not linked in the default
+   WASM build (MEMORY: "c-perceptual link-fails wasm") — fix the link first.
+5. **MED — leaks on throw**: progressive decoder handle (facade.ts:1377) + `wasmEncState`
+   (facade.ts:2074) leak if a malloc/alloc throws before the owning try/finally. Hoist into scope.
+6. **MED — rgb8 progressive pixelStride**: `eventsProgressive` uses a 4-byte stride for rgb8
+   (3-channel) (facade.ts:~1435) → byte-total mismatch (the long-rumored "rgb8 stats" issue,
+   located here → ADR adr-shared-channel-stride-helper).
+7. **LOW — hot-path `console.log` spam** (facade.ts:968/1171/2289) — redundant with `onMetric`.
+
+### B. bridge.cpp — C++, CANNOT build here, ALL deferred (by severity)
+1. **HIGH/security — JXTC encode integer overflow** (bridge.cpp:1611/1618): `tile_count =
+   tiles_x*tiles_y` 32-bit multiply can wrap; the loop writes `tile_bytes[idx]` at the un-wrapped
+   index → heap overflow. (The JXTC *decode* counterpart at 1713 was a verified FALSE POSITIVE.)
+2. **MED/security — unvalidated FFI lengths**: extra-channel `plane_ptr/size` (1022), custom-box
+   `data_ptr/size` (356), rgb16_planar planes (2404), butteraugli/PSNR/SSIM direct pointers (3377),
+   `EncodeAnimation` `wf.width*wf.height` with no `pixels_size` check (1884) + unbounded `name_size`
+   memcpy (1906).
+3. **MED — gain-map `gm_capacity*2u`** doubling has no overflow guard (2311); sibling `input_buf` IS guarded.
+4. **LOW — tiled-decode signed `crop_x0/y0` cast to uint32** (1403) → crafted-JXL OOB read.
+5. **LOW — unhandled `JxlDecoderStatus`** (no default branch, 2143) → spin; `BOX_NEED_MORE_OUTPUT` bare continue (2311).
+6. **LOW/perf — `EM_ASM console.log`** per encode chunk (2918) / per `enc_finish` (3102).
+
+### C. ADR drafts (sections/014/adr_draft/) — awaiting ratification
+- adr-ffi-abi-contract-test.md — CI smoke test: every facade-called symbol exists w/ right arity +
+  single source of truth for the FFI layout (root cause of A1/A2/A3).
+- adr-overflow-checked-size-helpers.md — `checked_size_mul` (bridge.cpp) + `assertHeapWrite` (facade.ts) (B1/B2/B3).
+- adr-structured-libjxl-error-mapping-raii.md — status→typed-error map + RAII C++ cleanup + missing `default:`.
+- adr-shared-channel-stride-helper.md — single `pixelLayout(format)` helper (fixes A6).

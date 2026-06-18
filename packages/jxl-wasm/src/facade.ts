@@ -206,6 +206,9 @@ export interface EncoderOptions {
    * (serializeExtraChannelsForWasm + post-malloc plane_ptr writes by caller.)
    */
   extraChannels?: ExtraChannel[];
+
+  /** Optional structured telemetry sink; mirrors DecoderOptions.onMetric. Read by LibjxlEncoder. */
+  onMetric?: (name: string, value: number) => void;
 }
 
 /**
@@ -651,6 +654,7 @@ export async function transcodeJpegToJxl(jpeg: ArrayBuffer | Uint8Array): Promis
   }
   const view = copyOrBorrowInput(jpeg, false);
   const ptr = module._malloc(view.byteLength);
+  if (ptr === 0) throw new Error("WASM malloc failed for JPEG transcode input");
   try {
     module.HEAPU8.set(view, ptr);
     const handle = module._jxl_wasm_transcode_jpeg_to_jxl!(ptr, view.byteLength);
@@ -1947,6 +1951,7 @@ class LibjxlEncoder implements JxlEncoder {
           // Back-compat with older WASM bridge: temp copy into WASM, then bridge memcpy.
           const t0 = performance.now();
           const ptr = module._malloc(view.byteLength);
+          if (ptr === 0) throw new Error("WASM malloc failed for streaming pixel push");
           try {
             module.HEAPU8.set(view, ptr);
             const rc = module._jxl_wasm_enc_push_chunk!(this.wasmEncState, ptr, view.byteLength);
@@ -2117,6 +2122,7 @@ class LibjxlEncoder implements JxlEncoder {
         }
       }
       const ptr = module._malloc(this.pixelByteTotal);
+      if (ptr === 0) throw new Error("WASM malloc failed for buffered encode pixels");
       try {
         let offset = 0;
         for (let i = 0; i < this.pixelChunks.length; i++) {
@@ -2137,6 +2143,7 @@ class LibjxlEncoder implements JxlEncoder {
         if (this.sortedSidecarSizes.length > 0 && caps.sidecars) {
           const sortedSizes = this.sortedSidecarSizes;
           const dimsPtr = module._malloc(sortedSizes.length * 4);
+          if (dimsPtr === 0) throw new Error("WASM malloc failed for sidecar dims");
           try {
             // Write uint32[] into WASM heap (HEAPU32 if available, byte-by-byte otherwise)
             if (module.HEAPU32) {
