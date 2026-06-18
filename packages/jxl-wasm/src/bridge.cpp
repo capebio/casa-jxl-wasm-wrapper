@@ -1469,6 +1469,12 @@ static JxlWasmBuffer* DecodeRgba8RegionTiled(const uint8_t* input, size_t input_
 #define JXTC_VERSION        1u
 #define JXTC_HEADER_BYTES   32u
 #define JXTC_INDEX_BYTES    8u
+// Upper bound on tiles_x*tiles_y. Far beyond any real encode (a 4096x4096 image
+// at tile_size=1 is 2^24 tiles), yet small enough that tile_count and every
+// derived byte-size (tile_count*JXTC_INDEX_BYTES, the calloc'd pointer/length
+// arrays) stay well inside uint32 / wasm32 size_t. Prevents the 32-bit overflow
+// of tiles_x*tiles_y from under-sizing the per-tile arrays.
+#define JXTC_MAX_TILES      (1u << 24)
 
 // Encode a single RGBA8 tile as a standalone JXL bitstream.
 // Strips alpha channel inline if !has_alpha. Returns malloc'd buffer; caller frees.
@@ -1615,8 +1621,13 @@ static JxlWasmBuffer* EncodeRgba8TileContainer(const uint8_t* pixels,
 
   const uint32_t tiles_x    = (width  + tile_size - 1u) / tile_size;
   const uint32_t tiles_y    = (height + tile_size - 1u) / tile_size;
-  const uint32_t tile_count = tiles_x * tiles_y;
-  if (tile_count == 0) return MakeError(91);
+  // Compute tiles_x*tiles_y in 64-bit: a 32-bit product can wrap, which would
+  // under-size the calloc'd tile_bytes/tile_lengths arrays below while the encode
+  // loop still writes tiles_y*tiles_x entries (idx = ty*tiles_x+tx) -> heap overflow.
+  // Reject the (pathological) overflow case up-front; narrow to uint32 only once safe.
+  const uint64_t tile_count64 = static_cast<uint64_t>(tiles_x) * tiles_y;
+  if (tile_count64 == 0 || tile_count64 > JXTC_MAX_TILES) return MakeError(91);
+  const uint32_t tile_count = static_cast<uint32_t>(tile_count64);
 
   uint8_t** tile_bytes   = static_cast<uint8_t**>(calloc(tile_count, sizeof(uint8_t*)));
   size_t*   tile_lengths = static_cast<size_t*>(  calloc(tile_count, sizeof(size_t)));

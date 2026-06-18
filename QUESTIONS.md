@@ -729,7 +729,12 @@ corrupt encodes or the WASM heap.
 ### B. bridge.cpp — C++, CANNOT build here, ALL deferred (by severity)
 1. **HIGH/security — JXTC encode integer overflow** (bridge.cpp:1611/1618): `tile_count =
    tiles_x*tiles_y` 32-bit multiply can wrap; the loop writes `tile_bytes[idx]` at the un-wrapped
-   index → heap overflow. (The JXTC *decode* counterpart at 1713 was a verified FALSE POSITIVE.)
+   index → heap overflow. (The JXTC *decode* counterpart at 1713 was a verified FALSE POSITIVE —
+   its `idx >= tile_count` guard + `input_size < header+index_bytes` check bound every index read.)
+   **→ PATCHED IN SOURCE (commit on this branch):** compute `tiles_x*tiles_y` in 64-bit, reject when
+   0 or `> JXTC_MAX_TILES` (2^24) before allocating, narrow to uint32 only once safe. **NOT yet
+   build-verified** — bridge.cpp can't be compiled here; rebuild WASM + run the jxl-wasm suite to
+   confirm (the guard is additive and rejects only the overflow case, so valid encodes are unaffected).
 2. **MED/security — unvalidated FFI lengths**: extra-channel `plane_ptr/size` (1022), custom-box
    `data_ptr/size` (356), rgb16_planar planes (2404), butteraugli/PSNR/SSIM direct pointers (3377),
    `EncodeAnimation` `wf.width*wf.height` with no `pixels_size` check (1884) + unbounded `name_size`
