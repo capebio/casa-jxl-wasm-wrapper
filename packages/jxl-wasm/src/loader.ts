@@ -7,7 +7,7 @@ export interface JxlWasmManifest {
 export interface LoaderOptions {
   fetchImpl?: typeof fetch;
   idbFactory?: IDBFactory;
-  nodeFs?: { readFile(path: string | URL): Promise<Uint8Array> };
+  nodeFs?: { readFile(path: string | URL, options?: { signal?: AbortSignal }): Promise<Uint8Array> };
   cacheDbName?: string;
   wasmUrl?: string;
   signal?: AbortSignal;
@@ -49,7 +49,7 @@ export async function loadJxlModule(manifest: JxlWasmManifest, options: LoaderOp
 async function loadNodeModule(manifest: JxlWasmManifest, options: LoaderOptions): Promise<WebAssembly.Module> {
   const fs = options.nodeFs ?? (await import("node:fs/promises"));
   const wasmUrl = options.wasmUrl ?? manifest.wasmUrl;
-  const bytes = await (fs.readFile as (p: unknown, o?: unknown) => Promise<Uint8Array>)(await resolveNodeWasmUrl(wasmUrl ?? ""), { signal: options.signal });
+  const bytes = await fs.readFile(await resolveNodeWasmUrl(wasmUrl ?? ""), { signal: options.signal });
   return WebAssembly.compile(bytes as BufferSource);
 }
 
@@ -88,7 +88,8 @@ async function compileFromResponse(response: Response, getFreshResponse?: () => 
         const fresh = await getFreshResponse();
         return WebAssembly.compile(await fresh.arrayBuffer());
       }
-      // Last-ditch: original response may be partially consumed.
+      // No refetcher provided and compileStreaming failed; body is spent.
+      throw new Error('[jxl-wasm] compileStreaming failed and no refetcher was provided to recover');
     }
   }
   return WebAssembly.compile(await response.arrayBuffer());
