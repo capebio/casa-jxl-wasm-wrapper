@@ -538,6 +538,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static BLUR_SCRATCH: std::cell::RefCell<(Vec<u16>, Vec<u16>)> =
         const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    static BLUR_ROW_F32: std::cell::RefCell<Vec<f32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static PERCEPTUAL_GRID: std::cell::RefCell<Option<PerceptualGrid>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -579,15 +581,12 @@ pub fn gaussian_kernel_13() -> [f32; 13] {
      0.1296, 0.1097, 0.0831, 0.0563, 0.0342, 0.0185]
 }
 
-/// Horizontal pass of separable blur into `temp`.
-/// Splits interior pixels (no border clamping) from the thin border strips so
-/// the inner kernel loop is branch-free and LLVM can auto-vectorize it.
+/// Horizontal blur pass: de-interleave → planar FIR (stride-1, LLVM vectorises) → re-interleave.
+/// Const-generic dispatch (N=5 or N=13) gives LLVM a fixed inner-loop bound to unroll.
 fn separable_blur_into(src: &[u16], width: usize, _height: usize,
                        kernel: &[f32], temp: &mut [u16]) {
     let half = kernel.len() / 2;
-    let int_start   = half;
-    let int_end     = width.saturating_sub(half);
-    let right_start = int_end.max(int_start);
+    let klen = kernel.len();
 
     #[cfg(feature = "parallel")]
     let iter = temp.par_chunks_mut(width * 3).enumerate();
@@ -595,62 +594,121 @@ fn separable_blur_into(src: &[u16], width: usize, _height: usize,
     let iter = temp.chunks_mut(width * 3).enumerate();
 
     iter.for_each(|(y, row)| {
-        // Left border — kernel window reaches outside left edge; clamp xi.
-        for x in 0..int_start.min(width) {
-            let mut acc = [0f32; 3];
-            for ki in 0..kernel.len() {
-                let kv = kernel[ki];
-                let xi = (x as isize + ki as isize - half as isize)
-                    .clamp(0, width as isize - 1) as usize;
-                let b = (y * width + xi) * 3;
-                acc[0] += src[b]   as f32 * kv;
-                acc[1] += src[b+1] as f32 * kv;
-                acc[2] += src[b+2] as f32 * kv;
+        let src_row = &src[y * width * 3 .. (y + 1) * width * 3];
+        BLUR_ROW_F32.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            // Layout: [R_in | G_in | B_in | R_out | G_out | B_out] each width f32.
+            scratch.resize(width * 6, 0.0f32);
+            let (r_in, rest) = scratch.split_at_mut(width);
+            let (g_in, rest) = rest.split_at_mut(width);
+            let (b_in, rest) = rest.split_at_mut(width);
+            let (r_out, rest) = rest.split_at_mut(width);
+            let (g_out, b_out) = rest.split_at_mut(width);
+
+            // De-interleave: stride-3 u16 read => 3 x stride-1 f32.
+            for px in 0..width {
+                let b = px * 3;
+                r_in[px] = src_row[b]     as f32;
+                g_in[px] = src_row[b + 1] as f32;
+                b_in[px] = src_row[b + 2] as f32;
             }
-            let b = x * 3;
-            row[b]   = acc[0].round() as u16;
-            row[b+1] = acc[1].round() as u16;
-            row[b+2] = acc[2].round() as u16;
-        }
-        // Interior — no clamping; reads are contiguous in `src`.
-        for x in int_start..int_end {
-            let mut acc_r = 0f32;
-            let mut acc_g = 0f32;
-            let mut acc_b = 0f32;
-            let b0 = (y * width + x - half) * 3;
-            for ki in 0..kernel.len() {
-                let kv = kernel[ki];
-                let b = b0 + ki * 3;
-                acc_r += src[b]   as f32 * kv;
-                acc_g += src[b+1] as f32 * kv;
-                acc_b += src[b+2] as f32 * kv;
+
+            // Dispatch on kernel length so LLVM sees a compile-time inner bound.
+            match klen {
+                13 => blur_fir_planar::<13>(r_in, kernel, half, r_out),
+                5  => blur_fir_planar::<5> (r_in, kernel, half, r_out),
+                _  => blur_fir_planar_dyn  (r_in, kernel, half, r_out),
             }
-            let b = x * 3;
-            row[b]   = acc_r.round() as u16;
-            row[b+1] = acc_g.round() as u16;
-            row[b+2] = acc_b.round() as u16;
-        }
-        // Right border — kernel window reaches outside right edge; clamp xi.
-        for x in right_start..width {
-            let mut acc = [0f32; 3];
-            for ki in 0..kernel.len() {
-                let kv = kernel[ki];
-                let xi = (x as isize + ki as isize - half as isize)
-                    .clamp(0, width as isize - 1) as usize;
-                let b = (y * width + xi) * 3;
-                acc[0] += src[b]   as f32 * kv;
-                acc[1] += src[b+1] as f32 * kv;
-                acc[2] += src[b+2] as f32 * kv;
+            match klen {
+                13 => blur_fir_planar::<13>(g_in, kernel, half, g_out),
+                5  => blur_fir_planar::<5> (g_in, kernel, half, g_out),
+                _  => blur_fir_planar_dyn  (g_in, kernel, half, g_out),
             }
-            let b = x * 3;
-            row[b]   = acc[0].round() as u16;
-            row[b+1] = acc[1].round() as u16;
-            row[b+2] = acc[2].round() as u16;
-        }
+            match klen {
+                13 => blur_fir_planar::<13>(b_in, kernel, half, b_out),
+                5  => blur_fir_planar::<5> (b_in, kernel, half, b_out),
+                _  => blur_fir_planar_dyn  (b_in, kernel, half, b_out),
+            }
+
+            // Re-interleave + f32->u16: stride-1 read => stride-3 write.
+            for px in 0..width {
+                let b = px * 3;
+                row[b]     = r_out[px].round() as u16;
+                row[b + 1] = g_out[px].round() as u16;
+                row[b + 2] = b_out[px].round() as u16;
+            }
+        });
     });
 }
 
+/// 1-D FIR on a single f32 plane with stride-1 I/O and fixed kernel length N.
+/// LLVM can unroll the ki loop and auto-vectorise the x loop.
+#[inline]
+fn blur_fir_planar<const N: usize>(plane: &[f32], kernel: &[f32], half: usize, out: &mut [f32]) {
+    let width = plane.len();
+    let int_start = half;
+    let int_end   = width.saturating_sub(half);
+    let wm = width as isize - 1;
 
+    // Left border.
+    for x in 0..int_start.min(width) {
+        let mut acc = 0f32;
+        for ki in 0..N {
+            let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
+            acc = plane[xi].mul_add(kernel[ki], acc);
+        }
+        out[x] = acc;
+    }
+    // Interior: stride-1 read + write; fixed N => LLVM unrolls ki, vectorises x.
+    for x in int_start..int_end {
+        let b0 = x - half;
+        let mut acc = 0f32;
+        for ki in 0..N {
+            acc = plane[b0 + ki].mul_add(kernel[ki], acc);
+        }
+        out[x] = acc;
+    }
+    // Right border.
+    for x in int_end.max(int_start)..width {
+        let mut acc = 0f32;
+        for ki in 0..N {
+            let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
+            acc = plane[xi].mul_add(kernel[ki], acc);
+        }
+        out[x] = acc;
+    }
+}
+
+/// Dynamic-length fallback (rare non-5/13 kernels).
+#[cold]
+fn blur_fir_planar_dyn(plane: &[f32], kernel: &[f32], half: usize, out: &mut [f32]) {
+    let width = plane.len();
+    let int_start = half;
+    let int_end   = width.saturating_sub(half);
+    let wm = width as isize - 1;
+    for x in 0..int_start.min(width) {
+        let mut acc = 0f32;
+        for ki in 0..kernel.len() {
+            let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
+            acc = plane[xi].mul_add(kernel[ki], acc);
+        }
+        out[x] = acc;
+    }
+    for x in int_start..int_end {
+        let b0 = x - half;
+        let mut acc = 0f32;
+        for (ki, &kv) in kernel.iter().enumerate() { acc = plane[b0 + ki].mul_add(kv, acc); }
+        out[x] = acc;
+    }
+    for x in int_end.max(int_start)..width {
+        let mut acc = 0f32;
+        for ki in 0..kernel.len() {
+            let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
+            acc = plane[xi].mul_add(kernel[ki], acc);
+        }
+        out[x] = acc;
+    }
+}
 fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[f32],
                              temp: &mut Vec<u16>, out: &mut Vec<u16>) {
     let n = width * height * 3;
@@ -693,7 +751,7 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
     #[cfg(not(feature = "parallel"))]
     {
         // Tiled vertical pass. Working set = VTILE * klen * 3 * 2 bytes.
-        // VTILE=128, k13: 128*13*6 ≈ 10 KB — fits in L1, giving ~38% speedup
+        // VTILE=128, k13: 128*13*6 ~= 10 KB -- fits in L1, giving ~38% speedup
         // over naive column-by-column access on a 20 MP image (117 MB rgb16).
         const VTILE: usize = 128;
         for y in 0..height {

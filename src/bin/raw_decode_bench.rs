@@ -254,15 +254,10 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     params.wb_b = img.wb_b;
     params.color_matrix = img.color_matrix;
 
-    // Measure clarity pass cost (single run; outside bench() to allow &mut rgb16 clone).
-    let clarity_dur = {
-        let mut tmp = rgb16.clone();
-        let mut p = params.clone();
-        p.clarity = 0.5;
-        let t = Instant::now();
-        pipeline::apply_unsharp_masks(&mut tmp, w, h, &p);
-        t.elapsed()
-    };
+    // Measure clarity: cold (first call) vs warm (second, buf reused).
+    let mut cp = params.clone(); cp.clarity = 0.5;
+    let clarity_cold = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
+    let clarity_warm = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
 
     let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
     let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
@@ -283,7 +278,7 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
         "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
         ms(decode_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
     );
-    println!("  clarity@0.5 {:.1}ms  ({:.1}% of total)", ms(clarity_dur), 100.0 * ms(clarity_dur) / ms(total));
+    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity_cold), ms(clarity_warm), 100.0 * ms(clarity_warm) / ms(total));
     println!("  WB R={:.3} B={:.3}  black={}  white={}", img.wb_r, img.wb_b, img.black, img.white);
     match (encode_ms, jxl_size_kb, decode_ms) {
         (Some(enc), Some(sz), Some(dec)) =>
@@ -413,15 +408,10 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     if let Some(b) = info.wb_b { params.wb_b = b; }
     if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
 
-    // Measure clarity pass cost (single run; outside bench() to allow &mut rgb16 clone).
-    let clarity_dur = {
-        let mut tmp = rgb16.clone();
-        let mut p = params.clone();
-        p.clarity = 0.5;
-        let t = Instant::now();
-        pipeline::apply_unsharp_masks(&mut tmp, w, h, &p);
-        t.elapsed()
-    };
+    // Measure clarity: cold (first call) vs warm (second, buf reused).
+    let mut cp = params.clone(); cp.clarity = 0.5;
+    let clarity_cold = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
+    let clarity_warm = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
 
     let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
     let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
@@ -442,7 +432,7 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
         "  parse {:.1}ms  decomp {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
         ms(parse_dur), ms(decomp_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
     );
-    println!("  clarity@0.5 {:.1}ms  ({:.1}% of total)", ms(clarity_dur), 100.0 * ms(clarity_dur) / ms(total));
+    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity_cold), ms(clarity_warm), 100.0 * ms(clarity_warm) / ms(total));
     match (encode_ms, jxl_size_kb, decode_ms) {
         (Some(enc), Some(sz), Some(dec)) =>
             println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),

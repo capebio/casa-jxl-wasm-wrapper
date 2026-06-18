@@ -21,17 +21,14 @@ When submitting results, include: **baseline (ms), optimized (ms), improvement (
 
 ### crates/raw-pipeline/src/pipeline.rs
 
-**[1] PR-1: Clarity pass rayon-row + SIMD vectorization (line 701)** ☐
-- **Proposed:** Add rayon parallelism + SIMD (AVX2/wasm128) to the unsharp clarity pass.
-- **Deferred reason:** Clarity is single-threaded scalar loop. No isolated baseline established. Thermal variance in prior benches exceeded any plausible gain; no corpus-level measurement confirming clarity is on the critical path.
-- **Verify:** Profile a real ORF/DNG file with clarity enabled; confirm time spent in clarity > 5% of total. If yes, benchmark rayon+SIMD branch vs current scalar.
-- **Acceptance:** Isolated clarity bench shows >5% improvement on real files with <2% thermal variance.
+**[1] PR-1: Clarity pass — explicit AVX2 kernel** ☑ (partial — measured 2026-06-18; strip-tiling attempted+reverted)
+- **Measured (2026-06-18):** ORF 20MP clarity@0.5 warm=1409ms (125% of 1120ms pipeline). DNG 12MP warm=896-1127ms.
+- **Root cause (confirmed):** Compute-bound (~10 GFLOPS effective), NOT DRAM-bandwidth limited. Rayon already parallelizes both passes. 13-tap FIR × 3ch × 2 passes = 5.2B FP ops for ORF.
+- **Tried + reverted:** Cache-tiled strip approach (STRIP_H=160) was 2.8× SLOWER — strip sequential barriers serialize Rayon, no benefit since L3 miss is not the bottleneck.
+- **Remaining:** Explicit AVX2 FMA for horizontal + vertical kernel inner loops (target: 4-8× from vectorization). Or recursive Gaussian (2× from 1-pass). Both significant work.
 
-**[2] PR-6: Luminance NR + downscale parallelism (lines 1393/1503/1493)** ☐
-- **Proposed:** Parallelize `apply_luminance_nr` and integer/box downscale paths (currently single-threaded under `parallel` feature gate).
-- **Deferred reason:** Only provably on critical path after tone/apply_tone_math kernel (70% cost center, already SIMD). These are downstream; profiler data needed to confirm they are not dominated by tone.
-- **Verify:** Run `raw_decode_bench --features jxl-codec` (or native MSVC bench) with flame graph or perf data. Confirm apply_luminance_nr + downscale > 5% of total post-tone.
-- **Acceptance:** Profiler shows the two functions as independent cost centers >5% each, then benchmark rayon+SIMD branch.
+**[2] PR-6: Luminance NR + downscale parallelism** ☑ DONE (2026-06-18)
+- **Measured + implemented:** pply_luminance_nr serial 208ms → parallel 31ms (**6.73×**). downscale_rgb16_into serial 17.9ms → parallel 4.8ms (**3.73×**). Both via par_iter_mut/par_chunks_mut. Bench verifies on each run.
 
 ---
 
@@ -65,11 +62,8 @@ When submitting results, include: **baseline (ms), optimized (ms), improvement (
 - **Verify:** WASM decode of ORF/DNG via web/pkg + profiler or `__jxlPerf` harness. Confirm scatter loop >2% of demosaic time.
 - **Acceptance:** Bench shows scatter loop >2% demosaic time, measure SIMD vector consolidation.
 
-**[7] PR-4: CFA match + border-clamp hoist (interior-loop dispatch, line ~838)** ☐
-- **Proposed:** Hoist per-pixel 4-way CFA dispatch + border clamp out of interior loop.
-- **Deferred reason:** Interior `match` is output-identical reordering, but no demosaic-level bench confirming it is the dominant cost. LJPEG is historically 97% of CR2; DNG tile decode likely bottleneck before this.
-- **Verify:** Profile DNG/ORF demosaic in isolation. Confirm CFA dispatch >3% of demosaic time.
-- **Acceptance:** Isolated demosaic bench shows dispatch >3%, measure hoist.
+**[7] PR-4: CFA match + border-clamp hoist (interior-loop dispatch, line ~838)** ☑ DONE (pre-existing)
+- demosaic_rggb_mhc hoists ow_par = row & 1 (line 1096) and processes 2-col pairs inline for all 4 CFA sites. The 4-way mhc_pixel_phased match only runs on border pixels (<=4/row). No further work needed.
 
 ---
 
