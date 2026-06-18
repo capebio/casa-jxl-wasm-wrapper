@@ -81,7 +81,7 @@ pub fn decompress_rows_into(
         let mut west = [0i32; 2];
         let mut north_west = [0i32; 2];
         // Lens 23: pointer for cur_row writes (advance instead of index)
-        let mut cur_row_ptr = cur_row.as_mut_ptr();
+        let cur_row_ptr = cur_row.as_mut_ptr();
         for col in 0..width {
             let parity = col & 1;
             let i = if acarry[parity][2] < 3 { 2 } else { 0 };

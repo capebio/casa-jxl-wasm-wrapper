@@ -246,7 +246,6 @@ const SHADOW_MASK_END: f32 = 0.6;
 const HIGHLIGHT_GAMMA_MIN: f32 = 0.05;
 const HIGHLIGHT_GAMMA_SCALE: f32 = 0.7;
 const HIGHLIGHT_MASK_START: f32 = 0.4;
-const CONTRAST_BLEND: f32 = 0.6; // for de-contrast sqrt factor etc. (kept inline where used)
 
 /// Soft highlight shoulder: identity below `HIGHLIGHT_KNEE`, then a smooth
 /// asymptotic rolloff that maps `[knee, +inf)` into `[knee, 1.0)`. The rolloff
@@ -1680,7 +1679,6 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
             let c = cache.as_ref().unwrap();
             let pre_lut_mask = c.pre_lut_len - 1;
             let pre_lut_shift = c.pre_lut_shift;
-            let post16 = c.post16.as_ref().unwrap();
             // Lens 23 pointer version for 16bit path too.
             // unsafe: same in-bounds invariant as process_into (out is n*3 u16; dst advances n*3).
             // NOTE: 4x unroll + perceptual bulk-tile (AVX2 hand intrinsics for pc) pattern implemented in process_into !par block.
