@@ -16,6 +16,16 @@ const CRAWL_SCHEMA = { type: 'object', required: ['files'], properties: { files:
   items: { type: 'object', required: ['path','layer'],
     properties: { path:{type:'string'}, layer:{enum:['rust','ts','cpp','js','other']} } } } } }
 
+// Lens sweep: what the lens agent EXAMINED (superset of files with findings) + the findings.
+// `examined` powers the coverage ledger (examined-but-clean ≠ never-looked).
+const SWEEP_SCHEMA = { type: 'object', required: ['examined','findings'], properties: {
+  examined: { type: 'array', items: { type: 'string' } },
+  findings: { type: 'array', items: { type: 'object',
+    required: ['lens','layer','file','location','hypothesis','predicted_gain_pct'],
+    properties: { lens:{enum:['aerial','seam','architecture','operational','tactical','mathematical']},
+      layer:{type:'string'}, file:{type:'string'}, location:{type:'string'},
+      hypothesis:{type:'string'}, predicted_gain_pct:{type:'number'} } } } } }
+
 const BASELINE_SCHEMA = { type: 'object', required: ['rows'], properties: { rows: { type: 'array',
   items: { type: 'object', required: ['file','metric','median_ms','bound_class','trust'],
     properties: { file:{type:'string'}, metric:{type:'string'}, median_ms:{type:'number'},
@@ -108,18 +118,21 @@ if (cfg.targetPath) {
   log(`crawl: ${crawled.length} source files under ${cfg.targetPath}`)
 
   // One optimizer per lens crawls the file list applying its altitude.
-  const findings = (await parallel(
+  // Each returns `examined` (every file it looked at) + `findings` → feeds the coverage ledger.
+  const sweeps = (await parallel(
     cfg.lenses.map(lensId => () => {
       const lens = LENSES.find(l => l.id === lensId)
       return agent(
         `LENS=${lensId}. ${lens.charter}\n` +
         `Crawl these files under ${cfg.targetPath} and apply THIS lens only: ${JSON.stringify(crawled)}.\n` +
-        `Return concrete speed/memory/dedup findings (each names the file + location).`,
-        { label: `crawl:${lensId}`, phase: 'Crawl', schema: FINDING_SCHEMA }
-      )
+        `Return BOTH: \`examined\` = every file path you actually looked at (even if you found nothing — ` +
+        `this is the coverage record), and \`findings\` = concrete speed/memory/dedup wins (each names file + location).`,
+        { label: `crawl:${lensId}`, phase: 'Crawl', schema: SWEEP_SCHEMA }
+      ).then(r => r && ({ lens: lensId, examined: r.examined ?? [], findings: r.findings ?? [] }))
     })
-  )).filter(Boolean).flatMap(r => r.findings ?? [])
-  log(`crawl findings: ${findings.length}`)
+  )).filter(Boolean)
+  const findings = sweeps.flatMap(s => s.findings)
+  log(`crawl findings: ${findings.length} across ${sweeps.length} lens sweeps`)
 
   const verdicts = await pipeline(
     findings,
@@ -133,11 +146,19 @@ if (cfg.targetPath) {
   const wins = verdicts.filter(Boolean).filter(v => v.accepted)
   log(`folder banked: ${wins.length}/${verdicts.filter(Boolean).length}`)
 
+  const crawledPaths = JSON.stringify(crawled.map(f => f.path))
+  const sweepData = JSON.stringify(sweeps.map(s => ({ lens: s.lens, examined: s.examined,
+    findingsByFile: s.findings.reduce((m, f) => ((m[f.file] = (m[f.file] || 0) + 1), m), {}) })))
   const folderReport = await agent(
-    `Synthesize the folder optimization of ${cfg.targetPath}. Banked: ${JSON.stringify(wins)}. ` +
-    `Write a revert manifest (benchmark/optimize/manifest.mjs, one isolated diff per change). ` +
-    `Then a completeness critic pass: which lens×file gaps were not explored, what regressed, what is deferred. ` +
-    `Return a markdown report path + the deferred-work list.`,
+    `Synthesize the folder optimization of ${cfg.targetPath}. Banked: ${JSON.stringify(wins)}.\n` +
+    `1) COVERAGE: update the ledger docs/outputs/optimize/coverage-ledger.json with ` +
+    `benchmark/optimize/coverage.mjs — loadLedger, then recordSweep once per lens with a fresh run id ` +
+    `(ISO timestamp), then saveLedger. Sweep data: ${sweepData}.\n` +
+    `2) GAPS: call gaps(ledger, ${crawledPaths}, ${JSON.stringify(cfg.lenses)}) and saturated(ledger, 2). ` +
+    `Report the coverage matrix, the (file×lens) gaps that were never examined, and which pairs are ` +
+    `saturated (dry — stop sweeping) vs need another sweep.\n` +
+    `3) Write a revert manifest (benchmark/optimize/manifest.mjs, one isolated diff per banked change).\n` +
+    `Return a markdown report path + the gaps list + the re-sweep recommendation.`,
     { phase: 'Crawl' }
   )
   return { mode: 'folder', target: cfg.targetPath, banked: wins.length, report: folderReport }

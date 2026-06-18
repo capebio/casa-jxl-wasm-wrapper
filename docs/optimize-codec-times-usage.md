@@ -26,6 +26,14 @@ wins before rebuild-heavy architecture rewrites.
 Outputs: per-metric speed/quality/rss deltas, a revert manifest (patches/ + manifest.md,
 cherry-pick to land), and a deferred-work list. Idempotent — re-running on optimized code banks nothing.
 
+COVERAGE LEDGER (folder mode): docs/outputs/optimize/coverage-ledger.json records, per (file × lens),
+how many times an agent EXAMINED it (examined-but-clean ≠ never-looked). The report names:
+- gaps — (file,lens) pairs never examined → re-run to fill them.
+- saturated — pairs examined ≥2× whose last sweep found nothing → dry, stop sweeping.
+Re-running folder mode on the same path accumulates visits, so you can sweep until coverage is
+complete AND the last sweep is dry. Inspect anytime:
+  node -e "import('./benchmark/optimize/coverage.mjs').then(async m=>{const {readFileSync}=await import('node:fs');const L=m.loadLedger('docs/outputs/optimize/coverage-ledger.json');console.log(m.matrix(L,Object.keys(L.files),['aerial','seam','architecture','tactical']))})"
+
 Prereqs:
 - flipflop skill installed (node flipflop.mjs --help works). Verified to provide async variants,
   quality() hook, --inputs, and variant role tags.

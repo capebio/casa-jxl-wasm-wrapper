@@ -125,6 +125,20 @@ Rules:
   unless algebraic equivalence is proven.
 - Lens set parameterizable via `args.lenses` (default: all six).
 
+### 4.5b Coverage ledger
+
+Each lens optimizer returns `examined` (every file it looked at, a superset of files with
+findings) alongside `findings`. A persistent ledger
+(`docs/outputs/optimize/coverage-ledger.json`, helper `benchmark/optimize/coverage.mjs`) records
+per (file × lens): `visits`, `lastFindings`, `totalFindings`. This distinguishes
+**examined-but-clean** (`visits>0, lastFindings=0`) from **never-looked** (a gap) — findings
+alone cannot. Queries:
+- `gaps(files, lenses)` — (file,lens) never examined → what was missed; re-run to fill.
+- `saturated(minVisits)` — examined ≥N× with last sweep empty → dry, stop sweeping.
+The completeness critic reads the ledger to report the coverage matrix + recommend a re-sweep.
+Re-running accumulates visits → sweep until coverage is complete AND the last pass is dry
+(concrete loop-until-dry termination).
+
 ### 4.6 Hot-files seed
 
 Finders point here first (from `docs/0 Core Hot Files.md` + `docs/0 boundary-cost-audit.md`)
