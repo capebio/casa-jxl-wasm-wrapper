@@ -216,7 +216,7 @@ node [--expose-gc] flipflop.mjs <test-file> [options]
 %TEMP%/flipflop-corpus/         # cmd-mode TIFF cache (per machine)
 ```
 
-`.flipflop/` and the repo-root engine copies are git-ignored by default (the canonical copy is the skill); the journal under `docs/outputs/` is intentionally **not** ignored (it is the kept record).
+**Tracked vs ignored (this repo):** the repo-root engine `.mjs` are **tracked/committed** (matches the existing tracked root benchmarks; this is the working source for the project). `.flipflop/tests/` and `%TEMP%/flipflop-corpus/` are **git-ignored**. The journal under `docs/outputs/` is **tracked** — it is the kept record. The skill's `engine/` dir is the portable canonical copy used to seed *other* repos that don't yet have the engine.
 
 ## 13. Edge cases & error handling
 
