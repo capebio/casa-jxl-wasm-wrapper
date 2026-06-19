@@ -2266,9 +2266,9 @@ pub struct PerceptualComparer {
 impl PerceptualComparer {
     #[wasm_bindgen(constructor)]
     pub fn new(ref_rgba: &[u8], width: usize, height: usize) -> PerceptualComparer {
-        let n = width * height;
+        let n = width.saturating_mul(height);
         let inner = PerceptualCore::new(ref_rgba, width, height, Opts::default());
-        PerceptualComparer { inner, scratch: vec![0u8; n * 4] }
+        PerceptualComparer { inner, scratch: vec![0u8; n.saturating_mul(4)] }
     }
 
     /// Copying convenience path: pass RGBA, get {butteraugli, ssim, psnr} as a JS object.
@@ -2302,7 +2302,11 @@ impl PerceptualComparer {
     pub fn all_at(&mut self, len: usize) -> JsValue {
         // Split the borrow: take the staging buffer out, evaluate, put it back.
         let buf = std::mem::take(&mut self.scratch);
-        let m = self.inner.all(&buf[..len]);
+        // Guard against a mismatched/early `len` from JS (e.g. `all_at` called
+        // before `input_ptr`, or with a stale length): slicing past the staging
+        // buffer would trap the module. Clamp to what is actually allocated.
+        let n = len.min(buf.len());
+        let m = self.inner.all(&buf[..n]);
         self.scratch = buf;
         metrics_to_js(&m)
     }
@@ -2489,7 +2493,7 @@ pub fn fstats_fast() -> JsValue {
 /// `pixels` into wasm linear memory on every call). Isolates the copy cost vs resident.
 #[wasm_bindgen]
 pub fn fstats_copy(pixels: &[u8], width: usize, height: usize) -> JsValue {
-    let px = width * height;
+    let px = width.saturating_mul(height);
     fs_to_js(&fs_core_scalar(pixels, px), px)
 }
 
@@ -2821,7 +2825,7 @@ fn fs_core_trunc_exact(d: &[u8], px: usize, limit: usize) -> FsRaw {
 #[wasm_bindgen]
 pub fn frame_stats(pixels: &[u8], width: usize, height: usize) -> JsValue {
     let px = width.saturating_mul(height);
-    let expected = px * 4;
+    let expected = px.saturating_mul(4);
     let limit = pixels.len().min(expected);
     let raw = if limit == expected {
         fs_core_simd(pixels, px)
