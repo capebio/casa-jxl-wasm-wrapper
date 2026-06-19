@@ -1032,7 +1032,7 @@ function makeCard(name) {
             <span class="size"></span>
         </div>
     `;
-    card.querySelector('.name').textContent = name.replace(/\.orf$/i, '');
+    card.querySelector('.name').textContent = name.replace(/\.(orf|cr2|dng)$/i, '');
     card.querySelector('.thumb-select').addEventListener('click', (e) => {
         e.stopPropagation();
         card.classList.toggle('selected');
@@ -1042,7 +1042,7 @@ function makeCard(name) {
     });
     card.querySelector('.thumb-dl-btn').addEventListener('click', (e) => {
         e.stopPropagation();
-        const stem = (card._file?.name || 'image').replace(/\.orf$/i, '');
+        const stem = (card._file?.name || 'image').replace(/\.(orf|cr2|dng)$/i, '');
         const cv = card.querySelector('canvas');
         cv.toBlob((blob) => {
             if (!blob) return;
@@ -1793,8 +1793,10 @@ async function handleFileList(fileList) {
     for (const f of orfs) startConvert(f);
 }
 
+// Supported RAW formats: Olympus ORF, Canon CR2, Adobe/Pixel DNG. (Name kept `isOrf`
+// for the many existing call sites; predicate now matches all three.)
 function isOrf(file) {
-    return /\.orf$/i.test(file.name);
+    return /\.(orf|cr2|dng)$/i.test(file.name);
 }
 
 // Walk a DataTransfer entry tree (only available on `drop` via
@@ -3106,7 +3108,7 @@ if (lbToggleJpegBtn) {
 lbDownloadBtn.addEventListener('click', () => {
     const card = cards[lightboxIndex];
     if (!card) return;
-    const stem = (card._file?.name || 'image').replace(/\.orf$/i, '');
+    const stem = (card._file?.name || 'image').replace(/\.(orf|cr2|dng)$/i, '');
     lightboxCanvas.toBlob((blob) => {
         if (!blob) return;
         const url = URL.createObjectURL(blob);

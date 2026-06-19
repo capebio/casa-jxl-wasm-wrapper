@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ORF → JPEG XL (browser)</title>
+    <title>RAW → JPEG XL (browser)</title>
     <link rel="stylesheet" href="style.css" />
     <link rel="stylesheet" href="test-nav.css" />
     <link rel="stylesheet" href="casabio.css" />
@@ -97,8 +97,8 @@
         <div class="file-sidebar-panel" id="sidebar-panel">
             <div class="resize-handle" id="files-resize"></div>
             <section id="drop" class="drop-target">
-                <input type="file" id="file-input" multiple accept=".orf,.ORF" class="visually-hidden" />
-                <button id="pick">Pick ORF files</button>
+                <input type="file" id="file-input" multiple accept=".orf,.ORF,.cr2,.CR2,.dng,.DNG" class="visually-hidden" />
+                <button id="pick">Pick image files</button>
                 <p class="hint">or drop files / folders here</p>
             </section>
         </div>
@@ -108,7 +108,7 @@
         <div class="title">
             <div class="title-copy">
                 <div class="title-line">
-                    <h1>ORF to JPEG XL browser test bench</h1>
+                    <h1>RAW (ORF / CR2 / DNG) to JPEG XL browser test bench</h1>
                     <button class="info-btn" id="info-btn" type="button" aria-label="About this tool">ℹ</button>
                 </div>
                 <p class="title-subcopy">Encode, benchmark, and inspect timing across the browser pipeline.</p>

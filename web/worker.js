@@ -20,7 +20,22 @@
 
 import init, * as rawWasm from './pkg/raw_converter_wasm.js';
 // A3: rgb_to_rgba removed — send RGB8 directly to JXL worker (saves ~250ms + 25% transfer)
-const { process_orf, process_orf_with_flags, LookRenderer, rotate_rgb8 } = rawWasm;
+const { process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8 } = rawWasm;
+
+// Route a RAW buffer to the right decoder by magic bytes (robust vs. filename):
+//   Olympus ORF: 'IIR' (IIRO/IIRS/IIUS).  Canon CR2: TIFF 'II*\0' with 'CR' at offset 8.
+//   Everything else TIFF-like (II*\0 / MM\0*) → DNG. Falls back to ORF if unrecognized.
+function pickRawDecoderWithFlags(bytes) {
+  const b = bytes;
+  if (b.length >= 10) {
+    if (b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x52) return process_orf_with_flags; // IIR*
+    if (b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a && b[3] === 0x00 &&
+        b[8] === 0x43 && b[9] === 0x52) return process_cr2_with_flags;                  // II*\0 + 'CR'
+    if ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a) ||
+        (b[0] === 0x4d && b[1] === 0x4d && b[3] === 0x2a)) return process_dng_with_flags; // TIFF → DNG
+  }
+  return process_orf_with_flags;
+}
 
 // EXIF orientation flag bits (mirror src/lib.rs).
 const OUT_FULL_RGB8 = 1;
@@ -187,7 +202,7 @@ self.addEventListener('message', async (ev) => {
         // rotation as metadata, so pixels stay sensor-native and we avoid the
         // 60–200 MB intermediate buffer + cache-hostile transpose at encode prep.
         const fullPipeFlags = OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB | OUT_NO_ORIENT;
-        const result = process_orf_with_flags(
+        const result = pickRawDecoderWithFlags(bytes)(
             bytes,
             fullPipeFlags,
             look.exposureEv ?? 0,
