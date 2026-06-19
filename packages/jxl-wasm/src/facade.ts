@@ -201,7 +201,7 @@ export interface EncoderOptions {
   /**
    * Extra channels to encode alongside the main image (Phase 2 full support).
    * Each descriptor's pixel data is supplied out-of-band for the low-level path
-   * (or future high-level Encoder extension). The 72-byte packed descriptor form
+   * (or future high-level Encoder extension). The 20-byte packed descriptor form
    * (matching WasmExtraChannel in bridge.cpp) is used for the WASM FFI.
    * (serializeExtraChannelsForWasm + post-malloc plane_ptr writes by caller.)
    */
@@ -592,11 +592,12 @@ export function createDecoder(options: DecoderOptions): JxlDecoder {
 }
 
 // Task 3: 72-byte packed descriptor for WASM FFI (exact layout matches C++ struct WasmExtraChannel sizeof==72).
-// Byte layout (no padding; 4B aligned):
-//   0:type(u32), 4:bits(u32), 8:distance(f32), 12:plane_ptr(u32), 16:plane_size(u32), 20:dim_shift(u32)
-//   24-39: spot[4](f32), 40:name_len(u8), 41-71:name[31] (UTF-8 truncated, zero-padded remainder)
+// Byte layout (no padding; 4B aligned) — MUST match `struct WasmExtraChannel` in bridge.cpp (20 bytes):
+//   0:type(u32), 4:bits(u32), 8:distance(f32), 12:plane_ptr(u32), 16:plane_size(u32)
 // plane_ptr/plane_size left 0 by serialize; filled by TS caller after separate per-plane _malloc.
-export const EC_BYTES = 72;
+// TODO: dimShift / spotColor / name on ExtraChannel are NOT yet wired to the C++ encoder
+// (no struct field reads them). They are intentionally not serialized until bridge.cpp grows them.
+export const EC_BYTES = 20;
 
 const EXTRA_TYPE_TO_JXL: Record<ExtraChannelType, number> = {
   alpha: 0, depth: 1, selection: 3, spot: 2, thermal: 6,
@@ -605,10 +606,13 @@ const EXTRA_TYPE_TO_JXL: Record<ExtraChannelType, number> = {
 };
 
 /**
- * Serializes ExtraChannel[] to a 72*N byte ArrayBuffer for the EC encode FFI.
- * Names UTF-8 truncated to 31 bytes, zero-padded. plane_ptr/plane_size left as 0 (filled by caller after malloc).
+ * Serializes ExtraChannel[] to a 20*N byte ArrayBuffer for the EC encode FFI.
+ * Layout matches `struct WasmExtraChannel` in bridge.cpp exactly — the ONLY consumer:
+ *   0:type(u32), 4:bits(u32), 8:distance(f32), 12:plane_ptr(u32), 16:plane_size(u32).
+ * plane_ptr/plane_size left as 0 (filled by caller after per-plane malloc).
  * Returns { buffer, view } for direct DataView writes of pointers/sizes by caller.
- * Offsets match bridge.cpp WasmExtraChannel exactly (critical for num_ec > 0; prior 56B caused overlap).
+ * NOTE: dimShift / spotColor / name on ExtraChannel are NOT serialized — the C++ struct
+ * does not read them yet. Wiring them requires growing WasmExtraChannel in bridge.cpp first.
  */
 export function serializeExtraChannelsForWasm(channels: ExtraChannel[]): { buffer: ArrayBuffer; view: DataView } {
   const n = channels.length;
@@ -621,18 +625,6 @@ export function serializeExtraChannelsForWasm(channels: ExtraChannel[]): { buffe
     dv.setUint32(off + 4, ch.bitsPerSample >>> 0, true);
     dv.setFloat32(off + 8, ch.distance ?? 0, true);
     // plane_ptr (12) and plane_size (16) filled by caller post-malloc
-    dv.setUint32(off + 20, (ch.dimShift ?? 0) >>> 0, true);
-    const spot = ch.spotColor;
-    dv.setFloat32(off + 24, spot ? spot.red : 0, true);
-    dv.setFloat32(off + 28, spot ? spot.green : 0, true);
-    dv.setFloat32(off + 32, spot ? spot.blue : 0, true);
-    dv.setFloat32(off + 36, spot ? spot.solidity : 0, true);
-    const nameStr = ch.name ?? '';
-    const nameBytes = TEXT_ENCODER.encode(nameStr);
-    const nameLen = Math.min(nameBytes.length, 31);
-    dv.setUint8(off + 40, nameLen);
-    for (let k = 0; k < nameLen; k++) dv.setUint8(off + 41 + k, nameBytes[k] ?? 0);
-    // remainder already zeroed (pad)
     off += EC_BYTES;
   }
   return { buffer: buf, view: dv };

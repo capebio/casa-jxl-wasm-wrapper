@@ -1369,112 +1369,51 @@ describe('ExtraChannel full infrastructure (Phase 2)', () => {
     expect(bad).toBeDefined();
   });
 
-  it('encodes and roundtrips full ExtraChannel descriptors (synthetic planes: spot 8-bit + depth 16-bit + named thermal) via packed 72B bridge', async () => {
-    const mod = await loadPreferredLibjxlModule();
-    if (typeof mod._jxl_wasm_encode_rgba8_with_extra_channels !== 'function' ||
-        typeof mod._jxl_wasm_get_extra_channels !== 'function' ||
-        typeof mod._malloc !== 'function') {
-      // Bridge not rebuilt with Task 3 symbols yet — skip (build step will enable)
-      return;
-    }
-
-    const w = 4, h = 2;
-    // Main RGBA8 (synthetic)
-    const main = new Uint8Array(w * h * 4);
-    for (let i = 0; i < main.length; i += 4) { main[i] = 120; main[i+1] = 130; main[i+2] = 140; main[i+3] = 255; }
-
-    // EC 0: 8-bit spot (constant) - synthetic plane
-    const spotPlane = new Uint8Array(w * h); spotPlane.fill(200);
-    // EC 1: 16-bit depth (gradient-ish) - synthetic plane
-    const depthPlane = new Uint16Array(w * h);
-    for (let i = 0; i < depthPlane.length; i++) depthPlane[i] = 1000 + i * 10;
-    const depthBytes = new Uint8Array(depthPlane.buffer);
-    // EC 2: 8-bit thermal named - synthetic plane
-    const thermalPlane = new Uint8Array(w * h); thermalPlane.fill(77);
+  it('serializes ExtraChannel descriptors at the 20-byte WasmExtraChannel stride (channels 1..N land at i*20)', () => {
+    // EC_BYTES must match `struct WasmExtraChannel` in bridge.cpp (20 bytes), the only consumer.
+    // The previous 72-byte stride misaligned every channel after #0 (writer i*72 vs reader i*20).
+    expect(EC_BYTES).toBe(20);
 
     const channels: ExtraChannel[] = [
       { type: 'spot', bitsPerSample: 8, name: 'RedSpot', distance: 0.1, spotColor: { red: 0.95, green: 0.05, blue: 0.1, solidity: 0.85 } },
-      { type: 'depth', bitsPerSample: 16, dimShift: 0, name: 'Depth16' },
+      { type: 'depth', bitsPerSample: 16, dimShift: 0, name: 'Depth16', distance: 0.5 },
       { type: 'thermal', bitsPerSample: 8, name: 'ThermalCam' },
     ];
 
-    const { buffer: descBuf, view: descDv } = serializeExtraChannelsForWasm(channels);
-    const descPtr = mod._malloc(descBuf.byteLength);
-    const spotPtr = mod._malloc(spotPlane.length);
-    const depthPtr = mod._malloc(depthBytes.length);
-    const thermalPtr = mod._malloc(thermalPlane.length);
-    const mainPtr = mod._malloc(main.length);
+    const { buffer, view } = serializeExtraChannelsForWasm(channels);
 
-    try {
-      mod.HEAPU8.set(main, mainPtr);
-      mod.HEAPU8.set(spotPlane, spotPtr);
-      mod.HEAPU8.set(depthBytes, depthPtr);
-      mod.HEAPU8.set(thermalPlane, thermalPtr);
-      mod.HEAPU8.set(new Uint8Array(descBuf), descPtr);
+    // Buffer is exactly 20*N — no oversized stride.
+    expect(buffer.byteLength).toBe(channels.length * 20);
+    expect(view.byteLength).toBe(channels.length * 20);
 
-      // Write plane pointers/sizes into the descriptors (offsets per EC_BYTES=72, matching C++ struct)
-      const EC = EC_BYTES;
-      // EC0 spot
-      descDv.setUint32(0*EC + 12, spotPtr >>> 0, true);
-      descDv.setUint32(0*EC + 16, spotPlane.length >>> 0, true);
-      // EC1 depth
-      descDv.setUint32(1*EC + 12, depthPtr >>> 0, true);
-      descDv.setUint32(1*EC + 16, depthBytes.length >>> 0, true);
-      // EC2 thermal
-      descDv.setUint32(2*EC + 12, thermalPtr >>> 0, true);
-      descDv.setUint32(2*EC + 16, thermalPlane.length >>> 0, true);
+    const EC = EC_BYTES; // 20
 
-      // Re-copy updated desc
-      mod.HEAPU8.set(new Uint8Array(descBuf), descPtr);
+    // Channel 0: spot, 8-bit, distance 0.1 — at offset 0.
+    expect(view.getUint32(0 * EC + 0, true)).toBe(2); // SPOT_COLOR
+    expect(view.getUint32(0 * EC + 4, true)).toBe(8); // bits
+    expect(view.getFloat32(0 * EC + 8, true)).toBeCloseTo(0.1, 5); // distance
+    expect(view.getUint32(0 * EC + 12, true)).toBe(0); // plane_ptr (filled by caller post-malloc)
+    expect(view.getUint32(0 * EC + 16, true)).toBe(0); // plane_size
 
-      const handle = mod._jxl_wasm_encode_rgba8_with_extra_channels!(
-        mainPtr, w, h, 1.0 /*distance*/, 4 /*effort*/, 0 /*no alpha*/, descPtr, 3
-      );
-      expect(handle).not.toBe(0);
-      const err = mod._jxl_wasm_buffer_error ? mod._jxl_wasm_buffer_error(handle) : 0;
-      expect(err).toBe(0);
+    // Channel 1: depth, 16-bit, distance 0.5 — MUST be at offset 20 (the bug put it at 72).
+    expect(view.getUint32(1 * EC + 0, true)).toBe(1); // DEPTH
+    expect(view.getUint32(1 * EC + 4, true)).toBe(16); // bits
+    expect(view.getFloat32(1 * EC + 8, true)).toBeCloseTo(0.5, 5); // distance
+    expect(view.getUint32(1 * EC + 12, true)).toBe(0);
+    expect(view.getUint32(1 * EC + 16, true)).toBe(0);
 
-      const size = mod._jxl_wasm_buffer_size(handle);
-      expect(size).toBeGreaterThan(100); // JXL bytes >0 (synthetic EC content encoded)
-      const jxlPtr = mod._jxl_wasm_buffer_data(handle);
-      const jxlBytes = new Uint8Array(size);
-      jxlBytes.set(mod.HEAPU8.subarray(jxlPtr, jxlPtr + size));
+    // Channel 2: thermal, 8-bit, default distance 0 — at offset 40.
+    expect(view.getUint32(2 * EC + 0, true)).toBe(6); // THERMAL
+    expect(view.getUint32(2 * EC + 4, true)).toBe(8); // bits
+    expect(view.getFloat32(2 * EC + 8, true)).toBeCloseTo(0, 5); // distance default
 
-      // Free encode buffer
-      mod._jxl_wasm_buffer_free(handle);
-
-      // Decode header via helper -> assert descriptors roundtripped (names/types/bits/spot values)
-      const infoH = mod._jxl_wasm_get_extra_channels!(jxlPtr, size);  // note: we pass the encoded bytes ptr/size
-      expect(infoH).not.toBe(0);
-      const infoSize = mod._jxl_wasm_buffer_size(infoH);
-      expect(infoSize).toBe(3 * EC_BYTES);
-      const infoDataPtr = mod._jxl_wasm_buffer_data(infoH);
-      const infoBytes = mod.HEAPU8.subarray(infoDataPtr, infoDataPtr + infoSize);
-
-      // Parse using exact 72B stride + field offsets (matches both sides now)
-      const dv = new DataView(infoBytes.buffer, infoBytes.byteOffset, infoBytes.byteLength);
-      // spot (first)
-      expect(dv.getUint32(0*EC + 0, true)).toBe(2); // SPOT_COLOR
-      expect(dv.getUint32(0*EC + 4, true)).toBe(8);
-      expect(dv.getUint8(0*EC + 40)).toBeGreaterThan(0); // name len
-      expect(dv.getFloat32(0*EC + 24, true)).toBeCloseTo(0.95, 5);
-      expect(dv.getFloat32(0*EC + 28, true)).toBeCloseTo(0.05, 5);
-      expect(dv.getFloat32(0*EC + 32, true)).toBeCloseTo(0.1, 5);
-      expect(dv.getFloat32(0*EC + 36, true)).toBeCloseTo(0.85, 5);
-      // depth
-      expect(dv.getUint32(1*EC + 0, true)).toBe(1); // DEPTH
-      expect(dv.getUint32(1*EC + 4, true)).toBe(16);
-      // thermal
-      expect(dv.getUint32(2*EC + 0, true)).toBe(6); // THERMAL
-      expect(dv.getUint32(2*EC + 4, true)).toBe(8);
-      const nameStart = 2*EC + 41;
-      const nameLen = dv.getUint8(2*EC + 40);
-      const nameBytes = infoBytes.subarray(nameStart, nameStart + nameLen);
-      expect(new TextDecoder().decode(nameBytes)).toBe('ThermalCam');
-
-      mod._jxl_wasm_buffer_free(infoH);
-    } finally {
-      mod._free(descPtr); mod._free(spotPtr); mod._free(depthPtr); mod._free(thermalPtr); mod._free(mainPtr);
-    }
+    // Caller post-malloc writes of plane_ptr/plane_size at +12/+16 land in the right slot per channel.
+    view.setUint32(1 * EC + 12, 0xCAFE, true);
+    view.setUint32(1 * EC + 16, 64, true);
+    expect(view.getUint32(1 * EC + 12, true)).toBe(0xCAFE);
+    expect(view.getUint32(1 * EC + 16, true)).toBe(64);
+    // ...and do NOT clobber neighbouring channels (proves stride correctness).
+    expect(view.getUint32(0 * EC + 0, true)).toBe(2);
+    expect(view.getUint32(2 * EC + 0, true)).toBe(6);
   });
 });
