@@ -896,3 +896,36 @@ Target: `tiff.rs cr2.rs dng.rs ljpeg.rs decompress.rs demosaic.rs`. 61 findings 
 **Status:** The `(this as any).testFetchTierWithPrefix = (opts as any).testFetchTierWithPrefix` cast in the constructor (line 175) remains as-is.  
 **Why:** `private readonly testFetchTierWithPrefix?: typeof fetchTierWithPrefix` declares an optional field. With `exactOptionalPropertyTypes: true`, you cannot assign `T | undefined` to a target typed as `T`. The direct assignment `this.testFetchTierWithPrefix = opts.testFetchTierWithPrefix` causes TS2412.  
 **Clean fix:** Change the field declaration to `private testFetchTierWithPrefix: typeof fetchTierWithPrefix | undefined = undefined` (not optional, but explicitly union with undefined). Then the assignment in the constructor is valid without a cast.
+
+---
+
+## Run `epiccodereview/20260619T130329Z` — ProgressiveJXLEncodeBunch (global architecture & vision pass)
+
+Target: the 7-file progressive-JXL encode bunch (casaencoder, casabio_encode, jxl-ffi, jxl-progressive index/manifest/stream/scheduler), workalone. Section direct fixes already landed in commit `414c8ec2`. The items below are the whole-target opportunities (mostly ADR-level) and the cross-file issues deferred for human ratification.
+
+### FLAGSHIP ADR (highest leverage — directly cuts encode time)
+- **Derive all three delivery tiers from ONE progressive JXL encode** instead of three independent libjxl passes. Draft: `.epiccodereview/20260619T130329Z/global/adr_draft/single-pass-progressive-encode.md`. Recommends: one progressive encode (ProgressiveDc + GroupOrder) + encoder-emitted byte offsets, retiring the `profileJxl` post-encode re-decode. Expected ~2/3 encode-CPU + storage reduction at ingest. Reversible: partial (stored-format change needs migration). GATE: per-tier Butteraugli/ΔE must hold — measure with the existing `.flipflop/tests/photon-qprogac.mjs` + `.verify-quality` sibling before flipping any default. **This is the big timing win; it was NOT auto-applied (architectural + storage-format = no-go without sign-off).**
+
+### Architecture opportunities (deferred — ADR/design decisions)
+- `casabio_encode.rs` parallel path runs 3 single-threaded libjxl `Encoder`s concurrently under rayon — subsumed by the flagship (one encode removes the need for 3-way fan-out).
+- `crates/jxl-ffi/src/lib.rs` is effectively empty on `wasm32` — there is no in-scope WASM-side progressive-encode bridge; the browser path can't produce progressive JXL today. Design decision: where does WASM progressive encode live.
+- `progressive-scheduler.ts:605` `prefixAccum` grow buffer has no upper bound — a full JXL accumulates unbounded in memory; needs a designed memory budget (P7).
+- `progressive-profile.ts:191` `computeSha256` is a second full sequential scan of `jxlBytes` after profiling — fuse with the profiling pass or move off the hot path (also see Q-perf below).
+
+### Vision opportunities (deferred — aspirational, ADR)
+- `ManifestTier` carries no per-tier pixel `width`/`height` (LOD metadata) — ML input sizing / AR / pyramid LOD must decode the header or guess. Small schema addition + encoder emit.
+- `TierFetchOptions` has no `timeoutMs` — an AR recognition pass can't enforce a hard DC-tier deadline without coupling into the scheduler's AbortController. Trivial: add `timeoutMs` backed by `AbortSignal.timeout()`.
+- `perceptual` passthrough on the manifest is `Record<string,unknown>` — no typed contract for the planned LookRenderer / Perceptual Constancy Mode metadata.
+- `onManifest` is the natural ML-dispatch point but carries no tier-resolution info; `ProgressiveImageJob` has no predicted-arrival-time and `fairnessScore` no render-budget signal (game-engine-style streaming/LOD scheduling); `streamTierFrames` discards per-frame byte offsets; encoder declares depth/spectral extra channels that are never populated.
+
+### Cross-file ISSUES deferred (confirmed, not auto-fixed)
+- **byteStart dead field** (`progressive-manifest.ts` ManifestTier): `byteStart` is always written 0 and never read (consumer uses cumulative `bytes=0-byteEnd`). Removing it is a public schema change → defer (no-go for unilateral edit). Decide alongside the flagship offset rework.
+- **manifest double-fetch race** (`progressive-scheduler.ts:428`): `prefetchManifest` and `startDecode` can both fetch the manifest for the same job. PARTIALLY mitigated by the landed TOCTOU local-capture fix, but the duplicate-fetch dedup itself is unaddressed — track the in-flight manifest promise per job and share it.
+
+### Perf items measured-but-deferred (from section pass)
+- Q1 `progressive-scheduler.ts:484` tick() re-sorts candidates every RAF — dirty-flag gives 73-80% on the sort, but absolute cost is small vs test-suite risk; deferred.
+- Q2 `progressive-scheduler.ts:400/247` full linear scan for earliest retry — 97% faster incrementally but absolute ~3.4µs; deferred.
+- Q3 `progressive-scheduler.ts:454` teeFetch tee() double-buffering + Q `:700` synchronous full-bytes SHA-256 — both architectural/threading changes; deferred (don't half-do crypto/threading).
+
+### HIGH-PRIORITY follow-up (out of requested scope but exposed by this run)
+- `progressive-profile.ts:156` — DC tier `byteEnd` is set to `bytesPushed` at the frame event and can reach/exceed the full file size; `profile.test.ts` "dc tier byteEnd is less than full file size" now FAILS (1/86). The suite was previously uncompilable (scheduler TS errors), so this pre-existing bug was hidden; fixing the compile block exposed it. `progressive-profile.ts` was NOT in the requested 7-file scope so it was not edited — recommend a focused follow-up (it is the same byte-offset-contract bug the flagship ADR addresses).
