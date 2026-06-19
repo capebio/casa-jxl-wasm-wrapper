@@ -14,11 +14,12 @@ fn synth(w: usize, h: usize, seed: u32) -> Vec<u8> {
     let mut px = vec![0u8; n * 4];
     for i in 0..n {
         let x = (i % w) as f32; let y = (i / w) as f32;
-        px[i * 4] = ((x * 255.0 / w as f32 + 40.0 * (y / 17.0).sin()) as i32 & 255) as u8;
-        px[i * 4 + 1] = ((y * 255.0 / h as f32 + 40.0 * (x / 23.0).sin()) as i32 & 255) as u8;
-        px[i * 4 + 2] = (((x + y) * 127.0 / (w + h) as f32) as i32 & 255) as u8;
+        // Add RNG-based noise to break coherent patterns that might alias with SIMD widths.
+        let noise = (rng() >> 24) as u8;
+        px[i * 4] = (((x * 255.0 / w as f32 + 40.0 * (y / 17.0).sin()) as i32 & 255) as u8).wrapping_add(noise >> 4);
+        px[i * 4 + 1] = (((y * 255.0 / h as f32 + 40.0 * (x / 23.0).sin()) as i32 & 255) as u8).wrapping_add(noise >> 5);
+        px[i * 4 + 2] = ((((x + y) * 127.0 / (w + h) as f32) as i32 & 255) as u8).wrapping_add(noise >> 6);
         px[i * 4 + 3] = 255;
-        let _ = rng();
     }
     px
 }
@@ -52,7 +53,8 @@ fn main() {
     ];
     // AVX-512 routes are added only when the CPU actually supports them — forcing
     // them on a non-AVX-512 part would execute illegal instructions (SIGILL).
-    // When present they take indices 3 (strict) and 4 (rsqrt).
+    // When present, candidates indices 3 (strict, Force(3)) and 4 (rsqrt, Force(5)).
+    // Note: Force id 4 = WasmSimd; Force ids are non-contiguous — rsqrt uses Force(5).
     let have_avx512 = std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw");
     if have_avx512 {
         candidates.push(("avx512-strict", BackendChoice::Force(3)));
@@ -72,9 +74,15 @@ fn main() {
     }
     for &(ia, ib) in &pairs {
         let (mut a_times, mut b_times) = (Vec::new(), Vec::new());
-        for _ in 0..rounds {
-            a_times.push(time_runs(&reference, &test, w, h, candidates[ia].1, iters));
-            b_times.push(time_runs(&reference, &test, w, h, candidates[ib].1, iters));
+        for r in 0..rounds {
+            // Alternate start-order each round to cancel thermal drift systematically.
+            if r % 2 == 0 {
+                a_times.push(time_runs(&reference, &test, w, h, candidates[ia].1, iters));
+                b_times.push(time_runs(&reference, &test, w, h, candidates[ib].1, iters));
+            } else {
+                b_times.push(time_runs(&reference, &test, w, h, candidates[ib].1, iters));
+                a_times.push(time_runs(&reference, &test, w, h, candidates[ia].1, iters));
+            }
         }
         a_times.sort_by(|x, y| x.partial_cmp(y).unwrap());
         b_times.sort_by(|x, y| x.partial_cmp(y).unwrap());

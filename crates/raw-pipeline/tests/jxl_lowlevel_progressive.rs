@@ -43,8 +43,8 @@ fn progressive_decode_emits_final_frame_with_image_shape() {
         assert!(
             frames[..frames.len() - 1]
                 .iter()
-                .any(|frame| !frame.is_final),
-            "expected non-final frame before final callback when multiple frames emitted"
+                .all(|frame| !frame.is_final),
+            "all intermediate frames must be non-final; only the last frame should be final"
         );
     }
 }
@@ -83,7 +83,6 @@ fn progressive_decode_borrowed_api_emits_progress_and_final_shapes() {
 
     assert!(timings.is_some(), "expected progressive decode timings");
     assert!(saw_final, "expected final borrowed event");
-    if saw_non_final {
-        assert!(saw_final, "non-final events must still end with final");
-    }
+    // Note: if saw_non_final is true, saw_final is already asserted above.
+    // To check ordering explicitly, add event tracking to the closure if needed.
 }

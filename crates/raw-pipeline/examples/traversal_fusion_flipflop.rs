@@ -35,55 +35,65 @@ fn main() {
         let buf = mkbuf(px, 7);
 
         // Separate traversals: frame_stats + histogram (2 passes).
-        let separate_passes = |_: &Vec<u8>| {
+        let separate_passes = |data: &Vec<u8>| {
             // Pass 1: frame stats
-            let _stats = frame_stats::analyze(&buf, w, h);
+            let _stats = frame_stats::analyze(data, w, h);
             // Pass 2: histogram (simulated as a separate traversal)
             let mut hist_r = [0u32; 256];
             let mut hist_g = [0u32; 256];
             let mut hist_b = [0u32; 256];
-            for chunk in buf.chunks(4) {
-                if chunk.len() == 4 {
-                    hist_r[chunk[0] as usize] += 1;
-                    hist_g[chunk[1] as usize] += 1;
-                    hist_b[chunk[2] as usize] += 1;
-                }
+            for chunk in data.chunks_exact(4) {
+                hist_r[chunk[0] as usize] += 1;
+                hist_g[chunk[1] as usize] += 1;
+                hist_b[chunk[2] as usize] += 1;
             }
             (hist_r, hist_g, hist_b)
         };
 
         // Fused pass: single traversal computes both.
-        let fused_pass = |_: &Vec<u8>| telemetry::analyze_fused(&buf, w, h);
+        let fused_pass = |data: &Vec<u8>| telemetry::analyze_fused(data, w, h);
 
-        // Benchmark helper.
-        let bench = |name: &str, f: &dyn Fn(&Vec<u8>)| -> f64 {
-            // Warmup
-            for _ in 0..4 {
-                std::hint::black_box(f(&buf));
-            }
-            // Measure
-            let mut best = f64::INFINITY;
-            for _ in 0..10 {
+        // Interleaved A/B benchmark with start-rotation to cancel thermal drift.
+        // Reports median (not min) to avoid hot-run bias.
+        let rounds = 12usize;
+        let iters = 8usize;
+
+        // Warmup both arms.
+        for _ in 0..4 {
+            std::hint::black_box(separate_passes(&buf));
+            std::hint::black_box(fused_pass(&buf));
+        }
+
+        let mut sep_times: Vec<f64> = Vec::with_capacity(rounds);
+        let mut fused_times: Vec<f64> = Vec::with_capacity(rounds);
+
+        for r in 0..rounds {
+            let time_fn = |f: &dyn Fn(&Vec<u8>)| -> f64 {
                 let t = std::time::Instant::now();
-                for _ in 0..8 {
+                for _ in 0..iters {
                     std::hint::black_box(f(&buf));
                 }
-                let ms = t.elapsed().as_secs_f64() * 1000.0 / 8.0;
-                if ms < best {
-                    best = ms;
-                }
+                t.elapsed().as_secs_f64() * 1000.0 / iters as f64
+            };
+            // Alternate which arm runs first to cancel start-of-round thermal advantage.
+            if r % 2 == 0 {
+                sep_times.push(time_fn(&|b| { std::hint::black_box(separate_passes(b)); }));
+                fused_times.push(time_fn(&|b| { std::hint::black_box(fused_pass(b)); }));
+            } else {
+                fused_times.push(time_fn(&|b| { std::hint::black_box(fused_pass(b)); }));
+                sep_times.push(time_fn(&|b| { std::hint::black_box(separate_passes(b)); }));
             }
-            println!("  {}: {:.3} ms", name, best);
-            best
+        }
+
+        let median = |v: &mut Vec<f64>| -> f64 {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
         };
+        let sep = median(&mut sep_times);
+        let fused = median(&mut fused_times);
 
-        let sep = bench("separate (2 passes)", &|buf| {
-            std::hint::black_box(separate_passes(buf));
-        });
-        let fused = bench("fused (1 pass)", &|buf| {
-            std::hint::black_box(fused_pass(buf));
-        });
-
+        println!("  separate (2 passes): {:.3} ms (median)", sep);
+        println!("  fused    (1 pass):   {:.3} ms (median)", fused);
         let speedup = sep / fused;
         let bandwidth_saved = (1.0 - (fused / sep)) * 100.0;
         println!("  {} speedup: {:.2}x   bandwidth saved: {:.1}%\n", label, speedup, bandwidth_saved);

@@ -48,7 +48,7 @@ fn main() {
         let time = |f: &dyn Fn() -> Vec<u8>, sink: &mut u64| {
             let t = Instant::now();
             let out = f();
-            *sink = sink.wrapping_add(out[out.len() / 2] as u64);
+            *sink = sink.wrapping_add(out.get(out.len() / 2).copied().unwrap_or(0) as u64);
             t.elapsed().as_secs_f64() * 1e3
         };
         for r in 0..rounds {
@@ -65,7 +65,11 @@ fn main() {
         println!("  parity: max abs output diff = {max_diff} ({} unit)", if bytes_per_ch == 1 { "u8" } else { "u16" });
         println!("  A scalar: {ma:.1} ms median");
         println!("  B simd:   {mb:.1} ms median");
-        println!("  %saved (B vs A): {:.1}%   speedup {:.2}×", (ma - mb) / ma * 100.0, ma / mb);
+        if ma > 0.0 && mb > 0.0 {
+            println!("  %saved (B vs A): {:.1}%   speedup {:.2}×", (ma - mb) / ma * 100.0, ma / mb);
+        } else {
+            println!("  %saved (B vs A): (timing too fast to measure reliably)");
+        }
     };
 
     println!("process_simd_flip  {w}×{h} = {:.1} MP  parallel={}", n as f64 / 1e6, cfg!(feature = "parallel"));
@@ -91,7 +95,7 @@ fn main() {
         let time = |f: &dyn Fn() -> Vec<u16>, sink: &mut u64| {
             let t = Instant::now();
             let out = f();
-            *sink = sink.wrapping_add(out[out.len() / 2] as u64);
+            *sink = sink.wrapping_add(out.get(out.len() / 2).copied().unwrap_or(0) as u64);
             t.elapsed().as_secs_f64() * 1e3
         };
         for r in 0..rounds {
@@ -103,6 +107,10 @@ fn main() {
         println!("  parity: max abs output diff = {max_diff} (u16)");
         println!("  A scalar: {ma:.1} ms median");
         println!("  B simd:   {mb:.1} ms median");
-        println!("  %saved (B vs A): {:.1}%   speedup {:.2}×", (ma - mb) / ma * 100.0, ma / mb);
+        if ma > 0.0 && mb > 0.0 {
+            println!("  %saved (B vs A): {:.1}%   speedup {:.2}×", (ma - mb) / ma * 100.0, ma / mb);
+        } else {
+            println!("  %saved (B vs A): (timing too fast to measure reliably)");
+        }
     }
 }

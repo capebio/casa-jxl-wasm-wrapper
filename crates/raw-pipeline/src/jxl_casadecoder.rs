@@ -1209,8 +1209,9 @@ pub fn decode_jxtc_region(
             compute_tile_copy_rects(&header, tx, ty, rx, ry, rw, rh, tw, th)
         {
             for row in 0..oh {
-                let src_row_off = ((src_y + row) * tw + src_x) as usize * bpp;
-                let dst_row_off = ((dst_y + row) * rw + dst_x) as usize * bpp;
+                // Cast to usize before multiplying to avoid u32 wrap on 32-bit (WASM).
+                let src_row_off = ((src_y + row) as usize * tw as usize + src_x as usize) * bpp;
+                let dst_row_off = ((dst_y + row) as usize * rw as usize + dst_x as usize) * bpp;
                 let row_bytes = (ow as usize) * bpp;
 
                 dest[dst_row_off..dst_row_off + row_bytes]

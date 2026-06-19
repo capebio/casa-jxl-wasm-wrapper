@@ -1085,12 +1085,15 @@ pub fn apply_tone_math(
             // Grid built for fixed scale~1 / vibz in normalized [0, 1.5] space.
             // Inputs (r2/g2/b2) are post-matrix values in [0, 65535]; normalize to [0, 1.5] before sampling.
             let norm = 1.0 / 65535.0;
-            let (rr, gg, bb) = PERCEPTUAL_GRID.with(|g| {
-                let mut opt = g.borrow_mut();
-                if opt.is_none() {
-                    *opt = Some(PerceptualGrid::new());
+            // Ensure the grid is initialised (borrow_mut only on first call per thread).
+            PERCEPTUAL_GRID.with(|g| {
+                if g.borrow().is_none() {
+                    *g.borrow_mut() = Some(PerceptualGrid::new());
                 }
-                opt.as_ref().unwrap().sample(r2 * norm, g2 * norm, b2 * norm)
+            });
+            // Read-only borrow for the hot pixel loop — avoids borrow_mut on every pixel.
+            let (rr, gg, bb) = PERCEPTUAL_GRID.with(|g| {
+                g.borrow().as_ref().unwrap().sample(r2 * norm, g2 * norm, b2 * norm)
             });
             // Grid output is in [0, 1.5]; scale back to [0, 65535] for the post-LUT.
             r2 = rr * 65535.0;
@@ -1333,7 +1336,8 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     out
 }
 
-/// T2: like `process` but writes into a caller-owned buffer (must be exactly rgb16.len() elements).
+/// T2: like `process` but writes into a caller-owned buffer.
+/// `out` must have exactly `rgb16.len()` elements (one u8 per u16 input; i.e. `width * height * 3` bytes).
 /// Lets the interactive LookRenderer reuse one output buffer across re-renders instead of
 /// allocating + zeroing a fresh Vec each slider tick. Output is byte-identical to `process`.
 pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {

@@ -26,6 +26,13 @@ impl DecodeResult {
     pub fn data(&self) -> Vec<u8> {
         self.data.clone()
     }
+
+    /// Consuming accessor — moves the pixel buffer out without cloning.
+    /// Prefer this over `data` when you only need the pixels once.
+    #[wasm_bindgen]
+    pub fn take_data(self) -> Vec<u8> {
+        self.data
+    }
 }
 
 /// Decode a JPEG buffer to RGBA, with DCT-domain downscale.
@@ -45,6 +52,16 @@ pub fn decode_scaled(jpeg: &[u8], denom: u8) -> Result<DecodeResult, JsValue> {
     let info = decoder
         .info()
         .ok_or_else(|| JsValue::from_str("no image info after read_info"))?;
+
+    // Decompression-bomb guard: reject images whose decoded pixel count exceeds 400 MP.
+    // This prevents OOM from crafted JPEG files with huge dimensions.
+    const MAX_PIXELS: u64 = 400_000_000;
+    if (info.width as u64).saturating_mul(info.height as u64) > MAX_PIXELS {
+        return Err(JsValue::from_str(&format!(
+            "image too large: {}×{} exceeds {} pixel limit",
+            info.width, info.height, MAX_PIXELS
+        )));
+    }
 
     if scale > 1 {
         let target_w = (info.width as u32 / scale).max(1) as u16;
@@ -86,13 +103,17 @@ fn to_rgba(pixels: &[u8], format: PixelFormat) -> Result<Vec<u8>, String> {
             Ok(rgba)
         }
         PixelFormat::L8 => {
-            let mut rgba = Vec::with_capacity(pixels.len() * 4);
+            let capacity = pixels
+                .len()
+                .checked_mul(4)
+                .ok_or_else(|| "L8 pixel buffer too large".to_string())?;
+            let mut rgba = Vec::with_capacity(capacity);
             for &lum in pixels {
                 rgba.extend_from_slice(&[lum, lum, lum, 255]);
             }
             Ok(rgba)
         }
-        PixelFormat::L16 => Err("l16 output is not supported for rgba8".into()),
-        PixelFormat::CMYK32 => Err("cmyk32 output is not supported for rgba8".into()),
+        PixelFormat::L16 => Err("UnsupportedFormat:l16 — 16-bit grayscale output is not supported for rgba8".into()),
+        PixelFormat::CMYK32 => Err("UnsupportedFormat:cmyk32 — CMYK output is not supported for rgba8".into()),
     }
 }

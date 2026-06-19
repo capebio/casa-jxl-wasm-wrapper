@@ -8,12 +8,12 @@
 
 use anyhow::{bail, Result};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 const MAX_COMPONENTS: usize = 4;
 
 thread_local! {
-    static DHT_CACHE: RefCell<Vec<(Vec<u8>, Rc<HuffTable>)>> = RefCell::new(Vec::new());
+    static DHT_CACHE: RefCell<Vec<(Vec<u8>, Arc<HuffTable>)>> = RefCell::new(Vec::new());
 }
 
 struct HuffTable {
@@ -341,7 +341,7 @@ fn decode_tile_impl<const COLLECT_STATS: bool>(
 
     let mut sof = Sof::default();
     let mut sos = Sos::default();
-    let mut dhts: [Option<Rc<HuffTable>>; 4] = [None, None, None, None];
+    let mut dhts: [Option<Arc<HuffTable>>; 4] = [None, None, None, None];
     let mut have_sof = false;
     let mut have_sos = false;
 
@@ -400,7 +400,7 @@ fn decode_tile_impl<const COLLECT_STATS: bool>(
                     let tbl = if let Some(t) = cached {
                         t
                     } else {
-                        let t = Rc::new(HuffTable::build(&bits, values)?);
+                        let t = Arc::new(HuffTable::build(&bits, values)?);
                         DHT_CACHE.with(|c| {
                             let mut cache = c.borrow_mut();
                             cache.push((key, t.clone()));
