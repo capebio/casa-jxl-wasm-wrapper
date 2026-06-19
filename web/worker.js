@@ -70,7 +70,9 @@ async function ensureWasm() {
         // back silently to single-threaded WASM if the context is not isolated
         // or the browser rejects the memory transfer (e.g. nested worker COI gap).
         if (typeof rawWasm.initThreadPool === 'function') {
-            if (crossOriginIsolated) {
+            if (self.__disableThreadPool) {
+                console.log('[worker] thread pool disabled (test mode)');
+            } else if (crossOriginIsolated) {
                 try {
                     await rawWasm.initThreadPool(navigator.hardwareConcurrency);
                 } catch (e) {
