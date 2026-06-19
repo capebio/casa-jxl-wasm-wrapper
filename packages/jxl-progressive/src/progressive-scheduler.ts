@@ -147,6 +147,14 @@ export class ProgressiveGallery {
   private retryTimerId: any = null;
   private armedRetryAt: number | null = null;
   private inFlightManifestFetches = 0;
+  /**
+   * Dirty-flag caches candidate list across RAF ticks.
+   * starvationBonus is time-dependent, so always updated; rebuild only on state change.
+   * Set true on any mutation that changes which jobs qualify or their relative ranking structure
+   * (observe, unobserve, select, deselect, intersection change, decode completion/abort).
+   */
+  private candidatesDirty = true;
+  private cachedCandidates: Array<{ job: ProgressiveImageJob; score: number }> = [];
   private readonly testFetchTier: GalleryOptions["testFetchTier"];
   private readonly testFetchFull: GalleryOptions["testFetchFull"];
   private readonly testStreamTierFrames: GalleryOptions["testStreamTierFrames"];
@@ -241,6 +249,7 @@ export class ProgressiveGallery {
     this.jobs.set(id, job);
     this.byElement.set(element, job);
     this.observer.observe(element);
+    this.candidatesDirty = true;
     this.requestTick();
   }
 
@@ -261,6 +270,7 @@ export class ProgressiveGallery {
     this.observer.unobserve(job.element);
     this.byElement.delete(job.element);
     this.jobs.delete(id);
+    this.candidatesDirty = true;
   }
 
   select(id: string): void {
@@ -272,6 +282,7 @@ export class ProgressiveGallery {
     job.targetTier = "full";
     job.errorCount = 0;
     job.nextRetryAt = 0;
+    this.candidatesDirty = true;
     this.requestTick();
   }
 
@@ -286,6 +297,7 @@ export class ProgressiveGallery {
     if (!job.visible && !job.nearViewport) {
       this.scheduleViewportExitCleanup(job);
     }
+    this.candidatesDirty = true;
     this.requestTick();
   }
 
@@ -348,6 +360,7 @@ export class ProgressiveGallery {
         this.prefetchManifest(job);
       }
     }
+    this.candidatesDirty = true;
     this.requestTick();
   };
 
@@ -477,17 +490,32 @@ export class ProgressiveGallery {
     const now =
       typeof performance !== "undefined" ? performance.now() : Date.now();
     this.armEarliestRetryTimer(now);
-    const candidates: Array<{ job: ProgressiveImageJob; score: number }> = [];
-    for (const j of this.jobs.values()) {
-      if (!j.visible && !j.nearViewport && !j.selected) continue;
-      if (j.decoderAbort !== null) continue;
-      if (j.nextRetryAt && now < j.nextRetryAt) continue;
-      const curRank = tierRank(j.currentTier);
-      const tgtRank = tierRank(j.targetTier);
-      if (curRank >= tgtRank) continue;
-      candidates.push({ job: j, score: fairnessScore(j, now) });
+
+    // Dirty-flag caches candidate list across RAF ticks. starvationBonus is time-dependent,
+    // so always updated; rebuild only on state change (job set, visibility, tiers, abort transitions).
+    let candidates: Array<{ job: ProgressiveImageJob; score: number }>;
+    if (this.candidatesDirty) {
+      candidates = [];
+      for (const j of this.jobs.values()) {
+        if (!j.visible && !j.nearViewport && !j.selected) continue;
+        if (j.decoderAbort !== null) continue;
+        if (j.nextRetryAt && now < j.nextRetryAt) continue;
+        const curRank = tierRank(j.currentTier);
+        const tgtRank = tierRank(j.targetTier);
+        if (curRank >= tgtRank) continue;
+        candidates.push({ job: j, score: fairnessScore(j, now) });
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      this.cachedCandidates = candidates;
+      this.candidatesDirty = false;
+    } else {
+      // State unchanged: update time-dependent starvationBonus and re-sort in-place.
+      for (const c of this.cachedCandidates) {
+        c.score = fairnessScore(c.job, now);
+      }
+      this.cachedCandidates.sort((a, b) => b.score - a.score);
+      candidates = this.cachedCandidates;
     }
-    candidates.sort((a, b) => b.score - a.score);
 
     for (const { job } of candidates) {
       if (this.activeDecoders >= this.opts.maxActiveDecoders) break;
@@ -750,6 +778,7 @@ export class ProgressiveGallery {
     } finally {
       job.decoderAbort = null;
       this.activeDecoders = Math.max(0, this.activeDecoders - 1);
+      this.candidatesDirty = true;
       this.requestTick();
       // partial prefix left in accum for resume (dropped only on C-2 timer / unobserve / full persist)
     }

@@ -1564,6 +1564,33 @@ mod tests {
         }
     }
 
+    /// 100×100 explicit parity check matching the benchmark spec.
+    /// Verifies that the SIMD shuffle path (x86 SSSE3 / wasm32 i8x16_swizzle) is
+    /// byte-identical to the reference scalar scatter for a typical thumbnail size.
+    #[test]
+    fn rgb_to_rgba_100x100_scalar_simd_parity() {
+        const W: usize = 100;
+        const H: usize = 100;
+        let mut s: u32 = 0xDEAD_BEEF;
+        let rgb: Vec<u8> = (0..W * H * 3).map(|_| {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (s >> 24) as u8
+        }).collect();
+        // Reference scalar: straightforward 3→4 stride scatter.
+        let n = W * H;
+        let mut expected = vec![255u8; n * 4];
+        let (mut si, mut di) = (0usize, 0usize);
+        for _ in 0..n {
+            expected[di] = rgb[si]; expected[di + 1] = rgb[si + 1]; expected[di + 2] = rgb[si + 2];
+            si += 3; di += 4;
+        }
+        let got = rgb_to_rgba(&rgb);
+        assert_eq!(got.len(), n * 4, "output length wrong");
+        assert_eq!(got, expected, "SIMD vs scalar mismatch on 100x100 input");
+        // Alpha channel must be 0xFF for every pixel.
+        assert!(got.chunks_exact(4).all(|px| px[3] == 255), "alpha != 0xFF");
+    }
+
     #[test]
     fn take_rgba_via_rgb_to_rgba_roundtrip() {
         // Basic sanity: the take_rgba path ultimately uses the same conversion
