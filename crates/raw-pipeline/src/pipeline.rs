@@ -160,12 +160,32 @@ fn linear_to_srgb(v: f32) -> f32 {
     } else {
         // powf is already LLVM-intrinsified on wasm32; #[inline(always)] ensures
         // it is inlined into the LUT build loop to avoid call overhead.
-        // LUT caching across process() calls should be done at the JS side
-        // (the wasm module instance is reused per worker, so a JS-level cache
-        // keyed on the tone params would eliminate all LUT rebuilds on re-renders).
-        // Use mul_add for the scale+bias.
+        // Use mul_add for the scale+bias. NB: per-slider post-LUT rebuilds go through
+        // `srgb_encode_lerp` instead (this powf path is now only hit ONCE, to build the table).
         1.055f32.mul_add(v.powf(1.0 / 2.4), -0.055)
     }
+}
+
+/// Once-built table of the sRGB EOTF over [0,1] (N+1 samples). The post-LUT is rebuilt on every
+/// tone-slider tick; the EOTF itself never changes, so caching it lets the rebuild replace the
+/// unconditional per-entry `powf` (`linear_to_srgb`) with a lerp gather. Built once process-wide
+/// (immutable, shared read-only across threads — no per-thread or per-rebuild cost beyond the first).
+static SRGB_ENCODE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+const SRGB_LUT_N: usize = 16384;
+
+/// sRGB-encode a linear value via the cached table + linear interpolation. Measured lerp error is
+/// ≤ ~0.22 u16 LSB even at the steep EOTF knee (`f''` peaks near 0.0031, step = 1/16384), so the u8
+/// post-LUT is byte-identical to the powf build and the u16 post-LUT differs by ≤1 LSB on rare
+/// entries (that 1 LSB is inherited from f32 `powf` node rounding in the table, not the lerp).
+#[inline(always)]
+fn srgb_encode_lerp(y: f32) -> f32 {
+    let tbl = SRGB_ENCODE.get_or_init(|| {
+        (0..=SRGB_LUT_N).map(|i| linear_to_srgb(i as f32 / SRGB_LUT_N as f32)).collect()
+    });
+    let pos = y.clamp(0.0, 1.0) * SRGB_LUT_N as f32;
+    let i0 = (pos as usize).min(SRGB_LUT_N - 1);
+    let frac = pos - i0 as f32;
+    tbl[i0] + (tbl[i0 + 1] - tbl[i0]) * frac
 }
 
 #[inline]
@@ -227,7 +247,7 @@ fn tone_curve(x: f32, p: &TonePost) -> f32 {
         y = y.mul_add(1.0 + c, inv_s * (-c));
     }
 
-    linear_to_srgb(y.clamp(0.0, 1.0))
+    srgb_encode_lerp(y)
 }
 
 /// Highlight rolloff knee, in normalized linear (after WB + exposure gain).
@@ -516,15 +536,22 @@ struct LutCache {
 }
 
 impl LutCache {
-    fn matches(&self, black: u16, white: u16, wb_r: f32, wb_g: f32, wb_b: f32,
-               exp_gain: f32, tone: &TonePost, compact: bool) -> bool {
+    /// Pre-LUT validity: depends ONLY on the linearisation params (black/white/WB/exposure/compact).
+    /// A tone-only slider drag (contrast/shadows/highlights/whites/blacks) leaves these intact, so
+    /// the 3 pre-LUTs are NOT rebuilt — see `ensure_lut`.
+    fn pre_matches(&self, black: u16, white: u16, wb_r: f32, wb_g: f32, wb_b: f32,
+                   exp_gain: f32, compact: bool) -> bool {
         self.black == black && self.white == white
             && self.compact_lut == compact
             && self.wb_r_bits    == wb_r.to_bits()
             && self.wb_g_bits    == wb_g.to_bits()
             && self.wb_b_bits    == wb_b.to_bits()
             && self.exp_gain_bits == exp_gain.to_bits()
-            && self.contrast_bits   == tone.contrast.to_bits()
+    }
+    /// Post-LUT validity: depends ONLY on the tone curve params. A WB/exposure/black/white drag
+    /// leaves these intact, so the powf-heavy post-LUT is NOT rebuilt.
+    fn post_matches(&self, tone: &TonePost) -> bool {
+        self.contrast_bits   == tone.contrast.to_bits()
             && self.shadows_bits    == tone.shadows.to_bits()
             && self.highlights_bits == tone.highlights.to_bits()
             && self.whites_bits     == tone.whites.to_bits()
@@ -568,6 +595,52 @@ fn build_post16_lut(t: &TonePost) -> Vec<u16> {
     #[cfg(not(feature = "parallel"))]
     lut.iter_mut().enumerate().for_each(|(i, o)| fill(i, o));
     lut
+}
+
+/// Build the three pre-LUTs (black/WB/exposure/highlight-shoulder linearisation). Shared by the
+/// full build and the partial (pre-only) rebuild in `ensure_lut`. Returns `(r,g,b,len,shift)`.
+fn build_pre_luts(
+    params: &PipelineParams,
+    ti: &ToneInputs,
+) -> (std::sync::Arc<Vec<u16>>, std::sync::Arc<Vec<u16>>, std::sync::Arc<Vec<u16>>, usize, u32) {
+    if params.compact_lut {
+        (
+            std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_r, ti.exp_gain)),
+            std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_g, ti.exp_gain)),
+            std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_b, ti.exp_gain)),
+            COMPACT_LUT_LEN,
+            COMPACT_LUT_SHIFT,
+        )
+    } else {
+        let lut_len = (params.white as usize + 1).next_power_of_two().min(65536);
+        (
+            std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, lut_len)),
+            std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, lut_len)),
+            std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_b, ti.exp_gain, lut_len)),
+            lut_len,
+            0u32,
+        )
+    }
+}
+
+/// Item-0 instrumentation: time one full LUT (re)build — the cost paid on every slider drag when
+/// tone/WB/exposure change (an `ensure_lut` miss rebuilds all tables). Returns `(pre3_ms, post_ms)`:
+/// `pre3` = three pre-LUTs (`build_pre_lut` ×3, WB/exposure/black-white), `post` = the 65536-entry
+/// tone post-LUT (`tone_curve`, powf-heavy). Build parallelism follows the crate feature, so call
+/// it under `--no-default-features` to see the serial cost the wasm interactive path actually pays.
+pub fn bench_lut_build_ms(params: &PipelineParams) -> (f64, f64) {
+    let ti = derive_tone_inputs(params);
+    let t = std::time::Instant::now();
+    let pr = build_pre_lut(params.black, params.white, ti.wb_r, ti.exp_gain);
+    let pg = build_pre_lut(params.black, params.white, ti.wb_g, ti.exp_gain);
+    let pb = build_pre_lut(params.black, params.white, ti.wb_b, ti.exp_gain);
+    std::hint::black_box((&pr, &pg, &pb));
+    let pre3_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = std::time::Instant::now();
+    let post = build_post_lut(&ti.tone);
+    std::hint::black_box(&post);
+    let post_ms = t.elapsed().as_secs_f64() * 1000.0;
+    (pre3_ms, post_ms)
 }
 
 pub fn gaussian_kernel_5() -> [f32; 5] {
@@ -1177,48 +1250,58 @@ fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
     ToneInputs { exp_gain, wb_r, wb_g, wb_b, tone, sat, vib, vib_zero, perceptual_constancy, matrix_fused }
 }
 
+/// Lazily (re)build the LUT cache, rebuilding ONLY the half whose inputs changed. The pre-LUTs
+/// (linearisation) and the post-LUT (tone curve) have disjoint dependencies, so a single-slider
+/// drag rebuilds at most one half: a WB/exposure drag skips the powf-heavy post-LUT entirely; a
+/// tone drag skips the three pre-LUTs. Bundling them (the old `matches`) rebuilt all four every
+/// tick — ~7.5 ms of needless work in the interactive loop.
 fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneInputs, need16: bool) {
-    if cache.as_ref().map_or(true, |c| {
-        !c.matches(params.black, params.white, ti.wb_r, ti.wb_g, ti.wb_b, ti.exp_gain, &ti.tone, params.compact_lut)
-    }) {
-        let (pre_r, pre_g, pre_b, pre_lut_len, pre_lut_shift) = if params.compact_lut {
-            (
-                std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_r, ti.exp_gain)),
-                std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_g, ti.exp_gain)),
-                std::sync::Arc::new(build_pre_lut_strided(params.black, params.white, ti.wb_b, ti.exp_gain)),
-                COMPACT_LUT_LEN,
-                COMPACT_LUT_SHIFT,
-            )
-        } else {
-            let lut_len = (params.white as usize + 1).next_power_of_two().min(65536);
-            (
-                std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, lut_len)),
-                std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, lut_len)),
-                std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_b, ti.exp_gain, lut_len)),
-                lut_len,
-                0u32,
-            )
-        };
-        *cache = Some(LutCache {
-            black: params.black, white: params.white,
-            wb_r_bits: ti.wb_r.to_bits(), wb_g_bits: ti.wb_g.to_bits(),
-            wb_b_bits: ti.wb_b.to_bits(), exp_gain_bits: ti.exp_gain.to_bits(),
-            contrast_bits:   ti.tone.contrast.to_bits(),
-            shadows_bits:    ti.tone.shadows.to_bits(),
-            highlights_bits: ti.tone.highlights.to_bits(),
-            whites_bits:     ti.tone.whites.to_bits(),
-            blacks_bits:     ti.tone.blacks.to_bits(),
-            pre_r, pre_g, pre_b,
-            post: std::sync::Arc::new(build_post_lut(&ti.tone)),
-            post16: if need16 { Some(std::sync::Arc::new(build_post16_lut(&ti.tone))) } else { None },
-            pre_lut_len,
-            pre_lut_shift,
-            compact_lut: params.compact_lut,
-        });
-    } else if need16 {
-        let c = cache.as_mut().unwrap();
-        if c.post16.is_none() {
-            c.post16 = Some(std::sync::Arc::new(build_post16_lut(&ti.tone)));
+    let pre_ok = cache.as_ref().is_some_and(|c| {
+        c.pre_matches(params.black, params.white, ti.wb_r, ti.wb_g, ti.wb_b, ti.exp_gain, params.compact_lut)
+    });
+    let post_ok = cache.as_ref().is_some_and(|c| c.post_matches(&ti.tone));
+
+    match cache {
+        None => {
+            let (pre_r, pre_g, pre_b, pre_lut_len, pre_lut_shift) = build_pre_luts(params, ti);
+            *cache = Some(LutCache {
+                black: params.black, white: params.white,
+                wb_r_bits: ti.wb_r.to_bits(), wb_g_bits: ti.wb_g.to_bits(),
+                wb_b_bits: ti.wb_b.to_bits(), exp_gain_bits: ti.exp_gain.to_bits(),
+                contrast_bits:   ti.tone.contrast.to_bits(),
+                shadows_bits:    ti.tone.shadows.to_bits(),
+                highlights_bits: ti.tone.highlights.to_bits(),
+                whites_bits:     ti.tone.whites.to_bits(),
+                blacks_bits:     ti.tone.blacks.to_bits(),
+                pre_r, pre_g, pre_b,
+                post: std::sync::Arc::new(build_post_lut(&ti.tone)),
+                post16: if need16 { Some(std::sync::Arc::new(build_post16_lut(&ti.tone))) } else { None },
+                pre_lut_len,
+                pre_lut_shift,
+                compact_lut: params.compact_lut,
+            });
+        }
+        Some(c) => {
+            if !pre_ok {
+                let (pre_r, pre_g, pre_b, pre_lut_len, pre_lut_shift) = build_pre_luts(params, ti);
+                c.pre_r = pre_r; c.pre_g = pre_g; c.pre_b = pre_b;
+                c.pre_lut_len = pre_lut_len; c.pre_lut_shift = pre_lut_shift;
+                c.compact_lut = params.compact_lut;
+                c.black = params.black; c.white = params.white;
+                c.wb_r_bits = ti.wb_r.to_bits(); c.wb_g_bits = ti.wb_g.to_bits();
+                c.wb_b_bits = ti.wb_b.to_bits(); c.exp_gain_bits = ti.exp_gain.to_bits();
+            }
+            if !post_ok {
+                c.post = std::sync::Arc::new(build_post_lut(&ti.tone));
+                c.post16 = if need16 { Some(std::sync::Arc::new(build_post16_lut(&ti.tone))) } else { None };
+                c.contrast_bits = ti.tone.contrast.to_bits();
+                c.shadows_bits = ti.tone.shadows.to_bits();
+                c.highlights_bits = ti.tone.highlights.to_bits();
+                c.whites_bits = ti.tone.whites.to_bits();
+                c.blacks_bits = ti.tone.blacks.to_bits();
+            } else if need16 && c.post16.is_none() {
+                c.post16 = Some(std::sync::Arc::new(build_post16_lut(&ti.tone)));
+            }
         }
     }
 }
@@ -2593,6 +2676,69 @@ mod tonemap_flip_flops {
         // avx2 lanes use hw FMA == scalar mul_add and the tail is fused to the SAME matrix, so the
         // two are byte-exact on this path. ≤1 left as the documented SIMD-reassociation ceiling.
         assert!(max_diff <= 1, "process_into_simd diverged from scalar by {max_diff} (>1) — real wiring bug");
+    }
+
+    #[test]
+    #[ignore]
+    fn flipflop_lut_movement() {
+        let med = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        eprintln!("=== LUT MOVEMENT FLIP (parallel={}) ===", cfg!(feature = "parallel"));
+
+        // === A: invalidation split — a single-slider drag rebuilds only ONE half ===
+        let params = PipelineParams::default_olympus();
+        let _ = bench_lut_build_ms(&params); // warm
+        let (mut pre_acc, mut post_acc) = (Vec::new(), Vec::new());
+        for _ in 0..9 {
+            let (pr, po) = bench_lut_build_ms(&params);
+            pre_acc.push(pr);
+            post_acc.push(po);
+        }
+        let (pre3, post) = (med(pre_acc), med(post_acc));
+        let full = pre3 + post;
+        eprintln!("[A split] full rebuild = pre3 {pre3:.3} + post {post:.3} = {full:.3} ms");
+        eprintln!("[A split] tone-drag    -> POST only, saves pre3 {pre3:.3} ms ({:.0}%)", pre3 / full * 100.0);
+        eprintln!("[A split] wb/exp-drag  -> PRE  only, saves post {post:.3} ms ({:.0}%)", post / full * 100.0);
+
+        // === B: sRGB EOTF powf vs cached-lerp — accuracy + EOTF build speed ===
+        let _ = srgb_encode_lerp(0.5); // warm the table
+        let n = 65536usize;
+        let (mut max_u8, mut max_u16) = (0i32, 0i32);
+        for i in 0..n {
+            let y = i as f32 / (n as f32 - 1.0);
+            let a = linear_to_srgb(y.clamp(0.0, 1.0)); // powf reference
+            let b = srgb_encode_lerp(y); // cached lerp
+            max_u8 = max_u8.max(((a * 255.0 + 0.5) as i32 - (b * 255.0 + 0.5) as i32).abs());
+            max_u16 = max_u16.max(((a * 65535.0 + 0.5) as i32 - (b * 65535.0 + 0.5) as i32).abs());
+        }
+        // Interleaved + start-rotated so thermal/frequency drift hits both arms equally (the crate's
+        // flipflop convention) — a single-shot powf-block-then-lerp-block would bias the delta.
+        let time = |f: &dyn Fn(f32) -> f32| {
+            let t = std::time::Instant::now();
+            let v: Vec<u16> = (0..n).map(|i| (f(i as f32 / (n as f32 - 1.0)) * 65535.0 + 0.5) as u16).collect();
+            std::hint::black_box(&v);
+            t.elapsed().as_secs_f64() * 1000.0
+        };
+        let powf = |y: f32| linear_to_srgb(y.clamp(0.0, 1.0));
+        let lerp = |y: f32| srgb_encode_lerp(y);
+        let _ = (time(&powf), time(&lerp)); // warm
+        let (mut powf_t, mut lerp_t) = (Vec::new(), Vec::new());
+        for r in 0..9 {
+            if r % 2 == 0 {
+                powf_t.push(time(&powf));
+                lerp_t.push(time(&lerp));
+            } else {
+                lerp_t.push(time(&lerp));
+                powf_t.push(time(&powf));
+            }
+        }
+        let (powf_ms, lerp_ms) = (med(powf_t), med(lerp_t));
+        eprintln!("[B srgb] EOTF accuracy: max u8 diff = {max_u8}, max u16 diff = {max_u16}");
+        eprintln!("[B srgb] EOTF 65536-build: powf {powf_ms:.3} -> lerp {lerp_ms:.3} ms ({:.0}% faster)", (powf_ms - lerp_ms) / powf_ms * 100.0);
+        assert!(max_u8 == 0, "sRGB lerp must be byte-exact on the u8 post-LUT (got {max_u8})");
+        assert!(max_u16 <= 1, "sRGB lerp must be ≤1 LSB on the u16 post-LUT (got {max_u16})");
     }
 
     #[test]
