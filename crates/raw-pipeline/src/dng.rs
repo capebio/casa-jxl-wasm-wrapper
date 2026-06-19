@@ -260,6 +260,26 @@ fn decode_tiles(
     Ok(())
 }
 
+/// Fill a contiguous u16 destination row from a contiguous source byte run of the same
+/// pixel count, honoring source endianness. On a little-endian target a little-endian
+/// source is a single memcpy (no per-element from_le_bytes); every other case (big-endian
+/// source, or big-endian host) falls back to an explicit per-element decode so output stays
+/// byte-exact. `bytes.len()` must equal `dst.len() * 2` (callers guarantee this).
+#[inline]
+fn fill_u16_row(dst: &mut [u16], bytes: &[u8], le: bool) {
+    #[cfg(target_endian = "little")]
+    if le {
+        // SAFETY: write dst.len()*2 bytes into dst (u16-aligned, stricter than u8); the
+        // byte count matches exactly. Only taken when the source is little-endian too.
+        let dstb = unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 2) };
+        dstb.copy_from_slice(bytes);
+        return;
+    }
+    for (o, c) in dst.iter_mut().zip(bytes.chunks_exact(2)) {
+        *o = if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) };
+    }
+}
+
 fn decode_uncompressed(
     data: &[u8],
     raw: &RawIfd,
@@ -304,23 +324,22 @@ fn decode_uncompressed(
                 let col_end = ((tc + 1) * tw).min(width);
                 let row_start = tr * tl;
                 let row_end = ((tr + 1) * tl).min(height);
+                // Per-row contiguous copy: dst run out[r*width+col_start .. col_end] and the
+                // source row segment are both dense u16 runs, so one bounds check + one
+                // fill_u16_row (memcpy on LE) per row replaces the per-pixel scatter + index
+                // recompute. Byte-identical; error path unchanged (bail on truncation).
+                let cw = col_end - col_start; // ≤ tw
                 let mut sp = 0usize;
                 for r in row_start..row_end {
-                    for c in col_start..col_end {
-                        if sp + 2 > src.len() {
-                            bail!("uncompressed DNG: tile {idx} truncated");
-                        }
-                        out[r * width + c] = if le {
-                            u16::from_le_bytes([src[sp], src[sp + 1]])
-                        } else {
-                            u16::from_be_bytes([src[sp], src[sp + 1]])
-                        };
-                        sp += 2;
+                    let need = cw * 2;
+                    if sp + need > src.len() {
+                        bail!("uncompressed DNG: tile {idx} truncated");
                     }
-                    // saturating: for valid tiles (col_end-col_start) <= tw, so this is
-                    // output-identical; guards the underflow on hostile tw/width
-                    // (000-security-27).
-                    sp += tw.saturating_sub(col_end.saturating_sub(col_start)) * 2;
+                    let base = r * width + col_start;
+                    fill_u16_row(&mut out[base..base + cw], &src[sp..sp + need], le);
+                    // saturating: for valid tiles cw ≤ tw, so the row stride is tw*2;
+                    // guards underflow on hostile tw/width (000-security-27).
+                    sp += tw * 2;
                 }
             }
         }
@@ -358,26 +377,27 @@ fn decode_uncompressed(
                 .checked_add(rows_per_strip)
                 .unwrap_or(usize::MAX)
                 .min(height);
+            // Per-row contiguous copy: a whole strip row out[r*width .. r*width+width] is a
+            // dense u16 run, so one OOB-checked dst slice + one bounds check + one
+            // fill_u16_row (memcpy on LE) per row replaces the per-pixel scatter, the
+            // per-element checked-mul/add and get_mut. Byte-identical; errors unchanged.
+            let need = width * 2;
             let mut sp = 0usize;
             for r in row_start..row_end {
-                for c in 0..width {
-                    if sp + 2 > src.len() {
-                        bail!("uncompressed DNG: strip {idx} truncated");
-                    }
-                    // Bound the destination index against the buffer (r*width+c can
-                    // overflow on hostile width; out.get_mut keeps writes in range).
-                    let dst = r
-                        .checked_mul(width)
-                        .and_then(|v| v.checked_add(c))
-                        .and_then(|i| out.get_mut(i))
-                        .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} dst OOB"))?;
-                    *dst = if le {
-                        u16::from_le_bytes([src[sp], src[sp + 1]])
-                    } else {
-                        u16::from_be_bytes([src[sp], src[sp + 1]])
-                    };
-                    sp += 2;
+                if sp + need > src.len() {
+                    bail!("uncompressed DNG: strip {idx} truncated");
                 }
+                // r*width+width can overflow on hostile width; checked range keeps the
+                // destination slice in range (preserves the old per-element get_mut guard).
+                let base = r
+                    .checked_mul(width)
+                    .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} dst OOB"))?;
+                let dst = base
+                    .checked_add(width)
+                    .and_then(|end| out.get_mut(base..end))
+                    .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} dst OOB"))?;
+                fill_u16_row(dst, &src[sp..sp + need], le);
+                sp += need;
             }
         }
         return Ok(());
