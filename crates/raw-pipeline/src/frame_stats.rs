@@ -29,10 +29,10 @@ pub struct FrameStats {
     pub alpha_min: u32,
     pub alpha_max: u32,
     /// Count of pixels with alpha == 0.
-    pub alpha_zero: u32,
+    pub alpha_zero: u64,
     /// Count of non-zero *channel values* (not pixels): each pixel contributes 0–3.
     /// Maximum value is `pixel_count * 3`. Named for historical compatibility.
-    pub rgb_nonzero: u32,
+    pub rgb_nonzero: u64,
     /// Sum of per-pixel luma values: `l = 54*r + 183*g + 18*b` (u8 inputs → max 65025/px).
     pub luma_sum: f64,
     /// Sum of squared per-pixel luma values (same units as luma_sum^2).
@@ -45,8 +45,8 @@ impl FrameStats {
     pub fn mean_luma(&self) -> f64 {
         if self.pixel_count == 0 { 0.0 } else { self.luma_sum / self.pixel_count as f64 }
     }
-    /// Returns luma variance normalized by 65025.0 (= 255×255, the max luma weight sum × max u8).
-    /// Result is in [0, 65025]: smaller means more uniform, larger means more contrast/detail.
+    /// Returns luma variance normalized by 65025.0 (= max luma per pixel = 255×255).
+    /// Result is in [0.0, 1.0]: 0.0 = uniform frame, 1.0 = maximum contrast/detail.
     /// Note: divides by 65025.0 (not 65536.0) so the normalization matches the actual luma range.
     pub fn luma_variance(&self) -> f64 {
         if self.pixel_count == 0 { return 0.0; }
@@ -61,7 +61,7 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
     // For valid full-length input (d.len() >= px*4) this is a no-op; only
     // undersized/malformed input is affected (avoids an OOB index panic).
     let px = px.min(d.len() / 4);
-    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u64, 0u64);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
     let mut lanes = [
         lane_seed(0), lane_seed(1), lane_seed(2), lane_seed(3),
@@ -76,7 +76,7 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
         let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
         let lane = p & 7;
         lanes[lane] = (lanes[lane] ^ w).wrapping_mul(PRIME);
-        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        rgb_nz += (r != 0) as u64 + (g != 0) as u64 + (b != 0) as u64;
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
@@ -104,7 +104,7 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     // Guard: clamp px so the SIMD loop never reads past d.
     let px = px.min(d.len() / 4);
     let chunks = px / 8; // 8 px = 32 bytes per __m256i
-    let (mut a_zero, mut rgb_nz) = (0u32, 0u32);
+    let (mut a_zero, mut rgb_nz) = (0u64, 0u64);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
 
     let mut hv = _mm256_setr_epi32(
@@ -135,8 +135,8 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         vmax = _mm256_max_epu8(vmax, _mm256_and_si256(pv, alpha_and));
 
         let zmask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(pv, zero)) as u32;
-        a_zero += (zmask & 0x8888_8888).count_ones();
-        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones();
+        a_zero += (zmask & 0x8888_8888).count_ones() as u64;
+        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones() as u64;
 
         let lo16 = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(pv));
         let hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(pv, 1));
@@ -178,7 +178,7 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
         let lane = p & 7;
         lanes[lane] = (lanes[lane] ^ w).wrapping_mul(PRIME);
-        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        rgb_nz += (r != 0) as u64 + (g != 0) as u64 + (b != 0) as u64;
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
@@ -209,9 +209,12 @@ pub fn analyze(pixels: &[u8], width: usize, height: usize) -> FrameStats {
             ]), pixel_count: 0,
         },
     };
-    let limit = pixels.len().min(px.saturating_mul(4));
-    if limit < px.saturating_mul(4) {
-        return analyze_scalar(&zero_padded(pixels, px.saturating_mul(4)), px);
+    if pixels.len() < px.saturating_mul(4) {
+        // Buffer is shorter than the declared pixel count: analyze only the complete pixels
+        // actually present. Avoid zero-padding which would skew alpha_zero and luma stats
+        // with phantom pixels.
+        let px_actual = pixels.len() / 4;
+        return analyze_scalar(pixels, px_actual);
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -222,12 +225,6 @@ pub fn analyze(pixels: &[u8], width: usize, height: usize) -> FrameStats {
     analyze_scalar(pixels, px)
 }
 
-fn zero_padded(src: &[u8], len: usize) -> Vec<u8> {
-    let mut v = vec![0u8; len];
-    let n = src.len().min(len);
-    v[..n].copy_from_slice(&src[..n]);
-    v
-}
 
 #[cfg(test)]
 mod tests {

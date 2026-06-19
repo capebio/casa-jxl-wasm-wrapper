@@ -145,13 +145,12 @@ fn bayer_pixel(
 ///   (odd  row, odd  col) = B
 pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
-    // Lens 22: on wasm32 use the explicit wasm128 SIMD version of the bilinear unroll (8-wide v128
-    // for the avg4/avg2 in the interior; parity bitselect to handle even/odd cols without deinterleave).
-    // Bit-identical to the scalar unroll path. Used in production for fast/LOD/preview bilinear paths
-    // (lib.rs previews, rggb calls on wasm). MHC (quality) is separate scalar path.
+    // Lens 22: on wasm32 use the shuffle SIMD variant — 3 direct v128 stores per 8-pixel chunk
+    // instead of 3 stack arrays + 24 scalar stores. Bit-identical to demosaic_rggb_simd.
+    // MHC (quality) is separate scalar path.
     #[cfg(target_arch = "wasm32")]
     {
-        return demosaic_rggb_simd(raw, width, height);
+        return demosaic_rggb_shuffle_simd(raw, width, height);
     }
     let n3 = width.checked_mul(height)
         .and_then(|n| n.checked_mul(3))
@@ -361,6 +360,8 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
         };
 
         let mut col = 2usize;
+        // col+8 <= w_max ensures col+8 < width, so ld(here, col+1..col+8) are all in-bounds.
+        // Up to 8 columns before the right border fall through to the scalar tail — acceptable trade-off.
         while col + 8 <= w_max {
             let (rv, gv, bv) = unsafe {
                 let ld = |s: &[u16], idx: usize| v128_load(s.as_ptr().add(idx) as *const v128);
@@ -550,6 +551,8 @@ pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Re
             u16x8_narrow_i32x4(lo, hi)
         };
         let mut col = 2usize;
+        // col+8 <= w_max ensures col+8 < width, so ld(here, col+1..col+8) are all in-bounds.
+        // Up to 8 columns before the right border fall through to the scalar tail — acceptable trade-off.
         while col + 8 <= w_max {
             let (rv, gv, bv) = unsafe {
                 let ld = |s: &[u16], idx: usize| v128_load(s.as_ptr().add(idx) as *const v128);
@@ -691,6 +694,8 @@ pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> R
             u16x8_narrow_i32x4(lo, hi)
         };
         let mut col = 2usize;
+        // col+8 <= w_max ensures col+8 < width, so ld(here, col+1..col+8) are all in-bounds.
+        // Up to 8 columns before the right border fall through to the scalar tail — acceptable trade-off.
         while col + 8 <= w_max {
             let (rv, gv, bv) = unsafe {
                 let ld = |s: &[u16], idx: usize| v128_load(s.as_ptr().add(idx) as *const v128);
@@ -1106,7 +1111,10 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
                 let o = col * 3;
                 out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
             }
-            for col in int_end..width {
+            // Start from int_end.max(int_start) to avoid re-computing pixels already written
+            // by the left-border loop when width is very small (e.g. width == 1 where int_end = 0
+            // < int_start = 1, so the border loops would both cover col 0).
+            for col in int_end.max(int_start)..width {
                 let c = col as isize;
                 let (rr, gg, bb) = mhc_pixel_phased(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
                     clamp(c-1,0,w_max), clamp(c+1,0,w_max),
@@ -1312,7 +1320,11 @@ pub fn demosaic_rggb_mhc_band(
                 *out_ptr = bb as u16; out_ptr = out_ptr.add(1);
             }
         }
-        let _ = global_row; // parity not needed in scalar path (mhc_pixel uses r_c &1)
+        // PRECONDITION: `halo` must be even so that `r_c & 1 == global_row & 1`.
+        // `mhc_pixel_phased` derives parity from the local context row `r_c`; for an odd halo the
+        // local parity would be inverted vs. the global frame parity, silently swapping R and B
+        // across the band. All current callers pass halo=2 (even), satisfying this contract.
+        let _ = global_row; // confirmed unused; parity comes from r_c (see precondition above)
     }
     Ok(())
 }
@@ -1609,6 +1621,10 @@ mod tests {
         // SIMD path (delegates to scalar on native) must agree byte-for-byte.
         let rgb_simd = demosaic_rggb_simd(&raw, w, h).unwrap();
         assert_eq!(rgb, rgb_simd, "simd path must match scalar");
+        // Shuffle SIMD path (delegates to simd on native) must agree byte-for-byte.
+        // On wasm32 this exercises the i8x16_shuffle interleave constants directly.
+        let rgb_shuffle = demosaic_rggb_shuffle_simd(&raw, w, h).unwrap();
+        assert_eq!(rgb, rgb_shuffle, "shuffle simd path must match scalar (validates shuffle constants)");
     }
 
     #[test]
@@ -1695,6 +1711,40 @@ mod tests {
         let grbg_raw = vec![20u16, 10, 40, 30];
         let rgb = demosaic_bayer_mhc(&grbg_raw, 2, 2, (0, 1)).unwrap();
         assert_eq!(rgb[3], 10, "phase-aware mhc must keep direct R sample at GRBG (0,1)");
+    }
+
+    /// DM-010: demosaic_bayer_mhc_band with GRBG phase must keep the direct R sample.
+    /// Verifies that the band path honours the phase parameter the same way the full-frame
+    /// demosaic_bayer_mhc does; a phase bug would silently swap R and B over the band.
+    #[test]
+    fn m12_bayer_mhc_band_grbg_preserves_red_site() {
+        // 4×4 GRBG raw: R at (0,1), (0,3), (2,1), (2,3) = value 10.
+        // G at (0,0),(0,2),(2,0),(2,2) and (1,1),(1,3),(3,1),(3,3).
+        // B at (1,0),(1,2),(3,0),(3,2). Others G.
+        let w = 4usize;
+        let h = 4usize;
+        let mut raw = vec![0u16; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                raw[r * w + c] = match ((r + 0) & 1, (c + 1) & 1) {
+                    // phase (0,1): R at (row&1==0, col&1==1)
+                    (0, 0) => 10,  // R site (col odd in GRBG)
+                    (1, 1) => 5,   // B site
+                    _ => 20,        // G sites
+                };
+            }
+        }
+        // Full-frame reference.
+        let rgb_full = demosaic_bayer_mhc(&raw, w, h, (0, 1)).unwrap();
+
+        // Band path: halo=2, ctx=entire image, first_local=0, num_rows=h.
+        let mut rgb_band = vec![0u16; w * h * 3];
+        demosaic_bayer_mhc_band(&raw, w, h, 0, (0, 1), 0, h, &mut rgb_band).unwrap();
+        assert_eq!(rgb_band, rgb_full, "band GRBG must match full-frame GRBG");
+
+        // The direct R sample at (0,1) must appear as R in the output.
+        // output pixel (0,1): offset = 1*3 = 3 for R.
+        assert_eq!(rgb_full[3], 10, "band GRBG phase: R sample at sensor (0,1) must be R at output");
     }
 
     #[test]

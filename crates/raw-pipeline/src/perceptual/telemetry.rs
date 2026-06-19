@@ -57,7 +57,7 @@ impl Default for RgbHistogram {
 pub fn analyze_fused_scalar(d: &[u8], px: usize) -> TelemetryMetrics {
     let px = px.min(d.len() / 4);
 
-    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u64, 0u64);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
     let mut lanes = [
         lane_seed(0), lane_seed(1), lane_seed(2), lane_seed(3),
@@ -79,7 +79,7 @@ pub fn analyze_fused_scalar(d: &[u8], px: usize) -> TelemetryMetrics {
         let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
         let lane = p & 7;
         lanes[lane] = (lanes[lane] ^ w).wrapping_mul(PRIME);
-        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        rgb_nz += (r != 0) as u64 + (g != 0) as u64 + (b != 0) as u64;
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
@@ -117,7 +117,7 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
     use core::arch::x86_64::*;
 
     let chunks = px / 8;
-    let (mut a_zero, mut rgb_nz) = (0u32, 0u32);
+    let (mut a_zero, mut rgb_nz) = (0u64, 0u64);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
 
     let mut hv = _mm256_setr_epi32(
@@ -150,8 +150,8 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
         vmax = _mm256_max_epu8(vmax, _mm256_and_si256(pv, alpha_and));
 
         let zmask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(pv, zero)) as u32;
-        a_zero += (zmask & 0x8888_8888).count_ones();
-        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones();
+        a_zero += (zmask & 0x8888_8888).count_ones() as u64;
+        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones() as u64;
 
         let lo16 = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(pv));
         let hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(pv, 1));
@@ -210,7 +210,7 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
         let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
         let lane = p & 7;
         lanes[lane] = (lanes[lane] ^ w).wrapping_mul(PRIME);
-        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        rgb_nz += (r != 0) as u64 + (g != 0) as u64 + (b != 0) as u64;
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
