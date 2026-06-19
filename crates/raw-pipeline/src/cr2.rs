@@ -73,6 +73,9 @@ pub struct Cr2Timings {
     pub raw_buf_bytes: usize,
     /// Bytes in final cropped output.
     pub crop_buf_bytes: usize,
+    /// Canon CR2Slices geometry [n_full_slices, full_width, remainder_width].
+    /// All zero ⇒ single-slice file (raster order, no reassembly).
+    pub slices: [u16; 3],
 }
 
 /// Reusable decode-buffer for batch processing. Avoids per-call full-frame allocation.
@@ -269,26 +272,119 @@ fn canon_color_matrix(make: &str, model: &str) -> Option<[[f32; 3]; 3]> {
 /// Decode CR2 from raw bytes. Single call, no second Vec allocation.
 pub fn decode_bytes(data: &[u8]) -> Result<Cr2Image> {
     let mut buf = Vec::new();
-    decode_impl(data, &mut buf, true, false, false).map(|(img, _, _)| img)
+    decode_impl(data, &mut buf, true, None, false, false).map(|(img, _, _)| img)
 }
 
-/// Decode with per-phase timings for benchmarking.
+/// Decode forcing a specific slice-reassembly variant (bench only).
+/// `use_scatter=true` selects the pre-#1 scalar scatter; `false` the shipped bulk copy.
+#[doc(hidden)]
+pub fn decode_bytes_variant(data: &[u8], use_scatter: bool) -> Result<Cr2Image> {
+    let mut buf = Vec::new();
+    decode_impl(data, &mut buf, true, None, false, use_scatter).map(|(img, _, _)| img)
+}
+
+/// Decode with per-phase timings for benchmarking (native — uses std::time::Instant).
 pub fn decode_bytes_bench(data: &[u8]) -> Result<(Cr2Image, Cr2Timings)> {
     let mut buf = Vec::new();
-    decode_impl(data, &mut buf, true, true, false).map(|(img, t, _)| (img, t))
+    let base = std::time::Instant::now();
+    let clock = move || base.elapsed().as_secs_f64() * 1000.0;
+    decode_impl(data, &mut buf, true, Some(&clock), false, false).map(|(img, t, _)| (img, t))
+}
+
+/// Decode with per-phase timings using a caller-supplied monotonic millisecond clock.
+/// Lets the wasm pipeline measure phases via now_ms() (std::time::Instant is unavailable
+/// on wasm32-unknown-unknown). Returns the same Cr2Timings as decode_bytes_bench.
+pub fn decode_bytes_with_clock(
+    data: &[u8],
+    clock: &dyn Fn() -> f64,
+) -> Result<(Cr2Image, Cr2Timings)> {
+    let mut buf = Vec::new();
+    decode_impl(data, &mut buf, true, Some(clock), false, false).map(|(img, t, _)| (img, t))
 }
 
 /// Decode with full LJPEG stage statistics (for profiling only — slightly slower due to counters).
 pub fn decode_bytes_with_ljpeg_stats(data: &[u8]) -> Result<(Cr2Image, ljpeg::LjpegStats)> {
     let mut buf = Vec::new();
-    decode_impl(data, &mut buf, true, false, true)
+    decode_impl(data, &mut buf, true, None, true, false)
         .map(|(img, _, stats)| (img, stats.expect("capture_stats=true always yields Some")))
 }
 
 /// Decode reusing scratch buffer to avoid per-call full-frame allocation (batch mode).
 /// The scratch.raw buffer grows to full-frame size on the first call and is reused thereafter.
 pub fn decode_with_scratch(data: &[u8], scratch: &mut ScratchBuffers) -> Result<Cr2Image> {
-    decode_impl(data, &mut scratch.raw, false, false, false).map(|(img, _, _)| img)
+    decode_impl(data, &mut scratch.raw, false, None, false, false).map(|(img, _, _)| img)
+}
+
+/// Reorder Canon multi-slice LJPEG output from stream-stacked vertical slices into
+/// a single side-by-side raster of width `stride`. The decoded buffer holds slice 0's
+/// whole `nw × high` block, then slice 1's, …, then a trailing remainder slice of
+/// width `lw`. Slice i (i<n) lands at column `i*nw`; the remainder at `n*nw`.
+///
+/// Contiguous per-row copies — no per-pixel division/modulo. Equivalent to the scalar
+/// reference `row = local/sw; col = local%sw + i*nw` (see reassemble_slices_scatter in
+/// tests), since each (slice,row) is a contiguous `sw`-wide run in both source and dest.
+fn reassemble_slices(
+    src: &[u16],
+    stride: usize,
+    high: usize,
+    n: usize,
+    nw: usize,
+    lw: usize,
+) -> Vec<u16> {
+    let buf_len = src.len(); // == stride * high
+    let mut raster = vec![0u16; stride * high];
+    let block = nw.saturating_mul(high);
+    for i in 0..n {
+        let col0 = i * nw;
+        if nw == 0 || col0 >= stride { break; }
+        let run = nw.min(stride - col0);
+        let src_base = i * block;
+        for row in 0..high {
+            let s = src_base + row * nw;
+            if s + run > buf_len { break; }
+            let d = row * stride + col0;
+            raster[d..d + run].copy_from_slice(&src[s..s + run]);
+        }
+    }
+    if lw != 0 {
+        let col0 = n * nw;
+        if col0 < stride {
+            let run = lw.min(stride - col0);
+            let src_base = n * block;
+            for row in 0..high {
+                let s = src_base + row * lw;
+                if s + run > buf_len { break; }
+                let d = row * stride + col0;
+                raster[d..d + run].copy_from_slice(&src[s..s + run]);
+            }
+        }
+    }
+    raster
+}
+
+/// Reference scalar scatter — the pre-#1 slice mapping (per-pixel divisions). Retained
+/// for parity tests and the bulk-vs-scatter flip bench; `reassemble_slices` must stay
+/// byte-identical to this. Not used by the shipped decode path.
+#[doc(hidden)]
+pub fn reassemble_slices_scatter(
+    src: &[u16], stride: usize, high: usize, n: usize, nw: usize, lw: usize,
+) -> Vec<u16> {
+    let block = nw * high;
+    let mut raster = vec![0u16; stride * high];
+    for jidx in 0..(stride * high) {
+        let mut i = jidx / block;
+        let last = i >= n;
+        if last { i = n; }
+        let local = jidx - i * block;
+        let sw = if last { lw } else { nw };
+        if sw == 0 { break; }
+        let row = local / sw;
+        let col = local % sw + i * nw;
+        if row < high && col < stride {
+            raster[row * stride + col] = src[jidx];
+        }
+    }
+    raster
 }
 
 // ---------------------------------------------------------------------------
@@ -301,10 +397,20 @@ fn decode_impl(
     data:           &[u8],
     raw_buf:        &mut Vec<u16>,
     move_buf:       bool,
-    time_phases:    bool,
+    clock:          Option<&dyn Fn() -> f64>,
     capture_stats:  bool,
+    use_scatter:    bool, // bench-only: force the pre-#1 scalar scatter reassembly
 ) -> Result<(Cr2Image, Cr2Timings, Option<ljpeg::LjpegStats>)> {
-    let t_total = time_phases.then(std::time::Instant::now);
+    // Phase timing is driven by an injected monotonic millisecond clock rather than
+    // std::time::Instant, which is unavailable on wasm32-unknown-unknown (panics).
+    // Native callers pass an Instant-backed closure; the wasm pipeline passes now_ms.
+    // `mark()` samples a start; `elapsed()` returns the delta (0.0 when untimed).
+    let mark = || clock.map(|c| c());
+    let elapsed = |start: Option<f64>| match (clock, start) {
+        (Some(c), Some(s)) => c() - s,
+        _ => 0.0,
+    };
+    let t_total = mark();
 
     // Minimum: TIFF header (8) + CR2 extension (8) = 16 bytes.
     if data.len() < 16 {
@@ -327,7 +433,7 @@ fn decode_impl(
     // -----------------------------------------------------------------------
     // Parse pass: IFD0 → ExifIFD → MakerNote → RAW IFD
     // -----------------------------------------------------------------------
-    let t_parse = time_phases.then(std::time::Instant::now);
+    let t_parse = mark();
 
     // IFD0: image dimensions, orientation, strings, ExifIFD pointer
     let mut img_width:    u32 = 0;
@@ -421,7 +527,7 @@ fn decode_impl(
         _ => {}
     });
 
-    let parse_ms = t_parse.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+    let parse_ms = elapsed(t_parse);
 
     if strip_offset == 0 || strip_byte_count == 0 {
         bail!("CR2: missing strip offset or byte count in raw IFD");
@@ -497,7 +603,7 @@ fn decode_impl(
     raw_buf.resize(total_pixels, 0);
 
     let strip_bytes = &data[strip_off..strip_end];
-    let t_ljpeg = time_phases.then(std::time::Instant::now);
+    let t_ljpeg = mark();
     let ljpeg_stats = if capture_stats {
         let s = ljpeg::decode_tile_stats(strip_bytes, raw_buf, 0, stride, stride, sof_h)
             .with_context(|| "CR2: LJPEG decode failed")?;
@@ -507,7 +613,7 @@ fn decode_impl(
             .with_context(|| "CR2: LJPEG decode failed")?;
         None
     };
-    let ljpeg_ms = t_ljpeg.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+    let ljpeg_ms = elapsed(t_ljpeg);
 
     // -----------------------------------------------------------------------
     // CR2 slice reassembly (Canon multi-slice). The LJPEG decodes to a buffer where the N+1
@@ -521,26 +627,13 @@ fn decode_impl(
         let n = cr2_slices[0] as usize;
         let nw = cr2_slices[1] as usize;
         let lw = cr2_slices[2] as usize;
-        let high = sof_h;
-        let block = nw.checked_mul(high).ok_or_else(|| anyhow!("CR2: slice block overflow"))?;
-        let mut raster = vec![0u16; stride * high];
-        for jidx in 0..(stride * high) {
-            let mut i = jidx / block; // which slice
-            let last = i >= n;
-            if last {
-                i = n;
-            }
-            let local = jidx - i * block;
-            let sw = if last { lw } else { nw };
-            if sw == 0 {
-                break;
-            }
-            let row = local / sw;
-            let col = local % sw + i * nw;
-            if row < high && col < stride {
-                raster[row * stride + col] = raw_buf[jidx];
-            }
-        }
+        // Overflow guard for nw*high (reassemble_slices uses saturating mul internally).
+        nw.checked_mul(sof_h).ok_or_else(|| anyhow!("CR2: slice block overflow"))?;
+        let raster = if use_scatter {
+            reassemble_slices_scatter(raw_buf, stride, sof_h, n, nw, lw)
+        } else {
+            reassemble_slices(raw_buf, stride, sof_h, n, nw, lw)
+        };
         raw_buf.clear();
         raw_buf.extend_from_slice(&raster);
     }
@@ -586,7 +679,7 @@ fn decode_impl(
     // -----------------------------------------------------------------------
     // In-place crop: compact rows within raw_buf — no second Vec (items 8,9)
     // -----------------------------------------------------------------------
-    let t_crop = time_phases.then(std::time::Instant::now);
+    let t_crop = mark();
     let crop_needed = top != 0 || left != 0 || decoded_width != crop_w;
     if crop_needed {
         for row in 0..crop_h {
@@ -596,7 +689,7 @@ fn decode_impl(
         }
     }
     raw_buf.truncate(crop_w * crop_h);
-    let crop_ms        = t_crop.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+    let crop_ms        = elapsed(t_crop);
     let crop_buf_bytes = crop_w * crop_h * 2;
 
     // -----------------------------------------------------------------------
@@ -608,11 +701,12 @@ fn decode_impl(
         raw_buf[..crop_w * crop_h].to_vec()   // batch mode: clone crop, retain capacity
     };
 
-    let total_ms = t_total.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+    let total_ms = elapsed(t_total);
 
     let timings = Cr2Timings {
         total_ms, parse_ms, ljpeg_ms, crop_ms,
         raw_buf_bytes, crop_buf_bytes,
+        slices: if have_slices { cr2_slices } else { [0; 3] },
     };
 
     Ok((Cr2Image {
@@ -773,6 +867,30 @@ mod tests {
         assert!(t.ljpeg_ms <= t.total_ms, "ljpeg_ms={} > total_ms={}", t.ljpeg_ms, t.total_ms);
         assert!(t.raw_buf_bytes > t.crop_buf_bytes,
             "raw_buf_bytes={} should exceed crop_buf_bytes={}", t.raw_buf_bytes, t.crop_buf_bytes);
+    }
+
+    #[test]
+    fn slice_reassembly_matches_scalar_reference() {
+        // Geometries: (n, nw, lw, high). stride = n*nw + lw. Covers single-remainder,
+        // even/odd widths, lw==nw, and the classic 5D-era CR2Slices=[2,1728,1888]→here
+        // scaled down to keep the test fast while exercising the same index arithmetic.
+        let cases = [
+            (2usize, 4usize, 6usize, 5usize),
+            (3, 8, 8, 7),
+            (1, 16, 4, 9),
+            (2, 1728, 1888, 12), // real Canon slice widths, few rows
+            (4, 5, 3, 6),
+        ];
+        for &(n, nw, lw, high) in &cases {
+            let stride = n * nw + lw;
+            let total = stride * high;
+            // Deterministic distinct values so any mis-mapped sample is detectable.
+            let src: Vec<u16> = (0..total).map(|i| (i % 65535) as u16).collect();
+            let bulk = reassemble_slices(&src, stride, high, n, nw, lw);
+            let scalar = reassemble_slices_scatter(&src, stride, high, n, nw, lw);
+            assert_eq!(bulk, scalar,
+                "mismatch for n={n} nw={nw} lw={lw} high={high}");
+        }
     }
 
     #[test]

@@ -2112,10 +2112,13 @@ fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
     const MAX_DIM: u32 = 8192;
     const MAX_PIXELS: usize = 50_000_000;
 
-    let t = now_ms();
-    let cr2 = raw_pipeline::cr2::decode_bytes(data)
+    // Time the LJPEG entropy decode specifically (not parse + slice-reassembly + crop)
+    // so CR2 decompress_ms is apples-to-apples with the ORF path, whose decompress_ms
+    // is also entropy-only. now_ms() is the wasm-safe clock (Instant panics on wasm32).
+    let clock = || now_ms();
+    let (cr2, cr2_timings) = raw_pipeline::cr2::decode_bytes_with_clock(data, &clock)
         .map_err(|e| JsError::new(&format!("CR2 decode: {}", e)))?;
-    let decode_ms = now_ms() - t;
+    let decode_ms = cr2_timings.ljpeg_ms;
 
     let w = cr2.width;
     let h = cr2.height;
