@@ -142,7 +142,9 @@ pub fn extract_thumbnail_jpeg(data: &[u8]) -> Option<Vec<u8>> {
     let start = jpeg_off? as usize;
     let len = jpeg_len? as usize;
     if len == 0 { return None; }
-    data.get(start..start + len).map(|b| b.to_vec())
+    // SEC-012: start + len can overflow usize on wasm32 for crafted values.
+    let end = start.checked_add(len)?;
+    data.get(start..end).map(|b| b.to_vec())
 }
 
 /// Scan the first 3 MB of `data` for JPEG SOI markers and return the smallest
@@ -309,6 +311,22 @@ pub fn parse(data: &[u8]) -> Result<OrfInfo> {
             info.strip_byte_count,
         );
     }
+    // SEC-009 / ERR-017: verify strip bounds before any caller does the slice.
+    {
+        let strip_start = info.strip_offset as usize;
+        let strip_end = strip_start
+            .checked_add(info.strip_byte_count as usize)
+            .ok_or_else(|| anyhow!("strip range overflow"))?;
+        if strip_end > data.len() {
+            bail!(
+                "strip OOB: strip_offset={} + strip_byte_count={} = {} > data.len()={}",
+                info.strip_offset,
+                info.strip_byte_count,
+                strip_end,
+                data.len()
+            );
+        }
+    }
 
     if exif_offset > 0 {
         if let Ok(exif) = read_ifd(&r, exif_offset) {
@@ -443,13 +461,30 @@ impl IfdEntry {
                 }
             }
             4 => Ok(self.value_off),
-            _ => Ok(self.value_off),
+            // PARSERS-006: reject unrecognized dtypes rather than silently treating
+            // value_off as a numeric value, which would return nonsense for pointer types
+            // (e.g. RATIONAL=5, ASCII=2, UNDEFINED=7) that happen to share a tag.
+            _ => bail!("IFD tag {:#06x}: unsupported dtype {} for as_u32", self.tag, self.dtype),
         }
     }
 
     fn as_ascii(&self, r: &Reader) -> String {
-        if self.count <= 4 {
+        if self.count == 0 {
             return String::new();
+        }
+        if self.count <= 4 {
+            // Inline ASCII: the bytes live in the 4-byte value field (TIFF-001).
+            // value_off was read as a u32 in file byte order; recover the raw bytes.
+            let bytes = if r.le {
+                self.value_off.to_le_bytes()
+            } else {
+                self.value_off.to_be_bytes()
+            };
+            let n = (self.count as usize).min(4);
+            return String::from_utf8_lossy(&bytes[..n])
+                .trim_end_matches('\0')
+                .trim_end()
+                .to_string();
         }
         let start = self.value_off as usize;
         let end = match start.checked_add(self.count as usize) {
@@ -543,9 +578,17 @@ pub(crate) fn visit_ifd<F: FnMut(u16, u16, u32, u32, usize)>(
             e + 8,
         );
     }
-    let next_pos = off + 2 + count * 12;
-    if next_pos.checked_add(4).map_or(true, |end| end > data.len()) { 0 }
-    else { ifd_u32(data, next_pos, le) }
+    // SEC-006 / ERR-010: off + 2 + count * 12 can overflow usize on wasm32 when
+    // off is a large file-supplied value.
+    let next_pos = off
+        .checked_add(2)
+        .and_then(|v| v.checked_add(count * 12));
+    match next_pos {
+        Some(p) if p.checked_add(4).map_or(false, |end| end <= data.len()) => {
+            ifd_u32(data, p, le)
+        }
+        _ => 0,
+    }
 }
 
 /// Olympus MakerNote header variants:
@@ -869,8 +912,13 @@ pub fn bench_decode_orf(data: &[u8]) -> Result<DecodeBench> {
 
     let w = info.width as usize;
     let h = info.height as usize;
-    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
-    let strip = &data[info.strip_offset as usize..strip_end];
+    // SEC-001 / ERR-001: use checked arithmetic to avoid wasm32 overflow.
+    let strip_start = info.strip_offset as usize;
+    let strip_end = strip_start
+        .checked_add(info.strip_byte_count as usize)
+        .ok_or_else(|| anyhow!("strip range overflow"))?;
+    let strip = data.get(strip_start..strip_end)
+        .ok_or_else(|| anyhow!("strip OOB ({strip_start}..{strip_end} > {})", data.len()))?;
 
     let t = std::time::Instant::now();
     let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
@@ -907,8 +955,13 @@ pub fn bench_pipeline_orf(data: &[u8]) -> Result<PipelineBench> {
     }
     let w = info.width as usize;
     let h = info.height as usize;
-    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
-    let strip = &data[info.strip_offset as usize..strip_end];
+    // SEC-001 / ERR-001: use checked arithmetic to avoid wasm32 overflow.
+    let strip_start = info.strip_offset as usize;
+    let strip_end = strip_start
+        .checked_add(info.strip_byte_count as usize)
+        .ok_or_else(|| anyhow!("strip range overflow"))?;
+    let strip = data.get(strip_start..strip_end)
+        .ok_or_else(|| anyhow!("strip OOB ({strip_start}..{strip_end} > {})", data.len()))?;
 
     let t = std::time::Instant::now();
     let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;

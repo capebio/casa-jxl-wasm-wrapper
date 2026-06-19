@@ -172,8 +172,10 @@ fn extract_wb_from_raw(data: &[u8], off: usize, cnt: u32, le: bool) -> Option<(f
 /// Parse SOF3 marker inside a LJPEG stream. Returns (precision, height, width, ncomp).
 /// Segment lengths are bounds-checked before advancing to prevent malformed-marker traversal.
 fn parse_ljpeg_sof(data: &[u8], strip_off: usize, strip_len: usize) -> Option<(u8, u16, u16, u8)> {
-    let end = (strip_off + strip_len).min(data.len());
-    let buf = &data[strip_off..end];
+    // SEC-005: strip_off + strip_len can overflow usize on wasm32 when
+    // file-supplied values are near usize::MAX.
+    let end = strip_off.checked_add(strip_len)?.min(data.len());
+    let buf = data.get(strip_off..end)?;
     let mut i = 0;
     while i + 3 < buf.len() {
         if buf[i] != 0xFF { i += 1; continue; }

@@ -367,7 +367,8 @@ fn decode_tile_impl<const COLLECT_STATS: bool>(
             0xC4 => {
                 let seg_len = read_u16_be(src, &mut pos)? as usize;
                 if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
-                let end = (pos + seg_len - 2).min(src.len());
+                // ERR-007: pos + (seg_len - 2) can overflow on wasm32.
+                let end = pos.saturating_add(seg_len - 2).min(src.len());
                 while pos < end {
                     let tcth = read_u8(src, &mut pos)?;
                     let tc = tcth >> 4;
@@ -383,11 +384,13 @@ fn decode_tile_impl<const COLLECT_STATS: bool>(
                         *b = read_u8(src, &mut pos)?;
                     }
                     let total: usize = bits.iter().map(|&b| b as usize).sum();
-                    if pos + total > src.len() {
-                        bail!("ljpeg: DHT values EOF");
-                    }
-                    let values = &src[pos..pos + total];
-                    pos += total;
+                    // SEC-010: pos + total can overflow usize on wasm32 for
+                    // file-controlled pos/total values.
+                    let val_end = pos.checked_add(total)
+                        .filter(|&e| e <= src.len())
+                        .ok_or_else(|| anyhow::anyhow!("ljpeg: DHT values EOF"))?;
+                    let values = &src[pos..val_end];
+                    pos = val_end;
                     // L11: thread-local exact-payload cache (Rc, WASM-safe). Key = bits[16]++values.
                     let key: Vec<u8> = bits.iter().copied().chain(values.iter().copied()).collect();
                     let cached = DHT_CACHE.with(|c| {
@@ -905,5 +908,42 @@ mod tests {
         let mut out = vec![0u16; 1];
         let err = decode_tile(&src, &mut out, 0, 1, 1, 1).unwrap_err();
         assert!(err.to_string().contains("ljpeg: category 9 exceeds precision 8"), "got: {}", err);
+    }
+
+    // LJPEG-001: property-based tests for extend() edge cases.
+    #[test]
+    fn extend_t0_always_zero() {
+        // t=0 must always return 0 regardless of diff.
+        for diff in [-32768i32, -1, 0, 1, 32767] {
+            assert_eq!(extend(diff, 0), 0, "extend({diff}, 0) should be 0");
+        }
+    }
+
+    #[test]
+    fn extend_t16_passthrough() {
+        // t=16: half = 1<<15 = 32768. All 16-bit diffs are >= 0 and diff < 32768
+        // triggers negative extension. diff >= 32768 passes through.
+        let half = 1i32 << 15;
+        // diff below half → negative extension
+        assert_eq!(extend(half - 1, 16), (half - 1) - ((1i32 << 16) - 1));
+        // diff at or above half → positive (passthrough)
+        assert_eq!(extend(half, 16), half);
+        assert_eq!(extend(65535, 16), 65535);
+    }
+
+    #[test]
+    fn extend_negative_values() {
+        // For t=1: half=1. diff=0 < half → negative: 0 - 1 = -1.
+        assert_eq!(extend(0, 1), -1);
+        // diff=1 >= half → positive passthrough.
+        assert_eq!(extend(1, 1), 1);
+    }
+
+    #[test]
+    fn extend_t8_range() {
+        // t=8: half=128. diff=127 → 127 - 255 = -128. diff=128 → 128 (passthrough).
+        assert_eq!(extend(127, 8), 127 - 255);
+        assert_eq!(extend(128, 8), 128);
+        assert_eq!(extend(255, 8), 255);
     }
 }

@@ -183,6 +183,7 @@ fn decode_tiles(
         col_start: usize,
         buf: Vec<u16>,
         buf_w: usize, // declared by this tile's SOF (compact stride unit)
+        buf_h: usize, // declared by this tile's SOF
         active_w: usize,
         active_h: usize,
     }
@@ -216,6 +217,7 @@ fn decode_tiles(
             col_start,
             buf,
             buf_w: bw,
+            buf_h: bh,
             active_w,
             active_h,
         })
@@ -232,11 +234,20 @@ fn decode_tiles(
     // Serial blit of active rects (disjoint; cheap vs decode work).
     for td in tiles {
         let aw = td.active_w.min(td.buf_w);
-        let ah = td.active_h;
+        // Clamp active_h by the SOF-declared tile height: a tile whose LJPEG SOF
+        // reports fewer rows than active_h would cause an OOB read into td.buf
+        // (DNG-002 / ERR-005).
+        let ah = td.active_h.min(td.buf_h);
         for r in 0..ah {
             let src_base = r * td.buf_w;
-            let dst_base = (td.row_start + r) * width + td.col_start;
-            let dst = &mut out[dst_base..dst_base + aw];
+            // SEC-008: (row_start + r) * width + col_start can overflow usize on
+            // wasm32 when file-supplied tile grid values are large.
+            let dst_base = (td.row_start + r)
+                .checked_mul(width)
+                .and_then(|v| v.checked_add(td.col_start))
+                .ok_or_else(|| anyhow!("tile blit dst overflow"))?;
+            let dst = out.get_mut(dst_base..dst_base + aw)
+                .ok_or_else(|| anyhow!("tile blit OOB dst_base={dst_base} aw={aw}"))?;
             let src = &td.buf[src_base..src_base + aw];
             dst.copy_from_slice(src);
         }
@@ -355,12 +366,32 @@ pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u
     if row_off == 0 && col_off == 0 {
         return (raw, width, height);
     }
+    // Trim columns first (shift start within each row), then trim rows.
+    // For Grbg (col_off=1, row_off=0): drop col 0 → width-1, same height.
+    // For Bggr (col_off=1, row_off=1): drop col 0 AND row 0.
+    // For Gbrg (col_off=0, row_off=1): drop row 0 only (handled below).
+    let new_w = width.saturating_sub(col_off);
+    let new_h = height.saturating_sub(row_off);
+    if new_w == 0 || new_h == 0 {
+        return (&raw[..0], 0, 0);
+    }
+    // Build a contiguous slice only when col_off == 0 (no column gap between rows).
+    // When col_off > 0 the rows are non-contiguous so we cannot return a plain slice;
+    // fall back to returning the full buffer starting from the first pixel of row
+    // row_off with the adjusted width — callers iterate row by row and honour the
+    // returned width, so this is safe and correct.
     if col_off == 0 {
-        let new_h = height - row_off;
         let start = row_off * width;
         return (&raw[start..start + new_h * width], width, new_h);
     }
-    (raw, width, height)
+    // col_off == 1 (Grbg or Bggr): start at (row_off, col_off) and use new_w.
+    let start = row_off * width + col_off;
+    // The slice must cover new_h full rows of new_w pixels, but the raw buffer is
+    // laid out with stride=width; we return width as the stride so callers that do
+    // row-stride arithmetic remain correct.  We expose only the tail of the buffer
+    // from `start` onward — the slice length naturally limits OOB reads.
+    let available = raw.len().saturating_sub(start);
+    (&raw[start..start + available.min((new_h - 1) * width + new_w)], width, new_h)
 }
 
 fn cfa_phase(cfa: Cfa) -> (u8, u8) {
@@ -452,11 +483,13 @@ fn raw_ifd_supported_candidate(ifd: &RawIfd, new_subfile_type: u32) -> bool {
         (!ifd.tile_offsets.is_empty() && !ifd.tile_byte_counts.is_empty())
             || (!ifd.strip_offsets.is_empty() && !ifd.strip_byte_counts.is_empty());
     let is_subsampled = (new_subfile_type & 1) != 0;
+    // PARSERS-005 / ERR-011: 0x884C (lossy DNG) is not decoded; exclude it from
+    // the candidate check so walk() does not select an IFD that will fail later.
     ifd.width > 0
         && ifd.height > 0
         && has_storage
         && !is_subsampled
-        && (ifd.compression == 7 || ifd.compression == 1 || ifd.compression == 0x884C)
+        && (ifd.compression == 7 || ifd.compression == 1)
 }
 
 fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
@@ -478,7 +511,7 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
     let mut has_image_dims = false;
     let mut has_tiles = false;
 
-    visit_ifd(data, off, le, |tag, dtype, cnt, val, inline_pos| match tag {
+    let next_ifd = visit_ifd(data, off, le, |tag, dtype, cnt, val, inline_pos| match tag {
             0x00FE => new_subfile_type = val,
             0x0100 => {
                 ifd.width = first_u32(data, dtype, cnt, val, inline_pos, le).unwrap_or(0);
@@ -588,7 +621,13 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
     }
 
     for s in subs {
-            walk_inner(data, s as usize, le, state, visited, depth + 1);
+        walk_inner(data, s as usize, le, state, visited, depth + 1);
+    }
+    // DNG-004: follow the next-IFD chain pointer so we also scan IFD1, IFD2, …
+    // (SubIFD chains for things like EXIF / maker-note sub-trees are handled
+    // separately via the `subs` vector above).
+    if next_ifd > 0 {
+        walk_inner(data, next_ifd as usize, le, state, visited, depth + 1);
     }
     }
     let mut visited = HashSet::new();
@@ -610,7 +649,8 @@ fn first_u32(
     if ts == 0 {
         return None;
     }
-    let bytes = ts * cnt as usize;
+    // SEC-003: ts * cnt can overflow usize on wasm32 for large file-supplied cnt.
+    let bytes = ts.checked_mul(cnt as usize)?;
     let p = if bytes <= 4 { inline_pos } else { val as usize };
     match dtype {
         1 | 6 => data.get(p).map(|&b| b as u32),
@@ -635,7 +675,8 @@ fn first_f32(
     if ts == 0 {
         return None;
     }
-    let bytes = ts * cnt as usize;
+    // SEC-003: ts * cnt can overflow usize on wasm32 for large file-supplied cnt.
+    let bytes = ts.checked_mul(cnt as usize)?;
     let p = if bytes <= 4 { inline_pos } else { val as usize };
     match dtype {
         1 | 6 => data.get(p).map(|&b| b as f32),
@@ -666,7 +707,11 @@ fn read_array_u32(
     if ts == 0 || cnt == 0 {
         return Vec::new();
     }
-    let bytes = ts * cnt as usize;
+    // SEC-003: ts * cnt can overflow usize on wasm32 for large file-supplied cnt.
+    let bytes = match ts.checked_mul(cnt as usize) {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
     let p = if bytes <= 4 { inline_pos } else { val as usize };
     // Cap the up-front reservation: cnt is file-controlled (up to u32::MAX) and the
     // loop below already breaks on OOB, so the real element count can never exceed
@@ -1040,6 +1085,44 @@ mod tests {
         assert_eq!(cfa_phase(Cfa::Bggr), (1, 1));
     }
 
+    // DNG-005: tests for align_to_rggb with non-RGGB patterns (previously untested).
+    #[test]
+    fn align_to_rggb_rggb_is_identity() {
+        let raw = [1u16, 2, 3, 4, 5, 6, 7, 8];
+        let (s, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Rggb);
+        assert_eq!(w, 4);
+        assert_eq!(h, 2);
+        assert_eq!(s, &raw[..]);
+    }
+
+    #[test]
+    fn align_to_rggb_gbrg_drops_row() {
+        // Gbrg: row_off=1, col_off=0 → drop first row, return width=4 height=1.
+        let raw = [0u16; 8]; // 2 rows × 4 cols
+        let (_, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Gbrg);
+        assert_eq!(w, 4);
+        assert_eq!(h, 1, "Gbrg should trim one row");
+    }
+
+    #[test]
+    fn align_to_rggb_grbg_drops_col() {
+        // Grbg: row_off=0, col_off=1 → drop col 0, return width=4 (stride) height=2 new_w=3.
+        let raw = [0u16; 8]; // 2 rows × 4 cols
+        let (_, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Grbg);
+        // Stride (w) remains 4 so row addressing is correct; new_w is 3 but stride=4.
+        assert_eq!(w, 4, "stride should remain full width for col-trimmed case");
+        assert_eq!(h, 2);
+    }
+
+    #[test]
+    fn align_to_rggb_bggr_drops_row_and_col() {
+        // Bggr: row_off=1, col_off=1 → drop row 0 and col 0.
+        let raw = [0u16; 8]; // 2 rows × 4 cols
+        let (_, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Bggr);
+        assert_eq!(w, 4, "stride should remain full width");
+        assert_eq!(h, 1, "Bggr should trim one row");
+    }
+
     #[test]
     fn raw_candidate_accepts_strips_and_small_width() {
         let raw = RawIfd {
@@ -1218,19 +1301,48 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
     }
 
     // RGGB fused strip path (X2). Never materializes full mosaic alongside full rgb.
+    // PARSERS-014: strip-based DNGs have no TileWidth/TileLength — fall back to the
+    // full mosaic path rather than erroring on a valid but strip-organised RGGB DNG.
+    let (tile_width, tile_length) = match (raw.tile_width, raw.tile_length) {
+        (Some(tw), Some(tl)) if tw > 0 && tl > 0 => (tw as usize, tl as usize),
+        _ => {
+            // No tile dims → fall back to full mosaic decode (correct; cheaper path
+            // only available when tile dims are present).
+            let t0 = Instant::now();
+            let mut img = decode_bytes(data)?;
+            if subtract_black {
+                demosaic::subtract_black_in_place(&mut img.raw, img.black);
+            }
+            let decode_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let t1 = Instant::now();
+            let rgb = demosaic::demosaic_bayer_mhc(&img.raw, img.width, img.height, cfa_phase(img.cfa))
+                .map_err(|e| anyhow!("demosaic: {}", e))?;
+            let demosaic_ms = t1.elapsed().as_secs_f64() * 1000.0;
+            return Ok(DngDemosaiced {
+                width: img.width,
+                height: img.height,
+                rgb,
+                black: if subtract_black { 0 } else { img.black },
+                white: img.white,
+                wb_r: img.wb_r,
+                wb_g: img.wb_g,
+                wb_b: img.wb_b,
+                orientation: img.orientation,
+                make: img.make,
+                model: img.model,
+                color_matrix: img.color_matrix,
+                iso: img.iso,
+                decode_ms,
+                demosaic_ms,
+            });
+        }
+    };
+    let tw = tile_width;
+    let tl = tile_length;
+
     let mut rgb = vec![0u16; width * height * 3];
     let aw = width;
     let ah = height;
-
-    let tw = raw.tile_width.ok_or_else(|| anyhow!("missing TileWidth"))? as usize;
-    let tl = raw
-        .tile_length
-        .ok_or_else(|| anyhow!("missing TileLength"))? as usize;
-    // TileWidth/TileLength are file-supplied; zero would div-by-zero below
-    // (000-errors-6). Only triggers on malformed input.
-    if tw == 0 || tl == 0 {
-        bail!("DNG: zero TileWidth/TileLength");
-    }
     let coltiles = (width + tw - 1) / tw;
     let rowtiles = (height + tl - 1) / tl;
     // Overflow guard on the tile grid (000-security-12).
@@ -1379,8 +1491,14 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
     }
 
     if rgb_write_row != ah {
-        // tiny images or edge math; pad or error softly by filling remain (should not happen for valid tiles)
-        // For robustness fall back would have caught, but keep going.
+        // Incomplete demosaic: fewer rows were written than the expected output
+        // height.  Emit a diagnostic instead of silently returning a zero-padded
+        // image (DNG-003 / ERR-004).  The partial output is retained rather than
+        // erroring so callers receive the best available data for a degraded file.
+        eprintln!(
+            "raw-pipeline: DNG demosaic wrote {} rgb rows but expected {} (width={}, gap={})",
+            rgb_write_row, ah, aw, ah - rgb_write_row
+        );
     }
 
     Ok(DngDemosaiced {

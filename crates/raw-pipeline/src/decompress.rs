@@ -153,6 +153,12 @@ pub fn decompress_rows_into(
             };
 
             let v = (pred + ((diff << 2) | low)) & 0xFFFF;
+            // SAFETY (SEC-004 / PARSERS-013 / CONC-05): cur_row_ptr is derived from
+            // `cur_row = &mut cur[..width]` (len = width).  The loop invariant `col <
+            // width` ensures `col` is always a valid index into cur_row, so
+            // `cur_row_ptr.add(col)` is always in-bounds and exclusively owned (no
+            // aliasing: `north_row` borrows `above` which is disjoint from `cur`
+            // due to `split_at_mut`; `cur_row_ptr` is not captured elsewhere).
             unsafe { *cur_row_ptr.add(col) = v as u16; }
             west[parity] = v;
             if row >= 2 {
