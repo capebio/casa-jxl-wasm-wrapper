@@ -17,9 +17,12 @@ export function packFramePixels(frame, options = {}) {
   }
 
   const source = toUint8Array(frame?.pixels);
-  const stride = Number.isFinite(frame?.pixelStride) && frame.pixelStride > 0
-    ? Math.floor(frame.pixelStride)
-    : rowBytes;
+  // `pixelStride` is the source ROW stride only when it carries row padding (≥ rowBytes). Some
+  // decoders instead report bytes-PER-PIXEL here (e.g. 4 for rgba8), which is far below a full row;
+  // using that as a row stride steps each row a few bytes → diagonal shear (P2200708-prog-p6-q85.jxl).
+  // A real row stride is always ≥ the tight rowBytes, so anything smaller means "tight".
+  const reported = Number.isFinite(frame?.pixelStride) ? Math.floor(frame.pixelStride) : 0;
+  const stride = reported >= rowBytes ? reported : rowBytes;
   const packedLength = rowBytes * height;
 
   // fast path: tight stride, no roi, allow view share (0-copy "pointer move")
