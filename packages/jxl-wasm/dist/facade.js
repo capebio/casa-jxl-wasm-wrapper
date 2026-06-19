@@ -611,21 +611,39 @@ async function encodeTileContainer(pixels, width, height, options, format) {
     const distance = options.distance ?? 1.0;
     const effort = options.effort ?? 3;
     const hasAlpha = options.hasAlpha !== false;
+    const onMetric = options.onMetric;
+    // Per-phase encode sub-timers (marshal vs libjxl core-compress). Mirrors the
+    // decodeTileContainerRegion split so the benchmark TOON Enc*Ms fields get real
+    // numbers without a WASM rebuild — enc_wasm_encode is the full synchronous FFI
+    // call into libjxl, i.e. the EncCoreCompressMs the ~90% claim is about.
+    const tStart = performance.now();
     const view = copyOrBorrowInput(pixels, false);
     const expectedBytes = width * height * 4 * bytesPerChannelForFormat(format);
     if (view.byteLength < expectedBytes) {
         throw new Error(`Pixel buffer too small: ${view.byteLength} < ${expectedBytes}`);
     }
+    onMetric?.("enc_input_prep", performance.now() - tStart);
+    const t2 = performance.now();
     const ptr = module._malloc(view.byteLength);
     if (ptr === 0)
         throw new Error("WASM malloc failed for tile container encode");
+    onMetric?.("enc_malloc", performance.now() - t2);
     try {
+        const t3 = performance.now();
         module.HEAPU8.set(view, ptr);
+        onMetric?.("enc_heap_set", performance.now() - t3);
+        const t4 = performance.now();
         const handle = encodeFn(ptr, width, height, tileSize, distance, effort, hasAlpha ? 1 : 0);
-        return takeBuffer(module, handle, "tile container encode").data;
+        onMetric?.("enc_wasm_encode", performance.now() - t4);
+        const t5 = performance.now();
+        const out = takeBuffer(module, handle, "tile container encode").data;
+        onMetric?.("enc_buffer_read", performance.now() - t5);
+        return out;
     }
     finally {
+        const tFree = performance.now();
         module._free(ptr);
+        onMetric?.("enc_free", performance.now() - tFree);
     }
 }
 /**
