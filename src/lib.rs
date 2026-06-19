@@ -1424,15 +1424,18 @@ pub fn apply_look(
 
 /// Convert interleaved RGB8 → RGBA8 (alpha = 255).  HTML canvas wants RGBA.
 // Input must be a multiple of 3 bytes; trailing bytes are ignored.
-// Manual indexing version — tends to produce tighter codegen than chunks+zip
-// for this extremely hot conversion path (called on every RAW frame).
+//
+// 3-stride → 4-stride is not a memcpy, but it is a fixed byte-shuffle: a single
+// pshufb/i8x16_swizzle turns 4 source pixels (12 bytes) into 4 RGBA pixels (16 bytes),
+// with alpha set by OR-ing a constant 0xFF mask. SIMD handles the bulk; a scalar tail
+// finishes the last <4 pixels (and the whole buffer when no SIMD is available).
 #[wasm_bindgen]
 pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     let n = rgb.len() / 3;
     let mut out = vec![255u8; n * 4];
-    let mut si = 0usize;
-    let mut di = 0usize;
-    for _ in 0..n {
+    let done = rgb_to_rgba_simd(rgb, &mut out, n);
+    let (mut si, mut di) = (done * 3, done * 4);
+    for _ in done..n {
         out[di] = rgb[si];
         out[di + 1] = rgb[si + 1];
         out[di + 2] = rgb[si + 2];
@@ -1440,6 +1443,68 @@ pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
         di += 4;
     }
     out
+}
+
+// Number of safe 4-pixel SIMD blocks: each reads 16 bytes (uses 12) from `rgb` and writes
+// 16 bytes to `out`, so the last block must satisfy block*12 + 16 <= rgb.len().
+#[inline]
+fn rgb_to_rgba_simd_blocks(src_len: usize, n: usize) -> usize {
+    if src_len < 16 { 0 } else { ((src_len - 16) / 12 + 1).min(n / 4) }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn rgb_to_rgba_simd(rgb: &[u8], out: &mut [u8], n: usize) -> usize {
+    use core::arch::wasm32::*;
+    let blocks = rgb_to_rgba_simd_blocks(rgb.len(), n);
+    if blocks == 0 {
+        return 0;
+    }
+    // Swizzle indices: lanes with the high bit set (here -128) emit 0; the alpha lanes
+    // are then forced to 0xFF by the OR mask. RGB lanes pull bytes 0..11 (4 pixels).
+    let idx = i8x16(0, 1, 2, -128, 3, 4, 5, -128, 6, 7, 8, -128, 9, 10, 11, -128);
+    let amask = u8x16(0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255);
+    for b in 0..blocks {
+        unsafe {
+            let v = v128_load(rgb.as_ptr().add(b * 12) as *const v128);
+            let res = v128_or(i8x16_swizzle(v, idx), amask);
+            v128_store(out.as_mut_ptr().add(b * 16) as *mut v128, res);
+        }
+    }
+    blocks * 4
+}
+
+#[cfg(target_arch = "x86_64")]
+fn rgb_to_rgba_simd(rgb: &[u8], out: &mut [u8], n: usize) -> usize {
+    if !std::is_x86_feature_detected!("ssse3") {
+        return 0;
+    }
+    let blocks = rgb_to_rgba_simd_blocks(rgb.len(), n);
+    if blocks == 0 {
+        return 0;
+    }
+    // SAFETY: ssse3 verified above; block bounds verified by rgb_to_rgba_simd_blocks.
+    unsafe { rgb_to_rgba_ssse3(rgb, out, blocks) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn rgb_to_rgba_ssse3(rgb: &[u8], out: &mut [u8], blocks: usize) -> usize {
+    use core::arch::x86_64::*;
+    // pshufb: index byte with the high bit set emits 0; alpha lanes (-128) become 0,
+    // then OR'd to 0xFF (-1i8). RGB lanes pull bytes 0..11.
+    let shuf = _mm_setr_epi8(0, 1, 2, -128, 3, 4, 5, -128, 6, 7, 8, -128, 9, 10, 11, -128);
+    let amask = _mm_setr_epi8(0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0, -1);
+    for b in 0..blocks {
+        let v = _mm_loadu_si128(rgb.as_ptr().add(b * 12) as *const __m128i);
+        let res = _mm_or_si128(_mm_shuffle_epi8(v, shuf), amask);
+        _mm_storeu_si128(out.as_mut_ptr().add(b * 16) as *mut __m128i, res);
+    }
+    blocks * 4
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_arch = "x86_64")))]
+fn rgb_to_rgba_simd(_rgb: &[u8], _out: &mut [u8], _n: usize) -> usize {
+    0
 }
 
 #[cfg(test)]
@@ -1474,6 +1539,29 @@ mod tests {
         let unpacked = unpack_rgb16_le(&packed);
         assert_eq!(unpacked, unpack_scalar(&packed), "unpack != scalar reference");
         assert_eq!(unpacked, src, "pack→unpack round-trip lost data");
+    }
+
+    #[test]
+    fn rgb_to_rgba_simd_matches_scalar() {
+        fn scalar(rgb: &[u8]) -> Vec<u8> {
+            let n = rgb.len() / 3;
+            let mut out = vec![255u8; n * 4];
+            let (mut si, mut di) = (0, 0);
+            for _ in 0..n {
+                out[di] = rgb[si]; out[di + 1] = rgb[si + 1]; out[di + 2] = rgb[si + 2];
+                si += 3; di += 4;
+            }
+            out
+        }
+        // Pixel counts spanning: empty, <4 (no SIMD), exact blocks, blocks+tail, large.
+        for &px in &[0usize, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 1000, 1001] {
+            let mut s: u32 = 0xC0FFEE ^ px as u32;
+            let rgb: Vec<u8> = (0..px * 3).map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (s >> 24) as u8
+            }).collect();
+            assert_eq!(rgb_to_rgba(&rgb), scalar(&rgb), "mismatch at {px} px");
+        }
     }
 
     #[test]
