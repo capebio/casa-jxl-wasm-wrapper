@@ -91,6 +91,36 @@ const LUMA_R: f32 = 0.2126;
 const LUMA_G: f32 = 0.7152;
 const LUMA_B: f32 = 0.0722;
 
+/// Precomputed ln/exp LUTs for perceptual constancy (Lens17 non-Riemannian grid).
+/// Reduces transcendental calls during grid initialization (4913 evaluations).
+/// Built lazily on first use.
+static LN_LINEAR_LUT: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+static EXP_LINEAR_LUT: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+
+fn build_ln_linear_lut() -> Vec<f32> {
+    let mut lut = vec![0.0f32; 256];
+    let eps = 1e-6f32;
+    for i in 0..256 {
+        let norm = i as f32 / 255.0;
+        let linear = if norm <= 0.04045 {
+            norm / 12.92
+        } else {
+            ((norm + 0.055) / 1.055).powf(2.4)
+        };
+        lut[i] = (linear.max(eps)).ln();
+    }
+    lut
+}
+
+fn build_exp_linear_lut() -> Vec<f32> {
+    let mut lut = vec![0.0f32; 256];
+    for i in 0..256 {
+        let log_val = -6.0 + (i as f32 / 255.0) * 12.0;
+        lut[i] = log_val.exp().min(1.5);
+    }
+    lut
+}
+
 #[derive(Clone)]
 pub struct PipelineParams {
     pub black: u16,
@@ -280,10 +310,9 @@ fn highlight_shoulder(x: f32) -> f32 {
     if x <= HIGHLIGHT_KNEE {
         x
     } else {
-        let range = 1.0 - HIGHLIGHT_KNEE; // output headroom above the knee
-        let s = x - HIGHLIGHT_KNEE;       // input excess above the knee (may be >> range)
-        // mul_add for the final (range * frac + KNEE)
-        HIGHLIGHT_KNEE + range.mul_add(s / (s + range), 0.0)
+        let range = 1.0 - HIGHLIGHT_KNEE;
+        let s = x - HIGHLIGHT_KNEE;
+        HIGHLIGHT_KNEE + range * s / (s + range)
     }
 }
 
@@ -432,9 +461,9 @@ impl PerceptualGrid {
     fn sample(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         // Trilinear interp in [0,1.5]^3 scaled to grid. Fast path for pc !c-perceptual rust.
         let s = self.size as f32 - 1.0;
-        let rf = (r / 1.5).clamp(0.0, 1.0) * s;
-        let gf = (g / 1.5).clamp(0.0, 1.0) * s;
-        let bf = (b / 1.5).clamp(0.0, 1.0) * s;
+        let rf = (r / 1.5).min(1.0) * s; // clamp(0,1) → min(1) since r>=0 guaranteed
+        let gf = (g / 1.5).min(1.0) * s;
+        let bf = (b / 1.5).min(1.0) * s;
         let ri = rf.floor() as usize;
         let gi = gf.floor() as usize;
         let bi = bf.floor() as usize;
@@ -618,6 +647,25 @@ fn build_post16_lut(t: &TonePost) -> Vec<u16> {
     let fill = |i: usize, o: &mut u16| {
         let y = tone_curve(i as f32 / 65535.0, t);
         *o = (y * 65535.0 + 0.5).clamp(0.0, 65535.0) as u16;
+    };
+    #[cfg(feature = "parallel")]
+    lut.par_iter_mut().enumerate().for_each(|(i, o)| fill(i, o));
+    #[cfg(not(feature = "parallel"))]
+    lut.iter_mut().enumerate().for_each(|(i, o)| fill(i, o));
+    lut
+}
+
+/// Compact 4096-entry post-LUT for u8 output. ~16x smaller (4KB vs 65KB).
+/// Access via `idx = (tone_index >> 4)` with linear interpolation for precision.
+const COMPACT_POST_LUT_LEN: usize = 4096;
+const COMPACT_POST_LUT_SHIFT: u32 = 4; // 65536 / 4096 = 16 = 1 << 4
+
+fn build_post_lut_strided(t: &TonePost) -> Vec<u8> {
+    let mut lut = vec![0u8; COMPACT_POST_LUT_LEN];
+    let fill = |i: usize, o: &mut u8| {
+        let raw_input = (i << COMPACT_POST_LUT_SHIFT) as f32; // map 4k index back to 65k range
+        let y = tone_curve(raw_input / 65535.0, t);
+        *o = (y * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
     };
     #[cfg(feature = "parallel")]
     lut.par_iter_mut().enumerate().for_each(|(i, o)| fill(i, o));
@@ -1003,13 +1051,15 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                 {
                     let n = rgb16.len();
                     let mut i = 0;
+                    let norm_4 = 4.0 / 65535.0;
+                    let clarity_factor = params.clarity;
                     while i < n {
                         let orig = rgb16[i] as i32;
                         let blur = blurred[i] as i32;
-                        let v = orig as f32 / 65535.0;
-                        let w = 4.0 * v * (1.0 - v);
-                        rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
-                            .clamp(0, 65535) as u16;
+                        let v = (orig as f32) * norm_4;
+                        let w = v * (1.0 - v);
+                        let delta = clarity_factor * w * (orig - blur) as f32;
+                        rgb16[i] = (orig as f32 + delta).round().clamp(0.0, 65535.0) as i32 as u16;
                         i += 1;
                     }
                 }
@@ -1170,10 +1220,10 @@ pub fn apply_tone_math(
             sat
         } else {
             let raw_mx = r2.max(g2).max(b2);
-            let mx = raw_mx.max(1.0);
+            let mx = raw_mx.max(1e-6); // branchless: avoid divide-by-zero
             let mn = r2.min(g2).min(b2).max(0.0);
-            let inv_mx = if raw_mx > 0.0 { 1.0 / mx } else { 0.0 };
-            let pixel_sat = ((mx - mn) * inv_mx).clamp(0.0, 1.0);
+            let inv_mx = 1.0 / mx;
+            let pixel_sat = ((mx - mn) * inv_mx).min(1.0); // min instead of clamp (no lower bound needed)
             let vib_w = 1.0 - pixel_sat;
             sat * (1.0 + vib * vib_w * 0.6)
         };

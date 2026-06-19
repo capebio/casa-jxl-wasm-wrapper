@@ -1200,3 +1200,60 @@ Target: the 7-file progressive-JXL encode bunch (casaencoder, casabio_encode, jx
 - What we need: ADR decision on the preferred JS-side API shape (flat args vs options object via JsValue/serde) before any implementation; the change breaks all existing JS callers and requires a migration path
 
 ---
+
+## ECR Section 002 — external/libjxl deferred (20260619T194416Z)
+
+Target: `external/libjxl/CMakeLists.txt`. All items below require a full C++/cmake rebuild
+to verify and are deployment-policy decisions that affect binary size, ABI compatibility, and
+fleet-wide performance. No direct fixes were deferred this section (direct_fix list was empty).
+Both items are ADR-level opportunities.
+
+### ADR-002-1 — Document AVX-512 opt-in build flags for capable deployment targets
+
+- **Finding ID:** hacker-k1l2
+- **File:** `external/libjxl/CMakeLists.txt`, lines 171–215
+- **Category:** build flags / SIMD coverage
+- **Severity:** medium
+- **What to do:** The CMakeLists currently enables Highway's default SIMD targets. AVX-512 (via
+  `-DJXL_ENABLE_AVX512=ON` or equivalent Highway flag) is left off by default because it widens
+  the binary and may regress throughput on some microarchitectures (AVX-512 port contention on
+  Skylake-server). For deployment targets known to be Icelake/Zen4+ (server ingest workers,
+  dedicated encode boxes), enabling AVX-512 can yield another measurable throughput gain on the
+  libjxl encode path.
+- **Why deferred:** Enabling AVX-512 is a project-wide deployment decision, not a single-file
+  mechanical edit. It affects: (1) binary size (wider code paths), (2) compatibility (must not
+  ship AVX-512 binaries to hosts that lack the feature), (3) potential throughput regression on
+  some SKUs. Requires an ADR covering target fleet capabilities, dispatch strategy (runtime
+  HWY_DYNAMIC_DISPATCH vs compile-time), and a flipflop benchmark on the actual encode
+  workload before adoption.
+- **ADR draft:** `.epiccodereview/20260619T194416Z/sections/002/adr_draft/avx512-opt-in-build-flags.md`
+- **Suggested approach:** Add a CMake option `CASAWASM_ENABLE_AVX512` (default OFF). When ON,
+  pass `-DHWY_COMPILE_ALL_ATTAINABLE=1` (or the Highway equivalent) so libjxl compiles and
+  registers AVX-512 dispatch targets. Gate behind a CI matrix job targeting a Zen4/Icelake host
+  and flipflop-verify that encode throughput improves by ≥5% before enabling in any default build.
+  Keep the default OFF so developer builds remain portable.
+
+### ADR-002-2 — Investigate LTO/IPO for release builds — verify Highway HWY_EXPORT dispatch survives
+
+- **Finding ID:** hacker-m3n4
+- **File:** `external/libjxl/CMakeLists.txt`, lines 1–547
+- **Category:** build flags / link-time optimization
+- **Severity:** medium
+- **What to do:** The current cmake build does not enable LTO/IPO (`-flto` / CMake
+  `INTERPROCEDURAL_OPTIMIZATION`). LTO can inline small hot helpers across the libjxl encode/decode
+  boundary and trim dead-code, but Highway's `HWY_EXPORT` dispatch table relies on weak-symbol
+  linkage and per-target function attributes that some LTO implementations merge or discard,
+  silently falling back to scalar.
+- **Why deferred:** The interaction between LTO and Highway's dynamic dispatch is uncertain and
+  has historically caused silent correctness regressions (wrong SIMD tier selected at runtime).
+  Verifying correctness requires: building with LTO, running the full libjxl test suite, and
+  confirming via `HWY_PRINT_RUNTIME_INFO` that all expected dispatch tiers are still reachable.
+  This is a benchmarking+risk analysis exercise that cannot be done without a full cmake+libjxl
+  rebuild and is therefore an ADR-level decision, not a one-line change.
+- **ADR draft:** `.epiccodereview/20260619T194416Z/sections/002/adr_draft/lto-ipo-release-build.md`
+- **Suggested approach:** (1) Add a CMake option `CASAWASM_ENABLE_LTO` (default OFF). (2) When ON,
+  set `set_property(TARGET jxl PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)` and add
+  `-fno-lto-odr-type-merging` (or equivalent) to preserve weak-symbol dispatch. (3) Build and run
+  `cargo test -p jxl-ffi` + the libjxl unit suite. (4) Run a flipflop encode/decode bench against
+  the non-LTO baseline; require ≥3% geomean gain before enabling in CI. (5) Document the risk in
+  CLAUDE.md build notes.

@@ -4,7 +4,7 @@
 **Files Reviewed:** `crates/raw-pipeline/src/jxl_casadecoder.rs` (1576 lines), `crates/raw-pipeline/src/jxl_casaencoder.rs` (900 lines)  
 **Focus:** Speed and performance  
 **Commits:** `823afe7d` (9 encoder changes), `8de70845` (test call-site fixes)  
-**Result:** ✅ 9 encoder issues fixed; pre-existing MSVC decoder issue noted (not introduced here)
+**Result:** ✅ 9 encoder issues fixed; ✅ decoder issue root-caused and fixed (commit `e5476c50`)
 
 ---
 
@@ -13,7 +13,12 @@
 Multi-agent review of the native JXL FFI wrapper (BSD-licensed replacement for GPL `jpegxl-rs`).
 Found **9 encoder issues** (3 perf, 3 correctness, 3 docs/API). All applied and committed.
 Ruled out 15 false-alarm security concerns — existing bounds validation already covers them.
-Decoder roundtrip tests fail with a pre-existing MSVC libjxl "Process" error unrelated to these changes.
+Fixed pre-existing decoder failure: libjxl 0.11 changed `JXL_DEC_NEED_IMAGE_OUT_BUFFER` from a
+subscribable bit flag (0x800) to a sequential return code (5). Passing it to `JxlDecoderSubscribeEvents`
+triggered the `events_wanted & 63` guard → `JXL_DEC_ERROR` on every decode call.
+Also fixed untracked `encode_internal.h` that gained a qualified friend declaration
+(`friend class jxl::ProcessFrameTest;`) without a prior forward declaration, breaking ClangCL
+re-builds when `BUILD_TESTING=OFF`.
 
 ---
 
@@ -108,9 +113,15 @@ Estimated win: ~1–2% (memory-bound operation). Deferred — requires flipflop 
 | `f32_rgb_lossless_roundtrip` | ❌ PRE-EXISTING | Same |
 | `planar_extra_channel_encodes` | ❌ PRE-EXISTING | Same |
 | `quality_and_distance_produce_valid_jxl` | ❌ PRE-EXISTING | Same |
-| All `jxl_casadecoder::tests::*` (14) | ❌ PRE-EXISTING | `JxlDecoderProcessInput` returns "Process" error |
+| All `jxl_casadecoder::tests::*` (15) | ✅ PASS | Fixed: dropped `S_NEEDOUT.0` from subscribe mask (commit `e5476c50`) |
+| All `jxl_casaencoder::tests::*` (10) | ✅ PASS | All roundtrips pass after decoder fix |
 
-**Root cause of decoder failures:** Pre-existing MSVC libjxl build issue. `jxl_casadecoder.rs` was not modified by this review; the decoder panics with `Err(Process)` at `jxl_casadecoder.rs:1545`. Not caused by encoder changes — `error_path_leaves_encoder_reusable` confirms the encoder produces valid bytes (encode succeeds, RAII reset works).
+**Root cause of decoder failures (resolved):** libjxl 0.11 changed `JXL_DEC_NEED_IMAGE_OUT_BUFFER`
+from a bit-flag (0x800) to an ordinal return code (5). `JxlDecoderSubscribeEvents` guards against
+any mask with bits 0-5 set (`events_wanted & 63 != 0 → JXL_DEC_ERROR`). Removed `| S_NEEDOUT.0`
+from all three call sites in `jxl_casadecoder.rs`; the event is delivered automatically without subscription.
+
+**Final result: 179 passed, 0 failed, 8 ignored** (full `--features jxl-codec --lib` run).
 
 ---
 
@@ -124,12 +135,12 @@ Estimated win: ~1–2% (memory-bound operation). Deferred — requires flipflop 
 
 **Remaining gaps:**
 - `decode_jxtc_region()` has zero test coverage (complex, security-sensitive path)
-- Decoder roundtrip tests gated behind MSVC libjxl build issue (pre-existing)
 
 ---
 
 ## Conclusion
 
-All 9 encoder changes applied and committed. Encoder is confirmed working — pure-encode tests pass. The JXL roundtrip failures are a pre-existing MSVC decoder issue outside this review's scope.
+All 9 encoder changes applied and committed. Decoder `Err(Process)` root-caused (libjxl 0.11 API change)
+and fixed. `encode_internal.h` forward-declaration added to unblock ClangCL re-builds. 179/179 tests green.
 
 **Grade:** A

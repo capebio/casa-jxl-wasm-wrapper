@@ -283,7 +283,7 @@
         "wasm"
       ],
       "gc": 40,
-      "lines": 3389
+      "lines": 3418
     },
     {
       "id": "p_params",
@@ -295,7 +295,7 @@
         "rust",
         "wasm"
       ],
-      "line": 95
+      "line": 125
     },
     {
       "id": "p_lut",
@@ -362,7 +362,7 @@
         "rust",
         "wasm"
       ],
-      "line": 2085
+      "line": 2114
     },
     {
       "id": "p_pc",
@@ -374,7 +374,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1039
+      "line": 1068
     },
     {
       "id": "p_wb",
@@ -397,7 +397,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1402
+      "line": 1431
     },
     {
       "id": "f_apply_tone",
@@ -409,7 +409,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1111
+      "line": 1140
     },
     {
       "id": "f_apply_tone4",
@@ -421,7 +421,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1237
+      "line": 1266
     },
     {
       "id": "f_tone_curve",
@@ -433,7 +433,7 @@
         "rust",
         "wasm"
       ],
-      "line": 211
+      "line": 241
     },
     {
       "id": "f_process_rgba",
@@ -445,7 +445,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1814
+      "line": 1843
     },
     {
       "id": "f_process16",
@@ -457,7 +457,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1955
+      "line": 1984
     },
     {
       "id": "f_build_pre",
@@ -469,7 +469,7 @@
         "rust",
         "wasm"
       ],
-      "line": 477
+      "line": 506
     },
     {
       "id": "f_build_post",
@@ -481,7 +481,7 @@
         "rust",
         "wasm"
       ],
-      "line": 599
+      "line": 628
     },
     {
       "id": "c_pre_lut",
@@ -515,7 +515,7 @@
         "rust",
         "wasm"
       ],
-      "line": 316
+      "line": 345
     },
     {
       "id": "f_molchanov",
@@ -527,7 +527,7 @@
         "rust",
         "wasm"
       ],
-      "line": 328
+      "line": 357
     },
     {
       "id": "f_spring",
@@ -539,7 +539,7 @@
         "rust",
         "wasm"
       ],
-      "line": 351
+      "line": 380
     },
     {
       "id": "c_grid",
@@ -551,7 +551,7 @@
         "rust",
         "wasm"
       ],
-      "line": 390
+      "line": 419
     },
     {
       "id": "c_ffi_perc",
@@ -563,7 +563,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1039
+      "line": 1068
     },
     {
       "id": "d_mhc",
@@ -755,7 +755,7 @@
       "tech": [
         "rust"
       ],
-      "gc": 6,
+      "gc": 7,
       "lines": 900
     },
     {
@@ -903,7 +903,7 @@
         "rust"
       ],
       "gc": 6,
-      "lines": 1576
+      "lines": 1579
     },
     {
       "id": "de_decoder",
@@ -1033,7 +1033,7 @@
       "tech": [
         "rust"
       ],
-      "line": 1158
+      "line": 1161
     },
     {
       "id": "ffi_lib",
@@ -1058,8 +1058,8 @@
       "tech": [
         "rust"
       ],
-      "gc": 1,
-      "lines": 135
+      "gc": 2,
+      "lines": 205
     },
     {
       "id": "ffi_wrap",
@@ -1084,7 +1084,7 @@
         "rust"
       ],
       "path": "external/libjxl",
-      "lines": 578086
+      "lines": 578049
     },
     {
       "id": "pc_mod",
@@ -1097,8 +1097,8 @@
         "rust",
         "wasm"
       ],
-      "gc": 20,
-      "lines": 498
+      "gc": 22,
+      "lines": 512
     },
     {
       "id": "pc_xyb",
@@ -1192,7 +1192,7 @@
         "rust",
         "wasm"
       ],
-      "line": 69
+      "line": 74
     },
     {
       "id": "b_scaleerr",
@@ -1310,8 +1310,8 @@
         "rust",
         "wasm"
       ],
-      "gc": 6,
-      "lines": 168
+      "gc": 7,
+      "lines": 228
     },
     {
       "id": "ps_scalar",
@@ -1659,7 +1659,7 @@
       "tech": [
         "rust"
       ],
-      "line": 638
+      "line": 641
     },
     {
       "id": "legacy_prog",
@@ -1670,7 +1670,7 @@
       "tech": [
         "rust"
       ],
-      "line": 847
+      "line": 850
     },
     {
       "id": "img_struct",
@@ -1736,7 +1736,7 @@
       "tech": [
         "rust"
       ],
-      "line": 794
+      "line": 797
     },
     {
       "id": "compat_rgba16",
@@ -1747,7 +1747,7 @@
       "tech": [
         "rust"
       ],
-      "line": 800
+      "line": 803
     },
     {
       "id": "compat_interleaved",
@@ -1758,7 +1758,7 @@
       "tech": [
         "rust"
       ],
-      "line": 785
+      "line": 788
     },
     {
       "id": "compat_timing",
@@ -1769,7 +1769,7 @@
       "tech": [
         "rust"
       ],
-      "line": 806
+      "line": 809
     },
     {
       "id": "compat_prog_fn",
@@ -1780,7 +1780,7 @@
       "tech": [
         "rust"
       ],
-      "line": 863
+      "line": 866
     },
     {
       "id": "tauri",

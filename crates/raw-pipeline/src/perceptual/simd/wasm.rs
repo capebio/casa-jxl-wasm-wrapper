@@ -143,6 +143,75 @@ pub fn ssd_wasm(a: &[u8], b: &[u8]) -> u64 {
     sum
 }
 
+/// Drain lanes 0/1/2 (R,G,B; lane 3 = alpha, discarded) of an i32x4 partial into a
+/// u64[3] accumulator. Unsigned `as u32 as u64` widen for the same reason as ssd.
+#[inline]
+fn drain3(v: v128, acc: &mut [u64; 3]) {
+    acc[0] += i32x4_extract_lane::<0>(v) as u32 as u64;
+    acc[1] += i32x4_extract_lane::<1>(v) as u32 as u64;
+    acc[2] += i32x4_extract_lane::<2>(v) as u32 as u64;
+}
+
+/// wasm v128 SSIM moment accumulation over RGBA test+ref. Returns per-channel
+/// (sa, saa, sab) for c in 0..3 — same contract as `avx2::ssim_moments_avx2`.
+///
+/// Strategy: channel-as-lane. Each pixel's [R,G,B,A] occupies one i32x4, so the
+/// three independent products (a, a*a, a*b) are computed for all channels in one
+/// vector op each — no deinterleave (which is what made the AVX2 SIMD attempt a
+/// wash). i32x4 partials drain to u64 every FLUSH pixels before saa/sab (≤255² per
+/// pixel) can overflow i32. NOTE: x86 keeps the scalar moments — this v128 path is
+/// only worth selecting if the wasm bench shows a real win (see bench-wasm).
+pub fn ssim_moments_wasm(a: &[u8], b: &[u8], np: usize) -> ([u64; 3], [u64; 3], [u64; 3]) {
+    // assert! (not debug_assert!) to match ssim_moments_avx2 — a short buffer would
+    // OOB the v128_load32_zero in a release WASM build (silent UB).
+    assert!(
+        a.len() >= np * 4 && b.len() >= np * 4,
+        "ssim_moments_wasm: a.len() and b.len() must be >= np*4"
+    );
+    let mut sa = [0u64; 3];
+    let mut saa = [0u64; 3];
+    let mut sab = [0u64; 3];
+    let mut va = i32x4_splat(0);
+    let mut vaa = i32x4_splat(0);
+    let mut vab = i32x4_splat(0);
+    // saa/sab lanes gain ≤255² = 65025 per pixel; i32 overflows after
+    // ⌊(2³¹−1)/65025⌋ ≈ 33025 pixels. 32000·65025 = 2.0808e9 < 2³¹−1, with margin.
+    const FLUSH: usize = 32000;
+    let mut fc = 0usize;
+    unsafe {
+        let mut p = 0;
+        while p < np {
+            let j = p * 4;
+            // Load the 4 channel bytes into the low i32 lane, then widen u8→u16→u32
+            // so each channel sits in its own i32x4 lane: [R, G, B, A].
+            let av = u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(v128_load32_zero(
+                a.as_ptr().add(j) as *const u32,
+            )));
+            let bv = u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(v128_load32_zero(
+                b.as_ptr().add(j) as *const u32,
+            )));
+            va = i32x4_add(va, av);
+            vaa = i32x4_add(vaa, i32x4_mul(av, av));
+            vab = i32x4_add(vab, i32x4_mul(av, bv));
+            p += 1;
+            fc += 1;
+            if fc == FLUSH {
+                drain3(va, &mut sa);
+                drain3(vaa, &mut saa);
+                drain3(vab, &mut sab);
+                va = i32x4_splat(0);
+                vaa = i32x4_splat(0);
+                vab = i32x4_splat(0);
+                fc = 0;
+            }
+        }
+    }
+    drain3(va, &mut sa);
+    drain3(vaa, &mut saa);
+    drain3(vab, &mut sab);
+    (sa, saa, sab)
+}
+
 /// wasm v128 RGBA→planar XYB. Scalar LUT loads (no wasm gather) + vector arithmetic.
 pub fn pixels_to_xyb_wasm(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
     // Reads px via get_unchecked up to (n-1)*4+2 and v128_store/index x/y/b up to

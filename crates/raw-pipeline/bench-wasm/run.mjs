@@ -3,7 +3,10 @@
 // Parity: SIMD SSD must equal scalar SSD exactly. Perf: interleaved SIMD/scalar
 // rounds (cancels thermal drift), reports median per-iter ms and the speedup; the
 // SpeedCodeReview perf gate wants SIMD >= 5% faster.
-import { ssd_simd_once, ssd_scalar_once, bench } from './pkg/perceptual_bench_wasm.js';
+import {
+  ssd_simd_once, ssd_scalar_once, bench,
+  ssim_moments_parity, bench_moments,
+} from './pkg/perceptual_bench_wasm.js';
 
 const MP = Number(process.argv[2] ?? 24);
 const ITERS = Number(process.argv[3] ?? 20);
@@ -40,11 +43,31 @@ for (let r = 0; r < ROUNDS; r++) {
   }
 }
 
-const sM = median(simdMs), cM = median(scalMs);
-const speedup = cM / sM;
-const pct = (speedup - 1) * 100;
-console.log(`buffer: ${MP}MP RGBA (${(N / 1e6).toFixed(0)} MB)  iters/round=${ITERS}  rounds=${ROUNDS}`);
-console.log(`scalar median: ${cM.toFixed(3)} ms/iter`);
-console.log(`simd   median: ${sM.toFixed(3)} ms/iter`);
-console.log(`speedup: ${speedup.toFixed(2)}x  (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)`);
-console.log(`gate (>=5% faster): ${pct >= 5 ? 'PASS' : 'FAIL'}`);
+const report = (name, sMs, cMs) => {
+  const sMed = median(sMs), cMed = median(cMs);
+  const speedup = cMed / sMed, pct = (speedup - 1) * 100;
+  console.log(`\n[${name}]`);
+  console.log(`  scalar median: ${cMed.toFixed(3)} ms/iter`);
+  console.log(`  simd   median: ${sMed.toFixed(3)} ms/iter`);
+  console.log(`  speedup: ${speedup.toFixed(2)}x  (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)   gate(>=5%): ${pct >= 5 ? 'PASS' : 'FAIL'}`);
+};
+console.log(`\nbuffer: ${MP}MP RGBA (${(N / 1e6).toFixed(0)} MB)  iters/round=${ITERS}  rounds=${ROUNDS}`);
+report('PSNR / ssd', simdMs, scalMs);
+
+// --- SSIM moments: parity + interleaved A/B ---
+const np = N / 4;
+const momParity = ssim_moments_parity(a, b, np) === 0.0;
+console.log(`\nssim_moments parity: ${momParity ? 'PASS' : 'FAIL'}`);
+if (!momParity) { console.error('SSIM MOMENTS PARITY FAILED'); process.exit(1); }
+bench_moments(a, b, np, 3, true); bench_moments(a, b, np, 3, false);
+const mSimd = [], mScal = [];
+for (let r = 0; r < ROUNDS; r++) {
+  const order = r % 2 ? [false, true] : [true, false];
+  for (const useSimd of order) {
+    const t0 = performance.now();
+    bench_moments(a, b, np, ITERS, useSimd);
+    const dt = (performance.now() - t0) / ITERS;
+    (useSimd ? mSimd : mScal).push(dt);
+  }
+}
+report('SSIM moments', mSimd, mScal);

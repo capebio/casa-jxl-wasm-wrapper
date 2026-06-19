@@ -1,0 +1,32 @@
+
+Main encoding files
+
+crates/raw-pipeline/src/jxl_casaencoder.rs
+
+crates/raw-pipeline/src/casabio_encode.rs
+
+crates/jxl-ffi/src/lib.rs
+
+packages/jxl-progressive/src/index.ts
+
+packages/jxl-progressive/src/progressive-manifest.ts
+
+packages/jxl-progressive/src/progressive-stream.ts
+
+packages/jxl-progressive/src/progressive-scheduler.ts
+
+Main Decoding files
+
+crates/raw-pipeline/src/tiff.rs
+
+crates/raw-pipeline/src/cr2.rs
+
+crates/raw-pipeline/src/dng.rs
+
+crates/raw-pipeline/src/ljpeg.rs
+
+crates/raw-pipeline/src/decompress.rs
+
+crates/raw-pipeline/src/demosaic.rs
+
+                   

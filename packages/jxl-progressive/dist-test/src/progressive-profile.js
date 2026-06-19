@@ -1,5 +1,15 @@
 // packages/jxl-progressive/src/progressive-profile.ts
 import {} from "./progressive-manifest.js";
+// Yield control until all pending microtasks (including async-generator machinery)
+// have drained. Needed so framesTask reads bytesPushed before pushTask advances it
+// for the next chunk. setImmediate (Node) fires after all microtasks; setTimeout(0)
+// (browser) fires after the current event-loop task + microtasks.
+function drainMicrotasks() {
+    if (typeof setImmediate === "function") {
+        return new Promise((r) => setImmediate(r));
+    }
+    return new Promise((r) => setTimeout(r, 0));
+}
 async function computeSha256(buffer) {
     if (typeof globalThis.crypto !== "undefined" &&
         typeof globalThis.crypto.subtle?.digest === "function") {
@@ -85,7 +95,8 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
     let bytesPushed = 0;
     let progressionIdx = 0;
     // Collect frames concurrently with pushing bytes.
-    // JavaScript is single-threaded: bytesPushed is read safely from the frame task.
+    // drainMicrotasks() after each push ensures framesTask reads bytesPushed before
+    // pushTask advances it for the next chunk (async-generator delivery adds 2+ hops).
     const framesTask = (async () => {
         for await (const frame of session.frames()) {
             events.push({
@@ -103,10 +114,9 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
                 if (signal?.aborted)
                     throw new DOMException("Aborted", "AbortError");
                 const end = Math.min(offset + chunkSize, total);
-                // Set bytesPushed before push() so frames emitted synchronously inside
-                // push() (before the promise resolves) capture the correct byte offset.
                 bytesPushed = end;
                 await session.push(jxlBytes.slice(offset, end));
+                await drainMicrotasks();
                 onProgress?.(end, total);
                 offset = end;
             }

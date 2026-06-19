@@ -1,0 +1,130 @@
+{
+  "timestamp": "2026-06-19T15:00:00Z",
+  "repo": "raw-converter-wasm",
+  "branch": "perf/mhc-demosaic-20260619",
+  "analysis_source": "Questions_raw-pipeline.md (C1-C10) + memory context",
+  "test_corpus": "synthetic Bayer + 512-4096px fractal patterns",
+  "candidates": [
+    {
+      "id": "C1",
+      "name": "demosaic-mhc (MHC on preview vs bilinear)",
+      "description": "ORF renders double demosaic: full-res MHC + preview-res MHC. Expected faster: MHC full + bilinear preview.",
+      "file": "src/demosaic.rs + src/lib.rs",
+      "functions": ["demosaic_rggb_mhc", "demosaic_rggb"],
+      "confidence": 5,
+      "expected_speedup_pct": 22,
+      "measurement_status": "ADR-4 established +22% for RGGB-specialized vs generic, needs corpus validation",
+      "gate": "flipflop demosaic_variants.rs on real ORF/DNG corpus ≥5%"
+    },
+    {
+      "id": "C3",
+      "name": "Demosaic phased-MHC specialization (MEASURED +22%)",
+      "description": "RGGB-specialized MHC path ~22% faster than generic per-pixel CFA-dispatch",
+      "file": "src/demosaic.rs",
+      "functions": ["demosaic_rggb_mhc"],
+      "confidence": 5,
+      "expected_speedup_pct": 22,
+      "measurement_status": "ADR-4 documented +22%, requires flipflop confirmation on production corpus",
+      "gate": "flipflop demosaic-mhc on 512-4096 RGGB frames ≥5%"
+    },
+    {
+      "id": "C4",
+      "name": "pack_rgb16_full redundant pass",
+      "description": "Encodes full-res RGB16 twice: once for output, once for progressive-profile. Opportunity: fuse or LE-transmute.",
+      "file": "src/lib.rs export functions",
+      "functions": ["process_orf", "process_dng"],
+      "confidence": 3,
+      "expected_speedup_pct": 8,
+      "measurement_status": "Not measured; requires deep trace of WASM export pipeline",
+      "gate": "flipflop .flipflop/tests/rgb16-pack-flip.mjs on 12MP full RGB16"
+    },
+    {
+      "id": "C6",
+      "name": "rgb_to_rgba scatter (SIMD v128 shuffle)",
+      "description": "Scalar 3→4 channel spread; SIMD v128 shuffle opportunity for frame-stats input",
+      "file": "src/lib.rs WASM exports",
+      "functions": ["process_rgba"],
+      "confidence": 3,
+      "expected_speedup_pct": 15,
+      "measurement_status": "Not measured",
+      "gate": "flipflop .flipflop/tests/rgb-to-rgba-shuffle.mjs on 12MP frame"
+    },
+    {
+      "id": "C7",
+      "name": "Integer downscale reciprocal multiply",
+      "description": "3 divides per pixel (5× thumbnail) vs precomputed reciprocal (1 multiply + rounding)",
+      "file": "src/pipeline.rs:2130-2132",
+      "functions": ["downscale_rgb16_into"],
+      "confidence": 4,
+      "expected_speedup_pct": 12,
+      "measurement_status": "Comment notes 1800→360 (5×) is a current benchmark target",
+      "gate": "flipflop 1800×1350→360×270 box downscale"
+    },
+    {
+      "id": "C8",
+      "name": "Float downscale x-bounds recompute",
+      "description": "Recompute x0/x1 per (dy,dx) vs hoist outside inner loop (float downscale path)",
+      "file": "src/pipeline.rs:2148-2151",
+      "functions": ["downscale_rgb16_into"],
+      "confidence": 2,
+      "expected_speedup_pct": 3,
+      "measurement_status": "Not measured; likely cold path (exact factors more common)",
+      "gate": "flipflop 24MP→4MP arbitrary-scale downscale"
+    },
+    {
+      "id": "C9",
+      "name": "LookRenderer clone overhead",
+      "description": "LookRenderer clones ~13MB RGB buffer per slider tick. Opportunity: reusable scratch allocator.",
+      "file": "src/lib.rs LookRenderer",
+      "functions": ["LookRenderer::from_rgb16"],
+      "confidence": 2,
+      "expected_speedup_pct": 6,
+      "measurement_status": "Profile-gated; need real tone-slider session",
+      "gate": "flipflop real slider workflow with 10+ parameter changes"
+    },
+    {
+      "id": "C10",
+      "name": "downscale_rgb16_planar SoA SIMD",
+      "description": "Horizontal-add opportunity in downscale accumulation loop (u64→v256)",
+      "file": "src/pipeline.rs:2113-2127",
+      "functions": ["downscale_rgb16_into"],
+      "confidence": 2,
+      "expected_speedup_pct": 8,
+      "measurement_status": "Not measured; comment notes LLVM cannot vectorise AoS stride-3",
+      "gate": "flipflop planar vs AoS accumulation on large downscale"
+    },
+    {
+      "id": "C5",
+      "name": "unpack_rgb16_le 12MB copy per LookRenderer ctor",
+      "description": "LE-transmute opportunity instead of vec allocation",
+      "file": "src/lib.rs",
+      "functions": ["LookRenderer"],
+      "confidence": 2,
+      "expected_speedup_pct": 4,
+      "measurement_status": "Allocation overhead only, depends on LookRenderer frequency",
+      "gate": "profile real workflow"
+    }
+  ],
+  "analysis_summary": {
+    "high_confidence": ["C1", "C3"],
+    "medium_confidence": ["C4", "C6", "C7"],
+    "low_confidence": ["C5", "C8", "C9", "C10"],
+    "priority_order": [
+      "C3 (demosaic RGGB specialization) — 22% documented, lowest effort, highest ROI",
+      "C1 (demosaic MHC+bilinear split) — 15-22% plausible, medium effort",
+      "C7 (reciprocal multiply in downscale) — 12% likely, trivial effort",
+      "C6 (SIMD rgb→rgba) — 15% plausible, medium effort, affects all RGBA paths",
+      "C4 (pack_rgb16 redundancy) — 8-10% possible, requires code audit"
+    ],
+    "rejected_candidates": [
+      "C2 (DNG tile endian) — flipflop measured −3.8% (REJECTED < 5% gate)"
+    ]
+  },
+  "next_steps": [
+    "1. Measure C3 (demosaic-mhc RGGB vs generic) on synthetic RGGB 512-4096",
+    "2. Measure C7 (reciprocal multiply) on 1800→360 thumbnail",
+    "3. Measure C6 (rgb→rgba shuffle) on 12MP RGBA frame",
+    "4. Code audit C4 (pack_rgb16 redundancy) — may require WASM trace",
+    "5. Defer C8/C9/C10 to profile data from real workloads"
+  ]
+}

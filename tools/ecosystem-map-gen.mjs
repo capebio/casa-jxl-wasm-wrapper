@@ -39,6 +39,26 @@ try {
   }
 } catch { /* non-git dir or no commits — leave map empty */ }
 
+// ── generic line counter (non-Rust source files + directories) ───────────────
+function countFileLines(abs) {
+  try { return fs.readFileSync(abs, "utf8").split(/\r?\n/).length; } catch { return 0; }
+}
+// Recursively sum lines of C/C++/header files under a directory (for vendored libs).
+function countDirLines(dir) {
+  let total = 0;
+  function walk(d) {
+    let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const fp = path.join(d, e.name);
+      if (e.isDirectory()) walk(fp);
+      else if (/\.(c|cc|cpp|cxx|h|hpp|hxx)$/.test(e.name)) {
+        try { total += fs.readFileSync(fp, "utf8").split(/\r?\n/).length; } catch {}
+      }
+    }
+  }
+  walk(dir); return total;
+}
+
 // ── Rust source scanner ──────────────────────────────────────────────────────
 // matches pub AND private decls (the map references private helpers + extern "C" fns)
 const DECL = /^(\s*)(pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|default\s+|const\s+|extern\s+(?:"[^"]*"\s+)?)*(fn|struct|enum|trait|mod|type|static)\s+([A-Za-z_]\w*)/;
@@ -114,10 +134,16 @@ function verifiable(toks, scan) {
 const claimed = new Map();  // abs -> Set(symbol names the map accounts for)
 let staleCount = 0, enriched = 0;
 for (const n of nodes) {
-  delete n.stale; delete n.line;  // recompute fresh
-  if (n.path && /\.rs$/.test(n.path)) {            // file node: attach line count
+  delete n.stale; delete n.line; delete n.lines;  // recompute fresh each run
+  if (n.path && /\.rs$/.test(n.path)) {            // Rust: scanner gives line count
     const sc = scanRust(path.join(ROOT, n.path));
     if (sc) n.lines = sc.lineCount;
+  } else if (n.path && /\.(h|hpp|hxx|cpp|cc|cxx|ts|tsx|js|mjs)$/.test(n.path)) {
+    const lc = countFileLines(path.join(ROOT, n.path));
+    if (lc) n.lines = lc;
+  } else if (n.path && !/\.\w+$/.test(n.path)) {  // directory path → sum C/C++ source
+    const lc = countDirLines(path.join(ROOT, n.path));
+    if (lc) n.lines = lc;
   }
   // git activity: count commits that touched this file (any extension → real path)
   if (n.path && /\.\w+$/.test(n.path)) {

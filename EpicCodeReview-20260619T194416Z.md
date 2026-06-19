@@ -40,23 +40,58 @@ Hacker tasks for `fs_core_simd` SIMD re-read, `fs_core_simd_exact` FNV loop, `do
 
 ---
 
-## Section 001 — crates/jxl-ffi/build.rs
+## Section 001 — crates/jxl-ffi/build.rs (COMMITTED af78ecb1)
 
-**No fixes applied.** The plan task list was empty for this section. The file is clean at HEAD (commit `988f8b94`). No staged changes; no commit needed.
+12 fixes applied across `crates/jxl-ffi/build.rs` and `.cargo/config.toml`:
 
-The file is well-structured: wasm32 short-circuit, cmake-rs build with correct Windows ClangCL + `/O2 /Ob2` release flags, lib/lib64 fallback, static link lines for all seven libjxl archives, OS-conditional C++ stdlib linking, and bindgen with `allowlist_*` + `NewType` enum style. One finding was deferred to the global pass as an ADR draft (see Global Pass below).
+1. **DEP_JXL_PATH → LIBJXL_SOURCE_DIR rename** — `DEP_*` naming implied a Cargo propagation variable; renamed to the conventional `LIBJXL_SOURCE_DIR` pattern; updated in `build.rs` and `.cargo/config.toml`.
+2. **CARGO_CFG_TARGET_OS replaces cfg!(windows)** — `cfg!(windows)` evaluates against the host, not the target; replaced with `env::var("CARGO_CFG_TARGET_OS")` for correct cross-compilation semantics throughout the cmake configuration block.
+3. **CARGO_CFG_TARGET_OS/VENDOR in stdlib link block** — same fix for `cfg!(target_os)` / `cfg!(target_vendor)` in the C++ stdlib link block.
+4. **`.cxxflag("/Zl")` added alongside `.cflag("/Zl")`** — `/Zl` was applied to C TUs but not C++ TUs, leaving CRT defaultlib directives in `.obj` files from `.cpp` sources.
+5. **lib_dir sentinel file probe** — lib_dir selection now checks for `jxl.lib` / `libjxl.a` inside `lib/` and `lib64/` before falling back to directory existence, handling multilib Linux correctly.
+6. **assert!(lib_dir.exists(), …)** — fires at build-script time with an actionable message pointing to the cmake install prefix rather than producing an opaque linker failure.
+7. **NUM_JOBS fallback for cmake parallelism** — `available_parallelism()` replaced by two-level lookup: `NUM_JOBS` first (set by Cargo `-j N`), then `available_parallelism()` — honours explicit parallelism flags.
+8. **rerun-if-changed for submodule .git** — `git submodule update` now triggers a cargo rebuild + bindgen re-run via the submodule's `.git` file mtime.
+9. **rerun-if-changed for source subtrees** — `CMakeLists.txt`, `lib/include`, `lib/jxl`, `lib/threads` registered individually; cmake no longer runs on every build when sources haven't changed.
+10. **rerun-if-changed per-header** — each `include/jxl/*.h` now registered individually (directory-level tracking misses file content changes).
+11. **rerun-if-env-changed updated** — `DEP_JXL_PATH` → `LIBJXL_SOURCE_DIR` in the `rerun-if-env-changed` directive.
+12. **bindgen .expect() message** — improved to hint at `LIBCLANG_PATH` (LLVM bin dir) and `.cargo/config.toml` configuration for faster developer debugging.
+
+Deferred (build-unverified):
+- **CRT mismatch verdict** (001-correctness-e5f6) — `CMAKE_EXE_LINKER_FLAGS=MSVCRTD.lib` vs `MultiThreaded` runtime; uncertain without toolchain probe; deferred to QUESTIONS.md.
+- **skcms/lcms2 link list** (001-correctness-o5p6) — depends on cmake config merging skcms into `jxl_cms`; deferred to QUESTIONS.md.
 
 ---
 
 ## Section 002 — external/libjxl (build-unverified C++)
 
-All findings deferred to QUESTIONS.md — cannot verify without a cmake rebuild.
+All 19 findings deferred to QUESTIONS.md — cannot verify without a cmake rebuild.
 
-Findings deferred (recorded in QUESTIONS.md under the session's ADR draft block):
+| Task | File | Sev | Description |
+|------|------|-----|-------------|
+| 002-correctness-a1b2 | `encode_internal.h:662` | High | `friend class ProcessFrameTest` must be qualified as `jxl::ProcessFrameTest` |
+| 002-correctness-c3d4 | `encode.cc:1089` | Med | Remove duplicate `SetFinalizedPosition` call in `ProcessOneEnqueuedInput` |
+| 002-correctness-g7h8 | `encode_process_frame_test.cc:47` | Crit | `CreateEncoder()` uses uninitialized `cms` + `memory_manager` — UB if tests compile |
+| 002-correctness-m3n4 | `encode_process_frame_test.cc:1` | High | Test file not registered in `jxl_lists.cmake` — never compiled or run |
+| 002-correctness-u1v2 | `encode_process_frame_test.cc:79` | High | Replace `raw new` + `MemoryManagerUniquePtr` with `MemoryManagerAlloc`-based allocation |
+| 002-hacker-a1b2 | `encode.cc:1019` | Med | Replace `std::vector<uint8_t> box_header` with stack array on hot path |
+| 002-hacker-c3d4 | `encode.cc:989` | Low | `std::move` for `frame_info.name` — avoid string copy |
+| 002-hacker-g7h8 | `encode.cc:924` | Low | Cache `MustUseContainer()` result in local bool |
+| 002-hacker-i9j0 | `lib/CMakeLists.txt:28` | High | Add `/O2 /Ob2` to `JPEGXL_INTERNAL_FLAGS` for ClangCL (fixes known ~30x slowdown) |
+| 002-hacker-k1l2 | `CMakeLists.txt:171` | Med | ADR: document AVX512 opt-in build flags for capable targets |
+| 002-hacker-m3n4 | `CMakeLists.txt:1` | Med | ADR: investigate LTO/IPO — verify Highway HWY_EXPORT dispatch survives |
+| 002-hacker-o5p6 | `encode_process_frame_test.cc:79` | Crit | Fix compile errors: `JxlEncoderQueuedFrame` constructor args + `SetFromBuffer` signature |
+| 002-hacker-u1v2 | `encode_internal.h:82` | Low | `StoreFrameIndexBox` loop → `const auto&` to avoid per-entry copy |
+| 002-structure-a1b2 | `encode_internal.h:662` | High | Duplicate of 002-correctness-a1b2 |
+| 002-structure-c3d4 | `encode_process_frame_test.cc:1` | High | Duplicate of 002-correctness-m3n4 |
+| 002-structure-e5f6 | `encode_process_frame_test.cc:79` | Med | Duplicate of 002-correctness-u1v2 |
+| 002-structure-g7h8 | `encode_process_frame_test.cc:151` | Low | Remove redundant `frames_closed=true` + add non-last-frame test case |
+| 002-structure-i9j0 | `encode_process_frame_test.cc:1` | Med | Add tests for `PrepareHeaders` + `ProcessBox` — two of three extracted methods uncovered |
+| 002-structure-k1l2 | `encode_process_frame_test.cc:102` | Med | Rewrite tests to call through real `PrepareHeaders` path (not `wrote_bytes=true` bypass) |
 
-- **Stale bindgen tracking** — `build.rs` emits `rerun-if-changed=wrapper.h` but not for individual `include/jxl/*.h` headers; a header-only libjxl upgrade will produce stale bindings silently. ADR draft: `.epiccodereview/20260619T194416Z/global/adr_draft/bindgen-rerun-tracking.md`.
-- **jxl-ffi runtime version assertion** — no startup check that the compiled-in libjxl major.minor matches the linked binary. ADR draft: `.epiccodereview/20260619T195435Z/global/adr_draft/jxl-ffi-runtime-version-check.md`.
-- All C++ source findings in `external/libjxl` itself require a cmake rebuild under Emscripten or MSVC to verify; deferred to owner review.
+Additional deferred items carried forward:
+- **Stale bindgen tracking** (now resolved by Section 001 fix #9/#10 above — per-header `rerun-if-changed` added).
+- **jxl-ffi runtime version assertion** — no startup check that compiled-in libjxl major.minor matches linked binary. ADR draft: `.epiccodereview/20260619T194416Z/global/adr_draft/jxl-ffi-runtime-version-check.md`.
 
 ---
 

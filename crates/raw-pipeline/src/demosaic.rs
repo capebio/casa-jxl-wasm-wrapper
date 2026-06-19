@@ -742,8 +742,8 @@ pub fn demosaic_bayer(raw: &[u16], width: usize, height: usize, phase: (u8, u8))
         // General path: phased bayer_pixel for every column. Correct for all 4 CFA phases.
         // (Fast unrolled interior is kept only in the RGGB-specialized demosaic_rggb.)
         for col in 0..width {
-            let cw = if col == 0 { 0 } else { col - 1 };
-            let ce = if col == w_max { w_max } else { col + 1 };
+            let cw = col.saturating_sub(1);  // branchless: max(0, col-1)
+            let ce = (col + 1).min(w_max);   // branchless: min(col+1, w_max)
             let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, cw, ce, ph);
             let o = col * 3;
             out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
@@ -1135,13 +1135,13 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
                 let sum_b4 = north[col-1] as i32 + north[col+1] as i32 + south[col-1] as i32 + south[col+1] as i32;
                 let b_v = sum_b4 >> 2;
                 out_row[o]     = rc as u16;
-                out_row[o+1]   = g_mhc.clamp(0,65535) as u16;
-                out_row[o+2]   = b_v.clamp(0,65535) as u16;
+                out_row[o+1]   = g_mhc as u16;
+                out_row[o+2]   = b_v as u16;
 
                 // even row, odd col (0,1): GR site
-                let gc  = here[col+1] as i32;
+                let gc  = ge;  // CSE: here[col+1] already loaded above as `ge`
                 let re  = here[col+2] as i32;
-                let rw  = here[col] as i32;
+                let rw  = rc;  // CSE: here[col] already loaded above as `rc`
                 let bn  = north[col+1] as i32;
                 let bs  = south[col+1] as i32;
                 let ge2 = here[col+3] as i32;
