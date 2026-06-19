@@ -43,9 +43,17 @@ mod bench {
     }
 
     fn time_encode(label: &str, w: u32, h: u32, opts: &EncodeOptions, warmup: usize, iters: usize) {
+        time_encode_threads(label, w, h, opts, 0, warmup, iters);
+    }
+
+    fn time_encode_threads(label: &str, w: u32, h: u32, opts: &EncodeOptions, nthreads: usize, warmup: usize, iters: usize) {
         let pixels = mkpix(w, h, 0xdeadbeef);
         let frame = Frame::rgb(&pixels, w, h);
-        let mut enc = Encoder::new(opts.clone()).expect("JxlEncoderCreate");
+        let mut enc = if nthreads > 1 {
+            Encoder::with_threads(opts.clone(), nthreads).expect("JxlEncoderCreate+threads")
+        } else {
+            Encoder::new(opts.clone()).expect("JxlEncoderCreate")
+        };
         let mut out: Vec<u8> = Vec::with_capacity(pixels.len() / 2);
 
         for _ in 0..warmup {
@@ -115,9 +123,36 @@ mod bench {
             time_encode(label, w, h, &opts_e1, WARMUP, ITERS);
         }
 
+        // ── Parallel runner: effort=3 container, N threads ───────────────────
+        // JxlThreadParallelRunner dispatches group-encode work across threads.
+        // Expected: 2–4× speedup at FHD/4K (more groups → more parallelism).
+        // 512×512 may show less gain (fewer groups, threading overhead dominates).
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        println!("\n--- effort=3  container  parallel ({nthreads} threads) ---");
+        let opts_par = EncodeOptions {
+            use_container: true,
+            ..EncodeOptions::distance(1.0).with_effort(3)
+        };
+        for &(w, h, label) in sizes {
+            time_encode_threads(label, w, h, &opts_par, nthreads, WARMUP, ITERS);
+        }
+
+        // ── Parallel runner: effort=1 container, N threads ───────────────────
+        // Effort=1 uses FJXL fast path — may not parallelize well (different code path).
+        println!("\n--- effort=1  container  parallel ({nthreads} threads) ---");
+        let opts_par_e1 = EncodeOptions {
+            use_container: true,
+            ..EncodeOptions::distance(1.0).with_effort(1)
+        };
+        for &(w, h, label) in sizes {
+            time_encode_threads(label, w, h, &opts_par_e1, nthreads, WARMUP, ITERS);
+        }
+
         println!("\nDone. Compare before/after by running with rebuilt C++ binary.");
         println!("Gate: ≥5% median improvement on container path = pass as perf fix.");
-        println!("Expected: <1% delta (frame overhead <1µs vs 3-50ms encode time).");
+        println!("Expected parallel speedup: 2–4× at FHD/4K; less at 512×512.");
     }
 }
 
