@@ -721,3 +721,50 @@ describe("fromBlobRange", () => {
     );
   });
 });
+
+describe("fromReadableStream abort contract", () => {
+  it("abort at 50% resolves (not rejects) with partial byte count", async () => {
+    const ac = new AbortController();
+
+    // 1000-byte file split across 10 chunks of 100 bytes each.
+    // We abort after 5 chunks (500 bytes) have been pushed.
+    const CHUNK_SIZE = 100;
+    const TOTAL_CHUNKS = 10;
+    const ABORT_AFTER = 5;
+
+    let chunkIndex = 0;
+    let sessionRef: RecordedSession;
+    const session = makeSession();
+    sessionRef = session;
+
+    // Wrap push() so we can abort mid-stream after ABORT_AFTER chunks.
+    const originalPush = session.push.bind(session);
+    session.push = async (chunk) => {
+      await originalPush(chunk);
+      if (sessionRef.pushes.length === ABORT_AFTER) {
+        ac.abort();
+      }
+    };
+
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (chunkIndex >= TOTAL_CHUNKS) { controller.close(); return; }
+        controller.enqueue(new Uint8Array(CHUNK_SIZE).fill(chunkIndex++));
+      },
+    });
+
+    // Must resolve, not reject.
+    const delivered = await fromReadableStream(stream, session, { signal: ac.signal });
+
+    // Resolved with partial byte count.
+    assert.equal(delivered, ABORT_AFTER * CHUNK_SIZE, "resolved value must equal bytes delivered before abort");
+    assert.equal(totalDelivered(session), ABORT_AFTER * CHUNK_SIZE, "session received correct partial bytes");
+
+    // Signal is aborted — caller can distinguish abort from error without try/catch.
+    assert.equal(ac.signal.aborted, true);
+
+    // Session was cancelled, not closed.
+    assert.equal(session.closed, false, "session must not be closed on abort");
+    assert.notEqual(session.cancelled, null, "session must be cancelled on abort");
+  });
+});

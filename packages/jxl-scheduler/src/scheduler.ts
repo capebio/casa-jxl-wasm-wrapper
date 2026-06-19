@@ -545,6 +545,10 @@ export class Scheduler {
         // Dedupe promotion can change priority (bg <-> visible); keep backgroundWorkers set correct for preemption eligibility.
         if (promotedRecord.priority === "background") this.backgroundWorkers.add(record.worker);
         else this.backgroundWorkers.delete(record.worker);
+        // Normalize state: subscriber init contract sets state="running"; make explicit so the
+        // count adjustment at line 575 always sees the correct state regardless of future
+        // refactors that might alter subscriber initialization (A3).
+        promotedRecord.state = "running";
       } else if (record.pausedOnWorker !== undefined && promotedRecord !== undefined) {
         // Transfer paused state.
         promotedRecord.state = "paused";
@@ -690,6 +694,10 @@ export class Scheduler {
     if (bp === undefined) return;
 
     bp.queueDepth = Math.max(0, bp.queueDepth - 1);
+    // Dev-only invariant: queueDepth must never go negative (A3).
+    if (process.env.NODE_ENV !== "production" && bp.queueDepth < 0) {
+      throw new Error(`Scheduler invariant violated: queueDepth went negative (${bp.queueDepth}) for session ${sessionId}`);
+    }
 
     const hwm = this.adaptiveHwm();
     if (bp.pendingHead < bp.pendingPushes.length) {

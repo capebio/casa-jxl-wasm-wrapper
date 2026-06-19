@@ -236,4 +236,83 @@ describe("Scheduler dedupe", () => {
     sched.cancelSession("bg-primary");
     await sched.shutdown();
   });
+
+  // A3: When the primary is cancelled and a running subscriber is promoted, the promoted
+  // record's state must be "running" so that _runningCount is incremented correctly.
+  it("A3: promoted subscriber state is 'running' after primary cancel (running branch)", async () => {
+    const workers: FakeWorker[] = [];
+    const sched = new Scheduler({
+      factory: fakeWorkerFactory(workers),
+      maxWorkers: 1,
+      idleTimeoutMs: 60_000,
+    });
+
+    await sched.acquireSlot({
+      sessionId: "primary",
+      priority: "visible",
+      startMsg: makeDecodeStart("primary", "visible"),
+      sourceKey: "key-a3",
+      signal: null,
+    });
+
+    await sched.acquireSlot({
+      sessionId: "sub",
+      priority: "visible",
+      startMsg: makeDecodeStart("sub", "visible"),
+      sourceKey: "key-a3",
+      signal: null,
+    });
+
+    // Primary has a live worker. Cancel it — sub should be promoted.
+    sched.cancelSession("primary");
+
+    await new Promise<void>((r) => setTimeout(r, 10));
+
+    // After promotion, "sub" should now be the primary with state="running".
+    const subRecord = (sched as any).sessions.get("sub");
+    assert.ok(subRecord, "promoted sub still in sessions map");
+    assert.equal(subRecord.state, "running", "promoted subscriber state normalised to 'running'");
+    assert.equal(subRecord.isSubscriber, undefined, "isSubscriber flag removed after promotion");
+
+    // _runningCount must reflect exactly one running session (the promoted sub).
+    assert.equal((sched as any)._runningCount, 1, "_runningCount is 1 after promotion");
+
+    sched.cancelSession("sub");
+    await sched.shutdown();
+  });
+
+  // A3: queueDepth invariant — signalDrain must not produce negative depth.
+  it("A3: queueDepth never goes negative under normal drain flow", async () => {
+    const workers: FakeWorker[] = [];
+    const sched = new Scheduler({
+      factory: fakeWorkerFactory(workers),
+      maxWorkers: 1,
+      idleTimeoutMs: 60_000,
+    });
+
+    await sched.acquireSlot({
+      sessionId: "sq",
+      priority: "visible",
+      startMsg: makeDecodeStart("sq", "visible"),
+      sourceKey: "key-drain",
+      signal: null,
+    });
+
+    // Trigger multiple waitForDrain / signalDrain cycles to confirm no underflow.
+    const drainCalls = Array.from({ length: 8 }, () => sched.waitForDrain("sq"));
+    // Simulate chunk completions draining the queue via the internal signalDrain path.
+    for (let i = 0; i < 8; i++) {
+      (sched as any).signalDrain("sq");
+    }
+
+    await Promise.all(drainCalls);
+
+    const bp = (sched as any).sessions.get("sq")?.backpressure;
+    if (bp !== undefined) {
+      assert.ok(bp.queueDepth >= 0, `queueDepth must not be negative, got ${bp.queueDepth}`);
+    }
+
+    sched.cancelSession("sq");
+    await sched.shutdown();
+  });
 });

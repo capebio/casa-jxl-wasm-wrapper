@@ -2758,6 +2758,34 @@ function findValidJpegEnd(view: Uint8Array, soi: number, limit: number): number 
     if (offset >= limit) return 0;
     const marker = view[offset++]!;
     if (marker === 0xd9) return segments >= 2 ? offset : 0;
+
+    // SOS (0xDA) marks the Start of Scan, followed by entropy-encoded data.
+    // Skip SOS header, then scan entropy data for the next marker.
+    if (marker === 0xda) {
+      if (offset + 2 > limit) return 0;
+      const sosLength = (view[offset]! << 8) | view[offset + 1]!;
+      if (sosLength < 2 || offset + sosLength > limit) return 0;
+      offset += sosLength;
+      segments++;
+
+      // Scan entropy data: 0xFF followed by non-zero, non-RST marker stops entropy.
+      while (offset < limit) {
+        if (view[offset] === 0xff) {
+          if (offset + 1 >= limit) return 0;
+          const nextByte = view[offset + 1]!;
+          // 0x00 is an escaped 0xFF in entropy data, 0xD0-0xD7 are RST markers (allowed in entropy).
+          if (nextByte !== 0x00 && (nextByte < 0xd0 || nextByte > 0xd7)) {
+            // Found next marker (0xFF nextByte). We'll reprocess the 0xFF in the next loop.
+            break;
+          }
+          offset += 2;
+        } else {
+          offset++;
+        }
+      }
+      continue;
+    }
+
     if (!isValidJpegHeaderMarker(marker) || offset + 2 > limit) return 0;
     const length = (view[offset]! << 8) | view[offset + 1]!;
     if (length < 2 || offset + length > limit) return 0;
