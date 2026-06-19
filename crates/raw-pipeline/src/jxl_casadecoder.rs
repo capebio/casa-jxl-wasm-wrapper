@@ -278,7 +278,18 @@ impl Decoder {
     }
 
     /// Replace the options used by subsequent decodes (the held handle is reused).
-    pub fn set_options(&mut self, opts: DecodeOptions) {
+    ///
+    /// **Note:** `opts.parallel` is reconciled with the live thread-runner state.
+    /// The runner is created once in `Decoder::new`; `set_options` cannot start or
+    /// stop it. If you pass `opts.parallel = true` but the runner was not created
+    /// (because `parallel` was false at construction time), the flag is corrected
+    /// to `false` so it accurately reflects actual behaviour.  Conversely, a
+    /// runner created at construction is never torn down here — `opts.parallel`
+    /// is forced to `true` when a runner is held.
+    pub fn set_options(&mut self, mut opts: DecodeOptions) {
+        // Force `parallel` to match the actual runner state so callers cannot
+        // be misled by opts.parallel diverging from what attach_runner will do.
+        opts.parallel = !self.runner.is_null();
         self.opts = opts;
     }
 
@@ -287,7 +298,9 @@ impl Decoder {
         self.opts
             .cancel
             .as_ref()
-            .is_some_and(|c| c.load(Ordering::Relaxed))
+            // Acquire ensures the cancelling thread's stores are visible before we
+            // observe the flag as set; Relaxed is insufficient for cross-thread visibility.
+            .is_some_and(|c| c.load(Ordering::Acquire))
     }
 
     unsafe fn attach_runner(&self) -> Result<(), DecodeError> {
@@ -533,11 +546,11 @@ impl Decoder {
                 buf.clear();
                 buf.reserve(elems);
                 buf.set_len(elems);
-                // Only zero when a partial (truncated) decode could leave holes;
-                // the success path has libjxl fill every byte before we read.
-                if self.opts.allow_partial {
-                    std::ptr::write_bytes(buf.as_mut_ptr(), 0, elems);
-                }
+                // Always zero: on error paths after set_len the buffer is exposed to
+                // the caller with uninitialized content. Zeroing also covers the
+                // allow_partial partial-flush case. libjxl fills all bytes on success,
+                // so the zero is a safety net only, not on the hot path's critical path.
+                std::ptr::write_bytes(buf.as_mut_ptr(), 0, elems);
                 if ffi::JxlDecoderSetImageOutBuffer(
                     dec,
                     &pf,
@@ -710,6 +723,14 @@ impl Decoder {
         if w == 0 || h == 0 || buf.is_empty() {
             return Err(DecodeError::Process);
         }
+        // Emit Final event — the variant was defined but never emitted by this driver.
+        // Emit with a clone so the owned `buf` is still available for the returned Image;
+        // callers that only use the callback path can avoid retaining the return value.
+        on_event(DecodeEvent::Final {
+            width: w,
+            height: h,
+            pixels: buf.clone(),
+        });
         Ok(Image {
             width: w,
             height: h,
@@ -779,9 +800,18 @@ pub fn decode_full_threaded(jxl_bytes: &[u8], num_threads: usize) -> Option<Dura
 
 #[inline]
 fn u16_samples_to_ne_bytes(px: &[u16]) -> Vec<u8> {
-    let mut bytes = vec![0u8; px.len() * 2];
-    for (i, &s) in px.iter().enumerate() {
-        bytes[i * 2..i * 2 + 2].copy_from_slice(&s.to_ne_bytes());
+    // Safe zero-copy transmute: u16 is always 2-byte aligned; the slice is
+    // already native-endian in memory, so reinterpret the bytes directly.
+    // SAFETY: u16 has no padding/uninit bytes; u8 alignment is <= u16 alignment.
+    let byte_len = px.len() * std::mem::size_of::<u16>();
+    let mut bytes = Vec::with_capacity(byte_len);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            px.as_ptr() as *const u8,
+            bytes.as_mut_ptr(),
+            byte_len,
+        );
+        bytes.set_len(byte_len);
     }
     bytes
 }
@@ -824,6 +854,9 @@ where
             ffi::JxlDecoderDestroy(dec);
             return None;
         }
+        // Signal that all input bytes are available so libjxl does not stall
+        // on JXL_DEC_NEED_MORE_INPUT even for a complete in-memory codestream.
+        ffi::JxlDecoderCloseInput(dec);
 
         let pf = pixel_format::<u8>(4);
         let mut info = std::mem::MaybeUninit::<ffi::JxlBasicInfo>::uninit();
@@ -840,6 +873,16 @@ where
                     && ffi::JxlDecoderGetBasicInfo(dec, info.as_mut_ptr()) == S_SUCCESS
                 {
                     let bi = info.assume_init_ref();
+                    // Decompression-bomb guard: reject before allocating output buffers.
+                    // Use the same default limits as Decoder (400 MP / 1.6 GB RGBA8).
+                    let pixels = bi.xsize as u64 * bi.ysize as u64;
+                    let out_bytes = pixels.saturating_mul(4);
+                    if pixels > DecodeLimits::default().max_pixels
+                        || out_bytes > DecodeLimits::default().max_output_bytes
+                    {
+                        status = ffi::JxlDecoderStatus::JXL_DEC_ERROR;
+                        break;
+                    }
                     image_w = bi.xsize;
                     image_h = bi.ysize;
                 }
@@ -887,7 +930,9 @@ where
                 height: image_h,
                 rgba: out_buf,
             });
-            Some((first_ms.unwrap_or(0.0), ms(total)))
+            // When no progressive flush occurred (non-progressive codestream),
+            // time-to-first-usable-pixel equals total decode time, not 0.
+            Some((first_ms.unwrap_or_else(|| ms(total)), ms(total)))
         } else {
             None
         }
@@ -971,6 +1016,16 @@ pub fn parse_jxtc_header(data: &[u8]) -> Option<JxtcHeader> {
     let flags = u32::from_le_bytes(data[28..32].try_into().ok()?);
 
     if image_w == 0 || image_h == 0 || tile_size == 0 || tiles_x == 0 || tiles_y == 0 {
+        return None;
+    }
+
+    // Validate that tiles_x / tiles_y exactly cover the image dimensions.
+    // tiles_x > ceil(image_w/tile_size) would allow tx*tile_size > image_w in the
+    // decode path, causing u32 underflow in expected-dimension calculations.
+    // tiles_x < ceil would mean the last column of pixels is unreachable.
+    let expected_tiles_x = image_w.div_ceil(tile_size);
+    let expected_tiles_y = image_h.div_ceil(tile_size);
+    if tiles_x != expected_tiles_x || tiles_y != expected_tiles_y {
         return None;
     }
 
@@ -1118,8 +1173,10 @@ pub fn decode_jxtc_region(
                     (img.data, img.width, img.height)
                 };
 
-                let exp_w = header.tile_size.min(header.image_w - tx * header.tile_size);
-                let exp_h = header.tile_size.min(header.image_h - ty * header.tile_size);
+                // saturating_sub: malformed headers can have tiles_x > ceil(image_w/tile_size);
+                // without saturation the subtraction wraps on u32 targets (see also parse validation).
+                let exp_w = header.tile_size.min(header.image_w.saturating_sub(tx * header.tile_size));
+                let exp_h = header.tile_size.min(header.image_h.saturating_sub(ty * header.tile_size));
                 if tw != exp_w || th != exp_h {
                     return None;
                 }
@@ -1131,7 +1188,11 @@ pub fn decode_jxtc_region(
         .flatten()
         .collect();
 
-    let mut dest = vec![0u8; (rw as usize) * (rh as usize) * bpp];
+    // Checked multiply: rw*rh*bpp can overflow on 32-bit/WASM targets.
+    let dest_len = (rw as usize)
+        .checked_mul(rh as usize)
+        .and_then(|n| n.checked_mul(bpp))?;
+    let mut dest = vec![0u8; dest_len];
 
     for ((tx, ty), tile_pixels, tw, th) in decoded_tiles {
         // Trust-boundary guard: `tw`/`th` are decoder-reported dims; verify the
