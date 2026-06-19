@@ -22,6 +22,9 @@ const args = process.argv.slice(2);
 const argv = (f, d) => { const i = args.indexOf(f); return i >= 0 && i + 1 < args.length ? args[i + 1] : d; };
 const RAW = argv("--raw", "C:/Foo/raw-converter/tests/P1110226.ORF");
 const REF = argv("--ref", "C:/Foo/raw-converter/tests/P1110226 windows.jpg");
+const SAT = Number(argv("--sat", "0")); // slider saturation (counteract BASELINE_SAT with negative)
+const WBR = argv("--wbr", "NaN"); // wb_r override (NaN = camera WB)
+const WBB = argv("--wbb", "NaN");
 const FN = { ".orf": "process_orf_with_flags", ".dng": "process_dng_with_flags", ".cr2": "process_cr2_with_flags" }[extname(RAW).toLowerCase()];
 if (!FN) throw new Error(`unsupported raw ext: ${RAW}`);
 const today = new Date().toISOString().slice(0, 10);
@@ -46,7 +49,7 @@ async function imgMean(url){ const blob=await (await fetch(url)).blob(); const b
     const orf = new Uint8Array(await (await fetch('/__file?which=raw')).arrayBuffer());
     log('raw bytes='+orf.length);
     const t0 = performance.now();
-    const res = ${FN}(orf, 1, 0,0,0,0,0,0,0,0,0,0, NaN, NaN, 0, 0); // OUTPUT_FULL_RGB, neutral, camera WB
+    const res = ${FN}(orf, 1, 0,0,0,0,0,0, ${SAT}, 0,0,0, ${WBR}, ${WBB}, 0, 0); // OUTPUT_FULL_RGB, neutral+sat, WB override
     const decodeMs = performance.now() - t0;
     const rgb = res.take_rgb(); const w = res.width, h = res.height; if (res.free) res.free();
     const rgba = rgb_to_rgba(rgb);
