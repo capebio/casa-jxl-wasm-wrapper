@@ -750,3 +750,47 @@ corrupt encodes or the WASM heap.
 - adr-overflow-checked-size-helpers.md — `checked_size_mul` (bridge.cpp) + `assertHeapWrite` (facade.ts) (B1/B2/B3).
 - adr-structured-libjxl-error-mapping-raii.md — status→typed-error map + RAII C++ cleanup + missing `default:`.
 - adr-shared-channel-stride-helper.md — single `pixelLayout(format)` helper (fixes A6).
+
+---
+
+# EpicCodeReview run 20260619T093126Z — src/lib.rs
+
+Target: src/lib.rs (2842 lines, Rust/WASM). Mode: workalone. Branch: epiccodereview/20260619T093126Z.
+Confirmed findings: 37 (section) + 25 (global). Applied: 4 safe guards (commit a5a2c5d7). Rest deferred below.
+Full detail: .epiccodereview/20260619T093126Z/{sections/000,global}/verified.json
+
+## A. Needs a human decision (public-API / output-contract / intent — no-go for auto-fix)
+
+1. FLAG COLLISION — `OUT_FULL_16 == OUT_NO_ORIENT == 8` (src/lib.rs:551,556). Independently flagged by 4 agents. Any caller setting bit 8 gets full-res-16 AND orientation suppressed; cannot request one independently. One verifier read the adjacent comment as "load-bearing by design (undocumented)"; others rate it critical. DECISION: intentional? If not, move OUT_NO_ORIENT to a free bit (e.g. 16) — but that changes a JS-visible flag value (ABI) and needs your sign-off + a JS-side update.
+2. DNG/CR2 exposure-time absent sentinel `den=1` vs ORF `den=0` (JS checks `den==0`). Visible to JS. Confirm desired sentinel.
+3. `color_matrix_from_mn` is always true for DNG (dng.rs supplies a default ColorMatrix) — misleads JS vs ORF. Confirm intended semantics / rename.
+4. `input_ptr` / `take_*` ownership + invalidation contract undocumented (structure-015). Doc-only, but it is a public contract.
+
+## B. Perf-sensitive — MEASURE before applying (gate: >=5% + output parity)
+Repo flipflop benchmarks kernels in isolation, not these WASM export paths; each needs a kernel flipflop or a new bench first:
+- ORF double demosaic (planar + MHC always; MHC dropped on preview-only) — hacker-001 / architecture-004,006 / structure-003,010
+- pack_rgb16_full redundant full-res pass; fuse or LE-transmute — hacker-002 / architecture-011
+- unpack_rgb16_le 12MB copy per LookRenderer ctor; LE-transmute — hacker-003 / architecture-003
+- rgb_to_rgba scalar 3->4 scatter; wasm128 shuffle — hacker-004 / architecture-013
+- ORF thumb from full planar vs cascade from lightbox (DNG already cascades) — hacker-005 / architecture-005
+- integer downscale: 3 divides/pixel -> reciprocal-multiply — hacker-006
+- float downscale recomputes x-bounds per (dy,dx) -> hoist — hacker-007
+- downscale_rgb16_planar SoA SIMD horizontal-add — hacker-008
+- LookRenderer::render clones ~13MB per slider tick -> reusable scratch — hacker-010 / architecture-007
+- fs_core_simd re-reads 16 bytes already in v128 -> extract_lane — hacker-012
+- fs_core_trunc_word per-pixel checks -> fast/tail split — hacker-013
+
+## C. Structural opportunities (ADR-worthy; not auto-edited)
+- 14-16 positional f32 params per export -> params struct (structure-011)
+- bench exports (fstats_*) ship ungated in production WASM -> feature-gate (structure-013)
+- DngDecoded == Cr2Decoded; unify (structure-019)
+- MAX_DIM 16384 (ORF) vs 8192 (DNG/CR2) inconsistent (structure-002)
+- NR not applied to planar preview; previews noisier at high ISO (structure-023)
+- tonemap dispatch: ORF process_into_auto vs DNG process_auto (structure-005)
+- duplicated integer box-filter impls (structure-006)
+- ~360MB WASM heap at 24MP all-flags; no memory budget (architecture-014, P7)
+- ProcessResult couples pixels+telemetry; rgb()/rgba() double-copy (architecture-007,009)
+- only 2 tests for 2842 lines; no flag/downscaler/LookRenderer/PerceptualComparer coverage (structure-020)
+
+## D. Vision (long-horizon ADR drafts)
+ML recognition entry (thumb+GPS already present); photogrammetry linear-16 contract + sensor-pitch for COLMAP; AR <15ms preview + crop-render ROI; gaming LOD via OpaqueDecodeHandle; multi-frame stacking; non-Riemannian Perceptual Constancy Mode hook (pipeline.rs already has perceptual_constancy + log-euclidean; LookOverrides lacks the field — vision-nonriemannian01). Sample draft: .epiccodereview/20260619T093126Z/global/adr_draft/0001-output-flag-gated-decode.md
