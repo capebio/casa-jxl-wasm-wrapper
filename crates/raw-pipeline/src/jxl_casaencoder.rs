@@ -180,7 +180,7 @@ impl<'a> Frame<'a, u8> {
 pub enum Rate {
     /// JPEG-style quality 0..100 → `JxlEncoderDistanceFromQuality`.
     Quality(f32),
-    /// Butteraugli distance, 0..15 (0 = mathematically lossless).
+    /// Butteraugli distance, 0..25 (0 = mathematically lossless).
     Distance(f32),
     /// True (modular) lossless via `JxlEncoderSetFrameLossless(true)`.
     Lossless,
@@ -290,6 +290,31 @@ impl EncodeOptions {
         self.effort = effort;
         self
     }
+
+    /// Validate option ranges before calling libjxl. Called automatically by
+    /// [`Encoder::encode`]. Exposed so callers can catch bad options early.
+    pub fn validate(&self) -> Result<(), EncodeError> {
+        match self.rate {
+            Rate::Quality(q) if !(0.0..=100.0).contains(&q) => {
+                return Err(EncodeError::Channels(format!(
+                    "Rate::Quality must be 0.0..=100.0, got {q}"
+                )));
+            }
+            Rate::Distance(d) if !(0.0..=25.0).contains(&d) => {
+                return Err(EncodeError::Channels(format!(
+                    "Rate::Distance must be 0.0..=25.0, got {d}"
+                )));
+            }
+            _ => {}
+        }
+        if !(1..=10).contains(&self.effort) {
+            return Err(EncodeError::Channels(format!(
+                "effort must be 1..=10, got {}",
+                self.effort
+            )));
+        }
+        Ok(())
+    }
 }
 
 // ─── Encoder ─────────────────────────────────────────────────────────────────
@@ -324,6 +349,9 @@ impl Encoder {
     /// Construct an encoder with a multi-threaded parallel runner
     /// (`num_threads` worker threads). The runner is held for the encoder's
     /// lifetime and re-applied on every `encode()` (after each `Reset`).
+    ///
+    /// `num_threads` ≤ 1 → single-threaded (no runner allocated). Pass 0 or 1
+    /// to opt out of parallelism without changing the call site.
     pub fn with_threads(opts: EncodeOptions, num_threads: usize) -> Result<Self, EncodeError> {
         let mut e = Self::new(opts)?;
         if num_threads > 1 {
@@ -345,6 +373,10 @@ impl Encoder {
     /// Replace the options used by subsequent encodes. Lets one held handle be
     /// reused across a variant set / ingest loop whose levels differ in
     /// quality/effort/progressive — the handle is reused, only options change.
+    ///
+    /// **Note**: this replaces `opts.extra` in full, discarding any settings
+    /// previously added via [`set_raw`]. If you need to preserve ad-hoc settings
+    /// use [`options_mut`] instead.
     pub fn set_options(&mut self, opts: EncodeOptions) {
         self.opts = opts;
     }
@@ -363,8 +395,41 @@ impl Encoder {
         r
     }
 
+    /// Like [`encode`] but appends output to a caller-supplied buffer. The
+    /// caller can `clear()` the buffer between calls to reuse its capacity,
+    /// avoiding the per-encode allocation on ingest loops.
+    ///
+    /// ```rust,ignore
+    /// let mut buf = Vec::with_capacity(1 << 20);
+    /// for frame in frames {
+    ///     buf.clear();
+    ///     encoder.encode_into(&frame, &mut buf)?;
+    ///     store(&buf);
+    /// }
+    /// ```
+    pub fn encode_into<S: Sample>(
+        &mut self,
+        frame: &Frame<S>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeError> {
+        let r = unsafe { self.encode_inner_into(frame, out) };
+        unsafe { ffi::JxlEncoderReset(self.enc) };
+        r
+    }
+
     unsafe fn encode_inner<S: Sample>(&self, frame: &Frame<S>) -> Result<Vec<u8>, EncodeError> {
+        let mut out = Vec::new();
+        self.encode_inner_into(frame, &mut out)?;
+        Ok(out)
+    }
+
+    unsafe fn encode_inner_into<S: Sample>(
+        &self,
+        frame: &Frame<S>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeError> {
         // ── validate ──────────────────────────────────────────────────────
+        self.opts.validate()?;
         if frame.color_channels != 1 && frame.color_channels != 3 {
             return Err(EncodeError::Channels(format!(
                 "color_channels must be 1 or 3, got {}",
@@ -567,14 +632,22 @@ impl Encoder {
         ffi::JxlEncoderCloseInput(enc);
 
         // ── drain output (grow loop, double on NeedMoreOutput) ─────────────
-        // Pre-size the drain buffer to ~2 bytes/pixel so that most images fit
-        // without a realloc. Clamp to [64 KiB, 256 MiB] for safety.
-        let hint_bytes = (frame.width as usize)
-            .saturating_mul(frame.height as usize)
-            .saturating_mul(2)
-            .clamp(1 << 16, 256 << 20);
-        let mut out = vec![0u8; hint_bytes];
-        let mut pos = 0usize;
+        // Rate-aware hint: lossless budgets the full uncompressed pixel footprint
+        // (worst case); lossy uses 0.5 bytes/pixel (JXL q90 is typically
+        // 0.1–0.4 bytes/pixel, so this is still conservative without zeroing
+        // 4–8× the actual output). Clamped to [64 KiB, 256 MiB].
+        let px_count = (frame.width as usize).saturating_mul(frame.height as usize);
+        let hint_bytes = if matches!(self.opts.rate, Rate::Lossless) {
+            px_count
+                .saturating_mul(std::mem::size_of::<S>())
+                .saturating_mul(frame.interleaved_channels() as usize)
+        } else {
+            px_count / 2
+        }
+        .clamp(1 << 16, 256 << 20);
+        out.resize(out.len() + hint_bytes, 0);
+        let base = out.len() - hint_bytes;
+        let mut pos = base;
         loop {
             let mut next = out.as_mut_ptr().add(pos);
             let mut avail = out.len() - pos;
@@ -585,7 +658,7 @@ impl Encoder {
                 out.truncate(pos);
                 break;
             } else if st == ffi::JxlEncoderStatus::JXL_ENC_NEED_MORE_OUTPUT {
-                let grow = out.len().max(1 << 16);
+                let grow = (out.len() - base).max(1 << 16);
                 out.resize(out.len() + grow, 0);
             } else {
                 return Err(EncodeError::Jxl(format!(
@@ -594,7 +667,7 @@ impl Encoder {
                 )));
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -611,19 +684,7 @@ impl Drop for Encoder {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/// Returns an error carrying both the failing operation name and the raw libjxl
-/// error code. Always prefer `check_enc` (which queries the encoder for the
-/// code) inside functions that have an `enc` handle; use this only when no
-/// encoder handle is available (e.g. from a stand-alone status check).
-fn check(status: ffi::JxlEncoderStatus, what: &str) -> Result<(), EncodeError> {
-    if status == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
-        Ok(())
-    } else {
-        Err(EncodeError::Jxl(format!("{what} failed (status {:?})", status)))
-    }
-}
-
-/// Like `check` but also surfaces the libjxl error code for diagnostics.
+/// Like `check_status` but also surfaces the libjxl error code for diagnostics.
 unsafe fn check_enc(
     status: ffi::JxlEncoderStatus,
     what: &str,
@@ -663,9 +724,9 @@ pub fn encode_rgba8(
     px: &[u8],
     w: u32,
     h: u32,
-    opts: &EncodeOptions,
+    opts: EncodeOptions,
 ) -> Result<Vec<u8>, EncodeError> {
-    Encoder::new(opts.clone())?.encode(&Frame::rgba8(px, w, h))
+    Encoder::new(opts)?.encode(&Frame::rgba8(px, w, h))
 }
 
 /// Encode interleaved RGB8 (no alpha).
@@ -673,9 +734,9 @@ pub fn encode_rgb8(
     px: &[u8],
     w: u32,
     h: u32,
-    opts: &EncodeOptions,
+    opts: EncodeOptions,
 ) -> Result<Vec<u8>, EncodeError> {
-    Encoder::new(opts.clone())?.encode(&Frame::rgb(px, w, h))
+    Encoder::new(opts)?.encode(&Frame::rgb(px, w, h))
 }
 
 #[cfg(test)]

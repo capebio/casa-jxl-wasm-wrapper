@@ -965,6 +965,32 @@ where
 }
 
 /// Compatibility wrapper that clones progressive frames for retaining callers.
+///
+/// # Performance Warning
+///
+/// This function **clones the entire frame buffer on every progressive flush event**. For images
+/// with dimensions such that RGBA8 output is 80+ MB, this incurs substantial allocation and copy
+/// overhead per pass. Each intermediate flush clones the partial result.
+///
+/// # Better Alternative
+///
+/// For better performance, use [`decode_progressive_frames_borrowed`] with a callback that accepts
+/// [`DecodeProgressiveEvent<'_>`]. This variant yields borrowed references (`&[u8]`) for intermediate
+/// `Progress` events, eliminating the clone. Cloning is only needed if you must retain the data
+/// beyond the callback scope.
+///
+/// Example:
+/// ```ignore
+/// decode_progressive_frames_borrowed(jxl_bytes, |event| match event {
+///     DecodeProgressiveEvent::Progress { width, height, rgba } => {
+///         // rgba is &[u8] — no clone needed if you're just reading it.
+///         process_frame(width, height, rgba);
+///     },
+///     DecodeProgressiveEvent::Final { width, height, rgba } => {
+///         // Only Final is owned (Vec<u8>) since it outlives the decoder.
+///     },
+/// })
+/// ```
 pub fn decode_progressive_frames<F>(jxl_bytes: &[u8], mut on_frame: F) -> Option<(f64, f64)>
 where
     F: FnMut(ProgressiveFrame),
