@@ -122,6 +122,7 @@ function makeJob(overrides: Partial<ProgressiveImageJob> = {}): ProgressiveImage
     prefixAccum: null,
     prefixBytes: 0,
     manifestDispatched: false,
+    saliencyBoosted: false,
     ...overrides,
   };
 }

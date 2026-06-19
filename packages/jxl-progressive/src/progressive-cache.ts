@@ -28,6 +28,7 @@ const TIER_SEP = "\0";
 const _textDecoder = new TextDecoder();
 
 const DEFAULT_MANIFEST_TTL_MS = 3_600_000; // 1 hour
+const MAX_BITMAP_ENTRIES = 100;
 
 /**
  * Progressive-specific cache layer wrapping JxlCacheBrowser.
@@ -129,6 +130,13 @@ export class ProgressiveCache {
     bitmap: ImageBitmap,
   ): Promise<void> {
     this.bitmapStore.set(BITMAP_KEY_PREFIX + jxlUrl + TIER_SEP + tier, bitmap);
+    // Evict oldest entry (insertion order) when cap is exceeded to bound GPU memory.
+    if (this.bitmapStore.size > MAX_BITMAP_ENTRIES) {
+      const oldestKey = this.bitmapStore.keys().next().value as string;
+      const evicted = this.bitmapStore.get(oldestKey);
+      this.bitmapStore.delete(oldestKey);
+      evicted?.close();
+    }
   }
 
   /**

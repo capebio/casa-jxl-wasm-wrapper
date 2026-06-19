@@ -929,3 +929,190 @@ Target: the 7-file progressive-JXL encode bunch (casaencoder, casabio_encode, jx
 
 ### HIGH-PRIORITY follow-up (out of requested scope but exposed by this run)
 - `progressive-profile.ts:156` — DC tier `byteEnd` is set to `bytesPushed` at the frame event and can reach/exceed the full file size; `profile.test.ts` "dc tier byteEnd is less than full file size" now FAILS (1/86). The suite was previously uncompilable (scheduler TS errors), so this pre-existing bug was hidden; fixing the compile block exposed it. `progressive-profile.ts` was NOT in the requested 7-file scope so it was not edited — recommend a focused follow-up (it is the same byte-offset-contract bug the flagship ADR addresses).
+
+---
+
+## ADR DRAFTS from section 000 review (2026-06-19)
+
+- Topic: Pyramid downscale→encode fusion (halve peak memory)
+  File: .epiccodereview/20260619T195435Z/sections/000/adr_draft/pyramid-downscale-encode-fusion.md
+  Recommends: Stream per-level downscale+encode, release each buffer before computing next
+  Reversible: yes
+
+- Topic: Test coverage for pyramid sidecar sort guard
+  File: .epiccodereview/20260619T195435Z/sections/000/adr_draft/test-coverage-pyramid-sidecar-sort.md
+  Recommends: Add pyramid_sidecar_sizes_unsorted_produces_correct_level_order unit test
+  Reversible: yes
+
+- Topic: validateManifest dimension + byteEnd guards
+  File: .epiccodereview/20260619T195435Z/sections/000/adr_draft/manifest-validate-dimensions-byteend.md
+  Recommends: Add width/height > 0 and byteEnd <= jxl.bytes checks; Zod rejected (no benefit, +15KB)
+  Reversible: yes
+
+- Topic: encoder.flags per-entry string validation
+  File: .epiccodereview/20260619T195435Z/sections/000/adr_draft/manifest-flags-entry-validation.md
+  Recommends: Validate each flag entry is a string in validateManifest; flagged as direct_fix candidate
+  Reversible: yes
+
+- Topic: Structured error reporting in startDecode
+  File: .epiccodereview/20260619T195435Z/sections/000/adr_draft/scheduler-structured-error-reporting.md
+  Recommends: Define SchedulerError class with cause/tier/attemptCount/bytesLoaded; update onError type
+  Reversible: partial
+
+---
+
+## ADR DRAFTs from EpicCodeReview run 20260619T194416Z (global + section 000)
+
+## ADR DRAFT from task G-arch-o7p8
+- Topic: Memory Budget Policy
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/memory-budget-policy.md
+- Recommends: Define RAW_DECODE_PEAK_BYTES, add pre-flight dimension check before large allocs, expose estimate_decode_peak_bytes() wasm_bindgen export
+- Reversible: partial
+
+## ADR DRAFT from task G-arch-u3v4
+- Topic: Unified Butteraugli Interface
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/unified-butteraugli-interface.md
+- Recommends: Designate PerceptualComparer (src/lib.rs) as canonical; delegate facade.ts ButteraugliComparator to it via thin TS adapter to enable zero-copy test-image staging
+- Reversible: partial
+
+## ADR DRAFT from task G-arch-a9b0
+- Topic: DNG/CR2 LookRenderer Factory
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/dng-cr2-lookrenderer-factory.md
+- Recommends: Add process_dng_to_renderer / process_cr2_to_renderer wasm_bindgen entry points that keep rgb16_lb in WASM and construct LookRenderer without a JS round-trip
+- Reversible: yes
+
+## ADR DRAFT from task G-arch-b3c4
+- Topic: ProcessResult Lazy Pixel Buffer Materialization
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/processresult-lazy-buffers.md
+- Recommends: Introduce RawDecodeSession wasm_bindgen struct with demand-pull take_lb/take_thumb/take_rgb8/take_full16 methods to reduce simultaneous peak WASM heap
+- Reversible: partial
+
+## ADR DRAFT from task G-arch-g9h0
+- Topic: DNG/CR2 Pre-Demosaic Planar Downscale (Hypercar Parity)
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/dng-cr2-planar-downscale.md
+- Recommends: For preview-only DNG/CR2 requests, replace full-resolution MHC demosaic + downscale with direct bayer-subsampled bilinear demosaic at target dims (10–20× throughput gain for gallery ingest)
+- Reversible: yes
+
+## ADR DRAFT from task G-vision-g3h4i5
+- Topic: AR Thumb-First Preview Path
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/ar-thumb-first-preview.md
+- Recommends: Add process_orf_thumb_fast() using 2×2 bayer quad average at target dims to achieve sub-30ms thumbnail latency for AR plant-ID use case
+- Reversible: yes
+
+## ADR DRAFT from task G-arch-i1j2
+- Topic: ProcessResult Metadata-Only Decode Path
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/processresult-metadata-only.md
+- Recommends: Add parse_dng_metadata() and parse_cr2_metadata() wasm_bindgen exports that parse TIFF/EXIF headers only, enabling gallery ingest metadata scan without bayer decompress
+- Reversible: yes
+
+## ADR DRAFT from task G-arch-g5h6
+- Topic: bindgen rerun-if-changed Tracking
+- File: .epiccodereview/20260619T194416Z/global/adr_draft/bindgen-rerun-tracking.md
+- Recommends: Emit cargo:rerun-if-changed for each libjxl header under include/jxl/ in crates/jxl-ffi/build.rs to prevent stale bindings after header upgrades
+- Reversible: yes
+
+## ADR DRAFT from task 000-hacker-d0e1f2a3
+- Topic: SIMD u16x8 Accumulation for downscale_rgb16_planar
+- File: .epiccodereview/20260619T194416Z/sections/000/adr_draft/simd-downscale-rgb16-planar.md
+- Recommends: Implement wasm32 SIMD fast path for downscale_rgb16_planar using u16x8 horizontal accumulation (4–8× throughput; pixel-identical to scalar)
+- Reversible: yes
+
+## ADR DRAFT from task 000-hacker-c5d6e7f8
+- Topic: SIMD v128 Accumulation for downscale_rgba
+- File: .epiccodereview/20260619T194416Z/sections/000/adr_draft/simd-downscale-rgba.md
+- Recommends: Implement wasm32 SIMD fast path for downscale_rgba using v128 4-pixel loads and u16x8 widening accumulation (4× wider than scalar; pixel-identical output)
+- Reversible: yes
+
+## ADR DRAFT from task 000-structure-v2w3x4
+- Topic: Unit Tests for LookRenderer and ORF Bench Paths
+- File: .epiccodereview/20260619T194416Z/sections/000/adr_draft/look-renderer-tests.md
+- Recommends: Add unit tests for LookRenderer clarity-clone guard, black pedestal subtraction, orientation dim invariant, and demosaic_rggb_shuffle_simd parity
+- Reversible: yes
+
+## ADR DRAFT from task 000-correctness-s6t7u8v9
+- Topic: PerceptualComparer Input Buffer Validation
+- File: .epiccodereview/20260619T194416Z/sections/000/adr_draft/perceptual-comparer-validation.md
+- Recommends: Add validate_rgba_len() check in PerceptualComparer::new() and all metric methods to surface buffer-length mismatches as JsError instead of silent OOB reads
+- Reversible: yes
+
+---
+
+## ADR DRAFTS from global architecture+vision pass (2026-06-19)
+
+- Topic: Strategic map / end-to-end contract test
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/strategic-map-two-pipeline-boundary.md
+  Recommends: Add a contract test covering Rust encode -> manifest -> TS byte ranges
+  Reversible: yes
+
+- Topic: Encoder pipeline separation
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/encoder-pipeline-separation.md
+  Recommends: Cache tonemapped RGBA, call encode variants only
+  Reversible: yes
+
+- Topic: jxl-ffi runtime version assertion
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/jxl-ffi-runtime-version-check.md
+  Recommends: Add startup version assertion for major.minor match
+  Reversible: yes
+
+- Topic: RGBA resize on no-alpha path
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/rgba-resize-no-alpha-waste.md
+  Recommends: Add resize_rgb variant or pass has_alpha hint
+  Reversible: yes
+
+- Topic: SHA-256 verification off main thread
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/checkHash-offthread-sha256.md
+  Recommends: Move SHA-256 to a Worker or detached SubtleCrypto task
+  Reversible: yes
+
+- Topic: sha256 optional in manifest
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/sha256-optional-in-manifest.md
+  Recommends: Make sha256 optional, default verifyHash=false
+  Reversible: yes
+
+- Topic: ML recognition seam wiring
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/ml-recognition-seam-wiring.md
+  Recommends: Wire ModelAdapter into ProgressiveGallery frame loop
+  Reversible: yes
+
+- Topic: types.ts scope creep split
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/types-ts-split-concerns.md
+  Recommends: Split into decode/ml/geometry type modules
+  Reversible: yes
+
+- Topic: 16-bit pyramid level support
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/pyramid-level-16bit-support.md
+  Recommends: Add bits_per_sample to PyramidLevel and uint16 encode path
+  Reversible: yes
+
+- Topic: Depth channel sidecar encode
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/depth-channel-sidecar-encode.md
+  Recommends: Add depth: Option<&[f32]> to encode_rgba8_pyramid
+  Reversible: partial
+
+- Topic: perceptual field typed (PerceptualParams interface)
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/manifest-perceptual-field-typed.md
+  Recommends: Define PerceptualParams interface and type manifest.perceptual
+  Reversible: yes
+
+- Topic: Camera intrinsics validation
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/manifest-capture-intrinsics-validation.md
+  Recommends: Add field-level validation for capture.intrinsics and capture.pose
+  Reversible: yes
+
+- Topic: ColorEncoding P3/ICC variants
+  File: .epiccodereview/20260619T195435Z/global/adr_draft/color-encoding-p3-icc.md
+  Recommends: Add DisplayP3 and IccProfile variants to ColorEncoding enum
+  Reversible: partial
+
+---
+
+## QUESTION from task G-arch-009-activeDecoders-count-no-fetch-limit
+- Section: (selected files)
+- File: packages/jxl-progressive/src/progressive-scheduler.ts
+- Finding: activeDecoders slot consumed during manifest fetch, starving WASM decode slots on slow network
+- Line range: 520-526
+- What we tried: Scheduler fixer reviewed the code but task not applied (not in fix log)
+- What we need: Add separate `activeFetches` counter incremented at startDecode entry, decremented when fetch settles; gate `activeFetches < maxActiveFetches` separately from `activeDecoders < maxActiveDecoders`
+- Suggested direction: `maxActiveFetches` could default to `maxActiveDecoders * 2` so slow fetches never starve fast WASM decoders
+
+---

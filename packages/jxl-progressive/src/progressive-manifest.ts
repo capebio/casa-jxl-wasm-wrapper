@@ -114,7 +114,9 @@ export function validateManifest(json: unknown): ProgressiveManifest {
   );
   const src = obj["source"] as Record<string, unknown>;
   assertField(typeof src["width"] === "number", "source.width", "source.width must be a number");
+  assertField((src["width"] as number) > 0, "source.width", "source.width must be > 0");
   assertField(typeof src["height"] === "number", "source.height", "source.height must be a number");
+  assertField((src["height"] as number) > 0, "source.height", "source.height must be > 0");
   assertField(typeof src["hasAlpha"] === "boolean", "source.hasAlpha", "source.hasAlpha must be a boolean");
   assertField(typeof src["orientation"] === "number", "source.orientation", "source.orientation must be a number");
 
@@ -146,6 +148,9 @@ export function validateManifest(json: unknown): ProgressiveManifest {
   assertField((enc["libjxlVersion"] as string).length <= 64, "encoder.libjxlVersion", "encoder.libjxlVersion must be <= 64 chars");
   assertField(Array.isArray(enc["flags"]), "encoder.flags", "encoder.flags must be an array");
   assertField((enc["flags"] as unknown[]).length <= 64, "encoder.flags", "encoder.flags must have <= 64 entries");
+  for (let fi = 0; fi < (enc["flags"] as unknown[]).length; fi++) {
+    assertField(typeof (enc["flags"] as unknown[])[fi] === "string", `encoder.flags[${fi}]`, `encoder.flags[${fi}] must be a string`);
+  }
 
   // saliency (optional; tighten ranges when present so scheduler boosts are safe)
   if (obj["saliency"] !== undefined) {
@@ -214,6 +219,11 @@ export function validateManifest(json: unknown): ProgressiveManifest {
       (t["byteEnd"] as number) > (t["byteStart"] as number),
       `${f}.byteEnd`,
       `${f}.byteEnd must be greater than ${f}.byteStart`
+    );
+    assertField(
+      (t["byteEnd"] as number) <= (jxl["bytes"] as number),
+      `${f}.byteEnd`,
+      `${f}.byteEnd (${t["byteEnd"]}) exceeds jxl.bytes (${jxl["bytes"]})`
     );
     assertField(
       typeof t["progressionIndex"] === "number" || t["progressionIndex"] === "final",

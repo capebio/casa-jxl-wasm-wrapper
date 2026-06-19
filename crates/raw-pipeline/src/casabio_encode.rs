@@ -93,7 +93,7 @@ pub fn encode_variants_with_progressive(
     })
 }
 
-pub(crate) fn encode_variants_progressive_opts(
+pub fn encode_variants_progressive_opts(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -134,7 +134,10 @@ pub fn encode_variants_cancellable(
     // alpha_strip fuses the alpha scan + RGB-strip into one pass (bandwidth win for RAW).
     // The rgb strip for the full-res image is NOT used here (variants encode at 3 sizes),
     // but we get has_alpha from the single pass.
-    let (has_alpha, _) = alpha_strip(rgba);
+    // Capture the full-res RGB strip alongside has_alpha; stored as _full_rgb to
+    // document that the buffer is available for future use (e.g. passing directly
+    // to the full-res encode variant to avoid a second strip inside encode_into).
+    let (has_alpha, _full_rgb) = alpha_strip(rgba);
 
     let full_quality: u8 = if hq_override {
         95
@@ -303,9 +306,8 @@ fn encode_into(
         enc.encode(&Frame::rgba8(pixels, w, h))?
     } else {
         // RAW images always have alpha=255; strip to RGB for smaller output.
-        // alpha_strip produces the RGB buffer in the same pass as the alpha scan.
-        let (_, rgb) = alpha_strip(pixels);
-        let rgb = rgb.expect("has_alpha=false but alpha_strip found alpha<255 — invariant broken");
+        // Use strip_rgba_to_rgb (no alpha scan) — caller already determined has_alpha=false.
+        let rgb = strip_rgba_to_rgb(pixels);
         enc.encode(&Frame::rgb(&rgb, w, h))?
     };
     Ok(bytes)
@@ -387,6 +389,17 @@ pub struct PyramidLevel {
     pub width: u32,
     pub height: u32,
     pub bits_per_sample: u8,
+}
+
+/// Strip RGBA8 to RGB8 without scanning for alpha (caller already knows has_alpha=false).
+/// Avoids the redundant per-pixel alpha check that `alpha_strip` performs.
+fn strip_rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    let n = rgba.len() / 4;
+    let mut rgb = Vec::with_capacity(n * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&px[0..3]);
+    }
+    rgb
 }
 
 /// Single-pass alpha scan + conditional RGB strip.
@@ -476,12 +489,22 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
 
     // general coverage (ceiling for end)
     // Use u64 for intermediate products to avoid u32 overflow on large images.
+    //
+    // x0/x1 depend only on dx, sw, dw — NOT on dy. Precompute once to avoid
+    // recomputing dh times for each column (loop-invariant hoisting).
+    let x_ranges: Vec<(u32, u32)> = (0..dw)
+        .map(|dx| {
+            let x0 = ((dx as u64 * sw as u64) / dw as u64) as u32;
+            let x1 = (((dx as u64 + 1) * sw as u64 + dw as u64 - 1) / dw as u64)
+                .min(sw as u64) as u32;
+            (x0, x1)
+        })
+        .collect();
     for dy in 0..dh {
         let y0 = ((dy as u64 * sh as u64) / dh as u64) as u32;
         let y1 = (((dy as u64 + 1) * sh as u64 + dh as u64 - 1) / dh as u64).min(sh as u64) as u32;
         for dx in 0..dw {
-            let x0 = ((dx as u64 * sw as u64) / dw as u64) as u32;
-            let x1 = (((dx as u64 + 1) * sw as u64 + dw as u64 - 1) / dw as u64).min(sw as u64) as u32;
+            let (x0, x1) = x_ranges[dx as usize];
             let mut r = 0u32;
             let mut g = 0u32;
             let mut b = 0u32;
@@ -497,6 +520,11 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
                     a += px[3] as u32;
                     count += 1;
                 }
+            }
+            // Defensive guard: count==0 can only occur if caller constraints are violated,
+            // but guard here to prevent div-by-zero from future callers.
+            if count == 0 {
+                continue;
             }
             let out = &mut dst[(dy as usize * dw as usize + dx as usize) * 4..];
             out[0] = (r / count) as u8;
@@ -524,8 +552,8 @@ fn encode_distance_into(
     let bytes = if has_alpha {
         enc.encode(&Frame::rgba8(pixels, w, h))?
     } else {
-        let (_, rgb) = alpha_strip(pixels);
-        let rgb = rgb.expect("has_alpha=false but alpha_strip found alpha<255 — invariant broken");
+        // Use strip_rgba_to_rgb (no alpha scan) — caller already determined has_alpha=false.
+        let rgb = strip_rgba_to_rgb(pixels);
         enc.encode(&Frame::rgb(&rgb, w, h))?
     };
     Ok(bytes)
@@ -620,8 +648,8 @@ pub fn encode_rgba8_pyramid(
                     let bytes = if has_alpha {
                         enc.encode(&Frame::rgba8(&buf, tw, th))?
                     } else {
-                        let (_, rgb) = alpha_strip(&buf);
-                        let rgb = rgb.expect("has_alpha=false but alpha_strip found alpha<255");
+                        // Use strip_rgba_to_rgb (no alpha scan) — has_alpha already determined.
+                        let rgb = strip_rgba_to_rgb(&buf);
                         enc.encode(&Frame::rgb(&rgb, tw, th))?
                     };
                     Ok(PyramidLevel { data: bytes, width: tw, height: th, bits_per_sample: 8 })

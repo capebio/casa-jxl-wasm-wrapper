@@ -51,6 +51,8 @@ export interface ProgressiveImageJob {
   errorCount: number;
   nextRetryAt: number;
   manifestChecked: boolean;
+  /** True once saliency priority boost has been applied; prevents cumulative drift across tiers. */
+  saliencyBoosted: boolean;
 }
 
 export interface GalleryOptions {
@@ -158,7 +160,7 @@ export class ProgressiveGallery {
   private readonly testFetchTier: GalleryOptions["testFetchTier"];
   private readonly testFetchFull: GalleryOptions["testFetchFull"];
   private readonly testStreamTierFrames: GalleryOptions["testStreamTierFrames"];
-  private readonly testFetchTierWithPrefix?: typeof fetchTierWithPrefix;
+  private readonly testFetchTierWithPrefix: GalleryOptions["testFetchTierWithPrefix"];
 
   constructor(
     cache: ProgressiveCache,
@@ -180,7 +182,7 @@ export class ProgressiveGallery {
     this.testFetchTier = opts.testFetchTier;
     this.testFetchFull = opts.testFetchFull;
     this.testStreamTierFrames = opts.testStreamTierFrames;
-    (this as any).testFetchTierWithPrefix = (opts as any).testFetchTierWithPrefix;
+    this.testFetchTierWithPrefix = opts.testFetchTierWithPrefix;
     const autoProfile = (opts.autoProfile ?? true) !== false;
     let maxActiveDecoders = opts.maxActiveDecoders;
     if (maxActiveDecoders === undefined && autoProfile) {
@@ -245,6 +247,7 @@ export class ProgressiveGallery {
       errorCount: 0,
       nextRetryAt: 0,
       manifestChecked: false,
+      saliencyBoosted: false,
     };
     this.jobs.set(id, job);
     this.byElement.set(element, job);
@@ -307,6 +310,7 @@ export class ProgressiveGallery {
       job.targetTier = tier;
       job.errorCount = 0;
       job.nextRetryAt = 0;
+      this.candidatesDirty = true;
       this.requestTick();
     }
   }
@@ -510,10 +514,17 @@ export class ProgressiveGallery {
       this.candidatesDirty = false;
     } else {
       // State unchanged: update time-dependent starvationBonus and re-sort in-place.
+      // Skip the sort when the largest score change is below 0.1 (starvationBonus drifts ~0.016/tick
+      // at 60 fps — too small to flip ordering on most ticks). perf-unverified.
+      let maxDelta = 0;
       for (const c of this.cachedCandidates) {
-        c.score = fairnessScore(c.job, now);
+        const newScore = fairnessScore(c.job, now);
+        maxDelta = Math.max(maxDelta, Math.abs(newScore - c.score));
+        c.score = newScore;
       }
-      this.cachedCandidates.sort((a, b) => b.score - a.score);
+      if (maxDelta > 0.1) {
+        this.cachedCandidates.sort((a, b) => b.score - a.score);
+      }
       candidates = this.cachedCandidates;
     }
 
@@ -561,9 +572,11 @@ export class ProgressiveGallery {
 
       // Saliency-aware: manifest carries center/conf from encode-side policy (saliency-policy.ts).
       // Boost priority + target for images with reliable ROI data so human-important detail arrives first.
-      // Only apply the boost once — on the tier when the manifest is first dispatched — to prevent
-      // cumulative priority drift across dc→preview→full repeated startDecode calls.
-      if (manifest?.saliency?.enabled && !wasManifestDispatched) {
+      // Use job.saliencyBoosted (not wasManifestDispatched) to guard the one-shot boost — prefetchManifest
+      // may have already set manifestDispatched before the first startDecode call, which would silently
+      // skip the boost if guarded only by !wasManifestDispatched.
+      if (manifest?.saliency?.enabled && !job.saliencyBoosted) {
+        job.saliencyBoosted = true;
         if (job.priority > 1) job.priority = Math.max(1, job.priority - 1);
         if (job.targetTier === "preview") job.targetTier = "full";
       }
@@ -634,6 +647,12 @@ export class ProgressiveGallery {
       job.bytesLoaded = job.prefixBytes || 0;
       const byteTarget = manifestTier?.byteEnd;
       this.opts.onProgress(job.id, job.bytesLoaded, byteTarget);
+
+      // Pre-size accum when byteTarget is known from the manifest tier to avoid repeated reallocations.
+      // Falls back to 4096 when byteTarget is unknown. perf-unverified.
+      if (!job.prefixAccum && byteTarget && byteTarget > 0) {
+        job.prefixAccum = new Uint8Array(byteTarget);
+      }
 
       const onChunk = (c: Uint8Array) => {
         const needed = job.prefixBytes + c.byteLength;
@@ -739,9 +758,11 @@ export class ProgressiveGallery {
               await this.cache.setByteRange(job.jxlUrl, achieved as "dc" | "preview" | "full", buffer as ArrayBuffer);
               // E-5 opt-in
               if (achieved === "full" && this.opts.verifyHash && job.manifest) {
-                const ok = await checkHash(job.manifest, fullPrefix);
+                const ok = await checkHash(job.manifest, buffer as ArrayBuffer);
                 if (!ok) {
                   await this.cache.invalidate(job.jxlUrl);
+                  job.currentTier = "preview"; // allow retry from preview→full
+                  this.candidatesDirty = true;
                   job.prefixAccum = null;
                   job.prefixBytes = 0;
                   job.bytesLoaded = 0;
