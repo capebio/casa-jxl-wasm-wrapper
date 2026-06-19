@@ -797,3 +797,44 @@ ML recognition entry (thumb+GPS already present); photogrammetry linear-16 contr
 
 ### RESOLVED — run 20260619T093126Z §A.1 (flag collision)
 OUT_FULL_16 vs OUT_NO_ORIENT (both =8): determined ACCIDENTAL via git (b2cb8dc9 2026-06-03 vs 1674aa11 2026-06-08, independent additions) + no caller sets bit 8 (raw-backend uses process_orf=7; OUT_FULL_16 is v1 test/synthetic only). Fixed: OUT_NO_ORIENT -> 16. Private consts, no ABI change. Commit follows on branch epiccodereview/20260619T093126Z.
+
+---
+
+# EpicCodeReview 20260619T124908Z (facade.ts, bridge.cpp, backends.ts, 2× .flipflop)
+
+FIXED this run: EC descriptor stride drift (72B writer vs 20B C++ struct → multi-extra-channel heap corruption). Commit f6821bb1. See EpicCodeReview-20260619T124908Z.md.
+
+## Needs WASM rebuild to verify (bridge.cpp) — Phase-6 territory
+1. Butteraugli ref deep-copy per compare (bridge.cpp:3509-3519, HIGH perf). `...InPlace` consumes args → full 3-plane memcpy of ref every pass; use non-consuming `ButteraugliInterface(const Image3F&,…)` (butteraugli.h:80). Flipflop after rebuild. **Bundle into Phase-6 decode-resident rebuild?**
+2. JXTC `tile_count` 32-bit overflow (bridge.cpp:1724, MED/security). `tiles_x*tiles_y` uint32 on attacker-controlled header; encode path guards uint64 (1624-1630). Mirror the guard.
+3. `ssim_block_luma` two-pass per block (bridge.cpp:3571, MED perf). Fuse mean+variance to one pass.
+
+## Flipflop-gated TS perf (low expected value — buffer-copy axis measured = noise)
+4. `ButteraugliComparator.compare` per-call malloc/free of constant-size candidate (facade.ts:748) → grow-only slot.
+5. No `SsimComparator`; `computeSsimWasm`/PSNR re-malloc+copy the fixed ref every pass (facade.ts:689,816).
+
+## Correctness, testable — not yet fixed
+6. **JPEG-end scanner rejects real JPEGs** (facade.ts:2740). `findValidJpegEnd` bails at SOS (0xDA) → `extractJpegReconstructionFromJxl` returns null for all genuine embedded JPEGs. Fix marker walk (SOS→entropy→EOI) + unit test. **Recommended next fix** (no rebuild).
+
+## Policy / calibration (human)
+7. `SSIM_CONVERGED=0.9995` build-dependent (backends.ts:216): calibrated to ssim.js, loaded build may use WASM SSIM (~1-2% off) → `convergedByteEnd` shifts. Recalibrate to WASM scale, or keep ssim.js for the gate? Needs your intent.
+8. `deferredRelease` 1080p hard cap + transfer-detach footgun (facade.ts:1411-1447). Opt-in, no prod caller. Grow + document no-transfer, or leave until a caller needs it?
+
+## Architecture ADR-drafts (ratify before building)
+9. Decode-resident metric (zero-copy SSIM/Butteraugli on the decoder heap buffer) — see docs/SSIM-buffer-engine-flipflop-spec-2026-06-19.md.
+10. Separate measurement pipeline from render/transfer decode path (P2).
+11. Pool decoders in profiler / source ref from progressive `final` event (drop 2nd full decode).
+
+## Vision ADR-drafts (aspirational)
+12. Interleaved-RGBA perceptual-constancy entry on decoder output (engine exposed via `perceptualConstancyApplyBulk`, but planar-SoA only).
+13. Emit perceptual-hash/recognition features from already-decoded qualityCurve pixels (organism ID).
+14. Populate `getDecodeGridInfo()` ({} today) for LOD/streaming; produce `DecodedExtraChannel` (depth/selection).
+
+## Uncertain — could not resolve from in-scope code
+- `take_flushed` borrowed-view lifetime (bridge.cpp:2361): caller copies before yield — safe today, contract comment-only.
+- Decoder cancel()/dispose() free WASM state only in generator `finally` (facade.ts:1876): leak only if a consumer abandons the iterator undrained — does any?
+- jxtc `prep()` caches a rejected promise permanently (.flipflop/tests/jxtc-vs-full-decode.mjs:70) — transient first-file failure poisons the run. Intended?
+- Encoder pending-push error lost on cancel; SSIM length-guard silently skips a pass's metric — gated on out-of-scope session/decoder behavior.
+
+### FALSE POSITIVE worth recording
+"Perceptual-Constancy engine completely unexposed" — WRONG. `perceptualConstancyApplyBulk` + `getPerceptualConstancySupport` already exist (facade.ts:3120/3136, also in dist). Engine IS exposed; only the interleaved-RGBA convenience entry is missing (#12).
