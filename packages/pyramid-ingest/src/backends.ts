@@ -287,7 +287,17 @@ async function measureConvergenceProfile(
   let useH = ref.h || (h ?? 0);
   if (!finalPixels || Math.max(useW, useH) < 1024) return undefined;
 
-  const ssimFn = await getCachedSsimFn();
+  // SSIM engine: prefer the WASM kernel (_jxl_wasm_ssim_compare) — measured 95-97% faster than
+  // ssim.js on synthetic + real camera pixels at 1024/2048/4096 (docs/SSIM-buffer-engine-flipflop-spec-2026-06-19.md,
+  // flipflopjournal "ssim-buffer-engine"). It is present in the split enc/dec WASM builds the facade
+  // loads first; ssim.js remains the fallback when the build lacks the symbol (returns null).
+  // NOTE: WASM SSIM and ssim.js differ by up to ~1-2% (image-dependent), so SSIM_CONVERGED (0.9995)
+  // was calibrated to ssim.js — it may need recalibration to the WASM-SSIM scale. butteraugli<=1.1
+  // is the primary convergence gate; the ssim gate only shifts (conservatively) until recalibrated.
+  const ssimWasm = typeof JW.computeSsimWasm === "function"
+    ? (JW.computeSsimWasm as (a: Uint8Array, b: Uint8Array, w: number, h: number) => Promise<number | null>)
+    : null;
+  const ssimFn = ssimWasm ? null : await getCachedSsimFn();
   const refImg = ssimFn ? { data: Uint8ClampedArray.from(finalPixels), width: useW, height: useH } : null;
 
   let comparator: { compare(p: Uint8Array): number; dispose(): void } | null = null;
@@ -322,13 +332,20 @@ async function measureConvergenceProfile(
         const px = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
         // compute immediately vs known final (no buffering of px)
         let ssimVal: number | undefined;
-        if (ssimFn && refImg && px.length === finalPixels.length) {
-          try {
-            const img1 = { data: Uint8ClampedArray.from(px), width: useW, height: useH };
-            const res = ssimFn(img1, refImg);
-            const v = typeof res === "number" ? res : res && res.mssim;
-            if (typeof v === "number" && Number.isFinite(v)) ssimVal = Math.round(v * 1e6) / 1e6;
-          } catch {}
+        if (px.length === finalPixels.length) {
+          if (ssimWasm) {
+            try {
+              const v = await ssimWasm(px, finalPixels, useW, useH);
+              if (typeof v === "number" && Number.isFinite(v)) ssimVal = Math.round(v * 1e6) / 1e6;
+            } catch {}
+          } else if (ssimFn && refImg) {
+            try {
+              const img1 = { data: Uint8ClampedArray.from(px), width: useW, height: useH };
+              const res = ssimFn(img1, refImg);
+              const v = typeof res === "number" ? res : res && res.mssim;
+              if (typeof v === "number" && Number.isFinite(v)) ssimVal = Math.round(v * 1e6) / 1e6;
+            } catch {}
+          }
         }
         let ba: number | undefined;
         if (comparator && px.length === finalPixels.length) {
