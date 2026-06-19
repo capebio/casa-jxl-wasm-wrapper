@@ -1698,7 +1698,21 @@ pub fn apply_luminance_nr(rgb16: &mut [u16], width: usize, height: usize, streng
 /// Full pipeline → 16-bit sRGB output (same pipeline as `process` but u16 output).
 /// Maps the tone-curved, sRGB-gamma-corrected result to [0, 65535] instead of [0, 255].
 /// Suitable as a 16-bit TIFF source for further editing.
+///
+/// Dispatcher peer of [`process_into_auto`]: the plain ingest case takes the SIMD bulk tone
+/// path ([`process_16bit_simd`]); perceptual-constancy keeps the byte-exact scalar path
+/// ([`process_16bit_scalar`]). Output differs from the scalar path only by the documented
+/// ≤1-LUT-step SIMD reassociation tolerance.
 pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
+    if params.perceptual_constancy {
+        process_16bit_scalar(rgb16, params)
+    } else {
+        process_16bit_simd(rgb16, params)
+    }
+}
+
+/// Byte-exact scalar 16-bit path (also the perceptual-constancy path). Fused matrix when vib_zero.
+pub fn process_16bit_scalar(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     debug_assert_eq!(rgb16.len() % 3, 0);
     let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
@@ -1759,6 +1773,59 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
         });
     }
 
+    out
+}
+
+/// SIMD 16-bit path: block-deinterleave the pre-LUT output into SoA, run the vectorized tone
+/// math (`tone_simd::apply_tone_bulk`, fused matrix when vib_zero), then reinterleave through the
+/// 16-bit post-LUT. Mirrors [`process_into_simd`] with u16 output. Plain ingest only
+/// (perceptual_constancy must be false — the dispatcher routes constancy to the scalar path).
+pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
+    debug_assert_eq!(rgb16.len() % 3, 0);
+    let ti = derive_tone_inputs(params);
+    debug_assert!(!ti.perceptual_constancy, "process_16bit_simd is the plain ingest path only");
+    let fallback = CAM_TO_SRGB;
+    let m = params.color_matrix.as_ref().unwrap_or(&fallback);
+    let n = rgb16.len() / 3;
+    let mut out = vec![0u16; n * 3];
+    let (pre_r, pre_g, pre_b, post16, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
+        ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, true);
+        let c = cache_cell.borrow();
+        let cr = c.as_ref().unwrap();
+        (cr.pre_r.clone(), cr.pre_g.clone(), cr.pre_b.clone(), cr.post16.as_ref().unwrap().clone(), cr.pre_lut_len - 1, cr.pre_lut_shift)
+    });
+
+    const BLK: usize = 2048;
+    let process_block = |ob: &mut [u16], ib: &[u16]| {
+        let np = ib.len() / 3;
+        let mut r = [0f32; BLK];
+        let mut g = [0f32; BLK];
+        let mut b = [0f32; BLK];
+        for i in 0..np {
+            r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+            b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+        }
+        crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
+        for i in 0..np {
+            ob[i * 3]     = post16[(r[i].clamp(0.0, 65535.0) as u16) as usize];
+            ob[i * 3 + 1] = post16[(g[i].clamp(0.0, 65535.0) as u16) as usize];
+            ob[i * 3 + 2] = post16[(b[i].clamp(0.0, 65535.0) as u16) as usize];
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        out.par_chunks_mut(3 * BLK)
+            .zip(rgb16.par_chunks(3 * BLK))
+            .for_each(|(ob, ib)| process_block(ob, ib));
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        out.chunks_mut(3 * BLK)
+            .zip(rgb16.chunks(3 * BLK))
+            .for_each(|(ob, ib)| process_block(ob, ib));
+    }
     out
 }
 
@@ -2479,6 +2546,53 @@ mod tonemap_flip_flops {
 
     fn synth_bayer(w: usize, h: usize) -> Vec<u16> {
         (0..w * h).map(|i| (i.wrapping_mul(2654435761) & 0x3fff) as u16).collect()
+    }
+
+    #[test]
+    fn process_16bit_simd_matches_scalar() {
+        // Plain ingest (non-perceptual): both paths take the fused matrix; the SIMD bulk differs
+        // from the scalar reference only by ≤1-LUT-step FMA reassociation. A real wiring bug
+        // (wrong LUT, transposed matrix, bad scatter) would diverge by hundreds/thousands.
+        let params = PipelineParams::default_olympus();
+        assert!(!derive_tone_inputs(&params).perceptual_constancy);
+        let n = 5000usize;
+        let rgb16: Vec<u16> = (0..n * 3).map(|i| (i.wrapping_mul(2654435761) & 0xffff) as u16).collect();
+        let a = process_16bit_scalar(&rgb16, &params);
+        let b = process_16bit_simd(&rgb16, &params);
+        assert_eq!(a.len(), b.len(), "length mismatch");
+        let (mut sum, mut max_diff) = (0u64, 0i32);
+        for (x, y) in a.iter().zip(b.iter()) {
+            let d = (*x as i32 - *y as i32).abs();
+            sum += d as u64;
+            max_diff = max_diff.max(d);
+        }
+        let mean = sum as f64 / a.len() as f64;
+        assert!(mean < 0.5, "process_16bit_simd vs scalar mean u16 diff {mean:.4} (max {max_diff}) — expected ≈0 modulo ≤1-LUT-step reassociation");
+    }
+
+    #[test]
+    fn process_into_simd_matches_scalar() {
+        // 8-bit twin of process_16bit_simd_matches_scalar, but TIGHTER: scalar process_into now
+        // fuses S·M, and the SIMD path fuses the SAME matrix incl. its ragged block tail (which
+        // previously called the unfused apply_tone_math). avx2 lanes use hw FMA == scalar mul_add,
+        // and apply_tone_bulk_scalar is fully fused — so on native x86_64 the two are BYTE-EXACT.
+        // n is deliberately NOT a multiple of 8 so the fused tail is exercised.
+        let mut params = PipelineParams::default_olympus();
+        params.vibrance = 0.0; // force the fused vib_zero path
+        let ti = derive_tone_inputs(&params);
+        assert!(ti.matrix_fused.is_some() && !ti.perceptual_constancy, "expected the fused vib_zero path");
+        // 14-bit data (sensor domain), n NOT a multiple of 8 so the fused ragged tail is exercised,
+        // and large enough to sample any rare boundary pixel a small buffer would miss.
+        let n = 2_000_001usize;
+        let rgb16: Vec<u16> = (0..n * 3).map(|i| (i.wrapping_mul(2654435761) & 0x3fff) as u16).collect();
+        let (mut a, mut b) = (vec![0u8; n * 3], vec![0u8; n * 3]);
+        process_into(&rgb16, &params, &mut a);
+        process_into_simd(&rgb16, &params, &mut b);
+        let max_diff = a.iter().zip(b.iter()).map(|(x, y)| (*x as i32 - *y as i32).abs()).max().unwrap_or(0);
+        eprintln!("process_into vs process_into_simd: max u8 diff = {max_diff} over {n} px");
+        // avx2 lanes use hw FMA == scalar mul_add and the tail is fused to the SAME matrix, so the
+        // two are byte-exact on this path. ≤1 left as the documented SIMD-reassociation ceiling.
+        assert!(max_diff <= 1, "process_into_simd diverged from scalar by {max_diff} (>1) — real wiring bug");
     }
 
     #[test]

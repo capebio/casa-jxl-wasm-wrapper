@@ -1357,12 +1357,14 @@ pub fn apply_look(
     // Defer clone to only when unsharp masking is needed (texture or clarity nonzero).
     // For the common no-sharpening path the borrow is sufficient and we avoid an
     // unnecessary full-resolution copy.
+    // SIMD-fused tone path (process_auto → process_into_simd). ≤1-LUT-step vs the byte-exact
+    // scalar `process`; same tolerance the heavy RAW decode already ships, invisible for display.
     let rgb8 = if params.texture != 0.0 || params.clarity != 0.0 {
         let mut rgb16 = rgb16_src.to_vec();
         pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
-        pipeline::process(&rgb16, &params)
+        pipeline::process_auto(&rgb16, &params)
     } else {
-        pipeline::process(rgb16_src, &params)
+        pipeline::process_auto(rgb16_src, &params)
     };
     if orientation == 1 {
         Ok(rgb8)
@@ -1582,12 +1584,14 @@ impl LookRenderer {
             clarity,
         );
 
+        // SIMD-fused tone path (process_auto → process_into_simd). ≤1-LUT-step vs the byte-exact
+        // scalar `process`; same tolerance the heavy RAW decode already ships, invisible for display.
         let rgb8 = if params.texture != 0.0 || params.clarity != 0.0 {
             let mut rgb16 = self.rgb16.clone();
             pipeline::apply_unsharp_masks(&mut rgb16, self.width, self.height, &params);
-            pipeline::process(&rgb16, &params)
+            pipeline::process_auto(&rgb16, &params)
         } else {
-            pipeline::process(&self.rgb16, &params)
+            pipeline::process_auto(&self.rgb16, &params)
         };
 
         if !self.apply_rotation || self.orientation == 1 {
