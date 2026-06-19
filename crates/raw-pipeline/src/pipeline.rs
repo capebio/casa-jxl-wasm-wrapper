@@ -1055,11 +1055,26 @@ pub fn apply_perceptual_constancy(r: f32, g: f32, b: f32, sat: f32, vib: f32, vi
     (rr.clamp(0.0, 1.5), gg.clamp(0.0, 1.5), bb.clamp(0.0, 1.5))
 }
 
+/// Fused-matrix fast path: `m` is already `S·M` (around-luma saturation pre-multiplied into the
+/// colour matrix by `derive_tone_inputs` → `tone_simd::vib_zero_matrix`), so per-pixel tone is a
+/// single matvec — no luma, no blend. Reproduces `apply_tone_math`'s `vib_zero` output in real
+/// arithmetic (differs only by f32 reassociation, ≤1 LUT-index LSB). Drops ~6 FMA + 3 selects
+/// per pixel. Used by the default no-vibrance, non-perceptual path.
+#[inline(always)]
+pub fn apply_tone_fused(r: f32, g: f32, b: f32, m: &[[f32; 3]; 3]) -> (f32, f32, f32) {
+    (
+        m[0][0].mul_add(r, m[0][1].mul_add(g, m[0][2] * b)),
+        m[1][0].mul_add(r, m[1][1].mul_add(g, m[1][2] * b)),
+        m[2][0].mul_add(r, m[2][1].mul_add(g, m[2][2] * b)),
+    )
+}
+
 /// 4-wide version for the classic (!pc) path (Layer 1 next enhancement).
 /// Mirrors the scalar math over 4 lanes. Call site in the 4x unrolled !par block
 /// (process_into) gathers 4 post-preLUT values, calls once, scatters post results.
 /// Gives better ILP / chance for auto-vec than 4 separate scalar calls.
 /// pc path delegates to scalar (bulk tile path covers pc+c-perceptual via AVX2).
+/// `sat_fused`: `m` is the pre-fused `S·M` ⇒ matrix-only, skip luma+blend.
 #[inline(always)]
 fn apply_tone_math4(
     rs: [f32; 4],
@@ -1070,6 +1085,7 @@ fn apply_tone_math4(
     vib: f32,
     vib_zero: bool,
     perceptual_constancy: bool,
+    sat_fused: bool,
 ) -> ([f32; 4], [f32; 4], [f32; 4]) {
     // Fleshed for Phase 1 of WASM/native strategy: explicit 4-wide arithmetic for the classic !pc path
     // (matrix + sat/vib). Eliminates 4 scalar calls inside the vec4 helper. LLVM can vectorize the
@@ -1084,6 +1100,13 @@ fn apply_tone_math4(
         for i in 0..4 {
             let (r2, g2, b2) = apply_tone_math(rs[i], gs[i], bs[i], m, sat, vib, vib_zero, true);
             r2s[i] = r2; g2s[i] = g2; b2s[i] = b2;
+        }
+    } else if sat_fused {
+        // Fused: m is already S·M ⇒ matrix only (saturation pre-multiplied). Drops the luma+blend loop.
+        for i in 0..4 {
+            r2s[i] = m[0][0].mul_add(rs[i], m[0][1].mul_add(gs[i], m[0][2] * bs[i]));
+            g2s[i] = m[1][0].mul_add(rs[i], m[1][1].mul_add(gs[i], m[1][2] * bs[i]));
+            b2s[i] = m[2][0].mul_add(rs[i], m[2][1].mul_add(gs[i], m[2][2] * bs[i]));
         }
     } else {
         // Unrolled classic path (the 90% case).
@@ -1115,7 +1138,11 @@ fn apply_tone_math4(
     (r2s, g2s, b2s)
 }
 
-struct ToneInputs { pub exp_gain: f32, pub wb_r: f32, pub wb_g: f32, pub wb_b: f32, pub tone: TonePost, pub sat: f32, pub vib: f32, pub vib_zero: bool, pub perceptual_constancy: bool }
+struct ToneInputs { pub exp_gain: f32, pub wb_r: f32, pub wb_g: f32, pub wb_b: f32, pub tone: TonePost, pub sat: f32, pub vib: f32, pub vib_zero: bool, pub perceptual_constancy: bool,
+    /// When the default path applies (`vib_zero && !perceptual_constancy`), the colour matrix
+    /// and around-luma saturation are pre-fused into ONE 3×3 (`S·M`) so per-pixel tone is a
+    /// single matvec — no luma, no blend. `None` ⇒ vibrance active or perceptual constancy on.
+    pub matrix_fused: Option<[[f32; 3]; 3]> }
 
 fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
     let exp_gain = 2f32.powf((params.exposure_ev + BASELINE_EXP_EV).clamp(-3.0, 4.0));
@@ -1139,7 +1166,15 @@ fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
     let vib = params.vibrance.clamp(-1.0, 1.0);
     let vib_zero = vib.abs() < 1e-6;
     let perceptual_constancy = params.perceptual_constancy;
-    ToneInputs { exp_gain, wb_r, wb_g, wb_b, tone, sat, vib, vib_zero, perceptual_constancy }
+    // Pre-fuse S·M for the default no-vibrance, non-perceptual path. Uses the SAME helper the
+    // SIMD bulk path uses (tone_simd::vib_zero_matrix) so scalar and SIMD stay bit-identical.
+    let matrix_fused = if vib_zero && !perceptual_constancy {
+        let m = params.color_matrix.unwrap_or(CAM_TO_SRGB);
+        Some(crate::tone_simd::vib_zero_matrix(&m, sat))
+    } else {
+        None
+    };
+    ToneInputs { exp_gain, wb_r, wb_g, wb_b, tone, sat, vib, vib_zero, perceptual_constancy, matrix_fused }
 }
 
 fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneInputs, need16: bool) {
@@ -1285,7 +1320,7 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
                             cnt += 1;
                         }
                         if cnt == 0 { break; }
-                        let (r2s, g2s, b2s) = apply_tone_math4(rs, gs, bs, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+                        let (r2s, g2s, b2s) = apply_tone_math4(rs, gs, bs, ti.matrix_fused.as_ref().unwrap_or(m), ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy, ti.matrix_fused.is_some());
                         for k in 0..cnt {
                             *dst = *post.add(r2s[k].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
                             *dst = *post.add(g2s[k].clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
@@ -1309,7 +1344,7 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
             let r = pre_r[(in_px[0] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let g = pre_g[(in_px[1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let b = pre_b[(in_px[2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+            let (r2, g2, b2) = match ti.matrix_fused.as_ref() { Some(mf) => apply_tone_fused(r, g, b, mf), None => apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy) };
             out_px[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[2] = post[b2.clamp(0.0, 65535.0) as u16 as usize];
@@ -1494,7 +1529,7 @@ pub fn bench_tone_split(rgb16: &[u16], params: &PipelineParams) -> (f64, f64) {
         let r = pre_r[px[0] as usize] as f32;
         let g = pre_g[px[1] as usize] as f32;
         let b = pre_b[px[2] as usize] as f32;
-        let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+        let (r2, g2, b2) = match ti.matrix_fused.as_ref() { Some(mf) => apply_tone_fused(r, g, b, mf), None => apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy) };
         o[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
         o[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
         o[2] = post[b2.clamp(0.0, 65535.0) as u16 as usize];
@@ -1561,7 +1596,7 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
                     let r = *pre_r.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                     let g = *pre_g.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                     let b = *pre_b.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
-                    let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+                    let (r2, g2, b2) = match ti.matrix_fused.as_ref() { Some(mf) => apply_tone_fused(r, g, b, mf), None => apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy) };
                     *dst = *post.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
                     *dst = *post.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
                     *dst = *post.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
@@ -1583,7 +1618,7 @@ pub fn process_rgba(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
             let r = pre_r[(in_px[0] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let g = pre_g[(in_px[1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let b = pre_b[(in_px[2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+            let (r2, g2, b2) = match ti.matrix_fused.as_ref() { Some(mf) => apply_tone_fused(r, g, b, mf), None => apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy) };
             out_px[0] = post[r2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[1] = post[g2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[2] = post[b2.clamp(0.0, 65535.0) as u16 as usize];
@@ -1696,7 +1731,7 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
                     let r = *pre_r.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                     let g = *pre_g.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
                     let b = *pre_b.add((*src as usize >> pre_lut_shift) & pre_lut_mask) as f32; src = src.add(1);
-                    let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+                    let (r2, g2, b2) = match ti.matrix_fused.as_ref() { Some(mf) => apply_tone_fused(r, g, b, mf), None => apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy) };
                     *dst = *post16.add(r2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
                     *dst = *post16.add(g2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
                     *dst = *post16.add(b2.clamp(0.0, 65535.0) as u16 as usize); dst = dst.add(1);
@@ -1717,7 +1752,7 @@ pub fn process_16bit(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
             let r = pre_r[(in_px[0] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let g = pre_g[(in_px[1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
             let b = pre_b[(in_px[2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            let (r2, g2, b2) = apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy);
+            let (r2, g2, b2) = match ti.matrix_fused.as_ref() { Some(mf) => apply_tone_fused(r, g, b, mf), None => apply_tone_math(r, g, b, m, ti.sat, ti.vib, ti.vib_zero, ti.perceptual_constancy) };
             out_px[0] = post16[r2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[1] = post16[g2.clamp(0.0, 65535.0) as u16 as usize];
             out_px[2] = post16[b2.clamp(0.0, 65535.0) as u16 as usize];

@@ -47,7 +47,7 @@ pub(crate) fn luma_weights(m: &[[f32; 3]; 3]) -> [f32; 3] {
 /// Reusable seam: `pipeline.rs` can premultiply this into the pre-LUT→matrix step so
 /// the common no-vibrance path is a single matrix multiply with no luma/blend.
 #[inline(always)]
-pub(crate) fn vib_zero_matrix(m: &[[f32; 3]; 3], sat: f32) -> [[f32; 3]; 3] {
+pub fn vib_zero_matrix(m: &[[f32; 3]; 3], sat: f32) -> [[f32; 3]; 3] {
     let lm = luma_weights(m);
     let inv = 1.0 - sat;
     let mut mp = [[0f32; 3]; 3];

@@ -184,6 +184,16 @@ function printSummary(rec) {
   console.log(`\nflipflopdom: ${rec.name} [${rec.config.timing_mode}, isolated=${rec.env.cross_origin_isolated}] — ${rec.verdict}\n`);
   console.log(rec.summaryCols.join('\t'));
   for (const row of rec.summary) console.log(rec.summaryCols.map((c) => row[c]).join('\t'));
+  if (rec.marks && rec.marks.length) {
+    console.log('\nper-stage timeline (full path — Δ each stage, ms):');
+    const byInput = {};
+    for (const m of rec.marks) (byInput[m.input] ??= []).push(m);
+    for (const [input, ms] of Object.entries(byInput)) {
+      let prev = 0;
+      const parts = ms.map((m) => { const d = m.median_ms - prev; prev = m.median_ms; return `${m.label}=${d.toFixed(2)}`; });
+      console.log(`  ${input}: ${parts.join('  ')}  (total ${prev.toFixed(2)})`);
+    }
+  }
 }
 
 async function main() {
