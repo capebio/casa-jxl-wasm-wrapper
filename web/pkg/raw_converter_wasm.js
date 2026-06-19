@@ -133,14 +133,15 @@ export class LookRenderer {
      * @param {number} orientation
      * @param {Float32Array} color_matrix_flat
      * @param {boolean} apply_rotation
+     * @param {number} black
      * @returns {LookRenderer}
      */
-    static new_with_options(rgb16_bytes, width, height, orientation, color_matrix_flat, apply_rotation) {
+    static new_with_options(rgb16_bytes, width, height, orientation, color_matrix_flat, apply_rotation, black) {
         const ptr0 = passArray8ToWasm0(rgb16_bytes, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArrayF32ToWasm0(color_matrix_flat, wasm.__wbindgen_malloc);
         const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.lookrenderer_new_with_options(ptr0, len0, width, height, orientation, ptr1, len1, apply_rotation);
+        const ret = wasm.lookrenderer_new_with_options(ptr0, len0, width, height, orientation, ptr1, len1, apply_rotation, black);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -428,6 +429,16 @@ export class ProcessResult {
     free() {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_processresult_free(ptr, 0);
+    }
+    /**
+     * Black pedestal subtracted by the pipeline (per-format). The live
+     * LookRenderer must use this same value or slider edits revert to the
+     * black=0 magenta cast. Olympus = OLYMPUS_BLACK_LEVEL; CR2/DNG = file tag.
+     * @returns {number}
+     */
+    get black_used() {
+        const ret = wasm.__wbg_get_processresult_black_used(this.__wbg_ptr);
+        return ret;
     }
     /**
      * @returns {boolean}

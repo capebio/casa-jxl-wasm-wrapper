@@ -176,6 +176,11 @@ pub struct ProcessResult {
     pub wb_r_used: f32,
     #[wasm_bindgen(readonly)]
     pub wb_b_used: f32,
+    /// Black pedestal subtracted by the pipeline (per-format). The live
+    /// LookRenderer must use this same value or slider edits revert to the
+    /// black=0 magenta cast. Olympus = OLYMPUS_BLACK_LEVEL; CR2/DNG = file tag.
+    #[wasm_bindgen(readonly)]
+    pub black_used: u16,
     #[wasm_bindgen(readonly)]
     pub color_matrix_from_mn: bool,
     make: String,
@@ -560,6 +565,12 @@ const OUT_FULL_16: u32 = 8; // full-resolution RGB16 (M3: RAW {2048,full} pyrami
 // and the lib.rs review caught this independently and both corrected it to 16.
 const OUT_NO_ORIENT: u32 = 16;
 
+/// Olympus 12-bit sensor black pedestal (counts). Subtracted before WB so the
+/// per-channel multipliers don't inflate the pedestal into a magenta cast. See
+/// the rationale block in `decode_orf_raw`. Canonical Olympus value; the raw
+/// histogram floor of real E-M1 III files sits here (~256).
+const OLYMPUS_BLACK_LEVEL: u16 = 256;
+
 struct LookOverrides {
     wb_r: f32,
     wb_b: f32,
@@ -639,6 +650,18 @@ fn decode_orf_raw(data: &[u8]) -> Result<OrfDecoded, JsError> {
     let fast_preview = true;  // we always compute and use the fast planar path for previews now
 
     let mut params = pipeline::PipelineParams::default_olympus();
+    // Olympus 12-bit sensors sit on a ~256-count black pedestal that `default_olympus`
+    // (black=0) never subtracted — uniquely among formats (DNG/CR2 read their black
+    // tags). With black=0 the pre-LUT multiplies the pedestal by the per-channel WB
+    // (R,B ×~1.8, G ×1.0), inflating R,B over G → a magenta/purple cast that is
+    // strongest in shadows and washes the whole frame lighter. Proven two ways:
+    // a synthetic neutral grey goes magenta +86 at black=0 vs 0 at black=256
+    // (examples/synthetic_calib.rs), and the raw histogram floor of real files sits
+    // at ~256 (min 251, p0.1% 260; examples/orf_black_sweep.rs). Subtracting it both
+    // removes the cast (camera WB 1.797/1.797 then renders neutral) and restores
+    // contrast/darkness. 256 is the canonical Olympus 12-bit pedestal — validated on
+    // E-M1 Mark III; other bodies share this floor but were not individually checked.
+    params.black = OLYMPUS_BLACK_LEVEL;
     // Trust camera WB_RBLevels (ImageProcessing 0x0100 / MakerNote 0x1017/1018/1029)
     // unconditionally.  This is the calibration the in-camera JPEG uses, so
     // matching it gives colour fidelity to the embedded preview.  Gray-world
@@ -828,6 +851,7 @@ fn process_orf_impl(
         fast_preview,
         wb_r_used: params.wb_r,
         wb_b_used: params.wb_b,
+        black_used: params.black,
         color_matrix_from_mn,
         make: info.make,
         model: info.model,
@@ -1449,6 +1473,10 @@ pub struct LookRenderer {
     // default), the rotation is baked into pixels during render.
     apply_rotation: bool,
     color_matrix: [[f32; 3]; 3],
+    // Per-format black pedestal (Olympus 256, CR2/DNG from file). Applied in
+    // every render() so live slider edits subtract the same black as the initial
+    // decode — otherwise edits revert to the black=0 magenta cast.
+    black: u16,
 }
 
 #[wasm_bindgen]
@@ -1465,7 +1493,9 @@ impl LookRenderer {
         orientation: u16,
         color_matrix_flat: &[f32],
     ) -> Result<LookRenderer, JsError> {
-        Self::new_with_options(rgb16_bytes, width, height, orientation, color_matrix_flat, true)
+        // Legacy 5-arg constructor (used by the perf benchmark): black=0. The
+        // colour-correct app path uses new_with_options with the per-format black.
+        Self::new_with_options(rgb16_bytes, width, height, orientation, color_matrix_flat, true, 0)
     }
 
     /// Variant of `new` that lets the caller opt out of CPU rotation in
@@ -1480,6 +1510,7 @@ impl LookRenderer {
         orientation: u16,
         color_matrix_flat: &[f32],
         apply_rotation: bool,
+        black: u16,
     ) -> Result<LookRenderer, JsError> {
         let w = width as usize;
         let h = height as usize;
@@ -1524,6 +1555,7 @@ impl LookRenderer {
             orientation,
             apply_rotation,
             color_matrix,
+            black,
         })
     }
 
@@ -1566,6 +1598,9 @@ impl LookRenderer {
         clarity: f32,
     ) -> Result<Vec<u8>, JsError> {
         let mut params = pipeline::PipelineParams::default_olympus();
+        // Subtract the same per-format black the initial decode used, else live
+        // edits revert to the black=0 magenta cast (Olympus) / wrong shadows.
+        params.black = self.black;
         if wb_r.is_finite() && wb_r > 0.0 {
             params.wb_r = wb_r;
         }
@@ -1920,6 +1955,7 @@ fn process_dng_impl(
         fast_preview: false,
         wb_r_used: params.wb_r,
         wb_b_used: params.wb_b,
+        black_used: params.black,
         color_matrix_from_mn: params.color_matrix.is_some(),
         make,
         model,

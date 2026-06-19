@@ -98,12 +98,14 @@ async function ensureWasm() {
 // Phase 2: construct with apply_rotation=false. render() returns sensor-orient
 // pixels with sensor dims. Main thread applies EXIF rotation as a canvas
 // transform during draw — GPU-accelerated, decoupled from slider tick rate.
-function makeLiveState(rgb16Bytes, w, h, orientation, wbR, wbB, colorMatrix) {
+function makeLiveState(rgb16Bytes, w, h, orientation, wbR, wbB, colorMatrix, black) {
     // Only orientations 6 (90° CW) and 8 (90° CCW) actually swap axes in
     // apply_orientation (pipeline.rs).  Tags 5/7 are pass-through there, so
     // using orientation >= 5 overreports axisSwap and mis-sizes the canvas.
     const axisSwap = orientation === 6 || orientation === 8;
-    const renderer = LookRenderer.new_with_options(rgb16Bytes, w, h, orientation, colorMatrix, false);
+    // black: per-format pedestal (Olympus 256, CR2/DNG from file) so live slider
+    // edits subtract the same black as the initial decode — no magenta on drag.
+    const renderer = LookRenderer.new_with_options(rgb16Bytes, w, h, orientation, colorMatrix, false, black >>> 0);
     return {
         renderer,
         // Native source dims (sensor orientation).
@@ -234,6 +236,7 @@ self.addEventListener('message', async (ev) => {
         };
         const wbR = result.wb_r_used;
         const wbB = result.wb_b_used;
+        const black = result.black_used; // per-format pedestal for the live LookRenderer
         const make  = result.make;
         const model = result.model;
         const colorMatrixFromMn = result.color_matrix_from_mn;
@@ -262,11 +265,11 @@ self.addEventListener('message', async (ev) => {
 
         // Store lightbox liveState
         const lb16 = result.take_rgb16_lb();
-        liveStateMap.set(id, makeLiveState(lb16, result.lb_w, result.lb_h, ori, wbR, wbB, colorMatrix));
+        liveStateMap.set(id, makeLiveState(lb16, result.lb_w, result.lb_h, ori, wbR, wbB, colorMatrix, black));
 
         // Store thumb liveState
         const thumb16 = result.take_rgb16_thumb();
-        thumbStateMap.set(id, makeLiveState(thumb16, result.thumb_w, result.thumb_h, ori, wbR, wbB, colorMatrix));
+        thumbStateMap.set(id, makeLiveState(thumb16, result.thumb_w, result.thumb_h, ori, wbR, wbB, colorMatrix, black));
 
         // thumb RGB8 — apply look to the pre-scaled rgb16 (360px) already cached in thumbStateMap.
         // Avoids downscaling the full 20MP fullRgb (~200× more pixels) for the same result.

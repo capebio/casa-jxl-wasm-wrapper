@@ -3230,3 +3230,54 @@ mod tone_simd_near_zero_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod black_neutrality_tests {
+    use super::*;
+
+    // Render a uniform demosaiced patch (12-bit sensor counts) through the real
+    // tone+WB+matrix pipeline; return the mean output sRGB.
+    fn render_patch(r12: u16, g12: u16, b12: u16, p: &PipelineParams) -> (f32, f32, f32) {
+        let (w, h) = (4usize, 4usize);
+        let rgb16: Vec<u16> = std::iter::repeat([r12, g12, b12]).take(w * h).flatten().collect();
+        let mut out = vec![0u8; w * h * 3];
+        process_into(&rgb16, p, &mut out);
+        let n = (w * h) as f32;
+        out.chunks_exact(3).fold((0f32, 0f32, 0f32), |(r, g, b), px|
+            (r + px[0] as f32 / n, g + px[1] as f32 / n, b + px[2] as f32 / n))
+    }
+
+    fn olympus(black: u16, wb: f32) -> PipelineParams {
+        let mut p = PipelineParams::default_olympus();
+        p.black = black; p.wb_r = wb; p.wb_g = 1.0; p.wb_b = wb;
+        p
+    }
+
+    // Regression for the Olympus magenta cast (lib.rs OLYMPUS_BLACK_LEVEL fix):
+    // a NEUTRAL sensor grey (green G_GAIN× R,B) on a black pedestal must render
+    // neutral (R≈G≈B) when the pedestal is subtracted. With black=0 the per-
+    // channel WB inflates the pedestal into R,B → a magenta cast. Tested in the
+    // shadows/mids where the cast is strongest (highlights clip it away).
+    #[test]
+    fn correct_black_keeps_neutral_grey_neutral() {
+        const G_GAIN: f32 = 1.797; // sensor green over R,B (== the 0x0100 WB)
+        const PED: u16 = 256;
+        for s in [40u16, 80, 150, 300] {
+            let (r, g, b) = render_patch(s + PED, (s as f32 * G_GAIN) as u16 + PED, s + PED, &olympus(PED, G_GAIN));
+            let magenta = (r + b) * 0.5 - g;
+            assert!(magenta.abs() < 4.0, "signal {s}: magenta {magenta:+.1} (R={r:.0} G={g:.0} B={b:.0}) — black subtraction broken");
+        }
+    }
+
+    // Documents the bug direction: black=0 leaves a large magenta cast in shadows.
+    // If this ever drops to ~0 the pedestal is being subtracted elsewhere and the
+    // lib.rs fix may be redundant — revisit then.
+    #[test]
+    fn zero_black_is_magenta_in_shadows() {
+        const G_GAIN: f32 = 1.797;
+        const PED: u16 = 256;
+        let s = 40u16;
+        let (r, g, b) = render_patch(s + PED, (s as f32 * G_GAIN) as u16 + PED, s + PED, &olympus(0, G_GAIN));
+        assert!((r + b) * 0.5 - g > 30.0, "expected strong magenta at black=0, got R={r:.0} G={g:.0} B={b:.0}");
+    }
+}
