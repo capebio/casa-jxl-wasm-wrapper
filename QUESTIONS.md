@@ -860,3 +860,39 @@ Target: `tiff.rs cr2.rs dng.rs ljpeg.rs decompress.rs demosaic.rs`. 61 findings 
 **Trivial deferrals (need owner confirm):**
 - `align_to_rggb` (dng.rs) is dead in production — doc/naming fixed; full removal pending confirm it stays dead.
 - DNG `CFAPattern != 4-entry` → silent RGGB fallback (dng.rs:569-573): hard-error vs warn is a product call.
+
+---
+
+## QUESTIONS from EpicCodeReview progressive-scheduler.ts (2026-06-19)
+
+### Q1 — tick() sort dirty-flag optimization (hacker-m3n4)
+**Deferred** from progressive-scheduler.ts correctness fix pass.  
+**Measured speedup:** 73-80% at 200-500 jobs (38 µs → 10 µs median per tick at 200 jobs).  
+**Why deferred:** Requires careful dirty-state tracking across all state-change methods (observe, unobserve, select, deselect, handleIntersection, startDecode completion). The `decoderAbort` filter is the key risk: if a job transitions to `decoderAbort !== null` inside a tick() call and the cached candidate list isn't updated, the next RAF tick with dirty=false would attempt to start a second decode for the same job.  
+**Implementation sketch:** Add `private candidatesDirty = true` field. Set it to `true` in observe, unobserve, select, deselect, handleIntersection, and at the end of startDecode's finally block. In tick(), if `!candidatesDirty`, recompute scores in-place (still need to update starvationBonus which is time-dependent) and re-sort the existing array without rebuilding. When dirty, rebuild from scratch and set `candidatesDirty = false`.  
+**Gate:** ≥5% faster at 200 jobs AND test suite green. Current tests exercise tick() at lines 503, 545, 602 of scheduler.test.ts.
+
+### Q2 — armEarliestRetryTimer incremental tracking (structure-x6y7z8)
+**Deferred** from progressive-scheduler.ts correctness fix pass.  
+**Measured speedup:** 97% at 200-500 jobs (3.4 µs → 0.1 µs). Absolute cost is tiny (3.4 µs) and the existing guard (`if (armedRetryAt === earliest && retryTimerId !== null) return`) already makes the re-arm path O(1) when nothing changed.  
+**Why deferred:** Maintaining a `minNextRetryAt` field incrementally requires updating it in every place that mutates `job.nextRetryAt` (observe, select, deselect, setTargetTier, startDecode catch block) and recomputing on unobserve (O(n) scan unavoidable when the removed job was the minimum). Net gain in the real-world case (job removal drives a scan anyway) is marginal.  
+**Recommendation:** Not worth implementing — the guard already handles the fast path. Close.
+
+### Q3 — teeFetch tee() double-buffering (hacker-w3x4)
+**Deferred** from progressive-scheduler.ts correctness fix pass.  
+**Confirmed:** `ReadableStream.tee()` buffers up to 1 full tier in memory when the JXL decoder stalls (slow consumer). For a 10 MB tier this means 20 MB peak.  
+**Fix approach:** Replace `resp.body.tee()` with a `TransformStream` that writes each chunk to both `onChunk()` (synchronously) and passes it through to the decoder. Zero extra buffering because the intercept is in-line with the consumer.  
+**Why deferred:** The `teeFetch` return type (`{ fetchImpl: typeof fetch; settled: () => Promise<void> }`) wraps a full `fetch` implementation. Replacing tee with a TransformStream changes how the response body is wrapped and requires verifying that `fromResponse`/`fromReadableStream` still sees a correctly-formed readable stream. This is an architectural change to the fetch abstraction.  
+**Gate before implementing:** Measure actual tier sizes in production; if P95 tier < 2 MB, 2× is only 4 MB peak and not worth the complexity. If P95 is 10+ MB, this is worth doing.
+
+### Q4 — profile.test.ts failure: "dc tier byteEnd is less than full file size"
+**Status:** Pre-existing test failure in `progressive-profile.ts` (not touched in this pass).  
+**Symptom:** The test was unreachable before this fix pass because the TS compile errors at lines 260/384 blocked compilation. After fixing those errors, the test now runs and fails.  
+**Location:** `packages/jxl-progressive/test/profile.test.ts` line 86.  
+**The test asserts:** `dcEvent.byteOffset < totalBytes` — i.e. dc tier should not span the full file.  
+**Likely cause:** The synthetic JXL test data used in `profileJxl` tests may not produce a real DC progression event, causing `selectTiers` to fall back to a heuristic that picks the full file size as the dc byteEnd. Needs investigation in `progressive-profile.ts`.
+
+### Q5 — testFetchTierWithPrefix TS exactOptionalPropertyTypes workaround
+**Status:** The `(this as any).testFetchTierWithPrefix = (opts as any).testFetchTierWithPrefix` cast in the constructor (line 175) remains as-is.  
+**Why:** `private readonly testFetchTierWithPrefix?: typeof fetchTierWithPrefix` declares an optional field. With `exactOptionalPropertyTypes: true`, you cannot assign `T | undefined` to a target typed as `T`. The direct assignment `this.testFetchTierWithPrefix = opts.testFetchTierWithPrefix` causes TS2412.  
+**Clean fix:** Change the field declaration to `private testFetchTierWithPrefix: typeof fetchTierWithPrefix | undefined = undefined` (not optional, but explicitly union with undefined). Then the assignment in the constructor is valid without a cast.

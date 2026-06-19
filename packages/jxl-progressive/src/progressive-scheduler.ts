@@ -257,7 +257,7 @@ export class ProgressiveGallery {
     job.decoderAbort?.abort("unobserved");
     job.prefixAccum = null;
     job.prefixBytes = 0;
-    job.lastProgressEmit = undefined;
+    delete job.lastProgressEmit;
     this.observer.unobserve(job.element);
     this.byElement.delete(job.element);
     this.jobs.delete(id);
@@ -381,7 +381,7 @@ export class ProgressiveGallery {
         job.prefixAccum = null;
         job.prefixBytes = 0;
         job.bytesLoaded = 0;
-        job.lastProgressEmit = undefined;
+        delete job.lastProgressEmit;
         // timer only aborts; finally owns activeDecoders decrement (C-2)
       }
     }, 2000);
@@ -447,10 +447,6 @@ export class ProgressiveGallery {
       });
   }
 
-  private scheduleTick(): void {
-    // replaced by requestTick (D-1)
-  }
-
   private teeFetch(onChunk: (c: Uint8Array) => void): { fetchImpl: typeof fetch; settled: () => Promise<void> } {
     let pump: Promise<void> = Promise.resolve();
     const fetchImpl: typeof fetch = async (input, init) => {
@@ -514,25 +510,32 @@ export class ProgressiveGallery {
     let capturedBytes = 0;
 
     try {
-      // Load manifest if not already loaded (prefetch may have populated)
-      if (job.manifest === null) {
-        job.manifest = await this.cache.getManifest(job.jxlUrl);
+      // Load manifest if not already loaded (prefetch may have populated).
+      // Capture into a local once — avoids TOCTOU between cache.getManifest,
+      // prefetchManifest writes, and the manifestDispatched flag check below.
+      let manifest = job.manifest;
+      if (manifest === null) {
+        manifest = await this.cache.getManifest(job.jxlUrl);
+        if (manifest !== null) job.manifest = manifest;
       }
       if (abort.signal.aborted) return;
-      if (job.manifest === null && !job.manifestChecked) {
-        job.manifest = await this.fetchAndCacheManifest(job, abort.signal);
+      if (manifest === null && !job.manifestChecked) {
+        manifest = await this.fetchAndCacheManifest(job, abort.signal);
+        job.manifest = manifest;
         job.manifestChecked = true;
       }
       if (abort.signal.aborted) return;
-      if (job.manifest && !job.manifestDispatched) {
+      const wasManifestDispatched = job.manifestDispatched;
+      if (manifest && !job.manifestDispatched) {
         job.manifestDispatched = true;
-        this.opts.onManifest(job.id, job.manifest);
+        this.opts.onManifest(job.id, manifest);
       }
 
       // Saliency-aware: manifest carries center/conf from encode-side policy (saliency-policy.ts).
       // Boost priority + target for images with reliable ROI data so human-important detail arrives first.
-      // This makes the "Saliency-Aware" name real in the delivery pipeline (AR/LLM/photogram/gaming LOD wins).
-      if (job.manifest?.saliency?.enabled) {
+      // Only apply the boost once — on the tier when the manifest is first dispatched — to prevent
+      // cumulative priority drift across dc→preview→full repeated startDecode calls.
+      if (manifest?.saliency?.enabled && !wasManifestDispatched) {
         if (job.priority > 1) job.priority = Math.max(1, job.priority - 1);
         if (job.targetTier === "preview") job.targetTier = "full";
       }
@@ -541,7 +544,7 @@ export class ProgressiveGallery {
       if (target === null) return;
 
       const manifestTier =
-        job.manifest !== null ? lookupTier(job.manifest, target as TierName) : undefined;
+        manifest !== null ? lookupTier(manifest, target as TierName) : undefined;
 
       // Fast path from bitmap cache (in-mem ImageBitmap populated by consumer after prior onFrame).
       // If we already have the decoded result for the next tier, claim instantly, notify, skip network+decode.
@@ -553,7 +556,9 @@ export class ProgressiveGallery {
             if (abort.signal.aborted) return;
             job.currentTier = target;
             this.opts.onTier(job.id, target);
-            this.opts.onProgress(job.id, manifestTier.byteEnd, manifestTier.byteEnd);
+            // Cache hit: 0 network bytes transferred; report the target so consumers
+            // know the tier is complete without simulating a phantom transfer spike.
+            this.opts.onProgress(job.id, 0, manifestTier.byteEnd);
             return;
           }
         } catch {
@@ -590,7 +595,7 @@ export class ProgressiveGallery {
       }
 
       if (startingPrefix && startingPrefix.byteLength > 0) {
-        await (session as any).push(startingPrefix);
+        await session.push(startingPrefix);
       }
 
       const ft: any = this.testFetchTier ?? fetchTier;
@@ -638,10 +643,14 @@ export class ProgressiveGallery {
         const p = (fwp as any)(job.jxlUrl, manifestTier, job.prefixBytes, session, {
           signal: abort.signal,
           fetchImpl: capture.fetchImpl,
-        }).catch((e: unknown) => {
+        }).catch(async (e: unknown) => {
           if (e instanceof RangeNotSupportedError && !abort.signal.aborted) {
             // delta range not supported by server/proxy; discard any partial accum from this attempt
-            // and fall back to full fetch from byte 0 (will rebuild accum via onChunk from scratch)
+            // and fall back to full fetch from byte 0 (will rebuild accum via onChunk from scratch).
+            // Drain the old capture pump first so the original toCapture branch releases its reader lock
+            // before we overwrite `capture` with t2 (prevents orphaned locked ReadableStream branch).
+            const oldCapture = capture;
+            if (oldCapture) await oldCapture.settled().catch(() => {});
             job.prefixAccum = null;
             job.prefixBytes = 0;
             capturedBytes = 0;

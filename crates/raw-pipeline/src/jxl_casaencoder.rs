@@ -416,12 +416,12 @@ impl Encoder {
                 Some(ffi::JxlThreadParallelRunner),
                 self.runner,
             );
-            check(st, "JxlEncoderSetParallelRunner")?;
+            check_enc(st, "JxlEncoderSetParallelRunner", enc)?;
         }
 
         if self.opts.use_container {
             let st = ffi::JxlEncoderUseContainer(enc, JXL_TRUE);
-            check(st, "JxlEncoderUseContainer")?;
+            check_enc(st, "JxlEncoderUseContainer", enc)?;
         }
 
         // ── basic info ─────────────────────────────────────────────────────
@@ -461,9 +461,10 @@ impl Encoder {
             let mut ci = ci.assume_init();
             ci.bits_per_sample = bits;
             ci.exponent_bits_per_sample = exp_bits;
-            check(
+            check_enc(
                 ffi::JxlEncoderSetExtraChannelInfo(enc, idx, &ci),
                 "JxlEncoderSetExtraChannelInfo",
+                enc,
             )?;
         }
 
@@ -484,41 +485,42 @@ impl Encoder {
             }
         }
         let ce = ce.assume_init();
-        check(ffi::JxlEncoderSetColorEncoding(enc, &ce), "JxlEncoderSetColorEncoding")?;
+        check_enc(ffi::JxlEncoderSetColorEncoding(enc, &ce), "JxlEncoderSetColorEncoding", enc)?;
 
         // ── frame settings ─────────────────────────────────────────────────
         let fs = ffi::JxlEncoderFrameSettingsCreate(enc, ptr::null());
         if fs.is_null() {
             return Err(EncodeError::Jxl("JxlEncoderFrameSettingsCreate failed".into()));
         }
-        set_opt(fs, FrameSettingId::Effort, self.opts.effort as i64)?;
+        set_opt(fs, enc, FrameSettingId::Effort, self.opts.effort as i64)?;
         match self.opts.rate {
             Rate::Lossless => {
-                check(
+                check_enc(
                     ffi::JxlEncoderSetFrameLossless(fs, JXL_TRUE),
                     "JxlEncoderSetFrameLossless",
+                    enc,
                 )?;
             }
             Rate::Distance(d) => {
-                check(ffi::JxlEncoderSetFrameDistance(fs, d), "JxlEncoderSetFrameDistance")?;
+                check_enc(ffi::JxlEncoderSetFrameDistance(fs, d), "JxlEncoderSetFrameDistance", enc)?;
             }
             Rate::Quality(q) => {
                 let d = ffi::JxlEncoderDistanceFromQuality(q);
-                check(ffi::JxlEncoderSetFrameDistance(fs, d), "JxlEncoderSetFrameDistance")?;
+                check_enc(ffi::JxlEncoderSetFrameDistance(fs, d), "JxlEncoderSetFrameDistance", enc)?;
             }
         }
         if let Some(dc) = self.opts.progressive_dc {
-            set_opt(fs, FrameSettingId::ProgressiveDc, dc)?;
+            set_opt(fs, enc, FrameSettingId::ProgressiveDc, dc)?;
         }
         if let Some(go) = self.opts.group_order {
-            set_opt(fs, FrameSettingId::GroupOrder, 1)?;
+            set_opt(fs, enc, FrameSettingId::GroupOrder, 1)?;
             if let Some((cx, cy)) = go.center {
-                set_opt(fs, FrameSettingId::GroupOrderCenterX, cx)?;
-                set_opt(fs, FrameSettingId::GroupOrderCenterY, cy)?;
+                set_opt(fs, enc, FrameSettingId::GroupOrderCenterX, cx)?;
+                set_opt(fs, enc, FrameSettingId::GroupOrderCenterY, cy)?;
             }
         }
         for &(id, val) in &self.opts.extra {
-            set_opt(fs, id, val)?;
+            set_opt(fs, enc, id, val)?;
         }
 
         // ── add interleaved color frame (zero-copy) ────────────────────────
@@ -549,7 +551,7 @@ impl Encoder {
         };
         for (i, e) in frame.extra.iter().enumerate() {
             let idx = (alpha_extra as usize + i) as u32;
-            check(
+            check_enc(
                 ffi::JxlEncoderSetExtraChannelBuffer(
                     fs,
                     &pf1,
@@ -558,6 +560,7 @@ impl Encoder {
                     idx,
                 ),
                 "JxlEncoderSetExtraChannelBuffer",
+                enc,
             )?;
         }
 
@@ -608,11 +611,15 @@ impl Drop for Encoder {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+/// Returns an error carrying both the failing operation name and the raw libjxl
+/// error code. Always prefer `check_enc` (which queries the encoder for the
+/// code) inside functions that have an `enc` handle; use this only when no
+/// encoder handle is available (e.g. from a stand-alone status check).
 fn check(status: ffi::JxlEncoderStatus, what: &str) -> Result<(), EncodeError> {
     if status == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
         Ok(())
     } else {
-        Err(EncodeError::Jxl(format!("{what} failed")))
+        Err(EncodeError::Jxl(format!("{what} failed (status {:?})", status)))
     }
 }
 
@@ -634,12 +641,14 @@ unsafe fn check_enc(
 
 unsafe fn set_opt(
     fs: *mut ffi::JxlEncoderFrameSettings,
+    enc: *mut ffi::JxlEncoder,
     id: FrameSettingId,
     val: i64,
 ) -> Result<(), EncodeError> {
-    check(
+    check_enc(
         ffi::JxlEncoderFrameSettingsSetOption(fs, id.to_ffi(), val),
         "JxlEncoderFrameSettingsSetOption",
+        enc,
     )
 }
 

@@ -93,7 +93,7 @@ pub fn encode_variants_with_progressive(
     })
 }
 
-pub fn encode_variants_progressive_opts(
+pub(crate) fn encode_variants_progressive_opts(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -131,7 +131,10 @@ pub fn encode_variants_cancellable(
 
     // Detect alpha once from the full-res input; all variant encode calls use this result.
     // RAW images always have alpha=255 → false → 3ch RGB encode path (fast, no extra-channel issues).
-    let has_alpha = has_meaningful_alpha(rgba);
+    // alpha_strip fuses the alpha scan + RGB-strip into one pass (bandwidth win for RAW).
+    // The rgb strip for the full-res image is NOT used here (variants encode at 3 sizes),
+    // but we get has_alpha from the single pass.
+    let (has_alpha, _) = alpha_strip(rgba);
 
     let full_quality: u8 = if hq_override {
         95
@@ -300,7 +303,9 @@ fn encode_into(
         enc.encode(&Frame::rgba8(pixels, w, h))?
     } else {
         // RAW images always have alpha=255; strip to RGB for smaller output.
-        let rgb = rgba_to_rgb(pixels);
+        // alpha_strip produces the RGB buffer in the same pass as the alpha scan.
+        let (_, rgb) = alpha_strip(pixels);
+        let rgb = rgb.expect("has_alpha=false but alpha_strip found alpha<255 — invariant broken");
         enc.encode(&Frame::rgb(&rgb, w, h))?
     };
     Ok(bytes)
@@ -384,22 +389,37 @@ pub struct PyramidLevel {
     pub bits_per_sample: u8,
 }
 
-/// Returns true if any pixel has alpha < 255.
-/// RAW images always have alpha=255 → returns false → fast 3ch RGB path.
-fn has_meaningful_alpha(rgba: &[u8]) -> bool {
-    rgba.chunks_exact(4).any(|px| px[3] < 255)
-}
-
-/// Strip alpha: RGBA8 interleaved → RGB8 interleaved.
-fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+/// Single-pass alpha scan + conditional RGB strip.
+///
+/// Returns `(has_alpha, rgb_strip)`:
+/// - `has_alpha = true`: at least one pixel has alpha < 255; `rgb_strip` is `None`
+///   (caller must use the original RGBA buffer with the alpha channel).
+/// - `has_alpha = false`: all pixels are fully opaque; `rgb_strip` is `Some(rgb)`
+///   containing the packed RGB8 buffer (no alpha), built in the same pass.
+///
+/// This fuses the previous two-pass approach (scan α, then copy RGB) into a single
+/// memory-bandwidth pass — a bandwidth win identical to the traversal-fusion pattern
+/// in `examples/traversal_fusion_flipflop.rs`.
+///
+/// For RAW images (always alpha=255) this saves an entire second traversal.
+fn alpha_strip(rgba: &[u8]) -> (bool, Option<Vec<u8>>) {
     let n = rgba.len() / 4;
     let mut rgb = Vec::with_capacity(n * 3);
-    // extend_from_slice on the 3-byte RGB slice lets LLVM emit a wider copy than
-    // three per-byte pushes; output is byte-identical.
     for px in rgba.chunks_exact(4) {
+        if px[3] < 255 {
+            // Meaningful alpha found — abandon the in-progress strip and return early.
+            return (true, None);
+        }
         rgb.extend_from_slice(&px[0..3]);
     }
-    rgb
+    (false, Some(rgb))
+}
+
+/// Returns true if any pixel has alpha < 255.
+/// Use `alpha_strip` instead when you also need the RGB buffer (avoids double pass).
+#[allow(dead_code)]
+fn has_meaningful_alpha(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).any(|px| px[3] < 255)
 }
 
 fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) -> bool {
@@ -422,13 +442,16 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
         let ystep = sh / dh;
+        // `count` is loop-invariant in the exact-ratio branch: every destination
+        // pixel averages exactly xstep*ystep source pixels, so compute it once
+        // rather than accumulating it per pixel.
+        let count = xstep * ystep;
         for dy in 0..dh {
             for dx in 0..dw {
                 let mut r = 0u32;
                 let mut g = 0u32;
                 let mut b = 0u32;
                 let mut a = 0u32;
-                let mut count = 0u32;
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let row = &src[(y as usize * sw as usize * 4)..];
@@ -439,7 +462,6 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
                         g += px[1] as u32;
                         b += px[2] as u32;
                         a += px[3] as u32;
-                        count += 1;
                     }
                 }
                 let out = &mut dst[(dy as usize * dw as usize + dx as usize) * 4..];
@@ -502,7 +524,8 @@ fn encode_distance_into(
     let bytes = if has_alpha {
         enc.encode(&Frame::rgba8(pixels, w, h))?
     } else {
-        let rgb = rgba_to_rgb(pixels);
+        let (_, rgb) = alpha_strip(pixels);
+        let rgb = rgb.expect("has_alpha=false but alpha_strip found alpha<255 — invariant broken");
         enc.encode(&Frame::rgb(&rgb, w, h))?
     };
     Ok(bytes)
@@ -555,24 +578,30 @@ pub fn encode_rgba8_pyramid(
     // blurry/tiled artefacts from upscaling smaller intermediate buffers.
     scs.sort_unstable_by(|a, b| b.tw.cmp(&a.tw));
 
-    let has_alpha = has_meaningful_alpha(rgba);
+    let (has_alpha, _) = alpha_strip(rgba);
 
     // Phase 1: cascade all scales sequentially (each level reads from previous).
     // Produces (pixels, w, h, distance) tuples for parallel encoding.
+    //
+    // The cascade reads each level's output as input for the next level.
+    // We move `thumb` directly into `scaled_bufs` (no clone), then borrow the last
+    // element for the next downscale. The original full-res `rgba` slice is kept for
+    // the first iteration via `src_ref` / separate pointer tracking.
     let mut scaled_bufs: Vec<(Vec<u8>, u32, u32, f32)> = Vec::with_capacity(scs.len());
     {
-        let mut current = rgba.to_vec();
         let mut cw = width;
         let mut ch = height;
         for sc in scs.iter() {
             let mut thumb = vec![0u8; sc.tw as usize * sc.th as usize * 4];
-            if !box_downscale_rgba8(&current, cw, ch, &mut thumb, sc.tw, sc.th) {
+            // Source for this iteration: last pushed buffer or original rgba.
+            let src: &[u8] = if scaled_bufs.is_empty() { rgba } else { &scaled_bufs.last().unwrap().0 };
+            if !box_downscale_rgba8(src, cw, ch, &mut thumb, sc.tw, sc.th) {
                 return Err(EncodeError::Resize);
             }
             cw = sc.tw;
             ch = sc.th;
-            scaled_bufs.push((thumb.clone(), sc.tw, sc.th, sc.dist));
-            current = thumb;
+            // Move into scaled_bufs — no clone needed.
+            scaled_bufs.push((thumb, sc.tw, sc.th, sc.dist));
         }
     }
 
@@ -591,7 +620,8 @@ pub fn encode_rgba8_pyramid(
                     let bytes = if has_alpha {
                         enc.encode(&Frame::rgba8(&buf, tw, th))?
                     } else {
-                        let rgb = rgba_to_rgb(&buf);
+                        let (_, rgb) = alpha_strip(&buf);
+                        let rgb = rgb.expect("has_alpha=false but alpha_strip found alpha<255");
                         enc.encode(&Frame::rgb(&rgb, tw, th))?
                     };
                     Ok(PyramidLevel { data: bytes, width: tw, height: th, bits_per_sample: 8 })

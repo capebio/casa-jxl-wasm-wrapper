@@ -126,6 +126,11 @@ export function validateManifest(json: unknown): ProgressiveManifest {
   );
   const jxl = obj["jxl"] as Record<string, unknown>;
   assertField(typeof jxl["bytes"] === "number", "jxl.bytes", "jxl.bytes must be a number");
+  assertField(
+    Number.isInteger(jxl["bytes"] as number) && (jxl["bytes"] as number) > 0,
+    "jxl.bytes",
+    "jxl.bytes must be a positive integer"
+  );
   assertField(typeof jxl["sha256"] === "string", "jxl.sha256", "jxl.sha256 must be a string");
 
   // encoder
@@ -216,6 +221,26 @@ export function validateManifest(json: unknown): ProgressiveManifest {
       `${f}.progressionIndex must be number or "final"`,
     );
     assertField(typeof t["intendedUse"] === "string", `${f}.intendedUse`, `${f}.intendedUse must be a string`);
+  }
+
+  // Cross-tier: each tier name must appear at most once.
+  const seenNames = new Set<string>();
+  for (let i = 0; i < tiersArr.length; i++) {
+    const name = (tiersArr[i] as Record<string, unknown>)["name"] as string;
+    assertField(!seenNames.has(name), `tiers[${i}].name`, `tier name "${name}" must appear at most once`);
+    seenNames.add(name);
+  }
+
+  // Cross-tier: byteEnd must be strictly ascending across tiers (all tiers are cumulative
+  // from byte 0; the consumer issues Range: bytes=0-{byteEnd-1} per tier).
+  for (let i = 1; i < tiersArr.length; i++) {
+    const prev = (tiersArr[i - 1] as Record<string, unknown>)["byteEnd"] as number;
+    const curr = (tiersArr[i] as Record<string, unknown>)["byteEnd"] as number;
+    assertField(
+      curr > prev,
+      `tiers[${i}].byteEnd`,
+      `tiers[${i}].byteEnd (${curr}) must be greater than tiers[${i - 1}].byteEnd (${prev})`
+    );
   }
 
   return json as ProgressiveManifest;

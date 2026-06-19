@@ -115,7 +115,6 @@ export declare class ProgressiveGallery {
     private requestTick;
     private armEarliestRetryTimer;
     private prefetchManifest;
-    private scheduleTick;
     private teeFetch;
     private tick;
     private startDecode;
