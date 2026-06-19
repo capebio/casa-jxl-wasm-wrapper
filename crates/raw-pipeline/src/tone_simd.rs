@@ -178,6 +178,15 @@ unsafe fn apply_tone_bulk_avx2(
             _mm256_storeu_ps(b.as_mut_ptr().add(i), nb);
             i += 8;
         }
+        // Fused tail — reuse the SAME M' as the lanes so the ragged block end stays byte-exact
+        // vs scalar process_into (was calling unfused apply_tone_math → ≤1-LUT-step tail mismatch).
+        while i < n {
+            let (rr, gg, bb) = (r[i], g[i], b[i]);
+            r[i] = p[0][0].mul_add(rr, p[0][1].mul_add(gg, p[0][2] * bb));
+            g[i] = p[1][0].mul_add(rr, p[1][1].mul_add(gg, p[1][2] * bb));
+            b[i] = p[2][0].mul_add(rr, p[2][1].mul_add(gg, p[2][2] * bb));
+            i += 1;
+        }
     } else {
         let (m00, m01, m02) = (_mm256_set1_ps(m[0][0]), _mm256_set1_ps(m[0][1]), _mm256_set1_ps(m[0][2]));
         let (m10, m11, m12) = (_mm256_set1_ps(m[1][0]), _mm256_set1_ps(m[1][1]), _mm256_set1_ps(m[1][2]));
@@ -215,12 +224,12 @@ unsafe fn apply_tone_bulk_avx2(
             _mm256_storeu_ps(b.as_mut_ptr().add(i), nb);
             i += 8;
         }
-    }
-    // scalar tail via the oracle → guaranteed parity on the ragged end.
-    while i < n {
-        let (r2, g2, b2) = apply_tone_math(r[i], g[i], b[i], m, sat, vib, vib_zero, false);
-        r[i] = r2; g[i] = g2; b[i] = b2;
-        i += 1;
+        // scalar tail via the oracle → parity on the ragged end (vibrance-active path).
+        while i < n {
+            let (r2, g2, b2) = apply_tone_math(r[i], g[i], b[i], m, sat, vib, vib_zero, false);
+            r[i] = r2; g[i] = g2; b[i] = b2;
+            i += 1;
+        }
     }
 }
 
@@ -252,6 +261,15 @@ fn apply_tone_bulk_wasm(
                 v128_store(g.as_mut_ptr().add(i) as *mut v128, ng);
                 v128_store(b.as_mut_ptr().add(i) as *mut v128, nb);
                 i += 4;
+            }
+            // Fused tail (mul+add to match the lanes; simd128 has no FMA) — keeps the block
+            // self-consistent. Brings i to n, so the shared scalar tail below is a no-op here.
+            while i < n {
+                let (rr, gg, bb) = (r[i], g[i], b[i]);
+                r[i] = p[0][0] * rr + (p[0][1] * gg + p[0][2] * bb);
+                g[i] = p[1][0] * rr + (p[1][1] * gg + p[1][2] * bb);
+                b[i] = p[2][0] * rr + (p[2][1] * gg + p[2][2] * bb);
+                i += 1;
             }
         } else {
             let (m00, m01, m02) = (f32x4_splat(m[0][0]), f32x4_splat(m[0][1]), f32x4_splat(m[0][2]));
