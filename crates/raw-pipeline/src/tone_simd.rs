@@ -296,6 +296,10 @@ fn apply_tone_bulk_wasm(
                 let raw_mx = f32x4_max(f32x4_max(r2, g2), b2);
                 let mx = f32x4_max(raw_mx, one);
                 let mn = f32x4_max(f32x4_min(f32x4_min(r2, g2), b2), zero);
+                // PIPE-010 (evaluated, no change): f32x4_div(one, mx) is the exact reciprocal.
+                // WASM SIMD128 has no reciprocal-estimate intrinsic (x86 rcp is not available).
+                // A Newton-Raphson approximation would need more ops than the divide on WASM.
+                // The vibrance path is also a minority branch (only when vib != 0). No net gain.
                 let inv = f32x4_div(one, mx);
                 let psat = v128_and(f32x4_sub(one, f32x4_mul(mn, inv)), f32x4_gt(raw_mx, zero));
                 let scale = f32x4_add(c1, f32x4_mul(neg_c2, psat));

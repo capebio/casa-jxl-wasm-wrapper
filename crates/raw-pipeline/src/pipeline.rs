@@ -381,11 +381,19 @@ fn hybrid_spring_and_dimishing_fc(lr: f32, lg: f32, lb: f32, luma_l: f32) -> (f3
 /// Currently a stub that documents the structure; real population + sample can replace
 /// the runtime calc in the !c-perceptual pc branch of apply_tone_math.
 /// (Agent can expand without touching other files.)
+///
+/// PIPE-008: data is stored as three separate planar arrays (data_r, data_g, data_b),
+/// each of length SZ^3, so the 8 corner values needed for trilinear interpolation on one
+/// channel are contiguous in their plane.  The interleaved layout (old: data[idx*3+ch])
+/// scattered the 8 corners across up to 24 cache lines; the planar layout keeps each
+/// channel's 8-corner reads within at most 2 cache lines of a 17^3×4 = 4.7 KB plane.
 struct PerceptualGrid {
-    // Coarse 3D LUT for the advanced (Lens17 / layer2) to replace ln/exp/sqrt/mol/hybrid/from at runtime.
-    // Built for fixed base_scale ~1.0 / vib_zero case (common in constancy mode); for varying vib use runtime fallback.
-    // Size 9^3 keeps build cheap (~700 evals) and memory tiny. Trilinear interp ~10-15 muls vs transcendentals.
-    data: Vec<f32>, // r g b interleaved, size*size*size * 3
+    // PIPE-008: planar layout — one Vec per output channel; index = ri*SZ*SZ + gi*SZ + bi.
+    // Total memory same as before (SZ^3 * 3 * 4 bytes), but trilinear reads are now
+    // channel-sequential rather than stride-3 interleaved across all 8 corners.
+    data_r: Vec<f32>,
+    data_g: Vec<f32>,
+    data_b: Vec<f32>,
     size: usize,
 }
 
@@ -394,7 +402,9 @@ impl PerceptualGrid {
         const SZ: usize = 17; // Phase 2 of WASM/native strategy: production quality (vs 9). ~4913 evals, still cheap on init.
                               // Pure Rust path (this grid + vec4) is the default for WASM and when c-perceptual feature is off.
                               // C++ AVX2 bulk (via tile in !par loops) is optional native turbo when feature + pc flag.
-        let mut data = vec![0f32; SZ * SZ * SZ * 3];
+        let mut data_r = vec![0f32; SZ * SZ * SZ];
+        let mut data_g = vec![0f32; SZ * SZ * SZ];
+        let mut data_b = vec![0f32; SZ * SZ * SZ];
         let scale = 1.0f32; // fixed for grid; vib_zero path (mode common case). Varying sat/vib falls back or rebuilds.
         for ri in 0..SZ {
             let r = (ri as f32 / (SZ - 1) as f32) * 1.5;
@@ -408,14 +418,14 @@ impl PerceptualGrid {
                     let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, scale);
                     let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
                     let (rr, gg, bb) = from_log_euclidean(lr3, lg3, lb3);
-                    let idx = (ri * SZ * SZ + gi * SZ + bi) * 3;
-                    data[idx] = rr.clamp(0.0, 1.5);
-                    data[idx + 1] = gg.clamp(0.0, 1.5);
-                    data[idx + 2] = bb.clamp(0.0, 1.5);
+                    let idx = ri * SZ * SZ + gi * SZ + bi;
+                    data_r[idx] = rr.clamp(0.0, 1.5);
+                    data_g[idx] = gg.clamp(0.0, 1.5);
+                    data_b[idx] = bb.clamp(0.0, 1.5);
                 }
             }
         }
-        Self { data, size: SZ }
+        Self { data_r, data_g, data_b, size: SZ }
     }
 
     #[inline(always)]
@@ -434,16 +444,17 @@ impl PerceptualGrid {
         let r1 = (ri + 1).min(self.size - 1);
         let g1 = (gi + 1).min(self.size - 1);
         let b1 = (bi + 1).min(self.size - 1);
-        // 8 corner samples (interleaved)
-        let idx000 = (ri * self.size * self.size + gi * self.size + bi) * 3;
-        let idx001 = (ri * self.size * self.size + gi * self.size + b1) * 3;
-        let idx010 = (ri * self.size * self.size + g1 * self.size + bi) * 3;
-        let idx011 = (ri * self.size * self.size + g1 * self.size + b1) * 3;
-        let idx100 = (r1 * self.size * self.size + gi * self.size + bi) * 3;
-        let idx101 = (r1 * self.size * self.size + gi * self.size + b1) * 3;
-        let idx110 = (r1 * self.size * self.size + g1 * self.size + bi) * 3;
-        let idx111 = (r1 * self.size * self.size + g1 * self.size + b1) * 3;
-        // lerp r then g then b for each channel (0=r,1=g,2=b)
+        // PIPE-008: planar corner indices — each channel's 8 reads are in its own contiguous plane.
+        // Each plane is SZ^3 * 4 = 4.7 KB (SZ=17); 8 corners fit in ≤2 cache lines per channel.
+        let idx000 = ri * self.size * self.size + gi * self.size + bi;
+        let idx001 = ri * self.size * self.size + gi * self.size + b1;
+        let idx010 = ri * self.size * self.size + g1 * self.size + bi;
+        let idx011 = ri * self.size * self.size + g1 * self.size + b1;
+        let idx100 = r1 * self.size * self.size + gi * self.size + bi;
+        let idx101 = r1 * self.size * self.size + gi * self.size + b1;
+        let idx110 = r1 * self.size * self.size + g1 * self.size + bi;
+        let idx111 = r1 * self.size * self.size + g1 * self.size + b1;
+        // lerp r then g then b for each channel
         let lerp = |c000: f32, c001: f32, c010: f32, c011: f32, c100: f32, c101: f32, c110: f32, c111: f32| {
             let c00 = c000 * (1.0 - bfr) + c001 * bfr;
             let c01 = c010 * (1.0 - bfr) + c011 * bfr;
@@ -453,12 +464,12 @@ impl PerceptualGrid {
             let c1 = c10 * (1.0 - gfr) + c11 * gfr;
             c0 * (1.0 - rfr) + c1 * rfr
         };
-        let dr = lerp(self.data[idx000], self.data[idx001], self.data[idx010], self.data[idx011],
-                      self.data[idx100], self.data[idx101], self.data[idx110], self.data[idx111]);
-        let dg = lerp(self.data[idx000+1], self.data[idx001+1], self.data[idx010+1], self.data[idx011+1],
-                      self.data[idx100+1], self.data[idx101+1], self.data[idx110+1], self.data[idx111+1]);
-        let db = lerp(self.data[idx000+2], self.data[idx001+2], self.data[idx010+2], self.data[idx011+2],
-                      self.data[idx100+2], self.data[idx101+2], self.data[idx110+2], self.data[idx111+2]);
+        let dr = lerp(self.data_r[idx000], self.data_r[idx001], self.data_r[idx010], self.data_r[idx011],
+                      self.data_r[idx100], self.data_r[idx101], self.data_r[idx110], self.data_r[idx111]);
+        let dg = lerp(self.data_g[idx000], self.data_g[idx001], self.data_g[idx010], self.data_g[idx011],
+                      self.data_g[idx100], self.data_g[idx101], self.data_g[idx110], self.data_g[idx111]);
+        let db = lerp(self.data_b[idx000], self.data_b[idx001], self.data_b[idx010], self.data_b[idx011],
+                      self.data_b[idx100], self.data_b[idx101], self.data_b[idx110], self.data_b[idx111]);
         (dr, dg, db)
     }
 }
@@ -574,8 +585,11 @@ impl LutCache {
 thread_local! {
     static LUT_CACHE: std::cell::RefCell<Option<LutCache>> =
         const { std::cell::RefCell::new(None) };
-    static BLUR_SCRATCH: std::cell::RefCell<(Vec<u16>, Vec<u16>)> =
-        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    // PIPE-003: third slot is the clarity/texture snapshot buffer; reused across calls to
+    // avoid a full-frame Vec allocation (~144 MB at 24 MP) when both texture and clarity
+    // are active simultaneously.
+    static BLUR_SCRATCH: std::cell::RefCell<(Vec<u16>, Vec<u16>, Vec<u16>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
     static BLUR_ROW_F32: std::cell::RefCell<Vec<f32>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static PERCEPTUAL_GRID: std::cell::RefCell<Option<PerceptualGrid>> =
@@ -902,16 +916,19 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
 pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                             params: &PipelineParams) {
     if params.texture == 0.0 && params.clarity == 0.0 { return; }
-    // When both texture and clarity are active, each must operate on the original
-    // (pre-unsharp) image.  Snapshot before the texture pass so the clarity blur is not
-    // computed from the already-sharpened texture output.
-    let pre_snap: Option<Vec<u16>> = if params.texture != 0.0 && params.clarity != 0.0 {
-        Some(rgb16.to_vec())
-    } else {
-        None
-    };
+    // PIPE-003: When both texture and clarity are active, each must operate on the original
+    // (pre-unsharp) image.  Previously this called rgb16.to_vec() here (full-frame allocation,
+    // ~144 MB at 24 MP on every slider tick).  Instead we reuse the third BLUR_SCRATCH slot
+    // so the allocation is amortised after the first call.
     BLUR_SCRATCH.with(|scratch| {
-        let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
+        let (ref mut temp, ref mut blurred, ref mut snap_buf) = *scratch.borrow_mut();
+        let need_snap = params.texture != 0.0 && params.clarity != 0.0;
+        if need_snap {
+            snap_buf.resize(rgb16.len(), 0u16);
+            snap_buf.copy_from_slice(rgb16);
+        }
+        // `pre_snap` is Some only when both sliders are active.
+        let has_snap = need_snap;
         if params.texture != 0.0 {
             separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_5(), temp, blurred);
             #[cfg(feature = "parallel")]
@@ -936,13 +953,13 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
         }
         if params.clarity != 0.0 {
             // Clarity blurs the original image (not the texture-sharpened output).
-            // When pre_snap is Some (both passes active), blur the snapshot; else blur rgb16 as usual.
-            if let Some(ref snap) = pre_snap {
-                separable_blur_with_bufs(snap, width, height, &gaussian_kernel_13(), temp, blurred);
-                // Apply clarity: orig from snap, delta from snap blur, added to texture-sharpened rgb16.
+            // When has_snap (both passes active), blur the snapshot in snap_buf; else blur rgb16 as usual.
+            if has_snap {
+                separable_blur_with_bufs(snap_buf, width, height, &gaussian_kernel_13(), temp, blurred);
+                // Apply clarity: orig from snap_buf, delta from snap blur, added to texture-sharpened rgb16.
                 #[cfg(feature = "parallel")]
                 rgb16.par_chunks_mut(width * 3)
-                    .zip(snap.par_chunks(width * 3))
+                    .zip(snap_buf.par_chunks(width * 3))
                     .zip(blurred.par_chunks(width * 3))
                     .for_each(|((r_row, o_row), b_row)| {
                     for i in 0..r_row.len() {
@@ -959,7 +976,7 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                     let n = rgb16.len();
                     let mut i = 0;
                     while i < n {
-                        let orig = snap[i] as i32;
+                        let orig = snap_buf[i] as i32;
                         let blur = blurred[i] as i32;
                         let v = orig as f32 / 65535.0;
                         let w = 4.0 * v * (1.0 - v);
@@ -1376,6 +1393,12 @@ fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneIn
     }
 }
 
+/// PIPE-009: allocates a fresh Vec<u8> (~72 MB at 24 MP) + zero-initializes on every call.
+/// For interactive or repeated renders (slider ticks, LookRenderer) always prefer
+/// [`process_into`] or [`process_into_auto`] with a retained buffer to amortise the
+/// allocation.  This function exists for one-shot callers and tests where the allocation
+/// cost is acceptable.
+// doc(alias) tags are not needed here; callers that need the fast path already use process_into.
 pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     assert_eq!(rgb16.len() % 3, 0, "process: rgb16.len() must be divisible by 3");
     let n = rgb16.len() / 3;
@@ -1506,6 +1529,68 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     }
 }
 
+/// PIPE-001 / PIPE-005: shared kernel for `process_into_simd` (u8 out) and
+/// `process_16bit_simd` (u16 out).  Both functions were structurally identical —
+/// BLK-pixel block loop, deinterleave pre-LUT → apply_tone_bulk → scatter through
+/// post-LUT — differing only in the output element type and scatter expression.
+///
+/// Callers pass `r/g/b` scratch slices of length BLK pre-allocated once outside
+/// the block loop (PIPE-005: eliminates per-block stack zeroing, ~279 MB memset
+/// traffic at 24 MP for the serial/WASM path). The `post_fn` closure maps a clamped
+/// f32 to the output element type: `|v| post[(v as u16) as usize]` for u8, or
+/// `|v| post16[(v as u16) as usize]` for u16.
+///
+/// NOTE on the parallel path: Rayon's `par_chunks_mut` dispatches to thread-pool
+/// workers; each worker's closure still zeroes its own BLK-sized stack frame once
+/// per block (the scratch arrays live inside the closure, not here).  The scratch-
+/// hoist benefit applies to the serial/WASM path only, where this kernel is called
+/// in a regular `for` loop with scratch re-used across iterations.
+#[inline(always)]
+fn simd_block_kernel<T: Copy>(
+    ob: &mut [T],
+    ib: &[u16],
+    r: &mut [f32],
+    g: &mut [f32],
+    b: &mut [f32],
+    pre_r: &[u16],
+    pre_g: &[u16],
+    pre_b: &[u16],
+    pre_lut_shift: u32,
+    pre_lut_mask: usize,
+    m: &[[f32; 3]; 3],
+    sat: f32,
+    vib: f32,
+    vib_zero: bool,
+    post_fn: impl Fn(f32) -> T,
+) {
+    let np = ib.len() / 3;
+    for i in 0..np {
+        r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+        g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+        b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+    }
+    crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, sat, vib, vib_zero);
+    // MEASURED FLOOR (2026-06-19, item-0 `examples/tonemap_subspans.rs`): this post stage
+    // (clamp + f32→u16 cast + LUT gather) is ~45% of the 24 MP tone frame and is the bottleneck
+    // — NOT build (2%), copy (14%), or math (4%). The gather itself is already cheap (~0.5 ns,
+    // `postlut_cache_flip.rs`); the cost is the scalar f32↔int conversion fused with it. Four
+    // ways to cut it were measured and REJECTED (see `docs/rejected optimizations.md`):
+    //   • split quantize into a vectorizable pass + bare gather → −21% (u16 round-trip traffic)
+    //   • L1 compact/strided post-LUT → 0.77× (gather not L2-bound; extra shift loses)
+    //   • 3D RAW→OUT LUT + trilinear → ~3× slower + shadow banding
+    //   • powf→poly in the build → negligible (build is 2%; sRGB EOTF already a cached lerp)
+    // PIPE-002 opportunity (not yet implemented): interleave pre_r/g/b into a single
+    //   pre_rgb[code*3..code*3+3] table so each pixel does one 384 KB gather instead of three.
+    //   Gate behind flipflop measurement: benefit depends on L2 hit rate vs the merge overhead.
+    // The inline clamp+cast+gather below IS the floor. The remaining lever is the SEAM:
+    // parallelise this (native rayon = ~5× over serial), not the kernel.
+    for i in 0..np {
+        ob[i * 3]     = post_fn(r[i].clamp(0.0, 65535.0));
+        ob[i * 3 + 1] = post_fn(g[i].clamp(0.0, 65535.0));
+        ob[i * 3 + 2] = post_fn(b[i].clamp(0.0, 65535.0));
+    }
+}
+
 /// SIMD variant of `process_into`: block-deinterleaves the pre-LUT output into
 /// SoA, runs the vectorized tone math (`tone_simd::apply_tone_bulk`), then
 /// reinterleaves through the post-LUT. New fn — leaves `process_into` untouched
@@ -1527,46 +1612,36 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
     });
 
     const BLK: usize = 2048;
-    let process_block = |ob: &mut [u8], ib: &[u16]| {
-        let np = ib.len() / 3;
-        let mut r = [0f32; BLK];
-        let mut g = [0f32; BLK];
-        let mut b = [0f32; BLK];
-        for i in 0..np {
-            r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-        }
-        crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
-        // MEASURED FLOOR (2026-06-19, item-0 `examples/tonemap_subspans.rs`): this post stage
-        // (clamp + f32→u16 cast + LUT gather) is ~45% of the 24 MP tone frame and is the bottleneck
-        // — NOT build (2%), copy (14%), or math (4%). The gather itself is already cheap (~0.5 ns,
-        // `postlut_cache_flip.rs`); the cost is the scalar f32↔int conversion fused with it. Four
-        // ways to cut it were measured and REJECTED (see `docs/rejected optimizations.md`):
-        //   • split quantize into a vectorizable pass + bare gather → −21% (u16 round-trip traffic)
-        //   • L1 compact/strided post-LUT → 0.77× (gather not L2-bound; extra shift loses)
-        //   • 3D RAW→OUT LUT + trilinear → ~3× slower + shadow banding
-        //   • powf→poly in the build → negligible (build is 2%; sRGB EOTF already a cached lerp)
-        // The inline clamp+cast+gather below IS the floor. The remaining lever is the SEAM:
-        // parallelise this (native rayon = ~5× over serial), not the kernel.
-        for i in 0..np {
-            ob[i * 3] = post[(r[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 1] = post[(g[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 2] = post[(b[i].clamp(0.0, 65535.0) as u16) as usize];
-        }
-    };
 
+    // Parallel path: Rayon dispatches blocks to worker threads; each closure allocates
+    // its own r/g/b scratch on that thread's stack (unavoidable without thread_local overhead).
     #[cfg(feature = "parallel")]
     {
         out.par_chunks_mut(3 * BLK)
             .zip(rgb16.par_chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+            .for_each(|(ob, ib)| {
+                let mut r = [0f32; BLK];
+                let mut g = [0f32; BLK];
+                let mut b = [0f32; BLK];
+                simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                    &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                    m, ti.sat, ti.vib, ti.vib_zero,
+                    |v| post[(v as u16) as usize]);
+            });
     }
+    // Serial/WASM path: hoist r/g/b scratch once (PIPE-005: eliminates per-block
+    // zeroing — ~279 MB memset at 24 MP — by reusing the same stack frame across blocks).
     #[cfg(not(feature = "parallel"))]
     {
-        out.chunks_mut(3 * BLK)
-            .zip(rgb16.chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+        let mut r = [0f32; BLK];
+        let mut g = [0f32; BLK];
+        let mut b = [0f32; BLK];
+        for (ob, ib) in out.chunks_mut(3 * BLK).zip(rgb16.chunks(3 * BLK)) {
+            simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                m, ti.sat, ti.vib, ti.vib_zero,
+                |v| post[(v as u16) as usize]);
+        }
     }
 }
 
@@ -1583,6 +1658,12 @@ pub fn process_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
 /// reassociation tolerance, so `process_into` stays byte-exact for callers that
 /// require it (LookRenderer, exact-equality tests). Heavy full-res RAW decode
 /// opts in via this wrapper.
+///
+/// PIPE-007 (verified 2026-06-19): LookRenderer.process() in src/lib.rs calls
+/// `pipeline::process_auto` (→ `process_into_auto` → `process_into_simd`), so the
+/// WASM SIMD128 kernel IS reached from the interactive render path.  The !parallel
+/// `process_into` 4-wide scalar path (PIPE-007 concern) is only the byte-exact
+/// reference; callers that need SIMD already route through `process_into_auto`.
 pub fn process_into_auto(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     if params.perceptual_constancy {
         process_into(rgb16, params, out);
@@ -1842,7 +1923,7 @@ pub fn apply_luminance_nr(rgb16: &mut [u16], width: usize, height: usize, streng
     let s = strength.clamp(0.0, 1.0);
     let kernel = gaussian_kernel_5();
     BLUR_SCRATCH.with(|scratch| {
-        let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
+        let (ref mut temp, ref mut blurred, _) = *scratch.borrow_mut();
         separable_blur_with_bufs(rgb16, width, height, &kernel, temp, blurred);
         // Flipflop bench (2026-06-18): serial 130ms, parallel 20ms → 6.6× speedup on 12MP.
         #[cfg(feature = "parallel")]
@@ -1946,7 +2027,8 @@ pub fn process_16bit_scalar(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> 
 
 /// SIMD 16-bit path: block-deinterleave the pre-LUT output into SoA, run the vectorized tone
 /// math (`tone_simd::apply_tone_bulk`, fused matrix when vib_zero), then reinterleave through the
-/// 16-bit post-LUT. Mirrors [`process_into_simd`] with u16 output. Plain ingest only
+/// 16-bit post-LUT. Delegates to [`simd_block_kernel`] (shared with [`process_into_simd`],
+/// PIPE-001) with a `|v| post16[(v as u16) as usize]` scatter.  Plain ingest only
 /// (perceptual_constancy must be false — the dispatcher routes constancy to the scalar path).
 pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     debug_assert_eq!(rgb16.len() % 3, 0);
@@ -1964,35 +2046,33 @@ pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     });
 
     const BLK: usize = 2048;
-    let process_block = |ob: &mut [u16], ib: &[u16]| {
-        let np = ib.len() / 3;
-        let mut r = [0f32; BLK];
-        let mut g = [0f32; BLK];
-        let mut b = [0f32; BLK];
-        for i in 0..np {
-            r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-        }
-        crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
-        for i in 0..np {
-            ob[i * 3]     = post16[(r[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 1] = post16[(g[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 2] = post16[(b[i].clamp(0.0, 65535.0) as u16) as usize];
-        }
-    };
 
     #[cfg(feature = "parallel")]
     {
         out.par_chunks_mut(3 * BLK)
             .zip(rgb16.par_chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+            .for_each(|(ob, ib)| {
+                let mut r = [0f32; BLK];
+                let mut g = [0f32; BLK];
+                let mut b = [0f32; BLK];
+                simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                    &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                    m, ti.sat, ti.vib, ti.vib_zero,
+                    |v| post16[(v as u16) as usize]);
+            });
     }
+    // Serial/WASM: hoist scratch once (PIPE-005).
     #[cfg(not(feature = "parallel"))]
     {
-        out.chunks_mut(3 * BLK)
-            .zip(rgb16.chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+        let mut r = [0f32; BLK];
+        let mut g = [0f32; BLK];
+        let mut b = [0f32; BLK];
+        for (ob, ib) in out.chunks_mut(3 * BLK).zip(rgb16.chunks(3 * BLK)) {
+            simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                m, ti.sat, ti.vib, ti.vib_zero,
+                |v| post16[(v as u16) as usize]);
+        }
     }
     out
 }
@@ -2034,6 +2114,11 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let base = (y * sw + dx * xstep) * 3;
+                    // PIPE-012: stride-3 AoS read with u64 accumulators; LLVM cannot vectorise
+                    // because u64 SIMD is not uniform across targets.  Known opportunity: split
+                    // into planar accumulation via `let px = &src[base + xx*3..];` to let LLVM
+                    // see regular access.  Profile first — downscale is not a current bottleneck.
+                    #[allow(clippy::needless_range_loop)]
                     for xx in 0..xstep {
                         let i = base + xx * 3;
                         rr += src[i] as u64;
