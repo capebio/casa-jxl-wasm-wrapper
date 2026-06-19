@@ -107,6 +107,10 @@ export async function fromReadableStream(stream, session, signalOrOpts) {
     catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
         await cancelBoth(reason);
+        // Mid-stream abort: resolve (not reject) so callers need no try/catch.
+        // The caller distinguishes abort from error via signal.aborted.
+        if (signal?.aborted)
+            return delivered;
         throw e;
     }
     finally {

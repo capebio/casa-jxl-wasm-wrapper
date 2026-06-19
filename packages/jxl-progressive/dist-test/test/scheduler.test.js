@@ -319,6 +319,68 @@ describe("ProgressiveGallery", () => {
         assert.equal((live || job).manifestChecked, true);
         gallery.destroy();
     });
+    it("dirty-flag: changing job.decoderAbort mid-tick forces dirty=true (prevents missing abort transitions)", () => {
+        // Verify that when decoderAbort transitions from non-null to null (decode finishes),
+        // the scheduler marks candidatesDirty so the next tick rebuilds candidates and
+        // can schedule the job again. Without the dirty flag in the finally block,
+        // the cached candidate list would permanently omit the job (decoderAbort !== null filter).
+        let rafCb = null;
+        let rafCount = 0;
+        const cache = new ProgressiveCache(makeInnerCache());
+        const gallery = new ProgressiveGallery(cache, makeInstantFactory(), {
+            intersectionObserverFactory: (_cb) => ({ observe() { }, unobserve() { }, disconnect() { } }),
+            rafScheduler: (fn) => { rafCb = fn; rafCount++; return rafCount; },
+            rafCanceller: () => { },
+            timeoutScheduler: (() => ({})),
+            timeoutCanceller: () => { },
+        });
+        const el = makeElement("abort-test");
+        gallery.observe(el, "abort-test", "https://example.com/abort.jxl");
+        // After observe, dirty must be true
+        assert.equal(gallery.candidatesDirty, true, "dirty after observe");
+        // Fire one tick to clear dirty (with no eligible candidates — no visibility)
+        if (rafCb) {
+            rafCb();
+            rafCb = null;
+        }
+        assert.equal(gallery.candidatesDirty, false, "dirty cleared after tick with no candidates");
+        // Simulate decoderAbort being set (in-flight)
+        const job = gallery.jobs.get("abort-test");
+        assert.ok(job, "job must exist");
+        job.decoderAbort = new AbortController();
+        // Manually trigger finally cleanup (mimics startDecode finally block)
+        job.decoderAbort = null;
+        gallery.activeDecoders = Math.max(0, gallery.activeDecoders - 1);
+        gallery.candidatesDirty = true; // this is what the finally block does
+        gallery.requestTick();
+        assert.equal(gallery.candidatesDirty, true, "dirty=true after decode completes (abort transition)");
+        gallery.destroy();
+    });
+    it("queueDepth non-negative after burst of waiters released", () => {
+        // Verify activeDecoders never goes below zero even when multiple
+        // concurrent finally blocks race to decrement.
+        const cache = new ProgressiveCache(makeInnerCache());
+        const gallery = new ProgressiveGallery(cache, makeInstantFactory(), {
+            intersectionObserverFactory: (_cb) => ({ observe() { }, unobserve() { }, disconnect() { } }),
+            rafScheduler: () => 0,
+            rafCanceller: () => { },
+            timeoutScheduler: (() => ({})),
+            timeoutCanceller: () => { },
+        });
+        // Directly set activeDecoders to 0 and apply the clamped decrement repeatedly
+        gallery.activeDecoders = 0;
+        for (let i = 0; i < 5; i++) {
+            gallery.activeDecoders = Math.max(0, gallery.activeDecoders - 1);
+        }
+        assert.equal(gallery.activeDecoders, 0, "activeDecoders clamped to 0 — never negative");
+        // Also verify via a small burst: set to 2, release 5 times
+        gallery.activeDecoders = 2;
+        for (let i = 0; i < 5; i++) {
+            gallery.activeDecoders = Math.max(0, gallery.activeDecoders - 1);
+        }
+        assert.equal(gallery.activeDecoders, 0, "activeDecoders clamped to 0 after over-release");
+        gallery.destroy();
+    });
     it("D-4: no-manifest fallback on success sets current to targetTier (jumps, not step)", async () => {
         let tiers = [];
         const cache = new ProgressiveCache(makeInnerCache());

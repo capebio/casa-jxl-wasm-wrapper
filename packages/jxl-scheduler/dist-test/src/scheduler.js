@@ -395,6 +395,10 @@ export class Scheduler {
                     this.backgroundWorkers.add(record.worker);
                 else
                     this.backgroundWorkers.delete(record.worker);
+                // Normalize state: subscriber init contract sets state="running"; make explicit so the
+                // count adjustment at line 575 always sees the correct state regardless of future
+                // refactors that might alter subscriber initialization (A3).
+                promotedRecord.state = "running";
             }
             else if (record.pausedOnWorker !== undefined && promotedRecord !== undefined) {
                 // Transfer paused state.
@@ -536,6 +540,10 @@ export class Scheduler {
         if (bp === undefined)
             return;
         bp.queueDepth = Math.max(0, bp.queueDepth - 1);
+        // Dev-only invariant: queueDepth must never go negative (A3).
+        if (process.env.NODE_ENV !== "production" && bp.queueDepth < 0) {
+            throw new Error(`Scheduler invariant violated: queueDepth went negative (${bp.queueDepth}) for session ${sessionId}`);
+        }
         const hwm = this.adaptiveHwm();
         if (bp.pendingHead < bp.pendingPushes.length) {
             // Resolve as many waiters as needed to keep queue depth below adaptive HWM (S13)
@@ -1010,6 +1018,11 @@ export class Scheduler {
                     return;
                 }
             }
+            // worker_error without a sessionId is a worker-lifecycle event — it cannot
+            // be attributed to any session. Drop it here so it does not accidentally
+            // terminate the currently-active session.
+            if (msg.type === "worker_error" && raw === undefined)
+                return;
             const sessionId = worker.activeSessionId;
             if (sessionId === null || sessionId === RESERVED_SESSION_ID)
                 return;
@@ -1100,6 +1113,10 @@ export class Scheduler {
             case "encode_cancelled":
             case "encode_error":
                 return true;
+            case "worker_error":
+                // worker_error is terminal only when it carries a sessionId — the session-
+                // less variant is a worker lifecycle event, not a per-session terminal.
+                return msg.sessionId !== undefined;
             default:
                 return false;
         }

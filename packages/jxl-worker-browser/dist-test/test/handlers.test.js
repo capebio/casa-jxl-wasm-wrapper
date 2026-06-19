@@ -359,6 +359,124 @@ describe("browser codec handlers", () => {
         expect(progress?.copyMs).toBeDefined();
         expect(progress?.copiedBytes).toBe(4);
     });
+    test("decode_budget_exceeded carries all DecodeFrameMeta fields from the decoder event", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        let nowMs = 0;
+        const restoreNow = mockPerformanceNow(() => nowMs);
+        const info = {
+            width: 1, height: 1, bitsPerSample: 8,
+            hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+        };
+        const codec = {
+            createDecoder() {
+                return {
+                    push() { },
+                    close() { },
+                    cancel() { },
+                    dispose() { },
+                    async *events() {
+                        yield { type: "header", info };
+                        nowMs = 5;
+                        // Emit a progress event with full DecodeFrameMeta; budget is already 0ms so
+                        // budget-check-1 fires before pixels are touched — meta must still ride the message.
+                        yield {
+                            type: "progress",
+                            stage: "dc",
+                            info,
+                            format: "rgba8",
+                            pixelStride: 4,
+                            // DecodeFrameMeta fields
+                            region: { x: 10, y: 20, w: 30, h: 40 },
+                            sourceScale: 2,
+                            progressiveRegion: true,
+                            regionFallback: "full-frame-then-crop",
+                            progressiveSequence: 3,
+                            passOrdinal: 1,
+                            frameIndex: 5,
+                            frameDuration: 100,
+                            frameName: "hero",
+                            animTicksPerSecond: 24,
+                            get pixels() { throw new Error("pixels getter must not be accessed before budget check"); },
+                        };
+                    },
+                };
+            },
+        };
+        const handler = new DecodeHandler({ ...baseDecodeStart, sessionId: "budget-meta-fields", budgetMs: 0 }, codec, { onSessionEnd: (sessionId) => ended.push(sessionId) });
+        handler.onChunk(new Uint8Array([0xff]).buffer);
+        handler.onClose();
+        await waitFor(() => ended.length === 1);
+        restoreNow();
+        const budget = messages.find((msg) => msg.type === "decode_budget_exceeded");
+        expect(budget).toBeDefined();
+        expect(budget?.region).toEqual({ x: 10, y: 20, w: 30, h: 40 });
+        expect(budget?.sourceScale).toBe(2);
+        expect(budget?.progressiveRegion).toBe(true);
+        expect(budget?.regionFallback).toBe("full-frame-then-crop");
+        expect(budget?.progressiveSequence).toBe(3);
+        expect(budget?.passOrdinal).toBe(1);
+        expect(budget?.frameIndex).toBe(5);
+        expect(budget?.frameDuration).toBe(100);
+        expect(budget?.frameName).toBe("hero");
+        expect(budget?.animTicksPerSecond).toBe(24);
+    });
+    test("decode_final carries all DecodeFrameMeta fields from the decoder event", async () => {
+        const messages = [];
+        const ended = [];
+        installWorkerPostMessage(messages);
+        const info = {
+            width: 1, height: 1, bitsPerSample: 8,
+            hasAlpha: true, hasAnimation: false, jpegReconstructionAvailable: false,
+        };
+        const codec = {
+            createDecoder() {
+                return {
+                    push() { },
+                    close() { },
+                    cancel() { },
+                    dispose() { },
+                    async *events() {
+                        yield { type: "header", info };
+                        yield {
+                            type: "final",
+                            info,
+                            pixels: new Uint8Array([1, 2, 3, 4]).buffer,
+                            format: "rgba8",
+                            pixelStride: 4,
+                            region: { x: 0, y: 0, w: 1, h: 1 },
+                            sourceScale: 8,
+                            progressiveRegion: false,
+                            regionFallback: "full-frame-then-crop",
+                            progressiveSequence: 0,
+                            passOrdinal: 2,
+                            frameIndex: 1,
+                            frameDuration: 42,
+                            frameName: "last",
+                            animTicksPerSecond: 30,
+                        };
+                    },
+                };
+            },
+        };
+        const handler = new DecodeHandler({ ...baseDecodeStart, sessionId: "final-meta-fields" }, codec, { onSessionEnd: (sessionId) => ended.push(sessionId) });
+        handler.onChunk(new Uint8Array([0xff]).buffer);
+        handler.onClose();
+        await waitFor(() => ended.length === 1);
+        const final = messages.find((msg) => msg.type === "decode_final");
+        expect(final).toBeDefined();
+        expect(final?.region).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+        expect(final?.sourceScale).toBe(8);
+        expect(final?.progressiveRegion).toBe(false);
+        expect(final?.regionFallback).toBe("full-frame-then-crop");
+        expect(final?.progressiveSequence).toBe(0);
+        expect(final?.passOrdinal).toBe(2);
+        expect(final?.frameIndex).toBe(1);
+        expect(final?.frameDuration).toBe(42);
+        expect(final?.frameName).toBe("last");
+        expect(final?.animTicksPerSecond).toBe(30);
+    });
     test("decode handler does not post decode_cancelled for release_state", async () => {
         const messages = [];
         const ended = [];

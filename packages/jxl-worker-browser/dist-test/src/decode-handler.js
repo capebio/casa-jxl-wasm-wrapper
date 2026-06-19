@@ -82,6 +82,7 @@ export class DecodeHandler {
     opts;
     wasm;
     callbacks;
+    decoderPool;
     state = "created";
     // ChunkRing is the single source of truth for queue depth (.size) and bytes (.bytes).
     chunkQueue = new ChunkRing();
@@ -128,6 +129,7 @@ export class DecodeHandler {
         this.opts = opts;
         this.wasm = wasm;
         this.callbacks = callbacks;
+        this.decoderPool = callbacks.decoderPool;
         this._metricMsg.sessionId = this.sessionId;
         this._drainMsg.sessionId = this.sessionId;
         this.run().catch((err) => this.failSession("Internal", String(err)));
@@ -188,20 +190,36 @@ export class DecodeHandler {
     // Main decode loop
     // ---------------------------------------------------------------------------
     async run() {
-        const decoder = this.wasm.createDecoder({
-            format: this.opts.format,
-            region: this.opts.region,
-            downsample: this.opts.downsample,
-            progressionTarget: this.opts.progressionTarget,
-            emitEveryPass: this.opts.emitEveryPass,
-            ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
-            preserveIcc: this.opts.preserveIcc,
-            preserveMetadata: this.opts.preserveMetadata,
-            targetWidth: this.opts.targetWidth,
-            targetHeight: this.opts.targetHeight,
-            fitMode: this.opts.fitMode,
-            onMetric: (name, value) => this.postMetric(name, value),
-        });
+        // Acquire decoder from pool if available; otherwise create new
+        const decoder = this.decoderPool
+            ? this.decoderPool.acquire({
+                format: this.opts.format,
+                region: this.opts.region,
+                downsample: this.opts.downsample,
+                progressionTarget: this.opts.progressionTarget,
+                emitEveryPass: this.opts.emitEveryPass,
+                progressiveDetail: this.opts.progressiveDetail,
+                preserveIcc: this.opts.preserveIcc,
+                preserveMetadata: this.opts.preserveMetadata,
+                targetWidth: this.opts.targetWidth,
+                targetHeight: this.opts.targetHeight,
+                fitMode: this.opts.fitMode,
+                onMetric: (name, value) => this.postMetric(name, value),
+            })
+            : this.wasm.createDecoder({
+                format: this.opts.format,
+                region: this.opts.region,
+                downsample: this.opts.downsample,
+                progressionTarget: this.opts.progressionTarget,
+                emitEveryPass: this.opts.emitEveryPass,
+                ...(this.opts.progressiveDetail !== null ? { progressiveDetail: this.opts.progressiveDetail } : {}),
+                preserveIcc: this.opts.preserveIcc,
+                preserveMetadata: this.opts.preserveMetadata,
+                targetWidth: this.opts.targetWidth,
+                targetHeight: this.opts.targetHeight,
+                fitMode: this.opts.fitMode,
+                onMetric: (name, value) => this.postMetric(name, value),
+            });
         // Store decoder reference so terminal paths can actively dispose it.
         this.decoder = decoder;
         try {
@@ -262,7 +280,22 @@ export class DecodeHandler {
         if (decoder === null)
             return Promise.resolve();
         this.decoder = null;
-        this.disposePromise = Promise.resolve(decoder.dispose()).catch((e) => {
+        // Release to pool if available; otherwise dispose
+        this.disposePromise = (this.decoderPool
+            ? this.decoderPool.release(decoder, {
+                format: this.opts.format,
+                region: this.opts.region,
+                downsample: this.opts.downsample,
+                progressionTarget: this.opts.progressionTarget,
+                emitEveryPass: this.opts.emitEveryPass,
+                progressiveDetail: this.opts.progressiveDetail,
+                preserveIcc: this.opts.preserveIcc,
+                preserveMetadata: this.opts.preserveMetadata,
+                targetWidth: this.opts.targetWidth,
+                targetHeight: this.opts.targetHeight,
+                fitMode: this.opts.fitMode,
+            })
+            : Promise.resolve(decoder.dispose())).catch((e) => {
             console.error('[jxl-worker] disposeActiveDecoder failed:', e);
         });
         return this.disposePromise;
@@ -370,7 +403,7 @@ export class DecodeHandler {
                     // marks the stop.
                     if (this.checkBudget()) {
                         this.postMetric("dropped_due_to_budget", 1);
-                        this.postBudgetExceeded(event.stage, event.info, new ArrayBuffer(0), event.format, event.pixelStride, event.region);
+                        this.postBudgetExceeded(event.stage, event.info, new ArrayBuffer(0), event.format, event.pixelStride, event);
                         return;
                     }
                     const t0 = performance.now();
@@ -386,7 +419,7 @@ export class DecodeHandler {
                             this.postMetric("copied_bytes", transfer.buffer.byteLength);
                         }
                         this.postMetric("dropped_due_to_budget", 1);
-                        this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event.region);
+                        this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event);
                         return;
                     }
                     const msg = {
@@ -421,7 +454,7 @@ export class DecodeHandler {
                     // event.pixels if budget is already exceeded. (Same lazy pattern as "progress".)
                     if (this.checkBudget()) {
                         this.postMetric("dropped_due_to_budget", 1);
-                        this.postBudgetExceeded("final", event.info, new ArrayBuffer(0), event.format, event.pixelStride, event.region);
+                        this.postBudgetExceeded("final", event.info, new ArrayBuffer(0), event.format, event.pixelStride, event);
                         return;
                     }
                     const t0 = performance.now();
@@ -436,7 +469,7 @@ export class DecodeHandler {
                             this.postMetric("copied_bytes", transfer.buffer.byteLength);
                         }
                         this.postMetric("dropped_due_to_budget", 1);
-                        this.postBudgetExceeded("final", event.info, transfer.buffer, event.format, event.pixelStride, event.region);
+                        this.postBudgetExceeded("final", event.info, transfer.buffer, event.format, event.pixelStride, event);
                         return;
                     }
                     const now = performance.now();
@@ -475,7 +508,7 @@ export class DecodeHandler {
                         this.postMetric("copy_to_transfer_ms", performance.now() - t0);
                     }
                     this.postMetric("dropped_due_to_budget", 1);
-                    this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event.region);
+                    this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event);
                     return;
                 }
                 case "error": {
@@ -523,7 +556,7 @@ export class DecodeHandler {
         // Best-effort unblock of decoder.events().
         void this.disposeActiveDecoder();
     }
-    postBudgetExceeded(stage, info, pixels, format, pixelStride, region) {
+    postBudgetExceeded(stage, info, pixels, format, pixelStride, meta) {
         if (this.ended)
             return;
         const msg = {
@@ -535,8 +568,7 @@ export class DecodeHandler {
             format,
             pixelStride,
         };
-        if (region !== undefined)
-            msg.region = region;
+        assignFrameMeta(msg, meta);
         this.postMetric("output_bytes", pixels.byteLength);
         self.postMessage(msg, transferList(pixels));
         this.finishSession("budget_exceeded");

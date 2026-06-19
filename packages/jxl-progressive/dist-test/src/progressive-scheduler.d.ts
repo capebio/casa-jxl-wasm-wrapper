@@ -93,6 +93,14 @@ export declare class ProgressiveGallery {
     private retryTimerId;
     private armedRetryAt;
     private inFlightManifestFetches;
+    /**
+     * Dirty-flag caches candidate list across RAF ticks.
+     * starvationBonus is time-dependent, so always updated; rebuild only on state change.
+     * Set true on any mutation that changes which jobs qualify or their relative ranking structure
+     * (observe, unobserve, select, deselect, intersection change, decode completion/abort).
+     */
+    private candidatesDirty;
+    private cachedCandidates;
     private readonly testFetchTier;
     private readonly testFetchFull;
     private readonly testStreamTierFrames;

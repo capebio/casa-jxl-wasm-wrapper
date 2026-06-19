@@ -9,6 +9,7 @@
 import { DecodeHandler } from "./decode-handler.js";
 import { EncodeHandler } from "./encode-handler.js";
 import { loadWasmModule, detectTier } from "./wasm-loader.js";
+import { DecoderPool } from "./decoder-pool.js";
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -32,6 +33,7 @@ let wasmModule = null;
 let wasmLoadPromise = null;
 let shuttingDown = false;
 let shutdownPromise = null;
+let decoderPool = null;
 // Cap per session to avoid unbounded cold-start buffering.
 const MAX_QUEUED_MESSAGES_PER_SESSION = 256;
 const MAX_QUEUED_BYTES_PER_SESSION = 128 * 1024 * 1024;
@@ -59,6 +61,10 @@ async function getWasm() {
             .then((m) => {
             clearTimeout(timeoutHandle);
             wasmModule = m;
+            // Initialize decoder pool on first WASM load
+            if (decoderPool === null) {
+                decoderPool = new DecoderPool(m);
+            }
             return m;
         })
             .catch((err) => {
@@ -341,6 +347,7 @@ async function handleDecodeStart(msg) {
         }
         const handler = new DecodeHandler(msg, wasm, {
             onSessionEnd: (sessionId) => decodeSessions.delete(sessionId),
+            decoderPool: decoderPool ?? undefined,
         });
         decodeSessions.set(msg.sessionId, handler);
         flushQueuedDecodeMessages(msg.sessionId, handler);
@@ -473,6 +480,11 @@ async function doShutdown() {
     queuedDecodeBytes.clear();
     queuedEncodeBytes.clear();
     abortedStarts.clear();
+    // Dispose decoder pool
+    if (decoderPool !== null) {
+        await decoderPool.dispose();
+        decoderPool = null;
+    }
     wasmModule = null;
     wasmLoadPromise = null;
     const ack = { type: "worker_shutdown_ack" };
@@ -482,25 +494,42 @@ async function doShutdown() {
 // ---------------------------------------------------------------------------
 // Uncaught error reporting
 // ---------------------------------------------------------------------------
+/** Returns the sessionId of the single active session on this worker, if any. */
+function activeSessionId() {
+    // Workers run at most one decode and one encode session concurrently (pool
+    // assigns one session per worker). Prefer the decode session as crashes mid-
+    // decode are the primary use-case, then fall back to encode.
+    for (const id of decodeSessions.keys())
+        return id;
+    for (const id of encodeSessions.keys())
+        return id;
+    return undefined;
+}
 self.addEventListener("error", (event) => {
+    const sid = activeSessionId();
     self.postMessage({
         type: "worker_error",
         code: "UnhandledError",
         message: event.message ?? "Unknown worker error",
+        ...(sid !== undefined ? { sessionId: sid } : {}),
     });
 });
 self.addEventListener("unhandledrejection", (event) => {
+    const sid = activeSessionId();
     self.postMessage({
         type: "worker_error",
         code: "UnhandledRejection",
         message: event.reason instanceof Error ? event.reason.message : String(event.reason),
+        ...(sid !== undefined ? { sessionId: sid } : {}),
     });
 });
 self.addEventListener("messageerror", () => {
+    const sid = activeSessionId();
     self.postMessage({
         type: "worker_error",
         code: "MessageDeserializeError",
         message: "Failed to deserialize incoming message",
+        ...(sid !== undefined ? { sessionId: sid } : {}),
     });
 });
 // ---------------------------------------------------------------------------

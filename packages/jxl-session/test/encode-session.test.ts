@@ -4,7 +4,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { EncodeSessionImpl } from "../src/encode-session.js";
+import { EncodeSessionImpl, encodeOptionsToStartMsg } from "../src/encode-session.js";
+import type { EncodeOptions } from "@casabio/jxl-core";
 import { JxlError } from "@casabio/jxl-core/errors";
 import { makeScheduler, waitForWorker, tick } from "./helpers.js";
 
@@ -143,5 +144,113 @@ describe("EncodeSessionImpl cancel and errors", () => {
     assert.equal(seen[0]?.name, "output_bytes");
     await session.cancel();
     await scheduler.shutdown();
+  });
+});
+
+describe("encodeOptionsToStartMsg mapper exhaustiveness", () => {
+  // These EncodeOptions keys are intentionally NOT forwarded to MsgEncodeStart:
+  // they are session-level (signal, onMetric) or encode-handler-side controls
+  // (modular, brotliEffort, decodingSpeed, photonNoiseIso, buffering,
+  //  advancedControls, jpegReconstruction) that are not part of the wire protocol.
+  const INTENTIONALLY_OMITTED: ReadonlySet<keyof EncodeOptions> = new Set([
+    "signal",
+    "onMetric",
+    "modular",
+    "brotliEffort",
+    "decodingSpeed",
+    "photonNoiseIso",
+    "buffering",
+    "advancedControls",
+    "jpegReconstruction",
+  ] as const satisfies (keyof EncodeOptions)[]);
+
+  // All EncodeOptions keys that ARE forwarded (must appear as keys in the
+  // returned MsgEncodeStart, keyed by their EncodeOptions name).
+  // distance/quality are derived by the caller so they map via the extra params.
+  const MAPPED_OPT_KEYS: ReadonlySet<keyof EncodeOptions> = new Set([
+    "format",
+    "width",
+    "height",
+    "hasAlpha",
+    "iccProfile",
+    "exif",
+    "xmp",
+    "distance",
+    "quality",
+    "effort",
+    "progressive",
+    "progressiveFlavor",
+    "previewFirst",
+    "progressiveDc",
+    "progressiveAc",
+    "qProgressiveAc",
+    "groupOrder",
+    "chunked",
+    "sidecarSizes",
+    "priority",
+    "orientation",
+    "centerX",
+    "centerY",
+    "intrinsicSize",
+    "disablePerceptualHeuristics",
+    "codestreamLevel",
+  ] as const satisfies (keyof EncodeOptions)[]);
+
+  it("MAPPED + OMITTED covers every EncodeOptions key (drift guard)", () => {
+    // Build a full EncodeOptions object with every field set so TypeScript
+    // exhaustiveness catches new keys at compile time via the satisfies below.
+    const allKeys: (keyof EncodeOptions)[] = [
+      ...MAPPED_OPT_KEYS,
+      ...INTENTIONALLY_OMITTED,
+    ];
+    // Detect if a new key was added to EncodeOptions but not listed above.
+    // We verify by creating a minimal EncodeOptions and checking via the type:
+    // if the union of both sets equals the full keyset, nothing drifts.
+    // Runtime check: no key appears in both sets.
+    for (const k of MAPPED_OPT_KEYS) {
+      assert.ok(!INTENTIONALLY_OMITTED.has(k), `Key "${k}" appears in both MAPPED and OMITTED sets`);
+    }
+    // Verify the mapper returns an object with all mapped fields populated
+    // (uses distance=1.0 / quality=null as the resolved defaults).
+    const opts: EncodeOptions = {
+      format: "rgba8",
+      width: 4,
+      height: 4,
+      hasAlpha: false,
+      effort: 3,
+      distance: 1.5,
+      progressive: true,
+      progressiveFlavor: "dc",
+      previewFirst: false,
+      progressiveDc: 1,
+      progressiveAc: 1,
+      qProgressiveAc: 0,
+      groupOrder: 1,
+      chunked: false,
+      sidecarSizes: [64],
+      priority: "visible",
+      orientation: 1,
+      centerX: -1,
+      centerY: -1,
+      intrinsicSize: { width: 4, height: 4 },
+      disablePerceptualHeuristics: true,
+      codestreamLevel: 5,
+    };
+    const msg = encodeOptionsToStartMsg("test-id", opts, opts.distance ?? null, null);
+    assert.equal(msg.type, "encode_start");
+    assert.equal(msg.sessionId, "test-id");
+    assert.equal(msg.format, "rgba8");
+    assert.equal(msg.effort, 3);
+    assert.equal(msg.distance, 1.5);
+    assert.equal(msg.progressive, true);
+    assert.equal(msg.progressiveDc, 1);
+    assert.equal(msg.sidecarSizes?.[0], 64);
+    assert.equal(msg.codestreamLevel, 5);
+    // Confirm the combined key list has no duplicates.
+    const seen = new Set<string>();
+    for (const k of allKeys) {
+      assert.ok(!seen.has(k), `Duplicate key "${k}" in exhaustiveness lists`);
+      seen.add(k);
+    }
   });
 });

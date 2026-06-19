@@ -3,7 +3,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { JxlError } from "@casabio/jxl-core/errors";
+import { JxlError, KNOWN_JXL_ERROR_CODES, normalizeCode } from "@casabio/jxl-core/errors";
 
 describe("JxlError", () => {
   it("is an Error subclass with code", () => {
@@ -49,6 +49,44 @@ describe("JxlError", () => {
     } catch (err) {
       assert.ok(err instanceof JxlError);
       assert.equal((err as JxlError).code, "Cancelled");
+    }
+  });
+});
+
+describe("normalizeCode", () => {
+  it("every KNOWN_JXL_ERROR_CODES entry round-trips unchanged", () => {
+    for (const code of KNOWN_JXL_ERROR_CODES) {
+      assert.equal(normalizeCode(code), code, `expected "${code}" to pass through normalizeCode unchanged`);
+    }
+  });
+
+  it("unknown wire codes collapse to 'Internal'", () => {
+    assert.equal(normalizeCode("SomeNewLibjxlCode"), "Internal");
+    assert.equal(normalizeCode(""), "Internal");
+    assert.equal(normalizeCode("undefined"), "Internal");
+  });
+
+  it("worker codes pass through (not collapsed to Internal)", () => {
+    const workerCodes = [
+      "DuplicateSession",
+      "UnhandledError",
+      "UnhandledRejection",
+      "WorkerError",
+      "MessageDeserializeError",
+    ] as const;
+    for (const code of workerCodes) {
+      assert.equal(normalizeCode(code), code, `worker code "${code}" must not be collapsed`);
+    }
+  });
+
+  it("libjxl codes pass through", () => {
+    const libjxlCodes = [
+      "MalformedCodestream", "TruncatedStream", "UnsupportedFeature",
+      "OutOfMemory", "BudgetExceeded", "Cancelled", "WorkerCrashed",
+      "CapabilityMissing", "ConfigError", "QueueOverflow", "Internal",
+    ] as const;
+    for (const code of libjxlCodes) {
+      assert.equal(normalizeCode(code), code);
     }
   });
 });

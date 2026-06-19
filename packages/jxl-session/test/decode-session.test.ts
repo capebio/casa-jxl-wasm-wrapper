@@ -268,6 +268,114 @@ describe("DecodeSessionImpl budget expiry", () => {
     });
     await scheduler.shutdown();
   });
+
+  it("decode_budget_exceeded: frame event carries all DecodeFrameMeta fields", async () => {
+    const { scheduler, workers } = makeScheduler();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8", budgetMs: 50 });
+    const worker = await waitForWorker(workers);
+    const info = imageInfo();
+    worker.emit({
+      type: "decode_budget_exceeded", sessionId: session.id, stage: "dc",
+      pixels: new ArrayBuffer(8), info, format: "rgba8", pixelStride: 256,
+      region: { x: 10, y: 20, w: 30, h: 40 },
+      sourceScale: 2,
+      progressiveRegion: true,
+      regionFallback: "full-frame-then-crop" as const,
+      progressiveSequence: 3,
+      passOrdinal: 1,
+      frameIndex: 5,
+      frameDuration: 100,
+      frameName: "hero",
+      animTicksPerSecond: 24,
+    });
+    const frames = await collectFrames(session);
+    assert.equal(frames.length, 1);
+    const f = frames[0]!;
+    assert.deepEqual(f.region, { x: 10, y: 20, w: 30, h: 40 });
+    assert.equal(f.sourceScale, 2);
+    assert.equal(f.progressiveRegion, true);
+    assert.equal(f.regionFallback, "full-frame-then-crop");
+    assert.equal(f.progressiveSequence, 3);
+    assert.equal(f.passOrdinal, 1);
+    assert.equal(f.frameIndex, 5);
+    assert.equal(f.frameDuration, 100);
+    assert.equal(f.frameName, "hero");
+    assert.equal(f.animTicksPerSecond, 24);
+    await session.done().catch(() => undefined);
+    await scheduler.shutdown();
+  });
+
+  it("decode_progress → frame event carries all DecodeFrameMeta fields", async () => {
+    const { scheduler, workers } = makeScheduler();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8" });
+    const worker = await waitForWorker(workers);
+    const info = imageInfo();
+    worker.emit({
+      type: "decode_progress", sessionId: session.id, stage: "dc",
+      pixels: new ArrayBuffer(8), info, format: "rgba8", pixelStride: 256,
+      region: { x: 0, y: 0, w: 4, h: 4 },
+      sourceScale: 4,
+      progressiveRegion: false,
+      regionFallback: "full-frame-then-crop" as const,
+      progressiveSequence: 1,
+      passOrdinal: 0,
+      frameIndex: 2,
+      frameDuration: 33,
+      frameName: "dc-frame",
+      animTicksPerSecond: 30,
+    });
+    worker.emit({ type: "decode_final", sessionId: session.id, info, pixels: new ArrayBuffer(8), format: "rgba8", pixelStride: 256 });
+    const frames = await collectFrames(session);
+    const progress = frames.find((f) => f.stage === "dc");
+    assert.ok(progress !== undefined, "expected a dc progress frame");
+    assert.deepEqual(progress.region, { x: 0, y: 0, w: 4, h: 4 });
+    assert.equal(progress.sourceScale, 4);
+    assert.equal(progress.progressiveRegion, false);
+    assert.equal(progress.regionFallback, "full-frame-then-crop");
+    assert.equal(progress.progressiveSequence, 1);
+    assert.equal(progress.passOrdinal, 0);
+    assert.equal(progress.frameIndex, 2);
+    assert.equal(progress.frameDuration, 33);
+    assert.equal(progress.frameName, "dc-frame");
+    assert.equal(progress.animTicksPerSecond, 30);
+    await scheduler.shutdown();
+  });
+
+  it("decode_final → frame event carries all DecodeFrameMeta fields", async () => {
+    const { scheduler, workers } = makeScheduler();
+    const session = new DecodeSessionImpl(scheduler, { format: "rgba8" });
+    const worker = await waitForWorker(workers);
+    const info = imageInfo();
+    worker.emit({ type: "decode_header", sessionId: session.id, info });
+    worker.emit({
+      type: "decode_final", sessionId: session.id, info,
+      pixels: new ArrayBuffer(8), format: "rgba8", pixelStride: 256,
+      region: { x: 1, y: 2, w: 3, h: 4 },
+      sourceScale: 8,
+      progressiveRegion: false,
+      regionFallback: "full-frame-then-crop" as const,
+      progressiveSequence: 0,
+      passOrdinal: 2,
+      frameIndex: 7,
+      frameDuration: 50,
+      frameName: "final-frame",
+      animTicksPerSecond: 60,
+    });
+    const frames = await collectFrames(session);
+    const final = frames.find((f) => f.stage === "final");
+    assert.ok(final !== undefined, "expected a final frame");
+    assert.deepEqual(final.region, { x: 1, y: 2, w: 3, h: 4 });
+    assert.equal(final.sourceScale, 8);
+    assert.equal(final.progressiveRegion, false);
+    assert.equal(final.regionFallback, "full-frame-then-crop");
+    assert.equal(final.progressiveSequence, 0);
+    assert.equal(final.passOrdinal, 2);
+    assert.equal(final.frameIndex, 7);
+    assert.equal(final.frameDuration, 50);
+    assert.equal(final.frameName, "final-frame");
+    assert.equal(final.animTicksPerSecond, 60);
+    await scheduler.shutdown();
+  });
 });
 
 describe("DecodeSessionImpl telemetry", () => {
