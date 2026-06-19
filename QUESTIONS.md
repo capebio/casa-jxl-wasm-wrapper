@@ -794,3 +794,6 @@ Repo flipflop benchmarks kernels in isolation, not these WASM export paths; each
 
 ## D. Vision (long-horizon ADR drafts)
 ML recognition entry (thumb+GPS already present); photogrammetry linear-16 contract + sensor-pitch for COLMAP; AR <15ms preview + crop-render ROI; gaming LOD via OpaqueDecodeHandle; multi-frame stacking; non-Riemannian Perceptual Constancy Mode hook (pipeline.rs already has perceptual_constancy + log-euclidean; LookOverrides lacks the field — vision-nonriemannian01). Sample draft: .epiccodereview/20260619T093126Z/global/adr_draft/0001-output-flag-gated-decode.md
+
+### RESOLVED — run 20260619T093126Z §A.1 (flag collision)
+OUT_FULL_16 vs OUT_NO_ORIENT (both =8): determined ACCIDENTAL via git (b2cb8dc9 2026-06-03 vs 1674aa11 2026-06-08, independent additions) + no caller sets bit 8 (raw-backend uses process_orf=7; OUT_FULL_16 is v1 test/synthetic only). Fixed: OUT_NO_ORIENT -> 16. Private consts, no ABI change. Commit follows on branch epiccodereview/20260619T093126Z.
