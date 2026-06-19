@@ -1,8 +1,12 @@
 //! Build script for `jxl-ffi`.
 //!
 //! Two jobs, in order:
-//!   1. Build BSD-3 libjxl (static) from the in-repo source at `DEP_JXL_PATH`
-//!      (`external/libjxl`), then emit the static link line.
+//!   1. Build BSD-3 libjxl (static) from the in-repo source at
+//!      `LIBJXL_SOURCE_DIR` (`external/libjxl`), then emit the static link
+//!      line.  `LIBJXL_SOURCE_DIR` is a plain environment variable configured
+//!      in `.cargo/config.toml [env]`.  It is *not* a Cargo `DEP_*`
+//!      propagation variable (those are emitted by a dependency's build script
+//!      via `cargo:metadata=KEY=VALUE` and forwarded automatically by Cargo).
 //!   2. Run bindgen over the *installed* C headers (which include the
 //!      cmake-generated `jxl_export.h` / `version.h`) → `$OUT_DIR/bindings.rs`.
 //!
@@ -26,8 +30,8 @@ fn main() {
     }
 
     let source = PathBuf::from(
-        env::var("DEP_JXL_PATH")
-            .expect("DEP_JXL_PATH must point at external/libjxl (set in .cargo/config.toml)"),
+        env::var("LIBJXL_SOURCE_DIR")
+            .expect("LIBJXL_SOURCE_DIR must point at external/libjxl (set in .cargo/config.toml)"),
     );
     assert!(
         source.join("CMakeLists.txt").exists(),
@@ -50,13 +54,26 @@ fn main() {
         .define("JPEGXL_ENABLE_JPEGLI", "OFF")
         .define("JPEGXL_BUNDLE_LIBPNG", "OFF");
 
-    if let Ok(p) = std::thread::available_parallelism() {
-        cfg.env("CMAKE_BUILD_PARALLEL_LEVEL", p.to_string());
+    // Prefer Cargo's NUM_JOBS (set by `-j N`) so explicit parallelism flags are
+    // honoured. Fall back to available_parallelism() only when Cargo doesn't
+    // provide the value (e.g. direct cmake invocation outside of cargo).
+    let parallelism = env::var("NUM_JOBS")
+        .ok()
+        .or_else(|| {
+            std::thread::available_parallelism()
+                .ok()
+                .map(|p| p.to_string())
+        });
+    if let Some(jobs) = parallelism {
+        cfg.env("CMAKE_BUILD_PARALLEL_LEVEL", jobs);
     }
 
     let is_release = env::var("PROFILE").as_deref() == Ok("release");
+    // Use CARGO_CFG_TARGET_* (target triple) not cfg!(windows) (host) for cross-compilation.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
 
-    if cfg!(windows) {
+    if target_os == "windows" {
         cfg.generator_toolset("ClangCL")
             .define(
                 "CMAKE_VS_GLOBALS",
@@ -65,7 +82,8 @@ fn main() {
             .define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded")
             // Satisfies cmake's compile-time CRT probe; not linked into our libs.
             .define("CMAKE_EXE_LINKER_FLAGS", "MSVCRTD.lib")
-            .cflag("/Zl");
+            .cflag("/Zl")
+            .cxxflag("/Zl");
         if is_release {
             cfg.cflag("/O2").cflag("/Ob2").cxxflag("/O2").cxxflag("/Ob2");
         }
@@ -74,13 +92,30 @@ fn main() {
     let prefix = cfg.build();
 
     let lib_dir = {
+        // On multilib Linux both `lib/` and `lib64/` may exist, but static
+        // archives land in only one of them.  Check for the actual library
+        // file rather than directory existence to pick the right one.
+        let lib_name = if target_os == "windows" { "jxl.lib" } else { "libjxl.a" };
         let l = prefix.join("lib");
-        if l.exists() {
+        let l64 = prefix.join("lib64");
+        if l.join(lib_name).exists() {
+            l
+        } else if l64.join(lib_name).exists() {
+            l64
+        } else if l.exists() {
+            // Fallback: directory exists but sentinel file not found
+            // (e.g. shared-only build or unusual install layout).
             l
         } else {
-            prefix.join("lib64")
+            l64
         }
     };
+    assert!(
+        lib_dir.exists(),
+        "cmake install produced neither lib/ nor lib64/ under {} — \
+         check that cmake install ran successfully",
+        prefix.display()
+    );
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     for lib in [
         "jxl",
@@ -93,9 +128,9 @@ fn main() {
     ] {
         println!("cargo:rustc-link-lib=static={lib}");
     }
-    if cfg!(target_os = "linux") {
+    if target_os == "linux" {
         println!("cargo:rustc-link-lib=stdc++");
-    } else if cfg!(any(target_vendor = "apple", target_os = "freebsd")) {
+    } else if target_vendor == "apple" || target_os == "freebsd" {
         println!("cargo:rustc-link-lib=c++");
     }
 
@@ -108,7 +143,37 @@ fn main() {
     );
 
     println!("cargo:rerun-if-changed=wrapper.h");
-    println!("cargo:rerun-if-env-changed=DEP_JXL_PATH");
+    println!("cargo:rerun-if-env-changed=LIBJXL_SOURCE_DIR");
+    // Re-run when the libjxl submodule HEAD changes. In a git submodule the
+    // `.git` entry is a plain file (pointing into the superproject gitdir);
+    // Cargo tracks it as a file, so `git submodule update` bumps its mtime
+    // and triggers a rebuild + bindgen re-run.
+    println!(
+        "cargo:rerun-if-changed={}",
+        source.join(".git").display()
+    );
+    // Re-run when key source subtrees change so cmake rebuilds on CMakeLists.txt
+    // changes and bindgen regenerates on header edits.
+    for subpath in &["CMakeLists.txt", "lib/include", "lib/jxl", "lib/threads"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            source.join(subpath).display()
+        );
+    }
+    // Explicitly track each public header so bindgen re-runs after a submodule
+    // update that touches headers. cargo:rerun-if-changed on a directory only
+    // watches the directory entry itself, not its contents recursively.
+    let jxl_include = source.join("lib").join("include").join("jxl");
+    if jxl_include.exists() {
+        if let Ok(entries) = std::fs::read_dir(&jxl_include) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("h") {
+                    println!("cargo:rerun-if-changed={}", p.display());
+                }
+            }
+        }
+    }
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
@@ -125,7 +190,12 @@ fn main() {
             is_global: false,
         })
         .generate()
-        .expect("bindgen failed to generate libjxl bindings");
+        .expect(
+            "bindgen failed to generate libjxl bindings — \
+             ensure libclang is available (set LIBCLANG_PATH to your LLVM bin dir, \
+             e.g. C:\\Program Files\\LLVM\\bin) and that LIBJXL_SOURCE_DIR is configured \
+             in .cargo/config.toml",
+        );
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings

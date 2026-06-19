@@ -4,6 +4,6 @@ rustflags = ["-C", "target-feature=+simd128"]
 [env]
 LLVMInstallDir = "C:/Program Files/LLVM"
 LLVMToolsVersion = "22"
-DEP_JXL_PATH = "C:/Foo/raw-converter-wasm/external/libjxl"
+LIBJXL_SOURCE_DIR = "C:/Foo/raw-converter-wasm/external/libjxl"
 # bindgen (jxl-ffi build.rs) needs libclang to parse the libjxl headers.
 LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
