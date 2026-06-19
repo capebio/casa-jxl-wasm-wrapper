@@ -83,6 +83,66 @@ pub fn scale_err_wasm(
     ((sum / n as f64).cbrt()) as f32
 }
 
+/// Horizontal sum of four i32x4 lanes (all non-negative here) widened to u64.
+/// Mirrors `avx2::hsum256i_u64`: uses `lane as u32 as u64` (unsigned widening) so a
+/// future FLUSH_EVERY past the i32-safe ceiling cannot turn a wrapped-negative lane
+/// into a huge u64.
+#[inline]
+fn hsum_i32x4_u64(v: v128) -> u64 {
+    (i32x4_extract_lane::<0>(v) as u32 as u64)
+        + (i32x4_extract_lane::<1>(v) as u32 as u64)
+        + (i32x4_extract_lane::<2>(v) as u32 as u64)
+        + (i32x4_extract_lane::<3>(v) as u32 as u64)
+}
+
+/// wasm v128 PSNR sum-of-squared-diffs over packed u8. Mirrors `avx2::ssd_avx2`;
+/// returns the exact integer SSD, caller computes dB. Widens each 16-byte chunk to
+/// two i16x8 halves, squares via `i32x4_dot_i16x8`, and drains the i32x4 accumulator
+/// into u64 before any lane can overflow.
+pub fn ssd_wasm(a: &[u8], b: &[u8]) -> u64 {
+    // assert_eq! (not debug_assert_eq!) to match ssd_avx2 — mismatched buffers would
+    // cause OOB SIMD reads in release builds (silent UB in WASM linear memory).
+    assert_eq!(a.len(), b.len(), "ssd_wasm: buffers must have equal length");
+    let len = a.len();
+    // Each chunk feeds two dot products (low+high half) into the SAME i32x4 lanes;
+    // each dot lane sums two products, so a lane gains up to 4·255² = 260100 per
+    // chunk. i32 overflows after ⌊(2³¹−1)/260100⌋ ≈ 8256 chunks, so drain well under
+    // that. 260100·8000 = 2.0808e9 < 2³¹−1 (2.1475e9), with margin. (Half the AVX2
+    // ceiling: 4-wide → 2 dots/chunk vs AVX2's single 8-wide madd.)
+    const FLUSH_EVERY: usize = 8000;
+    let mut acc = i32x4_splat(0);
+    let mut sum: u64 = 0;
+    let chunks = len / 16 * 16;
+    let mut i = 0;
+    let mut since_flush = 0usize;
+    unsafe {
+        while i < chunks {
+            let va = v128_load(a.as_ptr().add(i) as *const v128);
+            let vb = v128_load(b.as_ptr().add(i) as *const v128);
+            // Widen u8x16 → two i16x8 halves (|diff| ≤ 255 fits i16).
+            let d_lo = i16x8_sub(i16x8_extend_low_u8x16(va), i16x8_extend_low_u8x16(vb));
+            let d_hi = i16x8_sub(i16x8_extend_high_u8x16(va), i16x8_extend_high_u8x16(vb));
+            // dot(d,d): adjacent i16 pairs multiplied and summed → i32x4 partial sums.
+            acc = i32x4_add(acc, i32x4_dot_i16x8(d_lo, d_lo));
+            acc = i32x4_add(acc, i32x4_dot_i16x8(d_hi, d_hi));
+            i += 16;
+            since_flush += 1;
+            if since_flush == FLUSH_EVERY {
+                sum += hsum_i32x4_u64(acc);
+                acc = i32x4_splat(0);
+                since_flush = 0;
+            }
+        }
+    }
+    sum += hsum_i32x4_u64(acc);
+    while i < len {
+        let d = a[i] as i64 - b[i] as i64;
+        sum += (d * d) as u64;
+        i += 1;
+    }
+    sum
+}
+
 /// wasm v128 RGBA→planar XYB. Scalar LUT loads (no wasm gather) + vector arithmetic.
 pub fn pixels_to_xyb_wasm(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
     // Reads px via get_unchecked up to (n-1)*4+2 and v128_store/index x/y/b up to

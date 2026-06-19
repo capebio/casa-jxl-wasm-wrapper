@@ -289,6 +289,15 @@ impl Comparer {
                 let mse = sum_sq as f64 / test.len() as f64;
                 (10.0 * (255.0f64 * 255.0 / mse).log10()) as f32
             }
+            #[cfg(target_arch = "wasm32")]
+            Backend::WasmSimd => {
+                let sum_sq = simd::wasm::ssd_wasm(test, &self.ref_rgba);
+                if sum_sq == 0 {
+                    return f32::INFINITY;
+                }
+                let mse = sum_sq as f64 / test.len() as f64;
+                (10.0 * (255.0f64 * 255.0 / mse).log10()) as f32
+            }
             _ => psnr::psnr(test, &self.ref_rgba),
         }
     }
