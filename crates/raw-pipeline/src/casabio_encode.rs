@@ -615,7 +615,7 @@ pub fn encode_rgba8_pyramid(
             .map_init(
                 || Encoder::new(EncodeOptions::default()),
                 |enc_slot, (buf, tw, th, dist)| {
-                    let enc = enc_slot.as_mut().ok_or(EncodeError::Jxl("encoder init".into()))?;
+                    let enc = enc_slot.as_mut().map_err(|_| EncodeError::Jxl("encoder init".into()))?;
                     enc.set_options(EncodeOptions::distance(dist).with_effort(effort));
                     let bytes = if has_alpha {
                         enc.encode(&Frame::rgba8(&buf, tw, th))?

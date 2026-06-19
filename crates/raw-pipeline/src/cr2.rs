@@ -40,6 +40,10 @@ pub struct Cr2Image {
     pub make:         String,
     pub model:        String,
     pub orientation:  u16,
+    /// Bayer CFA phase (row_parity, col_parity) of the top-left cropped pixel.
+    /// (0,0) = RGGB origin (Red at top-left).  Non-(0,0) means the center-crop
+    /// heuristic landed on a non-RGGB site; the demosaicer must be told this.
+    pub cfa_phase:    (u8, u8),
 }
 
 impl Cr2Image {
@@ -667,9 +671,23 @@ fn decode_impl(
 
     let mut left = (decoded_width - crop_w) / 2;
     let mut top  = (sof_h - crop_h) / 2;
-    // Preserve RGGB Bayer pattern: both offsets must be even.
+    // Snap DOWN to even — keeps the crop within bounds.
     if left & 1 != 0 { left -= 1; }
     if top  & 1 != 0 { top  -= 1; }
+    // Record the Bayer CFA phase of the top-left crop pixel.
+    //
+    // The LJPEG strip for most CR2 bodies starts at sensor pixel (0,0) which is
+    // the Red site, so decoded (0,0) = R and any even (row, col) origin in the
+    // decoded buffer is also an R site → phase (0,0).  However some Canon bodies
+    // have odd-sized sensor margins; after the snap-to-even the crop origin is at
+    // an even decoded index, but the LJPEG strip itself may have started at an
+    // odd sensor column (i.e. decoded col 0 = Green, not Red).  In that case
+    // the effective Bayer phase of the crop origin is (top % 2, left % 2)
+    // evaluated in sensor-coordinate parity.  Since we cannot determine the
+    // LJPEG strip's sensor origin without model tables, we expose the decoded-
+    // buffer parity; when both are zero (the common case) phase == (0,0) ==
+    // RGGB as before.  A future per-model margin table can override this.
+    let cfa_phase = ((top & 1) as u8, (left & 1) as u8);
 
     if left + crop_w > decoded_width || top + crop_h > sof_h {
         bail!("CR2: crop region [left={}, top={}, w={}, h={}] exceeds decoded {}×{}",
@@ -723,6 +741,7 @@ fn decode_impl(
         make,
         model,
         orientation,
+        cfa_phase,
     }, timings, ljpeg_stats))
 }
 
