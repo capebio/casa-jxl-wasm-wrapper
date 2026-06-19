@@ -146,8 +146,12 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
         0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54,
     );
 
+    // FS-001/FS-003: hoist scratch arrays outside the loop — stack frame allocated once,
+    // not re-initialized per chunk. Rust hoists them, but explicit placement also prevents
+    // the store-to-load stall pattern from being obscured by optimizer decisions.
     let mut arr_lo = [0i32; 8];
     let mut arr_hi = [0i32; 8];
+    let mut scratch = [0u8; 32];
 
     let mut hist = RgbHistogram::new();
 
@@ -167,25 +171,23 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
         let hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(pv, 1));
         _mm256_storeu_si256(arr_lo.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(lo16, wv));
         _mm256_storeu_si256(arr_hi.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(hi16, wv));
+        // FS-002: pairwise integer reduction — one Kahan step per 8-pixel chunk instead of 8.
+        // Reduces f64 ops from 24M→3M at 24MP. Exact for i64: max chunk_sq_sum = 8×65025²≈3.4e10.
         let luma = [
             arr_lo[0] + arr_lo[1], arr_lo[2] + arr_lo[3], arr_lo[4] + arr_lo[5], arr_lo[6] + arr_lo[7],
             arr_hi[0] + arr_hi[1], arr_hi[2] + arr_hi[3], arr_hi[4] + arr_hi[5], arr_hi[6] + arr_hi[7],
         ];
-        for &lz in luma.iter() {
-            let lf = lz as f64;
-            l_sum += lf;
-            let term = lf * lf - l_sq_c;
-            let new_sq = l_sq + term;
-            l_sq_c = (new_sq - l_sq) - term;
-            l_sq = new_sq;
-        }
+        let chunk_sum: i64 = luma.iter().map(|&x| x as i64).sum();
+        let chunk_sq_sum: i64 = luma.iter().map(|&x| (x as i64) * (x as i64)).sum();
+        l_sum += chunk_sum as f64;
+        let term = chunk_sq_sum as f64 - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
 
-        // Store the already-loaded pv register to a 32-byte scratch and use it
-        // for histogram updates. This avoids re-reading the 8-pixel chunk from
-        // main memory a second time (the data is already in registers/L1 from the
-        // _mm256_loadu_si256 above), eliminating the double-traversal under
-        // memory-bound workloads at 24MP.
-        let mut scratch = [0u8; 32];
+        // FS-003: `scratch` declared outside the loop (hoisted above). The pv register is already
+        // live from the loadu above; storeu to scratch then scalar re-read is still one store +
+        // 24 loads, but the stack frame cost is amortized over all chunks.
         _mm256_storeu_si256(scratch.as_mut_ptr() as *mut __m256i, pv);
         for p_off in 0..8 {
             let i = p_off * 4;
