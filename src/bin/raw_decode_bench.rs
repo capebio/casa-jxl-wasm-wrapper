@@ -191,10 +191,28 @@ fn json_opt(v: Option<f64>) -> String {
     }
 }
 
+fn json_str(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('"');
+    for ch in v.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn rows_to_json(rows: &[BenchRow], generated_at: &str) -> String {
     let mut out = String::new();
     out.push_str("{\n");
-    out.push_str(&format!("  \"generatedAt\": \"{generated_at}\",\n"));
+    out.push_str(&format!("  \"generatedAt\": {},\n", json_str(generated_at)));
     out.push_str(&format!("  \"runsPerFile\": {RUNS},\n"));
     out.push_str("  \"reporting\": \"minimum\",\n");
     out.push_str(&format!("  \"jxlQuality\": {JXL_QUALITY},\n"));
@@ -203,8 +221,8 @@ fn rows_to_json(rows: &[BenchRow], generated_at: &str) -> String {
     for (i, row) in rows.iter().enumerate() {
         let comma = if i + 1 < rows.len() { "," } else { "" };
         out.push_str("    {\n");
-        out.push_str(&format!("      \"file\": \"{}\",\n", row.file.replace('\\', "/")));
-        out.push_str(&format!("      \"format\": \"{}\",\n", row.format));
+        out.push_str(&format!("      \"file\": {},\n", json_str(&row.file.replace('\\', "/"))));
+        out.push_str(&format!("      \"format\": {},\n", json_str(row.format)));
         out.push_str(&format!("      \"width\": {},\n", row.width));
         out.push_str(&format!("      \"height\": {},\n", row.height));
         out.push_str(&format!("      \"sizeMB\": {},\n", opt_f64(row.size_mb)));
@@ -219,12 +237,97 @@ fn rows_to_json(rows: &[BenchRow], generated_at: &str) -> String {
         out.push_str(&format!("      \"decodeBufferExtractMs\": {},\n", json_opt(row.decode_buffer_extract_ms)));
         out.push_str(&format!("      \"decodeRegionDownsampleMs\": {},\n", json_opt(row.decode_region_downsample_ms)));
         out.push_str(&format!("      \"sourcePixelsDecoded\": {},\n", row.source_pixels_decoded.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string())));
-        out.push_str(&format!("      \"decodeStrategy\": {}\n", row.decode_strategy.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "null".to_string())));
+        out.push_str(&format!("      \"decodeStrategy\": {}\n", row.decode_strategy.as_ref().map(|s| json_str(s)).unwrap_or_else(|| "null".to_string())));
         out.push_str(&format!("    }}{comma}\n"));
     }
     out.push_str("  ]\n");
     out.push_str("}\n");
     out
+}
+
+struct ClarityTimings {
+    cold: Duration,
+    warm: Duration,
+}
+
+struct ToneOutputs {
+    tone_dur: Duration,
+    rgb8: Vec<u8>,
+    direct_rgba_dur: Duration,
+    rgba8: Vec<u8>,
+}
+
+fn measure_clarity(rgb16: &[u16], w: usize, h: usize, params: &pipeline::PipelineParams) -> ClarityTimings {
+    let mut cp = params.clone();
+    cp.clarity = 0.5;
+    let mut scratch = rgb16.to_vec();
+    let s = Instant::now();
+    pipeline::apply_unsharp_masks(&mut scratch, w, h, &cp);
+    let cold = s.elapsed();
+
+    scratch.copy_from_slice(rgb16);
+    let s = Instant::now();
+    pipeline::apply_unsharp_masks(&mut scratch, w, h, &cp);
+    let warm = s.elapsed();
+
+    ClarityTimings { cold, warm }
+}
+
+fn bench_tone_outputs(rgb16: &[u16], params: &pipeline::PipelineParams) -> ToneOutputs {
+    let (tone_dur, rgb8) = bench(|| pipeline::process(rgb16, params));
+    let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(rgb16, params));
+    ToneOutputs {
+        tone_dur,
+        rgb8,
+        direct_rgba_dur,
+        rgba8,
+    }
+}
+
+fn print_jxl_result(encode_ms: Option<f64>, jxl_size_kb: Option<f64>, decode_ms: Option<f64>) {
+    match (encode_ms, jxl_size_kb, decode_ms) {
+        (Some(enc), Some(sz), Some(dec)) =>
+            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
+        _ =>
+            println!("  jxl encode/decode: failed"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_full_row(
+    rows: &mut Vec<BenchRow>,
+    file: String,
+    format: &'static str,
+    width: usize,
+    height: usize,
+    size_mb: f64,
+    decompress_ms: f64,
+    demosaic_dur: Duration,
+    tone: &ToneOutputs,
+    total: Duration,
+    encode_ms: Option<f64>,
+    jxl_size_kb: Option<f64>,
+    decode_ms: Option<f64>,
+) {
+    rows.push(BenchRow {
+        file,
+        format,
+        width,
+        height,
+        size_mb,
+        decompress_ms,
+        demosaic_ms: ms(demosaic_dur),
+        tonemap_ms: ms(tone.tone_dur),
+        total_ms: ms(total),
+        encode_ms,
+        jxl_size_kb,
+        decode_ms,
+        direct_rgba_ms: Some(ms(tone.direct_rgba_dur)),
+        decode_buffer_extract_ms: Some(0.0),
+        decode_region_downsample_ms: decode_ms,
+        source_pixels_decoded: Some((width * height) as u64),
+        decode_strategy: Some("full".to_string()),
+    });
 }
 
 // ─── Format benchmarks ───────────────────────────────────────────────────────
@@ -254,21 +357,17 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     params.wb_b = img.wb_b;
     params.color_matrix = img.color_matrix;
 
-    // Measure clarity: cold (first call) vs warm (second, buf reused).
-    let mut cp = params.clone(); cp.clarity = 0.5;
-    let clarity_cold = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
-    let clarity_warm = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
-
-    let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
-    let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
+    let clarity = measure_clarity(&rgb16, w, h, &params);
+    let tone = bench_tone_outputs(&rgb16, &params);
 
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
+    let (encode_ms, jxl_size_kb, decode_ms) =
+        bench_jxl_roundtrip(&tone.rgba8, &tone.rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
-    let total = decode_dur + demosaic_dur + tone_dur;
+    let total = decode_dur + demosaic_dur + tone.tone_dur;
     let demosaic_s = ms(demosaic_dur) / 1000.0;
     let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
@@ -276,37 +375,14 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
     println!(
         "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
-        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
+        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone.tone_dur), ms(tone.direct_rgba_dur), ms(total)
     );
-    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity_cold), ms(clarity_warm), 100.0 * ms(clarity_warm) / ms(total));
+    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity.cold), ms(clarity.warm), 100.0 * ms(clarity.warm) / ms(total));
     println!("  WB R={:.3} B={:.3}  black={}  white={}", img.wb_r, img.wb_b, img.black, img.white);
-    match (encode_ms, jxl_size_kb, decode_ms) {
-        (Some(enc), Some(sz), Some(dec)) =>
-            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
-        _ =>
-            println!("  jxl encode/decode: failed"),
-    }
+    print_jxl_result(encode_ms, jxl_size_kb, decode_ms);
     println!();
 
-    rows.push(BenchRow {
-        file: name.into_owned(),
-        format: "DNG",
-        width: w,
-        height: h,
-        size_mb,
-        decompress_ms: ms(decode_dur),
-        demosaic_ms: ms(demosaic_dur),
-        tonemap_ms: ms(tone_dur),
-        total_ms: ms(total),
-        encode_ms,
-        jxl_size_kb,
-        decode_ms,
-        direct_rgba_ms: Some(ms(direct_rgba_dur)),
-        decode_buffer_extract_ms: Some(0.0),
-        decode_region_downsample_ms: decode_ms,
-        source_pixels_decoded: Some((w * h) as u64),
-        decode_strategy: Some("full".to_string()),
-    });
+    push_full_row(rows, name.into_owned(), "DNG", w, h, size_mb, ms(decode_dur), demosaic_dur, &tone, total, encode_ms, jxl_size_kb, decode_ms);
 }
 
 fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
@@ -331,16 +407,16 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     params.wb_r = img.wb_r;
     params.wb_b = img.wb_b;
     params.color_matrix = img.color_matrix;
-    let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
-    let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
+    let tone = bench_tone_outputs(&rgb16, &params);
 
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
+    let (encode_ms, jxl_size_kb, decode_ms) =
+        bench_jxl_roundtrip(&tone.rgba8, &tone.rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
-    let total = decode_dur + demosaic_dur + tone_dur;
+    let total = decode_dur + demosaic_dur + tone.tone_dur;
     let demosaic_s = ms(demosaic_dur) / 1000.0;
     let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
@@ -348,36 +424,13 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
     println!(
         "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
-        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
+        ms(decode_dur), ms(demosaic_dur), mpps, ms(tone.tone_dur), ms(tone.direct_rgba_dur), ms(total)
     );
     println!("  WB R={:.3} B={:.3}  black={}  white={}  ISO={:?}", img.wb_r, img.wb_b, img.black, img.white, img.iso);
-    match (encode_ms, jxl_size_kb, decode_ms) {
-        (Some(enc), Some(sz), Some(dec)) =>
-            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
-        _ =>
-            println!("  jxl encode/decode: failed"),
-    }
+    print_jxl_result(encode_ms, jxl_size_kb, decode_ms);
     println!();
 
-    rows.push(BenchRow {
-        file: name.into_owned(),
-        format: "CR2",
-        width: w,
-        height: h,
-        size_mb,
-        decompress_ms: ms(decode_dur),
-        demosaic_ms: ms(demosaic_dur),
-        tonemap_ms: ms(tone_dur),
-        total_ms: ms(total),
-        encode_ms,
-        jxl_size_kb,
-        decode_ms,
-        direct_rgba_ms: Some(ms(direct_rgba_dur)),
-        decode_buffer_extract_ms: Some(0.0),
-        decode_region_downsample_ms: decode_ms,
-        source_pixels_decoded: Some((w * h) as u64),
-        decode_strategy: Some("full".to_string()),
-    });
+    push_full_row(rows, name.into_owned(), "CR2", w, h, size_mb, ms(decode_dur), demosaic_dur, &tone, total, encode_ms, jxl_size_kb, decode_ms);
 }
 
 fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
@@ -408,21 +461,17 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     if let Some(b) = info.wb_b { params.wb_b = b; }
     if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
 
-    // Measure clarity: cold (first call) vs warm (second, buf reused).
-    let mut cp = params.clone(); cp.clarity = 0.5;
-    let clarity_cold = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
-    let clarity_warm = { let mut t = rgb16.clone(); let s = Instant::now(); pipeline::apply_unsharp_masks(&mut t, w, h, &cp); s.elapsed() };
-
-    let (tone_dur, _rgb8) = bench(|| pipeline::process(&rgb16, &params));
-    let (direct_rgba_dur, rgba8) = bench(|| pipeline::process_rgba(&rgb16, &params));
+    let clarity = measure_clarity(&rgb16, w, h, &params);
+    let tone = bench_tone_outputs(&rgb16, &params);
 
     // Use direct RGBA + 4ch encode for the measured JXL path (Tauri direct-feed parity).
     // This never materializes a standalone owned 3ch RGB8 for the encode-only case.
     // Fallback to 3ch (from the tone result) if 4ch encode fails for this file (seen on some DNG test images).
-    let (encode_ms, jxl_size_kb, decode_ms) = bench_jxl_roundtrip(&rgba8, &_rgb8, w as u32, h as u32);
+    let (encode_ms, jxl_size_kb, decode_ms) =
+        bench_jxl_roundtrip(&tone.rgba8, &tone.rgb8, w as u32, h as u32);
 
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
-    let total = parse_dur + decomp_dur + demosaic_dur + tone_dur;
+    let total = parse_dur + decomp_dur + demosaic_dur + tone.tone_dur;
     let demosaic_s = ms(demosaic_dur) / 1000.0;
     let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
 
@@ -430,38 +479,15 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
     println!(
         "  parse {:.1}ms  decomp {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
-        ms(parse_dur), ms(decomp_dur), ms(demosaic_dur), mpps, ms(tone_dur), ms(direct_rgba_dur), ms(total)
+        ms(parse_dur), ms(decomp_dur), ms(demosaic_dur), mpps, ms(tone.tone_dur), ms(tone.direct_rgba_dur), ms(total)
     );
-    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity_cold), ms(clarity_warm), 100.0 * ms(clarity_warm) / ms(total));
-    match (encode_ms, jxl_size_kb, decode_ms) {
-        (Some(enc), Some(sz), Some(dec)) =>
-            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
-        _ =>
-            println!("  jxl encode/decode: failed"),
-    }
+    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity.cold), ms(clarity.warm), 100.0 * ms(clarity.warm) / ms(total));
+    print_jxl_result(encode_ms, jxl_size_kb, decode_ms);
     println!();
 
-    rows.push(BenchRow {
-        file: name.into_owned(),
-        format: "ORF",
-        width: w,
-        height: h,
-        size_mb,
-        // decompressMs = parse+decomp combined. WASM ProcessResult.decompress_ms
-        // covers only the decompress step; parse overhead is noted here.
-        decompress_ms: ms(parse_dur) + ms(decomp_dur),
-        demosaic_ms: ms(demosaic_dur),
-        tonemap_ms: ms(tone_dur),
-        total_ms: ms(total),
-        encode_ms,
-        jxl_size_kb,
-        decode_ms,
-        direct_rgba_ms: Some(ms(direct_rgba_dur)),
-        decode_buffer_extract_ms: Some(0.0),
-        decode_region_downsample_ms: decode_ms,
-        source_pixels_decoded: Some((w * h) as u64),
-        decode_strategy: Some("full".to_string()),
-    });
+    // decompressMs = parse+decomp combined. WASM ProcessResult.decompress_ms
+    // covers only the decompress step; parse overhead is noted here.
+    push_full_row(rows, name.into_owned(), "ORF", w, h, size_mb, ms(parse_dur) + ms(decomp_dur), demosaic_dur, &tone, total, encode_ms, jxl_size_kb, decode_ms);
 }
 
 // ─── Perf flipflop benches ────────────────────────────────────────────────────
@@ -996,3 +1022,57 @@ fn encode_full_proxy_jxl(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 // The bench conditionally re-exports the old `bench_jxl_decode_lowlevel_*` names from there
 // (see top of file) so that call sites in run_p2200_decode_roi_scan continue to work when the
 // feature is enabled. The shared module is the single source the Tauri side can depend on.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_to_json_escapes_strings() {
+        let rows = vec![BenchRow {
+            file: "quote\"slash\\line\n.orf".to_string(),
+            format: "ORF",
+            width: 1,
+            height: 1,
+            size_mb: 1.0,
+            decompress_ms: 2.0,
+            demosaic_ms: 3.0,
+            tonemap_ms: 4.0,
+            total_ms: 5.0,
+            encode_ms: None,
+            jxl_size_kb: None,
+            decode_ms: None,
+            direct_rgba_ms: None,
+            decode_buffer_extract_ms: None,
+            decode_region_downsample_ms: None,
+            source_pixels_decoded: None,
+            decode_strategy: Some("full\"strategy".to_string()),
+        }];
+
+        let json = rows_to_json(&rows, "2026-06-19T00:00:00Z");
+
+        assert!(json.contains("\"file\": \"quote\\\"slash\\\\line\\n.orf\""));
+        assert!(json.contains("\"decodeStrategy\": \"full\\\"strategy\""));
+    }
+
+    #[test]
+    fn median_dur_handles_even_odd_and_empty_inputs() {
+        let mut empty = Vec::new();
+        assert_eq!(median_dur(&mut empty), Duration::ZERO);
+
+        let mut odd = vec![
+            Duration::from_millis(9),
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+        ];
+        assert_eq!(median_dur(&mut odd), Duration::from_millis(5));
+
+        let mut even = vec![
+            Duration::from_millis(10),
+            Duration::from_millis(2),
+            Duration::from_millis(6),
+            Duration::from_millis(4),
+        ];
+        assert_eq!(median_dur(&mut even), Duration::from_millis(5));
+    }
+}

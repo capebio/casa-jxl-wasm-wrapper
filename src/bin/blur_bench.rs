@@ -66,6 +66,65 @@ fn k13() -> [f32; 13] {
 fn h_pass(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     let half = k.len() / 2;
     for y in 0..h {
+        let row = y * w * 3;
+
+        let left_end = half.min(w);
+        for x in 0..left_end {
+            let mut acc = [0f32; 3];
+            for (ki, &kv) in k.iter().enumerate() {
+                let xi =
+                    (x as isize + ki as isize - half as isize).clamp(0, w as isize - 1) as usize;
+                let b = row + xi * 3;
+                acc[0] += src[b] as f32 * kv;
+                acc[1] += src[b + 1] as f32 * kv;
+                acc[2] += src[b + 2] as f32 * kv;
+            }
+            let b = row + x * 3;
+            dst[b] = acc[0].round() as u16;
+            dst[b + 1] = acc[1].round() as u16;
+            dst[b + 2] = acc[2].round() as u16;
+        }
+
+        if w > half * 2 {
+            for x in half..(w - half) {
+                let mut acc = [0f32; 3];
+                let mut b = row + (x - half) * 3;
+                for &kv in k {
+                    acc[0] += src[b] as f32 * kv;
+                    acc[1] += src[b + 1] as f32 * kv;
+                    acc[2] += src[b + 2] as f32 * kv;
+                    b += 3;
+                }
+                let b = row + x * 3;
+                dst[b] = acc[0].round() as u16;
+                dst[b + 1] = acc[1].round() as u16;
+                dst[b + 2] = acc[2].round() as u16;
+            }
+        }
+
+        let right_start = half.max(w.saturating_sub(half));
+        for x in right_start..w {
+            let mut acc = [0f32; 3];
+            for (ki, &kv) in k.iter().enumerate() {
+                let xi =
+                    (x as isize + ki as isize - half as isize).clamp(0, w as isize - 1) as usize;
+                let b = row + xi * 3;
+                acc[0] += src[b] as f32 * kv;
+                acc[1] += src[b + 1] as f32 * kv;
+                acc[2] += src[b + 2] as f32 * kv;
+            }
+            let b = row + x * 3;
+            dst[b] = acc[0].round() as u16;
+            dst[b + 1] = acc[1].round() as u16;
+            dst[b + 2] = acc[2].round() as u16;
+        }
+    }
+}
+
+#[cfg(test)]
+fn h_pass_reference(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
+    let half = k.len() / 2;
+    for y in 0..h {
         for x in 0..w {
             let mut acc = [0f32; 3];
             for (ki, &kv) in k.iter().enumerate() {
@@ -111,15 +170,20 @@ fn v_pass_naive(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
 // inner loop for that last partial tile; all other tiles are exactly TILE wide.
 fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], dst: &mut [u16]) {
     let half = k.len() / 2;
+    let row_stride = w * 3;
     for y in 0..h {
+        let middle_y = y >= half && y + half < h;
         for x0 in (0..w).step_by(TILE) {
             let x1 = (x0 + TILE).min(w);
             let tile = x1 - x0;
             let mut acc = [[0f32; 3]; TILE];
             for (ki, &kv) in k.iter().enumerate() {
-                let yi =
-                    (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize;
-                let row = yi * w * 3;
+                let yi = if middle_y {
+                    y + ki - half
+                } else {
+                    (y as isize + ki as isize - half as isize).clamp(0, h as isize - 1) as usize
+                };
+                let row = yi * row_stride;
                 // Pointer advance (lens20): move ptr instead of recompute mul+add per pixel.
                 // SAFETY: tile, x0, yi validated by caller contract + clamp; bench synthetic data.
                 let mut sp = unsafe { src.as_ptr().add(row + x0 * 3) };
@@ -134,10 +198,14 @@ fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], d
                 }
             }
             for xi in 0..tile {
-                let b = (y * w + x0 + xi) * 3;
-                dst[b] = acc[xi][0].round() as u16;
-                dst[b + 1] = acc[xi][1].round() as u16;
-                dst[b + 2] = acc[xi][2].round() as u16;
+                let mut dp = unsafe { dst.as_mut_ptr().add(y * row_stride + (x0 + xi) * 3) };
+                unsafe {
+                    *dp = acc[xi][0].round() as u16;
+                    dp = dp.add(1);
+                    *dp = acc[xi][1].round() as u16;
+                    dp = dp.add(1);
+                    *dp = acc[xi][2].round() as u16;
+                }
             }
         }
     }
@@ -346,5 +414,41 @@ mod tests {
             full_roundtrip_variant_names().contains(&"tiled-128"),
             "full round-trip benchmark must include tiled-128 for Q3 verification"
         );
+    }
+
+    #[test]
+    fn h_pass_optimized_matches_reference() {
+        let w = 17;
+        let h = 9;
+        let n = w * h * 3;
+        let src: Vec<u16> = (0..n)
+            .map(|i| ((i * 251 + 17) % 65536) as u16)
+            .collect();
+        let kernel = k13();
+        let mut expected = vec![0u16; n];
+        let mut actual = vec![0u16; n];
+
+        h_pass_reference(&src, w, h, &kernel, &mut expected);
+        h_pass(&src, w, h, &kernel, &mut actual);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn v_pass_tiled_128_matches_naive_on_edges_and_tail() {
+        let w = 19;
+        let h = 11;
+        let n = w * h * 3;
+        let src: Vec<u16> = (0..n)
+            .map(|i| ((i * 193 + 29) % 65536) as u16)
+            .collect();
+        let kernel = k13();
+        let mut expected = vec![0u16; n];
+        let mut actual = vec![0u16; n];
+
+        v_pass_naive(&src, w, h, &kernel, &mut expected);
+        v_pass_tiled::<128>(&src, w, h, &kernel, &mut actual);
+
+        assert_eq!(actual, expected);
     }
 }

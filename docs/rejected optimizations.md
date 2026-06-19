@@ -662,3 +662,17 @@ Claim: "4 separate full-buffer reads; fusing psnr+channel_moments eliminates one
 **Item 6 — Hoist DNG tile decode endianness branch outside the inner loop.**
 Claim: "per-pixel `if le` + per-pixel bounds guard prevents compiler auto-vectorization; hoisting pre-validates size + splits into two tight loops for the compiler to vectorize".
 **Measured: hoisted 0.5% faster (geomean, 15 inputs, trust:low).** Individual results span −7% to +15% with no consistent direction. LLVM already strength-reduces the branched version: the `if sp + 2 > src.len() { break }` guard, despite appearing to be an unpredictable early-exit, is optimized by LLVM because the pre-loop allocation (`vec![0u16; rows * cols]`) guarantees `out` is exactly the right size, and `src.len() == rows * cols * 2` in all real inputs. Measured throughput for both variants: ≈ 2 ns/pixel (not the ~0.3 ns/pixel expected from SIMD). SIMD-level gains require explicit intrinsics or `target_feature = "+avx2"` — not obtainable from loop restructuring alone. **Rejected. Not worth restructuring dng.rs. Real vectorization requires SIMD intrinsics.**
+
+## 2026-06-19 — pipeline.rs ToneMap "optimization handoff" — four measured rejections
+
+Source: `docs/ai-unification/.../pipeline.rs-optimization-handoff` + the 0/1 architecture docs. Item-0 sub-span decomposition (`examples/tonemap_subspans.rs`, 24 MP) showed the ~70% "ToneMap" timer is **gather + f32↔int conversion bound (~72%)**, NOT build/copy/math: LUT build 7.9 ms (2% drag tax), tone math 10 ms, pre-gather 63 ms, post-gather/pack 106 ms, rgb16 clone 32 ms (serial). The handoff premise (rebuild + buffer copy dominate interactive latency) is **false by measurement**. Four follow-on ideas were spiked and rejected:
+
+**Handoff item 6 — replace LUT-build powf with polynomial.** Build is 2–6% of the frame; the sRGB EOTF is already cached as a lerp (committed). **Rejected — negligible.**
+
+**Architectural 3D preview LUT (RAW→OUT + trilinear), the "correct" form of items 9/10.** Per-channel 1D RAW→OUT is *incorrect* — the colour matrix mixes channels — so a 3D LUT was the only valid collapse. Spike `examples/preview3d_flip.rs`: **~3× SLOWER** (700–960 ms single-thread vs ~10 ns/px chain) — trilinear is 8 node lookups + ~21 lerps/channel, far more than the cheap small-LUT chain; and **accuracy fails** (maxΔ 46 @33³, 30 @65³/805 KB) with uniform nodes over the steep sRGB/tone region. **Rejected on both speed and quality.**
+
+**Compact/strided L1-resident post-LUT.** Spike `examples/postlut_cache_flip.rs`: the 64 KB post-LUT gather is already ~0.5 ns/lookup (37 ms/72 M, not L2-bound); strided **loses (0.77–0.83×)** — the extra shift costs more than any cache benefit. **Rejected.**
+
+**Handoff item 1 — move f32→u16 quantize out of the post gather loop.** Spike `examples/quantize_flip.rs`: splitting into a vectorizable convert pass + bare gather is **−21%** — the u16 intermediate's memory round-trip exceeds the convert saving. The inline `clamp+cast+gather` is the floor. **Rejected.**
+
+**Net:** the per-pixel tone *function* is at its memory floor; the only remaining lever is the *seam* — WASM multithreading (rayon+SAB; native parallel is ~5× over serial). Full per-doc outputs in `docs/outputs/ChatGPT plus Claude Outputs/Done Deal/`.
