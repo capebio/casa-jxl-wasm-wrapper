@@ -504,7 +504,10 @@ impl Decoder {
         if self.opts.keep_orientation {
             ffi::JxlDecoderSetKeepOrientation(dec, 1);
         }
-        let events = S_BASIC.0 | S_NEEDOUT.0 | S_FULL.0;
+        // libjxl 0.11: JXL_DEC_NEED_IMAGE_OUT_BUFFER=5 is a sequential return
+        // code (not a bit flag); JxlDecoderSubscribeEvents rejects values with
+        // bits 0-5 set. NEEDOUT is returned automatically without subscription.
+        let events = S_BASIC.0 | S_FULL.0;
         if ffi::JxlDecoderSubscribeEvents(dec, events) != S_SUCCESS {
             return Err(DecodeError::Process);
         }
@@ -646,7 +649,7 @@ impl Decoder {
         if self.opts.keep_orientation {
             ffi::JxlDecoderSetKeepOrientation(dec, 1);
         }
-        let events = S_BASIC.0 | S_PROG.0 | S_NEEDOUT.0 | S_FULL.0;
+        let events = S_BASIC.0 | S_PROG.0 | S_FULL.0;
         if ffi::JxlDecoderSubscribeEvents(dec, events) != S_SUCCESS {
             return Err(DecodeError::Process);
         }
@@ -869,7 +872,7 @@ where
         if dec.is_null() {
             return None;
         }
-        let events = S_BASIC.0 | S_PROG.0 | S_NEEDOUT.0 | S_FULL.0;
+        let events = S_BASIC.0 | S_PROG.0 | S_FULL.0;
         if ffi::JxlDecoderSubscribeEvents(dec, events) != S_SUCCESS {
             ffi::JxlDecoderDestroy(dec);
             return None;
