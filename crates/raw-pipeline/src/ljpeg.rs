@@ -447,10 +447,17 @@ fn decode_tile_impl<const COLLECT_STATS: bool>(
                 if interval != 0 { bail!("ljpeg: restart markers unsupported (DRI={})", interval); }
             }
             _ => {
-                // Skip unknown segment.
+                // Skip unknown segment. `seg_len` is attacker-controlled: guard
+                // the lower bound (>= 2) and the upper bound (advance must stay
+                // within the buffer) with checked arithmetic — on wasm32 a raw
+                // `pos += seg_len - 2` could leave `pos` past `src.len()`.
                 let seg_len = read_u16_be(src, &mut pos)? as usize;
                 if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
-                pos += seg_len - 2;
+                let next = match pos.checked_add(seg_len - 2) {
+                    Some(p) if p <= src.len() => p,
+                    _ => bail!("ljpeg: segment length {} runs past buffer", seg_len),
+                };
+                pos = next;
             }
         }
     }
@@ -613,6 +620,13 @@ fn decode_tile_impl<const COLLECT_STATS: bool>(
                 if emit_row {
                     let raw_col = col * cps + comp;
                     if raw_col < out_pixel_cols {
+                        // No per-write bounds check needed: emit_row gates row <
+                        // out_rows and raw_col < out_pixel_cols gates the column,
+                        // so the largest index reachable here is
+                        // base + (out_rows-1)*stride_pixels + (out_pixel_cols-1),
+                        // which is exactly `max_idx` validated < out.len() above
+                        // (outside this hot loop). Index is therefore always in
+                        // bounds; keep the inner loop free of redundant guards.
                         out[row_base + raw_col] = ((val << sos.point_transform) & 0xFFFF) as u16;
                     }
                 }
@@ -706,10 +720,17 @@ pub fn probe_tile(src: &[u8]) -> Result<TileInfo> {
             }
             0xD9 => bail!("ljpeg: EOI before SOF"),
             _ => {
-                // Skip unknown segment.
+                // Skip unknown segment. `seg_len` is attacker-controlled: guard
+                // the lower bound (>= 2) and the upper bound (advance must stay
+                // within the buffer) with checked arithmetic — on wasm32 a raw
+                // `pos += seg_len - 2` could leave `pos` past `src.len()`.
                 let seg_len = read_u16_be(src, &mut pos)? as usize;
                 if seg_len < 2 { bail!("ljpeg: segment length {} < 2", seg_len); }
-                pos += seg_len - 2;
+                let next = match pos.checked_add(seg_len - 2) {
+                    Some(p) if p <= src.len() => p,
+                    _ => bail!("ljpeg: segment length {} runs past buffer", seg_len),
+                };
+                pos = next;
             }
         }
     }

@@ -248,7 +248,12 @@ fn decode_tiles(
                 .ok_or_else(|| anyhow!("tile blit dst overflow"))?;
             let dst = out.get_mut(dst_base..dst_base + aw)
                 .ok_or_else(|| anyhow!("tile blit OOB dst_base={dst_base} aw={aw}"))?;
-            let src = &td.buf[src_base..src_base + aw];
+            // Clamp the SOURCE read to the actual decoded buffer length (DNG-002b):
+            // active_w/active_h are clamped to the *declared* SOF dims (buf_w/buf_h),
+            // but if the decoder produced a shorter buffer than declared, src_base+aw
+            // could read past td.buf. get() keeps reads inside the decoded buffer.
+            let src = td.buf.get(src_base..src_base + aw)
+                .ok_or_else(|| anyhow!("tile blit OOB src_base={src_base} aw={aw}"))?;
             dst.copy_from_slice(src);
         }
     }
@@ -279,6 +284,13 @@ fn decode_uncompressed(
         for tr in 0..rowtiles {
             for tc in 0..coltiles {
                 let idx = tr * coltiles + tc;
+                // Length guard before indexing, matching the compressed tile path
+                // (decode_tiles): file-supplied dims can yield an idx past the
+                // offset/byte-count arrays. Without this, indexing would panic on
+                // hostile input (DNG-001).
+                if idx >= raw.tile_offsets.len() || idx >= raw.tile_byte_counts.len() {
+                    bail!("uncompressed DNG: tile {idx} index out of range");
+                }
                 let off = raw.tile_offsets[idx] as usize;
                 let bc = raw.tile_byte_counts[idx] as usize;
                 // checked_add (000-security-11): off+bc can wrap usize on wasm32.
@@ -334,15 +346,32 @@ fn decode_uncompressed(
             let src = data
                 .get(off..end)
                 .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} OOB"))?;
-            let row_start = idx * rows_per_strip;
-            let row_end = (row_start + rows_per_strip).min(height);
+            // checked_mul/add (000-security-11 style): idx*rows_per_strip and the
+            // strip's last row can wrap usize on wasm32 for hostile strip counts,
+            // defeating the OOB bound below. Saturate row_start past `height` so the
+            // empty range simply skips the strip.
+            let row_start = idx
+                .checked_mul(rows_per_strip)
+                .unwrap_or(usize::MAX)
+                .min(height);
+            let row_end = row_start
+                .checked_add(rows_per_strip)
+                .unwrap_or(usize::MAX)
+                .min(height);
             let mut sp = 0usize;
             for r in row_start..row_end {
                 for c in 0..width {
                     if sp + 2 > src.len() {
                         bail!("uncompressed DNG: strip {idx} truncated");
                     }
-                    out[r * width + c] = if le {
+                    // Bound the destination index against the buffer (r*width+c can
+                    // overflow on hostile width; out.get_mut keeps writes in range).
+                    let dst = r
+                        .checked_mul(width)
+                        .and_then(|v| v.checked_add(c))
+                        .and_then(|i| out.get_mut(i))
+                        .ok_or_else(|| anyhow!("uncompressed DNG: strip {idx} dst OOB"))?;
+                    *dst = if le {
                         u16::from_le_bytes([src[sp], src[sp + 1]])
                     } else {
                         u16::from_be_bytes([src[sp], src[sp + 1]])
@@ -356,7 +385,19 @@ fn decode_uncompressed(
     bail!("uncompressed DNG: missing tile or strip offsets");
 }
 
+/// Trim a mosaic so its top-left pixel lands on the RGGB phase.
+///
+/// Returns `(slice, stride, height)`. NOTE: the second element is the row
+/// **STRIDE** (in pixels) of `slice`, NOT the logical/visible width. When a
+/// column is dropped (Grbg/Bggr) the logical width is one less than the stride,
+/// but the underlying buffer is still laid out with the original stride, so
+/// callers must keep using this stride for row arithmetic and treat
+/// `stride - col_off` as the visible width themselves. The returned slice length
+/// naturally bounds OOB reads.
 pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u16], usize, usize) {
+    // `width` is the row stride of `raw`; it is also the stride of every slice we
+    // return below (we never re-pack rows), hence named `stride` for the result.
+    let stride = width;
     let (row_off, col_off): (usize, usize) = match cfa {
         Cfa::Rggb => (0, 0),
         Cfa::Gbrg => (1, 0),
@@ -364,7 +405,7 @@ pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u
         Cfa::Bggr => (1, 1),
     };
     if row_off == 0 && col_off == 0 {
-        return (raw, width, height);
+        return (raw, stride, height);
     }
     // Trim columns first (shift start within each row), then trim rows.
     // For Grbg (col_off=1, row_off=0): drop col 0 → width-1, same height.
@@ -381,17 +422,18 @@ pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u
     // row_off with the adjusted width — callers iterate row by row and honour the
     // returned width, so this is safe and correct.
     if col_off == 0 {
-        let start = row_off * width;
-        return (&raw[start..start + new_h * width], width, new_h);
+        let start = row_off * stride;
+        // No column dropped: logical width == stride.
+        return (&raw[start..start + new_h * stride], stride, new_h);
     }
     // col_off == 1 (Grbg or Bggr): start at (row_off, col_off) and use new_w.
-    let start = row_off * width + col_off;
-    // The slice must cover new_h full rows of new_w pixels, but the raw buffer is
-    // laid out with stride=width; we return width as the stride so callers that do
-    // row-stride arithmetic remain correct.  We expose only the tail of the buffer
-    // from `start` onward — the slice length naturally limits OOB reads.
+    let start = row_off * stride + col_off;
+    // The slice must cover new_h full rows whose logical width is new_w, but the raw
+    // buffer is laid out with the original stride; we return `stride` (not new_w) so
+    // callers that do row-stride arithmetic remain correct. We expose only the tail
+    // of the buffer from `start` onward — the slice length naturally limits OOB reads.
     let available = raw.len().saturating_sub(start);
-    (&raw[start..start + available.min((new_h - 1) * width + new_w)], width, new_h)
+    (&raw[start..start + available.min((new_h - 1) * stride + new_w)], stride, new_h)
 }
 
 fn cfa_phase(cfa: Cfa) -> (u8, u8) {
@@ -566,6 +608,10 @@ fn walk(data: &[u8], off: usize, le: bool, state: &mut WalkState) {
                 // CFARepeatPatternDim — ignore (we assume 2x2)
             }
             0x828E => {
+                // CFAPattern: we only handle the standard 2x2 mosaic (exactly 4
+                // entries). Any other length (non-2x2 repeat, malformed, or absent
+                // tag) is an INTENTIONAL fallback to the RGGB default applied
+                // downstream — not a silent error.
                 let arr = read_array_u32(data, dtype, cnt, val, inline_pos, le);
                 if arr.len() == 4 {
                     ifd.cfa_pattern =
@@ -1492,11 +1538,13 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
 
     if rgb_write_row != ah {
         // Incomplete demosaic: fewer rows were written than the expected output
-        // height.  Emit a diagnostic instead of silently returning a zero-padded
-        // image (DNG-003 / ERR-004).  The partial output is retained rather than
-        // erroring so callers receive the best available data for a degraded file.
-        eprintln!(
-            "raw-pipeline: DNG demosaic wrote {} rgb rows but expected {} (width={}, gap={})",
+        // height. Previously this only eprintln!'d (invisible under wasm) and
+        // returned a zero-padded image. Since this fused path has no production
+        // caller (only decode_bytes_demosaiced, whose only callers are tests),
+        // surface the truncation as an error instead of silently degrading
+        // (DNG-003 / ERR-004).
+        bail!(
+            "raw-pipeline: DNG demosaic incomplete: wrote {} rgb rows but expected {} (width={}, gap={})",
             rgb_write_row, ah, aw, ah - rgb_write_row
         );
     }

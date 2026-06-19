@@ -1188,6 +1188,18 @@ pub fn demosaic_rggb_mhc_band(
     if num_rows == 0 {
         return Ok(());
     }
+    // PRECONDITION (enforced): `halo` must be even so that `r_c & 1 == global_row & 1`.
+    // This path derives CFA parity from the local context row `r_c = halo + first_local + br`
+    // and implicitly assumes phase (0,0) (RGGB). An odd `halo` inverts the local parity vs.
+    // the global frame parity, silently swapping R and B across the band — a wrong-colour bug.
+    // Enforce it once at entry, before any per-pixel work (never inside the row/col loops).
+    debug_assert_eq!(halo % 2, 0, "demosaic_rggb_mhc_band: halo must be even (RGGB phase precondition)");
+    if halo % 2 != 0 {
+        return Err(format!(
+            "demosaic: band halo must be even (got {}); odd halo inverts RGGB parity and swaps R/B",
+            halo
+        ));
+    }
     if width == 0 || ctx_h == 0 {
         return Err(format!("demosaic: band zero dimension {}×{}", width, ctx_h));
     }

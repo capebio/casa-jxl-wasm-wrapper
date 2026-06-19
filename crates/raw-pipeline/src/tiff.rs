@@ -598,10 +598,11 @@ pub(crate) fn visit_ifd<F: FnMut(u16, u16, u32, u32, usize)>(
 fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
     let off = entry.value_off as usize;
     let data = r.data;
-    if off + 12 > data.len() {
+    // SEC: off + 12 can overflow usize on wasm32 when off is a file-supplied
+    // value; use checked_add and a bounds-safe slice instead of a direct index.
+    let Some(head) = off.checked_add(12).and_then(|end| data.get(off..end)) else {
         return;
-    }
-    let head = &data[off..off + 12];
+    };
     // Try modern OLYMPUS header (12 bytes), then legacy OLYMP (8 bytes).
     let (sub_off, base_off) = if head.starts_with(b"OLYMPUS\0") {
         (off + 12, off)
@@ -995,8 +996,12 @@ pub fn bench_tone_split_orf(data: &[u8]) -> Result<(f64, f64)> {
     }
     let w = info.width as usize;
     let h = info.height as usize;
-    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
-    let strip = &data[info.strip_offset as usize..strip_end];
+    let strip_start = info.strip_offset as usize;
+    let strip_end = strip_start
+        .checked_add(info.strip_byte_count as usize)
+        .ok_or_else(|| anyhow!("strip range overflow"))?;
+    let strip = data.get(strip_start..strip_end)
+        .ok_or_else(|| anyhow!("strip OOB ({strip_start}..{strip_end} > {})", data.len()))?;
     let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
     let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let params = crate::pipeline::PipelineParams::default_olympus();
@@ -1013,8 +1018,12 @@ pub fn bench_tone_e2e_orf(data: &[u8]) -> Result<(f64, f64, u8, usize)> {
     }
     let w = info.width as usize;
     let h = info.height as usize;
-    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
-    let strip = &data[info.strip_offset as usize..strip_end];
+    let strip_start = info.strip_offset as usize;
+    let strip_end = strip_start
+        .checked_add(info.strip_byte_count as usize)
+        .ok_or_else(|| anyhow!("strip range overflow"))?;
+    let strip = data.get(strip_start..strip_end)
+        .ok_or_else(|| anyhow!("strip OOB ({strip_start}..{strip_end} > {})", data.len()))?;
     let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
     let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let params = crate::pipeline::PipelineParams::default_olympus();
@@ -1056,8 +1065,12 @@ pub fn bench_tone_stage_3way_orf(data: &[u8]) -> Result<(f64, f64, f64)> {
     }
     let w = info.width as usize;
     let h = info.height as usize;
-    let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
-    let strip = &data[info.strip_offset as usize..strip_end];
+    let strip_start = info.strip_offset as usize;
+    let strip_end = strip_start
+        .checked_add(info.strip_byte_count as usize)
+        .ok_or_else(|| anyhow!("strip range overflow"))?;
+    let strip = data.get(strip_start..strip_end)
+        .ok_or_else(|| anyhow!("strip OOB ({strip_start}..{strip_end} > {})", data.len()))?;
     let raw = crate::decompress::decompress(strip, w, h).map_err(|e| anyhow!("{e}"))?;
     let rgb16 = crate::demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| anyhow!("{e}"))?;
     let params = crate::pipeline::PipelineParams::default_olympus();

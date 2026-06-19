@@ -87,14 +87,35 @@ pub struct ScratchBuffers {
 
 #[inline(always)]
 fn read_u16(data: &[u8], off: usize, le: bool) -> u16 {
-    let b = &data[off..off + 2];
-    if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) }
+    // Bounds-safe (mirrors dng::read_u16). Returns 0 on OOB/overflow; for valid files the
+    // offset is always in range so this is output-identical. Direct `&data[off..off + 2]`
+    // panics on OOB and `off + 2` can wrap on 32-bit/wasm.
+    let end = match off.checked_add(2) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match data.get(off..end) {
+        Some(b) => {
+            if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) }
+        }
+        None => 0,
+    }
 }
 
 #[inline(always)]
 fn read_u32(data: &[u8], off: usize, le: bool) -> u32 {
-    let b = &data[off..off + 4];
-    if le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) }
+    // Bounds-safe (mirrors dng::read_u32). Returns 0 on OOB/overflow; for valid files the
+    // offset is always in range so this is output-identical.
+    let end = match off.checked_add(4) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match data.get(off..end) {
+        Some(b) => {
+            if le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) }
+        }
+        None => 0,
+    }
 }
 
 fn type_size(t: u16) -> usize {
@@ -113,7 +134,9 @@ fn entry_first_u32(data: &[u8], dtype: u16, cnt: u32, val: u32, inline_pos: usiz
     if ts == 0 { return None; }
     let bytes = ts * cnt as usize;
     let p = if bytes <= 4 { inline_pos } else { val as usize };
-    if p + ts > data.len() { return None; }
+    // Checked add: `p` and `ts` are file-controlled; `p + ts` can wrap on 32-bit/wasm and
+    // defeat the bounds guard. OOB/overflow returns None (unchanged for valid files).
+    if p.checked_add(ts).map_or(true, |e| e > data.len()) { return None; }
     match dtype {
         1 | 6 => data.get(p).map(|&b| b as u32),
         3 | 8 => Some(read_u16(data, p, le) as u32),
@@ -379,7 +402,8 @@ fn decode_impl(
         0xC640 if dtype == 3 && cnt >= 3 => {
             let bytes = 2 * cnt as usize;
             let p = if bytes <= 4 { ip } else { val as usize };
-            if p + 6 <= data.len() {
+            // Checked add: `p + 6` can wrap on 32-bit/wasm and spuriously pass the guard.
+            if p.checked_add(6).map_or(false, |e| e <= data.len()) {
                 cr2_slices[0] = read_u16(data, p,     le);
                 cr2_slices[1] = read_u16(data, p + 2, le);
                 cr2_slices[2] = read_u16(data, p + 4, le);
@@ -405,10 +429,14 @@ fn decode_impl(
 
     let strip_off = strip_offset     as usize;
     let strip_len = strip_byte_count as usize;
-    if strip_off + strip_len > data.len() {
-        bail!("CR2: strip [{}..{}] out of bounds (file size {})",
-              strip_off, strip_off + strip_len, data.len());
-    }
+    // Checked add: strip_off/strip_len are file-controlled; `strip_off + strip_len` can wrap
+    // on 32-bit/wasm and pass the guard, then `&data[strip_off..strip_off + strip_len]` (below)
+    // would panic. Reject on overflow or OOB. Unchanged for valid files.
+    let strip_end = match strip_off.checked_add(strip_len) {
+        Some(e) if e <= data.len() => e,
+        _ => bail!("CR2: strip [off={}, len={}] out of bounds (file size {})",
+                   strip_off, strip_len, data.len()),
+    };
 
     // -----------------------------------------------------------------------
     // SOF3 parse
@@ -468,7 +496,7 @@ fn decode_impl(
 
     raw_buf.resize(total_pixels, 0);
 
-    let strip_bytes = &data[strip_off..strip_off + strip_len];
+    let strip_bytes = &data[strip_off..strip_end];
     let t_ljpeg = time_phases.then(std::time::Instant::now);
     let ljpeg_stats = if capture_stats {
         let s = ljpeg::decode_tile_stats(strip_bytes, raw_buf, 0, stride, stride, sof_h)
