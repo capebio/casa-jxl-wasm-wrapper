@@ -6,9 +6,11 @@ mod blur;
 pub(crate) mod butteraugli;
 mod psnr;
 pub(crate) mod ssim;
+pub mod telemetry;
 pub(crate) mod xyb;
 mod simd;
 pub use simd::{detect_native, Backend};
+pub use telemetry::{TelemetryMetrics, RgbHistogram, analyze_fused};
 
 pub use butteraugli::Kweights;
 
