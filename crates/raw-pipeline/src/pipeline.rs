@@ -26,8 +26,8 @@ pub const MAX_PIXEL_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Validate width×height×channels fits the memory budget.
 pub fn validate_pixel_dims(width: usize, height: usize, channels: usize) -> Result<(), String> {
-    if width == 0 || height == 0 {
-        return Err(format!("pixel dimensions must be positive, got {width}×{height}"));
+    if width == 0 || height == 0 || channels == 0 {
+        return Err(format!("pixel dimensions must be positive, got {width}×{height}×{channels}"));
     }
     let bytes = width
         .checked_mul(height)
@@ -190,6 +190,9 @@ fn srgb_encode_lerp(y: f32) -> f32 {
 
 #[inline]
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    if (b - a).abs() < f32::EPSILON {
+        return if x >= b { 1.0 } else { 0.0 };
+    }
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -480,8 +483,13 @@ fn build_pre_lut(black: u16, white: u16, wb_eff: f32, exp_gain: f32) -> Vec<u16>
     lut
 }
 
+/// Build a power-of-two pre-LUT of size `lut_len` (≤ 65536).
+/// **Access pattern**: index via `raw_value & (lut_len - 1)` (bitwise mask).
+/// This covers the common case where `white < lut_len` so all valid raw values index directly.
+/// For the strided (compact 4096-entry) variant accessed via `raw_value >> COMPACT_LUT_SHIFT`, use
+/// `build_pre_lut_strided` instead. Do not mix the two access patterns.
 fn build_pre_lut_compact(black: u16, white: u16, wb_eff: f32, exp_gain: f32, lut_len: usize) -> Vec<u16> {
-    debug_assert!(lut_len.is_power_of_two() && lut_len <= 65536);
+    assert!(lut_len.is_power_of_two() && lut_len <= 65536, "build_pre_lut_compact: lut_len must be a power of two ≤ 65536, got {lut_len}");
     let mut lut = vec![0u16; lut_len];
     let denom = (white.saturating_sub(black)).max(1) as f32;
     let gain = wb_eff * exp_gain;
@@ -534,6 +542,10 @@ struct LutCache {
     pre_lut_shift: u32,
     compact_lut: bool,
 }
+
+// All fields are either plain integers, bool, or Arc<Vec<_>> which are Send.
+// This compile-time assertion catches future non-Send field additions.
+fn _assert_lut_cache_send() where LutCache: Send {}
 
 impl LutCache {
     /// Pre-LUT validity: depends ONLY on the linearisation params (black/white/WB/exposure/compact).
@@ -615,7 +627,10 @@ fn build_pre_luts(
             COMPACT_LUT_SHIFT,
         )
     } else {
-        let lut_len = (params.white as usize + 1).next_power_of_two().min(65536);
+        // Use a full 65536-entry LUT so the mask `& (lut_len - 1)` never wraps raw values
+        // that exceed white (e.g. hot pixels or unclamped sensor values). With lut_len == 65536
+        // the mask `0xFFFF` is an identity for all u16 inputs.
+        let lut_len = 65536usize;
         (
             std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, lut_len)),
             std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, lut_len)),
@@ -628,9 +643,10 @@ fn build_pre_luts(
 
 /// Item-0 instrumentation: time one full LUT (re)build — the cost paid on every slider drag when
 /// tone/WB/exposure change (an `ensure_lut` miss rebuilds all tables). Returns `(pre3_ms, post_ms)`:
-/// `pre3` = three pre-LUTs (`build_pre_lut` ×3, WB/exposure/black-white), `post` = the 65536-entry
+/// `pre3` = three pre-LUTs (65536-entry WB/exposure/black-white), `post` = the 65536-entry
 /// tone post-LUT (`tone_curve`, powf-heavy). Build parallelism follows the crate feature, so call
 /// it under `--no-default-features` to see the serial cost the wasm interactive path actually pays.
+/// Note: uses `build_pre_lut` (65536-entry) which matches the non-compact production path.
 pub fn bench_lut_build_ms(params: &PipelineParams) -> (f64, f64) {
     let ti = derive_tone_inputs(params);
     let t = std::time::Instant::now();
@@ -1006,15 +1022,14 @@ pub fn perceptual_apply_bulk(
     vib_zero: bool,
 ) {
     let n = r.len();
-    debug_assert_eq!(g.len(), n);
-    debug_assert_eq!(b.len(), n);
-    debug_assert_eq!(out_r.len(), n);
-    debug_assert_eq!(out_g.len(), n);
-    debug_assert_eq!(out_b.len(), n);
+    assert_eq!(g.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(b.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(out_r.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(out_g.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(out_b.len(), n, "perceptual_apply_bulk: all slices must be the same length");
     if n == 0 {
         return;
     }
-    let start = std::time::Instant::now();
     unsafe {
         perceptual_apply_full_avx2(
             r.as_ptr(),
@@ -1029,9 +1044,6 @@ pub fn perceptual_apply_bulk(
             if vib_zero { 1 } else { 0 },
         );
     }
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-    // Hook for benchmarking the SoA bulk (C++ AVX2 or scalar) vs old per-pixel path.
-    eprintln!("perceptual_bulk_ms: {:.3}", elapsed_ms);
 }
 
 #[inline(always)]
@@ -1069,19 +1081,21 @@ pub fn apply_tone_math(
         }
         #[cfg(not(feature = "c-perceptual"))]
         {
-            // Rust reference now accelerated by PerceptualGrid (coarse 9^3 + trilinear) for the Lens17 advanced.
-            // Grid built for fixed scale~1 / vibz (matches common constancy mode). For varying sat/vib use full runtime (or rebuild grid).
-            // Big win: replaces per-px ln/exp/sqrt/abs with ~12 muls + loads (sub-ms target when on for AR/LLM).
+            // Rust reference now accelerated by PerceptualGrid (coarse 17^3 + trilinear) for the Lens17 advanced.
+            // Grid built for fixed scale~1 / vibz in normalized [0, 1.5] space.
+            // Inputs (r2/g2/b2) are post-matrix values in [0, 65535]; normalize to [0, 1.5] before sampling.
+            let norm = 1.0 / 65535.0;
             let (rr, gg, bb) = PERCEPTUAL_GRID.with(|g| {
                 let mut opt = g.borrow_mut();
                 if opt.is_none() {
                     *opt = Some(PerceptualGrid::new());
                 }
-                opt.as_ref().unwrap().sample(r2, g2, b2)
+                opt.as_ref().unwrap().sample(r2 * norm, g2 * norm, b2 * norm)
             });
-            r2 = rr;
-            g2 = gg;
-            b2 = bb;
+            // Grid output is in [0, 1.5]; scale back to [0, 65535] for the post-LUT.
+            r2 = rr * 65535.0;
+            g2 = gg * 65535.0;
+            b2 = bb * 65535.0;
         }
     } else {
         // 2) Saturation + vibrance around luma (hoisted coeffs, restructured div once, mul_add).
@@ -1217,7 +1231,9 @@ fn apply_tone_math4(
 struct ToneInputs { pub exp_gain: f32, pub wb_r: f32, pub wb_g: f32, pub wb_b: f32, pub tone: TonePost, pub sat: f32, pub vib: f32, pub vib_zero: bool, pub perceptual_constancy: bool,
     /// When the default path applies (`vib_zero && !perceptual_constancy`), the colour matrix
     /// and around-luma saturation are pre-fused into ONE 3×3 (`S·M`) so per-pixel tone is a
-    /// single matvec — no luma, no blend. `None` ⇒ vibrance active or perceptual constancy on.
+    /// single matvec — no luma, no blend.
+    /// Invariant: `matrix_fused == Some(_) ⟺ vib_zero && !perceptual_constancy`.
+    /// `None` ⇒ vibrance active OR perceptual constancy enabled (both require runtime luma).
     pub matrix_fused: Option<[[f32; 3]; 3]> }
 
 fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
@@ -1317,12 +1333,12 @@ pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
     out
 }
 
-/// T2: like `process` but writes into a caller-owned buffer (must be exactly rgb16.len() bytes).
+/// T2: like `process` but writes into a caller-owned buffer (must be exactly rgb16.len() elements).
 /// Lets the interactive LookRenderer reuse one output buffer across re-renders instead of
 /// allocating + zeroing a fresh Vec each slider tick. Output is byte-identical to `process`.
 pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
-    debug_assert_eq!(rgb16.len() % 3, 0);
-    assert_eq!(out.len(), rgb16.len(), "process_into: out must be rgb16.len() bytes");
+    assert_eq!(rgb16.len() % 3, 0, "process_into: rgb16.len() must be divisible by 3");
+    assert_eq!(out.len(), rgb16.len(), "process_into: out must have rgb16.len() elements");
     let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
@@ -1332,7 +1348,7 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
         LUT_CACHE.with(|cache_cell| {
             ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
             let cache = cache_cell.borrow();
-            let c = cache.as_ref().unwrap();
+            let c = cache.as_ref().expect("ensure_lut must populate the cache");
             let pre_lut_mask = c.pre_lut_len - 1;
             let pre_lut_shift = c.pre_lut_shift;
 
@@ -1445,9 +1461,9 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
 /// (perceptual_constancy must be false).
 pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     debug_assert_eq!(rgb16.len() % 3, 0);
-    assert_eq!(out.len(), rgb16.len(), "process_into_simd: out must be rgb16.len() bytes");
+    assert_eq!(out.len(), rgb16.len(), "process_into_simd: out must be rgb16.len() elements");
     let ti = derive_tone_inputs(params);
-    debug_assert!(!ti.perceptual_constancy, "process_into_simd is the plain ingest path only");
+    assert!(!ti.perceptual_constancy, "process_into_simd is the plain ingest path only; use process_into for perceptual_constancy");
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
     let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
@@ -1540,6 +1556,8 @@ pub fn bench_tone_stage_3way(rgb16: &[u16], params: &PipelineParams) -> (f64, f6
     let lut_len = (params.white as usize + 1).next_power_of_two().min(65536);
     let lut_mask = lut_len - 1;
     let pre_r = build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, lut_len);
+    let pre_g = build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, lut_len);
+    let pre_b = build_pre_lut_compact(params.black, params.white, ti.wb_b, ti.exp_gain, lut_len);
     let post = build_post_lut(&ti.tone);
 
     let np = rgb16.len() / 3;
@@ -1556,8 +1574,8 @@ pub fn bench_tone_stage_3way(rgb16: &[u16], params: &PipelineParams) -> (f64, f6
         let cnt = (np - p).min(BLK);
         for i in 0..cnt {
             r[i] = pre_r[rgb16[(p + i) * 3]     as usize & lut_mask] as f32;
-            g[i] = pre_r[rgb16[(p + i) * 3 + 1] as usize & lut_mask] as f32;
-            b[i] = pre_r[rgb16[(p + i) * 3 + 2] as usize & lut_mask] as f32;
+            g[i] = pre_g[rgb16[(p + i) * 3 + 1] as usize & lut_mask] as f32;
+            b[i] = pre_b[rgb16[(p + i) * 3 + 2] as usize & lut_mask] as f32;
         }
         p += cnt;
     }
@@ -1880,7 +1898,7 @@ pub fn process_16bit_scalar(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> 
 pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     debug_assert_eq!(rgb16.len() % 3, 0);
     let ti = derive_tone_inputs(params);
-    debug_assert!(!ti.perceptual_constancy, "process_16bit_simd is the plain ingest path only");
+    assert!(!ti.perceptual_constancy, "process_16bit_simd is the plain ingest path only; use process_16bit_scalar for perceptual_constancy");
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
     let n = rgb16.len() / 3;
@@ -1952,22 +1970,22 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
         let ystep = sh / dh;
-        let n_px = (xstep * ystep) as u32;
+        let n_px = (xstep * ystep) as u64;
         #[cfg(feature = "parallel")]
         let iter = out.par_chunks_mut(dw * 3);
         #[cfg(not(feature = "parallel"))]
         let iter = out.chunks_mut(dw * 3);
         iter.enumerate().for_each(|(dy, row)| {
             for dx in 0..dw {
-                let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                let (mut rr, mut gg, mut bb) = (0u64, 0u64, 0u64);
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let base = (y * sw + dx * xstep) * 3;
                     for xx in 0..xstep {
                         let i = base + xx * 3;
-                        rr += src[i] as u32;
-                        gg += src[i + 1] as u32;
-                        bb += src[i + 2] as u32;
+                        rr += src[i] as u64;
+                        gg += src[i + 1] as u64;
+                        bb += src[i + 2] as u64;
                     }
                 }
                 let o = dx * 3;
@@ -2029,24 +2047,24 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
         let ystep = sh / dh;
-        let n = (xstep * ystep) as u32;
+        let n = (xstep * ystep) as u64;
         #[cfg(feature = "parallel")]
         let iter = out.par_chunks_mut(dw * 3);
         #[cfg(not(feature = "parallel"))]
         let iter = out.chunks_mut(dw * 3);
         iter.enumerate().for_each(|(dy, row)| {
             for dx in 0..dw {
-                let mut rr = 0u32;
-                let mut gg = 0u32;
-                let mut bb = 0u32;
+                let mut rr = 0u64;
+                let mut gg = 0u64;
+                let mut bb = 0u64;
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let base = (y * sw + dx * xstep) * 3;
                     for xx in 0..xstep {
                         let i = base + xx * 3;
-                        rr += src[i] as u32;
-                        gg += src[i + 1] as u32;
-                        bb += src[i + 2] as u32;
+                        rr += src[i] as u64;
+                        gg += src[i + 1] as u64;
+                        bb += src[i + 2] as u64;
                     }
                 }
                 let o = dx * 3;
@@ -2088,6 +2106,9 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
 
 /// Target dims for long-edge resize (preserves aspect, min 1).
 pub fn target_dims(w: usize, h: usize, long_edge: usize) -> (usize, usize) {
+    if w == 0 || h == 0 {
+        return (long_edge.max(1), long_edge.max(1));
+    }
     if w >= h {
         let lw = w.min(long_edge);
         (lw, ((h * lw) / w).max(1))
@@ -2855,6 +2876,74 @@ mod tonemap_flip_flops {
             }
             let (f, wm) = (median(full), median(warm));
             eprintln!("B4-rgb16cache\t{}\t{:.4}\t{:.4}\t{:.2}x", label, f, wm, f / wm);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lut_property_tests {
+    use super::*;
+
+    /// pre-LUT must be monotonically non-decreasing (higher raw values ≥ same or higher output).
+    #[test]
+    fn pre_lut_monotone_strided() {
+        let lut = build_pre_lut_strided(64, 4095, 1.78, 1.0);
+        for i in 1..lut.len() {
+            assert!(lut[i] >= lut[i - 1], "strided LUT not monotone at index {i}: {} < {}", lut[i], lut[i - 1]);
+        }
+    }
+
+    #[test]
+    fn pre_lut_monotone_compact() {
+        let lut = build_pre_lut_compact(64, 4095, 1.78, 1.0, 65536);
+        for i in 1..lut.len() {
+            assert!(lut[i] >= lut[i - 1], "compact LUT not monotone at index {i}: {} < {}", lut[i], lut[i - 1]);
+        }
+    }
+
+    /// Raw values above white must not wrap to a lower output than the white-point entry.
+    /// With lut_len=65536 and mask=0xFFFF all u16 values index within [0, 65535] safely.
+    #[test]
+    fn pre_lut_above_white_does_not_wrap() {
+        let white = 4095u16;
+        let lut = build_pre_lut_compact(64, white, 1.0, 1.0, 65536);
+        let at_white = lut[white as usize];
+        // Values above white should saturate to the same top value (highlight shoulder clamps to 1.0).
+        for raw in (white as usize + 1)..=65535 {
+            let v = lut[raw];
+            assert!(v >= at_white, "raw {raw} mapped below white-point value ({v} < {at_white})");
+        }
+    }
+
+    /// channels=0 must be rejected by validate_pixel_dims.
+    #[test]
+    fn validate_pixel_dims_rejects_zero_channels() {
+        let err = validate_pixel_dims(10, 10, 0).unwrap_err();
+        assert!(err.contains("positive"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tone_simd_near_zero_tests {
+    use crate::tone_simd::apply_tone_bulk_ref;
+
+    /// Near-zero raw_mx guard in vibrance path: very dark pixels must not produce NaN or Inf.
+    #[test]
+    fn vibrance_near_zero_raw_mx() {
+        const M: [[f32; 3]; 3] = [
+            [1.526, -0.450, -0.077],
+            [-0.245,  1.336, -0.091],
+            [ 0.018, -0.298,  1.281],
+        ];
+        let mut r = vec![0.0f32, 1e-7, 0.0];
+        let mut g = vec![0.0f32, 0.0, 1e-7];
+        let mut b = vec![0.0f32, 0.0, 0.0];
+        // vib_zero=false forces the vibrance path which has the raw_mx > 0 guard.
+        apply_tone_bulk_ref(&mut r, &mut g, &mut b, &M, 1.3, 0.5, false);
+        for i in 0..r.len() {
+            assert!(r[i].is_finite(), "r[{i}] = {} is not finite", r[i]);
+            assert!(g[i].is_finite(), "g[{i}] = {} is not finite", g[i]);
+            assert!(b[i].is_finite(), "b[{i}] = {} is not finite", b[i]);
         }
     }
 }

@@ -157,6 +157,9 @@ unsafe fn apply_tone_bulk_avx2(
     r: &mut [f32], g: &mut [f32], b: &mut [f32],
     m: &[[f32; 3]; 3], sat: f32, vib: f32, vib_zero: bool, n: usize,
 ) {
+    // Safety: caller (apply_tone_bulk) passes n = min(r.len(), g.len(), b.len()) so all
+    // three slices are guaranteed to have at least n elements.
+    debug_assert!(n <= r.len() && n <= g.len() && n <= b.len());
     use core::arch::x86_64::*;
     let lanes = n / 8 * 8;
     let mut i = 0;
@@ -336,6 +339,10 @@ pub fn apply_tone_fused_u16_u8(
     m: &[[f32; 3]; 3], sat: f32, vib: f32, vib_zero: bool,
     out: &mut [u8],
 ) {
+    // Each pre-LUT must cover the full u16 range so that rgb16[i] (any u16 value) is a valid index.
+    assert!(pre_r.len() >= 65536, "apply_tone_fused_u16_u8: pre_r must have at least 65536 entries");
+    assert!(pre_g.len() >= 65536, "apply_tone_fused_u16_u8: pre_g must have at least 65536 entries");
+    assert!(pre_b.len() >= 65536, "apply_tone_fused_u16_u8: pre_b must have at least 65536 entries");
     const BLK: usize = 2048;
     let np = (rgb16.len() / 3).min(out.len() / 3);
     // One reused stack scratch (zeroed once), not a fresh zeroed buffer per block.

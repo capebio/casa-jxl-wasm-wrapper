@@ -14,7 +14,7 @@ const maybe = existsSync(PORTRAIT_DNG) ? test : test.skip;
 const OUT_FULL_RGB8 = 1;
 const OUT_LIGHTBOX  = 2;
 const OUT_THUMB     = 4;
-const OUT_NO_ORIENT = 8;
+const OUT_NO_ORIENT = 16;
 
 async function encodeOnce(rgb, w, h, orientation) {
     const encoder = createEncoder({
