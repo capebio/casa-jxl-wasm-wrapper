@@ -10,6 +10,11 @@ pub mod telemetry;
 pub(crate) mod xyb;
 mod simd;
 pub use simd::{detect_native, Backend};
+// wasm-only: surface the v128 kernels so the bench-wasm harness can A/B them in a
+// real wasm runtime (the kernels are arch-gated internally, so this is invisible to
+// native builds and adds no native API surface).
+#[cfg(target_arch = "wasm32")]
+pub use simd::wasm as wasm_kernels;
 pub use telemetry::{TelemetryMetrics, RgbHistogram, analyze_fused};
 
 pub use butteraugli::Kweights;

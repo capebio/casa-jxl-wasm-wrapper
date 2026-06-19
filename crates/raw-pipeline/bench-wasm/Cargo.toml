@@ -1,0 +1,23 @@
+# Standalone wasm-SIMD bench harness for the perceptual kernels. NOT part of the
+# raw-pipeline build — its own workspace so the parent never adopts it. Build with:
+#   RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target nodejs --release
+[package]
+name = "perceptual-bench-wasm"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Empty workspace table => this crate is its own workspace root; the parent repo
+# workspace (if any) will not try to compile it during normal builds.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+raw-pipeline = { path = "..", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
