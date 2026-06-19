@@ -448,7 +448,7 @@ impl Encoder {
         // Lossless requires the original profile to be preserved bit-exact.
         info.uses_original_profile =
             if lossless || self.opts.uses_original_profile { JXL_TRUE } else { JXL_FALSE };
-        check(ffi::JxlEncoderSetBasicInfo(enc, &info), "JxlEncoderSetBasicInfo")?;
+        check_enc(ffi::JxlEncoderSetBasicInfo(enc, &info), "JxlEncoderSetBasicInfo", enc)?;
 
         // ── declare planar extra channels (mandatory init) ─────────────────
         // Interleaved alpha is handled by libjxl from alpha_bits + the 4th
@@ -529,7 +529,7 @@ impl Encoder {
             align: 0,
         };
         let color_bytes = std::mem::size_of_val(frame.color);
-        check(
+        check_enc(
             ffi::JxlEncoderAddImageFrame(
                 fs,
                 &pf,
@@ -537,6 +537,7 @@ impl Encoder {
                 color_bytes,
             ),
             "JxlEncoderAddImageFrame",
+            enc,
         )?;
 
         // ── supply planar extra-channel buffers (zero-copy) ────────────────
@@ -612,6 +613,22 @@ fn check(status: ffi::JxlEncoderStatus, what: &str) -> Result<(), EncodeError> {
         Ok(())
     } else {
         Err(EncodeError::Jxl(format!("{what} failed")))
+    }
+}
+
+/// Like `check` but also surfaces the libjxl error code for diagnostics.
+unsafe fn check_enc(
+    status: ffi::JxlEncoderStatus,
+    what: &str,
+    enc: *mut ffi::JxlEncoder,
+) -> Result<(), EncodeError> {
+    if status == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
+        Ok(())
+    } else {
+        Err(EncodeError::Jxl(format!(
+            "{what} failed (code {})",
+            encoder_error_code(enc)
+        )))
     }
 }
 

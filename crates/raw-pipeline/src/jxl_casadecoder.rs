@@ -269,6 +269,11 @@ impl Decoder {
             } else {
                 std::ptr::null_mut()
             };
+            // Reconcile opts.parallel with the actual runner state: if runner
+            // creation failed (null), opts.parallel must reflect single-threaded
+            // reality so attach_runner and callers are not misled.
+            let mut opts = opts;
+            opts.parallel = !runner.is_null();
             Some(Decoder {
                 handle,
                 runner,
@@ -412,12 +417,26 @@ impl Decoder {
             let src_off = ((y + ry) as usize * full.width as usize + x as usize) * cc;
             data.extend_from_slice(&full.data[src_off..src_off + row]);
         }
+        // Crop extra planes (depth, spectral, thermal, etc.) to the same region.
+        // Each extra plane is planar: width * height samples, one sample per pixel.
+        let extra: Vec<ExtraPlane<S>> = full
+            .extra
+            .into_iter()
+            .map(|plane| {
+                let mut plane_data: Vec<S> = Vec::with_capacity(h as usize * w as usize);
+                for ry in 0..h {
+                    let src_off = (y + ry) as usize * full.width as usize + x as usize;
+                    plane_data.extend_from_slice(&plane.data[src_off..src_off + w as usize]);
+                }
+                ExtraPlane { index: plane.index, data: plane_data }
+            })
+            .collect();
         Ok(Image {
             width: w,
             height: h,
             channels: ch.count(),
             data,
-            extra: Vec::new(),
+            extra,
             meta: full.meta,
         })
     }
@@ -442,6 +461,10 @@ impl Decoder {
     pub fn time_full_decode(&mut self, jxl: &[u8]) -> Result<DecodeMetrics, DecodeError> {
         let mut scratch: Vec<u8> = Vec::new();
         let t0 = Instant::now();
+        // Always requests 4-channel (RGBA8) output regardless of actual channel count.
+        // For grayscale JXL inputs this inflates measured output_bytes by 4× and
+        // includes a channel-upsample overhead not present in real usage. The timing
+        // is still a valid upper bound for photo (RGBA) decodes.
         let r = unsafe { self.run_full_into::<u8>(jxl, 4, &mut scratch, false) };
         let elapsed = t0.elapsed();
         unsafe { ffi::JxlDecoderReset(self.handle) };
@@ -481,7 +504,7 @@ impl Decoder {
         if self.opts.keep_orientation {
             ffi::JxlDecoderSetKeepOrientation(dec, 1);
         }
-        let events = S_BASIC.0 | S_FULL.0;
+        let events = S_BASIC.0 | S_NEEDOUT.0 | S_FULL.0;
         if ffi::JxlDecoderSubscribeEvents(dec, events) != S_SUCCESS {
             return Err(DecodeError::Process);
         }
@@ -546,11 +569,13 @@ impl Decoder {
                 buf.clear();
                 buf.reserve(elems);
                 buf.set_len(elems);
-                // Always zero: on error paths after set_len the buffer is exposed to
-                // the caller with uninitialized content. Zeroing also covers the
-                // allow_partial partial-flush case. libjxl fills all bytes on success,
-                // so the zero is a safety net only, not on the hot path's critical path.
-                std::ptr::write_bytes(buf.as_mut_ptr(), 0, elems);
+                // Zero only for allow_partial: partial flushes expose uninitialised bytes
+                // to the caller. On the normal (non-partial) path libjxl fills every byte
+                // before returning S_FULL, so zeroing is unnecessary and wastes one full
+                // memory sweep (~10-20 ms for 80 MB RGBA8 at 20 MP).
+                if self.opts.allow_partial {
+                    std::ptr::write_bytes(buf.as_mut_ptr(), 0, elems);
+                }
                 if ffi::JxlDecoderSetImageOutBuffer(
                     dec,
                     &pf,
@@ -621,7 +646,7 @@ impl Decoder {
         if self.opts.keep_orientation {
             ffi::JxlDecoderSetKeepOrientation(dec, 1);
         }
-        let events = S_BASIC.0 | S_PROG.0 | S_FULL.0;
+        let events = S_BASIC.0 | S_PROG.0 | S_NEEDOUT.0 | S_FULL.0;
         if ffi::JxlDecoderSubscribeEvents(dec, events) != S_SUCCESS {
             return Err(DecodeError::Process);
         }
@@ -697,14 +722,18 @@ impl Decoder {
                     return Err(DecodeError::OutputAlloc);
                 }
             } else if status == S_PROG {
+                // Increment pass unconditionally so the counter stays in sync with
+                // decoder-signalled progression events even when FlushImage fails.
+                // The event carries the pre-increment value (pass before this flush).
+                let this_pass = pass;
+                pass += 1;
                 if ffi::JxlDecoderFlushImage(dec) == S_SUCCESS && w > 0 && h > 0 {
                     let ctl = on_event(DecodeEvent::Progress {
-                        pass,
+                        pass: this_pass,
                         width: w,
                         height: h,
                         pixels: &buf,
                     });
-                    pass += 1;
                     if ctl == ProgressControl::Stop {
                         break;
                     }
@@ -723,14 +752,10 @@ impl Decoder {
         if w == 0 || h == 0 || buf.is_empty() {
             return Err(DecodeError::Process);
         }
-        // Emit Final event — the variant was defined but never emitted by this driver.
-        // Emit with a clone so the owned `buf` is still available for the returned Image;
-        // callers that only use the callback path can avoid retaining the return value.
-        on_event(DecodeEvent::Final {
-            width: w,
-            height: h,
-            pixels: buf.clone(),
-        });
+        // The return value carries the definitive final image; callers that want
+        // every progressive frame already received them via Progress events.
+        // Emitting Final with a clone here would double peak memory (80 MB for 20 MP
+        // RGBA8), so we omit it — the return value is the canonical final image.
         Ok(Image {
             width: w,
             height: h,
@@ -844,7 +869,7 @@ where
         if dec.is_null() {
             return None;
         }
-        let events = S_BASIC.0 | S_PROG.0 | S_FULL.0;
+        let events = S_BASIC.0 | S_PROG.0 | S_NEEDOUT.0 | S_FULL.0;
         if ffi::JxlDecoderSubscribeEvents(dec, events) != S_SUCCESS {
             ffi::JxlDecoderDestroy(dec);
             return None;
@@ -1161,6 +1186,12 @@ pub fn decode_jxtc_region(
                 // container.len() and slip past the bounds test.
                 let end = start.checked_add(len as usize)?;
                 if end > container.len() {
+                    return None;
+                }
+                // Trust-boundary: tiles must not overlap the header or index table.
+                // A crafted container with off < index_end would feed index bytes to
+                // the JXL decoder, potentially bypassing format validation.
+                if start < index_end {
                     return None;
                 }
                 let tile_jxl = &container[start..end];
