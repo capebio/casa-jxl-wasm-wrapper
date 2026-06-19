@@ -571,6 +571,9 @@ thread_local! {
 }
 
 fn build_post_lut(t: &TonePost) -> Vec<u8> {
+    // MEASURED (2026-06-19): this rebuild is only ~2% of a slider-drag frame (item-0). The handoff's
+    // "powf→polynomial" idea is therefore negligible — and the unconditional sRGB EOTF powf is
+    // already replaced by a cached lerp (`srgb_encode_lerp`). Do not micro-optimize the build.
     let mut lut = vec![0u8; 65536];
     // Hoist for mul_add + clamp.
     let fill = |i: usize, o: &mut u8| {
@@ -1466,6 +1469,17 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
             b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
         }
         crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
+        // MEASURED FLOOR (2026-06-19, item-0 `examples/tonemap_subspans.rs`): this post stage
+        // (clamp + f32→u16 cast + LUT gather) is ~45% of the 24 MP tone frame and is the bottleneck
+        // — NOT build (2%), copy (14%), or math (4%). The gather itself is already cheap (~0.5 ns,
+        // `postlut_cache_flip.rs`); the cost is the scalar f32↔int conversion fused with it. Four
+        // ways to cut it were measured and REJECTED (see `docs/rejected optimizations.md`):
+        //   • split quantize into a vectorizable pass + bare gather → −21% (u16 round-trip traffic)
+        //   • L1 compact/strided post-LUT → 0.77× (gather not L2-bound; extra shift loses)
+        //   • 3D RAW→OUT LUT + trilinear → ~3× slower + shadow banding
+        //   • powf→poly in the build → negligible (build is 2%; sRGB EOTF already a cached lerp)
+        // The inline clamp+cast+gather below IS the floor. The remaining lever is the SEAM:
+        // parallelise this (native rayon = ~5× over serial), not the kernel.
         for i in 0..np {
             ob[i * 3] = post[(r[i].clamp(0.0, 65535.0) as u16) as usize];
             ob[i * 3 + 1] = post[(g[i].clamp(0.0, 65535.0) as u16) as usize];

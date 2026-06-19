@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 use raw_pipeline::{cr2, demosaic, dng, pipeline};
 
 #[cfg(feature = "jxl-codec")]
-use raw_pipeline::jxl_decode::{bench_jxl_decode_lowlevel_full, bench_jxl_decode_lowlevel_progressive};
+use raw_pipeline::jxl_decode::{
+    bench_jxl_decode_lowlevel_full, bench_jxl_decode_lowlevel_progressive,
+};
 
 #[cfg(feature = "jxl-codec")]
 use raw_pipeline::casabio_encode::{encode_variants_with_progressive, SourceType};
@@ -79,8 +81,13 @@ fn bench<F: Fn() -> T, T>(f: F) -> (Duration, T) {
 /// Encode buffer (RGB8 or RGBA8) to JXL. num_ch must be 3 or 4.
 /// Used for the direct-RGBA (native parity) encode path: tone directly to 4ch
 /// and feed encoder without ever materializing a retained 3ch RGB8.
-fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -> Option<(Duration, Vec<u8>)> {
-    use raw_pipeline::jxl_encode::{EncodeOptions, Encoder, Frame};
+fn bench_jxl_encode_with_ch(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    num_ch: u32,
+) -> Option<(Duration, Vec<u8>)> {
+    use raw_pipeline::jxl_casaencoder::{EncodeOptions, Encoder, Frame};
 
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -90,7 +97,8 @@ fn bench_jxl_encode_with_ch(data: &[u8], width: u32, height: u32, num_ch: u32) -
     for _ in 0..RUNS {
         // Effort 3 = Falcon (matches WASM bench). Multi-threaded for representative numbers.
         let mut encoder =
-            Encoder::with_threads(EncodeOptions::quality(JXL_QUALITY).with_effort(3), threads).ok()?;
+            Encoder::with_threads(EncodeOptions::quality(JXL_QUALITY).with_effort(3), threads)
+                .ok()?;
         let t = Instant::now();
         let bytes = if num_ch == 4 {
             encoder.encode(&Frame::rgba8(data, width, height)).ok()?
@@ -127,7 +135,8 @@ fn bench_jxl_decode(jxl_bytes: &[u8]) -> Option<Duration> {
     let mut best = Duration::MAX;
     for _ in 0..RUNS {
         let t = Instant::now();
-        dec.decode_into::<u8>(jxl_bytes, Channels::Rgba, &mut buf).ok()?;
+        dec.decode_into::<u8>(jxl_bytes, Channels::Rgba, &mut buf)
+            .ok()?;
         let elapsed = t.elapsed();
         if elapsed < best {
             best = elapsed;
@@ -138,12 +147,20 @@ fn bench_jxl_decode(jxl_bytes: &[u8]) -> Option<Duration> {
 
 /// Shared JXL encode (direct-4ch preferred) + decode metrics for parity.
 /// Returns (encode_ms, jxl_size_kb, decode_ms). Dedupes the 4-line tail in bench_* fns.
-fn bench_jxl_roundtrip(rgba8: &[u8], rgb8_fb: &[u8], w: u32, h: u32) -> (Option<f64>, Option<f64>, Option<f64>) {
+fn bench_jxl_roundtrip(
+    rgba8: &[u8],
+    rgb8_fb: &[u8],
+    w: u32,
+    h: u32,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
     let jxl = bench_jxl_encode_with_ch(rgba8, w, h, 4)
         .or_else(|| bench_jxl_encode_with_ch(rgb8_fb, w, h, 3));
     let ems = jxl.as_ref().map(|(d, _)| ms(*d));
     let sz = jxl.as_ref().map(|(_, b)| b.len() as f64 / 1024.0);
-    let dms = jxl.as_ref().and_then(|(_, b)| bench_jxl_decode(b)).map(|d| ms(d));
+    let dms = jxl
+        .as_ref()
+        .and_then(|(_, b)| bench_jxl_decode(b))
+        .map(|d| ms(d));
     (ems, sz, dms)
 }
 
@@ -221,23 +238,64 @@ fn rows_to_json(rows: &[BenchRow], generated_at: &str) -> String {
     for (i, row) in rows.iter().enumerate() {
         let comma = if i + 1 < rows.len() { "," } else { "" };
         out.push_str("    {\n");
-        out.push_str(&format!("      \"file\": {},\n", json_str(&row.file.replace('\\', "/"))));
+        out.push_str(&format!(
+            "      \"file\": {},\n",
+            json_str(&row.file.replace('\\', "/"))
+        ));
         out.push_str(&format!("      \"format\": {},\n", json_str(row.format)));
         out.push_str(&format!("      \"width\": {},\n", row.width));
         out.push_str(&format!("      \"height\": {},\n", row.height));
         out.push_str(&format!("      \"sizeMB\": {},\n", opt_f64(row.size_mb)));
-        out.push_str(&format!("      \"decompressMs\": {},\n", opt_f64(row.decompress_ms)));
-        out.push_str(&format!("      \"demosaicMs\": {},\n", opt_f64(row.demosaic_ms)));
-        out.push_str(&format!("      \"tonemapMs\": {},\n", opt_f64(row.tonemap_ms)));
+        out.push_str(&format!(
+            "      \"decompressMs\": {},\n",
+            opt_f64(row.decompress_ms)
+        ));
+        out.push_str(&format!(
+            "      \"demosaicMs\": {},\n",
+            opt_f64(row.demosaic_ms)
+        ));
+        out.push_str(&format!(
+            "      \"tonemapMs\": {},\n",
+            opt_f64(row.tonemap_ms)
+        ));
         out.push_str(&format!("      \"totalMs\": {},\n", opt_f64(row.total_ms)));
-        out.push_str(&format!("      \"encodeMs\": {},\n", json_opt(row.encode_ms)));
-        out.push_str(&format!("      \"jxlSizeKB\": {},\n", json_opt(row.jxl_size_kb)));
-        out.push_str(&format!("      \"decodeMs\": {},\n", json_opt(row.decode_ms)));
-        out.push_str(&format!("      \"directRgbaMs\": {},\n", json_opt(row.direct_rgba_ms)));
-        out.push_str(&format!("      \"decodeBufferExtractMs\": {},\n", json_opt(row.decode_buffer_extract_ms)));
-        out.push_str(&format!("      \"decodeRegionDownsampleMs\": {},\n", json_opt(row.decode_region_downsample_ms)));
-        out.push_str(&format!("      \"sourcePixelsDecoded\": {},\n", row.source_pixels_decoded.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string())));
-        out.push_str(&format!("      \"decodeStrategy\": {}\n", row.decode_strategy.as_ref().map(|s| json_str(s)).unwrap_or_else(|| "null".to_string())));
+        out.push_str(&format!(
+            "      \"encodeMs\": {},\n",
+            json_opt(row.encode_ms)
+        ));
+        out.push_str(&format!(
+            "      \"jxlSizeKB\": {},\n",
+            json_opt(row.jxl_size_kb)
+        ));
+        out.push_str(&format!(
+            "      \"decodeMs\": {},\n",
+            json_opt(row.decode_ms)
+        ));
+        out.push_str(&format!(
+            "      \"directRgbaMs\": {},\n",
+            json_opt(row.direct_rgba_ms)
+        ));
+        out.push_str(&format!(
+            "      \"decodeBufferExtractMs\": {},\n",
+            json_opt(row.decode_buffer_extract_ms)
+        ));
+        out.push_str(&format!(
+            "      \"decodeRegionDownsampleMs\": {},\n",
+            json_opt(row.decode_region_downsample_ms)
+        ));
+        out.push_str(&format!(
+            "      \"sourcePixelsDecoded\": {},\n",
+            row.source_pixels_decoded
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        ));
+        out.push_str(&format!(
+            "      \"decodeStrategy\": {}\n",
+            row.decode_strategy
+                .as_ref()
+                .map(|s| json_str(s))
+                .unwrap_or_else(|| "null".to_string())
+        ));
         out.push_str(&format!("    }}{comma}\n"));
     }
     out.push_str("  ]\n");
@@ -257,7 +315,12 @@ struct ToneOutputs {
     rgba8: Vec<u8>,
 }
 
-fn measure_clarity(rgb16: &[u16], w: usize, h: usize, params: &pipeline::PipelineParams) -> ClarityTimings {
+fn measure_clarity(
+    rgb16: &[u16],
+    w: usize,
+    h: usize,
+    params: &pipeline::PipelineParams,
+) -> ClarityTimings {
     let mut cp = params.clone();
     cp.clarity = 0.5;
     let mut scratch = rgb16.to_vec();
@@ -286,10 +349,10 @@ fn bench_tone_outputs(rgb16: &[u16], params: &pipeline::PipelineParams) -> ToneO
 
 fn print_jxl_result(encode_ms: Option<f64>, jxl_size_kb: Option<f64>, decode_ms: Option<f64>) {
     match (encode_ms, jxl_size_kb, decode_ms) {
-        (Some(enc), Some(sz), Some(dec)) =>
-            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)"),
-        _ =>
-            println!("  jxl encode/decode: failed"),
+        (Some(enc), Some(sz), Some(dec)) => {
+            println!("  jxl encode {enc:.1}ms  {sz:.1} KB  decode {dec:.1}ms  (via direct rgba)")
+        }
+        _ => println!("  jxl encode/decode: failed"),
     }
 }
 
@@ -346,9 +409,8 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     let (raw_aligned, w, h) = dng::align_to_rggb(&img.raw, orig_w, orig_h, img.cfa);
     let mp = w * h;
 
-    let (demosaic_dur, rgb16) = bench(|| {
-        demosaic::demosaic_rggb_mhc(raw_aligned, w, h).expect("demosaic")
-    });
+    let (demosaic_dur, rgb16) =
+        bench(|| demosaic::demosaic_rggb_mhc(raw_aligned, w, h).expect("demosaic"));
 
     let mut params = pipeline::PipelineParams::default_olympus();
     params.black = img.black;
@@ -369,7 +431,11 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone.tone_dur;
     let demosaic_s = ms(demosaic_dur) / 1000.0;
-    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
+    let mpps = if demosaic_s > 0.0 {
+        mp as f64 / 1e6 / demosaic_s
+    } else {
+        0.0
+    };
 
     println!("DNG  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -377,12 +443,34 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
         "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
         ms(decode_dur), ms(demosaic_dur), mpps, ms(tone.tone_dur), ms(tone.direct_rgba_dur), ms(total)
     );
-    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity.cold), ms(clarity.warm), 100.0 * ms(clarity.warm) / ms(total));
-    println!("  WB R={:.3} B={:.3}  black={}  white={}", img.wb_r, img.wb_b, img.black, img.white);
+    println!(
+        "  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)",
+        ms(clarity.cold),
+        ms(clarity.warm),
+        100.0 * ms(clarity.warm) / ms(total)
+    );
+    println!(
+        "  WB R={:.3} B={:.3}  black={}  white={}",
+        img.wb_r, img.wb_b, img.black, img.white
+    );
     print_jxl_result(encode_ms, jxl_size_kb, decode_ms);
     println!();
 
-    push_full_row(rows, name.into_owned(), "DNG", w, h, size_mb, ms(decode_dur), demosaic_dur, &tone, total, encode_ms, jxl_size_kb, decode_ms);
+    push_full_row(
+        rows,
+        name.into_owned(),
+        "DNG",
+        w,
+        h,
+        size_mb,
+        ms(decode_dur),
+        demosaic_dur,
+        &tone,
+        total,
+        encode_ms,
+        jxl_size_kb,
+        decode_ms,
+    );
 }
 
 fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
@@ -397,9 +485,8 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     let h = img.height;
     let mp = w * h;
 
-    let (demosaic_dur, rgb16) = bench(|| {
-        demosaic::demosaic_rggb_mhc(&img.raw, w, h).expect("demosaic")
-    });
+    let (demosaic_dur, rgb16) =
+        bench(|| demosaic::demosaic_rggb_mhc(&img.raw, w, h).expect("demosaic"));
 
     let mut params = pipeline::PipelineParams::default_olympus();
     params.black = img.black;
@@ -418,7 +505,11 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = decode_dur + demosaic_dur + tone.tone_dur;
     let demosaic_s = ms(demosaic_dur) / 1000.0;
-    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
+    let mpps = if demosaic_s > 0.0 {
+        mp as f64 / 1e6 / demosaic_s
+    } else {
+        0.0
+    };
 
     println!("CR2  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -426,11 +517,28 @@ fn bench_cr2(path: &str, rows: &mut Vec<BenchRow>) {
         "  decode {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
         ms(decode_dur), ms(demosaic_dur), mpps, ms(tone.tone_dur), ms(tone.direct_rgba_dur), ms(total)
     );
-    println!("  WB R={:.3} B={:.3}  black={}  white={}  ISO={:?}", img.wb_r, img.wb_b, img.black, img.white, img.iso);
+    println!(
+        "  WB R={:.3} B={:.3}  black={}  white={}  ISO={:?}",
+        img.wb_r, img.wb_b, img.black, img.white, img.iso
+    );
     print_jxl_result(encode_ms, jxl_size_kb, decode_ms);
     println!();
 
-    push_full_row(rows, name.into_owned(), "CR2", w, h, size_mb, ms(decode_dur), demosaic_dur, &tone, total, encode_ms, jxl_size_kb, decode_ms);
+    push_full_row(
+        rows,
+        name.into_owned(),
+        "CR2",
+        w,
+        h,
+        size_mb,
+        ms(decode_dur),
+        demosaic_dur,
+        &tone,
+        total,
+        encode_ms,
+        jxl_size_kb,
+        decode_ms,
+    );
 }
 
 fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
@@ -448,7 +556,10 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     let mp = w * h;
     let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
     if strip_end > data.len() {
-        eprintln!("  [skip] {path} — strip out of bounds ({strip_end} > {})", data.len());
+        eprintln!(
+            "  [skip] {path} — strip out of bounds ({strip_end} > {})",
+            data.len()
+        );
         return;
     }
     let strip = &data[info.strip_offset as usize..strip_end];
@@ -457,9 +568,15 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     let (demosaic_dur, rgb16) = bench(|| demosaic::demosaic_rggb(&raw, w, h).expect("demosaic"));
 
     let mut params = pipeline::PipelineParams::default_olympus();
-    if let Some(r) = info.wb_r { params.wb_r = r; }
-    if let Some(b) = info.wb_b { params.wb_b = b; }
-    if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
+    if let Some(r) = info.wb_r {
+        params.wb_r = r;
+    }
+    if let Some(b) = info.wb_b {
+        params.wb_b = b;
+    }
+    if let Some(m) = info.color_matrix {
+        params.color_matrix = Some(m);
+    }
 
     let clarity = measure_clarity(&rgb16, w, h, &params);
     let tone = bench_tone_outputs(&rgb16, &params);
@@ -473,7 +590,11 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
     let name = Path::new(path).file_name().unwrap().to_string_lossy();
     let total = parse_dur + decomp_dur + demosaic_dur + tone.tone_dur;
     let demosaic_s = ms(demosaic_dur) / 1000.0;
-    let mpps = if demosaic_s > 0.0 { mp as f64 / 1e6 / demosaic_s } else { 0.0 };
+    let mpps = if demosaic_s > 0.0 {
+        mp as f64 / 1e6 / demosaic_s
+    } else {
+        0.0
+    };
 
     println!("ORF  {name}");
     println!("  {w}×{h}  {:.1} MB  ({} MP)", size_mb, mp / 1_000_000);
@@ -481,13 +602,32 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
         "  parse {:.1}ms  decomp {:.1}ms  demosaic {:.1}ms ({:.1} MP/s)  tone {:.1}ms  direct-rgba {:.1}ms  total {:.1}ms",
         ms(parse_dur), ms(decomp_dur), ms(demosaic_dur), mpps, ms(tone.tone_dur), ms(tone.direct_rgba_dur), ms(total)
     );
-    println!("  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)", ms(clarity.cold), ms(clarity.warm), 100.0 * ms(clarity.warm) / ms(total));
+    println!(
+        "  clarity@0.5  cold={:.1}ms  warm={:.1}ms  ({:.1}% of total warm)",
+        ms(clarity.cold),
+        ms(clarity.warm),
+        100.0 * ms(clarity.warm) / ms(total)
+    );
     print_jxl_result(encode_ms, jxl_size_kb, decode_ms);
     println!();
 
     // decompressMs = parse+decomp combined. WASM ProcessResult.decompress_ms
     // covers only the decompress step; parse overhead is noted here.
-    push_full_row(rows, name.into_owned(), "ORF", w, h, size_mb, ms(parse_dur) + ms(decomp_dur), demosaic_dur, &tone, total, encode_ms, jxl_size_kb, decode_ms);
+    push_full_row(
+        rows,
+        name.into_owned(),
+        "ORF",
+        w,
+        h,
+        size_mb,
+        ms(parse_dur) + ms(decomp_dur),
+        demosaic_dur,
+        &tone,
+        total,
+        encode_ms,
+        jxl_size_kb,
+        decode_ms,
+    );
 }
 
 // ─── Perf flipflop benches ────────────────────────────────────────────────────
@@ -495,8 +635,14 @@ fn bench_orf(path: &str, rows: &mut Vec<BenchRow>) {
 fn median_dur(v: &mut Vec<Duration>) -> Duration {
     v.sort_unstable();
     let n = v.len();
-    if n == 0 { return Duration::ZERO; }
-    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2 }
+    if n == 0 {
+        return Duration::ZERO;
+    }
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2
+    }
 }
 
 /// Alternating flip (current serial impl) / flop (parallel candidate) rounds.
@@ -512,8 +658,12 @@ fn bench_perf_flipflop() {
     let h = 3000usize;
     let n = w * h * 3;
     // Synthetic data — we're timing the blend arithmetic, not the blur itself.
-    let mut rgb16: Vec<u16> = (0..n).map(|i| ((i.wrapping_mul(37).wrapping_add(13)) % 65536) as u16).collect();
-    let blurred: Vec<u16>  = (0..n).map(|i| ((i.wrapping_mul(17).wrapping_add(7))  % 65536) as u16).collect();
+    let mut rgb16: Vec<u16> = (0..n)
+        .map(|i| ((i.wrapping_mul(37).wrapping_add(13)) % 65536) as u16)
+        .collect();
+    let blurred: Vec<u16> = (0..n)
+        .map(|i| ((i.wrapping_mul(17).wrapping_add(7)) % 65536) as u16)
+        .collect();
     let s = 0.3f32;
 
     let mut flip_times: Vec<Duration> = Vec::new();
@@ -537,10 +687,13 @@ fn bench_perf_flipflop() {
             {
                 use rayon::prelude::*;
                 let t = Instant::now();
-                rgb16.par_iter_mut().zip(blurred.par_iter()).for_each(|(o, &b)| {
-                    let ov = *o as f32;
-                    *o = (ov + (b as f32 - ov) * s).round().clamp(0.0, 65535.0) as u16;
-                });
+                rgb16
+                    .par_iter_mut()
+                    .zip(blurred.par_iter())
+                    .for_each(|(o, &b)| {
+                        let ov = *o as f32;
+                        *o = (ov + (b as f32 - ov) * s).round().clamp(0.0, 65535.0) as u16;
+                    });
                 flop_times.push(t.elapsed());
             }
             #[cfg(not(feature = "parallel"))]
@@ -561,13 +714,22 @@ fn bench_perf_flipflop() {
 
     let flip_med = median_dur(&mut flip_times);
     let flop_med = median_dur(&mut flop_times);
-    let speedup = if ms(flop_med) > 0.001 { ms(flip_med) / ms(flop_med) } else { 0.0 };
+    let speedup = if ms(flop_med) > 0.001 {
+        ms(flip_med) / ms(flop_med)
+    } else {
+        0.0
+    };
     println!("apply_luminance_nr blend loop  ({w}×{h}×3ch, strength={s})");
     println!("  flip (serial):   {:.2}ms", ms(flip_med));
     println!("  flop (parallel): {:.2}ms", ms(flop_med));
-    println!("  speedup: {speedup:.2}×  →  {}",
-        if speedup > 1.15 { "PARALLEL WINS — apply in pipeline.rs" }
-        else              { "keep serial (overhead dominates)" });
+    println!(
+        "  speedup: {speedup:.2}×  →  {}",
+        if speedup > 1.15 {
+            "PARALLEL WINS — apply in pipeline.rs"
+        } else {
+            "keep serial (overhead dominates)"
+        }
+    );
     println!();
 
     // ── 2. downscale_rgb16_into exact-factor path ─────────────────────────────
@@ -580,7 +742,9 @@ fn bench_perf_flipflop() {
     let ystep = sh / dh; // 5
     let n_src = sw * sh * 3;
     let n_dst = dw * dh * 3;
-    let src: Vec<u16> = (0..n_src).map(|i| ((i.wrapping_mul(37).wrapping_add(13)) % 65536) as u16).collect();
+    let src: Vec<u16> = (0..n_src)
+        .map(|i| ((i.wrapping_mul(37).wrapping_add(13)) % 65536) as u16)
+        .collect();
     let mut out_a = vec![0u16; n_dst];
     let mut out_b = vec![0u16; n_dst];
 
@@ -620,7 +784,36 @@ fn bench_perf_flipflop() {
                 use rayon::prelude::*;
                 let n_px = (xstep * ystep) as u32;
                 let t = Instant::now();
-                out_b.par_chunks_mut(dw * 3).enumerate().for_each(|(dy, row)| {
+                out_b
+                    .par_chunks_mut(dw * 3)
+                    .enumerate()
+                    .for_each(|(dy, row)| {
+                        for dx in 0..dw {
+                            let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                            for yy in 0..ystep {
+                                let y = dy * ystep + yy;
+                                let base = (y * sw + dx * xstep) * 3;
+                                for xx in 0..xstep {
+                                    let i = base + xx * 3;
+                                    rr += src[i] as u32;
+                                    gg += src[i + 1] as u32;
+                                    bb += src[i + 2] as u32;
+                                }
+                            }
+                            let o = dx * 3;
+                            row[o] = (rr / n_px) as u16;
+                            row[o + 1] = (gg / n_px) as u16;
+                            row[o + 2] = (bb / n_px) as u16;
+                        }
+                    });
+                flop_times2.push(t.elapsed());
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                let n_px = (xstep * ystep) as u32;
+                let t = Instant::now();
+                for dy in 0..dh {
+                    let row = &mut out_b[dy * dw * 3..(dy + 1) * dw * 3];
                     for dx in 0..dw {
                         let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
                         for yy in 0..ystep {
@@ -638,28 +831,6 @@ fn bench_perf_flipflop() {
                         row[o + 1] = (gg / n_px) as u16;
                         row[o + 2] = (bb / n_px) as u16;
                     }
-                });
-                flop_times2.push(t.elapsed());
-            }
-            #[cfg(not(feature = "parallel"))]
-            {
-                let n_px = (xstep * ystep) as u32;
-                let t = Instant::now();
-                for dy in 0..dh {
-                    let row = &mut out_b[dy * dw * 3..(dy + 1) * dw * 3];
-                    for dx in 0..dw {
-                        let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
-                        for yy in 0..ystep {
-                            let y = dy * ystep + yy;
-                            let base = (y * sw + dx * xstep) * 3;
-                            for xx in 0..xstep {
-                                let i = base + xx * 3;
-                                rr += src[i] as u32; gg += src[i+1] as u32; bb += src[i+2] as u32;
-                            }
-                        }
-                        let o = dx * 3;
-                        row[o] = (rr / n_px) as u16; row[o+1] = (gg / n_px) as u16; row[o+2] = (bb / n_px) as u16;
-                    }
                 }
                 flop_times2.push(t.elapsed());
             }
@@ -668,13 +839,22 @@ fn bench_perf_flipflop() {
 
     let flip_med2 = median_dur(&mut flip_times2);
     let flop_med2 = median_dur(&mut flop_times2);
-    let speedup2 = if ms(flop_med2) > 0.001 { ms(flip_med2) / ms(flop_med2) } else { 0.0 };
+    let speedup2 = if ms(flop_med2) > 0.001 {
+        ms(flip_med2) / ms(flop_med2)
+    } else {
+        0.0
+    };
     println!("downscale_rgb16_into exact 5×  ({sw}×{sh} → {dw}×{dh})");
     println!("  flip (serial):   {:.2}ms", ms(flip_med2));
     println!("  flop (parallel): {:.2}ms", ms(flop_med2));
-    println!("  speedup: {speedup2:.2}×  →  {}",
-        if speedup2 > 1.15 { "PARALLEL WINS — apply in pipeline.rs" }
-        else               { "keep serial (overhead dominates)" });
+    println!(
+        "  speedup: {speedup2:.2}×  →  {}",
+        if speedup2 > 1.15 {
+            "PARALLEL WINS — apply in pipeline.rs"
+        } else {
+            "keep serial (overhead dominates)"
+        }
+    );
     println!();
 
     println!("=== End Flipflop ===\n");
@@ -711,9 +891,18 @@ fn main() {
     if std::env::var("SKIP_INITIAL_TEST_BENCHES").unwrap_or_default() != "1" {
         bench_orf(&format!("{test_dir}\\P1110226.ORF"), &mut rows);
 
-        bench_dng(&format!("{test_dir}\\PXL_20260501_093507165.RAW-02.ORIGINAL.dng"), &mut rows);
-        bench_dng(&format!("{test_dir}\\PXL_20260501_095020990.RAW-02.ORIGINAL.dng"), &mut rows);
-        bench_dng(&format!("{test_dir}\\PXL_20260501_100404049.RAW-02.ORIGINAL.dng"), &mut rows);
+        bench_dng(
+            &format!("{test_dir}\\PXL_20260501_093507165.RAW-02.ORIGINAL.dng"),
+            &mut rows,
+        );
+        bench_dng(
+            &format!("{test_dir}\\PXL_20260501_095020990.RAW-02.ORIGINAL.dng"),
+            &mut rows,
+        );
+        bench_dng(
+            &format!("{test_dir}\\PXL_20260501_100404049.RAW-02.ORIGINAL.dng"),
+            &mut rows,
+        );
 
         bench_cr2(&format!("{test_dir}\\_MG_1744.CR2"), &mut rows);
         bench_cr2(&format!("{test_dir}\\_MG_1747.CR2"), &mut rows);
@@ -726,18 +915,26 @@ fn main() {
     // Drive with env (matches JS harness style):
     //   GOB_SCAN_LIMIT=30 GOB_ROOT=...  cargo run --bin raw_decode_bench --release
     //   P2200_SCAN_LIMIT=11 P2200_ROOT=... (falls back to GOB_ROOT)
-    let gob_limit: usize = std::env::var("GOB_SCAN_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let gob_limit: usize = std::env::var("GOB_SCAN_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     if gob_limit > 0 {
         run_gobabeb_encode_parity(&mut rows, gob_limit);
     }
-    let p2200_limit: usize = std::env::var("P2200_SCAN_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let p2200_limit: usize = std::env::var("P2200_SCAN_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     if p2200_limit > 0 {
         run_p2200_decode_roi_scan(&mut rows, p2200_limit);
     }
 
     println!("=== Done ===");
     println!("Tip: use --release + MSVC toolchain for representative numbers.");
-    println!("     `parallel` is REQUIRED for representative tone/demosaic numbers (multi-threaded):");
+    println!(
+        "     `parallel` is REQUIRED for representative tone/demosaic numbers (multi-threaded):"
+    );
     println!("     .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-codec,parallel\" 2>&1 | tee benchmark/results_latest.txt");
     println!("For Tauri/WASM parity ref sets (per HANDOFF-tauri-parity-2026-06-03.md):");
     println!("     $env:GOB_SCAN_LIMIT=30; $env:P2200_SCAN_LIMIT=11; .\\build-msvc.ps1 run --bin raw_decode_bench --release --features \"jxl-codec,parallel\"");
@@ -760,7 +957,9 @@ fn main() {
 }
 
 fn print_handoff_parity_summary(rows: &[BenchRow], generated_at: &str) {
-    if rows.is_empty() { return; }
+    if rows.is_empty() {
+        return;
+    }
     println!("\n=== Handoff Parity Summary (native vs WASM boundary metrics) ===");
     println!("generated: {generated_at}");
     println!("(Use with docs/boundary-cost-audit.md §12-13 and docs/suggested-settings.md Native section.)");
@@ -779,22 +978,33 @@ fn print_handoff_parity_summary(rows: &[BenchRow], generated_at: &str) {
     }
 
     // Decode handoff metrics aggregates
-    let extract_vals: Vec<f64> = rows.iter().filter_map(|r| r.decode_buffer_extract_ms).collect();
-    let region_ds_vals: Vec<f64> = rows.iter().filter_map(|r| r.decode_region_downsample_ms).collect();
+    let extract_vals: Vec<f64> = rows
+        .iter()
+        .filter_map(|r| r.decode_buffer_extract_ms)
+        .collect();
+    let region_ds_vals: Vec<f64> = rows
+        .iter()
+        .filter_map(|r| r.decode_region_downsample_ms)
+        .collect();
     if !extract_vals.is_empty() || !region_ds_vals.is_empty() {
         println!("\nDecode Pixel Handoff (native; expect extract≈0, downsample≈JXL decode work for requested region):");
         if !extract_vals.is_empty() {
-            let n = extract_vals.len(); let avg = extract_vals.iter().sum::<f64>() / n as f64;
+            let n = extract_vals.len();
+            let avg = extract_vals.iter().sum::<f64>() / n as f64;
             println!("  decode_buffer_extract_ms: avg={avg:.2}ms over {n} (near-zero = win vs any WASM glue)");
         }
         if !region_ds_vals.is_empty() {
-            let n = region_ds_vals.len(); let avg = region_ds_vals.iter().sum::<f64>() / n as f64;
+            let n = region_ds_vals.len();
+            let avg = region_ds_vals.iter().sum::<f64>() / n as f64;
             println!("  decode_region_downsample_ms: avg={avg:.1}ms over {n} (the real decode cost; ROI paths will shrink this)");
         }
     }
 
     // Per-strategy note
-    let strategies: std::collections::HashSet<_> = rows.iter().filter_map(|r| r.decode_strategy.as_ref()).collect();
+    let strategies: std::collections::HashSet<_> = rows
+        .iter()
+        .filter_map(|r| r.decode_strategy.as_ref())
+        .collect();
     if !strategies.is_empty() {
         println!("\nStrategies seen: {:?}", strategies);
     }
@@ -805,7 +1015,11 @@ fn print_handoff_parity_summary(rows: &[BenchRow], generated_at: &str) {
         if !crops.is_empty() {
             println!("\nSmall pre-cropped region JXL decodes (subject rect at encode time or JXTC-like tiles):");
             for sz in [128usize, 256] {
-                let vals: Vec<f64> = crops.iter().filter(|(_, s, _)| *s == sz).map(|(_, _, m)| *m).collect();
+                let vals: Vec<f64> = crops
+                    .iter()
+                    .filter(|(_, s, _)| *s == sz)
+                    .map(|(_, _, m)| *m)
+                    .collect();
                 if !vals.is_empty() {
                     let avg = vals.iter().sum::<f64>() / vals.len() as f64;
                     let minv = vals.iter().fold(f64::MAX, |a, &b| a.min(b));
@@ -819,9 +1033,12 @@ fn print_handoff_parity_summary(rows: &[BenchRow], generated_at: &str) {
     // Low-level progressive first-pixel (stateful FRAME_PROGRESSION path)
     if let Ok(firsts) = LOWLEVEL_PROG_FIRSTS.lock() {
         if !firsts.is_empty() {
-            let n = firsts.len(); let avg = firsts.iter().sum::<f64>() / n as f64;
+            let n = firsts.len();
+            let avg = firsts.iter().sum::<f64>() / n as f64;
             let minv = firsts.iter().fold(f64::MAX, |a, &b| a.min(b));
-            println!("\nLow-level progressive (jpegxl-sys stateful, first FRAME_PROGRESSION+Flush):");
+            println!(
+                "\nLow-level progressive (jpegxl-sys stateful, first FRAME_PROGRESSION+Flush):"
+            );
             println!("  time_to_first_pixel_ms: avg={:.1}ms min={:.1} over {} samples (early paint target; vs full decode cost reported above)", avg, minv, n);
             println!("  (Wire equivalent in Tauri lightbox/gallery for DC/early passes direct to egui/wgpu; no worker hop. For small assets first often collapses to total.)");
         }
@@ -848,11 +1065,26 @@ fn approximate_iso8601_utc() -> String {
     let year = y400 * 400 + y100 * 100 + y4 * 4 + y1 + 1970;
     let day_of_year = rem - y1 * 365;
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let months: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1u32;
     let mut dom = day_of_year;
     for mlen in &months {
-        if dom < *mlen { break; }
+        if dom < *mlen {
+            break;
+        }
         dom -= mlen;
         month += 1;
     }
@@ -875,10 +1107,18 @@ fn scan_orf_dir(root: &str, limit: usize, name_filter: Option<&str>) -> Vec<Stri
     if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("orf")) {
-                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if p.extension()
+                .map_or(false, |ext| ext.eq_ignore_ascii_case("orf"))
+            {
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if let Some(f) = &filter_lc {
-                    if !name.to_lowercase().contains(f.as_str()) { continue; }
+                    if !name.to_lowercase().contains(f.as_str()) {
+                        continue;
+                    }
                 }
                 files.push(p.to_string_lossy().into_owned());
             }
@@ -904,7 +1144,10 @@ fn run_gobabeb_encode_parity(rows: &mut Vec<BenchRow>, limit: usize) {
 fn run_p2200_decode_roi_scan(rows: &mut Vec<BenchRow>, limit: usize) {
     // P2200 herbarium set for decode/ROI parity (11-file crop benchmark equivalent).
     // Uses same collection root by default; filter names containing P2200 for the crop set.
-    let root = env_or_default("P2200_ROOT", &env_or_default("GOB_ROOT", r"C:\995\2026-02-20 Gobabeb To Windhoek"));
+    let root = env_or_default(
+        "P2200_ROOT",
+        &env_or_default("GOB_ROOT", r"C:\995\2026-02-20 Gobabeb To Windhoek"),
+    );
     let files = scan_orf_dir(&root, limit, Some("P2200"));
     println!("\n=== P2200 decode/ROI scan (full + region baseline) ===");
     println!("P2200_ROOT={root}  limit={limit}  found={}", files.len());
@@ -926,30 +1169,48 @@ fn run_p2200_decode_roi_scan(rows: &mut Vec<BenchRow>, limit: usize) {
                         let ms = dur.as_secs_f64() * 1000.0;
                         println!("  small pre-crop {}px decode: {:.1}ms (dedicated small JXL from subject rect)", sz, ms);
                         if let Ok(mut v) = SMALL_CROP_TIMES.lock() {
-                            v.push((Path::new(&f).file_name().unwrap_or_default().to_string_lossy().into_owned(), sz, ms));
+                            v.push((
+                                Path::new(&f)
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                sz,
+                                ms,
+                            ));
                         }
                     }
                     // Real low-level stateful progressive decode (the continuation target for full loads + ROI assets).
                     // Exercises FRAME_PROGRESSION + FlushImage + SetProgressiveDetail. Emits first-pixel timing.
                     // Only available when bench built with --features jxl-lowlevel (shared impl in raw-pipeline).
                     #[cfg(feature = "jxl-codec")]
-                    if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl) {
-                        println!("  lowlevel-prog (stateful) {}px: first={:.1}ms total={:.1}ms", sz, first_ms, total_ms);
+                    if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl)
+                    {
+                        println!(
+                            "  lowlevel-prog (stateful) {}px: first={:.1}ms total={:.1}ms",
+                            sz, first_ms, total_ms
+                        );
                     }
                 }
-
             }
             // Demo real low-level progressive for a "full load" using the file's rgba (proxy for produced JXL variant in Tauri ingest).
             // Gated: requires --features jxl-lowlevel at bench build time (pulls the shared jxl_lowlevel impl).
             #[cfg(feature = "jxl-codec")]
             if let Some(jxl_full) = encode_full_proxy_jxl(&rgba, w as u32, h as u32) {
-                if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl_full) {
-                    let prog_note = if cfg!(feature = "jxl-codec") { ", progressive asset" } else { "" };
+                if let Some((first_ms, total_ms)) = bench_jxl_decode_lowlevel_progressive(&jxl_full)
+                {
+                    let prog_note = if cfg!(feature = "jxl-codec") {
+                        ", progressive asset"
+                    } else {
+                        ""
+                    };
                     println!(
                         "  lowlevel-prog full-load ({}x{}): first={:.1}ms total={:.1}ms (model for Tauri direct-to-texture{})",
                         w, h, first_ms, total_ms, prog_note
                     );
-                    if let Ok(mut v) = LOWLEVEL_PROG_FIRSTS.lock() { v.push(first_ms); }
+                    if let Ok(mut v) = LOWLEVEL_PROG_FIRSTS.lock() {
+                        v.push(first_ms);
+                    }
                 }
                 if let Some(d) = bench_jxl_decode_lowlevel_full(&jxl_full) {
                     println!("  lowlevel-full ({}x{}): {:.1}ms", w, h, ms(d));
@@ -980,26 +1241,40 @@ fn process_orf_to_rgba8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
     let w = info.width as usize;
     let h = info.height as usize;
     let strip_end = info.strip_offset as usize + info.strip_byte_count as usize;
-    if strip_end > data.len() { return None; }
+    if strip_end > data.len() {
+        return None;
+    }
     let strip = &data[info.strip_offset as usize..strip_end];
     let raw = decompress::decompress(strip, w, h).ok()?;
     let rgb16 = demosaic::demosaic_rggb(&raw, w, h).ok()?;
     let mut params = pipeline::PipelineParams::default_olympus();
-    if let Some(r) = info.wb_r { params.wb_r = r; }
-    if let Some(b) = info.wb_b { params.wb_b = b; }
-    if let Some(m) = info.color_matrix { params.color_matrix = Some(m); }
+    if let Some(r) = info.wb_r {
+        params.wb_r = r;
+    }
+    if let Some(b) = info.wb_b {
+        params.wb_b = b;
+    }
+    if let Some(m) = info.color_matrix {
+        params.color_matrix = Some(m);
+    }
     let rgba = pipeline::process_rgba(&rgb16, &params);
     Some((rgba, w, h))
 }
 
 fn encode_small_rgba_jxl(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    use raw_pipeline::jxl_encode::{encode_rgba8, EncodeOptions};
-    encode_rgba8(rgba, width, height, &EncodeOptions::quality(85.0).with_effort(3)).ok()
+    use raw_pipeline::jxl_casaencoder::{encode_rgba8, EncodeOptions};
+    encode_rgba8(
+        rgba,
+        width,
+        height,
+        &EncodeOptions::quality(85.0).with_effort(3),
+    )
+    .ok()
 }
 
 /// Returns bytes for a full-size JXL to feed the low-level progressive decoder demo
-/// ("full load" case in P2200 scan). 
-/// 
+/// ("full load" case in P2200 scan).
+///
 /// When the "jxl-encode" feature is active we use the real progressive variant
 /// (progressive_dc=2, group_order=1) so that the measured `time_to_first_pixel_ms`
 /// (via FRAME_PROGRESSION + FlushImage) is representative of what Tauri will see
@@ -1051,7 +1326,7 @@ mod tests {
 
         let json = rows_to_json(&rows, "2026-06-19T00:00:00Z");
 
-        assert!(json.contains("\"file\": \"quote\\\"slash\\\\line\\n.orf\""));
+        assert!(json.contains("\"file\": \"quote\\\"slash/line\\n.orf\""));
         assert!(json.contains("\"decodeStrategy\": \"full\\\"strategy\""));
     }
 

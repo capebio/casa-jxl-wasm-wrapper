@@ -39,12 +39,13 @@ export class LRUCache {
     set(key, value, size) {
         if (!(size >= 0) || !Number.isFinite(size))
             return;
-        if (this.cache.has(key)) {
-            this.currentSize -= this.cache.get(key).size;
+        // Single lookup — was has() + get()!
+        const existing = this.cache.get(key);
+        if (existing !== undefined) {
+            this.currentSize -= existing.size;
             this.cache.delete(key);
-            if (this.mruKey === key) {
+            if (this.mruKey === key)
                 this.mruKey = undefined;
-            }
         }
         // Items that can never fit are dropped immediately without evicting
         // anything — callers that evict-before-set have already ensured room.
@@ -56,19 +57,15 @@ export class LRUCache {
         this.mruKey = key;
     }
     evictToFit(incomingSize) {
-        const iter = this.cache.keys();
-        while (this.currentSize + incomingSize > this.maxSize && this.cache.size > 0) {
-            const oldestKey = iter.next().value;
-            if (oldestKey === undefined)
-                break;
-            const item = this.cache.get(oldestKey);
-            if (!item)
+        if (this.currentSize + incomingSize <= this.maxSize)
+            return;
+        for (const [key, item] of this.cache) {
+            if (this.currentSize + incomingSize <= this.maxSize)
                 break;
             this.currentSize -= item.size;
-            this.cache.delete(oldestKey);
-            if (this.mruKey === oldestKey) {
+            this.cache.delete(key);
+            if (this.mruKey === key)
                 this.mruKey = undefined;
-            }
         }
     }
     delete(key) {

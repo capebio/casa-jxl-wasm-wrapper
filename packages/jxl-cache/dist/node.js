@@ -61,7 +61,7 @@ export class JxlCacheNode {
             const name = fileNameFor(key);
             this.persistentTracker.get(name);
             this.hitCount++;
-            return mem.slice(0);
+            return mem; // SAB: shared reference, no copy
         }
         if (!this.opts.persistent || !this.opts.basePath) {
             this.missCount++;
@@ -97,11 +97,11 @@ export class JxlCacheNode {
         const filePath = path.join(this.opts.basePath, name);
         try {
             const buffer = await fs.readFile(filePath);
-            const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-            const master = arrayBuffer.slice(0);
-            this.memoryCache.set(key, master, master.byteLength);
+            const sab = new SharedArrayBuffer(buffer.byteLength);
+            new Uint8Array(sab).set(buffer);
+            this.memoryCache.set(key, sab, sab.byteLength);
             this.persistentTracker.set(name, true, buffer.byteLength);
-            return master;
+            return sab;
         }
         catch {
             this.persistentTracker.delete(name);
@@ -124,8 +124,9 @@ export class JxlCacheNode {
         if (this.initPromise)
             await this.initPromise.catch(() => undefined);
         const size = buffer.byteLength;
-        const master = buffer.slice(0);
-        this.memoryCache.set(key, master, size);
+        const sab = new SharedArrayBuffer(size);
+        new Uint8Array(sab).set(new Uint8Array(buffer));
+        this.memoryCache.set(key, sab, size);
         if (this.opts.persistent && this.opts.basePath) {
             const name = fileNameFor(key);
             const filePath = path.join(this.opts.basePath, name);
@@ -154,7 +155,7 @@ export class JxlCacheNode {
                 }
                 try {
                     const tmp = filePath + `.tmp-${process.pid}-${tmpCounter++}`;
-                    await fs.writeFile(tmp, Buffer.from(master));
+                    await fs.writeFile(tmp, Buffer.from(sab));
                     await fs.rename(tmp, filePath);
                     this.persistentTracker.set(name, true, size);
                 }
